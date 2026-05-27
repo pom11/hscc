@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "hscc"
+version = "2026.05.28"
+description = "Hermes Spark Cluster Control — Install, configure, and manage DGX Spark cluster"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.0",
+]
+
+[project.scripts]
+hscc = "hscc_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["hscc_cli*"]

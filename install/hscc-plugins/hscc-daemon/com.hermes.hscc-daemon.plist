@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Unique identifier for the service -->
+    <key>Label</key>
+    <string>com.hermes.hscc-daemon</string>
+
+    <!-- Command to start the daemon -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/python3</string>
+        <string>/Users/desac/.hermes/plugins/hscc-daemon/hscc.py</string>
+        <string>start</string>
+    </array>
+
+    <!-- Working directory for the daemon -->
+    <key>WorkingDirectory</key>
+    <string>/Users/desac</string>
+
+    <!-- Route stdout and stderr to a single log file -->
+    <key>StandardOutPath</key>
+    <string>/Users/desac/Library/Logs/hscc-daemon.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/desac/Library/Logs/hscc-daemon.log</string>
+
+    <!-- Environment variables -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/desac/.hermes/hermes-agent/venv/bin:/opt/homebrew/bin:/Users/desac/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/desac</string>
+        <key>PYTHONDONTWRITEBYTECODE</key>
+        <string>1</string>
+    </dict>
+
+    <!-- KeepAlive: restart on crash (not on clean exit via SIGTERM) -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- Start on login / initial load -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Timeout: if daemon doesn't exit within 10s of SIGTERM, force-kill -->
+    <key>ExitTimeOut</key>
+    <integer>10</integer>
+
+    <!-- Process type: background daemon -->
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

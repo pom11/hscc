@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# ──────────────────────────────────────────────────────────────────────────────
+# hscc-daemon Launchd Setup Helper
+#
+# Installs, loads, and verifies the hscc-daemon Launchd service.
+#
+# Usage:
+#   ./launchd-setup.sh          # Load and verify (idempotent)
+#   ./launchd-setup.sh force    # Force unload then load
+# ──────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLIST_NAME="com.hermes.hscc-daemon.plist"
+PLIST_LOCAL="${SCRIPT_DIR}/${PLIST_NAME}"
+LAUNCH_DIR="$HOME/Library/LaunchAgents"
+LAUNCH_PLIST="${LAUNCH_DIR}/${PLIST_NAME}"
+LABEL="com.hermes.hscc-daemon"
+LOG_FILE="$HOME/Library/Logs/hscc-daemon.log"
+
+# Colors for output
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
+error() { echo -e "${RED}[ERROR]${NC} $*"; }
+
+# ── Pre-flight checks ──────────────────────────────────────────────────────
+
+if [[ ! -f "${PLIST_LOCAL}" ]]; then
+    error "Plist not found at ${PLIST_LOCAL}"
+    exit 1
+fi
+
+if ! command -v launchctl &>/dev/null; then
+    error "launchctl not found — this script requires macOS"
+    exit 1
+fi
+
+# ── Ensure directories exist ───────────────────────────────────────────────
+
+mkdir -p "${LAUNCH_DIR}"
+mkdir -p "$(dirname "${LOG_FILE}")"
+
+# ── Install plist ──────────────────────────────────────────────────────────
+
+if [[ "${1:-}" == "force" ]]; then
+    info "Force-reloading hscc-daemon..."
+    launchctl bootout "gui/$UID/${LABEL}" 2>/dev/null || true
+fi
+
+if [[ "${LAUNCH_PLIST}" != "${PLIST_LOCAL}" ]]; then
+    cp -f "${PLIST_LOCAL}" "${LAUNCH_PLIST}"
+    info "Installed plist to ${LAUNCH_PLIST}"
+else
+    info "Plist already up to date at ${LAUNCH_PLIST}"
+fi
+
+# ── Load service ───────────────────────────────────────────────────────────
+
+if launchctl list "${LABEL}" &>/dev/null; then
+    info "hscc-daemon is already loaded — skipping load"
+else
+    launchctl bootstrap "gui/$UID" "${LAUNCH_PLIST}"
+    info "Loaded ${LABEL} via launchctl bootstrap"
+fi
+
+# ── Enable on login (already done by GUI bootstrap, but verify) ─────────────
+
+if launchctl list "${LABEL}" &>/dev/null; then
+    info "${LABEL} is active and will start on login"
+else
+    warn "${LABEL} did not start — check for errors"
+fi
+
+# ── Status check ───────────────────────────────────────────────────────────
+
+echo ""
+info "── hscc-daemon Service Status ────────────────────────────────────"
+
+# Check launchd
+if launchctl list "${LABEL}" &>/dev/null; then
+    echo -e "  ${GREEN}●${NC} Launchd:    loaded and active"
+    launchctl list "${LABEL}" 2>/dev/null | head -5 | sed 's/^/    /'
+else
+    echo -e "  ${RED}○${NC} Launchd:    not loaded"
+fi
+
+# Check daemon process
+if pgrep -f "hscc.py.*start" &>/dev/null; then
+    PID=$(pgrep -f "hscc.py.*start" | head -1)
+    echo -e "  ${GREEN}●${NC} Process:    running (PID ${PID})"
+else
+    echo -e "  ${RED}○${NC} Process:    not running (expected to be started by Launchd)"
+fi
+
+# Check state dir
+if [[ -d "$HOME/.hscc/state" ]]; then
+    COUNT=$(find "$HOME/.hscc/state" -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+    echo -e "  ${GREEN}●${NC} State:      ${COUNT} JSON files in ~/.hscc/state/"
+else
+    echo -e "  ${RED}○${NC} State:      ~/.hscc/state/ not found"
+fi
+
+# Check log
+if [[ -f "${LOG_FILE}" ]]; then
+    LINES=$(wc -l < "${LOG_FILE}" | tr -d ' ')
+    echo -e "  ${GREEN}●${NC} Log:        ${LOG_FILE} (${LINES} lines)"
+    echo ""
+    echo -e "  ${YELLOW}── Tail last 10 log lines ────────────────────────────────────${NC}"
+    tail -10 "${LOG_FILE}" | sed 's/^/    /'
+else
+    echo -e "  ${YELLOW}○${NC} Log:        ${LOG_FILE} (will be created on first run)"
+fi
+
+echo ""
+info "── Management Commands ──────────────────────────────────────────"
+echo "  Start:   launchctl bootstrap gui/$UID ${LAUNCH_PLIST}"
+echo "  Stop:    launchctl bootout  gui/$UID ${LABEL}"
+echo "  Status:  launchctl list ${LABEL}"
+echo "  Log:     tail -f ${LOG_FILE}"
+echo "  Uninstall: ${SCRIPT_DIR}/hscc.py uninstall"
+echo ""
