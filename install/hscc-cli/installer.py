@@ -25,7 +25,7 @@ HSCC_DIR = HOME / ".hscc"
 HERMES_DIR = HOME / ".hermes"
 hermes_DIR = HOME / ".hermes"
 SPARKRUN_DIR = HOME / ".sparkrun-local"
-R2D2CC_DIR = HOME / ".r2d2cc"
+HSCC_DIR = HOME / ".hscc"
 
 # Qwen3.6 model details
 QWEN36_REPOS = {
@@ -211,7 +211,7 @@ def create_config(config_path=None):
         return config_path
     
     # Try template first
-    template_path = R2D2CC_DIR / "configs" / "hscc-config.yaml.template"
+    template_path = HSCC_DIR / "configs" / "hscc-config.yaml.template"
     if template_path.exists():
         config_path.write_text(template_path.read_text())
         print("  ✓ Created config.yaml from template")

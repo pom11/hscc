@@ -34,7 +34,7 @@ HSCC_DIR="$HOME/.hscc"
 HERMES_DIR="$HOME/.hermes"
 hermes_DIR="$HOME/.hermes"
 SPARKRUN_DIR="$HOME/.sparkrun-local"
-R2D2CC_DIR="$HOME/.r2d2cc"
+HSCC_DIR="$HOME/.r2d2cc"
 
 # Flags
 DRY_RUN=false

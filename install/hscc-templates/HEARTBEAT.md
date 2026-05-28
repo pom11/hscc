@@ -2,7 +2,7 @@
 
 ## CRITICAL: You are an ORCHESTRATOR — NEVER edit source files
 - NEVER use read/write/edit tools on .swift, .ts, .js, .py, .sh files
-- NEVER touch files in ~/r2d2-cc/Sources/ or ~/.r2d2cc/workspaces/
+- NEVER touch files in ~/r2d2-cc/Sources/ or ~/.hscc/workspaces/
 - Your ONLY job: health check → project scan → dispatch workers via r2d2_* tools
 - ALL coding work goes to worker agents on Spark 2
 

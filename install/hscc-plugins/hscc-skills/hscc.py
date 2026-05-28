@@ -15,7 +15,7 @@ Commands:
   uninstall            Remove all installed skills and templates (reverse install)
 
 Environment Variables:
-  R2D2CC_DIR           Override R2D2CC source path (default: ~/r2d2-cc)
+  HSCC_DIR           Override R2D2CC source path (default: ~/r2d2-cc)
   HERMES_HOME          Override Hermes home (default: ~/.hermes)
 """
 
@@ -27,12 +27,12 @@ import json
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
-R2D2CC_DIR = os.environ.get("R2D2CC_DIR", os.path.expanduser("~/r2d2-cc"))
+HSCC_DIR = os.environ.get("HSCC_DIR", os.path.expanduser("~/r2d2-cc"))
 HERMES_HOME = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
 
-SKILLS_SOURCE = os.path.join(R2D2CC_DIR, "skills")
+SKILLS_SOURCE = os.path.join(HSCC_DIR, "skills")
 SKILLS_DEST = os.path.join(HERMES_HOME, "skills")
-TEMPLATES_SOURCE = os.path.join(R2D2CC_DIR, "Resources", "templates")
+TEMPLATES_SOURCE = os.path.join(HSCC_DIR, "Resources", "templates")
 TEMPLATES_DEST = os.path.join(HERMES_HOME, "templates")
 
 # R2D2CC bundled skills
@@ -157,7 +157,7 @@ def cmd_install():
     """Install all skills and templates."""
     print("=" * 60)
     print("  HSCC Skills & Templates Installer")
-    print(f"  Source: {R2D2CC_DIR}")
+    print(f"  Source: {HSCC_DIR}")
     print(f"  Dest:   {HERMES_HOME}")
     print("=" * 60)
     print()
@@ -165,12 +165,12 @@ def cmd_install():
     # Verify source
     if not os.path.isdir(SKILLS_SOURCE):
         print(f"[WARN] Skills source not found: {SKILLS_SOURCE}")
-        print(f"       Setting R2D2CC_DIR env var or placing skills at ~/r2d2-cc/skills/")
+        print(f"       Setting HSCC_DIR env var or placing skills at ~/r2d2-cc/skills/")
         print()
 
     if not os.path.isdir(TEMPLATES_SOURCE):
         print(f"[WARN] Templates source not found: {TEMPLATES_SOURCE}")
-        print(f"       Setting R2D2CC_DIR env var or placing templates at ~/r2d2-cc/Resources/templates/")
+        print(f"       Setting HSCC_DIR env var or placing templates at ~/r2d2-cc/Resources/templates/")
         print()
 
     # Install skills
@@ -450,7 +450,7 @@ Commands:
   uninstall            Remove installed skills and templates (reverse)
 
 Environment Variables:
-  R2D2CC_DIR           Override R2D2CC source path (default: ~/r2d2-cc)
+  HSCC_DIR           Override R2D2CC source path (default: ~/r2d2-cc)
   HERMES_HOME          Override Hermes home (default: ~/.hermes)
         """.strip())
         sys.exit(0)

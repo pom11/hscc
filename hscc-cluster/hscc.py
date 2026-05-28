@@ -21,7 +21,7 @@ import os
 # ── Constants ─────────────────────────────────────────────────────────────
 
 SPARKRUN = "sparkrun"
-CLUSTER_JSON = os.path.expanduser("~/.r2d2cc/cluster.json")
+CLUSTER_JSON = os.path.expanduser("~/.hscc/cluster.json")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────

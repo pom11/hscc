@@ -34,7 +34,7 @@ from urllib.parse import urlparse
 
 SPARKRUN = "sparkrun"
 HSCC_DIR = os.path.expanduser("~/.hscc")
-AGENTS_JSON = os.path.expanduser("~/.r2d2cc/agents.json")
+AGENTS_JSON = os.path.expanduser("~/.hscc/agents.json")
 PROVISION_JSON = os.path.join(HSCC_DIR, "provision.json")
 HERMES_CONFIG = os.path.expanduser("~/.hermes/config.yaml")
 NAS_HOST = "192.0.2.10"

@@ -62,7 +62,7 @@ POLICY_FILE = os.path.join(HSCC_DIR, "policy.json")
 AUDIT_FILE = os.path.join(HSCC_DIR, "audit.jsonl")
 AUDIT_ARCHIVE_DIR = os.path.join(HSCC_DIR, "audit_archives")
 CIRCUIT_BREAKER_FILE = os.path.join(HSCC_DIR, "circuit_breaker.json")
-AGENTS_JSON = os.path.expanduser("~/.r2d2cc/agents.json")
+AGENTS_JSON = os.path.expanduser("~/.hscc/agents.json")
 LIFECYCLE_FILE = os.path.join(HSCC_DIR, "lifecycle.json")
 
 # ── RBAC Tier Definitions ────────────────────────────────────────────────
@@ -728,7 +728,7 @@ def _has_active_task(agent_id):
         return False
     project_file = os.path.expanduser("~/.hscc/projects.json")
     if not os.path.exists(project_file):
-        project_file = os.path.expanduser("~/.r2d2cc/projects.json")
+        project_file = os.path.expanduser("~/.hscc/projects.json")
     if not os.path.exists(project_file):
         return False
     try:

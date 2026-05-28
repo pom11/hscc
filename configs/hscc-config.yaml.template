@@ -36,7 +36,7 @@ logging:
 
 skills:
   install_dir: ~/.hermes/skills
-  # Skills to install (subset of R2D2CC bundled skills)
+  # Skills to install (subset of Hermes bundled skills)
   skills:
     - brainstorming
     - caveman

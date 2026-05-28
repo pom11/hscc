@@ -2,7 +2,7 @@
 """
 Hermes Spark Cluster Control (HSCC) - Agent Coordinator Plugin
 
-Merges r2d2-lifecycle (4 tools), r2d2-worktrees (8 tools), and r2d2-recovery (3 tools)
+Merges hscc-lifecycle (4 tools), hscc-worktrees (8 tools), and hscc-recovery (3 tools)
 into a single unified plugin with commands:
   assign-task      Assign a task to an agent with FSM guards
   list-agents      List all agents with lifecycle state summary
@@ -17,11 +17,11 @@ State files:
   Lifecycle: ~/.hscc/lifecycle.json
   Worktrees: ~/.hscc/worktrees.json
   Recovery:  ~/.hscc/recovery.json
-  Events:    ~/.r2d2cc/events.jsonl
+  Events:    ~/.hscc/events.jsonl
 
 Data sources:
-  Agents:    ~/.r2d2cc/agents.json
-  Projects:  ~/.r2d2cc/projects.json
+  Agents:    ~/.hscc/agents.json
+  Projects:  ~/.hscc/projects.json
 
 FSM transitions (VALID_TRANSITIONS):
   idle     -> spawning, running, finished, failed, disabled
@@ -50,17 +50,16 @@ from collections import Counter
 # ---- Constants ----
 
 HSCC_DIR = os.path.expanduser("~/.hscc")
-R2D2CC_DIR = os.path.expanduser("~/.r2d2cc")
 
-AGENTS_JSON = os.path.join(R2D2CC_DIR, "agents.json")
-PROJECTS_JSON = os.path.join(R2D2CC_DIR, "projects.json")
-
+AGENTS_JSON = os.path.join(HSCC_DIR, "agents.json")
+PROJECTS_JSON = os.path.join(HSCC_DIR, "projects.json")
+EVENTS_FILE = os.path.join(HSCC_DIR, "events.jsonl")
 LIFECYCLE_FILE = os.path.join(HSCC_DIR, "lifecycle.json")
 WORKTREES_FILE = os.path.join(HSCC_DIR, "worktrees.json")
 RECOVERY_FILE = os.path.join(HSCC_DIR, "recovery.json")
-EVENTS_FILE = os.path.join(R2D2CC_DIR, "events.jsonl")
+EVENTS_FILE = os.path.join(HSCC_DIR, "events.jsonl")
 
-# FSM transitions - same as r2d2-lifecycle shared/types.ts
+# FSM transitions - same as hscc-lifecycle shared/types.ts
 VALID_TRANSITIONS = {
     "idle": ["spawning", "ready", "running", "finished", "failed", "disabled"],
     "spawning": ["ready", "running", "failed", "idle", "disabled"],
@@ -75,7 +74,7 @@ VALID_TRANSITIONS = {
 FINISHED_REDIRECT = "finished"
 EFFECTIVE_REDIRECT = "idle"
 
-# Failure recipes - same as r2d2-recovery
+# Failure recipes - same as hscc-recovery
 FAILURE_RECIPES = {
     "session_create_failed": {
         "description": "Agent cannot create a session with the gateway",
@@ -163,9 +162,9 @@ def load_agent_by_id(agent_id):
 
 def get_lifecycle(agent_id):
     lc = read_json_file(LIFECYCLE_FILE, {"agents": {}, "history": []})
-    # Fallback to old path (r2d2 migration)
+    # Fallback to hscc state files
     if not lc.get("agents"):
-        old_path = os.path.join(R2D2CC_DIR, "plugin-state", "r2d2-lifecycle.json")
+        old_path = os.path.join(HSCC_DIR, "plugin-state", "hscc-lifecycle.json")
         lc = read_json_file(old_path, {"agents": {}, "history": []})
     agent_lc = lc.get("agents", {}).get(agent_id, {"state": "idle", "updated_at": now_iso()})
     return agent_lc
@@ -464,9 +463,9 @@ def cmd_assign_task():
 
     # 2. Check lifecycle state
     lc = read_json_file(LIFECYCLE_FILE, {"agents": {}, "history": []})
-    # Fallback to old path (r2d2 migration)
+    # Fallback to hscc state files
     if not lc.get("agents"):
-        old_path = os.path.join(R2D2CC_DIR, "plugin-state", "r2d2-lifecycle.json")
+        old_path = os.path.join(HSCC_DIR, "plugin-state", "hscc-lifecycle.json")
         lc = read_json_file(old_path, {"agents": {}, "history": []})
     current = lc.get("agents", {}).get(agent_id, {"state": "idle"})
     current_state = current.get("state", "idle")
@@ -596,13 +595,13 @@ def create_worktree_for_task(agent_id, task_id, project_id, branch_slug=None):
 
     # Look for git repo - try project dir and known repo paths
     repo_path = None
-    project_dir = os.path.join(R2D2CC_DIR, "projects", project_id)
+    project_dir = os.path.join(HSCC_DIR, "projects", project_id)
     if os.path.exists(os.path.join(project_dir, ".git")):
         repo_path = project_dir
-    elif os.path.exists(os.path.join(R2D2CC_DIR, ".git")):
-        repo_path = R2D2CC_DIR
+    elif os.path.exists(os.path.join(HSCC_DIR, ".git")):
+        repo_path = HSCC_DIR
     else:
-        # Try the r2d2-cc workspace
+        # Try ~/r2d2-cc or ~/.hscc (R2D2CC legacy state locations)
         cc_path = os.path.expanduser("~/r2d2-cc")
         if os.path.exists(os.path.join(cc_path, ".git")):
             repo_path = cc_path
@@ -611,7 +610,7 @@ def create_worktree_for_task(agent_id, task_id, project_id, branch_slug=None):
         return {"note": "No git repo found for project, skipping worktree creation"}
 
     # Determine worktree path
-    worktree_dir = os.path.join(R2D2CC_DIR, "worktrees", project_id, f"{agent_id}-{task_id[:8]}")
+    worktree_dir = os.path.join(HSCC_DIR, "worktrees", project_id, f"{agent_id}-{task_id[:8]}")
 
     # Sanitize branch name
     slug = branch_slug or task_id
@@ -721,9 +720,9 @@ def cmd_list_agents():
     """
     agents = load_agents_list()
     lc = read_json_file(LIFECYCLE_FILE, {"agents": {}, "history": []})
-    # Fallback to old path (r2d2 migration)
+    # Fallback to hscc state files
     if not lc.get("agents"):
-        old_path = os.path.join(R2D2CC_DIR, "plugin-state", "r2d2-lifecycle.json")
+        old_path = os.path.join(HSCC_DIR, "plugin-state", "hscc-lifecycle.json")
         lc = read_json_file(old_path, {"agents": {}, "history": []})
     assignments = get_task_assignments()
     wt_state = get_worktrees()
@@ -842,9 +841,9 @@ def cmd_update_task():
 
     # Get current state
     lc = read_json_file(LIFECYCLE_FILE, {"agents": {}, "history": []})
-    # Fallback to old path (r2d2 migration)
+    # Fallback to hscc state files
     if not lc.get("agents"):
-        old_path = os.path.join(R2D2CC_DIR, "plugin-state", "r2d2-lifecycle.json")
+        old_path = os.path.join(HSCC_DIR, "plugin-state", "hscc-lifecycle.json")
         lc = read_json_file(old_path, {"agents": {}, "history": []})
     current = lc.get("agents", {}).get(agent_id, {"state": "idle"})
     current_state = current.get("state", "idle")
@@ -986,9 +985,9 @@ def cmd_move_task():
 
     # Check current state of source agent
     lc = read_json_file(LIFECYCLE_FILE, {"agents": {}, "history": []})
-    # Fallback to old path (r2d2 migration)
+    # Fallback to hscc state files
     if not lc.get("agents"):
-        old_path = os.path.join(R2D2CC_DIR, "plugin-state", "r2d2-lifecycle.json")
+        old_path = os.path.join(HSCC_DIR, "plugin-state", "hscc-lifecycle.json")
         lc = read_json_file(old_path, {"agents": {}, "history": []})
     from_state = lc.get("agents", {}).get(from_agent, {"state": "idle"})
     if from_state.get("state") != "running":
@@ -1098,9 +1097,9 @@ def cmd_detect_orphans():
 
     agents = load_agents_list()
     lc = read_json_file(LIFECYCLE_FILE, {"agents": {}, "history": []})
-    # Fallback to old path (r2d2 migration)
+    # Fallback to hscc state files
     if not lc.get("agents"):
-        old_path = os.path.join(R2D2CC_DIR, "plugin-state", "r2d2-lifecycle.json")
+        old_path = os.path.join(HSCC_DIR, "plugin-state", "hscc-lifecycle.json")
         lc = read_json_file(old_path, {"agents": {}, "history": []})
 
     # Get list of actual running containers
@@ -1446,7 +1445,7 @@ def cmd_list_worktrees():
         print("Git worktrees in repo:")
         # List actual git worktrees
         repo_paths = [
-            os.path.expanduser("~/.r2d2cc"),
+            os.path.expanduser("~/.hscc"),
             os.path.expanduser("~/r2d2-cc"),
         ]
         for repo_path in repo_paths:
@@ -1506,7 +1505,7 @@ def cmd_list_worktrees():
 
 def repo_paths_defined():
     """Check if any known repo paths exist."""
-    for p in [os.path.expanduser("~/.r2d2cc"), os.path.expanduser("~/r2d2-cc")]:
+    for p in [os.path.expanduser("~/.hscc"), os.path.expanduser("~/r2d2-cc")]:
         if os.path.exists(os.path.join(p, ".git")):
             return True
     return False

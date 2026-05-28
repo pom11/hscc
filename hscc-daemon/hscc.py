@@ -92,7 +92,7 @@ VLLM_START_CMD = f"ssh {SSH_OPTS} {SSH_USER}@{PRIMARY_NODE} 'nohup vllm serve Qw
 
 # ── Cluster Config Resolution ─────────────────────────────────────────────
 
-CLUSTER_JSON = os.path.expanduser("~/.r2d2cc/cluster.json")
+CLUSTER_JSON = os.path.expanduser("~/.hscc/cluster.json")
 
 
 def resolve_cluster_config():
@@ -412,7 +412,7 @@ def check_heartbeat():
     data = {}
 
     # Agent fleet
-    agents_file = os.path.expanduser("~/.r2d2cc/agents.json")
+    agents_file = os.path.expanduser("~/.hscc/agents.json")
     if os.path.exists(agents_file):
         try:
             with open(agents_file) as f:

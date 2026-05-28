@@ -215,8 +215,8 @@ print(json.dumps({"error": f"Unknown command: {cmd}"}))
 
 | Constant | Plugins using it | Value |
 |----------|-----------------|-------|
-| `~/.r2d2cc/agents.json` | events (line 22), orchestrator (line 31), provision (line 36) | Direct path |
-| `R2D2CC_DIR + /agents.json` | agent-coordinator (line 55), projects (line 34) | Via variable |
+| `~/.hscc/agents.json` | events (line 22), orchestrator (line 31), provision (line 36) | Direct path |
+| `HSCC_DIR + /agents.json` | agent-coordinator (line 55), projects (line 34) | Via variable |
 | (not used) | cluster, daemon, chat, governance, skills | — |
 
 ### 3.3 `LIFECYCLE_FILE` — 3 Plugins
@@ -231,7 +231,7 @@ print(json.dumps({"error": f"Unknown command: {cmd}"}))
 
 | Constant | Plugins | Value | Meaning |
 |----------|---------|-------|---------|
-| `~/.r2d2cc/events.jsonl` | events (line 24), agent-coordinator (line 61) | Original location | Event log source |
+| `~/.hscc/events.jsonl` | events (line 24), agent-coordinator (line 61) | Original location | Event log source |
 | `~/.hscc/events.jsonl` | daemon (line 47) | Migration target | Daemon reads/writes here |
 
 **Migration risk:** Two different paths for the same logical file. The migration plan should consolidate to `~/.hscc/events.jsonl`.
@@ -240,8 +240,8 @@ print(json.dumps({"error": f"Unknown command: {cmd}"}))
 
 | Plugin | Line | Value |
 |--------|------|-------|
-| `hscc-agent-coordinator` | 56 | `~/.r2d2cc/projects.json` |
-| `hscc-projects` | 35 | `~/.r2d2cc/projects.json` |
+| `hscc-agent-coordinator` | 56 | `~/.hscc/projects.json` |
+| `hscc-projects` | 35 | `~/.hscc/projects.json` |
 
 ---
 
@@ -326,7 +326,7 @@ All plugins output JSON to stdout for machine consumption, with `indent=2` or `i
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                   ~/.r2d2cc/                             │
+│                   ~/.hscc/                             │
 │  agents.json ──► cluster, events, provision,             │
 │                orchestrator, projects, agent-coord       │
 │                                                         │
@@ -508,7 +508,7 @@ hscc-core/
 ├── __init__.py          # Package init
 ├── paths.py             # All path constants
 │   ├── HSCC_DIR
-│   ├── R2D2CC_DIR
+│   ├── HSCC_DIR
 │   ├── AGENTS_JSON
 │   ├── PROJECTS_JSON
 │   ├── LIFECYCLE_FILE
@@ -846,12 +846,12 @@ Week 3: Phase 3 — Cleanup
 
 ## 11. Open Questions
 
-1. **EVENTS_FILE canonical path:** Should all plugins use `~/.hscc/events.jsonl` or `~/.r2d2cc/events.jsonl`?  
+1. **EVENTS_FILE canonical path:** Should all plugins use `~/.hscc/events.jsonl` or `~/.hscc/events.jsonl`?  
    **Recommendation:** Migrate to `~/.hscc/events.jsonl` (hscc-core.paths.EVENTS_FILE).  
-   **Impact:** 1 data migration: `rsync ~/.r2d2cc/events.jsonl ~/.hscc/events.jsonl`.
+   **Impact:** 1 data migration: `rsync ~/.hscc/events.jsonl ~/.hscc/events.jsonl`.
 
-2. **AGENTS_JSON canonical path:** Should all plugins use `~/.r2d2cc/agents.json` or `~/.hscc/agents.json`?  
-   **Recommendation:** Keep `~/.r2d2cc/agents.json` (used by sparkrun/hermes tooling).
+2. **AGENTS_JSON canonical path:** Should all plugins use `~/.hscc/agents.json` or `~/.hscc/agents.json`?  
+   **Recommendation:** Keep `~/.hscc/agents.json` (used by sparkrun/hermes tooling).
 
 3. **Python path for imports:** Will `hscc-core` be in `PYTHONPATH` or installed as a pip package?  
    **Recommendation:** Add `~/.hermes/plugins/` to Python path via a `.pth` file in site-packages. No pip install needed.

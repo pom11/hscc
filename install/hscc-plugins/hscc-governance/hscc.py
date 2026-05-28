@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 HSCC_DIR = os.path.expanduser("~/.hscc")
 POLICY_FILE = os.path.join(HSCC_DIR, "policy.json")
 AUDIT_FILE = os.path.join(HSCC_DIR, "audit.jsonl")
-AGENTS_JSON = os.path.expanduser("~/.r2d2cc/agents.json")
+AGENTS_JSON = os.path.expanduser("~/.hscc/agents.json")
 LIFECYCLE_FILE = os.path.join(HSCC_DIR, "lifecycle.json")
 
 # ── RBAC Tier Definitions ─────────────────────────────────────────────────

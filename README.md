@@ -28,8 +28,8 @@ hscc cluster status  # Show status
 
 ```bash
 # Clone this repo (private)
-git clone <private-repo-url> ~/.r2d2cc
-cd ~/.r2d2cc
+git clone <private-repo-url> ~/.hscc
+cd ~/.hscc
 
 # Install hscc CLI
 pip install -e ./install/hscc-cli/

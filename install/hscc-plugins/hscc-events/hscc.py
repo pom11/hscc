@@ -19,9 +19,9 @@ import uuid
 # ── Constants ──────────────────────────────────────────────────────────────
 
 HSCC_DIR = os.path.expanduser("~/.hscc")
-AGENTS_JSON = os.path.expanduser("~/.r2d2cc/agents.json")
+AGENTS_JSON = os.path.expanduser("~/.hscc/agents.json")
 
-EVENTS_FILE = os.path.expanduser("~/.r2d2cc/events.jsonl")
+EVENTS_FILE = os.path.expanduser("~/.hscc/events.jsonl")
 NOTIFICATIONS_FILE = os.path.join(HSCC_DIR, "notifications.json")
 LIFECYCLE_FILE = os.path.join(HSCC_DIR, "lifecycle.json")
 RECOVERY_FILE = os.path.join(HSCC_DIR, "recovery.json")

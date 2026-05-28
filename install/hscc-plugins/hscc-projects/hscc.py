@@ -303,7 +303,7 @@ def cmd_assign_task(task_id, agent_id):
 
 def cmd_list_agents():
     """List all agents and their current assignments."""
-    agents_file = os.path.expanduser("~/.r2d2cc/agents.json")
+    agents_file = os.path.expanduser("~/.hscc/agents.json")
     try:
         with open(agents_file, "r") as f:
             agents_data = json.load(f)

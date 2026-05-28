@@ -414,7 +414,7 @@ def create_config():
         print(info("Config already exists"))
         return
     
-    template = Path("~/.r2d2cc/configs/hscc-config.yaml.template").expanduser()
+    template = Path("~/.hscc/configs/hscc-config.yaml.template").expanduser()
     if template.exists():
         config.write_text(template.read_text())
         print(ok("Created config.yaml from template"))

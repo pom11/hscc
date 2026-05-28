@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
-AGENTS_JSON = os.path.expanduser("~/.r2d2cc/agents.json")
+AGENTS_JSON = os.path.expanduser("~/.hscc/agents.json")
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 

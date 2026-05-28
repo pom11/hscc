@@ -28,7 +28,7 @@ set -uo pipefail
 # ── Configuration ──────────────────────────────────────────────────────────
 
 HSCC_DIR="${HSCC_DIR:-$HOME/.hscc}"
-R2D2CC_DIR="${R2D2CC_DIR:-$HOME/.r2d2cc}"
+HSCC_DIR="${HSCC_DIR:-$HOME/.r2d2cc}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 
 SKILLS_PLUGIN="$HERMES_HOME/plugins/hscc-skills/hscc.py"
@@ -321,7 +321,7 @@ import json
 import os
 
 hscc_dir = os.environ.get("HSCC_DIR", os.path.expanduser("~/.hscc"))
-r2d2cc_dir = os.environ.get("R2D2CC_DIR", os.path.expanduser("~/.r2d2cc"))
+r2d2cc_dir = os.environ.get("HSCC_DIR", os.path.expanduser("~/.hscc"))
 
 expected = {
     "lifecycle.json": ["agents", "history"],
@@ -587,7 +587,7 @@ run_cluster_check() {
     fi
 
     # Check cluster config
-    local cluster_file="$R2D2CC_DIR/cluster.json"
+    local cluster_file="$HSCC_DIR/cluster.json"
     if [[ -f "$cluster_file" ]]; then
         local cluster_info
         cluster_info=$(python3 -c "
@@ -640,7 +640,7 @@ main() {
     echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "  ${CYAN}HSCC_DIR:     ${HSCC_DIR}${NC}"
-    echo -e "  ${CYAN}R2D2CC_DIR:   ${R2D2CC_DIR}${NC}"
+    echo -e "  ${CYAN}HSCC_DIR:   ${HSCC_DIR}${NC}"
     echo -e "  ${CYAN}HERMES_HOME:  ${HERMES_HOME}${NC}"
     echo -e "  ${CYAN}GATEWAY:      ${GATEWAY_HOST}:${GATEWAY_PORT}${NC}"
     echo -e "  ${CYAN}SKILLS_PLUGIN: ${SKILLS_PLUGIN}${NC}"
