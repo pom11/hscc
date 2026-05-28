@@ -266,6 +266,88 @@ def version():
     click.echo(f"HSCC version {VERSION}")
 
 
+@main.group()
+def cluster():
+    """Cluster management commands."""
+    pass
+
+
+@cluster.command()
+def cluster_status():
+    """Show cluster workload status, per-host metrics, and temperatures.
+
+    Combines sparkrun workload listing with a live system snapshot
+    (CPU/RAM/GPU usage, temps, power draw). Raw output, no AI processing.
+    """
+    # ── Section 1: Workloads ──────────────────────────────────────────
+    print("=" * 60)
+    print("  WORKLOADS")
+    print("=" * 60)
+    rc, stdout, stderr = run_cmd("sparkrun status", check=False)
+    if rc == 0:
+        print(stdout)
+    else:
+        print("  No sparkrun status available.")
+        if stderr:
+            print(f"  Error: {stderr.strip()}")
+    print()
+
+    # ── Section 2: System Metrics (one-shot JSON snapshot) ────────────
+    print("=" * 60)
+    print("  SYSTEM METRICS (one-shot)")
+    print("=" * 60)
+    rc, json_output, stderr = run_cmd(
+        "timeout 4 sparkrun cluster monitor --simple --json", check=False
+    )
+    # timeout returns 124 when it kills the process, but data is already captured
+    if (rc == 0 or rc == 124) and json_output:
+        try:
+            # NDJSON: take first line only for one-shot
+            first_line = json_output.strip().split("\n")[0]
+            data = json.loads(first_line)
+            hosts = data.get("hosts", {})
+            if hosts:
+                # Print header
+                print(f"  {'Host':<18} {'CPU%':>6} {'RAM%':>6} {'GPU%':>6} "
+                      f"{'CPU°C':>7} {'GPU°C':>7} {'GPU W':>7}")
+                print(f"  {'-'*17:<18} {'-'*6:>6} {'-'*6:>6} {'-'*6:>6} "
+                      f"{'-'*7:>7} {'-'*7:>7} {'-'*7:>7}")
+                for ip in sorted(hosts.keys()):
+                    h = hosts[ip]
+                    cpu = h.get("cpu_usage_pct", "?")
+                    ram = h.get("mem_used_pct", "?")
+                    gpu = h.get("gpu_util_pct", "?")
+                    cpu_temp = h.get("cpu_temp_c", "?")
+                    gpu_temp = h.get("gpu_temp_c", "?")
+                    gpu_w = h.get("gpu_power_w", "?")
+                    jobs = h.get("sparkrun_jobs", "?")
+                    print(f"  {ip:<18} {cpu:>6} {ram:>6} {gpu:>6} "
+                          f"{cpu_temp:>6}C {gpu_temp:>6}C {gpu_w:>6}W  "
+                          f"jobs={jobs}")
+            else:
+                print("  No host data received.")
+        except (json.JSONDecodeError, KeyError) as e:
+            print(f"  Failed to parse monitor JSON: {e}")
+            print(f"  Raw: {json_output[:500]}")
+    else:
+        print("  No monitor data available.")
+        if stderr:
+            print(f"  Error: {stderr.strip()}")
+    print()
+
+    # ── Section 3: Cluster Info ───────────────────────────────────────
+    print("=" * 60)
+    print("  CLUSTER INFO")
+    print("=" * 60)
+    rc, stdout, stderr = run_cmd("sparkrun cluster list", check=False)
+    if rc == 0:
+        # Print as raw table
+        for line in stdout.strip().split("\n"):
+            print(f"  {line}")
+    else:
+        print("  No cluster info available.")
+
+
 @main.command()
 def reset():
     """Reset HSCC configuration (keep plugins and state)."""
