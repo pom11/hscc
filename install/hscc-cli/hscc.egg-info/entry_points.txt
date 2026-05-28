@@ -1,0 +1,2 @@
+[console_scripts]
+hscc = hscc_cli:main
