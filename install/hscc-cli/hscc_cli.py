@@ -209,7 +209,10 @@ def status():
     
     # Check gateway
     gw_reachable = check_gateway()
-    print(ok(f"Gateway: reachable (port 18789)") if gw_reachable else fail("Gateway: unreachable"))
+    if gw_reachable:
+        print(ok("Gateway: managed externally (not HSCC-managed)"))
+    else:
+        print(warn("Gateway: managed externally (not HSCC-managed)"))
     
     # Check daemon
     daemon_running = check_daemon()
@@ -311,9 +314,13 @@ def detect_qwen36_cache():
     return cached
 
 def check_gateway():
-    """Check if OpenClaw gateway is reachable."""
-    rc, _, _ = run_cmd("curl -s -o /dev/null -w '%{http_code}' http://localhost:18789/health")
-    return rc == 0
+    """Check gateway status.
+
+    NOTE: HSCC is now standalone — no longer depends on the OpenClaw gateway.
+    This check is kept for backward compatibility with the status CLI.
+    """
+    # Gateway is managed externally (not by HSCC anymore)
+    return False  # gateway is no longer HSCC's concern
 
 def check_daemon():
     """Check if HSCC daemon is running."""
@@ -470,7 +477,7 @@ def dashboard(cluster_status, existing):
     print(f"  {GREEN}✓ HSCC Initialized{RESET}")
     print(f"{GREEN}{'─' * 60}{RESET}")
     
-    gw = "✓ running" if existing["gateway_reachable"] else "✗ unreachable"
+    gw = "managed externally (not HSCC)"
     model = "✓ cached" if existing["qwen36_cached"] else "⚠ not cached"
     reachable = sum(1 for s in cluster_status.values() if s)
     total = len(cluster_status)

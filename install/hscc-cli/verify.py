@@ -42,15 +42,13 @@ def verify_config():
 
 
 def verify_gateway():
-    """Verify OpenClaw gateway is reachable."""
-    try:
-        import urllib.request
-        req = urllib.request.Request("http://localhost:18789/health")
-        req.add_header("User-Agent", "hscc/1.0")
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            return resp.status == 200
-    except:
-        return False
+    """Verify gateway status.
+
+    NOTE: HSCC is standalone — gateway is managed externally.
+    This is kept for backward compatibility.
+    """
+    # Gateway is managed externally (not by HSCC)
+    return False
 
 
 def verify_daemon():
