@@ -6,7 +6,7 @@
 #   1. Skill install (hscc-skills install)
 #   2. Skill status verification (hscc-skills status)
 #   3. State validation (verify all ~/.hscc/ state files)
-#   4. Gateway health check (localhost:18789)
+#   4. Daemon health check (HSCC daemon via pgrep)
 #   5. Cluster health check (sparkrun status)
 #
 # Usage:
@@ -27,7 +27,6 @@ set -uo pipefail
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
-HSCC_DIR="${HSCC_DIR:-$HOME/.hscc}"
 HSCC_DIR="${HSCC_DIR:-$HOME/.hscc}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 
@@ -87,12 +86,12 @@ while [[ $# -gt 0 ]]; do
             echo "  1. Skill install          — hscc-skills install"
             echo "  2. Skill status         — hscc-skills status (verification)"
             echo "  3. State validation     — verify ~/.hscc/ state files"
-            echo "  4. Gateway health check — localhost:18789"
+            echo "  4. Daemon health check  — HSCC daemon (pgrep)"
             echo "  5. Cluster health check — sparkrun status"
             echo ""
             echo "Flags:"
             echo "  --skip-skills   Skip skill/template installation"
-            echo "  --skip-gateway  Skip gateway health check"
+            echo "  --skip-daemon    Skip daemon health check"
             echo "  --skip-cluster  Skip cluster health check"
             echo "  --verbose       Show command output"
             echo "  --json          Machine-readable JSON output"
@@ -362,52 +361,6 @@ for fname, required_keys in expected.items():
         results.append(f"ERROR|json|{fname}: {e}")
         errors += 1
 
-# Check agents.json
-agents_file = os.path.join(hscc_dir, "agents.json")
-checks += 1
-if os.path.exists(agents_file):
-    try:
-        with open(agents_file) as f:
-            data = json.load(f)
-        count = len(data.get("agents", []))
-        if count > 0:
-            results.append(f"OK|agents|agents.json: {count} agent(s)")
-        else:
-            results.append(f"WARN|empty|agents.json: no agents defined")
-            warnings += 1
-    except (json.JSONDecodeError, IOError) as e:
-        results.append(f"ERROR|agents|agents.json: {e}")
-        errors += 1
-else:
-    results.append(f"WARN|missing|agents.json: not found at {agents_file}")
-    warnings += 1
-
-# Check cluster.json
-cluster_file = os.path.join(hscc_dir, "cluster.json")
-checks += 1
-if os.path.exists(cluster_file):
-    try:
-        with open(cluster_file) as f:
-            data = json.load(f)
-        has_gw = "yes" if data.get("gateway") else "no"
-        results.append(f"OK|cluster|cluster.json: gateway={has_gw}")
-    except (json.JSONDecodeError, IOError) as e:
-        results.append(f"ERROR|cluster|cluster.json: {e}")
-        errors += 1
-else:
-    results.append(f"WARN|missing|cluster.json: not found")
-    warnings += 1
-
-# Check events.jsonl
-events_file = os.path.join(hscc_dir, "events.jsonl")
-checks += 1
-if os.path.exists(events_file):
-    with open(events_file) as f:
-        line_count = sum(1 for _ in f)
-    results.append(f"OK|events|events.jsonl: {line_count} event(s)")
-else:
-    results.append(f"INFO|events|events.jsonl: created on first use")
-
 print(f"CHECKS={checks}")
 print(f"ERRORS={errors}")
 print(f"WARNINGS={warnings}")
@@ -585,30 +538,27 @@ run_cluster_check() {
         log_info "Install from: pip install sparkrun (or local package)"
     fi
 
-    # Check cluster config
-    local cluster_file="$HSCC_DIR/cluster.json"
-    if [[ -f "$cluster_file" ]]; then
-        local cluster_info
-        cluster_info=$(python3 -c "
+    # Check gateway.json (HSCC-managed)
+    local gateway_file="$HSCC_DIR/gateway.json"
+    if [[ -f "$gateway_file" ]]; then
+        local gw_info
+        gw_info=$(python3 -c "
 import json
-d = json.load(open('$cluster_file'))
-gw = d.get('gateway', {})
-workers = d.get('workers', [])
-nas = d.get('nasDevices', [])
-print(f'gateway={gw.get(\"ip\",\"?\")}')
-print(f'workers={len(workers)}')
-print(f'nas={len(nas)}')
+d = json.load(open('$gateway_file'))
+url = d.get('url', 'unknown')
+status = d.get('status', 'unknown')
+print(f'url={url}, status={status}')
 " 2>/dev/null) || true
-        if [[ -n "$cluster_info" ]]; then
-            log_pass "Cluster config: valid"
+        if [[ -n "$gw_info" ]]; then
+            log_pass "Gateway config: valid"
             if $VERBOSE; then
-                echo "$cluster_info" | sed 's/^/      /'
+                echo "$gw_info" | sed 's/^/      /'
             fi
         else
-            log_warn "Cluster config: parse error"
+            log_warn "Gateway config: parse error"
         fi
     else
-        log_warn "Cluster config: not found at $cluster_file"
+        log_warn "Gateway config: not found at $gateway_file"
     fi
 
     # Check NAS mount (local only)
@@ -638,9 +588,8 @@ main() {
     echo -e "${BOLD}║          $(date -u +"%Y-%m-%d %H:%M:%S UTC" 2>/dev/null || date)           ║${NC}"
     echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "  ${CYAN}HSCC_DIR:     ${HSCC_DIR}${NC}"
-    echo -e "  ${CYAN}HSCC_DIR:   ${HSCC_DIR}${NC}"
-    echo -e "  ${CYAN}HERMES_HOME:  ${HERMES_HOME}${NC}"
+    echo -e "  ${CYAN}HSCC_DIR:      ${HSCC_DIR}${NC}"
+    echo -e "  ${CYAN}HERMES_HOME:   ${HERMES_HOME}${NC}"
     echo -e "  ${CYAN}GATEWAY:      ${GATEWAY_HOST}:${GATEWAY_PORT}${NC}"
     echo -e "  ${CYAN}SKILLS_PLUGIN: ${SKILLS_PLUGIN}${NC}"
     echo ""

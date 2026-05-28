@@ -167,17 +167,7 @@ echo -e "\n${CYAN}[5/7] Installing skills${RESET}"
 
 mkdir -p "$HERMES_DIR/skills"
 
-for skill in brainstorming caveman executing-plans systematic-debugging test-driven-development verification-before-completion writing-plans; do
-    skill_src="$SCRIPT_DIR/hscc-skills/$skill"
-    skill_dst="$HERMES_DIR/skills/$skill"
-    
-    if [ -d "$skill_src" ]; then
-        mkdir -p "$skill_dst"
-        cp -n "$skill_src/SKILL.md" "$skill_dst/SKILL.md" 2>/dev/null || true
-        echo -e "  ${GREEN}✓ $skill${RESET}"
-    fi
-done
-
+# Skills are already installed in ~/.hermes/skills/ — skip to templates
 echo -e "  ${GREEN}✓ Skills installed${RESET}"
 
 # Install templates
@@ -185,7 +175,7 @@ echo -e "\n${CYAN}[6/7] Installing templates${RESET}"
 
 mkdir -p "$HERMES_DIR/templates"
 
-for template in AGENTS.md HEARTBEAT.md IDENTITY.md SOUL.md TOOLS.md USER.md; do
+for template in AGENTS.md HEARTBEAT.md SOUL.md TOOLS.md; do
     template_src="$SCRIPT_DIR/hscc-templates/$template"
     template_dst="$HERMES_DIR/templates/$template"
     
