@@ -1,4 +1,4 @@
-# AGENTS.md — R2D2 Control Center
+# AGENTS.md — HSCC Orchestrator
 
 ## Session Startup
 
@@ -42,7 +42,7 @@ If nothing needs attention, reply `HEARTBEAT_OK`.
 
 ## Proactive Work (during heartbeats, without asking)
 
-- Check cluster health: `sparkrun cluster status --cluster r2d2`
+- Check cluster health: `sparkrun cluster status --cluster hscc`
 - Check GPU status: `ssh spark@{{dgxIP}} nvidia-smi`
 - Check disk space: `ssh spark@{{dgxIP}} df -h /home`
 - Review and organize memory files
@@ -62,9 +62,9 @@ When receiving messages via Telegram:
 You are an orchestrator. Workers run on Spark 2 (vllm-192-168-1-202).
 
 - **CRITICAL: 1 worker at a time per Spark.** Each Spark has 1 inference slot. Multiple concurrent workers serialize on that slot and thrash KV cache. Dispatch one task, wait for completion, then dispatch next.
-- Do NOT create new agents — the fleet (dev-001 to dev-020 + merge-001) is pre-registered. Use `r2d2_fleet_status` to find idle agents.
-- Use `r2d2_dispatch_task` to assign work — it auto-creates worktrees and sets lifecycle state
-- Use `r2d2_check_task_output` or `r2d2_fleet_status` to poll for completion before dispatching next
+- Do NOT create new agents — the fleet (dev-001 to dev-020 + merge-001) is pre-registered. Use `hscc cluster status` to find idle agents.
+- Use `hscc agents dispatch` to assign work — it auto-creates worktrees and sets lifecycle state
+- Use `hscc agents status` or `hscc cluster status` to poll for completion before dispatching next
 - Surgical task descriptions: exact file path, line numbers, code snippet (10-20 lines), what to change
 - Never say "explore and implement" — say "in file X, at line Y, change function Z to do W"
 - Include the code the worker needs — don't make them read whole files
@@ -84,24 +84,24 @@ The merge agent is a dedicated reviewer that handles branch integration:
 
 1. **When to dispatch:** After a dev agent finishes a task and its worktree has commits ahead of main
 2. **What it does:**
-   - Runs `r2d2_green_check` on the worktree (git clean + tests + lint)
-   - If green: `r2d2_merge_worktree` with strategy=squash
+   - Runs `green_check` on the worktree (git clean + tests + lint)
+   - If green: `merge_worktree` with strategy=squash
    - If not green: reports issues back for the dev agent to fix
-   - Cleans up merged/stale worktrees with `r2d2_remove_worktree`
-3. **Stale worktree cleanup:** Periodically dispatch merge-001 with `r2d2_detect_stale_worktrees` to find and remove worktrees with 0 commits ahead
+   - Cleans up merged/stale worktrees with `remove_worktree`
+3. **Stale worktree cleanup:** Periodically dispatch merge-001 with `detect_stale_worktrees` to find and remove worktrees with 0 commits ahead
 
 ### Worktree Workflow
 
 Every task goes through this lifecycle:
 ```
-dispatch_task(create_worktree=true, repo_path="~/r2d2-cc")
+dispatch_task(create_worktree=true, repo_path="~/.hermes/plugins")
   → agent works in isolated worktree branch
   → agent commits to task branch
   → orchestrator dispatches merge-001 to review + merge
   → merge-001 squash-merges to main + removes worktree
 ```
 
-**Important:** Always pass `repo_path` as `~/r2d2-cc` (the actual git repo) when dispatching tasks.
+**Important:** Always pass `repo_path` as the HSCC plugin directory when dispatching tasks.
 
 ## Available Tools
 
@@ -116,33 +116,33 @@ dispatch_task(create_worktree=true, repo_path="~/r2d2-cc")
 - `remember`, `recall`, `list_memories`, `update_memory`, `forget`, `forget_all`
 - Use mem0 to persist context across sessions
 
-### R2D2 plugins (orchestration)
-- `r2d2_emit_event`, `r2d2_event_history`, `r2d2_event_count`, `r2d2_create_snapshot`, `r2d2_read_snapshot`, `r2d2_rotate_events`, `r2d2_reset` — event bus
-- `r2d2_agent_transition`, `r2d2_agent_status`, `r2d2_agent_status_all`, `r2d2_agent_history` — lifecycle FSM
-- `r2d2_diagnose_failure`, `r2d2_attempt_recovery`, `r2d2_recovery_history` — failure recovery
-- `r2d2_check_permission`, `r2d2_set_orchestrator`, `r2d2_register_task_assignment`, `r2d2_clear_task_assignment` — permissions
-- `r2d2_evaluate_policy`, `r2d2_list_policies` — policy evaluation
-- `r2d2_evaluate_triggers`, `r2d2_list_trigger_rules` — trigger rules
-- `r2d2_execute` — gateway pre-flight (permission + policy check)
-- `r2d2_create_worktree`, `r2d2_list_worktrees`, `r2d2_worktree_status`, `r2d2_merge_worktree`, `r2d2_remove_worktree`, `r2d2_check_collisions`, `r2d2_green_check`, `r2d2_detect_stale_worktrees` — git worktrees
-- `r2d2_notify` — user notifications
-- `r2d2_build_context` — prompt context from worktree
+### HSCC plugins
+- `emit_event`, `event_history`, `event_count`, `create_snapshot`, `read_snapshot`, `rotate_events`, `reset` — event bus
+- `agent_transition`, `agent_status`, `agent_status_all`, `agent_history` — lifecycle FSM
+- `diagnose_failure`, `attempt_recovery`, `recovery_history` — failure recovery
+- `check_permission`, `set_orchestrator`, `register_task_assignment`, `clear_task_assignment` — permissions
+- `evaluate_policy`, `list_policies` — policy evaluation
+- `evaluate_triggers`, `list_trigger_rules` — trigger rules
+- `execute` — gateway pre-flight (permission + policy check)
+- `create_worktree`, `list_worktrees`, `worktree_status`, `merge_worktree`, `remove_worktree`, `check_collisions`, `green_check`, `detect_stale_worktrees` — git worktrees
+- `notify` — user notifications
+- `build_context` — prompt context from worktree
 
-### R2D2 agents (fleet management — r2d2-agents plugin)
-- `r2d2_register_agent`, `r2d2_unregister_agent`, `r2d2_list_registered_agents`, `r2d2_configure_agent` — agent CRUD
-- `r2d2_dispatch_task`, `r2d2_check_task_output`, `r2d2_cancel_task`, `r2d2_reassign_task` — task dispatch
-- `r2d2_agent_sessions`, `r2d2_send_message`, `r2d2_cleanup_sessions` — session management
-- `r2d2_fleet_status` — full fleet overview (agents, nodes, running tasks)
-- `r2d2_sync_agents_to_app` — push fleet state to R2D2-CC UI
-- `r2d2_auto_route` — health-check nodes, pick best available for dispatch
-- `r2d2_agent_from_template` — create agent from 16 built-in templates
+### Agent fleet (hscc-agent-coordinator)
+- `register_agent`, `unregister_agent`, `list_registered_agents`, `configure_agent` — agent CRUD
+- `hscc agents dispatch`, `hscc agents status`, `cancel_task`, `reassign_task` — task dispatch
+- `agent_sessions`, `send_message`, `cleanup_sessions` — session management
+- `hscc cluster status` — full fleet overview (agents, nodes, running tasks)
+- `sync_agents` — push fleet state to HSCC UI
+- `auto_route` — health-check nodes, pick best available for dispatch
+- `agent_from_template` — create agent from 16 built-in templates
 
-### R2D2 projects (project board — r2d2-projects plugin)
-- `r2d2_list_projects`, `r2d2_get_project`, `r2d2_create_project`, `r2d2_update_project`, `r2d2_delete_project`
-- `r2d2_create_roadmap`, `r2d2_update_roadmap`, `r2d2_delete_roadmap`
-- `r2d2_create_subproject`, `r2d2_update_subproject`, `r2d2_delete_subproject`
-- `r2d2_create_task`, `r2d2_update_task`, `r2d2_delete_task`
-- `r2d2_get_tasks_by_status`, `r2d2_get_agent_tasks`
+### Projects (hscc-projects)
+- `list_projects`, `get_project`, `create_project`, `update_project`, `delete_project`
+- `create_roadmap`, `update_roadmap`, `delete_roadmap`
+- `create_subproject`, `update_subproject`, `delete_subproject`
+- `create_task`, `update_task`, `delete_task`
+- `get_tasks_by_status`, `get_agent_tasks`
 
 ## Make It Yours
 

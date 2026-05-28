@@ -1,4 +1,4 @@
-# TOOLS.md — R2D2 Infrastructure
+# TOOLS.md — HSCC Infrastructure
 
 ## CRITICAL: sparkrun Architecture
 
@@ -14,7 +14,7 @@ sparkrun is a CLI tool installed ONLY on the Mac. It manages DGX Spark nodes rem
 | Spark 1 | {{dgxIP}} | spark | Primary | GB10 | 128GB unified |
 | Spark 2 | 192.168.1.202 | spark | Worker | GB10 | 128GB unified |
 
-- Cluster name: `r2d2`
+- Cluster name: `hscc`
 - SSH auth: key-based (no passwords)
 - Networking: Realtek ethernet only (no CX7/InfiniBand)
 - Each node runs independently — ethernet is too slow for multi-node tensor parallelism
@@ -28,8 +28,8 @@ sparkrun is a CLI tool installed ONLY on the Mac. It manages DGX Spark nodes rem
 
 ### Launch / Stop Current Model
 ```bash
-sparkrun run {{recipe}} --cluster r2d2 --no-follow
-sparkrun stop {{recipe}} --cluster r2d2
+sparkrun run {{recipe}} --cluster hscc --no-follow
+sparkrun stop {{recipe}} --cluster hscc
 ```
 
 ## sparkrun CLI — Quick Reference
@@ -38,20 +38,20 @@ All commands run on the Mac. Use the `sparkrun_exec` tool or shell.
 
 ### Cluster Status
 ```bash
-sparkrun cluster status --cluster r2d2          # human-readable
-sparkrun cluster status --cluster r2d2 --json   # machine-readable
+sparkrun cluster status --cluster hscc          # human-readable
+sparkrun cluster status --cluster hscc --json   # machine-readable
 ```
 
 ### Launch a Model
 ```bash
-sparkrun run <recipe> --cluster r2d2 --no-follow         # deploy to cluster
+sparkrun run <recipe> --cluster hscc --no-follow         # deploy to cluster
 sparkrun run <recipe> --hosts {{dgxIP}} --no-follow   # deploy to specific node
 sparkrun run <recipe> --solo --no-follow                   # single-node mode
 ```
 
 ### Stop a Workload
 ```bash
-sparkrun stop <recipe> --cluster r2d2
+sparkrun stop <recipe> --cluster hscc
 ```
 
 ### Browse Recipes
@@ -64,12 +64,12 @@ sparkrun recipe search <query>          # search by keyword
 
 ### Model Sync (download model to nodes)
 ```bash
-sparkrun setup model-sync --recipe <recipe> --cluster r2d2
+sparkrun setup model-sync --recipe <recipe> --cluster hscc
 ```
 
 ### Container Logs
 ```bash
-sparkrun logs <recipe> --cluster r2d2 --tail 50
+sparkrun logs <recipe> --cluster hscc --tail 50
 ```
 
 ### VRAM Check
@@ -88,22 +88,22 @@ When doing sparkrun operations, load the appropriate skill first:
 - Before cluster setup: load the `setup` skill
 - Before managing registries: load the `registry` skill
 
-## R2D2 Plugins (Hermes)
+## HSCC Plugins
 
 | Plugin | Tools | Purpose |
 |--------|-------|---------|
-| r2d2-agents | 15 | Agent CRUD, task dispatch (atomic guards), fleet coordination, auto-routing. Includes merge-001 agent for branch integration |
-| r2d2-projects | 16 | Project/roadmap/subproject/task CRUD, status queries |
-| r2d2-worktrees | 8 | Git worktree management, collision detection, green checks |
-| r2d2-events | 7 | Event bus, snapshots, rotation, reset |
-| r2d2-lifecycle | 4 | Agent lifecycle FSM (idle→spawning→ready→running→finished→failed→disabled) |
-| r2d2-recovery | 3 | Failure diagnosis + auto-recovery |
-| r2d2-permissions | 4 | Tool access control |
-| r2d2-policy | 2 | Policy evaluation |
-| r2d2-triggers | 2 | Trigger rule evaluation + listing |
-| r2d2-gateway | 1 | Permission + policy pre-flight |
-| r2d2-notifications | 1 | User notifications |
-| r2d2-prompt-context | 1 | Build structured prompt context from worktree |
+| hscc-agent-coordinator | 15 | Agent CRUD, task dispatch (atomic guards), fleet coordination, auto-routing. Includes merge-001 agent for branch integration |
+| hscc-projects | 16 | Project/roadmap/subproject/task CRUD, status queries |
+| hscc-agent-coordinator (merged) | 8 | Git worktree management, collision detection, green checks |
+| hscc-events | 7 | Event bus, snapshots, rotation, reset |
+| hscc-agent-coordinator (merged) | 4 | Agent lifecycle FSM (idle→spawning→ready→running→finished→failed→disabled) |
+| hscc-agent-coordinator (merged) | 3 | Failure diagnosis + auto-recovery |
+| hscc-governance | 4 | Tool access control |
+| hscc-governance | 2 | Policy evaluation |
+| hscc-governance | 2 | Trigger rule evaluation + listing |
+| hscc-chat | 1 | Permission + policy pre-flight |
+| Telegram via subprocess | 1 | User notifications |
+| hscc-projects | 1 | Build structured prompt context from worktree |
 | @sparkarena/sparkrun | 1 | sparkrun CLI wrapper |
 
 ## mem0 MCP Tools
@@ -115,7 +115,7 @@ When doing sparkrun operations, load the appropriate skill first:
 - `forget(memory_id)` — delete a memory
 - `forget_all(user_id, confirm)` — delete ALL memories
 
-Default user_id is "r2d2". Use agent name for workers.
+Default user_id is "hermes". Use agent name for workers.
 
 ## Mac Control — Screen, Keyboard & Mouse
 
@@ -145,17 +145,17 @@ cliclick kd:cmd kp:v ku:cmd    # Cmd+V (paste)
 ### Permissions Required
 These apps MUST be added to BOTH Screen Recording AND Accessibility:
 - **node** (the Hermes/agent runtime)
-- **R2D2 Control Center** (the Mac app)
+- **HSCC** (the Mac app)
 - **Terminal / iTerm** (if running commands directly)
 
 Path: System Settings → Privacy & Security → Screen Recording / Accessibility
 
-## Services (managed by R2D2 app)
+## Services (managed by HSCC)
 
 | Service | Address |
 |---------|---------|
 | Hermes Gateway | localhost:18789 |
-| PostgreSQL | localhost:5432 (r2d2/r2d2local) |
+| PostgreSQL | localhost:5432 (hermes/hermes) |
 | mem0 | localhost:8090 |
 | mem0-mcp | localhost:9200 |
 | Ollama | localhost:11434 |

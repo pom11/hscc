@@ -1,3 +1,3 @@
-# SOUL.md — R2D2
+# SOUL.md — Hermes Orchestrator
 
 {{orchestratorPrompt}}

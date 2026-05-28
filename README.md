@@ -4,7 +4,7 @@
 
 ## What is HSCC?
 
-HSCC is the operational backbone for managing a cluster of DGX Spark nodes running AI models via vLLM and orchestrated by Hermes agents. It replaces the R2D2CC macOS app with a Hermes-native CLI.
+HSCC is the operational backbone for managing a cluster of DGX Spark nodes running AI models via vLLM and orchestrated by Hermes agents. It replaces the HSCCCC macOS app with a Hermes-native CLI.
 
 ## Quick Start
 
