@@ -358,9 +358,9 @@ All plugins output JSON to stdout for machine consumption, with `indent=2` or `i
 │                                                         │
 │  chats/ ──► chat (session persistence)                  │
 ├─────────────────────────────────────────────────────────┤
-│                   ~/.openclaw/                           │
+│                   ~/.hermes/                           │
 │  device.json ──► chat (Ed25519 auth)                    │
-│  openclaw.json ──► chat (gateway token)                 │
+│  hermes.json ──► chat (gateway token)                 │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -514,7 +514,7 @@ hscc-core/
 │   ├── LIFECYCLE_FILE
 │   ├── EVENTS_FILE (canonical)
 │   ├── CLUSTER_JSON
-│   ├── openclaw paths
+│   ├── hermes paths
 │   └── daemon-specific paths (STATE_DIR, PID_FILE, etc.)
 ├── io.py                # Shared I/O
 │   ├── ensure_dir()
@@ -851,7 +851,7 @@ Week 3: Phase 3 — Cleanup
    **Impact:** 1 data migration: `rsync ~/.r2d2cc/events.jsonl ~/.hscc/events.jsonl`.
 
 2. **AGENTS_JSON canonical path:** Should all plugins use `~/.r2d2cc/agents.json` or `~/.hscc/agents.json`?  
-   **Recommendation:** Keep `~/.r2d2cc/agents.json` (used by sparkrun/openclaw tooling).
+   **Recommendation:** Keep `~/.r2d2cc/agents.json` (used by sparkrun/hermes tooling).
 
 3. **Python path for imports:** Will `hscc-core` be in `PYTHONPATH` or installed as a pip package?  
    **Recommendation:** Add `~/.hermes/plugins/` to Python path via a `.pth` file in site-packages. No pip install needed.

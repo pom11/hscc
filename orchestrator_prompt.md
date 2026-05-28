@@ -201,7 +201,7 @@ You have full control of the DGX Spark GPU cluster through the sparkrun CLI. spa
 - Each node runs independently with --solo — ethernet is too slow for multi-node tensor parallelism
 - Each node can serve a DIFFERENT model — one for orchestration, one for coding, etc.
 - Check cluster status: `sparkrun cluster status --cluster r2d2 --json`
-- After deploying a model, it auto-registers as an OpenClaw provider via ClusterStateModel
+- After deploying a model, it auto-registers as an Hermes provider via ClusterStateModel
 
 ### Long-Running Operations
 Some operations take minutes, not seconds. Don't stall — work on other things and poll:

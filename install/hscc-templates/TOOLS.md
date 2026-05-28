@@ -24,7 +24,7 @@ sparkrun is a CLI tool installed ONLY on the Mac. It manages DGX Spark nodes rem
 - Recipe: `{{recipe}}`
 - Runtime: {{runtime}}
 - Endpoint: http://{{dgxIP}}:8000/v1
-- OpenClaw provider: `vllm-dgx`
+- Hermes provider: `vllm-dgx`
 
 ### Launch / Stop Current Model
 ```bash
@@ -77,7 +77,7 @@ sparkrun logs <recipe> --cluster r2d2 --tail 50
 sparkrun run <recipe> --dry-run   # preview VRAM usage without launching
 ```
 
-## sparkrun Plugin (OpenClaw)
+## sparkrun Plugin (Hermes)
 
 The `@sparkarena/sparkrun` plugin provides:
 - **Tool:** `sparkrun_exec` — execute any sparkrun CLI command
@@ -88,7 +88,7 @@ When doing sparkrun operations, load the appropriate skill first:
 - Before cluster setup: load the `setup` skill
 - Before managing registries: load the `registry` skill
 
-## R2D2 Plugins (OpenClaw)
+## R2D2 Plugins (Hermes)
 
 | Plugin | Tools | Purpose |
 |--------|-------|---------|
@@ -144,7 +144,7 @@ cliclick kd:cmd kp:v ku:cmd    # Cmd+V (paste)
 
 ### Permissions Required
 These apps MUST be added to BOTH Screen Recording AND Accessibility:
-- **node** (the OpenClaw/agent runtime)
+- **node** (the Hermes/agent runtime)
 - **R2D2 Control Center** (the Mac app)
 - **Terminal / iTerm** (if running commands directly)
 
@@ -154,7 +154,7 @@ Path: System Settings → Privacy & Security → Screen Recording / Accessibilit
 
 | Service | Address |
 |---------|---------|
-| OpenClaw Gateway | localhost:18789 |
+| Hermes Gateway | localhost:18789 |
 | PostgreSQL | localhost:5432 (r2d2/r2d2local) |
 | mem0 | localhost:8090 |
 | mem0-mcp | localhost:9200 |

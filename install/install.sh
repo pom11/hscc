@@ -32,7 +32,7 @@ RESET='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HSCC_DIR="$HOME/.hscc"
 HERMES_DIR="$HOME/.hermes"
-OPENCLAW_DIR="$HOME/.openclaw"
+hermes_DIR="$HOME/.hermes"
 SPARKRUN_DIR="$HOME/.sparkrun-local"
 R2D2CC_DIR="$HOME/.r2d2cc"
 

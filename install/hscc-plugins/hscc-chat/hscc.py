@@ -2,7 +2,7 @@
 """
 Hermes Spark Cluster Control — WebSocket Chat Daemon Plugin
 
-Connects to the OpenClaw gateway (localhost:18789) for chat streaming,
+Connects to the Hermes gateway (localhost:18789) for chat streaming,
 maintaining a persistent WebSocket connection with Ed25519 device auth
 + token auth, auto-reconnect, session persistence, and markdown rendering.
 
@@ -37,9 +37,9 @@ from pathlib import Path
 
 HSCC_DIR = os.path.expanduser("~/.hscc")
 CHATS_DIR = os.path.join(HSCC_DIR, "chats")
-OPENCLAW_DIR = os.path.expanduser("~/.openclaw")
-DEVICE_JSON = os.path.join(OPENCLAW_DIR, "device.json")
-OPENCLAW_JSON = os.path.join(OPENCLAW_DIR, "openclaw.json")
+hermes_DIR = os.path.expanduser("~/.hermes")
+DEVICE_JSON = os.path.join(hermes_DIR, "device.json")
+hermes_JSON = os.path.join(hermes_DIR, "hermes.json")
 WS_GATEWAY_HOST = "localhost"
 WS_GATEWAY_PORT = 18789
 WS_GATEWAY_URL = f"wss://{WS_GATEWAY_HOST}:{WS_GATEWAY_PORT}/ws/chat"
@@ -115,7 +115,7 @@ def _session_meta_file_path(session_id):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_device_config():
-    """Load Ed25519 device configuration from ~/.openclaw/device.json.
+    """Load Ed25519 device configuration from ~/.hermes/device.json.
 
     Returns a dict with keys like deviceId, privateKeyPem, publicKeyPem,
     or None if the file is missing / unparseable.
@@ -129,19 +129,19 @@ def load_device_config():
         return None
 
 
-def load_openclaw_config():
-    """Load OpenClaw config including gateway auth token from ~/.openclaw/openclaw.json."""
-    if not os.path.exists(OPENCLAW_JSON):
+def load_hermes_config():
+    """Load Hermes config including gateway auth token from ~/.hermes/hermes.json."""
+    if not os.path.exists(hermes_JSON):
         return None
     try:
-        with open(OPENCLAW_JSON, "r") as f:
+        with open(hermes_JSON, "r") as f:
             return json.load(f)
     except (json.JSONDecodeError, IOError):
         return None
 
 
 def get_gateway_token(config=None):
-    """Extract the gateway auth token from the OpenClaw config.
+    """Extract the gateway auth token from the Hermes config.
 
     Tries nested paths in order:
       config["gateway"]["auth"]["token"]
@@ -914,7 +914,7 @@ class GatewayConnection:
         }
 
     async def connect(self):
-        """Establish connection to the OpenClaw gateway.
+        """Establish connection to the Hermes gateway.
 
         In simulated mode: sets up local state and prints status.
         In real mode: uses websockets library for actual connection.
@@ -932,7 +932,7 @@ class GatewayConnection:
         ws = _websockets
         try:
             # Load auth config
-            token = self._auth_token or get_gateway_token(load_openclaw_config())
+            token = self._auth_token or get_gateway_token(load_hermes_config())
             pub_key = self._device_public_key or get_ed25519_public_key()
             if not token:
                 self._on_error("No gateway auth token found")
@@ -1203,7 +1203,7 @@ def _get_gateway():
     if _gateway_instance is None:
         _gateway_instance = GatewayConnection()
         # Try to load auth config
-        oc_config = load_openclaw_config()
+        oc_config = load_hermes_config()
         token = get_gateway_token(oc_config)
         if token:
             _gateway_instance._auth_token = token
@@ -1250,9 +1250,9 @@ def cmd_ws_status():
     dev_config = load_device_config()
     print(f"\n  Device Config:  {'loaded' if dev_config else 'not found at ' + DEVICE_JSON}")
 
-    oc_config = load_openclaw_config()
+    oc_config = load_hermes_config()
     gw_token = get_gateway_token(oc_config) if oc_config else None
-    print(f"  Gateway Config: {'loaded' if oc_config else 'not found at ' + OPENCLAW_JSON}")
+    print(f"  Gateway Config: {'loaded' if oc_config else 'not found at ' + hermes_JSON}")
     print(f"  Gateway Token:  {'configured' if gw_token else 'not found'}")
 
     print(f"{'─' * 70}")

@@ -320,10 +320,10 @@ def check_dgx():
 
 
 def check_gateway():
-    """Gateway check (every 10s): HTTP check on OpenClaw gateway port."""
+    """Gateway check (every 10s): HTTP check on Hermes gateway port."""
     log("Running gateway check")
 
-    # OpenClaw gateway default port
+    # Hermes gateway default port
     for port in [18789, 18788, 18790]:
         url = f"http://localhost:{port}/api/health"
         health = http_check(url, timeout=5)
@@ -375,14 +375,14 @@ def check_local():
         pass
     services["postgresql"] = {"running": pg_ok}
 
-    # OpenClaw process
+    # Hermes process
     oclaw_ok = False
     try:
-        r = run_cmd(["pgrep", "-f", "openclaw"], timeout=3)
+        r = run_cmd(["pgrep", "-f", "hermes"], timeout=3)
         oclaw_ok = bool(r.get("output", "").strip())
     except Exception:
         pass
-    services["openclaw"] = {"running": oclaw_ok}
+    services["hermes"] = {"running": oclaw_ok}
 
     # Node.js / npm
     node_r = run_cmd(["node", "--version"], timeout=3)

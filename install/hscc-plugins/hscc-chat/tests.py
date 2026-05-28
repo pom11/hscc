@@ -40,7 +40,7 @@ class TestAuthConfigLoading(unittest.TestCase):
         """Config returns None when file doesn't exist."""
         # Point to non-existent path via mock
         old = os.path.expanduser
-        os.path.expanduser = lambda p: "/tmp/nonexistent_" + p if ".openclaw" in p else p
+        os.path.expanduser = lambda p: "/tmp/nonexistent_" + p if ".hermes" in p else p
         try:
             result = hscc.load_device_config()
             self.assertIsNone(result)
@@ -54,17 +54,17 @@ class TestAuthConfigLoading(unittest.TestCase):
             path = os.path.join(d, "device.json")
             with open(path, "w") as f:
                 json.dump({"publicKey": "ed25519pub", "privateKey": "ed25519priv"}, f)
-            # Patch the OPENCLAW_DIR constant and DEVICE_JSON
-            orig_openclaw = hscc.OPENCLAW_DIR
+            # Patch the hermes_DIR constant and DEVICE_JSON
+            orig_hermes = hscc.hermes_DIR
             orig_device = hscc.DEVICE_JSON
-            hscc.OPENCLAW_DIR = d
+            hscc.hermes_DIR = d
             hscc.DEVICE_JSON = path
             try:
                 result = hscc.load_device_config()
                 self.assertIsNotNone(result)
                 self.assertEqual(result["publicKey"], "ed25519pub")
             finally:
-                hscc.OPENCLAW_DIR = orig_openclaw
+                hscc.hermes_DIR = orig_hermes
                 hscc.DEVICE_JSON = orig_device
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -77,7 +77,7 @@ class TestAuthConfigLoading(unittest.TestCase):
             with open(path, "w") as f:
                 f.write("{ invalid json }")
             old = os.path.expanduser
-            os.path.expanduser = lambda p: d if p == os.path.expanduser("~/.openclaw") else p
+            os.path.expanduser = lambda p: d if p == os.path.expanduser("~/.hermes") else p
             try:
                 result = hscc.load_device_config()
                 self.assertIsNone(result)

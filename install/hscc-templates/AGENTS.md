@@ -25,7 +25,7 @@ Memory is limited. If you want to remember something, WRITE IT TO A FILE.
 
 ## Worker Agents
 
-Your fleet is in `~/.openclaw/agents/`. Each has a `.md` profile with identity and instructions.
+Your fleet is in `~/.hermes/agents/`. Each has a `.md` profile with identity and instructions.
 Workers see ONLY their assigned task. You see everything.
 
 ## Red Lines

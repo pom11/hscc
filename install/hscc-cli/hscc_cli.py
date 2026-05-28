@@ -11,7 +11,7 @@ A Python CLI that wires together existing HSCC components:
 Usage:
     hscc init              # Full setup: detect → wire → verify → deploy
     hscc status            # Show system health dashboard
-    hscc chat              # Start interactive chat with OpenClaw gateway
+    hscc chat              # Start interactive chat with Hermes gateway
     hscc cluster start     # Start model on primary node
     hscc cluster stop      # Stop model on primary node
     hscc cluster status    # Show model status on all nodes
@@ -38,7 +38,7 @@ from datetime import datetime
 VERSION = "2026.05.28"
 HSCC_DIR = Path.home() / ".hscc"
 HERMES_DIR = Path.home() / ".hermes"
-OPENCLAW_DIR = Path.home() / ".openclaw"
+hermes_DIR = Path.home() / ".hermes"
 SPARKRUN_DIR = Path.home() / ".sparkrun-local"
 
 # Color codes
@@ -238,24 +238,24 @@ def status():
 
 @main.command()
 def chat():
-    """Start interactive chat with OpenClaw gateway."""
-    section("Chat with OpenClaw")
+    """Start interactive chat with Hermes gateway."""
+    section("Chat with Hermes")
     
     if not check_gateway():
         print(fail("Gateway not reachable. Run: hscc init first"))
         sys.exit(1)
     
-    print(info("Connecting to OpenClaw gateway..."))
+    print(info("Connecting to Hermes gateway..."))
     click.echo("Type your message. Type 'exit' to quit.")
     
     try:
         # In a real implementation, this would use websockets to connect
-        # to the OpenClaw gateway. For now, show a placeholder.
+        # to the Hermes gateway. For now, show a placeholder.
         while True:
             msg = click.prompt("You")
             if msg.lower() in ("exit", "quit"):
                 break
-            click.echo(f"\n{DIM}(Chat would connect to OpenClaw gateway here){RESET}\n")
+            click.echo(f"\n{DIM}(Chat would connect to Hermes gateway here){RESET}\n")
     except KeyboardInterrupt:
         click.echo("\nGoodbye!")
 
@@ -316,7 +316,7 @@ def detect_qwen36_cache():
 def check_gateway():
     """Check gateway status.
 
-    NOTE: HSCC is now standalone — no longer depends on the OpenClaw gateway.
+    NOTE: HSCC is now standalone — no longer depends on the Hermes gateway.
     This check is kept for backward compatibility with the status CLI.
     """
     # Gateway is managed externally (not by HSCC anymore)

@@ -23,7 +23,7 @@ from pathlib import Path
 HOME = Path.home()
 HSCC_DIR = HOME / ".hscc"
 HERMES_DIR = HOME / ".hermes"
-OPENCLAW_DIR = HOME / ".openclaw"
+hermes_DIR = HOME / ".hermes"
 SPARKRUN_DIR = HOME / ".sparkrun-local"
 R2D2CC_DIR = HOME / ".r2d2cc"
 

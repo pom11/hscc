@@ -1089,7 +1089,7 @@ def cmd_detect_orphans():
     Detect orphan agents: agents in working states (running, spawning, ready)
     with no corresponding sparkrun container.
 
-    These are agents that OpenClaw is working on but have no sparkrun container backing them.
+    These are agents that Hermes is working on but have no sparkrun container backing them.
     Orphans are reset to idle state.
 
     Usage: hscc-agent-coordinator detect-orphans [--force-reset]
