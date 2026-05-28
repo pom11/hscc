@@ -1,23 +1,19 @@
+# Runtime data
+events.jsonl
+agent-workspaces/
+*.jsonl
+
+# Sensitive files
+hf_token
+
+# Version tracking
+VERSION
+
 # Python bytecode
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-.Python
-*.egg-info/
-
-# Virtual environments
-venv/
-.env
 
 # IDE
 .idea/
 .vscode/
-*.swp
-*.swo
-
-# OS
 .DS_Store
-
-# Test artifacts
-.pytest_cache/

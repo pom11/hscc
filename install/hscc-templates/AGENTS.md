@@ -5,17 +5,16 @@
 Before doing anything else:
 
 1. Read `SOUL.md` — this is who you are
-2. Read `USER.md` — this is who you're helping
-3. Read `TOOLS.md` — this is your infrastructure
-4. Read `memory/` (today + yesterday) for recent context
-5. In main sessions: also read `MEMORY.md`
+2. Read `TOOLS.md` — infrastructure reference
+3. Read `memory/` (today + yesterday) for recent context
+4. In main sessions: also read `MEMORY.md`
 
 ## Memory System
 
 You wake up fresh each session. These files are your continuity:
 
-- **Daily notes:** `memory/YYYY-MM-DD.md` — raw logs of what happened
-- **Long-term:** `MEMORY.md` — curated memories, distilled from daily notes
+- **Daily notes:** `memory/YYYY-MM-DD.md` — raw logs
+- **Long-term:** `MEMORY.md` — curated memories
 - **MEMORY.md is private** — only load in direct chats, never in group contexts
 
 ### Write It Down
@@ -102,47 +101,6 @@ dispatch_task(create_worktree=true, repo_path="~/.hermes/plugins")
 ```
 
 **Important:** Always pass `repo_path` as the HSCC plugin directory when dispatching tasks.
-
-## Available Tools
-
-### sparkrun (GPU cluster management)
-- **Tool:** `sparkrun_exec` — runs any sparkrun CLI command locally on the Mac
-- **Skills:** `run` (launch/stop/monitor), `setup` (cluster config), `registry` (recipe management)
-- Load the appropriate skill before doing sparkrun operations
-- sparkrun runs ONLY on the Mac — it manages DGX nodes remotely via SSH
-- NEVER install sparkrun or any software on DGX nodes
-
-### mem0 (semantic memory via MCP)
-- `remember`, `recall`, `list_memories`, `update_memory`, `forget`, `forget_all`
-- Use mem0 to persist context across sessions
-
-### HSCC plugins
-- `emit_event`, `event_history`, `event_count`, `create_snapshot`, `read_snapshot`, `rotate_events`, `reset` — event bus
-- `agent_transition`, `agent_status`, `agent_status_all`, `agent_history` — lifecycle FSM
-- `diagnose_failure`, `attempt_recovery`, `recovery_history` — failure recovery
-- `check_permission`, `set_orchestrator`, `register_task_assignment`, `clear_task_assignment` — permissions
-- `evaluate_policy`, `list_policies` — policy evaluation
-- `evaluate_triggers`, `list_trigger_rules` — trigger rules
-- `execute` — gateway pre-flight (permission + policy check)
-- `create_worktree`, `list_worktrees`, `worktree_status`, `merge_worktree`, `remove_worktree`, `check_collisions`, `green_check`, `detect_stale_worktrees` — git worktrees
-- `notify` — user notifications
-- `build_context` — prompt context from worktree
-
-### Agent fleet (hscc-agent-coordinator)
-- `register_agent`, `unregister_agent`, `list_registered_agents`, `configure_agent` — agent CRUD
-- `hscc agents dispatch`, `hscc agents status`, `cancel_task`, `reassign_task` — task dispatch
-- `agent_sessions`, `send_message`, `cleanup_sessions` — session management
-- `hscc cluster status` — full fleet overview (agents, nodes, running tasks)
-- `sync_agents` — push fleet state to HSCC UI
-- `auto_route` — health-check nodes, pick best available for dispatch
-- `agent_from_template` — create agent from 16 built-in templates
-
-### Projects (hscc-projects)
-- `list_projects`, `get_project`, `create_project`, `update_project`, `delete_project`
-- `create_roadmap`, `update_roadmap`, `delete_roadmap`
-- `create_subproject`, `update_subproject`, `delete_subproject`
-- `create_task`, `update_task`, `delete_task`
-- `get_tasks_by_status`, `get_agent_tasks`
 
 ## Make It Yours
 
