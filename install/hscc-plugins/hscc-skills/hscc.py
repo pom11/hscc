@@ -2,20 +2,20 @@
 """
 Hermes Spark Cluster Control (HSCC) — Skills & Templates Installer
 
-Install / update bundled R2D2CC skills and templates to ~/.hermes/ directories.
+Install / update bundled Hermes skills and templates to ~/.hermes/ directories.
 Idempotent: skips files that are already installed (hash-matched).
 
 Usage: hscc-skills <command> [args]
 
 Commands:
   install              Install all skills and templates (full bootstrap)
-  install-skills       Install / update all R2D2CC skills to ~/.hermes/skills/
-  install-templates    Install / update all R2D2CC templates to ~/.hermes/templates/
+  install-skills       Install / update all Hermes skills to ~/.hermes/skills/
+  install-templates    Install / update all Hermes templates to ~/.hermes/templates/
   status               Show installation status: installed, missing, out-of-date
   uninstall            Remove all installed skills and templates (reverse install)
 
 Environment Variables:
-  HSCC_DIR           Override R2D2CC source path (default: ~/r2d2-cc)
+  HSCC_SKILLS_DIR           Override Hermes source path (default: ~/hermes-cc)
   HERMES_HOME          Override Hermes home (default: ~/.hermes)
 """
 
@@ -27,15 +27,15 @@ import json
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
-HSCC_DIR = os.environ.get("HSCC_DIR", os.path.expanduser("~/r2d2-cc"))
+HSCC_SKILLS_DIR = os.environ.get("HSCC_SKILLS_DIR", os.path.expanduser("~/.hermes"))
 HERMES_HOME = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
 
-SKILLS_SOURCE = os.path.join(HSCC_DIR, "skills")
+SKILLS_SOURCE = os.path.join(HSCC_SKILLS_DIR, "skills")
 SKILLS_DEST = os.path.join(HERMES_HOME, "skills")
-TEMPLATES_SOURCE = os.path.join(HSCC_DIR, "Resources", "templates")
+TEMPLATES_SOURCE = os.path.join(HSCC_SKILLS_DIR, "Resources", "templates")
 TEMPLATES_DEST = os.path.join(HERMES_HOME, "templates")
 
-# R2D2CC bundled skills
+# Hermes bundled skills
 BUNDLED_SKILLS = [
     "brainstorming",
     "caveman",
@@ -46,7 +46,7 @@ BUNDLED_SKILLS = [
     "writing-plans",
 ]
 
-# R2D2CC bundled templates
+# Hermes bundled templates
 BUNDLED_TEMPLATES = [
     "AGENTS.md",
     "HEARTBEAT.md",
@@ -157,7 +157,7 @@ def cmd_install():
     """Install all skills and templates."""
     print("=" * 60)
     print("  HSCC Skills & Templates Installer")
-    print(f"  Source: {HSCC_DIR}")
+    print(f"  Source: {HSCC_SKILLS_DIR}")
     print(f"  Dest:   {HERMES_HOME}")
     print("=" * 60)
     print()
@@ -165,12 +165,12 @@ def cmd_install():
     # Verify source
     if not os.path.isdir(SKILLS_SOURCE):
         print(f"[WARN] Skills source not found: {SKILLS_SOURCE}")
-        print(f"       Setting HSCC_DIR env var or placing skills at ~/r2d2-cc/skills/")
+        print(f"       Setting HSCC_SKILLS_DIR env var or placing skills at ~/hermes-cc/skills/")
         print()
 
     if not os.path.isdir(TEMPLATES_SOURCE):
         print(f"[WARN] Templates source not found: {TEMPLATES_SOURCE}")
-        print(f"       Setting HSCC_DIR env var or placing templates at ~/r2d2-cc/Resources/templates/")
+        print(f"       Setting HSCC_SKILLS_DIR env var or placing templates at ~/hermes-cc/Resources/templates/")
         print()
 
     # Install skills
@@ -256,8 +256,8 @@ def cmd_install():
 
 
 def cmd_install_skills():
-    """Install / update R2D2CC skills only."""
-    print("─── Installing R2D2CC Skills ───")
+    """Install / update Hermes skills only."""
+    print("─── Installing Hermes Skills ───")
     print(f"  Source: {SKILLS_SOURCE}")
     print(f"  Dest:   {SKILLS_DEST}")
     print()
@@ -287,8 +287,8 @@ def cmd_install_skills():
 
 
 def cmd_install_templates():
-    """Install / update R2D2CC templates only."""
-    print("─── Installing R2D2CC Templates ───")
+    """Install / update Hermes templates only."""
+    print("─── Installing Hermes Templates ───")
     print(f"  Source: {TEMPLATES_SOURCE}")
     print(f"  Dest:   {TEMPLATES_DEST}")
     print()
@@ -380,9 +380,9 @@ def cmd_status():
 
     # Locations
     print("─── Locations ───")
-    print(f"  R2D2CC Skills:  {SKILLS_SOURCE}")
+    print(f"  Hermes Skills:  {SKILLS_SOURCE}")
     print(f"  Hermes Skills:  {SKILLS_DEST}")
-    print(f"  R2D2CC Templates: {TEMPLATES_SOURCE}")
+    print(f"  Hermes Templates: {TEMPLATES_SOURCE}")
     print(f"  Hermes Templates: {TEMPLATES_DEST}")
 
 
@@ -444,13 +444,13 @@ Usage: hscc-skills <command> [args]
 
 Commands:
   install              Install all skills and templates (full bootstrap)
-  install-skills       Install / update all R2D2CC skills to ~/.hermes/skills/
-  install-templates    Install / update all R2D2CC templates to ~/.hermes/templates/
+  install-skills       Install / update all Hermes skills to ~/.hermes/skills/
+  install-templates    Install / update all Hermes templates to ~/.hermes/templates/
   status               Show installation status
   uninstall            Remove installed skills and templates (reverse)
 
 Environment Variables:
-  HSCC_DIR           Override R2D2CC source path (default: ~/r2d2-cc)
+  HSCC_SKILLS_DIR           Override Hermes source path (default: ~/hermes-cc)
   HERMES_HOME          Override Hermes home (default: ~/.hermes)
         """.strip())
         sys.exit(0)

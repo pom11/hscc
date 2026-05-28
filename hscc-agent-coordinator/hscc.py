@@ -600,11 +600,6 @@ def create_worktree_for_task(agent_id, task_id, project_id, branch_slug=None):
         repo_path = project_dir
     elif os.path.exists(os.path.join(HSCC_DIR, ".git")):
         repo_path = HSCC_DIR
-    else:
-        # Try ~/r2d2-cc or ~/.hscc (R2D2CC legacy state locations)
-        cc_path = os.path.expanduser("~/r2d2-cc")
-        if os.path.exists(os.path.join(cc_path, ".git")):
-            repo_path = cc_path
 
     if not repo_path:
         return {"note": "No git repo found for project, skipping worktree creation"}
@@ -1444,17 +1439,13 @@ def cmd_list_worktrees():
         print()
         print("Git worktrees in repo:")
         # List actual git worktrees
-        repo_paths = [
-            os.path.expanduser("~/.hscc"),
-            os.path.expanduser("~/r2d2-cc"),
-        ]
-        for repo_path in repo_paths:
-            if os.path.exists(os.path.join(repo_path, ".git")):
-                git_wts = list_git_worktrees(repo_path)
-                if git_wts:
-                    print(f"\n  In {repo_path}:")
-                    for wt in git_wts:
-                        print(f"    {wt['path']}: branch={wt['branch']}")
+        repo_path = os.path.expanduser("~/.hscc")
+        if os.path.exists(os.path.join(repo_path, ".git")):
+            git_wts = list_git_worktrees(repo_path)
+            if git_wts:
+                print(f"\n  In {repo_path}:")
+                for wt in git_wts:
+                    print(f"    {wt['path']}: branch={wt['branch']}")
         return
 
     for key, wt in sorted(worktrees.items()):
@@ -1483,32 +1474,6 @@ def cmd_list_worktrees():
         print(f"    path={path}{git_status}")
         print(f"    created={created}")
         print()
-
-    # Also list git worktrees not tracked in state
-    if repo_paths_defined():
-        print("Untracked git worktrees:")
-        repo_paths = [os.path.expanduser("~/r2d2-cc")]
-        for repo_path in repo_paths:
-            if os.path.exists(os.path.join(repo_path, ".git")):
-                tracked_keys = set(worktrees.keys())
-                git_wts = list_git_worktrees(repo_path)
-                for wt in git_wts:
-                    # Check if this worktree is tracked
-                    is_tracked = False
-                    for key in tracked_keys:
-                        if wt["path"] in key or key in wt["path"]:
-                            is_tracked = True
-                            break
-                    if not is_tracked:
-                        print(f"  (untracked) {wt['path']}: branch={wt['branch']}")
-
-
-def repo_paths_defined():
-    """Check if any known repo paths exist."""
-    for p in [os.path.expanduser("~/.hscc"), os.path.expanduser("~/r2d2-cc")]:
-        if os.path.exists(os.path.join(p, ".git")):
-            return True
-    return False
 
 
 # ---- Main ----

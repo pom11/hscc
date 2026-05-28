@@ -367,7 +367,7 @@ def check_local():
     # PostgreSQL
     pg_ok = False
     try:
-        r = run_cmd(["docker", "ps", "--filter", "name=r2d2-postgres", "--format", "{{.Status}}"],
+        r = run_cmd(["docker", "ps", "--filter", "name=hscc-postgres", "--format", "{{.Status}}"],
                      timeout=5)
         status = r.get("output", "").strip()
         pg_ok = bool(status)
@@ -375,14 +375,15 @@ def check_local():
         pass
     services["postgresql"] = {"running": pg_ok}
 
-    # Hermes process
-    oclaw_ok = False
+    # HSCC daemon (managed by launchd)
+    hscc_ok = False
     try:
-        r = run_cmd(["pgrep", "-f", "hermes"], timeout=3)
-        oclaw_ok = bool(r.get("output", "").strip())
+        r = run_cmd(["pgrep", "-f", "hscc-daemon"], timeout=3)
+        hscc_ok = bool(r.get("output", "").strip())
     except Exception:
         pass
-    services["hermes"] = {"running": oclaw_ok}
+    services["hscc-daemon"] = {"running": hscc_ok}
+    services.pop("hermes", None)  # remove old hermes entry
 
     # Node.js / npm
     node_r = run_cmd(["node", "--version"], timeout=3)

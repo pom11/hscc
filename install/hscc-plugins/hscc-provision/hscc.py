@@ -28,6 +28,7 @@ import json
 import os
 import subprocess
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
@@ -35,8 +36,27 @@ SPARKRUN = "sparkrun"
 HSCC_DIR = os.path.expanduser("~/.hscc")
 AGENTS_JSON = os.path.expanduser("~/.hscc/agents.json")
 PROVISION_JSON = os.path.join(HSCC_DIR, "provision.json")
+HERMES_CONFIG = os.path.expanduser("~/.hermes/config.yaml")
 NAS_HOST = "192.0.2.10"
 SSH_USER = "spark"
+
+
+def get_hermes_inference_host():
+    """Extract the host IP that hermes uses for its own inference backend."""
+    try:
+        in_model = False
+        with open(HERMES_CONFIG) as f:
+            for line in f:
+                stripped = line.strip()
+                if line[0:1] not in (" ", "\t") and stripped.endswith(":"):
+                    in_model = stripped == "model:"
+                if in_model and stripped.startswith("base_url:"):
+                    url = stripped.split(":", 1)[1].strip()
+                    if url:
+                        return urlparse(url).hostname
+        return None
+    except (IOError, OSError):
+        return None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -416,7 +436,7 @@ def resolve_local_recipe(recipe_name):
     
     # Check official and transitional directories
     for sub_dir in ["official", "transitional"]:
-        local_path = f"/Users/desac/.sparkrun-local/recipes/{sub_dir}/{base_name}"
+        local_path = f"{LOCAL_REGISTRY_DIR}/recipes/{sub_dir}/{base_name}"
         if os.path.exists(local_path):
             return local_path
     
@@ -425,7 +445,7 @@ def resolve_local_recipe(recipe_name):
 
 # ── Registry Management ────────────────────────────────────────────────────
 
-LOCAL_REGISTRY_DIR = "/Users/desac/.sparkrun-local"
+LOCAL_REGISTRY_DIR = os.path.expanduser("~/.sparkrun-local")
 LOCAL_REGISTRIES = {
     "official": {"dir": "recipes/official", "source": "@official", "description": "Official Spark-Arena recipes"},
     "transitional": {"dir": "recipes/transitional", "source": "@sparkrun-transitional", "description": "Sparkrun transitional recipes"},
@@ -637,8 +657,16 @@ def cmd_registry_remove(source):
     # TODO: Implement removing recipes from a source
 
 
-def cmd_stop(container_id):
-    """Stop a running container."""
+def cmd_stop(container_id, force=False):
+    """Stop a running container. Refuses to stop hermes' own backend unless --force."""
+    if not force:
+        self_host = get_hermes_inference_host()
+        if self_host:
+            containers = get_running_containers()
+            for c in containers:
+                if c["container_id"] == container_id and c.get("host") == self_host:
+                    print(json.dumps({"error": f"REFUSED: container {container_id} is on {self_host} which serves hermes' own inference. Use 'stop {container_id} --force' to override."}))
+                    return
     result = run_cmd([SPARKRUN, "stop", container_id], timeout=30)
     log_event("model_stopped", {"container_id": container_id, "result": result.get("output", "")})
     print(json.dumps({"success": result["returncode"] == 0, "output": result.get("output", "")}))
@@ -785,17 +813,23 @@ def cmd_cleanup():
     state = load_provision_state()
     mappings = state.get("mappings", {})
     active_recipes = set(m["recipe"] for m in mappings.values())
+    self_host = get_hermes_inference_host()
 
     containers = get_running_containers()
     stopped = 0
+    skipped_self = 0
     for c in containers:
         if c["name"] not in active_recipes:
+            if self_host and c.get("host") == self_host:
+                print(f"  SKIPPED (hermes inference backend): {c['container_id']} ({c['name']}) on {self_host}")
+                skipped_self += 1
+                continue
             print(f"  Stopping orphaned container: {c['container_id']} ({c['name']})")
             run_cmd([SPARKRUN, "stop", c["container_id"]], timeout=30)
             stopped += 1
 
-    print(json.dumps({"stopped": stopped, "reason": "no active agent assignments"}))
-    log_event("cleanup", {"stopped": stopped})
+    print(json.dumps({"stopped": stopped, "skipped_self": skipped_self, "reason": "no active agent assignments"}))
+    log_event("cleanup", {"stopped": stopped, "skipped_self": skipped_self})
 
 
 def cmd_status():
@@ -852,7 +886,7 @@ def main():
         "recipes": cmd_recipes,
         "list": cmd_list,
         "run": lambda: cmd_run(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None) if len(sys.argv) > 2 else print(json.dumps({"error": "Usage: hscc-provision run <recipe_name> [host]"})),
-        "stop": lambda: cmd_stop(sys.argv[2]) if len(sys.argv) > 2 else print(json.dumps({"error": "Usage: hscc-provision stop <container_id>"})),
+        "stop": lambda: cmd_stop(sys.argv[2], "--force" in sys.argv) if len(sys.argv) > 2 else print(json.dumps({"error": "Usage: hscc-provision stop <container_id> [--force]"})),
         "assign": lambda: cmd_assign(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else None) if len(sys.argv) > 3 else print(json.dumps({"error": "Usage: hscc-provision assign <agent_id> <recipe> [host]"})),
         "unassign": lambda: cmd_unassign(sys.argv[2]) if len(sys.argv) > 2 else print(json.dumps({"error": "Usage: hscc-provision unassign <agent_id>"})),
         "health": lambda: cmd_health(sys.argv[2]) if len(sys.argv) > 2 else cmd_health(None),

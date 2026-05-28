@@ -37,9 +37,9 @@ from pathlib import Path
 
 HSCC_DIR = os.path.expanduser("~/.hscc")
 CHATS_DIR = os.path.join(HSCC_DIR, "chats")
-hermes_DIR = os.path.expanduser("~/.hermes")
-DEVICE_JSON = os.path.join(hermes_DIR, "device.json")
-hermes_JSON = os.path.join(hermes_DIR, "hermes.json")
+Hermes_DIR = os.path.expanduser("~/.Hermes")
+DEVICE_JSON = os.path.join(Hermes_DIR, "device.json")
+Hermes_JSON = os.path.join(Hermes_DIR, "Hermes.json")
 WS_GATEWAY_HOST = "localhost"
 WS_GATEWAY_PORT = 18789
 WS_GATEWAY_URL = f"wss://{WS_GATEWAY_HOST}:{WS_GATEWAY_PORT}/ws/chat"
@@ -115,7 +115,7 @@ def _session_meta_file_path(session_id):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_device_config():
-    """Load Ed25519 device configuration from ~/.hermes/device.json.
+    """Load Ed25519 device configuration from ~/.Hermes/device.json.
 
     Returns a dict with keys like deviceId, privateKeyPem, publicKeyPem,
     or None if the file is missing / unparseable.
@@ -129,12 +129,12 @@ def load_device_config():
         return None
 
 
-def load_hermes_config():
-    """Load Hermes config including gateway auth token from ~/.hermes/hermes.json."""
-    if not os.path.exists(hermes_JSON):
+def load_Hermes_config():
+    """Load Hermes config including gateway auth token from ~/.Hermes/Hermes.json."""
+    if not os.path.exists(Hermes_JSON):
         return None
     try:
-        with open(hermes_JSON, "r") as f:
+        with open(Hermes_JSON, "r") as f:
             return json.load(f)
     except (json.JSONDecodeError, IOError):
         return None
@@ -932,7 +932,7 @@ class GatewayConnection:
         ws = _websockets
         try:
             # Load auth config
-            token = self._auth_token or get_gateway_token(load_hermes_config())
+            token = self._auth_token or get_gateway_token(load_Hermes_config())
             pub_key = self._device_public_key or get_ed25519_public_key()
             if not token:
                 self._on_error("No gateway auth token found")
@@ -1203,7 +1203,7 @@ def _get_gateway():
     if _gateway_instance is None:
         _gateway_instance = GatewayConnection()
         # Try to load auth config
-        oc_config = load_hermes_config()
+        oc_config = load_Hermes_config()
         token = get_gateway_token(oc_config)
         if token:
             _gateway_instance._auth_token = token
@@ -1250,9 +1250,9 @@ def cmd_ws_status():
     dev_config = load_device_config()
     print(f"\n  Device Config:  {'loaded' if dev_config else 'not found at ' + DEVICE_JSON}")
 
-    oc_config = load_hermes_config()
+    oc_config = load_Hermes_config()
     gw_token = get_gateway_token(oc_config) if oc_config else None
-    print(f"  Gateway Config: {'loaded' if oc_config else 'not found at ' + hermes_JSON}")
+    print(f"  Gateway Config: {'loaded' if oc_config else 'not found at ' + Hermes_JSON}")
     print(f"  Gateway Token:  {'configured' if gw_token else 'not found'}")
 
     print(f"{'─' * 70}")

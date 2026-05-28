@@ -28,7 +28,7 @@ set -uo pipefail
 # ── Configuration ──────────────────────────────────────────────────────────
 
 HSCC_DIR="${HSCC_DIR:-$HOME/.hscc}"
-HSCC_DIR="${HSCC_DIR:-$HOME/.r2d2cc}"
+HSCC_DIR="${HSCC_DIR:-$HOME/.hscc}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 
 SKILLS_PLUGIN="$HERMES_HOME/plugins/hscc-skills/hscc.py"
@@ -321,7 +321,6 @@ import json
 import os
 
 hscc_dir = os.environ.get("HSCC_DIR", os.path.expanduser("~/.hscc"))
-r2d2cc_dir = os.environ.get("HSCC_DIR", os.path.expanduser("~/.hscc"))
 
 expected = {
     "lifecycle.json": ["agents", "history"],
@@ -364,7 +363,7 @@ for fname, required_keys in expected.items():
         errors += 1
 
 # Check agents.json
-agents_file = os.path.join(r2d2cc_dir, "agents.json")
+agents_file = os.path.join(hscc_dir, "agents.json")
 checks += 1
 if os.path.exists(agents_file):
     try:
@@ -384,7 +383,7 @@ else:
     warnings += 1
 
 # Check cluster.json
-cluster_file = os.path.join(r2d2cc_dir, "cluster.json")
+cluster_file = os.path.join(hscc_dir, "cluster.json")
 checks += 1
 if os.path.exists(cluster_file):
     try:
@@ -400,7 +399,7 @@ else:
     warnings += 1
 
 # Check events.jsonl
-events_file = os.path.join(r2d2cc_dir, "events.jsonl")
+events_file = os.path.join(hscc_dir, "events.jsonl")
 checks += 1
 if os.path.exists(events_file):
     with open(events_file) as f:

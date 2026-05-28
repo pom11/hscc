@@ -367,7 +367,7 @@ def check_local():
     # PostgreSQL
     pg_ok = False
     try:
-        r = run_cmd(["docker", "ps", "--filter", "name=r2d2-postgres", "--format", "{{.Status}}"],
+        r = run_cmd(["docker", "ps", "--filter", "name=hscc-postgres", "--format", "{{.Status}}"],
                      timeout=5)
         status = r.get("output", "").strip()
         pg_ok = bool(status)

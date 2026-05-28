@@ -207,7 +207,7 @@ def cmd_info():
     """Show detailed cluster configuration."""
     cluster_data = read_json_file(CLUSTER_JSON)
     cluster_list = run_cmd([SPARKRUN, "cluster", "list"])
-    default_cluster = run_cmd([SPARKRUN, "cluster", "show", "r2d2"])
+    default_cluster = run_cmd([SPARKRUN, "cluster", "show", "hscc"])
 
     cluster_files = {}
     clusters_dir = os.path.expanduser("~/.config/sparkrun/clusters")
