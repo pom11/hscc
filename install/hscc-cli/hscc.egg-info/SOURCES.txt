@@ -8,7 +8,7 @@ hscc.egg-info/top_level.txt
 hscc_cli/__init__.py
 hscc_cli/__main__.py
 hscc_cli/config.py
-hscc_cli/hscc_cli.py
+hscc_cli/core.py
 hscc_cli/installer.py
 hscc_cli/model_utils.py
 hscc_cli/ssh_utils.py

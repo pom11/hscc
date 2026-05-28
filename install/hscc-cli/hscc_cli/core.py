@@ -328,8 +328,66 @@ def check_daemon():
     return rc == 0
 
 def detect_cluster_nodes():
-    """Detect which cluster nodes are reachable."""
-    nodes = ["192.0.2.10", "192.0.2.10", "192.0.2.11", "192.0.2.12"]
+    """Detect which cluster nodes are reachable.
+    
+    Reads the live node list from sparkrun's cluster config instead of hardcoding.
+    Falls back to R2D2 cluster.json if sparkrun is unavailable.
+    """
+    # Try sparkrun cluster list JSON
+    rc, output, _ = run_cmd("sparkrun cluster list --json", check=False)
+    nodes = []
+    if rc == 0 and output:
+        try:
+            clusters = json.loads(output)
+            if isinstance(clusters, list):
+                for cluster in clusters:
+                    if cluster.get("default") or cluster.get("name") == "hscc":
+                        hosts = cluster.get("hosts", [])
+                        for h in hosts:
+                            # Handle "ip:port" or plain "ip"
+                            nodes.append(h.split(":")[0])
+        except (json.JSONDecodeError, KeyError):
+            pass
+    
+    # Fallback: try sparkrun cluster list (tabular)
+    if not nodes:
+        rc, output, _ = run_cmd("sparkrun cluster list", check=False)
+        if rc == 0 and output:
+            # Parse lines like "* hscc                 192.0.2.10, 192.0.2.11"
+            for line in output.split("\n"):
+                if "192.168." in line:
+                    for part in line.split():
+                        if "." in part and part.count(".") == 3:
+                            try:
+                                octets = part.split(".")
+                                if all(0 <= int(o) <= 255 for o in octets):
+                                    if part not in nodes:
+                                        nodes.append(part)
+                            except ValueError:
+                                pass
+    
+    # Final fallback: R2D2 cluster.json
+    if not nodes:
+        for path in [
+            Path.home() / ".hermes" / "plugins" / "cluster.json",
+            Path.home() / ".hscc" / "cluster.json",
+        ]:
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text())
+                    if data.get("gateway"):
+                        nodes.append(data["gateway"].get("ip", ""))
+                    for worker in data.get("workers", []):
+                        nodes.append(worker.get("ip", ""))
+                    nodes = [n for n in nodes if n]
+                    break
+                except (json.JSONDecodeError, KeyError):
+                    pass
+    
+    # Ultimate fallback
+    if not nodes:
+        nodes = ["192.0.2.10", "192.0.2.11", "192.0.2.12", "192.0.2.13"]
+    
     status = {}
     for node in nodes:
         rc, _, _ = run_cmd(f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 spark@{node} 'true'", check=False)
