@@ -49,7 +49,7 @@ from collections import Counter
 
 # ---- Constants ----
 
-HSCC_DIR = os.path.expanduser("~/.hscc")
+HSCC_DIR = os.path.expanduser(os.environ.get("HSCC_HOME", "~/.hscc"))
 
 AGENTS_JSON = os.path.join(HSCC_DIR, "agents.json")
 PROJECTS_JSON = os.path.join(HSCC_DIR, "projects.json")
@@ -259,7 +259,6 @@ def run_shell(cmd, cwd=None, timeout=120):
             capture_output=True,
             text=True,
             timeout=timeout,
-            max_buffer_size=1024 * 1024,
         )
         combined = result.stdout.strip() or result.stderr.strip()
         return result.returncode == 0, combined[:2000]
@@ -1476,6 +1475,620 @@ def cmd_list_worktrees():
         print()
 
 
+# ---- Executor bridge (HSCC task -> Hermes kanban worker) ----
+
+BRIDGE_FILE = os.path.join(HSCC_DIR, "bridge.json")
+
+
+def load_bridge():
+    return read_json_file(BRIDGE_FILE, {"tasks": {}})
+
+
+def save_bridge(data):
+    write_json_file(BRIDGE_FILE, data)
+
+
+def find_hermes_bin():
+    """Locate the hermes CLI binary."""
+    candidate = os.path.expanduser("~/.local/bin/hermes")
+    if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+        return candidate
+    return "hermes"
+
+
+def run_hermes(args, timeout=120):
+    """Run a hermes CLI command. Returns (ok, output)."""
+    try:
+        result = subprocess.run(
+            [find_hermes_bin()] + args,
+            capture_output=True, text=True, timeout=timeout,
+        )
+        out = (result.stdout or "").strip()
+        if result.returncode != 0:
+            out = out or (result.stderr or "").strip()
+        return result.returncode == 0, out
+    except subprocess.TimeoutExpired:
+        return False, f"hermes timed out after {timeout}s"
+    except FileNotFoundError:
+        return False, "hermes not found"
+    except Exception as e:
+        return False, str(e)
+
+
+def _load_projects():
+    return read_json_file(PROJECTS_JSON, {"projects": [], "activeProjectId": ""})
+
+
+def get_project_record(project_id):
+    for p in _load_projects().get("projects", []):
+        if p.get("id") == project_id:
+            return p
+    return None
+
+
+def get_project_repo(project_id):
+    """Resolve the git repo path for a project, or None if not provisioned."""
+    p = get_project_record(project_id)
+    if p and p.get("gitRepoPath"):
+        rp = p["gitRepoPath"]
+        if os.path.exists(os.path.join(rp, ".git")):
+            return rp
+    default_rp = os.path.join(HSCC_DIR, "projects", project_id)
+    if os.path.exists(os.path.join(default_rp, ".git")):
+        return default_rp
+    return None
+
+
+def get_project_board(project_id):
+    """Resolve the kanban board slug for a project."""
+    p = get_project_record(project_id)
+    if p and p.get("boardSlug"):
+        return p["boardSlug"]
+    short = re.sub(r"[^a-z0-9]+", "-", str(project_id).lower())[:8].strip("-")
+    return f"hscc-{short}"
+
+
+def resolve_profile(agent_id, override=None):
+    """Resolve the Hermes profile a kanban worker should run as."""
+    if override:
+        return override
+    agent = load_agent_by_id(agent_id) if agent_id else None
+    if agent and agent.get("profile"):
+        return agent["profile"]
+    return "default"
+
+
+def ensure_board(board, repo_path):
+    """Idempotently ensure a kanban board exists and is bound to repo_path."""
+    run_hermes(["kanban", "boards", "create", board, "--switch"], timeout=30)
+    if repo_path:
+        run_hermes(["kanban", "boards", "set-default-workdir", board, repo_path], timeout=30)
+
+
+def cmd_dispatch_task():
+    """
+    EXECUTOR (guarded): mirror an HSCC task into its project's kanban board as a
+    BLOCKED worktree task. Pre-creates the git worktree so the worker's cwd lands
+    in the isolated checkout. Nothing runs until 'release-task' unblocks it.
+
+    Usage: hscc-agent-coordinator dispatch-task <task_id> [project_id] [profile]
+    """
+    if len(sys.argv) < 3:
+        print(json.dumps({"error": "Usage: dispatch-task <task_id> [project_id] [profile]"}))
+        return
+
+    task_id = sys.argv[2]
+    project_id = sys.argv[3] if len(sys.argv) > 3 else None
+    profile_override = sys.argv[4] if len(sys.argv) > 4 else None
+
+    p, rm, sp, task = find_project_for_task(task_id)
+    if not p:
+        print(json.dumps({"error": f"Task {task_id} not found in any project"}))
+        return
+    project_id = project_id or p.get("id", "")
+
+    repo_path = get_project_repo(project_id)
+    if not repo_path:
+        print(json.dumps({
+            "error": f"Project {project_id} has no git repo. Create the project via hscc-projects so it is provisioned.",
+            "expected": os.path.join(HSCC_DIR, "projects", project_id),
+        }))
+        return
+
+    agent_id = (task.get("assignedAgent") or "").strip() or "worker"
+    profile = resolve_profile(task.get("assignedAgent"), profile_override)
+
+    # Pre-create the worktree (reuses existing machinery). Derive a readable
+    # branch slug from the task title.
+    title_slug = sanitize_branch_name((task.get("title") or task.get("name") or "")[:40]) or None
+    wt = create_worktree_for_task(agent_id, task_id, project_id, branch_slug=title_slug)
+    if wt.get("error"):
+        print(json.dumps({"error": "worktree creation failed", "detail": wt}))
+        return
+    wt_path = wt.get("worktree_path")
+    branch = wt.get("branch")
+    if not wt_path:
+        # Worktree already existed — recover its path/branch from state.
+        key = task_to_key(project_id, task_id)
+        existing = get_worktrees().get("worktrees", {}).get(key, {})
+        wt_path = existing.get("path") or wt.get("path")
+        branch = existing.get("branch") or wt.get("branch")
+    if not wt_path:
+        print(json.dumps({"error": "could not resolve worktree path", "detail": wt}))
+        return
+
+    board = get_project_board(project_id)
+    ensure_board(board, repo_path)
+
+    title = task.get("title") or task.get("name") or task_id
+    body = task.get("description", "") or ""
+    idem = f"hscc-{project_id}-{task_id}"
+
+    create_args = ["kanban", "--board", board, "create", title]
+    if body:
+        create_args += ["--body", body]
+    create_args += [
+        "--assignee", profile,
+        "--workspace", f"worktree:{wt_path}",
+        "--initial-status", "blocked",
+        "--idempotency-key", idem,
+        "--json",
+    ]
+    if branch:
+        create_args += ["--branch", branch]
+
+    ok, out = run_hermes(create_args, timeout=60)
+    if not ok:
+        print(json.dumps({"error": "kanban create failed", "detail": out, "board": board}))
+        return
+    try:
+        kanban_id = json.loads(out).get("id")
+    except (json.JSONDecodeError, AttributeError):
+        kanban_id = None
+    if not kanban_id:
+        print(json.dumps({"error": "could not parse kanban task id", "raw": out[:500]}))
+        return
+
+    bridge = load_bridge()
+    bridge["tasks"][task_id] = {
+        "hscc_task_id": task_id,
+        "project_id": project_id,
+        "kanban_id": kanban_id,
+        "board": board,
+        "profile": profile,
+        "worktree": wt_path,
+        "branch": branch,
+        "status": "blocked",
+        "dispatched_at": now_iso(),
+    }
+    save_bridge(bridge)
+
+    emit_event("hscc-agent-coordinator", "task.dispatched", {
+        "task_id": task_id, "project_id": project_id,
+        "kanban_id": kanban_id, "board": board, "worktree": wt_path,
+    })
+
+    print(json.dumps({
+        "success": True,
+        "guarded": True,
+        "task_id": task_id,
+        "kanban_id": kanban_id,
+        "board": board,
+        "profile": profile,
+        "worktree": wt_path,
+        "branch": branch,
+        "status": "blocked",
+        "next": f"hscc-agent-coordinator release-task {task_id}",
+        "message": "Mirrored as a BLOCKED kanban task. Run release-task to dispatch a worker.",
+    }, indent=2))
+
+
+def cmd_release_task():
+    """
+    Guarded 'go': unblock the kanban mirror so the gateway dispatcher spawns a
+    worker in the pre-created worktree. Marks the HSCC task inProgress.
+
+    Usage: hscc-agent-coordinator release-task <task_id>
+    """
+    if len(sys.argv) < 3:
+        print(json.dumps({"error": "Usage: release-task <task_id>"}))
+        return
+    task_id = sys.argv[2]
+    bridge = load_bridge()
+    entry = bridge.get("tasks", {}).get(task_id)
+    if not entry:
+        print(json.dumps({"error": f"No dispatch bridge for task {task_id}. Run dispatch-task first."}))
+        return
+
+    board = entry["board"]
+    kanban_id = entry["kanban_id"]
+    ok, out = run_hermes(["kanban", "--board", board, "unblock", kanban_id], timeout=30)
+    if not ok:
+        print(json.dumps({"error": "unblock failed", "detail": out}))
+        return
+
+    # Nudge the dispatcher for immediacy (gateway also runs it on an interval).
+    run_hermes(["kanban", "--board", board, "dispatch"], timeout=60)
+
+    entry["status"] = "released"
+    entry["released_at"] = now_iso()
+    save_bridge(bridge)
+    mark_task_in_progress(task_id, entry.get("profile", ""), entry.get("project_id"))
+
+    emit_event("hscc-agent-coordinator", "task.released", {
+        "task_id": task_id, "kanban_id": kanban_id, "board": board,
+    })
+    print(json.dumps({
+        "success": True, "task_id": task_id, "kanban_id": kanban_id,
+        "board": board, "status": "released",
+        "message": "Task unblocked; dispatcher will spawn a worker in the worktree.",
+    }, indent=2))
+
+
+def cmd_task_status():
+    """
+    Show the kanban status + worker log tail for a dispatched HSCC task.
+
+    Usage: hscc-agent-coordinator task-status <task_id> [log_lines]
+    """
+    if len(sys.argv) < 3:
+        print(json.dumps({"error": "Usage: task-status <task_id> [log_lines]"}))
+        return
+    task_id = sys.argv[2]
+    log_lines = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3].isdigit() else 40
+    entry = load_bridge().get("tasks", {}).get(task_id)
+    if not entry:
+        print(json.dumps({"error": f"No dispatch bridge for task {task_id}"}))
+        return
+    board, kanban_id = entry["board"], entry["kanban_id"]
+    ok, show = run_hermes(["kanban", "--board", board, "show", kanban_id], timeout=30)
+    _, log = run_hermes(["kanban", "--board", board, "log", kanban_id], timeout=30)
+    log_tail = "\n".join(log.splitlines()[-log_lines:]) if log else ""
+    print(json.dumps({
+        "task_id": task_id, "kanban_id": kanban_id, "board": board,
+        "bridge_status": entry.get("status"),
+        "show": show, "log_tail": log_tail,
+    }, indent=2, default=str))
+
+
+def cmd_cancel_task():
+    """
+    Cancel a dispatched task: block the kanban mirror, reclaim any running worker,
+    and return the agent to idle.
+
+    Usage: hscc-agent-coordinator cancel-task <task_id>
+    """
+    if len(sys.argv) < 3:
+        print(json.dumps({"error": "Usage: cancel-task <task_id>"}))
+        return
+    task_id = sys.argv[2]
+    bridge = load_bridge()
+    entry = bridge.get("tasks", {}).get(task_id)
+    if not entry:
+        print(json.dumps({"error": f"No dispatch bridge for task {task_id}"}))
+        return
+    board, kanban_id = entry["board"], entry["kanban_id"]
+    run_hermes(["kanban", "--board", board, "reclaim", kanban_id], timeout=30)
+    ok, out = run_hermes(["kanban", "--board", board, "block", kanban_id], timeout=30)
+    entry["status"] = "cancelled"
+    entry["cancelled_at"] = now_iso()
+    save_bridge(bridge)
+
+    # Return the assigned agent to idle if one is tracked.
+    p, rm, sp, task = find_project_for_task(task_id)
+    if task:
+        aid = (task.get("assignedAgent") or "").strip()
+        if aid and load_agent_by_id(aid):
+            set_lifecycle(aid, "idle", task_id=task_id)
+    emit_event("hscc-agent-coordinator", "task.cancelled", {
+        "task_id": task_id, "kanban_id": kanban_id, "board": board,
+    }, "warning")
+    print(json.dumps({
+        "success": ok, "task_id": task_id, "kanban_id": kanban_id,
+        "status": "cancelled", "detail": out,
+    }, indent=2))
+
+
+def cmd_send_message():
+    """
+    Post a message to a dispatched task's kanban thread (inter-agent comms the
+    worker can read).
+
+    Usage: hscc-agent-coordinator send-message <task_id> <message...>
+    """
+    if len(sys.argv) < 4:
+        print(json.dumps({"error": "Usage: send-message <task_id> <message...>"}))
+        return
+    task_id = sys.argv[2]
+    message = " ".join(sys.argv[3:])
+    entry = load_bridge().get("tasks", {}).get(task_id)
+    if not entry:
+        print(json.dumps({"error": f"No dispatch bridge for task {task_id}"}))
+        return
+    board, kanban_id = entry["board"], entry["kanban_id"]
+    ok, out = run_hermes(["kanban", "--board", board, "comment", kanban_id, message], timeout=30)
+    print(json.dumps({"success": ok, "task_id": task_id, "kanban_id": kanban_id, "detail": out}))
+
+
+# ---- Worktree lifecycle ----
+
+def _resolve_worktree(project_id, task_id):
+    key = task_to_key(project_id, task_id)
+    return key, get_worktrees().get("worktrees", {}).get(key, {})
+
+
+def _worktree_base(wt_path):
+    """Return the base commit recorded in .claw-base, or None."""
+    base_file = os.path.join(wt_path, ".claw-base")
+    try:
+        with open(base_file) as f:
+            return f.read().strip()
+    except IOError:
+        return None
+
+
+def _changed_files(wt_path):
+    """Files changed in a worktree relative to its base commit (committed + working)."""
+    base = _worktree_base(wt_path)
+    files = set()
+    if base:
+        ok, out = run_git(["diff", "--name-only", f"{base}", "HEAD"], cwd=wt_path, timeout=10)
+        if ok and out:
+            files.update(l.strip() for l in out.splitlines() if l.strip())
+    ok2, out2 = run_git(["status", "--porcelain"], cwd=wt_path, timeout=10)
+    if ok2 and out2:
+        for line in out2.splitlines():
+            name = line[3:].strip()
+            if name:
+                files.add(name)
+    return files
+
+
+def cmd_merge_worktree():
+    """
+    Merge a task's worktree branch back into the project repo's default branch.
+    Reports conflicts without discarding work (no auto-abort).
+
+    Usage: hscc-agent-coordinator merge-worktree <project_id> <task_id> [--no-ff]
+    """
+    if len(sys.argv) < 4:
+        print(json.dumps({"error": "Usage: merge-worktree <project_id> <task_id> [--no-ff]"}))
+        return
+    project_id, task_id = sys.argv[2], sys.argv[3]
+    no_ff = "--no-ff" in sys.argv[4:]
+    key, wt = _resolve_worktree(project_id, task_id)
+    if not wt:
+        print(json.dumps({"error": f"No worktree for {key}"}))
+        return
+    repo_path = get_project_repo(project_id)
+    if not repo_path:
+        print(json.dumps({"error": f"No git repo for project {project_id}"}))
+        return
+    branch = wt.get("branch")
+    merge_args = ["merge", "--no-edit"] + (["--no-ff"] if no_ff else []) + [branch]
+    ok, out = run_git(merge_args, cwd=repo_path, timeout=60)
+    if not ok:
+        # Detect a conflict; leave it for manual resolution (do not abort).
+        conflicted = "conflict" in out.lower() or "CONFLICT" in out
+        print(json.dumps({
+            "success": False,
+            "conflict": conflicted,
+            "branch": branch,
+            "detail": out[:1000],
+            "hint": "Resolve in the repo, or run 'git merge --abort' there manually." if conflicted else "",
+        }, indent=2))
+        return
+    wt_state = get_worktrees()
+    if key in wt_state.get("worktrees", {}):
+        wt_state["worktrees"][key]["status"] = "merged"
+        wt_state["worktrees"][key]["merged_at"] = now_iso()
+        save_worktrees(wt_state)
+    emit_event("hscc-agent-coordinator", "worktree.merged", {
+        "project_id": project_id, "task_id": task_id, "branch": branch,
+    })
+    print(json.dumps({"success": True, "branch": branch, "detail": out[:500]}, indent=2))
+
+
+def cmd_remove_worktree():
+    """
+    Remove a task's git worktree. Refuses if the worktree has uncommitted changes
+    unless --force is given (safety guard against losing work).
+
+    Usage: hscc-agent-coordinator remove-worktree <project_id> <task_id> [--force]
+    """
+    if len(sys.argv) < 4:
+        print(json.dumps({"error": "Usage: remove-worktree <project_id> <task_id> [--force]"}))
+        return
+    project_id, task_id = sys.argv[2], sys.argv[3]
+    force = "--force" in sys.argv[4:]
+    key, wt = _resolve_worktree(project_id, task_id)
+    if not wt:
+        print(json.dumps({"error": f"No worktree for {key}"}))
+        return
+    wt_path = wt.get("path")
+    repo_path = get_project_repo(project_id)
+    if not repo_path:
+        print(json.dumps({"error": f"No git repo for project {project_id}"}))
+        return
+    # Safety: refuse to drop uncommitted work unless forced.
+    dirty_ok, dirty_out = run_git(["status", "--porcelain"], cwd=wt_path, timeout=10)
+    if dirty_ok and dirty_out.strip() and not force:
+        print(json.dumps({
+            "error": "worktree has uncommitted changes; refusing to remove",
+            "path": wt_path,
+            "changes": dirty_out.strip().splitlines()[:20],
+            "hint": "Pass --force to remove anyway (this discards uncommitted work).",
+        }, indent=2))
+        return
+    rm_args = ["worktree", "remove"] + (["--force"] if force else []) + [wt_path]
+    ok, out = run_git(rm_args, cwd=repo_path, timeout=30)
+    if not ok:
+        print(json.dumps({"error": "git worktree remove failed", "detail": out}))
+        return
+    wt_state = get_worktrees()
+    if key in wt_state.get("worktrees", {}):
+        wt_state["worktrees"][key]["status"] = "removed"
+        wt_state["worktrees"][key]["removed_at"] = now_iso()
+        save_worktrees(wt_state)
+    emit_event("hscc-agent-coordinator", "worktree.removed", {
+        "project_id": project_id, "task_id": task_id, "path": wt_path,
+    })
+    print(json.dumps({"success": True, "removed": wt_path, "detail": out}, indent=2))
+
+
+def cmd_check_collisions():
+    """
+    Detect files modified by more than one active worktree (potential merge
+    collisions).
+
+    Usage: hscc-agent-coordinator check-collisions [project_id]
+    """
+    project_id = sys.argv[2] if len(sys.argv) > 2 else None
+    worktrees = get_worktrees().get("worktrees", {})
+    if project_id:
+        worktrees = {k: v for k, v in worktrees.items() if v.get("project_id") == project_id}
+    active = {k: v for k, v in worktrees.items() if v.get("status") == "active"}
+
+    file_map = {}
+    for key, wt in active.items():
+        path = wt.get("path", "")
+        if not path or not os.path.exists(path):
+            continue
+        for f in _changed_files(path):
+            file_map.setdefault(f, []).append(key)
+
+    collisions = {f: keys for f, keys in file_map.items() if len(keys) > 1}
+    print(json.dumps({
+        "project_id": project_id,
+        "active_worktrees": len(active),
+        "collision_count": len(collisions),
+        "collisions": collisions,
+    }, indent=2))
+
+
+def cmd_detect_stale():
+    """
+    Detect active worktrees that look abandoned: no commits beyond base and older
+    than the threshold, or whose agent is finished/idle.
+
+    Usage: hscc-agent-coordinator detect-stale [project_id] [--hours N]
+    """
+    args = sys.argv[2:]
+    hours = 24
+    project_id = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--hours" and i + 1 < len(args):
+            try:
+                hours = int(args[i + 1])
+            except ValueError:
+                pass
+            i += 2
+        else:
+            project_id = args[i]
+            i += 1
+
+    worktrees = get_worktrees().get("worktrees", {})
+    if project_id:
+        worktrees = {k: v for k, v in worktrees.items() if v.get("project_id") == project_id}
+    active = {k: v for k, v in worktrees.items() if v.get("status") == "active"}
+    lc = read_json_file(LIFECYCLE_FILE, {"agents": {}})
+
+    from datetime import timedelta
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    stale = []
+    for key, wt in active.items():
+        path = wt.get("path", "")
+        reasons = []
+        created = wt.get("created_at", "")
+        try:
+            created_dt = datetime.fromisoformat(created)
+        except (ValueError, TypeError):
+            created_dt = None
+        base = _worktree_base(path) if path and os.path.exists(path) else None
+        has_commits = False
+        if path and os.path.exists(path) and base:
+            ok, out = run_git(["rev-list", "--count", f"{base}..HEAD"], cwd=path, timeout=10)
+            has_commits = ok and out.strip().isdigit() and int(out.strip()) > 0
+        if created_dt and created_dt < cutoff and not has_commits:
+            reasons.append(f"no commits and older than {hours}h")
+        aid = wt.get("agent_id", "")
+        astate = lc.get("agents", {}).get(aid, {}).get("state", "")
+        if astate in ("finished", "idle", "failed"):
+            reasons.append(f"agent state is '{astate}'")
+        if reasons:
+            stale.append({"key": key, "path": path, "agent_id": aid, "reasons": reasons})
+    print(json.dumps({
+        "project_id": project_id, "threshold_hours": hours,
+        "active_worktrees": len(active), "stale_count": len(stale), "stale": stale,
+    }, indent=2))
+
+
+def cmd_green_check():
+    """
+    Run the project's verifier inside a task's worktree and report pass/fail.
+    Detection order: explicit cmd after '--', ./verify.sh, make test, npm test,
+    pytest.
+
+    Usage: hscc-agent-coordinator green-check <project_id> <task_id> [-- cmd...]
+    """
+    if len(sys.argv) < 4:
+        print(json.dumps({"error": "Usage: green-check <project_id> <task_id> [-- cmd...]"}))
+        return
+    project_id, task_id = sys.argv[2], sys.argv[3]
+    key, wt = _resolve_worktree(project_id, task_id)
+    if not wt:
+        print(json.dumps({"error": f"No worktree for {key}"}))
+        return
+    path = wt.get("path")
+    if not path or not os.path.exists(path):
+        print(json.dumps({"error": f"Worktree path missing: {path}"}))
+        return
+
+    explicit = None
+    if "--" in sys.argv:
+        idx = sys.argv.index("--")
+        explicit = sys.argv[idx + 1:]
+
+    if explicit:
+        cmd = explicit
+        label = " ".join(explicit)
+    elif os.path.exists(os.path.join(path, "verify.sh")):
+        cmd = ["bash", "verify.sh"]
+        label = "./verify.sh"
+    elif os.path.exists(os.path.join(path, "Makefile")):
+        cmd = ["make", "test"]
+        label = "make test"
+    elif os.path.exists(os.path.join(path, "package.json")):
+        cmd = ["npm", "test"]
+        label = "npm test"
+    elif os.path.exists(os.path.join(path, "pytest.ini")) or os.path.exists(os.path.join(path, "pyproject.toml")) or os.path.isdir(os.path.join(path, "tests")):
+        cmd = ["python3", "-m", "pytest", "-q"]
+        label = "pytest"
+    else:
+        print(json.dumps({"green": None, "detail": "no verifier found in worktree"}))
+        return
+
+    try:
+        result = subprocess.run(cmd, cwd=path, capture_output=True, text=True, timeout=600)
+        passed = result.returncode == 0
+        tail = ((result.stdout or "") + (result.stderr or "")).strip()[-2000:]
+    except subprocess.TimeoutExpired:
+        passed, tail = False, "verifier timed out after 600s"
+    except FileNotFoundError as e:
+        passed, tail = False, f"verifier not runnable: {e}"
+    emit_event("hscc-agent-coordinator", "worktree.green_check", {
+        "project_id": project_id, "task_id": task_id, "green": passed, "verifier": label,
+    }, "info" if passed else "warning")
+    print(json.dumps({"green": passed, "verifier": label, "output_tail": tail}, indent=2))
+
+
+def cmd_list_dispatched():
+    """List all HSCC tasks dispatched to kanban via the bridge."""
+    bridge = load_bridge().get("tasks", {})
+    print(json.dumps({"count": len(bridge), "tasks": bridge}, indent=2, default=str))
+
+
 # ---- Main ----
 
 def main():
@@ -1493,6 +2106,19 @@ def main():
         "attempt-recovery": cmd_attempt_recovery,
         "recovery-log": cmd_recovery_log,
         "list-worktrees": cmd_list_worktrees,
+        # Executor bridge (HSCC task -> Hermes kanban worker)
+        "dispatch-task": cmd_dispatch_task,
+        "release-task": cmd_release_task,
+        "task-status": cmd_task_status,
+        "cancel-task": cmd_cancel_task,
+        "send-message": cmd_send_message,
+        "list-dispatched": cmd_list_dispatched,
+        # Worktree lifecycle
+        "merge-worktree": cmd_merge_worktree,
+        "remove-worktree": cmd_remove_worktree,
+        "check-collisions": cmd_check_collisions,
+        "detect-stale": cmd_detect_stale,
+        "green-check": cmd_green_check,
     }
 
     if cmd not in commands:
