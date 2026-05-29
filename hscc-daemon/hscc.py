@@ -520,6 +520,145 @@ def reconcile_lifecycle(agents):
         log(f"Reconciled lifecycle running->idle for {len(changed)} agent(s): {', '.join(changed)}")
 
 
+# ── Live-worker heartbeat (keeps long tasks from being reaped) ──────────────
+
+BRIDGE_FILE = os.path.expanduser("~/.hscc/bridge.json")
+# A 'running' kanban task that never leaves that state (wedged worker, dead
+# dispatcher) must not pin a GPU forever. Past this age we stop protecting it
+# and let the idle-monitor reap it on the normal staleness path.
+WORKER_MAX_RUNTIME_MINUTES = int(os.environ.get("HSCC_WORKER_MAX_RUNTIME_MINUTES", "360"))
+
+
+def find_hermes_bin():
+    """Locate the hermes CLI binary (mirrors hscc-agent-coordinator)."""
+    candidate = os.path.expanduser("~/.local/bin/hermes")
+    if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+        return candidate
+    return "hermes"
+
+
+def _kanban_task_status(board, kanban_id, timeout=20):
+    """Return (status, started_at) for a kanban task via the CLI, or (None, None)."""
+    r = run_cmd(
+        [find_hermes_bin(), "kanban", "--board", board, "show", kanban_id, "--json"],
+        timeout=timeout, as_json=True,
+    )
+    j = r.get("json")
+    if not isinstance(j, dict):
+        return None, None
+    return j.get("status"), j.get("started_at")
+
+
+def refresh_live_workers(agents):
+    """Keep genuinely-active dispatched workers alive across the idle-monitor's
+    staleness window, using the kanban task status as the authoritative liveness
+    signal.
+
+    A worker holds its GPU for as long as its kanban task is in the 'running'
+    state. Nothing refreshes the agent's lifecycle timestamp during a task, so a
+    task running longer than IDLE_TIMEOUT_MINUTES would have its worker vLLM
+    reaped mid-flight (the staleness guard downgrades 'running'->idle). Here we
+    (a) refresh the lifecycle timestamp and (b) hold agents.json status at
+    'working' so reconcile_lifecycle does not flip it to idle — but only while
+    the kanban task is actually 'running' and under the max-runtime cap. Tasks
+    that have left 'running' (done/review/blocked/archived) are released to idle
+    so the node reaps normally. Crashed workers are reaped because the dispatcher
+    moves the task out of 'running' (to blocked after the failure limit).
+
+    Mutates the in-memory ``agents`` list (so the subsequent reconcile sees the
+    updated status) and persists agents.json + lifecycle.json. Returns the set
+    of live agent ids.
+    """
+    try:
+        with open(BRIDGE_FILE) as f:
+            bridge = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return set()
+    candidates = {
+        tid: e for tid, e in bridge.get("tasks", {}).items()
+        if e.get("status") == "released"
+    }
+    if not candidates:
+        return set()
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    live_agents = {}    # agent_id -> task_id
+    done_agents = set()
+    for tid, e in candidates.items():
+        board, kid, aid = e.get("board"), e.get("kanban_id"), e.get("agent_id")
+        if not (board and kid and aid):
+            continue
+        status, started_at = _kanban_task_status(board, kid)
+        is_live = status == "running"
+        if is_live and started_at:
+            try:
+                age_min = (now - datetime.datetime.fromisoformat(started_at)).total_seconds() / 60
+                if age_min > WORKER_MAX_RUNTIME_MINUTES:
+                    is_live = False  # wedged → stop protecting, let it reap
+            except (ValueError, TypeError):
+                pass
+        if is_live:
+            live_agents[aid] = tid
+        elif status in ("done", "review", "archived", "blocked"):
+            done_agents.add(aid)
+
+    if not live_agents and not done_agents:
+        return set()
+
+    # (a) refresh lifecycle for live agents: state=running, fresh timestamp.
+    if live_agents:
+        lc_file = os.path.expanduser("~/.hscc/lifecycle.json")
+        try:
+            with open(lc_file) as f:
+                lc = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            lc = {"agents": {}, "history": []}
+        lc_states = lc.setdefault("agents", {})
+        for aid, tid in live_agents.items():
+            lc_states[aid] = {
+                "state": "running", "updated_at": now_iso(),
+                "task_id": tid, "heartbeat": True,
+            }
+        tmp = f"{lc_file}.{os.getpid()}.tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(lc, f, indent=2, default=str)
+            os.replace(tmp, lc_file)
+        except (OSError, IOError) as ex:
+            log(f"refresh_live_workers: lifecycle write failed: {ex}", "ERROR")
+
+    # (b) hold agents.json status: working for live, idle for finished dispatches.
+    #     agents.json is a symlink — write through its real target to keep the
+    #     link intact (os.replace onto the link would clobber it).
+    for a in agents:
+        aid = a.get("id")
+        if aid in live_agents:
+            a["status"] = "working"
+        elif aid in done_agents:
+            a["status"] = "idle"
+    real_agents_file = os.path.realpath(os.path.expanduser("~/.hscc/agents.json"))
+    try:
+        with open(real_agents_file) as f:
+            disk = json.load(f)
+        for a in disk.get("agents", []):
+            aid = a.get("id")
+            if aid in live_agents:
+                a["status"] = "working"
+            elif aid in done_agents:
+                a["status"] = "idle"
+        tmp = f"{real_agents_file}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(disk, f, indent=2, default=str)
+        os.replace(tmp, real_agents_file)
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as ex:
+        log(f"refresh_live_workers: agents.json update failed: {ex}", "ERROR")
+
+    if live_agents:
+        log(f"Heartbeat: holding {len(live_agents)} live worker(s) running: "
+            f"{', '.join(live_agents)}")
+    return set(live_agents)
+
+
 def check_heartbeat():
     """Heartbeat check (every 60s): agent fleet status, system health."""
     log("Running heartbeat check")
@@ -533,6 +672,10 @@ def check_heartbeat():
             with open(agents_file) as f:
                 agents_data = json.load(f)
             agents = agents_data.get("agents", [])
+            # Hold genuinely-active workers 'working' BEFORE reconcile so it does
+            # not flip their lifecycle running->idle (which would let the
+            # idle-monitor reap their node's vLLM mid-task).
+            refresh_live_workers(agents)
             reconcile_lifecycle(agents)
             total = len(agents)
             idle = sum(1 for a in agents if a.get("status") == "idle")

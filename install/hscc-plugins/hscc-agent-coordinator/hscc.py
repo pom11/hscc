@@ -44,6 +44,7 @@ import json
 import os
 import subprocess
 import re
+import time
 from datetime import datetime, timezone
 from collections import Counter
 
@@ -1523,6 +1524,106 @@ def run_hermes(args, timeout=120):
         return False, str(e)
 
 
+# Canonical worker vLLM recipe (same one the daemon serves on the gateway).
+WORKER_VLLM_RECIPE = os.path.expanduser(
+    "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-fp8-vllm.yaml")
+WORKER_VLLM_PORT = 8000
+
+
+def _provision_script():
+    """Path to the sibling hscc-provision plugin entrypoint."""
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "hscc-provision", "hscc.py")
+
+
+def worker_host_from_profile(profile):
+    """Map a ``worker-<octet>`` profile name to its node IP, else None.
+
+    Only worker-* profiles imply a node to provision; ``default`` (orchestrator)
+    and anything else return None so the caller skips provisioning.
+    """
+    m = re.match(r"worker-(\d+)$", profile or "")
+    if not m:
+        return None
+    return f"192.0.2.{m.group(1)}"
+
+
+def _vllm_healthy(host, timeout=5):
+    try:
+        r = subprocess.run(
+            ["curl", "-sf", "--max-time", str(timeout),
+             f"http://{host}:{WORKER_VLLM_PORT}/v1/models"],
+            capture_output=True, text=True, timeout=timeout + 3,
+        )
+        return r.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def _worker_container_running(host):
+    """True if sparkrun shows a container 'Up' on *host*.
+
+    A vLLM that is still loading the 35B is running but not yet healthy (the HTTP
+    port isn't open until the model is resident). Distinguishing 'loading' from
+    'absent' is what keeps ensure_worker_vllm from launching a second container
+    on top of one that's mid-load.
+    """
+    try:
+        r = subprocess.run(["sparkrun", "status"], capture_output=True,
+                           text=True, timeout=20)
+        if r.returncode != 0:
+            return False
+        for line in r.stdout.splitlines():
+            if host in line and "Up " in line:
+                return True
+        return False
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def ensure_worker_vllm(host, wait=False, timeout=300):
+    """Idempotently ensure the worker node's vLLM is serving.
+
+    Returns a dict describing the outcome. Idempotency has two layers: healthy
+    endpoint -> no-op; a container already 'Up' but still loading -> do NOT
+    relaunch (just wait/poll). Only when nothing is running do we provision via
+    the hscc-provision plugin (recipe launched with --cluster hscc / NAS +
+    --no-follow, returning once the container is started). A 35B load takes
+    minutes, so dispatch calls this with wait=False (kick off during the blocked
+    window) and release calls it with wait=True (poll until ready before
+    unblocking, so no worker is released into a dead endpoint).
+    """
+    if not host:
+        return {"ok": False, "reason": "no host (default/orchestrator profile)"}
+    if _vllm_healthy(host):
+        return {"ok": True, "host": host, "state": "already_healthy"}
+
+    detail = None
+    if _worker_container_running(host):
+        state = "loading"  # already coming up; don't double-launch
+    else:
+        try:
+            r = subprocess.run(
+                [sys.executable, _provision_script(), "run", WORKER_VLLM_RECIPE, host],
+                capture_output=True, text=True, timeout=320,
+            )
+            detail = ((r.stdout or "") + (r.stderr or "")).strip()[-500:]
+        except subprocess.TimeoutExpired:
+            detail = "provision timed out after 320s"
+        state = "provisioning"
+
+    if not wait:
+        return {"ok": False, "host": host, "state": state, "detail": detail}
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _vllm_healthy(host):
+            return {"ok": True, "host": host, "state": "ready", "detail": detail}
+        time.sleep(5)
+    return {"ok": False, "host": host, "state": "timeout",
+            "waited_s": timeout, "detail": detail}
+
+
 def _load_projects():
     return read_json_file(PROJECTS_JSON, {"projects": [], "activeProjectId": ""})
 
@@ -1557,12 +1658,26 @@ def get_project_board(project_id):
 
 
 def resolve_profile(agent_id, override=None):
-    """Resolve the Hermes profile a kanban worker should run as."""
+    """Resolve the Hermes profile a kanban worker should run as.
+
+    Precedence: explicit override -> agent's pinned ``profile`` -> the worker
+    node implied by the agent's ``model`` endpoint (``vllm-<host>/...`` maps to a
+    ``worker-<last-octet>`` profile when that profile exists on disk) -> default.
+    Routing by endpoint is what makes the worker run on its assigned GPU node
+    instead of inheriting the orchestrator (default profile -> gateway .244).
+    """
     if override:
         return override
     agent = load_agent_by_id(agent_id) if agent_id else None
-    if agent and agent.get("profile"):
+    if not agent:
+        return "default"
+    if agent.get("profile"):
         return agent["profile"]
+    m = re.search(r"vllm-(\d+\.\d+\.\d+\.\d+)", agent.get("model", ""))
+    if m:
+        prof = f"worker-{m.group(1).split('.')[-1]}"
+        if os.path.isdir(os.path.expanduser(f"~/.hermes/profiles/{prof}")):
+            return prof
     return "default"
 
 
@@ -1678,11 +1793,29 @@ def cmd_dispatch_task():
         "status": "blocked",
         "dispatched_at": now_iso(),
     }
+
+    # Kick off the worker node's vLLM now (non-blocking) so the 35B has minutes
+    # to load while the task sits blocked. release-task verifies it before go.
+    worker_host = worker_host_from_profile(profile)
+    provision = None
+    if worker_host:
+        provision = ensure_worker_vllm(worker_host, wait=False)
+        bridge["tasks"][task_id]["worker_host"] = worker_host
+        bridge["tasks"][task_id]["provision"] = provision
     save_bridge(bridge)
+
+    # Pin the real agent's lifecycle to 'spawning' so the daemon idle-monitor
+    # protects this node's vLLM through the (multi-minute) model load. Without
+    # this the agent stays stale-'idle' and the monitor reaps the worker vLLM
+    # mid-load/mid-task (the model-split worker then dies with APIConnectionError).
+    real_agent = task.get("assignedAgent", "").strip()
+    if worker_host and real_agent and load_agent_by_id(real_agent):
+        set_lifecycle(real_agent, "spawning", task_id=task_id)
 
     emit_event("hscc-agent-coordinator", "task.dispatched", {
         "task_id": task_id, "project_id": project_id,
         "kanban_id": kanban_id, "board": board, "worktree": wt_path,
+        "profile": profile, "worker_host": worker_host,
     })
 
     print(json.dumps({
@@ -1692,6 +1825,8 @@ def cmd_dispatch_task():
         "kanban_id": kanban_id,
         "board": board,
         "profile": profile,
+        "worker_host": worker_host,
+        "provision": provision,
         "worktree": wt_path,
         "branch": branch,
         "status": "blocked",
@@ -1719,6 +1854,28 @@ def cmd_release_task():
 
     board = entry["board"]
     kanban_id = entry["kanban_id"]
+
+    # Gate the 'go': for a worker-node task, the node's vLLM must be serving
+    # before we release a worker into it. Wait out the model load (provisioning
+    # was kicked off at dispatch). default/orchestrator tasks have no host -> skip.
+    worker_host = entry.get("worker_host") or worker_host_from_profile(entry.get("profile"))
+    if worker_host:
+        prov = ensure_worker_vllm(worker_host, wait=True, timeout=180)
+        entry["provision"] = prov
+        save_bridge(bridge)
+        if not prov.get("ok"):
+            # Node never came up — don't leave the agent pinned 'spawning'
+            # (that would keep a half-loaded container alive indefinitely).
+            reset_agent = entry.get("agent_id") or ""
+            if reset_agent and load_agent_by_id(reset_agent):
+                set_lifecycle(reset_agent, "idle", task_id=task_id)
+            print(json.dumps({
+                "error": "worker vLLM not ready; refusing to release",
+                "task_id": task_id, "worker_host": worker_host, "provision": prov,
+                "hint": "re-run release-task once the node is serving, or check hscc-provision/sparkrun status",
+            }, indent=2))
+            return
+
     ok, out = run_hermes(["kanban", "--board", board, "unblock", kanban_id], timeout=30)
     if not ok:
         print(json.dumps({"error": "unblock failed", "detail": out}))
@@ -1736,13 +1893,17 @@ def cmd_release_task():
         _, _, _, t = find_project_for_task(task_id)
         agent_id = (t.get("assignedAgent") or "").strip() if t else ""
     mark_task_in_progress(task_id, agent_id, entry.get("project_id"))
+    # Mark the agent 'running' (fresh timestamp) so the idle-monitor keeps this
+    # node's vLLM alive for the duration of the task instead of reaping it.
+    if worker_host and agent_id and load_agent_by_id(agent_id):
+        set_lifecycle(agent_id, "running", task_id=task_id)
 
     emit_event("hscc-agent-coordinator", "task.released", {
         "task_id": task_id, "kanban_id": kanban_id, "board": board,
     })
     print(json.dumps({
         "success": True, "task_id": task_id, "kanban_id": kanban_id,
-        "board": board, "status": "released",
+        "board": board, "status": "released", "worker_host": worker_host,
         "message": "Task unblocked; dispatcher will spawn a worker in the worktree.",
     }, indent=2))
 
