@@ -438,8 +438,10 @@ def resolve_local_recipe(recipe_name):
             break
     base_name = base_name + ".yaml" if not base_name.endswith(".yaml") else base_name
     
-    # Check official and transitional directories
-    for sub_dir in ["official", "transitional"]:
+    # Prefer local-fixed (carries chat-template/mods fixes) over the stock
+    # official/transitional variants, so a plain recipe name resolves to the
+    # canonical fixed recipe everywhere provisioning runs.
+    for sub_dir in ["local-fixed", "official", "transitional"]:
         local_path = f"{LOCAL_REGISTRY_DIR}/recipes/{sub_dir}/{base_name}"
         if os.path.exists(local_path):
             return local_path
