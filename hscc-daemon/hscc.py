@@ -87,10 +87,25 @@ SSH_OPTS = "-o StrictHostKeyChecking=no -o ConnectTimeout=10"
 NAS_HOST = "192.0.2.20"
 PRIMARY_NODE = "192.0.2.10"  # gateway: runs orchestrator vLLM + Hermes base_url
 
-# vLLM health check — resolved from cluster config
-VLLM_HEALTH_URL = "http://192.0.2.10:8000/health"
-VLLM_STOP_CMD = f"ssh {SSH_OPTS} {SSH_USER}@{PRIMARY_NODE} 'pkill -f vllm || true'"
-VLLM_START_CMD = f"ssh {SSH_OPTS} {SSH_USER}@{PRIMARY_NODE} 'nohup vllm serve Qwen/Qwen3.6-35B-A3B-FP8 --port 8000 > /tmp/vllm.log 2>&1 &'"
+# vLLM health check + control commands — rebuilt whenever PRIMARY_NODE changes
+VLLM_HEALTH_URL = ""
+VLLM_STOP_CMD = ""
+VLLM_START_CMD = ""
+
+
+def _rebuild_vllm_cmds():
+    """Rebuild the vLLM health URL + control commands from the current PRIMARY_NODE.
+
+    Must be called after any change to PRIMARY_NODE — otherwise the stop/start
+    commands keep pointing at whatever node was set when they were first built.
+    """
+    global VLLM_HEALTH_URL, VLLM_STOP_CMD, VLLM_START_CMD
+    VLLM_HEALTH_URL = f"http://{PRIMARY_NODE}:8000/health"
+    VLLM_STOP_CMD = f"ssh {SSH_OPTS} {SSH_USER}@{PRIMARY_NODE} 'pkill -f vllm || true'"
+    VLLM_START_CMD = f"ssh {SSH_OPTS} {SSH_USER}@{PRIMARY_NODE} 'nohup vllm serve Qwen/Qwen3.6-35B-A3B-FP8 --port 8000 > /tmp/vllm.log 2>&1 &'"
+
+
+_rebuild_vllm_cmds()
 
 # ── Cluster Config Resolution ─────────────────────────────────────────────
 
@@ -98,7 +113,11 @@ CLUSTER_JSON = os.path.expanduser("~/.hscc/cluster.json")
 
 
 def resolve_cluster_config():
-    """Resolve gateway/workers/NAS from cluster.json, update global config."""
+    """Resolve gateway/workers/NAS from cluster.json, falling back to sparkrun.
+
+    Keeps the module-level defaults if every source fails, so the daemon
+    degrades safely instead of leaving hosts unset.
+    """
     global NAS_HOST, PRIMARY_NODE, VLLM_HEALTH_URL
     try:
         with open(CLUSTER_JSON) as f:
@@ -118,10 +137,28 @@ def resolve_cluster_config():
         if nas_devices:
             NAS_HOST = nas_devices[0].get("ip", NAS_HOST)
 
-        # vLLM URL
-        VLLM_HEALTH_URL = f"http://{PRIMARY_NODE}:8000/health"
+        _rebuild_vllm_cmds()
+        return
 
     except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+
+    # Fallback: resolve the default cluster's primary host from sparkrun.
+    try:
+        result = subprocess.run(
+            "timeout 2 sparkrun cluster list --json",
+            shell=True, capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            clusters = json.loads(result.stdout.strip())
+            for cluster in clusters:
+                if cluster.get("default"):
+                    hosts = cluster.get("hosts", [])
+                    if hosts:
+                        PRIMARY_NODE = hosts[0].split(":")[0]
+                        _rebuild_vllm_cmds()
+                    break
+    except Exception:
         pass
 
 
