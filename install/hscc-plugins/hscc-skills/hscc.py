@@ -30,13 +30,34 @@ import json
 HSCC_SKILLS_DIR = os.environ.get("HSCC_SKILLS_DIR", os.path.expanduser("~/.hermes"))
 HERMES_HOME = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
 
-SKILLS_SOURCE = os.path.join(HSCC_SKILLS_DIR, "skills")
+
+def _find_skills_source():
+    """Locate the vendored skill source-of-truth inside the plugins repo.
+
+    Skills are versioned at <repo>/install/hscc-skills/. Walk up from this
+    file to find it so the installer works from both the active plugin path
+    and the install-template path. Falls back to the live skills dir.
+    """
+    env = os.environ.get("HSCC_SKILLS_SRC")
+    if env:
+        return env
+    d = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(5):
+        cand = os.path.join(d, "install", "hscc-skills")
+        if os.path.isdir(cand):
+            return cand
+        d = os.path.dirname(d)
+    return os.path.join(HERMES_HOME, "skills")
+
+
+SKILLS_SOURCE = _find_skills_source()
 SKILLS_DEST = os.path.join(HERMES_HOME, "skills")
 TEMPLATES_SOURCE = os.path.join(HSCC_SKILLS_DIR, "Resources", "templates")
 TEMPLATES_DEST = os.path.join(HERMES_HOME, "templates")
 
-# Hermes bundled skills
+# Bundled skills (vendored under install/hscc-skills/ in the repo)
 BUNDLED_SKILLS = [
+    # Generic Hermes skills
     "brainstorming",
     "caveman",
     "executing-plans",
@@ -44,6 +65,17 @@ BUNDLED_SKILLS = [
     "test-driven-development",
     "verification-before-completion",
     "writing-plans",
+    # HSCC cluster-control skills
+    "hscc",
+    "hscc-agent-coordinator",
+    "hscc-cluster",
+    "hscc-events",
+    "hscc-governance",
+    "hscc-orchestrator",
+    "hscc-projects",
+    "hscc-provision",
+    # devops skill group (architecture, plugins, kanban/webhook, migration helpers)
+    "devops",
 ]
 
 # Hermes bundled templates
@@ -98,33 +130,23 @@ def copy_if_different(src, dst):
 
 
 def copy_skill_dir(src_dir, dest_dir, skill_name):
-    """Copy an entire skill directory (may contain SKILL.md + extras).
-    
-    Returns dict with per-file status.
+    """Copy an entire skill tree (SKILL.md + nested references/scripts/sub-skills).
+
+    Walks the full tree so arbitrary depth (e.g. devops/<sub>/references/*.md)
+    is preserved. Returns dict mapping relative path -> copy status.
     """
     results = {}
     dest_skill_dir = os.path.join(dest_dir, skill_name)
-    ensure_dir(dest_skill_dir)
 
-    for entry in sorted(os.listdir(src_dir)):
-        src_path = os.path.join(src_dir, entry)
-        dst_path = os.path.join(dest_skill_dir, entry)
-
-        if os.path.isfile(src_path):
+    for root, _dirs, files in os.walk(src_dir):
+        rel_root = os.path.relpath(root, src_dir)
+        for fn in sorted(files):
+            rel_key = fn if rel_root == "." else os.path.join(rel_root, fn)
+            src_path = os.path.join(root, fn)
+            dst_path = os.path.join(dest_skill_dir, rel_key)
             status = copy_if_different(src_path, dst_path)
             if status:
-                results[entry] = status
-        elif os.path.isdir(src_path):
-            # Copy subdirectories recursively
-            copy_if_different(src_path, dst_path)
-            # Recurse into subdirectory
-            for sub_entry in sorted(os.listdir(src_path)):
-                sub_src = os.path.join(src_path, sub_entry)
-                sub_dst = os.path.join(dst_path, sub_entry)
-                if os.path.isfile(sub_src):
-                    sub_status = copy_if_different(sub_src, sub_dst)
-                    if sub_status:
-                        results[f"{entry}/{sub_entry}"] = sub_status
+                results[rel_key] = status
 
     return results
 
