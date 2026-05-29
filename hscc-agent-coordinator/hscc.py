@@ -57,7 +57,6 @@ EVENTS_FILE = os.path.join(HSCC_DIR, "events.jsonl")
 LIFECYCLE_FILE = os.path.join(HSCC_DIR, "lifecycle.json")
 WORKTREES_FILE = os.path.join(HSCC_DIR, "worktrees.json")
 RECOVERY_FILE = os.path.join(HSCC_DIR, "recovery.json")
-EVENTS_FILE = os.path.join(HSCC_DIR, "events.jsonl")
 
 # FSM transitions - same as hscc-lifecycle shared/types.ts
 VALID_TRANSITIONS = {
@@ -520,7 +519,12 @@ def cmd_assign_task():
             "message": f"Agent {agent_id} transitioned: idle -> spawning",
         }))
 
-    # Check if spawning succeeded (agent is now in spawning state)
+    # Check if spawning succeeded — re-read from disk; the in-memory `lc`
+    # snapshot is stale after set_lifecycle() wrote the new state.
+    lc = read_json_file(LIFECYCLE_FILE, {"agents": {}, "history": []})
+    if not lc.get("agents"):
+        lc = read_json_file(os.path.join(HSCC_DIR, "plugin-state", "hscc-lifecycle.json"),
+                            {"agents": {}, "history": []})
     current = lc.get("agents", {}).get(agent_id, {"state": "idle"})
     current_state = current.get("state", "idle")
 
@@ -592,19 +596,16 @@ def create_worktree_for_task(agent_id, task_id, project_id, branch_slug=None):
     if not p:
         return {"note": "No project found for task, skipping worktree creation"}
 
-    # Look for git repo - try project dir and known repo paths
-    repo_path = None
-    project_dir = os.path.join(HSCC_DIR, "projects", project_id)
-    if os.path.exists(os.path.join(project_dir, ".git")):
-        repo_path = project_dir
-    elif os.path.exists(os.path.join(HSCC_DIR, ".git")):
-        repo_path = HSCC_DIR
-
+    # Resolve the project's git repo via the canonical resolver so a project
+    # whose gitRepoPath points elsewhere is honored (never fall back to the
+    # HSCC state repo).
+    repo_path = get_project_repo(project_id)
     if not repo_path:
         return {"note": "No git repo found for project, skipping worktree creation"}
 
-    # Determine worktree path
-    worktree_dir = os.path.join(HSCC_DIR, "worktrees", project_id, f"{agent_id}-{task_id[:8]}")
+    # Determine worktree path. Use the full task id (UUID) so two tasks that
+    # share an 8-char prefix never collide on the same directory.
+    worktree_dir = os.path.join(HSCC_DIR, "worktrees", project_id, f"{agent_id}-{task_id}")
 
     # Sanitize branch name
     slug = branch_slug or task_id
@@ -614,7 +615,7 @@ def create_worktree_for_task(agent_id, task_id, project_id, branch_slug=None):
     parent_dir = os.path.dirname(worktree_dir)
     os.makedirs(parent_dir, exist_ok=True)
 
-    # Check for collision
+    # Reuse an existing active worktree (idempotent dispatch / retry).
     if os.path.exists(worktree_dir):
         existing_wt = get_worktrees()
         key = task_to_key(project_id, task_id)
@@ -622,18 +623,25 @@ def create_worktree_for_task(agent_id, task_id, project_id, branch_slug=None):
         if existing.get("status") == "active":
             return {
                 "note": "Worktree already exists",
-                "path": worktree_dir,
-                "branch": branch,
-                "collision": True,
+                "worktree_path": worktree_dir,
+                "branch": existing.get("branch") or branch,
+                "base_commit": _worktree_base(worktree_dir) or "unknown",
                 "status": "exists",
             }
 
-    # Create worktree
-    ok, output = run_git(["worktree", "add", worktree_dir, "-b", branch, "HEAD"], cwd=repo_path, timeout=30)
+    # Create worktree. If the branch already exists (e.g. a prior dispatch was
+    # removed but its branch was left behind), check it out instead of trying to
+    # create it again — `worktree add -b` would fail with "branch already exists".
+    branch_exists, _ = run_git(["rev-parse", "--verify", "--quiet", branch], cwd=repo_path, timeout=5)
+    if branch_exists:
+        add_args = ["worktree", "add", worktree_dir, branch]
+    else:
+        add_args = ["worktree", "add", worktree_dir, "-b", branch, "HEAD"]
+    ok, output = run_git(add_args, cwd=repo_path, timeout=30)
     if not ok:
         return {
             "error": f"Failed to create worktree: {output}",
-            "path": worktree_dir,
+            "worktree_path": worktree_dir,
             "branch": branch,
             "collision": True,
         }
@@ -1608,13 +1616,21 @@ def cmd_dispatch_task():
     wt_path = wt.get("worktree_path")
     branch = wt.get("branch")
     if not wt_path:
-        # Worktree already existed — recover its path/branch from state.
+        # Defensive: recover path/branch from state if the helper returned a note.
         key = task_to_key(project_id, task_id)
         existing = get_worktrees().get("worktrees", {}).get(key, {})
-        wt_path = existing.get("path") or wt.get("path")
-        branch = existing.get("branch") or wt.get("branch")
+        wt_path = existing.get("path")
+        branch = branch or existing.get("branch")
     if not wt_path:
         print(json.dumps({"error": "could not resolve worktree path", "detail": wt}))
+        return
+    # The kanban worker only changes cwd into the workspace if it exists on disk.
+    # Refuse to dispatch a worker that would land in a missing directory.
+    if not os.path.isdir(wt_path):
+        print(json.dumps({"error": "worktree path does not exist on disk; cannot dispatch", "path": wt_path}))
+        return
+    if not branch:
+        print(json.dumps({"error": "could not resolve worktree branch", "detail": wt}))
         return
 
     board = get_project_board(project_id)
@@ -1653,6 +1669,7 @@ def cmd_dispatch_task():
     bridge["tasks"][task_id] = {
         "hscc_task_id": task_id,
         "project_id": project_id,
+        "agent_id": agent_id,
         "kanban_id": kanban_id,
         "board": board,
         "profile": profile,
@@ -1713,7 +1730,12 @@ def cmd_release_task():
     entry["status"] = "released"
     entry["released_at"] = now_iso()
     save_bridge(bridge)
-    mark_task_in_progress(task_id, entry.get("profile", ""), entry.get("project_id"))
+    # Record the real agent id (not the worker profile) as the task assignee.
+    agent_id = entry.get("agent_id") or ""
+    if not agent_id:
+        _, _, _, t = find_project_for_task(task_id)
+        agent_id = (t.get("assignedAgent") or "").strip() if t else ""
+    mark_task_in_progress(task_id, agent_id, entry.get("project_id"))
 
     emit_event("hscc-agent-coordinator", "task.released", {
         "task_id": task_id, "kanban_id": kanban_id, "board": board,
@@ -1906,34 +1928,60 @@ def cmd_remove_worktree():
         print(json.dumps({"error": f"No worktree for {key}"}))
         return
     wt_path = wt.get("path")
+    branch = wt.get("branch")
+    merged = wt.get("status") == "merged"
     repo_path = get_project_repo(project_id)
     if not repo_path:
         print(json.dumps({"error": f"No git repo for project {project_id}"}))
         return
-    # Safety: refuse to drop uncommitted work unless forced.
-    dirty_ok, dirty_out = run_git(["status", "--porcelain"], cwd=wt_path, timeout=10)
-    if dirty_ok and dirty_out.strip() and not force:
-        print(json.dumps({
-            "error": "worktree has uncommitted changes; refusing to remove",
-            "path": wt_path,
-            "changes": dirty_out.strip().splitlines()[:20],
-            "hint": "Pass --force to remove anyway (this discards uncommitted work).",
-        }, indent=2))
-        return
+    # Safety: refuse to drop uncommitted work unless forced. If we cannot verify
+    # the worktree is clean (git status failed), treat that as unsafe too.
+    if wt_path and os.path.isdir(wt_path) and not force:
+        dirty_ok, dirty_out = run_git(["status", "--porcelain"], cwd=wt_path, timeout=10)
+        if not dirty_ok:
+            print(json.dumps({
+                "error": "cannot verify worktree is clean; refusing to remove",
+                "path": wt_path,
+                "detail": dirty_out,
+                "hint": "Pass --force to remove anyway (this may discard uncommitted work).",
+            }, indent=2))
+            return
+        if dirty_out.strip():
+            print(json.dumps({
+                "error": "worktree has uncommitted changes; refusing to remove",
+                "path": wt_path,
+                "changes": dirty_out.strip().splitlines()[:20],
+                "hint": "Pass --force to remove anyway (this discards uncommitted work).",
+            }, indent=2))
+            return
     rm_args = ["worktree", "remove"] + (["--force"] if force else []) + [wt_path]
     ok, out = run_git(rm_args, cwd=repo_path, timeout=30)
-    if not ok:
+    if not ok and os.path.isdir(wt_path):
         print(json.dumps({"error": "git worktree remove failed", "detail": out}))
         return
+    # Drop the branch only if it was merged, so re-dispatch starts clean and we
+    # don't accumulate stale task/* branches. Never delete unmerged work.
+    branch_removed = False
+    if branch and merged:
+        bok, _ = run_git(["branch", "-d", branch], cwd=repo_path, timeout=10)
+        branch_removed = bok
     wt_state = get_worktrees()
     if key in wt_state.get("worktrees", {}):
         wt_state["worktrees"][key]["status"] = "removed"
         wt_state["worktrees"][key]["removed_at"] = now_iso()
         save_worktrees(wt_state)
+    # Reap the dispatch bridge entry so it doesn't accumulate stale records.
+    bridge = load_bridge()
+    if task_id in bridge.get("tasks", {}):
+        del bridge["tasks"][task_id]
+        save_bridge(bridge)
     emit_event("hscc-agent-coordinator", "worktree.removed", {
         "project_id": project_id, "task_id": task_id, "path": wt_path,
     })
-    print(json.dumps({"success": True, "removed": wt_path, "detail": out}, indent=2))
+    print(json.dumps({
+        "success": True, "removed": wt_path,
+        "branch_removed": branch_removed, "detail": out,
+    }, indent=2))
 
 
 def cmd_check_collisions():
