@@ -36,6 +36,7 @@ import uuid
 import datetime
 import collections
 import shutil
+import re
 from pathlib import Path
 
 # ── Event-Driven Mode ───────────────────────────────────────────────────────
@@ -77,6 +78,7 @@ STREAMS = {
     "local":       30,
     "heartbeat":   60,
     "nas":         30,
+    "idle":        300,  # Idle monitor: every 5 min
 }
 
 # Cluster host configuration — loaded from cluster.json, fallback defaults
@@ -513,6 +515,230 @@ def check_nas():
     write_state("nas", {"ok": ok, "details": results})
     log(f"NAS check: ok={ok}")
     return ok
+
+
+# ── Idle Monitor ───────────────────────────────────────────────────────────
+
+IDLE_TIMEOUT_MINUTES = int(os.environ.get("HSCC_IDLE_TIMEOUT_MINUTES", "30"))
+
+
+def check_idle_monitor():
+    """Idle monitor check (every 5m): scan sparkrun containers, stop idle ones."""
+    log("Running idle monitor check")
+    import subprocess as sp_subprocess
+    
+    result = {
+        "timestamp": now_iso(),
+        "containers_scanned": 0,
+        "kept": [],
+        "stopped": [],
+        "errors": [],
+    }
+    
+    # Get running containers
+    try:
+        res = sp_subprocess.run(
+            ["sparkrun", "status"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if res.returncode != 0:
+            log("Idle monitor: sparkrun status failed", "ERROR")
+            write_state("idle", {"timestamp": now_iso(), "error": "sparkrun status failed"})
+            return True
+        
+        lines = res.stdout.split("\n")
+        containers = []
+        current_id = None
+        current_recipe = None
+        
+        for line in lines:
+            ls = line.strip()
+            id_match = re.search(r"\[([a-f0-9]+)\]", ls)
+            if id_match:
+                current_id = id_match.group(1)
+                job_match = re.search(r"Job:\s+(@\S+/\S+)", ls)
+                if job_match:
+                    current_recipe = job_match.group(1)
+                continue
+            
+            host_match = re.match(
+                r"^\s*(solo|multi)\s+(\d+\.\d+\.\d+\.\d+)\s+Up\s+.*$", ls
+            )
+            if host_match:
+                mode = host_match.group(1)
+                host_ip = host_match.group(2)
+                if current_id:
+                    name_parts = ls.split()
+                    cname = name_parts[-1] if name_parts else ""
+                    containers.append({
+                        "id": current_id,
+                        "container_id": current_id,
+                        "host": host_ip,
+                        "mode": mode,
+                        "recipe": current_recipe or "unknown",
+                        "docker_name": cname,
+                    })
+                current_id = None
+                current_recipe = None
+        
+        result["containers_scanned"] = len(containers)
+        
+        # Load agents and lifecycle
+        agents_file = os.path.expanduser("~/.hscc/agents.json")
+        agents = []
+        if os.path.exists(agents_file):
+            with open(agents_file) as f:
+                agents_data = json.load(f)
+            agents = agents_data.get("agents", [])
+        
+        lc_file = os.path.expanduser("~/.hscc/lifecycle.json")
+        agent_states = {}
+        if os.path.exists(lc_file):
+            with open(lc_file) as f:
+                lc_data = json.load(f)
+            agent_states = lc_data.get("agents", {})
+        
+        # Build model->agents map
+        model_to_agents = {}
+        for agent in agents:
+            model = agent.get("model", "")
+            if model:
+                if model not in model_to_agents:
+                    model_to_agents[model] = []
+                model_to_agents[model].append(agent["id"])
+        
+        # Check each container
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for container in containers:
+            host = container["host"]
+            recipe = container.get("recipe", "")
+            cid = container["container_id"]
+            
+            # Never stop MTP on gateway
+            if host == "192.0.2.10" and "mtp" in recipe.lower():
+                result["kept"].append({"container": container, "reason": "MTP gateway (protected)"})
+                continue
+            
+            # Find matching agents
+            matched = []
+            for model_str, aids in model_to_agents.items():
+                ip_match = re.search(r"vllm-(\d+\.\d+\.\d+\.\d+)", model_str)
+                if ip_match and ip_match.group(1) == host:
+                    matched.extend(aids)
+            
+            if not matched:
+                result["stopped"].append({
+                    "container": container,
+                    "check": {"reason": "orphan (no agents)", "container_id": cid, "host": host}
+                })
+                try:
+                    sp_res = sp_subprocess.run(
+                        ["sparkrun", "stop", cid],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    if sp_res.returncode == 0:
+                        result["stopped"][-1]["stopped"] = True
+                        result["stopped"][-1]["stop_message"] = sp_res.stdout.strip()
+                    else:
+                        result["stopped"][-1]["stopped"] = False
+                        result["stopped"][-1]["stop_message"] = sp_res.stderr.strip() or sp_res.stdout.strip()
+                        result["errors"].append(f"Failed to stop {cid}")
+                except Exception as e:
+                    result["stopped"][-1]["stopped"] = False
+                    result["stopped"][-1]["stop_message"] = str(e)
+                    result["errors"].append(str(e))
+                continue
+            
+            # Check agent states
+            has_running = False
+            has_idle = False
+            oldest_idle = None
+            
+            for aid in matched:
+                entry = agent_states.get(aid, {})
+                state = entry.get("state", "idle")
+                if state == "running":
+                    has_running = True
+                    break
+                elif state == "idle":
+                    has_idle = True
+                    updated = entry.get("updated_at", "")
+                    if updated:
+                        try:
+                            idle_time = datetime.datetime.fromisoformat(updated)
+                            if oldest_idle is None or idle_time < oldest_idle:
+                                oldest_idle = idle_time
+                        except (ValueError, TypeError):
+                            pass
+                elif state in ("spawning", "ready"):
+                    result["kept"].append({
+                        "container": container,
+                        "reason": f"agent {aid} in '{state}' state"
+                    })
+                    break
+            
+            if has_running:
+                result["kept"].append({"container": container, "reason": "agent actively running"})
+            elif has_idle and oldest_idle:
+                idle_dur = now - oldest_idle
+                idle_min = idle_dur.total_seconds() / 60
+                if idle_min < IDLE_TIMEOUT_MINUTES:
+                    remaining = IDLE_TIMEOUT_MINUTES - idle_min
+                    result["kept"].append({
+                        "container": container,
+                        "reason": f"agent idle {idle_min:.0f}min (timeout: {IDLE_TIMEOUT_MINUTES}min, {remaining:.0f}min remaining)",
+                    })
+                else:
+                    result["stopped"].append({
+                        "container": container,
+                        "check": {
+                            "reason": f"agent idle {idle_min:.0f}min (exceeded {IDLE_TIMEOUT_MINUTES}min threshold)",
+                            "container_id": cid,
+                            "host": host,
+                        }
+                    })
+                    try:
+                        sp_res = sp_subprocess.run(
+                            ["sparkrun", "stop", cid],
+                            capture_output=True, text=True, timeout=30,
+                        )
+                        if sp_res.returncode == 0:
+                            result["stopped"][-1]["stopped"] = True
+                            result["stopped"][-1]["stop_message"] = sp_res.stdout.strip()
+                        else:
+                            result["stopped"][-1]["stopped"] = False
+                            result["stopped"][-1]["stop_message"] = sp_res.stderr.strip() or sp_res.stdout.strip()
+                            result["errors"].append(f"Failed to stop {cid}")
+                    except Exception as e:
+                        result["stopped"][-1]["stopped"] = False
+                        result["stopped"][-1]["stop_message"] = str(e)
+                        result["errors"].append(str(e))
+            else:
+                result["kept"].append({"container": container, "reason": "unknown state"})
+    
+    except Exception as e:
+        log(f"Idle monitor error: {e}", "ERROR")
+        write_state("idle", {"timestamp": now_iso(), "error": str(e)})
+        return True
+    
+    # Log summary
+    stopped_count = len(result["stopped"])
+    kept_count = len(result["kept"])
+    error_count = len(result["errors"])
+    
+    if stopped_count > 0:
+        log(f"Idle monitor: {stopped_count} containers stopped, {kept_count} kept, {error_count} errors")
+        for s in result["stopped"]:
+            reason = s.get("check", {}).get("reason", "")[:80] if isinstance(s.get("check"), dict) else ""
+            status = "✓" if s.get("stopped") else "✗"
+            log(f"  {status} {s['container'].get('host', '?')}: {reason}")
+    else:
+        log(f"Idle monitor: {kept_count} containers kept")
+    
+    # Save state
+    write_state("idle", result)
+    
+    return True
 
 
 # ── PipelineWatchdog ───────────────────────────────────────────────────────
@@ -1299,6 +1525,7 @@ def _run_event_driven_daemon(stop_event: threading.Event) -> None:
         "local": check_local,
         "heartbeat": check_heartbeat,
         "nas": check_nas,
+        "idle": check_idle_monitor,
     }
 
     # Register event bridge callbacks for downstream reactions
@@ -1451,6 +1678,7 @@ def cmd_check(stream=None):
         "nas": check_nas,
         "watchdog": pipeline_watchdog,
         "triggers": trigger_engine,
+        "idle": check_idle_monitor,
     }
 
     if stream and stream == "all":
