@@ -55,11 +55,7 @@ def load_agents():
 
 
 def load_lifecycle():
-    data = read_json(LIFECYCLE_JSON, {"agents": {}})
-    if not data.get("agents"):
-        old = os.path.expanduser("~/.r2d2cc/plugin-state/r2d2-lifecycle.json")
-        data = read_json(old, {"agents": {}})
-    return data
+    return read_json(LIFECYCLE_JSON, {"agents": {}})
 
 
 def get_sparkrun_containers():

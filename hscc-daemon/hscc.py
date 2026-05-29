@@ -84,8 +84,8 @@ STREAMS = {
 # Cluster host configuration — loaded from cluster.json, fallback defaults
 SSH_USER = "spark"
 SSH_OPTS = "-o StrictHostKeyChecking=no -o ConnectTimeout=10"
-NAS_HOST = "192.0.2.10"
-PRIMARY_NODE = "192.0.2.10"  # gateway/primary node
+NAS_HOST = "192.0.2.20"
+PRIMARY_NODE = "192.0.2.10"  # gateway: runs orchestrator vLLM + Hermes base_url
 
 # vLLM health check — resolved from cluster config
 VLLM_HEALTH_URL = "http://192.0.2.10:8000/health"
@@ -107,11 +107,12 @@ def resolve_cluster_config():
         workers = config.get("workers", [])
         nas_devices = config.get("nasDevices", [])
 
-        # Primary node: use first worker if available, else gateway
-        if workers:
-            PRIMARY_NODE = workers[0].get("ip", PRIMARY_NODE)
-        elif gateway:
+        # Primary node = gateway: it runs the orchestrator vLLM (Qwen) and is the
+        # Hermes base_url host. Workers receive dispatched jobs, not vLLM traffic.
+        if gateway:
             PRIMARY_NODE = gateway.get("ip", PRIMARY_NODE)
+        elif workers:
+            PRIMARY_NODE = workers[0].get("ip", PRIMARY_NODE)
 
         # NAS
         if nas_devices:
@@ -162,7 +163,9 @@ def write_state(stream_name, data):
         "stream": stream_name,
         **data,
     }
-    tmp = filepath + ".tmp"
+    # Unique tmp per writer: a fixed name races when the same stream check
+    # overlaps (two writers, one renames first, the other's tmp vanishes).
+    tmp = f"{filepath}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
         with open(tmp, "w") as f:
             json.dump(entry, f, indent=2, default=str)
@@ -322,33 +325,31 @@ def check_dgx():
 
 
 def check_gateway():
-    """Gateway check (every 10s): HTTP check on Hermes gateway port."""
+    """Gateway check (every 10s): Hermes gateway launchd job + vLLM backend.
+
+    The Hermes gateway connects out to chat platforms; it is NOT a local HTTP
+    server, so liveness = its launchd job is loaded, not an HTTP port probe.
+    """
     log("Running gateway check")
 
-    # Hermes gateway default port
-    for port in [18789, 18788, 18790]:
-        url = f"http://localhost:{port}/api/health"
-        health = http_check(url, timeout=5)
-        if health.get("success"):
-            result = {"ok": True, "port": port, "health": health}
-            write_state("gateway", result)
-            log(f"Gateway check: healthy on port {port}")
-            return True
+    job_ok = False
+    try:
+        r = run_cmd(["launchctl", "list", "ai.hermes.gateway"], timeout=5)
+        job_ok = r.get("success", False)
+    except Exception:
+        pass
 
-    # Also try SSH to gateway
-    gw_result = ssh_cmd(PRIMARY_NODE, "echo ok", timeout=8)
-    result = {
-        "ok": False,
-        "ssh_reachable": gw_result.get("success", False),
-        "http_checks": [],
-    }
-    write_state("gateway", result)
-    log(f"Gateway check: not healthy")
-    return False
+    vllm = http_check(VLLM_HEALTH_URL, timeout=5)
+    vllm_ok = vllm.get("success", False)
+
+    ok = job_ok and vllm_ok
+    write_state("gateway", {"ok": ok, "gateway_job": job_ok, "vllm_healthy": vllm_ok})
+    log(f"Gateway check: ok={ok} (job={job_ok} vllm={vllm_ok})")
+    return ok
 
 
 def check_local():
-    """Local services check (every 30s): Docker, Ollama, PostgreSQL, mem0."""
+    """Local services check (every 30s): Docker, Ollama, PostgreSQL, hscc-daemon."""
     log("Running local services check")
 
     services = {}
@@ -397,14 +398,53 @@ def check_local():
         "sparkrun": {"version": spark_r.get("output", "").strip()} if spark_r.get("success") else {},
     }
 
-    all_running = docker_ok and ollama.get("success", False) and oclaw_ok
+    all_running = docker_ok and ollama.get("success", False)
     write_state("local", {
         "ok": all_running,
         "services": services,
         "tools": tools,
     })
-    log(f"Local check: ok={all_running}, docker={docker_ok}, ollama={ollama.get('success')}, oclaw={oclaw_ok}")
+    log(f"Local check: ok={all_running}, docker={docker_ok}, ollama={ollama.get('success')}")
     return all_running
+
+
+def reconcile_lifecycle(agents):
+    """Sync lifecycle.json to the authoritative agents.json status.
+
+    Nothing transitions lifecycle running->idle on normal task completion, so
+    lifecycle.json drifts to a stale 'running' while agents.json status (kept
+    current by provision/heartbeat) already reads 'idle'. Converge the FSM to
+    the authoritative field: when status is idle but lifecycle says running,
+    write the idle transition. Only running->idle is reconciled — transitional
+    states (spawning/ready/finished) are left untouched to avoid racing an
+    in-flight spawn.
+    """
+    lc_file = os.path.expanduser("~/.hscc/lifecycle.json")
+    if not os.path.exists(lc_file):
+        return
+    try:
+        with open(lc_file) as f:
+            lc_data = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return
+
+    states = lc_data.get("agents", {})
+    status_by_id = {a.get("id"): a.get("status") for a in agents}
+    changed = []
+    for aid, entry in states.items():
+        if entry.get("state") == "running" and status_by_id.get(aid) == "idle":
+            entry["state"] = "idle"
+            entry["updated_at"] = now_iso()
+            entry["reconciled"] = True
+            changed.append(aid)
+
+    if changed:
+        lc_data["agents"] = states
+        tmp = lc_file + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(lc_data, f, indent=2, default=str)
+        os.replace(tmp, lc_file)
+        log(f"Reconciled lifecycle running->idle for {len(changed)} agent(s): {', '.join(changed)}")
 
 
 def check_heartbeat():
@@ -420,6 +460,7 @@ def check_heartbeat():
             with open(agents_file) as f:
                 agents_data = json.load(f)
             agents = agents_data.get("agents", [])
+            reconcile_lifecycle(agents)
             total = len(agents)
             idle = sum(1 for a in agents if a.get("status") == "idle")
             working = sum(1 for a in agents if a.get("status") == "working")
@@ -657,12 +698,25 @@ def check_idle_monitor():
             for aid in matched:
                 entry = agent_states.get(aid, {})
                 state = entry.get("state", "idle")
+                updated = entry.get("updated_at", "")
+                # Staleness guard: a 'running' lifecycle state older than the
+                # idle timeout is stale (lifecycle drifted from reality — nothing
+                # resets running->idle on normal completion) and is downgraded to
+                # idle. Without a timestamp we cannot prove staleness, so we keep
+                # trusting it (never stop on uncertainty).
                 if state == "running":
-                    has_running = True
-                    break
-                elif state == "idle":
+                    age_min = None
+                    if updated:
+                        try:
+                            age_min = (now - datetime.datetime.fromisoformat(updated)).total_seconds() / 60
+                        except (ValueError, TypeError):
+                            age_min = None
+                    if age_min is None or age_min < IDLE_TIMEOUT_MINUTES:
+                        has_running = True
+                        break
+                    state = "idle"  # stale running → treat as idle
+                if state == "idle":
                     has_idle = True
-                    updated = entry.get("updated_at", "")
                     if updated:
                         try:
                             idle_time = datetime.datetime.fromisoformat(updated)
@@ -791,6 +845,7 @@ def pipeline_watchdog():
     if block.get("blocked"):
         log("Watchdog: blocked, skipping checks")
         write_state("watchdog", {
+            "ok": False,
             "blocked": True,
             "reason": block.get("reason", ""),
             "auto_restart_count": block.get("auto_restart_count", 0),
@@ -812,6 +867,7 @@ def pipeline_watchdog():
         block["failed_count"] = 0
         save_watchdog_block(block)
         write_state("watchdog", {
+            "ok": True,
             "blocked": False,
             "dgx": dgx_ok,
             "gateway": gw_ok,
@@ -841,6 +897,7 @@ def pipeline_watchdog():
         log(f"Watchdog: BLOCKING pipeline — {reason}")
         save_watchdog_block(block)
         write_state("watchdog", {
+            "ok": False,
             "blocked": True,
             "reason": reason,
             "last_check": now_iso(),
@@ -867,6 +924,7 @@ def pipeline_watchdog():
         block["last_restart"] = now_iso()
         save_watchdog_block(block)
         write_state("watchdog", {
+            "ok": False,
             "blocked": False,
             "dgx": dgx_ok,
             "gateway": gw_ok,
@@ -885,6 +943,7 @@ def pipeline_watchdog():
         )
     else:
         write_state("watchdog", {
+            "ok": False,
             "blocked": False,
             "dgx": dgx_ok,
             "gateway": gw_ok,

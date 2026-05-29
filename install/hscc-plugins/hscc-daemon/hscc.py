@@ -376,7 +376,7 @@ def check_gateway():
 
 
 def check_local():
-    """Local services check (every 30s): Docker, Ollama, PostgreSQL, mem0."""
+    """Local services check (every 30s): Docker, Ollama, PostgreSQL, hscc-daemon."""
     log("Running local services check")
 
     services = {}
@@ -435,6 +435,45 @@ def check_local():
     return all_running
 
 
+def reconcile_lifecycle(agents):
+    """Sync lifecycle.json to the authoritative agents.json status.
+
+    Nothing transitions lifecycle running->idle on normal task completion, so
+    lifecycle.json drifts to a stale 'running' while agents.json status (kept
+    current by provision/heartbeat) already reads 'idle'. Converge the FSM to
+    the authoritative field: when status is idle but lifecycle says running,
+    write the idle transition. Only running->idle is reconciled — transitional
+    states (spawning/ready/finished) are left untouched to avoid racing an
+    in-flight spawn.
+    """
+    lc_file = os.path.expanduser("~/.hscc/lifecycle.json")
+    if not os.path.exists(lc_file):
+        return
+    try:
+        with open(lc_file) as f:
+            lc_data = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return
+
+    states = lc_data.get("agents", {})
+    status_by_id = {a.get("id"): a.get("status") for a in agents}
+    changed = []
+    for aid, entry in states.items():
+        if entry.get("state") == "running" and status_by_id.get(aid) == "idle":
+            entry["state"] = "idle"
+            entry["updated_at"] = now_iso()
+            entry["reconciled"] = True
+            changed.append(aid)
+
+    if changed:
+        lc_data["agents"] = states
+        tmp = lc_file + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(lc_data, f, indent=2, default=str)
+        os.replace(tmp, lc_file)
+        log(f"Reconciled lifecycle running->idle for {len(changed)} agent(s): {', '.join(changed)}")
+
+
 def check_heartbeat():
     """Heartbeat check (every 60s): agent fleet status, system health."""
     log("Running heartbeat check")
@@ -448,6 +487,7 @@ def check_heartbeat():
             with open(agents_file) as f:
                 agents_data = json.load(f)
             agents = agents_data.get("agents", [])
+            reconcile_lifecycle(agents)
             total = len(agents)
             idle = sum(1 for a in agents if a.get("status") == "idle")
             working = sum(1 for a in agents if a.get("status") == "working")
@@ -595,6 +635,7 @@ def pipeline_watchdog():
     if block.get("blocked"):
         log("Watchdog: blocked, skipping checks")
         write_state("watchdog", {
+            "ok": False,
             "blocked": True,
             "reason": block.get("reason", ""),
             "auto_restart_count": block.get("auto_restart_count", 0),
@@ -616,6 +657,7 @@ def pipeline_watchdog():
         block["failed_count"] = 0
         save_watchdog_block(block)
         write_state("watchdog", {
+            "ok": True,
             "blocked": False,
             "dgx": dgx_ok,
             "gateway": gw_ok,
@@ -645,6 +687,7 @@ def pipeline_watchdog():
         log(f"Watchdog: BLOCKING pipeline — {reason}")
         save_watchdog_block(block)
         write_state("watchdog", {
+            "ok": False,
             "blocked": True,
             "reason": reason,
             "last_check": now_iso(),
@@ -671,6 +714,7 @@ def pipeline_watchdog():
         block["last_restart"] = now_iso()
         save_watchdog_block(block)
         write_state("watchdog", {
+            "ok": False,
             "blocked": False,
             "dgx": dgx_ok,
             "gateway": gw_ok,
@@ -689,6 +733,7 @@ def pipeline_watchdog():
         )
     else:
         write_state("watchdog", {
+            "ok": False,
             "blocked": False,
             "dgx": dgx_ok,
             "gateway": gw_ok,
