@@ -2298,6 +2298,161 @@ def cmd_list_dispatched():
     print(json.dumps({"count": len(bridge), "tasks": bridge}, indent=2, default=str))
 
 
+# Kanban statuses that mean the worker is finished with the card.
+_KANBAN_DONE = {"done", "archived"}
+
+# Lifecycle states where the agent may be holding a live kanban card. We only
+# pay the (network) kanban lookup for these; idle/finished/failed/disabled
+# agents are reported from local state alone, so fleet-activity stays
+# O(active agents) instead of O(all bridge entries) — bridge records linger
+# until remove-worktree reaps them.
+_ACTIVE_LIFECYCLE = {"spawning", "ready", "running"}
+
+
+def _node_from_model(model):
+    """Derive the worker node (last octet) from an agent model string like
+    'vllm-192.0.2.12/Qwen/...'. Returns '.247' or '' if not a worker."""
+    m = re.search(r"(\d+\.\d+\.\d+\.(\d+))", model or "")
+    return f".{m.group(2)}" if m else ""
+
+
+def _parse_iso(ts):
+    try:
+        return datetime.fromisoformat(ts)
+    except (TypeError, ValueError):
+        return None
+
+
+def _age_str(ts):
+    dt = _parse_iso(ts)
+    if not dt:
+        return "?"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    secs = int((datetime.now(timezone.utc) - dt).total_seconds())
+    if secs < 0:
+        return "0s"
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m"
+    if secs < 86400:
+        return f"{secs // 3600}h"
+    return f"{secs // 86400}d"
+
+
+def _kanban_card_json(board, kanban_id, timeout=20):
+    """Return the kanban card dict (status, started_at, title, ...) or {}."""
+    if not board or not kanban_id:
+        return {}
+    ok, out = run_hermes(["kanban", "--board", board, "show", kanban_id, "--json"],
+                         timeout=timeout)
+    if not ok:
+        return {}
+    try:
+        card = json.loads(out)
+        return card if isinstance(card, dict) else {}
+    except (json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _active_task_for_agent(agent_id, bridge, lifecycle_task_id):
+    """Find the agent's current live dispatched task by joining bridge -> kanban.
+    Prefers the entry matching the agent's lifecycle task_id; skips cards that
+    kanban reports as done/archived. Returns (task_id, entry, card) or
+    (None, None, None) when the agent holds no live card."""
+    entries = [(tid, e) for tid, e in bridge.get("tasks", {}).items()
+               if e.get("agent_id") == agent_id]
+    # Newest dispatch first, then float the lifecycle-pinned task to the top
+    # (stable sort preserves the recency order within each group).
+    entries.sort(key=lambda te: te[1].get("dispatched_at", ""), reverse=True)
+    entries.sort(key=lambda te: te[0] != lifecycle_task_id)
+    for tid, e in entries:
+        card = _kanban_card_json(e.get("board"), e.get("kanban_id"))
+        if card.get("status") in _KANBAN_DONE:
+            continue
+        return tid, e, card
+    return None, None, None
+
+
+def cmd_fleet_activity():
+    """Aggregated 'what is every agent doing right now' view.
+
+    Joins agents.json (roster) + lifecycle.json (live state) + bridge.json
+    (dispatched tasks) + kanban (card status) into one per-agent report.
+
+    Usage: hscc-agent-coordinator fleet-activity [--json]
+    """
+    want_json = "--json" in sys.argv
+    agents = load_agents_list()
+    bridge = load_bridge()
+    rows = []
+    for a in agents:
+        aid = a.get("id")
+        lc = get_lifecycle(aid)
+        state = lc.get("state", "idle")
+        lc_task = lc.get("task_id")
+        node = a.get("node_ip") or _node_from_model(a.get("model", "")) or a.get("node", "")
+        row = {
+            "agent": aid,
+            "role": a.get("role", ""),
+            "node": node,
+            "enabled": a.get("enabled", True),
+            "agent_status": a.get("status", ""),
+            "lifecycle": state,
+            "lifecycle_age": _age_str(lc.get("updated_at")),
+            "heartbeat": bool(lc.get("heartbeat")),
+            "task_id": None,
+            "task_title": None,
+            "kanban_status": None,
+            "kanban_id": None,
+            "branch": None,
+            "task_age": None,
+        }
+        tid = entry = card = None
+        if state in _ACTIVE_LIFECYCLE:
+            tid, entry, card = _active_task_for_agent(aid, bridge, lc_task)
+        if entry:
+            row.update({
+                "task_id": tid,
+                "task_title": card.get("title") or entry.get("title") or "",
+                "kanban_status": card.get("status") or entry.get("status"),
+                "kanban_id": entry.get("kanban_id"),
+                "branch": entry.get("branch"),
+                "task_age": _age_str(card.get("started_at") or entry.get("dispatched_at")),
+            })
+        rows.append(row)
+
+    if want_json:
+        print(json.dumps({"generated_at": now_iso(), "agents": rows},
+                         indent=2, default=str))
+        return
+
+    # Human-readable table.
+    busy = [r for r in rows if r["task_id"] or r["lifecycle"] not in ("idle", "disabled")]
+    idle = [r for r in rows if r not in busy]
+    print(f"Fleet activity @ {now_iso()}  ({len(busy)} active, {len(idle)} idle)")
+    print("=" * 78)
+    if busy:
+        for r in busy:
+            node = r["node"] or "-"
+            line = f"{r['agent']:10s} {r['lifecycle'].upper():9s} node={node:5s}"
+            if r["task_id"]:
+                title = (r["task_title"] or "")[:34]
+                line += (f" task=\"{title}\" ({r['kanban_id']}) "
+                         f"kanban={r['kanban_status'] or '?'} {r['task_age'] or ''}")
+            else:
+                line += f" (no live card, lc {r['lifecycle_age']})"
+            print(line)
+            if r["branch"]:
+                print(f"{'':10s} branch={r['branch']}")
+    else:
+        print("No active agents.")
+    if idle:
+        print("-" * 78)
+        print("idle: " + ", ".join(f"{r['agent']}({r['node'] or '-'})" for r in idle))
+
+
 # ---- Main ----
 
 def main():
@@ -2322,6 +2477,7 @@ def main():
         "cancel-task": cmd_cancel_task,
         "send-message": cmd_send_message,
         "list-dispatched": cmd_list_dispatched,
+        "fleet-activity": cmd_fleet_activity,
         # Worktree lifecycle
         "merge-worktree": cmd_merge_worktree,
         "remove-worktree": cmd_remove_worktree,
