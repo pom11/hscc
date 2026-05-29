@@ -58,10 +58,13 @@ def ensure_state():
 
 
 def save_state(data):
-    """Save state to projects.json."""
+    """Save state to projects.json atomically (temp file + rename) so a crash
+    mid-write can never corrupt the shared state file."""
     os.makedirs(HSCC_DIR, exist_ok=True)
-    with open(PROJECTS_FILE, "w") as f:
+    tmp = PROJECTS_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
+    os.replace(tmp, PROJECTS_FILE)
 
 
 def find_active_project(data):
@@ -631,14 +634,14 @@ def main():
             value = " ".join(sys.argv[4:]) if len(sys.argv) > 4 else ""
             result = fn(task_id, field, value)
         elif cmd == "move-task":
-            if len(sys.argv) < 3:
+            if len(sys.argv) < 4:
                 print("Usage: hscc-projects move-task <task_id> <status>")
                 sys.exit(1)
             task_id = sys.argv[2]
             status = sys.argv[3]
             result = fn(task_id, status)
         elif cmd == "assign-task":
-            if len(sys.argv) < 3:
+            if len(sys.argv) < 4:
                 print("Usage: hscc-projects assign-task <task_id> <agent_id>")
                 sys.exit(1)
             task_id = sys.argv[2]

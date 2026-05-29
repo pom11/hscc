@@ -413,7 +413,7 @@ def detect_cluster_nodes():
     """Detect which cluster nodes are reachable.
     
     Reads the live node list from sparkrun's cluster config instead of hardcoding.
-    Falls back to R2D2 cluster.json if sparkrun is unavailable.
+    Falls back to the legacy cluster.json if sparkrun is unavailable.
     """
     # Try sparkrun cluster list JSON
     rc, output, _ = run_cmd("sparkrun cluster list --json", check=False)
@@ -448,7 +448,7 @@ def detect_cluster_nodes():
                             except ValueError:
                                 pass
     
-    # Final fallback: R2D2 cluster.json
+    # Final fallback: legacy cluster.json
     if not nodes:
         for path in [
             Path.home() / ".hermes" / "plugins" / "cluster.json",
