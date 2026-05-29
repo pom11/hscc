@@ -44,7 +44,7 @@ import json
 import os
 import subprocess
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from collections import Counter
 
 # ---- Constants ----
@@ -1476,7 +1476,258 @@ def cmd_list_worktrees():
         print()
 
 
-# ---- Main ----
+# ---- Idle Monitor Functions ----
+
+IDLE_TIMEOUT_MINUTES = int(os.environ.get("HSCC_IDLE_TIMEOUT_MINUTES", "30"))
+
+
+def get_idle_monitor_containers():
+    """
+    List currently running sparkrun containers.
+    Returns list of dicts with keys: id, container_id, host, mode, recipe, docker_name
+    """
+    try:
+        result = subprocess.run(
+            ["sparkrun", "status"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return []
+
+        containers = []
+        current_container_id = None
+        current_recipe = None
+
+        for line in result.stdout.split("\n"):
+            line_stripped = line.strip()
+            # Match container ID: [abc123def456] on Job line
+            id_match = re.search(r"\[([a-f0-9]+)\]", line_stripped)
+            if id_match:
+                current_container_id = id_match.group(1)
+                job_match = re.search(r"Job:\s+(@\S+/\S+)", line_stripped)
+                if job_match:
+                    current_recipe = job_match.group(1)
+                continue
+
+            # Match host line
+            host_match = re.match(
+                r"^\s*(solo|multi)\s+(\d+\.\d+\.\d+\.\d+)\s+Up\s+.*$", line_stripped
+            )
+            if host_match:
+                mode = host_match.group(1)
+                host_ip = host_match.group(2)
+                if current_container_id:
+                    name_parts = line_stripped.split()
+                    container_name = name_parts[-1] if name_parts else ""
+                    containers.append({
+                        "id": current_container_id,
+                        "container_id": current_container_id,
+                        "host": host_ip,
+                        "mode": mode,
+                        "recipe": current_recipe or "unknown",
+                        "docker_name": container_name,
+                    })
+                current_container_id = None
+                current_recipe = None
+
+        return containers
+    except Exception:
+        return []
+
+
+def get_idle_monitor_agent_models():
+    """
+    Build a map of model identifiers -> agents.
+    Format: vllm-192.0.2.XXX/Recipe/Name -> [agent_ids]
+    """
+    agents = load_agents_list()
+    model_to_agents = {}
+    for agent in agents:
+        model = agent.get("model", "")
+        if model:
+            if model not in model_to_agents:
+                model_to_agents[model] = []
+            model_to_agents[model].append(agent["id"])
+    return model_to_agents
+
+
+def get_idle_monitor_agent_states():
+    """Get map of agent_id -> lifecycle state."""
+    lc = read_json_file(LIFECYCLE_FILE, {"agents": {}})
+    # Fallback to hscc state files
+    if not lc.get("agents"):
+        old_path = os.path.join(HSCC_DIR, "plugin-state", "hscc-lifecycle.json")
+        lc = read_json_file(old_path, {"agents": {}})
+    return lc.get("agents", {})
+
+
+def match_agents_to_container(container, model_to_agents):
+    """
+    Determine which agents reference a container by matching host IP.
+    """
+    host = container["host"]
+    matched_agents = []
+
+    for model_str, agent_ids in model_to_agents.items():
+        ip_match = re.search(r"vllm-(\d+\.\d+\.\d+\.\d+)", model_str)
+        if ip_match and ip_match.group(1) == host:
+            matched_agents.extend(agent_ids)
+
+    return matched_agents
+
+
+def check_container_idle(container, matched_agents, agent_states):
+    """
+    Determine if a container should be shut down.
+    Returns: {"shutdown": True/False, "reason": "...", ...}
+    """
+    host = container["host"]
+    recipe = container.get("recipe", "")
+    container_id = container["container_id"]
+
+    # Never auto-stop MTP container on gateway (244)
+    if host == "192.0.2.10" and "mtp" in recipe.lower():
+        return {"shutdown": False, "reason": "MTP gateway container (protected)"}
+
+    # If container has no associated agents → orphan → stop it
+    if not matched_agents:
+        return {
+            "shutdown": True,
+            "reason": "no agents reference this container (orphan)",
+            "container_id": container_id,
+            "host": host,
+            "recipe": recipe,
+        }
+
+    # Check agent states for this container
+    now = datetime.now(timezone.utc)
+    has_running_agent = False
+    has_idle_agent = False
+    oldest_idle_time = None
+
+    for agent_id in matched_agents:
+        state_entry = agent_states.get(agent_id, {})
+        state = state_entry.get("state", "idle")
+
+        if state == "running":
+            has_running_agent = True
+            break
+        elif state == "idle":
+            has_idle_agent = True
+            updated = state_entry.get("updated_at", "")
+            if updated:
+                try:
+                    idle_time = datetime.fromisoformat(updated)
+                    if oldest_idle_time is None or idle_time < oldest_idle_time:
+                        oldest_idle_time = idle_time
+                except (ValueError, TypeError):
+                    pass
+        elif state in ("spawning", "ready"):
+            # Still provisioning, don't touch
+            return {"shutdown": False, "reason": f"agent {agent_id} is in '{state}' state"}
+
+    # If any agent is actively running → keep container
+    if has_running_agent:
+        return {"shutdown": False, "reason": "agent is actively running"}
+
+    # If idle agent(s) exist, check timeout
+    if has_idle_agent and oldest_idle_time:
+        idle_duration = now - oldest_idle_time
+        if idle_duration < timedelta(minutes=IDLE_TIMEOUT_MINUTES):
+            remaining = IDLE_TIMEOUT_MINUTES - idle_duration.total_seconds() / 60
+            return {
+                "shutdown": False,
+                "reason": f"agent idle {idle_duration.total_seconds()/60:.0f}min (timeout: {IDLE_TIMEOUT_MINUTES}min, {remaining:.0f}min remaining)",
+                "container_id": container_id,
+                "host": host,
+                "idle_minutes": idle_duration.total_seconds() / 60,
+            }
+        return {
+            "shutdown": True,
+            "reason": f"agent idle for {idle_duration.total_seconds()/60:.0f} minutes (exceeded {IDLE_TIMEOUT_MINUTES}min threshold)",
+            "container_id": container_id,
+            "host": host,
+            "recipe": recipe,
+            "idle_minutes": idle_duration.total_seconds() / 60,
+        }
+
+    # Fallback: no clear state info, safe to keep
+    return {"shutdown": False, "reason": "cannot determine agent state"}
+
+
+def stop_container(container_id):
+    """
+    Stop a sparkrun container via ACC. Returns (ok, message).
+    Also updates agent lifecycle states.
+    """
+    try:
+        result = subprocess.run(
+            ["sparkrun", "stop", container_id],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            return True, result.stdout.strip()
+        return False, result.stderr.strip() or result.stdout.strip()
+    except Exception as e:
+        return False, str(e)
+
+
+def run_idle_monitor_scan(dry_run=False):
+    """
+    Perform one idle-container scan.
+    Returns summary dict.
+    """
+    result = {
+        "timestamp": now_iso(),
+        "containers_scanned": 0,
+        "kept": [],
+        "stopped": [],
+        "errors": [],
+    }
+
+    containers = get_idle_monitor_containers()
+    model_to_agents = get_idle_monitor_agent_models()
+    agent_states = get_idle_monitor_agent_states()
+
+    result["containers_scanned"] = len(containers)
+
+    if not containers:
+        result["message"] = "No running sparkrun containers found"
+        return result
+
+    for container in containers:
+        matched_agents = match_agents_to_container(container, model_to_agents)
+        check = check_container_idle(container, matched_agents, agent_states)
+
+        if check.get("shutdown"):
+            result["stopped"].append({
+                "container": container,
+                "check": check,
+            })
+            if not dry_run:
+                ok, msg = stop_container(container["container_id"])
+                result["stopped"][-1]["stopped"] = ok
+                result["stopped"][-1]["stop_message"] = msg
+                if not ok:
+                    result["errors"].append(f"Failed to stop {container['container_id']}: {msg}")
+        else:
+            result["kept"].append({
+                "container": container,
+                "reason": check.get("reason", "unknown"),
+            })
+
+    return result
+
+
+def cmd_idle_monitor():
+    """
+    Run idle monitor scan.
+    Usage: hscc-agent-coordinator idle-monitor [--dry-run]
+    """
+    dry_run = "--dry-run" in sys.argv
+    result = run_idle_monitor_scan(dry_run=dry_run)
+    print(json.dumps(result, indent=2, default=str))
+
 
 def main():
     if len(sys.argv) < 2:
@@ -1493,6 +1744,7 @@ def main():
         "attempt-recovery": cmd_attempt_recovery,
         "recovery-log": cmd_recovery_log,
         "list-worktrees": cmd_list_worktrees,
+        "idle-monitor": cmd_idle_monitor,
     }
 
     if cmd not in commands:

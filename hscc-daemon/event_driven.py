@@ -45,15 +45,16 @@ PLIST_DIR = os.path.expanduser("~/Library/LaunchAgents")
 
 # Streams that need periodic fixed-interval checks (not event-driven)
 PERIODIC_STREAMS = {
-    "dgx":         5,   # GPU status, sparkrun workloads
-    "gateway":    10,   # HTTP health
-    "local":      30,   # Docker, Ollama, PostgreSQL
-    "heartbeat":  60,   # Agent fleet, system info
-    "nas":        30,   # NAS disk, NFS
+    "dgx":         5,
+    "gateway":    10,
+    "local":      30,
+    "heartbeat":  60,
+    "nas":        30,
+    "idle":      300,  # Idle monitor
 }
 
 # Streams that are state-driven (triggered by write_state calls)
-STATE_STREAMS = {"dgx", "gateway", "local", "heartbeat", "nas", "watchdog"}
+STATE_STREAMS = {"dgx", "gateway", "local", "heartbeat", "nas", "watchdog", "idle"}
 
 # Directory-level labels
 CONFIG_LABEL_PREFIX = "com.nousresearch.hscc-configwatch"
