@@ -331,12 +331,13 @@ class KqueueWatcher:
                     # Wait up to 2 seconds for events (allow stop_event check)
                     kevents = self._kqueue.control(None, 10, 2.0)
                     for kevent in kevents:
-                        fn = os.path.basename(os.path.abspath(kevent.ident))
                         if self._stop_event.is_set():
                             break
-                        # Map file descriptor back to filename
-                        if kevent.ident in self._fileno_map:
-                            fn = self._fileno_map[kevent.ident]
+                        # kevent.ident is the watched file descriptor (int);
+                        # map it back to a filename rather than treating it as one.
+                        fn = self._fileno_map.get(kevent.ident)
+                        if not fn:
+                            continue
                         # Only process .json files
                         if fn.endswith(".json") and fn not in ("__mtimes__",):
                             try:
@@ -803,14 +804,17 @@ class EventDrivenDaemon:
 
         if kq_success:
             self._using_kqueue = True
-            _event_log("EventDrivenDaemon: using kqueue mode")
+            _event_log("EventDrivenDaemon: kqueue reactive layer active")
         else:
-            _event_log("EventDrivenDaemon: kqueue unavailable, falling back to polling")
-            self._start_fallback()
+            _event_log("EventDrivenDaemon: kqueue unavailable, polling only")
 
-        # Install launchd jobs for periodic streams (macOS only)
-        if self._using_kqueue and self._install_launchd:
-            self._start_launchd()
+        # Periodic checks always run in-process (each check writes state, which
+        # kqueue then reacts to). Previously delegated to launchd, but install_job
+        # only wrote the plists and never loaded them, so checks never fired.
+        self._start_fallback()
+
+        # Remove stale periodic launchd plists left by the pre-poller design.
+        self._cleanup_stale_launchd()
 
         _event_log("EventDrivenDaemon started")
         return True
@@ -895,20 +899,19 @@ class EventDrivenDaemon:
         )
         self._fallback_threads = self._fallback_poller.start(_STOP_EVENT)
 
-    def _start_launchd(self) -> None:
-        """Install and load launchd jobs for periodic streams."""
+    def _cleanup_stale_launchd(self) -> None:
+        """Unload+remove periodic launchd plists from the pre-poller design.
+
+        Idempotent: bootout of an unloaded job is a harmless no-op. Without this,
+        a leftover launchd idle job would double-run alongside the in-process one.
+        """
         try:
             hscc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hscc.py")
-            self._launchd_gen = LaunchdJobGenerator(hscc_script=hscc_path)
-            results = self._launchd_gen.install_all_periodic()
-            all_ok = all(ok for ok, _ in results.values())
-            if all_ok:
-                self._using_launchd = True
-                _event_log("Launchd jobs installed for all periodic streams")
-            else:
-                _event_log(f"Some launchd jobs failed: {results}", "WARN")
+            gen = LaunchdJobGenerator(hscc_script=hscc_path)
+            gen.uninstall_all_periodic()
+            _event_log("Removed stale periodic launchd plists")
         except Exception as e:
-            _event_log(f"Launchd setup failed: {e}", "WARN")
+            _event_log(f"Stale launchd cleanup failed: {e}", "WARN")
 
     def _on_state_change(self, stream: str) -> None:
         """Callback: a state file changed, trigger downstream reactions."""
