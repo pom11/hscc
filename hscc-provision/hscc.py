@@ -391,8 +391,12 @@ def cmd_run(recipe_name, host=None, tp=1, pp=1):
     env["TRANSFORMERS_OFFLINE"] = "1"
     env["HF_HUB_DISABLE_TELEMETRY"] = "1"
     
+    # --cluster makes the recipe inherit the cluster cache_dir (/mnt/nas),
+    # bind-mounting the NAS HF cache so the offline-downloaded model is served
+    # instead of a local copy. --hosts still pins the specific worker host.
     cmd = [SPARKRUN, "run", recipe_to_run,
            f"--tp={tp}", f"--pp={pp}",
+           "--cluster=hscc",
            f"--hosts={host}",
            "--no-follow"]
     

@@ -57,6 +57,14 @@ try:
 except ImportError:
     _EVENT_DRIVEN_AVAILABLE = False
 
+# ── PATH ───────────────────────────────────────────────────────────────────
+# launchd starts the daemon with a minimal PATH that lacks ~/.local/bin, where
+# sparkrun lives. Without this, every `sparkrun` subprocess (idle monitor, DGX
+# workload check, vLLM restart) fails with FileNotFoundError. Prepend it here.
+_LOCAL_BIN = os.path.expanduser("~/.local/bin")
+if _LOCAL_BIN not in os.environ.get("PATH", "").split(os.pathsep):
+    os.environ["PATH"] = _LOCAL_BIN + os.pathsep + os.environ.get("PATH", "")
+
 # ── Constants ──────────────────────────────────────────────────────────────
 
 HSCC_DIR = os.path.expanduser("~/.hscc")
@@ -87,6 +95,21 @@ SSH_OPTS = "-o StrictHostKeyChecking=no -o ConnectTimeout=10"
 NAS_HOST = "192.0.2.20"
 PRIMARY_NODE = "192.0.2.10"  # gateway: runs orchestrator vLLM + Hermes base_url
 
+# Orchestrator vLLM is a sparkrun-managed container, NOT a bare `vllm serve`
+# process. Restarts MUST go through sparkrun or the recovered workload won't be
+# tracked (and a bare vllm can't bind a port the recipe expects to own).
+# Launch via --cluster so the recipe inherits the cluster cache_dir (/mnt/nas):
+# that bind-mounts the NAS HF cache, serving the offline-downloaded model rather
+# than a local copy. The local-fixed recipe carries the chat-template/mods fixes.
+HSCC_CLUSTER = "hscc"
+VLLM_RECIPE = os.path.expanduser(
+    "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-fp8-vllm.yaml")
+VLLM_PORT = 8000
+# A 35B model takes minutes to load. After a restart the watchdog must wait out
+# this grace period before counting a failed health check toward its breaker,
+# otherwise it latches BLOCKED while the model is still legitimately loading.
+VLLM_LOAD_GRACE_MINUTES = int(os.environ.get("HSCC_VLLM_LOAD_GRACE_MINUTES", "6"))
+
 # vLLM health check + control commands — rebuilt whenever PRIMARY_NODE changes
 VLLM_HEALTH_URL = ""
 VLLM_STOP_CMD = ""
@@ -100,9 +123,11 @@ def _rebuild_vllm_cmds():
     commands keep pointing at whatever node was set when they were first built.
     """
     global VLLM_HEALTH_URL, VLLM_STOP_CMD, VLLM_START_CMD
-    VLLM_HEALTH_URL = f"http://{PRIMARY_NODE}:8000/health"
-    VLLM_STOP_CMD = f"ssh {SSH_OPTS} {SSH_USER}@{PRIMARY_NODE} 'pkill -f vllm || true'"
-    VLLM_START_CMD = f"ssh {SSH_OPTS} {SSH_USER}@{PRIMARY_NODE} 'nohup vllm serve Qwen/Qwen3.6-35B-A3B-FP8 --port 8000 > /tmp/vllm.log 2>&1 &'"
+    VLLM_HEALTH_URL = f"http://{PRIMARY_NODE}:{VLLM_PORT}/health"
+    VLLM_STOP_CMD = ["sparkrun", "stop", "--hosts", PRIMARY_NODE]
+    VLLM_START_CMD = ["sparkrun", "run", VLLM_RECIPE,
+                      "--cluster", HSCC_CLUSTER, "--hosts", PRIMARY_NODE,
+                      "--port", str(VLLM_PORT), "--no-follow", "--ensure"]
 
 
 _rebuild_vllm_cmds()
@@ -291,6 +316,17 @@ def http_check(url, timeout=5):
         return {"success": code.startswith(("2", "3")), "http_code": code, "url": url}
     except Exception as e:
         return {"success": False, "error": str(e), "url": url}
+
+
+def restart_vllm(timeout=90):
+    """Restart the orchestrator vLLM via its sparkrun recipe.
+
+    Uses `--ensure` so it only launches when the container is not already up,
+    and `--no-follow` so the call returns once the container is started. The
+    model loads asynchronously inside the container — callers MUST allow
+    VLLM_LOAD_GRACE_MINUTES before treating a failing health check as fatal.
+    """
+    return run_cmd(VLLM_START_CMD, timeout=timeout)
 
 
 # ── Stream Checks ──────────────────────────────────────────────────────────
@@ -692,9 +728,14 @@ def check_idle_monitor():
             recipe = container.get("recipe", "")
             cid = container["container_id"]
             
-            # Never stop MTP on gateway
-            if host == "192.0.2.10" and "mtp" in recipe.lower():
-                result["kept"].append({"container": container, "reason": "MTP gateway (protected)"})
+            # Never stop ANY vLLM on the gateway. The gateway (PRIMARY_NODE)
+            # runs the orchestrator vLLM that serves Hermes — it must stay up
+            # regardless of agent assignment. The idle monitor only reaps idle
+            # WORKER models on the other nodes, never the orchestrator. (Before
+            # this guard the orchestrator was reaped as an "orphan" because no
+            # agent's model string pointed at the gateway.)
+            if host == PRIMARY_NODE:
+                result["kept"].append({"container": container, "reason": "orchestrator vLLM on gateway (protected)"})
                 continue
             
             # Find matching agents
@@ -902,6 +943,7 @@ def pipeline_watchdog():
         failures.append(success_entry)
         block["failures"] = cleanup_old_failures(failures, window_minutes=10)
         block["failed_count"] = 0
+        block.pop("restart_cooldown_until", None)  # model loaded — end grace period
         save_watchdog_block(block)
         write_state("watchdog", {
             "ok": True,
@@ -914,6 +956,22 @@ def pipeline_watchdog():
         })
         log("Watchdog: pipeline healthy")
         return True
+
+    # Failure detected. If a restart is still within its load-grace window, the
+    # model is legitimately loading — don't count this toward the breaker.
+    cooldown_until = block.get("restart_cooldown_until")
+    if cooldown_until and now_iso() < cooldown_until:
+        write_state("watchdog", {
+            "ok": False,
+            "blocked": False,
+            "dgx": dgx_ok,
+            "gateway": gw_ok,
+            "last_check": now_iso(),
+            "auto_restart_count": block.get("auto_restart_count", 0),
+            "message": f"vLLM restarting — model loading (grace until {cooldown_until})",
+        })
+        log(f"Watchdog: in restart grace window until {cooldown_until}, model still loading — not counting failure")
+        return False
 
     # Failure — record it
     failure_entry = {"timestamp": now_iso(), "dgx": dgx_ok, "gateway": gw_ok}
@@ -949,16 +1007,21 @@ def pipeline_watchdog():
         )
         return False
 
-    # 1-2 failures — try auto-restart vLLM
+    # 1-2 failures — try auto-restart vLLM via its sparkrun recipe
     if not dgx_ok:
-        log("Watchdog: attempting vLLM auto-restart")
-        restart_result = ssh_cmd(PRIMARY_NODE,
-                                 "pkill -f vllm; sleep 2; nohup vllm serve Qwen/Qwen3.6-35B-A3B-FP8 --port 8000 > /tmp/vllm_recover.log 2>&1 & echo started",
-                                 timeout=15)
+        log("Watchdog: attempting vLLM auto-restart via sparkrun")
+        restart_result = restart_vllm()
         restart_ok = restart_result.get("success", False)
         count = block.get("auto_restart_count", 0) + 1
         block["auto_restart_count"] = count
         block["last_restart"] = now_iso()
+        # Open a load-grace window so the next checks don't latch the breaker
+        # while the 35B model is still loading inside the container.
+        if restart_ok:
+            block["restart_cooldown_until"] = (
+                datetime.datetime.now(datetime.timezone.utc)
+                + datetime.timedelta(minutes=VLLM_LOAD_GRACE_MINUTES)
+            ).isoformat()
         save_watchdog_block(block)
         write_state("watchdog", {
             "ok": False,
@@ -1113,9 +1176,8 @@ def fire_trigger_action(rule, event):
         log(f"Trigger {rule_id}: event emitted — {event_type}")
 
     elif action_type == "auto_restart":
-        restart_result = ssh_cmd(PRIMARY_NODE,
-                                 "pkill -f vllm; sleep 2; nohup vllm serve Qwen/Qwen3.6-35B-A3B-FP8 --port 8000 > /tmp/vllm_restart.log 2>&1 & echo started",
-                                 timeout=15)
+        # Restart via sparkrun (NAS-backed, recipe-managed) — never a bare vllm.
+        restart_result = restart_vllm()
         log(f"Trigger {rule_id}: auto-restart vLLM {'success' if restart_result.get('success') else 'failed'}")
         send_macos_notification("⚠️ HSCC Auto-Restart",
                                 f"Trigger {rule_id} triggered vLLM restart: {'OK' if restart_result.get('success') else 'FAILED'}",
