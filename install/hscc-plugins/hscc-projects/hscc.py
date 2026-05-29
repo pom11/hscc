@@ -20,6 +20,8 @@ Commands:
   assign-task <task_id> <agent_id> Assign a task to an agent
   list-agents                List all agents and their current assignments
   search <query>             Search tasks by title or description
+  delete <project_id>        Remove a project entry (leaves git repo on disk)
+  repo-path <project_id>     Show the git repo path for a project
 """
 
 import sys
@@ -27,10 +29,12 @@ import json
 import os
 import time
 import uuid
+import re
+import subprocess
 
 # ── Paths ─────────────────────────────────────────────────────────────────
 
-HSCC_DIR = os.path.expanduser("~/.hscc")
+HSCC_DIR = os.path.expanduser(os.environ.get("HSCC_HOME", "~/.hscc"))
 PROJECTS_FILE = os.path.join(HSCC_DIR, "projects.json")
 
 
@@ -54,10 +58,13 @@ def ensure_state():
 
 
 def save_state(data):
-    """Save state to projects.json."""
+    """Save state to projects.json atomically (temp file + rename) so a crash
+    mid-write can never corrupt the shared state file."""
     os.makedirs(HSCC_DIR, exist_ok=True)
-    with open(PROJECTS_FILE, "w") as f:
+    tmp = PROJECTS_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
+    os.replace(tmp, PROJECTS_FILE)
 
 
 def find_active_project(data):
@@ -87,6 +94,112 @@ def find_task(data, roadmap_name, subproject_name, task_title):
     return None, "Task not found"
 
 
+# ── Git & Kanban Helpers ────────────────────────────────────────────────────
+
+def run_git(args, cwd=None, timeout=30):
+    """Run a git command, returning (ok, output)."""
+    try:
+        result = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        output = result.stdout.strip()
+        if result.returncode != 0:
+            output = output or result.stderr.strip()
+        return result.returncode == 0, output or ""
+    except subprocess.TimeoutExpired:
+        return False, f"git timed out after {timeout}s"
+    except FileNotFoundError:
+        return False, "git not found"
+    except Exception as e:
+        return False, str(e)
+
+
+def project_slug(project_id):
+    """Return a kanban-safe board slug for a project id (hscc-<first 8 hex>)."""
+    short = project_id[:8].lower()
+    short = re.sub(r"[^a-z0-9]", "-", short)
+    return "hscc-" + short
+
+
+def provision_project_repo(project_id, name):
+    """Provision a git repo for a project. Returns (repo_path, status)."""
+    repo_path = os.path.join(HSCC_DIR, "projects", project_id)
+    os.makedirs(repo_path, exist_ok=True)
+
+    if os.path.exists(os.path.join(repo_path, ".git")):
+        return repo_path, "exists"
+
+    try:
+        ok, out = run_git(["init"], cwd=repo_path)
+        if not ok:
+            return repo_path, f"error: {out}"
+
+        run_git(["config", "user.name", "HSCC"], cwd=repo_path)
+        run_git(["config", "user.email", "hscc@local"], cwd=repo_path)
+
+        with open(os.path.join(repo_path, ".gitignore"), "w") as f:
+            f.write(".worktrees/\nworktrees/\n.claw-base\n")
+
+        with open(os.path.join(repo_path, "README.md"), "w") as f:
+            f.write(f"# {name}\n\nHSCC project {project_id}\n")
+
+        ok, out = run_git(["add", ".gitignore", "README.md"], cwd=repo_path)
+        if not ok:
+            return repo_path, f"error: {out}"
+
+        ok, out = run_git(["commit", "-m", "Initial commit"], cwd=repo_path)
+        if not ok:
+            return repo_path, f"error: {out}"
+
+        return repo_path, "created"
+    except Exception as e:
+        return repo_path, f"error: {e}"
+
+
+def provision_kanban_board(slug, repo_path):
+    """Provision a Hermes kanban board for a project. Never raises."""
+    hermes_bin = os.path.expanduser("~/.local/bin/hermes")
+    if not (os.path.exists(hermes_bin) and os.access(hermes_bin, os.X_OK)):
+        hermes_bin = "hermes"
+
+    created = False
+    detail = ""
+    try:
+        cr = subprocess.run(
+            [hermes_bin, "kanban", "boards", "create", slug, "--switch"],
+            capture_output=True, text=True, timeout=30
+        )
+        out = (cr.stdout or "") + (cr.stderr or "")
+        if cr.returncode == 0:
+            created = True
+            detail = "board created"
+        elif "exist" in out.lower():
+            created = True
+            detail = "board already exists"
+        else:
+            detail = out.strip()[:200] or "boards create failed"
+    except subprocess.TimeoutExpired:
+        return {"slug": slug, "created": False, "detail": "hermes kanban timed out"}
+    except FileNotFoundError:
+        return {"slug": slug, "created": False, "detail": "hermes not found"}
+    except Exception as e:
+        return {"slug": slug, "created": False, "detail": str(e)[:200]}
+
+    if created:
+        try:
+            sr = subprocess.run(
+                [hermes_bin, "kanban", "boards", "set-default-workdir", slug, repo_path],
+                capture_output=True, text=True, timeout=30
+            )
+            if sr.returncode != 0:
+                wd_out = ((sr.stdout or "") + (sr.stderr or "")).strip()[:200]
+                detail = detail + "; set-wd failed: " + (wd_out or "error")
+            else:
+                detail = detail + "; wd set"
+        except Exception as e:
+            detail = detail + "; set-wd error: " + str(e)[:200]
+
+    return {"slug": slug, "created": created, "detail": detail}
+
+
 # ── Commands ──────────────────────────────────────────────────────────────
 
 def cmd_list():
@@ -112,7 +225,7 @@ def cmd_list():
 
 
 def cmd_create(name, description=""):
-    """Create a new project."""
+    """Create a new project (with git repo + kanban board)."""
     data = ensure_state()
     project = {
         "id": str(uuid.uuid4()).upper(),
@@ -121,10 +234,23 @@ def cmd_create(name, description=""):
         "roadmaps": [],
         "createdAt": time.time()
     }
+
+    slug = project_slug(project["id"])
+    repo_path, repo_status = provision_project_repo(project["id"], name)
+    project["gitRepoPath"] = repo_path
+    project["boardSlug"] = slug
+
+    board = provision_kanban_board(slug, repo_path)
+
     data["projects"].append(project)
     data["activeProjectId"] = project["id"]
     save_state(data)
-    return {"success": True, "project": project}
+    return {
+        "success": True,
+        "project": project,
+        "repo_status": repo_status,
+        "board": board
+    }
 
 
 def cmd_show():
@@ -369,6 +495,43 @@ def cmd_search(query):
     return {"query": query, "results": results, "count": len(results)}
 
 
+def cmd_delete(project_id):
+    """Remove a project entry (non-destructive: leaves git repo on disk)."""
+    data = ensure_state()
+    target = None
+    for proj in data.get("projects", []):
+        if proj["id"] == project_id:
+            target = proj
+            break
+    if target is None:
+        return {"error": f"Project '{project_id}' not found"}
+
+    repo_path = target.get("gitRepoPath", os.path.join(HSCC_DIR, "projects", project_id))
+
+    data["projects"] = [p for p in data.get("projects", []) if p["id"] != project_id]
+    if data.get("activeProjectId") == project_id:
+        data["activeProjectId"] = ""
+    save_state(data)
+
+    return {
+        "success": True,
+        "removed": project_id,
+        "note": f"git repo left on disk at {repo_path} for manual removal"
+    }
+
+
+def cmd_repo_path(project_id):
+    """Return the git repo path for a project."""
+    data = ensure_state()
+    for proj in data.get("projects", []):
+        if proj["id"] == project_id:
+            return {
+                "project_id": project_id,
+                "gitRepoPath": proj.get("gitRepoPath", "")
+            }
+    return {"error": f"Project '{project_id}' not found"}
+
+
 # ── Command Map ───────────────────────────────────────────────────────────
 
 COMMANDS = {
@@ -385,6 +548,8 @@ COMMANDS = {
     "assign-task": cmd_assign_task,
     "list-agents": cmd_list_agents,
     "search": cmd_search,
+    "delete": cmd_delete,
+    "repo-path": cmd_repo_path,
 }
 
 
@@ -409,6 +574,8 @@ Commands:
   assign-task <id> <agent>   Assign task to an agent
   list-agents                List all agents and their current assignments
   search <query>             Search tasks by title or description
+  delete <project_id>        Remove a project entry (leaves git repo on disk)
+  repo-path <project_id>     Show the git repo path for a project
 """.strip()
 
 
@@ -467,14 +634,14 @@ def main():
             value = " ".join(sys.argv[4:]) if len(sys.argv) > 4 else ""
             result = fn(task_id, field, value)
         elif cmd == "move-task":
-            if len(sys.argv) < 3:
+            if len(sys.argv) < 4:
                 print("Usage: hscc-projects move-task <task_id> <status>")
                 sys.exit(1)
             task_id = sys.argv[2]
             status = sys.argv[3]
             result = fn(task_id, status)
         elif cmd == "assign-task":
-            if len(sys.argv) < 3:
+            if len(sys.argv) < 4:
                 print("Usage: hscc-projects assign-task <task_id> <agent_id>")
                 sys.exit(1)
             task_id = sys.argv[2]
@@ -486,6 +653,16 @@ def main():
                 sys.exit(1)
             query = " ".join(sys.argv[2:])
             result = fn(query)
+        elif cmd == "delete":
+            if len(sys.argv) < 3:
+                print("Usage: hscc-projects delete <project_id>")
+                sys.exit(1)
+            result = fn(sys.argv[2])
+        elif cmd == "repo-path":
+            if len(sys.argv) < 3:
+                print("Usage: hscc-projects repo-path <project_id>")
+                sys.exit(1)
+            result = fn(sys.argv[2])
         else:
             result = fn()
 
