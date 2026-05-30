@@ -1755,13 +1755,55 @@ def cmd_dispatch_task():
     body = task.get("description", "") or ""
     idem = f"hscc-{project_id}-{task_id}"
 
+    # Release-gate via a PARENT SENTINEL (race-free). `--initial-status blocked`
+    # is NOT sticky: create_task stamps the status only onto the 'created' event,
+    # so recompute_ready treats the card as merely dependency-blocked and, with
+    # no undone parents, AUTO-PROMOTES it to ready within one dispatch tick — a
+    # worker then spawns with no human release. Instead we create an undone
+    # sentinel parent and link the real card under it:
+    #   * recompute_ready promotes a child only when ALL parents are done/archived
+    #     (kanban_db.recompute_ready), and
+    #   * claim_task structurally demotes any racily-promoted child back to todo
+    #     while a parent is undone (kanban_db.claim_task).
+    # So the real card cannot run until release-task ARCHIVES the sentinel. The
+    # sentinel itself never spawns a worker — it has no assignee, and the
+    # dispatcher skips unassigned ready cards (dispatch_once: skipped_unassigned).
+    gate_idem = f"hscc-gate-{project_id}-{task_id}"
+    gate_args = [
+        "kanban", "--board", board, "create", f"GATE (hold): {title}",
+        "--body", ("Release-gate sentinel for the task below. It never runs (no "
+                   "assignee). release-task archives it to unblock the real card."),
+        "--idempotency-key", gate_idem, "--json",
+    ]
+    gok, gout = run_hermes(gate_args, timeout=60)
+    if not gok:
+        print(json.dumps({"error": "gate sentinel create failed", "detail": gout, "board": board}))
+        return
+    try:
+        gate_id = json.loads(gout).get("id")
+    except (json.JSONDecodeError, AttributeError):
+        gate_id = None
+    if not gate_id:
+        print(json.dumps({"error": "could not parse gate sentinel id", "raw": gout[:500]}))
+        return
+    # Best-effort: take the sentinel out of the ready queue so it doesn't sit as
+    # a perpetual unassigned-ready card (cosmetic / health-telemetry noise). The
+    # parent link is the real gate, so a failure here is non-fatal. block works
+    # because the freshly-created, parent-less sentinel is in 'ready'.
+    run_hermes(["kanban", "--board", board, "block", gate_id], timeout=30)
+
+    # Real card: linked under the sentinel and created with the DEFAULT status so
+    # create_task's parent logic applies — an undone parent forces status='todo'
+    # (held). Do NOT pass --initial-status blocked here (that path ignores parents
+    # and yields a non-sticky blocked card). The card stays todo until the
+    # sentinel is archived at release.
     create_args = ["kanban", "--board", board, "create", title]
     if body:
         create_args += ["--body", body]
     create_args += [
         "--assignee", profile,
         "--workspace", f"worktree:{wt_path}",
-        "--initial-status", "blocked",
+        "--parent", gate_id,
         "--idempotency-key", idem,
         "--json",
     ]
@@ -1773,11 +1815,22 @@ def cmd_dispatch_task():
         print(json.dumps({"error": "kanban create failed", "detail": out, "board": board}))
         return
     try:
-        kanban_id = json.loads(out).get("id")
+        created = json.loads(out)
+        kanban_id = created.get("id")
+        kstatus = created.get("status")
     except (json.JSONDecodeError, AttributeError):
-        kanban_id = None
+        kanban_id, kstatus = None, None
     if not kanban_id:
         print(json.dumps({"error": "could not parse kanban task id", "raw": out[:500]}))
+        return
+    # Safety: the card MUST land held. If it is ready/running the gate failed —
+    # refuse rather than leave an auto-promotable card a worker could grab.
+    if kstatus not in ("todo", "blocked"):
+        print(json.dumps({
+            "error": "release-gate failed: real card is not held",
+            "kanban_id": kanban_id, "gate_id": gate_id, "status": kstatus,
+            "detail": "expected todo/blocked (held by undone sentinel parent)",
+        }))
         return
 
     bridge = load_bridge()
@@ -1786,11 +1839,12 @@ def cmd_dispatch_task():
         "project_id": project_id,
         "agent_id": agent_id,
         "kanban_id": kanban_id,
+        "gate_id": gate_id,
         "board": board,
         "profile": profile,
         "worktree": wt_path,
         "branch": branch,
-        "status": "blocked",
+        "status": "held",
         "dispatched_at": now_iso(),
     }
 
@@ -1802,6 +1856,24 @@ def cmd_dispatch_task():
         provision = ensure_worker_vllm(worker_host, wait=False)
         bridge["tasks"][task_id]["worker_host"] = worker_host
         bridge["tasks"][task_id]["provision"] = provision
+
+    # Subscribe the operator's chat to this task's terminal events so the gateway
+    # kanban notifier pushes completion/blocked back automatically (event-driven,
+    # no polling). Board-scoped via --board. notifier-profile defaults to the CLI
+    # profile (default), which matches the gateway notifier so delivery isn't
+    # filtered. HSCC_NOTIFY_CHAT/PLATFORM override the operator default.
+    notify_chat = os.environ.get("HSCC_NOTIFY_CHAT", "0").strip()
+    notify_platform = os.environ.get("HSCC_NOTIFY_PLATFORM", "telegram").strip()
+    notify = None
+    if notify_chat:
+        nok, nout = run_hermes([
+            "kanban", "--board", board, "notify-subscribe", kanban_id,
+            "--platform", notify_platform, "--chat-id", notify_chat,
+        ], timeout=30)
+        notify = {"ok": nok, "platform": notify_platform, "chat_id": notify_chat}
+        if not nok:
+            notify["detail"] = nout[:200]
+        bridge["tasks"][task_id]["notify"] = notify
     save_bridge(bridge)
 
     # Pin the real agent's lifecycle to 'spawning' so the daemon idle-monitor
@@ -1823,15 +1895,18 @@ def cmd_dispatch_task():
         "guarded": True,
         "task_id": task_id,
         "kanban_id": kanban_id,
+        "gate_id": gate_id,
         "board": board,
         "profile": profile,
         "worker_host": worker_host,
         "provision": provision,
+        "notify": notify,
         "worktree": wt_path,
         "branch": branch,
-        "status": "blocked",
+        "status": "held",
         "next": f"hscc-agent-coordinator release-task {task_id}",
-        "message": "Mirrored as a BLOCKED kanban task. Run release-task to dispatch a worker.",
+        "message": ("Mirrored as a HELD kanban task (gated by an undone sentinel "
+                    "parent). Run release-task to archive the gate and dispatch a worker."),
     }, indent=2))
 
 
@@ -1846,6 +1921,20 @@ def cmd_release_task():
         print(json.dumps({"error": "Usage: release-task <task_id>"}))
         return
     task_id = sys.argv[2]
+
+    # Hard human gate. release-task spawns a LIVE worker on a GPU node; the
+    # orchestrator must NOT self-release. A human authorizes by setting
+    # HSCC_RELEASE_CONFIRM to the exact task id out-of-band. The token must match
+    # the target so a stale/blanket value can't release an unintended task.
+    if os.environ.get("HSCC_RELEASE_CONFIRM", "").strip() != task_id:
+        print(json.dumps({
+            "error": "release blocked: human confirmation required",
+            "task_id": task_id,
+            "why": "release-task dispatches a live worker on the cluster; the orchestrator may not self-release.",
+            "how_to_release": f"a human runs: HSCC_RELEASE_CONFIRM={task_id} hscc-agent-coordinator release-task {task_id}",
+        }, indent=2))
+        return
+
     bridge = load_bridge()
     entry = bridge.get("tasks", {}).get(task_id)
     if not entry:
@@ -1876,10 +1965,22 @@ def cmd_release_task():
             }, indent=2))
             return
 
-    ok, out = run_hermes(["kanban", "--board", board, "unblock", kanban_id], timeout=30)
-    if not ok:
-        print(json.dumps({"error": "unblock failed", "detail": out}))
-        return
+    # Open the gate. New dispatches hold the real card under an undone sentinel
+    # parent: ARCHIVING the sentinel flips it into (done,archived), and
+    # archive_task calls recompute_ready, which promotes the now-unblocked child
+    # to ready. Legacy entries (dispatched before the sentinel gate) used a
+    # blocked card directly — fall back to unblock for those.
+    gate_id = entry.get("gate_id")
+    if gate_id:
+        ok, out = run_hermes(["kanban", "--board", board, "archive", gate_id], timeout=30)
+        if not ok:
+            print(json.dumps({"error": "gate archive failed; task stays held", "detail": out}))
+            return
+    else:
+        ok, out = run_hermes(["kanban", "--board", board, "unblock", kanban_id], timeout=30)
+        if not ok:
+            print(json.dumps({"error": "unblock failed", "detail": out}))
+            return
 
     # Nudge the dispatcher for immediacy (gateway also runs it on an interval).
     run_hermes(["kanban", "--board", board, "dispatch"], timeout=60)
@@ -1952,7 +2053,16 @@ def cmd_cancel_task():
         return
     board, kanban_id = entry["board"], entry["kanban_id"]
     run_hermes(["kanban", "--board", board, "reclaim", kanban_id], timeout=30)
-    ok, out = run_hermes(["kanban", "--board", board, "block", kanban_id], timeout=30)
+    gate_id = entry.get("gate_id")
+    if gate_id:
+        # Sentinel-gated task: a held real card is in 'todo' and cannot be
+        # re-blocked. ARCHIVE both the real card and its sentinel so neither a
+        # dispatch tick nor a later release-task (which archives the gate to
+        # promote) can resurrect it. archive_task is terminal from any status.
+        ok, out = run_hermes(["kanban", "--board", board, "archive", kanban_id], timeout=30)
+        run_hermes(["kanban", "--board", board, "archive", gate_id], timeout=30)
+    else:
+        ok, out = run_hermes(["kanban", "--board", board, "block", kanban_id], timeout=30)
     entry["status"] = "cancelled"
     entry["cancelled_at"] = now_iso()
     save_bridge(bridge)
