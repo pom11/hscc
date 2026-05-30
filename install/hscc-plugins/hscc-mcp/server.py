@@ -2,6 +2,11 @@
 
 Run by Hermes via config ``mcp_servers.hscc`` with the hermes venv python.
 Tools are thin facades over the hscc-* CLI plugins (see tools.py / runner.py).
+
+Tool function names are intentionally bare verbs (e.g. ``cluster_status``).
+Hermes prefixes every MCP tool ``mcp_<server>_<tool>`` at registration, so the
+callable names the model sees are ``mcp_hscc_cluster_status`` etc. Naming the
+functions ``hscc_*`` here would double-stamp to ``mcp_hscc_hscc_*``.
 """
 import importlib.util
 import sys
@@ -36,75 +41,75 @@ mcp = FastMCP("hscc")
 
 
 @mcp.tool()
-def hscc_cluster_status() -> object:
+def cluster_status() -> object:
     """DGX Spark cluster status: running workloads and idle hosts."""
     return tools.cluster_status()
 
 
 @mcp.tool()
-def hscc_fleet_activity() -> object:
+def fleet_activity() -> object:
     """Per-agent live fleet activity (agent -> task -> kanban -> node)."""
     return tools.fleet_activity()
 
 
 @mcp.tool()
-def hscc_projects_show() -> object:
+def projects_show() -> object:
     """Active project roadmaps and tasks."""
     return tools.projects_show()
 
 
 @mcp.tool()
-def hscc_task_status(task_id: str) -> object:
+def task_status(task_id: str) -> object:
     """Status of a dispatched task by id."""
     return tools.task_status(task_id)
 
 
 @mcp.tool()
-def hscc_project_create(name: str, description: str = "") -> object:
+def project_create(name: str, description: str = "") -> object:
     """Create an HSCC project (auto-provisions a git repo + kanban board)."""
     return tools.project_create(name, description)
 
 
 @mcp.tool()
-def hscc_task_add(roadmap: str, subproject: str, title: str, description: str = "") -> object:
+def task_add(roadmap: str, subproject: str, title: str, description: str = "") -> object:
     """Add a task under a roadmap/subproject."""
     return tools.task_add(roadmap, subproject, title, description)
 
 
 @mcp.tool()
-def hscc_dispatch_task(task_id: str) -> object:
+def dispatch_task(task_id: str) -> object:
     """Pre-create a git worktree + a BLOCKED kanban card. Nothing runs until release."""
     return tools.dispatch_task(task_id)
 
 
 @mcp.tool()
-def hscc_release_task(task_id: str, confirm: bool = False) -> object:
+def release_task(task_id: str, confirm: bool = False) -> object:
     """Unblock a dispatched task so a worker runs it on its node. Ask the user
     first, then call with confirm=true."""
     return tools.release_task(task_id, confirm)
 
 
 @mcp.tool()
-def hscc_cancel_task(task_id: str, confirm: bool = False) -> object:
+def cancel_task(task_id: str, confirm: bool = False) -> object:
     """Cancel a live task/worker. Ask the user first, then confirm=true."""
     return tools.cancel_task(task_id, confirm)
 
 
 @mcp.tool()
-def hscc_green_check(task_id: str) -> object:
+def green_check(task_id: str) -> object:
     """Read-only readiness check before merging a task's worktree."""
     return tools.green_check(task_id)
 
 
 @mcp.tool()
-def hscc_merge_worktree(task_id: str, confirm: bool = False) -> object:
+def merge_worktree(task_id: str, confirm: bool = False) -> object:
     """Merge a task's worktree branch into the project default branch. Ask the
     user first, then confirm=true."""
     return tools.merge_worktree(task_id, confirm)
 
 
 @mcp.tool()
-def hscc_remove_worktree(task_id: str, confirm: bool = False) -> object:
+def remove_worktree(task_id: str, confirm: bool = False) -> object:
     """Remove a task's worktree. Ask the user first, then confirm=true."""
     return tools.remove_worktree(task_id, confirm)
 
