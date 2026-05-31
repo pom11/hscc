@@ -148,17 +148,41 @@ ORCH_ENDPOINT_STATE = os.path.expanduser("~/.hscc/.daemon_orch_endpoint")
 ORCH_NODES = {PRIMARY_NODE}
 
 
+def _serving_warn(msg):
+    """Loud warning that is safe to call at import time (before log() exists).
+
+    load_serving runs during resolve_cluster_config at import, before log() is
+    defined; guard so a malformed-file warning never crashes the import. Once the
+    daemon is running, the real log() is used (and printed in foreground mode).
+    """
+    fn = globals().get("log")
+    if callable(fn):
+        fn(msg, "ERROR")
+    else:
+        print(f"[ERROR] {msg}", file=sys.stderr)
+
+
 def load_serving(path=SERVING_JSON):
     """Parse serving.json. Return the dict, or None on missing/malformed.
 
     None is the fallback signal: the daemon reverts to its hardcoded PRIMARY_NODE
-    behavior so nothing breaks if the topology file is absent or corrupt.
+    behavior so nothing breaks if the topology file is absent or corrupt. A
+    present-but-malformed file is logged loudly (ERROR) — distinct from genuine
+    absence — because it silently shrinks the reaper exempt set and disables the
+    declarative topology while the operator believes it is active.
     """
     try:
         with open(path) as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else None
-    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+        if not isinstance(data, dict):
+            _serving_warn(f"{path} is not a JSON object — using fallback topology")
+            return None
+        return data
+    except FileNotFoundError:
+        return None
+    except (json.JSONDecodeError, OSError, TypeError) as e:
+        _serving_warn(f"{path} present but unparseable ({e}) — using fallback "
+                      f"topology (orchestrator exempt set may be incomplete)")
         return None
 
 
@@ -269,8 +293,11 @@ def resolve_cluster_config():
         _rebuild_vllm_cmds()
         return
 
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
-        pass
+    except FileNotFoundError:
+        pass  # no cluster.json — normal, try sparkrun next
+    except (json.JSONDecodeError, KeyError) as e:
+        _serving_warn(f"cluster.json present but unparseable ({e}) — trying "
+                      f"sparkrun fallback")
 
     # Fallback: resolve the default cluster's primary host from sparkrun.
     try:
@@ -286,12 +313,22 @@ def resolve_cluster_config():
                     if hosts:
                         PRIMARY_NODE = hosts[0].split(":")[0]
                     break
-    except Exception:
-        pass
+    except (json.JSONDecodeError, KeyError, IndexError, AttributeError,
+            subprocess.SubprocessError, OSError) as e:
+        # Narrowed from bare `except`: these are the expected parse/exec
+        # failures. The orchestrator endpoint is corrected by the serving.json
+        # overlay below; this fallback only matters when serving.json is ALSO
+        # absent, in which case PRIMARY_NODE stays at the hardcoded default —
+        # warn so a re-IP'd gateway with no readable config is not silent.
+        _serving_warn(f"sparkrun cluster fallback failed ({e})")
 
     # serving.json overlay applies on every path (incl. all-sources-failed),
     # so ORCH_NODES is always set and the orchestrator endpoint is authoritative.
-    _resolve_serving_overlay()
+    applied = _resolve_serving_overlay()
+    if not applied:
+        _serving_warn(f"no serving.json overlay; using PRIMARY_NODE="
+                      f"{PRIMARY_NODE} (cluster.json/sparkrun or hardcoded "
+                      f"default), ORCH_NODES={sorted(ORCH_NODES)}")
     _rebuild_vllm_cmds()
 
 
@@ -954,6 +991,7 @@ def update_orchestrator_followers():
         return
 
     changed = 0
+    had_failure = False
     for name in sorted(os.listdir(PROFILES_DIR)):
         cfg = os.path.join(PROFILES_DIR, name, "config.yaml")
         if not os.path.isfile(cfg):
@@ -963,6 +1001,7 @@ def update_orchestrator_followers():
                 lines = f.readlines()
         except OSError as e:
             log(f"base_url follower: cannot read {cfg}: {e}", "WARN")
+            had_failure = True
             continue
         dirty = False
         for i, line in enumerate(lines):
@@ -985,10 +1024,57 @@ def update_orchestrator_followers():
             log(f"base_url follower: {name} -> {new_endpoint}")
         except OSError as e:
             log(f"base_url follower: cannot write {cfg}: {e}", "WARN")
+            had_failure = True
 
+    # Only advance the persisted endpoint when every matched profile was
+    # followed successfully. If any read/write failed, keep the OLD endpoint
+    # recorded so the next tick re-detects the change and retries — otherwise a
+    # profile that failed to write is silently stranded on the dead endpoint
+    # forever (the early-return at old==new would skip it).
+    if had_failure:
+        log(f"base_url follower: {old_endpoint} -> {new_endpoint}, "
+            f"{changed} updated but some profiles FAILED; endpoint state NOT "
+            f"advanced — will retry next tick", "ERROR")
+        return
     log(f"base_url follower: {old_endpoint} -> {new_endpoint}, "
         f"{changed} profile(s) updated")
     _write_prev_orch_endpoint(new_endpoint)
+
+
+def live_dispatch_hosts():
+    """Worker hosts running a UNIT-ROUTED dispatched task, exempt from reaping.
+
+    Topology-routed tasks key their lifecycle by unit_id (e.g. "worker-246"),
+    not by a real agent in agents.json — so the idle reaper's agent->host
+    liveness path never sees them and would stop the worker vLLM mid-task. We
+    close that gap by protecting the host directly from the bridge: a host is
+    live while its unit-routed task is `held` (provisioning / blocked-gate
+    window) or `released` and the kanban task has not finished. Legacy roster
+    dispatches (no unit_id) are untouched — they keep their existing protection.
+    """
+    try:
+        with open(BRIDGE_FILE) as f:
+            bridge = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return set()
+    hosts = set()
+    for e in bridge.get("tasks", {}).values():
+        if not e.get("unit_id"):
+            continue  # legacy path: protected via agent lifecycle elsewhere
+        host = e.get("worker_host")
+        if not host:
+            continue
+        status = e.get("status")
+        if status == "held":
+            hosts.add(host)  # provisioning / awaiting release — keep it warm
+        elif status == "released":
+            board, kid = e.get("board"), e.get("kanban_id")
+            kstatus = (_kanban_task_status(board, kid)[0]
+                       if board and kid else None)
+            # Unknown kanban status -> protect (fail safe; never reap on doubt).
+            if kstatus not in ("done", "review", "archived", "blocked"):
+                hosts.add(host)
+    return hosts
 
 
 # ── Idle Monitor ───────────────────────────────────────────────────────────
@@ -1012,6 +1098,10 @@ def check_idle_monitor():
     # Follow the orchestrator endpoint into managed profiles (no-op unless it
     # actually changed and the new endpoint is healthy).
     update_orchestrator_followers()
+
+    # Hosts running a unit-routed dispatched task — exempt from reaping (their
+    # lifecycle is keyed by unit_id, invisible to the agent->host liveness path).
+    busy_hosts = live_dispatch_hosts()
     
     result = {
         "timestamp": now_iso(),
@@ -1108,6 +1198,13 @@ def check_idle_monitor():
             # Derived from serving.json; falls back to {PRIMARY_NODE} when absent.
             if host in ORCH_NODES:
                 result["kept"].append({"container": container, "reason": "orchestrator vLLM (protected)"})
+                continue
+
+            # Unit-routed dispatched task in flight on this host — protect it
+            # from mid-task reaping (capacity slot is held until release/cancel
+            # or worktree removal; see live_dispatch_hosts).
+            if host in busy_hosts:
+                result["kept"].append({"container": container, "reason": "unit-routed task in flight (protected)"})
                 continue
             
             # Find matching agents

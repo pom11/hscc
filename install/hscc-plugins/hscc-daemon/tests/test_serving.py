@@ -186,6 +186,87 @@ class TestUpdateOrchestratorFollowers(unittest.TestCase):
             H.update_orchestrator_followers()
         self.assertIn("http://192.0.2.10:8000/v1", self._read("default"))
 
+    def test_partial_write_failure_does_not_advance_endpoint(self):
+        # Two profiles track the OLD endpoint; one write fails. The persisted
+        # endpoint must stay OLD so the next tick retries the stranded profile.
+        self._profile("default", "http://192.0.2.10:8000/v1")
+        self._profile("orch-mirror", "http://192.0.2.10:8000/v1")
+        H._write_prev_orch_endpoint("http://192.0.2.10:8000/v1")
+        real_replace = os.replace
+
+        def flaky_replace(src, dst):
+            if dst.endswith(os.path.join("orch-mirror", "config.yaml")):
+                raise OSError("simulated write failure")
+            return real_replace(src, dst)
+
+        with self._mock.patch.object(H, "load_serving",
+                 return_value=self._serving("192.0.2.12")), \
+             self._mock.patch.object(H, "_endpoint_healthy", return_value=True), \
+             self._mock.patch.object(H.os, "replace", side_effect=flaky_replace):
+            H.update_orchestrator_followers()
+        # The healthy profile followed; the failed one did not.
+        self.assertIn("http://192.0.2.12:8000/v1", self._read("default"))
+        self.assertIn("http://192.0.2.10:8000/v1", self._read("orch-mirror"))
+        # Endpoint NOT advanced -> next tick re-detects old!=new and retries.
+        self.assertEqual(H._read_prev_orch_endpoint(),
+                         "http://192.0.2.10:8000/v1")
+
+
+class TestLiveDispatchHosts(unittest.TestCase):
+    import unittest.mock as _mock
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="hscc-bridge-")
+        self.bridge = os.path.join(self.tmp, "bridge.json")
+        self._orig = H.BRIDGE_FILE
+        H.BRIDGE_FILE = self.bridge
+
+    def tearDown(self):
+        H.BRIDGE_FILE = self._orig
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, tasks):
+        with open(self.bridge, "w") as f:
+            json.dump({"tasks": tasks}, f)
+
+    def test_missing_bridge_empty(self):
+        self.assertEqual(H.live_dispatch_hosts(), set())
+
+    def test_legacy_entries_ignored(self):
+        # No unit_id -> legacy roster dispatch, protected elsewhere, not here.
+        self._write({"t1": {"worker_host": "192.0.2.11", "status": "released",
+                            "board": "b", "kanban_id": "k"}})
+        with self._mock.patch.object(H, "_kanban_task_status",
+                                     return_value=("running", None)):
+            self.assertEqual(H.live_dispatch_hosts(), set())
+
+    def test_held_unit_entry_protected(self):
+        # held = provisioning / awaiting release -> protect without kanban call.
+        self._write({"t1": {"unit_id": "worker-246", "worker_host": "192.0.2.11",
+                            "status": "held"}})
+        self.assertEqual(H.live_dispatch_hosts(), {"192.0.2.11"})
+
+    def test_released_running_protected(self):
+        self._write({"t1": {"unit_id": "worker-247", "worker_host": "192.0.2.12",
+                            "status": "released", "board": "b", "kanban_id": "k"}})
+        with self._mock.patch.object(H, "_kanban_task_status",
+                                     return_value=("running", None)):
+            self.assertEqual(H.live_dispatch_hosts(), {"192.0.2.12"})
+
+    def test_released_finished_not_protected(self):
+        self._write({"t1": {"unit_id": "worker-248", "worker_host": "192.0.2.13",
+                            "status": "released", "board": "b", "kanban_id": "k"}})
+        with self._mock.patch.object(H, "_kanban_task_status",
+                                     return_value=("done", None)):
+            self.assertEqual(H.live_dispatch_hosts(), set())
+
+    def test_released_unknown_kanban_protected_failsafe(self):
+        # No board/kid -> cannot prove finished -> protect (never reap on doubt).
+        self._write({"t1": {"unit_id": "worker-246", "worker_host": "192.0.2.11",
+                            "status": "released"}})
+        self.assertEqual(H.live_dispatch_hosts(), {"192.0.2.11"})
+
 
 if __name__ == "__main__":
     unittest.main()
