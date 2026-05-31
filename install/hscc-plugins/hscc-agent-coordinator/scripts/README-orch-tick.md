@@ -16,7 +16,7 @@ that spawns an interpreting agent reading kanban (the source of truth).
 
 | File | Runtime home | Role |
 |------|--------------|------|
-| `hscc_orch_tick.py` | `~/.hermes/scripts/` | Detector. Reads `~/.hscc/bridge.json`, cross-refs live kanban, emits only NEW terminal tasks (done/review/blocked/archived) deduped via `~/.hscc/.orch_tick_ack.json`. Empty stdout → agent stays `[SILENT]`. First run seeds baseline silently. |
+| `hscc_orch_tick.py` | `~/.hermes/scripts/` | Detector. Scans every live `hscc-*` kanban board directly (source of truth — catches ad-hoc cards too), enriches with `~/.hscc/bridge.json` (worker host / worktree / hscc id) when a card came through `dispatch-task`. Emits only NEW terminal cards (done/review/blocked) deduped via `~/.hscc/.orch_tick_ack.json`. Empty stdout → agent stays `[SILENT]`. First run seeds baseline silently. |
 | `orch-tick.prompt.txt` | (in cron job) | Agent prompt: brief each task; honor the AUTONOMY flag; may flip its own gate. |
 | `orch-tick.cron.json` | (reference) | Sanitized snapshot of the live cron job in `~/.hermes/cron/jobs.json`. |
 | `install-orch-tick.sh` | — | Idempotent installer: detector → `~/.hermes/scripts/`, registers the cron job, seeds the autonomy gate. |
