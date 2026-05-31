@@ -1488,6 +1488,13 @@ def cmd_list_worktrees():
 
 BRIDGE_FILE = os.path.join(HSCC_DIR, "bridge.json")
 
+# Autonomy gate for the orchestrator reconcile loop (hscc-orch-tick cron).
+# "on"  -> the tick agent auto-dispatches the next step;
+# "off" -> it only summarizes and waits for a human go-ahead (default).
+# Both the human and the orchestrator itself may flip this.
+AUTONOMY_FILE = os.path.join(HSCC_DIR, "autonomy")
+_AUTONOMY_TRUE = ("on", "1", "true", "yes")
+
 
 def load_bridge():
     return read_json_file(BRIDGE_FILE, {"tasks": {}})
@@ -1495,6 +1502,22 @@ def load_bridge():
 
 def save_bridge(data):
     write_json_file(BRIDGE_FILE, data)
+
+
+def autonomy_on():
+    try:
+        with open(AUTONOMY_FILE) as f:
+            return f.read().strip().lower() in _AUTONOMY_TRUE
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def set_autonomy(value):
+    os.makedirs(HSCC_DIR, exist_ok=True)
+    tmp = AUTONOMY_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(value + "\n")
+    os.replace(tmp, AUTONOMY_FILE)
 
 
 def find_hermes_bin():
@@ -2789,6 +2812,25 @@ def cmd_fleet_activity():
         print("idle: " + ", ".join(f"{r['agent']}({r['node'] or '-'})" for r in idle))
 
 
+def cmd_autonomy():
+    """Show or set the orchestrator autonomy gate.
+
+    Usage:
+      autonomy           -> print current state
+      autonomy on|off    -> set state (callable by human OR orchestrator)
+    """
+    arg = sys.argv[2].strip().lower() if len(sys.argv) > 2 else None
+    if arg is None:
+        print(json.dumps({"autonomy": "on" if autonomy_on() else "off"}))
+        return
+    if arg in ("on", "off"):
+        set_autonomy(arg)
+        print(json.dumps({"ok": True, "autonomy": arg}))
+        return
+    print(json.dumps({"error": "usage: autonomy [on|off]"}))
+    sys.exit(1)
+
+
 # ---- Main ----
 
 def main():
@@ -2820,6 +2862,8 @@ def main():
         "check-collisions": cmd_check_collisions,
         "detect-stale": cmd_detect_stale,
         "green-check": cmd_green_check,
+        # Orchestrator autonomy gate (read/flip; human or orchestrator)
+        "autonomy": cmd_autonomy,
     }
 
     if cmd not in commands:
