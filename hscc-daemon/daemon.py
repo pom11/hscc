@@ -18,7 +18,11 @@ import os
 import signal
 import subprocess
 import sys
+import glob
+import ssl
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 
 
@@ -49,6 +53,91 @@ DEFAULT_CONFIG = {
 
 TELEGRAM_TIMEOUT = 10
 TELEGRAM_MAX_PER_MINUTE = 5
+
+# Telegram credential sources (token never lives in config — read at runtime).
+ENV_FILE = os.path.expanduser("~/.hermes/.env")
+OPERATOR_CHAT_FALLBACK = "0"
+
+
+def _env_file_value(key, path=None):
+    """Return the last non-empty `key=value` from a dotenv-style file, or None.
+
+    The bot token lives only in ~/.hermes/.env (often duplicated across lines);
+    the last non-empty assignment wins. Never printed or logged.
+    """
+    if path is None:
+        path = ENV_FILE
+    value = None
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                if k.strip() == key:
+                    v = v.strip().strip('"').strip("'")
+                    if v:
+                        value = v
+    except (FileNotFoundError, OSError):
+        return None
+    return value
+
+
+def resolve_telegram(config=None):
+    """Resolve (bot_token, chat_id) from config, env, then operator fallback.
+
+    Precedence: daemon config telegram.* -> process env -> ~/.hermes/.env file
+    (token) / HSCC_NOTIFY_CHAT (chat) -> hardcoded operator chat. Returns
+    (None, chat_id) when no token is available so callers can degrade.
+    """
+    tg = (config or {}).get("telegram", {}) if config else {}
+    token = (tg.get("bot_token")
+             or os.environ.get("TELEGRAM_BOT_TOKEN")
+             or _env_file_value("TELEGRAM_BOT_TOKEN"))
+    chat_id = (tg.get("chat_id")
+               or os.environ.get("HSCC_NOTIFY_CHAT")
+               or os.environ.get("TELEGRAM_CHAT_ID")
+               or _env_file_value("TELEGRAM_CHAT_ID")
+               or OPERATOR_CHAT_FALLBACK)
+    return token, str(chat_id) if chat_id else None
+
+
+def _ssl_context():
+    """SSL context using a working CA bundle.
+
+    The daemon runs under a stdlib Python whose default trust store rejects the
+    api.telegram.org chain on this host; the certifi bundle shipped in the
+    Hermes venv verifies cleanly. Prefer an explicit CA (env or that bundle),
+    falling back to the default context. Verification stays ON throughout.
+    """
+    candidates = [os.environ.get("SSL_CERT_FILE"),
+                  os.environ.get("REQUESTS_CA_BUNDLE")]
+    candidates += glob.glob(os.path.expanduser(
+        "~/.hermes/hermes-agent/venv/lib/python*/site-packages/"
+        "certifi/cacert.pem"))
+    for ca in candidates:
+        if ca and os.path.exists(ca):
+            try:
+                return ssl.create_default_context(cafile=ca)
+            except Exception:
+                continue
+    return ssl.create_default_context()
+
+
+def telegram_post(token, chat_id, text, timeout=TELEGRAM_TIMEOUT):
+    """POST a message to the Telegram Bot API. Returns True on success."""
+    if not token or not chat_id:
+        return False
+    url = "https://api.telegram.org/bot%s/sendMessage" % token
+    data = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
+    req = urllib.request.Request(url, data=data, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout,
+                                    context=_ssl_context()) as resp:
+            return 200 <= resp.status < 300
+    except Exception:
+        return False
 
 
 # ── Config helpers ─────────────────────────────────────────────────────────
@@ -313,9 +402,7 @@ class Daemon:
 
     def _send_telegram_alert(self, reason, report):
         """Send Telegram alert via orchestrator subprocess. Rate-limited."""
-        telegram_conf = self.config.get("telegram", {})
-        chat_id = telegram_conf.get("chat_id")
-        bot_token = telegram_conf.get("bot_token")
+        bot_token, chat_id = resolve_telegram(self.config)
 
         if not chat_id or not bot_token:
             print(
@@ -363,42 +450,15 @@ class Daemon:
         for name, check in report["checks"].items():
             alert_text += f"  {name}: {check['status']}\n"
 
-        try:
-            # Delegate to orchestrator's Telegram bot
-            result = subprocess.run(
-                ["hscc-daemon", "telegram", "send", alert_text],
-                capture_output=True, text=True, timeout=TELEGRAM_TIMEOUT,
-            )
-            if result.returncode == 0:
-                self.telegram_alert_timestamps.append(now)
-            else:
-                self.pending_alerts.append({
-                    "timestamp": datetime.now(timezone.utc).strftime(
-                        "%Y-%m-%dT%H:%M:%SZ"
-                    ),
-                    "severity": "warning",
-                    "message": f"Telegram send failed: {result.stderr.strip()}",
-                    "auto_resolved": False,
-                })
-        except FileNotFoundError:
-            print(
-                "    [WARN] hscc-daemon CLI not found - alert logged to file"
-            )
+        if telegram_post(bot_token, chat_id, alert_text):
+            self.telegram_alert_timestamps.append(now)
+        else:
             self.pending_alerts.append({
                 "timestamp": datetime.now(timezone.utc).strftime(
                     "%Y-%m-%dT%H:%M:%SZ"
                 ),
                 "severity": "warning",
-                "message": f"Telegram send failed (CLI not found): {reason}",
-                "auto_resolved": False,
-            })
-        except Exception as e:
-            self.pending_alerts.append({
-                "timestamp": datetime.now(timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ"
-                ),
-                "severity": "warning",
-                "message": f"Telegram send failed: {e}",
+                "message": f"Telegram send failed: {reason}",
                 "auto_resolved": False,
             })
 
@@ -630,9 +690,18 @@ def cmd_alerts():
 
 
 def cmd_telegram_send(message):
-    """Delegate Telegram message sending via orchestrator bot."""
-    print(f"[TELEGRAM-SEND] Would send: {message}")
-    sys.exit(0)
+    """Send a Telegram message via the Bot API. Exit 1 if it can't deliver."""
+    config = load_config() if os.path.exists(CONFIG_FILE) else None
+    token, chat_id = resolve_telegram(config)
+    if not token:
+        print("[TELEGRAM-SEND] no bot token (set TELEGRAM_BOT_TOKEN in "
+              "~/.hermes/.env)", file=sys.stderr)
+        sys.exit(1)
+    if telegram_post(token, chat_id, message):
+        print(f"[TELEGRAM-SEND] delivered to {chat_id}")
+        sys.exit(0)
+    print("[TELEGRAM-SEND] delivery failed", file=sys.stderr)
+    sys.exit(1)
 
 
 def main():
@@ -655,6 +724,11 @@ def main():
         type=str,
         default=None,
         help="Path to config file (default: ~/.hscc/daemon/config.json)",
+    )
+    parser.add_argument(
+        "rest",
+        nargs="*",
+        help="Subcommand args (e.g. 'send <message>' for telegram)",
     )
     args = parser.parse_args()
 
