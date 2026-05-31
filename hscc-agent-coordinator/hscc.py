@@ -1604,17 +1604,26 @@ def ensure_worker_vllm(host, recipe=None, wait=False, timeout=300):
     if _worker_container_running(host):
         state = "loading"  # already coming up; don't double-launch
     else:
+        state = "provisioning"
         try:
             r = subprocess.run(
                 [sys.executable, _provision_script(), "run", recipe, host],
                 capture_output=True, text=True, timeout=320,
             )
             detail = ((r.stdout or "") + (r.stderr or "")).strip()[-500:]
+            # A non-zero exit means the provision command itself failed (missing
+            # recipe, sparkrun error, NAS down) — distinct from "kicked off, now
+            # loading". Surface it so the caller fails fast instead of waiting
+            # out the full poll timeout on a node that will never come up.
+            if r.returncode != 0:
+                state = "provision_failed"
         except subprocess.TimeoutExpired:
             detail = "provision timed out after 320s"
-        state = "provisioning"
+        except FileNotFoundError as e:
+            state = "provision_failed"
+            detail = f"provision command not found: {e}"
 
-    if not wait:
+    if not wait or state == "provision_failed":
         return {"ok": False, "host": host, "state": state, "detail": detail}
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -1729,13 +1738,27 @@ def load_serving(path=SERVING_JSON):
     """Parse serving.json. Return the dict, or None on missing/malformed.
 
     None is the fallback signal: callers revert to legacy behavior so nothing
-    breaks if the file is absent or corrupt.
+    breaks if the file is absent or corrupt. A *present-but-malformed* file is a
+    different, dangerous situation from a genuinely absent one: the operator
+    thinks the topology is active while every read silently falls back to the
+    legacy roster path (caps unenforced). So absence is quiet, but a parse/IO
+    error on an existing file warns loudly to stderr (stdout is the JSON
+    contract) before returning the fallback signal.
     """
     try:
         with open(path) as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else None
-    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+        if not isinstance(data, dict):
+            print(f"[hscc] WARNING: {path} is not a JSON object — "
+                  f"falling back to legacy routing", file=sys.stderr)
+            return None
+        return data
+    except FileNotFoundError:
+        return None
+    except (json.JSONDecodeError, OSError, TypeError) as e:
+        print(f"[hscc] WARNING: {path} present but unparseable ({e}) — "
+              f"falling back to legacy routing (capacity caps NOT enforced)",
+              file=sys.stderr)
         return None
 
 
@@ -2084,7 +2107,7 @@ def cmd_dispatch_task():
         "profile": profile, "worker_host": worker_host,
     })
 
-    print(json.dumps({
+    resp = {
         "success": True,
         "guarded": True,
         "task_id": task_id,
@@ -2101,7 +2124,15 @@ def cmd_dispatch_task():
         "next": f"hscc-agent-coordinator release-task {task_id}",
         "message": ("Mirrored as a HELD kanban task (gated by an undone sentinel "
                     "parent). Run release-task to archive the gate and dispatch a worker."),
-    }, indent=2))
+    }
+    # Surface a HARD provisioning failure (recipe/sparkrun/NAS error) up front so
+    # it isn't buried in the raw provision dict. The task is still held (release
+    # re-provisions and fails closed), but the operator should see it now.
+    if isinstance(provision, dict) and provision.get("state") == "provision_failed":
+        resp["warning"] = (f"worker vLLM provisioning FAILED on {worker_host} "
+                           f"({provision.get('detail')}); release-task will retry "
+                           f"and refuse to release into a dead endpoint")
+    print(json.dumps(resp, indent=2))
 
 
 def cmd_release_task():
