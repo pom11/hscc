@@ -1582,7 +1582,7 @@ def _worker_container_running(host):
         return False
 
 
-def ensure_worker_vllm(host, wait=False, timeout=300):
+def ensure_worker_vllm(host, recipe=None, wait=False, timeout=300):
     """Idempotently ensure the worker node's vLLM is serving.
 
     Returns a dict describing the outcome. Idempotency has two layers: healthy
@@ -1596,6 +1596,7 @@ def ensure_worker_vllm(host, wait=False, timeout=300):
     """
     if not host:
         return {"ok": False, "reason": "no host (default/orchestrator profile)"}
+    recipe = recipe or WORKER_VLLM_RECIPE
     if _vllm_healthy(host):
         return {"ok": True, "host": host, "state": "already_healthy"}
 
@@ -1605,7 +1606,7 @@ def ensure_worker_vllm(host, wait=False, timeout=300):
     else:
         try:
             r = subprocess.run(
-                [sys.executable, _provision_script(), "run", WORKER_VLLM_RECIPE, host],
+                [sys.executable, _provision_script(), "run", recipe, host],
                 capture_output=True, text=True, timeout=320,
             )
             detail = ((r.stdout or "") + (r.stderr or "")).strip()[-500:]
@@ -1681,6 +1682,170 @@ def resolve_profile(agent_id, override=None):
     return "default"
 
 
+def pick_worker_agent():
+    """Round-robin a worker agent across the distinct worker GPU nodes.
+
+    Tasks dispatched without an ``assignedAgent`` would otherwise resolve to the
+    ``default`` profile and run inference on the orchestrator (.244). This picks
+    a routable worker agent so the worker lands on a GPU node instead.
+
+    Balances the three nodes evenly even though several agents share a node
+    (round-robin over distinct ``vllm-<host>`` octets, not over agents). Only
+    considers agents whose endpoint maps to an on-disk ``worker-<octet>``
+    profile. Returns an agent_id, or None when no routable worker agent exists
+    (caller then falls back to ``default``).
+    """
+    by_host = {}
+    for a in load_agents_list():
+        m = re.search(r"vllm-(\d+\.\d+\.\d+\.\d+)", a.get("model", ""))
+        if not m:
+            continue
+        octet = m.group(1).split(".")[-1]
+        if not os.path.isdir(os.path.expanduser(f"~/.hermes/profiles/worker-{octet}")):
+            continue
+        by_host.setdefault(octet, []).append(a.get("id"))
+    if not by_host:
+        return None
+    hosts = sorted(by_host)
+    state = load_bridge()
+    idx = int(state.get("_rr_index", 0)) % len(hosts)
+    state["_rr_index"] = (idx + 1) % len(hosts)
+    save_bridge(state)
+    return by_host[hosts[idx]][0]
+
+
+# ---- Declarative serving topology (serving.json) ----
+#
+# serving.json is the single source of truth for WHICH model runs WHERE and how
+# many concurrent workers each node sustains. The coordinator reads it to route
+# dispatched tasks to worker units by free capacity (cold-starting on demand).
+# When the file is absent/invalid, every read returns None/[] and callers fall
+# back to the legacy pick_worker_agent (roster) path -> reversible toggle.
+
+SERVING_JSON = os.path.join(HSCC_DIR, "serving.json")
+
+
+def load_serving(path=SERVING_JSON):
+    """Parse serving.json. Return the dict, or None on missing/malformed.
+
+    None is the fallback signal: callers revert to legacy behavior so nothing
+    breaks if the file is absent or corrupt.
+    """
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+        return None
+
+
+def parse_worker_units(serving):
+    """Extract worker serving-units from a serving.json dict.
+
+    Returns a list of {id, recipe, head, max_workers, model}. head = nodes[0]
+    (the endpoint host; multi-node units serve one endpoint via sparkrun). Units
+    with no nodes are skipped. max_workers defaults to 4 (concurrent task cap).
+    """
+    out = []
+    if not isinstance(serving, dict):
+        return out
+    for u in serving.get("units", []) or []:
+        if u.get("role") != "worker":
+            continue
+        nodes = u.get("nodes") or []
+        if not nodes:
+            continue
+        out.append({
+            "id": u.get("id"),
+            "recipe": os.path.expanduser(u.get("recipe", WORKER_VLLM_RECIPE)),
+            "head": nodes[0],
+            "max_workers": int(u.get("max_workers", 4)),
+            "model": u.get("model", ""),
+        })
+    return out
+
+
+def _head_octet(head):
+    try:
+        return int(str(head).split(".")[-1])
+    except (ValueError, AttributeError):
+        return 1 << 30  # sort unknown heads last
+
+
+def pick_unit(worker_units, unit_load):
+    """Pick the worker unit with the most free capacity (least-loaded).
+
+    free = max_workers - current load. Ties broken by lowest head octet
+    (deterministic). Returns a unit id, or None when every unit is full.
+    Pure: no I/O, so the scheduling policy is unit-tested without fixtures.
+    """
+    best = None
+    best_key = None
+    for u in worker_units:
+        free = u["max_workers"] - int(unit_load.get(u["id"], 0))
+        if free <= 0:
+            continue
+        # Maximize free, then minimize head octet -> sort key (-free, octet).
+        key = (-free, _head_octet(u["head"]))
+        if best_key is None or key < best_key:
+            best_key, best = key, u["id"]
+    return best
+
+
+# Bridge entry statuses that still occupy a worker-unit slot.
+_LIVE_STATUSES = {"held", "released"}
+
+
+def reconcile_unit_load():
+    """Rebuild _unit_load in the bridge by recounting live dispatch entries.
+
+    _unit_load is a fast cache; the bridge task records are ground truth. A
+    worker that died without decrementing would leave the cache too high and
+    starve a node; recounting live (held/released) entries per unit_id self-heals
+    that drift. Called before every capacity decision.
+    """
+    bridge = load_bridge()
+    counts = {}
+    for entry in bridge.get("tasks", {}).values():
+        uid = entry.get("unit_id")
+        if uid and entry.get("status") in _LIVE_STATUSES:
+            counts[uid] = counts.get(uid, 0) + 1
+    bridge["_unit_load"] = counts
+    save_bridge(bridge)
+    return counts
+
+
+def serving_active():
+    """True when serving.json exists, is valid, and defines >=1 worker unit.
+
+    Lets the dispatcher distinguish "topology in effect" (route by unit; queue
+    when full) from "no topology" (fall back to the legacy roster path).
+    """
+    return bool(parse_worker_units(load_serving()))
+
+
+def pick_worker_unit():
+    """Select the least-loaded worker unit (capacity is derived, not reserved).
+
+    Returns (unit_id, head_host, recipe), or (None, None, None) when serving.json
+    is absent/invalid OR every worker unit is at capacity. The actual
+    reservation is the HELD bridge entry written by cmd_dispatch_task: capacity
+    is recomputed from those entries (reconcile_unit_load) on the next pick, so
+    there is no separate counter to drift. Cold units (vLLM down) are still
+    eligible — provisioning happens in the dispatch/release path.
+    """
+    serving = load_serving()
+    worker_units = parse_worker_units(serving)
+    if not worker_units:
+        return None, None, None
+    load = reconcile_unit_load()
+    unit_id = pick_unit(worker_units, load)
+    if not unit_id:
+        return None, None, None  # all at capacity -> caller queues
+    unit = next(u for u in worker_units if u["id"] == unit_id)
+    return unit_id, unit["head"], unit["recipe"]
+
+
 def ensure_board(board, repo_path):
     """Idempotently ensure a kanban board exists and is bound to repo_path."""
     run_hermes(["kanban", "boards", "create", board, "--switch"], timeout=30)
@@ -1718,8 +1883,33 @@ def cmd_dispatch_task():
         }))
         return
 
-    agent_id = (task.get("assignedAgent") or "").strip() or "worker"
-    profile = resolve_profile(task.get("assignedAgent"), profile_override)
+    assigned = (task.get("assignedAgent") or "").strip()
+    unit_id = None
+    unit_recipe = None
+    if not assigned and not profile_override:
+        if serving_active():
+            # Declarative topology in effect: route to the least-loaded worker
+            # unit (capacity-aware). All units at cap -> queue (do not dispatch).
+            unit_id, unit_host, unit_recipe = pick_worker_unit()
+            if not unit_id:
+                print(json.dumps({
+                    "queued": True,
+                    "task_id": task_id,
+                    "reason": "all worker units at capacity",
+                    "hint": "re-run dispatch-task when a slot frees (a task completes/cancels)",
+                }, indent=2))
+                return
+            profile = f"worker-{unit_host.split('.')[-1]}"
+            agent_id = unit_id
+        else:
+            # No topology -> legacy roster round-robin so the worker still lands
+            # on a GPU node instead of defaulting to the orchestrator.
+            assigned = pick_worker_agent() or ""
+            agent_id = assigned or "worker"
+            profile = resolve_profile(assigned or None, profile_override)
+    else:
+        agent_id = assigned or "worker"
+        profile = resolve_profile(assigned or None, profile_override)
 
     # Pre-create the worktree (reuses existing machinery). Derive a readable
     # branch slug from the task title.
@@ -1842,6 +2032,8 @@ def cmd_dispatch_task():
         "gate_id": gate_id,
         "board": board,
         "profile": profile,
+        "unit_id": unit_id,
+        "recipe": unit_recipe,
         "worktree": wt_path,
         "branch": branch,
         "status": "held",
@@ -1850,10 +2042,12 @@ def cmd_dispatch_task():
 
     # Kick off the worker node's vLLM now (non-blocking) so the 35B has minutes
     # to load while the task sits blocked. release-task verifies it before go.
+    # Use the unit's own recipe when topology-routed (falls back to the canonical
+    # worker recipe for legacy roster dispatches).
     worker_host = worker_host_from_profile(profile)
     provision = None
     if worker_host:
-        provision = ensure_worker_vllm(worker_host, wait=False)
+        provision = ensure_worker_vllm(worker_host, recipe=unit_recipe, wait=False)
         bridge["tasks"][task_id]["worker_host"] = worker_host
         bridge["tasks"][task_id]["provision"] = provision
 
@@ -1949,7 +2143,8 @@ def cmd_release_task():
     # was kicked off at dispatch). default/orchestrator tasks have no host -> skip.
     worker_host = entry.get("worker_host") or worker_host_from_profile(entry.get("profile"))
     if worker_host:
-        prov = ensure_worker_vllm(worker_host, wait=True, timeout=180)
+        prov = ensure_worker_vllm(worker_host, recipe=entry.get("recipe"),
+                                  wait=True, timeout=180)
         entry["provision"] = prov
         save_bridge(bridge)
         if not prov.get("ok"):
