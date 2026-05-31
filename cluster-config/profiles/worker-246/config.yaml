@@ -297,7 +297,7 @@ delegation:
   api_key: ''
   api_mode: ''
   inherit_mcp_toolsets: true
-  max_iterations: 50
+  max_iterations: 200
   child_timeout_seconds: 600
   reasoning_effort: ''
   max_concurrent_children: 3
