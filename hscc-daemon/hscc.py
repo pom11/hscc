@@ -135,6 +135,107 @@ _rebuild_vllm_cmds()
 # ── Cluster Config Resolution ─────────────────────────────────────────────
 
 CLUSTER_JSON = os.path.expanduser("~/.hscc/cluster.json")
+SERVING_JSON = os.path.expanduser("~/.hscc/serving.json")
+PROFILES_DIR = os.path.expanduser("~/.hermes/profiles")
+# Last orchestrator endpoint the follower applied. Persisted so a re-map of the
+# orchestrator across daemon ticks is detectable (old != new) without keeping
+# the previous topology in memory across restarts.
+ORCH_ENDPOINT_STATE = os.path.expanduser("~/.hscc/.daemon_orch_endpoint")
+
+# Nodes the idle reaper must never stop (orchestrator serving units). Resolved
+# from serving.json each reconcile; defaults to {PRIMARY_NODE} when serving.json
+# is absent/invalid so the gateway vLLM stays protected exactly as before.
+ORCH_NODES = {PRIMARY_NODE}
+
+
+def load_serving(path=SERVING_JSON):
+    """Parse serving.json. Return the dict, or None on missing/malformed.
+
+    None is the fallback signal: the daemon reverts to its hardcoded PRIMARY_NODE
+    behavior so nothing breaks if the topology file is absent or corrupt.
+    """
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+        return None
+
+
+def _orchestrator_units(serving):
+    if not isinstance(serving, dict):
+        return []
+    return [u for u in (serving.get("units", []) or [])
+            if u.get("role") == "orchestrator" and (u.get("nodes") or [])]
+
+
+def orchestrator_nodes(serving):
+    """Set of every node belonging to an orchestrator unit (reaper exempt set)."""
+    nodes = set()
+    for u in _orchestrator_units(serving):
+        nodes.update(u.get("nodes") or [])
+    return nodes
+
+
+def orchestrator_head(serving):
+    """Head endpoint host (nodes[0]) of the first orchestrator unit, or None.
+
+    A multi-node orchestrator serves one endpoint via sparkrun; the head is that
+    single endpoint host.
+    """
+    units = _orchestrator_units(serving)
+    return (units[0].get("nodes") or [None])[0] if units else None
+
+
+def serving_port(serving):
+    """Top-level serving port, or the hardcoded VLLM_PORT default."""
+    try:
+        return int((serving or {}).get("port") or VLLM_PORT)
+    except (TypeError, ValueError):
+        return VLLM_PORT
+
+
+def orchestrator_endpoint(serving):
+    """The single orchestrator base_url (http://head:port/v1), or None."""
+    head = orchestrator_head(serving)
+    if not head:
+        return None
+    return f"http://{head}:{serving_port(serving)}/v1"
+
+
+def compute_base_url_change(current, old_endpoint, new_endpoint):
+    """Decide a managed profile's new base_url, or None for no change.
+
+    Rule: a profile that points at the OLD orchestrator endpoint follows it to
+    the NEW one. Worker profiles point at their own node (never the orchestrator
+    endpoint), so they are never matched — the model split is preserved. Pure, so
+    the policy is unit-tested without touching any config file.
+    """
+    if old_endpoint == new_endpoint:
+        return None
+    if current == old_endpoint and current != new_endpoint:
+        return new_endpoint
+    return None
+
+
+def _resolve_serving_overlay():
+    """Overlay serving.json onto PRIMARY_NODE + ORCH_NODES.
+
+    Returns True when topology was applied, False when serving.json is
+    absent/invalid (caller keeps cluster.json/hardcoded PRIMARY_NODE; ORCH_NODES
+    falls back to {PRIMARY_NODE} so the gateway vLLM stays protected). No logging
+    here: this runs at import before log() is defined.
+    """
+    global PRIMARY_NODE, ORCH_NODES
+    serving = load_serving()
+    if serving is None:
+        ORCH_NODES = {PRIMARY_NODE}
+        return False
+    head = orchestrator_head(serving)
+    if head:
+        PRIMARY_NODE = head
+    ORCH_NODES = orchestrator_nodes(serving) or {PRIMARY_NODE}
+    return True
 
 
 def resolve_cluster_config():
@@ -143,7 +244,7 @@ def resolve_cluster_config():
     Keeps the module-level defaults if every source fails, so the daemon
     degrades safely instead of leaving hosts unset.
     """
-    global NAS_HOST, PRIMARY_NODE, VLLM_HEALTH_URL
+    global NAS_HOST, PRIMARY_NODE, VLLM_HEALTH_URL, ORCH_NODES
     try:
         with open(CLUSTER_JSON) as f:
             config = json.load(f)
@@ -162,6 +263,9 @@ def resolve_cluster_config():
         if nas_devices:
             NAS_HOST = nas_devices[0].get("ip", NAS_HOST)
 
+        # serving.json (when present) is authoritative for the orchestrator
+        # endpoint + the reaper exempt set; it overrides the cluster.json gateway.
+        _resolve_serving_overlay()
         _rebuild_vllm_cmds()
         return
 
@@ -181,10 +285,14 @@ def resolve_cluster_config():
                     hosts = cluster.get("hosts", [])
                     if hosts:
                         PRIMARY_NODE = hosts[0].split(":")[0]
-                        _rebuild_vllm_cmds()
                     break
     except Exception:
         pass
+
+    # serving.json overlay applies on every path (incl. all-sources-failed),
+    # so ORCH_NODES is always set and the orchestrator endpoint is authoritative.
+    _resolve_serving_overlay()
+    _rebuild_vllm_cmds()
 
 
 # Resolve cluster config at import time — after log() is defined
@@ -774,6 +882,115 @@ def check_nas():
     return ok
 
 
+# ── Orchestrator base_url follower ───────────────────────────────────────────
+
+def _endpoint_healthy(endpoint, timeout=5):
+    """True iff GET <endpoint>/models returns HTTP 200. Validates a candidate
+    orchestrator endpoint before any profile is repointed at it — we never
+    rewrite a profile to a dead endpoint."""
+    try:
+        res = subprocess.run(
+            ["curl", "-sf", "-o", "/dev/null", "-w", "%{http_code}",
+             "--max-time", str(timeout), f"{endpoint}/models"],
+            capture_output=True, text=True, timeout=timeout + 2,
+        )
+        return res.returncode == 0 and res.stdout.strip() == "200"
+    except Exception:
+        return False
+
+
+def _read_prev_orch_endpoint():
+    try:
+        with open(ORCH_ENDPOINT_STATE) as f:
+            return f.read().strip() or None
+    except (FileNotFoundError, OSError):
+        return None
+
+
+def _write_prev_orch_endpoint(endpoint):
+    try:
+        tmp = ORCH_ENDPOINT_STATE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(endpoint)
+        os.replace(tmp, ORCH_ENDPOINT_STATE)
+    except OSError as e:
+        log(f"base_url follower: could not persist orch endpoint: {e}", "WARN")
+
+
+# A managed profile's base_url line: `  base_url: http://h:p/v1` (quoted or not).
+_BASE_URL_RE = re.compile(
+    r'^(?P<indent>\s*)base_url:\s*(?P<q>["\']?)(?P<url>\S+?)(?P=q)\s*$')
+
+
+def update_orchestrator_followers():
+    """Repoint managed profiles that track the OLD orchestrator endpoint to the
+    NEW one when serving.json re-maps the orchestrator.
+
+    Only profiles whose base_url == the previously-applied orchestrator endpoint
+    are rewritten (see compute_base_url_change): worker profiles point at their
+    own node and never match, so the model split is preserved. The new endpoint
+    is health-validated before any file is touched. No-op on first run (no prior
+    endpoint recorded) and when the endpoint is unchanged.
+    """
+    serving = load_serving()
+    new_endpoint = orchestrator_endpoint(serving)
+    if not new_endpoint:
+        return  # fallback mode: nothing declarative to follow
+    old_endpoint = _read_prev_orch_endpoint()
+    if old_endpoint == new_endpoint:
+        return  # unchanged — record already current, nothing to do
+    if old_endpoint is None:
+        # First observation: record baseline, do not touch profiles (their
+        # current values are the operator's intent until a re-map happens).
+        _write_prev_orch_endpoint(new_endpoint)
+        return
+    if not _endpoint_healthy(new_endpoint):
+        log(f"base_url follower: new orchestrator {new_endpoint} not healthy "
+            f"(/models != 200); deferring profile rewrites", "WARN")
+        return
+
+    if not os.path.isdir(PROFILES_DIR):
+        _write_prev_orch_endpoint(new_endpoint)
+        return
+
+    changed = 0
+    for name in sorted(os.listdir(PROFILES_DIR)):
+        cfg = os.path.join(PROFILES_DIR, name, "config.yaml")
+        if not os.path.isfile(cfg):
+            continue
+        try:
+            with open(cfg) as f:
+                lines = f.readlines()
+        except OSError as e:
+            log(f"base_url follower: cannot read {cfg}: {e}", "WARN")
+            continue
+        dirty = False
+        for i, line in enumerate(lines):
+            m = _BASE_URL_RE.match(line.rstrip("\n"))
+            if not m:
+                continue
+            repl = compute_base_url_change(m.group("url"), old_endpoint,
+                                           new_endpoint)
+            if repl:
+                lines[i] = f'{m.group("indent")}base_url: {repl}\n'
+                dirty = True
+        if not dirty:
+            continue
+        try:
+            tmp = cfg + ".tmp"
+            with open(tmp, "w") as f:
+                f.writelines(lines)
+            os.replace(tmp, cfg)
+            changed += 1
+            log(f"base_url follower: {name} -> {new_endpoint}")
+        except OSError as e:
+            log(f"base_url follower: cannot write {cfg}: {e}", "WARN")
+
+    log(f"base_url follower: {old_endpoint} -> {new_endpoint}, "
+        f"{changed} profile(s) updated")
+    _write_prev_orch_endpoint(new_endpoint)
+
+
 # ── Idle Monitor ───────────────────────────────────────────────────────────
 
 IDLE_TIMEOUT_MINUTES = int(os.environ.get("HSCC_IDLE_TIMEOUT_MINUTES", "30"))
@@ -783,6 +1000,18 @@ def check_idle_monitor():
     """Idle monitor check (every 5m): scan sparkrun containers, stop idle ones."""
     log("Running idle monitor check")
     import subprocess as sp_subprocess
+
+    # Re-resolve topology each tick so a live serving.json edit (orchestrator
+    # re-map, added/removed nodes) takes effect without a daemon restart.
+    resolve_cluster_config()
+    if load_serving() is None:
+        log("serving.json absent/invalid — FALLBACK mode: reaper exempt set = "
+            f"{sorted(ORCH_NODES)} (hardcoded PRIMARY_NODE only)", "WARN")
+    else:
+        log(f"serving.json active — orchestrator exempt set = {sorted(ORCH_NODES)}")
+    # Follow the orchestrator endpoint into managed profiles (no-op unless it
+    # actually changed and the new endpoint is healthy).
+    update_orchestrator_followers()
     
     result = {
         "timestamp": now_iso(),
@@ -871,14 +1100,14 @@ def check_idle_monitor():
             recipe = container.get("recipe", "")
             cid = container["container_id"]
             
-            # Never stop ANY vLLM on the gateway. The gateway (PRIMARY_NODE)
-            # runs the orchestrator vLLM that serves Hermes — it must stay up
-            # regardless of agent assignment. The idle monitor only reaps idle
-            # WORKER models on the other nodes, never the orchestrator. (Before
-            # this guard the orchestrator was reaped as an "orphan" because no
-            # agent's model string pointed at the gateway.)
-            if host == PRIMARY_NODE:
-                result["kept"].append({"container": container, "reason": "orchestrator vLLM on gateway (protected)"})
+            # Never stop ANY vLLM on an orchestrator node. ORCH_NODES is the set
+            # of nodes serving the orchestrator vLLM (Hermes base_url) — for a
+            # multi-node orchestrator unit this is every node in the unit, not
+            # just the head. These must stay up regardless of agent assignment;
+            # the idle monitor only reaps idle WORKER models on the other nodes.
+            # Derived from serving.json; falls back to {PRIMARY_NODE} when absent.
+            if host in ORCH_NODES:
+                result["kept"].append({"container": container, "reason": "orchestrator vLLM (protected)"})
                 continue
             
             # Find matching agents
