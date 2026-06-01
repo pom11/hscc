@@ -1934,8 +1934,8 @@ PLIST_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
     <string>com.nousresearch.hscc-daemon</string>
     <key>ProgramArguments</key>
     <array>
-        <string>python3</string>
         <string>{PYTHON_PATH}</string>
+        <string>{SCRIPT_PATH}</string>
         <string>start-daemon</string>
     </array>
     <key>WorkingDirectory</key>
@@ -1976,6 +1976,7 @@ def generate_plist():
 
     return PLIST_CONTENT.format(
         PYTHON_PATH=python_path,
+        SCRIPT_PATH=os.path.abspath(__file__),
         HOMEDIR=hmdir,
         PATH_ENV=path_env,
     )
