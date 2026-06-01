@@ -8,7 +8,7 @@ platforms: [macos, linux]
 metadata:
   hermes:
     tags: [HSCC, Cluster, Agents, Projects, Orchestration, Monitoring, Governance]
-    related_skills: [hscc-cluster, hscc-projects, hscc-orchestrator, hscc-events, hscc-provision, hscc-agent-coordinator]
+    related_skills: [hscc-cluster, hscc-projects, hscc-orchestrator, hscc-events, hscc-provision, hscc-agent-coordinator, hscc-model-onboard]
 ---
 
 # Hermes Spark Cluster Control (HSCC)
@@ -29,6 +29,7 @@ Hermes-native cluster control: 12 Python plugins with JSON state persistence.
 - Skills/templates auto-install: idempotent bootstrap from HSCC source (`hscc-skills`)
 - One-command provisioning: skill install + state validation + health checks (`hscc-bootstrap`)
 - Optimization analysis: merge proposals + event-driven pattern detection (`hscc-optimizations`)
+- **Onboarding a NEW model/quant cluster-wide** (recipe + offline NAS->node cache + wire all configs + launch + verify): use `hscc-model-onboard` (e.g. FP8 -> NVFP4 cutover)
 
 Key facts:
 - State lives in `~/.hscc/` (override with the `HSCC_HOME` env var)
