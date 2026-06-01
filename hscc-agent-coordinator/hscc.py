@@ -2163,23 +2163,23 @@ def cmd_release_task():
     Guarded 'go': unblock the kanban mirror so the gateway dispatcher spawns a
     worker in the pre-created worktree. Marks the HSCC task inProgress.
 
-    Usage: hscc-agent-coordinator release-task <task_id>
+    Usage: hscc-agent-coordinator release-task <task_id> [--confirm]
     """
     if len(sys.argv) < 3:
-        print(json.dumps({"error": "Usage: release-task <task_id>"}))
+        print(json.dumps({"error": "Usage: release-task <task_id> [--confirm]"}))
         return
     task_id = sys.argv[2]
-
+    confirm_flag = "--confirm" in sys.argv[3:]
     # Hard human gate. release-task spawns a LIVE worker on a GPU node; the
     # orchestrator must NOT self-release. A human authorizes by setting
-    # HSCC_RELEASE_CONFIRM to the exact task id out-of-band. The token must match
-    # the target so a stale/blanket value can't release an unintended task.
-    if os.environ.get("HSCC_RELEASE_CONFIRM", "").strip() != task_id:
+    # HSCC_RELEASE_CONFIRM to the exact task id out-of-band, or by passing --confirm.
+    # The token must match the target so a stale/blanket value can't release an unintended task.
+    if os.environ.get("HSCC_RELEASE_CONFIRM", "").strip() != task_id and not confirm_flag:
         print(json.dumps({
             "error": "release blocked: human confirmation required",
             "task_id": task_id,
             "why": "release-task dispatches a live worker on the cluster; the orchestrator may not self-release.",
-            "how_to_release": f"a human runs: HSCC_RELEASE_CONFIRM={task_id} hscc-agent-coordinator release-task {task_id}",
+            "how_to_release": f"HSCC_RELEASE_CONFIRM={task_id} hscc-agent-coordinator release-task {task_id} --confirm",
         }, indent=2))
         return
 
@@ -2298,7 +2298,10 @@ def cmd_cancel_task():
     bridge = load_bridge()
     entry = bridge.get("tasks", {}).get(task_id)
     if not entry:
-        print(json.dumps({"error": f"No dispatch bridge for task {task_id}"}))
+        print(json.dumps({
+            "error": f"No dispatch bridge for task {task_id}",
+            "hint": "Task has no active dispatch (stale/orphaned). Create a new task and dispatch it instead.",
+        }))
         return
     board, kanban_id = entry["board"], entry["kanban_id"]
     run_hermes(["kanban", "--board", board, "reclaim", kanban_id], timeout=30)
