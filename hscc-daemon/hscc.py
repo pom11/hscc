@@ -103,7 +103,7 @@ PRIMARY_NODE = "192.0.2.10"  # gateway: runs orchestrator vLLM + Hermes base_url
 # than a local copy. The local-fixed recipe carries the chat-template/mods fixes.
 HSCC_CLUSTER = "hscc"
 VLLM_RECIPE = os.path.expanduser(
-    "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-fp8-vllm.yaml")
+    "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml")
 VLLM_PORT = 8000
 # A 35B model takes minutes to load. After a restart the watchdog must wait out
 # this grace period before counting a failed health check toward its breaker,

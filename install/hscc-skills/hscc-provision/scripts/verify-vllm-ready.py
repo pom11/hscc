@@ -33,7 +33,7 @@ if __name__ == "__main__":
         print("Usage: verify-vllm-ready.py <ip1> [ip2] ...")
         sys.exit(1)
     
-    model = "Qwen/Qwen3.6-35B-A3B-FP8"
+    model = "nvidia/Qwen3.6-35B-A3B-NVFP4"
     print(f"Checking vLLM readiness for {model}...")
     print()
     
