@@ -15,7 +15,11 @@ Strategy:
   3. Check if any agent references this model/container
   4. If an agent references it AND is idle > 30 min → stop the container
   5. If NO agent references it → stop the container (orphan)
-  6. Exception: MTP container on gateway (244) is never auto-stopped
+  6. Exception: anything on the gateway node (244) is never auto-stopped —
+     it runs the always-on orchestrator vLLM (Telegram + all Hermes agents)
+
+Environment:
+  HSCC_GATEWAY_NODE          - Gateway IP, always protected (default: 192.0.2.10)
 
 Environment:
   HSCC_IDLE_TIMEOUT_MINUTES  - Idle timeout (default: 30)
@@ -35,6 +39,10 @@ AGENTS_JSON = os.path.join(HSCC_DIR, "agents.json")
 LIFECYCLE_JSON = os.path.join(HSCC_DIR, "lifecycle.json")
 IDLE_TIMEOUT = int(os.environ.get("HSCC_IDLE_TIMEOUT_MINUTES", "30"))
 SCAN_INTERVAL = int(os.environ.get("HSCC_SCAN_INTERVAL", "5"))
+# Gateway node runs the always-on orchestrator vLLM (serves Telegram + every
+# Hermes agent). It has no agent row, so it must be protected explicitly or the
+# orphan rule reaps it every scan and the daemon thrashes restarting it.
+GATEWAY_NODE = os.environ.get("HSCC_GATEWAY_NODE", "192.0.2.10")
 
 
 def now_utc():
@@ -185,9 +193,11 @@ def check_container_idle(container, agents, agent_states):
     recipe = container.get("recipe", "")
     container_id = container["container_id"]
 
-    # Never auto-stop MTP container on gateway
-    if host == "192.0.2.10" and "mtp" in recipe.lower():
-        return {"shutdown": False, "reason": "MTP gateway container (protected)"}
+    # Never auto-stop anything on the gateway node — it runs the orchestrator
+    # vLLM (Telegram + all Hermes agents) which has no agent row and would
+    # otherwise be reaped as an orphan, thrashing against the daemon's restart.
+    if host == GATEWAY_NODE:
+        return {"shutdown": False, "reason": "gateway orchestrator (protected)"}
 
     # If container has no associated agents → orphan → stop it
     if not agents:
