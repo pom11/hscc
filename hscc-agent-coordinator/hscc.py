@@ -929,8 +929,50 @@ def cmd_update_task():
     print(json.dumps(result, indent=2))
 
 
+def sync_kanban_status_for_task(task_id):
+    """Sync a task's status from kanban board cards back to projects.json.
+
+    Looks up the task in projects.json, finds its project's kanban board,
+    reads all cards on the board, matches by title, and updates projects.json
+    status to match the card's actual status (done, blocked, todo, etc.).
+    Called when an agent goes idle so completed work reflects on the board.
+    """
+    project, roadmap, sub, task = find_project_for_task(task_id)
+    if task is None or project is None:
+        return
+    project_id = project.get("id", "")
+    board = get_project_board(project_id)
+    if not board:
+        return
+
+    # Read all cards on the board
+    ok, out = run_hermes(["kanban", "--board", board, "list", "--json"], timeout=30)
+    if not ok:
+        return
+    try:
+        cards = json.loads(out)
+        if not isinstance(cards, list):
+            return
+    except (json.JSONDecodeError, ValueError):
+        return
+
+    task_title = task.get("title", "")
+    for card in cards:
+        if card.get("title") == task_title:
+            card_status = card.get("status", "")
+            if card_status and card_status != task.get("status"):
+                task["status"] = card_status
+                task["updatedAt"] = datetime.now(timezone.utc).timestamp()
+                write_json_file(PROJECTS_JSON, json.loads(json.dumps({
+                    "projects": json.loads(json.dumps([project]))
+                })))
+            break
+
+
 def clear_task_assignment(task_id):
-    """Clear a task's assignedAgent from projects.json."""
+    """Clear a task's assignedAgent from projects.json, syncing kanban status first."""
+    # First sync: read kanban board card status → projects.json
+    sync_kanban_status_for_task(task_id)
     if not os.path.exists(PROJECTS_JSON):
         return
     try:
@@ -942,7 +984,6 @@ def clear_task_assignment(task_id):
                     for task in sub.get("tasks", []):
                         if task.get("id") == task_id:
                             task["assignedAgent"] = ""
-                            task["status"] = "backlog"
                             task["updatedAt"] = datetime.now(timezone.utc).timestamp()
         write_json_file(PROJECTS_JSON, data)
     except (json.JSONDecodeError, IOError):
@@ -2225,6 +2266,14 @@ def cmd_release_task():
         if not ok:
             print(json.dumps({"error": "gate archive failed; task stays held", "detail": out}))
             return
+        # Belt-and-suspenders: archiving the bridge's gate only unblocks the child
+        # if THAT gate is the card's parent. Re-dispatches reuse the kanban_id
+        # (idempotency) without reparenting, so the card may still sit under an
+        # older sentinel and/or carry a direct block — leaving it blocked despite
+        # a "released" bridge. Force-clear any residual block; each task has a
+        # single sentinel gate, so there is no legitimate other dependency to
+        # protect. Idempotent on an already-ready card.
+        run_hermes(["kanban", "--board", board, "unblock", kanban_id], timeout=30)
     else:
         ok, out = run_hermes(["kanban", "--board", board, "unblock", kanban_id], timeout=30)
         if not ok:

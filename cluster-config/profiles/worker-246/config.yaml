@@ -1,5 +1,5 @@
 model:
-  default: Qwen/Qwen3.6-35B-A3B-FP8
+  default: nvidia/Qwen3.6-35B-A3B-NVFP4
   provider: custom
   base_url: http://192.0.2.11:8000/v1
 providers: {}

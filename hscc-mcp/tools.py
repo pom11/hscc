@@ -81,7 +81,8 @@ def merge_worktree(task_id: str, confirm: bool = False):
     gate = _require_confirm("merge_worktree", confirm)
     if gate:
         return gate
-    return _result(run_hscc(COORD, "merge-worktree", task_id))
+    project_id = _resolve_project_id(task_id)
+    return _result(run_hscc(COORD, "merge-worktree", project_id, task_id))
 
 
 def remove_worktree(task_id: str, confirm: bool = False):
@@ -89,9 +90,32 @@ def remove_worktree(task_id: str, confirm: bool = False):
     gate = _require_confirm("remove_worktree", confirm)
     if gate:
         return gate
-    return _result(run_hscc(COORD, "remove-worktree", task_id))
+    project_id = _resolve_project_id(task_id)
+    return _result(run_hscc(COORD, "remove-worktree", project_id, task_id))
 
 
 def green_check(task_id: str):
     """Read-only readiness check before merge. Not gated."""
-    return _result(run_hscc(COORD, "green-check", task_id))
+    project_id = _resolve_project_id(task_id)
+    return _result(run_hscc(COORD, "green-check", project_id, task_id))
+
+
+def _resolve_project_id(task_id: str) -> str:
+    """Find the project_id that owns the given task_id by scanning projects."""
+    import json
+    from hscc_mcp.runner import run_hscc as r
+    res = r(PROJECTS, "show")
+    err = res.get("error", "")
+    if err:
+        return ""
+    try:
+        data = json.loads(res["stdout"]) if isinstance(res["stdout"], str) else res["stdout"]
+    except:
+        return ""
+    project = data.get("project", data if isinstance(data, dict) else {})
+    for roadmap in project.get("roadmaps", []):
+        for sp in roadmap.get("subProjects", []):
+            for task in sp.get("tasks", []):
+                if task.get("id") == task_id:
+                    return project.get("id", "")
+    return ""
