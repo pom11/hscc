@@ -59,7 +59,7 @@ All idempotent (safe to re-run). NO vLLM model provisioning — bringing models 
 1. **Skills + templates** — `hscc-skills install` (bundled skills incl. `sdlc-review`, templates → `~/.hermes/skills`).
 2. **Role profiles** — `hscc-roles generate` (build all 22 role profiles → `~/.hermes/profiles`).
 3. **`~/.hscc` state + serving.json** — create `~/.hscc/`; write `serving.json` from the detected cluster + interview answers: one `orchestrator` unit (the chosen node), one `keepalive` `worker` unit per other node, each with the chosen recipe + model + port; seed `autonomy` = off. Don't clobber an existing serving.json without `--force` (back it up).
-4. **Daemon** — install + start the launchd job `com.hermes.hscc-daemon` (monitoring + keep-alive). Verify it comes up.
+4. **Daemon** — install + start the launchd job `com.hermes.hscc_daemon` (monitoring + keep-alive). Verify it comes up.
 
 ## Output
 
