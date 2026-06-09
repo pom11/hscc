@@ -51,11 +51,11 @@ else
 fi
 
 # 4. daemon auto-start service installed? (launchd on macOS, systemd on Linux)
-DAEMON="$HOME/.hermes/plugins/hscc-daemon/hscc.py"
+DAEMON="$HOME/.hermes/plugins/hscc_daemon/hscc.py"
 if [ "$(uname -s)" = "Darwin" ]; then
-  SERVICE="$HOME/Library/LaunchAgents/com.hermes.hscc-daemon.plist"
+  SERVICE="$HOME/Library/LaunchAgents/com.hermes.hscc_daemon.plist"
 else
-  SERVICE="$HOME/.config/systemd/user/hscc-daemon.service"
+  SERVICE="$HOME/.config/systemd/user/hscc_daemon.service"
 fi
 if [ -f "$SERVICE" ]; then
   echo "daemon service present ($SERVICE)"

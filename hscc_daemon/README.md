@@ -4,7 +4,7 @@ Continuous monitoring daemon for the DGX Spark cluster. Runs a 60s cycle of heal
 
 ## Installation
 
-The daemon lives in `~/.hermes/plugins/hscc-daemon/`. No dependencies beyond Python 3.9 stdlib.
+The daemon lives in `~/.hermes/plugins/hscc_daemon/`. No dependencies beyond Python 3.9 stdlib.
 
 ## Configuration
 
@@ -32,12 +32,12 @@ Create `~/.hscc/daemon/config.json`:
 
 | Command | Description |
 |---------|-------------|
-| `hscc-daemon start` | Start daemon in foreground |
-| `hscc-daemon start --dry-run` | Run checks without executing actions |
-| `hscc-daemon stop` | Graceful shutdown (sends SIGTERM) |
-| `hscc-daemon status` | Show latest health report |
-| `hscc-daemon alerts` | List pending alerts |
-| `hscc-daemon check` | Run self-diagnostic |
+| `hscc_daemon start` | Start daemon in foreground |
+| `hscc_daemon start --dry-run` | Run checks without executing actions |
+| `hscc_daemon stop` | Graceful shutdown (sends SIGTERM) |
+| `hscc_daemon status` | Show latest health report |
+| `hscc_daemon alerts` | List pending alerts |
+| `hscc_daemon check` | Run self-diagnostic |
 
 ## Health Status Categories
 
@@ -50,7 +50,7 @@ Create `~/.hscc/daemon/config.json`:
 ## File Layout
 
 ```
-~/.hermes/plugins/hscc-daemon/
+~/.hermes/plugins/hscc_daemon/
 ├── daemon.py          # Core loop, escalator, CLI
 ├── README.md          # This file
 ├── tests/
@@ -87,4 +87,4 @@ Create `~/.hscc/daemon/config.json`:
 | `docker: not found` | Ensure docker CLI is in PATH |
 | `SSH to NAS fails` | Check host, SSH key, and network |
 | `Telegram not sending` | Verify chat_id and bot_token in config |
-| `Daemon won't start` | Run `hscc-daemon check` for self-diagnostic |
+| `Daemon won't start` | Run `hscc_daemon check` for self-diagnostic |

@@ -11,7 +11,7 @@ Background **Hermes cron job** that periodically scans running sparkrun containe
 
 ## Critical: Cron job, NOT daemon
 
-The `hscc-daemon` process does health checks only — it does **NOT** stop containers. The idle monitor is a **separate Hermes cron job** (`HSCC Model Idle Monitor`, job_id `9508e87f9729`). It calls the Python script on a schedule.
+The `hscc_daemon` process does health checks only — it does **NOT** stop containers. The idle monitor is a **separate Hermes cron job** (`HSCC Model Idle Monitor`, job_id `9508e87f9729`). It calls the Python script on a schedule.
 
 If you see containers being killed, check `cronjob action=list` — not the daemon.
 

@@ -2,11 +2,11 @@
 """HSCC Monitoring Daemon — core loop, escalator, CLI.
 
 Usage:
-  hscc-daemon start    # Run daemon in foreground
-  hscc-daemon stop     # Graceful shutdown
-  hscc-daemon status   # Show latest health report
-  hscc-daemon alerts   # Show pending alerts
-  hscc-daemon check    # Run self-diagnostic
+  hscc_daemon start    # Run daemon in foreground
+  hscc_daemon stop     # Graceful shutdown
+  hscc_daemon status   # Show latest health report
+  hscc_daemon alerts   # Show pending alerts
+  hscc_daemon check    # Run self-diagnostic
 
 State directory: ~/.hscc/daemon/
 Config file:     ~/.hscc/daemon/config.json
@@ -646,7 +646,7 @@ class Daemon:
 def cmd_status():
     """Show latest health report from status.json."""
     if not os.path.exists(STATUS_FILE):
-        print("No status file found. Run 'hscc-daemon start' first.")
+        print("No status file found. Run 'hscc_daemon start' first.")
         sys.exit(1)
 
     with open(STATUS_FILE) as f:
@@ -707,7 +707,7 @@ def cmd_telegram_send(message):
 def main():
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description=__doc__.strip(), prog="hscc-daemon"
+        description=__doc__.strip(), prog="hscc_daemon"
     )
     parser.add_argument(
         "command",

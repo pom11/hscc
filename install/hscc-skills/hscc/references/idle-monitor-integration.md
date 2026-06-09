@@ -12,7 +12,7 @@ Integrated idle monitoring directly into the HSCC daemon in two places:
 - Added `cmd_idle_monitor()` CLI command with `--dry-run` support
 - Reads `HSCC_IDLE_TIMEOUT_MINUTES` env var (default 30)
 
-### 2. Daemon (`hscc-daemon/hscc.py` + `event_driven.py`)
+### 2. Daemon (`hscc_daemon/hscc.py` + `event_driven.py`)
 - Added `check_idle_monitor()` as a new periodic check (every 5 min = 300s)
 - Added to `STREAMS` dict in `hscc.py`
 - Added to `check_map` in `_run_event_driven_daemon()`
@@ -21,9 +21,9 @@ Integrated idle monitoring directly into the HSCC daemon in two places:
 ## CRITICAL: Adding New Streams
 When adding ANY new periodic check, update THREE places:
 
-1. `hscc-daemon/hscc.py` — `STREAMS` dict
-2. `hscc-daemon/hscc.py` — `check_map` in `_run_event_driven_daemon()`
-3. `hscc-daemon/event_driven.py` — `PERIODIC_STREAMS` dict AND `STATE_STREAMS` set
+1. `hscc_daemon/hscc.py` — `STREAMS` dict
+2. `hscc_daemon/hscc.py` — `check_map` in `_run_event_driven_daemon()`
+3. `hscc_daemon/event_driven.py` — `PERIODIC_STREAMS` dict AND `STATE_STREAMS` set
 
 If you forget #3, the launchd plist won't be generated and the check won't fire.
 
