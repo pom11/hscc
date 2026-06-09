@@ -3,7 +3,8 @@
 # Re-running changes nothing once the system is in the desired state.
 # Sets the kanban/toolset/plugin config (load -> mutate -> dump, never drops
 # keys), verifies the toolset is present, warns if the default kanban assignee
-# profile is missing, and installs the daemon launchd plist if absent.
+# profile is missing, and installs the daemon auto-start service if absent
+# (launchd on macOS, systemd --user on Linux).
 set -euo pipefail
 CFG="$HOME/.hermes/config.yaml"
 
@@ -49,12 +50,17 @@ else
   echo "assignee profile present ($ASSIGNEE)"
 fi
 
-# 4. daemon launchd plist installed?
-PLIST="$HOME/Library/LaunchAgents/com.hermes.hscc-daemon.plist"
-if [ -f "$PLIST" ]; then
-  echo "daemon plist present"
+# 4. daemon auto-start service installed? (launchd on macOS, systemd on Linux)
+DAEMON="$HOME/.hermes/plugins/hscc-daemon/hscc.py"
+if [ "$(uname -s)" = "Darwin" ]; then
+  SERVICE="$HOME/Library/LaunchAgents/com.hermes.hscc-daemon.plist"
 else
-  cp "$HOME/.hermes/plugins/hscc-daemon/com.hermes.hscc-daemon.plist" "$PLIST"
-  echo "daemon plist installed"
+  SERVICE="$HOME/.config/systemd/user/hscc-daemon.service"
+fi
+if [ -f "$SERVICE" ]; then
+  echo "daemon service present ($SERVICE)"
+else
+  python3 "$DAEMON" install >/dev/null 2>&1 && echo "daemon service installed ($SERVICE)" \
+    || echo "WARNING: daemon install reported issues — run: python3 $DAEMON install"
 fi
 echo "bootstrap complete"
