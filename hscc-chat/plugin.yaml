@@ -1,0 +1,5 @@
+name: hscc-chat
+version: 1.0.0
+description: "WebSocket chat daemon — connects to the Hermes gateway for chat streaming with Ed25519 device auth, token auth, auto-reconnect, session persistence, and markdown rendering."
+author: NousResearch
+kind: backend
