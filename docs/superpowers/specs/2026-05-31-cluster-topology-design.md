@@ -149,7 +149,7 @@ or bump `max_workers` in `serving.json` → more slots immediately, no code chan
 **Step 1 — Lock:** write the current live state to `serving.json` (the schema in
 Section 1: orch-244 + worker-246/247/248, `max_workers: 4` default, tune per node).
 
-**Step 2 — Daemon (`hscc-daemon/hscc.py`):**
+**Step 2 — Daemon (`hscc_daemon/hscc.py`):**
 - `resolve_cluster_config()` also loads `serving.json`.
 - Orchestrator node set = union of `nodes` from `role==orchestrator` units →
   replaces hardcoded `PRIMARY_NODE`.

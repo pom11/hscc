@@ -4,7 +4,7 @@
 
 **Goal:** Make `~/.hscc/serving.json` the single declarative source of truth for serving topology — daemon reconciles orchestrator units + exempts their nodes from reaping + auto-updates worker base_url; coordinator routes dispatched tasks to worker units by free capacity, cold-starting nodes on demand.
 
-**Architecture:** New `serving.json` read by both the daemon (`hscc-daemon/hscc.py`) and the agent-coordinator (`hscc-agent-coordinator/hscc.py`). Both fall back to today's hardcoded behavior when the file is absent/invalid. Pure, injectable core functions (`parse_worker_units`, `pick_unit`, `orchestrator_nodes`) are unit-tested with stdlib `unittest`. Dual-layout: every active-plugin edit mirrored to `install/hscc-plugins/<p>/`.
+**Architecture:** New `serving.json` read by both the daemon (`hscc_daemon/hscc.py`) and the agent-coordinator (`hscc-agent-coordinator/hscc.py`). Both fall back to today's hardcoded behavior when the file is absent/invalid. Pure, injectable core functions (`parse_worker_units`, `pick_unit`, `orchestrator_nodes`) are unit-tested with stdlib `unittest`. Dual-layout: every active-plugin edit mirrored to `install/hscc-plugins/<p>/`.
 
 **Tech Stack:** Python 3 stdlib (json, re, os, subprocess), sparkrun CLI, hscc-provision plugin, Hermes profiles, stdlib `unittest`.
 
@@ -17,10 +17,10 @@
 - `~/.hscc/serving.json` — NEW. Declarative serving topology (the lock). Data only.
 - `hscc-agent-coordinator/hscc.py` — MODIFY. Add serving-topology read + capacity-greedy routing; keep `pick_worker_agent` as fallback.
 - `install/hscc-plugins/hscc-agent-coordinator/hscc.py` — MIRROR.
-- `hscc-daemon/hscc.py` — MODIFY. Read serving.json for orchestrator-node set (reaper exempt) + base_url auto-update; fallback to `PRIMARY_NODE`.
-- `install/hscc-plugins/hscc-daemon/hscc.py` — MIRROR.
+- `hscc_daemon/hscc.py` — MODIFY. Read serving.json for orchestrator-node set (reaper exempt) + base_url auto-update; fallback to `PRIMARY_NODE`.
+- `install/hscc-plugins/hscc_daemon/hscc.py` — MIRROR.
 - `hscc-agent-coordinator/tests/test_serving.py` — NEW. Coordinator pure-core tests.
-- `hscc-daemon/tests/test_serving.py` — NEW. Daemon pure-core tests.
+- `hscc_daemon/tests/test_serving.py` — NEW. Daemon pure-core tests.
 
 ---
 
@@ -104,14 +104,14 @@ Steps: write tests for `release_unit_slot`/`reconcile_unit_load` (bridge injecte
 
 ## Task 3: Daemon — orchestrator-node set + reaper exempt + base_url auto-update
 
-**Files:** Modify `hscc-daemon/hscc.py`; test `hscc-daemon/tests/test_serving.py`; mirror to template.
+**Files:** Modify `hscc_daemon/hscc.py`; test `hscc_daemon/tests/test_serving.py`; mirror to template.
 
 - `SERVING_JSON`, `load_serving` (same as coordinator), `orchestrator_nodes(serving) -> set[str]` (union of nodes from `role==orchestrator`), `orchestrator_head(serving) -> str|None` (`nodes[0]` of first orchestrator unit).
 - `resolve_cluster_config`: after cluster.json, if serving.json valid set module `ORCH_NODES` set + `PRIMARY_NODE = orchestrator_head` (keeps existing var meaning). Absent → `ORCH_NODES = {PRIMARY_NODE}` + loud log.
 - `check_idle_monitor`: replace `if host == PRIMARY_NODE` with `if host in ORCH_NODES`.
 - `update_worker_base_urls(head, port)`: for each `~/.hermes/profiles/worker-*/config.yaml`, if `model.base_url != http://<head>:<port>/v1` and `curl -sf http://<head>:<port>/v1/models` 200 → rewrite that line; skip+log on validation fail. Pure helper `compute_base_url_change(current, head, port)` for tests. Call once per reconcile tick.
 
-Tests: `orchestrator_nodes` union, `orchestrator_head`, `compute_base_url_change` (no-op when equal / change when differ). Run-fail, implement, run-pass, commit `feat(hscc-daemon): serving.json reconcile + worker base_url auto-update`.
+Tests: `orchestrator_nodes` union, `orchestrator_head`, `compute_base_url_change` (no-op when equal / change when differ). Run-fail, implement, run-pass, commit `feat(hscc_daemon): serving.json reconcile + worker base_url auto-update`.
 
 ## Task 4: Write the lock (serving.json) + verify fallback
 

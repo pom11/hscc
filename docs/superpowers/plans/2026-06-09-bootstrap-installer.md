@@ -476,7 +476,7 @@ fi
 
 hdr "Install: daemon"
 if $SKIP_DAEMON; then warn "skipped"; else
-  bash "$PLUGINS/hscc-daemon/launchd-setup.sh" >/dev/null 2>&1 && ok "daemon installed + started" || warn "daemon setup reported issues (run launchd-setup.sh manually)"
+  bash "$PLUGINS/hscc_daemon/launchd-setup.sh" >/dev/null 2>&1 && ok "daemon installed + started" || warn "daemon setup reported issues (run launchd-setup.sh manually)"
 fi
 
 # ── Summary ────────────────────────────────────────────────────────────────
