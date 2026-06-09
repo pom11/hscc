@@ -561,4 +561,4 @@ plugins:
 #
 # fallback_model:
 #   provider: openrouter
-#   model: anthropic/claude-sonnet-4
+#   model: <provider/model-id>
