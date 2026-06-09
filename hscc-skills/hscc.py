@@ -65,15 +65,13 @@ BUNDLED_SKILLS = [
     "test-driven-development",
     "verification-before-completion",
     "writing-plans",
-    # HSCC cluster-control skills
+    # HSCC cluster-control skills (native-Hermes-first: coordinator/events/
+    # governance/orchestrator/projects archived 2026-06-08 with their plugins;
+    # dispatch is native kanban now, cluster ops via the hscc-cluster toolset).
     "hscc",
-    "hscc-agent-coordinator",
     "hscc-cluster",
-    "hscc-events",
-    "hscc-governance",
-    "hscc-orchestrator",
-    "hscc-projects",
     "hscc-provision",
+    "hscc-model-onboard",
     # devops skill group (architecture, plugins, kanban/webhook, migration helpers)
     "devops",
 ]

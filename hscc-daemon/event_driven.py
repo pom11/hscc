@@ -51,10 +51,11 @@ PERIODIC_STREAMS = {
     "heartbeat":  60,
     "nas":        30,
     "idle":      300,  # Idle monitor
+    "workers":    60,  # Keep-alive worker models (no-op unless KEEPALIVE_NODES set)
 }
 
 # Streams that are state-driven (triggered by write_state calls)
-STATE_STREAMS = {"dgx", "gateway", "local", "heartbeat", "nas", "watchdog", "idle"}
+STATE_STREAMS = {"dgx", "gateway", "local", "heartbeat", "nas", "watchdog", "idle", "workers"}
 
 # Directory-level labels
 CONFIG_LABEL_PREFIX = "com.nousresearch.hscc-configwatch"

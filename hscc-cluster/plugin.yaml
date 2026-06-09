@@ -1,0 +1,19 @@
+name: hscc-cluster
+version: 1.0.0
+description: "DGX Spark cluster control — provision/stop/heal/diagnose vLLM models via sparkrun. Orchestrator-only toolset. Reads live truth (sparkrun status + serving.json), never stale state."
+author: NousResearch
+kind: backend
+provides_tools:
+  - cluster_status
+  - list_recipes
+  - pick_node
+  - provision_model
+  - stop_model
+  - model_health
+  - vllm_logs
+  - node_diagnostics
+  - nas_diagnose
+  - restart_model
+  - remount_nas
+  - repair_nas_export
+  - reap_orphans
