@@ -1512,6 +1512,13 @@ _worker_load_grace = {}
 # Operations topic on TRANSITIONS (down→relaunch, down→recovered) rather than
 # spamming a message every healthy tick.
 _worker_prev_health = {}
+# Consecutive failed health probes per node. A single missed /health probe is
+# almost always the node being busy serving inference (slow to answer within the
+# timeout), NOT a crash — relaunching on one miss caused false "crashed" alerts.
+# Require N consecutive failures before declaring a worker down.
+_worker_fail_streak = {}
+WORKER_HEALTH_TIMEOUT = int(os.environ.get("HSCC_WORKER_HEALTH_TIMEOUT", "8"))
+WORKER_FAIL_THRESHOLD = int(os.environ.get("HSCC_WORKER_FAIL_THRESHOLD", "2"))
 
 
 def _worker_recipe_for(node, serving):
@@ -1556,10 +1563,11 @@ def check_workers():
 
     now = datetime.datetime.now(datetime.timezone.utc)
     for node in nodes:
-        health = http_check(f"http://{node}:{VLLM_PORT}/health", timeout=5)
+        health = http_check(f"http://{node}:{VLLM_PORT}/health", timeout=WORKER_HEALTH_TIMEOUT)
         if health.get("success"):
             result["healthy"].append(node)
             _worker_load_grace.pop(node, None)  # loaded — clear grace
+            _worker_fail_streak[node] = 0       # healthy — reset failure streak
             # Notify only on recovery (was down/relaunching, now healthy).
             if _worker_prev_health.get(node) == "down":
                 notify_operations(f"✅ Worker {node} model recovered — healthy again.")
@@ -1571,6 +1579,19 @@ def check_workers():
         grace_until = _worker_load_grace.get(node)
         if grace_until and now < grace_until:
             result["loading"].append({"node": node, "grace_until": grace_until.isoformat()})
+            continue
+
+        # A single missed probe is almost always the node being busy serving
+        # inference (slow to answer /health within the timeout), NOT a crash.
+        # Require WORKER_FAIL_THRESHOLD consecutive misses before declaring the
+        # worker down — otherwise just count it and wait for the next tick.
+        streak = _worker_fail_streak.get(node, 0) + 1
+        _worker_fail_streak[node] = streak
+        if streak < WORKER_FAIL_THRESHOLD:
+            result["loading"].append({"node": node, "transient_fail": streak,
+                                      "threshold": WORKER_FAIL_THRESHOLD})
+            log(f"Worker keep-alive: {node} health miss {streak}/{WORKER_FAIL_THRESHOLD} "
+                f"(transient — busy serving?), not relaunching yet")
             continue
 
         # Down past grace (or never seen) — relaunch via the shared heal
@@ -1607,6 +1628,7 @@ def check_workers():
                     f"🔁 Worker {node} model crashed — relaunching "
                     f"({'started' if ok else 'launch FAILED'}). Loading ~5-6min.")
             _worker_prev_health[node] = "down"
+            _worker_fail_streak[node] = 0  # relaunched — grace window now governs
             # Open a load-grace window so subsequent ticks don't thrash it.
             _worker_load_grace[node] = now + datetime.timedelta(
                 minutes=VLLM_LOAD_GRACE_MINUTES)
