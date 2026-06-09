@@ -1,37 +1,45 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for the HSCC daemon launchd job. launchctl does not expand ~ or
+  $HOME, so paths must be absolute. launchd-setup.sh substitutes __HOME__ with
+  the installing user's $HOME at install time. Do not edit the installed copy
+  directly — edit this template and re-run launchd-setup.sh.
+-->
 <plist version="1.0">
 <dict>
     <!-- Unique identifier for the service -->
     <key>Label</key>
     <string>com.hermes.hscc-daemon</string>
 
-    <!-- Command to start the daemon -->
+    <!-- Command to start the daemon. 'start-daemon' runs the loop in the
+         FOREGROUND so launchd supervises it directly; 'start' would fork a child
+         and exit, leaving launchd tracking the wrong (already-exited) process. -->
     <key>ProgramArguments</key>
     <array>
         <string>/usr/local/bin/python3</string>
-        <string>/Users/desac/.hermes/plugins/hscc-daemon/hscc.py</string>
-        <string>start</string>
+        <string>__HOME__/.hermes/plugins/hscc-daemon/hscc.py</string>
+        <string>start-daemon</string>
     </array>
 
     <!-- Working directory for the daemon -->
     <key>WorkingDirectory</key>
-    <string>/Users/desac</string>
+    <string>__HOME__</string>
 
     <!-- Route stdout and stderr to a single log file -->
     <key>StandardOutPath</key>
-    <string>/Users/desac/Library/Logs/hscc-daemon.log</string>
+    <string>__HOME__/Library/Logs/hscc-daemon.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/desac/Library/Logs/hscc-daemon.log</string>
+    <string>__HOME__/Library/Logs/hscc-daemon.log</string>
 
     <!-- Environment variables -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/Users/desac/.hermes/hermes-agent/venv/bin:/opt/homebrew/bin:/Users/desac/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>__HOME__/.hermes/hermes-agent/venv/bin:/opt/homebrew/bin:__HOME__/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>HOME</key>
-        <string>/Users/desac</string>
+        <string>__HOME__</string>
         <key>PYTHONDONTWRITEBYTECODE</key>
         <string>1</string>
     </dict>

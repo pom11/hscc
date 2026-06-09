@@ -6,7 +6,7 @@
 
 **Architecture:** Hermes core ALREADY contains the review-dispatch *consumer*: `dispatch_once` spawns a review agent for any task in `status='review'` (kanban_db.py:6273-6330), force-loading the `sdlc-review` skill; `claim_review_task` transitions review→running; `has_spawnable_review` gates concurrency. What's missing is (1) a *producer* — nothing moves a task INTO `review` status — and (2) the `sdlc-review` skill itself (referenced but absent on disk). This phase supplies both, using the existing `kanban_edit` tool (which already accepts any status in VALID_STATUSES) as the status-transition mechanism — no new core transitions needed. We also REVERT Phase 2's separate-review-task creation, because in the built-in model the coder self-submits its own task to review rather than spawning a sibling review task.
 
-**Tech Stack:** Python 3 (hermes-agent core, `local-custom` branch — confirm with `git -C /Users/desac/.hermes/hermes-agent branch --show-current`), a new skill authored as a Hermes skill (`~/.hermes/skills/sdlc-review/SKILL.md` + bundled into `hscc-skills`), pytest.
+**Tech Stack:** Python 3 (hermes-agent core, `local-custom` branch — confirm with `git -C ~/.hermes/hermes-agent branch --show-current`), a new skill authored as a Hermes skill (`~/.hermes/skills/sdlc-review/SKILL.md` + bundled into `hscc-skills`), pytest.
 
 **Branch:** Core/prompt changes on `hermes-agent` `local-custom` (never pushed upstream). The skill + hscc-skills bundling go in `pom11/hscc` (pushed).
 
@@ -47,7 +47,7 @@ def test_decompose_no_longer_autopairs_reviews(monkeypatch):
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cd /Users/desac/.hermes/hermes-agent && venv/bin/python -m pytest tests/test_kanban_review_pairing.py::test_decompose_no_longer_autopairs_reviews -v`
+Run: `cd ~/.hermes/hermes-agent && venv/bin/python -m pytest tests/test_kanban_review_pairing.py::test_decompose_no_longer_autopairs_reviews -v`
 Expected: FAIL (config still has `kanban.auto_review` from Phase 2 → `_review_policy` returns a non-empty dict)
 
 - [ ] **Step 3: Remove the config + the call site**
@@ -71,13 +71,13 @@ Replace it with a one-line note (keep the functions defined, just stop calling t
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `cd /Users/desac/.hermes/hermes-agent && venv/bin/python -m pytest tests/test_kanban_review_pairing.py -v`
+Run: `cd ~/.hermes/hermes-agent && venv/bin/python -m pytest tests/test_kanban_review_pairing.py -v`
 Expected: all pass (the helper unit tests still pass — functions still exist; the new test passes because auto_review is gone from config). Also confirm decompose still imports: `venv/bin/python -c "from hermes_cli import kanban_decompose"`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/desac/.hermes/hermes-agent
+cd ~/.hermes/hermes-agent
 git branch --show-current   # local-custom
 git add hermes_cli/kanban_decompose.py tests/test_kanban_review_pairing.py
 git commit -m "refactor(kanban): use built-in review path; stop Phase-2 auto-pairing"
@@ -136,7 +136,7 @@ NOTE: adapt `create_task`/`connect`/`init_db` calls to the real signatures in ka
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cd /Users/desac/.hermes/hermes-agent && venv/bin/python -m pytest tests/test_kanban_submit_review.py -v`
+Run: `cd ~/.hermes/hermes-agent && venv/bin/python -m pytest tests/test_kanban_submit_review.py -v`
 Expected: FAIL with `AttributeError: module 'hermes_cli.kanban_db' has no attribute 'submit_review_task'`
 
 - [ ] **Step 3a: Add the transition to kanban_db.py**
@@ -208,7 +208,7 @@ Replace the line-222 instruction `kanban_block(reason="review-required: ...")` s
 - [ ] **Step 4: Run tests + checks**
 
 ```bash
-cd /Users/desac/.hermes/hermes-agent
+cd ~/.hermes/hermes-agent
 venv/bin/python -m pytest tests/test_kanban_submit_review.py -v   # 2 passed
 venv/bin/python -c "from agent.prompt_builder import KANBAN_GUIDANCE; assert 'kanban_submit_review' in KANBAN_GUIDANCE and 'review-required' not in KANBAN_GUIDANCE; print('guidance OK')"
 venv/bin/python -c "from tools import kanban_tools; from tools.registry import registry; assert 'kanban_submit_review' in registry.get_all_tool_names() or 'kanban_submit_review' in getattr(registry,'_tools',{}); print('tool registered')"
@@ -218,7 +218,7 @@ venv/bin/python -m pytest tests/ -k "kanban" -q   # no regressions in isolated k
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/desac/.hermes/hermes-agent
+cd ~/.hermes/hermes-agent
 git add hermes_cli/kanban_db.py tools/kanban_tools.py agent/prompt_builder.py tests/test_kanban_submit_review.py
 git commit -m "feat(kanban): kanban_submit_review tool + running->review transition"
 ```
@@ -291,22 +291,22 @@ gate — approve only work that is correct, tested, and matches the spec.
 
 In `plugins/hscc-skills/hscc.py`, add `"sdlc-review"` to the `BUNDLED_SKILLS` list (in the HSCC cluster-control skills section).
 
-Run: `cd /Users/desac/.hermes/plugins/hscc-skills && ../../hermes-agent/venv/bin/python -c "import hscc; assert 'sdlc-review' in hscc.BUNDLED_SKILLS; print('bundled OK')"`
+Run: `cd ~/.hermes/plugins/hscc-skills && ../../hermes-agent/venv/bin/python -c "import hscc; assert 'sdlc-review' in hscc.BUNDLED_SKILLS; print('bundled OK')"`
 
 - [ ] **Step 3: Install the skill to ~/.hermes/skills**
 
-Run: `cd /Users/desac/.hermes/plugins/hscc-skills && ../../hermes-agent/venv/bin/python hscc.py install-skills 2>&1 | tail -5`
+Run: `cd ~/.hermes/plugins/hscc-skills && ../../hermes-agent/venv/bin/python hscc.py install-skills 2>&1 | tail -5`
 Then verify: `ls ~/.hermes/skills/sdlc-review/SKILL.md` exists.
 
 - [ ] **Step 4: Verify Hermes can resolve the skill**
 
-Run: `cd /Users/desac/.hermes && hermes-agent/venv/bin/python -m hermes_cli.main skills list 2>&1 | grep -i sdlc-review`
+Run: `cd ~/.hermes && hermes-agent/venv/bin/python -m hermes_cli.main skills list 2>&1 | grep -i sdlc-review`
 Expected: shows `sdlc-review`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/desac/.hermes/plugins
+cd ~/.hermes/plugins
 git add hscc-skills/hscc.py install/hscc-skills/sdlc-review/
 git commit -m "feat(hscc-skills): add sdlc-review skill for the built-in review loop"
 git push origin main
@@ -322,12 +322,12 @@ git push origin main
 
 - [ ] **Step 1: Static wiring check — review dispatch reads our skill**
 
-Run: `cd /Users/desac/.hermes/hermes-agent && grep -n 'claimed.skills = \["sdlc-review"\]' hermes_cli/kanban_db.py`
+Run: `cd ~/.hermes/hermes-agent && grep -n 'claimed.skills = \["sdlc-review"\]' hermes_cli/kanban_db.py`
 Expected: the line exists (confirms dispatcher force-loads our now-existing skill).
 
 - [ ] **Step 2: Static wiring check — the review-status producer exists**
 
-Run: `cd /Users/desac/.hermes/hermes-agent && venv/bin/python -c "
+Run: `cd ~/.hermes/hermes-agent && venv/bin/python -c "
 from agent.prompt_builder import KANBAN_GUIDANCE
 assert 'kanban_submit_review' in KANBAN_GUIDANCE
 print('producer (worker submits to review) OK')
@@ -336,7 +336,7 @@ Expected: OK.
 
 - [ ] **Step 3: Confirm the producer transition + tool exist**
 
-Run: `cd /Users/desac/.hermes/hermes-agent && venv/bin/python -c "
+Run: `cd ~/.hermes/hermes-agent && venv/bin/python -c "
 from hermes_cli.kanban_db import VALID_STATUSES, submit_review_task
 from tools import kanban_tools  # registers the tool
 assert 'review' in VALID_STATUSES
@@ -355,7 +355,7 @@ Write a short note (in the commit message / session) describing the manual end-t
 - [ ] **Step 5: Final commit (docs/note only)**
 
 ```bash
-cd /Users/desac/.hermes/plugins
+cd ~/.hermes/plugins
 git add docs/superpowers/plans/2026-06-09-reviewer-loop-phase3.md
 git commit -m "docs: Phase 3 reviewer-loop plan + manual e2e steps"
 git push origin main

@@ -51,7 +51,7 @@ In `~/.hermes/config.yaml`, the current block is:
 hooks:
   pre_tool_call:
   - matcher: terminal
-    command: python3 /Users/desac/.hermes/hooks/route-guard.py
+    command: python3 ~/.hermes/hooks/route-guard.py
     timeout: 5
 ```
 Replace it with:
@@ -89,7 +89,7 @@ Leave the "Brevity contract" and "Safety" sections unchanged.
 
 Run:
 ```bash
-/Users/desac/.hermes/hermes-agent/venv/bin/python -c "import yaml; yaml.safe_load(open('/Users/desac/.hermes/config.yaml')); print('YAML OK')"
+~/.hermes/hermes-agent/venv/bin/python -c "import yaml; yaml.safe_load(open('~/.hermes/config.yaml')); print('YAML OK')"
 ```
 Expected: `YAML OK`
 
@@ -201,7 +201,7 @@ def test_run_hscc_timeout_returns_error_dict_not_raises():
 
 Run:
 ```bash
-cd ~/.hermes/plugins/hscc-mcp && /Users/desac/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_runner.py -v
+cd ~/.hermes/plugins/hscc-mcp && ~/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_runner.py -v
 ```
 Expected: FAIL — `ModuleNotFoundError: No module named 'hscc_mcp'` / `runner`.
 
@@ -301,7 +301,7 @@ def run_hscc(plugin: str, *args: str, timeout: int = DEFAULT_TIMEOUT) -> dict:
 
 Run:
 ```bash
-cd ~/.hermes/plugins/hscc-mcp && /Users/desac/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_runner.py -v
+cd ~/.hermes/plugins/hscc-mcp && ~/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_runner.py -v
 ```
 Expected: 4 passed.
 
@@ -372,7 +372,7 @@ _load("tools", "tools.py")
 
 Run:
 ```bash
-cd ~/.hermes/plugins/hscc-mcp && /Users/desac/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_tools.py -v
+cd ~/.hermes/plugins/hscc-mcp && ~/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_tools.py -v
 ```
 Expected: FAIL — no module `tools` / attribute errors.
 
@@ -421,7 +421,7 @@ def task_status(task_id: str):
 
 Run:
 ```bash
-cd ~/.hermes/plugins/hscc-mcp && /Users/desac/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_tools.py -v
+cd ~/.hermes/plugins/hscc-mcp && ~/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_tools.py -v
 ```
 Expected: 4 passed.
 
@@ -468,7 +468,7 @@ def test_dispatch_task_passes_task_id_only():
 
 Run:
 ```bash
-cd ~/.hermes/plugins/hscc-mcp && /Users/desac/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_tools.py -k "create or task_add or dispatch" -v
+cd ~/.hermes/plugins/hscc-mcp && ~/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_tools.py -k "create or task_add or dispatch" -v
 ```
 Expected: FAIL — attributes not defined.
 
@@ -492,7 +492,7 @@ def dispatch_task(task_id: str):
 
 Run:
 ```bash
-cd ~/.hermes/plugins/hscc-mcp && /Users/desac/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_tools.py -v
+cd ~/.hermes/plugins/hscc-mcp && ~/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_tools.py -v
 ```
 Expected: all passed.
 
@@ -566,7 +566,7 @@ def test_remove_worktree_refuses_without_confirm():
 
 Run:
 ```bash
-cd ~/.hermes/plugins/hscc-mcp && /Users/desac/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_tools.py -k "release or cancel or merge or green or remove" -v
+cd ~/.hermes/plugins/hscc-mcp && ~/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_tools.py -k "release or cancel or merge or green or remove" -v
 ```
 Expected: FAIL — attributes not defined.
 
@@ -626,7 +626,7 @@ def green_check(task_id: str):
 
 Run:
 ```bash
-cd ~/.hermes/plugins/hscc-mcp && /Users/desac/.hermes/hermes-agent/venv/bin/python -m pytest tests/ -v
+cd ~/.hermes/plugins/hscc-mcp && ~/.hermes/hermes-agent/venv/bin/python -m pytest tests/ -v
 ```
 Expected: all passed (runner + tools).
 
@@ -767,9 +767,9 @@ if __name__ == "__main__":
 
 Run:
 ```bash
-/Users/desac/.hermes/hermes-agent/venv/bin/python -c "
+~/.hermes/hermes-agent/venv/bin/python -c "
 import importlib.util, sys
-spec = importlib.util.spec_from_file_location('srv', '/Users/desac/.hermes/plugins/hscc-mcp/server.py')
+spec = importlib.util.spec_from_file_location('srv', '~/.hermes/plugins/hscc-mcp/server.py')
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 names = [t.name for t in __import__('asyncio').get_event_loop().run_until_complete(m.mcp.list_tools())]
 print(sorted(names))
@@ -777,7 +777,7 @@ print(sorted(names))
 ```
 Expected: a sorted list containing `hscc_cluster_status`, `hscc_dispatch_task`, `hscc_release_task`, `hscc_merge_worktree`, etc. (12 tools). If the asyncio one-liner is awkward, instead just assert import succeeds:
 ```bash
-/Users/desac/.hermes/hermes-agent/venv/bin/python -c "import importlib.util; s=importlib.util.spec_from_file_location('srv','/Users/desac/.hermes/plugins/hscc-mcp/server.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print('server import OK, mcp name:', m.mcp.name)"
+~/.hermes/hermes-agent/venv/bin/python -c "import importlib.util; s=importlib.util.spec_from_file_location('srv','~/.hermes/plugins/hscc-mcp/server.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print('server import OK, mcp name:', m.mcp.name)"
 ```
 Expected: `server import OK, mcp name: hscc`
 
@@ -785,9 +785,9 @@ Expected: `server import OK, mcp name: hscc`
 
 Run (this actually shells out to the real plugin — read-only, safe):
 ```bash
-/Users/desac/.hermes/hermes-agent/venv/bin/python -c "
+~/.hermes/hermes-agent/venv/bin/python -c "
 import importlib.util,sys
-s=importlib.util.spec_from_file_location('srv','/Users/desac/.hermes/plugins/hscc-mcp/server.py')
+s=importlib.util.spec_from_file_location('srv','~/.hermes/plugins/hscc-mcp/server.py')
 m=importlib.util.module_from_spec(s); s.loader.exec_module(m)
 import json; print(json.dumps(m.tools.fleet_activity())[:300])
 "
@@ -814,9 +814,9 @@ In `~/.hermes/config.yaml`, add a top-level block (there is no existing `mcp_ser
 ```yaml
 mcp_servers:
   hscc:
-    command: /Users/desac/.hermes/hermes-agent/venv/bin/python
+    command: ~/.hermes/hermes-agent/venv/bin/python
     args:
-    - /Users/desac/.hermes/plugins/hscc-mcp/server.py
+    - ~/.hermes/plugins/hscc-mcp/server.py
     timeout: 60
 ```
 
@@ -824,7 +824,7 @@ mcp_servers:
 
 Run:
 ```bash
-/Users/desac/.hermes/hermes-agent/venv/bin/python -c "import yaml; c=yaml.safe_load(open('/Users/desac/.hermes/config.yaml')); print('hscc' in c.get('mcp_servers',{}))"
+~/.hermes/hermes-agent/venv/bin/python -c "import yaml; c=yaml.safe_load(open('~/.hermes/config.yaml')); print('hscc' in c.get('mcp_servers',{}))"
 ```
 Expected: `True`
 

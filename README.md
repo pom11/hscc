@@ -4,11 +4,28 @@
 
 # HSCC — Hermes Spark Cluster Control
 
-**Private installation package for running a specialized, autonomous AI agent fleet on a DGX Spark GPU cluster.**
+**Turn a DGX Spark GPU cluster into a self-running team of specialized AI agents.**
 
-HSCC is the operational backbone for a cluster of DGX Spark (GB10 / Grace-Blackwell, `sm_121a`) nodes serving LLMs via vLLM and orchestrated by [Hermes](https://github.com/NousResearch/hermes-agent) agents. It is a set of pure-stdlib Python plugins that live in `~/.hermes/plugins/` (this repo), with runtime state in `~/.hscc/`.
+HSCC is the operational backbone that lets you say *"build X"* in chat and have a fleet of role-specialized agents brainstorm it, decompose it into tasks, write the code, review it, and land it — across multiple GPU nodes, hands-off.
+
+It runs on a cluster of DGX Spark (GB10 / Grace-Blackwell, `sm_121a`) nodes serving LLMs via vLLM, orchestrated by [Hermes](https://github.com/NousResearch/hermes-agent) agents. HSCC is a set of pure-stdlib Python plugins that install into `~/.hermes/plugins/`, with runtime state in `~/.hscc/`.
 
 The design is **native-Hermes-first**: agent work runs on Hermes' built-in kanban dispatcher + git worktrees. HSCC contributes the thin physical layer (cluster control, monitoring, model lifecycle) plus a role framework that turns the fleet into specialized, self-extending workers.
+
+## Why HSCC
+
+- **A whole org, not one bot** — 22+ role profiles (architect, coder, reviewer, QA, and a full business roster), each with its own identity, skills, and disposition. New roles are minted on demand.
+- **Autonomous quality** — code is gated by a reviewer agent (diff + tests + spec) before it lands on an integration branch; main stays human-gated.
+- **Hands-off when you want it** — flip autonomy on (or just say "do it autonomously") and the fleet runs idea→shipped without babysitting.
+- **Spreads across your GPUs** — work dispatches to worker nodes that are health-monitored and kept alive automatically.
+- **Portable** — one bootstrap command detects your cluster and installs everything; no hardcoded topology.
+
+## Requirements
+
+- A configured [sparkrun](https://github.com/) DGX Spark cluster (one or more GB10 nodes)
+- [Hermes](https://github.com/NousResearch/hermes-agent) installed (`~/.hermes/hermes-agent`)
+- macOS host for the launchd-managed daemon; Python 3 (stdlib only)
+- Optional: a NAS for the offline model cache
 
 ---
 
@@ -113,3 +130,7 @@ Saying *"do it autonomously"* flips it on: the orchestrator writes a best-judgme
 - State is read from live sources (`sparkrun status`, `serving.json`), never stale caches.
 - "Strip/archive" means move to `_archive/<date>/`, never delete.
 - Restart the gateway after prompt/plugin/config edits: `launchctl kickstart -k gui/$UID/ai.hermes.gateway`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

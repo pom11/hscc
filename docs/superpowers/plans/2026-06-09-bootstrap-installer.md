@@ -84,7 +84,7 @@ def test_no_clusters_returns_none():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/desac/.hermes/plugins/hscc-bootstrap && ../../hermes-agent/venv/bin/python -m pytest tests/test_detect.py -v`
+Run: `cd ~/.hermes/plugins/hscc-bootstrap && ../../hermes-agent/venv/bin/python -m pytest tests/test_detect.py -v`
 Expected: FAIL `ModuleNotFoundError: No module named 'detect'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -139,13 +139,13 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd /Users/desac/.hermes/plugins/hscc-bootstrap && ../../hermes-agent/venv/bin/python -m pytest tests/test_detect.py -v`
+Run: `cd ~/.hermes/plugins/hscc-bootstrap && ../../hermes-agent/venv/bin/python -m pytest tests/test_detect.py -v`
 Expected: PASS (4 passed)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/desac/.hermes/plugins
+cd ~/.hermes/plugins
 git add hscc-bootstrap/detect.py hscc-bootstrap/tests/conftest.py hscc-bootstrap/tests/test_detect.py
 git commit -m "feat(hscc-bootstrap): sparkrun cluster detection helper"
 ```
@@ -201,7 +201,7 @@ def test_keepalive_false_omits_flag():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/desac/.hermes/plugins/hscc-bootstrap && ../../hermes-agent/venv/bin/python -m pytest tests/test_serving_gen.py -v`
+Run: `cd ~/.hermes/plugins/hscc-bootstrap && ../../hermes-agent/venv/bin/python -m pytest tests/test_serving_gen.py -v`
 Expected: FAIL `ModuleNotFoundError: No module named 'serving_gen'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -248,13 +248,13 @@ def build_serving(cluster, *, orchestrator, recipe, model, port=8000, keepalive=
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd /Users/desac/.hermes/plugins/hscc-bootstrap && ../../hermes-agent/venv/bin/python -m pytest tests/test_serving_gen.py -v`
+Run: `cd ~/.hermes/plugins/hscc-bootstrap && ../../hermes-agent/venv/bin/python -m pytest tests/test_serving_gen.py -v`
 Expected: PASS (3 passed)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/desac/.hermes/plugins
+cd ~/.hermes/plugins
 git add hscc-bootstrap/serving_gen.py hscc-bootstrap/tests/test_serving_gen.py
 git commit -m "feat(hscc-bootstrap): serving.json generator from detected cluster"
 ```
@@ -295,7 +295,7 @@ def test_list_recipes_finds_yaml(tmp_path):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/desac/.hermes/plugins/hscc-bootstrap && ../../hermes-agent/venv/bin/python -m pytest tests/test_detect.py -v`
+Run: `cd ~/.hermes/plugins/hscc-bootstrap && ../../hermes-agent/venv/bin/python -m pytest tests/test_detect.py -v`
 Expected: FAIL `AttributeError: module 'detect' has no attribute 'recipe_model'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -336,13 +336,13 @@ def recipe_model(recipe_path):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd /Users/desac/.hermes/plugins/hscc-bootstrap && ../../hermes-agent/venv/bin/python -m pytest tests/test_detect.py -v`
+Run: `cd ~/.hermes/plugins/hscc-bootstrap && ../../hermes-agent/venv/bin/python -m pytest tests/test_detect.py -v`
 Expected: PASS (7 passed)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/desac/.hermes/plugins
+cd ~/.hermes/plugins
 git add hscc-bootstrap/detect.py hscc-bootstrap/tests/test_detect.py
 git commit -m "feat(hscc-bootstrap): recipe discovery + model resolution"
 ```
@@ -488,14 +488,14 @@ say "Start Hermes gateway if not running, then message it to dispatch work."
 
 - [ ] **Step 2: Syntax-check the script**
 
-Run: `bash -n /Users/desac/.hermes/plugins/hscc-bootstrap/bootstrap.sh && echo "bash syntax OK"`
+Run: `bash -n ~/.hermes/plugins/hscc-bootstrap/bootstrap.sh && echo "bash syntax OK"`
 Expected: `bash syntax OK`
 
 - [ ] **Step 3: Dry verify the helpers the script calls (no install side effects)**
 
 Run:
 ```bash
-cd /Users/desac/.hermes/plugins/hscc-bootstrap
+cd ~/.hermes/plugins/hscc-bootstrap
 ../../hermes-agent/venv/bin/python detect.py   # prints the detected cluster JSON
 ../../hermes-agent/venv/bin/python -c "import sys;sys.path.insert(0,'.');import detect,serving_gen;cl=detect.detect_cluster();print(serving_gen.build_serving(cl,orchestrator=cl['hosts'][0],recipe='r',model='m',port=8000,keepalive=True))"
 ```
@@ -503,13 +503,13 @@ Expected: prints the live cluster + a serving.json structure with one orchestrat
 
 - [ ] **Step 4: Run the full unit suite**
 
-Run: `cd /Users/desac/.hermes/plugins/hscc-bootstrap && ../../hermes-agent/venv/bin/python -m pytest tests/ -q`
+Run: `cd ~/.hermes/plugins/hscc-bootstrap && ../../hermes-agent/venv/bin/python -m pytest tests/ -q`
 Expected: all green (4 detect + 3 recipe + 3 serving_gen = 10).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/desac/.hermes/plugins
+cd ~/.hermes/plugins
 git add hscc-bootstrap/bootstrap.sh
 git commit -m "feat(hscc-bootstrap): rewrite as preflight-gated topology-detecting installer"
 ```
@@ -522,7 +522,7 @@ git commit -m "feat(hscc-bootstrap): rewrite as preflight-gated topology-detecti
 
 - [ ] **Step 1: Run bootstrap on this machine, non-interactive, no force**
 
-Run: `cd /Users/desac/.hermes/plugins/hscc-bootstrap && bash bootstrap.sh --yes`
+Run: `cd ~/.hermes/plugins/hscc-bootstrap && bash bootstrap.sh --yes`
 Expected: prereqs pass; detects the live cluster; installs skills + roles (idempotent — already present); keeps existing serving.json (no --force); daemon already running. Staged report ends with "Done". No errors.
 
 - [ ] **Step 2: Confirm it did not clobber the working serving.json**
@@ -534,7 +534,7 @@ Expected: orchestrator .244 + worker .246/.247/.248 unchanged.
 
 The repo keeps a template copy under `install/hscc-plugins/hscc-bootstrap/`. Sync the new files so the packaged installer matches:
 ```bash
-cd /Users/desac/.hermes/plugins
+cd ~/.hermes/plugins
 mkdir -p install/hscc-plugins/hscc-bootstrap
 cp hscc-bootstrap/bootstrap.sh hscc-bootstrap/detect.py hscc-bootstrap/serving_gen.py install/hscc-plugins/hscc-bootstrap/ 2>/dev/null || true
 ```
@@ -543,7 +543,7 @@ cp hscc-bootstrap/bootstrap.sh hscc-bootstrap/detect.py hscc-bootstrap/serving_g
 - [ ] **Step 4: Commit + push**
 
 ```bash
-cd /Users/desac/.hermes/plugins
+cd ~/.hermes/plugins
 git add hscc-bootstrap/ install/hscc-plugins/hscc-bootstrap/ 2>/dev/null
 git commit -m "chore(hscc-bootstrap): sync install template + verified live run"
 git push origin main

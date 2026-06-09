@@ -28,7 +28,7 @@ Live state is under `~/.hscc/` (override with the `HSCC_HOME` env var):
       "name": "Builder",
       "role": "developer",
       "model": "Qwen/Qwen3.6-35B-A3B-FP8",
-      "workspace": "/Users/desac/projects/example-repo",
+      "workspace": "~/projects/example-repo",
       "node": "192.0.2.11",
       "current_task_id": "task-001",
       "status": "idle",

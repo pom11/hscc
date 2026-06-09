@@ -12,7 +12,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLIST_NAME="com.hermes.hscc-daemon.plist"
-PLIST_LOCAL="${SCRIPT_DIR}/${PLIST_NAME}"
+PLIST_TEMPLATE="${SCRIPT_DIR}/${PLIST_NAME}.template"
 LAUNCH_DIR="$HOME/Library/LaunchAgents"
 LAUNCH_PLIST="${LAUNCH_DIR}/${PLIST_NAME}"
 LABEL="com.hermes.hscc-daemon"
@@ -30,8 +30,8 @@ error() { echo -e "${RED}[ERROR]${NC} $*"; }
 
 # ── Pre-flight checks ──────────────────────────────────────────────────────
 
-if [[ ! -f "${PLIST_LOCAL}" ]]; then
-    error "Plist not found at ${PLIST_LOCAL}"
+if [[ ! -f "${PLIST_TEMPLATE}" ]]; then
+    error "Plist template not found at ${PLIST_TEMPLATE}"
     exit 1
 fi
 
@@ -52,8 +52,10 @@ if [[ "${1:-}" == "force" ]]; then
     launchctl bootout "gui/$UID/${LABEL}" 2>/dev/null || true
 fi
 
-if [[ "${LAUNCH_PLIST}" != "${PLIST_LOCAL}" ]]; then
-    cp -f "${PLIST_LOCAL}" "${LAUNCH_PLIST}"
+if true; then
+    # Substitute __HOME__ with the installing user's $HOME (launchctl does not
+    # expand ~ or $HOME), generating the real plist from the template.
+    sed "s|__HOME__|${HOME}|g" "${PLIST_TEMPLATE}" > "${LAUNCH_PLIST}"
     info "Installed plist to ${LAUNCH_PLIST}"
 else
     info "Plist already up to date at ${LAUNCH_PLIST}"
