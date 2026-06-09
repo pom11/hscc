@@ -20,3 +20,5 @@ def test_compose_soul_orchestrator_skips_worker_ops():
     soul = generator.compose_soul(spec, base_identity="BASE")
     # Orchestrator is not a kanban worker — must NOT claim to run in a worktree.
     assert "your own git worktree" not in soul.lower()
+    # ...but it MUST get its own gateway/authority operational block.
+    assert "gateway node" in soul.lower()
