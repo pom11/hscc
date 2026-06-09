@@ -8,6 +8,7 @@ Commands:
   create <name> <desc...>  Author a new role spec from a description
   list                     List role specs and whether their profile exists
   validate                 Validate every role spec (load + required fields)
+  autonomy [on|off]        Show or set the fleet autonomy flag
 """
 import os
 import sys
@@ -16,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rolelib
 import generator
 import author
+import autonomy
 
 
 def _base_identity():
@@ -68,6 +70,13 @@ def cmd_validate():
     return 1 if errs else 0
 
 
+def cmd_autonomy(argv):
+    if argv:
+        autonomy.set_state(argv[0])
+    print({"autonomy": "on" if autonomy.is_on() else "off"})
+    return 0
+
+
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
         print(__doc__)
@@ -81,6 +90,8 @@ def main():
         return cmd_list()
     if cmd == "validate":
         return cmd_validate()
+    if cmd == "autonomy":
+        return cmd_autonomy(sys.argv[2:])
     print(f"Unknown command: {cmd}")
     print(__doc__)
     return 1
