@@ -1,10 +1,22 @@
-# Runtime data
+# Runtime data — machine-specific state, never source
 events.jsonl
 agent-workspaces/
 *.jsonl
+agents.json
+projects.json
+serving.json
+vllm.json
+cluster.json
+cluster-manifest.json
+setup.json
+plugin-state/
 
-# Sensitive files
+# Sensitive files — credentials / private machine data
 hf_token
+setup.json
+*password*
+*secret*
+*.token
 
 # Version tracking
 VERSION
