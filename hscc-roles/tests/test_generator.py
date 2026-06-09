@@ -35,10 +35,12 @@ def test_generate_profile_writes_files(tmp_path, monkeypatch):
     pdir = os.path.join(str(tmp_path / "profiles"), "coder")
     assert os.path.isdir(pdir)
     assert os.path.exists(os.path.join(pdir, "SOUL.md"))
-    cfg = yaml.safe_load(open(os.path.join(pdir, "config.yaml")))
+    with open(os.path.join(pdir, "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
     assert "hscc-cluster" not in cfg["toolsets"]
     assert "hermes-cli" in cfg["toolsets"]
-    prof = yaml.safe_load(open(os.path.join(pdir, "profile.yaml")))
+    with open(os.path.join(pdir, "profile.yaml")) as f:
+        prof = yaml.safe_load(f)
     assert prof["description_auto"] is False
     assert changed is True  # first write reports changed
 
