@@ -69,7 +69,8 @@ def test_provision_requires_confirm(monkeypatch):
 def test_provision_auto_node_uses_pick(monkeypatch):
     monkeypatch.setattr(ops, "_running_by_node", lambda: {"192.0.2.11": "x"})
     out = ops.provision_model({"recipe": "r", "node": "auto"})
-    assert "192.0.2.24" in out["would_do"]   # preview names a chosen node
+    # .11 busy -> first idle worker is .12 (pick_node returns idle[0])
+    assert "192.0.2.12" in out["would_do"]   # preview names the chosen idle node
 
 def test_provision_executes_with_confirm(monkeypatch):
     monkeypatch.setattr(ops, "_running_by_node", lambda: {})
