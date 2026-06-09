@@ -1,0 +1,5 @@
+# HSCC — Hermes Spark Cluster Control
+# Third-party dependencies for active plugins (hscc-* top-level dirs only).
+# install/ and _archive/ plugins are not loaded at runtime.
+
+PyYAML>=6.0
