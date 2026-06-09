@@ -26,13 +26,13 @@ gateway:
   port: 18789
 
 daemon:
-  auto_start: true              # Use launchd for auto-start
+  auto_start: true              # Auto-start via launchd (macOS) / systemd --user (Linux)
   poll_interval: 5              # Minimum poll interval in seconds
-  log_path: ~/Library/Logs/hscc-daemon.log
+  log_path: ~/.hscc/daemon.log
 
 logging:
   level: info                   # debug, info, warn, error
-  path: ~/Library/Logs/hscc-daemon.log
+  path: ~/.hscc/daemon.log
 
 skills:
   install_dir: ~/.hermes/skills

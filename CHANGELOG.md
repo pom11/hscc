@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2026.06.09.1-alpha] — Linux compatibility
+
+The control daemon now runs on Linux, not just macOS. The agent fleet was
+always Linux (Spark nodes); this closes the gaps in the host-side daemon.
+
+### Added
+- **systemd --user service** as the Linux auto-start mechanism, mirroring the
+  macOS launchd plist. `install`/`uninstall`/`plist` now dispatch by platform,
+  with a plain backgrounded process as a last-resort fallback.
+- `hscc-daemon/systemd-setup.sh` — Linux counterpart to `launchd-setup.sh`
+  (installs the unit, enables linger, verifies status).
+- Linux desktop notifications via `notify-send` (libnotify), alongside macOS
+  osascript; both fall back to `~/.hscc/notifications.json` when headless.
+
+### Changed
+- Gateway liveness probe is platform-aware (launchd / `systemctl --user` /
+  process match) instead of launchctl-only — fixes the gateway always reading
+  "down" on Linux.
+- Host system info detects the OS (reads `/etc/os-release` on Linux) instead of
+  hard-coding macOS.
+- Bootstrap scripts pick launchd vs systemd by `uname`; daemon log path in the
+  config template moved from `~/Library/Logs/` to `~/.hscc/`.
+
 ## [2026.06.09-alpha] — Final Alpha
 
 Major refactor to native-Hermes-first + a specialized autonomous agent fleet.
