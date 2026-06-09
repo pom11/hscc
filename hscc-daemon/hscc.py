@@ -37,6 +37,10 @@ import datetime
 import collections
 import shutil
 import re
+import glob
+import ssl
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 # ── Event-Driven Mode ───────────────────────────────────────────────────────
@@ -86,6 +90,81 @@ HSCC_DIR = os.path.expanduser("~/.hscc")
 STATE_DIR = os.path.join(HSCC_DIR, "state")
 PID_FILE = os.path.join(HSCC_DIR, "daemon.pid")
 LOG_FILE = os.path.join(HSCC_DIR, "daemon.log")
+
+# ── Operations-topic Telegram notify ─────────────────────────────────────────
+# The daemon posts cluster events (worker model crash/relaunch/recovery) to the
+# "Operations" Telegram topic. Token lives ONLY in ~/.hermes/.env (never logged).
+# Chat + thread default to the Operations topic; override via env.
+ENV_FILE = os.path.expanduser("~/.hermes/.env")
+OPS_CHAT_ID = os.environ.get("HSCC_OPS_CHAT_ID", "0")
+OPS_THREAD_ID = os.environ.get("HSCC_OPS_THREAD_ID", "140")  # Operations topic
+TELEGRAM_NOTIFY_TIMEOUT = 10
+
+
+def _env_file_value(key, path=ENV_FILE):
+    """Return the last non-empty `key=value` from ~/.hermes/.env, or None.
+
+    The bot token may be duplicated across lines; last non-empty wins. The
+    value is never printed or logged — only used to authenticate the API call.
+    """
+    value = None
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                if k.strip() == key:
+                    v = v.strip().strip('"').strip("'")
+                    if v:
+                        value = v
+    except (FileNotFoundError, OSError):
+        return None
+    return value
+
+
+def _telegram_ssl_context():
+    """SSL context using a CA bundle that verifies api.telegram.org on this host.
+
+    The daemon's stdlib Python default trust store can reject the chain; the
+    certifi bundle in the Hermes venv verifies cleanly. Verification stays ON.
+    """
+    candidates = [os.environ.get("SSL_CERT_FILE"), os.environ.get("REQUESTS_CA_BUNDLE")]
+    candidates += glob.glob(os.path.expanduser(
+        "~/.hermes/hermes-agent/venv/lib/python*/site-packages/certifi/cacert.pem"))
+    for ca in candidates:
+        if ca and os.path.exists(ca):
+            try:
+                return ssl.create_default_context(cafile=ca)
+            except Exception:
+                continue
+    return ssl.create_default_context()
+
+
+def notify_operations(text):
+    """Post a message to the Operations Telegram topic. Returns True on success.
+
+    Best-effort: missing token or any network error is swallowed (the daemon
+    must never crash on a failed notification). Token read from ~/.hermes/.env.
+    """
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN")
+             or _env_file_value("TELEGRAM_BOT_TOKEN"))
+    if not token or not OPS_CHAT_ID:
+        return False
+    payload = {"chat_id": OPS_CHAT_ID, "text": text}
+    if OPS_THREAD_ID:
+        payload["message_thread_id"] = OPS_THREAD_ID
+    data = urllib.parse.urlencode(payload).encode()
+    url = "https://api.telegram.org/bot%s/sendMessage" % token
+    req = urllib.request.Request(url, data=data, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=TELEGRAM_NOTIFY_TIMEOUT,
+                                    context=_telegram_ssl_context()) as resp:
+            return 200 <= resp.status < 300
+    except Exception as e:
+        log(f"Operations notify failed: {e}", "WARN")
+        return False
 PLIST_DIR = os.path.expanduser("~/Library/LaunchAgents")
 PLIST_FILE = os.path.join(PLIST_DIR, "com.hermes.hscc-daemon.plist")
 
@@ -1429,6 +1508,10 @@ def check_idle_monitor():
 # attempts until this deadline so a mid-load node is not thrashed. Mirrors the
 # orchestrator's VLLM_LOAD_GRACE_MINUTES window in pipeline_watchdog.
 _worker_load_grace = {}
+# Last-seen health per worker node ("up"/"down"/None), so we only notify the
+# Operations topic on TRANSITIONS (down→relaunch, down→recovered) rather than
+# spamming a message every healthy tick.
+_worker_prev_health = {}
 
 
 def _worker_recipe_for(node, serving):
@@ -1477,6 +1560,10 @@ def check_workers():
         if health.get("success"):
             result["healthy"].append(node)
             _worker_load_grace.pop(node, None)  # loaded — clear grace
+            # Notify only on recovery (was down/relaunching, now healthy).
+            if _worker_prev_health.get(node) == "down":
+                notify_operations(f"✅ Worker {node} model recovered — healthy again.")
+            _worker_prev_health[node] = "up"
             continue
 
         # Unhealthy. If inside a load-grace window, the model is still loading —
@@ -1492,11 +1579,17 @@ def check_workers():
         # never the global VLLM_RECIPE (that's the orchestrator's, may differ).
         if cluster_heal is None:
             result["errors"].append(f"{node}: cluster_heal unavailable, cannot relaunch")
+            if _worker_prev_health.get(node) != "down":
+                notify_operations(f"⚠️ Worker {node} model DOWN — cannot relaunch (heal primitive unavailable).")
+            _worker_prev_health[node] = "down"
             continue
         recipe = _worker_recipe_for(node, serving)
         if not recipe:
             result["errors"].append(f"{node}: no worker recipe in serving.json, skipping relaunch")
             log(f"Worker keep-alive: {node} has no recipe in serving.json — skipping", "ERROR")
+            if _worker_prev_health.get(node) != "down":
+                notify_operations(f"⚠️ Worker {node} model DOWN — no recipe in serving.json, not relaunching.")
+            _worker_prev_health[node] = "down"
             continue
         try:
             res = cluster_heal.restart_model({
@@ -1508,12 +1601,21 @@ def check_workers():
             result["relaunched"].append({"node": node, "ok": ok})
             log(f"Worker keep-alive: relaunched {node} model (ok={ok})",
                 "INFO" if ok else "ERROR")
+            # Notify on the down→relaunch transition (once, not every tick).
+            if _worker_prev_health.get(node) != "down":
+                notify_operations(
+                    f"🔁 Worker {node} model crashed — relaunching "
+                    f"({'started' if ok else 'launch FAILED'}). Loading ~5-6min.")
+            _worker_prev_health[node] = "down"
             # Open a load-grace window so subsequent ticks don't thrash it.
             _worker_load_grace[node] = now + datetime.timedelta(
                 minutes=VLLM_LOAD_GRACE_MINUTES)
         except Exception as e:
             result["errors"].append(f"{node}: relaunch failed ({e})")
             log(f"Worker keep-alive: relaunch {node} failed: {e}", "ERROR")
+            if _worker_prev_health.get(node) != "down":
+                notify_operations(f"❌ Worker {node} model relaunch errored: {e}")
+            _worker_prev_health[node] = "down"
 
     if result["relaunched"] or result["errors"]:
         log(f"Worker keep-alive: {len(result['healthy'])} healthy, "
