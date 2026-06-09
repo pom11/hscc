@@ -48,3 +48,19 @@ def test_load_spec_defaults_preload_skills_empty(tmp_path):
     spec_file.write_text("name: x\nidentity: hi\n")
     spec = rolelib.load_spec(str(spec_file))
     assert spec["preload_skills"] == []
+
+
+def test_list_spec_files_empty_when_no_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(rolelib, "ROLES_DIR", str(tmp_path / "nonexistent"))
+    assert rolelib.list_spec_files() == []
+
+
+def test_list_spec_files_returns_sorted_yaml(tmp_path, monkeypatch):
+    monkeypatch.setattr(rolelib, "ROLES_DIR", str(tmp_path))
+    (tmp_path / "z.yaml").touch()
+    (tmp_path / "a.yaml").touch()
+    (tmp_path / "ignore.txt").touch()
+    files = rolelib.list_spec_files()
+    assert len(files) == 2
+    assert files[0].endswith("a.yaml")
+    assert files[1].endswith("z.yaml")
