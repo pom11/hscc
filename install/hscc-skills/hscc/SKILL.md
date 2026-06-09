@@ -48,7 +48,7 @@ Onboarding a NEW model/quant cluster-wide (recipe + offline NAS→node cache + w
 
 ## Daemon (hscc-daemon)
 
-Only continuous process. Live code: `~/.hermes/plugins/hscc-daemon/hscc.py` (run `start-daemon` foreground under launchd `com.hermes.hscc-daemon`). Polling streams write `~/.hscc/state/*.json`; a trigger engine evaluates `~/.hscc/events.jsonl`. Notifications are macOS-osascript + `events.jsonl` only — the daemon does **not** post to Telegram.
+Only continuous process. Live code: `~/.hermes/plugins/hscc-daemon/hscc.py` (run `start-daemon` foreground under launchd `com.hermes.hscc-daemon`). Polling streams write `~/.hscc/state/*.json`; a trigger engine evaluates `~/.hscc/events.jsonl`. Notifications are cross-platform desktop (macOS osascript / Linux notify-send, falling back to `~/.hscc/notifications.json` when neither is available) + `events.jsonl` — the daemon does **not** post to Telegram.
 
 - **Daemon health check**: `ps aux | grep hscc-daemon | grep -v grep` — `launchctl list | grep hscc` exit code is often STALE (`-9` while running). Trust the process list + `hscc.py status`.
 - **Daemon node resolution**: resolves `PRIMARY_NODE` (=gateway .244, runs the orchestrator vLLM) / `NAS_HOST` from `cluster.json` → `sparkrun cluster list --json` → hardcoded defaults. `_rebuild_vllm_cmds()` must run after any `PRIMARY_NODE` change.

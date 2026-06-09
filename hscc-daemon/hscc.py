@@ -3,8 +3,8 @@
 Hermes Spark Cluster Control (HSCC) — Monitoring Daemon & Watchdog
 
 Background daemon with 5 parallel check streams, PipelineWatchdog with
-auto-remediation, event-driven trigger engine, macOS notifications, and
-Launchd service integration.
+auto-remediation, event-driven trigger engine, cross-platform desktop
+notifications (macOS osascript / Linux notify-send), and service integration.
 
 Usage: hscc-daemon <command> [args]
 
@@ -990,14 +990,27 @@ def check_heartbeat():
     else:
         data["fleet"] = {"error": "agents.json not found"}
 
-    # macOS system info
-    sys_r = run_cmd(["sw_vers"], timeout=3)
-    sys_info = {"os": "macOS"}
-    if sys_r.get("success"):
-        for line in sys_r["output"].split("\n"):
-            if ":" in line:
-                key, val = line.split(":", 1)
-                sys_info[key.strip()] = val.strip()
+    # Host system info (platform-aware)
+    if sys.platform == "darwin":
+        sys_info = {"os": "macOS"}
+        sys_r = run_cmd(["sw_vers"], timeout=3)
+        if sys_r.get("success"):
+            for line in sys_r["output"].split("\n"):
+                if ":" in line:
+                    key, val = line.split(":", 1)
+                    sys_info[key.strip()] = val.strip()
+    else:
+        import platform as _platform
+        sys_info = {"os": _platform.system() or "Linux"}
+        sys_info["ProductVersion"] = _platform.release()
+        try:
+            with open("/etc/os-release") as f:
+                for line in f:
+                    if line.startswith("PRETTY_NAME="):
+                        sys_info["ProductName"] = line.split("=", 1)[1].strip().strip('"')
+                        break
+        except OSError:
+            pass
 
     # Disk space
     df_r = run_cmd(["df", "-h", "/"], timeout=3)
@@ -1772,7 +1785,7 @@ def pipeline_watchdog():
             "message": "PIPELINE BLOCKED — manual intervention required",
             "auto_restart_count": block.get("auto_restart_count", 0),
         })
-        # Send macOS notification
+        # Send desktop notification
         send_macos_notification(
             "🚨 HSCC Pipeline Blocked",
             reason,
@@ -2052,43 +2065,15 @@ def trigger_engine():
     return True
 
 
-# ── macOS Notifications ────────────────────────────────────────────────────
+# ── Desktop Notifications (cross-platform) ─────────────────────────────────
 
-def send_macos_notification(title, body, priority="normal", app_id="com.hermes.hscc-daemon"):
-    """Send a macOS notification via osascript (UNUserNotificationCenter)."""
-    urgency_map = {
-        "critical": "critical",
-        "high": "high",
-        "normal": "normal",
-        "low": "low",
-    }
-    urgency = urgency_map.get(priority, "normal")
-
-    # Escape quotes for AppleScript
+def _notify_macos(title, body, priority="normal"):
+    """Native macOS notification via osascript. Returns True on success."""
+    if sys.platform != "darwin" or not shutil.which("osascript"):
+        return False
     title_esc = title.replace('"', '\\"')
     body_esc = body.replace('"', '\\"')
-
-    script = f'''
-    do shell script "/usr/bin/osascript << 'EOF'
-    notify with title \"{title_esc}\" subtitle \"\"
-    content \"{body_esc}\"
-    end notify
-    set d to current date
-    tell application \"System Events\" to set notificationCenterPrefs to POSIX file \"/usr/bin/osascript\"
-    end tell
-    EOF\""
-    '''
-
-    # Simpler approach using macOS `osascript` with UserNotification framework
-    script = f'''
-    do shell script "/usr/bin/osascript -e '
-        display notification \"{body_esc}\" with title \"{title_esc}\" sound name \"Glass\"
-    '" 2>/dev/null
-    '''
-
-    # Use the simplest, most reliable method
     simple_script = f"display notification \"{body_esc}\" with title \"{title_esc}\""
-
     try:
         result = subprocess.run(
             ["osascript", "-e", simple_script],
@@ -2099,8 +2084,40 @@ def send_macos_notification(title, body, priority="normal", app_id="com.hermes.h
             return True
     except Exception:
         pass
+    return False
 
-    # Fallback: write to notifications file
+
+def _notify_linux(title, body, priority="normal"):
+    """Native Linux notification via notify-send (libnotify). Returns True on success."""
+    notify_send = shutil.which("notify-send")
+    if not notify_send:
+        return False
+    # libnotify urgency only accepts low/normal/critical
+    urgency = {"low": "low", "critical": "critical", "high": "critical"}.get(priority, "normal")
+    try:
+        result = subprocess.run(
+            [notify_send, "-a", "HSCC", "-u", urgency, title, body],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            log(f"Linux notification sent: {title}")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def send_desktop_notification(title, body, priority="normal", app_id="com.hermes.hscc-daemon"):
+    """Send a native desktop notification, falling back to notifications.json.
+
+    Dispatches by platform: macOS -> osascript, Linux -> notify-send.
+    Headless or unsupported hosts still get the notification persisted to
+    ~/.hscc/notifications.json so nothing is lost.
+    """
+    if _notify_macos(title, body, priority) or _notify_linux(title, body, priority):
+        return True
+
+    # Fallback: write to notifications file (works on any platform / headless)
     try:
         notif_data = {"notifications": []}
         if os.path.exists(os.path.join(HSCC_DIR, "notifications.json")):
@@ -2117,11 +2134,15 @@ def send_macos_notification(title, body, priority="normal", app_id="com.hermes.h
         })
         with open(os.path.join(HSCC_DIR, "notifications.json"), "w") as f:
             json.dump(notif_data, f, indent=2)
-        log(f"Notification saved to file (macOS notify failed): {title}")
+        log(f"Notification saved to file (no native notifier available): {title}")
     except Exception:
         pass
 
     return False
+
+
+# Backward-compatible alias: older callers used the macOS-specific name.
+send_macos_notification = send_desktop_notification
 
 
 # ── Event Emitter ──────────────────────────────────────────────────────────
@@ -2872,7 +2893,7 @@ Commands:
   check [stream]     Run a single check cycle (dgx|gateway|local|heartbeat|nas|watchdog|triggers|all)
   watch [stream]     Tail check results in real-time
   triggers           Show trigger engine status
-  notify <msg>       Send a manual macOS notification
+  notify <msg>       Send a manual desktop notification (macOS/Linux)
   plist              Generate Launchd plist for auto-start
   install            Install Launchd plist and start daemon
   uninstall          Remove Launchd plist and stop daemon
