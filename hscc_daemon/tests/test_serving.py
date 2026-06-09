@@ -287,5 +287,65 @@ class TestLiveDispatchHosts(unittest.TestCase):
         self.assertEqual(H.live_dispatch_hosts(), {"192.0.2.11"})
 
 
+class TestWorkerRecipeFor(unittest.TestCase):
+    """Test _worker_recipe_for resolves per-node worker recipes from serving.json."""
+
+    def test_worker_node_returns_recipe(self):
+        from hscc_daemon import serving as S
+        serving = {
+            "units": [
+                {"role": "worker", "nodes": ["10.0.0.1"], "recipe": "~/recipes/w.yaml"},
+            ]
+        }
+        r = S._worker_recipe_for("10.0.0.1", serving)
+        self.assertTrue(r.endswith("recipes/w.yaml"))
+
+    def test_orchestrator_node_returns_none(self):
+        from hscc_daemon import serving as S
+        serving = {
+            "units": [
+                {"role": "orchestrator", "nodes": ["10.0.0.2"], "recipe": "~/recipes/o.yaml"},
+            ]
+        }
+        self.assertIsNone(S._worker_recipe_for("10.0.0.2", serving))
+
+    def test_unknown_node_returns_none(self):
+        from hscc_daemon import serving as S
+        serving = {
+            "units": [
+                {"role": "worker", "nodes": ["10.0.0.1"], "recipe": "~/recipes/w.yaml"},
+            ]
+        }
+        self.assertIsNone(S._worker_recipe_for("10.0.0.99", serving))
+
+    def test_none_serving_returns_none(self):
+        from hscc_daemon import serving as S
+        self.assertIsNone(S._worker_recipe_for("10.0.0.1", None))
+        self.assertIsNone(S._worker_recipe_for("10.0.0.1", {}))
+
+    def test_worker_no_recipe_returns_none(self):
+        from hscc_daemon import serving as S
+        serving = {
+            "units": [
+                {"role": "worker", "nodes": ["10.0.0.1"]},  # no recipe key
+            ]
+        }
+        self.assertIsNone(S._worker_recipe_for("10.0.0.1", serving))
+
+    def test_multi_node_worker(self):
+        from hscc_daemon import serving as S
+        serving = {
+            "units": [
+                {"role": "worker", "nodes": ["10.0.0.1", "10.0.0.2"], "recipe": "~/recipes/multi.yaml"},
+            ]
+        }
+        r1 = S._worker_recipe_for("10.0.0.1", serving)
+        r2 = S._worker_recipe_for("10.0.0.2", serving)
+        self.assertIsNotNone(r1)
+        self.assertIsNotNone(r2)
+        self.assertTrue(r1.endswith("recipes/multi.yaml"))
+        self.assertTrue(r2.endswith("recipes/multi.yaml"))
+
+
 if __name__ == "__main__":
     unittest.main()
