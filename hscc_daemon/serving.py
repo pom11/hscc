@@ -115,6 +115,24 @@ def compute_base_url_change(current, old_endpoint, new_endpoint):
     return None
 
 
+def _worker_recipe_for(node, serving):
+    """Resolve the sparkrun recipe for a worker node from serving.json.
+
+    Each keep-alive worker unit carries its own ``recipe`` — authoritative,
+    because the global VLLM_RECIPE is the ORCHESTRATOR's recipe (may differ from
+    what a worker should serve). Returns None if no worker unit names this node,
+    so the caller skips relaunch rather than provisioning the wrong model.
+    """
+    if not isinstance(serving, dict):
+        return None
+    for u in (serving.get("units", []) or []):
+        if u.get("role") == "worker" and node in (u.get("nodes") or []):
+            recipe = u.get("recipe")
+            if recipe:
+                return os.path.expanduser(recipe)
+    return None
+
+
 def _rebuild_vllm_cmds():
     """Rebuild the vLLM health URL + control commands from the current PRIMARY_NODE.
 

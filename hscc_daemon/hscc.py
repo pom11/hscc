@@ -33,6 +33,7 @@ from hscc_daemon.serving import (
     serving_port,
     _serving_warn,
     _endpoint_healthy,
+    _worker_recipe_for,
 )
 from hscc_daemon.health import (
     check_dgx,
@@ -109,6 +110,21 @@ def live_dispatch_hosts():
             if kstatus not in ("done", "review", "archived", "blocked"):
                 hosts.add(host)
     return hosts
+
+
+def on_state_change(stream: str) -> None:
+    """State file changed — log and trigger re-evaluation of trigger rules.
+
+    Used as a callback registered with the event bridge so that any state
+    change automatically re-runs the trigger engine.
+    """
+    from .health import log
+    from .trigger import trigger_engine
+    log(f"Event-driven state change: {stream}")
+    try:
+        trigger_engine()
+    except Exception as e:
+        log(f"Post-state-change trigger eval error: {e}", "ERROR")
 
 
 # ── Orchestrator follower helpers (for test patching) ──────────────────────
