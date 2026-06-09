@@ -6,12 +6,14 @@
     <key>Label</key>
     <string>com.hermes.hscc-daemon</string>
 
-    <!-- Command to start the daemon -->
+    <!-- Command to start the daemon. 'start-daemon' runs the loop in the
+         FOREGROUND so launchd supervises it directly; 'start' would fork a child
+         and exit, leaving launchd tracking the wrong (already-exited) process. -->
     <key>ProgramArguments</key>
     <array>
         <string>/usr/local/bin/python3</string>
         <string>/Users/desac/.hermes/plugins/hscc-daemon/hscc.py</string>
-        <string>start</string>
+        <string>start-daemon</string>
     </array>
 
     <!-- Working directory for the daemon -->

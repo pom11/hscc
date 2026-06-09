@@ -39,7 +39,10 @@ AGENTS_JSON = os.path.join(HSCC_DIR, "agents.json")
 LIFECYCLE_JSON = os.path.join(HSCC_DIR, "lifecycle.json")
 IDLE_TIMEOUT = int(os.environ.get("HSCC_IDLE_TIMEOUT_MINUTES", "30"))
 SCAN_INTERVAL = int(os.environ.get("HSCC_SCAN_INTERVAL", "5"))
-# Gateway node runs the always-on orchestrator vLLM (serves Telegram + every
+# Persistent state between scans — prevents killing containers whose agents
+# just transitioned from idle→running (stale updated_at issue).
+prev_agent_states = {}
+# Gateway node runs the always-on orchestrator vLLM (serves Telegram + all Hermes agents). It has no agent row, so it must be protected explicitly or the
 # Hermes agent). It has no agent row, so it must be protected explicitly or the
 # orphan rule reaps it every scan and the daemon thrashes restarting it.
 GATEWAY_NODE = os.environ.get("HSCC_GATEWAY_NODE", "192.0.2.10")
@@ -184,10 +187,15 @@ def get_container_last_used(container_id):
     return None
 
 
-def check_container_idle(container, agents, agent_states):
+def check_container_idle(container, agents, agent_states, prev_agent_states=None):
     """
     Determine if a container should be shut down.
     Returns: {"shutdown": True/False, "reason": "..."}
+
+    prev_agent_states: dict of agent_id → previous "state" from last scan.
+    Used to detect state transitions so we don't kill containers whose agents
+    just moved from idle→running (stale updated_at would give false-positive
+    idle duration).
     """
     host = container["host"]
     recipe = container.get("recipe", "")
@@ -213,16 +221,22 @@ def check_container_idle(container, agents, agent_states):
     has_running_agent = False
     has_idle_agent = False
     oldest_idle_time = None
+    fresh_transition = False  # agent was previously active, just went idle
 
     for agent_id in agents:
         state_entry = agent_states.get(agent_id, {})
         state = state_entry.get("state", "idle")
+        prev_state = prev_agent_states.get(agent_id, None) if prev_agent_states else None
 
         if state == "running":
             has_running_agent = True
             break
         elif state == "idle":
             has_idle_agent = True
+            # Detect fresh transition: agent was previously active, just went idle
+            # The updated_at timestamp is stale from when it was last running
+            if prev_state and prev_state in ("running", "spawning", "ready"):
+                fresh_transition = True
             updated = state_entry.get("updated_at", "")
             if updated:
                 try:
@@ -238,6 +252,18 @@ def check_container_idle(container, agents, agent_states):
     # If any agent is actively running → keep container
     if has_running_agent:
         return {"shutdown": False, "reason": "agent is actively running"}
+
+    # Guard: if all agents just transitioned from active → idle, skip the idle check.
+    # The updated_at timestamp is stale from when the agent was last running,
+    # not when it just went idle. Killing now would terminate a container
+    # immediately after a task completed.
+    if fresh_transition and has_running_agent is False and has_idle_agent is True:
+        return {
+            "shutdown": False,
+            "reason": "agents just transitioned from active to idle (stale updated_at)",
+            "container_id": container_id,
+            "host": host,
+        }
 
     # If idle agent(s) exist, check timeout
     if has_idle_agent and oldest_idle_time:
@@ -278,11 +304,13 @@ def stop_container(container_id):
         return False, str(e)
 
 
-def run_scan(dry_run=False):
+def run_scan(dry_run=False, prev_agent_states=None):
     """
     Perform one idle-container scan.
-    Returns summary dict.
+    Returns summary dict with 'prev_states' key for caller to persist.
     """
+    if prev_agent_states is None:
+        prev_agent_states = {}
     result = {
         "timestamp": now_utc().isoformat(),
         "containers_scanned": 0,
@@ -301,9 +329,12 @@ def run_scan(dry_run=False):
         result["message"] = "No running sparkrun containers found"
         return result
 
+    # Track which agents are associated with kept containers for next scan
+    current_states = {}
+
     for container in containers:
         matched_agents = parse_container_model(container, model_to_agents)
-        check = check_container_idle(container, matched_agents, agent_states)
+        check = check_container_idle(container, matched_agents, agent_states, prev_agent_states)
 
         if check.get("shutdown"):
             result["stopped"].append({
@@ -321,7 +352,13 @@ def run_scan(dry_run=False):
                 "container": container,
                 "reason": check.get("reason", "unknown"),
             })
+            # Track agents on kept containers for next scan
+            for aid in matched_agents:
+                state_entry = agent_states.get(aid, {})
+                current_states[aid] = state_entry.get("state", "idle")
 
+    # Persist state for next scan
+    result["prev_states"] = current_states
     return result
 
 
@@ -334,11 +371,16 @@ def main():
     args = parser.parse_args()
 
     if args.daemon:
+        scan_num = 0
         print(f"Starting HSCC idle monitor daemon (interval: {SCAN_INTERVAL}min, timeout: {IDLE_TIMEOUT}min)")
         while True:
             try:
-                result = run_scan(dry_run=args.dry_run)
-                print(f"[{now_utc().strftime('%H:%M:%S')}] Scan complete: {result['containers_scanned']} containers, "
+                scan_num += 1
+                result = run_scan(dry_run=args.dry_run, prev_agent_states=prev_agent_states)
+                if result.get("prev_states"):
+                    prev_agent_states.clear()
+                    prev_agent_states.update(result["prev_states"])
+                print(f"[{now_utc().strftime('%H:%M:%S')}] Scan #{scan_num}: {result['containers_scanned']} containers, "
                       f"{len(result['kept'])} kept, {len(result['stopped'])} stopped")
                 for s in result["stopped"]:
                     reason = s["check"]["reason"]
@@ -350,7 +392,7 @@ def main():
                 print(f"  ERROR: {e}")
             time.sleep(SCAN_INTERVAL * 60)
     else:
-        result = run_scan(dry_run=args.dry_run)
+        result = run_scan(dry_run=args.dry_run, prev_agent_states=prev_agent_states)
         print(json.dumps(result, indent=2, default=str))
 
 

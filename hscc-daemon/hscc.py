@@ -65,6 +65,21 @@ _LOCAL_BIN = os.path.expanduser("~/.local/bin")
 if _LOCAL_BIN not in os.environ.get("PATH", "").split(os.pathsep):
     os.environ["PATH"] = _LOCAL_BIN + os.pathsep + os.environ.get("PATH", "")
 
+# ── Shared self-heal ─────────────────────────────────────────────────────────
+# Self-heal primitives live in the hscc-cluster toolset so the daemon
+# (autonomous) and the agent toolset share ONE implementation — no drift. Append
+# (not insert) to sys.path so the toolset's hscc.py/handlers can never shadow the
+# daemon's own modules of the same name. If the toolset is absent, cluster_heal
+# stays None and restart_vllm falls back to its local VLLM_START_CMD.
+cluster_heal = None
+try:
+    _HSCC_CLUSTER_DIR = os.path.expanduser("~/.hermes/plugins/hscc-cluster")
+    if _HSCC_CLUSTER_DIR not in sys.path:
+        sys.path.append(_HSCC_CLUSTER_DIR)
+    import heal as cluster_heal  # noqa: E402
+except Exception:  # import resilience — daemon must still run without the toolset
+    cluster_heal = None
+
 # ── Constants ──────────────────────────────────────────────────────────────
 
 HSCC_DIR = os.path.expanduser("~/.hscc")
@@ -72,7 +87,7 @@ STATE_DIR = os.path.join(HSCC_DIR, "state")
 PID_FILE = os.path.join(HSCC_DIR, "daemon.pid")
 LOG_FILE = os.path.join(HSCC_DIR, "daemon.log")
 PLIST_DIR = os.path.expanduser("~/Library/LaunchAgents")
-PLIST_FILE = os.path.join(PLIST_DIR, "com.nousresearch.hscc-daemon.plist")
+PLIST_FILE = os.path.join(PLIST_DIR, "com.hermes.hscc-daemon.plist")
 
 EVENTS_FILE = os.path.join(HSCC_DIR, "events.jsonl")
 TRIGGERS_FILE = os.path.join(HSCC_DIR, "triggers.json")
@@ -87,6 +102,7 @@ STREAMS = {
     "heartbeat":   60,
     "nas":         30,
     "idle":        300,  # Idle monitor: every 5 min
+    "workers":     60,   # Keep-alive worker models (no-op unless KEEPALIVE_NODES set)
 }
 
 # Cluster host configuration — loaded from cluster.json, fallback defaults
@@ -103,7 +119,7 @@ PRIMARY_NODE = "192.0.2.10"  # gateway: runs orchestrator vLLM + Hermes base_url
 # than a local copy. The local-fixed recipe carries the chat-template/mods fixes.
 HSCC_CLUSTER = "hscc"
 VLLM_RECIPE = os.path.expanduser(
-    "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml")
+    "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml")
 VLLM_PORT = 8000
 # A 35B model takes minutes to load. After a restart the watchdog must wait out
 # this grace period before counting a failed health check toward its breaker,
@@ -146,6 +162,35 @@ ORCH_ENDPOINT_STATE = os.path.expanduser("~/.hscc/.daemon_orch_endpoint")
 # from serving.json each reconcile; defaults to {PRIMARY_NODE} when serving.json
 # is absent/invalid so the gateway vLLM stays protected exactly as before.
 ORCH_NODES = {PRIMARY_NODE}
+
+# Worker nodes the operator wants kept alive 24/7: exempt from the idle reaper
+# AND health-monitored by the `workers` stream (relaunched on crash). A node is
+# kept-alive iff it is in this set — one source of truth so the reaper and the
+# recovery stream can never disagree. Sourced from serving.json units with
+# role=="worker" + keepalive truthy, unioned with the HSCC_KEEPALIVE_NODES env
+# list (comma/space separated IPs). Empty by default → zero behavior change
+# until the operator opts a node in (see Task 5 of the native-refactor plan).
+KEEPALIVE_NODES = set()
+
+
+def _env_keepalive_nodes():
+    """Parse HSCC_KEEPALIVE_NODES (comma/space separated IPs) into a set."""
+    raw = os.environ.get("HSCC_KEEPALIVE_NODES", "")
+    return {tok for tok in re.split(r"[,\s]+", raw) if tok}
+
+
+def keepalive_nodes(serving):
+    """Set of worker nodes flagged keep-alive in serving.json ∪ env override.
+
+    serving.json units with role=="worker" and a truthy "keepalive" contribute
+    all their nodes. HSCC_KEEPALIVE_NODES adds IPs without editing serving.json.
+    """
+    nodes = set(_env_keepalive_nodes())
+    if isinstance(serving, dict):
+        for u in (serving.get("units", []) or []):
+            if u.get("role") == "worker" and u.get("keepalive"):
+                nodes.update(u.get("nodes") or [])
+    return nodes
 
 
 def _serving_warn(msg):
@@ -250,15 +295,21 @@ def _resolve_serving_overlay():
     falls back to {PRIMARY_NODE} so the gateway vLLM stays protected). No logging
     here: this runs at import before log() is defined.
     """
-    global PRIMARY_NODE, ORCH_NODES
+    global PRIMARY_NODE, ORCH_NODES, KEEPALIVE_NODES
     serving = load_serving()
     if serving is None:
         ORCH_NODES = {PRIMARY_NODE}
+        # Env override still applies even without serving.json so an operator can
+        # keep a node alive via HSCC_KEEPALIVE_NODES alone.
+        KEEPALIVE_NODES = _env_keepalive_nodes()
         return False
     head = orchestrator_head(serving)
     if head:
         PRIMARY_NODE = head
     ORCH_NODES = orchestrator_nodes(serving) or {PRIMARY_NODE}
+    # Keep-alive workers must never overlap the orchestrator set (an orch node is
+    # already protected + monitored via its own path); subtract to be safe.
+    KEEPALIVE_NODES = keepalive_nodes(serving) - ORCH_NODES
     return True
 
 
@@ -268,7 +319,7 @@ def resolve_cluster_config():
     Keeps the module-level defaults if every source fails, so the daemon
     degrades safely instead of leaving hosts unset.
     """
-    global NAS_HOST, PRIMARY_NODE, VLLM_HEALTH_URL, ORCH_NODES
+    global NAS_HOST, PRIMARY_NODE, VLLM_HEALTH_URL, ORCH_NODES, KEEPALIVE_NODES
     try:
         with open(CLUSTER_JSON) as f:
             config = json.load(f)
@@ -464,14 +515,31 @@ def http_check(url, timeout=5):
 
 
 def restart_vllm(timeout=90):
-    """Restart the orchestrator vLLM via its sparkrun recipe.
+    """Restart the orchestrator vLLM via the shared hscc-cluster heal primitive.
+
+    Delegates to cluster_heal.restart_model so the daemon (autonomous) and the
+    agent toolset share one restart implementation. The orchestrator is the HEAD
+    node -> force=True. ensure=True keeps launch-only semantics (no hard stop
+    thrash while the model may be mid-load). confirm=True because the daemon IS
+    the autonomous path; the human confirm-gate is only for the agent path.
 
     Uses `--ensure` so it only launches when the container is not already up,
     and `--no-follow` so the call returns once the container is started. The
     model loads asynchronously inside the container — callers MUST allow
     VLLM_LOAD_GRACE_MINUTES before treating a failing health check as fatal.
+
+    Falls back to the local VLLM_START_CMD if the shared toolset is unavailable.
     """
-    return run_cmd(VLLM_START_CMD, timeout=timeout)
+    if cluster_heal is None:
+        return run_cmd(VLLM_START_CMD, timeout=timeout)
+    res = cluster_heal.restart_model({
+        "recipe": VLLM_RECIPE, "node": PRIMARY_NODE, "cluster": HSCC_CLUSTER,
+        "port": VLLM_PORT, "ensure": True, "no_follow": True,
+        "confirm": True, "force": True,
+    })
+    # Map heal's {ok, stdout_tail} onto the daemon's {success, output} contract.
+    return {"success": bool(res.get("ok")), "output": res.get("stdout_tail", ""),
+            "raw": res}
 
 
 # ── Stream Checks ──────────────────────────────────────────────────────────
@@ -1200,6 +1268,15 @@ def check_idle_monitor():
                 result["kept"].append({"container": container, "reason": "orchestrator vLLM (protected)"})
                 continue
 
+            # Keep-alive worker node — the operator wants this model up 24/7 so
+            # native-kanban workers always have an endpoint on their own node.
+            # Exempt from reaping; the `workers` stream relaunches it on crash.
+            # (KEEPALIVE_NODES is empty by default → no behavior change until the
+            # operator opts a node in via serving.json or HSCC_KEEPALIVE_NODES.)
+            if host in KEEPALIVE_NODES:
+                result["kept"].append({"container": container, "reason": "keep-alive worker (protected)"})
+                continue
+
             # Unit-routed dispatched task in flight on this host — protect it
             # from mid-task reaping (capacity slot is held until release/cancel
             # or worktree removal; see live_dispatch_hosts).
@@ -1338,7 +1415,107 @@ def check_idle_monitor():
     
     # Save state
     write_state("idle", result)
-    
+
+    return True
+
+
+# ── Worker-Model Keep-Alive ─────────────────────────────────────────────────
+
+# Per-node load-grace deadlines: after we (re)launch a worker model, its health
+# check is expected to fail until the model finishes loading. Suppress relaunch
+# attempts until this deadline so a mid-load node is not thrashed. Mirrors the
+# orchestrator's VLLM_LOAD_GRACE_MINUTES window in pipeline_watchdog.
+_worker_load_grace = {}
+
+
+def _worker_recipe_for(node, serving):
+    """Resolve the sparkrun recipe for a worker node from serving.json.
+
+    Each keep-alive worker unit carries its own ``recipe`` — authoritative,
+    because the global VLLM_RECIPE is the ORCHESTRATOR's recipe (may differ from
+    what a worker should serve). Returns None if no worker unit names this node,
+    so the caller skips relaunch rather than provisioning the wrong model.
+    """
+    if not isinstance(serving, dict):
+        return None
+    for u in (serving.get("units", []) or []):
+        if u.get("role") == "worker" and node in (u.get("nodes") or []):
+            recipe = u.get("recipe")
+            if recipe:
+                return os.path.expanduser(recipe)
+    return None
+
+
+def check_workers():
+    """Keep-alive worker check (every 60s): health-check each KEEPALIVE_NODES
+    worker vLLM and relaunch a crashed one via the shared heal primitive.
+
+    A node is watched iff it is in KEEPALIVE_NODES — the SAME set the idle
+    reaper exempts (see check_idle_monitor). This guarantees the reaper and the
+    keep-alive can never disagree about a node. Empty set → no-op (default).
+
+    Relaunch is suppressed during a per-node load-grace window so a model that
+    is still loading (health 000/503 for minutes) is not thrashed.
+    """
+    resolve_cluster_config()  # refresh KEEPALIVE_NODES from serving.json/env
+    nodes = sorted(KEEPALIVE_NODES)
+    result = {"timestamp": now_iso(), "watched": nodes,
+              "healthy": [], "loading": [], "relaunched": [], "errors": []}
+
+    if not nodes:
+        write_state("workers", result)
+        return True
+
+    serving = load_serving()  # for per-node recipe resolution
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for node in nodes:
+        health = http_check(f"http://{node}:{VLLM_PORT}/health", timeout=5)
+        if health.get("success"):
+            result["healthy"].append(node)
+            _worker_load_grace.pop(node, None)  # loaded — clear grace
+            continue
+
+        # Unhealthy. If inside a load-grace window, the model is still loading —
+        # don't relaunch yet.
+        grace_until = _worker_load_grace.get(node)
+        if grace_until and now < grace_until:
+            result["loading"].append({"node": node, "grace_until": grace_until.isoformat()})
+            continue
+
+        # Down past grace (or never seen) — relaunch via the shared heal
+        # primitive (worker node → no force; ensure=launch-only; confirm=daemon
+        # is the autonomous path). Use the node's OWN recipe from serving.json,
+        # never the global VLLM_RECIPE (that's the orchestrator's, may differ).
+        if cluster_heal is None:
+            result["errors"].append(f"{node}: cluster_heal unavailable, cannot relaunch")
+            continue
+        recipe = _worker_recipe_for(node, serving)
+        if not recipe:
+            result["errors"].append(f"{node}: no worker recipe in serving.json, skipping relaunch")
+            log(f"Worker keep-alive: {node} has no recipe in serving.json — skipping", "ERROR")
+            continue
+        try:
+            res = cluster_heal.restart_model({
+                "recipe": recipe, "node": node, "cluster": HSCC_CLUSTER,
+                "port": VLLM_PORT, "ensure": True, "no_follow": True,
+                "confirm": True,
+            })
+            ok = bool(res.get("ok"))
+            result["relaunched"].append({"node": node, "ok": ok})
+            log(f"Worker keep-alive: relaunched {node} model (ok={ok})",
+                "INFO" if ok else "ERROR")
+            # Open a load-grace window so subsequent ticks don't thrash it.
+            _worker_load_grace[node] = now + datetime.timedelta(
+                minutes=VLLM_LOAD_GRACE_MINUTES)
+        except Exception as e:
+            result["errors"].append(f"{node}: relaunch failed ({e})")
+            log(f"Worker keep-alive: relaunch {node} failed: {e}", "ERROR")
+
+    if result["relaunched"] or result["errors"]:
+        log(f"Worker keep-alive: {len(result['healthy'])} healthy, "
+            f"{len(result['relaunched'])} relaunched, {len(result['errors'])} errors")
+    write_state("workers", result)
     return True
 
 
@@ -1750,7 +1927,7 @@ def trigger_engine():
 
 # ── macOS Notifications ────────────────────────────────────────────────────
 
-def send_macos_notification(title, body, priority="normal", app_id="com.nousresearch.hscc-daemon"):
+def send_macos_notification(title, body, priority="normal", app_id="com.hermes.hscc-daemon"):
     """Send a macOS notification via osascript (UNUserNotificationCenter)."""
     urgency_map = {
         "critical": "critical",
@@ -1931,7 +2108,7 @@ PLIST_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.nousresearch.hscc-daemon</string>
+    <string>com.hermes.hscc-daemon</string>
     <key>ProgramArguments</key>
     <array>
         <string>{PYTHON_PATH}</string>
@@ -1972,7 +2149,11 @@ def generate_plist():
     """Generate the Launchd plist with resolved paths."""
     hmdir = os.path.expanduser("~")
     python_path = shutil.which("python3") or "/usr/bin/python3"
-    path_env = os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    # Clean, minimal PATH (NOT the interactive shell's bloated PATH). The daemon
+    # also prepends ~/.local/bin at runtime, so sparkrun resolves regardless.
+    path_env = (os.path.join(hmdir, ".hermes/hermes-agent/venv/bin")
+                + ":" + os.path.join(hmdir, ".local/bin")
+                + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 
     return PLIST_CONTENT.format(
         PYTHON_PATH=python_path,
@@ -2154,6 +2335,7 @@ def _run_event_driven_daemon(stop_event: threading.Event) -> None:
         "heartbeat": check_heartbeat,
         "nas": check_nas,
         "idle": check_idle_monitor,
+        "workers": check_workers,
     }
 
     # Register event bridge callbacks for downstream reactions
@@ -2307,6 +2489,7 @@ def cmd_check(stream=None):
         "watchdog": pipeline_watchdog,
         "triggers": trigger_engine,
         "idle": check_idle_monitor,
+        "workers": check_workers,
     }
 
     if stream and stream == "all":
@@ -2428,7 +2611,7 @@ def cmd_install():
     plist_path.mkdir(parents=True, exist_ok=True)
 
     plist_content = generate_plist()
-    plist_file = plist_path / "com.nousresearch.hscc-daemon.plist"
+    plist_file = Path(PLIST_FILE)
     with open(plist_file, "w") as f:
         f.write(plist_content)
 
@@ -2454,7 +2637,7 @@ def cmd_install():
 
 def cmd_uninstall():
     """Remove Launchd plist and stop daemon."""
-    plist_file = Path(PLIST_DIR) / "com.nousresearch.hscc-daemon.plist"
+    plist_file = Path(PLIST_FILE)
 
     # Stop daemon
     pid = get_pid()
@@ -2497,6 +2680,7 @@ def cmd_start_daemon():
     log("start-daemon invoked (Launchd mode)")
     write_stopped()  # Remove any stale PID
     ensure_state_dir()
+    save_pid()  # Record THIS (launchd-supervised) process so `status` reports it
     try:
         run_daemon_loop()
     except Exception as e:
