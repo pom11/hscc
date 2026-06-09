@@ -1,0 +1,5 @@
+name: hscc-daemon
+version: 1.0.0
+description: "Monitoring daemon & watchdog — background service with 5 parallel check streams, PipelineWatchdog with auto-remediation, event-driven trigger engine, cross-platform desktop notifications, and launchd/systemd integration."
+author: NousResearch
+kind: backend

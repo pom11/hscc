@@ -1,0 +1,5 @@
+name: hscc-skills
+version: 1.0.0
+description: "Skills & templates installer — install/update bundled Hermes skills and templates to ~/.hermes/ with idempotent, hash-matched file deployment."
+author: NousResearch
+kind: backend

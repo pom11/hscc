@@ -1,0 +1,5 @@
+name: hscc-provision
+version: 1.0.0
+description: "Dynamic model provisioning — manage the lifecycle of ML model containers on the DGX Spark cluster, including recipe discovery, container spin-up/down, agent assignment, and fleet health."
+author: NousResearch
+kind: backend
