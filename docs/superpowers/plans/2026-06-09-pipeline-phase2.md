@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 (Hermes core, `hermes-agent/hermes_cli/kanban_decompose.py`), pytest. Config in `~/.hermes/config.yaml` under `kanban.auto_review`.
 
-**Branch:** `local-custom` in the `hermes-agent` repo (the user's local-core-mods branch — same place heartbeat/TTS/kanban-assignee fixes live). NEVER pushed to NousResearch upstream. Confirm you are on `local-custom` before committing (`git -C /Users/desac/.hermes/hermes-agent branch --show-current`).
+**Branch:** `local-custom` in the `hermes-agent` repo (the user's local-core-mods branch — same place heartbeat/TTS/kanban-assignee fixes live). NEVER pushed to NousResearch upstream. Confirm you are on `local-custom` before committing (`git -C ~/.hermes/hermes-agent branch --show-current`).
 
 **Scope:** Phase 2 ONLY — auto-pair review tasks during decomposition. The reviewer LOOP (reviewer actually reading diffs, approving→integration-merge, reject→retry) is Phase 3. The autonomy governor + phrase trigger is Phase 4. This plan just guarantees a reviewer task EXISTS, gated behind each impl task. The orchestrator already runs brainstorm→decompose inline (existing capability); we are sharpening the decompose terminal step.
 
@@ -95,7 +95,7 @@ def test_pair_empty_policy_noop():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/desac/.hermes/hermes-agent && venv/bin/python -m pytest tests/test_kanban_review_pairing.py -v`
+Run: `cd ~/.hermes/hermes-agent && venv/bin/python -m pytest tests/test_kanban_review_pairing.py -v`
 Expected: FAIL with `AttributeError: module 'hermes_cli.kanban_decompose' has no attribute '_pair_review_tasks'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -147,13 +147,13 @@ def _pair_review_tasks(children, policy):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd /Users/desac/.hermes/hermes-agent && venv/bin/python -m pytest tests/test_kanban_review_pairing.py -v`
+Run: `cd ~/.hermes/hermes-agent && venv/bin/python -m pytest tests/test_kanban_review_pairing.py -v`
 Expected: PASS (5 passed)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/desac/.hermes/hermes-agent
+cd ~/.hermes/hermes-agent
 git branch --show-current   # MUST print: local-custom
 git add hermes_cli/kanban_decompose.py tests/test_kanban_review_pairing.py
 git commit -m "feat(kanban): pure review-pairing transform for decompose"
@@ -186,7 +186,7 @@ def test_review_policy_absent_returns_empty():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/desac/.hermes/hermes-agent && venv/bin/python -m pytest tests/test_kanban_review_pairing.py -v`
+Run: `cd ~/.hermes/hermes-agent && venv/bin/python -m pytest tests/test_kanban_review_pairing.py -v`
 Expected: FAIL with `AttributeError: ... has no attribute '_review_policy'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -213,13 +213,13 @@ def _review_policy(cfg):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd /Users/desac/.hermes/hermes-agent && venv/bin/python -m pytest tests/test_kanban_review_pairing.py -v`
+Run: `cd ~/.hermes/hermes-agent && venv/bin/python -m pytest tests/test_kanban_review_pairing.py -v`
 Expected: PASS (7 passed)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/desac/.hermes/hermes-agent
+cd ~/.hermes/hermes-agent
 git add hermes_cli/kanban_decompose.py tests/test_kanban_review_pairing.py
 git commit -m "feat(kanban): auto_review config policy reader"
 ```
@@ -257,7 +257,7 @@ def test_policy_and_transform_compose():
 
 - [ ] **Step 2: Run test to verify it passes (seam test — green once Tasks 1-2 exist)**
 
-Run: `cd /Users/desac/.hermes/hermes-agent && venv/bin/python -m pytest tests/test_kanban_review_pairing.py::test_policy_and_transform_compose -v`
+Run: `cd ~/.hermes/hermes-agent && venv/bin/python -m pytest tests/test_kanban_review_pairing.py::test_policy_and_transform_compose -v`
 Expected: PASS (the helpers from Tasks 1-2 compose correctly). The actual `decompose_task` wiring is verified by Step 4's integration check.
 
 - [ ] **Step 3: Write the wiring (the actual Phase-2 change)**
@@ -274,17 +274,17 @@ NOTE: `cfg` must be in scope at that point. `decompose_task` already loads confi
 
 - [ ] **Step 4: Run tests + a real integration check**
 
-Run unit tests: `cd /Users/desac/.hermes/hermes-agent && venv/bin/python -m pytest tests/test_kanban_review_pairing.py -v`
+Run unit tests: `cd ~/.hermes/hermes-agent && venv/bin/python -m pytest tests/test_kanban_review_pairing.py -v`
 Expected: PASS.
 
 Run the FULL decompose test suite to ensure no regression:
-`cd /Users/desac/.hermes/hermes-agent && venv/bin/python -m pytest tests/ -k "decompose or kanban" -q`
+`cd ~/.hermes/hermes-agent && venv/bin/python -m pytest tests/ -k "decompose or kanban" -q`
 Expected: all green (no existing decompose test broken by the new call).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/desac/.hermes/hermes-agent
+cd ~/.hermes/hermes-agent
 git add hermes_cli/kanban_decompose.py tests/test_kanban_review_pairing.py
 git commit -m "feat(kanban): wire review-pairing into decompose_task (policy-gated)"
 ```
@@ -299,7 +299,7 @@ git commit -m "feat(kanban): wire review-pairing into decompose_task (policy-gat
 - [ ] **Step 1: Back up config + add the policy**
 
 ```bash
-cd /Users/desac/.hermes
+cd ~/.hermes
 cp config.yaml config.yaml.bak-$(date +%Y%m%d-%H%M%S)
 ```
 Add under the existing `kanban:` block in `~/.hermes/config.yaml`:
@@ -318,14 +318,14 @@ Add under the existing `kanban:` block in `~/.hermes/config.yaml`:
 
 - [ ] **Step 2: Validate config loads**
 
-Run: `cd /Users/desac/.hermes && hermes-agent/venv/bin/python -c "import yaml; k=yaml.safe_load(open('config.yaml'))['kanban']['auto_review']; print('reviewer:', k['reviewer']); print('roles:', k['review_roles'])"`
+Run: `cd ~/.hermes && hermes-agent/venv/bin/python -c "import yaml; k=yaml.safe_load(open('config.yaml'))['kanban']['auto_review']; print('reviewer:', k['reviewer']); print('roles:', k['review_roles'])"`
 Expected: prints reviewer + the 6 roles.
 
 - [ ] **Step 3: End-to-end dry check of the transform against real config**
 
 Run:
 ```bash
-cd /Users/desac/.hermes/hermes-agent && venv/bin/python -c "
+cd ~/.hermes/hermes-agent && venv/bin/python -c "
 from hermes_cli import kanban_decompose as kd
 from hermes_cli.config import load_config
 pol = kd._review_policy(load_config())

@@ -64,7 +64,7 @@ def test_truthy_variants(tmp_path, monkeypatch):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/desac/.hermes/plugins/hscc-roles && ../../hermes-agent/venv/bin/python -m pytest tests/test_autonomy.py -v`
+Run: `cd ~/.hermes/plugins/hscc-roles && ../../hermes-agent/venv/bin/python -m pytest tests/test_autonomy.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'autonomy'`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -106,13 +106,13 @@ def set_state(value):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd /Users/desac/.hermes/plugins/hscc-roles && ../../hermes-agent/venv/bin/python -m pytest tests/test_autonomy.py -v`
+Run: `cd ~/.hermes/plugins/hscc-roles && ../../hermes-agent/venv/bin/python -m pytest tests/test_autonomy.py -v`
 Expected: PASS (3 passed)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/desac/.hermes/plugins
+cd ~/.hermes/plugins
 git add hscc-roles/autonomy.py hscc-roles/tests/test_autonomy.py
 git commit -m "feat(hscc-roles): autonomy flag module (~/.hscc/autonomy)"
 ```
@@ -152,7 +152,7 @@ NOTE: this relies on `autonomy.HSCC_DIR`/`AUTONOMY_FILE` deriving from `~` at im
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/desac/.hermes/plugins/hscc-roles && ../../hermes-agent/venv/bin/python -m pytest tests/test_autonomy.py::test_cli_autonomy_show_on_off -v`
+Run: `cd ~/.hermes/plugins/hscc-roles && ../../hermes-agent/venv/bin/python -m pytest tests/test_autonomy.py::test_cli_autonomy_show_on_off -v`
 Expected: FAIL (hscc.py has no `autonomy` command → nonzero or wrong output)
 
 - [ ] **Step 3: Add the command to hscc.py**
@@ -173,13 +173,13 @@ In the module docstring Commands list add:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd /Users/desac/.hermes/plugins/hscc-roles && ../../hermes-agent/venv/bin/python -m pytest tests/test_autonomy.py -v`
+Run: `cd ~/.hermes/plugins/hscc-roles && ../../hermes-agent/venv/bin/python -m pytest tests/test_autonomy.py -v`
 Expected: PASS (4 passed). Also run the full plugin suite: `../../hermes-agent/venv/bin/python -m pytest tests/ -q` → expect all green (18 from P1 + 4 autonomy = 22).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/desac/.hermes/plugins
+cd ~/.hermes/plugins
 git add hscc-roles/hscc.py hscc-roles/tests/test_autonomy.py
 git commit -m "feat(hscc-roles): autonomy CLI subcommand (show/on/off)"
 git push origin main
@@ -246,7 +246,7 @@ auto-create a role, note it so the human can review the new role's spec later.
 
 Run:
 ```bash
-cd /Users/desac/.hermes/hermes-agent && venv/bin/python -c "
+cd ~/.hermes/hermes-agent && venv/bin/python -c "
 from agent.prompt_builder import load_soul_md
 soul = load_soul_md()
 assert 'Autonomy' in soul and 'do it autonomously' in soul
@@ -270,7 +270,7 @@ No git commit (SOUL.md lives in ~/.hermes). The backup from Step 1 is the rollba
 - [ ] **Step 1: Flag round-trips via the real CLI**
 
 ```bash
-cd /Users/desac/.hermes/plugins/hscc-roles
+cd ~/.hermes/plugins/hscc-roles
 ../../hermes-agent/venv/bin/python hscc.py autonomy          # -> {"autonomy": "off"} (or current)
 ../../hermes-agent/venv/bin/python hscc.py autonomy on       # -> {"autonomy": "on"}
 ../../hermes-agent/venv/bin/python hscc.py autonomy          # -> {"autonomy": "on"}
@@ -286,7 +286,7 @@ Confirm the orchestrator has a terminal/exec path to the CLI. It already runs `p
 
 - [ ] **Step 4: Full plugin suite green**
 
-Run: `cd /Users/desac/.hermes/plugins/hscc-roles && ../../hermes-agent/venv/bin/python -m pytest tests/ -q`
+Run: `cd ~/.hermes/plugins/hscc-roles && ../../hermes-agent/venv/bin/python -m pytest tests/ -q`
 Expected: all green (P1 18 + autonomy 4 = 22).
 
 - [ ] **Step 5: Document the manual e2e for the user**

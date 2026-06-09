@@ -22,7 +22,7 @@ Idle hosts (no sparkrun containers):
   192.0.2.11
 ```
 
-**NEVER scan all lines for IP patterns** — file paths like `/Users/desac/.sparkrun-local/...` contain dots that match `count(".") == 3`.
+**NEVER scan all lines for IP patterns** — file paths like `~/.sparkrun-local/...` contain dots that match `count(".") == 3`.
 
 **Correct approach:**
 - Match "Job:" line → read NEXT line for host IP
@@ -34,7 +34,7 @@ Idle hosts (no sparkrun containers):
 ```python
 # WRONG
 sub.run(["python3", "~/.hermes/plugins/hscc-provision/hscc.py", ...])
-# ERROR: can't open file '/Users/desac/~/.hermes/...'
+# ERROR: can't open file '~/~/.hermes/...'
 
 # CORRECT
 path = os.path.expanduser("~/.hermes/plugins/hscc-provision/hscc.py")
