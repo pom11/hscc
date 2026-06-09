@@ -2,12 +2,35 @@
 Importable by the daemon for shared heal logic."""
 import json, os, subprocess
 
-NODES = ["192.0.2.11", "192.0.2.12", "192.0.2.13"]
-HEAD = "192.0.2.10"
-NAS_HOST = "192.0.2.20"
 SSH_USER = "spark"
+CLUSTER_JSON = os.path.expanduser("~/.hscc/cluster.json")
 SERVING_JSON = os.path.expanduser("~/.hscc/serving.json")
 SPARKRUN = "sparkrun"
+
+# Generic fallbacks (RFC-5737 documentation range). Real topology is resolved
+# from ~/.hscc/cluster.json at import; these only apply when that file is
+# absent/unreadable on a fresh machine.
+_DEFAULT_HEAD = "192.0.2.10"
+_DEFAULT_NODES = ["192.0.2.11", "192.0.2.12", "192.0.2.13"]
+_DEFAULT_NAS = "192.0.2.20"
+
+
+def _resolve_topology():
+    """Resolve (head, nodes, nas) from ~/.hscc/cluster.json, else generic
+    fallbacks. cluster.json shape: {"gateway": {"ip": ...}, "workers": [{"ip": ...}], "nasDevices": [{"ip": ...}]}."""
+    try:
+        with open(CLUSTER_JSON) as fh:
+            d = json.load(fh)
+        head = (d.get("gateway") or {}).get("ip") or _DEFAULT_HEAD
+        nodes = [w.get("ip") for w in (d.get("workers") or []) if w.get("ip")] or list(_DEFAULT_NODES)
+        nas_list = d.get("nasDevices") or d.get("nas_devices") or []
+        nas = (nas_list[0].get("ip") if nas_list else None) or _DEFAULT_NAS
+        return head, nodes, nas
+    except (FileNotFoundError, json.JSONDecodeError, OSError, KeyError, AttributeError, IndexError):
+        return _DEFAULT_HEAD, list(_DEFAULT_NODES), _DEFAULT_NAS
+
+
+HEAD, NODES, NAS_HOST = _resolve_topology()
 
 
 def run_cmd(args, timeout=30):
