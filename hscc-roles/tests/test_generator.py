@@ -22,3 +22,30 @@ def test_compose_soul_orchestrator_skips_worker_ops():
     assert "your own git worktree" not in soul.lower()
     # ...but it MUST get its own gateway/authority operational block.
     assert "gateway node" in soul.lower()
+
+
+import yaml
+
+
+def test_generate_profile_writes_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": ["test-driven-development"]}
+    changed = generator.generate_profile(spec, base_identity="BASE")
+    pdir = os.path.join(str(tmp_path / "profiles"), "coder")
+    assert os.path.isdir(pdir)
+    assert os.path.exists(os.path.join(pdir, "SOUL.md"))
+    cfg = yaml.safe_load(open(os.path.join(pdir, "config.yaml")))
+    assert "hscc-cluster" not in cfg["toolsets"]
+    assert "hermes-cli" in cfg["toolsets"]
+    prof = yaml.safe_load(open(os.path.join(pdir, "profile.yaml")))
+    assert prof["description_auto"] is False
+    assert changed is True  # first write reports changed
+
+
+def test_generate_profile_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "coder", "identity": "You build.\n", "preload_skills": []}
+    generator.generate_profile(spec, base_identity="BASE")
+    changed_second = generator.generate_profile(spec, base_identity="BASE")
+    assert changed_second is False  # unchanged content → no rewrite
