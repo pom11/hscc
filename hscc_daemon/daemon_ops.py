@@ -157,7 +157,13 @@ def run_daemon_loop():
     def run_trigger_loop():
         while not stop_event.is_set():
             try:
-                trigger_engine()
+                trigger_engine(
+                    check_dgx_fn=check_dgx,
+                    check_gateway_fn=check_gateway,
+                    pipeline_watchdog_fn=pipeline_watchdog,
+                    watchdog_block_fn=None,
+                    restart_vllm_fn=None,
+                )
             except Exception as e:
                 log(f"Trigger engine error: {e}", "ERROR")
             stop_event.wait(15)

@@ -5,7 +5,8 @@ import os
 import re
 import time
 
-from .state import read_state, read_all_states, now_iso
+from .state import read_state, read_all_states, now_iso, write_state
+from .lifecycle import save_watchdog_block
 from .desktop import send_macos_notification, emit_event
 
 
@@ -152,15 +153,6 @@ def fire_trigger_action(rule, event, watchdog_block_fn=None, restart_vllm_fn=Non
             )
 
 
-def save_watchdog_block(data):
-    """Save the watchdog block state file."""
-    WATCHDOG_BLOCK_FILE = os.path.expanduser("~/.hscc/watchdog-block.json")
-    tmp = WATCHDOG_BLOCK_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2, default=str)
-    os.replace(tmp, WATCHDOG_BLOCK_FILE)
-
-
 def trigger_engine(check_dgx_fn=None, check_gateway_fn=None,
                    pipeline_watchdog_fn=None, watchdog_block_fn=None,
                    restart_vllm_fn=None):
@@ -242,11 +234,3 @@ def trigger_engine(check_dgx_fn=None, check_gateway_fn=None,
         "message": f"Evaluated {len(rules)} rules, fired {actions_fired} actions",
     })
     return True
-
-
-def write_state(stream, data):
-    """Write state to file."""
-    STATE_DIR = os.path.expanduser("~/.hscc/state")
-    os.makedirs(STATE_DIR, exist_ok=True)
-    with open(os.path.join(STATE_DIR, f"{stream}.json"), "w") as f:
-        json.dump(data, f, indent=2, default=str)
