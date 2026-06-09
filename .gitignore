@@ -29,3 +29,6 @@ __pycache__/
 .idea/
 .vscode/
 .DS_Store
+
+# Scratch review notes
+hscc-*/REVIEW-*.md
