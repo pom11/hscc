@@ -31,3 +31,55 @@ def compose_soul(spec, base_identity):
         f"{spec['identity'].rstrip()}\n\n"
         f"{ops.format(name=name)}"
     )
+
+
+import yaml
+
+
+def _short_desc(spec):
+    """First sentence of the role identity, for the kanban decomposer roster."""
+    text = " ".join(spec["identity"].split())
+    first = text.split(". ")[0].strip()
+    return (first[:200] + ".") if first else f"The {spec['name']} role."
+
+
+def _write_if_changed(path, content):
+    """Write content only if it differs from what's on disk. Returns changed?"""
+    if os.path.exists(path):
+        with open(path) as f:
+            if f.read() == content:
+                return False
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(content)
+    return True
+
+
+def generate_profile(spec, base_identity):
+    """Materialize a Hermes profile dir for a role spec. Idempotent.
+
+    Writes SOUL.md (composed), config.yaml (toolsets = full minus cluster,
+    preload skills), and profile.yaml (decomposer-facing description). Returns
+    True if any file was written/changed this call, else False.
+    """
+    pdir = os.path.join(rolelib.PROFILES_DIR, spec["name"])
+    soul = compose_soul(spec, base_identity)
+    config = {
+        "toolsets": rolelib.role_toolsets(),
+        "skills": {"preload": spec["preload_skills"]},
+    }
+    profile = {
+        "description": _short_desc(spec),
+        "description_auto": False,
+    }
+    changed = False
+    changed |= _write_if_changed(os.path.join(pdir, "SOUL.md"), soul)
+    changed |= _write_if_changed(
+        os.path.join(pdir, "config.yaml"),
+        yaml.safe_dump(config, default_flow_style=False, sort_keys=False),
+    )
+    changed |= _write_if_changed(
+        os.path.join(pdir, "profile.yaml"),
+        yaml.safe_dump(profile, default_flow_style=False, sort_keys=False),
+    )
+    return changed
