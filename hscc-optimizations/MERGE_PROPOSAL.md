@@ -15,7 +15,7 @@
 | 3 | `hscc-projects` | `hscc-projects/hscc.py` | 499 | Project roadmap/subproject/task CRUD (projects.json) |
 | 4 | `hscc-events` | `hscc-events/hscc.py` | 617 | Event ingestion, lifecycle transitions, notifications, rules |
 | 5 | `hscc-orchestrator` | `hscc-orchestrator/hscc.py` | 329 | Agent fleet routing, show/enable/disable, status |
-| 6 | `hscc-daemon` | `hscc-daemon/hscc.py` | 1,618 | Background monitoring daemon, 5 check streams, watchdog, triggers |
+| 6 | `hscc_daemon` | `hscc_daemon/hscc.py` | 1,618 | Background monitoring daemon, 5 check streams, watchdog, triggers |
 | 7 | `hscc-chat` | `hscc-chat/hscc.py` | 1,578 | WebSocket gateway chat daemon (simulated mode) |
 | 8 | `hscc-agent-coordinator` | `hscc-agent-coordinator/hscc.py` | 1,545 | Agent lifecycle FSM, worktrees, recovery, orphan detection |
 | 9 | `hscc-governance` | `hscc-governance/hscc.py` | 1,120 | RBAC tiers, policy evaluation, audit log, enforcement gate |
@@ -39,7 +39,7 @@ def now_iso():
 |--------|------|-----------|
 | `hscc-events` | 71 | `def now_iso():` |
 | `hscc-orchestrator` | 59 | `def now_iso():` |
-| `hscc-daemon` | 123 | `def now_iso():` |
+| `hscc_daemon` | 123 | `def now_iso():` |
 | `hscc-agent-coordinator` | 123 | `def now_iso():` |
 | `hscc-governance` | 140 | `def now_iso():` |
 
@@ -131,7 +131,7 @@ def load_agents_list():
 
 | Plugin | Line | Signature |
 |--------|------|-----------|
-| `hscc-daemon` | 950 | `emit_event(event_type, payload, severity="info", source="hscc-daemon")` |
+| `hscc_daemon` | 950 | `emit_event(event_type, payload, severity="info", source="hscc_daemon")` |
 | `hscc-agent-coordinator` | 204 | `emit_event(source, event_type, payload, severity="info")` |
 
 Both append to `EVENTS_FILE` (~/.hscc/events.jsonl) with the same JSONL structure:
@@ -208,7 +208,7 @@ print(json.dumps({"error": f"Unknown command: {cmd}"}))
 | `hscc-governance` | 34 | `os.path.expanduser("~/.hscc")` |
 | `hscc-provision` | 35 | `os.path.expanduser("~/.hscc")` |
 | `hscc-projects` | 33 | `os.path.expanduser("~/.hscc")` |
-| `hscc-daemon` | 40 | `os.path.expanduser("~/.hscc")` |
+| `hscc_daemon` | 40 | `os.path.expanduser("~/.hscc")` |
 | `hscc-optimizations/event_driven_detector.py` | 27 | `os.path.expanduser("~/.hscc")` |
 
 ### 3.2 `AGENTS_JSON` — 3 Variants
@@ -256,7 +256,7 @@ print(json.dumps({"error": f"Unknown command: {cmd}"}))
 | `hscc-projects` | create, show, status, list-projects, add-roadmap, add-subproject, add-task, update-task, move-task, assign-task, list-agents, search | No |
 | `hscc-events` | events, event-count, lifecycle, lifecycle-show, recovery, recovery-detail, notifications, notify, notify-read, notify-clear, rules, rule-add, rule-remove, rule-reset-cooldown, policy, policy-add, policy-remove, perms, clear-recovery, clear-notifications, compact | No |
 | `hscc-orchestrator` | fleet, agents, show, configure, enable, disable, available, status, route | No |
-| `hscc-daemon` | start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, start-daemon | No |
+| `hscc_daemon` | start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, start-daemon | No |
 | `hscc-chat` | chat, chat-stream, session-list, session-create, session-delete, session-pin, session-rename, session-add, session-msgs, render-markdown, ws-status, ws-connect, ws-disconnect | **Yes** (argparse subparsers) |
 | `hscc-agent-coordinator` | assign-task, list-agents, update-task, move-task, detect-orphans, attempt-recovery, recovery-log, list-worktrees | No |
 | `hscc-governance` | policy-eval, check-permission, record-audit, list-audit, classify-tool, update-policy, enforce, governance-status, list-tiers, help | No |
@@ -678,7 +678,7 @@ hscc-recovery/hscc.py  (~400 lines)
 
 ---
 
-### 7.6 Candidate F: `hscc-daemon` → Keep as Single Monolith
+### 7.6 Candidate F: `hscc_daemon` → Keep as Single Monolith
 
 **Rationale:** The daemon is intentionally a single large file. It's a long-running process with:
 - Multi-threaded event loop
@@ -735,7 +735,7 @@ hscc-recovery/hscc.py  (~400 lines)
 | 1.2 | Migrate `hscc-events` to import from `hscc-core` | 1 existing | -25 |
 | 1.3 | Migrate `hscc-governance` to import from `hscc-core` | 1 existing | -25 |
 | 1.4 | Migrate `hscc-agent-coordinator` to import from `hscc-core` | 1 existing | -25 |
-| 1.5 | Migrate `hscc-daemon` to import from `hscc-core` | 1 existing | -20 |
+| 1.5 | Migrate `hscc_daemon` to import from `hscc-core` | 1 existing | -20 |
 | 1.6 | Migrate remaining plugins (provision, cluster, projects, orchestrator, chat, skills) | 5 existing | -60 |
 | **Net change** | | | **-155 lines of duplicates removed** |
 
@@ -856,7 +856,7 @@ Week 3: Phase 3 — Cleanup
 3. **Python path for imports:** Will `hscc-core` be in `PYTHONPATH` or installed as a pip package?  
    **Recommendation:** Add `~/.hermes/plugins/` to Python path via a `.pth` file in site-packages. No pip install needed.
 
-4. **Should `hscc-daemon` also be refactored?**  
+4. **Should `hscc_daemon` also be refactored?**  
    **Recommendation:** No. The daemon's monolithic structure is intentional and functional. Extracting only the shared `emit_event`, `now_iso`, `read_json_file` to `hscc-core` is sufficient.
 
 5. **Chat plugin's simulated mode:** Should it be moved to `hscc-core` as a testing utility?  
