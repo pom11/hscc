@@ -18,11 +18,13 @@ Commands:
   ed-install         Install event-driven launchd jobs only
   ed-uninstall       Remove event-driven launchd jobs only
   triggers           Show trigger engine status
-  notify <msg>       Send a manual notification
-  plist              Generate Launchd plist for auto-start
-  install            Install Launchd plist and start daemon
-  uninstall          Remove Launchd plist and stop daemon
+  notify <msg>       Send a manual desktop notification (macOS/Linux)
+  plist              Generate the auto-start service file (launchd/systemd)
+  install            Install the auto-start service and start the daemon
+  uninstall          Remove the auto-start service and stop the daemon
   log                Show daemon log output
+
+Service auto-start uses launchd on macOS, systemd --user on Linux.
 """
 
 import sys
@@ -167,6 +169,11 @@ def notify_operations(text):
         return False
 PLIST_DIR = os.path.expanduser("~/Library/LaunchAgents")
 PLIST_FILE = os.path.join(PLIST_DIR, "com.hermes.hscc-daemon.plist")
+
+# systemd --user unit (Linux auto-start equivalent of the launchd plist)
+SYSTEMD_USER_DIR = os.path.expanduser("~/.config/systemd/user")
+SYSTEMD_UNIT_NAME = "hscc-daemon.service"
+SYSTEMD_UNIT_FILE = os.path.join(SYSTEMD_USER_DIR, SYSTEMD_UNIT_NAME)
 
 EVENTS_FILE = os.path.join(HSCC_DIR, "events.jsonl")
 TRIGGERS_FILE = os.path.join(HSCC_DIR, "triggers.json")
@@ -338,6 +345,20 @@ def orchestrator_head(serving):
     return (units[0].get("nodes") or [None])[0] if units else None
 
 
+def orchestrator_recipe(serving):
+    """Sparkrun recipe of the first orchestrator unit (expanded), or None.
+
+    Authoritative for relaunching the orchestrator vLLM: the hardcoded
+    VLLM_RECIPE is only a fallback for when serving.json is absent. Mirrors
+    _worker_recipe_for, which does the same for worker units.
+    """
+    units = _orchestrator_units(serving)
+    if not units:
+        return None
+    recipe = units[0].get("recipe")
+    return os.path.expanduser(recipe) if recipe else None
+
+
 def serving_port(serving):
     """Top-level serving port, or the hardcoded VLLM_PORT default."""
     try:
@@ -377,7 +398,7 @@ def _resolve_serving_overlay():
     falls back to {PRIMARY_NODE} so the gateway vLLM stays protected). No logging
     here: this runs at import before log() is defined.
     """
-    global PRIMARY_NODE, ORCH_NODES, KEEPALIVE_NODES
+    global PRIMARY_NODE, ORCH_NODES, KEEPALIVE_NODES, VLLM_RECIPE
     serving = load_serving()
     if serving is None:
         ORCH_NODES = {PRIMARY_NODE}
@@ -388,6 +409,12 @@ def _resolve_serving_overlay():
     head = orchestrator_head(serving)
     if head:
         PRIMARY_NODE = head
+    # The orchestrator's recipe is authoritative from serving.json; the hardcoded
+    # VLLM_RECIPE is only the fallback. Without this, a daemon relaunch of a
+    # crashed orchestrator would resurrect the wrong (hardcoded) model.
+    orch_recipe = orchestrator_recipe(serving)
+    if orch_recipe:
+        VLLM_RECIPE = orch_recipe
     ORCH_NODES = orchestrator_nodes(serving) or {PRIMARY_NODE}
     # Keep-alive workers must never overlap the orchestrator set (an orch node is
     # already protected + monitored via its own path); subtract to be safe.
@@ -692,20 +719,45 @@ def check_dgx():
     return ok
 
 
+def _gateway_job_alive():
+    """Return True if the Hermes gateway supervisor job is loaded.
+
+    Platform-aware: launchd on macOS, systemd --user on Linux, with a process
+    match as a last resort on either (covers tmux/nohup-launched gateways).
+    """
+    if sys.platform == "darwin":
+        try:
+            r = run_cmd(["launchctl", "list", "ai.hermes.gateway"], timeout=5)
+            if r.get("success", False):
+                return True
+        except Exception:
+            pass
+    elif shutil.which("systemctl"):
+        try:
+            r = run_cmd(["systemctl", "--user", "is-active", "hermes-gateway"], timeout=5)
+            if r.get("output", "").strip() == "active":
+                return True
+        except Exception:
+            pass
+
+    # Last resort on any platform: is a gateway process running?
+    try:
+        r = run_cmd(["pgrep", "-f", "hermes.*gateway"], timeout=5)
+        return bool(r.get("output", "").strip())
+    except Exception:
+        return False
+
+
 def check_gateway():
-    """Gateway check (every 10s): Hermes gateway launchd job + vLLM backend.
+    """Gateway check (every 10s): Hermes gateway supervisor job + vLLM backend.
 
     The Hermes gateway connects out to chat platforms; it is NOT a local HTTP
-    server, so liveness = its launchd job is loaded, not an HTTP port probe.
+    server, so liveness = its supervising job is loaded, not an HTTP port probe.
+    The supervisor differs by platform (launchd / systemd / bare process).
     """
     log("Running gateway check")
 
-    job_ok = False
-    try:
-        r = run_cmd(["launchctl", "list", "ai.hermes.gateway"], timeout=5)
-        job_ok = r.get("success", False)
-    except Exception:
-        pass
+    job_ok = _gateway_job_alive()
 
     vllm = http_check(VLLM_HEALTH_URL, timeout=5)
     vllm_ok = vllm.get("success", False)
@@ -2293,21 +2345,59 @@ PLIST_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
+def _daemon_path_env(hmdir):
+    """Minimal PATH for the supervised daemon (not the interactive shell's).
+
+    The daemon also prepends ~/.local/bin at runtime, so sparkrun resolves
+    regardless. /opt/homebrew/bin is harmless on Linux (just absent).
+    """
+    return (os.path.join(hmdir, ".hermes/hermes-agent/venv/bin")
+            + ":" + os.path.join(hmdir, ".local/bin")
+            + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+
+
 def generate_plist():
     """Generate the Launchd plist with resolved paths."""
     hmdir = os.path.expanduser("~")
     python_path = shutil.which("python3") or "/usr/bin/python3"
-    # Clean, minimal PATH (NOT the interactive shell's bloated PATH). The daemon
-    # also prepends ~/.local/bin at runtime, so sparkrun resolves regardless.
-    path_env = (os.path.join(hmdir, ".hermes/hermes-agent/venv/bin")
-                + ":" + os.path.join(hmdir, ".local/bin")
-                + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
-
     return PLIST_CONTENT.format(
         PYTHON_PATH=python_path,
         SCRIPT_PATH=os.path.abspath(__file__),
         HOMEDIR=hmdir,
-        PATH_ENV=path_env,
+        PATH_ENV=_daemon_path_env(hmdir),
+    )
+
+
+# ── systemd --user unit (Linux) ────────────────────────────────────────────
+
+SYSTEMD_UNIT_CONTENT = """[Unit]
+Description=HSCC Monitoring Daemon (Hermes Spark Cluster Control)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={PYTHON_PATH} {SCRIPT_PATH} start-daemon
+WorkingDirectory={HOMEDIR}
+Environment=PATH={PATH_ENV}
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:{HOMEDIR}/.hscc/daemon.log
+StandardError=append:{HOMEDIR}/.hscc/daemon.log
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def generate_systemd_unit():
+    """Generate the systemd --user unit with resolved paths."""
+    hmdir = os.path.expanduser("~")
+    python_path = shutil.which("python3") or "/usr/bin/python3"
+    return SYSTEMD_UNIT_CONTENT.format(
+        PYTHON_PATH=python_path,
+        SCRIPT_PATH=os.path.abspath(__file__),
+        HOMEDIR=hmdir,
+        PATH_ENV=_daemon_path_env(hmdir),
     )
 
 
@@ -2730,42 +2820,53 @@ def cmd_notify(msg):
     print(f"  {'Sent' if ok else 'Failed'}")
 
 
-def cmd_plist():
-    """Generate and display Launchd plist."""
-    plist = generate_plist()
-    print(plist)
-    print(f"\n# To install: {plist}")
-    print(f"#   sudo cp <(python3 {__file__} plist) {PLIST_FILE}")
-    print(f"#   launchctl load {PLIST_FILE}")
+def _service_manager():
+    """Pick the auto-start mechanism for this host.
+
+    Returns 'launchd' on macOS, 'systemd' on Linux with `systemctl --user`
+    available, else 'none' (caller falls back to a plain backgrounded process).
+    """
+    if sys.platform == "darwin":
+        return "launchd"
+    if shutil.which("systemctl"):
+        return "systemd"
+    return "none"
 
 
-def cmd_install():
-    """Install Launchd plist and start daemon."""
-    print("Installing hscc-daemon Launchd service...")
-
-    # Stop any running instance first
+def _stop_running_daemon():
+    """Stop any running daemon instance (shared by install/uninstall)."""
     pid = get_pid()
     if pid:
         print(f"  Stopping existing daemon (PID {pid})")
         try:
             os.kill(pid, signal.SIGTERM)
             time.sleep(2)
-            os.kill(pid, 0)
         except OSError:
             pass
+    write_stopped()
 
-    # Generate and install plist
-    plist_path = Path(PLIST_DIR)
-    plist_path.mkdir(parents=True, exist_ok=True)
 
-    plist_content = generate_plist()
+def cmd_plist():
+    """Generate and display the auto-start service definition for this host."""
+    mgr = _service_manager()
+    if mgr == "systemd":
+        unit = generate_systemd_unit()
+        print(unit)
+        print(f"\n# To install: write to {SYSTEMD_UNIT_FILE}")
+        print(f"#   systemctl --user daemon-reload && systemctl --user enable --now {SYSTEMD_UNIT_NAME}")
+        return
+    plist = generate_plist()
+    print(plist)
+    print(f"\n# To install: write to {PLIST_FILE}")
+    print(f"#   launchctl load {PLIST_FILE}")
+
+
+def _install_launchd():
+    Path(PLIST_DIR).mkdir(parents=True, exist_ok=True)
     plist_file = Path(PLIST_FILE)
-    with open(plist_file, "w") as f:
-        f.write(plist_content)
-
+    plist_file.write_text(generate_plist())
     print(f"  Plist installed: {plist_file}")
 
-    # Load with launchctl
     result = subprocess.run(
         ["launchctl", "load", str(plist_file)],
         capture_output=True, text=True, timeout=10
@@ -2774,41 +2875,87 @@ def cmd_install():
         print("  Loaded into launchd")
         print(f"\n  hscc-daemon is now managed by launchd.")
         print(f"  To check status: launchctl list | grep hscc")
-        print(f"  To uninstall:    hscc-daemon uninstall")
     else:
-        # Plist was created but launchctl failed — try starting manually
         print(f"  launchctl load failed, starting manually...")
         cmd_start()
-        print(f"  Plist created at {plist_file}")
         print(f"  To load on next boot: launchctl load {plist_file}")
 
 
-def cmd_uninstall():
-    """Remove Launchd plist and stop daemon."""
+def _install_systemd():
+    Path(SYSTEMD_USER_DIR).mkdir(parents=True, exist_ok=True)
+    unit_file = Path(SYSTEMD_UNIT_FILE)
+    unit_file.write_text(generate_systemd_unit())
+    print(f"  Unit installed: {unit_file}")
+
+    subprocess.run(["systemctl", "--user", "daemon-reload"],
+                   capture_output=True, text=True, timeout=10)
+    result = subprocess.run(
+        ["systemctl", "--user", "enable", "--now", SYSTEMD_UNIT_NAME],
+        capture_output=True, text=True, timeout=15
+    )
+    if result.returncode == 0:
+        print("  Enabled + started via systemd --user")
+        print(f"\n  hscc-daemon is now managed by systemd.")
+        print(f"  To check status: systemctl --user status {SYSTEMD_UNIT_NAME}")
+        print(f"  Tip: run `loginctl enable-linger $USER` so it survives logout.")
+    else:
+        print(f"  systemctl enable failed ({result.stderr.strip()}), starting manually...")
+        cmd_start()
+        print(f"  To enable later: systemctl --user enable --now {SYSTEMD_UNIT_NAME}")
+
+
+def cmd_install():
+    """Install the auto-start service for this host and start the daemon."""
+    mgr = _service_manager()
+    print(f"Installing hscc-daemon ({mgr}) service...")
+    _stop_running_daemon()
+
+    if mgr == "launchd":
+        _install_launchd()
+    elif mgr == "systemd":
+        _install_systemd()
+    else:
+        print("  No service manager (launchd/systemd) found — starting as a")
+        print("  background process (will NOT auto-start on boot).")
+        cmd_start()
+
+
+def _uninstall_launchd():
     plist_file = Path(PLIST_FILE)
-
-    # Stop daemon
-    pid = get_pid()
-    if pid:
-        print(f"  Stopping daemon (PID {pid})")
-        try:
-            os.kill(pid, signal.SIGTERM)
-            time.sleep(2)
-        except OSError:
-            pass
-    write_stopped()
-
-    # Unload and remove plist
     if plist_file.exists():
-        result = subprocess.run(
-            ["launchctl", "unload", str(plist_file)],
-            capture_output=True, text=True, timeout=10
-        )
+        subprocess.run(["launchctl", "unload", str(plist_file)],
+                       capture_output=True, text=True, timeout=10)
         plist_file.unlink()
         print(f"  Plist removed: {plist_file}")
         print("  hscc-daemon uninstalled")
     else:
         print("  No plist found — nothing to remove")
+
+
+def _uninstall_systemd():
+    unit_file = Path(SYSTEMD_UNIT_FILE)
+    subprocess.run(["systemctl", "--user", "disable", "--now", SYSTEMD_UNIT_NAME],
+                   capture_output=True, text=True, timeout=15)
+    if unit_file.exists():
+        unit_file.unlink()
+        subprocess.run(["systemctl", "--user", "daemon-reload"],
+                       capture_output=True, text=True, timeout=10)
+        print(f"  Unit removed: {unit_file}")
+        print("  hscc-daemon uninstalled")
+    else:
+        print("  No unit found — nothing to remove")
+
+
+def cmd_uninstall():
+    """Remove the auto-start service for this host and stop the daemon."""
+    _stop_running_daemon()
+    mgr = _service_manager()
+    if mgr == "launchd":
+        _uninstall_launchd()
+    elif mgr == "systemd":
+        _uninstall_systemd()
+    else:
+        print("  No service manager — daemon stopped (nothing installed to remove)")
 
 
 def cmd_log():
@@ -2824,11 +2971,11 @@ def cmd_log():
 # ── Internal: start-daemon (called by Launchd) ─────────────────────────────
 
 def cmd_start_daemon():
-    """Internal entry point: run the daemon loop directly (used by Launchd)."""
-    log("start-daemon invoked (Launchd mode)")
+    """Internal entry point: run the daemon loop directly (used by launchd/systemd)."""
+    log("start-daemon invoked (service-supervised mode)")
     write_stopped()  # Remove any stale PID
     ensure_state_dir()
-    save_pid()  # Record THIS (launchd-supervised) process so `status` reports it
+    save_pid()  # Record THIS (service-supervised) process so `status` reports it
     try:
         run_daemon_loop()
     except Exception as e:

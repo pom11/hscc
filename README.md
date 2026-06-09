@@ -42,7 +42,7 @@ The result: Hermes goes from *one smart agent* to a *self-running, specialized f
 
 - A configured [sparkrun](https://sparkrun.dev/) DGX Spark cluster (one or more GB10 nodes)
 - [Hermes](https://github.com/NousResearch/hermes-agent) installed (`~/.hermes/hermes-agent`)
-- macOS host for the launchd-managed daemon; Python 3 (stdlib only)
+- A control host for the daemon — macOS (launchd) or Linux (systemd --user); Python 3 (stdlib only)
 - Optional: a NAS for the offline model cache
 
 ---
@@ -121,7 +121,7 @@ Saying *"do it autonomously"* flips it on: the orchestrator writes a best-judgme
 |--------|------|
 | **hscc-cluster** | Cluster ops toolset (orchestrator-only): `cluster_status`, `model_health`, `provision_model`, `stop_model`, `restart_model`, self-heal (`remount_nas`, `repair_nas_export`, `reap_orphans`). Reads live truth from `sparkrun status` + `serving.json`. |
 | **hscc-roles** | Role framework: author + generate role-specialized profiles; autonomy flag CLI. |
-| **hscc-daemon** | Monitoring + self-heal daemon (launchd `com.hermes.hscc-daemon`): vLLM/gateway/NAS health, worker keep-alive, trigger engine, Operations-topic notifications. |
+| **hscc-daemon** | Monitoring + self-heal daemon (launchd on macOS / systemd --user on Linux): vLLM/gateway/NAS health, worker keep-alive, trigger engine, Operations-topic notifications. |
 | **hscc-provision** | Model container lifecycle — recipe discovery, NAS sync, model checks. |
 | **hscc-bootstrap** | Preflight-gated, topology-detecting installer. |
 | **hscc-skills** | Idempotent installer for bundled skills + templates. |
