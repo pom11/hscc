@@ -1,5 +1,6 @@
 """Detect the configured sparkrun cluster (facts, no assumptions)."""
 import json
+import os
 import subprocess
 
 
@@ -37,6 +38,31 @@ def detect_cluster(timeout=10):
     if r.returncode != 0:
         return None
     return parse_clusters(r.stdout)
+
+
+def list_recipes(recipes_dir):
+    """All *.yaml recipe paths under recipes_dir (incl. subdirs like
+    local-fixed/), sorted. [] if the dir is absent."""
+    out = []
+    if not os.path.isdir(recipes_dir):
+        return out
+    for root, _dirs, files in os.walk(recipes_dir):
+        for f in sorted(files):
+            if f.endswith(".yaml"):
+                out.append(os.path.join(root, f))
+    return sorted(out)
+
+
+def recipe_model(recipe_path):
+    """Read the top-level ``model:`` field from a sparkrun recipe, or None."""
+    try:
+        with open(recipe_path) as f:
+            for line in f:
+                if line.startswith("model:"):
+                    return line.split(":", 1)[1].strip() or None
+    except (FileNotFoundError, OSError):
+        return None
+    return None
 
 
 if __name__ == "__main__":
