@@ -60,6 +60,20 @@ class TestOrchestratorNodes(unittest.TestCase):
         self.assertEqual(H.orchestrator_nodes(None), set())
         self.assertIsNone(H.orchestrator_head(None))
 
+    def test_orchestrator_recipe(self):
+        s = {"units": [{"id": "o", "role": "orchestrator", "nodes": ["192.0.2.10"],
+                        "recipe": "~/r/a3b.yaml", "model": "m"}]}
+        self.assertEqual(H.orchestrator_recipe(s),
+                         os.path.expanduser("~/r/a3b.yaml"))
+
+    def test_orchestrator_recipe_none_when_absent(self):
+        self.assertIsNone(H.orchestrator_recipe(None))
+        self.assertIsNone(H.orchestrator_recipe(
+            {"units": [{"role": "worker", "nodes": ["192.0.2.11"], "recipe": "r"}]}))
+        # orchestrator unit but no recipe key -> None (caller keeps fallback)
+        self.assertIsNone(H.orchestrator_recipe(
+            {"units": [{"role": "orchestrator", "nodes": ["192.0.2.10"]}]}))
+
     def test_no_orchestrator_unit(self):
         s = {"units": [{"id": "w", "role": "worker",
                         "nodes": ["192.0.2.11"], "recipe": "r", "model": "m"}]}
