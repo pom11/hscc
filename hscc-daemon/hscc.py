@@ -101,9 +101,12 @@ STREAMS = {
     "local":       30,
     "heartbeat":   60,
     "nas":         30,
-    "idle":        300,  # Idle monitor: every 5 min
     "workers":     60,   # Keep-alive worker models (no-op unless KEEPALIVE_NODES set)
 }
+# NOTE: the periodic "idle" reaper stream was removed 2026-06-09 — under
+# native-Hermes-first every node is declared in serving.json (orchestrator or
+# keep-alive worker) so there is nothing to reap. check_idle_monitor() is kept
+# for manual ad-hoc runs (`hscc.py run idle`) but is no longer scheduled.
 
 # Cluster host configuration — loaded from cluster.json, fallback defaults
 SSH_USER = "spark"
