@@ -1,0 +1,5 @@
+name: hscc-roles
+version: 1.0.0
+description: "Role framework — author + generate role-specialized Hermes profiles (architect, coder, reviewer, qa, ...) with layered SOULs. Capability uniform; cluster control excluded from all roles."
+author: NousResearch
+kind: backend

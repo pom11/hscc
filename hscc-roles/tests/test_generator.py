@@ -51,3 +51,22 @@ def test_generate_profile_idempotent(tmp_path, monkeypatch):
     generator.generate_profile(spec, base_identity="BASE")
     changed_second = generator.generate_profile(spec, base_identity="BASE")
     assert changed_second is False  # unchanged content → no rewrite
+
+
+import subprocess
+import sys
+
+
+def test_cli_generate_all_runs(tmp_path):
+    """End-to-end: `hscc.py generate` builds all 5 starter profiles into a temp home."""
+    env = dict(os.environ)
+    env["HERMES_HOME"] = str(tmp_path)
+    plugin_dir = os.path.dirname(os.path.abspath(generator.__file__))
+    venv_py = os.path.join(plugin_dir, "..", "..", "hermes-agent", "venv", "bin", "python")
+    result = subprocess.run(
+        [venv_py, os.path.join(plugin_dir, "hscc.py"), "generate"],
+        capture_output=True, text=True, env=env, cwd=plugin_dir,
+    )
+    assert result.returncode == 0, result.stderr
+    for role in ("orchestrator", "architect", "coder", "reviewer", "qa"):
+        assert os.path.exists(os.path.join(str(tmp_path), "profiles", role, "SOUL.md"))
