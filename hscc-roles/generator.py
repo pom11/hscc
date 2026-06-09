@@ -1,5 +1,6 @@
 """Generate Hermes profiles from role specs: SOUL composition + materialization."""
 import os
+import yaml
 import rolelib
 
 _WORKER_OPS = (
@@ -33,9 +34,6 @@ def compose_soul(spec, base_identity):
     )
 
 
-import yaml
-
-
 def _short_desc(spec):
     """First sentence of the role identity, for the kanban decomposer roster."""
     text = " ".join(spec["identity"].split())
@@ -46,11 +44,11 @@ def _short_desc(spec):
 def _write_if_changed(path, content):
     """Write content only if it differs from what's on disk. Returns changed?"""
     if os.path.exists(path):
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             if f.read() == content:
                 return False
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     return True
 
