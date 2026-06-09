@@ -1,0 +1,5 @@
+name: hscc-bootstrap
+version: 1.0.0
+description: "Preflight-gated, topology-detecting HSCC installer — prereq checks, cluster detection, interview-driven config, and idempotent install of skills, roles, serving.json, and daemon."
+author: NousResearch
+kind: backend

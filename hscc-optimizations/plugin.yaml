@@ -1,0 +1,5 @@
+name: hscc-optimizations
+version: 1.0.0
+description: "Event-driven pattern detector — scans HSCC plugin Python files to identify polling patterns and suggest kqueue (macOS) / launchd / filesystem-watch replacements."
+author: NousResearch
+kind: backend
