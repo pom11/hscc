@@ -12,11 +12,16 @@ from pathlib import Path
 
 
 def _load():
-    p = Path(__file__).resolve().parent.parent / "hscc.py"
-    spec = importlib.util.spec_from_file_location("daemon_hscc_test", p)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
+    import sys
+    import importlib
+    # Add plugins/ to sys.path so hscc_daemon package imports resolve
+    plugins_dir = str(Path(__file__).resolve().parent.parent.parent)
+    if plugins_dir not in sys.path:
+        sys.path.insert(0, plugins_dir)
+    # Import as proper package module so relative imports work
+    if "hscc_daemon.hscc" not in sys.modules:
+        import hscc_daemon.hscc
+    return sys.modules["hscc_daemon.hscc"]
 
 
 H = _load()

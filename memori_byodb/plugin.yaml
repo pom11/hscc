@@ -1,0 +1,7 @@
+name: memori_byodb
+version: 0.1.0
+description: Structured long-term memory using Memori BYODB (local SQLite, no API key).
+pip_dependencies:
+  - sqlalchemy>=2.0.0
+hooks:
+  - on_session_end

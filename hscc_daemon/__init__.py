@@ -15,3 +15,6 @@ Submodules:
 
 __version__ = "2026.06.09.2"
 __all__ = ["serving", "state", "util", "health", "lifecycle", "trigger", "desktop", "daemon_ops", "install", "cli"]
+
+# Re-export log so modules can use 'from . import log'
+from .daemon_ops import log
