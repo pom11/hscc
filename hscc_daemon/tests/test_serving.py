@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for serving.json reconcile helpers (daemon pure core).
 
-Run: cd hscc-daemon && python3 -m unittest tests.test_serving -v
+Run: cd hscc_daemon && python3 -m unittest tests.test_serving -v
 """
 import importlib.util
 import json

@@ -122,9 +122,9 @@ fi
 hdr "Install: daemon"
 if $SKIP_DAEMON; then warn "skipped"; else
   if [ "$(uname -s)" = "Darwin" ]; then
-    DAEMON_SETUP="$PLUGINS/hscc-daemon/launchd-setup.sh"
+    DAEMON_SETUP="$PLUGINS/hscc_daemon/launchd-setup.sh"
   else
-    DAEMON_SETUP="$PLUGINS/hscc-daemon/systemd-setup.sh"
+    DAEMON_SETUP="$PLUGINS/hscc_daemon/systemd-setup.sh"
   fi
   bash "$DAEMON_SETUP" >/dev/null 2>&1 && ok "daemon installed + started" || warn "daemon setup reported issues (run $DAEMON_SETUP manually)"
 fi

@@ -7,7 +7,7 @@ This directory is a **staging and template area** for the Hermes plugin/skill sy
 | Directory | Contents |
 |---|---|
 | `hscc-cli/` | Installable CLI tool (the hscc binary) |
-| `hscc-plugins/` | Archived / inactive plugins (e.g. hscc-agent-coordinator, hscc-chat, hscc-cluster, hscc-daemon, hscc-governance, hscc-orchestrator, etc.) |
+| `hscc-plugins/` | Archived / inactive plugins (e.g. hscc-agent-coordinator, hscc-chat, hscc-cluster, hscc_daemon, hscc-governance, hscc-orchestrator, etc.) |
 | `hscc-skills/` | Bundled skills (e.g. brainstorming, devops, sdlc-review, test-driven-development, etc.) |
 | `hscc-templates/` | Templates for new plugins and skills *(not yet provisioned)* |
 

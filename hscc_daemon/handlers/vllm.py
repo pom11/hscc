@@ -27,7 +27,7 @@ class VLLMHandler(AbstractHandler):
         """
         try:
             req = urllib.request.Request(self.url, method="GET")
-            req.add_header("User-Agent", "hscc-daemon/1.0")
+            req.add_header("User-Agent", "hscc_daemon/1.0")
             with urllib.request.urlopen(req, timeout=5) as resp:
                 code = resp.status
                 body = resp.read().decode()

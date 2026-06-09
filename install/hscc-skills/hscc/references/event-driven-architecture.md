@@ -20,7 +20,7 @@ Key class: `EventBridge()` with `register(event_type, callback)` and `fire(event
 If kqueue unavailable (non-macOS): detect at init, set `using_kqueue=False`, drop to polling mode.
 
 ## Integration
-- hscc-daemon: replace 5 polling loops with EventDrivenDaemon class
+- hscc_daemon: replace 5 polling loops with EventDrivenDaemon class
 - hscc-config: config changes trigger kqueue callbacks instead of poll cycles
 - hscc-governance: policy changes trigger EventBridge events
 

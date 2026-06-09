@@ -6,7 +6,7 @@ import re
 import datetime
 import shutil
 
-from . import log
+from .daemon_ops import log
 from .state import now_iso, read_state
 from .util import run_cmd
 from .serving import PRIMARY_NODE, ORCH_NODES, KEEPALIVE_NODES

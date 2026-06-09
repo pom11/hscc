@@ -24,7 +24,7 @@ import sys
 USAGE = """
 Hermes Spark Cluster Control (HSCC) — Monitoring Daemon & Watchdog
 
-Usage: hscc-daemon <command> [args]
+Usage: hscc_daemon <command> [args]
 
 Commands:
   start              Start the daemon in the background
@@ -72,7 +72,7 @@ def main():
         cmd_triggers()
     elif cmd == "notify":
         from .cli import cmd_notify
-        cmd_notify(" ".join(sys.argv[2:])) if len(sys.argv) > 2 else print("Usage: hscc-daemon notify <message>")
+        cmd_notify(" ".join(sys.argv[2:])) if len(sys.argv) > 2 else print("Usage: hscc_daemon notify <message>")
     elif cmd == "plist":
         from .install import cmd_plist
         cmd_plist()

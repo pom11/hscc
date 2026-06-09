@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for daemon Telegram credential resolution (pure, no network).
 
-Run: cd hscc-daemon && python3 -m unittest tests.test_telegram -v
+Run: cd hscc_daemon && python3 -m unittest tests.test_telegram -v
 """
 import importlib.util
 import os
