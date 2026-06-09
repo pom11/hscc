@@ -31,7 +31,7 @@ Payload:
   "task_id": "3E0329B4-89E6-478A-A41A-B88F83FC51A8",
   "session_id": "task-3E0329B4-89E6-478A-A41A-B88F83FC51A8",
   "success": true,
-  "worktree_path": "/Users/desac/.hscc/worktrees/<project>/dev-001-<task_id>"
+  "worktree_path": "~/.hscc/worktrees/<project>/dev-001-<task_id>"
 }
 ```
 
