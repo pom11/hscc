@@ -4,7 +4,7 @@ How to add a new periodic check to the HSCC daemon. Use this when integrating a 
 
 ## Steps
 
-1. **Add the check function** to `~/.hermes/plugins/hscc-daemon/hscc.py` as `def check_<name>():` — must return `True` on success, `False` on failure.
+1. **Add the check function** to `~/.hermes/plugins/hscc_daemon/hscc.py` as `def check_<name>():` — must return `True` on success, `False` on failure.
    - Always call `write_state("name", result_dict)` at the end to persist results.
    - Wrap in `try/except` and call `write_state("name", {"error": str(e)})` on failure.
 
@@ -22,9 +22,9 @@ How to add a new periodic check to the HSCC daemon. Use this when integrating a 
 
 5. **Register in event_driven.py** — add `"name": interval` to `PERIODIC_STREAMS` and `"name"` to `STATE_STREAMS` set in `event_driven.py`.
 
-6. **Register for manual invocation** — add `"name": check_name` to the `check_map` in `cmd_check()` so `hscc-daemon check name` works.
+6. **Register for manual invocation** — add `"name": check_name` to the `check_map` in `cmd_check()` so `hscc_daemon check name` works.
 
-7. **Restart the daemon** — `python3 ~/.hermes/plugins/hscc-daemon/hscc.py stop && start`.
+7. **Restart the daemon** — `python3 ~/.hermes/plugins/hscc_daemon/hscc.py stop && start`.
 
 ## Example: Idle Monitor Integration (2026-05-29)
 

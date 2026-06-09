@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────────────
-# hscc-daemon Launchd Setup Helper
+# hscc_daemon Launchd Setup Helper
 #
-# Installs, loads, and verifies the hscc-daemon Launchd service.
+# Installs, loads, and verifies the hscc_daemon Launchd service.
 #
 # Usage:
 #   ./launchd-setup.sh          # Load and verify (idempotent)
@@ -11,12 +11,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLIST_NAME="com.hermes.hscc-daemon.plist"
+PLIST_NAME="com.hermes.hscc_daemon.plist"
 PLIST_TEMPLATE="${SCRIPT_DIR}/${PLIST_NAME}.template"
 LAUNCH_DIR="$HOME/Library/LaunchAgents"
 LAUNCH_PLIST="${LAUNCH_DIR}/${PLIST_NAME}"
-LABEL="com.hermes.hscc-daemon"
-LOG_FILE="$HOME/Library/Logs/hscc-daemon.log"
+LABEL="com.hermes.hscc_daemon"
+LOG_FILE="$HOME/Library/Logs/hscc_daemon.log"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -48,7 +48,7 @@ mkdir -p "$(dirname "${LOG_FILE}")"
 # ── Install plist ──────────────────────────────────────────────────────────
 
 if [[ "${1:-}" == "force" ]]; then
-    info "Force-reloading hscc-daemon..."
+    info "Force-reloading hscc_daemon..."
     launchctl bootout "gui/$UID/${LABEL}" 2>/dev/null || true
 fi
 
@@ -64,7 +64,7 @@ fi
 # ── Load service ───────────────────────────────────────────────────────────
 
 if launchctl list "${LABEL}" &>/dev/null; then
-    info "hscc-daemon is already loaded — skipping load"
+    info "hscc_daemon is already loaded — skipping load"
 else
     launchctl bootstrap "gui/$UID" "${LAUNCH_PLIST}"
     info "Loaded ${LABEL} via launchctl bootstrap"
@@ -81,7 +81,7 @@ fi
 # ── Status check ───────────────────────────────────────────────────────────
 
 echo ""
-info "── hscc-daemon Service Status ────────────────────────────────────"
+info "── hscc_daemon Service Status ────────────────────────────────────"
 
 # Check launchd
 if launchctl list "${LABEL}" &>/dev/null; then

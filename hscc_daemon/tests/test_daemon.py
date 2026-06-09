@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for hscc-daemon handler layer and escalator logic."""
+"""Tests for hscc_daemon handler layer and escalator logic."""
 
 import sys
 import os

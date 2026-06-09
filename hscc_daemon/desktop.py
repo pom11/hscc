@@ -7,7 +7,7 @@ import subprocess
 import sys
 import uuid
 
-from . import log
+from .daemon_ops import log
 from .state import now_iso
 
 
@@ -57,7 +57,7 @@ def _notify_linux(title, body, priority="normal"):
     return False
 
 
-def send_desktop_notification(title, body, priority="normal", app_id="com.hermes.hscc-daemon"):
+def send_desktop_notification(title, body, priority="normal", app_id="com.hermes.hscc_daemon"):
     """Send a native desktop notification, falling back to notifications.json."""
     if _notify_macos(title, body, priority) or _notify_linux(title, body, priority):
         return True
@@ -91,7 +91,7 @@ def send_desktop_notification(title, body, priority="normal", app_id="com.hermes
 send_macos_notification = send_desktop_notification
 
 
-def emit_event(event_type, payload, severity="info", source="hscc-daemon"):
+def emit_event(event_type, payload, severity="info", source="hscc_daemon"):
     """Append an event to events.jsonl."""
     EVENTS_FILE = os.path.join(HSCC_DIR, "events.jsonl")
     event = {

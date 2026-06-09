@@ -121,7 +121,7 @@ Saying *"do it autonomously"* flips it on: the orchestrator writes a best-judgme
 |--------|------|
 | **hscc-cluster** | Cluster ops toolset (orchestrator-only): `cluster_status`, `model_health`, `provision_model`, `stop_model`, `restart_model`, self-heal (`remount_nas`, `repair_nas_export`, `reap_orphans`). Reads live truth from `sparkrun status` + `serving.json`. |
 | **hscc-roles** | Role framework: author + generate role-specialized profiles; autonomy flag CLI. |
-| **hscc-daemon** | Monitoring + self-heal daemon (launchd on macOS / systemd --user on Linux): vLLM/gateway/NAS health, worker keep-alive, trigger engine, Operations-topic notifications. |
+| **hscc_daemon** | Monitoring + self-heal daemon (launchd on macOS / systemd --user on Linux): vLLM/gateway/NAS health, worker keep-alive, trigger engine, Operations-topic notifications. |
 | **hscc-provision** | Model container lifecycle — recipe discovery, NAS sync, model checks. |
 | **hscc-bootstrap** | Preflight-gated, topology-detecting installer. |
 | **hscc-skills** | Idempotent installer for bundled skills + templates. |

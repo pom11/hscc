@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HSCC Event-Driven Replacement — kqueue/launchd for hscc-daemon.
+HSCC Event-Driven Replacement — kqueue/launchd for hscc_daemon.
 
 Replaces the 5 polling loops (DGX 5s, gateway 10s, local 30s, heartbeat 60s,
 NAS 30s) with event-driven triggers where possible:
@@ -733,7 +733,7 @@ _STOP_EVENT = threading.Event()
 
 class EventDrivenDaemon:
     """
-    Orchestrates the event-driven hscc-daemon.
+    Orchestrates the event-driven hscc_daemon.
 
     On macOS with kqueue available:
       1. KqueueWatcher on ~/.hscc/state/  → fires EventBridge callbacks

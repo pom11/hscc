@@ -10,7 +10,7 @@
 <dict>
     <!-- Unique identifier for the service -->
     <key>Label</key>
-    <string>com.hermes.hscc-daemon</string>
+    <string>com.hermes.hscc_daemon</string>
 
     <!-- Command to start the daemon. 'start-daemon' runs the loop in the
          FOREGROUND so launchd supervises it directly; 'start' would fork a child
@@ -18,7 +18,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/usr/local/bin/python3</string>
-        <string>__HOME__/.hermes/plugins/hscc-daemon/hscc.py</string>
+        <string>__HOME__/.hermes/plugins/hscc_daemon/hscc.py</string>
         <string>start-daemon</string>
     </array>
 
@@ -28,10 +28,10 @@
 
     <!-- Route stdout and stderr to a single log file -->
     <key>StandardOutPath</key>
-    <string>__HOME__/Library/Logs/hscc-daemon.log</string>
+    <string>__HOME__/Library/Logs/hscc_daemon.log</string>
 
     <key>StandardErrorPath</key>
-    <string>__HOME__/Library/Logs/hscc-daemon.log</string>
+    <string>__HOME__/Library/Logs/hscc_daemon.log</string>
 
     <!-- Environment variables -->
     <key>EnvironmentVariables</key>

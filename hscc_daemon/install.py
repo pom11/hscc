@@ -14,17 +14,17 @@ HSCC_DIR = os.path.expanduser("~/.hscc")
 PID_FILE = os.path.join(HSCC_DIR, "daemon.pid")
 LOG_FILE = os.path.join(HSCC_DIR, "daemon.log")
 PLIST_DIR = os.path.expanduser("~/Library/LaunchAgents")
-PLIST_FILE = os.path.join(PLIST_DIR, "com.hermes.hscc-daemon.plist")
+PLIST_FILE = os.path.join(PLIST_DIR, "com.hermes.hscc_daemon.plist")
 SYSTEMD_USER_DIR = Path(os.path.expanduser("~/.config/systemd/user"))
-SYSTEMD_UNIT_FILE = SYSTEMD_USER_DIR / "com.hermes.hscc-daemon.service"
-SYSTEMD_UNIT_NAME = "com.hermes.hscc-daemon.service"
+SYSTEMD_UNIT_FILE = SYSTEMD_USER_DIR / "com.hermes.hscc_daemon.service"
+SYSTEMD_UNIT_NAME = "com.hermes.hscc_daemon.service"
 
 PLIST_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.hermes.hscc-daemon</string>
+    <string>com.hermes.hscc_daemon</string>
     <key>ProgramArguments</key>
     <array>
         <string>{PYTHON_PATH}</string>
@@ -155,7 +155,7 @@ def _install_launchd():
     )
     if result.returncode == 0:
         print("  Loaded into launchd")
-        print(f"\n  hscc-daemon is now managed by launchd.")
+        print(f"\n  hscc_daemon is now managed by launchd.")
         print(f"  To check status: launchctl list | grep hscc")
     else:
         print(f"  launchctl load failed, starting manually...")
@@ -177,7 +177,7 @@ def _install_systemd():
     )
     if result.returncode == 0:
         print("  Enabled + started via systemd --user")
-        print(f"\n  hscc-daemon is now managed by systemd.")
+        print(f"\n  hscc_daemon is now managed by systemd.")
         print(f"  To check status: systemctl --user status {SYSTEMD_UNIT_NAME}")
         print(f"  Tip: run `loginctl enable-linger $USER` so it survives logout.")
     else:
@@ -192,7 +192,7 @@ def _uninstall_launchd():
                        capture_output=True, text=True, timeout=10)
         plist_file.unlink()
         print(f"  Plist removed: {plist_file}")
-        print("  hscc-daemon uninstalled")
+        print("  hscc_daemon uninstalled")
     else:
         print("  No plist found — nothing to remove")
 
@@ -205,7 +205,7 @@ def _uninstall_systemd():
         subprocess.run(["systemctl", "--user", "daemon-reload"],
                        capture_output=True, text=True, timeout=10)
         print(f"  Unit removed: {SYSTEMD_UNIT_FILE}")
-        print("  hscc-daemon uninstalled")
+        print("  hscc_daemon uninstalled")
     else:
         print("  No unit found — nothing to remove")
 
@@ -231,7 +231,7 @@ def cmd_plist():
 def cmd_install():
     """Install the auto-start service and start the daemon."""
     mgr = _service_manager()
-    print(f"Installing hscc-daemon ({mgr}) service...")
+    print(f"Installing hscc_daemon ({mgr}) service...")
     _stop_running_daemon()
 
     if mgr == "launchd":

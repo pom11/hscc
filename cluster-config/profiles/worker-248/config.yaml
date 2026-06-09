@@ -367,7 +367,7 @@ command_allowlist:
 - script execution via heredoc
 quick_commands:
   hscc_status:
-    command: python3 ~/.hermes/plugins/hscc-daemon/hscc.py status
+    command: python3 ~/.hermes/plugins/hscc_daemon/hscc.py status
     description: HSCC daemon + cluster-control health
     model: true
     no_stream: true

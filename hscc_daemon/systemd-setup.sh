@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────────────
-# hscc-daemon systemd --user Setup Helper (Linux)
+# hscc_daemon systemd --user Setup Helper (Linux)
 #
-# Installs, enables, and verifies the hscc-daemon systemd --user service.
+# Installs, enables, and verifies the hscc_daemon systemd --user service.
 # This is the Linux counterpart of launchd-setup.sh.
 #
 # Usage:
@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DAEMON="${SCRIPT_DIR}/hscc.py"
-UNIT_NAME="hscc-daemon.service"
+UNIT_NAME="hscc_daemon.service"
 UNIT_DIR="$HOME/.config/systemd/user"
 UNIT_FILE="${UNIT_DIR}/${UNIT_NAME}"
 LOG_FILE="$HOME/.hscc/daemon.log"
@@ -55,7 +55,7 @@ loginctl enable-linger "$USER" 2>/dev/null \
 
 # ── Status ──────────────────────────────────────────────────────────────────
 echo ""
-info "── hscc-daemon Service Status ────────────────────────────────────"
+info "── hscc_daemon Service Status ────────────────────────────────────"
 if systemctl --user is-active --quiet "${UNIT_NAME}"; then
     echo -e "  ${GREEN}●${NC} systemd:    active"
 else
