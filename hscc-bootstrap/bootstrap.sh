@@ -65,8 +65,12 @@ if ! $ASSUME_YES && [ "${#HOST_ARR[@]}" -gt 1 ]; then
 fi
 ok "orchestrator: $ORCH"
 
-# recipe: sole recipe auto, else pick
-mapfile -t RECIPES < <("$PYBIN" -c "import sys;sys.path.insert(0,'$BOOT_DIR');import detect;print('\n'.join(detect.list_recipes('$RECIPES_DIR')))")
+# recipe: sole recipe auto, else pick.
+# (read loop, not mapfile — macOS ships Bash 3.2 which lacks mapfile.)
+RECIPES=()
+while IFS= read -r _line; do
+  [ -n "$_line" ] && RECIPES+=("$_line")
+done < <("$PYBIN" -c "import sys;sys.path.insert(0,'$BOOT_DIR');import detect;print('\n'.join(detect.list_recipes('$RECIPES_DIR')))")
 RECIPE=""
 if [ "${#RECIPES[@]}" -eq 1 ]; then RECIPE="${RECIPES[0]}"
 elif [ "${#RECIPES[@]}" -gt 1 ]; then
