@@ -28,11 +28,12 @@ PLIST_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
     <key>ProgramArguments</key>
     <array>
         <string>{PYTHON_PATH}</string>
-        <string>{SCRIPT_PATH}</string>
+        <string>-m</string>
+        <string>hscc_daemon</string>
         <string>start-daemon</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>{HOMEDIR}</string>
+    <string>{PKG_DIR}</string>
     <key>StandardOutPath</key>
     <string>{HOMEDIR}/.hscc/daemon.log</string>
     <key>StandardErrorPath</key>
@@ -41,6 +42,8 @@ PLIST_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
     <dict>
         <key>PATH</key>
         <string>{PATH_ENV}</string>
+        <key>PYTHONPATH</key>
+        <string>{PLUGINS_DIR}</string>
     </dict>
     <key>KeepAlive</key>
     <true/>
@@ -66,9 +69,10 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart={PYTHON_PATH} {SCRIPT_PATH} start-daemon
-WorkingDirectory={HOMEDIR}
+ExecStart={PYTHON_PATH} -m hscc_daemon start-daemon
+WorkingDirectory={PKG_DIR}
 Environment=PATH={PATH_ENV}
+Environment=PYTHONPATH={PLUGINS_DIR}
 Restart=on-failure
 RestartSec=30
 StandardOutput=append:{HOMEDIR}/.hscc/daemon.log
@@ -123,11 +127,14 @@ def generate_plist():
     """Generate the Launchd plist with resolved paths."""
     hmdir = os.path.expanduser("~")
     python_path = shutil.which("python3") or "/usr/bin/python3"
+    pkg_dir = str(Path(__file__).resolve().parent)
+    plugins_dir = str(Path(__file__).resolve().parent.parent)  # plugins/
     return PLIST_CONTENT.format(
         PYTHON_PATH=python_path,
-        SCRIPT_PATH=os.path.abspath(__file__),
+        PKG_DIR=pkg_dir,
         HOMEDIR=hmdir,
         PATH_ENV=_daemon_path_env(hmdir),
+        PLUGINS_DIR=plugins_dir,
     )
 
 
@@ -135,11 +142,14 @@ def generate_systemd_unit():
     """Generate the systemd --user unit with resolved paths."""
     hmdir = os.path.expanduser("~")
     python_path = shutil.which("python3") or "/usr/bin/python3"
+    pkg_dir = str(Path(__file__).resolve().parent)
+    plugins_dir = str(Path(__file__).resolve().parent.parent)  # plugins/
     return SYSTEMD_UNIT_CONTENT.format(
         PYTHON_PATH=python_path,
-        SCRIPT_PATH=os.path.abspath(__file__),
+        PKG_DIR=pkg_dir,
         HOMEDIR=hmdir,
         PATH_ENV=_daemon_path_env(hmdir),
+        PLUGINS_DIR=plugins_dir,
     )
 
 

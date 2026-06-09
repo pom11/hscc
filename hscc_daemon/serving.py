@@ -225,5 +225,124 @@ def resolve_cluster_config():
     _rebuild_vllm_cmds()
 
 
+# ── Orchestrator follower helpers ─────────────────────────────────────────
+
+ORCH_ENDPOINT_STATE = os.path.expanduser("~/.hscc/orch-endpoint")
+PROFILES_DIR = os.path.expanduser("~/.hermes/profiles")
+
+
+def _endpoint_healthy(endpoint, timeout=5):
+    """True iff GET <endpoint>/models returns HTTP 200."""
+    try:
+        res = subprocess.run(
+            ["curl", "-sf", "-o", "/dev/null", "-w", "%{http_code}",
+             "--max-time", str(timeout), f"{endpoint}/models"],
+            capture_output=True, text=True, timeout=timeout + 2,
+        )
+        return res.returncode == 0 and res.stdout.strip() == "200"
+    except Exception:
+        return False
+
+
+_BASE_URL_RE = re.compile(
+    r'^(?P<indent>\s*)base_url:\s*(?P<q>["\']?)(?P<url>\S+?)(?P=q)\s*$')
+
+
+def _read_prev_orch_endpoint():
+    try:
+        with open(ORCH_ENDPOINT_STATE) as f:
+            return f.read().strip() or None
+    except (FileNotFoundError, OSError):
+        return None
+
+
+def _write_prev_orch_endpoint(endpoint):
+    from .health import log  # lazy to avoid circular import
+    try:
+        tmp = ORCH_ENDPOINT_STATE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(endpoint)
+        os.replace(tmp, ORCH_ENDPOINT_STATE)
+    except OSError as e:
+        log(f"base_url follower: could not persist orch endpoint: {e}", "WARN")
+
+
+def update_orchestrator_followers():
+    """Repoint managed profiles that track the OLD orchestrator endpoint to the
+    NEW one when serving.json re-maps the orchestrator.
+
+    Only profiles whose base_url == the previously-applied orchestrator endpoint
+    are rewritten. Worker profiles point at their own node and never match,
+    so the model split is preserved. The new endpoint is health-validated
+    before any file is touched. No-op on first run.
+    """
+    from .health import log  # circular import guard
+    
+    serving = load_serving()
+    new_endpoint = orchestrator_endpoint(serving)
+    if not new_endpoint:
+        return
+    old_endpoint = _read_prev_orch_endpoint()
+    if old_endpoint == new_endpoint:
+        return
+    if old_endpoint is None:
+        _write_prev_orch_endpoint(new_endpoint)
+        return
+    
+    if not _endpoint_healthy(new_endpoint):
+        log(f"base_url follower: new orchestrator {new_endpoint} not healthy "
+            f"(/models != 200); deferring profile rewrites", "WARN")
+        return
+
+    if not os.path.isdir(PROFILES_DIR):
+        _write_prev_orch_endpoint(new_endpoint)
+        return
+
+    changed = 0
+    had_failure = False
+    for name in sorted(os.listdir(PROFILES_DIR)):
+        cfg = os.path.join(PROFILES_DIR, name, "config.yaml")
+        if not os.path.isfile(cfg):
+            continue
+        try:
+            with open(cfg) as f:
+                lines = f.readlines()
+        except OSError as e:
+            log(f"base_url follower: cannot read {cfg}: {e}", "WARN")
+            had_failure = True
+            continue
+        dirty = False
+        for i, line in enumerate(lines):
+            m = _BASE_URL_RE.match(line.rstrip("\n"))
+            if not m:
+                continue
+            repl = compute_base_url_change(m.group("url"), old_endpoint,
+                                           new_endpoint)
+            if repl:
+                lines[i] = f'{m.group("indent")}base_url: {repl}\n'
+                dirty = True
+        if not dirty:
+            continue
+        try:
+            tmp = cfg + ".tmp"
+            with open(tmp, "w") as f:
+                f.writelines(lines)
+            os.replace(tmp, cfg)
+            changed += 1
+            log(f"base_url follower: {name} -> {new_endpoint}")
+        except OSError as e:
+            log(f"base_url follower: cannot write {cfg}: {e}", "WARN")
+            had_failure = True
+
+    if had_failure:
+        log(f"base_url follower: {old_endpoint} -> {new_endpoint}, "
+            f"{changed} updated but some profiles FAILED; endpoint state NOT "
+            f"advanced — will retry next tick", "ERROR")
+        return
+    log(f"base_url follower: {old_endpoint} -> {new_endpoint}, "
+        f"{changed} profile(s) updated")
+    _write_prev_orch_endpoint(new_endpoint)
+
+
 # Resolve cluster config at import time
 resolve_cluster_config()
