@@ -1,6 +1,0 @@
-Metadata-Version: 2.4
-Name: hscc
-Version: 2026.5.28
-Summary: Hermes Spark Cluster Control — Install, configure, and manage DGX Spark cluster
-Requires-Python: >=3.10
-Requires-Dist: click>=8.0
