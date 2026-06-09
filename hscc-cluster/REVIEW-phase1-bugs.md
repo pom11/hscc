@@ -13,7 +13,7 @@
 **PASS** — `ops.py:80-83` wraps `json.loads()` in try/except block; non-JSON body returns `served=None`, `reachable=False`, no traceback.
 
 ## 5. _running_by_node substring match safety
-**PASS** — `ops.py:8-19` searches for IPs .244/.246/.247/.248; none is a prefix of another, so substring match is safe. **Note**: would break if a `.24` style prefix node were ever added (e.g., `192.0.2.24`).
+**PASS** — `ops.py:8-19` searches for IPs .244/.246/.247/.248; none is a prefix of another, so substring match is safe. **Note**: would break if a `.24` style prefix node were ever added (e.g., `192.0.2.10`).
 
 ## 6. All ssh_cmd paths use clusterlib.ssh_cmd with BatchMode/ConnectTimeout
 **PASS** — `clusterlib.py:25-27` defines `ssh_cmd` with `-o BatchMode=yes -o ConnectTimeout=8`; all remote calls in `heal.py` and `debug.py` go through `cl.ssh_cmd`, ensuring fast-fail for key-rejecting QNAP.
