@@ -22,7 +22,7 @@ The design is **native-Hermes-first**: agent work runs on Hermes' built-in kanba
 
 ## Requirements
 
-- A configured [sparkrun](https://github.com/) DGX Spark cluster (one or more GB10 nodes)
+- A configured [sparkrun](https://sparkrun.dev/) DGX Spark cluster (one or more GB10 nodes)
 - [Hermes](https://github.com/NousResearch/hermes-agent) installed (`~/.hermes/hermes-agent`)
 - macOS host for the launchd-managed daemon; Python 3 (stdlib only)
 - Optional: a NAS for the offline model cache
