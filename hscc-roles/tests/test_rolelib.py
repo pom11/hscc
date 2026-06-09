@@ -64,3 +64,15 @@ def test_list_spec_files_returns_sorted_yaml(tmp_path, monkeypatch):
     assert len(files) == 2
     assert files[0].endswith("a.yaml")
     assert files[1].endswith("z.yaml")
+
+
+def test_starter_specs_all_load():
+    files = rolelib.list_spec_files()
+    names = {rolelib.load_spec(f)["name"] for f in files}
+    assert {"orchestrator", "architect", "coder", "reviewer", "qa"}.issubset(names)
+
+
+def test_base_identity_exists_and_nonempty():
+    assert os.path.exists(rolelib.BASE_IDENTITY_PATH)
+    with open(rolelib.BASE_IDENTITY_PATH) as f:
+        assert len(f.read().strip()) > 100
