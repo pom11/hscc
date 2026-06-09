@@ -149,7 +149,7 @@ See `references/health-check-daemon-pattern.md` for the full design.
 hscc cluster cluster-status
 
 # Daemon health
-launchctl list com.hermes.hscc-daemon
+launchctl list com.hermes.hscc_daemon
 
 # Agent counts
 cat ~/.hermes/plugins/plugin-state/hermes-lifecycle.json | python3 -c "import json,sys; d=json.load(sys.stdin); a=d['agents']; print(len(a), 'agents'); print(set(v.get('state') for v in a.values()))"

@@ -8,7 +8,7 @@ import subprocess
 import sys
 import datetime
 
-from . import log
+from .daemon_ops import log
 from .state import now_iso, write_state
 from .util import run_cmd, ssh_cmd, http_check
 
@@ -128,7 +128,7 @@ def check_gateway():
 
 
 def check_local():
-    """Local services check (every 30s): Docker, Ollama, PostgreSQL, hscc-daemon."""
+    """Local services check (every 30s): Docker, Ollama, PostgreSQL, hscc_daemon."""
     log("Running local services check")
     services = {}
     
@@ -161,11 +161,11 @@ def check_local():
     # HSCC daemon
     hscc_ok = False
     try:
-        r = run_cmd(["pgrep", "-f", "hscc-daemon"], timeout=3)
+        r = run_cmd(["pgrep", "-f", "hscc_daemon"], timeout=3)
         hscc_ok = bool(r.get("output", "").strip())
     except Exception:
         pass
-    services["hscc-daemon"] = {"running": hscc_ok}
+    services["hscc_daemon"] = {"running": hscc_ok}
     services.pop("hermes", None)  # remove old hermes entry
     
     # Node.js / npm

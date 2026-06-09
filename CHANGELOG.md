@@ -14,7 +14,7 @@ always Linux (Spark nodes); this closes the gaps in the host-side daemon.
 - **systemd --user service** as the Linux auto-start mechanism, mirroring the
   macOS launchd plist. `install`/`uninstall`/`plist` now dispatch by platform,
   with a plain backgrounded process as a last-resort fallback.
-- `hscc-daemon/systemd-setup.sh` — Linux counterpart to `launchd-setup.sh`
+- `hscc_daemon/systemd-setup.sh` — Linux counterpart to `launchd-setup.sh`
   (installs the unit, enables linger, verifies status).
 - Linux desktop notifications via `notify-send` (libnotify), alongside macOS
   osascript; both fall back to `~/.hscc/notifications.json` when headless.

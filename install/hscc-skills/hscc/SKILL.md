@@ -36,7 +36,7 @@ Guarded tools return a preview unless you pass `confirm=true`.
 |---|---|
 | **hscc-cluster** | Cluster ops toolset (sparkrun wrapper) — the live tool surface |
 | **hscc-provision** | Model container lifecycle (HF, NAS sync, model-check) — see `hscc-provision` skill |
-| **hscc-daemon** | Monitoring/self-heal daemon (launchd `com.hermes.hscc-daemon`) |
+| **hscc_daemon** | Monitoring/self-heal daemon (launchd `com.hermes.hscc_daemon`) |
 | **hscc-chat** | WebSocket gateway client (stale — users use Telegram; kept for future) |
 | **hscc-skills** | Idempotent skill/template installer |
 | **hscc-bootstrap** | One-command init (skill install → state → gateway → cluster checks) |
@@ -46,11 +46,11 @@ Onboarding a NEW model/quant cluster-wide (recipe + offline NAS→node cache + w
 
 **Archived 2026-06-08** (in `_archive/2026-06-08/`): hscc-agent-coordinator, hscc-projects, hscc-orchestrator, hscc-events, hscc-governance, hscc-mcp. Their skills are archived too. If you see a reference to `mcp_hscc_*` tools, `dispatch-task`, `release-task`, or those plugins anywhere, it is STALE — the function moved to native kanban.
 
-## Daemon (hscc-daemon)
+## Daemon (hscc_daemon)
 
-Only continuous process. Live code: `~/.hermes/plugins/hscc-daemon/hscc.py` (run `start-daemon` foreground under launchd `com.hermes.hscc-daemon`). Polling streams write `~/.hscc/state/*.json`; a trigger engine evaluates `~/.hscc/events.jsonl`. Notifications are cross-platform desktop (macOS osascript / Linux notify-send, falling back to `~/.hscc/notifications.json` when neither is available) + `events.jsonl` — the daemon does **not** post to Telegram.
+Only continuous process. Live code: `~/.hermes/plugins/hscc_daemon/hscc.py` (run `start-daemon` foreground under launchd `com.hermes.hscc_daemon`). Polling streams write `~/.hscc/state/*.json`; a trigger engine evaluates `~/.hscc/events.jsonl`. Notifications are cross-platform desktop (macOS osascript / Linux notify-send, falling back to `~/.hscc/notifications.json` when neither is available) + `events.jsonl` — the daemon does **not** post to Telegram.
 
-- **Daemon health check**: `ps aux | grep hscc-daemon | grep -v grep` — `launchctl list | grep hscc` exit code is often STALE (`-9` while running). Trust the process list + `hscc.py status`.
+- **Daemon health check**: `ps aux | grep hscc_daemon | grep -v grep` — `launchctl list | grep hscc` exit code is often STALE (`-9` while running). Trust the process list + `hscc.py status`.
 - **Daemon node resolution**: resolves `PRIMARY_NODE` (=gateway .244, runs the orchestrator vLLM) / `NAS_HOST` from `cluster.json` → `sparkrun cluster list --json` → hardcoded defaults. `_rebuild_vllm_cmds()` must run after any `PRIMARY_NODE` change.
 
 ## Telegram Operations-topic messages = CRON, not the daemon

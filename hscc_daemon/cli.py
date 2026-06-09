@@ -25,7 +25,7 @@ def cmd_start():
         except OSError:
             write_stopped()
 
-    print("Starting hscc-daemon...")
+    print("Starting hscc_daemon...")
     log("Daemon starting")
 
     # Fork into background
@@ -33,9 +33,9 @@ def cmd_start():
     if pid > 0:
         try:
             save_pid()
-            print(f"hscc-daemon started (PID {pid})")
+            print(f"hscc_daemon started (PID {pid})")
         except Exception:
-            print(f"hscc-daemon started (child PID {pid})")
+            print(f"hscc_daemon started (child PID {pid})")
         return
 
     # Child — become daemon
@@ -86,7 +86,7 @@ def cmd_stop():
         write_stopped()
         return
 
-    print(f"Stopping hscc-daemon (PID {pid})...")
+    print(f"Stopping hscc_daemon (PID {pid})...")
     log("Daemon stop requested")
 
     try:
@@ -96,12 +96,12 @@ def cmd_stop():
             try:
                 os.kill(pid, 0)
             except OSError:
-                print(f"hscc-daemon stopped (PID {pid})")
+                print(f"hscc_daemon stopped (PID {pid})")
                 return
         os.kill(pid, signal.SIGKILL)
-        print(f"hscc-daemon force-killed (PID {pid})")
+        print(f"hscc_daemon force-killed (PID {pid})")
     except ProcessLookupError:
-        print("hscc-daemon already stopped")
+        print("hscc_daemon already stopped")
     except Exception as e:
         print(f"Error stopping daemon: {e}")
     finally:
