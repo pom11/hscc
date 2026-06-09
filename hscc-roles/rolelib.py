@@ -1,6 +1,7 @@
 """Role framework shared helpers: paths, toolset policy, spec load/validate, hashing."""
 import hashlib
 import os
+import yaml
 
 _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 ROLES_DIR = os.path.join(_PLUGIN_DIR, "roles")
@@ -32,3 +33,42 @@ def file_md5(path):
         for chunk in iter(lambda: f.read(8192), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+REQUIRED_FIELDS = ("name", "identity")
+
+
+def load_spec(path):
+    """Load + validate a role spec YAML. Returns a normalized dict.
+
+    Required: name, identity. Optional: preload_skills (list, default []).
+    Raises ValueError on missing required fields so callers fail loudly.
+    """
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: spec must be a YAML mapping")
+    for field in REQUIRED_FIELDS:
+        if not data.get(field) or not str(data[field]).strip():
+            raise ValueError(f"{path}: missing required field '{field}'")
+    skills = data.get("preload_skills") or []
+    if isinstance(skills, str):
+        skills = [skills]
+    if not isinstance(skills, list):
+        raise ValueError(f"{path}: preload_skills must be a list")
+    return {
+        "name": str(data["name"]).strip(),
+        "identity": str(data["identity"]).rstrip() + "\n",
+        "preload_skills": [str(s).strip() for s in skills if str(s).strip()],
+    }
+
+
+def list_spec_files():
+    """All role spec file paths under ROLES_DIR, sorted by name."""
+    if not os.path.isdir(ROLES_DIR):
+        return []
+    return sorted(
+        os.path.join(ROLES_DIR, f)
+        for f in os.listdir(ROLES_DIR)
+        if f.endswith(".yaml")
+    )
