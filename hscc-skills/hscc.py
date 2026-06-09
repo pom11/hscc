@@ -72,6 +72,7 @@ BUNDLED_SKILLS = [
     "hscc-cluster",
     "hscc-provision",
     "hscc-model-onboard",
+    "sdlc-review",
     # devops skill group (architecture, plugins, kanban/webhook, migration helpers)
     "devops",
 ]
