@@ -135,7 +135,7 @@ def fire_trigger_action(rule, event, watchdog_block_fn=None, restart_vllm_fn=Non
             restart_result = restart_vllm_fn()
             send_macos_notification(
                 "HSCC Auto-Restart",
-                f"Trigger {rule_id} triggered vLLM restart: {'OK' if restart_result.get('success') else 'FAILED'}",
+                f"Trigger {rule_id} triggered vLLM restart: {'OK' if restart_result.get('ok') else 'FAILED'}",
                 priority="high"
             )
 

@@ -8,17 +8,19 @@ import subprocess
 import sys
 import datetime
 
+from . import serving
 from .daemon_ops import log
 from .state import now_iso, write_state
 from .util import run_cmd, ssh_cmd, http_check
 
 
-# These globals are set by the serving module at import time in the main hscc.py
-VLLM_HEALTH_URL = ""
-VLLM_RECIPE = ""
+# Topology (PRIMARY_NODE, VLLM_HEALTH_URL, NAS_HOST, ...) lives in the serving
+# module, which resolves it from cluster.json/serving.json/sparkrun at import and
+# may re-resolve at runtime. Read those values via `serving.<NAME>` at CALL time —
+# never copy them into module-level locals here, or the checks run against stale
+# placeholder IPs (the refactor regression this comment guards against).
 VLLM_PORT = 8000
 HSCC_CLUSTER = "hscc"
-PRIMARY_NODE = "192.0.2.10"
 SSH_USER = "spark"
 IDLE_TIMEOUT_MINUTES = 30
 
@@ -29,17 +31,17 @@ def check_dgx():
     results = {}
     
     # 1. SSH reachability
-    ssh_result = ssh_cmd(PRIMARY_NODE, "echo reachable", timeout=8)
-    results["ssh_reachable"] = ssh_result.get("success", False)
-    results["ssh_error"] = ssh_result.get("error", "")
+    ssh_result = ssh_cmd(serving.PRIMARY_NODE, "echo reachable", timeout=8)
+    results["ssh_reachable"] = ssh_result.get("ok", False)
+    results["ssh_error"] = ssh_result.get("output", "")
     
     # 2. GPU status
     gpu_result = ssh_cmd(
-        PRIMARY_NODE,
+        serving.PRIMARY_NODE,
         "nvidia-smi --query-gpu=index,name,memory.total,memory.used,temperature.gpu,power.draw --format=csv,noheader 2>/dev/null",
         timeout=10
     )
-    if gpu_result.get("success") and gpu_result.get("output"):
+    if gpu_result.get("ok") and gpu_result.get("output"):
         gpu_lines = [l.strip() for l in gpu_result["output"].split("\n") if l.strip()]
         gpus = []
         for line in gpu_lines:
@@ -61,7 +63,7 @@ def check_dgx():
     
     # 3. Sparkrun workloads
     spark_result = run_cmd(["sparkrun", "status"], timeout=10)
-    if spark_result.get("success"):
+    if spark_result.get("ok"):
         workloads = []
         for line in spark_result["output"].split("\n"):
             line = line.strip()
@@ -80,9 +82,9 @@ def check_dgx():
         results["workload_count"] = 0
     
     # 4. vLLM health
-    health = http_check(VLLM_HEALTH_URL, timeout=5)
+    health = http_check(serving.VLLM_HEALTH_URL, timeout=5)
     results["vllm_health"] = health
-    results["vllm_healthy"] = health.get("success", False)
+    results["vllm_healthy"] = health.get("ok", False)
     
     ok = results["ssh_reachable"] and results["vllm_healthy"]
     write_state("dgx", {"ok": ok, "details": results})
@@ -95,7 +97,7 @@ def _gateway_job_alive():
     if sys.platform == "darwin":
         try:
             r = run_cmd(["launchctl", "list", "ai.hermes.gateway"], timeout=5)
-            if r.get("success", False):
+            if r.get("ok", False):
                 return True
         except Exception:
             pass
@@ -119,8 +121,8 @@ def check_gateway():
     """Gateway check (every 10s): Hermes gateway supervisor job + vLLM backend."""
     log("Running gateway check")
     job_ok = _gateway_job_alive()
-    vllm = http_check(VLLM_HEALTH_URL, timeout=5)
-    vllm_ok = vllm.get("success", False)
+    vllm = http_check(serving.VLLM_HEALTH_URL, timeout=5)
+    vllm_ok = vllm.get("ok", False)
     ok = job_ok and vllm_ok
     write_state("gateway", {"ok": ok, "gateway_job": job_ok, "vllm_healthy": vllm_ok})
     log(f"Gateway check: ok={ok} (job={job_ok} vllm={vllm_ok})")
@@ -136,14 +138,14 @@ def check_local():
     docker_ok = False
     try:
         r = run_cmd(["docker", "info"], timeout=5)
-        docker_ok = r.get("success", False)
+        docker_ok = r.get("ok", False)
     except Exception:
         pass
     services["docker"] = {"running": docker_ok}
     
     # Ollama
     ollama = http_check("http://localhost:11434/api/tags", timeout=3)
-    services["ollama"] = {"running": ollama.get("success", False)}
+    services["ollama"] = {"running": ollama.get("ok", False)}
     
     # PostgreSQL
     pg_ok = False
@@ -173,14 +175,14 @@ def check_local():
     npm_r = run_cmd(["npm", "--version"], timeout=3)
     spark_r = run_cmd(["sparkrun", "--version"], timeout=3)
     tools = {
-        "node": {"version": node_r.get("output", "").strip()} if node_r.get("success") else {},
-        "npm": {"version": npm_r.get("output", "").strip()} if npm_r.get("success") else {},
-        "sparkrun": {"version": spark_r.get("output", "").strip()} if spark_r.get("success") else {},
+        "node": {"version": node_r.get("output", "").strip()} if node_r.get("ok") else {},
+        "npm": {"version": npm_r.get("output", "").strip()} if npm_r.get("ok") else {},
+        "sparkrun": {"version": spark_r.get("output", "").strip()} if spark_r.get("ok") else {},
     }
     
-    all_running = docker_ok and ollama.get("success", False)
+    all_running = docker_ok and ollama.get("ok", False)
     write_state("local", {"ok": all_running, "services": services, "tools": tools})
-    log(f"Local check: ok={all_running}, docker={docker_ok}, ollama={ollama.get('success')}")
+    log(f"Local check: ok={all_running}, docker={docker_ok}, ollama={ollama.get('ok')}")
     return all_running
 
 
@@ -221,7 +223,7 @@ def check_heartbeat():
     if sys.platform == "darwin":
         sys_info = {"os": "macOS"}
         sys_r = run_cmd(["sw_vers"], timeout=3)
-        if sys_r.get("success"):
+        if sys_r.get("ok"):
             for line in sys_r["output"].split("\n"):
                 if ":" in line:
                     key, val = line.split(":", 1)
@@ -241,7 +243,7 @@ def check_heartbeat():
     
     # Disk space
     df_r = run_cmd(["df", "-h", "/"], timeout=3)
-    if df_r.get("success"):
+    if df_r.get("ok"):
         parts = df_r["output"].split("\n")[1].split()
         if len(parts) >= 5:
             sys_info["disk_total"] = parts[1]
@@ -251,11 +253,11 @@ def check_heartbeat():
     
     # Load average
     sys_r2 = run_cmd(["sysctl", "vm.loadavg"], timeout=3)
-    if sys_r2.get("success"):
+    if sys_r2.get("ok"):
         sys_info["loadavg"] = sys_r2["output"].strip()
     
     uptime_r = run_cmd(["uptime"], timeout=3)
-    if uptime_r.get("success"):
+    if uptime_r.get("ok"):
         sys_info["uptime"] = uptime_r["output"].strip()
     
     data["system"] = sys_info
@@ -269,16 +271,16 @@ def check_nas():
     """NAS check (every 30s): disk SMART, RAID, NFS clients."""
     log("Running NAS check")
     results = {}
-    NAS_HOST = "192.0.2.20"
-    
+    NAS_HOST = serving.NAS_HOST
+
     # SSH to NAS
     ssh_ok = ssh_cmd(NAS_HOST, "echo reachable", timeout=8)
-    results["ssh_reachable"] = ssh_ok.get("success", False)
+    results["ssh_reachable"] = ssh_ok.get("ok", False)
     
     # Disk SMART / df
-    if ssh_ok.get("success"):
+    if ssh_ok.get("ok"):
         df_r = ssh_cmd(NAS_HOST, "df -h /mnt/nas 2>/dev/null || df -h / 2>/dev/null", timeout=10)
-        if df_r.get("success") and df_r.get("output"):
+        if df_r.get("ok") and df_r.get("output"):
             lines = df_r["output"].split("\n")
             if len(lines) >= 2:
                 parts = lines[1].split()
@@ -304,7 +306,7 @@ def check_nas():
         )
         results["nfs_mounts"] = mount_r.get("output", "none").strip()
     else:
-        results["error"] = ssh_ok.get("error", "SSH failed")
+        results["error"] = ssh_ok.get("output", "SSH failed")
     
     ok = results["ssh_reachable"]
     write_state("nas", {"ok": ok, "details": results})
