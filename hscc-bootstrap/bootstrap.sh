@@ -119,6 +119,9 @@ open(os.environ['SERVING'], 'w').write(json.dumps(s, indent=2) + '\n')
 " && ok "serving.json written ($SERVING)" || warn "serving.json generation failed"
 fi
 
+hdr "Install: enable HSCC plugins"
+ADDED=$("$PYBIN" "$BOOT_DIR/enable_plugins.py" 2>/dev/null) && ok "plugins enabled ($ADDED)" || warn "plugin enable reported issues"
+
 hdr "Install: daemon"
 if $SKIP_DAEMON; then warn "skipped"; else
   if [ "$(uname -s)" = "Darwin" ]; then
