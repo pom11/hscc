@@ -122,12 +122,11 @@ Saying *"do it autonomously"* flips it on: the orchestrator writes a best-judgme
 | **hscc-cluster** | Cluster ops toolset (orchestrator-only): `cluster_status`, `model_health`, `provision_model`, `stop_model`, `restart_model`, self-heal (`remount_nas`, `repair_nas_export`, `reap_orphans`). Reads live truth from `sparkrun status` + `serving.json`. |
 | **hscc-roles** | Role framework: author + generate role-specialized profiles; autonomy flag CLI. |
 | **hscc_daemon** | Monitoring + self-heal daemon (launchd on macOS / systemd --user on Linux): vLLM/gateway/NAS health, worker keep-alive, trigger engine, Operations-topic notifications. |
-| **hscc-provision** | Model container lifecycle — recipe discovery, NAS sync, model checks. |
+| **hscc-commands** | Operator slash commands for incident response: `/cluster`, `/orch-restart`, `/cluster-restart`. Run directly in the gateway (not via the LLM) so they work even when the orchestrator model is wedged. |
+| **sparkrun-hermes** | Official Hermes plugin for sparkrun: a single guarded `sparkrun_exec` CLI passthrough + the run/setup/registry skills. |
 | **hscc-bootstrap** | Preflight-gated, topology-detecting installer. |
 | **hscc-skills** | Idempotent installer for bundled skills + templates. |
 | **hscc-model-onboard** *(skill)* | Bring a new model/quant online cluster-wide end-to-end. |
-| **hscc-chat** | WebSocket gateway client (kept for future use). |
-| **hscc-optimizations** | Merge-proposal + event-driven pattern detector. |
 
 ---
 

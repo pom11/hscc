@@ -1,0 +1,7 @@
+name: sparkrun-hermes
+version: 1.0.0
+description: "Official Hermes plugin for sparkrun — run, manage, and stop LLM inference workloads on NVIDIA DGX Spark via a single guarded sparkrun_exec CLI passthrough. Bundles the run/setup/registry skills. Mirrors the official OpenClaw + Claude Code plugins."
+author: scitrera.ai
+kind: backend
+provides_tools:
+  - sparkrun_exec
