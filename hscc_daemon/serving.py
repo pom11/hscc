@@ -34,8 +34,15 @@ def _serving_warn(msg):
         print(f"[ERROR] {msg}", file=sys.stderr)
 
 
-def load_serving(path=SERVING_JSON):
-    """Parse serving.json. Return the dict, or None on missing/malformed."""
+def load_serving(path=None):
+    """Parse serving.json. Return the dict, or None on missing/malformed.
+
+    ``path`` defaults to the module-level SERVING_JSON read at CALL time (not a
+    default-arg bound at definition), so monkeypatching ``serving.SERVING_JSON``
+    or changing it at runtime actually takes effect.
+    """
+    if path is None:
+        path = SERVING_JSON
     try:
         with open(path) as f:
             data = json.load(f)

@@ -8,11 +8,11 @@ import urllib.request
 import urllib.error
 
 
-def run_cmd(args, timeout=30, as_json=False):
+def run_cmd(args, timeout=30, as_json=False, shell=False):
     """Run a command and return structured output."""
     try:
         result = subprocess.run(
-            args, capture_output=True, text=True, timeout=timeout
+            args, capture_output=True, text=True, timeout=timeout, shell=shell
         )
         if as_json and result.stdout.strip():
             try:
@@ -29,7 +29,7 @@ def run_cmd(args, timeout=30, as_json=False):
 def ssh_cmd(host, command, timeout=20):
     """Run a command on a remote host via SSH."""
     cmd = f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout={timeout} {host} \"{command}\""
-    return run_cmd(cmd, timeout=timeout + 5)
+    return run_cmd(cmd, timeout=timeout + 5, shell=True)
 
 
 def http_check(url, timeout=5):
