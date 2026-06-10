@@ -7,9 +7,9 @@ import datetime
 import shutil
 
 from .daemon_ops import log
+from . import serving
 from .state import now_iso, read_state
 from .util import run_cmd
-from .serving import PRIMARY_NODE, ORCH_NODES, KEEPALIVE_NODES
 
 
 BRIDGE_FILE = os.path.expanduser("~/.hscc/bridge.json")
@@ -93,8 +93,8 @@ def refresh_live_workers():
         if not node:
             continue
         try:
-            result = run_cmd(f"curl -s http://{node}:8080/health", timeout=5)
-            if result and result.get("success"):
+            result = run_cmd(f"curl -s http://{node}:8080/health", timeout=5, shell=True)
+            if result and result.get("ok"):
                 workers.append({
                     "node": node,
                     "status": "online",
@@ -169,19 +169,19 @@ def restart_vllm():
     try:
         # Stop current instance
         stop_result = run_cmd(VLLM_STOP_CMD, timeout=30)
-        if stop_result.get("success"):
+        if stop_result.get("ok"):
             log("vLLM stopped")
         else:
             log(f"vLLM stop failed: {stop_result.get('output', '')}", "WARN")
 
         # Start new instance
         start_result = run_cmd(VLLM_START_CMD, timeout=30)
-        success = start_result.get("success")
+        success = start_result.get("ok")
         log(f"vLLM restart: {'success' if success else 'failed'}")
-        return {"success": success, "output": start_result.get("output", "")}
+        return {"ok": success, "output": start_result.get("output", "")}
     except Exception as e:
         log(f"vLLM restart exception: {e}", "ERROR")
-        return {"success": False, "output": str(e)}
+        return {"ok": False, "output": str(e)}
 
 
 def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
@@ -296,7 +296,7 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
     if not dgx_ok:
         log("Watchdog: attempting vLLM auto-restart via sparkrun")
         restart_result = restart_vllm_fn()
-        restart_ok = restart_result.get("success", False)
+        restart_ok = restart_result.get("ok", False)
         count = block.get("auto_restart_count", 0) + 1
         block["auto_restart_count"] = count
         block["last_restart"] = now_iso()
@@ -314,7 +314,7 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
             "dgx": dgx_ok,
             "gateway": gw_ok,
             "auto_restart": True,
-            "restart_result": restart_result.get("success", False),
+            "restart_result": restart_result.get("ok", False),
             "restart_output": restart_result.get("output", "")[:200],
             "auto_restart_count": count,
             "last_check": now_iso(),
@@ -323,7 +323,7 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
         log(f"Watchdog: vLLM auto-restart #{count}: {'success' if restart_ok else 'failed'}")
         send_macos_notification_fn(
             "HSCC vLLM Auto-Restart",
-            f"Auto-restart #{count} of vLLM attempted on {PRIMARY_NODE}: {'OK' if restart_ok else 'FAILED'}",
+            f"Auto-restart #{count} of vLLM attempted on {serving.PRIMARY_NODE}: {'OK' if restart_ok else 'FAILED'}",
             priority="high",
         )
     else:

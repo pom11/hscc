@@ -118,7 +118,7 @@ def run_daemon_loop():
     """Main daemon event loop (polling mode fallback)."""
     from .health import check_dgx, check_gateway, check_local, check_heartbeat, check_nas, check_idle_monitor, check_workers
     from .trigger import trigger_engine
-    from .lifecycle import pipeline_watchdog
+    from .lifecycle import pipeline_watchdog, restart_vllm, load_watchdog_block
     from .state import now_iso, write_state
 
     ensure_state_dir()
@@ -136,6 +136,15 @@ def run_daemon_loop():
     STREAMS = {
         "dgx": 60, "gateway": 60, "local": 60, "heartbeat": 300,
         "nas": 900, "idle": 300, "workers": 60,
+    }
+
+    # The check_* fns are imported as locals above (not module globals), so map
+    # them explicitly — globals().get("check_<name>") would return None and no
+    # check thread would ever start.
+    CHECKS = {
+        "dgx": check_dgx, "gateway": check_gateway, "local": check_local,
+        "heartbeat": check_heartbeat, "nas": check_nas,
+        "idle": check_idle_monitor, "workers": check_workers,
     }
 
     def run_periodic(check_fn, interval, stream_name):
@@ -161,8 +170,8 @@ def run_daemon_loop():
                     check_dgx_fn=check_dgx,
                     check_gateway_fn=check_gateway,
                     pipeline_watchdog_fn=pipeline_watchdog,
-                    watchdog_block_fn=None,
-                    restart_vllm_fn=None,
+                    watchdog_block_fn=load_watchdog_block,
+                    restart_vllm_fn=restart_vllm,
                 )
             except Exception as e:
                 log(f"Trigger engine error: {e}", "ERROR")
@@ -170,7 +179,7 @@ def run_daemon_loop():
 
     threads = []
     for stream_name, interval in STREAMS.items():
-        check_fn = globals().get(f"check_{stream_name}")
+        check_fn = CHECKS.get(stream_name)
         if check_fn:
             t = threading.Thread(
                 target=run_periodic,
