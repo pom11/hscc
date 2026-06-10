@@ -67,10 +67,11 @@ BUNDLED_SKILLS = [
     "writing-plans",
     # HSCC cluster-control skills (native-Hermes-first: coordinator/events/
     # governance/orchestrator/projects archived 2026-06-08 with their plugins;
-    # dispatch is native kanban now, cluster ops via the hscc-cluster toolset).
+    # dispatch is native kanban now, cluster ops via the hscc-cluster toolset.
+    # provision archived 2026-06-10 — provision_model is in the hscc-cluster
+    # toolset; container lifecycle via sparkrun + the model-onboard skill).
     "hscc",
     "hscc-cluster",
-    "hscc-provision",
     "hscc-model-onboard",
     "sdlc-review",
     # devops skill group (architecture, plugins, kanban/webhook, migration helpers)
