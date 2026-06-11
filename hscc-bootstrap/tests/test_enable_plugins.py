@@ -41,9 +41,10 @@ def test_adds_missing_toolset_to_list(tmp_path):
                       "hscc-cluster", "hscc-commands", "sparkrun-hermes"]},
                    "toolsets": ["hermes-cli", "hscc-cluster", "kanban"]})
     res = enable_plugins.enable(path)
-    assert res["toolsets"] == ["sparkrun"]
+    assert res["toolsets"] == ["sparkrun", "delegation"]
     cfg = yaml.safe_load(open(path))
-    assert cfg["toolsets"] == ["hermes-cli", "hscc-cluster", "kanban", "sparkrun"]
+    assert cfg["toolsets"] == [
+        "hermes-cli", "hscc-cluster", "kanban", "sparkrun", "delegation"]
 
 
 def test_toolsets_json_string_normalized_to_list(tmp_path):
@@ -53,10 +54,11 @@ def test_toolsets_json_string_normalized_to_list(tmp_path):
                       "hscc-cluster", "hscc-commands", "sparkrun-hermes"]},
                    "toolsets": json.dumps(["hermes-cli", "kanban"])})
     res = enable_plugins.enable(path)
-    assert set(res["toolsets"]) == {"hscc-cluster", "sparkrun"}
+    assert set(res["toolsets"]) == {"hscc-cluster", "sparkrun", "delegation"}
     cfg = yaml.safe_load(open(path))
     assert isinstance(cfg["toolsets"], list)
-    assert "sparkrun" in cfg["toolsets"] and "hscc-cluster" in cfg["toolsets"]
+    assert all(t in cfg["toolsets"]
+               for t in ("hscc-cluster", "sparkrun", "delegation"))
 
 
 def test_toolsets_absent_seeds_default_plus_hscc(tmp_path):
@@ -65,8 +67,9 @@ def test_toolsets_absent_seeds_default_plus_hscc(tmp_path):
                       "hscc-cluster", "hscc-commands", "sparkrun-hermes"]}})
     res = enable_plugins.enable(path)
     cfg = yaml.safe_load(open(path))
-    assert cfg["toolsets"] == ["hermes-cli", "hscc-cluster", "sparkrun"]
-    assert set(res["toolsets"]) == {"hscc-cluster", "sparkrun"}
+    assert cfg["toolsets"] == [
+        "hermes-cli", "hscc-cluster", "sparkrun", "delegation"]
+    assert set(res["toolsets"]) == {"hscc-cluster", "sparkrun", "delegation"}
 
 
 # ── idempotency + guards ─────────────────────────────────────────────────────
@@ -74,7 +77,8 @@ def test_toolsets_absent_seeds_default_plus_hscc(tmp_path):
 def _fully_wired_cfg():
     return {
         "plugins": {"enabled": ["hscc-cluster", "hscc-commands", "sparkrun-hermes"]},
-        "toolsets": ["hermes-cli", "hscc-cluster", "kanban", "sparkrun"],
+        "toolsets": ["hermes-cli", "hscc-cluster", "kanban", "sparkrun",
+                     "delegation"],
         "kanban": {"default_assignee": enable_plugins.DEFAULT_ASSIGNEE,
                    "max_in_progress": enable_plugins.MAX_IN_PROGRESS,
                    "max_in_progress_per_profile":
