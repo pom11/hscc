@@ -216,5 +216,42 @@ class TestCheckWorkers:
         assert ran == []                         # grace window respected
 
 
+class TestCheckProxy:
+    """check_proxy() keeps the worker load-balancer alive."""
+
+    def _setup(self, tmp_hfcc_dir, monkeypatch, nodes):
+        from hscc_daemon import health, serving
+        from hscc_daemon import state as state_mod
+        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        monkeypatch.setattr(serving, "KEEPALIVE_NODES", set(nodes))
+        return health
+
+    def test_no_workers_noop(self, tmp_hfcc_dir, monkeypatch):
+        health = self._setup(tmp_hfcc_dir, monkeypatch, nodes=[])
+        assert health.check_proxy() is True
+
+    def test_proxy_healthy(self, tmp_hfcc_dir, monkeypatch):
+        health = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": True})
+        ran = []
+        monkeypatch.setattr(health, "run_cmd", lambda *a, **k: ran.append(a) or {"ok": True})
+        assert health.check_proxy() is True
+        assert ran == []                         # healthy -> no relaunch
+
+    def test_proxy_down_relaunched(self, tmp_hfcc_dir, monkeypatch):
+        health = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"])
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
+        ran = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(args) or {"ok": True})
+        assert health.check_proxy() is True
+        cmd = ran[0]
+        assert cmd[:3] == ["sparkrun", "proxy", "start"]
+        assert "10.0.0.2,10.0.0.3" in cmd
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
