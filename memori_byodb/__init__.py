@@ -172,6 +172,11 @@ Use `memori_byodb_feedback` when recall is irrelevant or missing important conte
                 return json.dumps(
                     self._client.agent_recall_summary(params), ensure_ascii=False
                 )
+            if tool_name == "memori_byodb_feedback":
+                content = str(args.get("content") or "")
+                return json.dumps(self._client.agent_feedback(content))
+            if tool_name == "memori_byodb_compaction":
+                return json.dumps(self._client.agent_compaction({}))
         except Exception as exc:
             return json.dumps({"error": str(exc)})
 
@@ -213,7 +218,7 @@ Use `memori_byodb_feedback` when recall is irrelevant or missing important conte
             except (OSError, json.JSONDecodeError):
                 existing = {}
 
-        config = MemoriConfig(**existing)
+        config = MemoriConfig.from_dict(existing)
 
         if values.get("entity_id"):
             config.entity_id = values["entity_id"]
@@ -263,7 +268,7 @@ def _load_config(hermes_home: str | Path | None = None) -> MemoriConfig | None:
     except (OSError, json.JSONDecodeError):
         return None
 
-    config = MemoriConfig(**raw)
+    config = MemoriConfig.from_dict(raw)
     if not config.entity_id:
         return None
     return config
@@ -434,6 +439,32 @@ TOOL_SCHEMAS = [
             },
             "required": [],
         },
+    },
+    {
+        "name": "memori_byodb_feedback",
+        "description": (
+            "Send feedback about a memory recall result. "
+            "Use when recall was irrelevant or missing important context. "
+            "Note: BYODB mode does not send feedback to cloud — this is a no-op."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "Feedback text explaining what was wrong or what was missing.",
+                },
+            },
+            "required": ["content"],
+        },
+    },
+    {
+        "name": "memori_byodb_compaction",
+        "description": (
+            "Merge similar memories to reduce redundancy. "
+            "Note: BYODB mode does not support compaction (cloud-only feature)."
+        ),
+        "parameters": {"type": "object", "properties": {}},
     },
 ]
 
