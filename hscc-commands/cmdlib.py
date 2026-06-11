@@ -74,6 +74,22 @@ def _curl_model(node):
         return None
 
 
+def cluster_metrics():
+    """One-shot snapshot of CPU/GPU/mem/power metrics across all nodes.
+    Returns dict keyed by IP, or empty dict on failure."""
+    # sparkrun --json streams continuously — pipe through head -1
+    ok, out, err = _run(
+        ["bash", "-c", "sparkrun cluster monitor --simple --json 2>/dev/null | head -1"],
+        timeout=30,
+    )
+    if not ok or not out:
+        return {}
+    try:
+        return json.loads(out).get("hosts", {})
+    except Exception:
+        return {}
+
+
 def restart_one(unit):
     """Hard stop+run a unit's model on its node. Returns a result dict."""
     node = unit_node(unit)
