@@ -38,6 +38,10 @@ DEFAULT_ASSIGNEE = os.environ.get("HSCC_DEFAULT_ASSIGNEE", "worker")
 # `worker` catch-all role can run many tasks in parallel (the proxy spreads them).
 MAX_IN_PROGRESS = int(os.environ.get("HSCC_MAX_IN_PROGRESS", "30"))
 MAX_IN_PROGRESS_PER_PROFILE = int(os.environ.get("HSCC_MAX_IN_PROGRESS_PER_PROFILE", "10"))
+# Subagent parallelism per delegate batch — sized for the worker pool (the proxy
+# load-balances across worker GPUs). Spawn depth stays flat (1) by default;
+# nesting (2+) multiplies cost and is opt-in.
+MAX_CONCURRENT_CHILDREN = int(os.environ.get("HSCC_MAX_CONCURRENT_CHILDREN", "9"))
 
 
 def _ensure_plugins_enabled(cfg, plugins):
@@ -124,6 +128,13 @@ def _ensure_delegation(cfg):
         if not (d.get(key) or "").strip():
             d[key] = want
             changed.append(key)
+    # Subagent parallelism: only RAISE toward the default (never lower a
+    # deliberately higher value). Spawn depth is left to Hermes' default (flat) —
+    # nesting is opt-in and not set here.
+    cur = d.get("max_concurrent_children")
+    if not isinstance(cur, int) or cur < MAX_CONCURRENT_CHILDREN:
+        d["max_concurrent_children"] = MAX_CONCURRENT_CHILDREN
+        changed.append("max_concurrent_children")
     return changed
 
 

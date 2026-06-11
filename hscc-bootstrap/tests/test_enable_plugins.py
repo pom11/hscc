@@ -86,7 +86,9 @@ def _fully_wired_cfg():
         "delegation": {"base_url": enable_plugins.WORKER_PROXY_URL,
                        "model": enable_plugins.WORKER_MODEL,
                        "provider": "custom",
-                       "api_key": enable_plugins.WORKER_PROXY_KEY},
+                       "api_key": enable_plugins.WORKER_PROXY_KEY,
+                       "max_concurrent_children":
+                           enable_plugins.MAX_CONCURRENT_CHILDREN},
     }
 
 
@@ -112,11 +114,14 @@ def test_routing_filled_on_fresh_config(tmp_path):
                    "toolsets": ["hermes-cli", "hscc-cluster", "kanban", "sparkrun"]})
     res = enable_plugins.enable(path)
     assert "default_assignee" in res["kanban"]
-    assert set(res["delegation"]) == {"base_url", "model", "provider", "api_key"}
+    assert set(res["delegation"]) == {
+        "base_url", "model", "provider", "api_key", "max_concurrent_children"}
     cfg = yaml.safe_load(open(path))
     assert cfg["kanban"]["default_assignee"] == enable_plugins.DEFAULT_ASSIGNEE
     assert cfg["kanban"]["max_in_progress"] == enable_plugins.MAX_IN_PROGRESS
     assert cfg["delegation"]["base_url"] == enable_plugins.WORKER_PROXY_URL
+    assert cfg["delegation"]["max_concurrent_children"] == \
+        enable_plugins.MAX_CONCURRENT_CHILDREN
 
 
 def test_routing_preserves_operator_choices(tmp_path):
