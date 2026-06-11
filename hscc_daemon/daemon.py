@@ -180,7 +180,7 @@ def instantiate_handlers(config: dict) -> dict:
     from handlers.vllm import VLLMHandler
     from handlers.container import ContainerHandler
     from handlers.gateway import GatewayHandler
-    from handlers.nas import NASHandler
+    from handlers.nas import NASHandler, DEFAULT_NAS_MOUNT
 
     handlers = {}
     h_conf = config.get("handlers", {})
@@ -205,6 +205,7 @@ def instantiate_handlers(config: dict) -> dict:
         host=nas_conf.get("host", "nas.local"),
         path=nas_conf.get("path", "/"),
         key_path=nas_conf.get("key_path"),
+        local_mount=nas_conf.get("local_mount", DEFAULT_NAS_MOUNT),
     )
 
     return handlers

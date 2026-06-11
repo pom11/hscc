@@ -187,10 +187,16 @@ class TestNASHandler:
         assert h.name == "nas"
 
     def test_ssh_not_found_becomes_unknown(self):
-        """If ssh host is unreachable, should return unknown not crash."""
-        h = NASHandler(host="nonexistent-host-xyz-12345")
+        """When the local mount is absent AND ssh fails, status is unknown.
+
+        local_mount points at a path that does not exist so the check falls
+        through to the SSH path (the unreachable host), which must degrade to
+        'unknown' rather than crash.
+        """
+        h = NASHandler(host="nonexistent-host-xyz-12345",
+                       local_mount="/nonexistent-nas-mount-xyz-12345")
         r = h.run()
-        assert r.status == "unknown"  # host unreachable
+        assert r.status == "unknown"  # mount missing + host unreachable
 
 
 # ─── Core loop / Escalator tests ───

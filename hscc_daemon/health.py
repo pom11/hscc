@@ -23,6 +23,13 @@ VLLM_PORT = 8000
 HSCC_CLUSTER = "hscc"
 SSH_USER = "spark"
 IDLE_TIMEOUT_MINUTES = 30
+# Local NFS mount of the cluster NAS. Env-overridable; defaults are platform
+# conventional (macOS gateway = /Volumes/NAS, Linux nodes = /mnt/nas). The NAS
+# check reads the local mount (the source of truth) rather than SSHing the QNAP,
+# which rejects SSH and produced a permanent false "DOWN".
+NAS_MOUNT = os.environ.get(
+    "HSCC_NAS_MOUNT",
+    "/Volumes/NAS" if sys.platform == "darwin" else "/mnt/nas")
 
 
 def check_dgx():
@@ -305,49 +312,44 @@ def check_heartbeat():
 
 
 def check_nas():
-    """NAS check (every 30s): disk SMART, RAID, NFS clients."""
+    """NAS check (every 30s): check the local NAS mount point."""
     log("Running NAS check")
     results = {}
-    NAS_HOST = serving.NAS_HOST
 
-    # SSH to NAS
-    ssh_ok = ssh_cmd(NAS_HOST, "echo reachable", timeout=8)
-    results["ssh_reachable"] = ssh_ok.get("ok", False)
-    
-    # Disk SMART / df
-    if ssh_ok.get("ok"):
-        df_r = ssh_cmd(NAS_HOST, "df -h /mnt/nas 2>/dev/null || df -h / 2>/dev/null", timeout=10)
-        if df_r.get("ok") and df_r.get("output"):
-            lines = df_r["output"].split("\n")
-            if len(lines) >= 2:
-                parts = lines[1].split()
-                if len(parts) >= 5:
-                    results["disk_total"] = parts[1]
-                    results["disk_used"] = parts[2]
-                    results["disk_avail"] = parts[3]
-                    results["disk_pct"] = parts[4]
-        
-        # NFS clients
-        nfs_r = ssh_cmd(NAS_HOST, "nfsstat -e 2>/dev/null | grep -c '^[0-9]' || true", timeout=8)
-        nfs_output = nfs_r.get("output", "0").strip().split("\n")[0].strip()
+    # Check local NFS mount (module-level NAS_MOUNT, env-overridable)
+    exists = os.path.exists(NAS_MOUNT)
+    results["local_mount"] = NAS_MOUNT
+    results["mount_exists"] = exists
+
+    if exists:
         try:
-            results["nfs_clients"] = int(nfs_output) if nfs_output else 0
-        except ValueError:
-            results["nfs_clients"] = 0
-        
-        # Mount check
-        mount_r = ssh_cmd(
-            NAS_HOST,
-            "cat /proc/mounts 2>/dev/null | grep nfs || mount 2>/dev/null | grep nfs || echo none",
-            timeout=8
-        )
-        results["nfs_mounts"] = mount_r.get("output", "none").strip()
+            st = shutil.disk_usage(NAS_MOUNT)
+            results["disk_total"] = f"{st.total // (1024**3)}G"
+            results["disk_used"] = f"{st.used // (1024**3)}G"
+            results["disk_avail"] = f"{st.free // (1024**3)}G"
+            results["disk_pct"] = f"{st.used * 100 / st.total:.1f}%"
+        except OSError:
+            results["disk_error"] = "df failed"
+
+        # Check key directories exist
+        results["has_huggingface"] = os.path.isdir(os.path.join(NAS_MOUNT, "huggingface"))
+        results["has_hub"] = os.path.isdir(os.path.join(NAS_MOUNT, "hub"))
+        results["has_memori"] = os.path.isfile(os.path.join(NAS_MOUNT, "hermes_memori_byodb.db"))
+
+        # Try to count cached models
+        try:
+            hf_dir = os.path.join(NAS_MOUNT, "huggingface")
+            if os.path.isdir(hf_dir):
+                hf_items = [d for d in os.listdir(hf_dir) if not d.startswith(".")]
+                results["huggingface_cached_items"] = len(hf_items)
+        except OSError:
+            pass
     else:
-        results["error"] = ssh_ok.get("output", "SSH failed")
-    
-    ok = results["ssh_reachable"]
+        results["error"] = f"{NAS_MOUNT} not mounted"
+
+    ok = exists
     write_state("nas", {"ok": ok, "details": results})
-    log(f"NAS check: ok={ok}")
+    log(f"NAS check: ok={ok} mount_exists={exists}")
     return ok
 
 
