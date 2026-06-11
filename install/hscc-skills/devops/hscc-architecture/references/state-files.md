@@ -8,17 +8,15 @@ Live state is under `~/.hscc/` (override with the `HSCC_HOME` env var):
 
 | File | Format | Contents | Used By |
 |------|--------|----------|---------|
-| `cluster.json` | JSON | Gateway, workers, NAS device definitions | hscc-cluster |
-| `agents.json` | JSON | 21 agents (dev-001..dev-020, merge-001) with roles, status, tasks | hscc-agents |
-| `projects.json` | JSON | Projects, tasks, kanban board state | hscc-projects |
+| `cluster.json` | JSON | Gateway, workers, NAS device definitions | hscc-cluster, hscc_daemon |
 | `network.json` | JSON | Network config, SSH settings | hscc-cluster |
-| `events.jsonl` | JSON Lines | Event log (one JSON object per line) | hscc-events |
-| `session-snapshot.json` | JSON | Current session state snapshot | hscc-projects |
-| `setup.json` | JSON | Setup wizard state | hscc-gateway |
+| `events.jsonl` | JSON Lines | Event log (one JSON object per line) | hscc_daemon |
+| `state/*.json` | JSON | Daemon polling/check state snapshots | hscc_daemon |
 | `cluster-manifest.json` | JSON | Cluster deployment manifest | hscc-cluster |
-| `plugin-state/` | dir | Per-plugin state (enabled/disabled, config) | hscc-gateway |
 
-## Agent Structure (agents.json)
+> **Stale state (consumers archived 2026-06-08).** `agents.json`, `projects.json`, `session-snapshot.json`, `setup.json`, `lifecycle.json` and `plugin-state/` were written by the old agent pipeline (hscc-agents/hscc-projects/hscc-gateway/hscc-agent-coordinator). Agent dispatch and task tracking are now **native Hermes kanban**; these files are no longer authoritative — the paused idle monitor still keys off the stale `agents.json`, which is why it must not be resumed. The `agents.json` schema below is kept for history.
+
+## Agent Structure (agents.json — historical)
 
 ```json
 {

@@ -22,7 +22,8 @@ If kqueue unavailable (non-macOS): detect at init, set `using_kqueue=False`, dro
 ## Integration
 - hscc_daemon: replace 5 polling loops with EventDrivenDaemon class
 - hscc-config: config changes trigger kqueue callbacks instead of poll cycles
-- hscc-governance: policy changes trigger EventBridge events
+
+> Note: the original design also wired `hscc-governance` (policy changes → EventBridge events). That plugin was archived 2026-06-08; only the `hscc_daemon` integration remains live.
 
 ## Pitfalls
 1. kqueue is macOS-only — check `EVENT_DRIVEN_SUPPORTED` first
