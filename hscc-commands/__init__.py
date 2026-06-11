@@ -30,11 +30,32 @@ def _fmt_units(units, label):
     )
 
 
+def _fmt_metrics(m):
+    """Format a metrics dict into a compact per-node block."""
+    parts = []
+    cpu_temp = m.get("cpu_temp_c", "")
+    cpu_load = m.get("cpu_load_1m", "")
+    cpu_pct = m.get("cpu_usage_pct", "")
+    mem_used = m.get("mem_used_pct", "")
+    mem_avail = m.get("mem_available_mb", "")
+    gpu = m.get("gpu_name", "")
+    gpu_util = m.get("gpu_util_pct", "")
+    gpu_temp = m.get("gpu_temp_c", "")
+    gpu_power = m.get("gpu_power_w", "")
+
+    parts.append(f"  CPU: {cpu_pct}% | temp {cpu_temp}°C | load {cpu_load}")
+    parts.append(f"  MEM: {mem_used}% used ({mem_avail} MB free)")
+    if gpu:
+        parts.append(f"  GPU {gpu}: {gpu_util}% util | {gpu_temp}°C | {gpu_power}W")
+    return "\n".join(parts)
+
+
 def cmd_cluster(raw_args):
     """Read-only cluster resource snapshot. Never mutates."""
     units = cmdlib.read_units()
     orch = cmdlib.orchestrator_unit(units)
     workers = cmdlib.worker_units(units)
+    metrics = cmdlib.cluster_metrics()
     lines = ["🖥️  *HSCC cluster*", ""]
 
     if orch:
@@ -43,10 +64,11 @@ def cmd_cluster(raw_args):
         state = f"✅ serving `{live}`" if live else "❌ DOWN / no /v1/models"
         lines.append(f"*Orchestrator* {node}: {state}")
         lines.append(f"  serving.json: `{orch.get('model')}`")
-    else:
-        lines.append("*Orchestrator*: ⚠️ none defined in serving.json")
+        m = metrics.get(node, {})
+        if m:
+            lines.append(_fmt_metrics(m))
+        lines.append("")
 
-    lines.append("")
     lines.append(f"*Workers* ({len(workers)}):")
     if not workers:
         lines.append("  (none)")
@@ -55,6 +77,9 @@ def cmd_cluster(raw_args):
         live = cmdlib._curl_model(node)
         mark = "✅" if live else "❌"
         lines.append(f"  {mark} {node}: {live or 'down'}")
+        m = metrics.get(node, {})
+        if m:
+            lines.append("  " + _fmt_metrics(m).replace("\n", "\n  "))
 
     return "\n".join(lines)
 
