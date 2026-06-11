@@ -24,10 +24,16 @@ the whole wiring into bootstrap so it survives a config rebuild.
   worker check was a no-op; the watchdog latched BLOCKED forever. The daemon now
   runs all checks against real topology, relaunches crashed worker models, and
   backs off + auto-resumes instead of giving up.
+- **Memory provider was down.** The BYODB provider failed to init every turn
+  (camelCase config keys vs snake_case dataclass fields). Fixed with a
+  casing-tolerant loader; memory works again.
 
 ### Added
 - **Worker load-balancer**: a daemon stream keeps the sparkrun LiteLLM proxy alive
   so role workers + orchestrator subagents always reach the balanced worker pool.
+- **Offline memory augmentation**: memory fact-extraction can run against a local
+  OpenAI-compatible LLM (the cluster orchestrator) instead of the Memori cloud —
+  fully offline, env-configurable.
 - **Bootstrap wires fleet routing**: `kanban.default_assignee`, concurrency caps,
   and `delegation.base_url` are now set idempotently by bootstrap (only fills
   unset values / raises low caps — never clobbers operator choices), so the
