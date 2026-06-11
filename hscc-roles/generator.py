@@ -3,6 +3,27 @@ import os
 import yaml
 import rolelib
 
+# Worker role profiles must serve from the WORKER pool, not inherit the root
+# config (which points at the orchestrator node). We point them at the sparkrun
+# LiteLLM proxy, which load-balances every worker endpoint serving the worker
+# model behind one OpenAI-compatible URL. Without this, every role task runs on
+# the orchestrator GPU. Overridable via env so bootstrap can set the real
+# proxy/host without editing code.
+WORKER_PROXY_BASE_URL = os.environ.get(
+    "HSCC_WORKER_PROXY_URL", "http://localhost:4000/v1")
+WORKER_MODEL = os.environ.get("HSCC_WORKER_MODEL", "Qwen/Qwen3.6-27B-FP8")
+WORKER_PROXY_KEY = os.environ.get("HSCC_WORKER_PROXY_KEY", "sk-sparkrun")
+
+
+def _worker_model_block():
+    """The model block that points a worker role at the load-balanced proxy."""
+    return {
+        "default": WORKER_MODEL,
+        "provider": "custom",
+        "base_url": WORKER_PROXY_BASE_URL,
+        "api_key": WORKER_PROXY_KEY,
+    }
+
 _WORKER_OPS = (
     "## Operational\n\n"
     "You run as the **{name}** role on a worker GPU node of the cluster, "
@@ -66,6 +87,11 @@ def generate_profile(spec, base_identity):
         "toolsets": rolelib.role_toolsets(),
         "skills": {"preload": spec["preload_skills"]},
     }
+    # Worker roles serve from the load-balanced worker proxy so their work runs
+    # on worker GPUs, not the orchestrator. The orchestrator role keeps the root
+    # config (its own gateway-node model) and is never repointed.
+    if spec["name"] != "orchestrator":
+        config["model"] = _worker_model_block()
     profile = {
         "description": _short_desc(spec),
         "description_auto": False,
