@@ -1,5 +1,7 @@
 # Idle Monitor Integration (May 2026)
 
+> **STALE (historical).** The `hscc-agent-coordinator` (ACC) plugin referenced below was archived 2026-06-08, and the legacy idle monitor was PAUSED 2026-06-08 (it reaps native-provisioned worker vLLMs as "orphan"). Dispatch is now native Hermes kanban; provisioning is the hscc-cluster `provision_model` tool. This doc is kept for history only — see the `hscc` skill for current mechanics.
+
 ## Background
 The idle monitor was originally a standalone cron job (`model-idle-monitor.py`) running every 5 minutes. It conflicted with the daemon's heartbeat check (which only read agent state, never killed containers). This caused kill loops — agents were assigned tasks but containers were preemptively killed by the cron job.
 

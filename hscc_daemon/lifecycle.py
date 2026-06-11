@@ -123,6 +123,10 @@ def refresh_live_workers():
 
 WATCHDOG_BLOCK_FILE = os.path.expanduser("~/.hscc/watchdog-block.json")
 VLLM_LOAD_GRACE_MINUTES = int(os.environ.get("HSCC_VLLM_LOAD_GRACE_MINUTES", "5"))
+# After the breaker trips, back off this long, then auto-clear and resume trying.
+# "Relentless, not infinite": repeated failures slow retries instead of stopping
+# them forever, so a transient outage self-heals once the cluster recovers.
+WATCHDOG_BACKOFF_MINUTES = int(os.environ.get("HSCC_WATCHDOG_BACKOFF_MINUTES", "10"))
 
 
 def load_watchdog_block():
@@ -204,18 +208,37 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
 
     block = load_watchdog_block()
 
-    # If currently blocked, don't run checks, just report
+    # If currently blocked, stay backed off until the backoff window elapses,
+    # then auto-clear and resume — instead of giving up permanently. This makes
+    # the breaker a backoff, not a dead-end: a transient outage self-heals once
+    # the cluster recovers, with retries merely slowed while it's down.
     if block.get("blocked"):
-        log("Watchdog: blocked, skipping checks")
-        write_state("watchdog", {
-            "ok": False,
-            "blocked": True,
-            "reason": block.get("reason", ""),
-            "auto_restart_count": block.get("auto_restart_count", 0),
-            "last_check": now_iso(),
-            "message": f"Pipeline blocked: {block['reason']}",
-        })
-        return False
+        blocked_at = block.get("blocked_at")
+        elapsed_ok = False
+        if blocked_at:
+            try:
+                ba = datetime.datetime.fromisoformat(blocked_at).replace(
+                    tzinfo=datetime.timezone.utc)
+                elapsed_ok = datetime.datetime.now(datetime.timezone.utc) >= \
+                    ba + datetime.timedelta(minutes=WATCHDOG_BACKOFF_MINUTES)
+            except (ValueError, TypeError):
+                elapsed_ok = True  # unparseable timestamp — don't latch forever
+        if not elapsed_ok:
+            log("Watchdog: backing off (blocked), will retry after cooldown")
+            write_state("watchdog", {
+                "ok": False, "blocked": True, "reason": block.get("reason", ""),
+                "auto_restart_count": block.get("auto_restart_count", 0),
+                "last_check": now_iso(),
+                "message": f"Backing off: {block.get('reason', '')}",
+            })
+            return False
+        # Backoff elapsed — clear the breaker and resume checking this cycle.
+        log("Watchdog: backoff elapsed, clearing block and resuming checks")
+        block["blocked"] = False
+        block["failures"] = []
+        block.pop("blocked_at", None)
+        block.pop("reason", None)
+        save_watchdog_block(block)
 
     # Run DGX + gateway checks
     dgx_ok = check_dgx_fn()

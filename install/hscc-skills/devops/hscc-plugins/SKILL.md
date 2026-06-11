@@ -10,9 +10,11 @@ Building custom Python plugins for Hermes to manage DGX Spark cluster, agents, a
 
 ## When to use
 
-- Building a new `hscc-*` component (hscc-cluster, hscc-projects, hscc-agents, etc.)
+- Building a new `hscc-*` component (hscc-cluster, hscc-roles, hscc_daemon, etc.)
 - Wrapping CLI tools as structured JSON plugins for the agent
 - Any task involving Python scripts in `~/.hermes/plugins/`
+
+> Note: agent/project/task plugins (hscc-projects, hscc-agents, hscc-orchestrator, hscc-agent-coordinator, hscc-events, hscc-governance) were archived 2026-06-08 — that work is now native Hermes kanban, not an HSCC plugin. Don't build new ones.
 
 ## File Structure
 
@@ -69,12 +71,16 @@ Always return JSON the agent can parse. Don't return raw text for commands the a
 
 ## Naming Convention
 
-All components use the `hscc-*` prefix (Hermes Spark Cluster Control):
-- `hscc-cluster` — sparkrun status, hosts, monitoring, workloads
-- `hscc-projects` — kanban boards, tasks, roadmaps
-- `hscc-agents` — agent fleet management
-- `hscc-orchestrator` — soul files, dispatch rules
-- `hscc-events` — notifications, lifecycle, triggers
+Active components use the `hscc-*` / `hscc_*` prefix (Hermes Spark Cluster Control):
+- `hscc-cluster` — sparkrun status, hosts, monitoring, workloads, `provision_model`
+- `hscc_daemon` — monitoring/self-heal daemon
+- `hscc-roles` — agent role/profile definitions
+- `hscc-skills` — skill/template installer
+- `hscc-bootstrap` — one-command init
+- `hscc-commands` — slash-command surface
+- `sparkrun-hermes` — sparkrun integration
+
+(Kanban boards/tasks and agent dispatch are native Hermes kanban, not HSCC plugins.)
 
 ## Anti-Patterns
 

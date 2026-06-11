@@ -8,7 +8,7 @@ platforms: [macos, linux]
 metadata:
   hermes:
     tags: [HSCC, Cluster, Provisioning, Monitoring]
-    related_skills: [hscc-cluster, hscc-provision, hscc-model-onboard]
+    related_skills: [hscc-cluster, hscc-model-onboard]
 ---
 
 # Hermes Spark Cluster Control (HSCC)
@@ -34,17 +34,17 @@ Guarded tools return a preview unless you pass `confirm=true`.
 
 | Plugin | Role |
 |---|---|
-| **hscc-cluster** | Cluster ops toolset (sparkrun wrapper) — the live tool surface |
-| **hscc-provision** | Model container lifecycle (HF, NAS sync, model-check) — see `hscc-provision` skill |
+| **hscc-cluster** | Cluster ops toolset (sparkrun wrapper, incl. `provision_model`) — the live tool surface |
 | **hscc_daemon** | Monitoring/self-heal daemon (launchd `com.hermes.hscc_daemon`) |
-| **hscc-chat** | WebSocket gateway client (stale — users use Telegram; kept for future) |
+| **hscc-roles** | Agent role/profile definitions |
 | **hscc-skills** | Idempotent skill/template installer |
 | **hscc-bootstrap** | One-command init (skill install → state → gateway → cluster checks) |
-| **hscc-optimizations** | Merge-proposal + pattern detector |
+| **hscc-commands** | HSCC slash-command surface |
+| **sparkrun-hermes** | sparkrun integration for Hermes |
 
-Onboarding a NEW model/quant cluster-wide (recipe + offline NAS→node cache + wire configs + launch + verify): use the **`hscc-model-onboard`** skill (e.g. FP8 → NVFP4 cutover).
+Model container lifecycle (provision/stop/restart) is now part of the **hscc-cluster** toolset (`provision_model` tool) — the old `hscc-provision` plugin/skill was archived. Onboarding a NEW model/quant cluster-wide (recipe + offline NAS→node cache + wire configs + launch + verify): use the **`hscc-model-onboard`** skill (e.g. FP8 → NVFP4 cutover).
 
-**Archived 2026-06-08** (in `_archive/2026-06-08/`): hscc-agent-coordinator, hscc-projects, hscc-orchestrator, hscc-events, hscc-governance, hscc-mcp. Their skills are archived too. If you see a reference to `mcp_hscc_*` tools, `dispatch-task`, `release-task`, or those plugins anywhere, it is STALE — the function moved to native kanban.
+**Archived 2026-06-08** (in `_archive/2026-06-08/`): hscc-agent-coordinator, hscc-projects, hscc-orchestrator, hscc-events, hscc-governance, hscc-mcp. **Archived 2026-06-10**: hscc-provision (its `provision_model` moved into hscc-cluster), hscc-chat, hscc-optimizations. Their skills are archived too. If you see a reference to `mcp_hscc_*` tools, `dispatch-task`, `release-task`, `assign-task`, or any of those plugins anywhere, it is STALE — the function moved to native kanban (dispatch) or the hscc-cluster toolset (provisioning).
 
 ## Daemon (hscc_daemon)
 
