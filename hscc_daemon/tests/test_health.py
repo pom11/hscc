@@ -156,93 +156,64 @@ class TestCheckIdleMonitor:
 
 
 class TestCheckWorkers:
-    """check_workers() checks worker node health."""
+    """check_workers() health-checks serving.json keep-alive workers and
+    relaunches crashed ones."""
 
-    def test_no_workers_file(self, tmp_hfcc_dir, monkeypatch):
-        from hscc_daemon import health
-        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
+    def _setup(self, tmp_hfcc_dir, monkeypatch, nodes, recipe="~/r/27b.yaml"):
+        from hscc_daemon import health, serving
         from hscc_daemon import state as state_mod
-        state_dir = tmp_hfcc_dir / "state"
-        state_dir.mkdir(parents=True)
-        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
-
-        def fake_expanduser(p):
-            if p == "~/.hscc/workers.json":
-                return str(tmp_hfcc_dir / "nonexistent.json")
-            return p
-
-        monkeypatch.setattr(os.path, "expanduser", fake_expanduser)
-        result = health.check_workers()
-        assert result is True  # No workers configured -> OK
-
-    def test_workers_online(self, tmp_hfcc_dir, monkeypatch):
-        from hscc_daemon import health
         monkeypatch.setattr(health, "log", lambda *a, **kw: None)
-        from hscc_daemon import state as state_mod
         state_dir = tmp_hfcc_dir / "state"
-        state_dir.mkdir(parents=True)
+        state_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        # serving.json with one orchestrator + the given keep-alive workers
+        units = [{"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"],
+                  "recipe": "~/r/orch.yaml", "model": "M"}]
+        for n in nodes:
+            units.append({"id": f"w-{n}", "role": "worker", "keepalive": True,
+                          "nodes": [n], "recipe": recipe, "model": "W"})
+        monkeypatch.setattr(serving, "ORCH_NODES", {"10.0.0.1"})
+        monkeypatch.setattr(serving, "load_serving",
+                            lambda: {"version": 1, "units": units})
+        health._worker_relaunch_at.clear()
+        return health, serving
 
-        workers_file = tmp_hfcc_dir / "workers.json"
-        workers_file.write_text(json.dumps({
-            "workers": [
-                {"node": "10.0.0.1", "status": "online"},
-                {"node": "10.0.0.2", "status": "offline"},
-            ]
-        }))
+    def test_no_keepalive_workers(self, tmp_hfcc_dir, monkeypatch):
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=[])
+        assert health.check_workers() is True   # nothing to watch -> ok
 
-        def fake_expanduser(p):
-            if p == "~/.hscc/workers.json":
-                return str(workers_file)
-            return p
+    def test_all_workers_online(self, tmp_hfcc_dir, monkeypatch):
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"])
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": True})
+        calls = []
+        monkeypatch.setattr(health, "run_cmd", lambda *a, **k: calls.append(a) or {"ok": True})
+        assert health.check_workers() is True
+        assert calls == []                      # healthy -> no relaunch
 
-        monkeypatch.setattr(os.path, "expanduser", fake_expanduser)
-        result = health.check_workers()
-        assert result is True  # At least 1 online
+    def test_crashed_worker_relaunched(self, tmp_hfcc_dir, monkeypatch):
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
+        ran = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(args) or {"ok": True})
+        assert health.check_workers() is True    # relaunched -> ok
+        # stop then run, both targeting the worker node + its recipe
+        assert any(a[:2] == ["sparkrun", "stop"] for a in ran)
+        run_cmd = next(a for a in ran if a[:2] == ["sparkrun", "run"])
+        assert "10.0.0.2" in run_cmd
+        assert any("27b" in str(x) for x in run_cmd)
 
-    def test_all_workers_offline(self, tmp_hfcc_dir, monkeypatch):
-        from hscc_daemon import health
-        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
-        from hscc_daemon import state as state_mod
-        state_dir = tmp_hfcc_dir / "state"
-        state_dir.mkdir(parents=True)
-        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
-
-        workers_file = tmp_hfcc_dir / "workers.json"
-        workers_file.write_text(json.dumps({
-            "workers": [
-                {"node": "10.0.0.1", "status": "offline"},
-            ]
-        }))
-
-        def fake_expanduser(p):
-            if p == "~/.hscc/workers.json":
-                return str(workers_file)
-            return p
-
-        monkeypatch.setattr(os.path, "expanduser", fake_expanduser)
-        result = health.check_workers()
-        assert result is False  # No online workers
-
-    def test_malformed_workers_file(self, tmp_hfcc_dir, monkeypatch):
-        from hscc_daemon import health
-        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
-        from hscc_daemon import state as state_mod
-        state_dir = tmp_hfcc_dir / "state"
-        state_dir.mkdir(parents=True)
-        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
-
-        workers_file = tmp_hfcc_dir / "workers.json"
-        workers_file.write_text("{bad json")
-
-        def fake_expanduser(p):
-            if p == "~/.hscc/workers.json":
-                return str(workers_file)
-            return p
-
-        monkeypatch.setattr(os.path, "expanduser", fake_expanduser)
-        result = health.check_workers()
-        assert result is False
+    def test_grace_window_skips_relaunch(self, tmp_hfcc_dir, monkeypatch):
+        import datetime as dt
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
+        # pretend we just relaunched it -> within grace, must NOT relaunch again
+        health._worker_relaunch_at["10.0.0.2"] = dt.datetime.now(dt.timezone.utc)
+        ran = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(args) or {"ok": True})
+        health.check_workers()
+        assert ran == []                         # grace window respected
 
 
 if __name__ == "__main__":

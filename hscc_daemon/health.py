@@ -198,8 +198,8 @@ def check_heartbeat():
             with open(agents_file) as f:
                 agents_data = json.load(f)
             agents = agents_data.get("agents", [])
-            from . import refresh_live_workers, reconcile_lifecycle
-            refresh_live_workers(agents)
+            from .lifecycle import refresh_live_workers, reconcile_lifecycle
+            refresh_live_workers()
             reconcile_lifecycle(agents)
             total = len(agents)
             idle = sum(1 for a in agents if a.get("status") == "idle")
@@ -349,46 +349,69 @@ def check_idle_monitor():
         return False
 
 
+# In-memory relaunch timestamps per worker node, so a node that is mid-load
+# (vLLM takes minutes) is not relaunched again before its grace window elapses.
+_worker_relaunch_at = {}
+
+
 def check_workers():
-    """Check worker node health and availability."""
+    """Keep-alive worker check: health-check each serving.json keep-alive worker
+    on its vLLM port and relaunch a crashed one with its own recipe.
+
+    A node is watched iff it is a serving.json unit with role=worker +
+    keepalive=true (serving.KEEPALIVE_NODES — the same set the idle reaper
+    exempts). Relaunch is rate-limited by VLLM_LOAD_GRACE_MINUTES so a node that
+    is still loading isn't thrashed.
+    """
     from .state import write_state
-    
+    from .lifecycle import VLLM_LOAD_GRACE_MINUTES
+    import datetime as _dt
+
     log("Running workers check")
-    
-    try:
-        workers_file = os.path.expanduser("~/.hscc/workers.json")
-        if not os.path.exists(workers_file):
-            log("No workers.json found, skipping workers check")
-            write_state("workers", {
-                "ok": True,
-                "message": "No workers configured",
-                "last_check": now_iso(),
-            })
-            return True
-        
-        with open(workers_file) as f:
-            data = json.load(f)
-        
-        workers = data.get("workers", [])
-        online = [w for w in workers if w.get("status") == "online"]
-        
-        log(f"Workers check: {len(online)}/{len(workers)} online")
-        
-        write_state("workers", {
-            "ok": len(online) > 0,
-            "total": len(workers),
-            "online": len(online),
-            "last_check": now_iso(),
-            "message": f"{len(online)}/{len(workers)} workers online",
-        })
-        return len(online) > 0
-        
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        log(f"Workers check error: {e}", "WARN")
-        write_state("workers", {
-            "ok": False,
-            "error": str(e),
-            "last_check": now_iso(),
-            "message": "Workers check failed",
-        })
-        return False
+    serving_data = serving.load_serving()
+    nodes = sorted(serving.keepalive_nodes(serving_data) - serving.ORCH_NODES) \
+        if serving_data else sorted(serving.KEEPALIVE_NODES)
+
+    if not nodes:
+        write_state("workers", {"ok": True, "message": "no keep-alive workers",
+                                "last_check": now_iso()})
+        return True
+
+    online, relaunched, down = [], [], []
+    now = _dt.datetime.now(_dt.timezone.utc)
+    for node in nodes:
+        url = f"http://{node}:{serving.VLLM_PORT}/health"
+        if http_check(url, timeout=5).get("ok"):
+            online.append(node)
+            _worker_relaunch_at.pop(node, None)
+            continue
+        # Down. Respect the grace window after a relaunch (mid-load == not dead).
+        last = _worker_relaunch_at.get(node)
+        if last and now < last + _dt.timedelta(minutes=VLLM_LOAD_GRACE_MINUTES):
+            down.append(node)  # still within load grace — leave it
+            continue
+        recipe = serving._worker_recipe_for(node, serving_data)
+        if not recipe:
+            down.append(node)
+            log(f"Worker {node} down but no recipe in serving.json — skipping", "WARN")
+            continue
+        log(f"Worker {node} down — relaunching ({recipe})")
+        run_cmd(["sparkrun", "stop", "--all", "--hosts", node], timeout=60)
+        r = run_cmd(["sparkrun", "run", recipe, "--cluster", serving.HSCC_CLUSTER,
+                     "--hosts", node, "--port", str(serving.VLLM_PORT),
+                     "--no-follow", "--ensure"], timeout=180)
+        _worker_relaunch_at[node] = now
+        (relaunched if r.get("ok") else down).append(node)
+
+    ok = not down or bool(relaunched)
+    write_state("workers", {
+        "ok": ok, "total": len(nodes), "online": len(online),
+        "relaunched": relaunched, "down": down, "last_check": now_iso(),
+        "message": f"{len(online)}/{len(nodes)} online"
+                   + (f", relaunched {relaunched}" if relaunched else "")
+                   + (f", down {down}" if down else ""),
+    })
+    log(f"Workers check: {len(online)}/{len(nodes)} online"
+        + (f", relaunched {relaunched}" if relaunched else "")
+        + (f", down {down}" if down else ""))
+    return ok
