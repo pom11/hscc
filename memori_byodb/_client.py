@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import aiohttp
 from sqlalchemy import create_engine, text
 
 try:
@@ -103,8 +102,10 @@ class MemoriBYODBClient:
                 model=self._model,
             )
             self._local_augment = LocalLLMAugmentation(config)
-            self._local_augment._session = aiohttp.ClientSession()
-            
+            # Session is created lazily inside the async augmentation call (which
+            # has a running event loop). Creating it here in sync __init__ raises
+            # "no running event loop" and silently falls back to cloud.
+
             # Replace cloud augmentation with local one AFTER Memori is created
             from memori.memory.augmentation.augmentations.memori._augmentation import AdvancedAugmentation
             self.memori.config.augmentation.augmentations.clear()
