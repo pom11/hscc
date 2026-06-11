@@ -71,20 +71,75 @@ def test_toolsets_absent_seeds_default_plus_hscc(tmp_path):
 
 # ── idempotency + guards ─────────────────────────────────────────────────────
 
+def _fully_wired_cfg():
+    return {
+        "plugins": {"enabled": ["hscc-cluster", "hscc-commands", "sparkrun-hermes"]},
+        "toolsets": ["hermes-cli", "hscc-cluster", "kanban", "sparkrun"],
+        "kanban": {"default_assignee": enable_plugins.DEFAULT_ASSIGNEE,
+                   "max_in_progress": enable_plugins.MAX_IN_PROGRESS,
+                   "max_in_progress_per_profile":
+                       enable_plugins.MAX_IN_PROGRESS_PER_PROFILE},
+        "delegation": {"base_url": enable_plugins.WORKER_PROXY_URL,
+                       "model": enable_plugins.WORKER_MODEL,
+                       "provider": "custom",
+                       "api_key": enable_plugins.WORKER_PROXY_KEY},
+    }
+
+
 def test_fully_wired_is_noop(tmp_path):
-    path = _write(tmp_path / "config.yaml",
-                  {"plugins": {"enabled": [
-                      "hscc-cluster", "hscc-commands", "sparkrun-hermes"]},
-                   "toolsets": ["hermes-cli", "hscc-cluster", "kanban", "sparkrun"]})
+    path = _write(tmp_path / "config.yaml", _fully_wired_cfg())
     before = open(path).read()
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": []}
     assert open(path).read() == before              # no rewrite, no backup churn
 
 
 def test_missing_config_noop(tmp_path):
     res = enable_plugins.enable(str(tmp_path / "nope.yaml"))
-    assert res == {"plugins": [], "toolsets": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": []}
+
+
+# ── fleet routing (kanban + delegation) ──────────────────────────────────────
+
+def test_routing_filled_on_fresh_config(tmp_path):
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": [
+                      "hscc-cluster", "hscc-commands", "sparkrun-hermes"]},
+                   "toolsets": ["hermes-cli", "hscc-cluster", "kanban", "sparkrun"]})
+    res = enable_plugins.enable(path)
+    assert "default_assignee" in res["kanban"]
+    assert set(res["delegation"]) == {"base_url", "model", "provider", "api_key"}
+    cfg = yaml.safe_load(open(path))
+    assert cfg["kanban"]["default_assignee"] == enable_plugins.DEFAULT_ASSIGNEE
+    assert cfg["kanban"]["max_in_progress"] == enable_plugins.MAX_IN_PROGRESS
+    assert cfg["delegation"]["base_url"] == enable_plugins.WORKER_PROXY_URL
+
+
+def test_routing_preserves_operator_choices(tmp_path):
+    # An operator-set default_assignee + a LARGER cap + a custom delegation
+    # endpoint must all be kept.
+    cfg = _fully_wired_cfg()
+    cfg["kanban"]["default_assignee"] = "my-special-worker"
+    cfg["kanban"]["max_in_progress"] = 99           # larger than default
+    cfg["delegation"]["base_url"] = "http://my-proxy:9000/v1"
+    path = _write(tmp_path / "config.yaml", cfg)
+    res = enable_plugins.enable(path)
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": []}
+    out = yaml.safe_load(open(path))
+    assert out["kanban"]["default_assignee"] == "my-special-worker"
+    assert out["kanban"]["max_in_progress"] == 99   # not lowered
+    assert out["delegation"]["base_url"] == "http://my-proxy:9000/v1"
+
+
+def test_caps_raised_when_too_low(tmp_path):
+    cfg = _fully_wired_cfg()
+    cfg["kanban"]["max_in_progress"] = 2            # below default -> raise
+    cfg["kanban"]["max_in_progress_per_profile"] = 1
+    path = _write(tmp_path / "config.yaml", cfg)
+    res = enable_plugins.enable(path)
+    assert "max_in_progress" in res["kanban"]
+    out = yaml.safe_load(open(path))
+    assert out["kanban"]["max_in_progress"] == enable_plugins.MAX_IN_PROGRESS
 
 
 def test_bad_plugins_shape_does_not_clobber(tmp_path):
