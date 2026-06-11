@@ -42,6 +42,15 @@ MAX_IN_PROGRESS_PER_PROFILE = int(os.environ.get("HSCC_MAX_IN_PROGRESS_PER_PROFI
 # load-balances across worker GPUs). Spawn depth stays flat (1) by default;
 # nesting (2+) multiplies cost and is opt-in.
 MAX_CONCURRENT_CHILDREN = int(os.environ.get("HSCC_MAX_CONCURRENT_CHILDREN", "9"))
+# Context-compaction: compact rarely (high threshold) and run the summarization
+# on a dedicated endpoint, not the main model — otherwise a big summary prompt
+# competes with real work and wedges. Default target is the orchestrator (set
+# the real host via HSCC_COMPACT_URL/_MODEL at bootstrap).
+COMPACT_THRESHOLD = float(os.environ.get("HSCC_COMPACT_THRESHOLD", "0.8"))
+COMPACT_URL = os.environ.get("HSCC_COMPACT_URL", "")
+COMPACT_MODEL = os.environ.get("HSCC_COMPACT_MODEL", "")
+COMPACT_KEY = os.environ.get("HSCC_COMPACT_KEY", "sk-sparkrun")
+COMPACT_TIMEOUT = int(os.environ.get("HSCC_COMPACT_TIMEOUT", "90"))
 
 
 def _ensure_plugins_enabled(cfg, plugins):
@@ -138,6 +147,36 @@ def _ensure_delegation(cfg):
     return changed
 
 
+def _ensure_compaction(cfg):
+    """Set context-compaction to compact rarely + summarize off the main model.
+
+    Raises compression.threshold toward the default (never lowers). Points
+    auxiliary.compression at HSCC_COMPACT_URL if provided (else leaves it to
+    Hermes' default). Only fills empty aux fields — operator choices survive.
+    """
+    changed = []
+    comp = cfg.setdefault("compression", {})
+    if isinstance(comp, dict):
+        cur = comp.get("threshold")
+        if not isinstance(cur, (int, float)) or cur < COMPACT_THRESHOLD:
+            comp["threshold"] = COMPACT_THRESHOLD
+            changed.append("threshold")
+    # Only wire the aux endpoint if an operator gave one (no safe generic default
+    # for the summarization host — it's cluster-specific).
+    if COMPACT_URL:
+        aux = cfg.setdefault("auxiliary", {}).setdefault("compression", {})
+        if isinstance(aux, dict):
+            for key, want in (("base_url", COMPACT_URL), ("model", COMPACT_MODEL),
+                              ("provider", "custom"), ("api_key", COMPACT_KEY)):
+                if want and not (aux.get(key) or "").strip():
+                    aux[key] = want
+                    changed.append(f"aux.{key}")
+            if not isinstance(aux.get("timeout"), int) or aux.get("timeout", 0) > COMPACT_TIMEOUT:
+                aux["timeout"] = COMPACT_TIMEOUT
+                changed.append("aux.timeout")
+    return changed
+
+
 def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS):
     """Ensure HSCC plugins + toolsets + fleet routing are wired in config_path.
 
@@ -147,7 +186,8 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS):
     """
     import yaml
 
-    empty = {"plugins": [], "toolsets": [], "kanban": [], "delegation": []}
+    empty = {"plugins": [], "toolsets": [], "kanban": [], "delegation": [],
+             "compaction": []}
     if not os.path.exists(config_path):
         return empty
     with open(config_path) as fh:
@@ -159,8 +199,10 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS):
     added_toolsets = _ensure_toolsets(cfg, toolsets)
     changed_kanban = _ensure_kanban_routing(cfg)
     changed_delegation = _ensure_delegation(cfg)
+    changed_compaction = _ensure_compaction(cfg)
 
-    if added_plugins or added_toolsets or changed_kanban or changed_delegation:
+    if (added_plugins or added_toolsets or changed_kanban or changed_delegation
+            or changed_compaction):
         import shutil
         import time
         shutil.copy(config_path,
@@ -169,7 +211,8 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS):
             yaml.safe_dump(cfg, fh, sort_keys=False, default_flow_style=False)
 
     return {"plugins": added_plugins, "toolsets": added_toolsets,
-            "kanban": changed_kanban, "delegation": changed_delegation}
+            "kanban": changed_kanban, "delegation": changed_delegation,
+            "compaction": changed_compaction}
 
 
 if __name__ == "__main__":
