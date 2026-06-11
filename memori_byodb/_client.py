@@ -25,11 +25,24 @@ logger = logging.getLogger(__name__)
 
 
 class LocalAugmentationWrapper:
-    """Wraps our custom LocalLLMAugmentation to match SDK's augmentation interface."""
-    
+    """Wraps our custom LocalLLMAugmentation to match the SDK augmentation
+    interface: the manager checks ``.enabled`` and calls
+    ``ctx = await aug.process(ctx, driver)``.
+    """
+
     def __init__(self, local_aug: Any) -> None:
         self.local_aug = local_aug
         self.enabled = True
+
+    async def process(self, ctx, driver):
+        """Delegate to the inner local augmentation, returning ctx.
+
+        The inner process mutates ctx in place and returns None; the SDK manager
+        rebinds ``ctx = await aug.process(...)``, so we must return ctx (not the
+        inner's None) or the augmentation chain breaks.
+        """
+        await self.local_aug.process(ctx, driver)
+        return ctx
 
 
 class MemoriBYODBClient:
