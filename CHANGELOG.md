@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2026.06.11-alpha] — Work runs on workers, not the orchestrator
+
+The orchestrator was silently doing nearly all the work. This release routes the
+fleet onto the worker GPU pool, makes the daemon actually self-heal, and bakes
+the whole wiring into bootstrap so it survives a config rebuild.
+
+### Fixed
+- **Role work ran on the orchestrator.** All 22 role profiles (coder, architect,
+  qa, …) had no model endpoint, so they inherited the gateway node. They now
+  serve from the sparkrun LiteLLM proxy, which load-balances across every worker
+  GPU. The orchestrator role stays on its own gateway model.
+- **Catch-all kanban work piled onto one node.** The per-node worker-246/247/248
+  profiles + `default_assignee=worker-246` funneled un-routed tasks to a single
+  node. Collapsed into one proxy-balanced `worker` role; `default_assignee=worker`.
+- **Control daemon didn't self-heal.** Check threads never started (`globals()`
+  lookup of local imports); health checks probed placeholder IPs; the keep-alive
+  worker check was a no-op; the watchdog latched BLOCKED forever. The daemon now
+  runs all checks against real topology, relaunches crashed worker models, and
+  backs off + auto-resumes instead of giving up.
+
+### Added
+- **Worker load-balancer**: a daemon stream keeps the sparkrun LiteLLM proxy alive
+  so role workers + orchestrator subagents always reach the balanced worker pool.
+- **Bootstrap wires fleet routing**: `kanban.default_assignee`, concurrency caps,
+  and `delegation.base_url` are now set idempotently by bootstrap (only fills
+  unset values / raises low caps — never clobbers operator choices), so the
+  routing is reproducible and never a manual re-apply.
+
+### Changed
+- Cleaned stale HSCC skill docs (archived-plugin references → current reality).
+- Removed dead `install/hscc-plugins` + `install/hscc-cli` staging copies; the
+  `install/` README now describes only the live bundled-skills source.
+
 ## [2026.06.10-alpha] — Operator commands, sparkrun plugin, daemon repair
 
 Incident-response tooling, the official Hermes sparkrun plugin, and a working
