@@ -6,4 +6,4 @@ identity: 'You are the market-researcher specialist. Researches markets, competi
   '
 preload_skills:
 - research
-- x-monitoring
+- social-media
