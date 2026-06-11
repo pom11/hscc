@@ -18,9 +18,15 @@ import os
 import sys
 
 HSCC_PLUGINS = ["hscc-cluster", "hscc-commands", "sparkrun-hermes"]
-# Toolsets the orchestrator needs. hscc-commands registers slash COMMANDS (not a
-# toolset), so it is intentionally absent here.
-HSCC_TOOLSETS = ["hscc-cluster", "sparkrun"]
+# Toolsets the orchestrator needs:
+#   hscc-cluster — cluster ops (orchestrator-only)
+#   sparkrun     — sparkrun_exec passthrough
+#   delegation   — the delegate_task tool, so the orchestrator can actually spawn
+#                  subagents (they run on the worker pool via delegation.base_url).
+#                  Without this the orchestrator has no way to delegate and does
+#                  everything inline.
+# hscc-commands registers slash COMMANDS (not a toolset), so it is absent here.
+HSCC_TOOLSETS = ["hscc-cluster", "sparkrun", "delegation"]
 
 # Fleet-routing defaults. The worker proxy (sparkrun LiteLLM LB) load-balances
 # every worker GPU behind one URL; env-overridable to match the generator.
