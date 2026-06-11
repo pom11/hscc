@@ -20,14 +20,14 @@ Building standalone Python/Shell components for cluster management. All componen
 
 ## Naming Convention
 
-**All components use `hscc-` prefix** (Hermes Spark Cluster Control):
-- `hscc-cluster` — cluster status, hosts, jobs, GPU monitoring
-- `hscc-agents` — agent fleet management, lifecycle, dispatch
-- `hscc-projects` — kanban boards, roadmaps, task tracking
-- `hscc-sparkrun` — model run/stop/monitor via sparkrun CLI
-- `hscc-soul` — orchestrator identity and rules
+**All components use `hscc-` / `hscc_` prefix** (Hermes Spark Cluster Control):
+- `hscc-cluster` — cluster status, hosts, jobs, GPU monitoring, `provision_model`
+- `hscc_daemon` — monitoring/self-heal daemon
+- `hscc-roles` — agent role/profile definitions
+- `sparkrun-hermes` — model run/stop/monitor via sparkrun CLI (formerly hscc-sparkrun)
 - `hscc-tools` — infrastructure reference (node table, commands)
-- `hscc-worktrees` — project workspace management
+
+> Agent fleet/dispatch, kanban boards/tasks, worktrees, soul files are now **native Hermes kanban**, not HSCC plugins. The old `hscc-agents`/`hscc-projects`/`hscc-soul`/`hscc-worktrees` components were archived 2026-06-08.
 
 ## Implementation Pattern
 
@@ -50,19 +50,17 @@ Building standalone Python/Shell components for cluster management. All componen
 
 **State location**: All HSCC state lives under `~/.hscc/` (override with the `HSCC_HOME` env var).
 
-## hscc Plugins
+## hscc Plugins (active)
 
-- `hscc-agents` — agent CRUD, fleet status, dispatch
-- `hscc-cluster` — status, hosts, monitor, jobs
-- `hscc-projects` — kanban, tasks, roadmaps
-- `hscc-agent-coordinator` — lifecycle FSM, worktrees, recovery, executor bridge
-- `hscc-events` — event log/search
-- `hscc-notifications` — alerting
-- `hscc-permissions` — access control
-- `hscc-policy` — execution policies
-- `hscc-soul` — orchestrator context
-- `hscc-triggers` — event-driven triggers
-- `hscc-gateway` — service management
+- `hscc-cluster` — status, hosts, monitor, jobs, `provision_model`/`stop_model`/`restart_model`
+- `hscc_daemon` — monitoring/self-heal daemon (launchd)
+- `hscc-roles` — agent role/profile definitions
+- `hscc-skills` — skill/template installer
+- `hscc-bootstrap` — one-command init
+- `hscc-commands` — slash-command surface
+- `sparkrun-hermes` — sparkrun CLI integration
+
+> **Archived 2026-06-08** (now native Hermes kanban or gone): hscc-agents, hscc-projects, hscc-agent-coordinator, hscc-events, hscc-notifications, hscc-permissions, hscc-policy, hscc-soul, hscc-triggers, hscc-gateway, hscc-orchestrator, hscc-governance, hscc-mcp. **Archived 2026-06-10**: hscc-provision (its `provision_model` moved into hscc-cluster), hscc-chat, hscc-optimizations. If you see these referenced as current, it is STALE.
 
 ## Cluster Architecture
 

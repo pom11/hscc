@@ -9,10 +9,10 @@ platform: macOS CLI
 # hscc-model-onboard
 
 One-command onboarding for a **new** model or quant across the whole cluster.
-Where `hscc-provision` runs *existing* recipes, this skill covers the steps
-*before* that: getting a recipe right, getting the weights onto every node from
-NAS **offline**, and wiring the 7 config layers that route the fleet — then
-launching and verifying.
+Where the hscc-cluster toolset's `provision_model` tool runs *existing* recipes,
+this skill covers the steps *before* that: getting a recipe right, getting the
+weights onto every node from NAS **offline**, and wiring the 7 config layers
+that route the fleet — then launching and verifying.
 
 Use it for a full cutover (e.g. Qwen3.6-35B-A3B **FP8 -> NVFP4**) or to add a
 brand-new model.
@@ -110,6 +110,5 @@ See `references/nas-cache.md`.
 
 ## Related skills
 
-- `hscc-provision` — run/assign/stop existing recipes once onboarded.
-- `hscc-cluster` — cluster status / host inspection.
+- `hscc-cluster` — cluster status / host inspection; `provision_model`/`stop_model`/`restart_model` to run existing recipes once onboarded.
 - `hscc` — umbrella router.

@@ -56,8 +56,8 @@ ssh spark@<gateway> \
   complete.
 - **Getting weights onto NAS** (only if missing): download once on the gateway
   into `/mnt/nas/hub` — `HF_HUB_OFFLINE=0 hf download <model> --cache-dir /mnt/nas/hub`.
-  If `hf` hangs on large Xet repos, see the direct-HTTP fallback in the
-  `hscc-provision` skill.
+  If `hf` hangs on large Xet repos, use the direct-HTTP fallback (download each
+  snapshot file over HTTPS instead of the Xet protocol).
 
 ## Quick verification
 

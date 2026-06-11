@@ -1,10 +1,12 @@
 # HSCC Event Types
 
+> **STALE (historical).** The `agent.*` event types below were emitted by the old HSCC agent pipeline (`hscc-events` + `hscc-agent-coordinator`), both archived 2026-06-08. Agent dispatch is now native Hermes kanban, which does not emit these. The daemon still appends operational events to `~/.hscc/events.jsonl`, but the `agent.task_*`/`permission.*` schema here no longer applies. Kept for history only.
+
 Events are stored in `~/.hscc/events.jsonl` as one JSON object per line.
 
 ## Source
 
-Implemented in `~/.hermes/plugins/hscc-events/hscc.py` (emit/read/compact) and `hscc-agent-coordinator/hscc.py` (lifecycle events).
+Was implemented in the archived `hscc-events/hscc.py` (emit/read/compact) and `hscc-agent-coordinator/hscc.py` (lifecycle events).
 
 ## Event Structure
 
