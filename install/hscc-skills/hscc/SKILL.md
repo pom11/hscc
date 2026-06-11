@@ -20,7 +20,7 @@ Cluster: gateway/orchestrator node `192.0.2.10` (always-on vLLM serving Telegram
 ## Two responsibilities, two surfaces
 
 ### 1. Agent work = native Hermes kanban (NOT HSCC)
-Drive all project work through the kanban tools / `hermes kanban`. Create a task (`kanban_create` or `hermes kanban create "<task>"`) → it lands in triage → auto-decomposes into todo cards (`kanban.auto_decompose`) → the gateway's **embedded dispatcher** (`kanban.dispatch_in_gateway: true`, 60s tick) runs each ready card in its own git worktree as a worker agent → moves it to review. `default_assignee: worker-246`. Inspect with `hermes kanban boards`. **Do NOT hand-manage worktrees or dispatch** — the gateway does it. There is no more `dispatch-task`/`release-task`/`merge-worktree` CLI.
+Drive all project work through the kanban tools / `hermes kanban`. Create a task (`kanban_create` or `hermes kanban create "<task>"`) → it lands in triage → auto-decomposes into todo cards (`kanban.auto_decompose`) → the gateway's **embedded dispatcher** (`kanban.dispatch_in_gateway: true`, 60s tick) runs each ready card in its own git worktree as a worker agent → moves it to review. `default_assignee: worker` (the catch-all role; all worker roles serve from the load-balanced sparkrun proxy, which spreads inference across every worker GPU). Inspect with `hermes kanban boards`. **Do NOT hand-manage worktrees or dispatch** — the gateway does it. There is no more `dispatch-task`/`release-task`/`merge-worktree` CLI.
 
 ### 2. Cluster physical ops = hscc-cluster toolset
 Change cluster shape via the toolset (orchestrator profile only). See the **`hscc-cluster`** skill. Tools:
