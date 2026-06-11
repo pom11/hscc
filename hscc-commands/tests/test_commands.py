@@ -109,9 +109,27 @@ def test_cluster_status_never_mutates(monkeypatch):
     monkeypatch.setattr(cmdlib, "_curl_model",
                         lambda node: "nvidia/Qwen3.6-35B-A3B-NVFP4"
                         if node == "10.0.0.1" else None)
+    monkeypatch.setattr(cmdlib, "cluster_metrics", lambda: {})  # no live sparkrun
     out = plugin.cmd_cluster("")
     assert "Orchestrator" in out and "10.0.0.1" in out
     assert "❌" in out                          # a down worker shows
+
+
+def test_cluster_status_shows_metrics(monkeypatch):
+    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
+    monkeypatch.setattr(cmdlib, "_curl_model", lambda node: "m")
+    monkeypatch.setattr(cmdlib, "cluster_metrics", lambda: {
+        "10.0.0.1": {"cpu_usage_pct": "12", "cpu_temp_c": "55",
+                     "cpu_load_1m": "0.5", "mem_used_pct": "40",
+                     "mem_available_mb": "90000", "gpu_name": "GB10",
+                     "gpu_util_pct": "30", "gpu_temp_c": "60", "gpu_power_w": "40"}})
+    out = plugin.cmd_cluster("")
+    assert "GPU GB10" in out and "30% util" in out
+
+
+def test_cluster_metrics_empty_on_failure(monkeypatch):
+    monkeypatch.setattr(cmdlib, "_run", lambda *a, **k: (False, "", "boom"))
+    assert cmdlib.cluster_metrics() == {}
 
 
 # ── restart_one shells out correctly ─────────────────────────────────────────
