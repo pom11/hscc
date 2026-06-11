@@ -206,7 +206,9 @@ def backup_configs():
             shutil.copy2(os.path.realpath(src), os.path.join(dest, name))
     if os.path.exists(HERMES_CONFIG):
         shutil.copy2(HERMES_CONFIG, os.path.join(dest, "hermes-config.yaml"))
-    for n in ("worker-246", "worker-247", "worker-248"):
+    # Back up the worker role profile (worker roles serve from the load-balanced
+    # proxy now, not per-node worker-246/247/248 profiles).
+    for n in ("worker",):
         p = os.path.join(PROFILES_DIR, n, "config.yaml")
         if os.path.exists(p):
             shutil.copy2(p, os.path.join(dest, f"{n}-config.yaml"))
