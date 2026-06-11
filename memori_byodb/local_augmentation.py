@@ -62,8 +62,10 @@ class LocalLLMAugmentation:
         This method modifies ctx in-place (same pattern as SDK).
         """
         if not self._session:
-            logger.warning("Local augmentation session not initialized")
-            return
+            # Create the aiohttp session lazily, inside the running event loop —
+            # it cannot be created at __init__ (sync, no loop), which previously
+            # forced a silent fallback to the cloud augmentation.
+            self._session = aiohttp.ClientSession()
         if not ctx.payload.conversation_messages:
             return
 

@@ -151,7 +151,7 @@ Use `memori_byodb_feedback` when recall is irrelevant or missing important conte
         self.shutdown()
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
-        return _TOOL_SCHEMAS
+        return TOOL_SCHEMAS
 
     def handle_tool_call(
         self,
