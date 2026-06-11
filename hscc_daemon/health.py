@@ -129,6 +129,43 @@ def check_gateway():
     return ok
 
 
+PROXY_PORT = int(os.environ.get("HSCC_PROXY_PORT", "4000"))
+
+
+def check_proxy():
+    """Keep the sparkrun LiteLLM worker proxy alive (worker load-balancer).
+
+    Role-worker profiles + orchestrator subagents reach the worker GPUs through
+    this proxy (http://localhost:PROXY_PORT). If it dies, all worker work falls
+    back onto the orchestrator. Health-check it and relaunch via `sparkrun proxy
+    start` over the keep-alive worker nodes if it's down. No-op when there are no
+    keep-alive workers configured.
+    """
+    from .state import write_state
+
+    log("Running proxy check")
+    nodes = sorted(serving.KEEPALIVE_NODES)
+    if not nodes:
+        write_state("proxy", {"ok": True, "message": "no workers — proxy not needed",
+                              "last_check": now_iso()})
+        return True
+
+    url = f"http://localhost:{PROXY_PORT}/v1/models"
+    if http_check(url, timeout=5).get("ok"):
+        write_state("proxy", {"ok": True, "port": PROXY_PORT,
+                              "last_check": now_iso(), "message": "proxy healthy"})
+        return True
+
+    log(f"Worker proxy down on :{PROXY_PORT} — relaunching", "WARN")
+    r = run_cmd(["sparkrun", "proxy", "start", "--cluster", serving.HSCC_CLUSTER,
+                 "--hosts", ",".join(nodes), "--port", str(PROXY_PORT)], timeout=90)
+    ok = r.get("ok", False)
+    write_state("proxy", {"ok": ok, "port": PROXY_PORT, "relaunched": True,
+                          "last_check": now_iso(),
+                          "message": "relaunched" if ok else "relaunch failed"})
+    return ok
+
+
 def check_local():
     """Local services check (every 30s): Docker, Ollama, PostgreSQL, hscc_daemon."""
     log("Running local services check")

@@ -116,7 +116,7 @@ def log(msg, level="INFO"):
 
 def run_daemon_loop():
     """Main daemon event loop (polling mode fallback)."""
-    from .health import check_dgx, check_gateway, check_local, check_heartbeat, check_nas, check_idle_monitor, check_workers
+    from .health import check_dgx, check_gateway, check_local, check_heartbeat, check_nas, check_idle_monitor, check_workers, check_proxy
     from .trigger import trigger_engine
     from .lifecycle import pipeline_watchdog, restart_vllm, load_watchdog_block
     from .state import now_iso, write_state
@@ -135,7 +135,7 @@ def run_daemon_loop():
 
     STREAMS = {
         "dgx": 60, "gateway": 60, "local": 60, "heartbeat": 300,
-        "nas": 900, "idle": 300, "workers": 60,
+        "nas": 900, "idle": 300, "workers": 60, "proxy": 60,
     }
 
     # The check_* fns are imported as locals above (not module globals), so map
@@ -145,6 +145,7 @@ def run_daemon_loop():
         "dgx": check_dgx, "gateway": check_gateway, "local": check_local,
         "heartbeat": check_heartbeat, "nas": check_nas,
         "idle": check_idle_monitor, "workers": check_workers,
+        "proxy": check_proxy,
     }
 
     def run_periodic(check_fn, interval, stream_name):
