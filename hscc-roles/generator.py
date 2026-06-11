@@ -24,6 +24,36 @@ def _worker_model_block():
         "api_key": WORKER_PROXY_KEY,
     }
 
+
+# Context-compaction (summarization) endpoint for worker roles. A long task
+# self-compacts when its context fills; if that summarization runs on the same
+# busy worker proxy doing the task, it competes for the saturated GPU and the
+# worker WEDGES (the big summary prompt generates forever). Route compaction to
+# the idle orchestrator (A3B, fast MoE) instead, with a hard timeout so a stuck
+# summarize fails fast rather than hanging. Env-overridable.
+COMPACT_BASE_URL = os.environ.get(
+    "HSCC_COMPACT_URL", "http://192.0.2.10:8000/v1")
+COMPACT_MODEL = os.environ.get("HSCC_COMPACT_MODEL", "orchestrator-model")
+COMPACT_KEY = os.environ.get("HSCC_COMPACT_KEY", "sk-sparkrun")
+COMPACT_TIMEOUT = int(os.environ.get("HSCC_COMPACT_TIMEOUT", "90"))
+# Compact less often: at this fraction of context (default 0.8 = ~210K of 262K),
+# so summarization is rare instead of firing at 40%.
+COMPACT_THRESHOLD = float(os.environ.get("HSCC_COMPACT_THRESHOLD", "0.8"))
+
+
+def _worker_compaction():
+    """Route a worker role's context-compaction to the idle orchestrator."""
+    return {
+        "compression": {"threshold": COMPACT_THRESHOLD},
+        "auxiliary": {"compression": {
+            "provider": "custom",
+            "model": COMPACT_MODEL,
+            "base_url": COMPACT_BASE_URL,
+            "api_key": COMPACT_KEY,
+            "timeout": COMPACT_TIMEOUT,
+        }},
+    }
+
 _WORKER_OPS = (
     "## Operational\n\n"
     "You run as the **{name}** role on a worker GPU node of the cluster, "
@@ -92,6 +122,11 @@ def generate_profile(spec, base_identity):
     # config (its own gateway-node model) and is never repointed.
     if spec["name"] != "orchestrator":
         config["model"] = _worker_model_block()
+        # Route context-compaction OFF the busy worker proxy to the idle
+        # orchestrator, so a long task's self-summarization doesn't wedge the
+        # worker. Merge the two keys into config.
+        for k, v in _worker_compaction().items():
+            config[k] = v
     profile = {
         "description": _short_desc(spec),
         "description_auto": False,
