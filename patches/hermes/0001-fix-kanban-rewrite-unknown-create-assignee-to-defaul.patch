@@ -15,7 +15,6 @@ real profile, rewrite to kanban.default_assignee (same guarantee the
 decomposer's _normalize_assignee_choice already provides). Best-effort:
 if neither resolves, leave as-is rather than drop.
 
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
 ---
  tools/kanban_tools.py | 42 ++++++++++++++++++++++++++++++++++++++++++
  1 file changed, 42 insertions(+)

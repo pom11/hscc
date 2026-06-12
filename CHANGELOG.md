@@ -115,7 +115,7 @@ control daemon — plus bootstrap that reproduces the full live wiring.
   they work even when the orchestrator model is wedged. Confirm-first.
 - **Official Hermes sparkrun plugin** (`sparkrun-hermes`): a single guarded
   `sparkrun_exec` CLI passthrough plus the run/setup/registry skills. Mirrors
-  the official OpenClaw + Claude Code plugins (no Hermes plugin existed before).
+  the official OpenClaw plugin (no Hermes plugin existed before).
 - **Bootstrap now wires the whole setup**: ensures the `sparkrun` + `hscc-cluster`
   toolsets (not just `plugins.enabled`), and installs a topology-free HSCC
   guidance block into `SOUL.md` + the `ops` personality via sentinel markers

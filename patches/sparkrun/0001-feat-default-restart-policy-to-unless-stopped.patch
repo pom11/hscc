@@ -14,7 +14,6 @@ This prevents overnight model crashes from requiring manual intervention.
 - Docker's --rm flag is incompatible with --restart, so auto_remove
   is automatically disabled when restart_policy is set (existing logic)
 
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 ---
  src/sparkrun/orchestration/executor.py | 8 ++++----
  tests/test_executor.py                 | 9 +++++----
