@@ -8,6 +8,15 @@ CLUSTER_STATUS_SCHEMA = {
 
 LIST_RECIPES_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
 PICK_NODE_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
+DISCOVERY_STATUS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "probe": {"type": "boolean",
+                  "description": "live-probe each node for VRAM/power/health (slower)",
+                  "default": False},
+    },
+    "additionalProperties": False,
+}
 
 PROVISION_MODEL_SCHEMA = {
     "type": "object",
