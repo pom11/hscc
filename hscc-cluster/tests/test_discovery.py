@@ -145,6 +145,43 @@ class TestDiscoverPrecedence:
         pytest.fail(f"discover() returned {topo} instead of raising")
 
 
+class TestNasStatus:
+    def test_no_nas(self, monkeypatch):
+        topo = d.topology_from_sparkrun(d.parse_sparkrun_clusters(SPARKRUN_FIXTURE))
+        monkeypatch.setattr(d, "discover", lambda **k: topo)  # no enrich → no nas
+        res = d.nas_status()
+        assert res["ok"] is True and res["nas"] is None
+
+    def test_nas_mounted(self, monkeypatch):
+        topo = d.topology_from_sparkrun(
+            d.parse_sparkrun_clusters(SPARKRUN_FIXTURE), enrich=CLUSTER_JSON_FIXTURE)
+        monkeypatch.setattr(d, "discover", lambda **k: topo)
+        monkeypatch.setattr(d, "_run",
+                            lambda args, timeout=20: {"ok": True, "stdout": "ok", "stderr": ""})
+        res = d.nas_status()
+        assert res["nas"] == "192.0.2.20" and res["mounted"] is True
+
+    def test_nas_not_mounted(self, monkeypatch):
+        topo = d.topology_from_sparkrun(
+            d.parse_sparkrun_clusters(SPARKRUN_FIXTURE), enrich=CLUSTER_JSON_FIXTURE)
+        monkeypatch.setattr(d, "discover", lambda **k: topo)
+        monkeypatch.setattr(d, "_run",
+                            lambda args, timeout=20: {"ok": True, "stdout": "fail", "stderr": ""})
+        res = d.nas_status()
+        assert res["mounted"] is False
+
+    def test_single_probe_no_fanout(self, monkeypatch):
+        """Staging constraint: NAS health is ONE probe, never a per-worker fan-out."""
+        topo = d.topology_from_sparkrun(
+            d.parse_sparkrun_clusters(SPARKRUN_FIXTURE), enrich=CLUSTER_JSON_FIXTURE)
+        monkeypatch.setattr(d, "discover", lambda **k: topo)
+        calls = []
+        monkeypatch.setattr(d, "_run",
+                            lambda args, timeout=20: calls.append(args) or {"ok": True, "stdout": "ok", "stderr": ""})
+        d.nas_status()
+        assert len(calls) == 1   # exactly one ssh probe
+
+
 class TestAutoAdopt:
     def test_live_membership_authoritative(self, monkeypatch):
         """A host added to the sparkrun cluster appears even if the cache

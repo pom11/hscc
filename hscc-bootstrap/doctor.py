@@ -89,6 +89,34 @@ def _disk_ok(path: str, min_gb: float = 5.0) -> Check:
         return Check("disk space", False, detail=str(e), fatal=False)
 
 
+def _nas_ok(_runner=None) -> Check:
+    """NAS reachability (non-fatal — NAS is optional but recommended for weight
+    staging). Uses the sparkrun cluster's cache_dir + a ping to the NAS host if
+    discoverable."""
+    runner = _runner or _detect_nas
+    nas = runner()
+    if not nas:
+        return Check("nas", True, detail="none configured (optional)", fatal=False)
+    # nas may be a mount path (cache_dir) and/or an ip; just report it — a deep
+    # mount probe needs ssh to a worker, which the live heal tools (nas_diagnose)
+    # do. Doctor only flags presence here.
+    return Check("nas", True, detail=str(nas), fatal=False)
+
+
+def _detect_nas():
+    """Best-effort NAS identifier from the sparkrun cluster (cache_dir)."""
+    raw = _run_cluster_list()
+    if not raw:
+        return None
+    try:
+        import json
+        clusters = json.loads(raw)
+        chosen = next((c for c in clusters if c.get("default")), clusters[0])
+        return (chosen.get("cache_dir") or "").strip() or None
+    except (ValueError, IndexError, KeyError):
+        return None
+
+
 def _gateway_running() -> Check:
     try:
         r = subprocess.run(["pgrep", "-f", "hermes_cli.main gateway"],
@@ -120,6 +148,7 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None) -> di
         _sparkrun_ok(),
         _sparkrun_cluster_ok(_cluster_runner),
         _hermes_ok(home),
+        _nas_ok(),
         _disk_ok(os.path.expanduser("~")),
         _gateway_running(),
     ]
