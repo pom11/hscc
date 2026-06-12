@@ -100,6 +100,43 @@ def ensure_state_dir():
     os.makedirs(STATE_DIR, exist_ok=True)
 
 
+HSCC_DIR = os.path.expanduser("~/.hscc")
+_BAK_KEEP = 5  # newest N of each <file>.bak.* kept
+
+
+def prune_dead_files(hscc_dir=None):
+    """Remove dead daemon cruft on startup: .corrupt-* snapshots + .stale flags
+    (both ignored by the daemon), and cap any <file>.bak.* group at _BAK_KEEP.
+
+    Best-effort + idempotent — never raises. Returns a summary dict of counts.
+    """
+    import glob
+    d = hscc_dir or HSCC_DIR
+    removed_dead, pruned_bak = 0, 0
+    # 1. dead files
+    for pat in ("*.corrupt-*", "*.stale"):
+        for f in glob.glob(os.path.join(d, pat)):
+            try:
+                os.remove(f)
+                removed_dead += 1
+            except OSError:
+                pass
+    # 2. cap each <stem>.bak.* group (e.g. serving.json.bak.*, models.json.bak.*)
+    groups = {}
+    for f in glob.glob(os.path.join(d, "*.bak.*")):
+        stem = f.rsplit(".bak.", 1)[0]
+        groups.setdefault(stem, []).append(f)
+    for files in groups.values():
+        files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        for old in files[_BAK_KEEP:]:
+            try:
+                os.remove(old)
+                pruned_bak += 1
+            except OSError:
+                pass
+    return {"removed_dead": removed_dead, "pruned_bak": pruned_bak}
+
+
 def log(msg, level="INFO"):
     """Write a timestamped log line to the daemon log file."""
     ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -123,6 +160,14 @@ def run_daemon_loop():
 
     ensure_state_dir()
     log("Daemon loop started")
+    # Self-clean dead cruft on startup: .corrupt-*/.stale + uncapped .bak.* groups.
+    try:
+        pruned = prune_dead_files()
+        if pruned["removed_dead"] or pruned["pruned_bak"]:
+            log(f"Startup cleanup: removed {pruned['removed_dead']} dead, "
+                f"{pruned['pruned_bak']} excess backups")
+    except Exception as e:
+        log(f"Startup cleanup skipped: {e}", "WARN")
 
     stop_event = threading.Event()
 
