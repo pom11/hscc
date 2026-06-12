@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.1] — Topology-free orchestrator + hardening
+
+First beta. The system is now feature-complete: a full in-depth audit was closed
+and an 8-workstream effort turns HSCC from "runs commands" into a self-running,
+**topology-free** orchestrator. ~497 tests pass across the four plugin suites,
+and the work was exercised live on the cluster (subagent routing, kanban
+dispatch, the review gate, and an engineered crash-and-resume).
+
+Versioning switches to SemVer for the beta line (was CalVer `-alpha`).
+
+### Added
+- **Dynamic cluster discovery** (`discovery.py`) — one source of truth, live →
+  cache → fail-loud (no silent fake-IP fallback). Tracks per-node VRAM, GPU
+  model, and **power-draw idle detection** (the real GB10 signal, not util%);
+  **auto-adopts** nodes added to the sparkrun cluster. New `discovery_status` +
+  `nas_status` tools.
+- **Topology-free cluster templates** (schema v2) — templates describe *intent*
+  (recipes + family structure), never IPs or ports; those resolve from the live
+  cluster at apply. **sparkrun-`show`-driven auto-fit** so a template only
+  proposes layouts that actually fit (incl. **2 models co-located on one node**),
+  with a node-count library for **1–8 nodes**, VRAM-verified.
+- **HSCC identity** — a topology-free SOUL + ops personality named HSCC, with
+  `~/dev` working-dir discipline and doc-driven/review-gate guidance.
+- **New slash commands** — `/status` (live dashboard incl. free-VRAM),
+  `/heal`, `/template`; `/cluster-restart` now re-applies the active template
+  (template = the recovery contract).
+- **Agentic work-flows** — an idempotent **resume probe** wired into dispatch via
+  a new `pre_kanban_dispatch` hook (a re-dispatched worker is told what already
+  landed on its branch, so it continues instead of redoing); native-kanban review
+  gate with reviewer auto-pairing and 3-reject → escalate.
+- **Reproducible install** — preflight `doctor`, atomic apply with
+  snapshot/auto-rollback, and bootstrap now reproduces the full live state
+  (applies the hermes/sparkrun patch set, wires compaction→worker proxy, seeds a
+  fallback provider).
+- **Per-directory READMEs** linked from the main README.
+
+### Fixed
+- Audit punch-list closed: daemon plist hardcoded python (respawn-loop on
+  Homebrew-only/Spark hosts); compaction summarizing on the orchestrator
+  (re-arming the freeze); broken `provision_model` invocation (no NAS cache);
+  unbounded `.bak`/orphan-proxy cruft; world-readable config + a stray HF token;
+  hardcoded IPs in a public repo; missing fallback provider; dead/contradictory
+  daemon code; silent bootstrap failures.
+
+### Changed
+- The daemon keep-alive loop is **unit-keyed (node, port)** so co-located
+  multi-model nodes are supervised independently; relaunch stops only the unit's
+  own recipe (a healthy sibling survives).
+- Healing is split: workers auto-heal; an orchestrator wedge alerts + activates
+  the fallback and waits for a human `/cluster-restart` (template re-apply).
+- Run official hermes/sparkrun; local edits are captured as a reapply-able patch
+  set (`patches/`) instead of long-lived forks.
+
+### Notes / known limits
+- The patch-reapply stage is `--check`-gated: on a hermes version that has
+  drifted from the patch base it warns + skips rather than half-applying (rebase
+  the patch set for very different upstreams).
+- vLLM-on-GPU behavior is logic-tested; a few paths are flagged for live-cluster
+  validation.
+
 ## [2026.06.11-alpha] — Work runs on workers, not the orchestrator
 
 The orchestrator was silently doing nearly all the work. This release routes the
