@@ -12,6 +12,7 @@ HSCC_DIR="${HSCC_DIR:-$HOME/.hscc}"
 PLUGINS="$HERMES_HOME/plugins"
 RECIPES_DIR="${RECIPES_DIR:-$HOME/.sparkrun-local/recipes}"
 BOOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$BOOT_DIR/.." && pwd)"
 PYBIN="$HERMES_HOME/hermes-agent/venv/bin/python"
 [ -x "$PYBIN" ] || PYBIN="python3"
 
@@ -89,6 +90,18 @@ else
 fi
 
 # ── Stage 4: install ───────────────────────────────────────────────────────
+hdr "Install: plugin files"
+# Copy the plugin tree from the work repo into the Hermes runtime dir
+# (backup-then-overwrite). Skipped automatically when the repo IS the runtime
+# dir (old in-place layout). All later stages run from $PLUGINS/... so this
+# must come first.
+if [ "$REPO_ROOT" -ef "$PLUGINS" ]; then
+  warn "repo is the runtime dir ($PLUGINS) — skipping plugin copy (in-place layout)"
+else
+  COPY=$(REPO_ROOT="$REPO_ROOT" PLUGINS="$PLUGINS" "$PYBIN" "$BOOT_DIR/install_payload.py" 2>/dev/null) \
+    && ok "plugin files copied → $PLUGINS" || warn "plugin copy reported issues"
+fi
+
 hdr "Install: skills"
 if $SKIP_SKILLS; then warn "skipped"; else
   "$PYBIN" "$PLUGINS/hscc-skills/hscc.py" install-skills >/dev/null 2>&1 && ok "skills installed" || warn "skills install reported issues"
