@@ -75,9 +75,11 @@ def recipe_cost(recipe: str, *, _runner=None) -> RecipeCost:
     return cost
 
 
-# Recipe names/paths only ever contain these chars; reject anything else (and
-# anything starting with '-') so a value can't smuggle a flag into sparkrun.
-_RECIPE_RE = re.compile(r"^[@\w][\w./:@-]*$")
+# A recipe is a registry name (@reg/name), a bare name, or a filesystem path
+# (absolute /…, home ~/…, or relative). Must start with one of @ ~ / or a word
+# char — never '-' — so a value can't smuggle a flag into sparkrun. The `--`
+# sentinel in _run_show is the real guard; this just rejects obvious junk.
+_RECIPE_RE = re.compile(r"^[@~/\w][\w./:@~+-]*$")
 
 
 def _run_show(recipe: str) -> str:

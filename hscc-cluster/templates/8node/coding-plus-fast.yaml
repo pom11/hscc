@@ -1,0 +1,17 @@
+# 8-node multi-family: coding (4× 27B-FP8 on :4000) + fast (3× A3B-FP8 on :4001).
+name: 8node-coding-plus-fast
+version: 2
+description: "8 nodes: orchestrator + coding (4× 27B-FP8) + fast (3× A3B-FP8). cluster_size=8."
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+families:
+  - name: coding
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+    workers: 4
+    proxy: true
+  - name: fast
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-fp8-vllm.yaml"
+    workers: remaining
+    proxy: true

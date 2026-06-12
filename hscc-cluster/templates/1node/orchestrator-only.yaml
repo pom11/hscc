@@ -1,0 +1,9 @@
+# 1-node cluster: orchestrator only, no workers.
+# Orchestrator = A3B-NVFP4 (31.82 GB/GPU — fits one Spark with room to spare).
+# For local dev / a single Spark before you add workers.
+name: 1node-orchestrator-only
+version: 2
+description: "1 node: A3B-NVFP4 orchestrator only (no worker family). cluster_size=1."
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+families: []

@@ -1,0 +1,12 @@
+# 8-node: A3B-NVFP4 orchestrator + 7 workers serving 27B-FP8, load-balanced behind one proxy.
+name: 8node-coding
+version: 2
+description: "8 nodes: orchestrator + 7 coding workers (27B-FP8). cluster_size=8."
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+families:
+  - name: coding
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+    workers: all
+    proxy: true

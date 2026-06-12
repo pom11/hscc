@@ -165,3 +165,24 @@ class TestServingJson:
         assert sorted(w["port"] for w in workers) == [8000, 8001]
         # unique ids even when co-located (id includes port)
         assert len({w["id"] for w in workers}) == 2
+
+
+# ── shipped node-count templates REALLY fit (real recipe_cost, real files) ───
+
+def test_all_shipped_templates_resolve_and_fit():
+    """Every templates/Nnode/*.yaml must resolve against an N-node cluster using
+    the REAL sparkrun-show VRAM cost (recipe files exist) — proving they can
+    actually be deployed, not just parse."""
+    import glob, os, yaml
+    import cluster_template as ct
+    files = sorted(glob.glob(os.path.join(os.path.dirname(__file__), "..",
+                                          "templates", "*node", "*.yaml")))
+    assert files, "no node-count templates found"
+    for f in files:
+        nnode = int(os.path.basename(os.path.dirname(f)).replace("node", ""))
+        name = yaml.safe_load(open(f))["name"]
+        tpl = ct._load_intent(name)
+        topo = FakeTopo(FakeNode("10.0.0.1"),
+                        [FakeNode(f"10.0.0.{2+i}") for i in range(nnode - 1)])
+        plan = ti.resolve(tpl, topo)              # real recipe_cost (files on disk)
+        assert ct.validate_resolved_plan(plan) == [], f"{name} did not validate"
