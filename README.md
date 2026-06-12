@@ -82,6 +82,19 @@ sparkrun run <recipe>.yaml --cluster <name> --hosts <node-ip> --port 8000 --ensu
 
 The model name is read from the recipe's `model:` field and recorded in `serving.json`.
 
+### Cluster templates
+
+Instead of provisioning by hand, apply a **topology-free template** that describes
+intent (which recipes, how many workers) and resolves to the live cluster at
+apply — auto-assigning nodes + ports, and refusing layouts that don't fit
+(checked against `sparkrun show` VRAM). A node-count library ships for 1–8 nodes,
+including multi-family and 2-models-per-node layouts. See
+[hscc-cluster/templates/](hscc-cluster/templates/README.md).
+
+```
+hscc-cluster cluster-template apply 4node-coding --confirm   # = the live setup
+```
+
 ---
 
 ## The fleet
@@ -120,27 +133,53 @@ Saying *"do it autonomously"* flips it on: the orchestrator writes a best-judgme
 
 ## Plugins
 
+Each plugin has its own README with details — linked below.
+
 | Plugin | Role |
 |--------|------|
-| **hscc-cluster** | Cluster ops toolset (orchestrator-only): `cluster_status`, `model_health`, `provision_model`, `stop_model`, `restart_model`, self-heal (`remount_nas`, `repair_nas_export`, `reap_orphans`). Reads live truth from `sparkrun status` + `serving.json`. |
-| **hscc-roles** | Role framework: author + generate role-specialized profiles; autonomy flag CLI. |
-| **hscc_daemon** | Monitoring + self-heal daemon (launchd on macOS / systemd --user on Linux): vLLM/gateway/NAS health, worker keep-alive, trigger engine, Operations-topic notifications. |
-| **hscc-commands** | Operator slash commands for incident response: `/cluster`, `/orch-restart`, `/cluster-restart`. Run directly in the gateway (not via the LLM) so they work even when the orchestrator model is wedged. |
-| **sparkrun-hermes** | Official Hermes plugin for sparkrun: a single guarded `sparkrun_exec` CLI passthrough + the run/setup/registry skills. |
-| **hscc-bootstrap** | Preflight-gated, topology-detecting installer. |
-| **hscc-skills** | Idempotent installer for bundled skills + templates. |
-| **hscc-model-onboard** *(skill)* | Bring a new model/quant online cluster-wide end-to-end. |
+| [**hscc-cluster**](hscc-cluster/README.md) | Cluster-control toolset (orchestrator-only): live **discovery** (`discovery_status`, power-draw idle, auto-adopt), status/health, model lifecycle (`provision_model`/`stop_model`/`restart_model`), self-heal, the **topology-free template engine** ([templates/](hscc-cluster/templates/README.md)), and the resume/work-flow helpers. |
+| [**hscc-roles**](hscc-roles/README.md) | Role framework: author + generate role-specialized profiles (incl. `reviewer`); autonomy flag CLI. |
+| [**hscc_daemon**](hscc_daemon/README.md) | Monitoring + self-heal daemon (launchd / systemd --user): vLLM/gateway/NAS health, **unit-keyed worker keep-alive** (multi-model-per-node), trigger engine, Operations notifications, startup cruft self-clean. |
+| [**hscc-commands**](hscc-commands/README.md) | Operator slash commands (run in the gateway, not the LLM): `/cluster`, `/status`, `/orch-restart`, `/cluster-restart` (template re-apply), `/heal`, `/template`. |
+| [**sparkrun-hermes**](sparkrun-hermes/README.md) | Official Hermes plugin for sparkrun: a guarded `sparkrun_exec` CLI passthrough + run/setup/registry skills. |
+| [**hscc-bootstrap**](hscc-bootstrap/README.md) | Preflight-gated, topology-detecting installer (doctor → copy → patches → wire → daemon). |
+| [**hscc-skills**](hscc-skills/README.md) | Idempotent installer for bundled skills + templates (sources in [install/](install/README.md)). |
+| [**memori** / **memori_byodb**](memori_byodb/README.md) | Memory-provider plugins (HSCC runs the BYODB variant: NAS-backed store + offline augmentation). |
+
+Also: [`patches/`](patches/MANIFEST.md) — curated hermes/sparkrun upstream patches
+(run official + reapply the delta); [`docs/`](docs/README.md) — design specs +
+per-workstream plans.
 
 ---
 
 ## Layout
 
+The repo (you edit here) is separate from the Hermes runtime (bootstrap copies
+into it):
+
 ```
-~/.hermes/plugins/        # this repo — the plugins
-~/.hermes/profiles/       # generated role profiles (build artifacts, not tracked)
-~/.hermes/skills/         # installed skills
-~/.hscc/                  # runtime state (serving.json, autonomy, state/, events.jsonl)
-~/.sparkrun-local/recipes # vLLM serving recipes
+~/dev/hscc/                 # the work repo — what you clone + edit
+├── hscc-cluster/           # cluster toolset + discovery + template engine   → README
+│   └── templates/          #   topology-free node-count template library     → README
+├── hscc-roles/             # role framework                                  → README
+├── hscc_daemon/            # monitoring + self-heal daemon                   → README
+├── hscc-commands/          # operator slash commands                         → README
+├── hscc-bootstrap/         # the installer                                   → README
+├── hscc-skills/            # skill installer                                 → README
+├── sparkrun-hermes/        # sparkrun passthrough plugin                     → README
+├── memori/ · memori_byodb/ # memory providers                               → README
+├── install/                # vendored skill sources                         → README
+├── patches/                # curated hermes/sparkrun upstream patches        → MANIFEST
+├── docs/                   # design specs + plans                           → README
+└── _archive/               # superseded code (moved, never deleted)
+
+# Hermes runtime (bootstrap targets — not edited directly):
+~/.hermes/plugins/          # installed copy of the plugins above
+~/.hermes/profiles/         # generated role profiles (build artifacts)
+~/.hermes/skills/           # installed skills
+~/.hscc/                    # runtime state (serving.json, applied_template.json,
+                            #   cluster.json, autonomy, rollback/, state/)
+~/.sparkrun-local/recipes/  # vLLM serving recipes
 ```
 
 ## Conventions
