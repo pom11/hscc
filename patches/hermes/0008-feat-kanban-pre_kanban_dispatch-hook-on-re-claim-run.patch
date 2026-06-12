@@ -1,7 +1,7 @@
 From 59b531295324225c5f999afb48b445f3074a6559 Mon Sep 17 00:00:00 2001
 From: pom11 <parsecoriginalmastercraft@gmail.com>
 Date: Fri, 12 Jun 2026 23:34:22 +0300
-Subject: [PATCH 8/8] feat(kanban): pre_kanban_dispatch hook on re-claim
+Subject: [PATCH 8/9] feat(kanban): pre_kanban_dispatch hook on re-claim
  (run_id>1)
 
 ---
