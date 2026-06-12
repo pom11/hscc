@@ -172,30 +172,38 @@ def resume_note(task, *, repo, base="main"):
     )
 
 
-def on_pre_kanban_dispatch(task_id=None, run_id=None, task=None, db_path=None,
+def on_pre_kanban_dispatch(task_id=None, run_id=None, task=None, conn=None,
                            repo=None, **kwargs):
     """Hook handler for `pre_kanban_dispatch` (fires on re-dispatch, run_id>1).
 
     Posts a resume note (from the task branch's committed state) as a kanban
     comment, which build_worker_context surfaces to the re-dispatched worker so
     it resumes instead of redoing. Best-effort: never raises (the core fires
-    this in a try/except, but we double-guard). ``repo`` defaults to cwd; in a
-    worktree dispatch the branch lives in the task's workspace."""
+    this in a try/except, but we double-guard).
+
+    ``conn`` is the live board connection passed by claim_task — used so the
+    comment lands on the SAME board the task lives on. ``repo`` is the task's
+    worktree; defaults to the task workspace_path, then cwd."""
     try:
         import os as _os
-        work_repo = repo or _os.getcwd()
-        note = resume_note(task if isinstance(task, dict) else
-                           {"branch_name": getattr(task, "branch_name", None)},
-                           repo=work_repo)
+        t = task if isinstance(task, dict) else {
+            "branch_name": getattr(task, "branch_name", None),
+            "workspace_path": getattr(task, "workspace_path", None),
+        }
+        work_repo = repo or t.get("workspace_path") or _os.getcwd()
+        note = resume_note(t, repo=work_repo)
         if not note or not task_id:
             return None
         from hermes_cli import kanban_db as _kb
-        board = kwargs.get("board")
-        conn = _kb.connect(board=board) if board else _kb.connect()
-        try:
+        if conn is not None:
             _kb.add_comment(conn, task_id, author="hscc-resume", body=note)
-        finally:
-            conn.close()
+        else:
+            board = kwargs.get("board")
+            c = _kb.connect(board=board) if board else _kb.connect()
+            try:
+                _kb.add_comment(c, task_id, author="hscc-resume", body=note)
+            finally:
+                c.close()
         return {"posted": True, "task_id": task_id}
     except Exception:
         return None

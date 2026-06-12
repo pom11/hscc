@@ -1,7 +1,7 @@
 From c67ebf0cf3ea787744b1580cac9d285bb88b0df4 Mon Sep 17 00:00:00 2001
 From: pom11 <parsecoriginalmastercraft@gmail.com>
 Date: Tue, 9 Jun 2026 12:16:05 +0300
-Subject: [PATCH 2/8] feat(kanban): pure review-pairing transform for decompose
+Subject: [PATCH 2/9] feat(kanban): pure review-pairing transform for decompose
 
 ---
  hermes_cli/kanban_decompose.py      | 43 ++++++++++++++++++++++++

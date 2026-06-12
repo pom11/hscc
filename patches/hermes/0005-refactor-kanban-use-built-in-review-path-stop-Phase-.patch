@@ -1,7 +1,7 @@
 From e16a63d5c44ac648e3d53efabbf0a2feb5e9a19e Mon Sep 17 00:00:00 2001
 From: pom11 <parsecoriginalmastercraft@gmail.com>
 Date: Tue, 9 Jun 2026 12:34:16 +0300
-Subject: [PATCH 5/8] refactor(kanban): use built-in review path; stop Phase-2
+Subject: [PATCH 5/9] refactor(kanban): use built-in review path; stop Phase-2
  auto-pairing
 
 ---

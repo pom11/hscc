@@ -1,7 +1,7 @@
 From 1d74273dd50fa00394835f2bc28b7f63fca3f253 Mon Sep 17 00:00:00 2001
 From: pom11 <parsecoriginalmastercraft@gmail.com>
 Date: Tue, 9 Jun 2026 12:21:33 +0300
-Subject: [PATCH 4/8] feat(kanban): wire review-pairing into decompose_task
+Subject: [PATCH 4/9] feat(kanban): wire review-pairing into decompose_task
  (policy-gated)
 
 ---
