@@ -18,7 +18,6 @@ Changes:
 - tests/test_kanban_submit_review.py: 2 tests (running->review success,
   non-running returns False)
 
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
 ---
  agent/prompt_builder.py            | 15 +++--
  hermes_cli/kanban_db.py            | 32 +++++++++++

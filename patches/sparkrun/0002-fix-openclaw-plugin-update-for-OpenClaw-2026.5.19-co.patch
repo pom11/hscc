@@ -8,7 +8,6 @@ Subject: [PATCH 2/2] fix(openclaw-plugin): update for OpenClaw 2026.5.19
 - Add TypeScript compilation (dist/index.js) as main entry
 - Add @sinclair/typebox dependency, node types for tsconfig
 
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 ---
  sparkrun-openclaw-plugin/index.ts      | 7 ++++---
  sparkrun-openclaw-plugin/package.json  | 8 ++++++--
