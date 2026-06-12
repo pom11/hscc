@@ -89,6 +89,83 @@ def atomic_yaml_update(path: Path, update_fn, backup: bool = True) -> Path:
     return path
 
 
+# ── Proxy plist generation ─────────────────────────────────────────────────
+
+def _generate_proxy_plist(family) -> str:
+    """Generate a launchd plist for a LiteLLM proxy instance."""
+    config_path = str(PROXY_DIR / family.name / "config.json")
+    log_path = str(PROXY_DIR / "logs" / f"{family.name}.log")
+    
+    plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hermes.proxy.{family.name}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>litellm</string>
+        <string>--port</string>
+        <string>{family.proxy.port}</string>
+        <string>--config</string>
+        <string>{config_path}</string>
+    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{log_path}</string>
+    <key>StandardErrorPath</key>
+    <string>{log_path}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LITELLM_LICENSE_KEY</key>
+        <string></string>
+    </dict>
+</dict>
+</plist>"""
+    return plist
+
+
+def install_proxy_plist(family) -> dict:
+    """Generate and install a proxy launchd plist. Returns action summary."""
+    proxy_dir = PROXY_DIR / family.name
+    logs_dir = PROXY_DIR / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    
+    plist_content = _generate_proxy_plist(family)
+    plist_path = proxy_dir / "proxy.plist"
+    
+    with open(plist_path, "w") as f:
+        f.write(plist_content)
+    
+    return {
+        "plist": str(plist_path),
+        "label": f"com.hermes.proxy.{family.name}",
+        "port": family.proxy.port,
+        "log": str(logs_dir / f"{family.name}.log"),
+    }
+
+
+def remove_proxy_plist(family) -> dict:
+    """Stop and remove a proxy launchd plist. Returns action summary."""
+    import subprocess
+    
+    label = f"com.hermes.proxy.{family.name}"
+    try:
+        subprocess.run(
+            ["launchctl", "bootout", "gui/" + str(os.getuid()), label],
+            capture_output=True, timeout=10
+        )
+    except Exception:
+        pass
+    
+    plist_path = PROXY_DIR / family.name / "proxy.plist"
+    if plist_path.exists():
+        plist_path.unlink()
+    
+    return {"label": label, "status": "removed"}
+
+
 # ── Template loading ───────────────────────────────────────────────────────
 
 def list_templates():
@@ -198,13 +275,21 @@ def apply_template(template_name: str, confirm: bool = False) -> dict:
         atomic_yaml_update(CONFIG_YAML, lambda d: _update_hermes_config(d, tpl))
         result["steps"].append({"step": "config.yaml", "status": "ok"})
         
-        # Step 4: Write proxy configs
+        # Step 4: Write proxy configs and install plists
+        proxy_actions = []
         for family in tpl.families:
             proxy_config = _build_proxy_config(family)
             proxy_dir = PROXY_DIR / family.name
             proxy_dir.mkdir(parents=True, exist_ok=True)
             write_json(proxy_dir / "config.json", proxy_config, backup=True)
-        result["steps"].append({"step": "proxies/", "status": "ok", "proxies": len(tpl.families)})
+            plist_result = install_proxy_plist(family)
+            proxy_actions.append(plist_result)
+        result["steps"].append({
+            "step": "proxies/",
+            "status": "ok",
+            "proxies": len(proxy_actions),
+            "details": proxy_actions,
+        })
         
         # Step 5: Update profile routing
         result["steps"].append({"step": "profiles", "status": "ok", "note": "Profile routing updated"})
