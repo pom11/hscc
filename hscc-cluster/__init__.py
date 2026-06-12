@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """HSCC Cluster Template System."""
 
 from .cluster_template_schema import (

@@ -1,0 +1,26 @@
+# 3-node cluster: 1 gateway + 2 workers (single family, load-balanced)
+# Workers share one proxy port, models are load-balanced across them
+
+name: basic-3-node
+version: 1
+cluster_size: 3
+description: "Gateway + 2 workers, single model family behind one proxy."
+
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+  tp: 1
+  pp: 1
+
+orchestrator_node: "10.0.0.244"
+
+families:
+  - name: general
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+        tp: 1
+        pp: 1
+    nodes:
+      - "10.0.0.246"
+      - "10.0.0.247"
+    proxy:
+      port: 4001

@@ -6,7 +6,6 @@ import yaml
 from pathlib import Path
 import sys
 
-# Ensure plugin dir is on path
 PLUGIN_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(PLUGIN_DIR))
 
@@ -25,7 +24,6 @@ class TestModelSpec:
     """Test ModelSpec schema."""
 
     def test_minimal(self):
-        """Only recipe required."""
         m = ModelSpec(recipe="test.yaml")
         assert m.recipe == "test.yaml"
         assert m.tp == 1
@@ -61,7 +59,7 @@ class TestFamilyProxyConfig:
             FamilyProxyConfig(port=0)
 
     def test_extra_args(self):
-        p = FamilyProxyConfig(port=8000, extra_args={"max-model-len": "32768"})
+        p = FamilyProxyConfig(extra_args={"max-model-len": "32768"})
         assert p.extra_args == {"max-model-len": "32768"}
 
 
@@ -105,11 +103,10 @@ class TestClusterTemplate:
         assert len(tpl.families) == 2
 
     def test_cluster_size_mismatch(self):
-        """cluster_size must match 1 + sum of nodes."""
         with pytest.raises(ValueError, match="cluster_size.*node count"):
             ClusterTemplate(
                 name="test",
-                cluster_size=5,  # says 5, but only 3 nodes
+                cluster_size=5,
                 orchestrator=ModelSpec(recipe="orch.yaml"),
                 orchestrator_node="10.0.0.244",
                 families=[
@@ -157,7 +154,7 @@ class TestToServingJson:
         )
         result = tpl.to_serving_json()
         assert result["version"] == 1
-        assert len(result["units"]) == 2  # 1 orch + 1 family
+        assert len(result["units"]) == 2
         assert result["units"][0]["role"] == "orchestrator"
         assert result["units"][1]["role"] == "worker"
         assert result["units"][1]["family"] == "coding"
@@ -192,7 +189,6 @@ class TestLoadTemplate:
     """Test loading templates from YAML files."""
 
     def test_load_valid(self, tmp_path):
-        """Load a valid template from disk."""
         yaml_content = {
             "name": "test",
             "cluster_size": 2,
@@ -208,7 +204,7 @@ class TestLoadTemplate:
         }
         yaml_file = tmp_path / "test.yaml"
         yaml_file.write_text(yaml.dump(yaml_content))
-        
+
         tpl = load_template(yaml_file)
         assert tpl.name == "test"
         assert tpl.cluster_size == 2
@@ -224,7 +220,6 @@ class TestListTemplates:
     """Test scanning templates directory."""
 
     def test_list_empty(self, tmp_path):
-        """No templates → empty registry."""
         registry = list_templates(tmp_path)
         assert len(registry.templates) == 0
 
@@ -244,7 +239,7 @@ class TestListTemplates:
             ],
         }
         (tmp_path / "my-template.yaml").write_text(yaml.dump(yaml_content))
-        
+
         registry = list_templates(tmp_path)
         assert len(registry.templates) == 1
         assert registry.templates[0]["name"] == "my-template"

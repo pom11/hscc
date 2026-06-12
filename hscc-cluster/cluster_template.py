@@ -221,6 +221,29 @@ def _provision_models(tpl: Any) -> dict:
     return result
 
 
+# ── Gateway restart ────────────────────────────────────────────────────────
+
+def _restart_gateway() -> dict:
+    """Restart the Hermes gateway process via launchd."""
+    import subprocess
+    
+    try:
+        result = subprocess.run(
+            ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/ai.hermes.gateway"],
+            capture_output=True, text=True, timeout=30
+        )
+        return {
+            "success": result.returncode == 0,
+            "note": "Gateway restarted to pick up config changes",
+        }
+    except subprocess.TimeoutExpired:
+        return {"success": False, "note": "Gateway restart timed out"}
+    except FileNotFoundError:
+        return {"success": False, "note": "launchctl not found"}
+    except Exception as e:
+        return {"success": False, "note": f"Gateway restart failed: {e}"}
+
+
 # ── Template loading ───────────────────────────────────────────────────────
 
 def list_templates():
@@ -360,10 +383,11 @@ def apply_template(template_name: str, confirm: bool = False) -> dict:
         })
         
         # Step 7: Restart gateway to pick up config changes
+        gw_result = _restart_gateway()
         result["steps"].append({
             "step": "gateway-restart",
-            "status": "ok",
-            "note": "Gateway should be restarted to pick up config changes",
+            "status": "ok" if gw_result["success"] else "warn",
+            "note": gw_result.get("note", ""),
         })
         
     except Exception as e:
