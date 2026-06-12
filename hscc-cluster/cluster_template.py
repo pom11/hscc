@@ -410,12 +410,32 @@ def _discover():
     return m.discover()
 
 
+def _find_template_file(template_name: str):
+    """Locate a template yaml by name, searching TEMPLATE_DIR + one level of
+    subdirs (e.g. templates/4node/coding.yaml). Match by filename stem OR by the
+    template's own ``name:`` field, so both 'coding' and '4node-coding' resolve."""
+    direct = TEMPLATE_DIR / f"{template_name}.yaml"
+    if direct.exists():
+        return direct
+    import yaml
+    for f in sorted(TEMPLATE_DIR.rglob("*.yaml")):
+        if f.stem == template_name:
+            return f
+        try:
+            data = yaml.safe_load(open(f)) or {}
+            if data.get("name") == template_name:
+                return f
+        except Exception:
+            continue
+    return None
+
+
 def _load_intent(template_name: str):
     """Load a v2 intent template (yaml → ClusterTemplate). Raises on bad shape."""
     import yaml
-    path = TEMPLATE_DIR / f"{template_name}.yaml"
-    if not path.exists():
-        raise FileNotFoundError(f"Template not found: {path}")
+    path = _find_template_file(template_name)
+    if path is None:
+        raise FileNotFoundError(f"Template not found: {template_name}")
     with open(path) as f:
         data = yaml.safe_load(f)
     return _ti().ClusterTemplate.from_dict(data)
@@ -432,16 +452,18 @@ def list_templates():
     """List all available cluster templates (v2 intent files)."""
     import yaml
     templates = []
-    for f in sorted(TEMPLATE_DIR.glob("*.yaml")):
+    for f in sorted(TEMPLATE_DIR.rglob("*.yaml")):
         try:
             with open(f) as fh:
                 data = yaml.safe_load(fh) or {}
             if data.get("name"):
+                rel = f.relative_to(TEMPLATE_DIR)
                 templates.append({
                     "name": data["name"],
                     "version": data.get("version", 2),
                     "description": data.get("description", ""),
                     "families": [fam.get("name") for fam in (data.get("families") or [])],
+                    "group": rel.parent.name if rel.parent.name != "." else "",
                 })
         except Exception:
             continue

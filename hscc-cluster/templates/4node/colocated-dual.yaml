@@ -1,0 +1,14 @@
+# 4-node co-location demo: each of 3 workers runs TWO models on distinct ports
+# (A3B-FP8 44.89 + A3B-FP8 44.89 = 89.8 GB/GPU — fits one Spark, verified via sparkrun show).
+name: 4node-colocated-dual
+version: 2
+description: "4 nodes: orchestrator + 3 workers EACH co-locating 2× A3B-FP8 (ports 8000/8001). cluster_size=4."
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+families:
+  - name: dual
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-fp8-vllm.yaml"
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-fp8-vllm.yaml"
+    workers: all
+    proxy: true
