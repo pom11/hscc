@@ -39,8 +39,27 @@ def cluster_status(args, **kwargs):
     running = _running_by_node()
     units = cl.read_serving_units()
     idle = [n for n in cl.NODES if n not in running]
-    return {"head": cl.HEAD, "running": running, "idle_nodes": idle,
-            "serving_units": [u.get("id") or u.get("name") for u in units]}
+    result = {"head": cl.HEAD, "running": running, "idle_nodes": idle,
+              "serving_units": [u.get("id") or u.get("name") for u in units]}
+    # Surface discovery source + free-VRAM when available (best-effort; never
+    # fail cluster_status if discovery/probe is unavailable).
+    try:
+        from . import discovery as _disc  # package context
+    except ImportError:
+        try:
+            import discovery as _disc  # direct context
+        except ImportError:
+            _disc = None
+    if _disc is not None:
+        try:
+            topo = _disc.discover()
+            result["source"] = topo.source
+            result["free_vram_gb"] = {
+                n.ip: n.vram_free_gb for n in topo.workers if n.vram_free_gb is not None
+            }
+        except Exception:
+            pass
+    return result
 
 
 def list_recipes(args, **kwargs):
