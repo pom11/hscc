@@ -84,6 +84,28 @@ def test_provision_executes_with_confirm(monkeypatch):
     assert out["base_url"] == "http://192.0.2.12:8000/v1"
     assert "run" in calls["args"] and "--hosts" in calls["args"]
 
+
+def test_provision_uses_correct_invocation(monkeypatch):
+    """H2: provision must pass --cluster (NAS cache), --port, --ensure and
+    expand ~ in the recipe path — not the old bare `run <recipe> --hosts`."""
+    import os
+    monkeypatch.setattr(ops, "_running_by_node", lambda: {})
+    monkeypatch.setattr(ops, "_cluster_name", lambda: "hscc")
+    calls = {}
+    def fake_run(args, timeout=30):
+        calls["args"] = args
+        return {"ok": True, "stdout": "", "stderr": "", "code": 0}
+    monkeypatch.setattr(ops.cl, "run_cmd", fake_run)
+    out = ops.provision_model({"recipe": "~/r/a.yaml", "node": "192.0.2.12",
+                               "port": 8001, "confirm": True})
+    a = calls["args"]
+    assert "--cluster" in a and "hscc" in a
+    assert "--port" in a and "8001" in a
+    assert "--ensure" in a
+    assert os.path.expanduser("~/r/a.yaml") in a   # ~ expanded
+    assert out["base_url"] == "http://192.0.2.12:8001/v1"
+
+
 def test_stop_requires_confirm():
     out = ops.stop_model({"recipe": "r", "node": "192.0.2.12"})
     assert out["preview"] is True
