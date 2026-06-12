@@ -1,15 +1,9 @@
 # docs
 
-Design specs and implementation plans for HSCC, following a doc-driven flow:
-**spec → plan → build**, with the plan's checklist as the acceptance contract the
-reviewer checks against.
+HSCC follows a doc-driven flow: **spec → plan → build**, with the plan's
+checklist as the acceptance contract the reviewer checks against.
 
-```
-docs/superpowers/
-  specs/   # what + why (design)   e.g. 2026-06-12-hscc-hardening-and-orchestrator-design.md
-  plans/   # how (per-workstream)  e.g. 2026-06-12-ws2-discovery.md, …-ws4-workflows.md
-```
-
-The master design (`specs/2026-06-12-hscc-hardening-and-orchestrator-design.md`)
-captures the 8-workstream hardening effort + locked decisions (D1–D17); each
-workstream has a matching plan under `plans/`.
+Internal design specs and per-workstream implementation plans are kept **local
+and untracked** (under `docs/superpowers/`, gitignored) — they're working
+documents, not part of the published repo. The shipped record of what changed
+lives in the top-level [`CHANGELOG.md`](../CHANGELOG.md) and the GitHub releases.
