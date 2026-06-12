@@ -52,10 +52,31 @@ if [[ "${1:-}" == "force" ]]; then
     launchctl bootout "gui/$UID/${LABEL}" 2>/dev/null || true
 fi
 
+# Resolve a REAL python interpreter for ProgramArguments[0]. The old template
+# hardcoded /usr/local/bin/python3, which doesn't exist on Homebrew-only Macs or
+# Spark nodes — launchd then fails to exec and KeepAlive respawn-loops it (C1).
+# Prefer the Hermes venv python, then the env's python3, then known locations.
+PYBIN=""
+for cand in \
+    "${HSCC_PYBIN:-}" \
+    "${HOME}/.hermes/hermes-agent/venv/bin/python" \
+    "$(command -v python3 2>/dev/null || true)" \
+    "/opt/homebrew/bin/python3" \
+    "/usr/local/bin/python3" \
+    "/usr/bin/python3"; do
+    if [[ -n "${cand}" && -x "${cand}" ]]; then PYBIN="${cand}"; break; fi
+done
+if [[ -z "${PYBIN}" ]]; then
+    error "No usable python3 found for the daemon plist (tried venv, PATH, /opt/homebrew, /usr/local, /usr/bin)"
+    exit 1
+fi
+info "Daemon python: ${PYBIN}"
+
 if true; then
-    # Substitute __HOME__ with the installing user's $HOME (launchctl does not
-    # expand ~ or $HOME), generating the real plist from the template.
-    sed "s|__HOME__|${HOME}|g" "${PLIST_TEMPLATE}" > "${LAUNCH_PLIST}"
+    # Substitute __HOME__ + __PYBIN__ (launchctl does not expand ~/$HOME, and the
+    # interpreter path must be a real absolute path), generating the real plist.
+    sed -e "s|__HOME__|${HOME}|g" -e "s|__PYBIN__|${PYBIN}|g" \
+        "${PLIST_TEMPLATE}" > "${LAUNCH_PLIST}"
     info "Installed plist to ${LAUNCH_PLIST}"
 else
     info "Plist already up to date at ${LAUNCH_PLIST}"
