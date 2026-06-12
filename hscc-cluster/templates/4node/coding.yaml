@@ -1,0 +1,13 @@
+# 4-node: A3B-NVFP4 orchestrator + 3 workers serving 27B-FP8 behind the proxy on :4000.
+# This is the LIVE cluster layout (== hscc-live).
+name: 4node-coding
+version: 2
+description: "4 nodes: orchestrator + 3 coding workers (27B-FP8). The live setup. cluster_size=4."
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+families:
+  - name: coding
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+    workers: all
+    proxy: true
