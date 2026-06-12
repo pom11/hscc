@@ -35,15 +35,14 @@ warn() { echo "  ⚠ $1"; }
 die()  { echo "  ✗ $1" >&2; exit 1; }
 hdr()  { echo; echo "━━━ $1 ━━━"; }
 
-# ── Stage 1: prerequisites (hard gate) ─────────────────────────────────────
-hdr "Prerequisites"
-command -v sparkrun >/dev/null 2>&1 || die "sparkrun not found in PATH. Install sparkrun first."
+# ── Stage 1: prerequisites (preflight doctor, hard gate) ────────────────────
+hdr "Prerequisites (doctor)"
+# The doctor checks python/pyyaml/sparkrun/cluster/Hermes/disk/gateway and
+# explains any failure in plain language. It exits non-zero on a FATAL miss, so
+# a half-configured machine stops here instead of failing deep in a later stage.
+"$PYBIN" "$BOOT_DIR/doctor.py" || die "preflight failed — fix the items above, then re-run."
 CLUSTER_JSON="$("$PYBIN" "$BOOT_DIR/detect.py" 2>/dev/null || echo null)"
 [ "$CLUSTER_JSON" != "null" ] || die "No sparkrun cluster configured. Run: sparkrun cluster add <name> <hosts...>"
-[ -d "$HERMES_HOME/hermes-agent" ] || die "Hermes not found at $HERMES_HOME/hermes-agent. Install Hermes first."
-ok "sparkrun cluster configured"
-ok "Hermes present at $HERMES_HOME/hermes-agent"
-if pgrep -f "hermes_cli.main gateway" >/dev/null 2>&1; then ok "Hermes gateway running"; else warn "Hermes gateway not running (start it after bootstrap)"; fi
 
 # ── Stage 2: detect ────────────────────────────────────────────────────────
 hdr "Detected cluster"
@@ -105,8 +104,16 @@ if [ "$REPO_ROOT" -ef "$PLUGINS" ]; then
   warn "repo is the runtime dir ($PLUGINS) — skipping plugin copy (in-place layout)"
 else
   COPY_FLAG=""; $NO_BACKUP && COPY_FLAG="--no-backup"
-  COPY=$(REPO_ROOT="$REPO_ROOT" PLUGINS="$PLUGINS" "$PYBIN" "$BOOT_DIR/install_payload.py" $COPY_FLAG 2>/dev/null) \
-    && ok "plugin files copied → $PLUGINS$($NO_BACKUP && echo ' (no backup)')" || warn "plugin copy reported issues"
+  # The copy is the FOUNDATION — every later stage runs from $PLUGINS/... A failed
+  # copy cascades into a half-wired install, so surface the error and HARD-STOP
+  # here rather than degrading to a yellow warning (H3). stderr is shown, not
+  # swallowed.
+  if COPY=$(REPO_ROOT="$REPO_ROOT" PLUGINS="$PLUGINS" "$PYBIN" "$BOOT_DIR/install_payload.py" $COPY_FLAG); then
+    ok "plugin files copied → $PLUGINS$($NO_BACKUP && echo ' (no backup)')"
+  else
+    echo "$COPY" >&2
+    die "plugin copy FAILED — aborting (later stages depend on $PLUGINS being populated)"
+  fi
 fi
 
 hdr "Install: skills"
