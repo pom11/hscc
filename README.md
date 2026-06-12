@@ -8,7 +8,7 @@
 
 HSCC is the operational backbone that lets you say *"build X"* in chat and have a fleet of role-specialized agents brainstorm it, decompose it into tasks, write the code, review it, and land it — across multiple GPU nodes, hands-off.
 
-It runs on a cluster of DGX Spark (GB10 / Grace-Blackwell, `sm_121a`) nodes serving LLMs via vLLM, orchestrated by [Hermes](https://github.com/NousResearch/hermes-agent) agents. HSCC is a set of pure-stdlib Python plugins that install into `~/.hermes/plugins/`, with runtime state in `~/.hscc/`.
+It runs on a cluster of DGX Spark (GB10 / Grace-Blackwell, `sm_121a`) nodes serving LLMs via vLLM, orchestrated by [Hermes](https://github.com/NousResearch/hermes-agent) agents. HSCC is a set of pure-stdlib Python plugins. You develop in a work repo (e.g. `~/dev/hscc`); bootstrap copies the plugins into the Hermes runtime dir `~/.hermes/plugins/`, with runtime state in `~/.hscc/`.
 
 The design is **native-Hermes-first**: agent work runs on Hermes' built-in kanban dispatcher + git worktrees. HSCC contributes the thin physical layer (cluster control, monitoring, model lifecycle) plus a role framework that turns the fleet into specialized, self-extending workers.
 
@@ -50,10 +50,13 @@ The result: Hermes goes from *one smart agent* to a *self-running, specialized f
 ## Quick start
 
 ```
-python3 ~/.hermes/plugins/hscc-bootstrap/bootstrap.sh
+git clone https://github.com/pom11/hscc ~/dev/hscc
+~/dev/hscc/hscc-bootstrap/bootstrap.sh
 ```
 
-Bootstrap checks prerequisites (a configured sparkrun cluster + Hermes), detects your cluster topology, asks a couple of questions, then installs everything HSCC needs — skills, role profiles, `~/.hscc` state + `serving.json`, and the monitoring daemon. It does **not** start vLLM models; bring those up explicitly when ready. Use `--yes` for a non-interactive run.
+Clone the repo to a work location of your choice (`~/dev/hscc` here), then run bootstrap. Bootstrap **copies** the plugin tree into `~/.hermes/plugins/` (backing up any existing copy), checks prerequisites (a configured sparkrun cluster + Hermes), detects your cluster topology, asks a couple of questions, then installs everything HSCC needs — skills, role profiles, `~/.hscc` state + `serving.json`, and the monitoring daemon. It does **not** start vLLM models; bring those up explicitly when ready. Use `--yes` for a non-interactive run.
+
+To pick up later changes, `git pull` in your work repo and re-run bootstrap — it re-copies the plugins into the runtime dir.
 
 ---
 
