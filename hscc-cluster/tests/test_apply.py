@@ -2,6 +2,7 @@
 
 import pytest
 import json
+import tempfile
 from pathlib import Path
 import sys
 
@@ -21,7 +22,6 @@ class TestListTemplates:
     """Test template listing."""
 
     def test_list_built_in(self):
-        """Should find built-in templates."""
         registry = list_templates(PLUGIN_DIR / "templates")
         assert len(registry.templates) >= 4  # basic-1 through basic-4
 
@@ -39,7 +39,7 @@ class TestWriteJson:
     def test_write_and_read(self, tmp_path):
         data = {"key": "value", "nested": {"a": 1}}
         write_json(tmp_path / "test.json", data)
-        
+
         with open(tmp_path / "test.json") as f:
             result = json.load(f)
         assert result == data
@@ -47,16 +47,14 @@ class TestWriteJson:
     def test_backup_on_overwrite(self, tmp_path):
         data1 = {"version": 1}
         data2 = {"version": 2}
-        
+
         write_json(tmp_path / "test.json", data1)
         write_json(tmp_path / "test.json", data2, backup=True)
-        
-        # Check backup exists
+
         backups = list(tmp_path.glob("test.json.bak.*"))
         assert len(backups) == 1
 
     def test_atomic_write_no_partial(self, tmp_path):
-        """Temp file should not persist after write."""
         write_json(tmp_path / "test.json", {"ok": True})
         assert not (tmp_path / "test.json.tmp").exists()
 
@@ -67,7 +65,7 @@ class TestAtomicYamlUpdate:
     def test_create_new(self, tmp_path):
         data = {"new": "value"}
         path = atomic_yaml_update(tmp_path / "test.yaml", lambda d: data)
-        
+
         import yaml
         with open(path) as f:
             result = yaml.safe_load(f)
@@ -78,9 +76,9 @@ class TestAtomicYamlUpdate:
         path = tmp_path / "test.yaml"
         with open(path, "w") as f:
             yaml.dump({"old": "value"}, f)
-        
+
         path = atomic_yaml_update(path, lambda d: {**d, "new": "value"})
-        
+
         with open(path) as f:
             result = yaml.safe_load(f)
         assert result["old"] == "value"
@@ -92,12 +90,11 @@ class TestPreviewTemplate:
 
     def test_preview_basic_1_node(self):
         result = preview_template("basic-1-node")
-        
+
         assert result["template"] == "basic-1-node"
         assert result["cluster_size"] == 1
         assert len(result["changes"]) > 0
-        
-        # Check change structure
+
         change_files = [c["file"] for c in result["changes"]]
         assert "serving.json" in change_files
         assert "models.json" in change_files
@@ -109,14 +106,13 @@ class TestPreviewTemplate:
 
     def test_preview_multi_family(self):
         result = preview_template("multi-family-4-node")
-        
+
         assert result["cluster_size"] == 4
-        assert len(result["changes"]) > 0
+        assert len(result["families"]) == 2  # coding + vision
 
     def test_preview_structure(self):
         result = preview_template("basic-2-node")
-        
-        # All changes should have file, action, summary
+
         for change in result["changes"]:
             assert "file" in change
             assert "action" in change
@@ -128,7 +124,7 @@ class TestApplyTemplate:
 
     def test_apply_without_confirm_returns_preview(self):
         result = apply_template("basic-1-node")
-        
+
         assert result["status"] == "preview"
         assert "Re-call with confirm=true" in result["note"]
         assert "changes" in result
@@ -136,7 +132,7 @@ class TestApplyTemplate:
     def test_apply_basic_structure(self):
         """Apply with confirm=True returns full step list."""
         result = apply_template("multi-family-4-node", confirm=True)
-        
+
         assert result["template"] == "multi-family-4-node"
         assert "steps" in result
         assert isinstance(result["steps"], list)
