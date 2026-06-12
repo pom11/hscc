@@ -38,6 +38,13 @@ DEFAULT_ASSIGNEE = os.environ.get("HSCC_DEFAULT_ASSIGNEE", "worker")
 # `worker` catch-all role can run many tasks in parallel (the proxy spreads them).
 MAX_IN_PROGRESS = int(os.environ.get("HSCC_MAX_IN_PROGRESS", "30"))
 MAX_IN_PROGRESS_PER_PROFILE = int(os.environ.get("HSCC_MAX_IN_PROGRESS_PER_PROFILE", "10"))
+# WS4 review flow: auto-pair a reviewer task behind each coder/role task, and
+# escalate after N consecutive rejects (the circuit breaker's failure_limit).
+REVIEW_ROLES = os.environ.get(
+    "HSCC_REVIEW_ROLES",
+    "worker,coder,backend-engineer,frontend-engineer,ml-engineer,data-engineer,devops-engineer").split(",")
+REVIEWER_PROFILE = os.environ.get("HSCC_REVIEWER_PROFILE", "reviewer")
+REJECT_ESCALATE_LIMIT = int(os.environ.get("HSCC_REJECT_ESCALATE_LIMIT", "3"))
 # Subagent parallelism per delegate batch — sized for the worker pool (the proxy
 # load-balances across worker GPUs). Spawn depth stays flat (1) by default;
 # nesting (2+) multiplies cost and is opt-in.
@@ -120,6 +127,20 @@ def _ensure_kanban_routing(cfg):
         if not isinstance(cur, int) or cur < want:
             k[key] = want
             changed.append(key)
+    # WS4: auto_review pairing — only fill when absent (operator override kept).
+    if not isinstance(k.get("auto_review"), dict):
+        k["auto_review"] = {
+            "review_roles": [r.strip() for r in REVIEW_ROLES if r.strip()],
+            "reviewer": REVIEWER_PROFILE,
+        }
+        changed.append("auto_review")
+    # WS4: escalate after N consecutive rejects. Only FILL when absent/invalid —
+    # a lower operator limit is deliberately STRICTER (escalates sooner), so it
+    # must be preserved, not raised.
+    cur = k.get("failure_limit")
+    if not isinstance(cur, int) or cur < 1:
+        k["failure_limit"] = REJECT_ESCALATE_LIMIT
+        changed.append("failure_limit")
     return changed
 
 
