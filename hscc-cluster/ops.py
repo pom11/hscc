@@ -39,8 +39,27 @@ def cluster_status(args, **kwargs):
     running = _running_by_node()
     units = cl.read_serving_units()
     idle = [n for n in cl.NODES if n not in running]
-    return {"head": cl.HEAD, "running": running, "idle_nodes": idle,
-            "serving_units": [u.get("id") or u.get("name") for u in units]}
+    result = {"head": cl.HEAD, "running": running, "idle_nodes": idle,
+              "serving_units": [u.get("id") or u.get("name") for u in units]}
+    # Surface discovery source + free-VRAM when available (best-effort; never
+    # fail cluster_status if discovery/probe is unavailable).
+    try:
+        from . import discovery as _disc  # package context
+    except ImportError:
+        try:
+            import discovery as _disc  # direct context
+        except ImportError:
+            _disc = None
+    if _disc is not None:
+        try:
+            topo = _disc.discover()
+            result["source"] = topo.source
+            result["free_vram_gb"] = {
+                n.ip: n.vram_free_gb for n in topo.workers if n.vram_free_gb is not None
+            }
+        except Exception:
+            pass
+    return result
 
 
 def list_recipes(args, **kwargs):
@@ -56,21 +75,43 @@ def pick_node(args, **kwargs):
     return {"node": idle[0], "reason": f"idle nodes: {idle}"}
 
 
+def _cluster_name():
+    """Saved sparkrun cluster name (for --cluster, which gives the NAS cache).
+    Reads ~/.hscc/cluster.json 'name', else 'hscc'."""
+    import json as _j
+    try:
+        with open(cl.CLUSTER_JSON) as fh:
+            return (_j.load(fh).get("name") or "hscc")
+    except (FileNotFoundError, ValueError, OSError):
+        return "hscc"
+
+
 def provision_model(args, **kwargs):
+    import os as _os
     recipe = args["recipe"]
     node = args.get("node", "auto")
+    port = int(args.get("port", 8000))
     if node == "auto":
         picked = pick_node({})
         if not picked["node"]:
             return {"ok": False, "error": picked["reason"]}
         node = picked["node"]
-    action = f"provision_model recipe={recipe} on {node} (sparkrun run --hosts {node})"
+    # Correct invocation (H2): --cluster gives the NAS weight cache; --port sets
+    # the vLLM port (supports >1 model/node); --ensure no-ops if already up;
+    # expanduser so a ~/... recipe path resolves.
+    recipe_path = _os.path.expanduser(recipe)
+    cluster = _cluster_name()
+    argv = [cl.SPARKRUN, "run", recipe_path, "--cluster", cluster,
+            "--hosts", node, "--port", str(port), "--no-follow", "--ensure"]
+    action = (f"provision_model recipe={recipe} on {node}:{port} "
+              f"(sparkrun run --cluster {cluster} --hosts {node} "
+              f"--port {port} --ensure)")
     gate = cl.confirm_gate(args.get("confirm", False), action)
     if gate:
         return gate
-    r = cl.run_cmd([cl.SPARKRUN, "run", recipe, "--hosts", node], timeout=900)
-    return {"ok": r["ok"], "executed": True, "node": node,
-            "base_url": f"http://{node}:8000/v1",
+    r = cl.run_cmd(argv, timeout=900)
+    return {"ok": r["ok"], "executed": True, "node": node, "port": port,
+            "base_url": f"http://{node}:{port}/v1",
             "stdout_tail": r["stdout"][-2000:], "error": r["stderr"] or None}
 
 

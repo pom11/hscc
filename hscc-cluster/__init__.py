@@ -5,6 +5,7 @@ from . import schemas as S
 from . import ops
 from . import debug
 from . import heal
+from . import discovery
 
 
 def _stringify(handler):
@@ -29,6 +30,10 @@ _READ_TOOLS = [
      "List available sparkrun recipes."),
     ("pick_node", S.PICK_NODE_SCHEMA, ops.pick_node, "🎯",
      "Pick an idle worker node for provisioning."),
+    ("discovery_status", S.DISCOVERY_STATUS_SCHEMA, discovery.discovery_status, "🛰️",
+     "Live cluster topology map (orchestrator/workers/NAS, source); probe=true for VRAM/power/health."),
+    ("nas_status", S.NAS_STATUS_SCHEMA, discovery.nas_status, "🗄️",
+     "NAS health: discovery's NAS node + a single mount probe (no fan-out)."),
 ]
 
 _OPS_TOOLS = [

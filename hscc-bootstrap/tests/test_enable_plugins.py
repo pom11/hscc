@@ -82,7 +82,11 @@ def _fully_wired_cfg():
         "kanban": {"default_assignee": enable_plugins.DEFAULT_ASSIGNEE,
                    "max_in_progress": enable_plugins.MAX_IN_PROGRESS,
                    "max_in_progress_per_profile":
-                       enable_plugins.MAX_IN_PROGRESS_PER_PROFILE},
+                       enable_plugins.MAX_IN_PROGRESS_PER_PROFILE,
+                   "auto_review": {
+                       "review_roles": [r.strip() for r in enable_plugins.REVIEW_ROLES if r.strip()],
+                       "reviewer": enable_plugins.REVIEWER_PROFILE},
+                   "failure_limit": enable_plugins.REJECT_ESCALATE_LIMIT},
         "delegation": {"base_url": enable_plugins.WORKER_PROXY_URL,
                        "model": enable_plugins.WORKER_MODEL,
                        "provider": "custom",
@@ -139,6 +143,28 @@ def test_routing_preserves_operator_choices(tmp_path):
     assert out["kanban"]["default_assignee"] == "my-special-worker"
     assert out["kanban"]["max_in_progress"] == 99   # not lowered
     assert out["delegation"]["base_url"] == "http://my-proxy:9000/v1"
+
+
+def test_auto_review_seeded_when_absent(tmp_path):
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]},
+                   "toolsets": ["kanban"]})
+    enable_plugins.enable(path)
+    k = yaml.safe_load(open(path))["kanban"]
+    assert k["auto_review"]["reviewer"] == enable_plugins.REVIEWER_PROFILE
+    assert "worker" in k["auto_review"]["review_roles"]
+    assert k["failure_limit"] == enable_plugins.REJECT_ESCALATE_LIMIT
+
+
+def test_auto_review_preserves_operator_choice(tmp_path):
+    cfg = _fully_wired_cfg()
+    cfg["kanban"]["auto_review"] = {"review_roles": ["custom"], "reviewer": "my-reviewer"}
+    cfg["kanban"]["failure_limit"] = 1          # stricter than default — keep
+    path = _write(tmp_path / "config.yaml", cfg)
+    enable_plugins.enable(path)
+    k = yaml.safe_load(open(path))["kanban"]
+    assert k["auto_review"]["reviewer"] == "my-reviewer"   # not overwritten
+    assert k["failure_limit"] == 1                          # not raised
 
 
 def test_caps_raised_when_too_low(tmp_path):

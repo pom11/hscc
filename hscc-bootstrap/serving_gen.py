@@ -7,20 +7,29 @@ def build_serving(cluster, *, orchestrator, recipe, model, port=8000, keepalive=
     """
     hosts = list(cluster.get("hosts") or [])
 
-    def _octet(ip, idx):
-        tail = ip.rsplit(".", 1)[-1]
-        return tail if tail.isdigit() else str(idx)
+    def _ipslug(ip, idx):
+        # Full IP with dots->dashes, so two hosts that share a last octet on
+        # different subnets (e.g. CX7 dual-subnet) get DISTINCT ids. Falls back
+        # to the index if the value isn't a dotted address.
+        s = str(ip).replace(".", "-")
+        return s if s else str(idx)
 
     units = [{
-        "id": f"orch-{_octet(orchestrator, 0)}",
+        "id": f"orch-{_ipslug(orchestrator, 0)}",
         "role": "orchestrator",
         "model": model,
         "recipe": recipe,
         "nodes": [orchestrator],
     }]
+    seen = set()
     for i, host in enumerate(h for h in hosts if h != orchestrator):
+        uid = f"worker-{_ipslug(host, i)}"
+        # Guarantee uniqueness even if two hosts somehow slug-collide.
+        if uid in seen:
+            uid = f"{uid}-{i}"
+        seen.add(uid)
         unit = {
-            "id": f"worker-{_octet(host, i)}",
+            "id": uid,
             "role": "worker",
             "model": model,
             "recipe": recipe,

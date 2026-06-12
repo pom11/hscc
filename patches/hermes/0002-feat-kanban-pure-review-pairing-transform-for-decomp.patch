@@ -1,0 +1,126 @@
+From c67ebf0cf3ea787744b1580cac9d285bb88b0df4 Mon Sep 17 00:00:00 2001
+From: pom11 <parsecoriginalmastercraft@gmail.com>
+Date: Tue, 9 Jun 2026 12:16:05 +0300
+Subject: [PATCH 2/6] feat(kanban): pure review-pairing transform for decompose
+
+---
+ hermes_cli/kanban_decompose.py      | 43 ++++++++++++++++++++++++
+ tests/test_kanban_review_pairing.py | 52 +++++++++++++++++++++++++++++
+ 2 files changed, 95 insertions(+)
+ create mode 100644 tests/test_kanban_review_pairing.py
+
+diff --git a/hermes_cli/kanban_decompose.py b/hermes_cli/kanban_decompose.py
+index 8af2da911..d1413af79 100644
+--- a/hermes_cli/kanban_decompose.py
++++ b/hermes_cli/kanban_decompose.py
+@@ -268,6 +268,49 @@ def _normalize_assignee_choice(
+     return chosen
+ 
+ 
++def _pair_review_tasks(children, policy):
++    """Append a reviewer task for each impl child whose role is in review_roles.
++
++    Pure transform: takes the built children list (each a dict with title,
++    body, assignee, parents=indices) and returns a NEW list with review
++    children appended. Each review child is gated behind its impl child via
++    ``parents=[impl_index]``. Review children are appended AFTER all impl
++    children so every pre-existing parent index stays valid.
++
++    ``policy`` is ``kanban.auto_review`` config:
++      {"review_roles": [<assignee names that produce reviewable work>],
++       "reviewer": "<reviewer profile name>"}
++    Empty/None policy or missing reviewer -> returns ``children`` unchanged.
++    A child already assigned to the reviewer is never paired (no review of a
++    review).
++    """
++    if not policy:
++        return children
++    review_roles = set(policy.get("review_roles") or [])
++    reviewer = (policy.get("reviewer") or "").strip()
++    if not review_roles or not reviewer:
++        return children
++    out = list(children)
++    for idx, child in enumerate(children):
++        assignee = child.get("assignee")
++        if assignee == reviewer:
++            continue
++        if assignee not in review_roles:
++            continue
++        out.append({
++            "title": f"review: {child.get('title', '')}".strip()[:200],
++            "body": (
++                "Review the work produced by the parent task. Read the diff for "
++                "correctness, run its tests and confirm they pass, and verify the "
++                "work matches the task spec. Approve, or send back with precise "
++                "change requests."
++            ),
++            "assignee": reviewer,
++            "parents": [idx],
++        })
++    return out
++
++
+ def decompose_task(
+     task_id: str,
+     *,
+diff --git a/tests/test_kanban_review_pairing.py b/tests/test_kanban_review_pairing.py
+new file mode 100644
+index 000000000..3bc688fc3
+--- /dev/null
++++ b/tests/test_kanban_review_pairing.py
+@@ -0,0 +1,52 @@
++from hermes_cli import kanban_decompose as kd
++
++
++def test_pair_adds_review_for_code_role():
++    children = [
++        {"title": "Build API", "body": "spec", "assignee": "backend-engineer", "parents": []},
++    ]
++    out = kd._pair_review_tasks(children, policy={"review_roles": ["backend-engineer"],
++                                                 "reviewer": "reviewer"})
++    assert len(out) == 2
++    impl, review = out[0], out[1]
++    assert impl["assignee"] == "backend-engineer"
++    assert review["assignee"] == "reviewer"
++    assert review["parents"] == [0]
++    assert "review" in review["title"].lower()
++
++
++def test_pair_skips_non_code_role():
++    children = [
++        {"title": "Write spec", "body": "", "assignee": "product-manager", "parents": []},
++    ]
++    out = kd._pair_review_tasks(children, policy={"review_roles": ["backend-engineer"],
++                                                 "reviewer": "reviewer"})
++    assert len(out) == 1
++
++
++def test_pair_never_reviews_a_reviewer_task():
++    children = [
++        {"title": "Review X", "body": "", "assignee": "reviewer", "parents": []},
++    ]
++    out = kd._pair_review_tasks(children, policy={"review_roles": ["reviewer"],
++                                                 "reviewer": "reviewer"})
++    assert len(out) == 1
++
++
++def test_pair_preserves_impl_indices_for_existing_parents():
++    children = [
++        {"title": "A", "body": "", "assignee": "coder", "parents": []},
++        {"title": "B", "body": "", "assignee": "coder", "parents": [0]},
++    ]
++    out = kd._pair_review_tasks(children, policy={"review_roles": ["coder"],
++                                                 "reviewer": "reviewer"})
++    assert len(out) == 4
++    assert out[1]["parents"] == [0]
++    reviews = [c for c in out if c["assignee"] == "reviewer"]
++    assert {tuple(r["parents"]) for r in reviews} == {(0,), (1,)}
++
++
++def test_pair_empty_policy_noop():
++    children = [{"title": "X", "body": "", "assignee": "coder", "parents": []}]
++    assert kd._pair_review_tasks(children, policy={}) == children
++    assert kd._pair_review_tasks(children, policy=None) == children
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,286 @@
+From 327c7904ac41a0b845a3d47faf8b7d8df7a5ac25 Mon Sep 17 00:00:00 2001
+From: pom11 <parsecoriginalmastercraft@gmail.com>
+Date: Tue, 9 Jun 2026 12:39:58 +0300
+Subject: [PATCH 6/6] feat(kanban): kanban_submit_review tool + running->review
+ transition
+
+Add submit_review_task transition (running -> review) so workers can
+move code tasks into review status for automated review agents.
+
+Changes:
+- hermes_cli/kanban_db.py: submit_review_task() clears claim_lock +
+  claim_expires + worker_pid so review dispatcher can claim the task;
+  emits submitted_review event
+- tools/kanban_tools.py: kanban_submit_review worker tool with schema +
+  handler + registration (mirrors kanban_block pattern)
+- agent/prompt_builder.py: KANBAN_GUIDANCE now instructs code tasks to
+  kanban_submit_review instead of kanban_block(reason="review-required")
+- tests/test_kanban_submit_review.py: 2 tests (running->review success,
+  non-running returns False)
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ agent/prompt_builder.py            | 15 +++--
+ hermes_cli/kanban_db.py            | 32 +++++++++++
+ tests/test_kanban_submit_review.py | 88 ++++++++++++++++++++++++++++++
+ tools/kanban_tools.py              | 66 ++++++++++++++++++++++
+ 4 files changed, 193 insertions(+), 8 deletions(-)
+ create mode 100644 tests/test_kanban_submit_review.py
+
+diff --git a/agent/prompt_builder.py b/agent/prompt_builder.py
+index cc62c13f9..1395642cd 100644
+--- a/agent/prompt_builder.py
++++ b/agent/prompt_builder.py
+@@ -215,14 +215,13 @@ KANBAN_GUIDANCE = (
+     "(`{changed_files: [...], tests_run: N, decisions: [...]}`). Downstream "
+     "workers read both via their own `kanban_show`. Never put secrets / "
+     "tokens / raw PII in either field — run rows are durable forever. "
+-    "Exception: if your output is a code change that needs human review "
+-    "before counting as merged/done (most coding tasks), drop the "
+-    "structured metadata (changed_files / tests_run / diff_path) into a "
+-    "`kanban_comment` first, then end with "
+-    "`kanban_block(reason=\"review-required: <one-line summary>\")` so a "
+-    "reviewer can approve+unblock or request changes. Reviewing-then-"
+-    "completing is more honest than auto-completing work that still needs "
+-    "eyes on it.\n"
++    "Exception: if your output is a code change that needs review before it "
++    "counts as done (most coding tasks), put the structured metadata "
++    "(changed_files / tests_run / diff summary) in a kanban_comment, then call "
++    "kanban_submit_review instead of kanban_complete. This hands your task to "
++    "an automated reviewer that checks the diff, runs the tests, and either "
++    "merges your work or sends it back to you with change requests. Do NOT "
++    "kanban_complete a code task yourself.\n"
+     "6. **If follow-up work appears, create it; don't do it.** Use "
+     "`kanban_create(title=..., assignee=<right-profile>, parents=[your-task-id])` "
+     "to spawn a child task for the appropriate specialist profile instead of "
+diff --git a/hermes_cli/kanban_db.py b/hermes_cli/kanban_db.py
+index ccad2ac7b..4bcf817c8 100644
+--- a/hermes_cli/kanban_db.py
++++ b/hermes_cli/kanban_db.py
+@@ -4164,6 +4164,38 @@ def block_task(
+         return True
+ 
+ 
++def submit_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
++    """Transition ``running -> review`` so the dispatcher spawns a review agent.
++
++    Returns True on success, False if the task is not currently running. The
++    review consumer (claim_review_task + review-column dispatch) already exists;
++    this is the producer side. The task keeps its worktree for the review agent.
++    Clears claim_lock + claim_expires so the review dispatcher can claim it.
++    """
++    with write_txn(conn):
++        cur = conn.execute(
++            """
++            UPDATE tasks
++               SET status       = 'review',
++                   claim_lock   = NULL,
++                   claim_expires= NULL,
++                   worker_pid   = NULL
++             WHERE id = ?
++               AND status = 'running'
++            """,
++            (task_id,),
++        )
++        if cur.rowcount != 1:
++            return False
++        run_id = _end_run(
++            conn, task_id,
++            outcome="review",
++            status="review",
++            summary=None,
++        )
++        _append_event(conn, task_id, "submitted_review", {}, run_id=run_id)
++        return True
++
+ 
+ def promote_task(
+     conn: sqlite3.Connection,
+diff --git a/tests/test_kanban_submit_review.py b/tests/test_kanban_submit_review.py
+new file mode 100644
+index 000000000..1edd1da51
+--- /dev/null
++++ b/tests/test_kanban_submit_review.py
+@@ -0,0 +1,88 @@
++"""Tests for submit_review_task (running -> review transition)."""
++from __future__ import annotations
++
++import os
++import sqlite3
++import tempfile
++from pathlib import Path
++
++import pytest
++
++from hermes_cli import kanban_db as kb
++
++
++@pytest.fixture
++def db_path(monkeypatch):
++    """Isolated temp DB for each test."""
++    with tempfile.TemporaryDirectory() as tmp:
++        db = Path(tmp) / "kanban.db"
++        monkeypatch.setenv("HERMES_KANBAN_DB", str(db))
++        # connect auto-initializes on first connection
++        yield db
++
++
++def test_submit_review_running_task(db_path):
++    """submit_review_task transitions running -> review and clears claim."""
++    conn = kb.connect(db_path=db_path)
++    try:
++        # Create and claim a task to get it into running state
++        tid = kb.create_task(
++            conn,
++            title="Test code change",
++            body="Needs review",
++        )
++        # Claim it to transition ready -> running
++        task = kb.claim_task(conn, tid)
++        assert task is not None
++        assert task.status == "running"
++
++        # Submit to review
++        ok = kb.submit_review_task(conn, tid)
++        assert ok is True
++
++        # Verify transition
++        task = kb.get_task(conn, tid)
++        assert task is not None
++        assert task.status == "review"
++        assert task.claim_lock is None
++        assert task.claim_expires is None
++        assert task.worker_pid is None
++
++        # Verify event was emitted
++        events = conn.execute(
++            "SELECT kind, payload FROM task_events WHERE task_id = ? ORDER BY id",
++            (tid,),
++        ).fetchall()
++        # Should have: created, claimed, submitted_review (at minimum)
++        event_kinds = [e[0] for e in events]
++        assert "submitted_review" in event_kinds
++    finally:
++        conn.close()
++
++
++def test_submit_review_non_running_task(db_path):
++    """submit_review_task returns False if task is not running."""
++    conn = kb.connect(db_path=db_path)
++    try:
++        # Create a blocked task
++        tid = kb.create_task(
++            conn,
++            title="Blocked task",
++            body="Not running",
++            initial_status="blocked",
++        )
++        # Verify initial state
++        task = kb.get_task(conn, tid)
++        assert task is not None
++        assert task.status == "blocked"
++
++        # Attempt submit to review (should fail)
++        ok = kb.submit_review_task(conn, tid)
++        assert ok is False
++
++        # Verify status unchanged
++        task = kb.get_task(conn, tid)
++        assert task is not None
++        assert task.status == "blocked"
++    finally:
++        conn.close()
+diff --git a/tools/kanban_tools.py b/tools/kanban_tools.py
+index 151a7ab3c..d1a098800 100644
+--- a/tools/kanban_tools.py
++++ b/tools/kanban_tools.py
+@@ -668,6 +668,39 @@ def _handle_block(args: dict, **kw) -> str:
+         return tool_error(f"kanban_block: {e}")
+ 
+ 
++def _handle_submit_review(args: dict, **kw) -> str:
++    """Submit the worker's own running task to review (running -> review).
++
++    This transitions the task to 'review' status so the dispatcher spawns a
++    review agent to check the diff, run tests, and either merge or request changes.
++    """
++    tid = _default_task_id(args.get("task_id"))
++    if not tid:
++        return tool_error(
++            "task_id is required (or set HERMES_KANBAN_TASK in the env)"
++        )
++    ownership_err = _enforce_worker_task_ownership(tid)
++    if ownership_err:
++        return ownership_err
++    board = args.get("board")
++    try:
++        kb, conn = _connect(board=board)
++        try:
++            ok = kb.submit_review_task(conn, tid)
++            if not ok:
++                return tool_error(
++                    f"could not submit {tid} to review (task must be running)"
++                )
++            return _ok(task_id=tid, status="review")
++        finally:
++            conn.close()
++    except ValueError as e:
++        return tool_error(f"kanban_submit_review: {e}")
++    except Exception as e:
++        logger.exception("kanban_submit_review failed")
++        return tool_error(f"kanban_submit_review: {e}")
++
++
+ def _handle_heartbeat(args: dict, **kw) -> str:
+     """Signal that the worker is still alive during a long operation.
+ 
+@@ -1141,6 +1174,30 @@ KANBAN_BLOCK_SCHEMA = {
+     },
+ }
+ 
++KANBAN_SUBMIT_REVIEW_SCHEMA = {
++    "name": "kanban_submit_review",
++    "description": (
++        "Submit your running task to review status (running -> review). "
++        "Use this for code changes that need automated review before merging. "
++        "The dispatcher will spawn a review agent that checks the diff, runs "
++        "tests, and either merges your work or sends it back with change requests. "
++        "Call this INSTEAD of kanban_complete for coding tasks. Put your "
++        "structured metadata (changed_files, tests_run, diff summary) in a "
++        "kanban_comment first."
++    ),
++    "parameters": {
++        "type": "object",
++        "properties": {
++            "task_id": {
++                "type": "string",
++                "description": _DESC_TASK_ID_DEFAULT,
++            },
++            "board": _board_schema_prop(),
++        },
++        "required": [],
++    },
++}
++
+ KANBAN_HEARTBEAT_SCHEMA = {
+     "name": "kanban_heartbeat",
+     "description": (
+@@ -1427,6 +1484,15 @@ registry.register(
+     emoji="⏸",
+ )
+ 
++registry.register(
++    name="kanban_submit_review",
++    toolset="kanban",
++    schema=KANBAN_SUBMIT_REVIEW_SCHEMA,
++    handler=_handle_submit_review,
++    check_fn=_check_kanban_mode,
++    emoji="🔎",
++)
++
+ registry.register(
+     name="kanban_heartbeat",
+     toolset="kanban",
+-- 
+2.50.1 (Apple Git-155)
+
