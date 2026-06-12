@@ -207,13 +207,51 @@ class TestCheckWorkers:
         import datetime as dt
         health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
-        # pretend we just relaunched it -> within grace, must NOT relaunch again
-        health._worker_relaunch_at["10.0.0.2"] = dt.datetime.now(dt.timezone.utc)
+        # pretend we just relaunched it -> within grace, must NOT relaunch again.
+        # Grace is keyed per UNIT (node, port); units w/o explicit port → :8000.
+        health._worker_relaunch_at[("10.0.0.2", 8000)] = dt.datetime.now(dt.timezone.utc)
         ran = []
         monkeypatch.setattr(health, "run_cmd",
                             lambda args, **k: ran.append(args) or {"ok": True})
         health.check_workers()
         assert ran == []                         # grace window respected
+
+    def test_colocated_units_supervised_per_port(self, tmp_hfcc_dir, monkeypatch):
+        """G1: two models co-located on one node (distinct ports) are each
+        health-checked + relaunched independently; a healthy sibling is NOT
+        killed when the other is down."""
+        from hscc_daemon import health, serving
+        from hscc_daemon import state as state_mod
+        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
+        state_dir = tmp_hfcc_dir / "state"; state_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        units = [
+            {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"],
+             "recipe": "~/r/orch.yaml", "model": "M"},
+            {"id": "a", "role": "worker", "keepalive": True, "nodes": ["10.0.0.2"],
+             "port": 8000, "recipe": "~/r/a.yaml", "model": "A"},
+            {"id": "b", "role": "worker", "keepalive": True, "nodes": ["10.0.0.2"],
+             "port": 8001, "recipe": "~/r/b.yaml", "model": "B"},
+        ]
+        monkeypatch.setattr(serving, "ORCH_NODES", {"10.0.0.1"})
+        monkeypatch.setattr(serving, "load_serving", lambda: {"version": 2, "units": units})
+        health._worker_relaunch_at.clear()
+        # :8000 healthy, :8001 down
+        monkeypatch.setattr(health, "http_check",
+                            lambda url, timeout=5: {"ok": ":8000/" in url})
+        ran = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(args) or {"ok": True})
+        health.check_workers()
+        # only b (:8001, ~/r/b.yaml) relaunched; a's recipe never touched
+        run_cmds = [a for a in ran if a[:2] == ["sparkrun", "run"]]
+        assert len(run_cmds) == 1
+        assert any("b.yaml" in str(x) for x in run_cmds[0])
+        assert "8001" in run_cmds[0]
+        # stop targeted b's recipe, not --all (sibling a survives)
+        stop_cmds = [a for a in ran if a[:2] == ["sparkrun", "stop"]]
+        assert all("--all" not in a for a in stop_cmds)
+        assert all(not any("a.yaml" in str(x) for x in a) for a in run_cmds)
 
 
 class TestCheckProxy:
