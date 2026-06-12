@@ -17,7 +17,7 @@ PYBIN="$HERMES_HOME/hermes-agent/venv/bin/python"
 [ -x "$PYBIN" ] || PYBIN="python3"
 
 ASSUME_YES=false; FORCE=false; NO_BACKUP=false
-SKIP_SKILLS=false; SKIP_ROLES=false; SKIP_DAEMON=false
+SKIP_SKILLS=false; SKIP_ROLES=false; SKIP_DAEMON=false; SKIP_PATCHES=false
 for a in "$@"; do case "$a" in
   --yes|-y) ASSUME_YES=true ;;
   --force) FORCE=true ;;
@@ -25,7 +25,8 @@ for a in "$@"; do case "$a" in
   --skip-skills) SKIP_SKILLS=true ;;
   --skip-roles) SKIP_ROLES=true ;;
   --skip-daemon) SKIP_DAEMON=true ;;
-  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon]"; exit 0 ;;
+  --skip-patches) SKIP_PATCHES=true ;;
+  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches]"; exit 0 ;;
   *) echo "Unknown option: $a" >&2; exit 1 ;;
 esac; done
 
@@ -144,6 +145,24 @@ s = serving_gen.build_serving(cl, orchestrator=os.environ['ORCH'],
                               port=8000, keepalive=True)
 open(os.environ['SERVING'], 'w').write(json.dumps(s, indent=2) + '\n')
 " && ok "serving.json written ($SERVING)" || warn "serving.json generation failed"
+fi
+
+hdr "Install: hermes/sparkrun patches"
+# Reapply the curated upstream patches (kanban review + pre_kanban_dispatch
+# resume hook live in hermes core, so the review/resume features need them on a
+# fresh official install). Non-fatal: a machine already on a patched/newer
+# hermes will report patches that don't re-apply — that's expected, not an error.
+if $SKIP_PATCHES; then warn "skipped"; else
+  HERMES_DIR="$HERMES_HOME/hermes-agent"
+  CHK=$("$PYBIN" "$BOOT_DIR/apply_patches.py" --check 2>/dev/null)
+  if echo "$CHK" | grep -q '"ok": true'; then
+    "$PYBIN" "$BOOT_DIR/apply_patches.py" --target "$HERMES_DIR" --set hermes >/dev/null 2>&1 \
+      && ok "hermes patches applied" || warn "hermes patch apply reported issues"
+    [ -d "$HOME/sparkrun" ] && { "$PYBIN" "$BOOT_DIR/apply_patches.py" --target "$HOME/sparkrun" --set sparkrun >/dev/null 2>&1 \
+      && ok "sparkrun patches applied" || warn "sparkrun patch apply reported issues"; }
+  else
+    warn "patches not cleanly applicable (already patched, or upstream drifted — run apply_patches.py --check to inspect)"
+  fi
 fi
 
 hdr "Install: enable HSCC plugins + toolsets"

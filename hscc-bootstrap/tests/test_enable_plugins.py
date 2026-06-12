@@ -94,6 +94,17 @@ def _fully_wired_cfg():
                        "max_concurrent_children":
                            enable_plugins.MAX_CONCURRENT_CHILDREN},
         "compression": {"threshold": enable_plugins.COMPACT_THRESHOLD},
+        "auxiliary": {"compression": {
+            "base_url": enable_plugins.COMPACT_URL,
+            "model": enable_plugins.COMPACT_MODEL,
+            "provider": "custom",
+            "api_key": enable_plugins.COMPACT_KEY,
+            "timeout": enable_plugins.COMPACT_TIMEOUT}},
+        "fallback_providers": [{
+            "provider": "custom",
+            "model": enable_plugins.FALLBACK_MODEL,
+            "base_url": enable_plugins.FALLBACK_URL,
+            "api_key": enable_plugins.FALLBACK_KEY}],
     }
 
 
@@ -101,13 +112,13 @@ def test_fully_wired_is_noop(tmp_path):
     path = _write(tmp_path / "config.yaml", _fully_wired_cfg())
     before = open(path).read()
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": []}
     assert open(path).read() == before              # no rewrite, no backup churn
 
 
 def test_missing_config_noop(tmp_path):
     res = enable_plugins.enable(str(tmp_path / "nope.yaml"))
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": []}
 
 
 # ── fleet routing (kanban + delegation) ──────────────────────────────────────
@@ -138,11 +149,42 @@ def test_routing_preserves_operator_choices(tmp_path):
     cfg["delegation"]["base_url"] = "http://my-proxy:9000/v1"
     path = _write(tmp_path / "config.yaml", cfg)
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": []}
     out = yaml.safe_load(open(path))
     assert out["kanban"]["default_assignee"] == "my-special-worker"
     assert out["kanban"]["max_in_progress"] == 99   # not lowered
     assert out["delegation"]["base_url"] == "http://my-proxy:9000/v1"
+
+
+def test_fallback_seeded_when_absent(tmp_path):
+    """M5: a fresh config gets a worker-LB fallback provider."""
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"]})
+    res = enable_plugins.enable(path)
+    assert res["fallback"] == ["fallback_providers"]
+    fp = yaml.safe_load(open(path))["fallback_providers"]
+    assert fp[0]["base_url"] == enable_plugins.FALLBACK_URL
+    assert fp[0]["model"] == enable_plugins.FALLBACK_MODEL
+
+
+def test_fallback_preserves_operator_chain(tmp_path):
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"],
+                   "fallback_providers": [{"provider": "x", "model": "m"}]})
+    enable_plugins.enable(path)
+    fp = yaml.safe_load(open(path))["fallback_providers"]
+    assert fp == [{"provider": "x", "model": "m"}]   # untouched
+
+
+def test_compaction_defaults_to_worker_proxy(tmp_path):
+    """H1: with no override, aux.compression points at the worker proxy, NOT
+    the orchestrator (avoids re-arming the compaction freeze)."""
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"]})
+    enable_plugins.enable(path)
+    aux = yaml.safe_load(open(path)).get("auxiliary", {}).get("compression", {})
+    assert aux.get("base_url") == enable_plugins.WORKER_PROXY_URL
+    assert "4000" in aux["base_url"]
 
 
 def test_auto_review_seeded_when_absent(tmp_path):
@@ -213,7 +255,9 @@ def test_compaction_threshold_raised(tmp_path, monkeypatch):
 def test_compaction_aux_wired_when_url_set(tmp_path, monkeypatch):
     monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://10.0.0.1:8000/v1")
     monkeypatch.setattr(enable_plugins, "COMPACT_MODEL", "orch-model")
-    path = _write(tmp_path / "config.yaml", _fully_wired_cfg())
+    # start from a config WITHOUT aux.compression so the override gets filled
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"]})
     res = enable_plugins.enable(path)
     aux = yaml.safe_load(open(path))["auxiliary"]["compression"]
     assert aux["base_url"] == "http://10.0.0.1:8000/v1"
