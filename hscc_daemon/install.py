@@ -90,6 +90,27 @@ def _daemon_path_env(hmdir):
             + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 
 
+def _resolve_python():
+    """Resolve a real python interpreter for the service unit (C1).
+
+    Prefer the Hermes venv python (has the daemon's deps), then PATH python3,
+    then known locations. Never returns a path that doesn't exist — a hardcoded
+    /usr/local/bin/python3 would respawn-loop on Homebrew-only/Spark hosts."""
+    hmdir = os.path.expanduser("~")
+    candidates = [
+        os.environ.get("HSCC_PYBIN", ""),
+        os.path.join(hmdir, ".hermes/hermes-agent/venv/bin/python"),
+        shutil.which("python3") or "",
+        "/opt/homebrew/bin/python3",
+        "/usr/local/bin/python3",
+        "/usr/bin/python3",
+    ]
+    for c in candidates:
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return "/usr/bin/python3"  # last-resort default
+
+
 def _service_manager():
     """Pick the auto-start mechanism for this host."""
     if sys.platform == "darwin":
@@ -126,7 +147,7 @@ def _write_stopped():
 def generate_plist():
     """Generate the Launchd plist with resolved paths."""
     hmdir = os.path.expanduser("~")
-    python_path = shutil.which("python3") or "/usr/bin/python3"
+    python_path = _resolve_python()
     pkg_dir = str(Path(__file__).resolve().parent)
     plugins_dir = str(Path(__file__).resolve().parent.parent)  # plugins/
     return PLIST_CONTENT.format(
@@ -141,7 +162,7 @@ def generate_plist():
 def generate_systemd_unit():
     """Generate the systemd --user unit with resolved paths."""
     hmdir = os.path.expanduser("~")
-    python_path = shutil.which("python3") or "/usr/bin/python3"
+    python_path = _resolve_python()
     pkg_dir = str(Path(__file__).resolve().parent)
     plugins_dir = str(Path(__file__).resolve().parent.parent)  # plugins/
     return SYSTEMD_UNIT_CONTENT.format(

@@ -388,19 +388,22 @@ def check_idle_monitor():
         return False
 
 
-# In-memory relaunch timestamps per worker node, so a node that is mid-load
-# (vLLM takes minutes) is not relaunched again before its grace window elapses.
+# In-memory relaunch timestamps per worker UNIT (node, port), so a unit that is
+# mid-load (vLLM takes minutes) is not relaunched again before its grace window
+# elapses. Keyed by (node, port) so co-located models on a node are tracked
+# independently (G1 — multi-model-per-node supervision).
 _worker_relaunch_at = {}
 
 
 def check_workers():
-    """Keep-alive worker check: health-check each serving.json keep-alive worker
-    on its vLLM port and relaunch a crashed one with its own recipe.
+    """Keep-alive worker check (UNIT-keyed, G1): health-check each serving.json
+    keep-alive worker UNIT on its own port and relaunch a crashed one with its
+    own recipe + port. A node may carry several units (co-located models) on
+    distinct ports — each is supervised independently.
 
-    A node is watched iff it is a serving.json unit with role=worker +
-    keepalive=true (serving.KEEPALIVE_NODES — the same set the idle reaper
-    exempts). Relaunch is rate-limited by VLLM_LOAD_GRACE_MINUTES so a node that
-    is still loading isn't thrashed.
+    Relaunch is rate-limited per (node,port) by VLLM_LOAD_GRACE_MINUTES so a unit
+    still loading isn't thrashed. Relaunch stops only the unit's own recipe (not
+    the whole node) so a co-located sibling isn't killed.
     """
     from .state import write_state
     from .lifecycle import VLLM_LOAD_GRACE_MINUTES
@@ -408,49 +411,53 @@ def check_workers():
 
     log("Running workers check")
     serving_data = serving.load_serving()
-    nodes = sorted(serving.keepalive_nodes(serving_data) - serving.ORCH_NODES) \
-        if serving_data else sorted(serving.KEEPALIVE_NODES)
+    units = [u for u in serving.keepalive_units(serving_data)
+             if u["node"] not in serving.ORCH_NODES]
 
-    if not nodes:
+    if not units:
         write_state("workers", {"ok": True, "message": "no keep-alive workers",
                                 "last_check": now_iso()})
         return True
 
     online, relaunched, down = [], [], []
     now = _dt.datetime.now(_dt.timezone.utc)
-    for node in nodes:
-        url = f"http://{node}:{serving.VLLM_PORT}/health"
+    for u in units:
+        node, port, recipe = u["node"], u["port"], u["recipe"]
+        key = (node, port)
+        label = u["id"]
+        url = f"http://{node}:{port}/health"
         if http_check(url, timeout=5).get("ok"):
-            online.append(node)
-            _worker_relaunch_at.pop(node, None)
+            online.append(label)
+            _worker_relaunch_at.pop(key, None)
             continue
         # Down. Respect the grace window after a relaunch (mid-load == not dead).
-        last = _worker_relaunch_at.get(node)
+        last = _worker_relaunch_at.get(key)
         if last and now < last + _dt.timedelta(minutes=VLLM_LOAD_GRACE_MINUTES):
-            down.append(node)  # still within load grace — leave it
+            down.append(label)  # still within load grace — leave it
             continue
-        recipe = serving._worker_recipe_for(node, serving_data)
         if not recipe:
-            down.append(node)
-            log(f"Worker {node} down but no recipe in serving.json — skipping", "WARN")
+            down.append(label)
+            log(f"Worker {label} down but no recipe in serving.json — skipping", "WARN")
             continue
-        log(f"Worker {node} down — relaunching ({recipe})")
-        run_cmd(["sparkrun", "stop", "--all", "--hosts", node], timeout=60)
+        log(f"Worker {label} down — relaunching ({recipe}) on :{port}")
+        # Stop only THIS recipe on the node (not --all) so a co-located sibling
+        # on another port survives.
+        run_cmd(["sparkrun", "stop", recipe, "--hosts", node], timeout=60)
         r = run_cmd(["sparkrun", "run", recipe, "--cluster", serving.HSCC_CLUSTER,
-                     "--hosts", node, "--port", str(serving.VLLM_PORT),
+                     "--hosts", node, "--port", str(port),
                      "--no-follow", "--ensure"], timeout=180)
-        _worker_relaunch_at[node] = now
-        (relaunched if r.get("ok") else down).append(node)
+        _worker_relaunch_at[key] = now
+        (relaunched if r.get("ok") else down).append(label)
 
     ok = not down or bool(relaunched)
     write_state("workers", {
-        "ok": ok, "total": len(nodes), "online": len(online),
+        "ok": ok, "total": len(units), "online": len(online),
         "relaunched": relaunched, "down": down, "last_check": now_iso(),
-        "message": f"{len(online)}/{len(nodes)} online"
+        "message": f"{len(online)}/{len(units)} online"
                    + (f", relaunched {relaunched}" if relaunched else "")
                    + (f", down {down}" if down else ""),
     })
-    log(f"Workers check: {len(online)}/{len(nodes)} online"
+    log(f"Workers check: {len(online)}/{len(units)} online"
         + (f", relaunched {relaunched}" if relaunched else "")
         + (f", down {down}" if down else ""))
     return ok

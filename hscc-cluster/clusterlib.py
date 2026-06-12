@@ -1,36 +1,41 @@
 """Shared helpers for hscc-cluster tools. Pure, live-truth, no persisted agent state.
-Importable by the daemon for shared heal logic."""
+Importable by the daemon for shared heal logic.
+
+Topology (HEAD/NODES/NAS_HOST) is resolved lazily via the single discovery
+module (WS2). There is NO fake-IP fallback: if the cluster can't be resolved,
+accessing these names raises DiscoveryError rather than silently SSHing
+documentation addresses."""
 import json, os, subprocess
+
+try:
+    from . import discovery as _discovery  # package context (runtime)
+except ImportError:
+    import discovery as _discovery  # direct import context (tests)
+
+DiscoveryError = _discovery.DiscoveryError
 
 SSH_USER = "spark"
 CLUSTER_JSON = os.path.expanduser("~/.hscc/cluster.json")
 SERVING_JSON = os.path.expanduser("~/.hscc/serving.json")
 SPARKRUN = "sparkrun"
 
-# Generic fallbacks (RFC-5737 documentation range). Real topology is resolved
-# from ~/.hscc/cluster.json at import; these only apply when that file is
-# absent/unreadable on a fresh machine.
-_DEFAULT_HEAD = "192.0.2.10"
-_DEFAULT_NODES = ["192.0.2.11", "192.0.2.12", "192.0.2.13"]
-_DEFAULT_NAS = "192.0.2.20"
+
+def _topology():
+    """Resolve the live topology via the discovery module (raises on failure)."""
+    return _discovery.discover()
 
 
-def _resolve_topology():
-    """Resolve (head, nodes, nas) from ~/.hscc/cluster.json, else generic
-    fallbacks. cluster.json shape: {"gateway": {"ip": ...}, "workers": [{"ip": ...}], "nasDevices": [{"ip": ...}]}."""
-    try:
-        with open(CLUSTER_JSON) as fh:
-            d = json.load(fh)
-        head = (d.get("gateway") or {}).get("ip") or _DEFAULT_HEAD
-        nodes = [w.get("ip") for w in (d.get("workers") or []) if w.get("ip")] or list(_DEFAULT_NODES)
-        nas_list = d.get("nasDevices") or d.get("nas_devices") or []
-        nas = (nas_list[0].get("ip") if nas_list else None) or _DEFAULT_NAS
-        return head, nodes, nas
-    except (FileNotFoundError, json.JSONDecodeError, OSError, KeyError, AttributeError, IndexError):
-        return _DEFAULT_HEAD, list(_DEFAULT_NODES), _DEFAULT_NAS
-
-
-HEAD, NODES, NAS_HOST = _resolve_topology()
+def __getattr__(name):
+    """Lazy module attributes: HEAD / NODES / NAS_HOST resolve from discovery on
+    first access. Keeps import side-effect-free and never invents IPs."""
+    if name == "HEAD":
+        return _topology().orchestrator.ip
+    if name == "NODES":
+        return _topology().worker_ips
+    if name == "NAS_HOST":
+        t = _topology()
+        return t.nas.ip if t.nas else None
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def run_cmd(args, timeout=30):

@@ -67,7 +67,11 @@ def test_orch_restart_executes_with_confirm(monkeypatch):
     assert "launched" in out.lower()
 
 
+# cluster-restart now prefers TEMPLATE re-apply (D14); the unit-restart path is
+# the fallback when no template is recorded. These tests pin "no template".
+
 def test_cluster_restart_preview_lists_all(monkeypatch):
+    monkeypatch.setattr(cmdlib, "applied_template", lambda: None)   # no template
     monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
     fired = []
     monkeypatch.setattr(cmdlib, "restart_one", lambda u: fired.append(u) or {})
@@ -78,6 +82,7 @@ def test_cluster_restart_preview_lists_all(monkeypatch):
 
 
 def test_cluster_restart_executes_all_with_confirm(monkeypatch):
+    monkeypatch.setattr(cmdlib, "applied_template", lambda: None)
     monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
     fired = []
     monkeypatch.setattr(cmdlib, "restart_one",
@@ -89,6 +94,7 @@ def test_cluster_restart_executes_all_with_confirm(monkeypatch):
 
 
 def test_cluster_restart_reports_failures(monkeypatch):
+    monkeypatch.setattr(cmdlib, "applied_template", lambda: None)
     monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
 
     def fake(u):
@@ -100,6 +106,100 @@ def test_cluster_restart_reports_failures(monkeypatch):
     out = plugin.cmd_cluster_restart("confirm")
     assert "2/3 launched" in out
     assert "boom" in out
+
+
+# ── cluster-restart TEMPLATE recovery path (D14) ──────────────────────────────
+
+def test_cluster_restart_reapplies_template_preview(monkeypatch):
+    monkeypatch.setattr(cmdlib, "applied_template", lambda: {"template": "hscc-live"})
+    called = []
+    monkeypatch.setattr(cmdlib, "reapply_template",
+                        lambda confirm: called.append(confirm) or {"ok": True})
+    out = plugin.cmd_cluster_restart("")
+    assert "re-apply template" in out.lower() and "hscc-live" in out
+    assert called == []                        # preview must not execute
+
+
+def test_cluster_restart_reapplies_template_confirm(monkeypatch):
+    monkeypatch.setattr(cmdlib, "applied_template", lambda: {"template": "hscc-live"})
+    called = []
+    monkeypatch.setattr(cmdlib, "reapply_template",
+                        lambda confirm: called.append(confirm) or {"ok": True})
+    out = plugin.cmd_cluster_restart("confirm")
+    assert called == [True]
+    assert "re-applied template" in out.lower() and "hscc-live" in out
+
+
+# ── /status, /heal, /template ─────────────────────────────────────────────────
+
+def test_status_renders_topology_and_vram(monkeypatch):
+    monkeypatch.setattr(cmdlib, "discovery_snapshot", lambda probe=True: {
+        "ok": True, "source": "live",
+        "orchestrator": {"ip": "10.0.0.1", "name": "gw"},
+        "workers": [{"ip": "10.0.0.2", "vram_free_gb": 90.0, "power_draw_w": 12.0,
+                     "idle": True, "vllm_healthy": True}],
+        "nas": {"ip": "10.0.0.9"},
+    })
+    monkeypatch.setattr(cmdlib, "proxy_health", lambda: True)
+    monkeypatch.setattr(cmdlib, "applied_template", lambda: {"template": "hscc-live"})
+    monkeypatch.setattr(cmdlib, "autonomy_flag", lambda: "on")
+    out = plugin.cmd_status("")
+    assert "live" in out and "10.0.0.2" in out and "90.0GB free" in out
+    assert "hscc-live" in out and "on" in out
+
+
+def test_status_handles_discovery_failure(monkeypatch):
+    monkeypatch.setattr(cmdlib, "discovery_snapshot", lambda probe=True: {})
+    monkeypatch.setattr(cmdlib, "proxy_health", lambda: False)
+    monkeypatch.setattr(cmdlib, "applied_template", lambda: None)
+    monkeypatch.setattr(cmdlib, "autonomy_flag", lambda: None)
+    out = plugin.cmd_status("")
+    assert "discovery unavailable" in out and "down" in out
+
+
+def test_heal_reports_unhealthy_and_gates(monkeypatch):
+    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
+    monkeypatch.setattr(cmdlib, "_curl_model",
+                        lambda node: None if node == "10.0.0.2" else "m")
+    fired = []
+    monkeypatch.setattr(cmdlib, "restart_one", lambda u: fired.append(u) or {"ok": True})
+    out = plugin.cmd_heal("")
+    assert "10.0.0.2" in out and "/heal confirm" in out
+    assert fired == []                          # gated
+
+
+def test_heal_restarts_on_confirm(monkeypatch):
+    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
+    monkeypatch.setattr(cmdlib, "_curl_model",
+                        lambda node: None if node == "10.0.0.2" else "m")
+    fired = []
+    monkeypatch.setattr(cmdlib, "restart_one",
+                        lambda u: fired.append(cmdlib.unit_node(u)) or
+                        {"ok": True, "unit": u["id"], "node": cmdlib.unit_node(u)})
+    out = plugin.cmd_heal("confirm")
+    assert fired == ["10.0.0.2"]
+
+
+def test_heal_advises_cluster_restart_on_orch_wedge(monkeypatch):
+    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
+    monkeypatch.setattr(cmdlib, "_curl_model", lambda node: None)  # all down incl orch
+    monkeypatch.setattr(cmdlib, "restart_one", lambda u: {"ok": True})
+    out = plugin.cmd_heal("")
+    assert "/cluster-restart" in out and "wedged" in out.lower()
+
+
+def test_template_routes_to_cli(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cmdlib, "template_cli", lambda argv: seen.append(argv) or {"templates": []})
+    plugin.cmd_template("list")
+    plugin.cmd_template("apply hscc-live confirm")
+    assert seen[0] == ["x", "list"]
+    assert seen[1] == ["x", "apply", "hscc-live", "--confirm"]
+
+
+def test_template_usage_on_bad_subcommand():
+    out = plugin.cmd_template("frobnicate")
+    assert "Usage:" in out
 
 
 # ── /cluster read-only ───────────────────────────────────────────────────────
@@ -150,3 +250,25 @@ def test_restart_one_calls_stop_then_run(monkeypatch):
     assert res["ok"] is True
     assert calls[0][:2] == [cmdlib.SPARKRUN, "stop"]
     assert calls[1][:2] == [cmdlib.SPARKRUN, "run"]
+
+
+# ── registration + topology-free ──────────────────────────────────────────────
+
+def test_register_exposes_six_commands():
+    names = []
+
+    class Ctx:
+        def register_command(self, **kw):
+            names.append(kw["name"])
+    plugin.register(Ctx())
+    assert set(names) == {"cluster", "status", "orch-restart",
+                          "cluster-restart", "heal", "template"}
+
+
+def test_no_hardcoded_ips_in_source():
+    import re
+    import os as _os
+    here = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    for fn in ("__init__.py", "cmdlib.py"):
+        text = open(_os.path.join(here, fn)).read()
+        assert not re.search(r"\b192\.168\.\d{1,3}\.\d{1,3}\b", text), fn

@@ -8,12 +8,23 @@ CLUSTER_STATUS_SCHEMA = {
 
 LIST_RECIPES_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
 PICK_NODE_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
+DISCOVERY_STATUS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "probe": {"type": "boolean",
+                  "description": "live-probe each node for VRAM/power/health (slower)",
+                  "default": False},
+    },
+    "additionalProperties": False,
+}
+NAS_STATUS_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
 
 PROVISION_MODEL_SCHEMA = {
     "type": "object",
     "properties": {
         "recipe": {"type": "string", "description": "sparkrun recipe name"},
         "node": {"type": "string", "description": "worker IP or 'auto'", "default": "auto"},
+        "port": {"type": "integer", "description": "vLLM port (default 8000; use a distinct port to co-locate a 2nd model)", "default": 8000},
         "confirm": {"type": "boolean", "description": "must be true to execute", "default": False},
     },
     "required": ["recipe"], "additionalProperties": False,

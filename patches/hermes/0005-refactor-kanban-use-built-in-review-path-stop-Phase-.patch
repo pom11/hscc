@@ -1,0 +1,49 @@
+From e16a63d5c44ac648e3d53efabbf0a2feb5e9a19e Mon Sep 17 00:00:00 2001
+From: pom11 <parsecoriginalmastercraft@gmail.com>
+Date: Tue, 9 Jun 2026 12:34:16 +0300
+Subject: [PATCH 5/6] refactor(kanban): use built-in review path; stop Phase-2
+ auto-pairing
+
+---
+ hermes_cli/kanban_decompose.py      | 8 +++-----
+ tests/test_kanban_review_pairing.py | 8 ++++++++
+ 2 files changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/hermes_cli/kanban_decompose.py b/hermes_cli/kanban_decompose.py
+index cef1d04d1..d72eebb8c 100644
+--- a/hermes_cli/kanban_decompose.py
++++ b/hermes_cli/kanban_decompose.py
+@@ -499,11 +499,9 @@ def decompose_task(
+             "parents": clean_parents,
+         })
+ 
+-    # Auto-pair a reviewer task onto each code-producing child (Phase 2).
+-    # Policy-driven: kanban.auto_review.{review_roles, reviewer}. No-op when
+-    # unconfigured. Review children are appended after all impl children so the
+-    # impl parent indices above stay valid; each review is gated behind its impl.
+-    children = _pair_review_tasks(children, _review_policy(cfg))
++    # NOTE: review is handled by the built-in review-status path (coders submit
++    # their own task to 'review'; the dispatcher spawns an sdlc-review agent).
++    # The Phase-2 auto-pairing (_pair_review_tasks) is intentionally NOT called.
+ 
+     try:
+         with kb.connect_closing() as conn:
+diff --git a/tests/test_kanban_review_pairing.py b/tests/test_kanban_review_pairing.py
+index 2a69bbab0..b75c1dfaf 100644
+--- a/tests/test_kanban_review_pairing.py
++++ b/tests/test_kanban_review_pairing.py
+@@ -76,3 +76,11 @@ def test_policy_and_transform_compose():
+     assert len(out) == 2
+     assert out[1]["assignee"] == "reviewer"
+     assert out[1]["parents"] == [0]
++
++
++def test_decompose_no_longer_autopairs_reviews():
++    """Phase 3: built-in review path replaces Phase 2 auto-pairing.
++    auto_review is removed from config, so _review_policy returns {}."""
++    from hermes_cli import kanban_decompose as kd
++    from hermes_cli.config import load_config
++    assert kd._review_policy(load_config()) == {}
+-- 
+2.50.1 (Apple Git-155)
+

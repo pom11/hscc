@@ -12,18 +12,20 @@ HSCC_DIR="${HSCC_DIR:-$HOME/.hscc}"
 PLUGINS="$HERMES_HOME/plugins"
 RECIPES_DIR="${RECIPES_DIR:-$HOME/.sparkrun-local/recipes}"
 BOOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$BOOT_DIR/.." && pwd)"
 PYBIN="$HERMES_HOME/hermes-agent/venv/bin/python"
 [ -x "$PYBIN" ] || PYBIN="python3"
 
-ASSUME_YES=false; FORCE=false
+ASSUME_YES=false; FORCE=false; NO_BACKUP=false
 SKIP_SKILLS=false; SKIP_ROLES=false; SKIP_DAEMON=false
 for a in "$@"; do case "$a" in
   --yes|-y) ASSUME_YES=true ;;
   --force) FORCE=true ;;
+  --no-backup) NO_BACKUP=true ;;
   --skip-skills) SKIP_SKILLS=true ;;
   --skip-roles) SKIP_ROLES=true ;;
   --skip-daemon) SKIP_DAEMON=true ;;
-  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--force] [--skip-skills|--skip-roles|--skip-daemon]"; exit 0 ;;
+  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon]"; exit 0 ;;
   *) echo "Unknown option: $a" >&2; exit 1 ;;
 esac; done
 
@@ -33,15 +35,14 @@ warn() { echo "  ⚠ $1"; }
 die()  { echo "  ✗ $1" >&2; exit 1; }
 hdr()  { echo; echo "━━━ $1 ━━━"; }
 
-# ── Stage 1: prerequisites (hard gate) ─────────────────────────────────────
-hdr "Prerequisites"
-command -v sparkrun >/dev/null 2>&1 || die "sparkrun not found in PATH. Install sparkrun first."
+# ── Stage 1: prerequisites (preflight doctor, hard gate) ────────────────────
+hdr "Prerequisites (doctor)"
+# The doctor checks python/pyyaml/sparkrun/cluster/Hermes/disk/gateway and
+# explains any failure in plain language. It exits non-zero on a FATAL miss, so
+# a half-configured machine stops here instead of failing deep in a later stage.
+"$PYBIN" "$BOOT_DIR/doctor.py" || die "preflight failed — fix the items above, then re-run."
 CLUSTER_JSON="$("$PYBIN" "$BOOT_DIR/detect.py" 2>/dev/null || echo null)"
 [ "$CLUSTER_JSON" != "null" ] || die "No sparkrun cluster configured. Run: sparkrun cluster add <name> <hosts...>"
-[ -d "$HERMES_HOME/hermes-agent" ] || die "Hermes not found at $HERMES_HOME/hermes-agent. Install Hermes first."
-ok "sparkrun cluster configured"
-ok "Hermes present at $HERMES_HOME/hermes-agent"
-if pgrep -f "hermes_cli.main gateway" >/dev/null 2>&1; then ok "Hermes gateway running"; else warn "Hermes gateway not running (start it after bootstrap)"; fi
 
 # ── Stage 2: detect ────────────────────────────────────────────────────────
 hdr "Detected cluster"
@@ -88,7 +89,33 @@ else
   MODEL=""
 fi
 
+# Suggest a cluster template matching the detected host count (suggestion only;
+# the operator applies it explicitly).
+SUGGEST=$("$PYBIN" -c "import sys;sys.path.insert(0,'$BOOT_DIR');import suggest_template as s;print(s.pick_template(${#HOST_ARR[@]}) or '')" 2>/dev/null)
+[ -n "$SUGGEST" ] && say "template: $SUGGEST (apply: hscc-cluster cluster-template apply $SUGGEST --confirm)"
+
 # ── Stage 4: install ───────────────────────────────────────────────────────
+hdr "Install: plugin files"
+# Copy the plugin tree from the work repo into the Hermes runtime dir
+# (backup-then-overwrite; --no-backup overwrites in place). Skipped
+# automatically when the repo IS the runtime dir (old in-place layout). All
+# later stages run from $PLUGINS/... so this must come first.
+if [ "$REPO_ROOT" -ef "$PLUGINS" ]; then
+  warn "repo is the runtime dir ($PLUGINS) — skipping plugin copy (in-place layout)"
+else
+  COPY_FLAG=""; $NO_BACKUP && COPY_FLAG="--no-backup"
+  # The copy is the FOUNDATION — every later stage runs from $PLUGINS/... A failed
+  # copy cascades into a half-wired install, so surface the error and HARD-STOP
+  # here rather than degrading to a yellow warning (H3). stderr is shown, not
+  # swallowed.
+  if COPY=$(REPO_ROOT="$REPO_ROOT" PLUGINS="$PLUGINS" "$PYBIN" "$BOOT_DIR/install_payload.py" $COPY_FLAG); then
+    ok "plugin files copied → $PLUGINS$($NO_BACKUP && echo ' (no backup)')"
+  else
+    echo "$COPY" >&2
+    die "plugin copy FAILED — aborting (later stages depend on $PLUGINS being populated)"
+  fi
+fi
+
 hdr "Install: skills"
 if $SKIP_SKILLS; then warn "skipped"; else
   "$PYBIN" "$PLUGINS/hscc-skills/hscc.py" install-skills >/dev/null 2>&1 && ok "skills installed" || warn "skills install reported issues"

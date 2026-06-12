@@ -13,11 +13,19 @@ import os
 import subprocess
 
 SERVING_JSON = os.path.expanduser("~/.hscc/serving.json")
+APPLIED_TEMPLATE = os.path.expanduser("~/.hscc/applied_template.json")
+AUTONOMY_FLAG = os.path.expanduser("~/.hscc/autonomy")
 SPARKRUN = "sparkrun"
 CLUSTER = "hscc"
 PORT = 8000
+PROXY_PORT = 4000
 HEALTH_TIMEOUT = 6
 RUN_TIMEOUT = 240
+
+# The hscc-cluster plugin dir (sibling of this plugin in ~/.hermes/plugins or
+# ~/dev/hscc). Used to import the template engine + discovery by path.
+_PLUGINS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_CLUSTER_DIR = os.path.join(_PLUGINS_DIR, "hscc-cluster")
 
 
 def read_units():
@@ -88,6 +96,98 @@ def cluster_metrics():
         return json.loads(out).get("hosts", {})
     except Exception:
         return {}
+
+
+def _import_cluster_module(name):
+    """Import a module from the hscc-cluster plugin dir by path (best-effort)."""
+    import importlib.util
+    path = os.path.join(_CLUSTER_DIR, f"{name}.py")
+    if not os.path.isfile(path):
+        return None
+    try:
+        import sys as _sys
+        modname = f"_hscc_{name}"
+        spec = importlib.util.spec_from_file_location(modname, path)
+        mod = importlib.util.module_from_spec(spec)
+        if _CLUSTER_DIR not in _sys.path:
+            _sys.path.insert(0, _CLUSTER_DIR)  # so sibling imports resolve
+        # Register BEFORE exec: @dataclass resolves cls.__module__ via sys.modules.
+        _sys.modules[modname] = mod
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
+def applied_template():
+    """Read ~/.hscc/applied_template.json → the recorded template dict, or None."""
+    try:
+        with open(APPLIED_TEMPLATE) as fh:
+            data = json.load(fh)
+        return data or None
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+def reapply_template(confirm):
+    """Re-apply the active template (D14 recovery contract). Returns a dict.
+
+    {"ok", "mode": "template"|"none", "template"?, "result"?|"error"?}"""
+    state = applied_template()
+    name = (state or {}).get("template")
+    if not name:
+        return {"ok": False, "mode": "none",
+                "error": "no applied template recorded (~/.hscc/applied_template.json)"}
+    ct = _import_cluster_module("cluster_template")
+    if ct is None or not hasattr(ct, "apply_template"):
+        return {"ok": False, "mode": "template", "template": name,
+                "error": "cluster_template engine unavailable"}
+    try:
+        result = ct.apply_template(name, confirm=confirm)
+    except Exception as e:
+        return {"ok": False, "mode": "template", "template": name, "error": str(e)[:300]}
+    ok = bool(result.get("success")) if confirm else True
+    return {"ok": ok, "mode": "template", "template": name, "result": result}
+
+
+def discovery_snapshot(probe=True):
+    """Best-effort live topology map for /status. Never raises → {} on failure."""
+    disc = _import_cluster_module("discovery")
+    if disc is None:
+        return {}
+    try:
+        return disc.discovery_status({"probe": probe})
+    except Exception:
+        return {}
+
+
+def autonomy_flag():
+    """Read the ~/.hscc/autonomy flag value ('on'/'off'), or None."""
+    try:
+        with open(AUTONOMY_FLAG) as fh:
+            return fh.read().strip() or None
+    except (FileNotFoundError, OSError):
+        return None
+
+
+def proxy_health():
+    """Is the sparkrun LiteLLM proxy on :PROXY_PORT answering? bool."""
+    ok, out, _ = _run(
+        ["curl", "-s", "--max-time", str(HEALTH_TIMEOUT),
+         f"http://localhost:{PROXY_PORT}/v1/models"], timeout=12)
+    return bool(ok and out)
+
+
+def template_cli(argv):
+    """Route a /template subcommand through the cluster_template CLI. Returns a
+    result dict (or {'error': ...})."""
+    cli = _import_cluster_module("cluster_template_cli")
+    if cli is None or not hasattr(cli, "cmd_cluster_template"):
+        return {"error": "cluster_template CLI unavailable"}
+    try:
+        return cli.cmd_cluster_template(argv)
+    except Exception as e:
+        return {"error": str(e)[:300]}
 
 
 def restart_one(unit):

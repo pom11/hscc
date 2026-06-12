@@ -85,6 +85,25 @@ class TestGeneratePlist:
         plist = generate_plist()
         assert "KeepAlive" in plist
 
+    def test_python_path_is_real_not_hardcoded(self):
+        """C1: the interpreter must be a real executable, never a blindly
+        hardcoded /usr/local/bin/python3 (absent on Homebrew-only/Spark hosts)."""
+        import os
+        from hscc_daemon.install import _resolve_python
+        p = _resolve_python()
+        assert os.path.isfile(p) and os.access(p, os.X_OK)
+
+    def test_resolver_prefers_venv(self, monkeypatch, tmp_path):
+        import os
+        from hscc_daemon import install
+        venv = tmp_path / ".hermes/hermes-agent/venv/bin"
+        venv.mkdir(parents=True)
+        py = venv / "python"
+        py.write_text("#!/bin/sh\n")
+        py.chmod(0o755)
+        monkeypatch.setattr(os.path, "expanduser", lambda p: str(tmp_path) if p == "~" else p)
+        assert install._resolve_python() == str(py)
+
     def test_contains_run_at_load(self):
         from hscc_daemon.install import generate_plist
         plist = generate_plist()

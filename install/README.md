@@ -15,5 +15,7 @@ This is the **source of truth** for the bundled skills — edit them here, then 
 ## Note
 
 The HSCC **plugins** are the top-level `hscc-*` / `hscc_daemon` directories at the
-repo root — they are loaded in place from `~/.hermes/plugins/`, not staged or
-copied through here. There is no separate plugin staging area.
+repo root. The repo is the source of truth; `hscc-bootstrap/bootstrap.sh` **copies**
+them into the Hermes runtime dir `~/.hermes/plugins/` (backup-then-overwrite) via
+`install_payload.py`. The plugins are *not* copied through this `install/` dir —
+that staging path is only for the bundled skills above.

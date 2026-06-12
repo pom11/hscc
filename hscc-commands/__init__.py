@@ -107,28 +107,44 @@ def cmd_orch_restart(raw_args):
 
 
 def cmd_cluster_restart(raw_args):
-    """Restart orchestrator + all worker models. Confirm-first."""
+    """Recover the cluster by RE-APPLYING the active template (D14). The template
+    is the recovery contract: make reality match the declared state. Falls back
+    to restarting serving.json units when no template is recorded. Confirm-first."""
+    state = cmdlib.applied_template()
+    name = (state or {}).get("template")
+
+    # Template-driven recovery (preferred)
+    if name:
+        if not _confirmed(raw_args):
+            return ("⚠️ *Confirm cluster recovery (re-apply template)*\n"
+                    f"  template: `{name}`\n\n"
+                    "Re-applies the active template — provisions every declared "
+                    "unit to match the template (orchestrator + workers). Models "
+                    "reload.\nRun `/cluster-restart confirm` to execute.")
+        res = cmdlib.reapply_template(confirm=True)
+        if res["ok"]:
+            return (f"♻️ Re-applied template `{name}`. Cluster is converging to "
+                    f"the declared state — `/cluster` in a few minutes to verify.")
+        return (f"❌ Template re-apply FAILED (`{name}`): {res.get('error') or res.get('result')}\n"
+                f"Falling back: try `/cluster-restart confirm` again or restart units manually.")
+
+    # Fallback: no template recorded → restart serving.json units
     units = cmdlib.read_units()
     orch = cmdlib.orchestrator_unit(units)
     workers = cmdlib.worker_units(units)
     targets = ([orch] if orch else []) + workers
     if not targets:
-        return "⚠️ No units in serving.json — nothing to restart."
-
+        return "⚠️ No applied template and no units in serving.json — nothing to restart."
     if not _confirmed(raw_args):
         body = []
         if orch:
-            body.append(f"  • orchestrator @ {cmdlib.unit_node(orch)} "
-                        f"[{orch.get('model')}]")
+            body.append(f"  • orchestrator @ {cmdlib.unit_node(orch)} [{orch.get('model')}]")
         for w in workers:
             body.append(f"  • worker @ {cmdlib.unit_node(w)} [{w.get('model')}]")
-        return ("⚠️ *Confirm FULL cluster restart*\n"
+        return ("⚠️ *Confirm FULL cluster restart* (no template recorded — unit restart)\n"
                 + "\n".join(body)
-                + f"\n\nRestarts {len(targets)} model(s) "
-                  f"(orchestrator + {len(workers)} worker(s)). Whole cluster is "
-                  f"down while they reload.\n"
-                  f"Run `/cluster-restart confirm` to execute.")
-
+                + f"\n\nRestarts {len(targets)} model(s). Whole cluster down while "
+                  f"they reload.\nRun `/cluster-restart confirm` to execute.")
     results = [cmdlib.restart_one(u) for u in targets]
     ok = [r for r in results if r["ok"]]
     bad = [r for r in results if not r["ok"]]
@@ -141,10 +157,99 @@ def cmd_cluster_restart(raw_args):
     return "\n".join(lines)
 
 
+def cmd_status(raw_args):
+    """Rich one-glance dashboard: topology + free-VRAM + proxy + daemon + template."""
+    snap = cmdlib.discovery_snapshot(probe=True)
+    lines = ["📊 *HSCC status*", ""]
+    if snap.get("ok"):
+        lines.append(f"*Topology* (source: {snap.get('source')})")
+        o = snap.get("orchestrator") or {}
+        lines.append(f"  orchestrator {o.get('ip')} {o.get('name') or ''}".rstrip())
+        for w in snap.get("workers") or []:
+            vram = w.get("vram_free_gb")
+            pw = w.get("power_draw_w")
+            idle = w.get("idle")
+            extra = []
+            if vram is not None:
+                extra.append(f"{vram}GB free")
+            if pw is not None:
+                extra.append(f"{pw}W{' idle' if idle else ''}")
+            hp = "✅" if w.get("vllm_healthy") else "❌"
+            lines.append(f"  {hp} worker {w.get('ip')}" + (f" — {', '.join(extra)}" if extra else ""))
+        if snap.get("nas"):
+            lines.append(f"  NAS {snap['nas'].get('ip')}")
+    else:
+        lines.append(f"*Topology*: ⚠️ discovery unavailable ({snap.get('error', 'n/a')})")
+    lines.append("")
+    lines.append(f"*Proxy* :{cmdlib.PROXY_PORT}: " + ("✅ up" if cmdlib.proxy_health() else "❌ down"))
+    tpl = cmdlib.applied_template()
+    lines.append(f"*Applied template*: {tpl.get('template') if tpl else '(none)'}")
+    lines.append(f"*Autonomy*: {cmdlib.autonomy_flag() or 'off'}")
+    return "\n".join(lines)
+
+
+def cmd_heal(raw_args):
+    """Manual healing pass: report unhealthy workers; confirm-first restart.
+    Orchestrator wedge → advise /cluster-restart (template recovery)."""
+    units = cmdlib.read_units()
+    orch = cmdlib.orchestrator_unit(units)
+    workers = cmdlib.worker_units(units)
+    unhealthy = [w for w in workers if not cmdlib._curl_model(cmdlib.unit_node(w))]
+    orch_down = orch and not cmdlib._curl_model(cmdlib.unit_node(orch))
+
+    lines = ["🩺 *HSCC heal*", ""]
+    if orch_down:
+        lines.append(f"⚠️ Orchestrator @ {cmdlib.unit_node(orch)} looks DOWN/wedged.")
+        lines.append("  → run `/cluster-restart confirm` (re-applies the template).")
+    if not unhealthy:
+        lines.append("Workers: ✅ all healthy." if workers else "No worker units.")
+        return "\n".join(lines)
+    lines.append(f"Unhealthy workers ({len(unhealthy)}):")
+    for w in unhealthy:
+        lines.append(f"  ❌ {cmdlib.unit_node(w)} [{w.get('model')}]")
+    if not _confirmed(raw_args):
+        lines.append("\nRun `/heal confirm` to restart the unhealthy worker(s).")
+        return "\n".join(lines)
+    results = [cmdlib.restart_one(w) for w in unhealthy]
+    for r in results:
+        mark = "✅" if r["ok"] else "❌"
+        lines.append(f"  {mark} {r['unit']} @ {r.get('node','?')}"
+                     + ("" if r["ok"] else f": {r['error']}"))
+    lines.append("\nRestarted unhealthy workers — `/cluster` to verify.")
+    return "\n".join(lines)
+
+
+def cmd_template(raw_args):
+    """List / preview / validate / apply cluster templates from chat.
+    Usage: /template [list|status|validate <name>|preview <name>|apply <name> [confirm]]"""
+    import json as _json
+    parts = (raw_args or "").split()
+    sub = parts[0] if parts else "list"
+    if sub == "apply":
+        if len(parts) < 2:
+            return "Usage: /template apply <name> [confirm]"
+        argv = ["x", "apply", parts[1]] + (["--confirm"] if _confirmed(raw_args) else [])
+    elif sub in ("preview", "validate"):
+        if len(parts) < 2:
+            return f"Usage: /template {sub} <name>"
+        argv = ["x", sub, parts[1]]
+    elif sub in ("list", "status"):
+        argv = ["x", sub]
+    else:
+        return ("Usage: /template [list|status|validate <name>|preview <name>|"
+                "apply <name> [confirm]]")
+    res = cmdlib.template_cli(argv)
+    return "📦 *HSCC template*\n```\n" + _json.dumps(res, indent=2, default=str)[:3000] + "\n```"
+
+
 def register(ctx) -> None:
     ctx.register_command(
         name="cluster", handler=cmd_cluster,
         description="Show HSCC cluster status (orchestrator + workers, live health).",
+    )
+    ctx.register_command(
+        name="status", handler=cmd_status,
+        description="Rich HSCC dashboard: topology, free-VRAM, proxy, daemon, template.",
     )
     ctx.register_command(
         name="orch-restart", handler=cmd_orch_restart,
@@ -153,6 +258,16 @@ def register(ctx) -> None:
     )
     ctx.register_command(
         name="cluster-restart", handler=cmd_cluster_restart,
-        description="Restart ALL cluster models — orchestrator + workers (confirm-first).",
+        description="Recover the cluster by re-applying the active template (confirm-first).",
         args_hint="confirm",
+    )
+    ctx.register_command(
+        name="heal", handler=cmd_heal,
+        description="Heal unhealthy workers; advise on orchestrator wedge (confirm-first).",
+        args_hint="confirm",
+    )
+    ctx.register_command(
+        name="template", handler=cmd_template,
+        description="List/preview/validate/apply cluster templates.",
+        args_hint="list|preview <name>|apply <name> [confirm]",
     )

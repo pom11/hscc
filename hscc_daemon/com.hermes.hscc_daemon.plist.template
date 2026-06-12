@@ -17,7 +17,7 @@
          and exit, leaving launchd tracking the wrong (already-exited) process. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/python3</string>
+        <string>__PYBIN__</string>
         <string>__HOME__/.hermes/plugins/hscc_daemon/hscc.py</string>
         <string>start-daemon</string>
     </array>

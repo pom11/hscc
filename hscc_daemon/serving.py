@@ -169,6 +169,40 @@ def keepalive_nodes(serving):
     return nodes
 
 
+def keepalive_units(serving):
+    """Unit-keyed keep-alive workers for multi-model-per-node supervision (G1).
+
+    Returns a list of {node, port, recipe, id} — one per keep-alive worker unit.
+    A node may appear multiple times on different ports (co-located models), so
+    the daemon health-checks + relaunches each (node,port) independently. Port
+    comes from the unit (v2 schema), else the serving-level port / VLLM_PORT.
+    """
+    out = []
+    default_port = serving_port(serving) if isinstance(serving, dict) else VLLM_PORT
+    seen = set()
+    if isinstance(serving, dict):
+        for u in (serving.get("units", []) or []):
+            if u.get("role") != "worker" or not u.get("keepalive"):
+                continue
+            recipe = u.get("recipe")
+            port = int(u.get("port") or default_port)
+            for node in (u.get("nodes") or []):
+                key = (node, port)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append({"node": node, "port": port,
+                            "recipe": os.path.expanduser(recipe) if recipe else None,
+                            "id": u.get("id") or f"{node}:{port}"})
+    for node in _env_keepalive_nodes():
+        key = (node, default_port)
+        if key not in seen:
+            seen.add(key)
+            out.append({"node": node, "port": default_port, "recipe": None,
+                        "id": f"{node}:{default_port}"})
+    return out
+
+
 def _resolve_serving_overlay():
     """Overlay serving.json onto PRIMARY_NODE + ORCH_NODES.
 

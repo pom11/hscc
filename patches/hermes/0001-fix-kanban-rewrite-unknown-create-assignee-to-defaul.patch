@@ -1,0 +1,85 @@
+From 63ec4880581d39a14bba5df9cc8182cd2c333ceb Mon Sep 17 00:00:00 2001
+From: pom11 <parsecoriginalmastercraft@gmail.com>
+Date: Tue, 9 Jun 2026 11:13:22 +0300
+Subject: [PATCH 1/6] fix(kanban): rewrite unknown create-assignee to
+ default_assignee
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+kanban_create accepted any assignee string verbatim. Agents sometimes pass
+a generic name (e.g. "worker") that is not a profile on disk — the
+dispatcher silently skips such cards, stranding them in `ready` forever.
+Validate the requested assignee via profiles.profile_exists; if it isn't a
+real profile, rewrite to kanban.default_assignee (same guarantee the
+decomposer's _normalize_assignee_choice already provides). Best-effort:
+if neither resolves, leave as-is rather than drop.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ tools/kanban_tools.py | 42 ++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 42 insertions(+)
+
+diff --git a/tools/kanban_tools.py b/tools/kanban_tools.py
+index 67157dfc1..151a7ab3c 100644
+--- a/tools/kanban_tools.py
++++ b/tools/kanban_tools.py
+@@ -274,6 +274,41 @@ def _normalize_profile(value: Any) -> Optional[str]:
+     return text
+ 
+ 
++def _default_assignee() -> Optional[str]:
++    """The configured kanban.default_assignee, or None."""
++    try:
++        from hermes_cli.config import load_config
++        cfg = load_config()
++        da = (cfg.get("kanban", {}) or {}).get("default_assignee")
++        return str(da).strip() or None if da else None
++    except Exception:
++        return None
++
++
++def _resolve_valid_assignee(assignee: str) -> tuple[str, Optional[str]]:
++    """Map a requested assignee to a real on-disk profile.
++
++    Agents sometimes pass a generic name (e.g. "worker") that is NOT a profile
++    on disk — the dispatcher silently skips such cards, stranding them in
++    ``ready`` forever. Mirror the decomposer's guarantee: if the requested
++    assignee isn't a real profile, rewrite it to kanban.default_assignee.
++    Returns (effective_assignee, note) where note is a human-readable string
++    when a rewrite happened (else None). If neither the requested name nor the
++    default resolves, returns the original (best-effort — never silently drops).
++    """
++    try:
++        from hermes_cli.profiles import profile_exists
++    except Exception:
++        return assignee, None  # can't validate — leave as-is
++    if profile_exists(assignee):
++        return assignee, None
++    default = _default_assignee()
++    if default and profile_exists(default):
++        return default, (f"assignee '{assignee}' is not a profile on disk; "
++                         f"routed to default_assignee '{default}'")
++    return assignee, None
++
++
+ def _parse_bool_arg(args: dict, name: str, *, default: bool = False):
+     value = args.get(name)
+     if value is None:
+@@ -735,6 +770,13 @@ def _handle_create(args: dict, **kw) -> str:
+             "assignee is required — name the profile that should execute this "
+             "task (the dispatcher will only spawn tasks with an assignee)"
+         )
++    # Guard against stranded cards: an assignee that is not a real on-disk
++    # profile (e.g. the generic "worker") is silently skipped by the dispatcher
++    # and sits in `ready` forever. Rewrite unknown assignees to the configured
++    # default_assignee, same guarantee the decomposer provides.
++    assignee, _assignee_note = _resolve_valid_assignee(str(assignee))
++    if _assignee_note:
++        logger.warning("kanban_create: %s", _assignee_note)
+     body = args.get("body")
+     parents = args.get("parents") or []
+     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
+-- 
+2.50.1 (Apple Git-155)
+

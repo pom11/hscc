@@ -1,0 +1,42 @@
+# 4-node cluster: 1 gateway + coding family (2 workers) + vision family (2 workers)
+# Multi-family: different models behind separate proxies
+
+name: multi-family-4-node
+version: 1
+cluster_size: 4
+description: "Gateway + coding family (2 workers on :4001) + vision family (2 workers on :4002)."
+
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+  tp: 1
+  pp: 1
+
+orchestrator_node: "192.0.2.10"
+
+families:
+  - name: coding
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3-coder-235b-a22b-nvfp4-vllm.yaml"
+        tp: 2
+        pp: 1
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+        tp: 1
+        pp: 1
+    nodes:
+      - "192.0.2.11"
+      - "192.0.2.12"
+    proxy:
+      port: 4001
+
+  - name: vision
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+        tp: 1
+        pp: 1
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/siglip-xx400m-vllm.yaml"
+        tp: 1
+        pp: 1
+    nodes:
+      - "192.0.2.13"
+    proxy:
+      port: 4002
