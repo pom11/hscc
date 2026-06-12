@@ -4,7 +4,7 @@ Exposes a single guarded `sparkrun_exec` tool (CLI passthrough) so any Hermes
 agent can launch/stop/inspect inference workloads on a DGX Spark cluster. The
 bundled skills (run/setup/registry) teach the agent how to drive it.
 
-Mirrors the official sparkrun OpenClaw + Claude Code plugins' design. Entry:
+Mirrors the official sparkrun OpenClaw plugin's design. Entry:
 register(ctx).
 """
 import functools
