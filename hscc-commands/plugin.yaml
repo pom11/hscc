@@ -1,9 +1,12 @@
 name: hscc-commands
 version: 1.0.0
-description: "Operator slash commands for cluster incident response — /orch-restart, /cluster, /cluster-restart. Direct sparkrun handlers (run in the gateway, not via the LLM) so they work even when the orchestrator model is wedged."
+description: "Operator slash commands for cluster incident response — /cluster, /status, /orch-restart, /cluster-restart, /heal, /template. Direct handlers (run in the gateway, not via the LLM) so they work even when the orchestrator model is wedged."
 author: NousResearch
 kind: backend
 provides_commands:
-  - orch-restart
   - cluster
+  - status
+  - orch-restart
   - cluster-restart
+  - heal
+  - template
