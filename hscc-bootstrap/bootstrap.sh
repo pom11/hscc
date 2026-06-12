@@ -16,15 +16,16 @@ REPO_ROOT="$(cd "$BOOT_DIR/.." && pwd)"
 PYBIN="$HERMES_HOME/hermes-agent/venv/bin/python"
 [ -x "$PYBIN" ] || PYBIN="python3"
 
-ASSUME_YES=false; FORCE=false
+ASSUME_YES=false; FORCE=false; NO_BACKUP=false
 SKIP_SKILLS=false; SKIP_ROLES=false; SKIP_DAEMON=false
 for a in "$@"; do case "$a" in
   --yes|-y) ASSUME_YES=true ;;
   --force) FORCE=true ;;
+  --no-backup) NO_BACKUP=true ;;
   --skip-skills) SKIP_SKILLS=true ;;
   --skip-roles) SKIP_ROLES=true ;;
   --skip-daemon) SKIP_DAEMON=true ;;
-  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--force] [--skip-skills|--skip-roles|--skip-daemon]"; exit 0 ;;
+  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon]"; exit 0 ;;
   *) echo "Unknown option: $a" >&2; exit 1 ;;
 esac; done
 
@@ -97,14 +98,15 @@ SUGGEST=$("$PYBIN" -c "import sys;sys.path.insert(0,'$BOOT_DIR');import suggest_
 # ── Stage 4: install ───────────────────────────────────────────────────────
 hdr "Install: plugin files"
 # Copy the plugin tree from the work repo into the Hermes runtime dir
-# (backup-then-overwrite). Skipped automatically when the repo IS the runtime
-# dir (old in-place layout). All later stages run from $PLUGINS/... so this
-# must come first.
+# (backup-then-overwrite; --no-backup overwrites in place). Skipped
+# automatically when the repo IS the runtime dir (old in-place layout). All
+# later stages run from $PLUGINS/... so this must come first.
 if [ "$REPO_ROOT" -ef "$PLUGINS" ]; then
   warn "repo is the runtime dir ($PLUGINS) — skipping plugin copy (in-place layout)"
 else
-  COPY=$(REPO_ROOT="$REPO_ROOT" PLUGINS="$PLUGINS" "$PYBIN" "$BOOT_DIR/install_payload.py" 2>/dev/null) \
-    && ok "plugin files copied → $PLUGINS" || warn "plugin copy reported issues"
+  COPY_FLAG=""; $NO_BACKUP && COPY_FLAG="--no-backup"
+  COPY=$(REPO_ROOT="$REPO_ROOT" PLUGINS="$PLUGINS" "$PYBIN" "$BOOT_DIR/install_payload.py" $COPY_FLAG 2>/dev/null) \
+    && ok "plugin files copied → $PLUGINS$($NO_BACKUP && echo ' (no backup)')" || warn "plugin copy reported issues"
 fi
 
 hdr "Install: skills"
