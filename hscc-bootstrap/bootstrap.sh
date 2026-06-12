@@ -89,6 +89,11 @@ else
   MODEL=""
 fi
 
+# Suggest a cluster template matching the detected host count (suggestion only;
+# the operator applies it explicitly).
+SUGGEST=$("$PYBIN" -c "import sys;sys.path.insert(0,'$BOOT_DIR');import suggest_template as s;print(s.pick_template(${#HOST_ARR[@]}) or '')" 2>/dev/null)
+[ -n "$SUGGEST" ] && say "template: $SUGGEST (apply: hscc-cluster cluster-template apply $SUGGEST --confirm)"
+
 # ── Stage 4: install ───────────────────────────────────────────────────────
 hdr "Install: plugin files"
 # Copy the plugin tree from the work repo into the Hermes runtime dir
