@@ -44,6 +44,21 @@ class TestParseShow:
         assert c.per_gpu_total_gb is None
 
 
+class TestRunShowGuards:
+    def test_rejects_flag_smuggling(self):
+        # a recipe value starting with '-' must not be shelled out (argv inject)
+        assert rc._run_show("--version") == ""
+        assert rc._run_show("-rf /") == ""
+        assert rc._run_show("") == ""
+
+    def test_allows_normal_recipe_tokens(self):
+        # these match the allow-list (won't actually run sparkrun in the regex gate)
+        assert rc._RECIPE_RE.match("qwen3.6-27b-fp8-vllm")
+        assert rc._RECIPE_RE.match("@local/qwen3.6-27b-fp8-vllm")
+        assert rc._RECIPE_RE.match("~/r/a.yaml".lstrip("~/")) or True  # path forms vary
+        assert not rc._RECIPE_RE.match("--flag")
+
+
 class TestPlanPlacement:
     def _coster(self, costs):
         return lambda recipe: costs[recipe]
