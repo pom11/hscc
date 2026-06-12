@@ -277,8 +277,37 @@ def remove_proxy_plist(family) -> dict:
     plist_path = PROXY_DIR / family.name / "proxy.plist"
     if plist_path.exists():
         plist_path.unlink()
-    
+
     return {"label": label, "status": "removed"}
+
+
+def _prune_orphan_proxies(active_names) -> list:
+    """Remove proxy dirs for families no longer in the plan (incl. their backups).
+
+    Orphan family dirs (e.g. a 'vision' family dropped from the template) would
+    otherwise keep their config.json + accumulated .bak.* forever. Boots out the
+    stale launchd plist, then removes the whole family dir. Never touches the
+    'logs' dir or an active family. Returns the names pruned."""
+    import subprocess
+    if not PROXY_DIR.is_dir():
+        return []
+    keep = set(active_names) | {"logs"}
+    pruned = []
+    for d in PROXY_DIR.iterdir():
+        if not d.is_dir() or d.name in keep:
+            continue
+        try:
+            subprocess.run(
+                ["launchctl", "bootout", f"gui/{os.getuid()}/com.hermes.proxy.{d.name}"],
+                capture_output=True, timeout=10)
+        except Exception:
+            pass
+        try:
+            shutil.rmtree(d)
+            pruned.append(d.name)
+        except OSError:
+            pass
+    return pruned
 
 
 # ── Model provisioning ─────────────────────────────────────────────────────
@@ -561,10 +590,15 @@ def apply_template(template_name: str, confirm: bool = False) -> dict:
             write_json(proxy_dir / "config.json", proxy_config, backup=True)
             plist_result = install_proxy_plist(fam)
             proxy_actions.append(plist_result)
+        # Remove proxy dirs (+ their accumulated backups) for families no longer
+        # in the plan, so orphan families don't leak config.json.bak.* forever.
+        active = [f.name for f in plan.families if f.proxy_port is not None]
+        pruned = _prune_orphan_proxies(active)
         result["steps"].append({
             "step": "proxies/",
             "status": "ok",
             "proxies": len(proxy_actions),
+            "pruned_orphans": pruned,
             "details": proxy_actions,
         })
 

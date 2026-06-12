@@ -162,6 +162,36 @@ class TestInstallProxyPlist:
         assert res["loaded"] is True and res["port"] == 4000
 
 
+class TestPruneOrphanProxies:
+    def test_removes_orphan_family_dirs_and_backups(self, tmp_path, monkeypatch):
+        import cluster_template as ct
+        import subprocess
+        from unittest.mock import MagicMock
+        monkeypatch.setattr(ct, "PROXY_DIR", tmp_path / "proxies")
+        monkeypatch.setattr(subprocess, "run",
+                            lambda *a, **k: MagicMock(returncode=0))
+        # active 'coding' + orphan 'vision' (with stale backups) + logs dir
+        for fam in ("coding", "vision"):
+            d = tmp_path / "proxies" / fam
+            d.mkdir(parents=True)
+            (d / "config.json").write_text("{}")
+            for i in range(8):
+                (d / f"config.json.bak.{1000+i}").write_text("{}")
+        (tmp_path / "proxies" / "logs").mkdir()
+        pruned = ct._prune_orphan_proxies(["coding"])
+        assert pruned == ["vision"]
+        assert (tmp_path / "proxies" / "coding").is_dir()      # active kept
+        assert not (tmp_path / "proxies" / "vision").exists()  # orphan gone (+backups)
+        assert (tmp_path / "proxies" / "logs").is_dir()        # logs never pruned
+
+    def test_noop_when_no_orphans(self, tmp_path, monkeypatch):
+        import cluster_template as ct
+        monkeypatch.setattr(ct, "PROXY_DIR", tmp_path / "proxies")
+        (tmp_path / "proxies" / "coding").mkdir(parents=True)
+        assert ct._prune_orphan_proxies(["coding"]) == []
+        assert (tmp_path / "proxies" / "coding").is_dir()
+
+
 class TestApplyIntegration:
     """Full apply against a temp HOME — asserts GENERATED FILES, not mocks."""
 
