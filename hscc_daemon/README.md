@@ -1,6 +1,6 @@
 # HSCC Monitoring Daemon
 
-Continuous monitoring daemon for the DGX Spark cluster. Runs a 60s cycle of health checks, auto-restarts the vLLM orchestrator if dead, and alerts the user via Telegram for other failures.
+Continuous monitoring daemon for the DGX Spark cluster. Runs a 60s cycle of health checks. **Workers** are auto-healed: each keep-alive serving unit is health-checked per (node, port) — so co-located multi-model nodes are supervised independently — and a crashed one is relaunched with its own recipe + port. An **orchestrator** wedge is NOT auto-restarted (too disruptive): the daemon alerts via Telegram + the active fallback keeps the gateway answering, and a human runs `/cluster-restart` (which re-applies the active template). On startup it also self-cleans dead `~/.hscc` cruft (`.corrupt`/`.stale` + uncapped `.bak`).
 
 ## Installation
 
@@ -44,7 +44,7 @@ Create `~/.hscc/daemon/config.json`:
 | Status | Meaning | Action |
 |--------|---------|--------|
 | `healthy` | Explicit success | No action |
-| `unhealthy` | Explicit failure | Auto-restart orchestrator / Telegram alert |
+| `unhealthy` | Explicit failure | Worker: auto-relaunch (per node:port). Orchestrator: Telegram alert + fallback (human runs `/cluster-restart`). |
 | `unknown` | Timeout / connection refused | Warn only (no restart) |
 
 ## File Layout
