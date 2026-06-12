@@ -37,3 +37,6 @@ hscc-*/REVIEW-*.md
 *.egg-info/
 build/
 dist/
+
+# Internal design docs — kept local, not tracked
+docs/superpowers/
