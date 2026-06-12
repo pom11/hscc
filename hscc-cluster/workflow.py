@@ -148,3 +148,54 @@ def probe_task_state(task: Dict[str, Any], *, repo: str, plan: Dict[str, Any],
     return ProbeResult(False, resume_idx, why,
                        {"changed": changed, "hits": hits,
                         "tests": tests_ok, "abandoned": abandoned})
+
+
+# ── dispatch hook: post an idempotent-resume note on re-dispatch ─────────────
+
+def resume_note(task, *, repo, base="main"):
+    """Build a short resume reminder from the task branch's committed work, or
+    None when there's nothing committed yet (nothing to resume). Pure read-only
+    git; does not run tests (dispatch time must be cheap)."""
+    branch = (task or {}).get("branch_name") if isinstance(task, dict) else getattr(task, "branch_name", None)
+    if not branch or not branch_exists(repo, branch):
+        return None
+    changed = changed_files(repo, base, branch)
+    if not changed:
+        return None
+    n = len(changed)
+    shown = ", ".join(changed[:8]) + (" …" if n > 8 else "")
+    return (
+        "♻️ **Resume — prior work exists on this task.**\n"
+        f"Branch `{branch}` already has committed changes to {n} file(s): {shown}\n"
+        "Read what's there and CONTINUE from the first unfinished step — do NOT "
+        "redo files that are already done. Verify with the task's tests."
+    )
+
+
+def on_pre_kanban_dispatch(task_id=None, run_id=None, task=None, db_path=None,
+                           repo=None, **kwargs):
+    """Hook handler for `pre_kanban_dispatch` (fires on re-dispatch, run_id>1).
+
+    Posts a resume note (from the task branch's committed state) as a kanban
+    comment, which build_worker_context surfaces to the re-dispatched worker so
+    it resumes instead of redoing. Best-effort: never raises (the core fires
+    this in a try/except, but we double-guard). ``repo`` defaults to cwd; in a
+    worktree dispatch the branch lives in the task's workspace."""
+    try:
+        import os as _os
+        work_repo = repo or _os.getcwd()
+        note = resume_note(task if isinstance(task, dict) else
+                           {"branch_name": getattr(task, "branch_name", None)},
+                           repo=work_repo)
+        if not note or not task_id:
+            return None
+        from hermes_cli import kanban_db as _kb
+        board = kwargs.get("board")
+        conn = _kb.connect(board=board) if board else _kb.connect()
+        try:
+            _kb.add_comment(conn, task_id, author="hscc-resume", body=note)
+        finally:
+            conn.close()
+        return {"posted": True, "task_id": task_id}
+    except Exception:
+        return None
