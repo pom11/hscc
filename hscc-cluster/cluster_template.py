@@ -196,7 +196,7 @@ def _generate_proxy_plist(family) -> str:
     <array>
         <string>litellm</string>
         <string>--port</string>
-        <string>{family.proxy.port}</string>
+        <string>{family.proxy_port}</string>
         <string>--config</string>
         <string>{config_path}</string>
     </array>
@@ -254,7 +254,7 @@ def install_proxy_plist(family) -> dict:
     return {
         "plist": str(plist_path),
         "label": label,
-        "port": family.proxy.port,
+        "port": family.proxy_port,
         "log": str(logs_dir / f"{family.name}.log"),
         "loaded": loaded,
         "error": load_error or None,
@@ -283,66 +283,59 @@ def remove_proxy_plist(family) -> dict:
 
 # ── Model provisioning ─────────────────────────────────────────────────────
 
-def _provision_models(tpl: Any, cluster: str = "hscc",
+def _provision_models(plan: Any, cluster: str = "hscc",
                       do_launch: bool = True) -> dict:
-    """Bring the cluster to the template's model layout via sparkrun.
+    """Bring the cluster to the resolved plan's model layout via sparkrun.
 
-    For each template unit (orchestrator + each worker node) launch the model
-    with `sparkrun run <recipe> --hosts <node> --ensure` (--ensure = no-op if it
-    is already serving). Stop any sparkrun container on a node the template does
-    not use. This is the step that makes the live cluster actually match the
-    template — not a report.
-
-    do_launch=False makes it a dry plan (no sparkrun calls) — used by preview and
-    tests so they never touch the real cluster.
+    For each unit (orchestrator + each worker unit) launch the model with
+    `sparkrun run <recipe> --cluster <c> --hosts <node> --port <port> --ensure`
+    (--ensure = no-op if already serving). Stop sparkrun containers on nodes the
+    plan does not use. do_launch=False = dry plan (preview/tests).
     """
     import subprocess
 
     result = {"stopped": [], "provisioned": [], "failed": [],
               "status": "ok", "note": ""}
 
-    # (node, recipe) the template wants serving, derived from serving.json units.
-    serving = tpl.to_serving_json()
-    want = []  # list of (node, recipe)
-    want.append((tpl.orchestrator_node, tpl.orchestrator.recipe))
-    for u in serving["units"]:
-        if u["role"] == "worker":
-            want.append((u["nodes"][0], u["recipe"]))
-    template_nodes = {n for n, _ in want}
+    # (node, port, recipe) the plan wants serving.
+    want = [(plan.orchestrator.node, plan.orchestrator.port, plan.orchestrator.recipe)]
+    for fam in plan.families:
+        for u in fam.units:
+            want.append((u.node, u.port, u.recipe))
+    plan_nodes = {n for n, _, _ in want}
 
     if not do_launch:
         result["note"] = "dry-run: would provision " + ", ".join(
-            f"{r.split('/')[-1]}@{n}" for n, r in want)
-        result["provisioned"] = [f"{n}:{r}" for n, r in want]
+            f"{r.split('/')[-1]}@{n}:{p}" for n, p, r in want)
+        result["provisioned"] = [f"{n}:{p}:{r}" for n, p, r in want]
         return result
 
-    # Stop sparkrun containers on nodes the template does not use.
+    # Stop sparkrun containers on nodes the plan does not use.
     try:
-        for line in _running_nodes_via_sparkrun():
-            node = line
-            if node and node not in template_nodes:
+        for node in _running_nodes_via_sparkrun():
+            if node and node not in plan_nodes:
                 subprocess.run(["sparkrun", "stop", "--all", "--hosts", node],
                                capture_output=True, timeout=60)
                 result["stopped"].append(node)
     except Exception:
-        pass  # stopping is best-effort; never block provisioning on it
+        pass  # best-effort
 
-    # Launch each wanted (node, recipe). --ensure: skip if already up.
-    for node, recipe in want:
+    # Launch each wanted (node, port, recipe). --ensure: skip if already up.
+    for node, port, recipe in want:
         try:
             r = subprocess.run(
                 ["sparkrun", "run", os.path.expanduser(recipe),
                  "--cluster", cluster, "--hosts", node,
-                 "--port", "8000", "--no-follow", "--ensure"],
+                 "--port", str(port), "--no-follow", "--ensure"],
                 capture_output=True, text=True, timeout=240)
             if r.returncode == 0:
-                result["provisioned"].append(f"{node}:{recipe.split('/')[-1]}")
+                result["provisioned"].append(f"{node}:{port}:{recipe.split('/')[-1]}")
             else:
                 result["failed"].append(
-                    {"node": node, "recipe": recipe,
+                    {"node": node, "port": port, "recipe": recipe,
                      "error": (r.stderr or "").strip()[:200]})
         except Exception as e:
-            result["failed"].append({"node": node, "recipe": recipe,
+            result["failed"].append({"node": node, "port": port, "recipe": recipe,
                                      "error": str(e)})
 
     if result["failed"]:
@@ -372,81 +365,101 @@ def _running_nodes_via_sparkrun() -> List[str]:
 
 # ── Template loading ───────────────────────────────────────────────────────
 
+def _ti():
+    try:
+        from . import template_intent as m
+    except ImportError:
+        import template_intent as m
+    return m
+
+
+def _discover():
+    try:
+        from . import discovery as m
+    except ImportError:
+        import discovery as m
+    return m.discover()
+
+
+def _load_intent(template_name: str):
+    """Load a v2 intent template (yaml → ClusterTemplate). Raises on bad shape."""
+    import yaml
+    path = TEMPLATE_DIR / f"{template_name}.yaml"
+    if not path.exists():
+        raise FileNotFoundError(f"Template not found: {path}")
+    with open(path) as f:
+        data = yaml.safe_load(f)
+    return _ti().ClusterTemplate.from_dict(data)
+
+
+def _resolve(template_name: str, topology=None):
+    """Load + resolve a template against the live cluster → ResolvedPlan."""
+    tpl = _load_intent(template_name)
+    topo = topology if topology is not None else _discover()
+    return _ti().resolve(tpl, topo)
+
+
 def list_templates():
-    """List all available cluster templates."""
-    from cluster_template_schema import list_templates as schema_list
-    
-    registry = schema_list(TEMPLATE_DIR)
-    return {
-        "count": len(registry.templates),
-        "templates": registry.templates,
-    }
+    """List all available cluster templates (v2 intent files)."""
+    import yaml
+    templates = []
+    for f in sorted(TEMPLATE_DIR.glob("*.yaml")):
+        try:
+            with open(f) as fh:
+                data = yaml.safe_load(fh) or {}
+            if data.get("name"):
+                templates.append({
+                    "name": data["name"],
+                    "version": data.get("version", 2),
+                    "description": data.get("description", ""),
+                    "families": [fam.get("name") for fam in (data.get("families") or [])],
+                })
+        except Exception:
+            continue
+    return {"count": len(templates), "templates": templates}
 
 
 def preview_template(template_name: str) -> dict:
-    """Preview what applying a template would change (dry-run).
-    
-    Returns the full apply plan without making any changes.
+    """Preview what applying a template would change (dry-run). No writes.
+
+    Resolves the intent template against the LIVE cluster so the preview shows
+    the concrete nodes/ports that would be used.
     """
-    from cluster_template_schema import load_template
-    
-    template_path = TEMPLATE_DIR / f"{template_name}.yaml"
-    tpl = load_template(template_path)
-    
-    plan = {
-        "template": tpl.name,
-        "cluster_size": tpl.cluster_size,
+    resolved = _resolve(template_name)
+    tpl = _load_intent(template_name)
+
+    new_serving = _ti().to_serving_json(resolved)
+    new_models = _build_models_json(resolved)
+    out = {
+        "template": resolved.template,
         "description": tpl.description,
-        "changes": [],
+        "changes": [
+            {"file": "serving.json", "action": "write",
+             "summary": f"{len(new_serving['units'])} units "
+                        f"(1 orchestrator + {len(resolved.families)} families)",
+             "diff_summary": _diff_serving_summary(read_json(SERVING_JSON), new_serving)},
+            {"file": "models.json", "action": "write",
+             "summary": f"{len(new_models['models'])} models registered"},
+            {"file": "config.yaml", "action": "update",
+             "summary": "Update provider/model settings",
+             "details": _describe_config_changes(resolved, read_json(MODELS_JSON))},
+        ],
     }
-    
-    # 1. serving.json changes
-    current_serving = read_json(SERVING_JSON)
-    new_serving = tpl.to_serving_json()
-    plan["changes"].append({
-        "file": "serving.json",
-        "action": "write",
-        "summary": f"{len(new_serving['units'])} units (1 orchestrator + {len(tpl.families)} families)",
-        "diff_summary": _diff_serving_summary(current_serving, new_serving),
-    })
-    
-    # 2. models.json changes
-    current_models = read_json(MODELS_JSON)
-    new_models = _build_models_json(tpl)
-    plan["changes"].append({
-        "file": "models.json",
-        "action": "write",
-        "summary": f"{len(new_models['models'])} models registered",
-    })
-    
-    # 3. Hermes config.yaml changes
-    plan["changes"].append({
-        "file": "config.yaml",
-        "action": "update",
-        "summary": "Update provider/model settings",
-        "details": _describe_config_changes(tpl, current_models),
-    })
-    
-    # 4. Proxy configs
-    if tpl.families:
-        plan["changes"].append({
-            "file": "proxies/",
-            "action": "create",
-            "summary": f"{len(tpl.families)} proxy configs",
-            "details": [
-                f"  {f.name}: port {f.proxy.port}, nodes {f.nodes}"
-                for f in tpl.families
-            ],
+    proxy_fams = [f for f in resolved.families if f.proxy_port is not None]
+    if proxy_fams:
+        out["changes"].append({
+            "file": "proxies/", "action": "create",
+            "summary": f"{len(proxy_fams)} proxy configs",
+            "details": [f"  {f.name}: port {f.proxy_port}, "
+                        f"nodes {sorted({u.node for u in f.units})}"
+                        for f in proxy_fams],
         })
-    
-    # 5. Models to provision
-    plan["changes"].append({
-        "file": "models (provision)",
-        "action": "provision",
-        "summary": f"{len(tpl.orchestrator.recipe) > 0 and 1 or 0} orchestrator + {sum(len(f.models) for f in tpl.families)} worker models",
+    out["changes"].append({
+        "file": "models (provision)", "action": "provision",
+        "summary": f"1 orchestrator + "
+                   f"{sum(len(f.units) for f in resolved.families)} worker units",
     })
-    
-    return plan
+    return out
 
 
 class TemplateValidationError(Exception):
@@ -457,78 +470,45 @@ class TemplateValidationError(Exception):
         super().__init__("; ".join(errors))
 
 
-def validate_template_deployable(tpl: Any) -> List[str]:
-    """Pre-apply preflight: is this template actually runnable here?
+def validate_resolved_plan(plan: Any) -> List[str]:
+    """Pre-apply preflight on a RESOLVED plan (concrete nodes/ports).
 
-    Returns a list of human-readable problems ([] = OK). Catches the failure
-    classes that previously corrupted a live cluster:
-      1. recipe file does not exist (template referenced models we don't have)
-      2. two models pinned to the same node:port (vLLM can't bind twice)
-
-    Pure + read-only — never mutates anything.
+    Auto-assigned ports make node:port collisions structurally impossible, so the
+    real checks are: every recipe exists, and no residual (node,port) dup. Pure +
+    read-only.
     """
     errors: List[str] = []
 
     def _recipe_missing(recipe: str) -> bool:
         return not Path(os.path.expanduser(recipe)).is_file()
 
-    # 1. every recipe must exist on disk
-    if _recipe_missing(tpl.orchestrator.recipe):
-        errors.append(f"orchestrator recipe not found: {tpl.orchestrator.recipe}")
-    for family in tpl.families:
-        for model in family.models:
-            if _recipe_missing(model.recipe):
-                errors.append(
-                    f"family '{family.name}' recipe not found: {model.recipe}")
-
-    # 2. no node:port may host more than one model. The orchestrator owns
-    #    orchestrator_node:8000; every family model binds family.proxy.port? No —
-    #    each model runs on its node's vLLM port (8000); the proxy multiplexes.
-    #    So the real collision is >1 model on the same node (same :8000).
-    node_models: Dict[str, List[str]] = {}
-    orch_node = tpl.orchestrator_node
-    node_models.setdefault(orch_node, []).append("orchestrator")
-    for family in tpl.families:
-        for model in family.models:
-            mname = _extract_model_name(model.recipe)
-            for node in family.nodes:
-                node_models.setdefault(node, []).append(f"{family.name}:{mname}")
-    for node, models in node_models.items():
-        if len(models) > 1:
-            errors.append(
-                f"node {node} assigned {len(models)} models on port 8000 "
-                f"(collision): {', '.join(models)}")
-
-    # 3. no two families may share a proxy port (one LiteLLM proxy per port).
-    port_families: Dict[int, List[str]] = {}
-    for family in tpl.families:
-        port_families.setdefault(family.proxy.port, []).append(family.name)
-    for port, fams in port_families.items():
-        if len(fams) > 1:
-            errors.append(
-                f"proxy port {port} shared by families {fams} "
-                f"(each family needs its own proxy port)")
-
-    # 4. a family node must not be the orchestrator node (the gateway runs the
-    #    orchestrator model on :8000; a worker model there would collide).
-    for family in tpl.families:
-        if orch_node in family.nodes:
-            errors.append(
-                f"family '{family.name}' uses the orchestrator node {orch_node} "
-                f"(reserved for the orchestrator model)")
-
+    if _recipe_missing(plan.orchestrator.recipe):
+        errors.append(f"orchestrator recipe not found: {plan.orchestrator.recipe}")
+    seen = set()
+    for fam in plan.families:
+        for u in fam.units:
+            if _recipe_missing(u.recipe):
+                errors.append(f"family '{fam.name}' recipe not found: {u.recipe}")
+            key = (u.node, u.port)
+            if key in seen:
+                errors.append(f"(node,port) collision: {u.node}:{u.port}")
+            seen.add(key)
     return errors
 
 
 def apply_template(template_name: str, confirm: bool = False) -> dict:
-    """Apply a cluster template. Writes all configs, provisions models, sets up proxies."""
-    from cluster_template_schema import load_template, ClusterTemplate
-    
-    template_path = TEMPLATE_DIR / f"{template_name}.yaml"
-    tpl = load_template(template_path)
+    """Apply a cluster template (v2 intent). Resolves it against the live cluster,
+    then writes configs, provisions models, sets up proxies — transactionally."""
+    # Load + resolve against the live topology. Bad shape or unresolvable
+    # (no workers, overcommit, …) is a hard, pre-write failure.
+    try:
+        tpl = _load_intent(template_name)
+        plan = _resolve(template_name)
+    except _ti().TemplateIntentError as e:
+        return {"status": "blocked", "success": False,
+                "note": "Template is NOT deployable.", "errors": [str(e)]}
 
-    # Preflight: refuse to write live config for a template that can't deploy.
-    problems = validate_template_deployable(tpl)
+    problems = validate_resolved_plan(plan)
 
     if not confirm:
         return {
@@ -540,8 +520,6 @@ def apply_template(template_name: str, confirm: bool = False) -> dict:
         }
 
     if problems:
-        # Hard stop BEFORE any write. This is the guard that stops an
-        # aspirational/invalid template from corrupting the live cluster.
         raise TemplateValidationError(problems)
 
     result = {"template": tpl.name, "steps": [], "success": True}
@@ -556,30 +534,32 @@ def apply_template(template_name: str, confirm: bool = False) -> dict:
         _pkg_dir = str(Path(__file__).parent)
         if _pkg_dir not in sys.path:
             sys.path.insert(0, _pkg_dir)
-        # Step 1: Write serving.json
-        serving = tpl.to_serving_json()
+        # Step 1: Write serving.json (from the resolved plan)
+        serving = _ti().to_serving_json(plan)
         write_json(SERVING_JSON, serving, backup=True)
         result["steps"].append({"step": "serving.json", "status": "ok", "units": len(serving["units"])})
-        
+
         # Step 2: Write models.json
-        models = _build_models_json(tpl)
+        models = _build_models_json(plan)
         write_json(MODELS_JSON, models, backup=True)
         result["steps"].append({"step": "models.json", "status": "ok", "models": len(models["models"])})
-        
+
         # Step 3: Update Hermes config.yaml
         _, config_changed = atomic_yaml_update(
-            CONFIG_YAML, lambda d: _update_hermes_config(d, tpl))
+            CONFIG_YAML, lambda d: _update_hermes_config(d, plan))
         result["steps"].append({"step": "config.yaml", "status": "ok",
                                 "changed": config_changed})
-        
-        # Step 4: Write proxy configs and install plists
+
+        # Step 4: Write proxy configs and install plists (per resolved family)
         proxy_actions = []
-        for family in tpl.families:
-            proxy_config = _build_proxy_config(family)
-            proxy_dir = PROXY_DIR / family.name
+        for fam in plan.families:
+            if fam.proxy_port is None:
+                continue
+            proxy_config = _build_proxy_config(fam)
+            proxy_dir = PROXY_DIR / fam.name
             proxy_dir.mkdir(parents=True, exist_ok=True)
             write_json(proxy_dir / "config.json", proxy_config, backup=True)
-            plist_result = install_proxy_plist(family)
+            plist_result = install_proxy_plist(fam)
             proxy_actions.append(plist_result)
         result["steps"].append({
             "step": "proxies/",
@@ -587,12 +567,12 @@ def apply_template(template_name: str, confirm: bool = False) -> dict:
             "proxies": len(proxy_actions),
             "details": proxy_actions,
         })
-        
+
         # Step 5: Update profile routing
         result["steps"].append({"step": "profiles", "status": "ok", "note": "Profile routing updated"})
-        
+
         # Step 6: Provision models via sparkrun
-        provision_result = _provision_models(tpl)
+        provision_result = _provision_models(plan)
         result["steps"].append({
             "step": "provision",
             "status": provision_result.get("status", "ok"),
@@ -639,9 +619,9 @@ def apply_template(template_name: str, confirm: bool = False) -> dict:
             write_json(APPLIED_STATE, {
                 "template": tpl.name,
                 "applied_at": datetime.now().isoformat(timespec="seconds"),
-                "cluster_size": tpl.cluster_size,
-                "orchestrator_node": tpl.orchestrator_node,
-                "families": [f.name for f in tpl.families],
+                "orchestrator_node": plan.orchestrator.node,
+                "families": [f.name for f in plan.families],
+                "units": len(serving["units"]),
             }, backup=False)
         except Exception:
             pass
@@ -660,130 +640,114 @@ def applied_status() -> dict:
 
 
 def validate_template(template_name: str) -> dict:
-    """Standalone preflight: is this template deployable? No writes.
-
-    Lets an operator check a template before apply, separate from preview.
-    """
-    from cluster_template_schema import load_template
-    template_path = TEMPLATE_DIR / f"{template_name}.yaml"
+    """Standalone preflight: is this template deployable against the live cluster?
+    No writes. Resolves intent → plan, then validates the plan."""
     try:
-        tpl = load_template(template_path)
+        plan = _resolve(template_name)
     except FileNotFoundError as e:
+        return {"template": template_name, "ok": False, "errors": [str(e)]}
+    except _ti().TemplateIntentError as e:
         return {"template": template_name, "ok": False, "errors": [str(e)]}
     except Exception as e:
         return {"template": template_name, "ok": False,
                 "errors": [f"template invalid: {e}"]}
-    problems = validate_template_deployable(tpl)
+    problems = validate_resolved_plan(plan)
     return {"template": template_name, "ok": not problems, "errors": problems}
 
 
 # ── Config generation helpers ──────────────────────────────────────────────
 
-def _build_models_json(tpl: Any) -> dict:
-    """Build the models.json content from a template."""
-    models = [
-        {
-            "name": _extract_model_name(tpl.orchestrator.recipe),
-            "type": "llm",
-            "status": "serving",
-            "location": "vLLM",
-            "tp": tpl.orchestrator.tp,
-            "pp": tpl.orchestrator.pp,
-            "family": "orchestrator",
-        }
-    ]
-    
-    for family in tpl.families:
-        for model in family.models:
+def _build_models_json(plan: Any) -> dict:
+    """Build models.json from a resolved plan (template_intent.ResolvedPlan)."""
+    o = plan.orchestrator
+    models = [{
+        "name": o.model, "type": "llm", "status": "serving", "location": "vLLM",
+        "tp": o.tp, "pp": o.pp, "family": "orchestrator",
+    }]
+    for fam in plan.families:
+        for u in fam.units:
             models.append({
-                "name": _extract_model_name(model.recipe),
-                "type": "llm",
-                "status": "serving",
-                "location": "vLLM",
-                "tp": model.tp,
-                "pp": model.pp,
-                "family": family.name,
+                "name": u.model, "type": "llm", "status": "serving",
+                "location": "vLLM", "tp": u.tp, "pp": u.pp, "family": fam.name,
             })
-    
     return {
-        "primary_model": _extract_model_name(tpl.orchestrator.recipe),
+        "primary_model": o.model,
         "provider": "custom",
-        "base_url": f"http://{tpl.orchestrator_node}:8000/v1",
+        "base_url": f"http://{o.node}:{o.port}/v1",
         "models": models,
     }
 
 
-def _build_proxy_config(family) -> dict:
-    """Build a LiteLLM proxy config for a worker family."""
+def _build_proxy_config(resolved_family) -> dict:
+    """Build a LiteLLM proxy config for a resolved worker family.
+
+    Each backend is a concrete node:port from the resolved plan (so the proxy
+    load-balances across the real worker endpoints)."""
+    backends = []
+    for u in resolved_family.units:
+        backends.append({
+            "model_name": u.model,
+            "litellm_params": {
+                "model": f"openai/{u.model}",
+                "api_base": f"http://{u.node}:{u.port}/v1",
+                "tp": u.tp, "pp": u.pp,
+            },
+        })
     return {
         "model": [],
-        "litellm_settings": {
-            "drop_params": True,
-        },
+        "litellm_settings": {"drop_params": True},
         "general_settings": {},
-        "serving_model_configs": [
-            {
-                "model_name": _extract_model_name(m.recipe),
-                "litellm_params": {
-                    "model": m.recipe,
-                    "tp": m.tp,
-                    "pp": m.pp,
-                }
-            }
-            for m in family.models
-        ],
+        "serving_model_configs": backends,
         "proxy_params": {
-            "host": family.proxy.host,
-            "port": family.proxy.port,
-            "model_type": family.proxy.model_type,
-            "extra_args": family.proxy.extra_args,
-        }
+            "host": "0.0.0.0",
+            "port": resolved_family.proxy_port,
+            "model_type": "openai",
+            "extra_args": {},
+        },
     }
 
 
-def _update_hermes_config(config: dict, tpl: Any) -> dict:
-    """Update the Hermes config.yaml with template settings.
+def _update_hermes_config(config: dict, plan: Any) -> dict:
+    """Update Hermes config.yaml providers from a resolved plan.
 
-    Idempotent: providers are keyed by name and rebuilt, so re-running apply
-    never duplicates entries. (The previous version appended a family provider
-    on every call without dedup, growing the list unbounded and corrupting the
-    live config.)
-    """
+    Idempotent: providers keyed by name and rebuilt, so re-running apply never
+    duplicates (a prior version appended on every call, corrupting config)."""
     existing = config.get("providers")
     by_name: dict = {}
-    # Preserve any pre-existing providers the template doesn't manage, keyed by
-    # name (last definition wins — also collapses prior duplicates).
     if isinstance(existing, list):
         for p in existing:
             if isinstance(p, dict) and p.get("name"):
                 by_name[p["name"]] = p
 
-    # Orchestrator (the "custom" provider).
+    o = plan.orchestrator
     by_name["custom"] = {
         "name": "custom",
-        "model": {"default": f"{tpl.orchestrator_node}:8000"},
-        "base_url": f"http://{tpl.orchestrator_node}:8000/v1",
+        "model": {"default": f"{o.node}:{o.port}"},
+        "base_url": f"http://{o.node}:{o.port}/v1",
     }
-
-    # One provider per proxy family (overwrites by name — never appends a dup).
-    for family in tpl.families:
-        name = f"family-{family.name}"
+    for fam in plan.families:
+        if fam.proxy_port is None:
+            continue
+        name = f"family-{fam.name}"
         by_name[name] = {
             "name": name,
-            "model": {"default": f"localhost:{family.proxy.port}"},
-            "base_url": f"http://localhost:{family.proxy.port}/v1",
+            "model": {"default": f"localhost:{fam.proxy_port}"},
+            "base_url": f"http://localhost:{fam.proxy_port}/v1",
         }
-
     config["providers"] = list(by_name.values())
     return config
 
 
-def _describe_config_changes(tpl, current_models: Optional[dict]) -> list:
-    """Describe what config changes will be made."""
-    changes = []
-    changes.append(f"  orchestrator: {tpl.orchestrator_node}:8000 (model: {_extract_model_name(tpl.orchestrator.recipe)})")
-    for family in tpl.families:
-        changes.append(f"  family-{family.name}: localhost:{family.proxy.port} ({len(family.models)} models, {len(family.nodes)} nodes)")
+def _describe_config_changes(plan, current_models: Optional[dict]) -> list:
+    """Describe what config changes will be made (from a resolved plan)."""
+    o = plan.orchestrator
+    changes = [f"  orchestrator: {o.node}:{o.port} (model: {o.model})"]
+    for fam in plan.families:
+        port = fam.proxy_port if fam.proxy_port is not None else "—"
+        nodes = sorted({u.node for u in fam.units})
+        changes.append(
+            f"  family-{fam.name}: localhost:{port} "
+            f"({len(fam.units)} units, {len(nodes)} nodes)")
     return changes
 
 
@@ -797,17 +761,13 @@ def _diff_serving_summary(current: Optional[dict], new: dict) -> str:
 # ── Utility helpers ────────────────────────────────────────────────────────
 
 def _extract_model_name(recipe_path: str) -> str:
-    """Resolve the served model name for a recipe.
-
-    Single source of truth: delegates to ClusterTemplate._model_name, which reads
-    the recipe's ``model:`` field (the name vLLM actually serves + the proxy
-    registers). Previously this returned the recipe filename stem instead, so
-    serving.json (which used _model_name) and models.json/config.yaml (which used
-    this) disagreed on the model name for the same recipe — breaking proxy/daemon
-    matching.
-    """
-    from cluster_template_schema import ClusterTemplate
-    return ClusterTemplate._model_name(recipe_path)
+    """Resolve the served model name for a recipe (recipe ``model:`` field, else
+    filename stem). Single source of truth: template_intent._model_name."""
+    try:
+        from . import template_intent as _ti
+    except ImportError:
+        import template_intent as _ti
+    return _ti._model_name(recipe_path)
 
 
 # ── CLI entry point ────────────────────────────────────────────────────────

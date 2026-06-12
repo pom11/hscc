@@ -1,0 +1,23 @@
+# Two models co-located on EACH worker (the "2 models on one Spark" case).
+# Both models in the family run on every selected worker, on distinct vLLM ports
+# (8000, 8001), behind one proxy. At apply, resolve() checks via `sparkrun show`
+# that their combined per-GPU VRAM fits each worker; it refuses otherwise.
+#
+# Topology-free (v2): no IPs, no ports — resolved live. Pick two recipes whose
+# combined per-GPU total fits one Spark (~110 GB usable). Both must be tp=1
+# (a tp>1 model needs the node to itself).
+
+name: colocated-two-models
+version: 2
+description: "One family, two co-located models per worker on distinct ports behind one proxy."
+
+orchestrator:
+  recipe: "qwen3.6-35b-a3b-nvfp4-vllm"
+
+families:
+  - name: dual
+    models:
+      - recipe: "qwen3.6-27b-fp8-vllm"
+      - recipe: "qwen3.6-27b-fp8-vllm"
+    workers: all
+    proxy: true

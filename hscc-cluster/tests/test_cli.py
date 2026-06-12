@@ -8,6 +8,33 @@ PLUGIN_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN_DIR))
 
 from cluster_template_cli import cmd_cluster_template
+import cluster_template
+import template_intent as ti
+import recipe_cost as rc
+from dataclasses import dataclass
+
+
+@dataclass
+class _N:
+    ip: str
+    vram_free_gb: float = 120.0
+
+
+@dataclass
+class _T:
+    orchestrator: _N
+    workers: list
+
+
+@pytest.fixture
+def stub_cluster(monkeypatch):
+    """Stub discovery + recipe cost + recipe-exists so CLI preview/apply/validate
+    resolve against a fake cluster without live sparkrun or real recipe files."""
+    monkeypatch.setattr(cluster_template, "_discover",
+                        lambda: _T(_N("10.0.0.1"), [_N("10.0.0.2"), _N("10.0.0.3")]))
+    monkeypatch.setattr(ti._rc, "recipe_cost",
+                        lambda r: rc.RecipeCost(r, per_gpu_total_gb=30, fits=True))
+    monkeypatch.setattr(cluster_template.Path, "is_file", lambda self: True)
 
 
 class TestCmdClusterTemplateMissingSubcommand:
@@ -44,44 +71,33 @@ class TestCmdClusterTemplateList:
         result = cmd_cluster_template(["list"])
         assert "count" in result
         assert isinstance(result["count"], int)
-        assert result["count"] >= 4  # basic-1 through basic-4 node templates
+        assert result["count"] >= 2  # single-family + colocated-two-models
 
     def test_list_returns_templates(self):
         result = cmd_cluster_template(["list"])
-        assert "templates" in result
         assert isinstance(result["templates"], list)
         assert len(result["templates"]) == result["count"]
 
     def test_list_template_structure(self):
-        result = cmd_cluster_template(["list"])
-        # Each template entry has name, version, cluster_size, description
-        first = result["templates"][0]
-        assert "name" in first
-        assert "version" in first
-        assert "cluster_size" in first
-        assert "description" in first
+        first = cmd_cluster_template(["list"])["templates"][0]
+        assert "name" in first and "version" in first and "description" in first
 
-    def test_list_includes_basic_1_node(self):
-        result = cmd_cluster_template(["list"])
-        names = [t["name"] for t in result["templates"]]
-        assert "basic-1-node" in names
+    def test_list_includes_single_family(self):
+        names = [t["name"] for t in cmd_cluster_template(["list"])["templates"]]
+        assert "single-family" in names
 
 
 class TestCmdClusterTemplatePreview:
     """Test the 'preview' subcommand."""
 
-    def test_preview_valid_template(self):
-        result = cmd_cluster_template(["preview", "basic-1-node"])
-        assert "template" in result
-        assert result["template"] == "basic-1-node"
-        assert "cluster_size" in result
+    def test_preview_valid_template(self, stub_cluster):
+        result = cmd_cluster_template(["preview", "single-family"])
+        assert result["template"] == "single-family"
         assert "description" in result
-        assert "changes" in result
-        assert isinstance(result["changes"], list)
-        assert len(result["changes"]) >= 1
+        assert isinstance(result["changes"], list) and result["changes"]
 
-    def test_preview_includes_change_entries(self):
-        result = cmd_cluster_template(["preview", "basic-1-node"])
+    def test_preview_includes_change_entries(self, stub_cluster):
+        result = cmd_cluster_template(["preview", "single-family"])
         file_actions = [c["file"] for c in result["changes"]]
         assert "serving.json" in file_actions
         assert "models.json" in file_actions
@@ -98,9 +114,8 @@ class TestCmdClusterTemplatePreview:
         assert "Missing template name" in result["error"]
         assert "usage" in result
 
-    def test_preview_no_provisioning_in_changes(self):
-        """Preview should include a provisioning change entry."""
-        result = cmd_cluster_template(["preview", "basic-1-node"])
+    def test_preview_has_provision_entry(self, stub_cluster):
+        result = cmd_cluster_template(["preview", "single-family"])
         actions = [c["action"] for c in result["changes"]]
         assert "provision" in actions
 
@@ -108,18 +123,16 @@ class TestCmdClusterTemplatePreview:
 class TestCmdClusterTemplateApply:
     """Test the 'apply' subcommand."""
 
-    def test_apply_without_confirm_returns_preview(self):
-        """Without --confirm, apply returns a preview status."""
-        result = cmd_cluster_template(["apply", "basic-1-node"])
+    def test_apply_without_confirm_returns_preview(self, stub_cluster):
+        result = cmd_cluster_template(["apply", "single-family"])
         assert result["status"] == "preview"
         assert "Re-call with confirm=true" in result["note"]
         assert "changes" in result
 
-    def test_apply_without_confirm_includes_plan(self):
-        result = cmd_cluster_template(["apply", "basic-1-node"])
+    def test_apply_without_confirm_includes_plan(self, stub_cluster):
+        result = cmd_cluster_template(["apply", "single-family"])
         changes = result["changes"]
-        assert "template" in changes
-        assert "changes" in changes
+        assert "template" in changes and "changes" in changes
 
     def test_apply_missing_name_returns_error(self):
         result = cmd_cluster_template(["apply"])
@@ -132,20 +145,14 @@ class TestCmdClusterTemplateApply:
         assert "not found" in result["error"].lower()
 
 
-
 class TestStatusAndValidateCommands:
     def test_status_subcommand(self):
         result = cmd_cluster_template(["status"])
         assert "applied" in result
 
-    def test_validate_subcommand_good(self):
-        result = cmd_cluster_template(["validate", "hscc-live"])
+    def test_validate_subcommand_good(self, stub_cluster):
+        result = cmd_cluster_template(["validate", "single-family"])
         assert result["ok"] is True
-
-    def test_validate_subcommand_bad(self):
-        result = cmd_cluster_template(["validate", "multi-family-4-node"])
-        assert result["ok"] is False
-        assert result["errors"]
 
     def test_validate_missing_name(self):
         result = cmd_cluster_template(["validate"])
