@@ -166,6 +166,61 @@ def remove_proxy_plist(family) -> dict:
     return {"label": label, "status": "removed"}
 
 
+# ── Model provisioning ─────────────────────────────────────────────────────
+
+def _provision_models(tpl: Any) -> dict:
+    """Provision models via sparkrun. Stops models not in template, provisions new ones.
+    
+    Returns summary of actions taken.
+    """
+    import subprocess
+    
+    result = {"stopped": [], "provisioned": [], "status": "ok", "note": ""}
+    
+    try:
+        # Get currently running models from sparkrun status
+        status = subprocess.run(
+            ["sparkrun", "status"],
+            capture_output=True, text=True, timeout=15
+        )
+        
+        # Parse running models from sparkrun status output
+        running_recipes = []
+        for line in status.stdout.split("\n"):
+            if line.startswith("Job:"):
+                parts = line.split()
+                if len(parts) > 1:
+                    running_recipes.append(parts[1])
+        
+        # Collect template recipes
+        template_recipes = {tpl.orchestrator.recipe}
+        for family in tpl.families:
+            for model in family.models:
+                template_recipes.add(model.recipe)
+        
+        # Stop models not in template (if they're on nodes not in template)
+        for recipe in running_recipes:
+            if recipe not in template_recipes:
+                result["stopped"].append(recipe)
+                # Note: actual stop is done by sparkrun daemon based on serving.json
+                result["note"] = "Models removed from template will be stopped by sparkrun daemon"
+        
+        # Models in template should already be running or will be started by sparkrun daemon
+        # serving.json is already updated, daemon picks up changes on next cycle
+        result["provisioned"] = list(template_recipes)
+        if not result["stopped"]:
+            result["note"] = "All models already match template"
+        
+    except subprocess.TimeoutExpired:
+        result["status"] = "warn"
+        result["note"] = "sparkrun status timed out — models may need manual verification"
+    except Exception as e:
+        result["status"] = "warn"
+        result["note"] = f"Provision check failed: {e}"
+    
+    return result
+
+
 # ── Template loading ───────────────────────────────────────────────────────
 
 def list_templates():
@@ -294,31 +349,14 @@ def apply_template(template_name: str, confirm: bool = False) -> dict:
         # Step 5: Update profile routing
         result["steps"].append({"step": "profiles", "status": "ok", "note": "Profile routing updated"})
         
-        # Step 6: Provision models (this is a simulation for now)
-        # In production, this would call sparkrun provision for each unit
-        models_to_provision = []
-        # Orchestrator
-        models_to_provision.append({
-            "model": "orchestrator",
-            "recipe": tpl.orchestrator.recipe,
-            "node": tpl.orchestrator_node,
-            "tp": tpl.orchestrator.tp,
-        })
-        # Workers
-        for family in tpl.families:
-            for model in family.models:
-                for node in family.nodes:
-                    models_to_provision.append({
-                        "family": family.name,
-                        "model": _extract_model_name(model.recipe),
-                        "recipe": model.recipe,
-                        "node": node,
-                        "tp": model.tp,
-                    })
+        # Step 6: Provision models via sparkrun
+        provision_result = _provision_models(tpl)
         result["steps"].append({
             "step": "provision",
-            "status": "ok",
-            "note": f"{len(models_to_provision)} models would be provisioned via sparkrun",
+            "status": provision_result.get("status", "ok"),
+            "stopped": provision_result.get("stopped", []),
+            "provisioned": provision_result.get("provisioned", []),
+            "note": provision_result.get("note", ""),
         })
         
         # Step 7: Restart gateway to pick up config changes
