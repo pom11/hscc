@@ -32,6 +32,8 @@ _READ_TOOLS = [
      "Pick an idle worker node for provisioning."),
     ("discovery_status", S.DISCOVERY_STATUS_SCHEMA, discovery.discovery_status, "🛰️",
      "Live cluster topology map (orchestrator/workers/NAS, source); probe=true for VRAM/power/health."),
+    ("nas_status", S.NAS_STATUS_SCHEMA, discovery.nas_status, "🗄️",
+     "NAS health: discovery's NAS node + a single mount probe (no fan-out)."),
 ]
 
 _OPS_TOOLS = [

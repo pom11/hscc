@@ -282,6 +282,28 @@ def discover(*, refresh: bool = False, probe: bool = False) -> ClusterTopology:
     return topo
 
 
+def nas_status(args=None, **kwargs) -> dict:
+    """Read-only NAS health: discovery's NAS node + a mount probe from one worker.
+
+    Honors the staging constraint (NAS 10G/SATA caps parallel pulls) — this is a
+    single lightweight probe, never a fan-out. Returns {ok, nas, mounted, detail}.
+    """
+    try:
+        topo = discover()
+    except DiscoveryError as e:
+        return {"ok": False, "error": str(e)}
+    if not topo.nas:
+        return {"ok": True, "nas": None, "note": "no NAS configured (optional)"}
+    probe_node = topo.workers[0].ip if topo.workers else topo.orchestrator.ip
+    r = _run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+              f"{topo.orchestrator.ssh_user}@{probe_node}",
+              "ls /mnt/nas >/dev/null 2>&1 && echo ok || echo fail"], timeout=15)
+    mounted = r["ok"] and "ok" in (r["stdout"] or "")
+    return {"ok": True, "nas": topo.nas.ip, "probe_node": probe_node,
+            "mounted": mounted,
+            "detail": "mounted" if mounted else "not mounted / unreachable"}
+
+
 def discovery_status(args=None, **kwargs) -> dict:
     """Read-only tool: full topology map + source. probe=true for live caps."""
     do_probe = bool((args or {}).get("probe"))

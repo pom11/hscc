@@ -17,6 +17,7 @@ DISCOVERY_STATUS_SCHEMA = {
     },
     "additionalProperties": False,
 }
+NAS_STATUS_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
 
 PROVISION_MODEL_SCHEMA = {
     "type": "object",

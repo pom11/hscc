@@ -31,6 +31,12 @@ class TestIndividualChecks:
     def test_gateway_is_nonfatal(self):
         assert doctor._gateway_running().fatal is False
 
+    def test_nas_nonfatal_and_optional(self):
+        none_nas = doctor._nas_ok(_runner=lambda: None)
+        assert none_nas.ok is True and none_nas.fatal is False
+        with_nas = doctor._nas_ok(_runner=lambda: "/mnt/nas")
+        assert with_nas.ok is True and "/mnt/nas" in with_nas.detail
+
 
 class TestRunDoctor:
     def test_all_good(self, tmp_path):
