@@ -364,6 +364,81 @@ class TestApplyIntegration:
         ct.apply_template("hscc-live", confirm=True)
         assert ct.applied_status()["applied"]["template"] == "hscc-live"
 
+    def test_failed_apply_rolls_back_to_prior_state(self, tmp_path, monkeypatch):
+        """G4/5e: a half-completed apply restores the pre-apply snapshot so the
+        cluster is left in its prior state, not corrupted."""
+        import cluster_template as ct
+        import subprocess
+        from unittest.mock import MagicMock
+        hscc = tmp_path / "hscc"; hscc.mkdir()
+        for attr, val in [("HSCC_DIR", hscc), ("SERVING_JSON", hscc / "serving.json"),
+                          ("MODELS_JSON", hscc / "models.json"),
+                          ("CONFIG_YAML", hscc / "config.yaml"),
+                          ("PROXY_DIR", hscc / "proxies"),
+                          ("APPLIED_STATE", hscc / "applied_template.json"),
+                          ("ROLLBACK_DIR", hscc / "rollback")]:
+            monkeypatch.setattr(ct, attr, val)
+        monkeypatch.setattr(subprocess, "run",
+                            lambda *a, **k: MagicMock(returncode=0, stderr="", stdout=""))
+        # Seed a known-good prior serving.json (the state to restore).
+        prior = {"version": 1, "units": [{"id": "prior", "role": "orchestrator",
+                                          "nodes": ["10.0.0.1"]}]}
+        (hscc / "serving.json").write_text(json.dumps(prior))
+
+        # Make provisioning blow up AFTER serving.json was overwritten.
+        def boom(tpl, **k):
+            raise RuntimeError("provision exploded mid-apply")
+        monkeypatch.setattr(ct, "_provision_models", boom)
+
+        res = ct.apply_template("hscc-live", confirm=True)
+        assert res["success"] is False
+        assert res["rolled_back"] is True
+        # serving.json restored to the prior content, not the half-applied one
+        restored = json.loads((hscc / "serving.json").read_text())
+        assert restored["units"][0]["id"] == "prior"
+
+
+class TestSnapshotRollback:
+    def test_snapshot_and_restore_roundtrip(self, tmp_path, monkeypatch):
+        import cluster_template as ct
+        hscc = tmp_path / "hscc"; hscc.mkdir()
+        monkeypatch.setattr(ct, "HSCC_DIR", hscc)
+        monkeypatch.setattr(ct, "CONFIG_YAML", hscc / "config.yaml")
+        monkeypatch.setattr(ct, "ROLLBACK_DIR", hscc / "rollback")
+        (hscc / "serving.json").write_text('{"v": 1}')
+        (hscc / "config.yaml").write_text("a: 1\n")
+        bundle = ct._snapshot_state()
+        assert bundle and (bundle / "serving.json").exists()
+        # mutate, then restore
+        (hscc / "serving.json").write_text('{"v": 999}')
+        assert ct._restore_snapshot(bundle) is True
+        assert json.loads((hscc / "serving.json").read_text())["v"] == 1
+
+    def test_snapshot_none_when_nothing_exists(self, tmp_path, monkeypatch):
+        import cluster_template as ct
+        hscc = tmp_path / "hscc"; hscc.mkdir()
+        monkeypatch.setattr(ct, "HSCC_DIR", hscc)
+        monkeypatch.setattr(ct, "CONFIG_YAML", hscc / "config.yaml")
+        monkeypatch.setattr(ct, "ROLLBACK_DIR", hscc / "rollback")
+        assert ct._snapshot_state() is None
+
+    def test_rollback_bundles_pruned(self, tmp_path, monkeypatch):
+        import cluster_template as ct
+        import os as _os
+        hscc = tmp_path / "hscc"; hscc.mkdir()
+        monkeypatch.setattr(ct, "HSCC_DIR", hscc)
+        monkeypatch.setattr(ct, "CONFIG_YAML", hscc / "config.yaml")
+        monkeypatch.setattr(ct, "ROLLBACK_DIR", hscc / "rollback")
+        (hscc / "serving.json").write_text("{}")
+        # pre-seed > MAX_ROLLBACKS old bundles
+        rb = hscc / "rollback"; rb.mkdir()
+        for i in range(ct.MAX_ROLLBACKS + 4):
+            b = rb / f"old-{i}"; b.mkdir()
+            (b / "serving.json").write_text("{}")
+            _os.utime(b, (1000 + i, 1000 + i))
+        ct._snapshot_state()  # makes one more + prunes
+        assert len([p for p in rb.iterdir() if p.is_dir()]) <= ct.MAX_ROLLBACKS
+
 
 class TestValidateAndStatusHelpers:
     def test_validate_template_good(self):

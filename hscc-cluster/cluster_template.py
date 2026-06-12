@@ -56,6 +56,63 @@ def _prune_backups(path: Path, keep: int = MAX_BACKUPS) -> None:
             pass
 
 
+ROLLBACK_DIR = HSCC_DIR / "rollback"
+MAX_ROLLBACKS = 5
+# Files captured in a pre-apply snapshot for atomic rollback (G4/5e).
+_SNAPSHOT_FILES = ("serving.json", "models.json", "applied_template.json")
+
+
+def _snapshot_state() -> Optional[Path]:
+    """Copy the current serving/models/applied-template + config.yaml into a
+    timestamped rollback bundle. Returns the bundle path (or None if nothing to
+    snapshot). Pruned to MAX_ROLLBACKS most-recent bundles."""
+    sources = [(HSCC_DIR / f) for f in _SNAPSHOT_FILES] + [CONFIG_YAML]
+    if not any(s.exists() for s in sources):
+        return None
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    bundle = ROLLBACK_DIR / ts
+    try:
+        bundle.mkdir(parents=True, exist_ok=True)
+        for src in sources:
+            if src.exists():
+                shutil.copy2(str(src), str(bundle / src.name))
+    except OSError:
+        return None
+    # prune old bundles
+    try:
+        bundles = sorted([p for p in ROLLBACK_DIR.iterdir() if p.is_dir()],
+                         key=lambda p: p.stat().st_mtime, reverse=True)
+        for old in bundles[MAX_ROLLBACKS:]:
+            shutil.rmtree(old, ignore_errors=True)
+    except OSError:
+        pass
+    return bundle
+
+
+def _restore_snapshot(bundle: Optional[Path]) -> bool:
+    """Restore files from a snapshot bundle back to their live locations.
+    Returns True if a restore happened."""
+    if not bundle or not Path(bundle).is_dir():
+        return False
+    restored = False
+    for f in _SNAPSHOT_FILES:
+        src = bundle / f
+        if src.exists():
+            try:
+                shutil.copy2(str(src), str(HSCC_DIR / f))
+                restored = True
+            except OSError:
+                pass
+    cfg = bundle / CONFIG_YAML.name
+    if cfg.exists():
+        try:
+            shutil.copy2(str(cfg), str(CONFIG_YAML))
+            restored = True
+        except OSError:
+            pass
+    return restored
+
+
 def read_json(path: Path) -> Optional[dict]:
     """Read and parse a JSON file."""
     try:
@@ -488,7 +545,12 @@ def apply_template(template_name: str, confirm: bool = False) -> dict:
         raise TemplateValidationError(problems)
 
     result = {"template": tpl.name, "steps": [], "success": True}
-        
+
+    # Snapshot the live state BEFORE any write, so a half-completed apply can be
+    # rolled back atomically (G4/5e — we corrupted a live cluster once this way).
+    snapshot = _snapshot_state()
+    result["rollback_bundle"] = str(snapshot) if snapshot else None
+
     try:
         # Ensure cluster-template package dir is on path for imports
         _pkg_dir = str(Path(__file__).parent)
@@ -560,6 +622,16 @@ def apply_template(template_name: str, confirm: bool = False) -> dict:
         result["success"] = False
         result["error"] = str(e)
         result["steps"].append({"step": "error", "status": "fail", "message": str(e)})
+        # Atomic rollback: restore the pre-apply snapshot so the cluster is left
+        # in its prior state, not a half-applied one (G4/5e).
+        rolled_back = _restore_snapshot(snapshot)
+        result["rolled_back"] = rolled_back
+        result["steps"].append({
+            "step": "rollback",
+            "status": "ok" if rolled_back else "warn",
+            "note": ("restored serving/models/config from snapshot"
+                     if rolled_back else "no snapshot to restore"),
+        })
 
     # Record which template is now live (so `status` can answer "what's applied?")
     if result["success"]:
