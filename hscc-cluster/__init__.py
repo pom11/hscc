@@ -70,3 +70,11 @@ def register(ctx) -> None:
     for name, schema, handler, emoji, desc in _READ_TOOLS + _OPS_TOOLS + _DEBUG_TOOLS + _HEAL_TOOLS:
         ctx.register_tool(name=name, toolset="hscc-cluster", schema=schema,
                           handler=_stringify(handler), emoji=emoji, description=desc)
+    # WS4: on kanban re-dispatch, post an idempotent-resume note so the worker
+    # continues from prior branch state instead of redoing finished work.
+    if hasattr(ctx, "register_hook"):
+        try:
+            from . import workflow
+            ctx.register_hook("pre_kanban_dispatch", workflow.on_pre_kanban_dispatch)
+        except Exception:
+            pass

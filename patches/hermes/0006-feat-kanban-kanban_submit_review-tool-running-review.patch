@@ -1,7 +1,7 @@
 From 327c7904ac41a0b845a3d47faf8b7d8df7a5ac25 Mon Sep 17 00:00:00 2001
 From: pom11 <parsecoriginalmastercraft@gmail.com>
 Date: Tue, 9 Jun 2026 12:39:58 +0300
-Subject: [PATCH 6/6] feat(kanban): kanban_submit_review tool + running->review
+Subject: [PATCH 6/8] feat(kanban): kanban_submit_review tool + running->review
  transition
 
 Add submit_review_task transition (running -> review) so workers can

@@ -1,7 +1,7 @@
 From df66b812f83a0b5de358c0fadacfa9097ac58a96 Mon Sep 17 00:00:00 2001
 From: pom11 <parsecoriginalmastercraft@gmail.com>
 Date: Tue, 9 Jun 2026 12:17:57 +0300
-Subject: [PATCH 3/6] feat(kanban): auto_review config policy reader
+Subject: [PATCH 3/8] feat(kanban): auto_review config policy reader
 
 ---
  hermes_cli/kanban_decompose.py      | 18 ++++++++++++++++++

@@ -1,7 +1,7 @@
 From 63ec4880581d39a14bba5df9cc8182cd2c333ceb Mon Sep 17 00:00:00 2001
 From: pom11 <parsecoriginalmastercraft@gmail.com>
 Date: Tue, 9 Jun 2026 11:13:22 +0300
-Subject: [PATCH 1/6] fix(kanban): rewrite unknown create-assignee to
+Subject: [PATCH 1/8] fix(kanban): rewrite unknown create-assignee to
  default_assignee
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
