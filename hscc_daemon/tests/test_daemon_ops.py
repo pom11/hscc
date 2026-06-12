@@ -167,5 +167,40 @@ class TestEnsureStateDir:
         assert (tmp_hfcc_dir / "state").is_dir()
 
 
+class TestPruneDeadFiles:
+    """prune_dead_files() removes .corrupt-*/.stale + caps .bak.* groups."""
+
+    def test_removes_corrupt_and_stale(self, tmp_path):
+        from hscc_daemon import daemon_ops
+        (tmp_path / "serving.json.corrupt-112313").write_text("x")
+        (tmp_path / "models.json.corrupt-112344").write_text("x")
+        (tmp_path / "autonomy.stale").write_text("on")
+        (tmp_path / "watchdog_block.json.stale").write_text("{}")
+        (tmp_path / "serving.json").write_text("{}")        # live file — keep
+        res = daemon_ops.prune_dead_files(str(tmp_path))
+        assert res["removed_dead"] == 4
+        assert not list(tmp_path.glob("*.corrupt-*"))
+        assert not list(tmp_path.glob("*.stale"))
+        assert (tmp_path / "serving.json").exists()         # live untouched
+
+    def test_caps_bak_groups(self, tmp_path):
+        import os
+        from hscc_daemon import daemon_ops
+        for stem in ("serving.json", "models.json"):
+            for i in range(9):
+                f = tmp_path / f"{stem}.bak.{1000+i}"
+                f.write_text("{}")
+                os.utime(f, (1000 + i, 1000 + i))
+        res = daemon_ops.prune_dead_files(str(tmp_path))
+        assert len(list(tmp_path.glob("serving.json.bak.*"))) == 5
+        assert len(list(tmp_path.glob("models.json.bak.*"))) == 5
+        assert res["pruned_bak"] == 8                       # 2 groups × (9-5)... =8
+
+    def test_idempotent_and_safe_on_empty(self, tmp_path):
+        from hscc_daemon import daemon_ops
+        res = daemon_ops.prune_dead_files(str(tmp_path))
+        assert res == {"removed_dead": 0, "pruned_bak": 0}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

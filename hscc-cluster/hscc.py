@@ -18,6 +18,13 @@ import json
 import subprocess
 import os
 
+# ── Template subcommand ────────────────────────────────────────────────────
+
+def cmd_cluster_template():
+    """Route cluster-template commands to the template engine."""
+    from cluster_template_cli import cmd_cluster_template as _cmd
+    return _cmd(sys.argv[2:])
+
 # ── Constants ─────────────────────────────────────────────────────────────
 
 SPARKRUN = "sparkrun"
@@ -238,6 +245,7 @@ COMMANDS = {
     "jobs": cmd_jobs,
     "stop": cmd_stop,
     "info": cmd_info,
+    "cluster-template": cmd_cluster_template,
 }
 
 
@@ -251,12 +259,13 @@ Hermes Spark Cluster Control (HSCC)
 Usage: hscc-cluster <command> [args]
 
 Commands:
-  cluster-status   Show running workloads and idle hosts
-  hosts            List all cluster hosts and saved clusters
-  monitor          Single snapshot of CPU/RAM/GPU metrics
-  jobs             List all sparkrun jobs running
-  stop <id>        Stop a running workload by container ID
-  info             Detailed cluster configuration
+  cluster-status      Show running workloads and idle hosts
+  hosts               List all cluster hosts and saved clusters
+  monitor             Single snapshot of CPU/RAM/GPU metrics
+  jobs                List all sparkrun jobs running
+  stop <id>           Stop a running workload by container ID
+  info                Detailed cluster configuration
+  cluster-template    Manage cluster templates (list|preview|apply)
         """.strip())
         sys.exit(0)
 
@@ -276,6 +285,9 @@ Commands:
                 sys.exit(1)
             container_id = sys.argv[2]
             result = fn(container_id)
+        elif cmd == "cluster-template":
+            # Pass remaining args through to template CLI
+            result = fn()
         else:
             result = fn()
 

@@ -1,0 +1,18 @@
+# The live HSCC cluster, as a v2 intent template.
+# Topology-free: no IPs, no ports — resolved from the live sparkrun cluster at
+# apply (orchestrator → gateway node, coding family → all workers). Uses the
+# full local-fixed recipe paths so pre-apply recipe-exists validation passes.
+
+name: hscc-live
+version: 2
+description: "Live cluster: A3B-NVFP4 orchestrator + one coding family (27B-FP8) across all workers, behind the proxy."
+
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+
+families:
+  - name: coding
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+    workers: all
+    proxy: true
