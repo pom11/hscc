@@ -23,6 +23,12 @@ import time
 BEGIN = "<!-- HSCC:BEGIN (managed by hscc-bootstrap — edit above/below, not inside) -->"
 END = "<!-- HSCC:END -->"
 
+# A second managed region for the identity preamble (line 1 of SOUL). Kept
+# separate so it can carry the HSCC name + character while staying topology-free,
+# and so a hand-edited hardcoded-IP line can't drift back in (M4).
+HEAD_BEGIN = "<!-- HSCC:HEADER:BEGIN (managed — topology-free identity) -->"
+HEAD_END = "<!-- HSCC:HEADER:END -->"
+
 HSCC_SOUL_BLOCK = """\
 ## You orchestrate — you do NOT do project work yourself
 
@@ -45,10 +51,12 @@ rather than working around them.
 
 ## Cluster ops = hscc-cluster toolset
 
-Observe before acting: use the read tools (`cluster_status`, `model_health`, \
-`list_recipes`, `vllm_logs`, `node_diagnostics`, `nas_diagnose`) to read live \
-state (nodes, endpoints, what's serving) before changing it — never assume the \
-topology. To change cluster shape use `provision_model` (sparkrun run; \
+Observe before acting: use the read tools (`discovery_status`, `cluster_status`, \
+`model_health`, `list_recipes`, `vllm_logs`, `node_diagnostics`, `nas_diagnose`) \
+to read live state before changing it — NEVER assume topology. `discovery_status` \
+is the single source of truth for nodes/roles/NAS (live from the sparkrun \
+cluster, auto-adopting new nodes; pass `probe=true` for VRAM/power/health). To \
+change cluster shape use `provision_model` (sparkrun run; \
 node='auto' picks an idle worker; returns the live base_url), `stop_model`, \
 `restart_model`. Self-heal with `remount_nas`, `repair_nas_export`, \
 `reap_orphans`. These are GUARDED — they return a preview unless you pass \
@@ -74,6 +82,16 @@ bare command previews, `/orch-restart confirm` executes).
 A wedged engine (front-end answers /health=200 but generation hangs, GPU pinned) \
 will NOT self-heal — the watchdog can't see it. `/orch-restart` is the fix.
 
+## Working-dir discipline
+
+All development happens under `~/dev/<repo>` — one checkout per project. NEVER \
+create duplicate clones of a repo; if a repo already exists under `~/dev`, work \
+in it. The HSCC plugin repo lives at `~/dev/hscc` and is installed into \
+`~/.hermes/plugins` by `hscc-bootstrap` (edit in the repo, run bootstrap, the \
+runtime updates) — never edit `~/.hermes/plugins` directly as if it were the \
+source. Keep work on a feature branch; reviewed work lands on the integration \
+branch; main is the human's call.
+
 ## Safety
 
 Never provision a model without work assigned — the daemon idle-reaper kills \
@@ -85,17 +103,26 @@ the tool's preview, then re-call with `confirm=true`). Never edit sparkrun \
 recipes; switch to an alternative if one breaks. Never patch Hermes core.\
 """
 
-_DEFAULT_SOUL_HEADER = """\
-You are Hermes, the operations orchestrator for a DGX Spark GPU cluster and a \
-native Hermes agent workflow.
+# Topology-free identity preamble (the HSCC name + character). No IPs — the
+# agent reads live topology via discovery_status. Managed via HEAD sentinels.
+_SOUL_IDENTITY = """\
+You are **HSCC** — the orchestrator of a DGX Spark GPU cluster and a native \
+Hermes agent fleet. You command the cluster and route work to specialized \
+workers; you don't grind tasks yourself. You are calm, precise, and decisive — \
+an operator who reads live state before acting and says exactly what changed. \
+You never hardcode the cluster's shape: you discover it.
 """
 
 _OPS_PERSONA_HEADER = (
-    "You are Hermes, operations co-pilot for a DGX Spark GPU cluster and a "
-    "native Hermes agent workflow. Be terse and action-oriented: lead with the "
-    "decision, result, or command, then only the rationale that matters. No "
-    "filler, no emoji."
+    "You are HSCC, orchestrator of a DGX Spark GPU cluster and a native Hermes "
+    "agent fleet. Be terse and action-oriented: lead with the decision, result, "
+    "or command, then only the rationale that matters. No filler, no emoji. Read "
+    "live cluster state via discovery before acting; never assume topology."
 )
+
+
+def _wrapped_header():
+    return f"{HEAD_BEGIN}\n{_SOUL_IDENTITY.rstrip()}\n{HEAD_END}"
 
 
 def _wrapped_block():
@@ -111,6 +138,22 @@ def _replace_or_append(text, block):
     return f"{text.rstrip()}\n\n{block}\n"
 
 
+def _replace_header(text, header):
+    """Replace the managed identity header at the top of SOUL.
+
+    If HEAD sentinels exist, replace between them. Otherwise treat the first
+    paragraph (up to the first blank line) as the legacy hardcoded preamble and
+    replace it — this strips the old `...10.0.0.244...` line (M4). User
+    content below the first blank line is preserved."""
+    if HEAD_BEGIN in text and HEAD_END in text:
+        post = text.split(HEAD_END, 1)[1]
+        return f"{header}\n{post.lstrip()}".rstrip() + "\n"
+    # No header sentinels yet: replace the leading paragraph (legacy preamble).
+    parts = text.split("\n\n", 1)
+    body = parts[1] if len(parts) == 2 else ""
+    return f"{header}\n\n{body.lstrip()}".rstrip() + "\n"
+
+
 def _backup(path):
     shutil.copy(path, f"{path}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
 
@@ -122,15 +165,17 @@ def install_soul(soul_path):
     Idempotent: if the block is already current, no write, returns 'unchanged'.
     """
     block = _wrapped_block()
+    header = _wrapped_header()
     if not os.path.exists(soul_path):
         os.makedirs(os.path.dirname(soul_path), exist_ok=True)
         with open(soul_path, "w") as fh:
-            fh.write(f"{_DEFAULT_SOUL_HEADER}\n{block}\n")
+            fh.write(f"{header}\n\n{block}\n")
         return "created"
 
     with open(soul_path) as fh:
         current = fh.read()
-    updated = _replace_or_append(current, block)
+    updated = _replace_header(current, header)   # strip/refresh identity (M4)
+    updated = _replace_or_append(updated, block)  # refresh guidance block
     if updated == current:
         return "unchanged"
     _backup(soul_path)
@@ -160,12 +205,16 @@ def install_personality(config_path, name="ops"):
     if not isinstance(pers, dict):
         return "bad-config"
 
+    header = f"{HEAD_BEGIN}\n{_OPS_PERSONA_HEADER}\n{HEAD_END}"
     existing = pers.get(name)
     if not isinstance(existing, str) or not existing.strip():
-        new_text = f"{_OPS_PERSONA_HEADER}\n\n{block}\n"
+        new_text = f"{header}\n\n{block}\n"
         action = "seeded"
     else:
-        new_text = _replace_or_append(existing, block)
+        # Strip/refresh the identity preamble (M4: ops persona line 1 also
+        # hardcoded IPs) then refresh the guidance block.
+        new_text = _replace_header(existing, header)
+        new_text = _replace_or_append(new_text, block)
         if new_text == existing:
             return "unchanged"
         action = "replaced" if (BEGIN in existing) else "appended"
