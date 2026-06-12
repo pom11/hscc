@@ -1,0 +1,16 @@
+# Single-node cluster (gateway only)
+# Useful for local development/testing before spinning up workers
+
+name: basic-1-node
+version: 1
+cluster_size: 1
+description: "Gateway only — orchestrator model, no workers. For local dev/testing."
+
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+  tp: 1
+  pp: 1
+
+orchestrator_node: "192.168.88.244"
+
+families: []
