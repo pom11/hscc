@@ -45,9 +45,6 @@ nemotron-550b **64 GB (tp=4, needs 4 nodes)**.
 | `4node/` | **coding** | orch + 3× 27B-FP8 — **the live setup** |
 | `4node/` | coding-plus-fast | coding (2× 27B) + fast (1× A3B-FP8), separate proxies |
 | `4node/` | colocated-dual | 3 workers each running **2× A3B-FP8** (89.8 GB/GPU) |
-| `5node/` | coding | orch + 4× 27B-FP8 |
-| `6node/` | coding · coding-plus-fast | orch + 5 workers (single- or two-family) |
-| `7node/` | coding | orch + 6× 27B-FP8 |
 | `8node/` | coding · coding-plus-fast | orch + 7 workers (single- or two-family) |
 
 Plus the flat top-level: `single-family`, `colocated-two-models`, `hscc-live`.
