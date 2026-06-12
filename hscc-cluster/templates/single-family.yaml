@@ -1,0 +1,17 @@
+# Single worker family — all workers serve one model behind one proxy.
+# Topology-free (v2): no IPs, no ports. Nodes + ports are resolved from the live
+# sparkrun cluster at apply time. Works on a 2-node or a 40-node cluster unchanged.
+
+name: single-family
+version: 2
+description: "Orchestrator + one coding family across all workers, load-balanced behind a proxy."
+
+orchestrator:
+  recipe: "qwen3.6-35b-a3b-nvfp4-vllm"
+
+families:
+  - name: coding
+    models:
+      - recipe: "qwen3.6-27b-fp8-vllm"
+    workers: all
+    proxy: true
