@@ -11,6 +11,6 @@ orchestrator:
   tp: 1
   pp: 1
 
-orchestrator_node: "192.168.88.244"
+orchestrator_node: "192.0.2.10"
 
 families: []

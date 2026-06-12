@@ -11,7 +11,7 @@ orchestrator:
   tp: 1
   pp: 1
 
-orchestrator_node: "192.168.88.244"
+orchestrator_node: "192.0.2.10"
 
 families:
   - name: general
@@ -20,7 +20,7 @@ families:
         tp: 1
         pp: 1
     nodes:
-      - "192.168.88.246"
-      - "192.168.88.247"
+      - "192.0.2.11"
+      - "192.0.2.12"
     proxy:
       port: 4001

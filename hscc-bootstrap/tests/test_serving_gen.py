@@ -33,3 +33,17 @@ def test_keepalive_false_omits_flag():
         recipe="r", model="m", port=8000, keepalive=False)
     workers = [u for u in s["units"] if u["role"] == "worker"]
     assert all("keepalive" not in w for w in workers)
+
+
+def test_same_last_octet_different_subnet_no_id_collision():
+    """Two hosts sharing a last octet on different subnets (CX7 dual-subnet)
+    must get DISTINCT unit ids (regression: ids were derived from last octet)."""
+    cluster = {"hosts": ["192.168.88.10", "10.0.0.10", "172.16.0.10"]}
+    s = serving_gen.build_serving(
+        cluster, orchestrator="192.168.88.10",
+        recipe="r", model="m", port=8000, keepalive=True)
+    ids = [u["id"] for u in s["units"]]
+    assert len(ids) == len(set(ids)), f"duplicate unit ids: {ids}"
+    # workers are the two non-orchestrator .10 hosts
+    workers = [u for u in s["units"] if u["role"] == "worker"]
+    assert len({u["id"] for u in workers}) == 2
