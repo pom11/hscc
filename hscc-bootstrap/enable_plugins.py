@@ -51,13 +51,20 @@ REJECT_ESCALATE_LIMIT = int(os.environ.get("HSCC_REJECT_ESCALATE_LIMIT", "3"))
 MAX_CONCURRENT_CHILDREN = int(os.environ.get("HSCC_MAX_CONCURRENT_CHILDREN", "9"))
 # Context-compaction: compact rarely (high threshold) and run the summarization
 # on a dedicated endpoint, not the main model — otherwise a big summary prompt
-# competes with real work and wedges. Default target is the orchestrator (set
-# the real host via HSCC_COMPACT_URL/_MODEL at bootstrap).
+# competes with real work and wedges the orchestrator (H1). Default the summary
+# endpoint to the WORKER proxy (:4000) so compaction never runs on the
+# orchestrator; override with HSCC_COMPACT_URL/_MODEL.
 COMPACT_THRESHOLD = float(os.environ.get("HSCC_COMPACT_THRESHOLD", "0.8"))
-COMPACT_URL = os.environ.get("HSCC_COMPACT_URL", "")
-COMPACT_MODEL = os.environ.get("HSCC_COMPACT_MODEL", "")
+COMPACT_URL = os.environ.get("HSCC_COMPACT_URL", WORKER_PROXY_URL)
+COMPACT_MODEL = os.environ.get("HSCC_COMPACT_MODEL", WORKER_MODEL)
 COMPACT_KEY = os.environ.get("HSCC_COMPACT_KEY", "sk-sparkrun")
 COMPACT_TIMEOUT = int(os.environ.get("HSCC_COMPACT_TIMEOUT", "90"))
+
+# M5: a wedged orchestrator (200-but-hangs) should degrade to the worker LB
+# instead of hanging. Seed one fallback provider = the worker proxy.
+FALLBACK_MODEL = os.environ.get("HSCC_FALLBACK_MODEL", WORKER_MODEL)
+FALLBACK_URL = os.environ.get("HSCC_FALLBACK_URL", WORKER_PROXY_URL)
+FALLBACK_KEY = os.environ.get("HSCC_FALLBACK_KEY", "sk-sparkrun")
 
 
 def _ensure_plugins_enabled(cfg, plugins):
@@ -198,6 +205,23 @@ def _ensure_compaction(cfg):
     return changed
 
 
+def _ensure_fallback(cfg):
+    """Seed a fallback provider = the worker LB (M5), so a wedged orchestrator
+    degrades to the worker tier instead of hanging. Only fills an EMPTY
+    fallback_providers — an operator-defined chain is preserved.
+    """
+    cur = cfg.get("fallback_providers")
+    if isinstance(cur, list) and cur:
+        return []          # operator already has a chain — keep it
+    cfg["fallback_providers"] = [{
+        "provider": "custom",
+        "model": FALLBACK_MODEL,
+        "base_url": FALLBACK_URL,
+        "api_key": FALLBACK_KEY,
+    }]
+    return ["fallback_providers"]
+
+
 def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS):
     """Ensure HSCC plugins + toolsets + fleet routing are wired in config_path.
 
@@ -208,7 +232,7 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS):
     import yaml
 
     empty = {"plugins": [], "toolsets": [], "kanban": [], "delegation": [],
-             "compaction": []}
+             "compaction": [], "fallback": []}
     if not os.path.exists(config_path):
         return empty
     with open(config_path) as fh:
@@ -221,9 +245,10 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS):
     changed_kanban = _ensure_kanban_routing(cfg)
     changed_delegation = _ensure_delegation(cfg)
     changed_compaction = _ensure_compaction(cfg)
+    changed_fallback = _ensure_fallback(cfg)
 
     if (added_plugins or added_toolsets or changed_kanban or changed_delegation
-            or changed_compaction):
+            or changed_compaction or changed_fallback):
         import shutil
         import time
         shutil.copy(config_path,
@@ -233,7 +258,7 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS):
 
     return {"plugins": added_plugins, "toolsets": added_toolsets,
             "kanban": changed_kanban, "delegation": changed_delegation,
-            "compaction": changed_compaction}
+            "compaction": changed_compaction, "fallback": changed_fallback}
 
 
 if __name__ == "__main__":
