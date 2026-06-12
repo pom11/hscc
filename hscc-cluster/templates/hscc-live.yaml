@@ -13,7 +13,7 @@ orchestrator:
   tp: 1
   pp: 1
 
-orchestrator_node: "10.0.0.244"
+orchestrator_node: "192.0.2.10"
 
 families:
   - name: coding
@@ -22,8 +22,8 @@ families:
         tp: 1
         pp: 1
     nodes:
-      - "10.0.0.246"
-      - "10.0.0.247"
-      - "10.0.0.248"
+      - "192.0.2.11"
+      - "192.0.2.12"
+      - "192.0.2.13"
     proxy:
       port: 4000

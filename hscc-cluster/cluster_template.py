@@ -35,7 +35,26 @@ CONFIG_YAML = HERMES_HOME / "config.yaml"
 PROXY_DIR = HSCC_DIR / "proxies"
 APPLIED_STATE = HSCC_DIR / "applied_template.json"  # which template is live
 
+# Cap timestamped backups per file so re-applies don't accumulate forever
+# (a prior version left 100+ serving.json.bak.* / models.json.bak.* in ~/.hscc).
+MAX_BACKUPS = 5
+
 # ── Helpers ────────────────────────────────────────────────────────────────
+
+def _prune_backups(path: Path, keep: int = MAX_BACKUPS) -> None:
+    """Keep only the newest ``keep`` ``<path>.bak.<epoch>`` siblings; delete older."""
+    path = Path(path)
+    backups = sorted(
+        path.parent.glob(path.name + ".bak.*"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for old in backups[keep:]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
 
 def read_json(path: Path) -> Optional[dict]:
     """Read and parse a JSON file."""
@@ -53,6 +72,7 @@ def write_json(path: Path, data: dict, backup: bool = True) -> Path:
     if backup and path.exists():
         backup_path = Path(str(path) + f".bak.{int(datetime.now().timestamp())}")
         shutil.copy2(str(path), str(backup_path))
+        _prune_backups(path)
     # Atomic write: tmp + rename
     tmp_path = Path(str(path) + ".tmp")
     with open(tmp_path, "w") as f:
@@ -93,6 +113,7 @@ def atomic_yaml_update(path: Path, update_fn, backup: bool = True):
     if backup and path.exists():
         backup_path = Path(str(path) + f".bak.{int(datetime.now().timestamp())}")
         shutil.copy2(str(path), str(backup_path))
+        _prune_backups(path)
 
     tmp_path = Path(str(path) + ".tmp")
     with open(tmp_path, "w") as f:

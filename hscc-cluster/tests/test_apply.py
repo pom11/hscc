@@ -51,13 +51,51 @@ class TestWriteJson:
     def test_backup_on_overwrite(self, tmp_path):
         data1 = {"version": 1}
         data2 = {"version": 2}
-        
+
         write_json(tmp_path / "test.json", data1)
         write_json(tmp_path / "test.json", data2, backup=True)
-        
+
         # Check backup exists
         backups = list(tmp_path.glob("test.json.bak.*"))
         assert len(backups) == 1
+
+    def test_prune_backups_caps_to_max(self, tmp_path):
+        """_prune_backups keeps only the newest MAX_BACKUPS (M1).
+
+        Regression: a prior version left 100+ serving.json.bak.* in ~/.hscc
+        because every write made a timestamped backup and nothing pruned them.
+        """
+        import os
+        import cluster_template as ct
+        p = tmp_path / "serving.json"
+        p.write_text("{}")
+        # Fabricate MAX+7 backups with strictly increasing mtimes.
+        made = []
+        for i in range(ct.MAX_BACKUPS + 7):
+            b = tmp_path / f"serving.json.bak.{1000 + i}"
+            b.write_text(f"v{i}")
+            os.utime(b, (1000 + i, 1000 + i))
+            made.append(b)
+        ct._prune_backups(p)
+        remaining = sorted(tmp_path.glob("serving.json.bak.*"))
+        assert len(remaining) == ct.MAX_BACKUPS
+        # The newest ones survive; the oldest are gone.
+        assert made[-1] in remaining
+        assert made[0] not in remaining
+
+    def test_write_json_prunes_old_backups(self, tmp_path):
+        """write_json itself caps backups across many overwrites."""
+        import os
+        import cluster_template as ct
+        p = tmp_path / "serving.json"
+        write_json(p, {"n": 0})
+        # Seed extra old backups (distinct mtimes) then trigger one more write.
+        for i in range(ct.MAX_BACKUPS + 5):
+            b = tmp_path / f"serving.json.bak.{2000 + i}"
+            b.write_text("old")
+            os.utime(b, (2000 + i, 2000 + i))
+        write_json(p, {"n": 1}, backup=True)  # makes 1 more + prunes
+        assert len(list(tmp_path.glob("serving.json.bak.*"))) <= ct.MAX_BACKUPS
 
     def test_atomic_write_no_partial(self, tmp_path):
         """Temp file should not persist after write."""

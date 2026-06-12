@@ -26,12 +26,21 @@ def restart_gateway() -> dict:
     plist_id = f"gui/{user_id}/ai.hermes.gateway"
     
     try:
-        # Check if gateway is running
+        # Gate on whether the label is actually loaded: `kickstart` against an
+        # unloaded label fails with an opaque "Could not find service" — detect
+        # that up front and return a clear message instead.
         status_result = subprocess.run(
             ["launchctl", "list", "ai.hermes.gateway"],
             capture_output=True, text=True, timeout=10
         )
-        
+        if status_result.returncode != 0:
+            return {
+                "success": False,
+                "note": ("Gateway service ai.hermes.gateway is not loaded "
+                         "(launchctl list returned non-zero); start it before "
+                         "kicking. Nothing to restart."),
+            }
+
         # Kickstart the gateway
         result = subprocess.run(
             ["launchctl", "kickstart", "-k", plist_id],
