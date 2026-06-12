@@ -42,6 +42,19 @@ def test_reinstall_backs_up_then_overwrites(tmp_path):
     assert (plugins / "hscc-cluster" / "__init__.py").read_text() == "x=1\n"
 
 
+def test_no_backup_overwrites_in_place(tmp_path):
+    repo = _make_repo(tmp_path)
+    plugins = tmp_path / "plugins"
+    install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts="A")
+    (plugins / "hscc-cluster" / "__init__.py").write_text("STALE\n")
+    res = install_payload.install_payload(
+        repo, plugins, ["hscc-cluster"], backup=False, ts="B")
+
+    assert res["backed_up"] == []
+    assert not list(plugins.glob("hscc-cluster.bak-*"))  # nothing kept
+    assert (plugins / "hscc-cluster" / "__init__.py").read_text() == "x=1\n"
+
+
 def test_self_install_guard_skips(tmp_path):
     repo = _make_repo(tmp_path)
     # repo IS the plugins dir → nothing to copy

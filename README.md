@@ -56,7 +56,7 @@ git clone https://github.com/pom11/hscc ~/dev/hscc
 
 Clone the repo to a work location of your choice (`~/dev/hscc` here), then run bootstrap. Bootstrap **copies** the plugin tree into `~/.hermes/plugins/` (backing up any existing copy), checks prerequisites (a configured sparkrun cluster + Hermes), detects your cluster topology, asks a couple of questions, then installs everything HSCC needs — skills, role profiles, `~/.hscc` state + `serving.json`, and the monitoring daemon. It does **not** start vLLM models; bring those up explicitly when ready. Use `--yes` for a non-interactive run.
 
-To pick up later changes, `git pull` in your work repo and re-run bootstrap — it re-copies the plugins into the runtime dir.
+To pick up later changes, `git pull` in your work repo and re-run bootstrap — it re-copies the plugins into the runtime dir. Each run backs up the previous runtime copy as `<dir>.bak-<timestamp>`; pass `--no-backup` to overwrite in place without the backups.
 
 ---
 
