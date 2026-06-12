@@ -1,0 +1,63 @@
+From df66b812f83a0b5de358c0fadacfa9097ac58a96 Mon Sep 17 00:00:00 2001
+From: pom11 <parsecoriginalmastercraft@gmail.com>
+Date: Tue, 9 Jun 2026 12:17:57 +0300
+Subject: [PATCH 3/6] feat(kanban): auto_review config policy reader
+
+---
+ hermes_cli/kanban_decompose.py      | 18 ++++++++++++++++++
+ tests/test_kanban_review_pairing.py | 13 +++++++++++++
+ 2 files changed, 31 insertions(+)
+
+diff --git a/hermes_cli/kanban_decompose.py b/hermes_cli/kanban_decompose.py
+index d1413af79..1d22bd2fe 100644
+--- a/hermes_cli/kanban_decompose.py
++++ b/hermes_cli/kanban_decompose.py
+@@ -214,6 +214,24 @@ def _resolve_default_assignee(cfg: dict) -> str:
+         return "default"
+ 
+ 
++def _review_policy(cfg):
++    """Return the kanban.auto_review policy dict, or {} when not configured.
++
++    Shape: {"review_roles": [...], "reviewer": "<profile>"}. Missing or
++    malformed config returns {} so callers treat review-pairing as disabled.
++    """
++    kanban_cfg = (cfg or {}).get("kanban", {}) if isinstance(cfg, dict) else {}
++    policy = kanban_cfg.get("auto_review")
++    if not isinstance(policy, dict):
++        return {}
++    roles = policy.get("review_roles")
++    reviewer = policy.get("reviewer")
++    if not isinstance(roles, list) or not isinstance(reviewer, str):
++        return {}
++    return {"review_roles": [str(r).strip() for r in roles if str(r).strip()],
++            "reviewer": reviewer.strip()}
++
++
+ def _build_roster() -> tuple[list[dict], set[str]]:
+     """Return (roster_for_prompt, valid_assignee_names).
+ 
+diff --git a/tests/test_kanban_review_pairing.py b/tests/test_kanban_review_pairing.py
+index 3bc688fc3..a05b8f545 100644
+--- a/tests/test_kanban_review_pairing.py
++++ b/tests/test_kanban_review_pairing.py
+@@ -50,3 +50,16 @@ def test_pair_empty_policy_noop():
+     children = [{"title": "X", "body": "", "assignee": "coder", "parents": []}]
+     assert kd._pair_review_tasks(children, policy={}) == children
+     assert kd._pair_review_tasks(children, policy=None) == children
++
++
++def test_review_policy_reads_config():
++    cfg = {"kanban": {"auto_review": {"review_roles": ["coder", "backend-engineer"],
++                                      "reviewer": "reviewer"}}}
++    pol = kd._review_policy(cfg)
++    assert pol["reviewer"] == "reviewer"
++    assert "coder" in pol["review_roles"]
++
++
++def test_review_policy_absent_returns_empty():
++    assert kd._review_policy({}) == {}
++    assert kd._review_policy({"kanban": {}}) == {}
+-- 
+2.50.1 (Apple Git-155)
+
