@@ -1,0 +1,80 @@
+From 9e4513f90b97a2b08a88923c1b9bc24c7b5a0af1 Mon Sep 17 00:00:00 2001
+From: pom11 <parsecoriginalmastercraft@gmail.com>
+Date: Wed, 15 Apr 2026 07:09:46 +0300
+Subject: [PATCH 1/2] feat: default restart policy to unless-stopped
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Containers now restart automatically instead of being removed on exit.
+This prevents overnight model crashes from requiring manual intervention.
+
+- Changed auto_remove default: True → False
+- Changed restart_policy default: None → "unless-stopped"
+- Docker's --rm flag is incompatible with --restart, so auto_remove
+  is automatically disabled when restart_policy is set (existing logic)
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ src/sparkrun/orchestration/executor.py | 8 ++++----
+ tests/test_executor.py                 | 9 +++++----
+ 2 files changed, 9 insertions(+), 8 deletions(-)
+
+diff --git a/src/sparkrun/orchestration/executor.py b/src/sparkrun/orchestration/executor.py
+index 0db3b7a..67a57b4 100644
+--- a/src/sparkrun/orchestration/executor.py
++++ b/src/sparkrun/orchestration/executor.py
+@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
+ # Default executor settings for DGX Spark GPU workloads.
+ # Lowest priority in the config chain: CLI → recipe → these defaults.
+ EXECUTOR_DEFAULTS = {
+-    "auto_remove": True,
+-    "restart_policy": None,
++    "auto_remove": False,
++    "restart_policy": "unless-stopped",
+     "privileged": True,
+     "gpus": "all",
+     "ipc": "host",
+@@ -47,8 +47,8 @@ class ExecutorConfig:
+     defaults layering.
+     """
+ 
+-    auto_remove: bool = True
+-    restart_policy: str | None = None
++    auto_remove: bool = False
++    restart_policy: str | None = "unless-stopped"
+     privileged: bool = True
+     gpus: str = "all"
+     ipc: str = "host"
+diff --git a/tests/test_executor.py b/tests/test_executor.py
+index 7b6ce02..a08d96e 100644
+--- a/tests/test_executor.py
++++ b/tests/test_executor.py
+@@ -31,8 +31,8 @@ class TestExecutorConfig:
+ 
+     def test_defaults(self):
+         cfg = ExecutorConfig()
+-        assert cfg.auto_remove is True
+-        assert cfg.restart_policy is None
++        assert cfg.auto_remove is False
++        assert cfg.restart_policy == "unless-stopped"
+         assert cfg.privileged is True
+         assert cfg.gpus == "all"
+         assert cfg.ipc == "host"
+@@ -187,10 +187,11 @@ class TestDockerExecutorConfig:
+         cmd = executor.run_cmd("img:latest")
+         assert "--rm" not in cmd
+ 
+-    def test_rm_flag_default(self):
++    def test_restart_flag_default(self):
+         executor = DockerExecutor()
+         cmd = executor.run_cmd("img:latest")
+-        assert "--rm" in cmd
++        assert "--restart unless-stopped" in cmd
++        assert "--rm" not in cmd
+ 
+     def test_restart_policy(self):
+         cfg = ExecutorConfig(restart_policy="always")
+-- 
+2.50.1 (Apple Git-155)
+
