@@ -1,29 +1,30 @@
 """Tests for cluster_template_schema.py — Pydantic schema validation."""
 
 import pytest
-import tempfile
 import yaml
 from pathlib import Path
 import sys
 
-PLUGIN_DIR = Path(__file__).parent.parent
+# Ensure plugin dir is on path
+PLUGIN_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN_DIR))
 
-from cluster_template_schema import (
-    ClusterTemplate,
-    ModelSpec,
-    WorkerFamily,
-    FamilyProxyConfig,
-    TemplateRegistry,
-    load_template,
-    list_templates,
-)
+# Import directly from module files
+import cluster_template_schema
+ClusterTemplate = cluster_template_schema.ClusterTemplate
+ModelSpec = cluster_template_schema.ModelSpec
+WorkerFamily = cluster_template_schema.WorkerFamily
+FamilyProxyConfig = cluster_template_schema.FamilyProxyConfig
+TemplateRegistry = cluster_template_schema.TemplateRegistry
+load_template = cluster_template_schema.load_template
+list_templates = cluster_template_schema.list_templates
 
 
 class TestModelSpec:
     """Test ModelSpec schema."""
 
     def test_minimal(self):
+        """Only recipe required."""
         m = ModelSpec(recipe="test.yaml")
         assert m.recipe == "test.yaml"
         assert m.tp == 1
@@ -103,10 +104,11 @@ class TestClusterTemplate:
         assert len(tpl.families) == 2
 
     def test_cluster_size_mismatch(self):
+        """cluster_size must match 1 + sum of nodes."""
         with pytest.raises(ValueError, match="cluster_size.*node count"):
             ClusterTemplate(
                 name="test",
-                cluster_size=5,
+                cluster_size=5,  # says 5, but only 3 nodes
                 orchestrator=ModelSpec(recipe="orch.yaml"),
                 orchestrator_node="10.0.0.244",
                 families=[
@@ -154,7 +156,7 @@ class TestToServingJson:
         )
         result = tpl.to_serving_json()
         assert result["version"] == 1
-        assert len(result["units"]) == 2
+        assert len(result["units"]) == 2  # 1 orch + 1 family
         assert result["units"][0]["role"] == "orchestrator"
         assert result["units"][1]["role"] == "worker"
         assert result["units"][1]["family"] == "coding"
@@ -182,13 +184,20 @@ class TestToServingJson:
             ],
         )
         result = tpl.to_serving_json()
-        assert len(result["units"]) == 4  # 1 orch + 1 + 2 models
+        # One unit per (model, node): orch(1) + coding(1 model x 2 nodes) +
+        # vision(2 models x 1 node) = 5.
+        assert len(result["units"]) == 5
+        workers = [u for u in result["units"] if u["role"] == "worker"]
+        # every worker unit pins exactly one node + is keep-alive-able
+        assert all(len(u["nodes"]) == 1 for u in workers)
+        assert all(u["keepalive"] is True for u in workers)
 
 
 class TestLoadTemplate:
     """Test loading templates from YAML files."""
 
     def test_load_valid(self, tmp_path):
+        """Load a valid template from disk."""
         yaml_content = {
             "name": "test",
             "cluster_size": 2,
@@ -204,7 +213,7 @@ class TestLoadTemplate:
         }
         yaml_file = tmp_path / "test.yaml"
         yaml_file.write_text(yaml.dump(yaml_content))
-
+        
         tpl = load_template(yaml_file)
         assert tpl.name == "test"
         assert tpl.cluster_size == 2
@@ -220,6 +229,7 @@ class TestListTemplates:
     """Test scanning templates directory."""
 
     def test_list_empty(self, tmp_path):
+        """No templates → empty registry."""
         registry = list_templates(tmp_path)
         assert len(registry.templates) == 0
 
@@ -239,7 +249,7 @@ class TestListTemplates:
             ],
         }
         (tmp_path / "my-template.yaml").write_text(yaml.dump(yaml_content))
-
+        
         registry = list_templates(tmp_path)
         assert len(registry.templates) == 1
         assert registry.templates[0]["name"] == "my-template"

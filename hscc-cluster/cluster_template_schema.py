@@ -105,35 +105,45 @@ class ClusterTemplate(BaseModel):
         # Family units
         for family in self.families:
             for model in family.models:
-                units.append({
-                    "id": f"family-{family.name}-{self._model_name(model.recipe).split('/')[-1]}",
-                    "role": "worker",
-                    "keepalive": False,
-                    "model": self._model_name(model.recipe),
-                    "recipe": model.recipe,
-                    "nodes": family.nodes,
-                    "tp": model.tp,
-                    "pp": model.pp,
-                    "family": family.name,
-                })
+                short = self._model_name(model.recipe).split('/')[-1]
+                # ONE unit per (model, node). The daemon keep-alive + idle-reaper
+                # operate per node (health-check each endpoint, relaunch a crashed
+                # one), so a single unit listing many nodes is not keep-alive-able.
+                for node in family.nodes:
+                    suffix = node.rsplit('.', 1)[-1]
+                    units.append({
+                        "id": f"family-{family.name}-{short}-{suffix}",
+                        "role": "worker",
+                        "keepalive": True,
+                        "model": self._model_name(model.recipe),
+                        "recipe": model.recipe,
+                        "nodes": [node],
+                        "tp": model.tp,
+                        "pp": model.pp,
+                        "family": family.name,
+                    })
         return {"version": 1, "port": 8000, "units": units}
 
     @staticmethod
     def _model_name(recipe_path: str) -> str:
-        """Extract model name from recipe path."""
-        recipe_path = recipe_path.replace("~", str(Path.home()))
-        recipe_path = str(recipe_path)
-        if recipe_path.endswith(".yaml") or recipe_path.endswith(".yml"):
-            # Parse recipe to extract model name
+        """Resolve the served model name for a recipe.
+
+        Reads the recipe's ``model:`` field (what vLLM serves + the proxy
+        registers). Falls back to the recipe filename stem when the file can't
+        be read (e.g. in tests with placeholder paths).
+        """
+        expanded = str(recipe_path).replace("~", str(Path.home()))
+        if expanded.endswith((".yaml", ".yml")):
             try:
                 import yaml
-                with open(recipe_path, "r") as f:
+                with open(expanded) as f:
                     cfg = yaml.safe_load(f)
-                if isinstance(cfg, dict):
-                    return cfg.get("model", recipe_path.split("/")[-1].split("-")[0])
+                if isinstance(cfg, dict) and cfg.get("model"):
+                    return cfg["model"]
             except Exception:
                 pass
-        return recipe_path.split("/")[-1].split("-")[0]
+        # Fallback: filename stem (drop dir + .yaml/.yml extension).
+        return Path(expanded).stem
 
 
 class TemplateRegistry(BaseModel):

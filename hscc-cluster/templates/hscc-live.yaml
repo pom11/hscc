@@ -1,0 +1,29 @@
+# HSCC live cluster — the actual running config.
+# 1 orchestrator (A3B-NVFP4 on the gateway) + 1 coding family of 3 workers,
+# all serving the SAME 27B-FP8 model, load-balanced behind the proxy on :4000.
+# This mirrors what is really deployed (see ~/.hscc/serving.json).
+
+name: hscc-live
+version: 1
+cluster_size: 4
+description: "Gateway A3B orchestrator + coding family (3 workers, single 27B-FP8 model) behind the proxy on :4000."
+
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+  tp: 1
+  pp: 1
+
+orchestrator_node: "10.0.0.244"
+
+families:
+  - name: coding
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+        tp: 1
+        pp: 1
+    nodes:
+      - "10.0.0.246"
+      - "10.0.0.247"
+      - "10.0.0.248"
+    proxy:
+      port: 4000
