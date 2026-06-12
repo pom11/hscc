@@ -75,10 +75,19 @@ def recipe_cost(recipe: str, *, _runner=None) -> RecipeCost:
     return cost
 
 
+# Recipe names/paths only ever contain these chars; reject anything else (and
+# anything starting with '-') so a value can't smuggle a flag into sparkrun.
+_RECIPE_RE = re.compile(r"^[@\w][\w./:@-]*$")
+
+
 def _run_show(recipe: str) -> str:
     # sparkrun show accepts a recipe name or path; pass through as given.
+    if not _RECIPE_RE.match(recipe or ""):
+        return ""  # invalid/suspicious recipe token — don't shell out
     try:
-        r = subprocess.run([SPARKRUN, "show", recipe],
+        # `--` end-of-options sentinel: everything after is positional, so a
+        # recipe like "--foo" can't be parsed as a flag (argv injection).
+        r = subprocess.run([SPARKRUN, "show", "--", recipe],
                            capture_output=True, text=True, timeout=30)
         return r.stdout if r.returncode == 0 else ""
     except (subprocess.SubprocessError, FileNotFoundError, OSError):
