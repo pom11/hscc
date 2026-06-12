@@ -1,0 +1,47 @@
+From 6431a340c9146ed7bbee0fc68bf4f9e5d1651cf6 Mon Sep 17 00:00:00 2001
+From: pom11 <parsecoriginalmastercraft@gmail.com>
+Date: Wed, 10 Jun 2026 11:11:21 +0300
+Subject: [PATCH 7/8] chore: remove obsolete holographic memory plugin
+
+---
+ plugins/memory/{holographic => _holographic}/README.md      | 0
+ plugins/memory/{holographic => _holographic}/__init__.py    | 0
+ plugins/memory/{holographic => _holographic}/holographic.py | 0
+ plugins/memory/{holographic => _holographic}/plugin.yaml    | 0
+ plugins/memory/{holographic => _holographic}/retrieval.py   | 0
+ plugins/memory/{holographic => _holographic}/store.py       | 0
+ 6 files changed, 0 insertions(+), 0 deletions(-)
+ rename plugins/memory/{holographic => _holographic}/README.md (100%)
+ rename plugins/memory/{holographic => _holographic}/__init__.py (100%)
+ rename plugins/memory/{holographic => _holographic}/holographic.py (100%)
+ rename plugins/memory/{holographic => _holographic}/plugin.yaml (100%)
+ rename plugins/memory/{holographic => _holographic}/retrieval.py (100%)
+ rename plugins/memory/{holographic => _holographic}/store.py (100%)
+
+diff --git a/plugins/memory/holographic/README.md b/plugins/memory/_holographic/README.md
+similarity index 100%
+rename from plugins/memory/holographic/README.md
+rename to plugins/memory/_holographic/README.md
+diff --git a/plugins/memory/holographic/__init__.py b/plugins/memory/_holographic/__init__.py
+similarity index 100%
+rename from plugins/memory/holographic/__init__.py
+rename to plugins/memory/_holographic/__init__.py
+diff --git a/plugins/memory/holographic/holographic.py b/plugins/memory/_holographic/holographic.py
+similarity index 100%
+rename from plugins/memory/holographic/holographic.py
+rename to plugins/memory/_holographic/holographic.py
+diff --git a/plugins/memory/holographic/plugin.yaml b/plugins/memory/_holographic/plugin.yaml
+similarity index 100%
+rename from plugins/memory/holographic/plugin.yaml
+rename to plugins/memory/_holographic/plugin.yaml
+diff --git a/plugins/memory/holographic/retrieval.py b/plugins/memory/_holographic/retrieval.py
+similarity index 100%
+rename from plugins/memory/holographic/retrieval.py
+rename to plugins/memory/_holographic/retrieval.py
+diff --git a/plugins/memory/holographic/store.py b/plugins/memory/_holographic/store.py
+similarity index 100%
+rename from plugins/memory/holographic/store.py
+rename to plugins/memory/_holographic/store.py
+-- 
+2.50.1 (Apple Git-155)
+
