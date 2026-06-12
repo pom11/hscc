@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +33,7 @@ MODELS_JSON = HSCC_DIR / "models.json"
 CLUSTER_JSON = HSCC_DIR / "cluster.json"
 CONFIG_YAML = HERMES_HOME / "config.yaml"
 PROXY_DIR = HSCC_DIR / "proxies"
+APPLIED_STATE = HSCC_DIR / "applied_template.json"  # which template is live
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -60,33 +62,43 @@ def write_json(path: Path, data: dict, backup: bool = True) -> Path:
     return path
 
 
-def atomic_yaml_update(path: Path, update_fn, backup: bool = True) -> Path:
+def atomic_yaml_update(path: Path, update_fn, backup: bool = True):
     """Read a YAML file, apply update_fn, write back atomically.
-    
+
     update_fn receives the parsed dict and returns the updated dict.
+    Returns (path, changed): ``changed`` is False when the new content is
+    byte-identical to the old, so callers can skip side effects (e.g. a gateway
+    restart) on a no-op apply.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     import yaml
     old_data = {}
+    old_text = ""
     if path.exists():
         try:
-            with open(path) as f:
-                old_data = yaml.safe_load(f) or {}
+            old_text = open(path).read()
+            old_data = yaml.safe_load(old_text) or {}
         except Exception:
             pass
-    
+
     new_data = update_fn(old_data.copy()) if isinstance(old_data, dict) else {}
+    new_text = yaml.dump(new_data, default_flow_style=False, sort_keys=False)
+    changed = new_text != old_text
+
+    if not changed:
+        return path, False
+
     if backup and path.exists():
         backup_path = Path(str(path) + f".bak.{int(datetime.now().timestamp())}")
         shutil.copy2(str(path), str(backup_path))
-    
+
     tmp_path = Path(str(path) + ".tmp")
     with open(tmp_path, "w") as f:
-        yaml.dump(new_data, f, default_flow_style=False, sort_keys=False)
+        f.write(new_text)
     os.replace(str(tmp_path), str(path))
-    return path
+    return path, True
 
 
 # ── Proxy plist generation ─────────────────────────────────────────────────
@@ -127,22 +139,47 @@ def _generate_proxy_plist(family) -> str:
 
 
 def install_proxy_plist(family) -> dict:
-    """Generate and install a proxy launchd plist. Returns action summary."""
+    """Generate, write, AND load a proxy launchd plist. Returns action summary.
+
+    Writing the plist alone does not start the proxy — it must be loaded into the
+    user's launchd domain. Bootout-then-bootstrap so re-applying reloads cleanly
+    (idempotent) rather than erroring on an already-loaded label.
+    """
+    import subprocess
+
     proxy_dir = PROXY_DIR / family.name
     logs_dir = PROXY_DIR / "logs"
+    proxy_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
-    
+
     plist_content = _generate_proxy_plist(family)
     plist_path = proxy_dir / "proxy.plist"
-    
     with open(plist_path, "w") as f:
         f.write(plist_content)
-    
+
+    label = f"com.hermes.proxy.{family.name}"
+    domain = f"gui/{os.getuid()}"
+    loaded = False
+    load_error = ""
+    try:
+        # Drop any prior instance (ignore failure: may not be loaded yet).
+        subprocess.run(["launchctl", "bootout", f"{domain}/{label}"],
+                       capture_output=True, timeout=10)
+        r = subprocess.run(["launchctl", "bootstrap", domain, str(plist_path)],
+                           capture_output=True, text=True, timeout=30)
+        loaded = r.returncode == 0
+        if not loaded:
+            load_error = (r.stderr or "").strip() or "launchctl bootstrap failed"
+    except Exception as e:  # subprocess/timeout — report, don't crash apply
+        load_error = str(e)
+
     return {
         "plist": str(plist_path),
-        "label": f"com.hermes.proxy.{family.name}",
+        "label": label,
         "port": family.proxy.port,
         "log": str(logs_dir / f"{family.name}.log"),
+        "loaded": loaded,
+        "error": load_error or None,
     }
 
 
@@ -168,80 +205,91 @@ def remove_proxy_plist(family) -> dict:
 
 # ── Model provisioning ─────────────────────────────────────────────────────
 
-def _provision_models(tpl: Any) -> dict:
-    """Provision models via sparkrun. Stops models not in template, provisions new ones.
-    
-    Returns summary of actions taken.
+def _provision_models(tpl: Any, cluster: str = "hscc",
+                      do_launch: bool = True) -> dict:
+    """Bring the cluster to the template's model layout via sparkrun.
+
+    For each template unit (orchestrator + each worker node) launch the model
+    with `sparkrun run <recipe> --hosts <node> --ensure` (--ensure = no-op if it
+    is already serving). Stop any sparkrun container on a node the template does
+    not use. This is the step that makes the live cluster actually match the
+    template — not a report.
+
+    do_launch=False makes it a dry plan (no sparkrun calls) — used by preview and
+    tests so they never touch the real cluster.
     """
     import subprocess
-    
-    result = {"stopped": [], "provisioned": [], "status": "ok", "note": ""}
-    
+
+    result = {"stopped": [], "provisioned": [], "failed": [],
+              "status": "ok", "note": ""}
+
+    # (node, recipe) the template wants serving, derived from serving.json units.
+    serving = tpl.to_serving_json()
+    want = []  # list of (node, recipe)
+    want.append((tpl.orchestrator_node, tpl.orchestrator.recipe))
+    for u in serving["units"]:
+        if u["role"] == "worker":
+            want.append((u["nodes"][0], u["recipe"]))
+    template_nodes = {n for n, _ in want}
+
+    if not do_launch:
+        result["note"] = "dry-run: would provision " + ", ".join(
+            f"{r.split('/')[-1]}@{n}" for n, r in want)
+        result["provisioned"] = [f"{n}:{r}" for n, r in want]
+        return result
+
+    # Stop sparkrun containers on nodes the template does not use.
     try:
-        # Get currently running models from sparkrun status
-        status = subprocess.run(
-            ["sparkrun", "status"],
-            capture_output=True, text=True, timeout=15
-        )
-        
-        # Parse running models from sparkrun status output
-        running_recipes = []
-        for line in status.stdout.split("\n"):
-            if line.startswith("Job:"):
-                parts = line.split()
-                if len(parts) > 1:
-                    running_recipes.append(parts[1])
-        
-        # Collect template recipes
-        template_recipes = {tpl.orchestrator.recipe}
-        for family in tpl.families:
-            for model in family.models:
-                template_recipes.add(model.recipe)
-        
-        # Stop models not in template (if they're on nodes not in template)
-        for recipe in running_recipes:
-            if recipe not in template_recipes:
-                result["stopped"].append(recipe)
-                # Note: actual stop is done by sparkrun daemon based on serving.json
-                result["note"] = "Models removed from template will be stopped by sparkrun daemon"
-        
-        # Models in template should already be running or will be started by sparkrun daemon
-        # serving.json is already updated, daemon picks up changes on next cycle
-        result["provisioned"] = list(template_recipes)
-        if not result["stopped"]:
-            result["note"] = "All models already match template"
-        
-    except subprocess.TimeoutExpired:
+        for line in _running_nodes_via_sparkrun():
+            node = line
+            if node and node not in template_nodes:
+                subprocess.run(["sparkrun", "stop", "--all", "--hosts", node],
+                               capture_output=True, timeout=60)
+                result["stopped"].append(node)
+    except Exception:
+        pass  # stopping is best-effort; never block provisioning on it
+
+    # Launch each wanted (node, recipe). --ensure: skip if already up.
+    for node, recipe in want:
+        try:
+            r = subprocess.run(
+                ["sparkrun", "run", os.path.expanduser(recipe),
+                 "--cluster", cluster, "--hosts", node,
+                 "--port", "8000", "--no-follow", "--ensure"],
+                capture_output=True, text=True, timeout=240)
+            if r.returncode == 0:
+                result["provisioned"].append(f"{node}:{recipe.split('/')[-1]}")
+            else:
+                result["failed"].append(
+                    {"node": node, "recipe": recipe,
+                     "error": (r.stderr or "").strip()[:200]})
+        except Exception as e:
+            result["failed"].append({"node": node, "recipe": recipe,
+                                     "error": str(e)})
+
+    if result["failed"]:
         result["status"] = "warn"
-        result["note"] = "sparkrun status timed out — models may need manual verification"
-    except Exception as e:
-        result["status"] = "warn"
-        result["note"] = f"Provision check failed: {e}"
-    
+        result["note"] = f"{len(result['failed'])} model(s) failed to launch"
+    else:
+        result["note"] = f"{len(result['provisioned'])} model(s) ensured up"
     return result
 
 
-# ── Gateway restart ────────────────────────────────────────────────────────
-
-def _restart_gateway() -> dict:
-    """Restart the Hermes gateway process via launchd."""
+def _running_nodes_via_sparkrun() -> List[str]:
+    """Best-effort: node IPs that currently have a sparkrun container."""
     import subprocess
-    
+    nodes: List[str] = []
     try:
-        result = subprocess.run(
-            ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/ai.hermes.gateway"],
-            capture_output=True, text=True, timeout=30
-        )
-        return {
-            "success": result.returncode == 0,
-            "note": "Gateway restarted to pick up config changes",
-        }
-    except subprocess.TimeoutExpired:
-        return {"success": False, "note": "Gateway restart timed out"}
-    except FileNotFoundError:
-        return {"success": False, "note": "launchctl not found"}
-    except Exception as e:
-        return {"success": False, "note": f"Gateway restart failed: {e}"}
+        r = subprocess.run(["sparkrun", "status"], capture_output=True,
+                           text=True, timeout=15)
+        for line in (r.stdout or "").split("\n"):
+            # status rows include the host IP; collect anything IP-shaped
+            for tok in line.split():
+                if tok.count(".") == 3 and tok.replace(".", "").isdigit():
+                    nodes.append(tok)
+    except Exception:
+        pass
+    return nodes
 
 
 # ── Template loading ───────────────────────────────────────────────────────
@@ -323,22 +371,108 @@ def preview_template(template_name: str) -> dict:
     return plan
 
 
+class TemplateValidationError(Exception):
+    """A template is not deployable on this machine. Carries the failures."""
+
+    def __init__(self, errors: List[str]):
+        self.errors = errors
+        super().__init__("; ".join(errors))
+
+
+def validate_template_deployable(tpl: Any) -> List[str]:
+    """Pre-apply preflight: is this template actually runnable here?
+
+    Returns a list of human-readable problems ([] = OK). Catches the failure
+    classes that previously corrupted a live cluster:
+      1. recipe file does not exist (template referenced models we don't have)
+      2. two models pinned to the same node:port (vLLM can't bind twice)
+
+    Pure + read-only — never mutates anything.
+    """
+    errors: List[str] = []
+
+    def _recipe_missing(recipe: str) -> bool:
+        return not Path(os.path.expanduser(recipe)).is_file()
+
+    # 1. every recipe must exist on disk
+    if _recipe_missing(tpl.orchestrator.recipe):
+        errors.append(f"orchestrator recipe not found: {tpl.orchestrator.recipe}")
+    for family in tpl.families:
+        for model in family.models:
+            if _recipe_missing(model.recipe):
+                errors.append(
+                    f"family '{family.name}' recipe not found: {model.recipe}")
+
+    # 2. no node:port may host more than one model. The orchestrator owns
+    #    orchestrator_node:8000; every family model binds family.proxy.port? No —
+    #    each model runs on its node's vLLM port (8000); the proxy multiplexes.
+    #    So the real collision is >1 model on the same node (same :8000).
+    node_models: Dict[str, List[str]] = {}
+    orch_node = tpl.orchestrator_node
+    node_models.setdefault(orch_node, []).append("orchestrator")
+    for family in tpl.families:
+        for model in family.models:
+            mname = _extract_model_name(model.recipe)
+            for node in family.nodes:
+                node_models.setdefault(node, []).append(f"{family.name}:{mname}")
+    for node, models in node_models.items():
+        if len(models) > 1:
+            errors.append(
+                f"node {node} assigned {len(models)} models on port 8000 "
+                f"(collision): {', '.join(models)}")
+
+    # 3. no two families may share a proxy port (one LiteLLM proxy per port).
+    port_families: Dict[int, List[str]] = {}
+    for family in tpl.families:
+        port_families.setdefault(family.proxy.port, []).append(family.name)
+    for port, fams in port_families.items():
+        if len(fams) > 1:
+            errors.append(
+                f"proxy port {port} shared by families {fams} "
+                f"(each family needs its own proxy port)")
+
+    # 4. a family node must not be the orchestrator node (the gateway runs the
+    #    orchestrator model on :8000; a worker model there would collide).
+    for family in tpl.families:
+        if orch_node in family.nodes:
+            errors.append(
+                f"family '{family.name}' uses the orchestrator node {orch_node} "
+                f"(reserved for the orchestrator model)")
+
+    return errors
+
+
 def apply_template(template_name: str, confirm: bool = False) -> dict:
     """Apply a cluster template. Writes all configs, provisions models, sets up proxies."""
     from cluster_template_schema import load_template, ClusterTemplate
     
-    if not confirm:
-        return {
-            "status": "preview",
-            "note": "Re-call with confirm=true to execute",
-            "changes": preview_template(template_name),
-        }
-    
     template_path = TEMPLATE_DIR / f"{template_name}.yaml"
     tpl = load_template(template_path)
+
+    # Preflight: refuse to write live config for a template that can't deploy.
+    problems = validate_template_deployable(tpl)
+
+    if not confirm:
+        return {
+            "status": "blocked" if problems else "preview",
+            "note": ("Template is NOT deployable — fix the errors below."
+                     if problems else "Re-call with confirm=true to execute"),
+            "errors": problems,
+            "changes": preview_template(template_name),
+        }
+
+    if problems:
+        # Hard stop BEFORE any write. This is the guard that stops an
+        # aspirational/invalid template from corrupting the live cluster.
+        raise TemplateValidationError(problems)
+
     result = {"template": tpl.name, "steps": [], "success": True}
-    
+        
     try:
+        # Ensure cluster-template package dir is on path for imports
+        _pkg_dir = str(Path(__file__).parent)
+        if _pkg_dir not in sys.path:
+            sys.path.insert(0, _pkg_dir)
         # Step 1: Write serving.json
         serving = tpl.to_serving_json()
         write_json(SERVING_JSON, serving, backup=True)
@@ -350,8 +484,10 @@ def apply_template(template_name: str, confirm: bool = False) -> dict:
         result["steps"].append({"step": "models.json", "status": "ok", "models": len(models["models"])})
         
         # Step 3: Update Hermes config.yaml
-        atomic_yaml_update(CONFIG_YAML, lambda d: _update_hermes_config(d, tpl))
-        result["steps"].append({"step": "config.yaml", "status": "ok"})
+        _, config_changed = atomic_yaml_update(
+            CONFIG_YAML, lambda d: _update_hermes_config(d, tpl))
+        result["steps"].append({"step": "config.yaml", "status": "ok",
+                                "changed": config_changed})
         
         # Step 4: Write proxy configs and install plists
         proxy_actions = []
@@ -382,20 +518,70 @@ def apply_template(template_name: str, confirm: bool = False) -> dict:
             "note": provision_result.get("note", ""),
         })
         
-        # Step 7: Restart gateway to pick up config changes
-        gw_result = _restart_gateway()
-        result["steps"].append({
-            "step": "gateway-restart",
-            "status": "ok" if gw_result["success"] else "warn",
-            "note": gw_result.get("note", ""),
-        })
+        # Step 7: Restart gateway ONLY if config.yaml actually changed —
+        # a no-op apply shouldn't cause a ~30s gateway outage.
+        if config_changed:
+            from gateway_restart import restart_gateway
+            gw_result = restart_gateway()
+            result["steps"].append({
+                "step": "gateway-restart",
+                "status": "ok" if gw_result["success"] else "warn",
+                "note": gw_result.get("note", ""),
+            })
+        else:
+            result["steps"].append({
+                "step": "gateway-restart",
+                "status": "skipped",
+                "note": "config.yaml unchanged — gateway restart not needed",
+            })
         
     except Exception as e:
         result["success"] = False
         result["error"] = str(e)
         result["steps"].append({"step": "error", "status": "fail", "message": str(e)})
-    
+
+    # Record which template is now live (so `status` can answer "what's applied?")
+    if result["success"]:
+        try:
+            write_json(APPLIED_STATE, {
+                "template": tpl.name,
+                "applied_at": datetime.now().isoformat(timespec="seconds"),
+                "cluster_size": tpl.cluster_size,
+                "orchestrator_node": tpl.orchestrator_node,
+                "families": [f.name for f in tpl.families],
+            }, backup=False)
+        except Exception:
+            pass
+
     return result
+
+
+def applied_status() -> dict:
+    """Report which template is currently applied (from APPLIED_STATE).
+
+    Returns {"applied": <state>} or {"applied": None} if nothing recorded.
+    """
+    state = read_json(APPLIED_STATE)
+    return {"applied": state or None,
+            "note": "" if state else "No template applied yet (or applied before status tracking)."}
+
+
+def validate_template(template_name: str) -> dict:
+    """Standalone preflight: is this template deployable? No writes.
+
+    Lets an operator check a template before apply, separate from preview.
+    """
+    from cluster_template_schema import load_template
+    template_path = TEMPLATE_DIR / f"{template_name}.yaml"
+    try:
+        tpl = load_template(template_path)
+    except FileNotFoundError as e:
+        return {"template": template_name, "ok": False, "errors": [str(e)]}
+    except Exception as e:
+        return {"template": template_name, "ok": False,
+                "errors": [f"template invalid: {e}"]}
+    problems = validate_template_deployable(tpl)
+    return {"template": template_name, "ok": not problems, "errors": problems}
 
 
 # ── Config generation helpers ──────────────────────────────────────────────
@@ -463,40 +649,39 @@ def _build_proxy_config(family) -> dict:
 
 
 def _update_hermes_config(config: dict, tpl: Any) -> dict:
-    """Update the Hermes config.yaml with template settings."""
-    if "providers" not in config or not isinstance(config.get("providers"), list):
-        config["providers"] = []
-    
-    # Update main provider (orchestrator)
-    orch_model = _extract_model_name(tpl.orchestrator.recipe)
-    found = False
-    for i, provider in enumerate(config["providers"]):
-        if isinstance(provider, dict) and provider.get("name") == "custom":
-            config["providers"][i]["model"] = {
-                "default": f"{tpl.orchestrator_node}:8000",
-            }
-            found = True
-            break
-    
-    if not found:
-        config["providers"].append({
-            "name": "custom",
-            "model": {
-                "default": f"{tpl.orchestrator_node}:8000",
-            },
-            "base_url": f"http://{tpl.orchestrator_node}:8000/v1",
-        })
-    
-    # Add provider entries for each proxy family
+    """Update the Hermes config.yaml with template settings.
+
+    Idempotent: providers are keyed by name and rebuilt, so re-running apply
+    never duplicates entries. (The previous version appended a family provider
+    on every call without dedup, growing the list unbounded and corrupting the
+    live config.)
+    """
+    existing = config.get("providers")
+    by_name: dict = {}
+    # Preserve any pre-existing providers the template doesn't manage, keyed by
+    # name (last definition wins — also collapses prior duplicates).
+    if isinstance(existing, list):
+        for p in existing:
+            if isinstance(p, dict) and p.get("name"):
+                by_name[p["name"]] = p
+
+    # Orchestrator (the "custom" provider).
+    by_name["custom"] = {
+        "name": "custom",
+        "model": {"default": f"{tpl.orchestrator_node}:8000"},
+        "base_url": f"http://{tpl.orchestrator_node}:8000/v1",
+    }
+
+    # One provider per proxy family (overwrites by name — never appends a dup).
     for family in tpl.families:
-        config["providers"].append({
-            "name": f"family-{family.name}",
-            "model": {
-                "default": f"localhost:{family.proxy.port}",
-            },
+        name = f"family-{family.name}"
+        by_name[name] = {
+            "name": name,
+            "model": {"default": f"localhost:{family.proxy.port}"},
             "base_url": f"http://localhost:{family.proxy.port}/v1",
-        })
-    
+        }
+
+    config["providers"] = list(by_name.values())
     return config
 
 
@@ -519,15 +704,17 @@ def _diff_serving_summary(current: Optional[dict], new: dict) -> str:
 # ── Utility helpers ────────────────────────────────────────────────────────
 
 def _extract_model_name(recipe_path: str) -> str:
-    """Extract a short model name from a recipe path."""
-    recipe_path = recipe_path.replace("~", str(Path.home()))
-    # Remove path components, keep the stem
-    name = Path(recipe_path).stem
-    # Clean up common suffixes
-    for suffix in ("-vllm", "-yaml", "-yml"):
-        if name.endswith(suffix):
-            name = name[:-len(suffix)]
-    return name
+    """Resolve the served model name for a recipe.
+
+    Single source of truth: delegates to ClusterTemplate._model_name, which reads
+    the recipe's ``model:`` field (the name vLLM actually serves + the proxy
+    registers). Previously this returned the recipe filename stem instead, so
+    serving.json (which used _model_name) and models.json/config.yaml (which used
+    this) disagreed on the model name for the same recipe — breaking proxy/daemon
+    matching.
+    """
+    from cluster_template_schema import ClusterTemplate
+    return ClusterTemplate._model_name(recipe_path)
 
 
 # ── CLI entry point ────────────────────────────────────────────────────────
