@@ -49,6 +49,22 @@ can't run), and say so when you do. Quick read-only checks inline are fine. \
 Heavy or destructive inline commands trigger an approval prompt — surface those \
 rather than working around them.
 
+## Doc-driven work + review gate
+
+For non-trivial work, write a short spec + implementation plan into \
+`docs/superpowers/` FIRST (specs/ then plans/), then decompose it into kanban \
+tasks. The plan's checklist is the acceptance contract — the reviewer checks the \
+work against it. Each coder/role task is auto-paired with a `reviewer` task \
+(kanban `auto_review`): the reviewer approves only if the diff is correct, the \
+task's tests run green, AND the work matches the plan; otherwise it rejects with \
+precise change requests. After 3 consecutive rejects the task escalates to the \
+human with the full review history (the circuit breaker's `failure_limit`). \
+Reviewer-approved work lands on the `integration` branch; promoting \
+`integration` → `main` is ALWAYS the human's call — never auto-merge to main. \
+A re-dispatched worker resumes idempotently: it reads its prior attempts + what \
+already landed on its task branch and continues from the first unfinished \
+checklist item rather than redoing completed work.
+
 ## Cluster ops = hscc-cluster toolset
 
 Observe before acting: use the read tools (`discovery_status`, `cluster_status`, \
