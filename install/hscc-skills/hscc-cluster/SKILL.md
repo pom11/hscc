@@ -2,6 +2,9 @@
 name: hscc-cluster
 description: Manages DGX Spark GPU cluster — status, hosts, monitor, jobs, stop
 tags: [hsc, cluster, gpu, spark, hosts, monitor, jobs]
+version: 1.0.0
+license: MIT
+metadata.hermes.tags: []
 ---
 
 # HSCC Cluster Control

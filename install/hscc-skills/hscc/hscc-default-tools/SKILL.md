@@ -1,6 +1,9 @@
 ---
 name: hscc-default-tools
 description: HSCC is the primary toolset for cluster-physical work. Agent dispatch and project/task work are native Hermes kanban, NOT HSCC.
+version: 1.0.0
+license: MIT
+metadata.hermes.tags: []
 ---
 
 # HSCC as Primary Toolset

@@ -2,6 +2,9 @@
 name: brand-migration
 description: Systematic brand/name replacement across multi-file codebases, config, state files, and templates. Covers rebrands, renames, legacy cleanup, and migration from one system name to another.
 category: devops
+version: 1.0.0
+license: MIT
+metadata.hermes.tags: []
 ---
 
 # brand-migration — Systematic Brand/Name Replacement

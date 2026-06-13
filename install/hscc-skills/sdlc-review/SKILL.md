@@ -1,6 +1,9 @@
 ---
 name: sdlc-review
 description: "Autonomous code review for a kanban task in review status. Verifies diff + tests + spec, then merges to the integration branch or sends the task back to the worker with change requests."
+version: 1.0.0
+license: MIT
+metadata.hermes.tags: []
 ---
 
 # SDLC Review

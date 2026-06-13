@@ -1,6 +1,9 @@
 ---
 name: registry
 description: Manage recipe registries and create inference recipes
+version: 1.0.0
+license: MIT
+metadata.hermes.tags: []
 ---
 
 <Purpose>

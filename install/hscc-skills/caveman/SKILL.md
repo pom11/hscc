@@ -6,6 +6,9 @@ description: >
   wenyan-lite, wenyan-full, wenyan-ultra.
   Use when user says "caveman mode", "talk like caveman", "use caveman", "less tokens",
   "be brief", or invokes /caveman. Also auto-triggers when token efficiency is requested.
+version: 1.0.0
+license: MIT
+metadata.hermes.tags: []
 ---
 
 Respond terse like smart caveman. All technical substance stay. Only fluff die.

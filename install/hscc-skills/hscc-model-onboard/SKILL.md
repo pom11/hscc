@@ -4,6 +4,9 @@ description: Bring a NEW model online across the DGX Spark cluster end-to-end â€
 category: hscc
 domain: cluster control, model onboarding, cutover
 platform: macOS CLI
+version: 1.0.0
+license: MIT
+metadata.hermes.tags: []
 ---
 
 # hscc-model-onboard

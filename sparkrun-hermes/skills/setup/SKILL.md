@@ -1,6 +1,9 @@
 ---
 name: setup
 description: Install sparkrun and configure DGX Spark clusters
+version: 1.0.0
+license: MIT
+metadata.hermes.tags: []
 ---
 
 <Purpose>

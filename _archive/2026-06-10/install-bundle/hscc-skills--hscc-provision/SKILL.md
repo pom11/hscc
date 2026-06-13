@@ -4,6 +4,9 @@ description: Manage dynamic lifecycle of ML model containers on the DGX Spark cl
 category: hscc
 domain: cluster control, dynamic provisioning
 platform: macOS CLI
+version: 1.0.0
+license: MIT
+metadata.hermes.tags: []
 ---
 
 # hscc-provision

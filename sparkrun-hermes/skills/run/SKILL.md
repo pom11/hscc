@@ -1,6 +1,9 @@
 ---
 name: run
 description: "ALWAYS invoke this skill before running any sparkrun CLI commands. Never run sparkrun directly without loading this skill first. Covers launching, monitoring, stopping, and checking status of inference workloads on NVIDIA DGX Spark."
+version: 1.0.0
+license: MIT
+metadata.hermes.tags: []
 ---
 
 <Purpose>

@@ -2,6 +2,9 @@
 name: hscc-plugins
 description: Building Hermes plugins for cluster control, agent management, and project tracking.
 category: devops
+version: 1.0.0
+license: MIT
+metadata.hermes.tags: []
 ---
 
 # HSCC Plugins

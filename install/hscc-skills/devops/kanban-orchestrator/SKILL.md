@@ -7,6 +7,8 @@ metadata:
   hermes:
     tags: [kanban, multi-agent, orchestration, routing]
     related_skills: [kanban-worker]
+license: MIT
+metadata.hermes.tags: []
 ---
 
 # Kanban Orchestrator — Decomposition Playbook

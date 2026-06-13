@@ -2,6 +2,9 @@
 name: hscc-architecture
 description: "Building Hermes-native cluster management components (hscc-*). Covers architecture, naming, patterns, and component mapping."
 category: devops
+version: 1.0.0
+license: MIT
+metadata.hermes.tags: []
 ---
 
 # HSCC (Hermes Spark Cluster Control) Architecture

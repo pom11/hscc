@@ -1,6 +1,9 @@
 ---
 name: test-driven-development
 description: Use when implementing any feature or bugfix, before writing implementation code
+version: 1.0.0
+license: MIT
+metadata.hermes.tags: []
 ---
 
 # Test-Driven Development (TDD)

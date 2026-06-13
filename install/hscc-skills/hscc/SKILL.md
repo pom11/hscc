@@ -9,6 +9,7 @@ metadata:
   hermes:
     tags: [HSCC, Cluster, Provisioning, Monitoring]
     related_skills: [hscc-cluster, hscc-model-onboard]
+metadata.hermes.tags: []
 ---
 
 # Hermes Spark Cluster Control (HSCC)

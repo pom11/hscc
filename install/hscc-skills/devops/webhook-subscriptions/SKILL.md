@@ -6,6 +6,8 @@ platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [webhook, events, automation, integrations, notifications, push]
+license: MIT
+metadata.hermes.tags: []
 ---
 
 # Webhook Subscriptions

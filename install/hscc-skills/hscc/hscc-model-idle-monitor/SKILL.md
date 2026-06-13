@@ -3,6 +3,9 @@ name: hscc-model-idle-monitor
 description: Background process (Hermes cron job) that scans running sparkrun containers and shuts down models idle for > 30 min
 category: hscc
 domain: cluster resource management, automatic cleanup
+version: 1.0.0
+license: MIT
+metadata.hermes.tags: []
 ---
 
 # HSCC Model Idle Monitor

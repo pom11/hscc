@@ -2,6 +2,9 @@
 name: template-audit
 description: Auditing template documentation files for utility and relevance. Categorizes files as procedural (keep), reference (shrink), flavor (delete), placeholder (delete), or cross-referenced (inline or delete). Prevents bloated template directories from accumulating dead files.
 category: devops
+version: 1.0.0
+license: MIT
+metadata.hermes.tags: []
 ---
 
 # template-audit — Auditing Template Documentation for Utility
