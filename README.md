@@ -10,7 +10,7 @@ HSCC is the operational backbone that lets you say *"build X"* in chat and have 
 
 It runs on a cluster of DGX Spark (GB10 / Grace-Blackwell, `sm_121a`) nodes serving LLMs via vLLM, orchestrated by [Hermes](https://github.com/NousResearch/hermes-agent) agents. HSCC is a set of pure-stdlib Python plugins. You develop in a work repo (e.g. `~/dev/hscc`); bootstrap copies the plugins into the Hermes runtime dir `~/.hermes/plugins/`, with runtime state in `~/.hscc/`.
 
-The design is **native-Hermes-first**: agent work runs on Hermes' built-in kanban dispatcher + git worktrees. HSCC contributes the thin physical layer (cluster control, monitoring, model lifecycle) plus a role framework that turns the fleet into specialized, self-extending workers.
+The design is **native-Hermes-first**: agent work runs on Hermes' built-in kanban dispatcher + git worktrees. HSCC does not build a dispatcher — it *hooks into* the one Hermes already ships. On top of that, HSCC contributes the thin physical layer (cluster control, monitoring, model lifecycle), a role framework that turns the fleet into specialized self-extending workers, and a review gate on the dispatch path.
 
 ## Why we built this
 
@@ -99,7 +99,7 @@ hscc-cluster cluster-template apply 4node-coding --confirm   # = the live setup
 
 ## The fleet
 
-Agent work flows through native Hermes kanban: an idea is brainstormed into a spec, decomposed into a dependency-ordered task graph, and each task is dispatched to a **role-specialized worker** running in its own git worktree.
+Agent work flows through native Hermes kanban — HSCC adds a pre-dispatch hook (cluster-aware host routing) and the review gate, but the dispatch loop is Hermes'. An idea is brainstormed into a spec, decomposed into a dependency-ordered task graph, and each task is dispatched to a **role-specialized worker** running in its own git worktree.
 
 ### Roles
 
