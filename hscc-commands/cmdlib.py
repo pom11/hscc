@@ -246,3 +246,40 @@ def wait_for_ssh_back(node, max_wait=180, probe_interval=5):
 
 
 REBOOT_REQUIRED_FILE = "/var/run/reboot-required"
+
+
+def _local_ips():
+    """Return set of IPv4 addresses bound to local interfaces."""
+    import socket
+    ips = set()
+    try:
+        # Hostname-based lookup
+        host = socket.gethostname()
+        for info in socket.getaddrinfo(host, None, socket.AF_INET):
+            ips.add(info[4][0])
+    except Exception:  # noqa: BLE001
+        pass
+    # Fallback: parse `ifconfig` / `ip addr` for any IPv4
+    ok, out, _ = _run(["bash", "-c", "ifconfig 2>/dev/null || ip -4 addr"], timeout=5)
+    if ok and out:
+        import re
+        for m in re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", out):
+            ips.add(m)
+    return ips
+
+
+def gateway_runs_on_node(node_ip):
+    """True if the gateway (this process) runs on the same host as ``node_ip``.
+    Used to decide whether a node reboot would kill the gateway."""
+    if not node_ip:
+        return False
+    locals_ = _local_ips()
+    return node_ip in locals_ or node_ip == "127.0.0.1" or node_ip == "localhost"
+
+
+def gateway_on_cluster():
+    """True if the gateway shares a host with ANY unit in serving.json."""
+    for u in read_units():
+        if gateway_runs_on_node(unit_node(u)):
+            return True
+    return False

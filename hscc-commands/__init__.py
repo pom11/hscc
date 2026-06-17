@@ -331,10 +331,10 @@ def cmd_cluster_docker_prune(raw_args):
 def cmd_cluster_reboot(raw_args):
     """Reboot all cluster nodes. Workers in parallel; orchestrator last.
 
-    Confirm-first. Orchestrator reboot kills the gateway mid-command, so the
-    final completion message comes from the workers; user runs `/cluster` after
-    ~2-3 min to verify everything came back. Skips docker prune (reboot recycles
-    all containers anyway)."""
+    Confirm-first. Gateway runs on the Mac host (separate from the cluster), so
+    orchestrator reboot does NOT kill the gateway — the chain can complete and
+    fire follow-up commands. Use `wait_for_ssh_back()` to gate any post-reboot
+    actions."""
     units = cmdlib.read_units()
     orch = cmdlib.orchestrator_unit(units)
     workers = cmdlib.worker_units(units)
@@ -343,6 +343,8 @@ def cmd_cluster_reboot(raw_args):
     if not orch_node and not worker_nodes:
         return "⚠️ No nodes in serving.json — nothing to reboot."
 
+    on_cluster = cmdlib.gateway_on_cluster()
+
     if not _confirmed(raw_args):
         lines = ["⚠️ *Confirm full cluster reboot*", ""]
         if worker_nodes:
@@ -350,8 +352,13 @@ def cmd_cluster_reboot(raw_args):
         if orch_node:
             lines.append(f"  orchestrator (last): {orch_node}")
         lines.append("")
-        lines.append("Workers reboot in parallel (~3 min). Orchestrator reboots last "
-                     "and kills the gateway — no completion message after that.")
+        lines.append("Workers reboot in parallel (~2-3 min). Orchestrator reboots last.")
+        if on_cluster:
+            lines.append("⚠️ Gateway runs on a cluster node — reboot WILL kill the gateway. "
+                         "No completion message after that.")
+        else:
+            lines.append("Gateway runs off-cluster — it survives the reboot. "
+                         "Run `/cluster` after ~3 min to verify.")
         lines.append("Run `/cluster-reboot confirm` to execute.")
         return "\n".join(lines)
 
@@ -367,15 +374,12 @@ def cmd_cluster_reboot(raw_args):
             tail = "" if ok else f" — {err[:120]}"
             lines.append(f"  {mark} worker {node}: reboot triggered{tail}")
         lines.append("")
-        lines.append("Workers rebooting (~2-3 min). Run `/cluster` after to verify.")
     else:
         lines.append("(no workers in serving.json)")
 
     # Phase 2: orchestrator reboot last
     if orch_node:
-        # Delay 5s so this message lands before gateway dies
-        lines.append("")
-        lines.append(f"  ⏳ orchestrator {orch_node}: reboot in 5s (kills this gateway)")
+        lines.append(f"  ⏳ orchestrator {orch_node}: reboot scheduled (5s delay)")
         cmdlib.ssh_exec(
             orch_node,
             "sudo nohup bash -c 'sleep 5 && shutdown -r now' >/dev/null 2>&1 &",
@@ -452,20 +456,20 @@ def cmd_cluster_apt_upgrade(raw_args):
 def cmd_cluster_prune(raw_args):
     """Macro: full cluster recycle — down → docker-prune → apt-upgrade → restart.
 
-    Confirm-first; one confirm runs the whole chain. If apt-upgrade triggers a
-    kernel reboot, /cluster-restart at the tail is skipped (gateway dies mid-
-    reboot; vLLM relies on host-boot auto-start, otherwise run /cluster-restart
-    manually after hosts return)."""
+    Confirm-first; one confirm runs the whole chain. The gateway runs on the Mac
+    host (separate from cluster nodes), so it survives any cluster reboot. If
+    step 3 chains a reboot, this macro waits for SSH on all nodes to come back
+    before firing /cluster-restart so the template re-applies onto live hosts."""
     if not _confirmed(raw_args):
         return ("⚠️ *Confirm cluster prune* (macro)\n\n"
-                "Sequence (each step gets `confirm` auto-passed):\n"
+                "Sequence (each step auto-confirmed):\n"
                 "  1. /cluster-down — stop all vLLM\n"
                 "  2. /cluster-docker-prune — `docker system prune -af` per node\n"
                 "  3. /cluster-apt-upgrade — apt update+upgrade; may chain reboot\n"
-                "  4. /cluster-restart — re-apply template (skipped if step 3 rebooted)\n\n"
-                "If step 3 lands a kernel update → cluster reboots → gateway dies → "
-                "step 4 won't fire. Run `/cluster-restart confirm` manually once "
-                "hosts return if vLLM doesn't auto-start.\n\n"
+                "  4. wait for SSH back on all nodes (if step 3 rebooted)\n"
+                "  5. /cluster-restart — re-apply template (always)\n\n"
+                "Gateway lives on the Mac host so it survives cluster reboots. "
+                "Total time: ~5-10 min without kernel update, ~15-20 min with.\n\n"
                 "Run `/cluster-prune confirm` to execute.")
 
     lines = ["🧼 *HSCC cluster-prune (macro)*", ""]
@@ -483,14 +487,47 @@ def cmd_cluster_prune(raw_args):
     lines.append(apt_out)
     lines.append("")
 
-    # If apt-upgrade chained reboot, skip the cluster-restart tail
+    # If apt-upgrade chained a reboot, decide what to do post-reboot based on
+    # where the gateway lives:
+    #   - gateway on cluster node (e.g. orch host): orch reboot kills us →
+    #     can't continue → SKIP cluster-restart, advise manual run
+    #   - gateway off-cluster (Mac host etc.): we survive → wait for SSH back
+    #     on all nodes, THEN fire cluster-restart for template reapply
     if "reboot-required on:" in apt_out:
-        lines.append("--- step 4: /cluster-restart SKIPPED (reboot chained) ---")
-        lines.append("Cluster is rebooting. Run `/cluster` in ~3 min; if vLLM "
-                     "didn't auto-start, run `/cluster-restart confirm`.")
-        return "\n".join(lines)
+        if cmdlib.gateway_on_cluster():
+            lines.append("--- step 4: /cluster-restart SKIPPED ---")
+            lines.append("Gateway runs ON a cluster node — reboot will kill it. "
+                         "Cluster is rebooting; run `/cluster-restart confirm` "
+                         "manually once gateway returns + nodes are back.")
+            return "\n".join(lines)
 
-    lines.append("--- step 4: /cluster-restart ---")
+        # Gateway off-cluster: safe to wait + re-apply template
+        units = cmdlib.read_units()
+        orch = cmdlib.orchestrator_unit(units)
+        workers = cmdlib.worker_units(units)
+        all_nodes = []
+        if orch and cmdlib.unit_node(orch):
+            all_nodes.append(cmdlib.unit_node(orch))
+        for w in workers:
+            n = cmdlib.unit_node(w)
+            if n:
+                all_nodes.append(n)
+        lines.append("--- step 4: wait for SSH back on all nodes ---")
+        results = {}
+        for n in all_nodes:
+            ok = cmdlib.wait_for_ssh_back(n, max_wait=240, probe_interval=5)
+            mark = "✅" if ok else "❌"
+            results[n] = ok
+            lines.append(f"  {mark} {n}: {'back' if ok else 'TIMEOUT (still rebooting?)'}")
+        lines.append("")
+        all_back = all(results.values())
+        if not all_back:
+            lines.append("⚠️ Some nodes did not return within 4 min. Investigate before "
+                         "re-applying template. Run `/cluster-restart confirm` manually "
+                         "once all nodes are back.")
+            return "\n".join(lines)
+
+    lines.append("--- step 5: /cluster-restart ---")
     lines.append(cmd_cluster_restart("confirm"))
     return "\n".join(lines)
 
