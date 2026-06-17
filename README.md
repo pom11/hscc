@@ -148,7 +148,9 @@ Each plugin has its own README with details — linked below.
 
 Also: [`patches/`](patches/MANIFEST.md) — curated hermes/sparkrun upstream patches
 (run official + reapply the delta); [`docs/`](docs/README.md) — design specs +
-per-workstream plans.
+per-workstream plans; [`scripts/`](scripts/README.md) — pure-shell `--no-agent`
+operator watchdogs (proxy / workers / cluster / NAS) registered as Hermes cron
+jobs, installed by bootstrap into `~/.hermes/scripts/`.
 
 ---
 
@@ -171,12 +173,14 @@ into it):
 ├── install/                # vendored skill sources                         → README
 ├── patches/                # curated hermes/sparkrun upstream patches        → MANIFEST
 ├── docs/                   # design specs + plans                           → README
+├── scripts/                # operator watchdog shell scripts                 → README
 └── _archive/               # superseded code (moved, never deleted)
 
 # Hermes runtime (bootstrap targets — not edited directly):
 ~/.hermes/plugins/          # installed copy of the plugins above
 ~/.hermes/profiles/         # generated role profiles (build artifacts)
 ~/.hermes/skills/           # installed skills
+~/.hermes/scripts/          # installed operator watchdog scripts
 ~/.hscc/                    # runtime state (serving.json, applied_template.json,
                             #   cluster.json, autonomy, rollback/, state/)
 ~/.sparkrun-local/recipes/  # vLLM serving recipes
