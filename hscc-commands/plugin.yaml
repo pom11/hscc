@@ -1,6 +1,6 @@
 name: hscc-commands
 version: 1.0.0
-description: "Operator slash commands for cluster incident response — /cluster, /status, /orch-restart, /cluster-restart, /heal, /template. Direct handlers (run in the gateway, not via the LLM) so they work even when the orchestrator model is wedged."
+description: "Operator slash commands for cluster incident response — /cluster, /status, /orch-restart, /cluster-restart, /cluster-down, /cluster-docker-prune, /cluster-reboot, /cluster-apt-upgrade, /cluster-prune, /heal, /template. Direct handlers (run in the gateway, not via the LLM) so they work even when the orchestrator model is wedged."
 author: NousResearch
 kind: backend
 provides_commands:
@@ -8,5 +8,10 @@ provides_commands:
   - status
   - orch-restart
   - cluster-restart
+  - cluster-down
+  - cluster-docker-prune
+  - cluster-reboot
+  - cluster-apt-upgrade
+  - cluster-prune
   - heal
   - template
