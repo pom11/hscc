@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.4] — Gateway-host-aware cluster-prune
+
+Fixes false assumption that orchestrator reboot kills the gateway. Gateway
+typically runs off-cluster (Mac host), so /cluster-prune can complete the
+full chain including the post-reboot template reapply.
+
+### Changed (hscc-commands)
+- `/cluster-prune` no longer skips the final `/cluster-restart` after a
+  chained reboot. New behavior: detect gateway location at runtime via
+  `gateway_on_cluster()`; if off-cluster (the common case), wait for SSH
+  to return on every node (up to 4 min), then re-apply the template.
+  On-cluster gateway falls back to the old skip+advise path.
+- `/cluster-reboot` confirm preview now states accurately whether the
+  gateway will survive the reboot.
+
+### Added (cmdlib)
+- `_local_ips()` — IPv4 set from hostname + `ifconfig`/`ip addr` fallback.
+- `gateway_runs_on_node(ip)` / `gateway_on_cluster()` — runtime detection.
+
+
 ## [1.0.0-beta.3] — Cluster lifecycle slash commands
 
 Adds 5 new operator slash commands to `hscc-commands` covering full cluster
