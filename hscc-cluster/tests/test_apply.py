@@ -162,6 +162,51 @@ class TestInstallProxyPlist:
         assert res["loaded"] is True and res["port"] == 4000
 
 
+class TestGenerateProxyPlistHardening:
+    """A generated proxy plist must not crash-loop a missing/failing binary into
+    a memory-exhausting respawn storm (the 2026-06-17 watchdog panic). Guards:
+    resolve litellm at LAUNCH (no machine-specific path frozen into the plist),
+    throttled respawn, crash-only KeepAlive."""
+
+    def _fam(self):
+        return ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
+            ti.ResolvedUnit("worker", "coding", "m.yaml", "M", "10.0.0.2", 8000, 1, 1)])
+
+    def _plist(self):
+        import cluster_template as ct
+        import plistlib
+        return plistlib.loads(ct._generate_proxy_plist(self._fam()).encode())
+
+    def test_resolves_litellm_dynamically_at_launch(self):
+        argv = self._plist()["ProgramArguments"]
+        # Launched via a shell that resolves litellm live, not a baked path.
+        assert argv[0] == "/bin/sh" and argv[1] == "-c"
+        resolver = argv[2]
+        assert "command -v litellm" in resolver                    # PATH first
+        assert "$HOME/miniconda3/envs/*/bin/litellm" in resolver   # glob fallback (dynamic)
+        assert resolver.startswith("exec ")  # replace sh so launchd supervises litellm
+
+    def test_no_machine_specific_litellm_path_baked(self):
+        resolver = self._plist()["ProgramArguments"][2]
+        # The concrete install location must NOT be frozen in; only the wildcard.
+        assert "/miniconda3/envs/r2d2/bin/litellm" not in resolver
+        assert "envs/*/bin/litellm" in resolver
+
+    def test_honors_litellm_bin_override(self):
+        resolver = self._plist()["ProgramArguments"][2]
+        assert "${LITELLM_BIN:-" in resolver   # an explicit pin wins when set
+
+    def test_throttles_respawn(self):
+        plist = self._plist()
+        assert isinstance(plist.get("ThrottleInterval"), int)
+        assert plist["ThrottleInterval"] >= 10
+
+    def test_keepalive_is_crash_only(self):
+        # Must NOT be bare-True (always-respawn). Crash-only: relaunch only on
+        # unsuccessful exit, so a permanently-failing binary backs off.
+        assert self._plist()["KeepAlive"] == {"SuccessfulExit": False}
+
+
 class TestPruneOrphanProxies:
     def test_removes_orphan_family_dirs_and_backups(self, tmp_path, monkeypatch):
         import cluster_template as ct

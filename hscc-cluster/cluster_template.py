@@ -182,10 +182,31 @@ def atomic_yaml_update(path: Path, update_fn, backup: bool = True):
 # ── Proxy plist generation ─────────────────────────────────────────────────
 
 def _generate_proxy_plist(family) -> str:
-    """Generate a launchd plist for a LiteLLM proxy instance."""
+    """Generate a launchd plist for a LiteLLM proxy instance.
+
+    Hardened against respawn storms (the 2026-06-17 watchdog panic):
+
+    - **Dynamic litellm resolution at launch.** launchd runs jobs with a minimal
+      PATH (/usr/bin:/bin:/usr/sbin:/sbin), so a bare ``litellm`` arg fails
+      posix_spawn (error 0x2). Rather than freezing a machine-specific absolute
+      path into the plist, launch via ``/bin/sh -c`` and resolve litellm at each
+      launch: an explicit ``$LITELLM_BIN`` wins, else ``command -v``, else a glob
+      of the usual conda/uv install locations. ``exec`` replaces the shell so
+      launchd supervises the litellm process directly.
+    - **Crash-only KeepAlive** (no relaunch after a clean exit) plus a
+      **ThrottleInterval** so a persistently-failing binary backs off instead of
+      hammering launchd every ~10s."""
     config_path = str(PROXY_DIR / family.name / "config.json")
     log_path = str(PROXY_DIR / "logs" / f"{family.name}.log")
-    
+    # Resolve litellm at launch (not generate time) so the plist carries no
+    # frozen binary path and self-heals if the install moves between launches.
+    resolver = (
+        'exec "${LITELLM_BIN:-$(command -v litellm || '
+        'ls $HOME/miniconda3/envs/*/bin/litellm '
+        '$HOME/.cache/uv/archive-v0/*/bin/litellm 2>/dev/null | head -n1)}" '
+        f'--port {family.proxy_port} --config {config_path}'
+    )
+
     plist = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -194,14 +215,17 @@ def _generate_proxy_plist(family) -> str:
     <string>com.hermes.proxy.{family.name}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>litellm</string>
-        <string>--port</string>
-        <string>{family.proxy_port}</string>
-        <string>--config</string>
-        <string>{config_path}</string>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>{resolver}</string>
     </array>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
     <key>StandardOutPath</key>
     <string>{log_path}</string>
     <key>StandardErrorPath</key>
