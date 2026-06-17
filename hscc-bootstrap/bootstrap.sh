@@ -117,6 +117,19 @@ else
   fi
 fi
 
+hdr "Install: operator watchdog scripts"
+# Copy <repo>/scripts/hscc_*.sh into ~/.hermes/scripts/. Non-fatal: watchdogs
+# are operator convenience, not a foundation — if this step fails the rest of
+# the install can still complete. User scripts in the runtime dir are
+# preserved (only hscc_*.sh names are touched).
+SCRIPTS_RUNTIME="${HERMES_SCRIPTS:-$HOME/.hermes/scripts}"
+if SCOPY=$(REPO_ROOT="$REPO_ROOT" SCRIPTS="$SCRIPTS_RUNTIME" "$PYBIN" "$BOOT_DIR/install_scripts.py" $COPY_FLAG); then
+  ok "watchdog scripts copied → $SCRIPTS_RUNTIME$($NO_BACKUP && echo ' (no backup)')"
+else
+  echo "$SCOPY" >&2
+  warn "watchdog script copy reported issues — see scripts/README.md for manual install"
+fi
+
 hdr "Install: skills"
 if $SKIP_SKILLS; then warn "skipped"; else
   "$PYBIN" "$PLUGINS/hscc-skills/hscc.py" install-skills >/dev/null 2>&1 && ok "skills installed" || warn "skills install reported issues"

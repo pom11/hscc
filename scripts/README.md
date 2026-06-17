@@ -11,9 +11,24 @@ Pure shell scripts (no LLM) that monitor the HSCC cluster + Mac dispatcher host.
 | `hscc_cluster_digest.sh` | Periodic summary: container count per host, endpoint health, proxy state, per-job uptime. Designed to be delivered to a chat (e.g. the HSCC Telegram channel). |
 | `hscc_nas_watchdog.sh` | NAS health: ping QNAP `.249`, check Mac `/Volumes/NAS` mount listability. Falls back to project docs for remediation. |
 
-## Install (one-time per host)
+## Install
 
-Scripts go under `~/.hermes/scripts/` so Hermes can find them via `--script`:
+Scripts go under `~/.hermes/scripts/` so Hermes can find them via `--script`.
+
+### Via bootstrap (recommended)
+
+Bootstrap copies these automatically as part of the install flow:
+
+```bash
+~/dev/hscc/hscc-bootstrap/bootstrap.sh
+```
+
+Look for the *Install: operator watchdog scripts* stage. User-added scripts in
+the runtime dir are preserved (only `hscc_*.sh` names are touched), and the
+previous version of each script is backed up to `<name>.bak-<timestamp>` before
+overwrite. Pass `--no-backup` to skip the backup step.
+
+### Manual install (no bootstrap)
 
 ```bash
 mkdir -p ~/.hermes/scripts
