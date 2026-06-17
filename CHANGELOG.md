@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.5] — Proxy-plist respawn-storm hardening
+
+Hardens generated LiteLLM proxy launchd plists so a missing/failing binary can
+no longer crash-loop into a memory-exhausting respawn storm. On 2026-06-17 a
+proxy plist invoked a bare `litellm` (absent from launchd's minimal PATH →
+`posix_spawn` error 0x2) under an always-on `KeepAlive`, respawning every ~10s;
+re-applying the template 3× compounded it. (The host watchdog panic that day was
+ultimately caused by an unrelated 6-wide dataset job, but the proxy storm was a
+real latent fault.)
+
+### Changed (hscc-cluster)
+- `_generate_proxy_plist` now launches via `/bin/sh -c` and **resolves litellm
+  at launch** instead of freezing a machine-specific path into the plist:
+  `$LITELLM_BIN` override wins, else `command -v litellm`, else a glob of the
+  usual conda/uv install locations (`exec` so launchd supervises litellm
+  directly). It also uses a **crash-only** `KeepAlive` (`{SuccessfulExit:
+  false}`) instead of bare `true`, and adds a `ThrottleInterval` of 30s so a
+  persistently-failing binary backs off rather than respawning every ~10s.
+
+
 ## [1.0.0-beta.4] — Gateway-host-aware cluster-prune
 
 Fixes false assumption that orchestrator reboot kills the gateway. Gateway
