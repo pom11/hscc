@@ -206,3 +206,43 @@ def restart_one(unit):
     )
     return {"unit": label, "node": node, "ok": ok,
             "error": None if ok else (err or "sparkrun run failed")[:200]}
+
+
+def ssh_exec(node, remote_cmd, timeout=120):
+    """Run a shell command on a remote node via SSH. Returns (ok, stdout, stderr)."""
+    return _run(
+        ["ssh", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=no",
+         f"spark@{node}", remote_cmd],
+        timeout=timeout,
+    )
+
+
+def ssh_exec_parallel(nodes, remote_cmd, timeout=120):
+    """Run the same command on multiple nodes in parallel. Returns
+    {node: (ok, stdout, stderr)}."""
+    from concurrent.futures import ThreadPoolExecutor
+    out = {}
+    with ThreadPoolExecutor(max_workers=max(1, len(nodes))) as pool:
+        futures = {pool.submit(ssh_exec, n, remote_cmd, timeout): n for n in nodes}
+        for fut in futures:
+            n = futures[fut]
+            try:
+                out[n] = fut.result(timeout=timeout + 30)
+            except Exception as e:  # noqa: BLE001
+                out[n] = (False, "", str(e)[:200])
+    return out
+
+
+def wait_for_ssh_back(node, max_wait=180, probe_interval=5):
+    """Poll SSH on node until it answers or max_wait elapsed. Returns bool."""
+    import time
+    deadline = time.time() + max_wait
+    while time.time() < deadline:
+        ok, _o, _e = ssh_exec(node, "echo ready", timeout=8)
+        if ok:
+            return True
+        time.sleep(probe_interval)
+    return False
+
+
+REBOOT_REQUIRED_FILE = "/var/run/reboot-required"

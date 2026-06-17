@@ -219,6 +219,127 @@ def cmd_heal(raw_args):
     return "\n".join(lines)
 
 
+def cmd_cluster_reboot(raw_args):
+    """Reboot all cluster nodes. Workers in parallel; orchestrator last.
+
+    Confirm-first. Orchestrator reboot kills the gateway mid-command, so the
+    final completion message comes from the workers; user runs `/cluster` after
+    ~2-3 min to verify everything came back. Skips docker prune (reboot recycles
+    all containers anyway)."""
+    units = cmdlib.read_units()
+    orch = cmdlib.orchestrator_unit(units)
+    workers = cmdlib.worker_units(units)
+    worker_nodes = [cmdlib.unit_node(w) for w in workers if cmdlib.unit_node(w)]
+    orch_node = cmdlib.unit_node(orch) if orch else None
+    if not orch_node and not worker_nodes:
+        return "⚠️ No nodes in serving.json — nothing to reboot."
+
+    if not _confirmed(raw_args):
+        lines = ["⚠️ *Confirm full cluster reboot*", ""]
+        if worker_nodes:
+            lines.append(f"  workers (parallel): {', '.join(worker_nodes)}")
+        if orch_node:
+            lines.append(f"  orchestrator (last): {orch_node}")
+        lines.append("")
+        lines.append("Workers reboot in parallel (~3 min). Orchestrator reboots last "
+                     "and kills the gateway — no completion message after that.")
+        lines.append("Run `/cluster-reboot confirm` to execute.")
+        return "\n".join(lines)
+
+    lines = ["♻️ *HSCC cluster reboot launched*", ""]
+
+    # Phase 1: parallel worker reboot
+    if worker_nodes:
+        results = cmdlib.ssh_exec_parallel(
+            worker_nodes, "sudo nohup shutdown -r now >/dev/null 2>&1 &", timeout=30,
+        )
+        for node, (ok, _o, err) in results.items():
+            mark = "✅" if ok else "❌"
+            tail = "" if ok else f" — {err[:120]}"
+            lines.append(f"  {mark} worker {node}: reboot triggered{tail}")
+        lines.append("")
+        lines.append("Workers rebooting (~2-3 min). Run `/cluster` after to verify.")
+    else:
+        lines.append("(no workers in serving.json)")
+
+    # Phase 2: orchestrator reboot last
+    if orch_node:
+        # Delay 5s so this message lands before gateway dies
+        lines.append("")
+        lines.append(f"  ⏳ orchestrator {orch_node}: reboot in 5s (kills this gateway)")
+        cmdlib.ssh_exec(
+            orch_node,
+            "sudo nohup bash -c 'sleep 5 && shutdown -r now' >/dev/null 2>&1 &",
+            timeout=15,
+        )
+        lines.append("")
+        lines.append("Run `/cluster` in ~3 min to verify all 4 units are back.")
+    return "\n".join(lines)
+
+
+def cmd_cluster_apt_upgrade(raw_args):
+    """Run apt-get update + upgrade across all cluster nodes. Confirm-first.
+    Auto-chains to /cluster-reboot if /var/run/reboot-required appears on any
+    node (kernel/critical lib update). Sequential per node so each apt
+    finishes cleanly; parallel risks dpkg lock contention."""
+    units = cmdlib.read_units()
+    orch = cmdlib.orchestrator_unit(units)
+    workers = cmdlib.worker_units(units)
+    nodes = []
+    if orch:
+        n = cmdlib.unit_node(orch)
+        if n:
+            nodes.append(("orchestrator", n))
+    for w in workers:
+        n = cmdlib.unit_node(w)
+        if n:
+            nodes.append(("worker", n))
+
+    if not nodes:
+        return "⚠️ No nodes in serving.json — nothing to upgrade."
+
+    if not _confirmed(raw_args):
+        lines = ["⚠️ *Confirm cluster apt-upgrade*", ""]
+        for role, n in nodes:
+            lines.append(f"  • {role} {n}")
+        lines.append("")
+        lines.append("Runs `sudo apt-get update && sudo apt-get -y upgrade` on each "
+                     "node (sequential — apt lock-safe). If `/var/run/reboot-required` "
+                     "appears on any node afterwards, will chain into /cluster-reboot "
+                     "automatically.")
+        lines.append("Run `/cluster-apt-upgrade confirm` to execute.")
+        return "\n".join(lines)
+
+    lines = ["📦 *HSCC apt-upgrade*", ""]
+    reboot_needed = []
+    cmd = ("sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && "
+           "sudo DEBIAN_FRONTEND=noninteractive apt-get -y -qq upgrade && "
+           f"test -f {cmdlib.REBOOT_REQUIRED_FILE} && echo REBOOT_NEEDED || true")
+    for role, n in nodes:
+        ok, out, err = cmdlib.ssh_exec(n, cmd, timeout=600)
+        mark = "✅" if ok else "❌"
+        rb_marker = "REBOOT_NEEDED" in (out or "")
+        line = f"  {mark} {role} {n}"
+        if rb_marker:
+            line += " — *reboot required*"
+            reboot_needed.append(n)
+        if not ok:
+            line += f" — {(err or out)[:140]}"
+        lines.append(line)
+
+    if reboot_needed:
+        lines.append("")
+        lines.append(f"🔁 reboot-required on: {', '.join(reboot_needed)}")
+        lines.append("Chaining → `/cluster-reboot confirm` …")
+        chain = cmd_cluster_reboot("confirm")
+        lines.append("")
+        lines.append(chain)
+    else:
+        lines.append("")
+        lines.append("No reboot required. Done.")
+    return "\n".join(lines)
+
+
 def cmd_template(raw_args):
     """List / preview / validate / apply cluster templates from chat.
     Usage: /template [list|status|validate <name>|preview <name>|apply <name> [confirm]]"""
@@ -259,6 +380,16 @@ def register(ctx) -> None:
     ctx.register_command(
         name="cluster-restart", handler=cmd_cluster_restart,
         description="Recover the cluster by re-applying the active template (confirm-first).",
+        args_hint="confirm",
+    )
+    ctx.register_command(
+        name="cluster-reboot", handler=cmd_cluster_reboot,
+        description="Reboot all nodes (workers parallel, orchestrator last) — confirm-first.",
+        args_hint="confirm",
+    )
+    ctx.register_command(
+        name="cluster-apt-upgrade", handler=cmd_cluster_apt_upgrade,
+        description="apt update+upgrade across cluster; chains to /cluster-reboot if needed.",
         args_hint="confirm",
     )
     ctx.register_command(
