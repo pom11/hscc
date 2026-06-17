@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.2] — Operator watchdogs + script bootstrap
+
+Reliability follow-up to beta.1. A real incident on 2026-06-17 surfaced a
+gap: the sparkrun LiteLLM proxy (`localhost:4000`) had died days earlier
+with a stale PID, and nothing restarted it — kanban worker dispatch was
+silently degraded. This release ships pure-shell `--no-agent` watchdogs
+that monitor the proxy, vLLM endpoints, NAS, and the cluster at large,
+and wires them into bootstrap so a fresh-machine install reproduces them.
+
+### Added
+- **Operator watchdog scripts** (`scripts/hscc_*.sh`) — four no-LLM,
+  silent-when-healthy shell probes registered via Hermes cron with
+  `--no-agent`:
+  - `hscc_proxy_watchdog.sh` (every 5m) — restarts the sparkrun proxy
+    if `localhost:4000` is unreachable; covers the stale-PID regression.
+  - `hscc_worker_health.sh` (every 10m) — checks all 4 vLLM endpoints
+    plus per-host model-id match; reports drift.
+  - `hscc_cluster_digest.sh` (every 2h) — summary message (containers,
+    endpoint health, proxy state, uptimes) delivered to a chat target
+    (e.g. Telegram HSCC channel).
+  - `hscc_nas_watchdog.sh` (every 4h) — pings QNAP `.249`, probes the
+    Mac `/Volumes/NAS` mount; falls back to NAS-export remediation docs.
+- **`scripts/README.md`** — install (bootstrap or manual), per-script
+  purpose, and the `hermes cron create` commands to register each job.
+- **`hscc-bootstrap/install_scripts.py`** — installer parallel to
+  `install_payload.py`. Copies `<repo>/scripts/hscc_*.sh` into
+  `~/.hermes/scripts/` with backup-then-overwrite, preserves user-added
+  scripts, re-applies the executable bit, respects `--no-backup`.
+- **New bootstrap stage** — *Install: operator watchdog scripts* runs
+  after the plugin-files stage. Non-fatal: a script-install failure
+  warns instead of dying the install (watchdogs are operator convenience,
+  not foundation).
+
+### Fixed
+- **Sparkrun proxy stays alive across crashes.** Before: stale PID =
+  silent worker-dispatch outage. After: `hscc-proxy-watchdog` cron
+  detects + restarts within 5m, no operator action required.
+
+### Notes
+- Cron jobs themselves are not auto-registered by bootstrap — install
+  lays the script files, operators run the `hermes cron create` commands
+  once per host. See `scripts/README.md`.
+- 5 new tests in `hscc-bootstrap/tests/test_install_scripts.py`; full
+  bootstrap suite 83/83 passing.
+
 ## [1.0.0-beta.1] — Topology-free orchestrator + hardening
 
 First beta. The system is now feature-complete: a full in-depth audit was closed
