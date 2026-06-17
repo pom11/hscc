@@ -449,6 +449,52 @@ def cmd_cluster_apt_upgrade(raw_args):
     return "\n".join(lines)
 
 
+def cmd_cluster_prune(raw_args):
+    """Macro: full cluster recycle — down → docker-prune → apt-upgrade → restart.
+
+    Confirm-first; one confirm runs the whole chain. If apt-upgrade triggers a
+    kernel reboot, /cluster-restart at the tail is skipped (gateway dies mid-
+    reboot; vLLM relies on host-boot auto-start, otherwise run /cluster-restart
+    manually after hosts return)."""
+    if not _confirmed(raw_args):
+        return ("⚠️ *Confirm cluster prune* (macro)\n\n"
+                "Sequence (each step gets `confirm` auto-passed):\n"
+                "  1. /cluster-down — stop all vLLM\n"
+                "  2. /cluster-docker-prune — `docker system prune -af` per node\n"
+                "  3. /cluster-apt-upgrade — apt update+upgrade; may chain reboot\n"
+                "  4. /cluster-restart — re-apply template (skipped if step 3 rebooted)\n\n"
+                "If step 3 lands a kernel update → cluster reboots → gateway dies → "
+                "step 4 won't fire. Run `/cluster-restart confirm` manually once "
+                "hosts return if vLLM doesn't auto-start.\n\n"
+                "Run `/cluster-prune confirm` to execute.")
+
+    lines = ["🧼 *HSCC cluster-prune (macro)*", ""]
+
+    lines.append("--- step 1: /cluster-down ---")
+    lines.append(cmd_cluster_down("confirm"))
+    lines.append("")
+
+    lines.append("--- step 2: /cluster-docker-prune ---")
+    lines.append(cmd_cluster_docker_prune("confirm"))
+    lines.append("")
+
+    lines.append("--- step 3: /cluster-apt-upgrade ---")
+    apt_out = cmd_cluster_apt_upgrade("confirm")
+    lines.append(apt_out)
+    lines.append("")
+
+    # If apt-upgrade chained reboot, skip the cluster-restart tail
+    if "reboot-required on:" in apt_out:
+        lines.append("--- step 4: /cluster-restart SKIPPED (reboot chained) ---")
+        lines.append("Cluster is rebooting. Run `/cluster` in ~3 min; if vLLM "
+                     "didn't auto-start, run `/cluster-restart confirm`.")
+        return "\n".join(lines)
+
+    lines.append("--- step 4: /cluster-restart ---")
+    lines.append(cmd_cluster_restart("confirm"))
+    return "\n".join(lines)
+
+
 def cmd_template(raw_args):
     """List / preview / validate / apply cluster templates from chat.
     Usage: /template [list|status|validate <name>|preview <name>|apply <name> [confirm]]"""
@@ -509,6 +555,11 @@ def register(ctx) -> None:
     ctx.register_command(
         name="cluster-apt-upgrade", handler=cmd_cluster_apt_upgrade,
         description="apt update+upgrade across cluster; chains to /cluster-reboot if needed.",
+        args_hint="confirm",
+    )
+    ctx.register_command(
+        name="cluster-prune", handler=cmd_cluster_prune,
+        description="Macro: down → docker-prune → apt-upgrade → restart (confirm-first).",
         args_hint="confirm",
     )
     ctx.register_command(
