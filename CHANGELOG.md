@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.3] — Cluster lifecycle slash commands
+
+Adds 5 new operator slash commands to `hscc-commands` covering full cluster
+recycle. Triggered by a 16% swap-pressure incident on `.247` (2026-06-17)
+that `/cluster-restart` couldn't clear because re-applying the template only
+reloads vLLM models — the container/host memory state persisted across the
+template apply. The new commands give graduated recovery without always
+needing a kernel-level reboot.
+
+### Added (hscc-commands)
+- **`/cluster-down`** — confirm-first; parallel `sparkrun stop --all` per
+  node. Hosts stay up; vLLM containers go away.
+- **`/cluster-docker-prune`** — confirm-first; parallel `docker system
+  prune -af` (no volumes — model cache safe). Reports per-node reclaimed
+  space. Best run after `/cluster-down`.
+- **`/cluster-reboot`** — confirm-first; SSH `shutdown -r now` on workers in
+  parallel, orchestrator last with 5s delay so the confirmation message
+  reaches Telegram before the gateway dies.
+- **`/cluster-apt-upgrade`** — confirm-first; sequential
+  `apt-get update && apt-get -y upgrade` per node (dpkg-lock safe). Detects
+  `/var/run/reboot-required` and auto-chains into `/cluster-reboot`.
+- **`/cluster-prune`** — macro: `/cluster-down` → `/cluster-docker-prune` →
+  `/cluster-apt-upgrade` → `/cluster-restart`. One confirm runs the chain.
+  Skips the final `/cluster-restart` if step 3 chained a reboot (gateway
+  dies mid-reboot; vLLM relies on host-boot auto-start or a manual
+  `/cluster-restart` once hosts return).
+
+### Added (cmdlib)
+- `ssh_exec(node, cmd, timeout)` — single-node SSH wrapper around `_run`.
+- `ssh_exec_parallel(nodes, cmd, timeout)` — `ThreadPoolExecutor` fan-out.
+- `wait_for_ssh_back(node, max_wait, probe_interval)` — poll SSH until host
+  answers; for future reboot-completion gating.
+- `REBOOT_REQUIRED_FILE` constant.
+
+### Bootstrap
+No changes needed — `install_payload.py` already ships the full
+`hscc-commands/` directory; `enable_plugins.py` already enables the plugin.
+Fresh-machine installs pick the new commands up automatically.
+
+### Notes
+- All commands are **confirm-first**: bare invocation shows a preview;
+  re-run with `confirm` to execute.
+- Gateway restart (or `launchctl kickstart -k`) is required after install
+  for new commands to register, same as beta.2.
+
 ## [1.0.0-beta.2] — Operator watchdogs + script bootstrap
 
 Reliability follow-up to beta.1. A real incident on 2026-06-17 surfaced a
