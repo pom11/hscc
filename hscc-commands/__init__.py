@@ -219,6 +219,115 @@ def cmd_heal(raw_args):
     return "\n".join(lines)
 
 
+def cmd_cluster_down(raw_args):
+    """Stop all vLLM units across the cluster — leaves hosts up. Confirm-first.
+
+    Uses sparkrun stop per node (parallel). Pairs with /cluster-docker-prune +
+    /cluster-restart for a clean recycle without a full reboot."""
+    units = cmdlib.read_units()
+    orch = cmdlib.orchestrator_unit(units)
+    workers = cmdlib.worker_units(units)
+    nodes = []
+    if orch:
+        n = cmdlib.unit_node(orch)
+        if n:
+            nodes.append(("orchestrator", n))
+    for w in workers:
+        n = cmdlib.unit_node(w)
+        if n:
+            nodes.append(("worker", n))
+
+    if not nodes:
+        return "⚠️ No nodes in serving.json — nothing to stop."
+
+    if not _confirmed(raw_args):
+        lines = ["⚠️ *Confirm cluster down*", ""]
+        for role, n in nodes:
+            lines.append(f"  • {role} {n}")
+        lines.append("")
+        lines.append("Stops all vLLM units (sparkrun stop --all) on each node, "
+                     "parallel. Hosts stay up. Workflow: /cluster-down → "
+                     "/cluster-docker-prune → /cluster-restart.")
+        lines.append("Run `/cluster-down confirm` to execute.")
+        return "\n".join(lines)
+
+    # Parallel sparkrun stop per node
+    from concurrent.futures import ThreadPoolExecutor
+    lines = ["🛑 *HSCC cluster down*", ""]
+    node_list = [n for _r, n in nodes]
+
+    def _stop(node):
+        return node, cmdlib._run(
+            [cmdlib.SPARKRUN, "stop", "--all", "--hosts", node], timeout=90,
+        )
+
+    with ThreadPoolExecutor(max_workers=max(1, len(node_list))) as pool:
+        results = list(pool.map(_stop, node_list))
+
+    for node, (ok, _o, err) in results:
+        mark = "✅" if ok else "❌"
+        tail = "" if ok else f" — {err[:140]}"
+        lines.append(f"  {mark} {node}: stopped{tail}")
+    lines.append("")
+    lines.append("All units stopped. Next: `/cluster-docker-prune confirm` then "
+                 "`/cluster-restart confirm`.")
+    return "\n".join(lines)
+
+
+def cmd_cluster_docker_prune(raw_args):
+    """Run `docker system prune -af` across all cluster nodes (parallel).
+    Reclaims images/containers/networks. Volumes preserved (model cache safe).
+    Confirm-first."""
+    units = cmdlib.read_units()
+    orch = cmdlib.orchestrator_unit(units)
+    workers = cmdlib.worker_units(units)
+    nodes = []
+    if orch:
+        n = cmdlib.unit_node(orch)
+        if n:
+            nodes.append(("orchestrator", n))
+    for w in workers:
+        n = cmdlib.unit_node(w)
+        if n:
+            nodes.append(("worker", n))
+
+    if not nodes:
+        return "⚠️ No nodes in serving.json — nothing to prune."
+
+    if not _confirmed(raw_args):
+        lines = ["⚠️ *Confirm cluster docker prune*", ""]
+        for role, n in nodes:
+            lines.append(f"  • {role} {n}")
+        lines.append("")
+        lines.append("Runs `docker system prune -af` on each node (parallel). "
+                     "Removes dangling images, stopped containers, unused networks. "
+                     "Volumes preserved (model cache safe).")
+        lines.append("Best run AFTER `/cluster-down confirm`.")
+        lines.append("Run `/cluster-docker-prune confirm` to execute.")
+        return "\n".join(lines)
+
+    node_list = [n for _r, n in nodes]
+    results = cmdlib.ssh_exec_parallel(
+        node_list, "docker system prune -af 2>&1 | tail -3", timeout=120,
+    )
+
+    lines = ["🧹 *HSCC docker prune*", ""]
+    for node in node_list:
+        ok, out, err = results.get(node, (False, "", "no result"))
+        mark = "✅" if ok else "❌"
+        # Pull the "Total reclaimed space" line if present
+        space_line = ""
+        for ln in (out or "").splitlines():
+            if "reclaimed" in ln.lower():
+                space_line = " — " + ln.strip()
+                break
+        tail = space_line if ok else f" — {(err or out)[:140]}"
+        lines.append(f"  {mark} {node}{tail}")
+    lines.append("")
+    lines.append("Done. Next: `/cluster-restart confirm` to re-apply the template.")
+    return "\n".join(lines)
+
+
 def cmd_cluster_reboot(raw_args):
     """Reboot all cluster nodes. Workers in parallel; orchestrator last.
 
@@ -385,6 +494,16 @@ def register(ctx) -> None:
     ctx.register_command(
         name="cluster-reboot", handler=cmd_cluster_reboot,
         description="Reboot all nodes (workers parallel, orchestrator last) — confirm-first.",
+        args_hint="confirm",
+    )
+    ctx.register_command(
+        name="cluster-down", handler=cmd_cluster_down,
+        description="Stop all vLLM units cluster-wide (hosts stay up) — confirm-first.",
+        args_hint="confirm",
+    )
+    ctx.register_command(
+        name="cluster-docker-prune", handler=cmd_cluster_docker_prune,
+        description="docker system prune -af on every node (volumes preserved) — confirm-first.",
         args_hint="confirm",
     )
     ctx.register_command(
