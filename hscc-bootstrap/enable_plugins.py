@@ -1,13 +1,15 @@
 """Idempotently wire HSCC into ~/.hermes/config.yaml.
 
-Four things must be true for the HSCC fleet to actually work:
+Five things must be true for the HSCC fleet to actually work:
   1. each plugin name is in ``plugins.enabled`` (Hermes only loads enabled plugins);
   2. each plugin's toolset is in the top-level ``toolsets`` (a tool is gated by its
      toolset — without it the tool registers but no agent can call it);
   3. kanban routing sends catch-all work to a WORKER, not the orchestrator
      (``kanban.default_assignee`` + concurrency caps);
   4. orchestrator subagents run on the WORKER pool, not the gateway GPU
-     (``delegation.base_url`` → the load-balanced worker proxy).
+     (``delegation.base_url`` → the load-balanced worker proxy);
+  5. cluster-guard hook is installed and wired so provision/restart operations
+     are capacity-gated and all cluster ops are audited.
 
 Bootstrap calls this so a fresh install is fully wired, not half-wired and
 silently dumping all work onto the orchestrator. Safe to re-run: only fills
@@ -18,6 +20,12 @@ import os
 import sys
 
 HSCC_PLUGINS = ["hscc-cluster", "hscc-commands", "sparkrun-hermes"]
+
+# Cluster-guard hook — lives in hscc-bootstrap/hooks/cluster-guard.py in the
+# repo; installed to ~/.hermes/hooks/cluster-guard.py at bootstrap time.
+HOOKS_DIR = os.path.expanduser("~/.hermes/hooks")
+CLUSTER_GUARD_DST = os.path.join(HOOKS_DIR, "cluster-guard.py")
+CLUSTER_GUARD_COMMAND = f"python3 {CLUSTER_GUARD_DST}"
 # Toolsets the orchestrator needs:
 #   hscc-cluster — cluster ops (orchestrator-only)
 #   sparkrun     — sparkrun_exec passthrough
@@ -49,9 +57,16 @@ REJECT_ESCALATE_LIMIT = int(os.environ.get("HSCC_REJECT_ESCALATE_LIMIT", "3"))
 # load-balances across worker GPUs). Spawn depth stays flat (1) by default;
 # nesting (2+) multiplies cost and is opt-in.
 MAX_CONCURRENT_CHILDREN = int(os.environ.get("HSCC_MAX_CONCURRENT_CHILDREN", "9"))
-# Gateway node LAN IP — used by dashboard, compaction, and fallback.
-# Env-overridable; default matches the live HSCC topology (gateway .244).
-GATEWAY_IP = os.environ.get("HSCC_GATEWAY_IP", "10.0.0.244")
+# Gateway LAN IPs — env-overridable; defaults match the live HSCC topology.
+# ORCH_MODEL_HOST: the orchestrator vLLM node (runs models :8000)
+# GATEWAY_HOST: the gateway Mac Studio (runs Hermes + dashboard :3000 + LB :4000)
+ORCH_MODEL_HOST = os.environ.get("HSCC_ORCH_MODEL_HOST", "10.0.0.244")
+GATEWAY_HOST = os.environ.get("HSCC_GATEWAY_HOST", "10.0.0.245")
+
+# Orchestrator model: the vLLM model served on ORCH_MODEL_HOST:8000/v1.
+# Used by compaction when COMPACT_URL defaults to the orchestrator endpoint.
+# Env-overridable; default matches the live HSCC orch (Qwen3.6-35B-A3B-NVFP4).
+ORCH_MODEL = os.environ.get("HSCC_ORCH_MODEL", "nvidia/Qwen3.6-35B-A3B-NVFP4")
 
 # Context-compaction: compact rarely (high threshold) and run the summarization
 # on a dedicated endpoint, not the main model — otherwise a big summary prompt
@@ -59,8 +74,14 @@ GATEWAY_IP = os.environ.get("HSCC_GATEWAY_IP", "10.0.0.244")
 # endpoint to the orchestrator's vLLM (fast MoE A3B) so compaction never runs on
 # the busy worker proxy; override with HSCC_COMPACT_URL/_MODEL.
 COMPACT_THRESHOLD = float(os.environ.get("HSCC_COMPACT_THRESHOLD", "0.8"))
-COMPACT_URL = os.environ.get("HSCC_COMPACT_URL", f"http://{GATEWAY_IP}:8000/v1")
-COMPACT_MODEL = os.environ.get("HSCC_COMPACT_MODEL", WORKER_MODEL)
+# When COMPACT_URL defaults to the orch endpoint (:8000), the model MUST be the
+# orch model — the worker model (27B-FP8) is not registered on the orchestrator
+# and every compaction call returns 404.
+_DEFAULT_COMPACT_URL = f"http://{ORCH_MODEL_HOST}:8000/v1"
+_COMPACT_URL_RAW = os.environ.get("HSCC_COMPACT_URL", _DEFAULT_COMPACT_URL)
+_COMPACT_MODEL_DEFAULT = ORCH_MODEL if _COMPACT_URL_RAW == _DEFAULT_COMPACT_URL else WORKER_MODEL
+COMPACT_URL = _COMPACT_URL_RAW
+COMPACT_MODEL = os.environ.get("HSCC_COMPACT_MODEL", _COMPACT_MODEL_DEFAULT)
 COMPACT_KEY = os.environ.get("HSCC_COMPACT_KEY", "sk-sparkrun")
 COMPACT_TIMEOUT = int(os.environ.get("HSCC_COMPACT_TIMEOUT", "90"))
 
@@ -74,7 +95,7 @@ FALLBACK_KEY = os.environ.get("HSCC_FALLBACK_KEY", "sk-sparkrun")
 # (orchestrator) on port 3000. Env-overridable. Leave blank to skip.
 DASHBOARD_PUBLIC_URL = os.environ.get(
     "HSCC_DASHBOARD_PUBLIC_URL",
-    f"http://{GATEWAY_IP}:3000")
+    f"http://{GATEWAY_HOST}:3000")
 
 
 def _ensure_plugins_enabled(cfg, plugins):
@@ -250,18 +271,157 @@ def _ensure_dashboard(cfg):
     return changed
 
 
-def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS):
-    """Ensure HSCC plugins + toolsets + fleet routing are wired in config_path.
+def _probe_compaction_endpoint():
+    """Sanity-probe the compaction endpoint at bootstrap.
+
+    Hit <COMPACT_URL>/v1/models and assert that COMPACT_MODEL is present.
+    Print a warning (non-fatal) if the model is missing so the user knows
+    compression is silently dead (abort_on_summary_failure=False means workers
+    limp on with degraded summaries).
+
+    Returns True if the model is present in the endpoint's model list, False
+    otherwise. Silently skips on connection errors (no live orch in test env).
+    """
+    import urllib.request
+    import json
+    import sys
+
+    if not COMPACT_URL:
+        return True  # no aux endpoint configured — nothing to probe
+
+    models_url = COMPACT_URL.rstrip("/") + "/v1/models"
+    try:
+        req = urllib.request.Request(models_url)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        listed = {m["id"] for m in data.get("data", [])}
+        # vLLM sometimes returns fully-qualified IDs; check substring match too.
+        present = COMPACT_MODEL in listed or any(
+            COMPACT_MODEL.split("/")[-1] in mid for mid in listed
+        )
+        if not present:
+            # Log a warning-like message so it surfaces in gateway logs.
+            print(
+                f"[WARN] HSCC compaction model mismatch: endpoint {models_url} "
+                f"lists {len(listed)} model(s) — '{COMPACT_MODEL}' not found. "
+                f"Compression will fail with 404. Fix: set HSCC_COMPACT_MODEL "
+                f"or update the endpoint.",
+                file=sys.stderr,
+            )
+        return present
+    except Exception as exc:
+        # Silent skip in tests (no live orch); only warn in real runs.
+        if "pytest" not in sys.modules and "unittest" not in sys.modules:
+            print(f"[WARN] HSCC compaction probe failed: {exc}", file=sys.stderr)
+        return False
+
+
+def _ensure_hooks_file(hooks_source):
+    """Copy cluster-guard.py from the repo's hooks/ dir to ~/.hermes/hooks/.
+
+    Args:
+        hooks_source: path to hscc-bootstrap/hooks/ in the repo.
+
+    Returns {"installed": True/False, "backed_up": str|None}.
+    """
+    import shutil
+    from datetime import datetime
+    from pathlib import Path
+
+    src = Path(hooks_source) / "cluster-guard.py"
+    if not src.is_file():
+        return {"installed": False, "reason": "source cluster-guard.py not found"}
+
+    dst = Path(CLUSTER_GUARD_DST)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    backed_up = None
+    if dst.exists():
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        bak = dst.parent / f"{dst.name}.bak-{stamp}"
+        shutil.copy2(dst, bak)
+        backed_up = str(bak)
+
+    shutil.copy2(src, dst)
+    os.chmod(dst, 0o755)
+    return {"installed": True, "backed_up": backed_up}
+
+
+def _ensure_hooks(cfg):
+    """Wire cluster-guard shell hooks into config.yaml hooks section.
+
+    Adds three hook entries (pre_tool_call, post_tool_call, on_session_start)
+    only when a cluster-guard entry is not already present for that hook type.
+    Preserves any operator-added hooks.  Returns keys changed.
+    """
+    hooks = cfg.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        return []
+
+    changed = []
+
+    # Build the desired hook entries
+    pre_hook = {
+        "matcher": "hscc-cluster",
+        "command": CLUSTER_GUARD_COMMAND,
+        "timeout": 10,
+    }
+    post_hook = {
+        "matcher": "hscc-cluster",
+        "command": CLUSTER_GUARD_COMMAND,
+        "timeout": 5,
+    }
+    session_hook = {
+        "command": CLUSTER_GUARD_COMMAND,
+        "timeout": 5,
+    }
+
+    for hook_type, hook_entry in [
+        ("pre_tool_call", pre_hook),
+        ("post_tool_call", post_hook),
+        ("on_session_start", session_hook),
+    ]:
+        entries = hooks.get(hook_type, [])
+        if not isinstance(entries, list):
+            entries = []
+            hooks[hook_type] = entries
+
+        # Check if cluster-guard is already wired for this hook type
+        has_guard = any(
+            isinstance(e, dict) and e.get("command", "").endswith("cluster-guard.py")
+            for e in entries
+        )
+        if not has_guard:
+            entries.append(hook_entry)
+            changed.append(hook_type)
+
+    return changed
+
+
+def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
+           hooks_source=None):
+    """Ensure HSCC plugins + toolsets + fleet routing + hooks are wired.
 
     Returns {"plugins": [...], "toolsets": [...], "kanban": [...], "delegation":
-    [...], "dashboard": [...]} of what changed. Writes (with one backup) only
-    if something changed. No-op + no backup if already wired or if the config
-    is missing/malformed.
+    [...], "compaction": [...], "fallback": [...], "dashboard": [...],
+    "hooks": [...]} of what changed. Writes (with one backup) only if something
+    changed. No-op + no backup if already wired or if the config is
+    missing/malformed.
+
+    Args:
+        hooks_source: path to hscc-bootstrap/hooks/ in the repo.  Auto-detected
+            from this module's location when None.
     """
     import yaml
 
+    # Auto-detect hooks source: ../hscc-bootstrap/hooks/ relative to this file
+    if hooks_source is None:
+        hooks_source = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "hooks"
+        )
+
     empty = {"plugins": [], "toolsets": [], "kanban": [], "delegation": [],
-             "compaction": [], "fallback": [], "dashboard": []}
+             "compaction": [], "fallback": [], "dashboard": [], "hooks": []}
     if not os.path.exists(config_path):
         return empty
     with open(config_path) as fh:
@@ -276,9 +436,18 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS):
     changed_compaction = _ensure_compaction(cfg)
     changed_fallback = _ensure_fallback(cfg)
     changed_dashboard = _ensure_dashboard(cfg)
+    changed_hooks = _ensure_hooks(cfg)
+
+    # Sanity-probe the compaction endpoint (prints a warning to gateway logs
+    # if the model is missing — non-fatal but alerts the operator).
+    _probe_compaction_endpoint()
+
+    # Install the hook script to disk (idempotent, backup-then-overwrite)
+    hooks_file_result = _ensure_hooks_file(hooks_source)
 
     if (added_plugins or added_toolsets or changed_kanban or changed_delegation
-            or changed_compaction or changed_fallback or changed_dashboard):
+            or changed_compaction or changed_fallback or changed_dashboard
+            or changed_hooks):
         import shutil
         import time
         shutil.copy(config_path,
@@ -289,7 +458,8 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS):
     return {"plugins": added_plugins, "toolsets": added_toolsets,
             "kanban": changed_kanban, "delegation": changed_delegation,
             "compaction": changed_compaction, "fallback": changed_fallback,
-            "dashboard": changed_dashboard}
+            "dashboard": changed_dashboard,
+            "hooks": changed_hooks}
 
 
 if __name__ == "__main__":

@@ -106,6 +106,11 @@ def _fully_wired_cfg():
             "base_url": enable_plugins.FALLBACK_URL,
             "api_key": enable_plugins.FALLBACK_KEY}],
         "dashboard": {"public_url": enable_plugins.DASHBOARD_PUBLIC_URL},
+        "hooks": {
+            "pre_tool_call": [{"matcher": "hscc-cluster", "command": "cluster-guard.py", "timeout": 10}],
+            "post_tool_call": [{"matcher": "hscc-cluster", "command": "cluster-guard.py", "timeout": 5}],
+            "on_session_start": [{"command": "cluster-guard.py", "timeout": 5}],
+        },
     }
 
 
@@ -113,13 +118,13 @@ def test_fully_wired_is_noop(tmp_path):
     path = _write(tmp_path / "config.yaml", _fully_wired_cfg())
     before = open(path).read()
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "dashboard": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "dashboard": [], "hooks": []}
     assert open(path).read() == before              # no rewrite, no backup churn
 
 
 def test_missing_config_noop(tmp_path):
     res = enable_plugins.enable(str(tmp_path / "nope.yaml"))
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "dashboard": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "dashboard": [], "hooks": []}
 
 
 # ── fleet routing (kanban + delegation) ──────────────────────────────────────
@@ -150,7 +155,7 @@ def test_routing_preserves_operator_choices(tmp_path):
     cfg["delegation"]["base_url"] = "http://my-proxy:9000/v1"
     path = _write(tmp_path / "config.yaml", cfg)
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "dashboard": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "dashboard": [], "hooks": []}
     out = yaml.safe_load(open(path))
     assert out["kanban"]["default_assignee"] == "my-special-worker"
     assert out["kanban"]["max_in_progress"] == 99   # not lowered
@@ -196,6 +201,47 @@ def test_worker_proxy_default_is_lb_4000(tmp_path):
     assert enable_plugins.WORKER_PROXY_URL == "http://localhost:4000/v1"
     assert "4000" in enable_plugins.WORKER_PROXY_URL
     assert "8000" not in enable_plugins.WORKER_PROXY_URL
+
+
+def test_dashboard_default_targets_gateway(tmp_path):
+    """DASHBOARD_PUBLIC_URL defaults to GATEWAY_HOST:3000 (the gateway Mac
+    Studio), NOT ORCH_MODEL_HOST. The gateway runs Hermes + dashboard + LB;
+    the orchestrator runs vLLM :8000 only."""
+    assert enable_plugins.DASHBOARD_PUBLIC_URL == f"http://{enable_plugins.GATEWAY_HOST}:3000"
+    assert enable_plugins.GATEWAY_HOST != enable_plugins.ORCH_MODEL_HOST
+
+
+def test_compaction_model_defaults_to_orch_model(tmp_path):
+    """When COMPACT_URL defaults to orch :8000, COMPACT_MODEL must default to
+    the ORCH_MODEL (nvidia/Qwen3.6-35B-A3B-NVFP4), NOT the worker model
+    (Qwen/Qwen3.6-27B-FP8). A mismatch causes every compression call to 404.
+    Only when COMPACT_URL is overridden to a non-orch URL does COMPACT_MODEL
+    fall back to WORKER_MODEL."""
+    assert enable_plugins.COMPACT_URL == f"http://{enable_plugins.ORCH_MODEL_HOST}:8000/v1"
+    assert enable_plugins.COMPACT_MODEL == enable_plugins.ORCH_MODEL
+    assert enable_plugins.COMPACT_MODEL != enable_plugins.WORKER_MODEL
+
+
+def test_compaction_model_switches_when_url_customized(monkeypatch):
+    """If the operator overrides COMPACT_URL to a non-orch endpoint, the model
+    should fall back to WORKER_MODEL (not ORCH_MODEL) since the operator is
+    pointing at a different cluster."""
+    monkeypatch.setenv("HSCC_COMPACT_URL", "http://other-host:8000/v1")
+    import importlib
+    import enable_plugins as ep
+    importlib.reload(ep)
+    assert ep.COMPACT_MODEL == ep.WORKER_MODEL
+
+
+def test_compaction_url_customized_keeps_model_override(monkeypatch):
+    """When the operator overrides COMPACT_URL, an explicit HSCC_COMPACT_MODEL
+    env var is STILL respected (not overridden by WORKER_MODEL default)."""
+    monkeypatch.setenv("HSCC_COMPACT_URL", "http://other-host:8000/v1")
+    monkeypatch.setenv("HSCC_COMPACT_MODEL", "my/custom-model")
+    import importlib
+    import enable_plugins as ep
+    importlib.reload(ep)
+    assert ep.COMPACT_MODEL == "my/custom-model"
 
 
 def test_auto_review_seeded_when_absent(tmp_path):
@@ -283,3 +329,35 @@ def test_compaction_threshold_not_lowered(tmp_path, monkeypatch):
     path = _write(tmp_path / "config.yaml", cfg)
     enable_plugins.enable(path)
     assert yaml.safe_load(open(path))["compression"]["threshold"] == 0.95
+
+
+# ── dashboard ────────────────────────────────────────────────────────────────
+
+def test_dashboard_public_url_filled_on_fresh(tmp_path, monkeypatch):
+    """A fresh config gets dashboard.public_url from the env default."""
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"]})
+    res = enable_plugins.enable(path)
+    assert "public_url" in res["dashboard"]
+    cfg = yaml.safe_load(open(path))
+    assert cfg["dashboard"]["public_url"] == enable_plugins.DASHBOARD_PUBLIC_URL
+
+
+def test_dashboard_public_url_preserved_when_set(tmp_path, monkeypatch):
+    """An operator-set public_url is NOT overwritten."""
+    cfg = _fully_wired_cfg()
+    cfg["dashboard"]["public_url"] = "http://custom-host:9999"
+    path = _write(tmp_path / "config.yaml", cfg)
+    res = enable_plugins.enable(path)
+    assert res["dashboard"] == []
+    out = yaml.safe_load(open(path))
+    assert out["dashboard"]["public_url"] == "http://custom-host:9999"
+
+
+def test_dashboard_skipped_when_env_blank(tmp_path, monkeypatch):
+    """When DASHBOARD_PUBLIC_URL is empty, bootstrap does not touch dashboard."""
+    monkeypatch.setattr(enable_plugins, "DASHBOARD_PUBLIC_URL", "")
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"]})
+    res = enable_plugins.enable(path)
+    assert res["dashboard"] == []
