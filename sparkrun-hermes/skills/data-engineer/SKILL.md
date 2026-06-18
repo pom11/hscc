@@ -33,41 +33,33 @@ MEM_ESTIMATE_GB = {
 
 **When in doubt:** Use the higher estimate. The gate will serialize execution rather than let processes compete for RAM.
 
-## 🔒 RULE 2: Process Dedup — Check Before Spawn (ALWAYS)
+## 🔒 RULE 2: Process Dedup — pgrep Check (ALWAYS)
 
-**Before spawning any `generate_dataset_v2.py` subprocess, ALWAYS scan for existing instances with the same `--family` and `--timeframe` args.** This prevents duplicate gen processes that waste memory and trigger the 2026-06-17 OOM panic.
+**Before spawning any `generate_dataset_v2.py` subprocess, use `pgrep` to check for existing instances with the same `--family` and `--timeframe` args.**
 
-### The Check (Execute EVERY Time)
+### The Check (Simple One-Liner)
 
-```bash
-# Extract family and timeframe from your command
-# Example: --family forex --timeframe 4h
+```python
+import subprocess, sys
 
-# Scan for matching running processes (excluding grep itself)
-ps aux | grep generate_dataset_v2.py | grep -- '--family YOUR_FAMILY' | grep -- '--timeframe YOUR_TIMEFRAME' | grep -v grep
+family = "YOUR_FAMILY"  # e.g., "forex"
+tf = "YOUR_TIMEFRAME"   # e.g., "4h"
+
+existing = subprocess.check_output(
+    ["pgrep", "-f", f"generate_dataset_v2.py.*--family {family}.*--timeframe {tf}"],
+    text=True
+).strip()
+if existing:
+    sys.exit(f"duplicate gen detected for {family}/{tf} (pid={existing}). abort.")
 ```
 
-### Concrete Example
+`pgrep` returns empty (exit code 1) if not found, non-empty if found. No `grep -v grep` needed, no `ps aux` parsing.
 
-If your task body says:
-```
-/Users/desac/miniconda3/envs/p313/bin/python3 ~/dev/sphoin_engine/bin/generate_dataset_v2.py --family forex --timeframe 4h --mem-est-gb 30 --mem-gate-timeout 3600
-```
+### Decision Tree
 
-Before running it, execute:
-```bash
-ps aux | grep generate_dataset_v2.py | grep -- '--family forex' | grep -- '--timeframe 4h' | grep -v grep
-```
-
-If output is non-empty → **DUPLICATE DETECTED**. Check PID, age, RSS:
-```bash
-ps -o pid,etime,rss,args | grep generate_dataset_v2.py | grep -- '--family forex' | grep -- '--timeframe 4h' | grep -v grep
-```
-
-**Decision:**
-- Healthy (running > 5 min, RSS < 30GB): **WAIT** — do NOT spawn. Poll every 30s.
-- Stuck/zombie (running < 5 min, RSS growing rapidly, or PID not in ps): **KILL and RESTART**.
-- Dead process: Kill it, then spawn fresh.
+- **pgrep returns empty** → spawn the gen subprocess
+- **pgrep returns PIDs** → do NOT spawn. Wait for existing process to finish, or kill it if stuck/zombie
+- **pgrep returns a PID that's not in `ps aux`** → zombie, kill it, then spawn fresh
 
 ### Why This Is Critical
 
@@ -80,6 +72,8 @@ Each duplicate gen process allocates 8-37GB of RAM. On a 36GB Mac Studio, just 2
 **Rule: ONE process per family+timeframe combo at any time.**
 
 ## 🔒 RULE 3: EURJPY Crash — Explicit Handling Procedure
+
+> **Full diagnostic reference:** `references/eurjp4y-crash.md` — detailed symptom log, probe commands, and fix approaches.
 
 **Problem:** forex_4h gen consistently crashes at EURJPY (tickers [1-2] skip, [3] EURJPY → process dies). 2+ runs confirmed.
 
@@ -158,3 +152,8 @@ When the gen subprocess fails:
 4. **Stale worker PIDs:** The kanban DB worker_pid can be stale — always verify the gen subprocess exists separately
 5. **Memory underestimation:** If a gen uses significantly more memory than `--mem-est-gb`, increase the estimate so the gate forces single-process execution
 6. **Memory estimates not sticky:** Each kanban worker re-derives from a stale brief. **ALWAYS read from the hardcoded table in this skill.**
+
+## References
+
+- `references/eurjp4y-crash.md` — EURJPY crash symptom log, probe commands, fix approaches
+- `references/sphoin-gen-safety.md` — memory gate ops, mem_gate registry location, duplicate detection, conda quirk, known bugs
