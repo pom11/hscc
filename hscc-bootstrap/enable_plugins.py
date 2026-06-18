@@ -487,10 +487,10 @@ def _ensure_hooks(cfg):
         ("post_tool_call", post_hook),
         ("on_session_start", session_hook),
     ]:
-        entries = hooks.get(hook_type, [])
+        entries = hooks.get(hook_type)
         if not isinstance(entries, list):
             entries = []
-            hooks[hook_type] = entries
+        hooks[hook_type] = entries
 
         # Check if cluster-guard is already wired for this hook type
         has_guard = any(
