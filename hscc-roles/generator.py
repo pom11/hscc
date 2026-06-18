@@ -10,7 +10,7 @@ import rolelib
 # the orchestrator GPU. Overridable via env so bootstrap can set the real
 # proxy/host without editing code.
 WORKER_PROXY_BASE_URL = os.environ.get(
-    "HSCC_WORKER_PROXY_URL", "http://192.168.88.244:8000/v1")
+    "HSCC_WORKER_PROXY_URL", "http://localhost:4000/v1")
 WORKER_MODEL = os.environ.get("HSCC_WORKER_MODEL", "Qwen/Qwen3.6-27B-FP8")
 WORKER_PROXY_KEY = os.environ.get("HSCC_WORKER_PROXY_KEY", "sk-sparkrun")
 

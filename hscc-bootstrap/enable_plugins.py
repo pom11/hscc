@@ -34,7 +34,7 @@ HSCC_TOOLSETS = ["hscc-cluster", "sparkrun", "delegation"]
 
 # Fleet-routing defaults. The worker proxy (sparkrun LiteLLM LB) load-balances
 # every worker GPU behind one URL; env-overridable to match the generator.
-WORKER_PROXY_URL = os.environ.get("HSCC_WORKER_PROXY_URL", "http://192.168.88.244:8000/v1")
+WORKER_PROXY_URL = os.environ.get("HSCC_WORKER_PROXY_URL", "http://localhost:4000/v1")
 WORKER_MODEL = os.environ.get("HSCC_WORKER_MODEL", "Qwen/Qwen3.6-27B-FP8")
 WORKER_PROXY_KEY = os.environ.get("HSCC_WORKER_PROXY_KEY", "sk-sparkrun")
 DEFAULT_ASSIGNEE = os.environ.get("HSCC_DEFAULT_ASSIGNEE", "worker")
@@ -53,13 +53,17 @@ REJECT_ESCALATE_LIMIT = int(os.environ.get("HSCC_REJECT_ESCALATE_LIMIT", "3"))
 # load-balances across worker GPUs). Spawn depth stays flat (1) by default;
 # nesting (2+) multiplies cost and is opt-in.
 MAX_CONCURRENT_CHILDREN = int(os.environ.get("HSCC_MAX_CONCURRENT_CHILDREN", "9"))
+# Gateway node LAN IP — used by dashboard, compaction, and fallback.
+# Env-overridable; default matches the live HSCC topology (gateway .244).
+GATEWAY_IP = os.environ.get("HSCC_GATEWAY_IP", "192.168.88.244")
+
 # Context-compaction: compact rarely (high threshold) and run the summarization
 # on a dedicated endpoint, not the main model — otherwise a big summary prompt
 # competes with real work and wedges the orchestrator (H1). Default the summary
-# endpoint to the WORKER proxy (:4000) so compaction never runs on the
-# orchestrator; override with HSCC_COMPACT_URL/_MODEL.
+# endpoint to the orchestrator's vLLM (fast MoE A3B) so compaction never runs on
+# the busy worker proxy; override with HSCC_COMPACT_URL/_MODEL.
 COMPACT_THRESHOLD = float(os.environ.get("HSCC_COMPACT_THRESHOLD", "0.8"))
-COMPACT_URL = os.environ.get("HSCC_COMPACT_URL", WORKER_PROXY_URL)
+COMPACT_URL = os.environ.get("HSCC_COMPACT_URL", f"http://{GATEWAY_IP}:8000/v1")
 COMPACT_MODEL = os.environ.get("HSCC_COMPACT_MODEL", WORKER_MODEL)
 COMPACT_KEY = os.environ.get("HSCC_COMPACT_KEY", "sk-sparkrun")
 COMPACT_TIMEOUT = int(os.environ.get("HSCC_COMPACT_TIMEOUT", "90"))
@@ -80,6 +84,12 @@ BITWARDEN_SERVER_URL = os.environ.get("HSCC_BITWARDEN_SERVER_URL", "")
 # a 1hr cache TTL keeps the prompt prefix cached across session restarts,
 # slashing token costs for long autonomous tasks. Default 3600s (1hr).
 PROMPT_CACHE_TTL_SECONDS = int(os.environ.get("HSCC_PROMPT_CACHE_TTL_SECONDS", "3600"))
+
+# Dashboard: public_url for network access. Defaults to the gateway node
+# (orchestrator) on port 3000. Env-overridable. Leave blank to skip.
+DASHBOARD_PUBLIC_URL = os.environ.get(
+    "HSCC_DASHBOARD_PUBLIC_URL",
+    f"http://{GATEWAY_IP}:3000")
 
 
 def _ensure_plugins_enabled(cfg, plugins):
@@ -330,20 +340,38 @@ def _ensure_prompt_caching(cfg):
     return changed
 
 
+def _ensure_dashboard(cfg):
+    """Ensure the dashboard block has a public_url for network access.
+
+    Only fills ``dashboard.public_url`` when it is empty and DASHBOARD_PUBLIC_URL
+    is configured. Does NOT touch basic_auth (operator manages credentials).
+    Returns keys changed.
+    """
+    d = cfg.setdefault("dashboard", {})
+    if not isinstance(d, dict):
+        return []
+    changed = []
+    # public_url: only fill when empty — operator overrides are preserved.
+    if DASHBOARD_PUBLIC_URL and not (d.get("public_url") or "").strip():
+        d["public_url"] = DASHBOARD_PUBLIC_URL
+        changed.append("public_url")
+    return changed
+
+
 def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS):
     """Ensure HSCC plugins + toolsets + fleet routing are wired in config_path.
 
     Returns {"plugins": [...], "toolsets": [...], "kanban": [...], "delegation":
     [...], "compaction": [...], "fallback": [...], "bitwarden": [...],
-    "prompt_caching": [...]} of what changed. Writes (with one backup) only if
-    something changed. No-op + no backup if already wired or if the config is
-    missing/malformed.
+    "prompt_caching": [...], "dashboard": [...]} of what changed. Writes (with
+    one backup) only if something changed. No-op + no backup if already wired
+    or if the config is missing/malformed.
     """
     import yaml
 
     empty = {"plugins": [], "toolsets": [], "kanban": [], "delegation": [],
              "compaction": [], "fallback": [], "bitwarden": [],
-             "prompt_caching": []}
+             "prompt_caching": [], "dashboard": []}
     if not os.path.exists(config_path):
         return empty
     with open(config_path) as fh:
@@ -359,10 +387,11 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS):
     changed_fallback = _ensure_fallback(cfg)
     changed_bitwarden = _ensure_bitwarden(cfg)
     changed_prompt_caching = _ensure_prompt_caching(cfg)
+    changed_dashboard = _ensure_dashboard(cfg)
 
     if (added_plugins or added_toolsets or changed_kanban or changed_delegation
             or changed_compaction or changed_fallback or changed_bitwarden
-            or changed_prompt_caching):
+            or changed_prompt_caching or changed_dashboard):
         import shutil
         import time
         shutil.copy(config_path,
@@ -374,7 +403,8 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS):
             "kanban": changed_kanban, "delegation": changed_delegation,
             "compaction": changed_compaction, "fallback": changed_fallback,
             "bitwarden": changed_bitwarden,
-            "prompt_caching": changed_prompt_caching}
+            "prompt_caching": changed_prompt_caching,
+            "dashboard": changed_dashboard}
 
 
 if __name__ == "__main__":

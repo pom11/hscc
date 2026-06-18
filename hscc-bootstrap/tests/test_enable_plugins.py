@@ -105,7 +105,9 @@ def _fully_wired_cfg():
             "model": enable_plugins.FALLBACK_MODEL,
             "base_url": enable_plugins.FALLBACK_URL,
             "api_key": enable_plugins.FALLBACK_KEY}],
+        "bitwarden": {"enabled": False},
         "prompt_caching": {"cache_ttl": "1hr"},
+        "dashboard": {"public_url": enable_plugins.DASHBOARD_PUBLIC_URL},
     }
 
 
@@ -113,13 +115,13 @@ def test_fully_wired_is_noop(tmp_path):
     path = _write(tmp_path / "config.yaml", _fully_wired_cfg())
     before = open(path).read()
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": []}
     assert open(path).read() == before              # no rewrite, no backup churn
 
 
 def test_missing_config_noop(tmp_path):
     res = enable_plugins.enable(str(tmp_path / "nope.yaml"))
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": []}
 
 
 # ── fleet routing (kanban + delegation) ──────────────────────────────────────
@@ -150,7 +152,7 @@ def test_routing_preserves_operator_choices(tmp_path):
     cfg["delegation"]["base_url"] = "http://my-proxy:9000/v1"
     path = _write(tmp_path / "config.yaml", cfg)
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": []}
     out = yaml.safe_load(open(path))
     assert out["kanban"]["default_assignee"] == "my-special-worker"
     assert out["kanban"]["max_in_progress"] == 99   # not lowered
@@ -177,15 +179,25 @@ def test_fallback_preserves_operator_chain(tmp_path):
     assert fp == [{"provider": "x", "model": "m"}]   # untouched
 
 
-def test_compaction_defaults_to_worker_proxy(tmp_path):
-    """H1: with no override, aux.compression points at the worker proxy, NOT
-    the orchestrator (avoids re-arming the compaction freeze)."""
+def test_compaction_aux_defaults_to_orchestrator(tmp_path):
+    """H1: with no override, aux.compression points at the orchestrator :8000,
+    NOT the worker proxy (avoids re-arming the compaction freeze)."""
     path = _write(tmp_path / "config.yaml",
                   {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"]})
     enable_plugins.enable(path)
     aux = yaml.safe_load(open(path)).get("auxiliary", {}).get("compression", {})
-    assert aux.get("base_url") == enable_plugins.WORKER_PROXY_URL
+    # aux compaction targets the orchestrator (COMPACT_URL/COMPACT_BASE_URL),
+    # NOT the worker proxy (WORKER_PROXY_URL) — they are different endpoints.
+    assert aux.get("base_url") == enable_plugins.COMPACT_URL
     assert "192.168.88.244" in aux["base_url"]
+
+
+def test_worker_proxy_default_is_lb_4000(tmp_path):
+    """WORKER_PROXY_URL must point at the LiteLLM LB (:4000), NOT raw vLLM (:8000).
+    Worker traffic goes through the LB to avoid dumping on a single GPU."""
+    assert enable_plugins.WORKER_PROXY_URL == "http://localhost:4000/v1"
+    assert "4000" in enable_plugins.WORKER_PROXY_URL
+    assert "8000" not in enable_plugins.WORKER_PROXY_URL
 
 
 def test_auto_review_seeded_when_absent(tmp_path):
