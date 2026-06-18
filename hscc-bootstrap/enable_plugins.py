@@ -30,7 +30,7 @@ HSCC_TOOLSETS = ["hscc-cluster", "sparkrun", "delegation"]
 
 # Fleet-routing defaults. The worker proxy (sparkrun LiteLLM LB) load-balances
 # every worker GPU behind one URL; env-overridable to match the generator.
-WORKER_PROXY_URL = os.environ.get("HSCC_WORKER_PROXY_URL", "http://localhost:4000/v1")
+WORKER_PROXY_URL = os.environ.get("HSCC_WORKER_PROXY_URL", "http://192.168.88.244:8000/v1")
 WORKER_MODEL = os.environ.get("HSCC_WORKER_MODEL", "Qwen/Qwen3.6-27B-FP8")
 WORKER_PROXY_KEY = os.environ.get("HSCC_WORKER_PROXY_KEY", "sk-sparkrun")
 DEFAULT_ASSIGNEE = os.environ.get("HSCC_DEFAULT_ASSIGNEE", "worker")
