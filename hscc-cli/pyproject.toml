@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hscc-cli"
+version = "2026.6.15"
+description = "HSCC CLI — Hermes Spark Cluster Control command-line interface"
+requires-python = ">=3.10"
+dependencies = ["click"]
+
+[project.scripts]
+hscc = "hscc_cli:main"
+
+[tool.setuptools.packages.find]
+include = ["hscc_cli*"]

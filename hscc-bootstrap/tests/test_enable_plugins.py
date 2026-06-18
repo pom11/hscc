@@ -108,6 +108,11 @@ def _fully_wired_cfg():
         "bitwarden": {"enabled": False},
         "prompt_caching": {"cache_ttl": "1hr"},
         "dashboard": {"public_url": enable_plugins.DASHBOARD_PUBLIC_URL},
+        "hooks": {
+            "pre_tool_call": [{"matcher": "hscc-cluster", "command": "cluster-guard.py", "timeout": 10}],
+            "post_tool_call": [{"matcher": "hscc-cluster", "command": "cluster-guard.py", "timeout": 5}],
+            "on_session_start": [{"command": "cluster-guard.py", "timeout": 5}],
+        },
     }
 
 
@@ -115,13 +120,13 @@ def test_fully_wired_is_noop(tmp_path):
     path = _write(tmp_path / "config.yaml", _fully_wired_cfg())
     before = open(path).read()
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "hooks": []}
     assert open(path).read() == before              # no rewrite, no backup churn
 
 
 def test_missing_config_noop(tmp_path):
     res = enable_plugins.enable(str(tmp_path / "nope.yaml"))
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "hooks": []}
 
 
 # ── fleet routing (kanban + delegation) ──────────────────────────────────────
@@ -152,7 +157,7 @@ def test_routing_preserves_operator_choices(tmp_path):
     cfg["delegation"]["base_url"] = "http://my-proxy:9000/v1"
     path = _write(tmp_path / "config.yaml", cfg)
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "hooks": []}
     out = yaml.safe_load(open(path))
     assert out["kanban"]["default_assignee"] == "my-special-worker"
     assert out["kanban"]["max_in_progress"] == 99   # not lowered

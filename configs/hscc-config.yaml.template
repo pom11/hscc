@@ -59,3 +59,12 @@ templates:
 sparkrun:
   config: ~/.sparkrun-local/config.yaml
   recipes_dir: ~/.sparkrun-local/recipes
+
+# Dashboard configuration (written to ~/.hermes/config.yaml by bootstrap)
+dashboard:
+  # Dashboard runs on the orchestrator/gateway node
+  # Start with: hermes dashboard --host 0.0.0.0 --port 3000 --no-open
+  # public_url is auto-set by bootstrap to http://<gateway>:3000
+  # basic_auth:                  # Optional — add username/password_hash for auth
+  #   username: admin
+  #   password_hash: scrypt$...  # python -c "from plugins.dashboard_auth.basic import hash_password; print(hash_password('PW'))"
