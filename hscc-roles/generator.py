@@ -10,7 +10,7 @@ import rolelib
 # the orchestrator GPU. Overridable via env so bootstrap can set the real
 # proxy/host without editing code.
 WORKER_PROXY_BASE_URL = os.environ.get(
-    "HSCC_WORKER_PROXY_URL", "http://localhost:4000/v1")
+    "HSCC_WORKER_PROXY_URL", "http://10.0.0.244:8000/v1")
 WORKER_MODEL = os.environ.get("HSCC_WORKER_MODEL", "Qwen/Qwen3.6-27B-FP8")
 WORKER_PROXY_KEY = os.environ.get("HSCC_WORKER_PROXY_KEY", "sk-sparkrun")
 
@@ -32,7 +32,7 @@ def _worker_model_block():
 # the idle orchestrator (A3B, fast MoE) instead, with a hard timeout so a stuck
 # summarize fails fast rather than hanging. Env-overridable.
 COMPACT_BASE_URL = os.environ.get(
-    "HSCC_COMPACT_URL", "http://192.0.2.10:8000/v1")
+    "HSCC_COMPACT_URL", "http://10.0.0.244:8000/v1")
 COMPACT_MODEL = os.environ.get("HSCC_COMPACT_MODEL", "orchestrator-model")
 COMPACT_KEY = os.environ.get("HSCC_COMPACT_KEY", "sk-sparkrun")
 COMPACT_TIMEOUT = int(os.environ.get("HSCC_COMPACT_TIMEOUT", "90"))

@@ -184,7 +184,7 @@ def test_compaction_defaults_to_worker_proxy(tmp_path):
     enable_plugins.enable(path)
     aux = yaml.safe_load(open(path)).get("auxiliary", {}).get("compression", {})
     assert aux.get("base_url") == enable_plugins.WORKER_PROXY_URL
-    assert "4000" in aux["base_url"]
+    assert "10.0.0.244" in aux["base_url"]
 
 
 def test_auto_review_seeded_when_absent(tmp_path):
