@@ -1,13 +1,17 @@
 """Idempotently wire HSCC into ~/.hermes/config.yaml.
 
-Four things must be true for the HSCC fleet to actually work:
+Six things must be true for the HSCC fleet to actually work:
   1. each plugin name is in ``plugins.enabled`` (Hermes only loads enabled plugins);
   2. each plugin's toolset is in the top-level ``toolsets`` (a tool is gated by its
      toolset — without it the tool registers but no agent can call it);
   3. kanban routing sends catch-all work to a WORKER, not the orchestrator
      (``kanban.default_assignee`` + concurrency caps);
   4. orchestrator subagents run on the WORKER pool, not the gateway GPU
-     (``delegation.base_url`` → the load-balanced worker proxy).
+     (``delegation.base_url`` → the load-balanced worker proxy);
+  5. Bitwarden secrets manager is enabled when HSCC_BITWARDEN_PROJECT_ID is set,
+     so API keys live in BSM instead of plaintext .env / config.yaml;
+  6. prompt caching TTL is set to 1hr so long-running autonomous tasks (kanban
+     workers, cron jobs) benefit from cached prompt prefixes across restarts.
 
 Bootstrap calls this so a fresh install is fully wired, not half-wired and
 silently dumping all work onto the orchestrator. Safe to re-run: only fills
@@ -65,6 +69,17 @@ COMPACT_TIMEOUT = int(os.environ.get("HSCC_COMPACT_TIMEOUT", "90"))
 FALLBACK_MODEL = os.environ.get("HSCC_FALLBACK_MODEL", WORKER_MODEL)
 FALLBACK_URL = os.environ.get("HSCC_FALLBACK_URL", WORKER_PROXY_URL)
 FALLBACK_KEY = os.environ.get("HSCC_FALLBACK_KEY", "sk-sparkrun")
+
+# Bitwarden Secrets Manager integration. When HSCC_BITWARDEN_PROJECT_ID is set,
+# bootstrap enables BSM so API keys live in Bitwarden instead of plaintext .env
+# or config.yaml. HSCC_BITWARDEN_SERVER_URL is optional (defaults to US Cloud).
+BITWARDEN_PROJECT_ID = os.environ.get("HSCC_BITWARDEN_PROJECT_ID", "")
+BITWARDEN_SERVER_URL = os.environ.get("HSCC_BITWARDEN_SERVER_URL", "")
+
+# Cross-session prompt caching. Kanban workers and cron jobs run for hours;
+# a 1hr cache TTL keeps the prompt prefix cached across session restarts,
+# slashing token costs for long autonomous tasks. Default 3600s (1hr).
+PROMPT_CACHE_TTL_SECONDS = int(os.environ.get("HSCC_PROMPT_CACHE_TTL_SECONDS", "3600"))
 
 
 def _ensure_plugins_enabled(cfg, plugins):
@@ -222,17 +237,113 @@ def _ensure_fallback(cfg):
     return ["fallback_providers"]
 
 
+def _parse_cache_ttl_seconds(ttl_str: str | None) -> int:
+    """Parse a cache TTL string (e.g. '5m', '1hr', '3600') into seconds.
+
+    Supports: plain integers (seconds), 'm' suffix (minutes), 'hr'/'h' suffix
+    (hours), 'd' suffix (days). Returns 0 on parse failure.
+    """
+    if not ttl_str or not isinstance(ttl_str, str):
+        return 0
+    ttl_str = ttl_str.strip().lower()
+    if ttl_str.endswith("d"):
+        try:
+            return int(ttl_str[:-1]) * 86400
+        except ValueError:
+            return 0
+    if ttl_str.endswith(("hr", "h")):
+        try:
+            return int(ttl_str[:-2 if ttl_str.endswith("hr") else -1]) * 3600
+        except ValueError:
+            return 0
+    if ttl_str.endswith("m"):
+        try:
+            return int(ttl_str[:-1]) * 60
+        except ValueError:
+            return 0
+    try:
+        return int(ttl_str)
+    except ValueError:
+        return 0
+
+
+def _ensure_bitwarden(cfg):
+    """Enable Bitwarden Secrets Manager when HSCC_BITWARDEN_PROJECT_ID is set.
+
+    Writes ``bitwarden.enabled: true`` + ``project_id``. Optionally sets
+    ``server_url`` for EU Cloud or self-hosted instances. Leaves
+    ``access_token_env`` and other defaults alone (Hermes handles them).
+
+    Only activates when BITWARDEN_PROJECT_ID is non-empty. Returns keys changed.
+    """
+    if not BITWARDEN_PROJECT_ID:
+        return []
+
+    bw = cfg.setdefault("bitwarden", {})
+    if not isinstance(bw, dict):
+        return []
+
+    changed = []
+    # Enable BSM + set the project ID (the minimum required config).
+    if not bw.get("enabled"):
+        bw["enabled"] = True
+        changed.append("enabled")
+    if bw.get("project_id", "") != BITWARDEN_PROJECT_ID:
+        bw["project_id"] = BITWARDEN_PROJECT_ID
+        changed.append("project_id")
+    # Optional: set server URL for non-default regions.
+    if BITWARDEN_SERVER_URL:
+        cur_url = (bw.get("server_url") or "").strip()
+        if cur_url != BITWARDEN_SERVER_URL:
+            bw["server_url"] = BITWARDEN_SERVER_URL
+            changed.append("server_url")
+    return changed
+
+
+def _ensure_prompt_caching(cfg):
+    """Set prompt caching TTL for long-running autonomous tasks.
+
+    HSCC workers run for hours (up to max_runtime_seconds per kanban task);
+    a 1hr cache TTL keeps the system prompt + early context cached across
+    session restarts, avoiding redundant token billing for cached prefixes.
+
+    Only raises the TTL — an operator-set higher value is preserved. Returns
+    keys changed.
+    """
+    pc = cfg.setdefault("prompt_caching", {})
+    if not isinstance(pc, dict):
+        return []
+
+    changed = []
+    current_ttl = _parse_cache_ttl_seconds(pc.get("cache_ttl", "") or "")
+    if current_ttl < PROMPT_CACHE_TTL_SECONDS:
+        # Format: seconds → human-readable string for config.yaml.
+        if PROMPT_CACHE_TTL_SECONDS >= 86400:
+            pc["cache_ttl"] = f"{PROMPT_CACHE_TTL_SECONDS // 86400}d"
+        elif PROMPT_CACHE_TTL_SECONDS >= 3600:
+            pc["cache_ttl"] = f"{PROMPT_CACHE_TTL_SECONDS // 3600}hr"
+        elif PROMPT_CACHE_TTL_SECONDS >= 60:
+            pc["cache_ttl"] = f"{PROMPT_CACHE_TTL_SECONDS // 60}m"
+        else:
+            pc["cache_ttl"] = str(PROMPT_CACHE_TTL_SECONDS)
+        changed.append("cache_ttl")
+    return changed
+
+
 def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS):
     """Ensure HSCC plugins + toolsets + fleet routing are wired in config_path.
 
     Returns {"plugins": [...], "toolsets": [...], "kanban": [...], "delegation":
-    [...]} of what changed. Writes (with one backup) only if something changed.
-    No-op + no backup if already wired or if the config is missing/malformed.
+    [...], "compaction": [...], "fallback": [...], "bitwarden": [...],
+    "prompt_caching": [...]} of what changed. Writes (with one backup) only if
+    something changed. No-op + no backup if already wired or if the config is
+    missing/malformed.
     """
     import yaml
 
     empty = {"plugins": [], "toolsets": [], "kanban": [], "delegation": [],
-             "compaction": [], "fallback": []}
+             "compaction": [], "fallback": [], "bitwarden": [],
+             "prompt_caching": []}
     if not os.path.exists(config_path):
         return empty
     with open(config_path) as fh:
@@ -246,9 +357,12 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS):
     changed_delegation = _ensure_delegation(cfg)
     changed_compaction = _ensure_compaction(cfg)
     changed_fallback = _ensure_fallback(cfg)
+    changed_bitwarden = _ensure_bitwarden(cfg)
+    changed_prompt_caching = _ensure_prompt_caching(cfg)
 
     if (added_plugins or added_toolsets or changed_kanban or changed_delegation
-            or changed_compaction or changed_fallback):
+            or changed_compaction or changed_fallback or changed_bitwarden
+            or changed_prompt_caching):
         import shutil
         import time
         shutil.copy(config_path,
@@ -258,7 +372,9 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS):
 
     return {"plugins": added_plugins, "toolsets": added_toolsets,
             "kanban": changed_kanban, "delegation": changed_delegation,
-            "compaction": changed_compaction, "fallback": changed_fallback}
+            "compaction": changed_compaction, "fallback": changed_fallback,
+            "bitwarden": changed_bitwarden,
+            "prompt_caching": changed_prompt_caching}
 
 
 if __name__ == "__main__":
