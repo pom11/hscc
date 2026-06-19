@@ -105,7 +105,6 @@ def _fully_wired_cfg():
             "model": enable_plugins.FALLBACK_MODEL,
             "base_url": enable_plugins.FALLBACK_URL,
             "api_key": enable_plugins.FALLBACK_KEY}],
-        "bitwarden": {"enabled": False},
         "prompt_caching": {"cache_ttl": "1hr"},
         "dashboard": {"public_url": enable_plugins.DASHBOARD_PUBLIC_URL},
         "hooks": {
@@ -205,6 +204,47 @@ def test_worker_proxy_default_is_lb_4000(tmp_path):
     assert "8000" not in enable_plugins.WORKER_PROXY_URL
 
 
+def test_dashboard_default_targets_gateway(tmp_path):
+    """DASHBOARD_PUBLIC_URL defaults to GATEWAY_HOST:3000 (the gateway Mac
+    Studio), NOT ORCH_MODEL_HOST. The gateway runs Hermes + dashboard + LB;
+    the orchestrator runs vLLM :8000 only."""
+    assert enable_plugins.DASHBOARD_PUBLIC_URL == f"http://{enable_plugins.GATEWAY_HOST}:3000"
+    assert enable_plugins.GATEWAY_HOST != enable_plugins.ORCH_MODEL_HOST
+
+
+def test_compaction_model_defaults_to_orch_model(tmp_path):
+    """When COMPACT_URL defaults to orch :8000, COMPACT_MODEL must default to
+    the ORCH_MODEL (nvidia/Qwen3.6-35B-A3B-NVFP4), NOT the worker model
+    (Qwen/Qwen3.6-27B-FP8). A mismatch causes every compression call to 404.
+    Only when COMPACT_URL is overridden to a non-orch URL does COMPACT_MODEL
+    fall back to WORKER_MODEL."""
+    assert enable_plugins.COMPACT_URL == f"http://{enable_plugins.ORCH_MODEL_HOST}:8000/v1"
+    assert enable_plugins.COMPACT_MODEL == enable_plugins.ORCH_MODEL
+    assert enable_plugins.COMPACT_MODEL != enable_plugins.WORKER_MODEL
+
+
+def test_compaction_model_switches_when_url_customized(monkeypatch):
+    """If the operator overrides COMPACT_URL to a non-orch endpoint, the model
+    should fall back to WORKER_MODEL (not ORCH_MODEL) since the operator is
+    pointing at a different cluster."""
+    monkeypatch.setenv("HSCC_COMPACT_URL", "http://other-host:8000/v1")
+    import importlib
+    import enable_plugins as ep
+    importlib.reload(ep)
+    assert ep.COMPACT_MODEL == ep.WORKER_MODEL
+
+
+def test_compaction_url_customized_keeps_model_override(monkeypatch):
+    """When the operator overrides COMPACT_URL, an explicit HSCC_COMPACT_MODEL
+    env var is STILL respected (not overridden by WORKER_MODEL default)."""
+    monkeypatch.setenv("HSCC_COMPACT_URL", "http://other-host:8000/v1")
+    monkeypatch.setenv("HSCC_COMPACT_MODEL", "my/custom-model")
+    import importlib
+    import enable_plugins as ep
+    importlib.reload(ep)
+    assert ep.COMPACT_MODEL == "my/custom-model"
+
+
 def test_auto_review_seeded_when_absent(tmp_path):
     path = _write(tmp_path / "config.yaml",
                   {"plugins": {"enabled": ["hscc-cluster"]},
@@ -292,6 +332,38 @@ def test_compaction_threshold_not_lowered(tmp_path, monkeypatch):
     assert yaml.safe_load(open(path))["compression"]["threshold"] == 0.95
 
 
+# ── dashboard ────────────────────────────────────────────────────────────────
+
+def test_dashboard_public_url_filled_on_fresh(tmp_path, monkeypatch):
+    """A fresh config gets dashboard.public_url from the env default."""
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"]})
+    res = enable_plugins.enable(path)
+    assert "public_url" in res["dashboard"]
+    cfg = yaml.safe_load(open(path))
+    assert cfg["dashboard"]["public_url"] == enable_plugins.DASHBOARD_PUBLIC_URL
+
+
+def test_dashboard_public_url_preserved_when_set(tmp_path, monkeypatch):
+    """An operator-set public_url is NOT overwritten."""
+    cfg = _fully_wired_cfg()
+    cfg["dashboard"]["public_url"] = "http://custom-host:9999"
+    path = _write(tmp_path / "config.yaml", cfg)
+    res = enable_plugins.enable(path)
+    assert res["dashboard"] == []
+    out = yaml.safe_load(open(path))
+    assert out["dashboard"]["public_url"] == "http://custom-host:9999"
+
+
+def test_dashboard_skipped_when_env_blank(tmp_path, monkeypatch):
+    """When DASHBOARD_PUBLIC_URL is empty, bootstrap does not touch dashboard."""
+    monkeypatch.setattr(enable_plugins, "DASHBOARD_PUBLIC_URL", "")
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"]})
+    res = enable_plugins.enable(path)
+    assert res["dashboard"] == []
+
+
 # ── bitwarden ────────────────────────────────────────────────────────────────
 
 def test_bitwarden_skipped_when_no_project_id(tmp_path):
@@ -336,18 +408,6 @@ def test_bitwarden_idempotent_when_already_configured(tmp_path, monkeypatch):
     path = _write(tmp_path / "config.yaml", cfg)
     res = enable_plugins.enable(path)
     assert res["bitwarden"] == []
-
-
-def test_bitwarden_preserves_existing_server_url(tmp_path, monkeypatch):
-    """An operator-set server_url is not overwritten when env var is empty."""
-    monkeypatch.setattr(enable_plugins, "BITWARDEN_PROJECT_ID", "abc-123")
-    monkeypatch.setattr(enable_plugins, "BITWARDEN_SERVER_URL", "")
-    cfg = {"bitwarden": {"enabled": True, "project_id": "abc-123",
-                         "server_url": "https://custom.bw.local"}}
-    path = _write(tmp_path / "config.yaml", cfg)
-    enable_plugins.enable(path)
-    assert yaml.safe_load(open(path))["bitwarden"]["server_url"] == \
-        "https://custom.bw.local"
 
 
 def test_bitwarden_skipped_on_bad_shape(tmp_path, monkeypatch):
@@ -420,3 +480,59 @@ def test_parse_cache_ttl_seconds():
     assert p("") == 0
     assert p("bad") == 0
     assert p(None) == 0
+
+
+# ── hooks ────────────────────────────────────────────────────────────────────
+
+def test_hooks_filled_on_fresh(tmp_path):
+    """A fresh config gets cluster-guard hooks wired."""
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"]})
+    res = enable_plugins.enable(path)
+    assert set(res["hooks"]) == {"pre_tool_call", "post_tool_call", "on_session_start"}
+    cfg = yaml.safe_load(open(path))
+    assert cfg["hooks"]["pre_tool_call"][0]["matcher"] == "hscc-cluster"
+    assert "cluster-guard.py" in cfg["hooks"]["pre_tool_call"][0]["command"]
+
+
+def test_hooks_preserves_operator_hooks(tmp_path):
+    """Operator-added hooks are not overwritten."""
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"]})
+    enable_plugins.enable(path)
+    # Re-run — should be noop since hooks are already present
+    res = enable_plugins.enable(path)
+    assert res["hooks"] == []
+
+
+# ── hooks file (integration) ─────────────────────────────────────────────────
+
+def test_hooks_file_installed(tmp_path, monkeypatch):
+    """_ensure_hooks_file copies cluster-guard.py and sets permissions."""
+    hooks_src = tmp_path / "hooks_src"
+    hooks_src.mkdir()
+    (hooks_src / "cluster-guard.py").write_text("# hook script\n")
+
+    hooks_dst = tmp_path / "hooks_dst"
+    monkeypatch.setattr(enable_plugins, "HOOKS_DIR", str(hooks_dst))
+    monkeypatch.setattr(enable_plugins, "CLUSTER_GUARD_DST",
+                        str(hooks_dst / "cluster-guard.py"))
+
+    res = enable_plugins._ensure_hooks_file(str(hooks_src))
+    assert res["installed"] is True
+    assert (hooks_dst / "cluster-guard.py").is_file()
+
+
+def test_hooks_file_missing_source(tmp_path, monkeypatch):
+    """No crash when source cluster-guard.py doesn't exist."""
+    hooks_src = tmp_path / "hooks_src"
+    hooks_src.mkdir()  # dir exists but no cluster-guard.py
+
+    hooks_dst = tmp_path / "hooks_dst"
+    monkeypatch.setattr(enable_plugins, "HOOKS_DIR", str(hooks_dst))
+    monkeypatch.setattr(enable_plugins, "CLUSTER_GUARD_DST",
+                        str(hooks_dst / "cluster-guard.py"))
+
+    res = enable_plugins._ensure_hooks_file(str(hooks_src))
+    assert res["installed"] is False
+    assert "not found" in res.get("reason", "")

@@ -1,6 +1,6 @@
 """Idempotently wire HSCC into ~/.hermes/config.yaml.
 
-Six things must be true for the HSCC fleet to actually work:
+Eight things must be true for the HSCC fleet to actually work:
   1. each plugin name is in ``plugins.enabled`` (Hermes only loads enabled plugins);
   2. each plugin's toolset is in the top-level ``toolsets`` (a tool is gated by its
      toolset — without it the tool registers but no agent can call it);
@@ -10,8 +10,11 @@ Six things must be true for the HSCC fleet to actually work:
      (``delegation.base_url`` → the load-balanced worker proxy);
   5. Bitwarden secrets manager is enabled when HSCC_BITWARDEN_PROJECT_ID is set,
      so API keys live in BSM instead of plaintext .env / config.yaml;
-  6. cluster-guard hook is installed and wired so provision/restart operations
-     are capacity-gated and all cluster ops are audited.
+  6. prompt caching TTL is set to 1hr so long-running autonomous tasks (kanban
+     workers, cron jobs) benefit from cached prompt prefixes across restarts;
+  7. cluster-guard hook is installed and wired so provision/restart operations
+     are capacity-gated and all cluster ops are audited;
+  8. dashboard public_url is configured for network access.
 
 Bootstrap calls this so a fresh install is fully wired, not half-wired and
 silently dumping all work onto the orchestrator. Safe to re-run: only fills
@@ -579,4 +582,3 @@ if __name__ == "__main__":
     parts = [f"{k}: {', '.join(v)}" for k, v in res.items() if v]
     print(" | ".join(parts) if parts else "already wired (no changes)")
     sys.exit(0)
-
