@@ -105,6 +105,7 @@ def _fully_wired_cfg():
             "model": enable_plugins.FALLBACK_MODEL,
             "base_url": enable_plugins.FALLBACK_URL,
             "api_key": enable_plugins.FALLBACK_KEY}],
+        "prompt_caching": {"cache_ttl": "1hr"},
     }
 
 
@@ -112,13 +113,13 @@ def test_fully_wired_is_noop(tmp_path):
     path = _write(tmp_path / "config.yaml", _fully_wired_cfg())
     before = open(path).read()
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": []}
     assert open(path).read() == before              # no rewrite, no backup churn
 
 
 def test_missing_config_noop(tmp_path):
     res = enable_plugins.enable(str(tmp_path / "nope.yaml"))
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": []}
 
 
 # ── fleet routing (kanban + delegation) ──────────────────────────────────────
@@ -149,7 +150,7 @@ def test_routing_preserves_operator_choices(tmp_path):
     cfg["delegation"]["base_url"] = "http://my-proxy:9000/v1"
     path = _write(tmp_path / "config.yaml", cfg)
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": []}
     out = yaml.safe_load(open(path))
     assert out["kanban"]["default_assignee"] == "my-special-worker"
     assert out["kanban"]["max_in_progress"] == 99   # not lowered
@@ -272,3 +273,133 @@ def test_compaction_threshold_not_lowered(tmp_path, monkeypatch):
     path = _write(tmp_path / "config.yaml", cfg)
     enable_plugins.enable(path)
     assert yaml.safe_load(open(path))["compression"]["threshold"] == 0.95
+
+
+# ── bitwarden ────────────────────────────────────────────────────────────────
+
+def test_bitwarden_skipped_when_no_project_id(tmp_path):
+    """Without HSCC_BITWARDEN_PROJECT_ID, bitwarden section is not created."""
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"]})
+    res = enable_plugins.enable(path)
+    assert res["bitwarden"] == []
+    cfg = yaml.safe_load(open(path))
+    assert "bitwarden" not in cfg
+
+
+def test_bitwarden_enabled_when_project_id_set(tmp_path, monkeypatch):
+    """HSCC_BITWARDEN_PROJECT_ID enables BSM with the given project."""
+    monkeypatch.setattr(enable_plugins, "BITWARDEN_PROJECT_ID", "abc-123")
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"]})
+    res = enable_plugins.enable(path)
+    assert set(res["bitwarden"]) == {"enabled", "project_id"}
+    cfg = yaml.safe_load(open(path))
+    assert cfg["bitwarden"]["enabled"] is True
+    assert cfg["bitwarden"]["project_id"] == "abc-123"
+
+
+def test_bitwarden_server_url_optional(tmp_path, monkeypatch):
+    """HSCC_BITWARDEN_SERVER_URL sets the server_url when provided."""
+    monkeypatch.setattr(enable_plugins, "BITWARDEN_PROJECT_ID", "abc-123")
+    monkeypatch.setattr(enable_plugins, "BITWARDEN_SERVER_URL",
+                        "https://vault.bitwarden.eu")
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"]})
+    res = enable_plugins.enable(path)
+    assert "server_url" in res["bitwarden"]
+    cfg = yaml.safe_load(open(path))
+    assert cfg["bitwarden"]["server_url"] == "https://vault.bitwarden.eu"
+
+
+def test_bitwarden_idempotent_when_already_configured(tmp_path, monkeypatch):
+    """If bitwarden is already enabled with the same project, nothing changes."""
+    monkeypatch.setattr(enable_plugins, "BITWARDEN_PROJECT_ID", "abc-123")
+    cfg = {"bitwarden": {"enabled": True, "project_id": "abc-123"}}
+    path = _write(tmp_path / "config.yaml", cfg)
+    res = enable_plugins.enable(path)
+    assert res["bitwarden"] == []
+
+
+def test_bitwarden_preserves_existing_server_url(tmp_path, monkeypatch):
+    """An operator-set server_url is not overwritten when env var is empty."""
+    monkeypatch.setattr(enable_plugins, "BITWARDEN_PROJECT_ID", "abc-123")
+    monkeypatch.setattr(enable_plugins, "BITWARDEN_SERVER_URL", "")
+    cfg = {"bitwarden": {"enabled": True, "project_id": "abc-123",
+                         "server_url": "https://custom.bw.local"}}
+    path = _write(tmp_path / "config.yaml", cfg)
+    enable_plugins.enable(path)
+    assert yaml.safe_load(open(path))["bitwarden"]["server_url"] == \
+        "https://custom.bw.local"
+
+
+def test_bitwarden_skipped_on_bad_shape(tmp_path, monkeypatch):
+    """If bitwarden config is a non-dict, we don't clobber it."""
+    monkeypatch.setattr(enable_plugins, "BITWARDEN_PROJECT_ID", "abc-123")
+    path = _write(tmp_path / "config.yaml",
+                  {"bitwarden": "weird-string"})
+    res = enable_plugins.enable(path)
+    assert res["bitwarden"] == []
+    assert yaml.safe_load(open(path))["bitwarden"] == "weird-string"
+
+
+# ── prompt caching ───────────────────────────────────────────────────────────
+
+def test_prompt_caching_ttl_raised_from_default(tmp_path):
+    """5m cache TTL is raised to 1hr for long-running autonomous tasks."""
+    path = _write(tmp_path / "config.yaml",
+                  {"prompt_caching": {"cache_ttl": "5m"}})
+    res = enable_plugins.enable(path)
+    assert "cache_ttl" in res["prompt_caching"]
+    cfg = yaml.safe_load(open(path))
+    assert cfg["prompt_caching"]["cache_ttl"] == "1hr"
+
+
+def test_prompt_caching_absent_seeds_default(tmp_path):
+    """When prompt_caching is absent, 1hr TTL is seeded."""
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"]})
+    res = enable_plugins.enable(path)
+    assert "cache_ttl" in res["prompt_caching"]
+    cfg = yaml.safe_load(open(path))
+    assert cfg["prompt_caching"]["cache_ttl"] == "1hr"
+
+
+def test_prompt_caching_preserves_higher_ttl(tmp_path):
+    """An operator-set 2hr TTL is not lowered to 1hr."""
+    path = _write(tmp_path / "config.yaml",
+                  {"prompt_caching": {"cache_ttl": "2hr"}})
+    res = enable_plugins.enable(path)
+    assert res["prompt_caching"] == []
+    assert yaml.safe_load(open(path))["prompt_caching"]["cache_ttl"] == "2hr"
+
+
+def test_prompt_caching_preserves_day_ttl(tmp_path):
+    """A 1d TTL is not lowered."""
+    path = _write(tmp_path / "config.yaml",
+                  {"prompt_caching": {"cache_ttl": "1d"}})
+    res = enable_plugins.enable(path)
+    assert res["prompt_caching"] == []
+    assert yaml.safe_load(open(path))["prompt_caching"]["cache_ttl"] == "1d"
+
+
+def test_prompt_caching_skipped_on_bad_shape(tmp_path):
+    """If prompt_caching is a non-dict, we don't clobber it."""
+    path = _write(tmp_path / "config.yaml",
+                  {"prompt_caching": "weird-string"})
+    res = enable_plugins.enable(path)
+    assert res["prompt_caching"] == []
+    assert yaml.safe_load(open(path))["prompt_caching"] == "weird-string"
+
+
+def test_parse_cache_ttl_seconds():
+    """Verify the TTL parser handles all supported formats."""
+    p = enable_plugins._parse_cache_ttl_seconds
+    assert p("5m") == 300
+    assert p("1hr") == 3600
+    assert p("2h") == 7200
+    assert p("1d") == 86400
+    assert p("3600") == 3600
+    assert p("") == 0
+    assert p("bad") == 0
+    assert p(None) == 0
