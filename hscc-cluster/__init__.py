@@ -75,6 +75,6 @@ def register(ctx) -> None:
     if hasattr(ctx, "register_hook"):
         try:
             from . import workflow
-            ctx.register_hook("pre_kanban_dispatch", workflow.on_pre_kanban_dispatch)
+            ctx.register_hook("kanban_task_claimed", workflow.on_kanban_task_claimed)
         except Exception:
             pass
