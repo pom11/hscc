@@ -42,7 +42,7 @@ apply. Records the active template in `~/.hscc/applied_template.json`.
 CLI: `hscc.py cluster-template <list|status|validate|preview|apply> [name] [--confirm]`.
 
 ## Work-flows — `workflow.py`
-The idempotent-resume probe (`probe_task_state`) + the `pre_kanban_dispatch` hook
+The idempotent-resume probe (`probe_task_state`) + the `kanban_task_claimed` hook
 handler that posts a "resume, don't redo" note to a re-dispatched worker, built
 from its task branch's committed state.
 

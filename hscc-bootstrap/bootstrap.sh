@@ -161,7 +161,7 @@ open(os.environ['SERVING'], 'w').write(json.dumps(s, indent=2) + '\n')
 fi
 
 hdr "Install: hermes/sparkrun patches"
-# Reapply the curated upstream patches (kanban review + pre_kanban_dispatch
+# Reapply the curated upstream patches (kanban review + kanban_task_claimed
 # resume hook live in hermes core, so the review/resume features need them on a
 # fresh official install). Non-fatal: a machine already on a patched/newer
 # hermes will report patches that don't re-apply — that's expected, not an error.

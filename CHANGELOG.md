@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.6] — Hermes-agent 0.17 compatibility
+
+Update HSCC to be compatible with upstream hermes-agent 0.17.0 (commit
+`885e80df7`), which renamed the kanban re-dispatch hook from
+`pre_kanban_dispatch` → `kanban_task_claimed` and changed the kwargs
+passed to hook handlers.
+
+### Changed (hscc-cluster)
+- `workflow.py:on_pre_kanban_dispatch` → `on_kanban_task_claimed`: renamed
+  hook handler to match the upstream hook name. Adapts kwarg handling:
+  the upstream hook no longer passes the full task dict or a pre-opened
+  `conn`; instead HSCC fetches them via `kanban_db.connect()` +
+  `kanban_db.get_task()` (pure stdlib, no extra deps).
+
+---
+
 ## [1.0.0-beta.5] — Proxy-plist respawn-storm hardening
 
 Hardens generated LiteLLM proxy launchd plists so a missing/failing binary can

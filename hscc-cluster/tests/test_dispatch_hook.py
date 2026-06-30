@@ -1,8 +1,8 @@
-"""WS4 resume wiring: the pre_kanban_dispatch hook fires on RE-dispatch.
+"""WS4 resume wiring: the kanban_task_claimed hook fires on every claim.
 
-The core patch (kanban_db.claim_task) fires `pre_kanban_dispatch` only when a
-re-claim opens run_id > 1 — so first claims are untouched and a re-dispatched
-worker can be handed a resume note. Tested against the real kanban_db with a
+The upstream patch (kanban_db._fire_kanban_lifecycle_hook) fires
+`kanban_task_claimed` on every task claim. HSCC's handler checks branch state
+to decide if a resume note is needed. Tested against the real kanban_db with a
 spy on invoke_hook.
 
 Skipped where hermes_cli isn't installed.
@@ -26,12 +26,12 @@ def _board():
 
 
 def test_hook_in_valid_hooks():
-    assert "pre_kanban_dispatch" in plugins.VALID_HOOKS
+    assert "kanban_task_claimed" in plugins.VALID_HOOKS
 
 
-def test_hook_not_fired_on_first_claim(monkeypatch):
+def test_hook_fires_on_each_claim(monkeypatch):
     conn = _board()
-    t = kb.create_task(conn, title="first claim", assignee="coder")
+    t = kb.create_task(conn, title="each claim", assignee="coder")
     tid = t.id if hasattr(t, "id") else t
     # task starts in triage/ready depending on flow — force ready
     fired = []
@@ -42,11 +42,11 @@ def test_hook_not_fired_on_first_claim(monkeypatch):
     conn.commit()
     claimed = kb.claim_task(conn, tid)
     assert claimed is not None
-    # run_id == 1 → hook must NOT fire
-    assert not any(n == "pre_kanban_dispatch" for n, _ in fired)
+    # kanban_task_claimed fires on every claim (including first)
+    assert any(n == "kanban_task_claimed" for n, _ in fired)
 
 
-def test_hook_fires_on_redispatch(monkeypatch):
+def test_hook_fires_on_each_claim(monkeypatch):
     conn = _board()
     t = kb.create_task(conn, title="redispatch", assignee="coder")
     tid = t.id if hasattr(t, "id") else t
@@ -57,23 +57,23 @@ def test_hook_fires_on_redispatch(monkeypatch):
     monkeypatch.setattr("hermes_cli.plugins.invoke_hook",
                         lambda name, **kw: fired.append((name, kw)) or [])
 
-    # 1st claim (run 1) — no hook
+    # 1st claim → hook fires
     kb.claim_task(conn, tid)
     # simulate a failure that returns the task to ready (crash path)
     kb._record_task_failure(conn, tid, "crash", outcome="crashed", failure_limit=99)
     conn.execute("UPDATE tasks SET status='ready', claim_lock=NULL WHERE id=?", (tid,))
     conn.commit()
-    # 2nd claim (run 2) — hook MUST fire
+    # 2nd claim → hook fires again
     kb.claim_task(conn, tid)
 
-    dispatch_fires = [kw for n, kw in fired if n == "pre_kanban_dispatch"]
-    assert len(dispatch_fires) == 1
-    assert dispatch_fires[0]["task_id"] == tid
-    assert dispatch_fires[0]["run_id"] > 1
-    assert dispatch_fires[0].get("conn") is not None   # board conn passed to handler
+    claim_fires = [kw for n, kw in fired if n == "kanban_task_claimed"]
+    assert len(claim_fires) == 2
+    assert claim_fires[0]["task_id"] == tid
+    assert claim_fires[1]["task_id"] == tid
+    assert claim_fires[1].get("run_id") > 1
 
 
-def test_end_to_end_resume_comment_posted(tmp_path, monkeypatch):
+def test_hook_fires_on_reclaim(monkeypatch, tmp_path):
     """Engineered crash→resume: a real task branch with committed work, a crash,
     then re-dispatch → the live hook posts a resume comment build_worker_context
     surfaces. Proves the full wiring, not just that the hook fires."""
@@ -93,9 +93,9 @@ def test_end_to_end_resume_comment_posted(tmp_path, monkeypatch):
     # route claim_task's invoke_hook to the REAL handler, injecting our repo
     import hermes_cli.plugins as P
     def fake_invoke(name, **kw):
-        if name == "pre_kanban_dispatch":
-            return [workflow.on_pre_kanban_dispatch(repo=str(repo),
-                    **{k: v for k, v in kw.items() if k != "repo"})]
+        if name == "kanban_task_claimed":
+            return [workflow.on_kanban_task_claimed(board=None, repo=str(repo),
+                    **{k: v for k, v in kw.items() if k not in ("board", "repo", "profile_name", "assignee")})]
         return []
     monkeypatch.setattr("hermes_cli.plugins.invoke_hook", fake_invoke)
 
