@@ -78,3 +78,17 @@ def register(ctx) -> None:
             ctx.register_hook("kanban_task_claimed", workflow.on_kanban_task_claimed)
         except Exception:
             pass
+    # hermes 0.17: `kanban_task_blocked` — surface blocked tasks to ops.
+    if hasattr(ctx, "register_hook"):
+        try:
+            from . import workflow
+            ctx.register_hook("kanban_task_blocked", workflow.on_kanban_task_blocked)
+        except Exception:
+            pass
+    # hermes 0.17: `kanban_task_completed` — record completions + auto-unblock.
+    if hasattr(ctx, "register_hook"):
+        try:
+            from . import workflow
+            ctx.register_hook("kanban_task_completed", workflow.on_kanban_task_completed)
+        except Exception:
+            pass

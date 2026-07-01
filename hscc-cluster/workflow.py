@@ -4,14 +4,14 @@ kanban tracks RUN history (attempts) but not WORK-PRODUCT state. Before a
 re-dispatched worker redoes a task, `probe_task_state` judges "is this already
 satisfied?" from three signals, kanban-truth first:
 
-  1. lifecycle: task already done/review  → satisfied (don't re-dispatch)
+  1. lifecycle: task already done/review → satisfied (don't re-dispatch)
   2. git work-product: the task branch exists AND its diff vs base touches the
-     plan's target files  → work is present
+     plan's target files → work is present
   3. tests: if the plan names tests, run them on the branch; green + on-target
      diff → satisfied; else resume from the first unsatisfied checklist item
 
 "done vs abandoned mid-edit" is disambiguated by the last run outcome
-(completed vs crashed/timed_out/reclaimed) + branch dirtiness.
+(crashed/timed_out/reclaimed) + branch dirtiness.
 
 The probe is READ-ONLY (git status/diff/branch + an opt-in test command). It
 augments build_worker_context via a comment — it never patches kanban core.
@@ -67,7 +67,7 @@ def _targets_hit(changed: List[str], targets: List[str]) -> List[str]:
     hits = []
     for t in targets:
         if any(c == t or c.startswith(t.rstrip("/") + "/") or c.endswith(t)
-               for c in changed):
+                for c in changed):
             hits.append(t)
     return hits
 
@@ -186,7 +186,8 @@ def on_kanban_task_claimed(task_id=None, board=None, profile_name=None,
     from the task's workspace_path, then cwd.
 
     NOTE: upstream's ``kanban_task_claimed`` no longer passes the full task
-    dict or a pre-opened ``conn``; we fetch them via kanban_db.connect/get_task."""
+    dict or a pre-opened ``conn``; we fetch them via kanban_db.connect/get_task.
+    """
     try:
         import os as _os
         from hermes_cli import kanban_db as _kb
@@ -204,5 +205,196 @@ def on_kanban_task_claimed(task_id=None, board=None, profile_name=None,
         finally:
             c.close()
         return {"posted": bool(note and task_id), "task_id": task_id}
+    except Exception:
+        return None
+
+
+# ── kanban_task_blocked handler ──────────────────────────────────────────────
+
+_BLOCKED_LOG = os.path.join(os.path.expanduser("~/.hscc"), "blocked_tasks.jsonl")
+
+
+def on_kanban_task_blocked(task_id=None, profile_name=None, reason=None,
+                           board=None, **kwargs):
+    """Hook handler for `kanban_task_blocked` (fires when a task is blocked).
+
+    Surfaces blocked tasks so the ops team sees them:
+    1. Posts a concise alert to the HSCC ops Telegram topic via the existing
+       ``hscc_daemon.telegram.notify_operations`` path (reused at import time).
+    2. Appends a JSON line to ``~/.hscc/blocked_tasks.jsonl`` so the dashboard
+       or status tools can read stuck-task history.
+
+    Best-effort: never raises. The ``reason`` field is new in hermes 0.17 —
+    it is included verbatim in the alert.
+
+    Parameters
+    ----------
+    task_id : str or None
+        Kanban task identifier.
+    profile_name : str or None
+        Which profile blocked the task.
+    reason : str or None
+        Why the task is blocked (new in 0.17).
+    board : str or None
+        Board slug, passed by the upstream hook.
+    """
+    try:
+        # Build the alert message.
+        parts = ["\U0001f6a7 **Task blocked**"]
+        if task_id:
+            parts.append(f"  `task_id`: `{task_id}`")
+        if profile_name:
+            parts.append(f"  `profile`: `{profile_name}`")
+        if board:
+            parts.append(f"  `board`: `{board}`")
+        if reason:
+            parts.append(f"  **reason**: {reason}")
+        if not any(parts[1:]):
+            parts = ["\U0001f6a7 **Task blocked** (no context available)"]
+        alert = "\n".join(parts)
+
+        # Post to Telegram ops topic (best-effort; may not be importable outside
+        # the daemon context).
+        try:
+            from . import _telegram_compat as _tg
+            _tg.notify_operations(alert)
+        except ImportError:
+            pass
+
+        # Persist to the local log so the dashboard can read it.
+        try:
+            import datetime
+            import json
+            entry = {
+                "task_id": task_id,
+                "profile_name": profile_name,
+                "reason": reason,
+                "board": board,
+                "blocked_at": datetime.datetime.utcnow().isoformat(),
+            }
+            with open(_BLOCKED_LOG, "a") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+        return {"task_id": task_id, "notified": True}
+    except Exception:
+        return None
+
+
+# ── kanban_task_completed handler ────────────────────────────────────────────
+
+_COMPLETION_LOG = os.path.join(os.path.expanduser("~/.hscc"), "task_completions.jsonl")
+
+
+def _try_auto_unblock(child_task_id, parent_task_id):
+    """If HSCC's kanban supports dependency linking, attempt to auto-unblock.
+
+    Checks whether the child was blocked *because* of the parent (common in
+    HSCC's ``kanban_link`` pattern). If so, moves the child from blocked →
+    ready. Best-effort — silently does nothing if the API or schema doesn't
+    match.
+
+    Returns True if the child was auto-unblocked, False otherwise.
+    """
+    try:
+        from hermes_cli import kanban_db as _kb
+        c = _kb.connect()
+        child_row = _kb.get_task(c, child_task_id)
+        if not child_row:
+            return False
+
+        # If the child is in blocked status and its block reason references
+        # the parent, auto-unblock.
+        child_status = (child_row.get("status") or "").lower()
+        if child_status != "blocked":
+            return False
+
+        # Check block comments for parent reference.
+        # hermes_cli kanban_db stores comments as a list in the row or separately.
+        try:
+            comments = _kb.get_comments(c, child_task_id) or []
+        except Exception:
+            # Some versions may not have get_comments — skip auto-unblock.
+            return False
+
+        for comment in comments:
+            body = str(comment.get("body", "")) if isinstance(comment, dict) else str(comment)
+            if parent_task_id and parent_task_id in body:
+                # Auto-unblock: set status to ready, clear claim_lock.
+                _kb.update_task(c, child_task_id, {"status": "ready"})
+                try:
+                    _kb.clear_lock(c, child_task_id)
+                except Exception:
+                    pass
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def on_kanban_task_completed(task_id=None, profile_name=None, summary=None,
+                             board=None, **kwargs):
+    """Hook handler for `kanban_task_completed` (fires when a task completes).
+
+    Records the completion for HSCC's own metrics:
+    1. Appends a JSON line to ``~/.hscc/task_completions.jsonl`` with
+       task_id, profile_name, summary, and timestamp.
+    2. Best-effort auto-unblock: scans for any blocked tasks that were waiting
+       on this completed task (by matching the parent task_id in block comments)
+       and promotes them to ready. If HSCC has no dependency mechanism, this
+       silently does nothing — we do NOT build a new dependency system.
+
+    Best-effort: never raises.
+
+    Parameters
+    ----------
+    task_id : str or None
+        Kanban task identifier.
+    profile_name : str or None
+        Which profile completed the task.
+    summary : str or None
+        The task completion summary (from the worker's ``kanban_complete`` call).
+    board : str or None
+        Board slug.
+    """
+    try:
+        import datetime
+        import json
+
+        # 1. Record the completion.
+        entry = {
+            "task_id": task_id,
+            "profile_name": profile_name,
+            "summary": summary,
+            "board": board,
+            "completed_at": datetime.datetime.utcnow().isoformat(),
+        }
+        try:
+            with open(_COMPLETION_LOG, "a") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+        # 2. Best-effort auto-unblock of dependents.
+        # Read the blocked log to find tasks that reference this completed task.
+        try:
+            if os.path.exists(_BLOCKED_LOG):
+                with open(_BLOCKED_LOG) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            blocked_entry = json.loads(line)
+                            blocked_tid = blocked_entry.get("task_id")
+                            if blocked_tid and blocked_tid != task_id:
+                                _try_auto_unblock(blocked_tid, task_id)
+                        except (json.JSONDecodeError, KeyError):
+                            continue
+        except Exception:
+            pass
+
+        return {"task_id": task_id, "completed": True}
     except Exception:
         return None
