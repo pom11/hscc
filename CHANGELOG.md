@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.10] — Phase 2: doctor --fix, per-profile status, model tiering
+
+### Added
+- **`doctor.py --fix` mode**: idempotently reconciles kanban caps + routing/
+  auto_review wiring via `enable_plugins.enable()` (preserves operator-set lower
+  caps), and reports drift ("was X → set Y") for each corrected key.
+- **Per-profile task status** (`hscc-cluster/profile_status.py` +
+  `hscc profile-status`): running kanban task counts per profile (assignee),
+  read from `~/.hermes/kanban.db`, degrading gracefully on a missing db/schema.
+- **Model tiering per role** (`model_tier: fast | strong`): `strong` routes a
+  role to the orchestrator GPU (`.244:8000`, 35B-A3B); `fast` (default) keeps
+  the worker proxy (`:4000`, 27B). Only `architect` (+ orchestrator) default to
+  `strong` — reviewers/coders/QA stay `fast` so the orchestrator node (which
+  also runs orchestration + worker-compaction) is not saturated. Endpoints are
+  env-overridable; `rolelib` validates the tier and fails loud on bad values.
+
 ## [1.0.0-beta.9] — Profile integration Phase 1 (routing + native API + caps fix)
 
 Make HSCC's 24 role profiles actually usable by the kanban decomposer, adopt
