@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.7] — New kanban lifecycle hooks (blocked + completed)
+
+Add handlers for hermes-agent 0.17's two new kanban lifecycle hooks:
+`kanban_task_blocked` and `kanban_task_completed`, wired into the
+`hscc-cluster` toolset alongside the existing `kanban_task_claimed`.
+
+### Added (hscc-cluster)
+- **`kanban_task_blocked` handler** (`workflow.py:on_kanban_task_blocked`):
+  registers via `ctx.register_hook("kanban_task_blocked", ...)`. On fire,
+  posts a concise alert to the HSCC ops Telegram topic (reuses the
+  existing `hscc_daemon.telegram.notify_operations` path via a lightweight
+  `_telegram_compat` shim) **with the typed `reason` field from 0.17**,
+  and appends a JSON line to `~/.hscc/blocked_tasks.jsonl` for dashboard
+  status reading. Best-effort: never raises.
+- **`kanban_task_completed` handler** (`workflow.py:on_kanban_task_completed`):
+  registers via `ctx.register_hook("kanban_task_completed", ...)`. On fire,
+  appends a JSON line to `~/.hscc/task_completions.jsonl` (task_id,
+  profile_name, summary, timestamp) for HSCC task metrics. Also scans
+  blocked tasks for dependency references and best-effort auto-unblocks
+  any blocked task whose block comments reference this completed task
+  via `_try_auto_unblock()`. If HSCC has no dependency mechanism, this
+  silently does nothing — does NOT build a new dependency system.
+- **`_telegram_compat.py`** — shim module that wraps
+  `hscc_daemon.telegram.notify_operations` for hscc-cluster plugin use.
+  Best-effort: if the daemon package is not importable, provides a no-op.
+  Never raises.
+
+### Changed (hscc-cluster)
+- `__init__.py:register()` now registers all three hooks (`kanban_task_claimed`,
+  `kanban_task_blocked`, `kanban_task_completed`) with best-effort guards.
+
+### Versioning
+- Bumped VERSION from `1.0.0-beta.6` → `1.0.0-beta.7`.
+
+---
+
 ## [1.0.0-beta.6] — Hermes-agent 0.17 compatibility
 
 Update HSCC to be compatible with upstream hermes-agent 0.17.0 (commit
