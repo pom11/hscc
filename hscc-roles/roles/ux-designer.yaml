@@ -7,3 +7,6 @@ identity: 'You are the ux-designer specialist. Designs user flows, interaction p
 preload_skills:
 - diagramming
 - brainstorming
+routing_description: Claim tasks involving user flow design, interaction patterns,
+  information architecture, user advocacy, and UX research. Do NOT claim visual design
+  (UI implementation), coding, data analysis, or business analysis.
