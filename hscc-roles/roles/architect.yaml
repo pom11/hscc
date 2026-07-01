@@ -13,6 +13,7 @@ identity: 'You are a software architect. Given a spec, you design the approach a
 preload_skills:
 - writing-plans
 - brainstorming
+model_tier: strong
 routing_description: Claim tasks that require system design, architecture decisions,
   dependency-ordered task decomposition into small self-contained units, interface
   contracts, and YAGNI scoping. Do NOT claim implementation tasks — hand to coder,
