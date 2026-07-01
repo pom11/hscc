@@ -165,8 +165,10 @@ def _ensure_kanban_routing(cfg):
     keys changed.
 
     Only fills an EMPTY/absent ``default_assignee`` (so an operator who set a
-    specific assignee keeps it). Caps are only RAISED toward the HSCC defaults —
-    never lowered, so a deliberately larger cap is preserved.
+    specific assignee keeps it). Concurrency caps follow the same pattern as
+    ``failure_limit`` in this function: a lower operator value is deliberate
+    (STRICTER — limits concurrency or escalates sooner), so we preserve it.
+    Only fill when absent or invalid (not an int).
     """
     k = cfg.setdefault("kanban", {})
     if not isinstance(k, dict):
@@ -178,7 +180,9 @@ def _ensure_kanban_routing(cfg):
     for key, want in (("max_in_progress", MAX_IN_PROGRESS),
                       ("max_in_progress_per_profile", MAX_IN_PROGRESS_PER_PROFILE)):
         cur = k.get(key)
-        if not isinstance(cur, int) or cur < want:
+        # Mirror the failure_limit pattern: a lower operator value is
+        # deliberate — STRICTER concurrency. Only fill when absent / not an int.
+        if not isinstance(cur, int):
             k[key] = want
             changed.append(key)
     # WS4: auto_review pairing — only fill when absent (operator override kept).
