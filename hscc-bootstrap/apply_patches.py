@@ -44,7 +44,8 @@ def apply_set(set_name: str, target: Path, *, check: bool) -> dict:
     on failure it aborts the am and reports the offending patch."""
     patches = list_patches(set_name)
     if not patches:
-        return {"ok": False, "set": set_name, "error": f"no patches in {SETS.get(set_name)}"}
+        # Intentionally empty patch set (patches landed upstream) — quiet success.
+        return {"ok": True, "set": set_name, "mode": "check", "patches": []}
     # A normal checkout has a .git dir; a worktree/submodule has a .git file.
     if not (target / ".git").exists():
         return {"ok": False, "set": set_name, "error": f"{target} is not a git checkout"}

@@ -32,9 +32,10 @@ def _make_patch(tmp_path) -> Path:
 
 
 def test_list_patches_reads_real_set():
-    # The repo ships real hermes/sparkrun patch sets.
+    # The repo ships real hermes patch set; sparkrun is empty (patches
+    # landed upstream as 9e4513f + 37a7bdb).
     assert len(apply_patches.list_patches("hermes")) >= 1
-    assert len(apply_patches.list_patches("sparkrun")) >= 1
+    assert len(apply_patches.list_patches("sparkrun")) == 0
 
 
 def test_check_passes_when_patch_applies(tmp_path, monkeypatch):

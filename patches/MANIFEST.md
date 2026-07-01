@@ -27,10 +27,13 @@ cleanup, not features HSCC needs to carry forward.
 
 ## sparkrun/ — applies onto spark-arena/sparkrun
 
-| Patch | What |
-|-------|------|
-| 0001 | feat: default restart policy to unless-stopped |
-| 0002 | fix(openclaw-plugin): update for OpenClaw 2026.5.19 compatibility |
+**Empty — all sparkrun patches landed upstream.**
+
+- `0001` (restart policy → `unless-stopped`) merged upstream as `9e4513f`.
+- `0002` (OpenClaw 2026.5.19 compat) merged upstream as `37a7bdb`.
+
+The patch directory exists but contains zero `.patch` files. `apply_patches.py`
+returns `ok: true` for empty sets so bootstrap stays quiet.
 
 ## Recipes (not patches)
 
