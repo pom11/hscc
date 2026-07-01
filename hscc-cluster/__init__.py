@@ -92,3 +92,10 @@ def register(ctx) -> None:
             ctx.register_hook("kanban_task_completed", workflow.on_kanban_task_completed)
         except Exception:
             pass
+    # hermes 0.17: `pre_tool_call` — stamp profile_name into observability.
+    if hasattr(ctx, "register_hook"):
+        try:
+            from . import workflow
+            ctx.register_hook("pre_tool_call", workflow.on_pre_tool_call)
+        except Exception:
+            pass

@@ -366,6 +366,27 @@ def _ensure_prompt_caching(cfg):
     return changed
 
 
+def _ensure_multiplex(cfg):
+    """Enable gateway multiplexing for per-profile session isolation.
+
+    Hermes 0.17 added ``gateway.multiplex_profiles`` for multi-profile
+    gateway processes. Enabling it here prepares HSCC for clusters where
+    multiple profiles share one gateway. Only fills when absent — an
+    operator who explicitly set ``multiplex_profiles: false`` keeps it.
+    Returns keys changed.
+    """
+    gw = cfg.setdefault("gateway", {})
+    if not isinstance(gw, dict):
+        return []
+
+    # Only set when the key is not already present — preserves explicit
+    # operator choices (even ``false``).
+    if "multiplex_profiles" in gw:
+        return []
+    gw["multiplex_profiles"] = True
+    return ["multiplex_profiles"]
+
+
 def _ensure_dashboard(cfg):
     """Ensure the dashboard block has a public_url for network access.
 
@@ -517,7 +538,7 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
 
     Returns {"plugins": [...], "toolsets": [...], "kanban": [...], "delegation":
     [...], "compaction": [...], "fallback": [...], "bitwarden": [...],
-    "prompt_caching": [...], "dashboard": [...], "hooks": [...]} of what
+    "prompt_caching": [...], "dashboard": [...], "multiplex": [...], "hooks": [...]} of what
     changed. Writes (with one backup) only if something changed. No-op + no
     backup if already wired or if the config is missing/malformed.
 
@@ -535,7 +556,7 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
 
     empty = {"plugins": [], "toolsets": [], "kanban": [], "delegation": [],
              "compaction": [], "fallback": [], "bitwarden": [],
-             "prompt_caching": [], "dashboard": [], "hooks": []}
+             "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": []}
     if not os.path.exists(config_path):
         return empty
     with open(config_path) as fh:
@@ -552,6 +573,7 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
     changed_bitwarden = _ensure_bitwarden(cfg)
     changed_prompt_caching = _ensure_prompt_caching(cfg)
     changed_dashboard = _ensure_dashboard(cfg)
+    changed_multiplex = _ensure_multiplex(cfg)
     changed_hooks = _ensure_hooks(cfg)
 
     # Sanity-probe the compaction endpoint (prints a warning to gateway logs
@@ -563,7 +585,8 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
 
     if (added_plugins or added_toolsets or changed_kanban or changed_delegation
             or changed_compaction or changed_fallback or changed_bitwarden
-            or changed_prompt_caching or changed_dashboard or changed_hooks):
+            or changed_prompt_caching or changed_dashboard or changed_multiplex
+            or changed_hooks):
         import shutil
         import time
         shutil.copy(config_path,
@@ -577,6 +600,7 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
             "bitwarden": changed_bitwarden,
             "prompt_caching": changed_prompt_caching,
             "dashboard": changed_dashboard,
+            "multiplex": changed_multiplex,
             "hooks": changed_hooks}
 
 
