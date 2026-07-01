@@ -36,13 +36,19 @@ def file_md5(path):
 
 
 REQUIRED_FIELDS = ("name", "identity", "routing_description")
+VALID_MODEL_TIERS = ("fast", "strong")
 
 
 def load_spec(path):
     """Load + validate a role spec YAML. Returns a normalized dict.
 
-    Required: name, identity, routing_description. Optional: preload_skills (list, default []).
+    Required: name, identity, routing_description.
+    Optional: preload_skills (list, default []), model_tier (str, default "fast").
     Raises ValueError on missing required fields so callers fail loudly.
+
+    model_tier controls which GPU tier a role uses:
+      - "fast"  (default): worker proxy at :4000 with 27B-FP8
+      - "strong": orchestrator node at :8000 with 35B-A3B-NVFP4
     """
     with open(path) as f:
         data = yaml.safe_load(f) or {}
@@ -56,11 +62,19 @@ def load_spec(path):
         skills = [skills]
     if not isinstance(skills, list):
         raise ValueError(f"{path}: preload_skills must be a list")
+
+    model_tier = str(data.get("model_tier", "fast")).strip().lower()
+    if model_tier not in VALID_MODEL_TIERS:
+        raise ValueError(
+            f"{path}: model_tier must be one of {VALID_MODEL_TIERS}, got '{model_tier}'"
+        )
+
     return {
         "name": str(data["name"]).strip(),
         "identity": str(data["identity"]).rstrip() + "\n",
         "routing_description": str(data["routing_description"]).strip(),
         "preload_skills": [str(s).strip() for s in skills if str(s).strip()],
+        "model_tier": model_tier,
     }
 
 

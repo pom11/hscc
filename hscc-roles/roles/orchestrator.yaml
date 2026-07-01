@@ -15,6 +15,7 @@ identity: 'You are Hermes, the operations orchestrator. You are the brain that t
 preload_skills:
 - brainstorming
 - writing-plans
+model_tier: strong
 routing_description: Claim tasks involving fleet coordination, kanban decomposition,
   dependency-graph routing, cluster operations, and orchestrating work across specialized
   roles. Do NOT claim implementation work — route to the appropriate specialist profile.

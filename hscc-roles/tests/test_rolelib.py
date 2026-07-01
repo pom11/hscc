@@ -79,3 +79,65 @@ def test_base_identity_exists_and_nonempty():
     assert os.path.exists(rolelib.BASE_IDENTITY_PATH)
     with open(rolelib.BASE_IDENTITY_PATH) as f:
         assert len(f.read().strip()) > 100
+
+
+# -- model_tier tests --
+
+
+def test_model_tier_fast_defaults(tmp_path):
+    """When model_tier is absent, it defaults to 'fast'. Cant be a value error, but it should be a value."""
+    spec_file = tmp_path / "min.yaml"
+    spec_file.write_text(
+        "name: x\n"
+        "identity: hi\n"
+        "routing_description: Minimal.\n"
+    )
+    spec = rolelib.load_spec(str(spec_file))
+    assert spec["model_tier"] == "fast"
+
+
+def test_model_tier_strong_when_set(tmp_path):
+    """When model_tier: strong, spec returns 'strong'."""
+    spec_file = tmp_path / "arch.yaml"
+    spec_file.write_text(
+        "name: architect\n"
+        "identity: Designs systems.\n"
+        "routing_description: Architecture.\n"
+        "model_tier: strong\n"
+    )
+    spec = rolelib.load_spec(str(spec_file))
+    assert spec["model_tier"] == "strong"
+
+
+def test_model_tier_invalid_raises(tmp_path):
+    """Invalid model_tier raises ValueError."""
+    spec_file = tmp_path / "bad.yaml"
+    spec_file.write_text(
+        "name: x\n"
+        "identity: hi\n"
+        "routing_description: test.\n"
+        "model_tier: quantum\n"
+    )
+    with pytest.raises(ValueError, match="model_tier must be one of"):
+        rolelib.load_spec(str(spec_file))
+
+
+def test_model_tier_case_insensitive(tmp_path):
+    """model_tier is normalized to lowercase."""
+    spec_file = tmp_path / "case.yaml"
+    spec_file.write_text(
+        "name: x\n"
+        "identity: hi\n"
+        "routing_description: test.\n"
+        "model_tier: STRONG\n"
+    )
+    spec = rolelib.load_spec(str(spec_file))
+    assert spec["model_tier"] == "strong"
+
+
+def test_all_specs_load_with_model_tier():
+    """All real spec files load and carry a valid model_tier."""
+    files = rolelib.list_spec_files()
+    for f in files:
+        spec = rolelib.load_spec(f)
+        assert spec["model_tier"] in ("fast", "strong")
