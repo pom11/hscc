@@ -28,6 +28,10 @@ import yaml
 
 
 def test_generate_profile_writes_files(tmp_path, monkeypatch):
+    # PROFILES_DIR covers the fallback path; HERMES_HOME covers the native API
+    # path (create_profile reads HERMES_HOME, not PROFILES_DIR), so the test is
+    # isolated in BOTH modes and never touches the real ~/.hermes/profiles.
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
     spec = {"name": "coder", "identity": "You build.\n",
             "preload_skills": ["test-driven-development"]}
@@ -46,6 +50,7 @@ def test_generate_profile_writes_files(tmp_path, monkeypatch):
 
 
 def test_generate_profile_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
     spec = {"name": "coder", "identity": "You build.\n", "preload_skills": []}
     generator.generate_profile(spec, base_identity="BASE")
