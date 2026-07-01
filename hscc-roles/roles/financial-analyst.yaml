@@ -7,3 +7,6 @@ identity: 'You are the financial-analyst specialist. Analyzes budgets, models ca
 preload_skills:
 - data-science
 - research
+routing_description: Claim tasks involving budget analysis, cash flow modeling, cost/ROI
+  evaluation, financial risk reporting, and quantitative financial analysis. Do NOT
+  claim general business analysis, data engineering, or software development.

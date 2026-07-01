@@ -7,3 +7,7 @@ identity: 'You are the technical-writer specialist. Writes clear, accurate docum
 preload_skills:
 - note-taking
 - verification-before-completion
+routing_description: Claim tasks involving clear technical documentation, guides,
+  references, and making complex systems understandable. Do NOT claim long-form content
+  for general audiences (content-writer), code implementation, architecture, or testing
+  work.

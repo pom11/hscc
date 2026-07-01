@@ -29,13 +29,13 @@ def test_truthy_variants(tmp_path, monkeypatch):
 
 def test_cli_autonomy_show_on_off(tmp_path):
     plugin_dir = os.path.dirname(os.path.abspath(autonomy.__file__))
-    venv_py = os.path.join(plugin_dir, "..", "..", "hermes-agent", "venv", "bin", "python")
+    py = sys.executable  # use system python, works in sandboxed tests
     hscc = os.path.join(plugin_dir, "hscc.py")
     env = dict(os.environ, HOME=str(tmp_path))
-    r = subprocess.run([venv_py, hscc, "autonomy"], capture_output=True, text=True, env=env)
+    r = subprocess.run([py, hscc, "autonomy"], capture_output=True, text=True, env=env)
     assert r.returncode == 0
     assert "off" in r.stdout.lower()
-    r = subprocess.run([venv_py, hscc, "autonomy", "on"], capture_output=True, text=True, env=env)
+    r = subprocess.run([py, hscc, "autonomy", "on"], capture_output=True, text=True, env=env)
     assert r.returncode == 0
-    r = subprocess.run([venv_py, hscc, "autonomy"], capture_output=True, text=True, env=env)
+    r = subprocess.run([py, hscc, "autonomy"], capture_output=True, text=True, env=env)
     assert "on" in r.stdout.lower()

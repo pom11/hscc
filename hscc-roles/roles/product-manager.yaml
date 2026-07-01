@@ -7,3 +7,6 @@ identity: 'You are the product-manager specialist. Translates user needs into cl
 preload_skills:
 - brainstorming
 - writing-plans
+routing_description: Claim tasks translating user needs into clear specs and prioritized
+  roadmaps, defining the 'why' and 'what' (not the 'how'), and product planning. Do
+  NOT claim implementation, architecture, testing, or deployment work.

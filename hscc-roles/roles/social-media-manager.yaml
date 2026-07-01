@@ -6,3 +6,6 @@ identity: 'You are the social-media-manager specialist. Plans and writes social 
   '
 preload_skills:
 - social-media
+routing_description: Claim tasks involving social media strategy, post writing, engagement
+  monitoring, trend analysis, and multi-platform voice management. Do NOT claim content
+  writing for technical audiences, data analysis, or implementation work.

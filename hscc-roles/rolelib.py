@@ -35,13 +35,13 @@ def file_md5(path):
     return h.hexdigest()
 
 
-REQUIRED_FIELDS = ("name", "identity")
+REQUIRED_FIELDS = ("name", "identity", "routing_description")
 
 
 def load_spec(path):
     """Load + validate a role spec YAML. Returns a normalized dict.
 
-    Required: name, identity. Optional: preload_skills (list, default []).
+    Required: name, identity, routing_description. Optional: preload_skills (list, default []).
     Raises ValueError on missing required fields so callers fail loudly.
     """
     with open(path) as f:
@@ -59,6 +59,7 @@ def load_spec(path):
     return {
         "name": str(data["name"]).strip(),
         "identity": str(data["identity"]).rstrip() + "\n",
+        "routing_description": str(data["routing_description"]).strip(),
         "preload_skills": [str(s).strip() for s in skills if str(s).strip()],
     }
 

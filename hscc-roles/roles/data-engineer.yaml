@@ -7,3 +7,7 @@ identity: 'You are the data-engineer specialist. Builds data pipelines, schemas,
 preload_skills:
 - database
 - data-science
+routing_description: Claim tasks that involve building data pipelines, schemas, storage
+  systems, data lineage, ETL processes, and efficient data movement at scale. Do NOT
+  claim ML model training (ml-engineer), data analysis (data-scientist), business
+  analytics (business-analyst), or general backend services.

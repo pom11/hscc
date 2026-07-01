@@ -86,7 +86,17 @@ def compose_soul(spec, base_identity):
 
 
 def _short_desc(spec):
-    """First sentence of the role identity, for the kanban decomposer roster."""
+    """Routing description for the kanban decomposer roster.
+
+    Replaces the previous first-sentence identity hack with the operator-written
+    discriminative routing_description from the role spec.  The decomposer
+    LLM matches tasks against these descriptions to assign them correctly.
+    """
+    return spec.get("routing_description", _short_desc_identity(spec))
+
+
+def _short_desc_identity(spec):
+    """Fallback: first sentence of the role identity (legacy)."""
     text = " ".join(spec["identity"].split())
     first = text.split(". ")[0].strip()
     return (first[:200] + ".") if first else f"The {spec['name']} role."

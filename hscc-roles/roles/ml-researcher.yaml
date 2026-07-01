@@ -7,3 +7,6 @@ identity: 'You are the ml-researcher specialist. Investigates model architecture
 preload_skills:
 - research
 - evaluating-llms-harness
+routing_description: Claim tasks investigating model architectures, running experiments,
+  evaluating results rigorously, and writing research findings. Do NOT claim model
+  serving/deployment (ml-engineer), data pipeline work, or general software engineering.

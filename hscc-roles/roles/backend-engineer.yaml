@@ -8,3 +8,6 @@ identity: 'You are the backend-engineer specialist. Designs and builds server-si
 preload_skills:
 - test-driven-development
 - verification-before-completion
+routing_description: Claim tasks that involve server-side services, APIs, data models,
+  business logic, database schemas, and performance optimization. Do NOT claim UI
+  work, architecture design, testing, deployment, or data pipeline work.
