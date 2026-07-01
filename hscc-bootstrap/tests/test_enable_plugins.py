@@ -112,6 +112,7 @@ def _fully_wired_cfg():
             "post_tool_call": [{"matcher": "hscc-cluster", "command": "cluster-guard.py", "timeout": 5}],
             "on_session_start": [{"command": "cluster-guard.py", "timeout": 5}],
         },
+        "gateway": {"multiplex_profiles": True},
     }
 
 
@@ -119,13 +120,13 @@ def test_fully_wired_is_noop(tmp_path):
     path = _write(tmp_path / "config.yaml", _fully_wired_cfg())
     before = open(path).read()
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "hooks": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": []}
     assert open(path).read() == before              # no rewrite, no backup churn
 
 
 def test_missing_config_noop(tmp_path):
     res = enable_plugins.enable(str(tmp_path / "nope.yaml"))
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "hooks": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": []}
 
 
 # ── fleet routing (kanban + delegation) ──────────────────────────────────────
@@ -156,7 +157,7 @@ def test_routing_preserves_operator_choices(tmp_path):
     cfg["delegation"]["base_url"] = "http://my-proxy:9000/v1"
     path = _write(tmp_path / "config.yaml", cfg)
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "hooks": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": []}
     out = yaml.safe_load(open(path))
     assert out["kanban"]["default_assignee"] == "my-special-worker"
     assert out["kanban"]["max_in_progress"] == 99   # not lowered
@@ -563,3 +564,78 @@ def test_hooks_file_missing_source(tmp_path, monkeypatch):
     res = enable_plugins._ensure_hooks_file(str(hooks_src))
     assert res["installed"] is False
     assert "not found" in res.get("reason", "")
+
+
+# ── multiplex ────────────────────────────────────────────────────────────────
+
+class TestEnsureMultiplex:
+    """_ensure_multiplex enables gateway.multiplex_profiles idempotently."""
+
+    def test_creates_multiplex_when_absent(self):
+        cfg: dict = {}
+        changed = enable_plugins._ensure_multiplex(cfg)
+        assert changed == ["multiplex_profiles"]
+        assert cfg["gateway"]["multiplex_profiles"] is True
+
+    def test_does_not_clobber_operator_true(self):
+        cfg = {"gateway": {"multiplex_profiles": True}}
+        changed = enable_plugins._ensure_multiplex(cfg)
+        assert changed == []
+        assert cfg["gateway"]["multiplex_profiles"] is True
+
+    def test_does_not_clobber_operator_false(self):
+        cfg = {"gateway": {"multiplex_profiles": False}}
+        changed = enable_plugins._ensure_multiplex(cfg)
+        assert changed == []
+        assert cfg["gateway"]["multiplex_profiles"] is False
+
+    def test_does_not_clobber_string_value(self):
+        cfg = {"gateway": {"multiplex_profiles": "true"}}
+        changed = enable_plugins._ensure_multiplex(cfg)
+        assert changed == []
+        assert cfg["gateway"]["multiplex_profiles"] == "true"
+
+    def test_gateway_non_dict_returns_empty(self):
+        cfg = {"gateway": "not-a-dict"}
+        changed = enable_plugins._ensure_multiplex(cfg)
+        assert changed == []
+
+    def test_preserves_other_gateway_keys(self):
+        cfg = {"gateway": {"some_other_key": "value"}}
+        changed = enable_plugins._ensure_multiplex(cfg)
+        assert changed == ["multiplex_profiles"]
+        assert cfg["gateway"]["some_other_key"] == "value"
+        assert cfg["gateway"]["multiplex_profiles"] is True
+
+    def test_idempotent_second_call(self):
+        cfg: dict = {}
+        enable_plugins._ensure_multiplex(cfg)
+        changed = enable_plugins._ensure_multiplex(cfg)
+        assert changed == []
+        assert cfg["gateway"]["multiplex_profiles"] is True
+
+    def test_return_empty_list_when_already_set(self):
+        cfg = {"gateway": {"multiplex_profiles": True}}
+        assert enable_plugins._ensure_multiplex(cfg) == []
+
+
+class TestEnableIntegratesMultiplex:
+    """enable() return dict includes 'multiplex' key."""
+
+    def test_enable_return_has_multiplex_key(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("model:\n  default: test\n")
+        result = enable_plugins.enable(str(config_file))
+        assert "multiplex" in result
+
+    def test_enable_sets_multiplex_when_absent(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("{}\n")
+        result = enable_plugins.enable(str(config_file))
+        assert result["multiplex"] == ["multiplex_profiles"]
+
+    def test_enable_preserves_multiplex_when_set(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("gateway:\n  multiplex_profiles: false\n")
+        result = enable_plugins.enable(str(config_file))
+        assert result["multiplex"] == []
