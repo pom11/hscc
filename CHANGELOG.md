@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.9] — Profile integration Phase 1 (routing + native API + caps fix)
+
+Make HSCC's 24 role profiles actually usable by the kanban decomposer, adopt
+the Hermes 0.17 native profile API, and kill the recurring concurrency-caps
+footgun.
+
+### Fixed
+- **Concurrency caps footgun** (`enable_plugins.py`): `max_in_progress` /
+  `max_in_progress_per_profile` were RAISED toward the HSCC defaults (30/10)
+  whenever the current value was lower, so an operator-set 6/2 got clobbered
+  on every bootstrap. Now mirrors the `failure_limit` pattern — a lower
+  operator value is deliberate (STRICTER) and preserved; caps are only filled
+  when absent/invalid. Ends the recurring hand-fix.
+
+### Added
+- **Discriminative routing descriptions for all 24 roles** (`hscc-roles`): each
+  role spec carries a `routing_description` ("Claim tasks that <X>; do NOT claim
+  <Y>") that the generator writes verbatim to `profile.yaml`. The kanban
+  decomposer matches tasks against these, so work routes to the right
+  specialist instead of collapsing onto the `worker` catch-all.
+  `routing_description` is now a required role-spec field.
+
+### Changed
+- **Generator uses the Hermes 0.17 native profile API** (`hscc-roles/generator.py`):
+  `create_profile()` scaffolds the profile dir and `write_profile_meta()` writes
+  the descriptor, with a graceful fallback (`USE_NATIVE_API`) when `hermes_cli`
+  is unavailable. HSCC-specific `config.yaml` (worker model block → proxy
+  `:4000`, compaction routing, toolsets) is still written manually since the
+  native API has no cluster-topology concept. Generation stays idempotent
+  (verified: second run returns `changed=False`, byte-identical profile dir,
+  worker `base_url` = `http://localhost:4000/v1`). Tests now set `HERMES_HOME`
+  so the native path is exercised under venv python and isolated from the real
+  `~/.hermes`.
+
 ## [1.0.0-beta.8] — Retire sparkrun patches that landed upstream
 
 The two curated `patches/sparkrun/` patches are now merged into official
