@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.8] — Retire sparkrun patches that landed upstream
+
+The two curated `patches/sparkrun/` patches are now merged into official
+sparkrun, so the local delta is empty. Carrying them made
+`apply_patches.py --check` fail and `bootstrap.sh` emit a misleading warning
+on every run. Verified byte-identical to upstream before removal.
+
+### Changed
+- **Retired `patches/sparkrun/0001` and `0002`.** Confirmed byte-equivalent
+  to upstream commits `9e4513f` (default restart policy → `unless-stopped`)
+  and `37a7bdb` (OpenClaw 2026.5.19 plugin compat). The sparkrun patch set
+  is now empty; recipe overlay (`~/.sparkrun-local/recipes`) is unaffected.
+- **`apply_patches.py`** returns `ok: true` for an intentionally empty patch
+  set (patches landed upstream) instead of an error, so `bootstrap.sh` stays
+  quiet. `patches/MANIFEST.md` updated to record the upstream landing.
+
+### Notes
+- sparkrun runtime is an editable uv-tool install from `~/sparkrun`
+  (`v0.2.38`+3 upstream commits). All CLI commands `hscc-cluster` calls
+  (`cluster list --json`, `run`, `stop`, `status`, `proxy`) verified present
+  — command surface fully compatible; no functional sparkrun upgrade needed.
+- Tests: 117/117 bootstrap suite pass.
+
 ## [1.0.0-beta.7] — New kanban lifecycle hooks (blocked + completed)
 
 Add handlers for hermes-agent 0.17's two new kanban lifecycle hooks:
