@@ -236,6 +236,12 @@ def cmd_info():
     }
 
 
+def cmd_profile_status():
+    """Show running kanban task counts per profile."""
+    from profile_status import get_profile_status as _get_status
+    return _get_status()
+
+
 # ── Command Map ───────────────────────────────────────────────────────────
 
 COMMANDS = {
@@ -246,6 +252,7 @@ COMMANDS = {
     "stop": cmd_stop,
     "info": cmd_info,
     "cluster-template": cmd_cluster_template,
+    "profile-status": cmd_profile_status,
 }
 
 
@@ -266,6 +273,7 @@ Commands:
   stop <id>           Stop a running workload by container ID
   info                Detailed cluster configuration
   cluster-template    Manage cluster templates (list|preview|apply)
+  profile-status      Show running kanban task counts per profile
         """.strip())
         sys.exit(0)
 
