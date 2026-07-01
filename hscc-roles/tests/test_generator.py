@@ -1,4 +1,6 @@
 import os
+import yaml
+import pytest
 import rolelib
 import generator
 
@@ -22,9 +24,6 @@ def test_compose_soul_orchestrator_skips_worker_ops():
     assert "your own git worktree" not in soul.lower()
     # ...but it MUST get its own gateway/authority operational block.
     assert "gateway node" in soul.lower()
-
-
-import yaml
 
 
 def test_generate_profile_writes_files(tmp_path, monkeypatch):
@@ -83,3 +82,72 @@ def test_cli_generate_all_runs(tmp_path):
     assert "routing_description" in pdata or "description" in pdata
     # The decomposer-facing description IS the routing_description
     assert "Claim tasks" in str(pdata.get("description", ""))
+
+
+# -- model_tier generator tests --
+
+
+def test_model_tier_fast_uses_worker_proxy(tmp_path, monkeypatch):
+    """Fast-tier (default) roles use the worker proxy endpoint."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    generator.generate_profile(spec, base_identity="BASE")
+    with open(os.path.join(str(tmp_path / "profiles" / "coder"), "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["model"]["base_url"] == "http://localhost:4000/v1"
+    assert cfg["model"]["default"] == "Qwen/Qwen3.6-27B-FP8"
+
+
+def test_model_tier_strong_uses_orch_endpoint(tmp_path, monkeypatch):
+    """Strong-tier roles use the orchestrator endpoint."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "architect", "identity": "You design.\n",
+            "preload_skills": [], "model_tier": "strong"}
+    generator.generate_profile(spec, base_identity="BASE")
+    with open(os.path.join(str(tmp_path / "profiles" / "architect"), "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["model"]["base_url"] == "http://192.168.88.244:8000/v1"
+    assert cfg["model"]["default"] == "nvidia/Qwen3.6-35B-A3B-NVFP4"
+
+
+def test_model_tier_override_via_env(tmp_path, monkeypatch):
+    """HSCC_STRONG_URL env var overrides the strong-tier endpoint."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    monkeypatch.setattr(generator, "STRONG_URL", "http://custom:9999/v1")
+    monkeypatch.setattr(generator, "STRONG_MODEL", "custom/model")
+    spec = {"name": "designer", "identity": "You design.\n",
+            "preload_skills": [], "model_tier": "strong"}
+    generator.generate_profile(spec, base_identity="BASE")
+    with open(os.path.join(str(tmp_path / "profiles" / "designer"), "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["model"]["base_url"] == "http://custom:9999/v1"
+    assert cfg["model"]["default"] == "custom/model"
+
+
+def test_model_tier_strong_idempotent(tmp_path, monkeypatch):
+    """Generating a strong-tier role twice reports changed=False on second run."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "architect", "identity": "You design.\n",
+            "preload_skills": [], "model_tier": "strong"}
+    generator.generate_profile(spec, base_identity="BASE")
+    changed_second = generator.generate_profile(spec, base_identity="BASE")
+    assert changed_second is False
+
+
+def test_model_tier_strong_still_has_compaction(tmp_path, monkeypatch):
+    """Strong-tier roles still route compaction to the orchestrator."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "architect", "identity": "You design.\n",
+            "preload_skills": [], "model_tier": "strong"}
+    generator.generate_profile(spec, base_identity="BASE")
+    with open(os.path.join(str(tmp_path / "profiles" / "architect"), "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    # Compaction auxiliary should still be present
+    assert "auxiliary" in cfg
+    assert "compression" in cfg["auxiliary"]
