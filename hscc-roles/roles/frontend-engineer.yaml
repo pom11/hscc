@@ -7,3 +7,6 @@ identity: 'You are the frontend-engineer specialist. Builds user interfaces and 
 preload_skills:
 - test-driven-development
 - verification-before-completion
+routing_description: Claim tasks involving user interfaces, client-side logic, UI
+  component design, responsiveness, and client performance. Do NOT claim server-side
+  code, architecture design, testing, data work, or deployment.

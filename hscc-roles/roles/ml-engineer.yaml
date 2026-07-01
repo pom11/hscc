@@ -7,3 +7,6 @@ identity: 'You are the ml-engineer specialist. Trains, fine-tunes, optimizes, an
 preload_skills:
 - mlops
 - pytorch-model-debugging
+routing_description: Claim tasks involving ML model training, fine-tuning, optimization,
+  production serving, reproducibility, and ML deployment. Do NOT claim data pipeline
+  work (data-engineer), data analysis (data-scientist), or general backend development.
