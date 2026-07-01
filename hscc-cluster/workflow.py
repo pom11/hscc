@@ -201,6 +201,9 @@ def on_kanban_task_claimed(task_id=None, board=None, profile_name=None,
             work_repo = t.get("workspace_path") or _os.getcwd()
             note = resume_note(t, repo=work_repo)
             if note and task_id:
+                # Stamp profile_name into the resume note when available.
+                if profile_name:
+                    note = f"  `profile`: `{profile_name}`\n\n" + note
                 _kb.add_comment(c, task_id, author="hscc-resume", body=note)
         finally:
             c.close()
@@ -398,3 +401,27 @@ def on_kanban_task_completed(task_id=None, profile_name=None, summary=None,
         return {"task_id": task_id, "completed": True}
     except Exception:
         return None
+
+
+# ── pre_tool_call observability hook ──────────────────────────────────────
+
+_TOOL_EVENT_LOG = os.path.join(os.path.expanduser("~/.hscc"), "tool_events.jsonl")
+
+
+def on_pre_tool_call(**kwargs):
+    """Stamp profile_name into HSCC observability for every tool call."""
+    try:
+        profile = kwargs.get("profile_name", "unknown")
+        import datetime
+        import json
+
+        entry = {
+            "event": "pre_tool_call",
+            "profile_name": profile,
+            "tool_name": kwargs.get("tool_name", ""),
+            "timestamp": datetime.datetime.utcnow().isoformat(),
+        }
+        with open(_TOOL_EVENT_LOG, "a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # best-effort, never raise
