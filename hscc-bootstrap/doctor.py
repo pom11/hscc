@@ -160,19 +160,109 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None) -> di
     }
 
 
+def run_doctor_fix(config_path: Optional[str] = None,
+                   hermes_home: Optional[str] = None,
+                   *, _cluster_runner=None) -> dict:
+    """Run doctor + fix all non-fatal HSCC config drift.
+
+    Reads the current config, runs checks, then calls enable_plugins.enable()
+    if there are non-fatal failures. Reports what was wrong and what was fixed.
+
+    Returns the same dict as run_doctor() plus "fixes_applied" list describing
+    each corrected key.
+    """
+    checks_result = run_doctor(hermes_home, _cluster_runner=_cluster_runner)
+    fixes_applied: list[str] = []
+
+    has_nonfatal_failures = any(
+        not c["ok"] and not c.get("fatal") for c in checks_result["checks"]
+    )
+
+    if config_path and has_nonfatal_failures:
+        # Capture pre-fix snapshot for drift reporting
+        snapshot = {}
+        try:
+            import yaml
+            if os.path.exists(config_path):
+                with open(config_path) as fh:
+                    snapshot = yaml.safe_load(fh) or {}
+        except Exception:
+            snapshot = {}
+
+        # Reconcile config via enable_plugins (idempotent, preserves operator caps)
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from enable_plugins import enable as _enable
+        result = _enable(config_path)
+
+        # Read post-fix config for drift reporting
+        fixed_cfg = {}
+        try:
+            import yaml
+            with open(config_path) as fh:
+                fixed_cfg = yaml.safe_load(fh) or {}
+        except Exception:
+            pass
+
+        # Build "was X -> set Y" report for each changed key
+        for section, keys in result.items():
+            for k in keys:
+                old_val = _get_nested(snapshot, section, k)
+                new_val = _get_nested(fixed_cfg, section, k)
+                if old_val is None or old_val == "":
+                    fixes_applied.append(
+                        f"{section}/{k}: was missing -> set {new_val}"
+                    )
+                else:
+                    fixes_applied.append(
+                        f"{section}/{k}: was {old_val} -> set {new_val}"
+                    )
+
+    return {**checks_result, "fixes_applied": fixes_applied}
+
+
+def _get_nested(cfg: dict, section: str, key: str):
+    """Safely extract cfg[section][key] for drift reporting."""
+    try:
+        val = cfg.get(section, {})
+        if isinstance(val, dict):
+            val = val.get(key)
+        if val is None:
+            return None
+        if isinstance(val, (dict, list)):
+            return str(val)
+        return val
+    except Exception:
+        return None
+
+
 def main(argv=None) -> int:
     import json
     argv = argv if argv is not None else sys.argv[1:]
-    res = run_doctor()
+    fix_mode = "--fix" in argv
+    config_path = os.path.expanduser("~/.hermes/config.yaml")
+
+    if fix_mode:
+        res = run_doctor_fix(config_path=config_path)
+    else:
+        res = run_doctor()
+
     if "--json" in argv:
         print(json.dumps(res, indent=2))
         return 0 if res["ok"] else 1
+
     for c in res["checks"]:
         mark = "✓" if c["ok"] else ("✗" if c["fatal"] else "○")
         line = f"  {mark} {c['name']}: {c['detail']}"
         if not c["ok"] and c["fix"]:
             line += f"\n      → {c['fix']}"
         print(line)
+
+    # Print fixes if we ran in --fix mode
+    if fix_mode and res.get("fixes_applied"):
+        print(f"\n  🛠 Applied fixes:")
+        for fix_line in res["fixes_applied"]:
+            print(f"    {fix_line}")
+
     if not res["ok"]:
         print(f"\n  ✗ preflight FAILED: {', '.join(res['fatal_failures'])}")
         return 1
