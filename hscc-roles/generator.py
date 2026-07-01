@@ -1,6 +1,28 @@
-"""Generate Hermes profiles from role specs: SOUL composition + materialization."""
+"""Generate Hermes profiles from role specs: SOUL composition + materialization.
+
+Uses the Hermes 0.17 native profile API where available:
+- create_profile() to scaffold the profile directory
+- write_profile_meta() for profile.yaml (routing_description → description)
+- seed_profile_skills() for skills
+
+HSCC-specific config.yaml (model block, compaction, toolsets) is still
+written manually because the native API has no concept of cluster topology.
+"""
 import os
 import yaml
+
+# Allowed non-stdlib import: hermes_cli.profiles (Hermes 0.17 native API)
+try:
+    from hermes_cli.profiles import (
+        create_profile,
+        get_profile_dir,
+        write_profile_meta,
+        seed_profile_skills,
+    )
+    USE_NATIVE_API = True
+except ImportError:
+    USE_NATIVE_API = False
+
 import rolelib
 
 # Worker role profiles must serve from the WORKER pool, not inherit the root
@@ -88,9 +110,9 @@ def compose_soul(spec, base_identity):
 def _short_desc(spec):
     """Routing description for the kanban decomposer roster.
 
-    Replaces the previous first-sentence identity hack with the operator-written
-    discriminative routing_description from the role spec.  The decomposer
-    LLM matches tasks against these descriptions to assign them correctly.
+    Uses the operator-written discriminative routing_description from the
+    role spec.  The decomposer LLM matches tasks against these descriptions
+    to assign them correctly.
     """
     return spec.get("routing_description", _short_desc_identity(spec))
 
@@ -117,12 +139,41 @@ def _write_if_changed(path, content):
 def generate_profile(spec, base_identity):
     """Materialize a Hermes profile dir for a role spec. Idempotent.
 
-    Writes SOUL.md (composed), config.yaml (toolsets = full minus cluster,
-    preload skills), and profile.yaml (decomposer-facing description). Returns
-    True if any file was written/changed this call, else False.
+    Uses the Hermes 0.17 native profile API where available:
+    - create_profile() scaffolds the profile directory (idempotent —
+      raises FileExistsError if it already exists, which we catch)
+    - write_profile_meta() writes profile.yaml with routing_description
+      (always safe — only overwrites the fields we pass)
+    - seed_profile_skills() seeds bundled skills
+
+    HSCC-specific config.yaml (model block, compaction, toolsets) is still
+    written manually because the native API has no concept of cluster
+    topology or the worker proxy.
+
+    Returns True if any file was written/changed this call, else False.
     """
-    pdir = os.path.join(rolelib.PROFILES_DIR, spec["name"])
+    name = spec["name"]
+
+    # 1. Scaffold profile dir via native API (idempotent — creates if absent)
+    if USE_NATIVE_API:
+        try:
+            profile_dir = create_profile(name, no_alias=True, no_skills=True)
+            pdir = str(profile_dir)
+            changed = True  # newly created
+        except FileExistsError:
+            # Already exists — idempotent, resolve dir and continue
+            pdir = str(get_profile_dir(name))
+            changed = False
+    else:
+        # Fallback: manual path resolution
+        pdir = os.path.join(rolelib.PROFILES_DIR, name)
+        changed = False
+
+    # 2. Compose and write SOUL.md (HSCC-specific composition — always manual)
     soul = compose_soul(spec, base_identity)
+    changed |= _write_if_changed(os.path.join(pdir, "SOUL.md"), soul)
+
+    # 3. Write config.yaml (HSCC-specific: model block + compaction + toolsets)
     config = {
         "toolsets": rolelib.role_toolsets(),
         "skills": {"preload": spec["preload_skills"]},
@@ -130,25 +181,36 @@ def generate_profile(spec, base_identity):
     # Worker roles serve from the load-balanced worker proxy so their work runs
     # on worker GPUs, not the orchestrator. The orchestrator role keeps the root
     # config (its own gateway-node model) and is never repointed.
-    if spec["name"] != "orchestrator":
+    if name != "orchestrator":
         config["model"] = _worker_model_block()
         # Route context-compaction OFF the busy worker proxy to the idle
         # orchestrator, so a long task's self-summarization doesn't wedge the
         # worker. Merge the two keys into config.
         for k, v in _worker_compaction().items():
             config[k] = v
-    profile = {
-        "description": _short_desc(spec),
-        "description_auto": False,
-    }
-    changed = False
-    changed |= _write_if_changed(os.path.join(pdir, "SOUL.md"), soul)
     changed |= _write_if_changed(
         os.path.join(pdir, "config.yaml"),
         yaml.safe_dump(config, default_flow_style=False, sort_keys=False),
     )
-    changed |= _write_if_changed(
-        os.path.join(pdir, "profile.yaml"),
-        yaml.safe_dump(profile, default_flow_style=False, sort_keys=False),
-    )
+
+    # 4. Write profile.yaml via native API (routing_description → description)
+    routing_desc = _short_desc(spec)  # routing_description from spec (WS2)
+    if USE_NATIVE_API:
+        write_profile_meta(pdir, description=routing_desc, description_auto=False)
+        changed = True  # metadata set via native API
+    else:
+        # Fallback: write manually (legacy path)
+        profile = {"description": routing_desc, "description_auto": False}
+        changed |= _write_if_changed(
+            os.path.join(pdir, "profile.yaml"),
+            yaml.safe_dump(profile, default_flow_style=False, sort_keys=False),
+        )
+
+    # 5. Seed bundled skills via native API
+    if USE_NATIVE_API:
+        try:
+            seed_profile_skills(pdir, quiet=True)
+        except Exception:
+            pass  # best-effort — missing bundled skills is not fatal
+
     return changed
