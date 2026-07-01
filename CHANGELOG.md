@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.11] — Phase 2: gateway multiplexing + per-profile observability
+
+### Added
+- **Gateway multiplexing** (`enable_plugins._ensure_multiplex`): sets
+  `gateway.multiplex_profiles: true` so one gateway serves multiple profiles
+  with per-profile session isolation. Only fills when absent — an operator who
+  set it to `false` keeps that choice.
+- **Per-profile observability** (`hscc-cluster`): a `pre_tool_call` hook
+  (`workflow.on_pre_tool_call`) stamps `profile_name` on every tool call into
+  `~/.hscc/tool_events.jsonl` (cheap single append), and the kanban resume note
+  now records the claiming profile. Lets us correlate which profile drove which
+  activity across the fleet.
+
 ## [1.0.0-beta.10] — Phase 2: doctor --fix, per-profile status, model tiering
 
 ### Added
