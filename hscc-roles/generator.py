@@ -3,10 +3,12 @@
 Uses the Hermes 0.17 native profile API where available:
 - create_profile() to scaffold the profile directory
 - write_profile_meta() for profile.yaml (routing_description → description)
-- seed_profile_skills() for skills
 
-HSCC-specific config.yaml (model block, compaction, toolsets) is still
-written manually because the native API has no concept of cluster topology.
+Bundled-skill seeding is intentionally skipped (create_profile is called with
+no_skills=True): the hand-written path never seeded skill files either, and the
+config.yaml skills.preload list is what drives preloading. HSCC-specific
+config.yaml (model block, compaction, toolsets) is still written manually
+because the native API has no concept of cluster topology.
 """
 import os
 import yaml
@@ -17,7 +19,6 @@ try:
         create_profile,
         get_profile_dir,
         write_profile_meta,
-        seed_profile_skills,
     )
     USE_NATIVE_API = True
 except ImportError:
@@ -144,7 +145,6 @@ def generate_profile(spec, base_identity):
       raises FileExistsError if it already exists, which we catch)
     - write_profile_meta() writes profile.yaml with routing_description
       (always safe — only overwrites the fields we pass)
-    - seed_profile_skills() seeds bundled skills
 
     HSCC-specific config.yaml (model block, compaction, toolsets) is still
     written manually because the native API has no concept of cluster
@@ -154,16 +154,19 @@ def generate_profile(spec, base_identity):
     """
     name = spec["name"]
 
-    # 1. Scaffold profile dir via native API (idempotent — creates if absent)
+    # 1. Scaffold profile dir via native API (idempotent — creates if absent).
+    # The native fns take a pathlib.Path, so keep the Path handle (pdir_path)
+    # and derive the str form (pdir) only for os.path.join.
+    pdir_path = None
     if USE_NATIVE_API:
         try:
-            profile_dir = create_profile(name, no_alias=True, no_skills=True)
-            pdir = str(profile_dir)
+            pdir_path = create_profile(name, no_alias=True, no_skills=True)
             changed = True  # newly created
         except FileExistsError:
             # Already exists — idempotent, resolve dir and continue
-            pdir = str(get_profile_dir(name))
+            pdir_path = get_profile_dir(name)
             changed = False
+        pdir = str(pdir_path)
     else:
         # Fallback: manual path resolution
         pdir = os.path.join(rolelib.PROFILES_DIR, name)
@@ -195,22 +198,26 @@ def generate_profile(spec, base_identity):
 
     # 4. Write profile.yaml via native API (routing_description → description)
     routing_desc = _short_desc(spec)  # routing_description from spec (WS2)
+    profile_yaml = os.path.join(pdir, "profile.yaml")
     if USE_NATIVE_API:
-        write_profile_meta(pdir, description=routing_desc, description_auto=False)
-        changed = True  # metadata set via native API
+        # Write via the native API (takes a Path). Track a real change by
+        # comparing profile.yaml before/after so a no-op re-run reports
+        # changed=False (idempotent return value).
+        before = ""
+        if os.path.isfile(profile_yaml):
+            with open(profile_yaml) as f:
+                before = f.read()
+        write_profile_meta(pdir_path, description=routing_desc,
+                           description_auto=False)
+        with open(profile_yaml) as f:
+            after = f.read()
+        changed |= (before != after)
     else:
         # Fallback: write manually (legacy path)
         profile = {"description": routing_desc, "description_auto": False}
         changed |= _write_if_changed(
-            os.path.join(pdir, "profile.yaml"),
+            profile_yaml,
             yaml.safe_dump(profile, default_flow_style=False, sort_keys=False),
         )
-
-    # 5. Seed bundled skills via native API
-    if USE_NATIVE_API:
-        try:
-            seed_profile_skills(pdir, quiet=True)
-        except Exception:
-            pass  # best-effort — missing bundled skills is not fatal
 
     return changed
