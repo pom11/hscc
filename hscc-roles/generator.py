@@ -37,6 +37,16 @@ WORKER_PROXY_BASE_URL = os.environ.get(
 WORKER_MODEL = os.environ.get("HSCC_WORKER_MODEL", "Qwen/Qwen3.6-27B-FP8")
 WORKER_PROXY_KEY = os.environ.get("HSCC_WORKER_PROXY_KEY", "sk-sparkrun")
 
+# Strong-tier roles (model_tier: strong) route to the orchestrator GPU directly.
+# Only architect + orchestrator use strong by default — .244 already runs
+# orchestration + worker-compaction, so saturating it would hurt the whole fleet.
+# Reviewers, coders, and QA stay on the fast worker proxy (:4000).
+STRONG_URL = os.environ.get(
+    "HSCC_STRONG_URL", "http://10.0.0.244:8000/v1")
+STRONG_MODEL = os.environ.get(
+    "HSCC_STRONG_MODEL", "nvidia/Qwen3.6-35B-A3B-NVFP4")
+STRONG_KEY = os.environ.get("HSCC_STRONG_KEY", "sk-sparkrun")
+
 
 def _worker_model_block():
     """The model block that points a worker role at the load-balanced proxy."""
@@ -45,6 +55,16 @@ def _worker_model_block():
         "provider": "custom",
         "base_url": WORKER_PROXY_BASE_URL,
         "api_key": WORKER_PROXY_KEY,
+    }
+
+
+def _strong_model_block():
+    """The model block that points a strong-tier role at the orchestrator GPU."""
+    return {
+        "default": STRONG_MODEL,
+        "provider": "custom",
+        "base_url": STRONG_URL,
+        "api_key": STRONG_KEY,
     }
 
 
@@ -185,10 +205,15 @@ def generate_profile(spec, base_identity):
     # on worker GPUs, not the orchestrator. The orchestrator role keeps the root
     # config (its own gateway-node model) and is never repointed.
     if name != "orchestrator":
-        config["model"] = _worker_model_block()
+        model_tier = spec.get("model_tier", "fast")
+        if model_tier == "strong":
+            config["model"] = _strong_model_block()
+        else:
+            config["model"] = _worker_model_block()
         # Route context-compaction OFF the busy worker proxy to the idle
         # orchestrator, so a long task's self-summarization doesn't wedge the
-        # worker. Merge the two keys into config.
+        # worker. This applies regardless of model_tier — even strong-tier roles
+        # should not compete with their own model for compaction.
         for k, v in _worker_compaction().items():
             config[k] = v
     changed |= _write_if_changed(
