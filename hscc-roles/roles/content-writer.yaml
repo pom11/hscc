@@ -7,3 +7,7 @@ identity: 'You are the content-writer specialist. Writes engaging, accurate long
 preload_skills:
 - creative
 - social-media
+routing_description: Claim tasks that require writing engaging long-form content,
+  articles, blog posts, or documentation tuned to audience and purpose. Do NOT claim
+  technical documentation (use technical-writer), code implementation, architecture,
+  or data work.

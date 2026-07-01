@@ -7,3 +7,7 @@ identity: 'You are the devops-engineer specialist. Owns CI/CD, infrastructure-as
 preload_skills:
 - devops
 - verification-before-completion
+routing_description: Claim tasks involving CI/CD, infrastructure-as-code, deployment
+  pipelines, observability, monitoring, reliability engineering, and automation of
+  operational workflows. Do NOT claim application code implementation, architecture
+  design, data engineering, or security audits.

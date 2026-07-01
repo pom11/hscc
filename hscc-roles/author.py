@@ -27,11 +27,19 @@ def create_role(name, description, preload_skills=None):
     skills = preload_skills if preload_skills is not None else list(_DEFAULT_PRELOAD)
     identity = (
         f"You are the {name} specialist. {desc} "
-        f"You apply the fleet's shared values and own exactly the task you are "
-        f"given."
+        f"You apply the fleet's shared values and own exactly the task you "
+        f"are given."
+    )
+    # Auto-generate a basic routing_description: the task is owned by this role,
+    # and it does NOT belong to other roles.
+    routing_desc = (
+        f"Claim tasks that require {desc.lower()}. Do NOT claim tasks that belong to "
+        f"other specialist roles or general-purpose workers."
     )
     spec_yaml = yaml.safe_dump(
-        {"name": name, "identity": identity + "\n", "preload_skills": skills},
+        {"name": name, "identity": identity + "\n",
+         "routing_description": routing_desc,
+         "preload_skills": skills},
         default_flow_style=False, sort_keys=False, allow_unicode=True,
     )
     with open(path, "w", encoding="utf-8") as f:

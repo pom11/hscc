@@ -58,15 +58,23 @@ import sys
 
 
 def test_cli_generate_all_runs(tmp_path):
-    """End-to-end: `hscc.py generate` builds all 5 starter profiles into a temp home."""
+    """End-to-end: `hscc.py generate` builds all 24 role profiles into a temp home."""
     env = dict(os.environ)
     env["HERMES_HOME"] = str(tmp_path)
     plugin_dir = os.path.dirname(os.path.abspath(generator.__file__))
-    venv_py = os.path.join(plugin_dir, "..", "..", "hermes-agent", "venv", "bin", "python")
+    py = sys.executable  # use system python, works in sandboxed tests
     result = subprocess.run(
-        [venv_py, os.path.join(plugin_dir, "hscc.py"), "generate"],
+        [py, os.path.join(plugin_dir, "hscc.py"), "generate"],
         capture_output=True, text=True, env=env, cwd=plugin_dir,
     )
     assert result.returncode == 0, result.stderr
     for role in ("orchestrator", "architect", "coder", "reviewer", "qa"):
         assert os.path.exists(os.path.join(str(tmp_path), "profiles", role, "SOUL.md"))
+    # Verify routing_description landed as description in profile.yaml
+    import yaml
+    coder_profile = os.path.join(str(tmp_path), "profiles", "coder", "profile.yaml")
+    with open(coder_profile) as f:
+        pdata = yaml.safe_load(f)
+    assert "routing_description" in pdata or "description" in pdata
+    # The decomposer-facing description IS the routing_description
+    assert "Claim tasks" in str(pdata.get("description", ""))

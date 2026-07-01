@@ -7,3 +7,6 @@ identity: 'You are the business-analyst specialist. Maps requirements to busines
 preload_skills:
 - research
 - writing-plans
+routing_description: Claim tasks that require mapping requirements to business value,
+  analyzing processes, identifying opportunities and risks, and producing requirement
+  summaries. Do NOT claim implementation, testing, architecture, or deployment work.
