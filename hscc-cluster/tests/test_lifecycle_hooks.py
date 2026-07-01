@@ -1,14 +1,170 @@
-"""Tests for workflow lifecycle hooks — profile_name wiring + pre_tool_call."""
+"""Tests for workflow lifecycle hooks — original coverage + profile_name wiring + pre_tool_call."""
+
 import json
 import os
 import sys
+import tempfile
 import types
+from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 import pytest
-from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import workflow
+
+
+# ── Original tests from origin/main ────────────────────────────────────────
+# These require hermes_cli; skipped gracefully when unavailable.
+
+_HAS_HERMES_CLI = True
+try:
+    import hermes_cli.kanban_db as kb  # noqa: E402
+    import hermes_cli.plugins as plugins  # noqa: E402
+except ImportError:
+    _HAS_HERMES_CLI = False
+
+
+def _board():
+    d = tempfile.mkdtemp()
+    dbp = Path(d) / "kanban.db"
+    kb.init_db(dbp)
+    return kb.connect(dbp)
+
+
+@pytest.mark.skipif(not _HAS_HERMES_CLI, reason="hermes_cli not installed in this env")
+class TestHookRegistration:
+    """Hook registration checks — require hermes_cli."""
+
+    def test_blocked_hook_in_valid_hooks(self):
+        assert "kanban_task_blocked" in plugins.VALID_HOOKS
+
+    def test_completed_hook_in_valid_hooks(self):
+        assert "kanban_task_completed" in plugins.VALID_HOOKS
+
+
+@pytest.mark.skipif(not _HAS_HERMES_CLI, reason="hermes_cli not installed in this env")
+class TestBlockedHandler:
+    """on_kanban_task_blocked writes a JSON line to the blocked log."""
+
+    def test_blocked_handler_writes_jsonl(self, tmp_path):
+        log_path = tmp_path / "blocked_tasks.jsonl"
+        with patch.object(workflow, "_BLOCKED_LOG", str(log_path)):
+            result = workflow.on_kanban_task_blocked(
+                task_id="test-123",
+                profile_name="coder",
+                reason="needs_input",
+                board="default"
+            )
+
+        assert result is not None
+        assert result["task_id"] == "test-123"
+        entries = log_path.read_text().strip().split("\n")
+        entry = json.loads(entries[0])
+        assert entry["task_id"] == "test-123"
+        assert entry["profile_name"] == "coder"
+        assert entry["reason"] == "needs_input"
+        assert entry["board"] == "default"
+        assert "blocked_at" in entry
+
+    def test_blocked_handler_noop_without_context(self):
+        """on_kanban_task_blocked doesn't crash with all-None args."""
+        result = workflow.on_kanban_task_blocked()
+        assert result is not None
+        assert result["task_id"] is None
+
+
+@pytest.mark.skipif(not _HAS_HERMES_CLI, reason="hermes_cli not installed in this env")
+class TestCompletedHandler:
+    """on_kanban_task_completed writes a JSON line to the completion log."""
+
+    def test_completed_handler_writes_jsonl(self, tmp_path):
+        log_path = tmp_path / "task_completions.jsonl"
+        with patch.object(workflow, "_COMPLETION_LOG", str(log_path)):
+            result = workflow.on_kanban_task_completed(
+                task_id="test-456",
+                profile_name="reviewer",
+                summary="All checklist items done",
+                board="default"
+            )
+
+        assert result is not None
+        assert result["task_id"] == "test-456"
+        entries = log_path.read_text().strip().split("\n")
+        entry = json.loads(entries[0])
+        assert entry["task_id"] == "test-456"
+        assert entry["profile_name"] == "reviewer"
+        assert entry["summary"] == "All checklist items done"
+        assert "completed_at" in entry
+
+    def test_completed_handler_noop_without_context(self):
+        """on_kanban_task_completed doesn't crash with all-None args."""
+        result = workflow.on_kanban_task_completed()
+        assert result is not None
+        assert result["task_id"] is None
+
+
+@pytest.mark.skipif(not _HAS_HERMES_CLI, reason="hermes_cli not installed in this env")
+class TestAutoUnblock:
+    """_try_auto_unblock promotes a blocked task when its block comments
+    reference the completed parent task_id."""
+
+    def test_auto_unblock_with_parent_reference(self, monkeypatch, tmp_path):
+        import workflow as wf
+
+        conn = _board()
+        parent_tid = kb.create_task(conn, title="parent", assignee="coder")
+        if not hasattr(parent_tid, "id"):
+            parent_tid = parent_tid
+        child_tid = kb.create_task(conn, title="child", assignee="coder")
+        if not hasattr(child_tid, "id"):
+            child_tid = child_tid
+
+        # Block the child with a comment referencing the parent.
+        conn.execute(
+            "UPDATE tasks SET status='blocked' WHERE id=?", (child_tid,))
+        conn.execute(
+            "INSERT INTO task_comments (task_id, author, body) VALUES (?, ?, ?)",
+            (child_tid, "test", f"blocked because of {parent_tid}"))
+        conn.commit()
+
+        # Patch _kb.connect to return our test board.
+        monkeypatch.setattr("hermes_cli.kanban_db.connect",
+                            lambda *a, **kw: conn)
+
+        result = wf._try_auto_unblock(child_tid, parent_tid)
+        assert result is True
+
+        # Verify the child is now ready.
+        child_row = kb.get_task(conn, child_tid)
+        assert child_row["status"] == "ready"
+
+    def test_auto_unblock_no_match(self, monkeypatch):
+        """_try_auto_unblock returns False when block comments don't reference
+        the parent."""
+        import workflow as wf
+
+        conn = _board()
+        child_tid = kb.create_task(conn, title="child", assignee="coder")
+        if not hasattr(child_tid, "id"):
+            child_tid = child_tid
+
+        conn.execute(
+            "UPDATE tasks SET status='blocked' WHERE id=?", (child_tid,))
+        conn.execute(
+            "INSERT INTO task_comments (task_id, author, body) VALUES (?, ?, ?)",
+            (child_tid, "test", "some unrelated reason"))
+        conn.commit()
+
+        monkeypatch.setattr("hermes_cli.kanban_db.connect",
+                            lambda *a, **kw: conn)
+
+        result = wf._try_auto_unblock(child_tid, "nonexistent-parent")
+        assert result is False
+
+
+# ── profile_name wiring tests (from feat-multiplexing-observability) ────────
+# These do NOT require hermes_cli installed — they use unittest.mock.
 
 
 class TestOnPreToolCall:
