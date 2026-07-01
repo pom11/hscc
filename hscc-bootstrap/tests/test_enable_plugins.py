@@ -269,13 +269,40 @@ def test_auto_review_preserves_operator_choice(tmp_path):
 
 def test_caps_raised_when_too_low(tmp_path):
     cfg = _fully_wired_cfg()
-    cfg["kanban"]["max_in_progress"] = 2            # below default -> raise
+    cfg["kanban"]["max_in_progress"] = 2            # below default → preserved (STRICTER)
     cfg["kanban"]["max_in_progress_per_profile"] = 1
     path = _write(tmp_path / "config.yaml", cfg)
     res = enable_plugins.enable(path)
-    assert "max_in_progress" in res["kanban"]
+    # Lower caps are STRICTER — not raised to defaults.
+    assert "max_in_progress" not in res["kanban"]
+    assert "max_in_progress_per_profile" not in res["kanban"]
     out = yaml.safe_load(open(path))
-    assert out["kanban"]["max_in_progress"] == enable_plugins.MAX_IN_PROGRESS
+    assert out["kanban"]["max_in_progress"] == 2
+    assert out["kanban"]["max_in_progress_per_profile"] == 1
+
+
+def test_caps_preserved_when_operator_set_low(tmp_path):
+    """A deliberate operator-set lower cap (6/2) is NOT raised to defaults (30/10).
+    Mirror the failure_limit pattern: a lower value is STRICTER, never clobbered."""
+    cfg = _fully_wired_cfg()
+    cfg["kanban"]["max_in_progress"] = 6
+    cfg["kanban"]["max_in_progress_per_profile"] = 2
+    path = _write(tmp_path / "config.yaml", cfg)
+    res = enable_plugins.enable(path)
+    assert "max_in_progress" not in res["kanban"]
+    assert "max_in_progress_per_profile" not in res["kanban"]
+    out = yaml.safe_load(open(path))
+    assert out["kanban"]["max_in_progress"] == 6
+    assert out["kanban"]["max_in_progress_per_profile"] == 2
+
+
+def test_caps_just_set_to_defaults_is_noop(tmp_path):
+    """Caps already equal to defaults → no change."""
+    cfg = _fully_wired_cfg()
+    path = _write(tmp_path / "config.yaml", cfg)
+    res = enable_plugins.enable(path)
+    assert "max_in_progress" not in res["kanban"]
+    assert "max_in_progress_per_profile" not in res["kanban"]
 
 
 def test_bad_plugins_shape_does_not_clobber(tmp_path):
