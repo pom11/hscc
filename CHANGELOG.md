@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-beta.12] — Fix: multiplexing never activated (top-level config key)
+
+### Fixed
+- **`_ensure_multiplex` wrote a key the gateway never reads** (beta.11 bug):
+  Hermes 0.17's `gateway/config.py::load_gateway_config` maps only the
+  TOP-LEVEL `multiplex_profiles` key from `~/.hermes/config.yaml`; the nested
+  `gateway.multiplex_profiles` that beta.11 wrote never reached
+  `GatewayConfig.from_dict` (the nested fallback fires only for the legacy
+  `gateway.json` path). Result: multiplexing silently stayed off —
+  `served_profiles` absent from `gateway_state.json` and every non-default
+  profile unserved, even after beta.11. Found live 2026-07-21: bootstrap to
+  beta.11 + gateway restart still produced zero multiplexed profiles until
+  the top-level key was added by hand.
+- **Fix:** `_ensure_multiplex` now writes BOTH forms (top-level for the 0.17
+  loader, nested for forward compat), filling each form only when absent.
+  Filling the top-level key when only the nested one is present is the point:
+  every install bootstrapped on beta.11 sits in exactly that broken state,
+  and both bootstrap and `doctor --fix` must be able to repair it.
+  Cross-form disable guard: an explicit `false` in EITHER form bails the
+  whole write — a deliberate disable is never overridden through the other
+  form. A `gateway:` value that is not a mapping is left untouched (only the
+  top-level key is written then), and no phantom "changed" entries are
+  reported for writes that never landed.
+
+### Changed
+- Tests: rewrote `test_doctor.py` (cleaned up broken fixtures, replaced
+  invalid `monkeypatch.setattr(sys, ...)` / `__import__` hacks with proper
+  `patch` / `monkeypatch.setattr`); 147 bootstrap tests pass.
+
 ## [1.0.0-beta.11] — Phase 2: gateway multiplexing + per-profile observability
 
 ### Added

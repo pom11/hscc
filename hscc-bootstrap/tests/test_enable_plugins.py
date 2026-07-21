@@ -113,6 +113,7 @@ def _fully_wired_cfg():
             "on_session_start": [{"command": "cluster-guard.py", "timeout": 5}],
         },
         "gateway": {"multiplex_profiles": True},
+        "multiplex_profiles": True,
     }
 
 
@@ -571,40 +572,65 @@ def test_hooks_file_missing_source(tmp_path, monkeypatch):
 class TestEnsureMultiplex:
     """_ensure_multiplex enables gateway.multiplex_profiles idempotently."""
 
-    def test_creates_multiplex_when_absent(self):
+    def test_creates_both_keys_when_absent(self):
         cfg: dict = {}
         changed = enable_plugins._ensure_multiplex(cfg)
-        assert changed == ["multiplex_profiles"]
+        assert sorted(changed) == sorted(["multiplex_profiles", "gateway.multiplex_profiles"])
+        assert cfg["multiplex_profiles"] is True
         assert cfg["gateway"]["multiplex_profiles"] is True
 
     def test_does_not_clobber_operator_true(self):
+        # Nested True, top-level absent → fills top-level only.
         cfg = {"gateway": {"multiplex_profiles": True}}
         changed = enable_plugins._ensure_multiplex(cfg)
-        assert changed == []
+        assert changed == ["multiplex_profiles"]
+        assert cfg["multiplex_profiles"] is True
         assert cfg["gateway"]["multiplex_profiles"] is True
 
-    def test_does_not_clobber_operator_false(self):
+    def test_nested_false_bails_entirely(self):
+        """If nested is False → no write at all (operator deliberate disable)."""
         cfg = {"gateway": {"multiplex_profiles": False}}
         changed = enable_plugins._ensure_multiplex(cfg)
         assert changed == []
+        assert "multiplex_profiles" not in cfg
         assert cfg["gateway"]["multiplex_profiles"] is False
 
-    def test_does_not_clobber_string_value(self):
+    def test_string_value_fills_top_level(self):
+        """Nested string value (not False) → fills top-level when absent."""
         cfg = {"gateway": {"multiplex_profiles": "true"}}
         changed = enable_plugins._ensure_multiplex(cfg)
-        assert changed == []
+        assert changed == ["multiplex_profiles"]
+        assert cfg["multiplex_profiles"] is True
         assert cfg["gateway"]["multiplex_profiles"] == "true"
 
-    def test_gateway_non_dict_returns_empty(self):
+    def test_gateway_non_dict_writes_top_level_only(self):
         cfg = {"gateway": "not-a-dict"}
         changed = enable_plugins._ensure_multiplex(cfg)
+        assert changed == ["multiplex_profiles"]
+        assert cfg["multiplex_profiles"] is True
+        # Nested key must NOT be present since gateway isn't a dict
+        assert "multiplex_profiles" not in cfg["gateway"]
+
+    def test_top_level_false_bails_entirely(self):
+        """Top-level False → no write at all (operator deliberate disable)."""
+        cfg = {"multiplex_profiles": False}
+        changed = enable_plugins._ensure_multiplex(cfg)
         assert changed == []
+        assert "gateway" not in cfg
+
+    def test_nested_false_preserves_top_level_absent(self):
+        """Cross-form guard: nested false → no write at all."""
+        cfg = {"gateway": {"multiplex_profiles": False}}
+        changed = enable_plugins._ensure_multiplex(cfg)
+        assert changed == []
+        assert "multiplex_profiles" not in cfg
 
     def test_preserves_other_gateway_keys(self):
         cfg = {"gateway": {"some_other_key": "value"}}
         changed = enable_plugins._ensure_multiplex(cfg)
-        assert changed == ["multiplex_profiles"]
+        assert changed == ["multiplex_profiles", "gateway.multiplex_profiles"]
         assert cfg["gateway"]["some_other_key"] == "value"
+        assert cfg["multiplex_profiles"] is True
         assert cfg["gateway"]["multiplex_profiles"] is True
 
     def test_idempotent_second_call(self):
@@ -612,10 +638,12 @@ class TestEnsureMultiplex:
         enable_plugins._ensure_multiplex(cfg)
         changed = enable_plugins._ensure_multiplex(cfg)
         assert changed == []
+        assert cfg["multiplex_profiles"] is True
         assert cfg["gateway"]["multiplex_profiles"] is True
 
     def test_return_empty_list_when_already_set(self):
-        cfg = {"gateway": {"multiplex_profiles": True}}
+        # Both forms present → noop.
+        cfg = {"multiplex_profiles": True, "gateway": {"multiplex_profiles": True}}
         assert enable_plugins._ensure_multiplex(cfg) == []
 
 
@@ -632,10 +660,33 @@ class TestEnableIntegratesMultiplex:
         config_file = tmp_path / "config.yaml"
         config_file.write_text("{}\n")
         result = enable_plugins.enable(str(config_file))
-        assert result["multiplex"] == ["multiplex_profiles"]
+        cfg = yaml.safe_load(open(config_file))
+        assert result["multiplex"] == ["multiplex_profiles", "gateway.multiplex_profiles"]
+        assert cfg["multiplex_profiles"] is True
+        assert cfg["gateway"]["multiplex_profiles"] is True
 
     def test_enable_preserves_multiplex_when_set(self, tmp_path):
         config_file = tmp_path / "config.yaml"
         config_file.write_text("gateway:\n  multiplex_profiles: false\n")
         result = enable_plugins.enable(str(config_file))
         assert result["multiplex"] == []
+
+    def test_enable_preserves_top_level_set(self, tmp_path):
+        """Top-level set to true, nested absent → fills only nested."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("multiplex_profiles: true\n")
+        result = enable_plugins.enable(str(config_file))
+        cfg = yaml.safe_load(open(config_file))
+        assert "gateway.multiplex_profiles" in result["multiplex"]
+        assert cfg["multiplex_profiles"] is True
+        assert cfg["gateway"]["multiplex_profiles"] is True
+
+    def test_cross_form_top_level_present_fills_nested(self, tmp_path):
+        """Top-level set to true, nested absent → fills nested."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("multiplex_profiles: true\ngateway: {}\n")
+        result = enable_plugins.enable(str(config_file))
+        cfg = yaml.safe_load(open(config_file))
+        assert "gateway.multiplex_profiles" in result["multiplex"]
+        assert cfg["multiplex_profiles"] is True
+        assert cfg["gateway"]["multiplex_profiles"] is True
