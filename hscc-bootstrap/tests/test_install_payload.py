@@ -37,9 +37,12 @@ def test_reinstall_backs_up_then_overwrites(tmp_path):
     (plugins / "hscc-cluster" / "__init__.py").write_text("STALE\n")
     res = install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts="B")
 
+    backups = tmp_path / "plugins-backups"
     assert "hscc-cluster.bak-B" in res["backed_up"]
-    assert (plugins / "hscc-cluster.bak-B" / "__init__.py").read_text() == "STALE\n"
+    assert (backups / "hscc-cluster.bak-B" / "__init__.py").read_text() == "STALE\n"
     assert (plugins / "hscc-cluster" / "__init__.py").read_text() == "x=1\n"
+    # No .bak-* entries remain inside plugins_dir
+    assert not list(plugins.glob("hscc-cluster.bak-*"))
 
 
 def test_no_backup_overwrites_in_place(tmp_path):
@@ -78,6 +81,66 @@ def test_idempotent_second_run_backs_up_again(tmp_path):
     install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts="1")
     res = install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts="2")
     # second run finds the existing live copy and backs it up — not nested
+    backups = tmp_path / "plugins-backups"
     assert "hscc-cluster.bak-2" in res["backed_up"]
+    assert (backups / "hscc-cluster.bak-2").exists()
     assert (plugins / "hscc-cluster" / "__init__.py").read_text() == "x=1\n"
     assert not (plugins / "hscc-cluster" / "hscc-cluster").exists()
+    # No .bak-* entries remain inside plugins_dir
+    assert not list(plugins.glob("hscc-cluster.bak-*"))
+
+
+def test_backup_goes_to_plugins_backups_dir(tmp_path):
+    """(a) plugins_dir has no .bak-* after install, (b) backup in sibling dir."""
+    repo = _make_repo(tmp_path)
+    plugins = tmp_path / "plugins"
+    install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts="A")
+    (plugins / "hscc-cluster" / "__init__.py").write_text("MUTATED\n")
+    res = install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts="B")
+
+    backups = tmp_path / "plugins-backups"
+    # (a) no .bak-* entries inside plugins_dir
+    assert not list(plugins.glob("*.bak-*"))
+    # (b) backup exists under plugins-backups dir
+    assert (backups / "hscc-cluster.bak-B").is_dir()
+    assert (backups / "hscc-cluster.bak-B" / "__init__.py").read_text() == "MUTATED\n"
+    # (c) fresh content in plugins_dir
+    assert (plugins / "hscc-cluster" / "__init__.py").read_text() == "x=1\n"
+
+
+def test_no_backup_leaves_no_backup_anywhere(tmp_path):
+    """(d) --no-backup leaves no backup dir and no backup inside plugins_dir."""
+    repo = _make_repo(tmp_path)
+    plugins = tmp_path / "plugins"
+    install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts="A")
+    (plugins / "hscc-cluster" / "__init__.py").write_text("STALE\n")
+    res = install_payload.install_payload(
+        repo, plugins, ["hscc-cluster"], backup=False, ts="B")
+
+    assert res["backed_up"] == []
+    assert not list(plugins.glob("*.bak-*"))
+    backups = tmp_path / "plugins-backups"
+    assert not backups.exists()  # no backup dir created
+    assert (plugins / "hscc-cluster" / "__init__.py").read_text() == "x=1\n"
+
+
+def test_sweep_relocates_planted_bak_out_of_plugins_dir(tmp_path):
+    """(e) pre-existing .bak-* entries in plugins_dir are swept to plugins-backups."""
+    repo = _make_repo(tmp_path)
+    plugins = tmp_path / "plugins"
+    install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts="A")
+
+    # Plant a fake old backup inside plugins_dir
+    fake_bak = plugins / "foo.bak-123"
+    fake_bak.mkdir()
+    (fake_bak / "old.py").write_text("junk\n")
+
+    # Reinstall — sweep runs before copy
+    res = install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts="C")
+
+    backups = tmp_path / "plugins-backups"
+    # Planted backup moved out of plugins_dir
+    assert not (plugins / "foo.bak-123").exists()
+    assert (backups / "foo.bak-123" / "old.py").read_text() == "junk\n"
+    # Current install still worked
+    assert "hscc-cluster" in res["installed"]
