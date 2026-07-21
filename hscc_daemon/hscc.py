@@ -19,6 +19,8 @@ Modules:
 import sys
 import os
 import re
+import json
+from pathlib import Path
 
 # ── Re-exports for backward compatibility (tests load this file directly) ──
 
@@ -241,85 +243,362 @@ from hscc_daemon.daemon_ops import (
 
 # ── CLI Entry Point ────────────────────────────────────────────────────────
 
-USAGE = """
-Hermes Spark Cluster Control (HSCC) — Monitoring Daemon & Watchdog
+def _get_version():
+    """Read VERSION from the project root, fallback to 1.0.0."""
+    try:
+        version_file = Path(__file__).resolve().parent.parent / "VERSION"
+        if version_file.is_file():
+            return version_file.read_text().strip() or "1.0.0"
+    except Exception:
+        pass
+    return "1.0.0"
 
-Usage: hscc_daemon <command> [args]
 
-Commands:
-  start              Start the daemon in the background
-  stop               Gracefully stop a running daemon
-  status             Show daemon status and last check results
-  check [stream]     Run a single check cycle (dgx|gateway|local|heartbeat|nas|watchdog|triggers|all)
-  watch [stream]     Tail check results in real-time
-  triggers           Show trigger engine status
-  notify <msg>       Send a manual desktop notification (macOS/Linux)
-  plist              Generate Launchd plist for auto-start
-  install            Install Launchd plist and start daemon
-  uninstall          Remove Launchd plist and stop daemon
-  log                Show daemon log output
+def _get_help_text():
+    """Build the full grouped help text with live version."""
+    version = _get_version()
+    return f"""\
+HSCC — Hermes Spark Cluster Control   v{version}
+Turn a DGX Spark GPU cluster into a self-running fleet of AI agents.
 
-Internal (called by Launchd):
-  start-daemon       Start daemon loop directly
+Usage:  hscc <command> [args]        hscc help <command>   for details
+
+Daemon control
+  start                Start the monitoring daemon in the background
+  stop                 Gracefully stop the running daemon
+  status               Daemon status + last result of every health stream
+  install              Install the launchd service (auto-start at login)
+  uninstall            Remove the service and stop the daemon
+  plist                Print the launchd plist (no install)
+  log                  Show the daemon log output
+
+Health & monitoring
+  check [stream]       Run one check cycle now (default: all)
+                         streams: dgx gateway local heartbeat nas watchdog triggers
+  watch [stream]       Live-tail check results
+  triggers             Show trigger-engine rules and recent firings
+
+Cluster & templates
+  cluster status       Running workloads + idle hosts
+  cluster hosts        All cluster hosts and saved sparkrun clusters
+  cluster monitor      One CPU/RAM/GPU snapshot across the fleet
+  cluster jobs         All sparkrun jobs currently running
+  cluster info         Detailed resolved cluster configuration
+  cluster stop <id>    Stop a running workload by container id
+  template list        List available cluster templates (declared fleet layouts)
+  template status      Which template is currently applied
+  template preview <name>    Dry-run: what applying <name> would change
+  template validate <name>   Preflight-check a template is deployable
+  template apply <name> [--confirm]   Apply a template (--confirm to execute)
+  profiles             Running kanban task counts per profile
+
+Utility
+  notify <message>     Send a desktop notification
+
+Examples
+  hscc status                          # is the daemon healthy?
+  hscc check gateway                   # re-run just the gateway check
+  hscc template list                   # see the declared fleet layouts
+  hscc template preview 3node-coding
+  hscc template apply 3node-coding --confirm
+  hscc cluster status
+
+Docs: ~/dev/hscc/README.md   Slash commands (in Hermes chat): /cluster /workers-up /cluster-restart /template
+
+Run `hscc help advanced` for internal/service-manager commands."""
+
+
+def _get_advanced_help():
+    """Return help text for advanced/internal commands."""
+    return """\
+Advanced / internal commands (omitted from main help):
+
+  start-daemon       Run the daemon loop in the foreground (used by launchd)
+  ed-status          Event-driven mode status (placeholder, not yet available)
+  ed-install         Event-driven mode install (placeholder, not yet available)
+  ed-uninstall       Event-driven mode uninstall (placeholder, not yet available)
 """
 
 
+COMMAND_HELP = {
+    "start": "Start the monitoring daemon in the background",
+    "stop": "Gracefully stop the running daemon",
+    "status": "Daemon status + last result of every health stream",
+    "install": "Install the launchd service (auto-start at login)",
+    "uninstall": "Remove the service and stop the daemon",
+    "plist": "Print the launchd plist (no install)",
+    "log": "Show the daemon log output",
+    "check": "Run one check cycle now. Usage: hscc check [stream]\n  streams: dgx gateway local heartbeat nas watchdog triggers",
+    "watch": "Live-tail check results. Usage: hscc watch [stream]",
+    "triggers": "Show trigger-engine rules and recent firings",
+    "notify": "Send a desktop notification. Usage: hscc notify <message>",
+    "cluster": "Cluster management commands.\n  Subcommands: status hosts monitor jobs info stop <id>\n  Usage: hscc cluster <subcommand> [args]",
+    "template": "Cluster template commands.\n  Subcommands: list status preview <name> validate <name> apply <name> [--confirm]\n  Usage: hscc template <subcommand> [args]",
+    "profiles": "Running kanban task counts per profile",
+    "help": "Show help. Usage: hscc help [command]\n  Use 'hscc help advanced' for internal commands.",
+    "advanced": "Internal/service-manager commands.\n  See 'hscc help advanced' for details.",
+    "start-daemon": "Run the daemon loop in the foreground (used by launchd)",
+    "ed-status": "Event-driven mode status (placeholder, not yet available)",
+    "ed-install": "Event-driven mode install (placeholder, not yet available)",
+    "ed-uninstall": "Event-driven mode uninstall (placeholder, not yet available)",
+}
+
+
+CLUSTER_SUBCOMMANDS = {"status", "hosts", "monitor", "jobs", "info", "stop"}
+TEMPLATE_SUBCOMMANDS = {"list", "status", "preview", "validate", "apply"}
+
+
+def _resolve_cluster_dir():
+    """Locate the hscc-cluster plugin as a sibling of hscc_daemon."""
+    cluster_dir = Path(__file__).resolve().parent.parent / "hscc-cluster"
+    return cluster_dir
+
+
+def _load_cluster_engine():
+    """Load the hscc-cluster engine module directly as a library.
+
+    The cluster engine lives in the hscc-cluster plugin (Hermes loads it as a
+    toolset). We import its functions and call them directly — one CLI, one
+    source of truth, no sub-process / argv rewriting. The sibling file is also
+    named ``hscc.py`` so we load it under an alias to avoid colliding with
+    ``hscc_daemon.hscc``. Its own submodules import each other by bare name, so
+    the plugin dir must be on ``sys.path`` while we call into it.
+
+    Returns the loaded module, or None (after printing an error) if missing.
+    """
+    cluster_dir = _resolve_cluster_dir()
+    cluster_hscc = cluster_dir / "hscc.py"
+    if not cluster_hscc.is_file():
+        print(f"Error: hscc-cluster plugin not found at {cluster_dir}", file=sys.stderr)
+        return None
+
+    import importlib.util
+
+    if str(cluster_dir) not in sys.path:
+        sys.path.insert(0, str(cluster_dir))
+    spec = importlib.util.spec_from_file_location("hscc_cluster_engine", str(cluster_hscc))
+    if spec is None or spec.loader is None:
+        print(f"Error: cannot load hscc-cluster engine from {cluster_hscc}", file=sys.stderr)
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _emit(result):
+    """Print an engine result dict as pretty JSON (the cluster engine's format)."""
+    print(json.dumps(result, indent=2, default=str))
+    # A result carrying an ``error`` key is a failed command.
+    return 1 if isinstance(result, dict) and result.get("error") else 0
+
+
+def _handle_cluster():
+    """Route 'cluster' subcommands to hscc-cluster plugin."""
+    if len(sys.argv) < 3 or sys.argv[2] == "--help":
+        print("Cluster management commands:")
+        print()
+        print("  hscc cluster status       Running workloads + idle hosts")
+        print("  hscc cluster hosts        All cluster hosts and saved sparkrun clusters")
+        print("  hscc cluster monitor      One CPU/RAM/GPU snapshot across the fleet")
+        print("  hscc cluster jobs         All sparkrun jobs currently running")
+        print("  hscc cluster info         Detailed resolved cluster configuration")
+        print("  hscc cluster stop <id>    Stop a running workload by container id")
+        if len(sys.argv) < 3:
+            return 0
+        else:
+            return 0
+
+    sub = sys.argv[2]
+    if sub not in CLUSTER_SUBCOMMANDS:
+        print(f"Error: unknown cluster subcommand: {sub}")
+        print(f"Valid subcommands: {', '.join(sorted(CLUSTER_SUBCOMMANDS))}")
+        return 1
+
+    eng = _load_cluster_engine()
+    if eng is None:
+        return 1
+
+    if sub == "stop":
+        if len(sys.argv) < 4:
+            print("Usage: hscc cluster stop <id>")
+            return 1
+        return _emit(eng.cmd_stop(sys.argv[3]))
+
+    fn = {
+        "status": eng.cmd_cluster_status,
+        "hosts": eng.cmd_hosts,
+        "monitor": eng.cmd_monitor,
+        "jobs": eng.cmd_jobs,
+        "info": eng.cmd_info,
+    }[sub]
+    return _emit(fn())
+
+
+def _handle_template():
+    """Route 'template' subcommands to hscc-cluster plugin."""
+    if len(sys.argv) < 3 or sys.argv[2] == "--help":
+        print("Cluster template commands:")
+        print()
+        print("  hscc template list                 List available cluster templates")
+        print("  hscc template status               Which template is currently applied")
+        print("  hscc template preview <name>       Dry-run: what applying <name> would change")
+        print("  hscc template validate <name>      Preflight-check a template is deployable")
+        print("  hscc template apply <name> [--confirm]  Apply a template")
+        if len(sys.argv) < 3:
+            return 0
+        else:
+            return 0
+
+    sub = sys.argv[2]
+    if sub not in TEMPLATE_SUBCOMMANDS:
+        print(f"Error: unknown template subcommand: {sub}")
+        print(f"Valid subcommands: {', '.join(sorted(TEMPLATE_SUBCOMMANDS))}")
+        return 1
+
+    # Reuse the template engine's own subcommand handler (returns a dict).
+    if str(_resolve_cluster_dir()) not in sys.path:
+        sys.path.insert(0, str(_resolve_cluster_dir()))
+    try:
+        from cluster_template_cli import cmd_cluster_template
+    except ImportError:
+        print(f"Error: hscc-cluster plugin not found at {_resolve_cluster_dir()}",
+              file=sys.stderr)
+        return 1
+    return _emit(cmd_cluster_template([sub, *sys.argv[3:]]))
+
+
+def _handle_help():
+    """Handle 'hscc help [command]' and 'hscc --help' / '-h'."""
+    if len(sys.argv) < 3:
+        print(_get_help_text())
+        return 0
+
+    topic = sys.argv[2]
+    if topic == "advanced":
+        print(_get_advanced_help())
+        return 0
+
+    help_text = COMMAND_HELP.get(topic)
+    if help_text:
+        print(f"hscc {topic}")
+        print(f"  {help_text}")
+        return 0
+
+    print(f"Error: no help for '{topic}'")
+    print("Use 'hscc help' to see all commands.")
+    return 1
+
+
+def _handle_profiles():
+    """Route 'profiles' to the cluster engine's profile-status."""
+    eng = _load_cluster_engine()
+    if eng is None:
+        return 1
+    return _emit(eng.cmd_profile_status())
+
+
+# Per-command --help support
+DAEMON_COMMANDS = {
+    "start", "stop", "status", "install", "uninstall", "plist",
+    "log", "check", "watch", "triggers", "notify",
+}
+
+
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h", "help"):
-        print(USAGE.strip())
+    args = sys.argv[1:]
+
+    # No args or explicit help flags -> full help
+    if not args or args[0] in ("--help", "-h"):
+        print(_get_help_text())
         sys.exit(0)
 
-    cmd = sys.argv[1].lower()
+    cmd = args[0]
 
-    # Import commands on-demand to avoid circular imports
-    if cmd == "start":
+    # 'help' subcommand
+    if cmd == "help":
+        rc = _handle_help()
+        sys.exit(rc)
+
+    # 'cluster' group
+    if cmd == "cluster":
+        rc = _handle_cluster()
+        sys.exit(rc)
+
+    # 'template' group
+    if cmd == "template":
+        rc = _handle_template()
+        sys.exit(rc)
+
+    # 'profiles'
+    if cmd == "profiles":
+        rc = _handle_profiles()
+        sys.exit(rc)
+
+    # Per-command --help (daemon commands)
+    if cmd in DAEMON_COMMANDS and len(args) > 1 and args[1] == "--help":
+        help_text = COMMAND_HELP.get(cmd, f"Run 'hscc help {cmd}' for details.")
+        print(f"hscc {cmd}")
+        print(f"  {help_text}")
+        sys.exit(0)
+
+    # Advanced commands (also support --help)
+    advanced_cmds = {"start-daemon", "ed-status", "ed-install", "ed-uninstall"}
+    if cmd in advanced_cmds and len(args) > 1 and args[1] == "--help":
+        help_text = COMMAND_HELP.get(cmd, "")
+        print(f"hscc {cmd}")
+        print(f"  {help_text}")
+        sys.exit(0)
+
+    # Daemon command dispatch
+    cmd_lower = cmd.lower()
+    if cmd_lower == "start":
         from hscc_daemon.cli import cmd_start
         cmd_start()
-    elif cmd == "stop":
+    elif cmd_lower == "stop":
         from hscc_daemon.cli import cmd_stop
         cmd_stop()
-    elif cmd == "status":
+    elif cmd_lower == "status":
         from hscc_daemon.cli import cmd_status
         cmd_status()
-    elif cmd == "check":
+    elif cmd_lower == "check":
         from hscc_daemon.cli import cmd_check
-        cmd_check(sys.argv[2] if len(sys.argv) > 2 else None)
-    elif cmd == "watch":
+        cmd_check(args[1] if len(args) > 1 else None)
+    elif cmd_lower == "watch":
         from hscc_daemon.cli import cmd_watch
-        cmd_watch(sys.argv[2] if len(sys.argv) > 2 else None)
-    elif cmd == "triggers":
+        cmd_watch(args[1] if len(args) > 1 else None)
+    elif cmd_lower == "triggers":
         from hscc_daemon.cli import cmd_triggers
         cmd_triggers()
-    elif cmd == "notify":
+    elif cmd_lower == "notify":
         from hscc_daemon.cli import cmd_notify
-        cmd_notify(" ".join(sys.argv[2:])) if len(sys.argv) > 2 else print("Usage: hscc_daemon notify <message>")
-    elif cmd == "plist":
+        cmd_notify(" ".join(args[1:])) if len(args) > 1 else print("Usage: hscc notify <message>")
+    elif cmd_lower == "plist":
         from hscc_daemon.install import cmd_plist
         cmd_plist()
-    elif cmd == "install":
+    elif cmd_lower == "install":
         from hscc_daemon.install import cmd_install
         cmd_install()
-    elif cmd == "uninstall":
+    elif cmd_lower == "uninstall":
         from hscc_daemon.install import cmd_uninstall
         cmd_uninstall()
-    elif cmd == "log":
+    elif cmd_lower == "log":
         from hscc_daemon.cli import cmd_log
         cmd_log()
-    elif cmd == "start-daemon":
+    elif cmd_lower == "start-daemon":
         from hscc_daemon.cli import cmd_start_daemon
         cmd_start_daemon()
-    elif cmd == "ed-status":
+    elif cmd_lower == "ed-status":
         from hscc_daemon.cli import cmd_ed_status
         cmd_ed_status()
-    elif cmd == "ed-install":
+    elif cmd_lower == "ed-install":
         from hscc_daemon.cli import cmd_ed_install
         cmd_ed_install()
-    elif cmd == "ed-uninstall":
+    elif cmd_lower == "ed-uninstall":
         from hscc_daemon.cli import cmd_ed_uninstall
         cmd_ed_uninstall()
     else:
         print(f"Unknown command: {cmd}")
-        print(f"Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, start-daemon")
+        print(f"Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, start-daemon")
         sys.exit(1)
 
 
