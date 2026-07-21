@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0] — First stable release
+
+HSCC leaves beta: the fleet self-heals for real, the daemon sees everything
+it is supposed to see, and the operator surface covers the day-to-day
+worker lifecycle. 650 tests green across all six components.
+
+### Fixed
+- **Worker self-heal actually works** (`hscc_daemon/health.py`): relaunches
+  were killed after 180 s by the subprocess timeout — weight staging alone
+  takes 5–10+ min, so self-heal NEVER succeeded and failed silently (the
+  error output was discarded). Relaunches are now detached
+  (`subprocess.Popen`, `start_new_session=True`) with output captured in
+  `~/.hscc/relaunch-<node>-<port>.log`; a launch that fails to spawn counts
+  the worker down instead of "relaunched"; stream ok no longer masks
+  failures (`ok = not down`); load-grace default raised 5 → 20 min to match
+  staging + vLLM start reality.
+- **Stale command-registration test** updated for the full 12-command
+  surface.
+
+### Added
+- **Gateway check sees multiplexed profiles** (`check_gateway()`): reads
+  `multiplex_profiles` from config.yaml and `served_profiles` from
+  `gateway_state.json`, compares against the profile roster on disk, and
+  fails the stream naming the missing profiles when multiplex is on but
+  profiles are unserved. This is the check that would have caught the
+  silent-multiplex-off condition fixed in beta.12.
+- **`/workers-up` operator command**: brings up only the DOWN keep-alive
+  workers from serving.json — health-checks each unit on its own port,
+  never touches the orchestrator, no confirm needed (non-destructive).
+  Fills the gap between `/cluster` (status) and `/cluster-restart`
+  (full template re-apply incl. orchestrator reload).
+
+### Changed
+- **Local docker/ollama check is informational by default**
+  (`check_local()`): a gateway host without docker/ollama no longer sits
+  in permanent FAIL. Set `HSCC_LOCAL_REQUIRE=docker,ollama` to make their
+  absence a failure again; requiring a service the check does not track
+  counts as missing rather than silently passing.
+- `VERSION` now tracks releases (was stuck at beta.7).
+
 ## [1.0.0-beta.12] — Fix: multiplexing never activated (top-level config key)
 
 ### Fixed
