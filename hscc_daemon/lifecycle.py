@@ -122,7 +122,7 @@ def refresh_live_workers():
 # ── Pipeline Watchdog ────────────────────────────────────────────────────
 
 WATCHDOG_BLOCK_FILE = os.path.expanduser("~/.hscc/watchdog-block.json")
-VLLM_LOAD_GRACE_MINUTES = int(os.environ.get("HSCC_VLLM_LOAD_GRACE_MINUTES", "5"))
+VLLM_LOAD_GRACE_MINUTES = int(os.environ.get("HSCC_VLLM_LOAD_GRACE_MINUTES", "20"))
 # After the breaker trips, back off this long, then auto-clear and resume trying.
 # "Relentless, not infinite": repeated failures slow retries instead of stopping
 # them forever, so a transient outage self-heals once the cluster recovers.
