@@ -254,7 +254,7 @@ def test_restart_one_calls_stop_then_run(monkeypatch):
 
 # ── registration + topology-free ──────────────────────────────────────────────
 
-def test_register_exposes_six_commands():
+def test_register_exposes_all_commands():
     names = []
 
     class Ctx:
@@ -262,7 +262,10 @@ def test_register_exposes_six_commands():
             names.append(kw["name"])
     plugin.register(Ctx())
     assert set(names) == {"cluster", "status", "orch-restart",
-                          "cluster-restart", "heal", "template"}
+                          "cluster-restart", "cluster-reboot",
+                          "cluster-down", "cluster-docker-prune",
+                          "cluster-apt-upgrade", "cluster-prune",
+                          "heal", "template"}
 
 
 def test_no_hardcoded_ips_in_source():
