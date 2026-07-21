@@ -11,9 +11,9 @@ SERVING = {
          "model": "nvidia/Qwen3.6-35B-A3B-NVFP4",
          "recipe": "~/r/a3b.yaml", "nodes": ["10.0.0.1"]},
         {"id": "worker-2", "role": "worker", "model": "Qwen/27B",
-         "recipe": "~/r/27b.yaml", "nodes": ["10.0.0.2"]},
+         "recipe": "~/r/27b.yaml", "nodes": ["10.0.0.2"], "keepalive": True},
         {"id": "worker-3", "role": "worker", "model": "Qwen/27B",
-         "recipe": "~/r/27b.yaml", "nodes": ["10.0.0.3"]},
+         "recipe": "~/r/27b.yaml", "nodes": ["10.0.0.3"], "keepalive": True},
     ],
 }
 
@@ -254,7 +254,7 @@ def test_restart_one_calls_stop_then_run(monkeypatch):
 
 # ── registration + topology-free ──────────────────────────────────────────────
 
-def test_register_exposes_six_commands():
+def test_register_exposes_all_commands():
     names = []
 
     class Ctx:
@@ -262,7 +262,10 @@ def test_register_exposes_six_commands():
             names.append(kw["name"])
     plugin.register(Ctx())
     assert set(names) == {"cluster", "status", "orch-restart",
-                          "cluster-restart", "heal", "template"}
+                          "cluster-restart", "heal", "template",
+                          "cluster-reboot", "cluster-down",
+                          "cluster-docker-prune", "cluster-apt-upgrade",
+                          "cluster-prune", "workers-up"}
 
 
 def test_no_hardcoded_ips_in_source():
@@ -272,3 +275,81 @@ def test_no_hardcoded_ips_in_source():
     for fn in ("__init__.py", "cmdlib.py"):
         text = open(_os.path.join(here, fn)).read()
         assert not re.search(r"\b192\.168\.\d{1,3}\.\d{1,3}\b", text), fn
+
+
+# ── /workers-up ────────────────────────────────────────────────────────────
+
+def test_workers_up_skips_online_workers(monkeypatch):
+    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
+    monkeypatch.setattr(cmdlib, "check_unit_health", lambda node: True)
+    restarted = []
+    monkeypatch.setattr(cmdlib, "restart_one",
+                        lambda u: restarted.append(u) or {"ok": True})
+    out = plugin.cmd_workers_up("")
+    assert restarted == []
+    assert "already online" in out
+    assert "10.0.0.2" in out and "10.0.0.3" in out
+
+
+def test_workers_up_launches_down_workers(monkeypatch):
+    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
+    monkeypatch.setattr(cmdlib, "check_unit_health",
+                        lambda node: node != "10.0.0.2")  # worker-2 down
+    restarted = []
+    monkeypatch.setattr(cmdlib, "restart_one",
+                        lambda u: restarted.append(cmdlib.unit_node(u)) or
+                        {"ok": True, "unit": u["id"], "node": cmdlib.unit_node(u)})
+    out = plugin.cmd_workers_up("")
+    assert restarted == ["10.0.0.2"]
+    assert "already online" in out
+    assert "launched" in out
+
+
+def test_workers_up_never_restarts_orchestrator(monkeypatch):
+    """Orchestrator is never in keepalive list — even if it were down."""
+    units_with_orch_keepalive = {
+        "version": 1, "port": 8000,
+        "units": [
+            {"id": "orch-a3b", "role": "orchestrator",
+             "model": "x", "recipe": "~/r/a3b.yaml",
+             "nodes": ["10.0.0.1"], "keepalive": True},
+            {"id": "worker-2", "role": "worker", "model": "Qwen/27B",
+             "recipe": "~/r/27b.yaml", "nodes": ["10.0.0.2"], "keepalive": True},
+        ],
+    }
+    monkeypatch.setattr(cmdlib, "read_units", lambda: units_with_orch_keepalive["units"])
+    monkeypatch.setattr(cmdlib, "check_unit_health", lambda node: False)
+    restarted = []
+    monkeypatch.setattr(cmdlib, "restart_one",
+                        lambda u: restarted.append(u.get("role")) or
+                        {"ok": True, "unit": u["id"], "node": cmdlib.unit_node(u)})
+    out = plugin.cmd_workers_up("")
+    assert "orchestrator" not in restarted
+    assert restarted == ["worker"]
+
+
+def test_workers_up_reports_failure(monkeypatch):
+    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
+    monkeypatch.setattr(cmdlib, "check_unit_health", lambda node: False)
+    monkeypatch.setattr(cmdlib, "restart_one",
+                        lambda u: {
+                            "ok": False,
+                            "unit": u["id"],
+                            "node": cmdlib.unit_node(u),
+                            "error": "ssh refused",
+                        })
+    out = plugin.cmd_workers_up("")
+    assert "failed" in out and "ssh refused" in out
+
+
+def test_workers_up_no_keepalive_workers(monkeypatch):
+    units = {
+        "version": 1, "port": 8000,
+        "units": [
+            {"id": "w1", "role": "worker", "model": "m",
+             "recipe": "~/r/m.yaml", "nodes": ["10.0.0.2"]},  # no keepalive
+        ],
+    }
+    monkeypatch.setattr(cmdlib, "read_units", lambda: units["units"])
+    out = plugin.cmd_workers_up("")
+    assert "nothing to check" in out
