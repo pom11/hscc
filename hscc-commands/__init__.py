@@ -568,7 +568,7 @@ def cmd_workers_up(raw_args):
     for w in workers:
         node = cmdlib.unit_node(w)
         label = w.get("id") or node
-        if cmdlib.check_unit_health(node):
+        if cmdlib.check_unit_health(node, w.get("port")):
             lines.append(f"  ✅ {label} @ {node}: already online")
         else:
             res = cmdlib.restart_one(w)
