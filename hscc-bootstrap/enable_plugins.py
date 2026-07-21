@@ -369,22 +369,45 @@ def _ensure_prompt_caching(cfg):
 def _ensure_multiplex(cfg):
     """Enable gateway multiplexing for per-profile session isolation.
 
-    Hermes 0.17 added ``gateway.multiplex_profiles`` for multi-profile
-    gateway processes. Enabling it here prepares HSCC for clusters where
-    multiple profiles share one gateway. Only fills when absent — an
-    operator who explicitly set ``multiplex_profiles: false`` keeps it.
+    Hermes 0.17 gateway loader (gateway/config.py::load_gateway_config) only
+    reads a TOP-LEVEL ``multiplex_profiles`` key from config.yaml — it never
+    looks inside the nested ``gateway.multiplex_profiles`` that we historically
+    wrote here. The nested fallback only works for the legacy ``gateway.json``.
+    To make multiplexing actually activate we write BOTH forms: the top-level
+    key (for the 0.17 loader) and the nested ``gateway.multiplex_profiles`` (for
+    forward compatibility and for any code that still reads the nested form).
+
+    Fill-only semantics with a cross-form disable guard: if the operator set
+    EITHER form to explicit ``false``, we bail and write nothing — a
+    deliberate disable is never overridden through the other form. Otherwise
+    each absent form is filled. Filling the top-level key when only the
+    nested one is present is the whole point: every install bootstrapped
+    before this fix has nested ``true`` and no top-level key — the exact
+    state where multiplexing silently stays off.
+
+    When ``gateway`` exists but is not a dict (operator damage), we skip the
+    nested write — never clobber the value with a dict — and only fill the
+    top-level key.
     Returns keys changed.
     """
-    gw = cfg.setdefault("gateway", {})
-    if not isinstance(gw, dict):
+    gw_raw = cfg.get("gateway")
+    nested_raw = gw_raw.get("multiplex_profiles") if isinstance(gw_raw, dict) else None
+    if cfg.get("multiplex_profiles") is False or nested_raw is False:
         return []
 
-    # Only set when the key is not already present — preserves explicit
-    # operator choices (even ``false``).
-    if "multiplex_profiles" in gw:
-        return []
-    gw["multiplex_profiles"] = True
-    return ["multiplex_profiles"]
+    changed = []
+    if "multiplex_profiles" not in cfg:
+        cfg["multiplex_profiles"] = True
+        changed.append("multiplex_profiles")
+
+    if "gateway" not in cfg:
+        cfg["gateway"] = {}
+    gw = cfg["gateway"]
+    if isinstance(gw, dict) and "multiplex_profiles" not in gw:
+        gw["multiplex_profiles"] = True
+        changed.append("gateway.multiplex_profiles")
+
+    return changed
 
 
 def _ensure_dashboard(cfg):
