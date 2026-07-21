@@ -54,6 +54,24 @@ def worker_units(units):
     return [u for u in units if u.get("role") == "worker" and unit_node(u)]
 
 
+def keepalive_worker_units(units):
+    """Return workers with keepalive=true (never includes orchestrator)."""
+    return [u for u in units if u.get("role") == "worker"
+            and u.get("keepalive") is True and unit_node(u)]
+
+
+def check_unit_health(node, port=None):
+    """HTTP GET http://<node>:<port>/health → True if 2xx, else False."""
+    port = port or PORT
+    ok, _, _ = _run(
+        ["ssh", "-o", "ConnectTimeout=6", f"spark@{node}",
+         f"curl -sf -o /dev/null --max-time {HEALTH_TIMEOUT} "
+         f"http://localhost:{port}/health"],
+        timeout=20,
+    )
+    return bool(ok)
+
+
 def _run(args, timeout=RUN_TIMEOUT):
     """Run a subprocess, never raise — return (ok, stdout, stderr)."""
     try:
