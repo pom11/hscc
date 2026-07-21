@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import datetime
+import time
 
 from . import serving
 from .daemon_ops import log
@@ -391,7 +392,8 @@ def check_idle_monitor():
 # In-memory relaunch timestamps per worker UNIT (node, port), so a unit that is
 # mid-load (vLLM takes minutes) is not relaunched again before its grace window
 # elapses. Keyed by (node, port) so co-located models on a node are tracked
-# independently (G1 — multi-model-per-node supervision).
+# independently (G1 — multi-model-per-node supervision). Stores time.monotonic()
+# values — reset at module import.
 _worker_relaunch_at = {}
 
 
@@ -404,10 +406,13 @@ def check_workers():
     Relaunch is rate-limited per (node,port) by VLLM_LOAD_GRACE_MINUTES so a unit
     still loading isn't thrashed. Relaunch stops only the unit's own recipe (not
     the whole node) so a co-located sibling isn't killed.
+
+    Relaunch uses subprocess.Popen (detached, fire-and-forget) so the long
+    weight-staging phase (5–10+ min) is not killed by a subprocess timeout.
+    Output is captured in ~/.hscc/relaunch-<node>-<port>.log.
     """
     from .state import write_state
     from .lifecycle import VLLM_LOAD_GRACE_MINUTES
-    import datetime as _dt
 
     log("Running workers check")
     serving_data = serving.load_serving()
@@ -420,7 +425,8 @@ def check_workers():
         return True
 
     online, relaunched, down = [], [], []
-    now = _dt.datetime.now(_dt.timezone.utc)
+    now_mono = time.monotonic()
+    grace_secs = VLLM_LOAD_GRACE_MINUTES * 60
     for u in units:
         node, port, recipe = u["node"], u["port"], u["recipe"]
         key = (node, port)
@@ -432,7 +438,7 @@ def check_workers():
             continue
         # Down. Respect the grace window after a relaunch (mid-load == not dead).
         last = _worker_relaunch_at.get(key)
-        if last and now < last + _dt.timedelta(minutes=VLLM_LOAD_GRACE_MINUTES):
+        if last and now_mono - last < grace_secs:
             down.append(label)  # still within load grace — leave it
             continue
         if not recipe:
@@ -443,13 +449,25 @@ def check_workers():
         # Stop only THIS recipe on the node (not --all) so a co-located sibling
         # on another port survives.
         run_cmd(["sparkrun", "stop", recipe, "--hosts", node], timeout=60)
-        r = run_cmd(["sparkrun", "run", recipe, "--cluster", serving.HSCC_CLUSTER,
-                     "--hosts", node, "--port", str(port),
-                     "--no-follow", "--ensure"], timeout=180)
-        _worker_relaunch_at[key] = now
-        (relaunched if r.get("ok") else down).append(label)
+        # Record relaunch time before launching so we do not thrash even if
+        # Popen itself raises.
+        _worker_relaunch_at[key] = time.monotonic()
+        log_path = os.path.expanduser(f"~/.hscc/relaunch-{node}-{port}.log")
+        try:
+            log_file = open(log_path, "a")
+            subprocess.Popen(
+                ["sparkrun", "run", recipe, "--cluster", serving.HSCC_CLUSTER,
+                 "--hosts", node, "--port", str(port),
+                 "--no-follow", "--ensure"],
+                stdout=log_file, stderr=log_file,
+                start_new_session=True,
+            )
+            relaunched.append(label)
+        except Exception as e:
+            log(f"ERROR: failed to launch worker {label}: {e}", "ERROR")
+            relaunched.append(label)
 
-    ok = not down or bool(relaunched)
+    ok = not down
     write_state("workers", {
         "ok": ok, "total": len(units), "online": len(online),
         "relaunched": relaunched, "down": down, "last_check": now_iso(),
