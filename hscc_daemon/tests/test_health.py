@@ -639,3 +639,147 @@ class TestCheckGatewayWithMultiplex:
         assert state["multiplex_ok"] is False
         assert state["gateway_job"] is True
         assert state["vllm_healthy"] is True
+class TestCheckLocal:
+    """check_local() — informational by default, required via HSCC_LOCAL_REQUIRE."""
+
+    def _mock(self, monkeypatch, tmp_hfcc_dir, docker_ok=False, ollama_ok=False,
+              pg_ok=False, hscc_ok=False):
+        """Set up mocks for check_local(). Returns (health module, state_calls list)."""
+        from hscc_daemon import health
+        from hscc_daemon import state as state_mod
+        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+
+        # Capture write_state calls
+        state_calls = []
+        def fake_write_state(name, data):
+            state_calls.append((name, data))
+        monkeypatch.setattr(health, "write_state", fake_write_state)
+
+        # Control run_cmd responses
+        def fake_run_cmd(args, **kwa):
+            if args[0] == "docker" and "info" in args:
+                return {"ok": docker_ok, "output": ""}
+            elif args[0] == "docker" and "ps" in args:
+                return {"ok": pg_ok, "output": "Up 5 hours" if pg_ok else ""}
+            elif args[0] == "pgrep":
+                return {"ok": hscc_ok, "output": "12345" if hscc_ok else ""}
+            elif args[0] == "node":
+                return {"ok": True, "output": "v18.0.0"}
+            elif args[0] == "npm":
+                return {"ok": True, "output": "9.0.0"}
+            elif args[0] == "sparkrun":
+                return {"ok": False, "output": ""}
+            return {"ok": False, "output": ""}
+        monkeypatch.setattr(health, "run_cmd", fake_run_cmd)
+
+        # Control http_check (Ollama)
+        def fake_http_check(url, **kwa):
+            if "11434" in url:
+                return {"ok": ollama_ok}
+            return {"ok": False}
+        monkeypatch.setattr(health, "http_check", fake_http_check)
+
+        return health, state_calls
+
+    # -- default mode (HSCC_LOCAL_REQUIRE not set) --
+
+    def test_default_docker_absent_ok(self, tmp_hfcc_dir, monkeypatch):
+        monkeypatch.delenv("HSCC_LOCAL_REQUIRE", raising=False)
+        health, state_calls = self._mock(monkeypatch, tmp_hfcc_dir)
+        result = health.check_local()
+        assert result is True
+        _, data = state_calls[-1]
+        assert data["ok"] is True
+        assert "docker" in data["message"]
+
+    def test_default_all_services_present_ok(self, tmp_hfcc_dir, monkeypatch):
+        monkeypatch.delenv("HSCC_LOCAL_REQUIRE", raising=False)
+        health, state_calls = self._mock(
+            monkeypatch, tmp_hfcc_dir,
+            docker_ok=True, ollama_ok=True, pg_ok=True, hscc_ok=True
+        )
+        result = health.check_local()
+        assert result is True
+        _, data = state_calls[-1]
+        assert data["ok"] is True
+        assert "all services available" in data["message"]
+
+    def test_default_all_absent_ok(self, tmp_hfcc_dir, monkeypatch):
+        """Default mode: everything missing is still informational ok=True."""
+        monkeypatch.delenv("HSCC_LOCAL_REQUIRE", raising=False)
+        health, state_calls = self._mock(monkeypatch, tmp_hfcc_dir)
+        result = health.check_local()
+        assert result is True
+        _, data = state_calls[-1]
+        assert data["ok"] is True
+        assert "informational" in data["message"]
+
+    # -- required mode --
+
+    def test_required_docker_absent_fail(self, tmp_hfcc_dir, monkeypatch):
+        monkeypatch.setenv("HSCC_LOCAL_REQUIRE", "docker,ollama")
+        health, state_calls = self._mock(monkeypatch, tmp_hfcc_dir)
+        result = health.check_local()
+        assert result is False
+        _, data = state_calls[-1]
+        assert data["ok"] is False
+        assert "docker" in data["message"]
+        assert "required" in data["message"]
+
+    def test_required_all_required_present_non_required_absent_ok(self, tmp_hfcc_dir, monkeypatch):
+        monkeypatch.setenv("HSCC_LOCAL_REQUIRE", "docker,ollama")
+        health, state_calls = self._mock(
+            monkeypatch, tmp_hfcc_dir,
+            docker_ok=True, ollama_ok=True, pg_ok=False, hscc_ok=False
+        )
+        result = health.check_local()
+        assert result is True
+        _, data = state_calls[-1]
+        assert data["ok"] is True
+        assert "all required services running" in data["message"]
+
+    def test_required_one_present_one_absent(self, tmp_hfcc_dir, monkeypatch):
+        """Docker present, Ollama absent — only Ollama listed as missing."""
+        monkeypatch.setenv("HSCC_LOCAL_REQUIRE", "docker,ollama")
+        health, state_calls = self._mock(
+            monkeypatch, tmp_hfcc_dir,
+            docker_ok=True, ollama_ok=False, pg_ok=False, hscc_ok=False
+        )
+        result = health.check_local()
+        assert result is False
+        _, data = state_calls[-1]
+        assert data["ok"] is False
+        assert "ollama" in data["message"]
+        assert "docker" not in data["message"]  # docker is present, not listed
+
+    def test_required_whitespace_stripped(self, tmp_hfcc_dir, monkeypatch):
+        """HSCC_LOCAL_REQUIRE with spaces around names still works."""
+        monkeypatch.setenv("HSCC_LOCAL_REQUIRE", " docker , Ollama ")
+        health, state_calls = self._mock(monkeypatch, tmp_hfcc_dir)
+        result = health.check_local()
+        assert result is False  # both docker and ollama absent
+        _, data = state_calls[-1]
+        assert "docker" in data["message"].lower()
+        assert "ollama" in data["message"].lower()
+
+    def test_services_dict_populated(self, tmp_hfcc_dir, monkeypatch):
+        """services dict has correct running flags regardless of mode."""
+        monkeypatch.delenv("HSCC_LOCAL_REQUIRE", raising=False)
+        health, state_calls = self._mock(
+            monkeypatch, tmp_hfcc_dir,
+            docker_ok=True, ollama_ok=False, pg_ok=True, hscc_ok=False
+        )
+        health.check_local()
+        _, data = state_calls[-1]
+        svc = data["services"]
+        assert svc["docker"]["running"] is True
+        assert svc["ollama"]["running"] is False
+        assert svc["postgresql"]["running"] is True
+        assert svc["hscc_daemon"]["running"] is False
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
