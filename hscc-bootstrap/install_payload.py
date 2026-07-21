@@ -120,7 +120,7 @@ DEFAULT_PAYLOAD = [
     "hscc_daemon", "hscc-bootstrap", "sparkrun-hermes",
     "memori", "memori_byodb",
     "install", "docs", "assets", "configs",
-    "README.md", "CHANGELOG.md", "LICENSE", "requirements.txt",
+    "README.md", "CHANGELOG.md", "LICENSE", "requirements.txt", "VERSION",
 ]
 
 
