@@ -432,5 +432,210 @@ class TestCheckProxy:
         assert "10.0.0.2,10.0.0.3" in cmd
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+class TestCheckMultiplexProfiles:
+    """_check_multiplex_profiles() verifies that all Hermes profiles are served
+    when multiplex is enabled."""
+
+    def _setup(self, tmp_path, monkeypatch):
+        """Create tmp dirs and monkeypatch the module-level path constants."""
+        hermes_dir = tmp_path / "hermes"
+        hermes_dir.mkdir(parents=True)
+        profiles_dir = hermes_dir / "profiles"
+        config_yaml = hermes_dir / "config.yaml"
+        gw_state = hermes_dir / "gateway_state.json"
+
+        from hscc_daemon import health
+        monkeypatch.setattr(health, "_HERMES_CONFIG_YAML", str(config_yaml))
+        monkeypatch.setattr(health, "_HERMES_GATEWAY_STATE", str(gw_state))
+        monkeypatch.setattr(health, "_HERMES_PROFILES_DIR", str(profiles_dir))
+        return health, profiles_dir, config_yaml, gw_state
+
+    # --- multiplex enabled, served_profiles missing ---
+    def test_multiplex_true_no_gateway_state(self, tmp_path, monkeypatch):
+        health, profiles_dir, config_yaml, gw_state = self._setup(tmp_path, monkeypatch)
+
+        config_yaml.write_text("multiplex_profiles: true\n")
+        profiles_dir.mkdir(parents=True)
+        # gw_state does not exist
+
+        result = health._check_multiplex_profiles()
+        assert result["ok"] is False
+        assert "gateway_state.json" in result["message"]
+
+    # --- multiplex enabled, served_profiles empty ---
+    def test_multiplex_true_served_profiles_empty(self, tmp_path, monkeypatch):
+        health, profiles_dir, config_yaml, gw_state = self._setup(tmp_path, monkeypatch)
+
+        config_yaml.write_text("multiplex_profiles: true\n")
+        gw_state.write_text(json.dumps({"served_profiles": []}))
+        profiles_dir.mkdir(parents=True)
+
+        result = health._check_multiplex_profiles()
+        assert result["ok"] is False
+        assert "empty" in result["message"].lower() or "no profiles" in result["message"].lower()
+
+    # --- multiplex enabled, served_profiles missing key ---
+    def test_multiplex_true_served_profiles_missing_key(self, tmp_path, monkeypatch):
+        health, profiles_dir, config_yaml, gw_state = self._setup(tmp_path, monkeypatch)
+
+        config_yaml.write_text("multiplex_profiles: true\n")
+        gw_state.write_text(json.dumps({}))
+        profiles_dir.mkdir(parents=True)
+
+        result = health._check_multiplex_profiles()
+        assert result["ok"] is False
+        assert "empty" in result["message"].lower() or "no profiles" in result["message"].lower()
+
+    # --- multiplex enabled, profiles missing from served ---
+    def test_multiplex_true_partial_profiles(self, tmp_path, monkeypatch):
+        health, profiles_dir, config_yaml, gw_state = self._setup(tmp_path, monkeypatch)
+
+        config_yaml.write_text("multiplex_profiles: true\n")
+        gw_state.write_text(json.dumps({"served_profiles": ["backend-engineer"]}))
+        profiles_dir.mkdir(parents=True)
+        (profiles_dir / "backend-engineer").mkdir()
+        (profiles_dir / "orchestrator").mkdir()
+        (profiles_dir / "researcher").mkdir()
+
+        result = health._check_multiplex_profiles()
+        assert result["ok"] is False
+        assert "orchestrator" in result["message"]
+        assert "researcher" in result["message"]
+        assert "backend-engineer" not in result["message"]  # served, not missing
+
+    # --- multiplex enabled, all profiles served ---
+    def test_multiplex_true_all_profiles_served(self, tmp_path, monkeypatch):
+        health, profiles_dir, config_yaml, gw_state = self._setup(tmp_path, monkeypatch)
+
+        config_yaml.write_text("multiplex_profiles: true\n")
+        gw_state.write_text(json.dumps({"served_profiles": ["backend-engineer", "orchestrator"]}))
+        profiles_dir.mkdir(parents=True)
+        (profiles_dir / "backend-engineer").mkdir()
+        (profiles_dir / "orchestrator").mkdir()
+
+        result = health._check_multiplex_profiles()
+        assert result["ok"] is True
+        assert "served" in result["message"]
+
+    # --- multiplex disabled ---
+    def test_multiplex_false(self, tmp_path, monkeypatch):
+        health, profiles_dir, config_yaml, gw_state = self._setup(tmp_path, monkeypatch)
+
+        config_yaml.write_text("multiplex_profiles: false\n")
+        profiles_dir.mkdir(parents=True)
+
+        result = health._check_multiplex_profiles()
+        assert result["ok"] is True
+        assert "disabled" in result["message"].lower() or "absent" in result["message"].lower()
+
+    # --- multiplex key absent in config ---
+    def test_multiplex_key_absent(self, tmp_path, monkeypatch):
+        health, profiles_dir, config_yaml, gw_state = self._setup(tmp_path, monkeypatch)
+
+        config_yaml.write_text("something_else: true\n")
+        profiles_dir.mkdir(parents=True)
+
+        result = health._check_multiplex_profiles()
+        assert result["ok"] is True
+        assert "disabled" in result["message"].lower() or "absent" in result["message"].lower()
+
+    # --- config.yaml missing entirely ---
+    def test_config_yaml_missing(self, tmp_path, monkeypatch):
+        health, profiles_dir, config_yaml, gw_state = self._setup(tmp_path, monkeypatch)
+
+        profiles_dir.mkdir(parents=True)
+        # config_yaml does not exist
+
+        result = health._check_multiplex_profiles()
+        assert result["ok"] is True
+        assert "skipped" in result["message"].lower()
+
+    # --- gateway_state.json parse error ---
+    def test_gateway_state_parse_error(self, tmp_path, monkeypatch):
+        health, profiles_dir, config_yaml, gw_state = self._setup(tmp_path, monkeypatch)
+
+        config_yaml.write_text("multiplex_profiles: true\n")
+        gw_state.write_text("{invalid json")
+        profiles_dir.mkdir(parents=True)
+
+        result = health._check_multiplex_profiles()
+        assert result["ok"] is True
+        assert "skipped" in result["message"].lower() or "parse" in result["message"].lower()
+
+    # --- profiles dir missing when multiplex enabled ---
+    def test_profiles_dir_missing_multiplex_true(self, tmp_path, monkeypatch):
+        health, profiles_dir, config_yaml, gw_state = self._setup(tmp_path, monkeypatch)
+
+        config_yaml.write_text("multiplex_profiles: true\n")
+        gw_state.write_text(json.dumps({"served_profiles": ["default"]}))
+        # profiles_dir does not exist
+
+        result = health._check_multiplex_profiles()
+        assert result["ok"] is True
+        assert "skipped" in result["message"].lower()
+
+
+class TestCheckGatewayWithMultiplex:
+    """check_gateway() integrates multiplex check with gateway health."""
+
+    def test_gateway_ok_mux_ok(self, tmp_hfcc_dir, monkeypatch, fake_subprocess):
+        from hscc_daemon import health
+        from hscc_daemon import state as state_mod
+
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(parents=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
+
+        # Gateway job alive
+        fake_subprocess.set_result(stdout="12345\n", returncode=0)
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": True})
+
+        # Multiplex disabled — informational
+        hermes_dir = tmp_hfcc_dir / "hermes"
+        (hermes_dir / "profiles").mkdir(parents=True)
+        (hermes_dir / "config.yaml").write_text("multiplex_profiles: false\n")
+        monkeypatch.setattr(health, "_HERMES_CONFIG_YAML", str(hermes_dir / "config.yaml"))
+        monkeypatch.setattr(health, "_HERMES_GATEWAY_STATE", str(hermes_dir / "gateway_state.json"))
+        monkeypatch.setattr(health, "_HERMES_PROFILES_DIR", str(hermes_dir / "profiles"))
+
+        result = health.check_gateway()
+        assert result is True
+
+        # Verify state was written with multiplex fields
+        state = state_mod.read_state("gateway")
+        assert state is not None
+        assert "multiplex_ok" in state
+        assert "multiplex_message" in state
+
+    def test_gateway_ok_but_mux_fails(self, tmp_hfcc_dir, monkeypatch, fake_subprocess):
+        from hscc_daemon import health
+        from hscc_daemon import state as state_mod
+
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(parents=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
+
+        # Gateway job alive
+        fake_subprocess.set_result(stdout="12345\n", returncode=0)
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": True})
+
+        # Multiplex enabled, all profiles missing
+        hermes_dir = tmp_hfcc_dir / "hermes"
+        (hermes_dir / "profiles").mkdir(parents=True)
+        (hermes_dir / "profiles" / "backend-engineer").mkdir()
+        (hermes_dir / "config.yaml").write_text("multiplex_profiles: true\n")
+        # No gateway_state.json
+        monkeypatch.setattr(health, "_HERMES_CONFIG_YAML", str(hermes_dir / "config.yaml"))
+        monkeypatch.setattr(health, "_HERMES_GATEWAY_STATE", str(hermes_dir / "gateway_state.json"))
+        monkeypatch.setattr(health, "_HERMES_PROFILES_DIR", str(hermes_dir / "profiles"))
+
+        result = health.check_gateway()
+        assert result is False  # multiplex failure makes gateway check fail
+
+        state = state_mod.read_state("gateway")
+        assert state is not None
+        assert state["multiplex_ok"] is False
+        assert state["gateway_job"] is True
+        assert state["vllm_healthy"] is True

@@ -14,6 +14,11 @@ from .daemon_ops import log
 from .state import now_iso, write_state
 from .util import run_cmd, ssh_cmd, http_check
 
+# Paths used for multiplex-profile verification
+_HERMES_CONFIG_YAML = os.path.expanduser("~/.hermes/config.yaml")
+_HERMES_GATEWAY_STATE = os.path.expanduser("~/.hermes/gateway_state.json")
+_HERMES_PROFILES_DIR = os.path.expanduser("~/.hermes/profiles")
+
 
 # Topology (PRIMARY_NODE, VLLM_HEALTH_URL, NAS_HOST, ...) lives in the serving
 # module, which resolves it from cluster.json/serving.json/sparkrun at import and
@@ -125,15 +130,90 @@ def _gateway_job_alive():
         return False
 
 
+def _check_multiplex_profiles():
+    """Best-effort multiplex-profile check (runs after basic gateway health).
+
+    Returns a dict with keys:
+      ok: bool — False if multiplex is enabled but profiles are missing.
+      message: str — human-readable note (always present).
+    When the check is skipped (missing files, parse errors), ok=True and the
+    message explains why.
+    """
+    # 1. Read multiplex config — best-effort
+    try:
+        import yaml
+        with open(_HERMES_CONFIG_YAML) as f:
+            config = yaml.safe_load(f) or {}
+    except (FileNotFoundError, OSError):
+        return {"ok": True, "message": "multiplex check skipped: config.yaml not found"}
+    except Exception:
+        return {"ok": True, "message": "multiplex check skipped: config parse error"}
+
+    multiplex = config.get("multiplex_profiles")
+    if not multiplex:
+        return {"ok": True,
+                "message": "multiplex_profiles is disabled or absent"}
+
+    # 2. Read served_profiles — best-effort
+    try:
+        with open(_HERMES_GATEWAY_STATE) as f:
+            gw_state = json.load(f)
+    except (FileNotFoundError, OSError):
+        # Missing gateway_state.json when multiplex is enabled is fatal.
+        return {"ok": False,
+                "message": "multiplex enabled but gateway_state.json is missing — no profiles served"}
+    except Exception:
+        return {"ok": True,
+                "message": "multiplex check skipped: gateway_state.json parse error"}
+
+    served = set(gw_state.get("served_profiles") or [])
+    if not served and multiplex:
+        return {"ok": False,
+                "message": "multiplex enabled but served_profiles is empty — all profiles unserved"}
+
+    # 3. Determine expected roster from profile dirs — best-effort
+    try:
+        expected = {
+            entry.name
+            for entry in os.scandir(_HERMES_PROFILES_DIR)
+            if entry.is_dir() and not entry.name.startswith(".")
+        }
+    except (FileNotFoundError, OSError):
+        return {"ok": True,
+                "message": "multiplex check skipped: profiles dir not found"}
+
+    missing = expected - served
+    if missing:
+        return {"ok": False,
+                "message": (
+                    f"multiplex enabled but {len(missing)} profile(s) not served: "
+                    + ", ".join(sorted(missing))
+                )}
+
+    return {"ok": True,
+            "message": f"all {len(served & expected)} multiplex profile(s) served"}
+
+
 def check_gateway():
-    """Gateway check (every 10s): Hermes gateway supervisor job + vLLM backend."""
+    """Gateway check (every 10s): Hermes gateway supervisor job + vLLM backend + multiplex."""
     log("Running gateway check")
     job_ok = _gateway_job_alive()
     vllm = http_check(serving.VLLM_HEALTH_URL, timeout=5)
     vllm_ok = vllm.get("ok", False)
     ok = job_ok and vllm_ok
-    write_state("gateway", {"ok": ok, "gateway_job": job_ok, "vllm_healthy": vllm_ok})
-    log(f"Gateway check: ok={ok} (job={job_ok} vllm={vllm_ok})")
+
+    # Multiplex-profile check (best-effort, never blocks basic gateway health)
+    mux = _check_multiplex_profiles()
+    if not mux["ok"]:
+        ok = False
+
+    state_data = {
+        "ok": ok, "gateway_job": job_ok, "vllm_healthy": vllm_ok,
+        "multiplex_ok": mux["ok"], "multiplex_message": mux["message"],
+    }
+    write_state("gateway", state_data)
+    log(f"Gateway check: ok={ok} (job={job_ok} vllm={vllm_ok} mux={mux['ok']}) "
+        f"{mux['message']}")
     return ok
 
 
