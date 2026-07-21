@@ -341,13 +341,11 @@ class TestCheckWorkers:
         assert "spawn denied" in error_logs[0]
         assert "w-10.0.0.2" in error_logs[0]
 
-    def test_state_ok_logic_relaunched_not_counted_online(self, tmp_hfcc_dir, monkeypatch):
-        """Asserts state-ok logic: relaunched worker is in-grace but not counted online.
-
-        ok = not down — relaunched workers are NOT in down, so ok=True when
-        all workers are either online or relaunched. Workers that fail to
-        even start (no recipe) go to down and make ok=False.
-        """
+    def test_popen_failure_counts_worker_down(self, tmp_hfcc_dir, monkeypatch):
+        """A relaunch whose Popen raises is a FAILED launch: the worker goes to
+        down (ok=False), not to relaunched — a worker we could not even start
+        must not look healthy. The grace timestamp is still recorded so the
+        next cycle does not thrash."""
         import time as _time
         health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
@@ -360,9 +358,9 @@ class TestCheckWorkers:
         monkeypatch.setattr(health.subprocess, "Popen", fake_popen)
 
         ok = health.check_workers()
-        # Worker went to relaunched (not down) — ok = not down = True
-        assert ok is True
-        # Verify _worker_relaunch_at was set with monotonic timestamp
+        # Popen raised — worker goes to down, ok = not down = False
+        assert ok is False
+        # Grace timestamp still recorded (no thrash on the next cycle)
         assert ("10.0.0.2", 8000) in health._worker_relaunch_at
         ts = health._worker_relaunch_at[("10.0.0.2", 8000)]
         assert isinstance(ts, float)

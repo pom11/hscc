@@ -454,18 +454,18 @@ def check_workers():
         _worker_relaunch_at[key] = time.monotonic()
         log_path = os.path.expanduser(f"~/.hscc/relaunch-{node}-{port}.log")
         try:
-            log_file = open(log_path, "a")
-            subprocess.Popen(
-                ["sparkrun", "run", recipe, "--cluster", serving.HSCC_CLUSTER,
-                 "--hosts", node, "--port", str(port),
-                 "--no-follow", "--ensure"],
-                stdout=log_file, stderr=log_file,
-                start_new_session=True,
-            )
+            with open(log_path, "a") as log_file:
+                subprocess.Popen(
+                    ["sparkrun", "run", recipe, "--cluster", serving.HSCC_CLUSTER,
+                     "--hosts", node, "--port", str(port),
+                     "--no-follow", "--ensure"],
+                    stdout=log_file, stderr=log_file,
+                    start_new_session=True,
+                )
             relaunched.append(label)
         except Exception as e:
             log(f"ERROR: failed to launch worker {label}: {e}", "ERROR")
-            relaunched.append(label)
+            down.append(label)
 
     ok = not down
     write_state("workers", {
