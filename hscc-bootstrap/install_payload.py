@@ -4,8 +4,9 @@ The repo is the source of truth; bootstrap installs a copy into
 ``~/.hermes/plugins/`` so the git checkout and the runtime dir stay separate
 (edit in the repo, run bootstrap, runtime updates — a real user install).
 
-Backup-then-overwrite: an existing runtime ``<dir>`` is moved aside to
-``<dir>.bak-<ts>`` before the fresh copy lands. Build artifacts and tests are
+Backup-then-overwrite: an existing runtime ``<dir>`` is moved aside to a
+sibling ``plugins-backups/<dir>.bak-<ts>`` (never inside the scanned
+plugins_dir) before the fresh copy lands. Build artifacts and tests are
 not shipped to the runtime dir.
 """
 
@@ -24,6 +25,33 @@ def _ignore(_dir, names):
     return drop
 
 
+def _backups_dir(plugins_dir):
+    """Return the sibling backup directory next to ``plugins_dir``."""
+    return plugins_dir.parent / "plugins-backups"
+
+
+def _sweep_old_backups(plugins_dir, backups_dir):
+    """Move any pre-existing ``<name>.bak-<ts>`` entries out of ``plugins_dir``.
+
+    Best-effort — never raises; silently skips anything that fails.
+    """
+    try:
+        candidates = [e for e in plugins_dir.iterdir() if ".bak-" in e.name]
+    except OSError:
+        return
+    if not candidates:
+        return
+    try:
+        backups_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+    for entry in candidates:
+        try:
+            shutil.move(str(entry), str(backups_dir / entry.name))
+        except OSError:
+            pass
+
+
 def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None):
     """Copy each ``payload`` entry from ``repo_root`` into ``plugins_dir``.
 
@@ -31,6 +59,10 @@ def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None):
     Returns a summary dict. If ``repo_root`` and ``plugins_dir`` resolve to the
     same directory (the old in-place layout, or a clone into the runtime dir),
     the copy is skipped — there is nothing to install.
+
+    Backups are written to the sibling ``plugins-backups/`` directory (never
+    inside the scanned ``plugins_dir``) so stale copies can never shadow
+    freshly-installed plugins.
     """
     repo_root = Path(repo_root).expanduser().resolve()
     plugins_dir = Path(plugins_dir).expanduser().resolve()
@@ -45,6 +77,9 @@ def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None):
     stamp = ts or datetime.now().strftime("%Y%m%d-%H%M%S")
     plugins_dir.mkdir(parents=True, exist_ok=True)
 
+    # Sweep stale .bak-* entries out of the scanned plugins_dir (best effort).
+    _sweep_old_backups(plugins_dir, _backups_dir(plugins_dir))
+
     installed, backed_up, missing = [], [], []
     for name in payload:
         src = repo_root / name
@@ -54,7 +89,9 @@ def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None):
         dst = plugins_dir / name
         if dst.exists() or dst.is_symlink():
             if backup:
-                bak = plugins_dir / f"{name}.bak-{stamp}"
+                bak_dir = _backups_dir(plugins_dir)
+                bak_dir.mkdir(parents=True, exist_ok=True)
+                bak = bak_dir / f"{name}.bak-{stamp}"
                 shutil.move(str(dst), str(bak))
                 backed_up.append(bak.name)
             elif dst.is_dir() and not dst.is_symlink():
