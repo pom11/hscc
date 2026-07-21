@@ -144,3 +144,9 @@ def test_sweep_relocates_planted_bak_out_of_plugins_dir(tmp_path):
     assert (backups / "foo.bak-123" / "old.py").read_text() == "junk\n"
     # Current install still worked
     assert "hscc-cluster" in res["installed"]
+
+
+def test_default_payload_ships_version_marker():
+    """The runtime version marker must be shipped so ~/.hermes/plugins/VERSION
+    tracks releases instead of going stale."""
+    assert "VERSION" in install_payload.DEFAULT_PAYLOAD
