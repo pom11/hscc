@@ -555,6 +555,30 @@ def cmd_template(raw_args):
     return "📦 *HSCC template*\n```\n" + _json.dumps(res, indent=2, default=str)[:3000] + "\n```"
 
 
+def cmd_workers_up(raw_args):
+    """Bring up only down keepalive workers — never touch the orchestrator.
+
+    Non-destructive: only starts what is down, no confirm step needed."""
+    units = cmdlib.read_units()
+    workers = cmdlib.keepalive_worker_units(units)
+    if not workers:
+        return "⚠️ No keepalive worker units in serving.json — nothing to check."
+
+    lines = ["🔧 *HSCC workers-up*", ""]
+    for w in workers:
+        node = cmdlib.unit_node(w)
+        label = w.get("id") or node
+        if cmdlib.check_unit_health(node):
+            lines.append(f"  ✅ {label} @ {node}: already online")
+        else:
+            res = cmdlib.restart_one(w)
+            if res["ok"]:
+                lines.append(f"  ♻️  {label} @ {node}: launched")
+            else:
+                lines.append(f"  ❌ {label} @ {node}: failed — {res.get('error', '?')}")
+    return "\n".join(lines)
+
+
 def register(ctx) -> None:
     ctx.register_command(
         name="cluster", handler=cmd_cluster,
@@ -608,4 +632,8 @@ def register(ctx) -> None:
         name="template", handler=cmd_template,
         description="List/preview/validate/apply cluster templates.",
         args_hint="list|preview <name>|apply <name> [confirm]",
+    )
+    ctx.register_command(
+        name="workers-up", handler=cmd_workers_up,
+        description="Bring up down keepalive workers only (non-destructive, no confirm).",
     )
