@@ -9,9 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 HSCC leaves beta: the fleet self-heals for real, the daemon sees everything
 it is supposed to see, and the operator surface covers the day-to-day
-worker lifecycle. 650 tests green across all six components.
+worker lifecycle. 653 tests green across all six components.
 
 ### Fixed
+- **Bootstrap no longer poisons its own runtime dir**
+  (`hscc-bootstrap/install_payload.py`): plugin backups were written as
+  `<name>.bak-<ts>` INSIDE `~/.hermes/plugins/` — the directory Hermes
+  scans — so every backup kept a `plugin.yaml` under the same plugin name
+  and a stale copy could shadow the freshly-installed plugin (observed
+  live: `/workers-up` returned "unknown command" because an old
+  `hscc-commands.bak-*` won manifest resolution). Backups now go to a
+  sibling `~/.hermes/plugins-backups/`, and each install first sweeps any
+  pre-existing `*.bak-*` entries out of the scanned dir.
 - **Worker self-heal actually works** (`hscc_daemon/health.py`): relaunches
   were killed after 180 s by the subprocess timeout — weight staging alone
   takes 5–10+ min, so self-heal NEVER succeeded and failed silently (the
