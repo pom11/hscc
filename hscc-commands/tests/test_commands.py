@@ -281,7 +281,7 @@ def test_no_hardcoded_ips_in_source():
 
 def test_workers_up_skips_online_workers(monkeypatch):
     monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
-    monkeypatch.setattr(cmdlib, "check_unit_health", lambda node: True)
+    monkeypatch.setattr(cmdlib, "check_unit_health", lambda node, port=None: True)
     restarted = []
     monkeypatch.setattr(cmdlib, "restart_one",
                         lambda u: restarted.append(u) or {"ok": True})
@@ -294,7 +294,7 @@ def test_workers_up_skips_online_workers(monkeypatch):
 def test_workers_up_launches_down_workers(monkeypatch):
     monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
     monkeypatch.setattr(cmdlib, "check_unit_health",
-                        lambda node: node != "10.0.0.2")  # worker-2 down
+                        lambda node, port=None: node != "10.0.0.2")  # worker-2 down
     restarted = []
     monkeypatch.setattr(cmdlib, "restart_one",
                         lambda u: restarted.append(cmdlib.unit_node(u)) or
@@ -318,7 +318,7 @@ def test_workers_up_never_restarts_orchestrator(monkeypatch):
         ],
     }
     monkeypatch.setattr(cmdlib, "read_units", lambda: units_with_orch_keepalive["units"])
-    monkeypatch.setattr(cmdlib, "check_unit_health", lambda node: False)
+    monkeypatch.setattr(cmdlib, "check_unit_health", lambda node, port=None: False)
     restarted = []
     monkeypatch.setattr(cmdlib, "restart_one",
                         lambda u: restarted.append(u.get("role")) or
@@ -330,7 +330,7 @@ def test_workers_up_never_restarts_orchestrator(monkeypatch):
 
 def test_workers_up_reports_failure(monkeypatch):
     monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
-    monkeypatch.setattr(cmdlib, "check_unit_health", lambda node: False)
+    monkeypatch.setattr(cmdlib, "check_unit_health", lambda node, port=None: False)
     monkeypatch.setattr(cmdlib, "restart_one",
                         lambda u: {
                             "ok": False,
