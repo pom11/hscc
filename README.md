@@ -92,7 +92,9 @@ including multi-family and 2-models-per-node layouts. See
 [hscc-cluster/templates/](hscc-cluster/templates/README.md).
 
 ```
-hscc-cluster cluster-template apply 4node-coding --confirm   # = the live setup
+hscc template list                              # see the shipped layouts
+hscc template preview 4node-coding              # dry-run against the live cluster
+hscc template apply 4node-coding --confirm      # = the live setup
 ```
 
 ---

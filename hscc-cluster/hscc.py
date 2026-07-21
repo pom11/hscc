@@ -259,6 +259,12 @@ COMMANDS = {
 # ── Entry Point ───────────────────────────────────────────────────────────
 
 def main():
+    # These commands are merged into the single `hscc` CLI. This entry stays
+    # for back-compat (and as the library the merged CLI imports), but point
+    # users at the unified command.
+    print("note: `hscc-cluster <cmd>` is merged into the main CLI — "
+          "use `hscc cluster <cmd>` / `hscc template <cmd>` / `hscc profiles`.",
+          file=sys.stderr)
     if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h", "help"):
         print("""
 Hermes Spark Cluster Control (HSCC)
