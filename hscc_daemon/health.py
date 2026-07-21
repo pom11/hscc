@@ -174,10 +174,15 @@ def check_proxy():
 
 
 def check_local():
-    """Local services check (every 30s): Docker, Ollama, PostgreSQL, hscc_daemon."""
+    """Local services check (every 30s): Docker, Ollama, PostgreSQL, hscc_daemon.
+
+    By default (HSCC_LOCAL_REQUIRE not set), missing services are informational —
+    the check reports ok=True and just notes what is unavailable. Only when
+    HSCC_LOCAL_REQUIRE lists specific services does their absence cause a failure.
+    """
     log("Running local services check")
     services = {}
-    
+
     # Docker
     docker_ok = False
     try:
@@ -186,11 +191,11 @@ def check_local():
     except Exception:
         pass
     services["docker"] = {"running": docker_ok}
-    
+
     # Ollama
     ollama = http_check("http://localhost:11434/api/tags", timeout=3)
     services["ollama"] = {"running": ollama.get("ok", False)}
-    
+
     # PostgreSQL
     pg_ok = False
     try:
@@ -203,7 +208,7 @@ def check_local():
     except Exception:
         pass
     services["postgresql"] = {"running": pg_ok}
-    
+
     # HSCC daemon
     hscc_ok = False
     try:
@@ -213,7 +218,7 @@ def check_local():
         pass
     services["hscc_daemon"] = {"running": hscc_ok}
     services.pop("hermes", None)  # remove old hermes entry
-    
+
     # Node.js / npm
     node_r = run_cmd(["node", "--version"], timeout=3)
     npm_r = run_cmd(["npm", "--version"], timeout=3)
@@ -223,11 +228,37 @@ def check_local():
         "npm": {"version": npm_r.get("output", "").strip()} if npm_r.get("ok") else {},
         "sparkrun": {"version": spark_r.get("output", "").strip()} if spark_r.get("ok") else {},
     }
-    
-    all_running = docker_ok and ollama.get("ok", False)
-    write_state("local", {"ok": all_running, "services": services, "tools": tools})
-    log(f"Local check: ok={all_running}, docker={docker_ok}, ollama={ollama.get('ok')}")
-    return all_running
+
+    # Collect missing services
+    missing = [name for name, info in services.items() if not info.get("running")]
+
+    # Determine required services from env var
+    required_str = os.environ.get("HSCC_LOCAL_REQUIRE", "")
+    required = {s.strip().lower() for s in required_str.split(",") if s.strip()} if required_str else set()
+
+    if required:
+        # Required mode: missing required services fail the check. A required
+        # service this check does not even track (typo / unsupported name) is
+        # unverifiable — treat it as missing rather than silently passing.
+        untracked = required - set(services)
+        missing_required = sorted((required & {m for m in missing}) | untracked)
+        if missing_required:
+            ok = False
+            msg = f"required but missing: {', '.join(missing_required)}"
+        else:
+            ok = True
+            msg = "all required services running"
+    else:
+        # Default (informational) mode: absence is informational
+        ok = True
+        if missing:
+            msg = f"informational: {', '.join(missing)} not available"
+        else:
+            msg = "all services available"
+
+    write_state("local", {"ok": ok, "services": services, "tools": tools, "message": msg})
+    log(f"Local check: ok={ok}, message={msg}")
+    return ok
 
 
 def check_heartbeat():
