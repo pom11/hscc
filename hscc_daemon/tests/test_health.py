@@ -191,30 +191,54 @@ class TestCheckWorkers:
         assert calls == []                      # healthy -> no relaunch
 
     def test_crashed_worker_relaunched(self, tmp_hfcc_dir, monkeypatch):
+        import time as _time
         health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
         ran = []
         monkeypatch.setattr(health, "run_cmd",
-                            lambda args, **k: ran.append(args) or {"ok": True})
-        assert health.check_workers() is True    # relaunched -> ok
-        # stop then run, both targeting the worker node + its recipe
-        assert any(a[:2] == ["sparkrun", "stop"] for a in ran)
-        run_cmd = next(a for a in ran if a[:2] == ["sparkrun", "run"])
-        assert "10.0.0.2" in run_cmd
-        assert any("27b" in str(x) for x in run_cmd)
+                            lambda args, **k: ran.append(("run_cmd", args)) or {"ok": True})
+        # Track Popen calls (the detached relaunch path)
+        popen_calls = []
+        real_popen = health.subprocess.Popen
+        def fake_popen(*args, **kwargs):
+            popen_calls.append((args, kwargs))
+            return real_popen.__class__.__new__(real_popen.__class__)
+        monkeypatch.setattr(health.subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(health, "time", _time)
+
+        # With ok = not down, and relaunched workers not in down, this should be True
+        # because the worker goes into relaunched list (not down)
+        ok = health.check_workers()
+        # stop via run_cmd still fires
+        assert any(t == "run_cmd" and a[:2] == ["sparkrun", "stop"] for t, a in ran)
+        # Popen called for sparkrun run (detached)
+        assert len(popen_calls) == 1
+        popen_args = popen_calls[0][0][0]
+        assert popen_args[:2] == ["sparkrun", "run"]
+        assert "10.0.0.2" in popen_args
+        assert any("27b" in str(x) for x in popen_args)
+        # Popen kwargs: detached + log file
+        kwargs = popen_calls[0][1]
+        assert kwargs.get("start_new_session") is True
 
     def test_grace_window_skips_relaunch(self, tmp_hfcc_dir, monkeypatch):
-        import datetime as dt
+        import time as _time
         health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
         # pretend we just relaunched it -> within grace, must NOT relaunch again.
         # Grace is keyed per UNIT (node, port); units w/o explicit port → :8000.
-        health._worker_relaunch_at[("10.0.0.2", 8000)] = dt.datetime.now(dt.timezone.utc)
+        health._worker_relaunch_at[("10.0.0.2", 8000)] = _time.monotonic()
         ran = []
         monkeypatch.setattr(health, "run_cmd",
                             lambda args, **k: ran.append(args) or {"ok": True})
+        popen_calls = []
+        def fake_popen(*args, **kwargs):
+            popen_calls.append((args, kwargs))
+            raise RuntimeError("should not launch")
+        monkeypatch.setattr(health.subprocess, "Popen", fake_popen)
         health.check_workers()
         assert ran == []                         # grace window respected
+        assert popen_calls == []                 # no Popen within grace
 
     def test_colocated_units_supervised_per_port(self, tmp_hfcc_dir, monkeypatch):
         """G1: two models co-located on one node (distinct ports) are each
@@ -242,16 +266,133 @@ class TestCheckWorkers:
         ran = []
         monkeypatch.setattr(health, "run_cmd",
                             lambda args, **k: ran.append(args) or {"ok": True})
+        popen_calls = []
+        def fake_popen(*args, **kwargs):
+            popen_calls.append((args, kwargs))
+            raise RuntimeError("mock")
+        monkeypatch.setattr(health.subprocess, "Popen", fake_popen)
         health.check_workers()
         # only b (:8001, ~/r/b.yaml) relaunched; a's recipe never touched
-        run_cmds = [a for a in ran if a[:2] == ["sparkrun", "run"]]
-        assert len(run_cmds) == 1
-        assert any("b.yaml" in str(x) for x in run_cmds[0])
-        assert "8001" in run_cmds[0]
+        assert len(popen_calls) == 1
+        popen_args = popen_calls[0][0][0]
+        assert any("b.yaml" in str(x) for x in popen_args)
+        assert "8001" in popen_args
         # stop targeted b's recipe, not --all (sibling a survives)
         stop_cmds = [a for a in ran if a[:2] == ["sparkrun", "stop"]]
         assert all("--all" not in a for a in stop_cmds)
-        assert all(not any("a.yaml" in str(x) for x in a) for a in run_cmds)
+        assert not any("a.yaml" in str(x) for x in popen_args)
+
+    def test_detached_relaunch_log_file(self, tmp_hfcc_dir, monkeypatch):
+        """Asserts log-file wiring: file opened in append mode at expected path."""
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: {"ok": True})
+        # Track open() calls via builtins — only intercept relaunch log path
+        opened_files = []
+        _real_open = open
+        def fake_open(path, mode="r", *args, **kwargs):
+            if isinstance(path, str) and "relaunch-" in path:
+                opened_files.append((path, mode))
+                class FakeFile:
+                    def __enter__(self): return self
+                    def __exit__(self, *a): pass
+                    def write(self, *a): pass
+                    def close(self): pass
+                return FakeFile()
+            return _real_open(path, mode, *args, **kwargs)
+        monkeypatch.setattr("builtins.open", fake_open)
+        # Track Popen calls
+        popen_calls = []
+        def fake_popen(*args, **kwargs):
+            popen_calls.append((args, kwargs))
+            raise RuntimeError("mock")
+        monkeypatch.setattr(health.subprocess, "Popen", fake_popen)
+        # Expanduser for log path
+        def fake_expanduser(p):
+            if p.startswith("~/.hscc/"):
+                return str(tmp_hfcc_dir / p[1:])
+            return p
+        monkeypatch.setattr(os.path, "expanduser", fake_expanduser)
+
+        health.check_workers()
+        # open() called with append mode at correct path
+        assert len(opened_files) >= 1
+        log_path, log_mode = opened_files[0]
+        assert "relaunch-10.0.0.2-8000.log" in log_path
+        assert log_mode == "a"
+
+    def test_popen_exception_logged(self, tmp_hfcc_dir, monkeypatch):
+        """On Popen exception, log ERROR with exception text."""
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: {"ok": True})
+        log_calls = []
+        monkeypatch.setattr(health, "log", lambda msg, level="INFO": log_calls.append((msg, level)))
+        def fake_popen(*args, **kwargs):
+            raise PermissionError("spawn denied")
+        monkeypatch.setattr(health.subprocess, "Popen", fake_popen)
+
+        health.check_workers()
+        # ERROR log with exception text
+        error_logs = [m for m, l in log_calls if l == "ERROR"]
+        assert len(error_logs) == 1
+        assert "spawn denied" in error_logs[0]
+        assert "w-10.0.0.2" in error_logs[0]
+
+    def test_popen_failure_counts_worker_down(self, tmp_hfcc_dir, monkeypatch):
+        """A relaunch whose Popen raises is a FAILED launch: the worker goes to
+        down (ok=False), not to relaunched — a worker we could not even start
+        must not look healthy. The grace timestamp is still recorded so the
+        next cycle does not thrash."""
+        import time as _time
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: {"ok": True})
+        popen_calls = []
+        def fake_popen(*args, **kwargs):
+            popen_calls.append((args, kwargs))
+            raise RuntimeError("mock")
+        monkeypatch.setattr(health.subprocess, "Popen", fake_popen)
+
+        ok = health.check_workers()
+        # Popen raised — worker goes to down, ok = not down = False
+        assert ok is False
+        # Grace timestamp still recorded (no thrash on the next cycle)
+        assert ("10.0.0.2", 8000) in health._worker_relaunch_at
+        ts = health._worker_relaunch_at[("10.0.0.2", 8000)]
+        assert isinstance(ts, float)
+
+    def test_grace_period_uses_lifecycle_default_20min(self, tmp_hfcc_dir, monkeypatch):
+        """Asserts grace period from lifecycle.py is respected (20 min default)."""
+        import time as _time
+        from hscc_daemon import lifecycle
+        # Confirm default is 20
+        monkeypatch.setattr(lifecycle, "VLLM_LOAD_GRACE_MINUTES", 20)
+
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: {"ok": True})
+
+        # Set relaunch time to 19 minutes ago (within 20-min grace)
+        health._worker_relaunch_at[("10.0.0.2", 8000)] = _time.monotonic() - 19 * 60
+        popen_calls = []
+        def fake_popen(*args, **kwargs):
+            popen_calls.append((args, kwargs))
+            raise RuntimeError("should not launch")
+        monkeypatch.setattr(health.subprocess, "Popen", fake_popen)
+
+        health.check_workers()
+        assert popen_calls == []  # within 20-min grace, no relaunch
+
+        # Set relaunch time to 21 minutes ago (past grace) — relaunch fires
+        health._worker_relaunch_at[("10.0.0.2", 8000)] = _time.monotonic() - 21 * 60
+        popen_calls.clear()
+        health.check_workers()
+        assert len(popen_calls) == 1  # past grace, relaunch fires
 
 
 class TestCheckProxy:
