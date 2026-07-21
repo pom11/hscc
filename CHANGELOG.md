@@ -8,8 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [1.0.0] — First stable release
 
 HSCC leaves beta: the fleet self-heals for real, the daemon sees everything
-it is supposed to see, and the operator surface covers the day-to-day
-worker lifecycle. 653 tests green across all six components.
+it is supposed to see, one `hscc` command exposes the whole system, and the
+operator surface covers the day-to-day worker lifecycle. All test suites green
+across the six components.
+
+### Added
+- **One unified `hscc` CLI** (`hscc_daemon/hscc.py`): the two separate CLIs
+  are merged. `hscc` now owns daemon control **and** cluster ops **and** the
+  cluster templates — `hscc template list|status|preview|validate|apply`,
+  `hscc cluster status|hosts|monitor|jobs|info|stop`, `hscc profiles`. Before,
+  the 11 cluster templates lived only in a separate `hscc-cluster` CLI that
+  was never installed on PATH, so they were invisible from a terminal. The
+  cluster engine stays in the `hscc-cluster` plugin (Hermes loads it as a
+  toolset); the merged CLI imports it directly as a library — no sub-process,
+  no argv rewriting. Rich grouped `--help` with a templates section and
+  worked examples, plus `hscc help <command>` and `hscc help advanced`. The
+  old `hscc-cluster` entry prints a deprecation note and still works.
 
 ### Fixed
 - **Bootstrap no longer poisons its own runtime dir**
