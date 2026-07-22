@@ -186,12 +186,15 @@ def _ensure_kanban_routing(cfg):
             k[key] = want
             changed.append(key)
     # WS4: auto_review pairing — only fill when absent (operator override kept).
-    if not isinstance(k.get("auto_review"), dict):
+    # If the key exists but is not a dict, preserve it (operator intent) and warn.
+    if "auto_review" not in k:
         k["auto_review"] = {
             "review_roles": [r.strip() for r in REVIEW_ROLES if r.strip()],
             "reviewer": REVIEWER_PROFILE,
         }
         changed.append("auto_review")
+    elif not isinstance(k.get("auto_review"), dict):
+        print(f"[WARN] HSCC could not wire kanban.auto_review: expected dict, got {type(k.get('auto_review')).__name__}", file=sys.stderr)
     # WS4: escalate after N consecutive rejects. Only FILL when absent/invalid —
     # a lower operator limit is deliberately STRICTER (escalates sooner), so it
     # must be preserved, not raised.
@@ -250,7 +253,9 @@ def _ensure_compaction(cfg):
                 if want and not (aux.get(key) or "").strip():
                     aux[key] = want
                     changed.append(f"aux.{key}")
-            if not isinstance(aux.get("timeout"), int) or aux.get("timeout", 0) > COMPACT_TIMEOUT:
+            # Only fill timeout when absent or non-int — a higher operator value
+            # is deliberate and preserved (no lowering above COMPACT_TIMEOUT).
+            if not isinstance(aux.get("timeout"), int):
                 aux["timeout"] = COMPACT_TIMEOUT
                 changed.append("aux.timeout")
     return changed
@@ -262,6 +267,10 @@ def _ensure_fallback(cfg):
     fallback_providers — an operator-defined chain is preserved.
     """
     cur = cfg.get("fallback_providers")
+    if cur is not None and not isinstance(cur, list):
+        # Key present but wrong shape — preserve operator value and warn.
+        print(f"[WARN] HSCC could not wire fallback_providers: expected list, got {type(cur).__name__}", file=sys.stderr)
+        return []
     if isinstance(cur, list) and cur:
         return []          # operator already has a chain — keep it
     cfg["fallback_providers"] = [{
@@ -321,7 +330,9 @@ def _ensure_bitwarden(cfg):
 
     changed = []
     # Enable BSM + set the project ID (the minimum required config).
-    if not bw.get("enabled"):
+    # Only set enabled=true when the key is ABSENT — an explicit false is an
+    # operator deliberate disable, never overridden.
+    if "enabled" not in bw:
         bw["enabled"] = True
         changed.append("enabled")
     if bw.get("project_id", "") != BITWARDEN_PROJECT_ID:
@@ -539,9 +550,14 @@ def _ensure_hooks(cfg):
         ("on_session_start", session_hook),
     ]:
         entries = hooks.get(hook_type)
-        if not isinstance(entries, list):
+        if entries is None:
+            # Key absent — create a fresh list and append cluster-guard.
             entries = []
-        hooks[hook_type] = entries
+            hooks[hook_type] = entries
+        elif not isinstance(entries, list):
+            # Key present but wrong shape — preserve operator value and warn.
+            print(f"[WARN] HSCC could not wire hooks.{hook_type}: expected list, got {type(entries).__name__}", file=sys.stderr)
+            continue
 
         # Check if cluster-guard is already wired for this hook type
         has_guard = any(
