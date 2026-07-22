@@ -184,6 +184,17 @@ WIRED=$("$PYBIN" "$BOOT_DIR/enable_plugins.py" 2>/dev/null) && ok "config wired 
 hdr "Install: agent instructions (SOUL + ops personality)"
 INSTR=$("$PYBIN" "$BOOT_DIR/install_soul.py" 2>/dev/null) && ok "$INSTR" || warn "SOUL/personality update reported issues"
 
+hdr "Install: strip worker Telegram credentials"
+# Comment out TELEGRAM_* vars in non-default role profiles so the multiplex
+# gateway does not log ~24 ERROR lines on each restart (0.19+). Non-fatal:
+# a failure here should warn, not die.
+if STRIP_JSON=$("$PYBIN" "$BOOT_DIR/strip_worker_telegram.py" 2>/dev/null); then
+  STRIP_N=$("$PYBIN" -c "import sys,json;print(json.loads(sys.argv[1])['scanned'])" _ "$STRIP_JSON" 2>/dev/null || echo 0)
+  ok "worker telegram creds stripped ($STRIP_N profiles)"
+else
+  warn "strip_worker_telegram failed (profiles may still hold seeded Telegram creds)"
+fi
+
 hdr "Install: daemon"
 if $SKIP_DAEMON; then warn "skipped"; else
   if [ "$(uname -s)" = "Darwin" ]; then
