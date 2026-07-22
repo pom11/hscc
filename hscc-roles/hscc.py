@@ -28,12 +28,19 @@ def _base_identity():
 def cmd_generate():
     base = _base_identity()
     out = []
+    failures = []
     for spec_file in rolelib.list_spec_files():
-        spec = rolelib.load_spec(spec_file)
-        changed = generator.generate_profile(spec, base)
-        out.append({"role": spec["name"], "changed": changed})
-    print({"generated": out})
-    return 0
+        try:
+            spec = rolelib.load_spec(spec_file)
+            changed = generator.generate_profile(spec, base)
+            out.append({"role": spec["name"], "changed": changed})
+        except Exception as e:
+            failures.append({"file": os.path.basename(spec_file), "error": str(e)})
+    result = {"generated": out}
+    if failures:
+        result["failures"] = failures
+    print(result)
+    return 1 if failures else 0
 
 
 def cmd_create(argv):
