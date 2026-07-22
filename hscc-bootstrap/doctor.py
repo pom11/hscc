@@ -178,7 +178,7 @@ def run_doctor_fix(config_path: Optional[str] = None,
         not c["ok"] and not c.get("fatal") for c in checks_result["checks"]
     )
 
-    if config_path and has_nonfatal_failures:
+    if config_path:
         # Capture pre-fix snapshot for drift reporting
         snapshot = {}
         try:
