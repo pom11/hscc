@@ -151,3 +151,21 @@ def test_model_tier_strong_still_has_compaction(tmp_path, monkeypatch):
     # Compaction auxiliary should still be present
     assert "auxiliary" in cfg
     assert "compression" in cfg["auxiliary"]
+
+
+def test_short_desc_identity_no_double_period():
+    """_short_desc_identity should not produce '..' when identity sentence already ends with '.'."""
+    spec = {"name": "reviewer", "identity": "You review code.\n", "preload_skills": []}
+    desc = generator._short_desc_identity(spec)
+    assert not desc.endswith(".."), f"got: {desc!r}"
+    assert desc == "You review code."
+
+
+def test_write_if_changed_handles_non_utf8(tmp_path):
+    """_write_if_changed should overwrite a non-UTF-8 file without raising."""
+    path = tmp_path / "test.txt"
+    path.write_bytes(b"\xff\xfe garbage binary \xff")
+    content = "valid utf-8 content"
+    changed = generator._write_if_changed(str(path), content)
+    assert changed is True
+    assert path.read_text() == content
