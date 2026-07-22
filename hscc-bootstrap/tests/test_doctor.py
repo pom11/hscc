@@ -291,6 +291,37 @@ class TestDoctorFixDriftDetected:
         assert "fixes_applied" in res
 
 
+    def test_fix_reconciles_even_when_healthy(self, tmp_path):
+        """Fix 1: doctor --fix reconciles even when all checks pass (HEALTHY system).
+
+        Previously, reconciliation was gated on has_nonfatal_failures, so a healthy
+        system never called enable() and config drift was never corrected.
+        """
+        config_path = tmp_path / "config.yaml"
+        # Config is missing HSCC wiring but all doctor checks pass
+        cfg = {
+            "plugins": {"enabled": []},
+            "toolsets": ["hermes-cli"],
+        }
+        with open(config_path, "w") as fh:
+            yaml.safe_dump(cfg, fh)
+
+        hermes_home = str(tmp_path)
+        os.makedirs(os.path.join(hermes_home, "hermes-agent"), exist_ok=True)
+
+        res = doctor.run_doctor_fix(
+            config_path=str(config_path),
+            hermes_home=hermes_home,
+            _cluster_runner=lambda: '[{"name":"x"}]',
+        )
+        # Even though all checks pass (healthy), fixes should still be applied
+        assert "fixes_applied" in res
+        assert len(res["fixes_applied"]) > 0  # config drift was reconciled
+        # Verify plugins were actually added
+        final_cfg = yaml.safe_load(open(config_path))
+        assert "hscc-cluster" in final_cfg["plugins"]["enabled"]
+
+
 class TestDoctorCLI:
     def test_main_json_output(self, tmp_path, monkeypatch):
         config_path = tmp_path / "config.yaml"
