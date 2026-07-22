@@ -9,8 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 HSCC leaves beta: the fleet self-heals for real, the daemon sees everything
 it is supposed to see, one `hscc` command exposes the whole system, and the
-operator surface covers the day-to-day worker lifecycle. All test suites green
+operator surface covers the day-to-day worker lifecycle. 735 tests green
 across the six components.
+
+### Hardened (pre-release correctness audit)
+A full-repo audit of all six components turned up ~26 real bugs (no live
+symptom under the current single-model-per-node layout, but exposed on the
+co-located templates, the operator commands, and any config/file corruption).
+All fixed:
+- **Daemon startup crash**: a valid-JSON-but-non-dict `cluster.json` (`[]`,
+  `null`) raised `AttributeError` in `resolve_cluster_config` at import,
+  killing the whole daemon; now guarded like `load_serving`.
+- **Relaunch grace window now survives restarts**: it was in-memory only, so
+  a daemon restart discarded it and immediately stop+relaunched a still-loading
+  worker (crash-loop). Persisted (wall-clock) to `~/.hscc/worker_relaunch.json`.
+- **Operator restart commands no longer over-kill or mis-port**: `restart_one`
+  used `sparkrun stop --all` (killing co-located siblings) and hardcoded port
+  8000; it now stops only the unit's recipe and uses the unit's real port.
+  Fixes `/heal`, `/orch-restart`, `/cluster-restart`, `/workers-up`.
+- **Template VRAM fit-check now actually runs**: the per-node free-VRAM
+  overflow guard never fired (resolve never probed), so co-located templates
+  could overcommit; preview/validate/apply now probe with graceful fallback.
+- **`doctor --fix` reconciles config unconditionally** (was gated on an infra
+  check also failing, so it never fixed drift on a healthy system).
+- **No more silent-success / masked-failure**: template `apply` reports failure
+  when provisioning warns; `reap_orphans` checks the stop result; template
+  stop-loop records failures instead of swallowing them; `hscc check watchdog`
+  reports degraded on a partial failure; a corrupt `gateway_state.json` fails
+  the gateway check instead of passing.
+- **Config-intent preserved**: `_ensure_bitwarden` no longer flips an explicit
+  `enabled: false`; compaction no longer lowers a higher operator timeout;
+  unexpected-shape hook/auto_review/fallback values are preserved with a warning
+  instead of being clobbered.
+- **Kanban auto-unblock** only promotes a blocked task when *every* referenced
+  dependency is `done` (exact `t_…` id match, not a substring).
+- **Discovery / node matching**: probes the node's actual served ports (not just
+  8000); node-IP matching is exact (`10.0.0.1` no longer matches `10.0.0.10`).
+- **Role regen resilience**: one bad spec no longer aborts the whole batch;
+  `model_tier: null` defaults to `fast`; a non-UTF-8 profile is overwritten
+  rather than crashing.
 
 ### Added
 - **One unified `hscc` CLI** (`hscc_daemon/hscc.py`): the two separate CLIs
