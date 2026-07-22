@@ -17,6 +17,7 @@ plain ``hermes update`` and this step becomes a no-op.
 
 import json
 import os
+import re
 import subprocess
 
 
@@ -26,6 +27,9 @@ FEATURE_BRANCH = os.environ.get(
     "HSCC_REVIEW_FEATURE_BRANCH", "feat/kanban-submit-review")
 # The tool name whose presence means the feature is already installed.
 _MARKER = "kanban_submit_review"
+
+# A safe git ref token: alnum start, no leading '-' (blocks option smuggling).
+_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 
 
 def _git(args, cwd, timeout=60):
@@ -56,11 +60,18 @@ def ensure_review_feature(hermes_dir=None, remote=None, branch=None):
 
     Returns a dict: {status, ok, [detail]}. status is one of:
       already_present | applied | not_git | dirty | fetch_failed |
-      conflict | missing_ref | skipped_missing
+      conflict | missing_ref | skipped_missing | invalid_config
     """
     hermes_dir = hermes_dir or HERMES_DIR
     remote = remote or FORK_REMOTE
     branch = branch or FEATURE_BRANCH
+
+    # ``remote``/``branch`` are env-overridable and flow into git argv. Reject
+    # anything that isn't a plain ref token (in particular a leading ``-``) so a
+    # value can't smuggle a git option (e.g. ``--upload-pack=…``).
+    if not (_REF_RE.fullmatch(remote) and _REF_RE.fullmatch(branch)):
+        return {"status": "invalid_config", "ok": False,
+                "detail": "remote/branch must match a plain ref token"}
 
     if not os.path.isdir(hermes_dir):
         return {"status": "skipped_missing", "ok": True}
