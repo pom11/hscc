@@ -690,3 +690,117 @@ class TestEnableIntegratesMultiplex:
         assert "gateway.multiplex_profiles" in result["multiplex"]
         assert cfg["multiplex_profiles"] is True
         assert cfg["gateway"]["multiplex_profiles"] is True
+
+
+# ── Fix 2: _ensure_bitwarden preserves explicit false ──────────────────────
+
+def test_bitwarden_preserves_explicit_false(tmp_path, monkeypatch):
+    """Fix 2: when operator explicitly set bitwarden.enabled: false,
+    enable_plugins does NOT flip it to true even with BITWARDEN_PROJECT_ID set."""
+    monkeypatch.setattr(enable_plugins, "BITWARDEN_PROJECT_ID", "abc-123")
+    cfg = {"bitwarden": {"enabled": False}}
+    path = _write(tmp_path / "config.yaml", cfg)
+    res = enable_plugins.enable(path)
+    out = yaml.safe_load(open(path))
+    # enabled stays false (operator deliberate disable)
+    assert out["bitwarden"]["enabled"] is False
+    # Only project_id changes (it was absent)
+    assert "enabled" not in res["bitwarden"]
+
+
+# ── Fix 3: _ensure_compaction preserves operator timeout above default ─────
+
+def test_compaction_timeout_preserved_when_operator_sets_higher(tmp_path, monkeypatch):
+    """Fix 3: when operator set aux.timeout=120 (> default 90), it is NOT lowered to 90."""
+    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://10.0.0.1:8000/v1")
+    monkeypatch.setattr(enable_plugins, "COMPACT_MODEL", "orch-model")
+    monkeypatch.setattr(enable_plugins, "COMPACT_KEY", "sk-test")
+    cfg = {
+        "plugins": {"enabled": ["hscc-cluster", "hscc-commands", "sparkrun-hermes"]},
+        "toolsets": ["hermes-cli", "hscc-cluster", "sparkrun", "delegation"],
+        "kanban": {"default_assignee": "worker", "max_in_progress": 30,
+                   "max_in_progress_per_profile": 10,
+                   "auto_review": {"review_roles": ["worker"], "reviewer": "reviewer"},
+                   "failure_limit": 3},
+        "delegation": {"base_url": "http://localhost:4000/v1",
+                       "model": "Qwen/Qwen3.6-27B-FP8", "provider": "custom",
+                       "api_key": "sk-sparkrun", "max_concurrent_children": 9},
+        "compression": {"threshold": 0.8},
+        "auxiliary": {"compression": {
+            "base_url": "http://10.0.0.1:8000/v1",
+            "model": "orch-model",
+            "provider": "custom",
+            "api_key": "sk-test",
+            "timeout": 120,  # operator set higher than default 90
+        }},
+        "fallback_providers": [{"provider": "custom", "model": "Qwen/Qwen3.6-27B-FP8",
+                                "base_url": "http://localhost:4000/v1", "api_key": "sk-sparkrun"}],
+        "prompt_caching": {"cache_ttl": "1hr"},
+        "dashboard": {"public_url": "http://10.0.0.245:3000"},
+        "hooks": {},
+        "multiplex_profiles": True,
+        "gateway": {"multiplex_profiles": True},
+    }
+    path = _write(tmp_path / "config.yaml", cfg)
+    res = enable_plugins.enable(path)
+    out = yaml.safe_load(open(path))
+    # timeout should NOT be lowered from 120 to 90
+    assert out["auxiliary"]["compression"]["timeout"] == 120
+    assert "aux.timeout" not in res["compaction"]
+
+
+def test_compaction_timeout_filled_when_absent(tmp_path, monkeypatch):
+    """timeout absent → filled with COMPACT_TIMEOUT."""
+    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://10.0.0.1:8000/v1")
+    monkeypatch.setattr(enable_plugins, "COMPACT_MODEL", "orch-model")
+    monkeypatch.setattr(enable_plugins, "COMPACT_KEY", "sk-test")
+    cfg = {"auxiliary": {"compression": {}}}
+    path = _write(tmp_path / "config.yaml", cfg)
+    res = enable_plugins.enable(path)
+    out = yaml.safe_load(open(path))
+    assert out["auxiliary"]["compression"]["timeout"] == enable_plugins.COMPACT_TIMEOUT
+    assert "aux.timeout" in res["compaction"]
+
+
+def test_compaction_timeout_filled_when_non_int(tmp_path, monkeypatch):
+    """timeout is a string → filled with COMPACT_TIMEOUT."""
+    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "http://10.0.0.1:8000/v1")
+    monkeypatch.setattr(enable_plugins, "COMPACT_MODEL", "orch-model")
+    monkeypatch.setattr(enable_plugins, "COMPACT_KEY", "sk-test")
+    cfg = {"auxiliary": {"compression": {"timeout": "fast"}}}
+    path = _write(tmp_path / "config.yaml", cfg)
+    res = enable_plugins.enable(path)
+    out = yaml.safe_load(open(path))
+    assert out["auxiliary"]["compression"]["timeout"] == enable_plugins.COMPACT_TIMEOUT
+
+
+# ── Fix 4: _ensure_hooks/_ensure_kanban_routing/_ensure_fallback preserve wrong-shape values ──
+
+def test_ensure_hooks_preserves_non_list_value(tmp_path, monkeypatch):
+    """Fix 4: when hooks.pre_tool_call is a string (non-list), preserve it and don't crash."""
+    cfg = {"hooks": {"pre_tool_call": "some-string"}}
+    path = _write(tmp_path / "config.yaml", cfg)
+    enable_plugins.enable(path)
+    out = yaml.safe_load(open(path))
+    # The string value is preserved, not replaced with []
+    assert out["hooks"]["pre_tool_call"] == "some-string"
+
+
+def test_ensure_kanban_routing_preserves_non_dict_auto_review(tmp_path):
+    """Fix 4: when kanban.auto_review is a string (non-dict), preserve it."""
+    cfg = _fully_wired_cfg()
+    cfg["kanban"]["auto_review"] = "legacy-string"
+    path = _write(tmp_path / "config.yaml", cfg)
+    enable_plugins.enable(path)
+    out = yaml.safe_load(open(path))
+    assert out["kanban"]["auto_review"] == "legacy-string"
+
+
+def test_ensure_fallback_preserves_non_list_value(tmp_path):
+    """Fix 4: when fallback_providers is a string (non-list), preserve it."""
+    cfg = {"fallback_providers": "some-string"}
+    path = _write(tmp_path / "config.yaml", cfg)
+    res = enable_plugins.enable(path)
+    out = yaml.safe_load(open(path))
+    assert out["fallback_providers"] == "some-string"
+    assert res["fallback"] == []
