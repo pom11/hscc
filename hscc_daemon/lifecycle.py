@@ -360,4 +360,4 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
             "message": "Degraded — gateway not reachable",
         })
 
-    return not (not dgx_ok and not gw_ok)
+    return dgx_ok and gw_ok
