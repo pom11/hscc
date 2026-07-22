@@ -232,6 +232,8 @@ def resolve_cluster_config():
     try:
         with open(CLUSTER_JSON) as f:
             config = json.load(f)
+        if not isinstance(config, dict):
+            raise ValueError("cluster.json is not a JSON object")
         gateway = config.get("gateway", {})
         workers = config.get("workers", [])
         nas_devices = config.get("nasDevices", [])
@@ -253,7 +255,7 @@ def resolve_cluster_config():
 
     except FileNotFoundError:
         pass
-    except (json.JSONDecodeError, KeyError) as e:
+    except (json.JSONDecodeError, KeyError, TypeError, AttributeError, ValueError) as e:
         _serving_warn(f"cluster.json present but unparseable ({e}) — trying "
                       f"sparkrun fallback")
 
