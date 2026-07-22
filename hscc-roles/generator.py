@@ -141,16 +141,20 @@ def _short_desc(spec):
 def _short_desc_identity(spec):
     """Fallback: first sentence of the role identity (legacy)."""
     text = " ".join(spec["identity"].split())
-    first = text.split(". ")[0].strip()
+    first = text.split(". ")[0].rstrip(".").strip()
     return (first[:200] + ".") if first else f"The {spec['name']} role."
 
 
 def _write_if_changed(path, content):
     """Write content only if it differs from what's on disk. Returns changed?"""
     if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            if f.read() == content:
-                return False
+        try:
+            with open(path, encoding="utf-8") as f:
+                if f.read() == content:
+                    return False
+        except (UnicodeDecodeError, OSError):
+            # Existing file is not valid UTF-8 or unreadable — treat as different.
+            pass
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
