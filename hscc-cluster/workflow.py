@@ -328,6 +328,10 @@ def _try_auto_unblock(child_task_id, parent_task_id):
             body = str(comment.get("body", "")) if isinstance(comment, dict) else str(comment)
             all_dep_ids.update(re.findall(r"t_[0-9a-f]{6,}", body))
 
+        # A comment may mention the child's own id (resume/claim notes); it is
+        # not a dependency and is never "done" while blocked — exclude it.
+        all_dep_ids.discard(child_task_id)
+
         if not all_dep_ids or parent_task_id not in all_dep_ids:
             return False
 
