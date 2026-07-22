@@ -301,6 +301,7 @@ def _try_auto_unblock(child_task_id, parent_task_id):
     Returns True if the child was auto-unblocked, False otherwise.
     """
     try:
+        import re
         from hermes_cli import kanban_db as _kb
         c = _kb.connect()
         child_row = _kb.get_task(c, child_task_id)
@@ -321,17 +322,32 @@ def _try_auto_unblock(child_task_id, parent_task_id):
             # Some versions may not have get_comments — skip auto-unblock.
             return False
 
+        # Extract all task IDs from comment bodies using exact pattern.
+        all_dep_ids = set()
         for comment in comments:
             body = str(comment.get("body", "")) if isinstance(comment, dict) else str(comment)
-            if parent_task_id and parent_task_id in body:
-                # Auto-unblock: set status to ready, clear claim_lock.
-                _kb.update_task(c, child_task_id, {"status": "ready"})
-                try:
-                    _kb.clear_lock(c, child_task_id)
-                except Exception:
-                    pass
-                return True
-        return False
+            all_dep_ids.update(re.findall(r"t_[0-9a-f]{6,}", body))
+
+        # A comment may mention the child's own id (resume/claim notes); it is
+        # not a dependency and is never "done" while blocked — exclude it.
+        all_dep_ids.discard(child_task_id)
+
+        if not all_dep_ids or parent_task_id not in all_dep_ids:
+            return False
+
+        # Only unblock when EVERY referenced dependency is done.
+        for dep_id in all_dep_ids:
+            dep_row = _kb.get_task(c, dep_id)
+            if not dep_row or (dep_row.get("status") or "").lower() != "done":
+                return False
+
+        # All deps are done — auto-unblock.
+        _kb.update_task(c, child_task_id, {"status": "ready"})
+        try:
+            _kb.clear_lock(c, child_task_id)
+        except Exception:
+            pass
+        return True
     except Exception:
         return False
 
