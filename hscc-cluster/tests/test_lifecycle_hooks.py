@@ -162,6 +162,118 @@ class TestAutoUnblock:
         result = wf._try_auto_unblock(child_tid, "nonexistent-parent")
         assert result is False
 
+    def test_two_deps_only_one_done_not_unblocked(self, monkeypatch, tmp_path):
+        """(a) Two deps referenced, only one done -> NOT unblocked."""
+        import workflow as wf
+
+        conn = _board()
+        parent_a = kb.create_task(conn, title="parent_a", assignee="coder")
+        parent_b = kb.create_task(conn, title="parent_b", assignee="coder")
+        child_tid = kb.create_task(conn, title="child", assignee="coder")
+
+        # Mark parent_a as done, parent_b stays pending.
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (parent_a,))
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (child_tid,))
+        conn.execute(
+            "INSERT INTO task_comments (task_id, author, body) VALUES (?, ?, ?)",
+            (child_tid, "test",
+             f"blocked on {parent_a} and {parent_b}"))
+        conn.commit()
+
+        monkeypatch.setattr("hermes_cli.kanban_db.connect",
+                            lambda *a, **kw: conn)
+
+        result = wf._try_auto_unblock(child_tid, parent_a)
+        assert result is False
+
+        # Child should still be blocked.
+        child_row = kb.get_task(conn, child_tid)
+        assert child_row["status"] == "blocked"
+
+    def test_two_deps_both_done_unblocked(self, monkeypatch, tmp_path):
+        """(b) Two deps referenced, both done -> unblocked."""
+        import workflow as wf
+
+        conn = _board()
+        parent_a = kb.create_task(conn, title="parent_a", assignee="coder")
+        parent_b = kb.create_task(conn, title="parent_b", assignee="coder")
+        child_tid = kb.create_task(conn, title="child", assignee="coder")
+
+        # Both parents done.
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (parent_a,))
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (parent_b,))
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (child_tid,))
+        conn.execute(
+            "INSERT INTO task_comments (task_id, author, body) VALUES (?, ?, ?)",
+            (child_tid, "test",
+             f"blocked on {parent_a} and {parent_b}"))
+        conn.commit()
+
+        monkeypatch.setattr("hermes_cli.kanban_db.connect",
+                            lambda *a, **kw: conn)
+
+        result = wf._try_auto_unblock(child_tid, parent_a)
+        assert result is True
+
+        child_row = kb.get_task(conn, child_tid)
+        assert child_row["status"] == "ready"
+
+    def test_substring_lookalike_does_not_trigger(self, monkeypatch, tmp_path):
+        """(c) A task id that looks like a substring of another does not
+        falsely match (e.g., t_aaaa inside t_aaaaaa)."""
+        import workflow as wf
+
+        conn = _board()
+        real_parent = kb.create_task(conn, title="real_parent", assignee="coder")
+        child_tid = kb.create_task(conn, title="child", assignee="coder")
+
+        # Mark the real parent as done.
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (real_parent,))
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (child_tid,))
+
+        # Comment mentions a task id that shares a prefix but is NOT the
+        # real parent.
+        fake_id = "t_aaaaaa111111"
+        conn.execute(
+            "INSERT INTO task_comments (task_id, author, body) VALUES (?, ?, ?)",
+            (child_tid, "test", f"blocked on {fake_id}"))
+        conn.commit()
+
+        monkeypatch.setattr("hermes_cli.kanban_db.connect",
+                            lambda *a, **kw: conn)
+
+        # Calling with the real parent id should NOT unblock because
+        # the comment references the fake id, not the real parent.
+        result = wf._try_auto_unblock(child_tid, real_parent)
+        assert result is False
+
+        child_row = kb.get_task(conn, child_tid)
+        assert child_row["status"] == "blocked"
+
+    def test_single_dep_done_unblocked(self, monkeypatch, tmp_path):
+        """(d) Single dependency, now done -> unblocked (preserves happy path)."""
+        import workflow as wf
+
+        conn = _board()
+        parent_tid = kb.create_task(conn, title="parent", assignee="coder")
+        child_tid = kb.create_task(conn, title="child", assignee="coder")
+
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (parent_tid,))
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (child_tid,))
+        conn.execute(
+            "INSERT INTO task_comments (task_id, author, body) VALUES (?, ?, ?)",
+            (child_tid, "test", f"blocked because of {parent_tid}"))
+        conn.commit()
+
+        monkeypatch.setattr("hermes_cli.kanban_db.connect",
+                            lambda *a, **kw: conn)
+
+        result = wf._try_auto_unblock(child_tid, parent_tid)
+        assert result is True
+
+        child_row = kb.get_task(conn, child_tid)
+        assert child_row["status"] == "ready"
+
 
 # ── profile_name wiring tests (from feat-multiplexing-observability) ────────
 # These do NOT require hermes_cli installed — they use unittest.mock.
