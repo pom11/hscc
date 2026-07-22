@@ -155,7 +155,8 @@ def atomic_yaml_update(path: Path, update_fn, backup: bool = True):
     old_text = ""
     if path.exists():
         try:
-            old_text = open(path).read()
+            with open(path) as f:
+                old_text = f.read()
             old_data = yaml.safe_load(old_text) or {}
         except Exception:
             pass
@@ -364,14 +365,18 @@ def _provision_models(plan: Any, cluster: str = "hscc",
         return result
 
     # Stop sparkrun containers on nodes the plan does not use.
-    try:
-        for node in _running_nodes_via_sparkrun():
-            if node and node not in plan_nodes:
+    stop_failures: list[str] = []
+    for node in _running_nodes_via_sparkrun():
+        if node and node not in plan_nodes:
+            try:
                 subprocess.run(["sparkrun", "stop", "--all", "--hosts", node],
                                capture_output=True, timeout=60)
                 result["stopped"].append(node)
-    except Exception:
-        pass  # best-effort
+            except Exception as e:
+                stop_failures.append(f"{node}: {e}")
+    if stop_failures:
+        result["stop_failures"] = stop_failures
+        result.setdefault("note", "")
 
     # Launch each wanted (node, port, recipe). --ensure: skip if already up.
     for node, port, recipe in want:
@@ -426,12 +431,17 @@ def _ti():
     return m
 
 
-def _discover():
+def _discover(probe: bool = False):
     try:
         from . import discovery as m
     except ImportError:
         import discovery as m
-    return m.discover()
+    try:
+        return m.discover(probe=probe)
+    except Exception:
+        # Probe is live-cluster + ssh; on failure fall back to probe=False
+        # (free stays None, overflow check skipped, as before).
+        return m.discover()
 
 
 def _find_template_file(template_name: str):
@@ -465,10 +475,10 @@ def _load_intent(template_name: str):
     return _ti().ClusterTemplate.from_dict(data)
 
 
-def _resolve(template_name: str, topology=None):
+def _resolve(template_name: str, *, topology=None, probe: bool = False):
     """Load + resolve a template against the live cluster → ResolvedPlan."""
     tpl = _load_intent(template_name)
-    topo = topology if topology is not None else _discover()
+    topo = topology if topology is not None else _discover(probe=probe)
     return _ti().resolve(tpl, topo)
 
 
@@ -500,7 +510,7 @@ def preview_template(template_name: str) -> dict:
     Resolves the intent template against the LIVE cluster so the preview shows
     the concrete nodes/ports that would be used.
     """
-    resolved = _resolve(template_name)
+    resolved = _resolve(template_name, probe=True)
     tpl = _load_intent(template_name)
 
     new_serving = _ti().to_serving_json(resolved)
@@ -578,7 +588,7 @@ def apply_template(template_name: str, confirm: bool = False) -> dict:
     # (no workers, overcommit, …) is a hard, pre-write failure.
     try:
         tpl = _load_intent(template_name)
-        plan = _resolve(template_name)
+        plan = _resolve(template_name, probe=True)
     except _ti().TemplateIntentError as e:
         return {"status": "blocked", "success": False,
                 "note": "Template is NOT deployable.", "errors": [str(e)]}
@@ -677,7 +687,16 @@ def apply_template(template_name: str, confirm: bool = False) -> dict:
                 "status": "skipped",
                 "note": "config.yaml unchanged — gateway restart not needed",
             })
-        
+
+        # After provision + gateway-restart, check that no step ended in a
+        # non-OK state — warn/error means the cluster was only partially
+        # brought up, so apply is not a success.
+        for step in result["steps"]:
+            status = step.get("status", "")
+            if status in ("warn", "error", "fail"):
+                result["success"] = False
+                break
+
     except Exception as e:
         result["success"] = False
         result["error"] = str(e)
@@ -723,7 +742,7 @@ def validate_template(template_name: str) -> dict:
     """Standalone preflight: is this template deployable against the live cluster?
     No writes. Resolves intent → plan, then validates the plan."""
     try:
-        plan = _resolve(template_name)
+        plan = _resolve(template_name, probe=True)
     except FileNotFoundError as e:
         return {"template": template_name, "ok": False, "errors": [str(e)]}
     except _ti().TemplateIntentError as e:

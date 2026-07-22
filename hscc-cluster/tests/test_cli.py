@@ -31,7 +31,7 @@ def stub_cluster(monkeypatch):
     """Stub discovery + recipe cost + recipe-exists so CLI preview/apply/validate
     resolve against a fake cluster without live sparkrun or real recipe files."""
     monkeypatch.setattr(cluster_template, "_discover",
-                        lambda: _T(_N("10.0.0.1"), [_N("10.0.0.2"), _N("10.0.0.3")]))
+                        lambda probe=False: _T(_N("10.0.0.1"), [_N("10.0.0.2"), _N("10.0.0.3")]))
     monkeypatch.setattr(ti._rc, "recipe_cost",
                         lambda r: rc.RecipeCost(r, per_gpu_total_gb=30, fits=True))
     monkeypatch.setattr(cluster_template.Path, "is_file", lambda self: True)
@@ -157,6 +157,27 @@ class TestStatusAndValidateCommands:
     def test_validate_missing_name(self):
         result = cmd_cluster_template(["validate"])
         assert "error" in result
+
+# ── Fix 4: CLI argv passes sys.argv[1:] ──────────────────────────────────────
+
+class TestCLIArgvNoScriptName:
+    """Fix 4: __main__ passes sys.argv[1:] (not sys.argv) to cmd_cluster_template,
+    so the script name is NOT passed as args[0] (which caused 'Unknown subcommand:
+    cluster_template_cli.py')."""
+
+    def test_argv_without_script_name(self):
+        """When called with ['list'], the subcommand is 'list' not 'cluster_template_cli.py'."""
+        # Simulate the __main__ path: subprocess calls this with [script, 'list']
+        import subprocess
+        result = subprocess.run(
+            ["python", "hscc-cluster/cluster_template_cli.py", "list"],
+            capture_output=True, text=True, cwd="/Users/desac/dev/hscc",
+            timeout=30,
+        )
+        data = __import__("json").loads(result.stdout)
+        assert "error" not in data, f"Got error: {data.get('error')}"
+        assert "count" in data and data["count"] >= 2
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

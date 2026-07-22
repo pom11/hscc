@@ -74,5 +74,5 @@ def cmd_cluster_template(args):
 
 
 if __name__ == "__main__":
-    result = cmd_cluster_template(sys.argv)
+    result = cmd_cluster_template(sys.argv[1:])
     print(json.dumps(result, indent=2, default=str))
