@@ -216,10 +216,11 @@ def restart_one(unit):
     if not node or not recipe:
         return {"unit": label, "ok": False, "error": "missing node or recipe"}
     recipe = os.path.expanduser(recipe)
-    _run([SPARKRUN, "stop", "--all", "--hosts", node], timeout=60)
+    port = unit.get("port") or PORT
+    _run([SPARKRUN, "stop", recipe, "--hosts", node], timeout=60)
     ok, _out, err = _run(
         [SPARKRUN, "run", recipe, "--cluster", CLUSTER, "--hosts", node,
-         "--port", str(PORT), "--no-follow", "--ensure"],
+         "--port", str(port), "--no-follow", "--ensure"],
         timeout=RUN_TIMEOUT,
     )
     return {"unit": label, "node": node, "ok": ok,

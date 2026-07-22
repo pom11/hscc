@@ -252,6 +252,56 @@ def test_restart_one_calls_stop_then_run(monkeypatch):
     assert calls[1][:2] == [cmdlib.SPARKRUN, "run"]
 
 
+def test_restart_one_stops_only_target_recipe(monkeypatch):
+    """restart_one must stop the unit's recipe, not --all (which kills siblings)."""
+    calls = []
+
+    def fake_run(args, timeout=0):
+        calls.append(args)
+        return True, "", ""
+    monkeypatch.setattr(cmdlib, "_run", fake_run)
+    unit = {"id": "w1", "role": "worker", "recipe": "~/r/27b.yaml",
+            "nodes": ["10.0.0.2"], "port": 8001}
+    cmdlib.restart_one(unit)
+    stop_call = calls[0]
+    assert "--all" not in stop_call, "must not use --all"
+    assert "~/r/27b.yaml" in stop_call or "/Users" in stop_call[2]  # recipe is the target
+    assert stop_call[1] == "stop"
+    assert stop_call[2] != "--all"
+
+
+def test_restart_one_uses_unit_port(monkeypatch):
+    """restart_one must use the unit's real port, not the default PORT=8000."""
+    calls = []
+
+    def fake_run(args, timeout=0):
+        calls.append(args)
+        return True, "", ""
+    monkeypatch.setattr(cmdlib, "_run", fake_run)
+    unit = {"id": "w1", "role": "worker", "recipe": "~/r/27b.yaml",
+            "nodes": ["10.0.0.2"], "port": 8001}
+    cmdlib.restart_one(unit)
+    run_call = calls[1]
+    port_idx = run_call.index("--port")
+    assert run_call[port_idx + 1] == "8001"
+
+
+def test_restart_one_falls_back_to_default_port(monkeypatch):
+    """When unit has no port key, restart_one defaults to PORT=8000."""
+    calls = []
+
+    def fake_run(args, timeout=0):
+        calls.append(args)
+        return True, "", ""
+    monkeypatch.setattr(cmdlib, "_run", fake_run)
+    unit = {"id": "w1", "role": "worker", "recipe": "~/r/27b.yaml",
+            "nodes": ["10.0.0.2"]}  # no port
+    cmdlib.restart_one(unit)
+    run_call = calls[1]
+    port_idx = run_call.index("--port")
+    assert run_call[port_idx + 1] == "8000"
+
+
 # ── registration + topology-free ──────────────────────────────────────────────
 
 def test_register_exposes_all_commands():
