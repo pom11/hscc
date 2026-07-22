@@ -63,7 +63,8 @@ def load_spec(path):
     if not isinstance(skills, list):
         raise ValueError(f"{path}: preload_skills must be a list")
 
-    model_tier = str(data.get("model_tier", "fast")).strip().lower()
+    model_tier = (data.get("model_tier") or "fast")
+    model_tier = str(model_tier).strip().lower()
     if model_tier not in VALID_MODEL_TIERS:
         raise ValueError(
             f"{path}: model_tier must be one of {VALID_MODEL_TIERS}, got '{model_tier}'"
