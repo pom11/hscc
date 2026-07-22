@@ -108,3 +108,15 @@ def test_fetch_failure_reports(tmp_path, monkeypatch):
     monkeypatch.setattr(erf, "_git", fake_git)
     res = erf.ensure_review_feature(hermes_dir=str(hermes))
     assert res["status"] == "fetch_failed" and res["ok"] is False
+
+
+def test_option_smuggling_remote_rejected(tmp_path, monkeypatch):
+    """An env-injected remote/branch starting with '-' is refused before any git call."""
+    hermes = _make_runtime(tmp_path, marker=False)
+    called = []
+    monkeypatch.setattr(erf, "_git", lambda *a, **k: called.append(a) or (True, "", ""))
+    res = erf.ensure_review_feature(hermes_dir=str(hermes), remote="--upload-pack=evil")
+    assert res["status"] == "invalid_config" and res["ok"] is False
+    res2 = erf.ensure_review_feature(hermes_dir=str(hermes), branch="-x;rm")
+    assert res2["status"] == "invalid_config" and res2["ok"] is False
+    assert called == []  # never reached git

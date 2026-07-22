@@ -189,7 +189,7 @@ hdr "Install: strip worker Telegram credentials"
 # gateway does not log ~24 ERROR lines on each restart (0.19+). Non-fatal:
 # a failure here should warn, not die.
 if STRIP_JSON=$("$PYBIN" "$BOOT_DIR/strip_worker_telegram.py" 2>/dev/null); then
-  STRIP_N=$("$PYBIN" -c "import sys,json;print(json.loads(sys.argv[1])['scanned'])" _ "$STRIP_JSON" 2>/dev/null || echo 0)
+  STRIP_N=$("$PYBIN" -c "import sys,json;print(json.loads(sys.argv[2])['scanned'])" _ "$STRIP_JSON" 2>/dev/null || echo 0)
   ok "worker telegram creds stripped ($STRIP_N profiles)"
 else
   warn "strip_worker_telegram failed (profiles may still hold seeded Telegram creds)"
@@ -200,7 +200,7 @@ hdr "Install: ensure kanban review feature in Hermes runtime"
 # if a hermes update dropped it. Idempotent + safe (refuses a dirty repo, aborts
 # on conflict). No-op once the PR merges upstream. Non-fatal: warn, not die.
 if REVIEW_JSON=$("$PYBIN" "$BOOT_DIR/ensure_review_feature.py" 2>/dev/null); then
-  REVIEW_STATUS=$("$PYBIN" -c "import sys,json;print(json.loads(sys.argv[1])['status'])" _ "$REVIEW_JSON" 2>/dev/null || echo unknown)
+  REVIEW_STATUS=$("$PYBIN" -c "import sys,json;print(json.loads(sys.argv[2])['status'])" _ "$REVIEW_JSON" 2>/dev/null || echo unknown)
   case "$REVIEW_STATUS" in
     already_present|applied|skipped_missing) ok "kanban review feature: $REVIEW_STATUS" ;;
     *) warn "kanban review feature not ensured ($REVIEW_STATUS) — auto_review may be inactive; see PR #43425" ;;
