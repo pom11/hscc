@@ -158,13 +158,20 @@ def _check_multiplex_profiles():
     try:
         with open(_HERMES_GATEWAY_STATE) as f:
             gw_state = json.load(f)
-    except (FileNotFoundError, OSError):
+    except FileNotFoundError:
         # Missing gateway_state.json when multiplex is enabled is fatal.
         return {"ok": False,
                 "message": "multiplex enabled but gateway_state.json is missing — no profiles served"}
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {"ok": False,
+                "message": "multiplex enabled but gateway_state.json is corrupt — cannot parse profiles"}
     except Exception:
-        return {"ok": True,
-                "message": "multiplex check skipped: gateway_state.json parse error"}
+        return {"ok": False,
+                "message": "multiplex enabled but gateway_state.json is corrupt — unexpected parse error"}
+
+    if not isinstance(gw_state, dict):
+        return {"ok": False,
+                "message": "multiplex enabled but gateway_state.json is corrupt — expected JSON object"}
 
     served = set(gw_state.get("served_profiles") or [])
     if not served and multiplex:
@@ -500,12 +507,45 @@ def check_idle_monitor():
         return False
 
 
-# In-memory relaunch timestamps per worker UNIT (node, port), so a unit that is
+# Persisted relaunch timestamps per worker UNIT (node, port), so a unit that is
 # mid-load (vLLM takes minutes) is not relaunched again before its grace window
 # elapses. Keyed by (node, port) so co-located models on a node are tracked
-# independently (G1 — multi-model-per-node supervision). Stores time.monotonic()
-# values — reset at module import.
+# independently (G1 — multi-model-per-node supervision). Stores WALL-CLOCK time
+# (time.time()) so the grace window survives daemon restarts. Persisted to
+# ~/.hscc/worker_relaunch.json (best-effort — missing/corrupt file treated as empty).
+_WORKER_RELATCH_FILE = os.path.expanduser("~/.hscc/worker_relaunch.json")
 _worker_relaunch_at = {}
+
+
+def _load_worker_relaunch_timestamps():
+    """Load persisted worker relaunch timestamps from disk (best-effort)."""
+    try:
+        with open(_WORKER_RELATCH_FILE) as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            # Keys are "(node, port)" strings; values are wall-clock floats.
+            for key_str, ts in data.items():
+                try:
+                    parts = key_str.strip("()").split(",")
+                    key = (parts[0], int(parts[1]))
+                    if isinstance(ts, (int, float)):
+                        _worker_relaunch_at[key] = float(ts)
+                except (ValueError, IndexError):
+                    pass
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+
+
+def _save_worker_relaunch_timestamps():
+    """Persist worker relaunch timestamps to disk (best-effort)."""
+    try:
+        serializable = {f"({k[0]},{k[1]})": v for k, v in _worker_relaunch_at.items()}
+        tmp = _WORKER_RELATCH_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(serializable, f)
+        os.replace(tmp, _WORKER_RELATCH_FILE)
+    except OSError:
+        pass
 
 
 def check_workers():
@@ -535,8 +575,11 @@ def check_workers():
                                 "last_check": now_iso()})
         return True
 
+    # Load persisted grace timestamps on each check (survives restarts)
+    _load_worker_relaunch_timestamps()
+
     online, relaunched, down = [], [], []
-    now_mono = time.monotonic()
+    now_wall = time.time()
     grace_secs = VLLM_LOAD_GRACE_MINUTES * 60
     for u in units:
         node, port, recipe = u["node"], u["port"], u["recipe"]
@@ -549,7 +592,7 @@ def check_workers():
             continue
         # Down. Respect the grace window after a relaunch (mid-load == not dead).
         last = _worker_relaunch_at.get(key)
-        if last and now_mono - last < grace_secs:
+        if last and now_wall - last < grace_secs:
             down.append(label)  # still within load grace — leave it
             continue
         if not recipe:
@@ -559,10 +602,13 @@ def check_workers():
         log(f"Worker {label} down — relaunching ({recipe}) on :{port}")
         # Stop only THIS recipe on the node (not --all) so a co-located sibling
         # on another port survives.
-        run_cmd(["sparkrun", "stop", recipe, "--hosts", node], timeout=60)
+        stop_result = run_cmd(["sparkrun", "stop", recipe, "--hosts", node], timeout=60)
+        if not stop_result.get("ok"):
+            log(f"sparkrun stop for {label} failed: {stop_result.get('output', '')}", "WARN")
         # Record relaunch time before launching so we do not thrash even if
         # Popen itself raises.
-        _worker_relaunch_at[key] = time.monotonic()
+        _worker_relaunch_at[key] = time.time()
+        _save_worker_relaunch_timestamps()
         log_path = os.path.expanduser(f"~/.hscc/relaunch-{node}-{port}.log")
         try:
             with open(log_path, "a") as log_file:
