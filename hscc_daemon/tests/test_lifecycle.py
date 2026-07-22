@@ -323,5 +323,82 @@ class TestRefreshLiveWorkers:
         assert data["workers"][1]["status"] == "offline"
 
 
+class TestPipelineWatchdog:
+    """pipeline_watchdog() return value — healthy only when BOTH dgx and gateway pass."""
+
+    def test_both_ok_returns_true(self, tmp_hfcc_dir, monkeypatch):
+        from hscc_daemon import lifecycle
+        monkeypatch.setattr(lifecycle, "log", lambda *a, **kw: None)
+        from hscc_daemon import state as state_mod
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(parents=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        monkeypatch.setattr(lifecycle, "WATCHDOG_BLOCK_FILE", str(tmp_hfcc_dir / "block.json"))
+
+        result = lifecycle.pipeline_watchdog(
+            check_dgx_fn=lambda: True,
+            check_gateway_fn=lambda: True,
+            restart_vllm_fn=lambda: {"ok": True},
+            send_macos_notification_fn=lambda *a, **kw: None,
+        )
+        assert result is True
+
+    def test_dgx_fail_gw_ok_returns_false(self, tmp_hfcc_dir, monkeypatch):
+        """Partial failure (DGX down, gateway OK) returns False."""
+        from hscc_daemon import lifecycle
+        monkeypatch.setattr(lifecycle, "log", lambda *a, **kw: None)
+        from hscc_daemon import state as state_mod
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(parents=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        monkeypatch.setattr(lifecycle, "WATCHDOG_BLOCK_FILE", str(tmp_hfcc_dir / "block.json"))
+
+        restart_calls = []
+        result = lifecycle.pipeline_watchdog(
+            check_dgx_fn=lambda: False,
+            check_gateway_fn=lambda: True,
+            restart_vllm_fn=lambda: restart_calls.append(1) or {"ok": True},
+            send_macos_notification_fn=lambda *a, **kw: None,
+        )
+        assert result is False  # NOT True — the old bug returned True here
+        assert len(restart_calls) == 1  # vLLM restart was attempted
+
+    def test_dgx_ok_gw_fail_returns_false(self, tmp_hfcc_dir, monkeypatch):
+        """Partial failure (gateway down, DGX OK) returns False."""
+        from hscc_daemon import lifecycle
+        monkeypatch.setattr(lifecycle, "log", lambda *a, **kw: None)
+        from hscc_daemon import state as state_mod
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(parents=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        monkeypatch.setattr(lifecycle, "WATCHDOG_BLOCK_FILE", str(tmp_hfcc_dir / "block.json"))
+
+        result = lifecycle.pipeline_watchdog(
+            check_dgx_fn=lambda: True,
+            check_gateway_fn=lambda: False,
+            restart_vllm_fn=lambda: {"ok": True},
+            send_macos_notification_fn=lambda *a, **kw: None,
+        )
+        assert result is False  # NOT True — the old bug returned True here
+
+    def test_both_fail_returns_false(self, tmp_hfcc_dir, monkeypatch):
+        """Both failing returns False."""
+        from hscc_daemon import lifecycle
+        monkeypatch.setattr(lifecycle, "log", lambda *a, **kw: None)
+        from hscc_daemon import state as state_mod
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(parents=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        monkeypatch.setattr(lifecycle, "WATCHDOG_BLOCK_FILE", str(tmp_hfcc_dir / "block.json"))
+
+        result = lifecycle.pipeline_watchdog(
+            check_dgx_fn=lambda: False,
+            check_gateway_fn=lambda: False,
+            restart_vllm_fn=lambda: {"ok": True},
+            send_macos_notification_fn=lambda *a, **kw: None,
+        )
+        assert result is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
