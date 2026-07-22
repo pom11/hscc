@@ -136,6 +136,44 @@ class TestResolveClusterConfig:
         serving.resolve_cluster_config()
         # Should complete without crashing
 
+    def test_cluster_json_non_dict_falls_back(self, tmp_hfcc_dir, monkeypatch):
+        """A valid-JSON non-dict (e.g. [] or null) triggers the sparkrun fallback
+        path instead of crashing with AttributeError."""
+        from hscc_daemon import serving
+
+        cluster_file = tmp_hfcc_dir / "cluster.json"
+
+        # Test with array
+        cluster_file.write_text("[]")
+        monkeypatch.setattr(serving, "CLUSTER_JSON", str(cluster_file))
+        monkeypatch.setattr(serving, "SERVING_JSON", str(tmp_hfcc_dir / "serving.json"))
+
+        # Must not raise
+        serving.resolve_cluster_config()
+
+        # Test with null
+        cluster_file.write_text("null")
+        serving.resolve_cluster_config()
+
+        # Test with string
+        cluster_file.write_text('"just a string"')
+        serving.resolve_cluster_config()
+
+        # Test with number
+        cluster_file.write_text("42")
+        serving.resolve_cluster_config()
+
+    def test_cluster_json_malformed_falls_back(self, tmp_hfcc_dir, monkeypatch):
+        """Corrupt JSON triggers the sparkrun fallback path."""
+        from hscc_daemon import serving
+
+        cluster_file = tmp_hfcc_dir / "cluster.json"
+        cluster_file.write_text("{bad json")
+        monkeypatch.setattr(serving, "CLUSTER_JSON", str(cluster_file))
+        monkeypatch.setattr(serving, "SERVING_JSON", str(tmp_hfcc_dir / "serving.json"))
+
+        serving.resolve_cluster_config()  # must not raise
+
 
 class TestRebuildVllmCmds:
     """_rebuild_vllm_cmds() sets vLLM control commands."""
