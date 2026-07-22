@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] — Hermes 0.19 compatibility + post-update reconcile
+
+Keeps HSCC working across a Hermes runtime upgrade (validated live on a
+0.17 → v0.19.0 jump) and makes the fixes survive future `hermes update`s.
+All test suites green.
+
+### Added
+- **`strip_worker_telegram.py`** (wired into `bootstrap.sh`): `hermes update`
+  seeds the default profile's `.env` — including the active Telegram bot token —
+  into every role profile. On 0.19+ the multiplex gateway refuses to poll one
+  bot token from multiple profiles and logs ~24 errors per restart. This step
+  idempotently comments out the seeded `TELEGRAM_*` vars in every non-`default`
+  profile (reversible; only the `default` chat front-end keeps telegram).
+- **`ensure_review_feature.py`** (wired into `bootstrap.sh`): the
+  `kanban_submit_review` / `auto_review` feature (upstream PR #43425) is carried
+  as a local commit on the runtime until it merges upstream, so a `hermes
+  update` can drop it. This step re-applies it idempotently — presence-checked
+  (no-op when already installed), and safe (refuses a dirty/mid-operation repo,
+  aborts cleanly on conflict, validates the git ref against an allowlist so an
+  env-set remote/branch can't smuggle a git option). No-op once the PR lands
+  upstream. Run `hscc-bootstrap/bootstrap.sh` after any Hermes update to restore
+  both the clean telegram setup and the review wiring.
+
+### Fixed
+- **Bootstrap status parse**: `python -c CODE _ JSON` puts the JSON at
+  `sys.argv[2]` (argv[1] is the placeholder), so the reconcile steps
+  misreported (telegram count stuck at 0; the review step falsely warned
+  "unknown" when the feature was present). Read `argv[2]`.
+
 ## [1.0.0] — First stable release
 
 HSCC leaves beta: the fleet self-heals for real, the daemon sees everything
