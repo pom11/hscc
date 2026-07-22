@@ -141,3 +141,16 @@ def test_all_specs_load_with_model_tier():
     for f in files:
         spec = rolelib.load_spec(f)
         assert spec["model_tier"] in ("fast", "strong")
+
+
+def test_model_tier_null_defaults_to_fast(tmp_path):
+    """Explicit YAML model_tier: (null) defaults to 'fast', not 'none'."""
+    spec_file = tmp_path / "null_tier.yaml"
+    spec_file.write_text(
+        "name: x\n"
+        "identity: hi\n"
+        "routing_description: test.\n"
+        "model_tier:\n"
+    )
+    spec = rolelib.load_spec(str(spec_file))
+    assert spec["model_tier"] == "fast"
