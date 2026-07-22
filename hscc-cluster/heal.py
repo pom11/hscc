@@ -97,7 +97,13 @@ def reap_orphans(args, **kwargs):
     if gate:
         return gate
     reaped = []
+    failed = []
     for o in orphans:
-        cl.run_cmd([cl.SPARKRUN, "stop", o["recipe"], "--hosts", o["node"]], timeout=120)
-        reaped.append({"node": o["node"], "recipe": o["recipe"]})
-    return {"ok": True, "executed": True, "reaped": reaped}
+        r = cl.run_cmd([cl.SPARKRUN, "stop", o["recipe"], "--hosts", o["node"]], timeout=120)
+        if r["ok"]:
+            reaped.append({"node": o["node"], "recipe": o["recipe"]})
+        else:
+            failed.append({"node": o["node"], "recipe": o["recipe"],
+                           "error": r.get("stderr", "unknown")[:200]})
+    return {"ok": len(failed) == 0, "executed": True, "reaped": reaped,
+            "failed": failed if failed else None}
