@@ -142,7 +142,7 @@ def _short_desc_identity(spec):
     """Fallback: first sentence of the role identity (legacy)."""
     text = " ".join(spec["identity"].split())
     first = text.split(". ")[0].rstrip(".").strip()
-    return (first + ".") if first else f"The {spec['name']} role."
+    return (first[:200] + ".") if first else f"The {spec['name']} role."
 
 
 def _write_if_changed(path, content):
