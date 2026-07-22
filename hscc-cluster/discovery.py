@@ -22,6 +22,7 @@ from typing import Optional, List, Dict, Any
 
 CLUSTER_JSON = os.path.expanduser("~/.hscc/cluster.json")
 DISCOVERY_CACHE = os.path.expanduser("~/.hscc/discovery_cache.json")
+SERVING_JSON = os.path.expanduser("~/.hscc/serving.json")
 SPARKRUN = "sparkrun"
 SSH_USER_DEFAULT = "spark"
 DEFAULT_PROXY_PORT = 4000
@@ -242,9 +243,29 @@ def _probe_node(node: Node) -> None:
         node.vram_free_gb = caps.get("vram_free_gb")
         node.power_draw_w = caps.get("power_draw_w")
         node.idle = classify_idle(node.power_draw_w)
-    h = _run(["curl", "-s", "--max-time", "6", f"http://{node.ip}:8000/v1/models"],
-             timeout=10)
-    node.vllm_healthy = bool(h["ok"] and h["stdout"].strip())
+    # vLLM health: probe the ports this node actually serves (from serving.json),
+    # falling back to 8000 if no serving info is available.
+    ports_to_probe = [8000]  # default fallback
+    try:
+        with open(SERVING_JSON) as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            for unit in data.get("units", []):
+                if node.ip in (unit.get("nodes") or []):
+                    port = unit.get("port")
+                    if port and port != 8000:
+                        ports_to_probe.append(port)
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+        pass  # no serving info — stick with fallback 8000
+
+    vllm_ok = False
+    for port in ports_to_probe:
+        h = _run(["curl", "-s", "--max-time", "6",
+                  f"http://{node.ip}:{port}/v1/models"], timeout=10)
+        if h["ok"] and h["stdout"].strip():
+            vllm_ok = True
+            break
+    node.vllm_healthy = vllm_ok
 
 
 def discover(*, refresh: bool = False, probe: bool = False) -> ClusterTopology:
