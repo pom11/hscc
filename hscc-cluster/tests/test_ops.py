@@ -39,6 +39,43 @@ def test_running_by_node_excludes_idle_section(monkeypatch):
     # only the head is running; idle hosts must NOT appear as running
     assert m == {"192.0.2.10": "@local-official/qwen3.6-27b-fp8-vllm"}
 
+
+def test_running_by_node_no_substring_ip_match(monkeypatch):
+    """Regression: '10.0.0.1' must NOT match a line containing '10.0.0.10'."""
+    sample = """Job: @local-official/qwen3.6-27b-fp8-vllm  (tp=1, pp=1)  [abc123]  (1 container(s))
+  solo       10.0.0.10                          Up About an hour          sparkrun-eugr-vllm
+  logs: sparkrun logs abc123
+
+Total: 1 container(s) across 2 host(s)
+"""
+    monkeypatch.setattr(ops.cl, "NODES", ["10.0.0.1"])
+    monkeypatch.setattr(ops.cl, "HEAD", "10.0.0.1")
+    monkeypatch.setattr(ops.cl, "run_cmd",
+                        lambda a, timeout=30: {"ok": True, "stdout": sample,
+                                               "stderr": "", "code": 0})
+    m = ops._running_by_node()
+    # 10.0.0.1 should NOT match the line for 10.0.0.10
+    assert "10.0.0.1" not in m
+    assert len(m) == 0
+
+
+def test_running_by_node_exact_match_longer_ip(monkeypatch):
+    """'10.0.0.10' must match a line containing '10.0.0.10' exactly."""
+    sample = """Job: @local-official/qwen3.6-27b-fp8-vllm  (tp=1, pp=1)  [abc123]  (1 container(s))
+  solo       10.0.0.100                         Up About an hour          sparkrun-eugr-vllm
+  logs: sparkrun logs abc123
+
+Total: 1 container(s) across 2 host(s)
+"""
+    monkeypatch.setattr(ops.cl, "NODES", ["10.0.0.10"])
+    monkeypatch.setattr(ops.cl, "HEAD", "10.0.0.10")
+    monkeypatch.setattr(ops.cl, "run_cmd",
+                        lambda a, timeout=30: {"ok": True, "stdout": sample,
+                                               "stderr": "", "code": 0})
+    m = ops._running_by_node()
+    # 10.0.0.10 should NOT match 10.0.0.100 either
+    assert "10.0.0.10" not in m
+
 def test_cluster_status_idle_and_units(monkeypatch, tmp_path):
     monkeypatch.setattr(ops.cl, "run_cmd",
                         lambda a, timeout=30: {"ok": True, "stdout": _STATUS_SAMPLE,

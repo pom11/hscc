@@ -29,8 +29,9 @@ def _running_by_node():
             continue
         if in_idle:
             continue
+        import re as _re
         for ip in cl.NODES + [cl.HEAD]:
-            if ip in line:
+            if _re.search(r'(?<![0-9.])' + _re.escape(str(ip)) + r'(?![0-9.])', line):
                 mapping[ip] = recipe
     return mapping
 
