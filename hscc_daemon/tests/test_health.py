@@ -175,7 +175,11 @@ class TestCheckWorkers:
         monkeypatch.setattr(serving, "ORCH_NODES", {"10.0.0.1"})
         monkeypatch.setattr(serving, "load_serving",
                             lambda: {"version": 1, "units": units})
+        # Clear in-memory state and point persistence file at tmp dir so
+        # _load_worker_relaunch_timestamps() does not pick up real timestamps.
         health._worker_relaunch_at.clear()
+        monkeypatch.setattr(health, "_WORKER_RELATCH_FILE",
+                            str(tmp_hfcc_dir / "worker_relaunch.json"))
         return health, serving
 
     def test_no_keepalive_workers(self, tmp_hfcc_dir, monkeypatch):
@@ -227,7 +231,8 @@ class TestCheckWorkers:
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
         # pretend we just relaunched it -> within grace, must NOT relaunch again.
         # Grace is keyed per UNIT (node, port); units w/o explicit port → :8000.
-        health._worker_relaunch_at[("10.0.0.2", 8000)] = _time.monotonic()
+        # Uses wall-clock time.time() (not monotonic).
+        health._worker_relaunch_at[("10.0.0.2", 8000)] = _time.time()
         ran = []
         monkeypatch.setattr(health, "run_cmd",
                             lambda args, **k: ran.append(args) or {"ok": True})
@@ -260,6 +265,8 @@ class TestCheckWorkers:
         monkeypatch.setattr(serving, "ORCH_NODES", {"10.0.0.1"})
         monkeypatch.setattr(serving, "load_serving", lambda: {"version": 2, "units": units})
         health._worker_relaunch_at.clear()
+        monkeypatch.setattr(health, "_WORKER_RELATCH_FILE",
+                            str(tmp_hfcc_dir / "worker_relaunch.json"))
         # :8000 healthy, :8001 down
         monkeypatch.setattr(health, "http_check",
                             lambda url, timeout=5: {"ok": ":8000/" in url})
@@ -366,7 +373,8 @@ class TestCheckWorkers:
         assert isinstance(ts, float)
 
     def test_grace_period_uses_lifecycle_default_20min(self, tmp_hfcc_dir, monkeypatch):
-        """Asserts grace period from lifecycle.py is respected (20 min default)."""
+        """Asserts grace period from lifecycle.py is respected (20 min default). Uses
+        wall-clock time (time.time())."""
         import time as _time
         from hscc_daemon import lifecycle
         # Confirm default is 20
@@ -378,7 +386,7 @@ class TestCheckWorkers:
                             lambda args, **k: {"ok": True})
 
         # Set relaunch time to 19 minutes ago (within 20-min grace)
-        health._worker_relaunch_at[("10.0.0.2", 8000)] = _time.monotonic() - 19 * 60
+        health._worker_relaunch_at[("10.0.0.2", 8000)] = _time.time() - 19 * 60
         popen_calls = []
         def fake_popen(*args, **kwargs):
             popen_calls.append((args, kwargs))
@@ -389,10 +397,99 @@ class TestCheckWorkers:
         assert popen_calls == []  # within 20-min grace, no relaunch
 
         # Set relaunch time to 21 minutes ago (past grace) — relaunch fires
-        health._worker_relaunch_at[("10.0.0.2", 8000)] = _time.monotonic() - 21 * 60
+        health._worker_relaunch_at[("10.0.0.2", 8000)] = _time.time() - 21 * 60
         popen_calls.clear()
         health.check_workers()
         assert len(popen_calls) == 1  # past grace, relaunch fires
+
+    def test_persisted_grace_window_survives_reload(self, tmp_hfcc_dir, monkeypatch):
+        """Grace timestamps persisted to disk survive a module reload."""
+        from hscc_daemon import health
+        from hscc_daemon import state as state_mod
+        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
+        state_dir = tmp_hfcc_dir / "state"; state_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+
+        relaunch_file = tmp_hfcc_dir / "worker_relaunch.json"
+        # Persist a timestamp from 10 minutes ago
+        import time as _time
+        old_ts = _time.time() - 10 * 60
+        relaunch_file.write_text(json.dumps({"(10.0.0.2,8000)": old_ts}))
+        monkeypatch.setattr(health, "_WORKER_RELATCH_FILE", str(relaunch_file))
+
+        # Clear in-memory dict to simulate fresh process
+        health._worker_relaunch_at.clear()
+
+        # Load persisted timestamps
+        health._load_worker_relaunch_timestamps()
+
+        assert ("10.0.0.2", 8000) in health._worker_relaunch_at
+        ts = health._worker_relaunch_at[("10.0.0.2", 8000)]
+        assert abs(ts - old_ts) < 1  # loaded correctly
+
+    def test_persisted_grace_window_corrupt_file(self, tmp_hfcc_dir, monkeypatch):
+        """Corrupt persisted file is treated as empty (no crash)."""
+        from hscc_daemon import health
+
+        relaunch_file = tmp_hfcc_dir / "worker_relaunch.json"
+        relaunch_file.write_text("{bad json content")
+        monkeypatch.setattr(health, "_WORKER_RELATCH_FILE", str(relaunch_file))
+
+        health._worker_relaunch_at.clear()
+        health._load_worker_relaunch_timestamps()  # must not raise
+        assert health._worker_relaunch_at == {}
+
+    def test_persisted_grace_window_missing_file(self, tmp_hfcc_dir, monkeypatch):
+        """Missing persisted file is treated as empty (no crash)."""
+        from hscc_daemon import health
+
+        monkeypatch.setattr(health, "_WORKER_RELATCH_FILE",
+                            str(tmp_hfcc_dir / "nonexistent.json"))
+        health._worker_relaunch_at.clear()
+        health._load_worker_relaunch_timestamps()  # must not raise
+        assert health._worker_relaunch_at == {}
+
+    def test_save_worker_relaunch_timestamps(self, tmp_hfcc_dir, monkeypatch):
+        """_save_worker_relaunch_timestamps() persists to disk."""
+        from hscc_daemon import health
+
+        relaunch_file = tmp_hfcc_dir / "worker_relaunch.json"
+        monkeypatch.setattr(health, "_WORKER_RELATCH_FILE", str(relaunch_file))
+
+        import time as _time
+        ts = _time.time()
+        health._worker_relaunch_at[("10.0.0.2", 8000)] = ts
+        health._save_worker_relaunch_timestamps()
+
+        assert relaunch_file.exists()
+        data = json.loads(relaunch_file.read_text())
+        assert "(10.0.0.2,8000)" in data
+        assert abs(data["(10.0.0.2,8000)"] - ts) < 1
+
+    def test_sparkrun_stop_failure_logged(self, tmp_hfcc_dir, monkeypatch):
+        """When sparkrun stop fails, a WARN is logged but relaunch still proceeds."""
+        import time as _time
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
+
+        log_calls = []
+        monkeypatch.setattr(health, "log", lambda msg, level="INFO": log_calls.append((msg, level)))
+
+        # First call: sparkrun stop fails. No more calls needed (Popen not reached)
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: {"ok": False, "output": "stop error"})
+
+        popen_calls = []
+        def fake_popen(*args, **kwargs):
+            popen_calls.append((args, kwargs))
+            raise RuntimeError("should not reach Popen if run_cmd is mocked")
+        monkeypatch.setattr(health.subprocess, "Popen", fake_popen)
+
+        health.check_workers()
+
+        # WARN logged for stop failure
+        warn_logs = [m for m, l in log_calls if l == "WARN"]
+        assert any("stop" in m.lower() and "stop error" in m for m in warn_logs)
 
 
 class TestCheckProxy:
@@ -550,7 +647,7 @@ class TestCheckMultiplexProfiles:
         assert result["ok"] is True
         assert "skipped" in result["message"].lower()
 
-    # --- gateway_state.json parse error ---
+    # --- gateway_state.json parse error (present but corrupt) ---
     def test_gateway_state_parse_error(self, tmp_path, monkeypatch):
         health, profiles_dir, config_yaml, gw_state = self._setup(tmp_path, monkeypatch)
 
@@ -559,8 +656,20 @@ class TestCheckMultiplexProfiles:
         profiles_dir.mkdir(parents=True)
 
         result = health._check_multiplex_profiles()
-        assert result["ok"] is True
-        assert "skipped" in result["message"].lower() or "parse" in result["message"].lower()
+        assert result["ok"] is False
+        assert "corrupt" in result["message"].lower()
+
+    # --- gateway_state.json present but contains non-dict (e.g. array) ---
+    def test_gateway_state_non_dict(self, tmp_path, monkeypatch):
+        health, profiles_dir, config_yaml, gw_state = self._setup(tmp_path, monkeypatch)
+
+        config_yaml.write_text("multiplex_profiles: true\n")
+        gw_state.write_text("[1, 2, 3]")
+        profiles_dir.mkdir(parents=True)
+
+        result = health._check_multiplex_profiles()
+        assert result["ok"] is False
+        assert "corrupt" in result["message"].lower()
 
     # --- profiles dir missing when multiplex enabled ---
     def test_profiles_dir_missing_multiplex_true(self, tmp_path, monkeypatch):
