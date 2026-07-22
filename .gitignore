@@ -40,3 +40,6 @@ dist/
 
 # Internal design docs — kept local, not tracked
 docs/superpowers/
+
+# git worktrees used by the kanban dispatcher
+.worktrees/
