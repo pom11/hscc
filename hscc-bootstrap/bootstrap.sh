@@ -209,6 +209,17 @@ else
   warn "ensure_review_feature failed — auto_review may be inactive"
 fi
 
+hdr "Install: default trigger rules"
+# Seed ~/.hscc/triggers.json with default alert rules (idempotent: only adds
+# rules whose id is not already present, preserves operator edits). Non-fatal.
+if TRIG_JSON=$("$PYBIN" "$BOOT_DIR/install_triggers.py" 2>/dev/null); then
+  TRIG_TOTAL=$("$PYBIN" -c "import sys,json;d=json.loads(sys.argv[2]);print(d.get('total',0))" _ "$TRIG_JSON" 2>/dev/null || echo 0)
+  TRIG_ADDED=$("$PYBIN" -c "import sys,json;d=json.loads(sys.argv[2]);print(len(d.get('added',[])))" _ "$TRIG_JSON" 2>/dev/null || echo 0)
+  ok "trigger rules installed (${TRIG_TOTAL} total, added ${TRIG_ADDED})"
+else
+  warn "trigger rules install failed (~/.hscc/triggers.json may be missing default rules)"
+fi
+
 hdr "Install: daemon"
 if $SKIP_DAEMON; then warn "skipped"; else
   if [ "$(uname -s)" = "Darwin" ]; then
