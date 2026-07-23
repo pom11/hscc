@@ -43,12 +43,19 @@ def load_spec(path):
     """Load + validate a role spec YAML. Returns a normalized dict.
 
     Required: name, identity, routing_description.
-    Optional: preload_skills (list, default []), model_tier (str, default "fast").
+    Optional: preload_skills (list, default []), model_tier (str, default "fast"),
+    model_endpoint (str, default None), model_name (str, default None).
     Raises ValueError on missing required fields so callers fail loudly.
 
     model_tier controls which GPU tier a role uses:
       - "fast"  (default): worker proxy at :4000 with 27B-FP8
       - "strong": orchestrator node at :8000 with 35B-A3B-NVFP4
+
+    Optional per-role override (specialized model routing):
+      - model_endpoint: a base_url like "http://host:port/v1"
+      - model_name: a model name to use with that endpoint
+    When model_endpoint is set, it supersedes the tier-resolved endpoint.
+    model_name defaults to the tier's model when only the endpoint is set.
     """
     with open(path) as f:
         data = yaml.safe_load(f) or {}
@@ -70,12 +77,31 @@ def load_spec(path):
             f"{path}: model_tier must be one of {VALID_MODEL_TIERS}, got '{model_tier}'"
         )
 
+    # Optional per-role model endpoint override (specialized model routing).
+    model_endpoint = data.get("model_endpoint")
+    if model_endpoint is not None:
+        model_endpoint = str(model_endpoint).strip()
+        if not model_endpoint:
+            raise ValueError(f"{path}: model_endpoint must be a non-empty string")
+        if not model_endpoint.startswith("http"):
+            raise ValueError(
+                f"{path}: model_endpoint must start with 'http', got '{model_endpoint}'"
+            )
+
+    model_name = data.get("model_name")
+    if model_name is not None:
+        model_name = str(model_name).strip()
+        if not model_name:
+            raise ValueError(f"{path}: model_name must be a non-empty string")
+
     return {
         "name": str(data["name"]).strip(),
         "identity": str(data["identity"]).rstrip() + "\n",
         "routing_description": str(data["routing_description"]).strip(),
         "preload_skills": [str(s).strip() for s in skills if str(s).strip()],
         "model_tier": model_tier,
+        "model_endpoint": model_endpoint,
+        "model_name": model_name,
     }
 
 

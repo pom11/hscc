@@ -169,3 +169,90 @@ def test_write_if_changed_handles_non_utf8(tmp_path):
     changed = generator._write_if_changed(str(path), content)
     assert changed is True
     assert path.read_text() == content
+
+
+# -- model_endpoint / model_name generator tests --
+
+
+def test_model_endpoint_and_name_in_config(tmp_path, monkeypatch):
+    """a) spec with model_endpoint+model_name -> config.yaml uses that base_url + model."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast",
+            "model_endpoint": "http://coding:5000/v1",
+            "model_name": "Qwen/Code-32B"}
+    generator.generate_profile(spec, base_identity="BASE")
+    with open(os.path.join(str(tmp_path / "profiles" / "coder"), "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["model"]["base_url"] == "http://coding:5000/v1"
+    assert cfg["model"]["default"] == "Qwen/Code-32B"
+
+
+def test_model_endpoint_only_falls_back_to_tier_model(tmp_path, monkeypatch):
+    """b) spec with model_endpoint only -> uses that base_url, model falls back to tier default."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast",
+            "model_endpoint": "http://coding:5000/v1"}
+    generator.generate_profile(spec, base_identity="BASE")
+    with open(os.path.join(str(tmp_path / "profiles" / "coder"), "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["model"]["base_url"] == "http://coding:5000/v1"
+    assert cfg["model"]["default"] == "Qwen/Qwen3.6-27B-FP8"
+
+
+def test_model_endpoint_only_strong_falls_back_to_strong_model(tmp_path, monkeypatch):
+    """b) spec with model_endpoint only on strong tier -> falls back to strong model."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "architect", "identity": "You design.\n",
+            "preload_skills": [], "model_tier": "strong",
+            "model_endpoint": "http://arch:6000/v1"}
+    generator.generate_profile(spec, base_identity="BASE")
+    with open(os.path.join(str(tmp_path / "profiles" / "architect"), "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["model"]["base_url"] == "http://arch:6000/v1"
+    assert cfg["model"]["default"] == "nvidia/Qwen3.6-35B-A3B-NVFP4"
+
+
+def test_no_override_uses_tier_logic(tmp_path, monkeypatch):
+    """c) spec WITHOUT override -> identical to current tier behaviour."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    generator.generate_profile(spec, base_identity="BASE")
+    with open(os.path.join(str(tmp_path / "profiles" / "coder"), "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["model"]["base_url"] == "http://localhost:4000/v1"
+    assert cfg["model"]["default"] == "Qwen/Qwen3.6-27B-FP8"
+
+
+def test_model_endpoint_idempotent(tmp_path, monkeypatch):
+    """e) generation stays idempotent with an override present."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast",
+            "model_endpoint": "http://coding:5000/v1",
+            "model_name": "Qwen/Code-32B"}
+    generator.generate_profile(spec, base_identity="BASE")
+    changed_second = generator.generate_profile(spec, base_identity="BASE")
+    assert changed_second is False
+
+
+def test_model_endpoint_still_has_compaction(tmp_path, monkeypatch):
+    """model_endpoint override does not remove compaction config."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast",
+            "model_endpoint": "http://coding:5000/v1",
+            "model_name": "Qwen/Code-32B"}
+    generator.generate_profile(spec, base_identity="BASE")
+    with open(os.path.join(str(tmp_path / "profiles" / "coder"), "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    assert "auxiliary" in cfg
+    assert "compression" in cfg["auxiliary"]
