@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — Fleet operations: verify, alerting, throughput, escalation, autoscale
+
+A batch of operator + self-management features, each built as a small module by
+the cluster itself (sub-atomic kanban cards, human-reviewed). 936 tests green.
+
+### Added
+- **`hscc verify`** — one-command smoke test of the whole stack: plugins
+  registered, multiplex profiles served, daemon streams fresh, proxy serving,
+  config wiring. Turns the manual post-upgrade checklist into a gate.
+- **Alerting is live** — the trigger engine shipped with zero rules (inert);
+  now seeded with default rules (orchestrator/DGX down, vLLM down, watchdog
+  blocked) via an idempotent `install_triggers.py`, wired into bootstrap.
+- **`hscc stats`** — fleet analytics: completions + tool activity per profile /
+  per day, aggregated from the jsonl logs.
+- **`hscc throughput`** — vLLM token throughput + per-node queue depth across
+  the fleet (the meaningful "cost"/utilization view for local models).
+- **Failure escalation** — `escalate.py` (decision logic) + `escalate_watcher.py`
+  (applies it): a card that fails `fail_limit` times is reassigned to the strong
+  tier, or flagged for a human if the strong tier is also failing.
+- **Autoscale decision logic** (`autoscale.py`) — scale up on queue backlog,
+  down when fully idle, from the throughput signal (read-only `hscc autoscale`
+  view; the acting layer is opt-in).
+- **`hscc escalate`** — dry-run view of which failing cards would be escalated.
+- **Per-role model override** — role specs may set `model_endpoint`/`model_name`
+  to point a role at a specialized model, superseding the fast/strong tier
+  (fully backward-compatible).
+- **`hscc-lessons` skill** — the fleet's hard-won engineering conventions
+  (sub-atomic cards, verify-not-narrative, ports-from-serving, best-effort IO,
+  preserve-operator-config, no `stop --all`, argv[2], test + verify live).
+
+### Fixed
+- CLI help asserts a version pattern, not a pinned literal (survives bumps).
+
 ## [1.0.2] — Automated runtime-dependency update loop
 
 Keeps the cluster's runtime dependencies (hermes-agent, sparkrun) current with a
