@@ -210,7 +210,21 @@ def generate_profile(spec, base_identity):
     # config (its own gateway-node model) and is never repointed.
     if name != "orchestrator":
         model_tier = spec.get("model_tier", "fast")
-        if model_tier == "strong":
+        model_endpoint = spec.get("model_endpoint")
+        model_name = spec.get("model_name")
+
+        if model_endpoint:
+            # Per-role override: use the specified endpoint.
+            override_block = {
+                "default": model_name if model_name else (
+                    STRONG_MODEL if model_tier == "strong" else WORKER_MODEL
+                ),
+                "provider": "custom",
+                "base_url": model_endpoint,
+                "api_key": WORKER_PROXY_KEY,
+            }
+            config["model"] = override_block
+        elif model_tier == "strong":
             config["model"] = _strong_model_block()
         else:
             config["model"] = _worker_model_block()
