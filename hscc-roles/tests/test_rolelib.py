@@ -154,3 +154,74 @@ def test_model_tier_null_defaults_to_fast(tmp_path):
     )
     spec = rolelib.load_spec(str(spec_file))
     assert spec["model_tier"] == "fast"
+
+
+# -- model_endpoint / model_name override tests --
+
+
+def test_model_endpoint_and_name_accepted(tmp_path):
+    """a) spec with model_endpoint+model_name -> spec dict has both set."""
+    spec_file = tmp_path / "coding.yaml"
+    spec_file.write_text(
+        "name: coding-expert\n"
+        "identity: Expert coder.\n"
+        "routing_description: Code tasks.\n"
+        "model_endpoint: http://coding:5000/v1\n"
+        "model_name: Qwen/Code-32B\n"
+    )
+    spec = rolelib.load_spec(str(spec_file))
+    assert spec["model_endpoint"] == "http://coding:5000/v1"
+    assert spec["model_name"] == "Qwen/Code-32B"
+
+
+def test_model_endpoint_defaults_to_none(tmp_path):
+    """model_endpoint and model_name default to None when absent."""
+    spec_file = tmp_path / "plain.yaml"
+    spec_file.write_text(
+        "name: x\n"
+        "identity: hi\n"
+        "routing_description: test.\n"
+    )
+    spec = rolelib.load_spec(str(spec_file))
+    assert spec["model_endpoint"] is None
+    assert spec["model_name"] is None
+
+
+def test_model_endpoint_non_http_raises(tmp_path):
+    """d) rolelib rejects a non-http model_endpoint."""
+    spec_file = tmp_path / "bad_endpoint.yaml"
+    spec_file.write_text(
+        "name: x\n"
+        "identity: hi\n"
+        "routing_description: test.\n"
+        "model_endpoint: ftp://bad-url\n"
+    )
+    with pytest.raises(ValueError, match="model_endpoint must start with 'http'"):
+        rolelib.load_spec(str(spec_file))
+
+
+def test_model_endpoint_empty_raises(tmp_path):
+    """Empty model_endpoint raises ValueError."""
+    spec_file = tmp_path / "empty_endpoint.yaml"
+    spec_file.write_text(
+        "name: x\n"
+        "identity: hi\n"
+        "routing_description: test.\n"
+        "model_endpoint: ''\n"
+    )
+    with pytest.raises(ValueError, match="model_endpoint must be a non-empty string"):
+        rolelib.load_spec(str(spec_file))
+
+
+def test_model_name_empty_raises(tmp_path):
+    """Empty model_name raises ValueError."""
+    spec_file = tmp_path / "empty_name.yaml"
+    spec_file.write_text(
+        "name: x\n"
+        "identity: hi\n"
+        "routing_description: test.\n"
+        "model_endpoint: http://x/v1\n"
+        "model_name: ''\n"
+    )
+    with pytest.raises(ValueError, match="model_name must be a non-empty string"):
+        rolelib.load_spec(str(spec_file))
