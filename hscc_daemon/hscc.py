@@ -550,7 +550,9 @@ def _handle_autoscale():
     if json_mode:
         print(json.dumps(d))
     else:
-        print(f"autoscale: {d['action']} (target {d['target']}) — {d['reason']}")
+        # A "none" decision carries no target — only scale_up/down do.
+        tgt = f" (target {d['target']})" if "target" in d else ""
+        print(f"autoscale: {d['action']}{tgt} — {d['reason']}")
     sys.exit(0)
 
 
