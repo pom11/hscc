@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.2] — Automated runtime-dependency update loop
+
+Keeps the cluster's runtime dependencies (hermes-agent, sparkrun) current with a
+human-gated, cluster-verified loop.
+
+### Added
+- **`check-runtime-deps` GitHub Action** (`.github/workflows/`, daily): compares
+  each upstream repo's latest release to `hscc-bootstrap/runtime-versions.json`
+  and, on a bump, opens/updates a PR — label `needs-cluster-check`, repo owner as
+  reviewer — with a cluster-verification checklist. Stdlib-only checker;
+  injection-safe (dynamic values passed via env, never inlined into the shell).
+- **`scripts/dep_pr_watcher.py`** + **`scripts/install_dep_watcher.sh`**: a
+  Hermes-cron watcher (daily, `--no-agent`) that turns those PRs into idempotent
+  kanban verification cards for the workers (one card per PR, deduped by
+  `idempotency_key`). Silent when idle. The installer registers the job via
+  Hermes' native cron (no external launchd/plumbing).
+
+The loop: Action detects a release -> opens PR (owner reviews) -> Hermes cron
+creates a kanban card -> a worker upgrades + bootstraps + tests + reports -> the
+human merges the version-lock bump. GitHub cloud and the LAN cluster never need a
+direct network path.
+
 ## [1.0.1] — Hermes 0.19 compatibility + post-update reconcile
 
 Keeps HSCC working across a Hermes runtime upgrade (validated live on a
