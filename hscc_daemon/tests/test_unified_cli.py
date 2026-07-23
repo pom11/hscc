@@ -50,8 +50,10 @@ class TestFullHelp:
         assert "Examples" in output
 
     def test_help_contains_version(self, monkeypatch):
+        import re
         output = self._run_help([], monkeypatch)
-        assert "v1.0.0" in output
+        # A version token, not a pinned literal — survives release bumps.
+        assert re.search(r"\bv\d+\.\d+\.\d+\b", output)
 
     def test_help_contains_advanced_footer(self, monkeypatch):
         output = self._run_help([], monkeypatch)
