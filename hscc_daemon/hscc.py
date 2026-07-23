@@ -279,6 +279,9 @@ Health & monitoring
   triggers             Show trigger-engine rules and recent firings
   verify               Run a full compatibility/health smoke-test of the cluster
   stats [days]         Fleet activity — completions & tool usage over N days (default 7)
+  throughput           Aggregate vLLM throughput + queue depth across the fleet
+  autoscale            Show autoscale decision from current queue depth (read-only)
+  escalate             Show pending failure escalations (dry-run, no mutations)
 
 Cluster & templates
   cluster status       Running workloads + idle hosts
@@ -340,6 +343,9 @@ COMMAND_HELP = {
     "help": "Show help. Usage: hscc help [command]\n  Use 'hscc help advanced' for internal commands.",
     "verify": "Run a full compatibility/health smoke-test of the cluster.\n  Usage: hscc verify [--json]",
     "stats": "Fleet activity — completions & tool usage over N days (default 7).\n  Usage: hscc stats [days] [--json]",
+    "throughput": "Aggregate vLLM throughput + queue depth across the fleet.\n  Usage: hscc throughput [--json]",
+    "autoscale": "Show autoscale decision from current queue depth (read-only, never scales).\n  Usage: hscc autoscale [--json]",
+    "escalate": "Show pending failure escalations (dry-run, no mutations).\n  Usage: hscc escalate [--json]",
     "advanced": "Internal/service-manager commands.\n  See 'hscc help advanced' for details.",
     "start-daemon": "Run the daemon loop in the foreground (used by launchd)",
     "ed-status": "Event-driven mode status (placeholder, not yet available)",
@@ -517,6 +523,61 @@ def _handle_stats():
     sys.exit(0)
 
 
+def _handle_throughput():
+    """Run throughput.compute_throughput() and print formatted output (or JSON with --json)."""
+    from hscc_daemon import throughput
+
+    json_mode = "--json" in sys.argv[1:]
+    tp = throughput.compute_throughput()
+
+    if json_mode:
+        print(json.dumps(tp))
+    else:
+        print(throughput.format_throughput(tp))
+    sys.exit(0)
+
+
+def _handle_autoscale():
+    """Run autoscale decision from throughput data and print it (read-only, never scales)."""
+    from hscc_daemon import throughput
+    from hscc_daemon import autoscale
+
+    json_mode = "--json" in sys.argv[1:]
+    tp = throughput.compute_throughput()
+    current = tp.get("fleet", {}).get("nodes_ok", 0) or len(tp.get("by_node", {}))
+    d = autoscale.decide_scale(tp, current_workers=current)
+
+    if json_mode:
+        print(json.dumps(d))
+    else:
+        print(f"autoscale: {d['action']} (target {d['target']}) — {d['reason']}")
+    sys.exit(0)
+
+
+def _handle_escalate():
+    """Run escalate_watcher scan in dry-run mode (read-only, no mutations)."""
+    from hscc_daemon import escalate_watcher
+
+    json_mode = "--json" in sys.argv[1:]
+    actions = escalate_watcher.scan_and_escalate(
+        _reassign=lambda *a: None,
+        _notify=lambda *a: None,
+    )
+
+    if json_mode:
+        print(json.dumps(actions))
+    else:
+        if actions:
+            for a in actions:
+                task_id = a.get("task", "?")
+                action = a.get("action", "?")
+                to = a.get("to", a.get("category", "?"))
+                print(f"card {task_id}: {action} -> {to}")
+        else:
+            print("no escalations pending")
+    sys.exit(0)
+
+
 def _handle_help():
     """Handle 'hscc help [command]' and 'hscc --help' / '-h'."""
     if len(sys.argv) < 3:
@@ -551,6 +612,7 @@ def _handle_profiles():
 DAEMON_COMMANDS = {
     "start", "stop", "status", "install", "uninstall", "plist",
     "log", "check", "watch", "triggers", "notify", "verify", "stats",
+    "throughput", "autoscale", "escalate",
 }
 
 
@@ -598,6 +660,18 @@ def main():
     # 'stats'
     if cmd == "stats":
         _handle_stats()
+
+    # 'throughput'
+    if cmd == "throughput":
+        _handle_throughput()
+
+    # 'autoscale'
+    if cmd == "autoscale":
+        _handle_autoscale()
+
+    # 'escalate'
+    if cmd == "escalate":
+        _handle_escalate()
 
     # Advanced commands (also support --help)
     advanced_cmds = {"start-daemon", "ed-status", "ed-install", "ed-uninstall"}
@@ -656,7 +730,7 @@ def main():
         cmd_ed_uninstall()
     else:
         print(f"Unknown command: {cmd}")
-        print(f"Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, verify, stats, start-daemon")
+        print(f"Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, verify, stats, throughput, autoscale, escalate, start-daemon")
         sys.exit(1)
 
 
