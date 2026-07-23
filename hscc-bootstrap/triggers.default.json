@@ -1,0 +1,43 @@
+{
+  "rules": [
+    {
+      "id": "orch-dgx-down",
+      "trigger_type": "notify",
+      "condition": {
+        "metric": "failed_dgx",
+        "op": "==",
+        "value": true
+      },
+      "trigger_params": {
+        "title": "HSCC: orchestrator/DGX unhealthy",
+        "body": "The orchestrator node / DGX check is failing \u2014 inference may be down."
+      }
+    },
+    {
+      "id": "vllm-down",
+      "trigger_type": "notify",
+      "condition": {
+        "metric": "vllm_down",
+        "op": "==",
+        "value": true
+      },
+      "trigger_params": {
+        "title": "HSCC: vLLM backend down",
+        "body": "The orchestrator vLLM endpoint is not serving."
+      }
+    },
+    {
+      "id": "watchdog-blocked",
+      "trigger_type": "notify",
+      "condition": {
+        "metric": "watchdog_blocked",
+        "op": "==",
+        "value": true
+      },
+      "trigger_params": {
+        "title": "HSCC: pipeline watchdog blocked",
+        "body": "The pipeline watchdog tripped its circuit breaker \u2014 dispatch is halted."
+      }
+    }
+  ]
+}
