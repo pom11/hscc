@@ -277,6 +277,8 @@ Health & monitoring
                          streams: dgx gateway local heartbeat nas watchdog triggers
   watch [stream]       Live-tail check results
   triggers             Show trigger-engine rules and recent firings
+  verify               Run a full compatibility/health smoke-test of the cluster
+  stats [days]         Fleet activity — completions & tool usage over N days (default 7)
 
 Cluster & templates
   cluster status       Running workloads + idle hosts
@@ -336,6 +338,8 @@ COMMAND_HELP = {
     "template": "Cluster template commands.\n  Subcommands: list status preview <name> validate <name> apply <name> [--confirm]\n  Usage: hscc template <subcommand> [args]",
     "profiles": "Running kanban task counts per profile",
     "help": "Show help. Usage: hscc help [command]\n  Use 'hscc help advanced' for internal commands.",
+    "verify": "Run a full compatibility/health smoke-test of the cluster.\n  Usage: hscc verify [--json]",
+    "stats": "Fleet activity — completions & tool usage over N days (default 7).\n  Usage: hscc stats [days] [--json]",
     "advanced": "Internal/service-manager commands.\n  See 'hscc help advanced' for details.",
     "start-daemon": "Run the daemon loop in the foreground (used by launchd)",
     "ed-status": "Event-driven mode status (placeholder, not yet available)",
@@ -467,6 +471,52 @@ def _handle_template():
     return _emit(cmd_cluster_template([sub, *sys.argv[3:]]))
 
 
+def _handle_verify():
+    """Run verify.run_all() and print a per-check table (or JSON with --json)."""
+    from hscc_daemon import verify as verify_mod
+
+    json_mode = "--json" in sys.argv[1:]
+    result = verify_mod.run_all()
+
+    if json_mode:
+        print(json.dumps(result))
+    else:
+        checks = result.get("checks", [])
+        if checks:
+            max_name = max(len(c.get("name", "")) for c in checks)
+            max_name = max(max_name, 4)  # minimum padding
+            for c in checks:
+                glyph = "\u2713" if c.get("ok") else "\u2717"
+                name = c.get("name", "").ljust(max_name)
+                detail = c.get("detail", "")
+                print(f"  {glyph} {name}  {detail}")
+        overall = "\u2713 All checks passed" if result.get("ok") else "\u2717 Some checks failed"
+        print(f"\n  {overall}")
+    sys.exit(0 if result.get("ok") else 1)
+
+
+def _handle_stats():
+    """Run stats.compute_stats and print formatted output (or JSON with --json)."""
+    from hscc_daemon import stats as stats_mod
+
+    json_mode = "--json" in sys.argv[1:]
+    days = 7
+    rest = [a for a in sys.argv[1:] if a != "--json"]
+    if len(rest) > 1:
+        try:
+            days = int(rest[1])
+        except (ValueError, TypeError):
+            days = 7
+
+    result = stats_mod.compute_stats(since_days=days)
+
+    if json_mode:
+        print(json.dumps(result))
+    else:
+        print(stats_mod.format_stats(result))
+    sys.exit(0)
+
+
 def _handle_help():
     """Handle 'hscc help [command]' and 'hscc --help' / '-h'."""
     if len(sys.argv) < 3:
@@ -500,7 +550,7 @@ def _handle_profiles():
 # Per-command --help support
 DAEMON_COMMANDS = {
     "start", "stop", "status", "install", "uninstall", "plist",
-    "log", "check", "watch", "triggers", "notify",
+    "log", "check", "watch", "triggers", "notify", "verify", "stats",
 }
 
 
@@ -540,6 +590,14 @@ def main():
         print(f"hscc {cmd}")
         print(f"  {help_text}")
         sys.exit(0)
+
+    # 'verify'
+    if cmd == "verify":
+        _handle_verify()
+
+    # 'stats'
+    if cmd == "stats":
+        _handle_stats()
 
     # Advanced commands (also support --help)
     advanced_cmds = {"start-daemon", "ed-status", "ed-install", "ed-uninstall"}
@@ -598,7 +656,7 @@ def main():
         cmd_ed_uninstall()
     else:
         print(f"Unknown command: {cmd}")
-        print(f"Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, start-daemon")
+        print(f"Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, verify, stats, start-daemon")
         sys.exit(1)
 
 

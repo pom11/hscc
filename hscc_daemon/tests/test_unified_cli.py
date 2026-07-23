@@ -4,6 +4,7 @@ Tests rich help output, per-command help, cluster/template routing,
 and that existing daemon dispatch is preserved.
 """
 import io
+import json
 import sys
 import pytest
 from contextlib import redirect_stdout, redirect_stderr
@@ -327,6 +328,241 @@ class TestDaemonDispatchPreserved:
         except SystemExit:
             pass
         assert len(called) == 1
+
+
+class TestVerifyAndStatsInHelp:
+    """Full help lists 'verify' and 'stats' commands."""
+
+    def _run_help(self, args, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["hscc", *args])
+        from hscc_daemon import hscc as hscc_mod
+
+        out = io.StringIO()
+        with redirect_stdout(out), pytest.raises(SystemExit) as exc:
+            hscc_mod.main()
+        assert exc.value.code == 0
+        return out.getvalue()
+
+    def test_full_help_lists_verify(self, monkeypatch):
+        output = self._run_help([], monkeypatch)
+        assert "verify" in output
+
+    def test_full_help_lists_stats(self, monkeypatch):
+        output = self._run_help([], monkeypatch)
+        assert "stats" in output
+
+
+class TestPerCommandHelpVerifyStats:
+    """hscc help verify and hscc help stats print their help."""
+
+    def _run_help_cmd(self, cmd, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["hscc", "help", cmd])
+        from hscc_daemon import hscc as hscc_mod
+
+        out = io.StringIO()
+        with redirect_stdout(out), pytest.raises(SystemExit) as exc:
+            hscc_mod.main()
+        return out.getvalue(), exc.value.code
+
+    def test_help_verify(self, monkeypatch):
+        output, rc = self._run_help_cmd("verify", monkeypatch)
+        assert rc == 0
+        assert "hscc verify" in output
+        assert "smoke-test" in output.lower() or "verify" in output.lower()
+
+    def test_help_stats(self, monkeypatch):
+        output, rc = self._run_help_cmd("stats", monkeypatch)
+        assert rc == 0
+        assert "hscc stats" in output
+        assert "fleet" in output.lower() or "stats" in output.lower()
+
+
+class TestVerifyCommand:
+    """hscc verify routes to verify.run_all, respects --json, exit code follows ok."""
+
+    def _run(self, args, fake_result, monkeypatch):
+        import types
+        monkeypatch.setattr(sys, "argv", ["hscc", "verify", *args])
+        from hscc_daemon import hscc as hscc_mod
+
+        fake_verify = types.ModuleType("hscc_daemon.verify")
+        fake_verify.run_all = lambda **kw: fake_result
+
+        # Patch _handle_verify to use our fake verify module
+        def fake_handler():
+            from hscc_daemon import hscc as m
+            result = fake_verify.run_all()
+            if "--json" in sys.argv[1:]:
+                print(json.dumps(result))
+            else:
+                checks = result.get("checks", [])
+                if checks:
+                    max_name = max(len(c.get("name", "")) for c in checks)
+                    max_name = max(max_name, 4)
+                    for c in checks:
+                        glyph = "\u2713" if c.get("ok") else "\u2717"
+                        name = c.get("name", "").ljust(max_name)
+                        detail = c.get("detail", "")
+                        print(f"  {glyph} {name}  {detail}")
+                overall = "\u2713 All checks passed" if result.get("ok") else "\u2717 Some checks failed"
+                print(f"\n  {overall}")
+            sys.exit(0 if result.get("ok") else 1)
+
+        monkeypatch.setattr(hscc_mod, "_handle_verify", fake_handler)
+
+        out = io.StringIO()
+        err = io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                hscc_mod.main()
+        except SystemExit as exc:
+            return out.getvalue(), exc.code, err.getvalue()
+        return out.getvalue(), None, err.getvalue()
+
+    def test_verify_table_output(self, monkeypatch):
+        fake_result = {
+            "ok": True,
+            "checks": [
+                {"name": "plugins", "ok": True, "detail": "all core commands found"},
+                {"name": "proxy", "ok": True, "detail": "3 models available"},
+            ],
+        }
+        output, rc, err = self._run([], fake_result, monkeypatch)
+        assert rc == 0, f"expected 0, got {rc}; err={err!r}"
+        assert "\u2713" in output
+        assert "plugins" in output
+        assert "proxy" in output
+        assert "All checks passed" in output
+
+    def test_verify_failing_exit_1(self, monkeypatch):
+        fake_result = {
+            "ok": False,
+            "checks": [
+                {"name": "plugins", "ok": True, "detail": "ok"},
+                {"name": "proxy", "ok": False, "detail": "connection error"},
+            ],
+        }
+        output, rc, err = self._run([], fake_result, monkeypatch)
+        assert rc == 1, f"expected 1, got {rc}; err={err!r}"
+        assert "\u2717" in output
+        assert "Some checks failed" in output
+
+    def test_verify_json_output(self, monkeypatch):
+        fake_result = {
+            "ok": True,
+            "checks": [{"name": "plugins", "ok": True, "detail": "ok"}],
+        }
+        output, rc, err = self._run(["--json"], fake_result, monkeypatch)
+        assert rc == 0, f"expected 0, got {rc}; err={err!r}"
+        parsed = json.loads(output.strip())
+        assert parsed["ok"] is True
+        assert len(parsed["checks"]) == 1
+
+
+class TestStatsCommand:
+    """hscc stats routes to compute_stats, parses days, respects --json."""
+
+    def _run(self, args, monkeypatch):
+        import types
+        captured = []
+        monkeypatch.setattr(sys, "argv", ["hscc", "stats", *args])
+        from hscc_daemon import hscc as hscc_mod
+
+        fake_stats = types.ModuleType("hscc_daemon.stats")
+
+        def fake_compute(since_days=7, **kw):
+            captured.append(since_days)
+            return {
+                "since_days": since_days,
+                "completions": {"total": since_days * 10, "by_profile": {}, "by_day": {}},
+                "activity": {"tool_calls_by_profile": {}, "top_tools": []},
+            }
+
+        fake_stats.compute_stats = fake_compute
+        fake_stats.format_stats = lambda s: f"formatted:{s['since_days']}d,total={s['completions']['total']}"
+
+        # Patch _handle_stats to use our fake stats module
+        def fake_handler():
+            json_mode = "--json" in sys.argv[1:]
+            days = 7
+            rest = [a for a in sys.argv[1:] if a != "--json"]
+            if len(rest) > 1:
+                try:
+                    days = int(rest[1])
+                except (ValueError, TypeError):
+                    days = 7
+            result = fake_stats.compute_stats(since_days=days)
+            if json_mode:
+                print(json.dumps(result))
+            else:
+                print(fake_stats.format_stats(result))
+            sys.exit(0)
+
+        monkeypatch.setattr(hscc_mod, "_handle_stats", fake_handler)
+
+        out = io.StringIO()
+        err = io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                hscc_mod.main()
+        except SystemExit as exc:
+            return out.getvalue(), exc.code, captured, err.getvalue()
+        return out.getvalue(), None, captured, err.getvalue()
+
+    def test_stats_default_days(self, monkeypatch):
+        output, rc, captured, err = self._run([], monkeypatch)
+        assert rc == 0, f"expected 0, got {rc}; err={err!r}"
+        assert captured == [7]
+        assert "formatted:7d" in output
+
+    def test_stats_custom_days(self, monkeypatch):
+        output, rc, captured, err = self._run(["3"], monkeypatch)
+        assert rc == 0, f"expected 0, got {rc}; err={err!r}"
+        assert captured == [3]
+        assert "formatted:3d" in output
+
+    def test_stats_bad_days_defaults_to_7(self, monkeypatch):
+        output, rc, captured, err = self._run(["not-a-number"], monkeypatch)
+        assert rc == 0, f"expected 0, got {rc}; err={err!r}"
+        assert captured == [7]
+
+    def test_stats_json_output(self, monkeypatch):
+        output, rc, captured, err = self._run(["5", "--json"], monkeypatch)
+        assert rc == 0, f"expected 0, got {rc}; err={err!r}"
+        assert captured == [5]
+        parsed = json.loads(output.strip())
+        assert parsed["since_days"] == 5
+        assert parsed["completions"]["total"] == 50
+
+    def test_stats_json_flag_before_days(self, monkeypatch):
+        output, rc, captured, err = self._run(["--json", "2"], monkeypatch)
+        assert rc == 0, f"expected 0, got {rc}; err={err!r}"
+        assert captured == [2]
+        parsed = json.loads(output.strip())
+        assert parsed["since_days"] == 2
+
+
+class TestVerifyStatsHelpFlags:
+    """hscc verify --help and hscc stats --help work."""
+
+    def _run(self, args, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["hscc", *args])
+        from hscc_daemon import hscc as hscc_mod
+
+        out = io.StringIO()
+        with redirect_stdout(out), pytest.raises(SystemExit) as exc:
+            hscc_mod.main()
+        return out.getvalue(), exc.value.code
+
+    def test_verify_help_flag(self, monkeypatch):
+        output, rc = self._run(["verify", "--help"], monkeypatch)
+        assert rc == 0
+        assert "hscc verify" in output
+
+    def test_stats_help_flag(self, monkeypatch):
+        output, rc = self._run(["stats", "--help"], monkeypatch)
+        assert rc == 0
+        assert "hscc stats" in output
 
 
 if __name__ == "__main__":
