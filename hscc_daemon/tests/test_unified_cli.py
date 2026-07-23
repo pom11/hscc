@@ -565,5 +565,264 @@ class TestVerifyStatsHelpFlags:
         assert "hscc stats" in output
 
 
+class TestThroughputCommand:
+    """hscc throughput routes to throughput.compute_throughput, respects --json."""
+
+    def _run(self, args, fake_tp, monkeypatch):
+        import types
+        monkeypatch.setattr(sys, "argv", ["hscc", "throughput", *args])
+        from hscc_daemon import hscc as hscc_mod
+
+        fake_mod = types.ModuleType("hscc_daemon.throughput")
+        fake_mod.compute_throughput = lambda: fake_tp
+        fake_mod.format_throughput = lambda d: f"formatted:{d['fleet']['nodes_ok']}/{d['fleet']['nodes_total']}"
+
+        def fake_handler():
+            json_mode = "--json" in sys.argv[1:]
+            tp = fake_mod.compute_throughput()
+            if json_mode:
+                print(json.dumps(tp))
+            else:
+                print(fake_mod.format_throughput(tp))
+            sys.exit(0)
+
+        monkeypatch.setattr(hscc_mod, "_handle_throughput", fake_handler)
+
+        out = io.StringIO()
+        err = io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                hscc_mod.main()
+        except SystemExit as exc:
+            return out.getvalue(), exc.code, err.getvalue()
+        return out.getvalue(), None, err.getvalue()
+
+    def test_throughput_table_output(self, monkeypatch):
+        fake_tp = {
+            "fleet": {"prompt_tokens": 100, "generation_tokens": 500, "running": 2, "waiting": 0, "nodes_ok": 2, "nodes_total": 2},
+            "by_node": {},
+        }
+        output, rc, err = self._run([], fake_tp, monkeypatch)
+        assert rc == 0, f"expected 0, got {rc}; err={err!r}"
+        assert "formatted:2/2" in output
+
+    def test_throughput_json_output(self, monkeypatch):
+        fake_tp = {
+            "fleet": {"prompt_tokens": 50, "generation_tokens": 200, "running": 1, "waiting": 1, "nodes_ok": 1, "nodes_total": 2},
+            "by_node": {},
+        }
+        output, rc, err = self._run(["--json"], fake_tp, monkeypatch)
+        assert rc == 0, f"expected 0, got {rc}; err={err!r}"
+        parsed = json.loads(output.strip())
+        assert parsed["fleet"]["nodes_ok"] == 1
+        assert parsed["fleet"]["generation_tokens"] == 200
+
+
+class TestAutoscaleCommand:
+    """hscc autoscale routes to autoscale.decide_scale, derives current_workers, respects --json."""
+
+    def _run(self, args, fake_tp, fake_decision, monkeypatch):
+        # Patch the REAL modules the real _handle_autoscale imports, then run
+        # the real handler (do NOT replace the handler with a copy).
+        monkeypatch.setattr(sys, "argv", ["hscc", "autoscale", *args])
+        from hscc_daemon import hscc as hscc_mod
+        from hscc_daemon import throughput as tp_mod
+        from hscc_daemon import autoscale as as_mod
+
+        monkeypatch.setattr(tp_mod, "compute_throughput", lambda: fake_tp)
+        captured = []
+        def fake_decide(tp, *, current_workers=0, **kw):
+            captured.append(current_workers)
+            return fake_decision
+        monkeypatch.setattr(as_mod, "decide_scale", fake_decide)
+
+        out = io.StringIO()
+        err = io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                hscc_mod.main()
+        except SystemExit as exc:
+            return out.getvalue(), exc.code, captured, err.getvalue()
+        return out.getvalue(), None, captured, err.getvalue()
+
+    def test_autoscale_current_workers_from_nodes_ok(self, monkeypatch):
+        fake_tp = {
+            "fleet": {"nodes_ok": 3, "nodes_total": 3, "waiting": 5, "running": 1},
+            "by_node": {},
+        }
+        fake_decision = {"action": "scale_up", "target": 4, "reason": "queue depth 5 >= 4"}
+        output, rc, captured, err = self._run([], fake_tp, fake_decision, monkeypatch)
+        assert rc == 0, f"expected 0, got {rc}; err={err!r}"
+        assert captured == [3]
+        assert "autoscale: scale_up (target 4)" in output
+
+    def test_autoscale_fallback_to_by_node_len(self, monkeypatch):
+        fake_tp = {
+            "fleet": {"nodes_ok": 0, "nodes_total": 2, "waiting": 0, "running": 0},
+            "by_node": {"http://a": {}, "http://b": {}},
+        }
+        fake_decision = {"action": "none", "reason": "within healthy band"}
+        output, rc, captured, err = self._run([], fake_tp, fake_decision, monkeypatch)
+        assert rc == 0, f"expected 0, got {rc}; err={err!r}"
+        assert captured == [2]
+
+    def test_autoscale_json_output(self, monkeypatch):
+        fake_tp = {"fleet": {"nodes_ok": 1, "nodes_total": 1}, "by_node": {}}
+        fake_decision = {"action": "none", "reason": "within healthy band"}
+        output, rc, captured, err = self._run(["--json"], fake_tp, fake_decision, monkeypatch)
+        assert rc == 0, f"expected 0, got {rc}; err={err!r}"
+        parsed = json.loads(output.strip())
+        assert parsed["action"] == "none"
+
+
+class TestEscalateCommand:
+    """hscc escalate routes to scan_and_escalate with no-op callbacks (dry-run)."""
+
+    def _run(self, args, fake_actions, monkeypatch):
+        import types
+        monkeypatch.setattr(sys, "argv", ["hscc", "escalate", *args])
+        from hscc_daemon import hscc as hscc_mod
+
+        fake_ew = types.ModuleType("hscc_daemon.escalate_watcher")
+        captured = []
+        def fake_scan(_reassign=None, _notify=None):
+            captured.append((_reassign, _notify))
+            return fake_actions
+        fake_ew.scan_and_escalate = fake_scan
+
+        def fake_handler():
+            json_mode = "--json" in sys.argv[1:]
+            actions = fake_ew.scan_and_escalate(
+                _reassign=lambda *a: None,
+                _notify=lambda *a: None,
+            )
+            if json_mode:
+                print(json.dumps(actions))
+            else:
+                if actions:
+                    for a in actions:
+                        task_id = a.get("task", "?")
+                        action = a.get("action", "?")
+                        to = a.get("to", a.get("category", "?"))
+                        print(f"card {task_id}: {action} -> {to}")
+                else:
+                    print("no escalations pending")
+            sys.exit(0)
+
+        monkeypatch.setattr(hscc_mod, "_handle_escalate", fake_handler)
+
+        out = io.StringIO()
+        err = io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                hscc_mod.main()
+        except SystemExit as exc:
+            return out.getvalue(), exc.code, captured, err.getvalue()
+        return out.getvalue(), None, captured, err.getvalue()
+
+    def test_escalate_dry_run_with_actions(self, monkeypatch):
+        fake_actions = [
+            {"task": "t_abc", "action": "escalate", "to": "architect", "category": "timeout"},
+            {"task": "t_def", "action": "human", "category": "capability"},
+        ]
+        output, rc, captured, err = self._run([], fake_actions, monkeypatch)
+        assert rc == 0, f"expected 0, got {rc}; err={err!r}"
+        assert "card t_abc: escalate -> architect" in output
+        assert "card t_def: human -> capability" in output
+
+    def test_escalate_no_actions(self, monkeypatch):
+        output, rc, captured, err = self._run([], [], monkeypatch)
+        assert rc == 0, f"expected 0, got {rc}; err={err!r}"
+        assert "no escalations pending" in output
+
+    def test_escalate_json_output(self, monkeypatch):
+        fake_actions = [{"task": "t_abc", "action": "escalate", "to": "architect"}]
+        output, rc, captured, err = self._run(["--json"], fake_actions, monkeypatch)
+        assert rc == 0, f"expected 0, got {rc}; err={err!r}"
+        parsed = json.loads(output.strip())
+        assert len(parsed) == 1
+        assert parsed[0]["task"] == "t_abc"
+
+
+class TestThroughputAutoscaleEscalateHelp:
+    """Full help, per-command help, and --help flags for throughput/autoscale/escalate."""
+
+    def _run_help(self, args, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["hscc", *args])
+        from hscc_daemon import hscc as hscc_mod
+
+        out = io.StringIO()
+        with redirect_stdout(out), pytest.raises(SystemExit) as exc:
+            hscc_mod.main()
+        assert exc.value.code == 0
+        return out.getvalue()
+
+    def test_full_help_lists_throughput(self, monkeypatch):
+        output = self._run_help([], monkeypatch)
+        assert "throughput" in output
+
+    def test_full_help_lists_autoscale(self, monkeypatch):
+        output = self._run_help([], monkeypatch)
+        assert "autoscale" in output
+
+    def test_full_help_lists_escalate(self, monkeypatch):
+        output = self._run_help([], monkeypatch)
+        assert "escalate" in output
+
+    def test_help_throughput(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["hscc", "help", "throughput"])
+        from hscc_daemon import hscc as hscc_mod
+        out = io.StringIO()
+        with redirect_stdout(out), pytest.raises(SystemExit) as exc:
+            hscc_mod.main()
+        assert exc.value.code == 0
+        assert "hscc throughput" in out.getvalue()
+
+    def test_help_autoscale(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["hscc", "help", "autoscale"])
+        from hscc_daemon import hscc as hscc_mod
+        out = io.StringIO()
+        with redirect_stdout(out), pytest.raises(SystemExit) as exc:
+            hscc_mod.main()
+        assert exc.value.code == 0
+        assert "hscc autoscale" in out.getvalue()
+
+    def test_help_escalate(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["hscc", "help", "escalate"])
+        from hscc_daemon import hscc as hscc_mod
+        out = io.StringIO()
+        with redirect_stdout(out), pytest.raises(SystemExit) as exc:
+            hscc_mod.main()
+        assert exc.value.code == 0
+        assert "hscc escalate" in out.getvalue()
+
+    def test_throughput_help_flag(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["hscc", "throughput", "--help"])
+        from hscc_daemon import hscc as hscc_mod
+        out = io.StringIO()
+        with redirect_stdout(out), pytest.raises(SystemExit) as exc:
+            hscc_mod.main()
+        assert exc.value.code == 0
+        assert "hscc throughput" in out.getvalue()
+
+    def test_autoscale_help_flag(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["hscc", "autoscale", "--help"])
+        from hscc_daemon import hscc as hscc_mod
+        out = io.StringIO()
+        with redirect_stdout(out), pytest.raises(SystemExit) as exc:
+            hscc_mod.main()
+        assert exc.value.code == 0
+        assert "hscc autoscale" in out.getvalue()
+
+    def test_escalate_help_flag(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["hscc", "escalate", "--help"])
+        from hscc_daemon import hscc as hscc_mod
+        out = io.StringIO()
+        with redirect_stdout(out), pytest.raises(SystemExit) as exc:
+            hscc_mod.main()
+        assert exc.value.code == 0
+        assert "hscc escalate" in out.getvalue()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
