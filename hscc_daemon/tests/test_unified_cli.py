@@ -622,32 +622,19 @@ class TestAutoscaleCommand:
     """hscc autoscale routes to autoscale.decide_scale, derives current_workers, respects --json."""
 
     def _run(self, args, fake_tp, fake_decision, monkeypatch):
-        import types
+        # Patch the REAL modules the real _handle_autoscale imports, then run
+        # the real handler (do NOT replace the handler with a copy).
         monkeypatch.setattr(sys, "argv", ["hscc", "autoscale", *args])
         from hscc_daemon import hscc as hscc_mod
+        from hscc_daemon import throughput as tp_mod
+        from hscc_daemon import autoscale as as_mod
 
-        fake_tp_mod = types.ModuleType("hscc_daemon.throughput")
-        fake_tp_mod.compute_throughput = lambda: fake_tp
-
-        fake_as_mod = types.ModuleType("hscc_daemon.autoscale")
+        monkeypatch.setattr(tp_mod, "compute_throughput", lambda: fake_tp)
         captured = []
         def fake_decide(tp, *, current_workers=0, **kw):
             captured.append(current_workers)
             return fake_decision
-        fake_as_mod.decide_scale = fake_decide
-
-        def fake_handler():
-            json_mode = "--json" in sys.argv[1:]
-            tp = fake_tp_mod.compute_throughput()
-            current = tp.get("fleet", {}).get("nodes_ok", 0) or len(tp.get("by_node", {}))
-            d = fake_as_mod.decide_scale(tp, current_workers=current)
-            if json_mode:
-                print(json.dumps(d))
-            else:
-                print(f"autoscale: {d['action']} (target {d['target']}) — {d['reason']}")
-            sys.exit(0)
-
-        monkeypatch.setattr(hscc_mod, "_handle_autoscale", fake_handler)
+        monkeypatch.setattr(as_mod, "decide_scale", fake_decide)
 
         out = io.StringIO()
         err = io.StringIO()
@@ -674,14 +661,14 @@ class TestAutoscaleCommand:
             "fleet": {"nodes_ok": 0, "nodes_total": 2, "waiting": 0, "running": 0},
             "by_node": {"http://a": {}, "http://b": {}},
         }
-        fake_decision = {"action": "none", "target": 0, "reason": "within healthy band"}
+        fake_decision = {"action": "none", "reason": "within healthy band"}
         output, rc, captured, err = self._run([], fake_tp, fake_decision, monkeypatch)
         assert rc == 0, f"expected 0, got {rc}; err={err!r}"
         assert captured == [2]
 
     def test_autoscale_json_output(self, monkeypatch):
         fake_tp = {"fleet": {"nodes_ok": 1, "nodes_total": 1}, "by_node": {}}
-        fake_decision = {"action": "none", "target": 1, "reason": "within healthy band"}
+        fake_decision = {"action": "none", "reason": "within healthy band"}
         output, rc, captured, err = self._run(["--json"], fake_tp, fake_decision, monkeypatch)
         assert rc == 0, f"expected 0, got {rc}; err={err!r}"
         parsed = json.loads(output.strip())
