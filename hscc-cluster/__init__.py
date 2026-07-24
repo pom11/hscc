@@ -6,6 +6,7 @@ from . import ops
 from . import debug
 from . import heal
 from . import discovery
+from . import fleet
 
 
 def _stringify(handler):
@@ -66,8 +67,21 @@ _HEAL_TOOLS = [
 ]
 
 
+_FLEET_TOOLS = [
+    ("cluster_verify", fleet.CLUSTER_VERIFY_SCHEMA, fleet.cluster_verify, "🔍",
+     "Full compatibility/health smoke-test (plugins, multiplex, streams, proxy, config)."),
+    ("cluster_throughput", fleet.CLUSTER_THROUGHPUT_SCHEMA, fleet.cluster_throughput, "📊",
+     "vLLM token throughput + per-node queue depth across the fleet."),
+    ("fleet_stats", fleet.FLEET_STATS_SCHEMA, fleet.fleet_stats, "📈",
+     "Fleet activity: task completions + tool usage over N days (default 7)."),
+    ("autoscale_advice", fleet.AUTOSCALE_ADVICE_SCHEMA, fleet.autoscale_advice, "🧭",
+     "Advisory scale up/down/none decision from current queue depth (does NOT scale)."),
+]
+
+
 def register(ctx) -> None:
-    for name, schema, handler, emoji, desc in _READ_TOOLS + _OPS_TOOLS + _DEBUG_TOOLS + _HEAL_TOOLS:
+    for name, schema, handler, emoji, desc in (_READ_TOOLS + _OPS_TOOLS + _DEBUG_TOOLS
+                                                 + _HEAL_TOOLS + _FLEET_TOOLS):
         ctx.register_tool(name=name, toolset="hscc-cluster", schema=schema,
                           handler=_stringify(handler), emoji=emoji, description=desc)
     # WS4: on kanban re-dispatch, post an idempotent-resume note so the worker
