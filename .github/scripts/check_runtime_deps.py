@@ -11,8 +11,9 @@ Outputs (to $GITHUB_OUTPUT when set, else stdout):
   branch=deps/runtime-bump
 A PR body is written to the path in $DEP_PR_BODY_FILE (default: pr_body.md).
 
-Exit code is always 0 — a transient API failure for one dep is skipped, not
-fatal, so a single flaky upstream never fails the workflow.
+Exit code 0 when no deps need updating. Exits 1 when a dep's latest release
+tag could not be fetched — a persistent API failure should fail the workflow,
+not slip by silently.
 """
 
 import json
@@ -24,6 +25,29 @@ import urllib.request
 LOCK_PATH = os.environ.get(
     "RUNTIME_VERSIONS_FILE", "hscc-bootstrap/runtime-versions.json")
 BRANCH = "deps/runtime-bump"
+
+
+def _parse_version(tag):
+    """Parse 'v0.2.41' → (0, 2, 41) for numeric comparison.
+
+    Strips a leading v/V, splits on '.', keeps leading digits in each
+    segment.  Unparseable tags return (0,) so they never trigger an
+    upgrade."""
+    try:
+        s = tag.lstrip("vV")
+        parts = []
+        for seg in s.split("."):
+            num = ""
+            for ch in seg:
+                if ch.isdigit():
+                    num += ch
+                elif num:
+                    break
+            if num:
+                parts.append(int(num))
+        return tuple(parts) if parts else (0,)
+    except (ValueError, AttributeError):
+        return (0,)
 
 
 def _latest_release_tag(repo):
@@ -59,6 +83,7 @@ def main():
     deps = lock.get("dependencies", {})
 
     changes = []  # (name, repo, old, new)
+    fetch_failed = False
     for name, meta in deps.items():
         repo = meta.get("repo")
         cur = meta.get("tag")
@@ -69,10 +94,14 @@ def main():
             # A transient/permission failure — skip this dep (never open a
             # spurious PR); surface it so the Action log shows the miss.
             print(f"warning: could not check {name} ({repo})", file=sys.stderr)
+            fetch_failed = True
             continue
-        if latest != cur:
+        if _parse_version(latest) > _parse_version(cur):
             changes.append((name, repo, cur, latest))
             meta["tag"] = latest  # stage the bump
+
+    if fetch_failed:
+        return 1
 
     if not changes:
         _emit("updated", "false")

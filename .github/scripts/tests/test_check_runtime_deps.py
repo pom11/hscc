@@ -52,11 +52,31 @@ def test_detects_and_writes_bump(tmp_path, monkeypatch):
     assert "releases/tag/v0.2.41" in text
 
 
-def test_fetch_failure_skips_dep(tmp_path, monkeypatch):
-    """A None from the fetch skips that dep — never a spurious update."""
+def test_fetch_failure_exits_nonzero(tmp_path, monkeypatch):
+    """When a dep cannot be fetched the script exits 1 — CI goes red."""
     lock = _lock(tmp_path)
     monkeypatch.setattr(c, "LOCK_PATH", str(lock))
     monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
     monkeypatch.setattr(c, "_latest_release_tag", lambda repo: None)
+    assert c.main() == 1
+
+
+def test_no_downgrade_when_latest_is_older(tmp_path, monkeypatch):
+    """A backport tag newer in date but older in semver does NOT trigger a bump."""
+    lock = _lock(tmp_path)
+    monkeypatch.setattr(c, "LOCK_PATH", str(lock))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
+    # latest=v0.2.40.1 (backport released after v0.2.41) is older → no bump
+    monkeypatch.setattr(c, "_latest_release_tag",
+                        lambda repo: {"NousResearch/hermes-agent": "v2026.7.20",
+                                      "spark-arena/sparkrun": "v0.2.40.1"}[repo])
+    # Lock has sparkrun at v0.2.41
+    lock.write_text(json.dumps({"dependencies": {
+        "hermes-agent": {"repo": "NousResearch/hermes-agent", "tag": "v2026.7.20"},
+        "sparkrun": {"repo": "spark-arena/sparkrun", "tag": "v0.2.41"},
+    }}))
     assert c.main() == 0
-    assert "updated=false" in (tmp_path / "out").read_text()
+    out = (tmp_path / "out").read_text()
+    assert "updated=false" in out
+    # lock untouched
+    assert json.loads(lock.read_text())["dependencies"]["sparkrun"]["tag"] == "v0.2.41"
