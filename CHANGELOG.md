@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] — Agent tool parity: the orchestrator can manage the fleet directly
+
+The v1.1.0 fleet capabilities were operator-facing (CLI) only. This registers
+them as `hscc-cluster` agent tools so the Hermes orchestrator can call them
+itself — closing the last gap between what the operator can do and what the
+agent can do.
+
+### Added
+- **Fleet read tools** (`hscc-cluster/fleet.py`): `cluster_verify` (full
+  smoke-test), `cluster_throughput` (vLLM tokens + queue depth), `fleet_stats`
+  (completions + tool activity), `autoscale_advice` (advisory scale decision).
+  Thin, best-effort wrappers over the merged daemon modules (path-robust lazy
+  import).
+- **Template tools** (`hscc-cluster/template_tools.py`): `list_templates`,
+  `preview_template` (dry-run), and `apply_template` (reshapes the whole fleet —
+  HIGH-RISK, confirm-gated: without `confirm=true` it returns a preview). The
+  agent can now inspect and reshape the fleet, not just single models.
+
+With these, the orchestrator's tool surface reaches parity with the operator:
+read/diagnose, provision/restart/stop, heal, verify, observe throughput, get
+scaling advice, and apply whole-fleet templates.
+
 ## [1.1.0] — Fleet operations: verify, alerting, throughput, escalation, autoscale
 
 A batch of operator + self-management features, each built as a small module by
