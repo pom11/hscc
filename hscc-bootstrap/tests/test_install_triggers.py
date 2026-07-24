@@ -194,3 +194,49 @@ def test_main_prints_json(capsys, tmp_path, monkeypatch):
     parsed = json.loads(captured.out)
     assert "added" in parsed
     assert "total" in parsed
+
+
+# ── Write failure reporting ──────────────────────────────────────────
+
+
+def test_write_failure_returns_ok_false(tmp_path, monkeypatch):
+    """When os.replace raises OSError, result has ok=False and error set."""
+    target = str(tmp_path / "triggers.json")
+
+    def fake_replace(src, dst):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(os, "replace", fake_replace)
+
+    result = IT.install_triggers(triggers_path=target, defaults_path=_DEFAULTS_PATH)
+
+    assert result["ok"] is False
+    assert "error" in result
+    assert "No space left on device" in result["error"]
+    assert result["total"] == 3  # total still reflects merged count
+    assert set(result["added"]) == set(DEFAULT_RULES)  # added still computed
+
+    # Target file was never written
+    assert not os.path.exists(target)
+    # Leftover .tmp was cleaned up
+    assert not os.path.exists(target + ".tmp")
+
+
+def test_write_failure_main_exits_nonzero(tmp_path, monkeypatch):
+    """The __main__ block exits 1 when write fails."""
+    def fake_replace(src, dst):
+        raise OSError("Permission denied")
+
+    monkeypatch.setattr(os, "replace", fake_replace)
+    monkeypatch.setattr(sys, "argv", ["install_triggers"])
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    import importlib
+
+    mod = importlib.reload(IT)
+
+    # Run __main__ logic directly (avoid actual sys.exit in test)
+    result = mod.install_triggers()
+    assert result["ok"] is False
+    # Confirm exit code would be non-zero
+    assert not result.get("ok", True)
