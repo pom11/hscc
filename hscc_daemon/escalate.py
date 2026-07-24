@@ -27,13 +27,13 @@ def classify_failure(error_text):
     if "oom" in text or "out of memory" in text or "killed" in text or "memory" in text:
         return "oom"
 
+    # Tooling / import issues
+    if "importerror" in text or "modulenotfound" in text or "traceback" in text or "import" in text:
+        return "tooling"
+
     # Test failures
     if "test" in text or "assert" in text or "pytest" in text or "failed" in text:
         return "test-failure"
-
-    # Tooling / import issues
-    if "importerror" in text or "modulenotfound" in text or "traceback" in text:
-        return "tooling"
 
     return "other"
 
