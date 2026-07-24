@@ -10,6 +10,7 @@ Commands:
   validate                 Validate every role spec (load + required fields)
   autonomy [on|off]        Show or set the fleet autonomy flag
 """
+import json
 import os
 import sys
 
@@ -39,7 +40,7 @@ def cmd_generate():
     result = {"generated": out}
     if failures:
         result["failures"] = failures
-    print(result)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
     return 1 if failures else 0
 
 
