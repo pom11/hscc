@@ -1,6 +1,7 @@
 """Smoke-test checks for a future `hscc verify` command.
 
-Each check returns {\"name\": str, \"ok\": bool, \"detail\": str} and never raises.
+Each check returns {"name": str, "ok": bool|None, "detail": str} and never raises.
+ok=None means the check could not be verified (not a pass, not a hard fail).
 """
 
 import json
@@ -90,11 +91,11 @@ def check_multiplex(gateway_state=None, config=None, profiles_dir=None):
     # Load gateway state
     try:
         if not os.path.isfile(gateway_state):
-            return {"name": "multiplex", "ok": True, "detail": "skipped: gateway state not found"}
+            return {"name": "multiplex", "ok": None, "detail": "multiplex enabled but gateway state missing — coverage unverified"}
         with open(gateway_state, "r") as f:
             gw = json.load(f)
     except (OSError, IOError, json.JSONDecodeError):
-        return {"name": "multiplex", "ok": True, "detail": "skipped: cannot read gateway state"}
+        return {"name": "multiplex", "ok": None, "detail": "multiplex enabled but cannot read gateway state — coverage unverified"}
 
     served = gw.get("served_profiles", [])
     if not served:
@@ -171,7 +172,7 @@ def check_daemon_streams(state_dir=None, max_age_s=None):
                 if now - ts > timedelta(seconds=max_age_s):
                     issues.append(f"{fn}: stale ({ts_str})")
             except (ValueError, TypeError):
-                pass  # ignore bad timestamps
+                issues.append(f"{fn}: unparseable timestamp ({ts_str})")
 
     if issues:
         return {"name": "daemon_streams", "ok": False, "detail": "; ".join(issues)}
