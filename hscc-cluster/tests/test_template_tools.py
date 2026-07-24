@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import template_tools
 
 
@@ -112,6 +113,90 @@ def test_handler_returns_error_on_engine_exception(monkeypatch):
 
 
 # ── Confirm propagation ──
+
+
+# ── _get_cluster_template fallback ──
+
+
+def test_get_cluster_template_raises_on_import_error(monkeypatch):
+    """When relative import fails, _get_cluster_template raises RuntimeError (fail-fast)."""
+    original_import = template_tools.__builtins__ if hasattr(template_tools, "__builtins__") else None
+
+    def import_side_effect(*args, **kwargs):
+        raise ImportError("no module named 'cluster_template'")
+
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if "cluster_template" in name:
+            raise ImportError("no module named 'cluster_template'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import, raising=False)
+
+    try:
+        with pytest.raises(RuntimeError, match="cluster_template module not available"):
+            template_tools._get_cluster_template()
+    finally:
+        monkeypatch.setattr(builtins, "__import__", real_import, raising=False)
+
+
+# ── Confirm coercion security tests ──
+
+
+def test_apply_template_string_false_does_not_execute(monkeypatch):
+    """confirm='false' (string) must NOT bypass the gate — returns preview."""
+    received = {}
+
+    class ConfirmChecker:
+        def apply_template(self, name, confirm=False):
+            received["confirm"] = confirm
+            if not confirm:
+                return {"status": "preview", "confirm_received": confirm}
+            return {"status": "applied", "confirm_received": confirm}
+
+    fake = ConfirmChecker()
+    monkeypatch.setattr(template_tools, "_get_cluster_template", lambda: fake)
+    out = template_tools.apply_template({"template": "coding", "confirm": "false"})
+    assert out["status"] == "preview"
+    assert received["confirm"] is False
+
+
+def test_apply_template_string_true_does_not_execute(monkeypatch):
+    """confirm='true' (string) must NOT bypass the gate — returns preview."""
+    received = {}
+
+    class ConfirmChecker:
+        def apply_template(self, name, confirm=False):
+            received["confirm"] = confirm
+            if not confirm:
+                return {"status": "preview", "confirm_received": confirm}
+            return {"status": "applied", "confirm_received": confirm}
+
+    fake = ConfirmChecker()
+    monkeypatch.setattr(template_tools, "_get_cluster_template", lambda: fake)
+    out = template_tools.apply_template({"template": "coding", "confirm": "true"})
+    assert out["status"] == "preview"
+    assert received["confirm"] is False
+
+
+def test_apply_template_int_1_does_not_execute(monkeypatch):
+    """confirm=1 (int) must NOT bypass the gate — returns preview."""
+    received = {}
+
+    class ConfirmChecker:
+        def apply_template(self, name, confirm=False):
+            received["confirm"] = confirm
+            if not confirm:
+                return {"status": "preview", "confirm_received": confirm}
+            return {"status": "applied", "confirm_received": confirm}
+
+    fake = ConfirmChecker()
+    monkeypatch.setattr(template_tools, "_get_cluster_template", lambda: fake)
+    out = template_tools.apply_template({"template": "coding", "confirm": 1})
+    assert out["status"] == "preview"
+    assert received["confirm"] is False
 
 
 def test_apply_template_propagates_confirm_false(monkeypatch):
