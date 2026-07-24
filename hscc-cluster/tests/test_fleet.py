@@ -1,8 +1,10 @@
 """Tests for hscc-cluster/fleet.py — lazy daemon imports, best-effort handlers."""
+import importlib
 import inspect
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -277,3 +279,94 @@ def test_register_total_tool_count(monkeypatch):
     assert "+ _FLEET_TOOLS" in src, "_FLEET_TOOLS not in register loop"
     # Verify from . import fleet
     assert "from . import fleet" in src
+
+
+def test_daemon_mod_does_not_pollute_sys_path_on_success():
+    """After a successful _daemon_mod call, the plugins dir must NOT be left in sys.path
+    when it wasn't there before the call."""
+    plugins_dir = os.path.dirname(os.path.dirname(os.path.abspath(fleet.__file__)))
+    original_path = list(sys.path)
+
+    # Ensure the plugins dir is NOT in sys.path before the test
+    if plugins_dir in sys.path:
+        sys.path.remove(plugins_dir)
+
+    # Patch import_module so it succeeds without actually importing
+    orig_import = importlib.import_module
+    called_with = []
+    def fake_import(name):
+        called_with.append(name)
+        return SimpleNamespace()
+    importlib.import_module = fake_import
+    try:
+        try:
+            fleet._daemon_mod("verify")
+        finally:
+            importlib.import_module = orig_import
+
+        assert called_with == ["hscc_daemon.verify"]
+        # Key assertion: plugins dir must NOT be in sys.path after the call
+        assert plugins_dir not in sys.path, (
+            f"_daemon_mod left plugins dir in sys.path: {plugins_dir}"
+        )
+    finally:
+        # Restore sys.path to exactly what it was
+        sys.path[:] = original_path
+
+
+def test_daemon_mod_does_not_pollute_sys_path_on_import_failure():
+    """When import_module raises, sys.path must still be cleaned up."""
+    plugins_dir = os.path.dirname(os.path.dirname(os.path.abspath(fleet.__file__)))
+    original_path = list(sys.path)
+
+    # Ensure the plugins dir is NOT in sys.path before the test
+    if plugins_dir in sys.path:
+        sys.path.remove(plugins_dir)
+
+    # Patch import_module to always raise
+    orig_import = importlib.import_module
+    def failing_import(name):
+        raise ModuleNotFoundError(f"No module named '{name}'")
+    importlib.import_module = failing_import
+    try:
+        try:
+            fleet._daemon_mod("nonexistent")
+        except ModuleNotFoundError:
+            pass  # expected
+        finally:
+            importlib.import_module = orig_import
+
+        # Key assertion: plugins dir must NOT be in sys.path after failed import
+        assert plugins_dir not in sys.path, (
+            f"_daemon_mod left plugins dir in sys.path after import failure: {plugins_dir}"
+        )
+    finally:
+        # Restore sys.path to exactly what it was
+        sys.path[:] = original_path
+
+
+def test_daemon_mod_does_not_remove_preexisting_sys_path_entry():
+    """If the plugins dir was already in sys.path, _daemon_mod must not pop it."""
+    plugins_dir = os.path.dirname(os.path.dirname(os.path.abspath(fleet.__file__)))
+    original_path = list(sys.path)
+
+    # Ensure the plugins dir IS in sys.path before the test
+    if plugins_dir not in sys.path:
+        sys.path.insert(0, plugins_dir)
+
+    orig_import = importlib.import_module
+    def fake_import(name):
+        return SimpleNamespace()
+    importlib.import_module = fake_import
+    try:
+        try:
+            fleet._daemon_mod("verify")
+        finally:
+            importlib.import_module = orig_import
+
+        # Plugins dir should STILL be in sys.path (we didn't insert it, so we shouldn't remove it)
+        assert plugins_dir in sys.path, (
+            "_daemon_mod removed a pre-existing sys.path entry"
+        )
+    finally:
+        sys.path[:] = original_path
