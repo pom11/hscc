@@ -29,7 +29,9 @@ def _read_jsonl(path):
                 if not line:
                     continue
                 try:
-                    yield json.loads(line)
+                    obj = json.loads(line)
+                    if isinstance(obj, dict):
+                        yield obj
                 except json.JSONDecodeError:
                     pass
     except FileNotFoundError:
