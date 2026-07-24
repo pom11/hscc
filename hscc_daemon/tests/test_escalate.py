@@ -68,6 +68,17 @@ class TestClassifyFailure:
     def test_traceback(self):
         assert classify_failure("Traceback (most recent call last): ...") == "tooling"
 
+    def test_import_error_with_failed_keyword(self):
+        """Regression: 'failed to import numpy' must be tooling, not test-failure.
+
+        The bare 'failed' keyword should not override the tooling check
+        for import-related errors.
+        """
+        assert classify_failure("Worker failed to import numpy") == "tooling"
+        assert classify_failure("ImportError: No module named foo") == "tooling"
+        assert classify_failure("ModuleNotFoundError: No module named 'bar'") == "tooling"
+        assert classify_failure("Traceback (most recent call last): ...") == "tooling"
+
 
 # ---------------------------------------------------------------------------
 # decide_escalation
