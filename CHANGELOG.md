@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] — Correctness audit fixes
+
+A full adversarial audit of the v1.0–v1.2 code surfaced a set of latent
+correctness bugs — mostly silent failures that reported success while doing
+nothing, and one safety-gate weakness. None affected the running cluster (the
+escalation-watcher paths are opt-in and not enabled), but all are fixed here.
+
+### Fixed
+- **Safety gate** — `apply_template` (whole-fleet reprovision) no longer trusts
+  `bool(args["confirm"])`, which treated the string `"false"` as truthy and
+  could execute without real confirmation. Now requires `confirm is True`.
+- **Silent success on failure** — `install_triggers` now reports `ok=False` +
+  `error` (and exits non-zero) when the triggers file cannot be written,
+  instead of printing a green checkmark over a no-op.
+- **verify smoke-test false green** — `check_multiplex` returns `ok=None`
+  ("unverified") rather than `ok=True` when multiplex is enabled but gateway
+  state is missing/unreadable, and `check_daemon_streams` surfaces an
+  unparseable timestamp instead of silently treating the stream as fresh.
+- **stats crash** — `_read_jsonl` skips non-dict JSON lines instead of raising
+  `AttributeError` and aborting the whole aggregation; `hscc stats` rejects a
+  negative `--days` (which had silently returned an empty result).
+- **escalate-watcher** — de-duplicates the "needs human" notification so a
+  stuck task is not re-notified every tick, and records an `escalate_failed`
+  action when the reassign subprocess fails instead of reporting success.
+- **classify_failure** — the tooling check runs before the broad `"failed"`
+  keyword so import errors are categorized as `tooling`, not `test-failure`.
+- **fleet agent tools** — `_daemon_mod` restores `sys.path` via `try/finally`
+  (success and error paths), removing only the entry it inserted.
+- **dep-update checker** — compares versions numerically (no more downgrade
+  PRs from date-latest backport tags) and fails the workflow when an upstream
+  release tag cannot be fetched, instead of silently staying green.
+- **hscc-roles generate** — emits valid JSON instead of a Python dict repr.
+
 ## [1.2.0] — Agent tool parity: the orchestrator can manage the fleet directly
 
 The v1.1.0 fleet capabilities were operator-facing (CLI) only. This registers
