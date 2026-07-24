@@ -122,6 +122,24 @@ class TestComputeStatsCompletions:
         stats = compute_stats(hscc_dir=str(tmp_path))
         assert stats["completions"]["total"] == 2
 
+    def test_non_dict_json_line_skipped(self, tmp_path):
+        """Valid JSON but non-dict lines (array, number, string) must not crash."""
+        path = tmp_path / "task_completions.jsonl"
+        content = (
+            json.dumps({"task_id": "t1", "profile_name": "eng",
+                        "summary": "ok", "board": "main",
+                        "completed_at": _now_iso()}) + "\n"
+            + "[1, 2, 3]\n"
+            + "42\n"
+            + '"just a string"\n'
+            + json.dumps({"task_id": "t2", "profile_name": "eng",
+                          "summary": "ok", "board": "main",
+                          "completed_at": _now_iso()}) + "\n"
+        )
+        path.write_text(content)
+        stats = compute_stats(hscc_dir=str(tmp_path))
+        assert stats["completions"]["total"] == 2
+
     def test_null_profile_ignored_in_by_profile(self, tmp_path):
         records = [
             {"task_id": "t1", "profile_name": None,
@@ -219,6 +237,21 @@ class TestComputeStatsToolEvents:
             json.dumps({"event": "call", "profile_name": "eng",
                         "tool_name": "read", "timestamp": _now_iso()}) + "\n"
             + "bad line here\n"
+            + json.dumps({"event": "call", "profile_name": "eng",
+                          "tool_name": "read", "timestamp": _now_iso()}) + "\n"
+        )
+        path.write_text(content)
+        stats = compute_stats(hscc_dir=str(tmp_path))
+        assert stats["activity"]["tool_calls_by_profile"]["eng"] == 2
+
+    def test_non_dict_json_line_skipped(self, tmp_path):
+        """Valid JSON but non-dict lines in tool_events must not crash."""
+        path = tmp_path / "tool_events.jsonl"
+        content = (
+            json.dumps({"event": "call", "profile_name": "eng",
+                        "tool_name": "read", "timestamp": _now_iso()}) + "\n"
+            + "[1, 2, 3]\n"
+            + "null\n"
             + json.dumps({"event": "call", "profile_name": "eng",
                           "tool_name": "read", "timestamp": _now_iso()}) + "\n"
         )
