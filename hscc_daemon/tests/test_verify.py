@@ -141,8 +141,18 @@ class TestCheckMultiplex:
         config = tmp_path / "config.yaml"
         self._write_config(config, multiplex=True)
         result = check_multiplex(config=str(config), gateway_state=str(tmp_path / "no.json"))
-        assert result["ok"] is True
-        assert "skipped" in result["detail"]
+        assert result["ok"] is None
+        assert "unverified" in result["detail"]
+
+    def test_skip_gateway_state_corrupt(self, tmp_path):
+        from hscc_daemon.verify import check_multiplex
+        config = tmp_path / "config.yaml"
+        gw_state = tmp_path / "gateway_state.json"
+        self._write_config(config, multiplex=True)
+        gw_state.write_text("not-json{{{")
+        result = check_multiplex(config=str(config), gateway_state=str(gw_state))
+        assert result["ok"] is None
+        assert "unverified" in result["detail"]
 
 
 class TestCheckDaemonStreams:
@@ -201,6 +211,18 @@ class TestCheckDaemonStreams:
         result = check_daemon_streams(state_dir=str(state_dir))
         assert result["ok"] is True
         assert "no state files" in result["detail"]
+
+    def test_fail_unparseable_timestamp(self, tmp_path):
+        from hscc_daemon.verify import check_daemon_streams
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        data = {"ok": True, "timestamp": "not-a-date", "stream": "dgx"}
+        (state_dir / "dgx.json").write_text(json.dumps(data))
+
+        result = check_daemon_streams(state_dir=str(state_dir))
+        assert result["ok"] is False
+        assert "unparseable timestamp" in result["detail"]
 
 
 class TestCheckProxy:
@@ -401,3 +423,45 @@ class TestRunAll:
 
         result = run_all(plugins_dir=str(tmp_path / "plugins"))
         assert len(result["checks"]) == 5
+
+    def test_run_all_ok_none_is_not_pass(self, tmp_path):
+        """When multiplex is enabled but gateway state is missing (ok=None),
+        run_all must NOT report overall ok=True."""
+        from hscc_daemon.verify import run_all
+        import yaml
+
+        # Config with multiplex enabled -> triggers the gateway state path
+        config = tmp_path / "config.yaml"
+        cfg = {"multiplex_profiles": True}
+        config.write_text(yaml.dump(cfg))
+
+        # No gateway_state.json — will yield ok=None
+        plugins_dir = tmp_path / "plugins" / "hscc-commands"
+        plugins_dir.mkdir(parents=True)
+        (plugins_dir / "__init__.py").write_text('register("workers-up")\nregister("cluster-restart")\nregister("template")\n')
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        now = datetime.now(timezone.utc).isoformat()
+        data = {"ok": True, "timestamp": now, "last_check": now, "stream": "dgx"}
+        (state_dir / "dgx.json").write_text(json.dumps(data))
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = json.dumps({"data": [{"id": "m1"}]}).encode()
+        mock_resp.__enter__ = lambda self: self
+        mock_resp.__exit__ = lambda self, *a: None
+
+        with patch("hscc_daemon.verify.urllib.request.urlopen", return_value=mock_resp):
+            result = run_all(
+                plugins_dir=str(tmp_path / "plugins"),
+                config=str(config),
+                gateway_state=str(tmp_path / "no_gateway.json"),
+                profiles_dir=str(tmp_path / "profiles"),
+                state_dir=str(state_dir),
+                url="http://localhost:4000/v1/models",
+            )
+
+        assert result["ok"] is False
+        multiplex_check = [c for c in result["checks"] if c["name"] == "multiplex"][0]
+        assert multiplex_check["ok"] is None
