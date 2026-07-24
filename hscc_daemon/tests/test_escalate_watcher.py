@@ -112,7 +112,7 @@ class TestScanAndEscalate:
         results = scan_and_escalate(
             fail_limit=3,
             _kb=kb,
-            _reassign=lambda tid, to: reassign_calls.append((tid, to)),
+            _reassign=lambda tid, to: reassign_calls.append((tid, to)) or True,
             _notify=lambda title, body: notify_calls.append((title, body)),
         )
 
@@ -131,7 +131,7 @@ class TestScanAndEscalate:
         results = scan_and_escalate(
             fail_limit=3,
             _kb=kb,
-            _reassign=lambda tid, to: reassign_calls.append((tid, to)),
+            _reassign=lambda tid, to: reassign_calls.append((tid, to)) or True,
             _notify=lambda title, body: notify_calls.append((title, body)),
         )
 
@@ -155,7 +155,7 @@ class TestScanAndEscalate:
         results = scan_and_escalate(
             fail_limit=3,
             _kb=kb,
-            _reassign=lambda tid, to: reassign_calls.append((tid, to)),
+            _reassign=lambda tid, to: reassign_calls.append((tid, to)) or True,
             _notify=lambda title, body: notify_calls.append((title, body)),
         )
 
@@ -183,7 +183,7 @@ class TestScanAndEscalate:
         results = scan_and_escalate(
             fail_limit=3,
             _kb=kb,
-            _reassign=lambda tid, to: reassign_calls.append((tid, to)),
+            _reassign=lambda tid, to: reassign_calls.append((tid, to)) or True,
             _notify=lambda title, body: notify_calls.append((title, body)),
         )
 
@@ -238,7 +238,7 @@ class TestScanAndEscalate:
             fail_limit=3,
             strong_profile="architect",
             _kb=kb,
-            _reassign=lambda tid, to: reassign_calls.append((tid, to)),
+            _reassign=lambda tid, to: reassign_calls.append((tid, to)) or True,
             _notify=lambda title, body: None,
         )
 
@@ -256,7 +256,7 @@ class TestScanAndEscalate:
         results = scan_and_escalate(
             fail_limit=2,
             _kb=kb,
-            _reassign=lambda tid, to: reassign_calls.append((tid, to)),
+            _reassign=lambda tid, to: reassign_calls.append((tid, to)) or True,
             _notify=lambda title, body: None,
         )
 
@@ -291,7 +291,7 @@ class TestScanAndEscalate:
 
         results = scan_and_escalate(
             _kb=kb,
-            _reassign=lambda tid, to: None,
+            _reassign=lambda tid, to: True,
             _notify=lambda title, body: None,
         )
 
@@ -328,10 +328,130 @@ class TestScanAndEscalate:
 
         results = scan_and_escalate(
             _kb=kb,
-            _reassign=lambda tid, to: reassign_calls.append((tid, to)),
+            _reassign=lambda tid, to: reassign_calls.append((tid, to)) or True,
             _notify=lambda title, body: None,
         )
 
         # Only t-active should be processed
         assert len(results) == 1
         assert results[0]["task"] == "t-active"
+
+
+# ---------------------------------------------------------------------------
+# Defect A: idempotency — _notified dedup
+# ---------------------------------------------------------------------------
+
+class TestIdempotencyHumanNotify:
+    """Human notification fires only once per task within a scan."""
+
+    def test_notify_once_when_stuck_at_strong(self):
+        """Two scans of the same stuck task -> _notify called ONCE."""
+        rows = [_make_row("t-g", "architect", 3, "running", "timeout")]
+        kb = _FakeKB(rows)
+
+        notify_calls = []
+        notified = set()
+
+        # First scan: task not yet notified
+        scan_and_escalate(
+            fail_limit=3,
+            _kb=kb,
+            _reassign=lambda tid, to: None,
+            _notify=lambda title, body: notify_calls.append((title, body)),
+            _notified=notified,
+        )
+
+        # Second scan: same task, same _notified set
+        scan_and_escalate(
+            fail_limit=3,
+            _kb=kb,
+            _reassign=lambda tid, to: None,
+            _notify=lambda title, body: notify_calls.append((title, body)),
+            _notified=notified,
+        )
+
+        # _notified now has "t-g" and the task is still stuck,
+        # so second scan should NOT call _notify again.
+        assert len(notify_calls) == 1, \
+            f"_notify called {len(notify_calls)} times; expected 1"
+
+    def test_fresh_notified_set_notifies(self):
+        """Each new _notified set triggers notification."""
+        rows = [_make_row("t-g", "architect", 3, "running", "timeout")]
+        kb = _FakeKB(rows)
+
+        notify_calls = []
+
+        # Fresh set each call -> notify every time
+        scan_and_escalate(
+            fail_limit=3,
+            _kb=kb,
+            _reassign=lambda tid, to: None,
+            _notify=lambda title, body: notify_calls.append((title, body)),
+            _notified=set(),
+        )
+
+        scan_and_escalate(
+            fail_limit=3,
+            _kb=kb,
+            _reassign=lambda tid, to: None,
+            _notify=lambda title, body: notify_calls.append((title, body)),
+            _notified=set(),
+        )
+
+        assert len(notify_calls) == 2, \
+            f"_notify called {len(notify_calls)} times; expected 2"
+
+
+# ---------------------------------------------------------------------------
+# Defect B: escalate failure recorded
+# ---------------------------------------------------------------------------
+
+class TestEscalateFailureRecording:
+    """When _reassign returns False, the action reflects failure."""
+
+    def test_reassign_failure_records_escalate_failed(self):
+        """Inject a _reassign that returns False -> recorded action is escalate_failed."""
+        rows = [_make_row("t-h", "coder", 3, "running", "timeout")]
+        kb = _FakeKB(rows)
+
+        reassign_calls = []
+
+        def failing_reassign(tid, to):
+            reassign_calls.append((tid, to))
+            return False
+
+        results = scan_and_escalate(
+            fail_limit=3,
+            _kb=kb,
+            _reassign=failing_reassign,
+            _notify=lambda title, body: None,
+        )
+
+        assert len(results) == 1
+        assert results[0]["action"] == "escalate_failed"
+        assert results[0]["ok"] is False
+        assert reassign_calls == [("t-h", "architect")]
+
+    def test_reassign_success_records_ok_true(self):
+        """When _reassign succeeds, action stays 'escalate' with no 'ok' key."""
+        rows = [_make_row("t-h", "coder", 3, "running", "timeout")]
+        kb = _FakeKB(rows)
+
+        reassign_calls = []
+
+        def successful_reassign(tid, to):
+            reassign_calls.append((tid, to))
+            return True
+
+        results = scan_and_escalate(
+            fail_limit=3,
+            _kb=kb,
+            _reassign=successful_reassign,
+            _notify=lambda title, body: None,
+        )
+
+        assert len(results) == 1
+        assert results[0]["action"] == "escalate"
+        assert "ok" not in results[0] or results[0].get("ok") is True
+        assert reassign_calls == [("t-h", "architect")]
