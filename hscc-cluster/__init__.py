@@ -7,6 +7,7 @@ from . import debug
 from . import heal
 from . import discovery
 from . import fleet
+from . import template_tools
 
 
 def _stringify(handler):
@@ -79,9 +80,19 @@ _FLEET_TOOLS = [
 ]
 
 
+_TEMPLATE_TOOLS = [
+    ("list_templates", template_tools.LIST_TEMPLATES_SCHEMA, template_tools.list_templates, "📋",
+     "List available cluster templates (declared fleet layouts)."),
+    ("preview_template", template_tools.PREVIEW_TEMPLATE_SCHEMA, template_tools.preview_template, "🔎",
+     "Dry-run: what applying a template would change against the live cluster (no writes)."),
+    ("apply_template", template_tools.APPLY_TEMPLATE_SCHEMA, template_tools.apply_template, "⚠️",
+     "Apply a cluster template — reshapes the ENTIRE fleet (provisions orchestrator + workers). HIGH-RISK. GUARDED: confirm=true to execute; without confirm returns a preview."),
+]
+
+
 def register(ctx) -> None:
     for name, schema, handler, emoji, desc in (_READ_TOOLS + _OPS_TOOLS + _DEBUG_TOOLS
-                                                 + _HEAL_TOOLS + _FLEET_TOOLS):
+                                                 + _HEAL_TOOLS + _FLEET_TOOLS + _TEMPLATE_TOOLS):
         ctx.register_tool(name=name, toolset="hscc-cluster", schema=schema,
                           handler=_stringify(handler), emoji=emoji, description=desc)
     # WS4: on kanban re-dispatch, post an idempotent-resume note so the worker
