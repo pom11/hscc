@@ -1,30 +1,28 @@
 # Audit: daemon self-management (escalate + escalate_watcher + autoscale)
 
-## Bug 1
+## Finding 1
 
-**File:** `hscc_daemon/escalate.py:27`
+**Location:** hscc_daemon/escalate.py:27
 **Severity:** high
-**Defect:** The OOM keyword check includes `"memory"`, which is so broad that any failure message containing the word "memory" gets classified as `"oom"` even if the failure is a test failure. This means the OOM category swallows the test-failure category.
-**Concrete failure scenario:** Error text is `"OutOfMemoryError in test_load_data: assertion on row 5"`. The check on line 27 matches `"memory"` first and returns `"oom"`. The downstream `decide_escalation` then routes the task based on the OOM category instead of test-failure. An operator debugging this would see "oom" and look for GPU/OOM issues, wasting time because the root cause is an assertion error in a test.
+**Defect:** The `"memory" in text` substring check inside the OOM branch at line 27 is so broad that any error containing the word "memory" gets classified as "oom", swallowing the test-failure and other categories. The OOM check (line 27) runs before the test-failure check (line 31), so a test error mentioning memory is misclassified.
+**Concrete failure scenario:** Error text: `"OutOfMemoryError during test_load_data: assertion on row 5"`. The `"memory"` check at line 27 matches (lowercased: "outofmemoryerror during test_load_data: assertion on row 5" contains "memory"). Returns `"oom"`. The task is then treated as an OOM failure rather than a test failure, causing operators to debug GPU memory when the real problem is an assertion error in the test suite.
 
-## Bug 2
+## Finding 2
 
-**File:** `hscc_daemon/escalate.py:31`
+**Location:** hscc_daemon/escalate.py:31
 **Severity:** high
-**Defect:** The test-failure keyword check includes `"failed"` (lowercased), which is so broad that any error message containing "failed" — including non-test failures like build failures, startup failures, or validation failures — gets classified as `"test-failure"`. This means the test-failure category swallows the "other" and "tooling" categories.
-**Concrete failure scenario:** Error text is `"System failed to initialize: missing config section"` or `"Build failed with exit code 2"`. The check on line 31 matches `"failed"` and returns `"test-failure"`. `decide_escalation` then treats the failure as a test issue, reassigning the task to the strong tier with an incorrect category. An operator would waste time looking for test failures when the real problem is a build or config issue.
+**Defect:** The `"failed" in text` substring check inside the test-failure branch at line 31 is so broad that any error containing the word "failed" gets classified as "test-failure", swallowing the "other" and "tooling" categories.
+**Concrete failure scenario:** Error text: `"Build failed due to missing dependency libfoo"`. The check at line 31 matches `"failed"` and returns `"test-failure"`. The task is then escalated as a test failure when it's actually a build/dependency issue. Operators looking for test failures will not fix the real problem.
 
-## Bug 3
+## Finding 3
 
-**File:** `hscc_daemon/escalate.py:47`
+**Location:** hscc_daemon/escalate_watcher.py:126
 **Severity:** medium
-**Defect:** The `fail_limit` parameter's semantics are off by one relative to the docstring. The docstring says "number of consecutive failures *before* escalation kicks in", which reads as "escalation fires after N failures". But the condition `consecutive < fail_limit` means escalation triggers *at* N failures (i.e., when `consecutive == fail_limit`), not after N. A user who sets `fail_limit=3` expecting escalation only after 3 failures have occurred will actually see it trigger at the 3rd failure.
-**Concrete failure scenario:** User sets `fail_limit=3` thinking the task will get 3 chances (failures 1, 2, 3) before escalation. But at consecutive_failure=3 the condition `3 < 3` is false, so escalation triggers immediately. The task only gets 2 "free" failures before being escalated, not 3.
+**Defect:** The return value of `_reassign()` at line 126 is ignored. The action is appended to `actions` regardless of whether the reassign succeeded or failed. The returned list then contains "escalate" entries that were never actually acted upon, masking real failures.
+**Concrete failure scenario:** The hermes CLI is unreachable (network error, binary not found, hermes server down). `_default_reassign` returns `False` at line 52 or line 54. But line 126 doesn't check the return value, so `actions.append(...)` still executes with `"action": "escalate"`. The caller sees a successful escalation report but the task was never reassigned. The failing task continues on its original assignee, potentially triggering the same escalation again and again on each scan, creating a silent loop where the task never actually gets reassigned.
 
-## File: `hscc_daemon/escalate_watcher.py` — no correctness issues found.
+## Clean files
 
-SQL query is safe (no injection, correct status filter, correct column names). Subprocess uses list-based `subprocess.run` (no shell injection). Best-effort error handling is intentional and documented. Idempotency is handled by `decide_escalation`: once a task is reassigned to the strong profile, the next scan produces `"human"` instead of re-escalating.
+**hscc_daemon/escalate_watcher.py:** No correctness issues with the SQL query (no injection, correct status filter, correct column names). Subprocess uses list-based `subprocess.run` (no shell injection). Best-effort error handling is documented at the top of the file.
 
-## File: `hscc_daemon/autoscale.py` — no correctness issues found.
-
-Bounds checking (`min`/`max` clamping) is correct. Scale-down condition (`waiting <= low_waiting and running == 0`) correctly requires full idleness. Missing-key handling via `or 0` is present for both `waiting` and `running`.
+**hscc_daemon/autoscale.py:** No correctness issues. Bounds checking is correct (`min`/`max` clamping on both scale-up and scale-down paths). Scale-down condition (`waiting <= low_waiting and running == 0 and current_workers > min_workers`) correctly requires full idleness. Missing-key handling via `or 0` at lines 36-37 is present. The caller at `hscc.py:547` derives `current_workers` from `nodes_ok` which is always >= 0.
