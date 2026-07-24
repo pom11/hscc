@@ -64,7 +64,8 @@ def _default_notify(title, body):
 
 
 def scan_and_escalate(*, fail_limit=3, strong_profile="architect",
-                       _kb=None, _reassign=None, _notify=None):
+                       _kb=None, _reassign=None, _notify=None,
+                       _notified=None):
     """Scan live kanban tasks and escalate repeated failures.
 
     Args:
@@ -73,11 +74,16 @@ def scan_and_escalate(*, fail_limit=3, strong_profile="architect",
         _kb: kanban_db module (injected for testing).
         _reassign: callable(task_id, to_profile) — injected for testing.
         _notify: callable(title, body) — injected for testing.
+        _notified: set of already-notified task ids (injectable for
+            testing; callers persist a set to ~/.hscc/escalated.json
+            between runs for durability).
 
     Returns:
         list[dict] — one entry per action taken.  Empty list when no
         escalation was needed or the DB was unreachable.
     """
+    if _notified is None:
+        _notified = set()
     from hscc_daemon import escalate
 
     if _kb is None:
@@ -123,19 +129,25 @@ def scan_and_escalate(*, fail_limit=3, strong_profile="architect",
         action = decision["action"]
 
         if action == "escalate":
-            _reassign(task["id"], decision["reassign_to"])
-            actions.append({
+            ok = _reassign(task["id"], decision["reassign_to"])
+            entry = {
                 "task": task["id"],
                 "action": "escalate",
                 "to": decision["reassign_to"],
                 "category": decision["category"],
-            })
+            }
+            if not ok:
+                entry["ok"] = False
+                entry["action"] = "escalate_failed"
+            actions.append(entry)
 
         elif action == "human":
-            title = f"Kanban task needs human attention: {task['id']}"
-            body = f"{decision.get('reason', 'repeated failures')} " \
-                   f"[category: {decision['category']}]"
-            _notify(title, body)
+            if task["id"] not in _notified:
+                title = f"Kanban task needs human attention: {task['id']}"
+                body = f"{decision.get('reason', 'repeated failures')} " \
+                       f"[category: {decision['category']}]"
+                _notify(title, body)
+                _notified.add(task["id"])
             actions.append({
                 "task": task["id"],
                 "action": "human",
