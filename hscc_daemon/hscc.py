@@ -514,6 +514,10 @@ def _handle_stats():
         except (ValueError, TypeError):
             days = 7
 
+    if days < 0:
+        print("error: days must be non-negative, got %d" % days, file=sys.stderr)
+        sys.exit(1)
+
     result = stats_mod.compute_stats(since_days=days)
 
     if json_mode:

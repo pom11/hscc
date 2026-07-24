@@ -542,6 +542,54 @@ class TestStatsCommand:
         assert parsed["since_days"] == 2
 
 
+class TestStatsNegativeDays:
+    """Real _handle_stats rejects negative days with error + non-zero exit."""
+
+    def _run(self, args, monkeypatch, tmp_path):
+        import types
+        monkeypatch.setattr(sys, "argv", ["hscc", "stats", *args])
+        from hscc_daemon import hscc as hscc_mod
+
+        # Fake stats module — compute_stats is real enough to return a dict
+        fake_stats = types.ModuleType("hscc_daemon.stats")
+
+        def fake_compute(since_days=7, **kw):
+            return {
+                "since_days": since_days,
+                "completions": {"total": 0, "by_profile": {}, "by_day": {}},
+                "activity": {"tool_calls_by_profile": {}, "top_tools": []},
+            }
+
+        fake_stats.compute_stats = fake_compute
+        fake_stats.format_stats = lambda s: f"ok:{s['since_days']}d"
+
+        monkeypatch.setitem(hscc_mod.sys.modules, "hscc_daemon.stats", fake_stats)
+
+        out = io.StringIO()
+        err = io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                hscc_mod._handle_stats()
+        except SystemExit as exc:
+            return out.getvalue(), exc.code, err.getvalue()
+        return out.getvalue(), None, err.getvalue()
+
+    def test_negative_days_rejected(self, monkeypatch, tmp_path):
+        output, rc, err = self._run(["-3"], monkeypatch, tmp_path)
+        assert rc == 1, f"expected exit 1, got {rc}; out={output!r}; err={err!r}"
+        assert "days must be non-negative" in err
+
+    def test_zero_days_allowed(self, monkeypatch, tmp_path):
+        output, rc, err = self._run(["0"], monkeypatch, tmp_path)
+        assert rc == 0, f"expected 0, got {rc}; err={err!r}"
+        assert "ok:0d" in output
+
+    def test_positive_days_allowed(self, monkeypatch, tmp_path):
+        output, rc, err = self._run(["5"], monkeypatch, tmp_path)
+        assert rc == 0, f"expected 0, got {rc}; err={err!r}"
+        assert "ok:5d" in output
+
+
 class TestVerifyStatsHelpFlags:
     """hscc verify --help and hscc stats --help work."""
 
