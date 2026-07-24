@@ -31,8 +31,10 @@ def install_triggers(
             in this package's directory).
 
     Returns:
-        dict with ``added`` (list of rule ids that were newly inserted) and
-        ``total`` (final number of rules in the file).
+        dict with ``added`` (list of rule ids that were newly inserted),
+        ``total`` (final number of rules), ``ok`` (True on successful write,
+        False if an OSError occurred), and ``error`` (error message when
+        ``ok`` is False).
     """
     if triggers_path is None:
         triggers_path = os.path.expanduser("~/.hscc/triggers.json")
@@ -47,6 +49,7 @@ def install_triggers(
             defaults = json.load(f)
         default_rules = defaults.get("rules", [])
     except (FileNotFoundError, json.JSONDecodeError, OSError):
+        result["ok"] = True
         return result
 
     # --- Load existing ---
@@ -75,6 +78,7 @@ def install_triggers(
     result["total"] = len(merged)
 
     # --- Write back ---
+    tmp = None
     try:
         out_dir = os.path.dirname(triggers_path)
         if out_dir:
@@ -89,11 +93,21 @@ def install_triggers(
             json.dump({"rules": merged}, f, indent=2, ensure_ascii=False)
             f.write("\n")
         os.replace(tmp, triggers_path)
-    except OSError:
-        pass  # best-effort
-
+        result["ok"] = True
+    except OSError as e:
+        result["ok"] = False
+        result["error"] = str(e)
+        # Clean up leftover .tmp file on failure
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
     return result
 
 
 if __name__ == "__main__":
-    print(json.dumps(install_triggers(), indent=2, ensure_ascii=False))
+    result = install_triggers()
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    if not result.get("ok", True):
+        sys.exit(1)
