@@ -66,7 +66,7 @@ def apply_template(args, **kwargs):
     tpl = args.get("template")
     if not tpl:
         return {"ok": False, "error": "template name required"}
-    confirm = bool(args.get("confirm", False))
+    confirm = args.get("confirm") is True
     try:
         ct = _get_cluster_template()
         return ct.apply_template(tpl, confirm=confirm)
@@ -79,5 +79,5 @@ def _get_cluster_template():
     try:
         from . import cluster_template
     except ImportError:
-        import cluster_template  # noqa: F401
+        raise RuntimeError("cluster_template module not available — is the hscc-cluster plugin installed?")
     return cluster_template
