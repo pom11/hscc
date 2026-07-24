@@ -7,9 +7,15 @@ import sys
 def _daemon_mod(name):
     """Import a module from the sibling hscc_daemon plugin, path-robustly."""
     plugins = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    idx = None
     if plugins not in sys.path:
         sys.path.insert(0, plugins)
-    return importlib.import_module(f"hscc_daemon.{name}")
+        idx = 0
+    try:
+        return importlib.import_module(f"hscc_daemon.{name}")
+    finally:
+        if idx is not None:
+            sys.path.pop(idx)
 
 
 # ── Schemas (OpenAI function-parameters style) ──
