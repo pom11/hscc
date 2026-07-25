@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] — Escalation automation on + auto-unblock repair
+
+### Added
+- **Failure-escalation watcher, wired to Hermes cron** (`scripts/escalate_watcher_run.py`
+  + `scripts/install_escalate_watcher.sh`). Runs every 15 min under
+  `--no-agent --deliver telegram`: reassigns repeatedly-failing tasks to the
+  strong tier, and when the strong tier also fails, posts a human-attention
+  alert to the Telegram group. Silent when idle; the human alert is deduped
+  across runs via `~/.hscc/escalated.json` so a stuck task is not re-announced
+  every tick. This turns on the previously opt-in "acting" escalation path
+  (autoscale remains advisory).
+- **`scripts/run_tests.sh`** — runs the suite one pytest process per plugin dir
+  (the six plugins are independent, some in non-importable hyphenated dirs, so a
+  single process cross-contaminates via `sys.path`/`sys.modules`). Plus a root
+  `pytest.ini` that keeps `.worktrees`/`_archive` out of collection.
+
+### Fixed
+- **Auto-unblock was silently dead since the 0.19 kanban upgrade.**
+  `hscc-cluster/workflow.py` (`_try_auto_unblock`, `on_kanban_task_claimed`)
+  called kanban_db APIs that were removed or reshaped in 0.19 — `get_comments`,
+  `update_task`, `clear_lock`, and dict-style access on the now-dataclass
+  `Task`/`Comment`. Every call raised and was swallowed by the best-effort
+  `except`, so blocked cards whose dependencies had completed never got
+  unblocked. Switched to `list_comments`/`unblock_task`/`reclaim_task`, added a
+  dataclass/dict accessor shim, and let the claim hook honor an explicit repo.
+- Test-suite green: repaired stale tests (comment API, dataclass field access,
+  connection lifecycle, and a mock-identity bug where patching the `sys.modules`
+  entry missed a `from package import module` reference).
+
 ## [1.2.1] — Correctness audit fixes
 
 A full adversarial audit of the v1.0–v1.2 code surfaced a set of latent
