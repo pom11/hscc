@@ -99,7 +99,15 @@ def test_hook_fires_on_reclaim(monkeypatch, tmp_path):
         return []
     monkeypatch.setattr("hermes_cli.plugins.invoke_hook", fake_invoke)
 
-    conn = _board()
+    # The real on_kanban_task_claimed opens (and closes) its OWN connection via
+    # kanban_db.connect. Point that at the SAME temp board — with a fresh handle
+    # per call, since the hook closes what it opens — so the resume comment lands
+    # on this board, not the live DB.
+    _dbp = tmp_path / "kanban.db"
+    kb.init_db(_dbp)
+    _orig_connect = kb.connect
+    monkeypatch.setattr("hermes_cli.kanban_db.connect", lambda *a, **k: _orig_connect(_dbp))
+    conn = _orig_connect(_dbp)
     t = kb.create_task(conn, title="step task", assignee="coder")
     tid = t.id if hasattr(t, "id") else t
     conn.execute("UPDATE tasks SET status='ready',claim_lock=NULL,branch_name='task-resume' WHERE id=?", (tid,))
