@@ -120,12 +120,12 @@ class TestAutoUnblock:
         if not hasattr(child_tid, "id"):
             child_tid = child_tid
 
-        # Block the child with a comment referencing the parent.
+        # Parent is completed; block the child with a comment referencing it.
+        conn.execute(
+            "UPDATE tasks SET status='done' WHERE id=?", (parent_tid,))
         conn.execute(
             "UPDATE tasks SET status='blocked' WHERE id=?", (child_tid,))
-        conn.execute(
-            "INSERT INTO task_comments (task_id, author, body) VALUES (?, ?, ?)",
-            (child_tid, "test", f"blocked because of {parent_tid}"))
+        kb.add_comment(conn, child_tid, "test", f"blocked because of {parent_tid}")
         conn.commit()
 
         # Patch _kb.connect to return our test board.
@@ -137,7 +137,7 @@ class TestAutoUnblock:
 
         # Verify the child is now ready.
         child_row = kb.get_task(conn, child_tid)
-        assert child_row["status"] == "ready"
+        assert child_row.status == "ready"
 
     def test_auto_unblock_no_match(self, monkeypatch):
         """_try_auto_unblock returns False when block comments don't reference
@@ -151,9 +151,7 @@ class TestAutoUnblock:
 
         conn.execute(
             "UPDATE tasks SET status='blocked' WHERE id=?", (child_tid,))
-        conn.execute(
-            "INSERT INTO task_comments (task_id, author, body) VALUES (?, ?, ?)",
-            (child_tid, "test", "some unrelated reason"))
+        kb.add_comment(conn, child_tid, "test", "some unrelated reason")
         conn.commit()
 
         monkeypatch.setattr("hermes_cli.kanban_db.connect",
@@ -174,10 +172,8 @@ class TestAutoUnblock:
         # Mark parent_a as done, parent_b stays pending.
         conn.execute("UPDATE tasks SET status='done' WHERE id=?", (parent_a,))
         conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (child_tid,))
-        conn.execute(
-            "INSERT INTO task_comments (task_id, author, body) VALUES (?, ?, ?)",
-            (child_tid, "test",
-             f"blocked on {parent_a} and {parent_b}"))
+        kb.add_comment(conn, child_tid, "test",
+             f"blocked on {parent_a} and {parent_b}")
         conn.commit()
 
         monkeypatch.setattr("hermes_cli.kanban_db.connect",
@@ -188,7 +184,7 @@ class TestAutoUnblock:
 
         # Child should still be blocked.
         child_row = kb.get_task(conn, child_tid)
-        assert child_row["status"] == "blocked"
+        assert child_row.status == "blocked"
 
     def test_two_deps_both_done_unblocked(self, monkeypatch, tmp_path):
         """(b) Two deps referenced, both done -> unblocked."""
@@ -203,10 +199,8 @@ class TestAutoUnblock:
         conn.execute("UPDATE tasks SET status='done' WHERE id=?", (parent_a,))
         conn.execute("UPDATE tasks SET status='done' WHERE id=?", (parent_b,))
         conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (child_tid,))
-        conn.execute(
-            "INSERT INTO task_comments (task_id, author, body) VALUES (?, ?, ?)",
-            (child_tid, "test",
-             f"blocked on {parent_a} and {parent_b}"))
+        kb.add_comment(conn, child_tid, "test",
+             f"blocked on {parent_a} and {parent_b}")
         conn.commit()
 
         monkeypatch.setattr("hermes_cli.kanban_db.connect",
@@ -216,7 +210,7 @@ class TestAutoUnblock:
         assert result is True
 
         child_row = kb.get_task(conn, child_tid)
-        assert child_row["status"] == "ready"
+        assert child_row.status == "ready"
 
     def test_substring_lookalike_does_not_trigger(self, monkeypatch, tmp_path):
         """(c) A task id that looks like a substring of another does not
@@ -234,9 +228,7 @@ class TestAutoUnblock:
         # Comment mentions a task id that shares a prefix but is NOT the
         # real parent.
         fake_id = "t_aaaaaa111111"
-        conn.execute(
-            "INSERT INTO task_comments (task_id, author, body) VALUES (?, ?, ?)",
-            (child_tid, "test", f"blocked on {fake_id}"))
+        kb.add_comment(conn, child_tid, "test", f"blocked on {fake_id}")
         conn.commit()
 
         monkeypatch.setattr("hermes_cli.kanban_db.connect",
@@ -248,7 +240,7 @@ class TestAutoUnblock:
         assert result is False
 
         child_row = kb.get_task(conn, child_tid)
-        assert child_row["status"] == "blocked"
+        assert child_row.status == "blocked"
 
     def test_single_dep_done_unblocked(self, monkeypatch, tmp_path):
         """(d) Single dependency, now done -> unblocked (preserves happy path)."""
@@ -260,9 +252,7 @@ class TestAutoUnblock:
 
         conn.execute("UPDATE tasks SET status='done' WHERE id=?", (parent_tid,))
         conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (child_tid,))
-        conn.execute(
-            "INSERT INTO task_comments (task_id, author, body) VALUES (?, ?, ?)",
-            (child_tid, "test", f"blocked because of {parent_tid}"))
+        kb.add_comment(conn, child_tid, "test", f"blocked because of {parent_tid}")
         conn.commit()
 
         monkeypatch.setattr("hermes_cli.kanban_db.connect",
@@ -272,7 +262,7 @@ class TestAutoUnblock:
         assert result is True
 
         child_row = kb.get_task(conn, child_tid)
-        assert child_row["status"] == "ready"
+        assert child_row.status == "ready"
 
 
 # ── profile_name wiring tests (from feat-multiplexing-observability) ────────
