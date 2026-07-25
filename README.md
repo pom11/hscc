@@ -98,8 +98,8 @@ hscc template apply 4node-coding --confirm  # apply the layout
 
 Topology is detected from `sparkrun cluster list` — HSCC makes no assumptions about IPs, node count, or whether a NAS is present. A reference layout:
 
-| Node | Role | Notes |
-|---|---|---|
+| Node | Role |
+|---|---|
 | Gateway / orchestrator | Always-on vLLM serving the Hermes orchestrator + chat. Never reaped. |
 | Worker(s) | Per-node vLLM, kept alive + health-monitored by the daemon. |
 | NAS (optional) | HF model cache, NFS-mounted to every node. Containers serve from this offline cache (`HF_HUB_OFFLINE=1`). |
