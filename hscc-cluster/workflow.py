@@ -28,6 +28,17 @@ _SATISFIED_STATUSES = {"done", "review"}
 _INCOMPLETE_OUTCOMES = {"crashed", "timed_out", "reclaimed", "spawn_failed", "gave_up"}
 
 
+def _row_get(row, key, default=None):
+    """Read a field from a kanban row that may be a Task/Comment dataclass, a
+    dict, or None. kanban_db returns dataclasses (0.19+); older code paths and
+    event payloads pass dicts — support both."""
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        return row.get(key, default)
+    return getattr(row, key, default)
+
+
 @dataclass
 class ProbeResult:
     satisfied: bool
@@ -195,10 +206,12 @@ def on_kanban_task_claimed(task_id=None, board=None, profile_name=None,
         try:
             task_row = _kb.get_task(c, task_id)
             t = {
-                "branch_name": task_row.get("branch_name") if task_row else None,
-                "workspace_path": task_row.get("workspace_path") if task_row else None,
+                "branch_name": _row_get(task_row, "branch_name"),
+                "workspace_path": _row_get(task_row, "workspace_path"),
             } if task_row else {}
-            work_repo = t.get("workspace_path") or _os.getcwd()
+            # workspace_path is the production signal (worktree tasks carry it);
+            # an explicit repo= (e.g. from a caller/test) is honored next, cwd last.
+            work_repo = t.get("workspace_path") or kwargs.get("repo") or _os.getcwd()
             note = resume_note(t, repo=work_repo)
             if note and task_id:
                 # Stamp profile_name into the resume note when available.
@@ -310,23 +323,26 @@ def _try_auto_unblock(child_task_id, parent_task_id):
 
         # If the child is in blocked status and its block reason references
         # the parent, auto-unblock.
-        child_status = (child_row.get("status") or "").lower()
+        child_status = (_row_get(child_row, "status") or "").lower()
         if child_status != "blocked":
             return False
 
         # Check block comments for parent reference.
-        # hermes_cli kanban_db stores comments as a list in the row or separately.
+        # hermes_cli kanban_db exposes comments via list_comments (each a
+        # Comment dataclass with a .body); tolerate dict/str shapes too.
         try:
-            comments = _kb.get_comments(c, child_task_id) or []
+            comments = _kb.list_comments(c, child_task_id) or []
         except Exception:
-            # Some versions may not have get_comments — skip auto-unblock.
+            # Some versions may not have list_comments — skip auto-unblock.
             return False
 
         # Extract all task IDs from comment bodies using exact pattern.
         all_dep_ids = set()
         for comment in comments:
-            body = str(comment.get("body", "")) if isinstance(comment, dict) else str(comment)
-            all_dep_ids.update(re.findall(r"t_[0-9a-f]{6,}", body))
+            body = getattr(comment, "body", None)
+            if body is None:
+                body = comment.get("body", "") if isinstance(comment, dict) else str(comment)
+            all_dep_ids.update(re.findall(r"t_[0-9a-f]{6,}", str(body)))
 
         # A comment may mention the child's own id (resume/claim notes); it is
         # not a dependency and is never "done" while blocked — exclude it.
@@ -338,13 +354,13 @@ def _try_auto_unblock(child_task_id, parent_task_id):
         # Only unblock when EVERY referenced dependency is done.
         for dep_id in all_dep_ids:
             dep_row = _kb.get_task(c, dep_id)
-            if not dep_row or (dep_row.get("status") or "").lower() != "done":
+            if not dep_row or (_row_get(dep_row, "status") or "").lower() != "done":
                 return False
 
-        # All deps are done — auto-unblock.
-        _kb.update_task(c, child_task_id, {"status": "ready"})
+        # All deps are done — auto-unblock (blocked → ready).
+        _kb.unblock_task(c, child_task_id)
         try:
-            _kb.clear_lock(c, child_task_id)
+            _kb.reclaim_task(c, child_task_id, reason="auto-unblock")
         except Exception:
             pass
         return True
