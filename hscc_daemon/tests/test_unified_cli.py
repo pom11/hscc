@@ -546,12 +546,14 @@ class TestStatsNegativeDays:
     """Real _handle_stats rejects negative days with error + non-zero exit."""
 
     def _run(self, args, monkeypatch, tmp_path):
-        import types
         monkeypatch.setattr(sys, "argv", ["hscc", "stats", *args])
         from hscc_daemon import hscc as hscc_mod
 
-        # Fake stats module — compute_stats is real enough to return a dict
-        fake_stats = types.ModuleType("hscc_daemon.stats")
+        # Patch the functions on the REAL stats module. _handle_stats resolves
+        # it via `from hscc_daemon import stats`, which returns the package
+        # attribute once stats has been imported anywhere — so swapping the
+        # sys.modules entry misses it; patching the module's attributes doesn't.
+        from hscc_daemon import stats as stats_mod
 
         def fake_compute(since_days=7, **kw):
             return {
@@ -560,10 +562,8 @@ class TestStatsNegativeDays:
                 "activity": {"tool_calls_by_profile": {}, "top_tools": []},
             }
 
-        fake_stats.compute_stats = fake_compute
-        fake_stats.format_stats = lambda s: f"ok:{s['since_days']}d"
-
-        monkeypatch.setitem(hscc_mod.sys.modules, "hscc_daemon.stats", fake_stats)
+        monkeypatch.setattr(stats_mod, "compute_stats", fake_compute)
+        monkeypatch.setattr(stats_mod, "format_stats", lambda s: f"ok:{s['since_days']}d")
 
         out = io.StringIO()
         err = io.StringIO()
