@@ -298,17 +298,22 @@ def _provision_models(plan: Any, cluster: str = "hscc",
     result = {"stopped": [], "provisioned": [], "failed": [],
               "status": "ok", "note": ""}
 
-    # (node, port, recipe) the plan wants serving.
-    want = [(plan.orchestrator.node, plan.orchestrator.port, plan.orchestrator.recipe)]
+    # (nodes, port, recipe, tp) the plan wants serving.
+    #   nodes is a List[str] — the full span (len == tp).
+    want = [(plan.orchestrator.nodes, plan.orchestrator.port,
+             plan.orchestrator.recipe, plan.orchestrator.tp)]
     for fam in plan.families:
         for u in fam.units:
-            want.append((u.node, u.port, u.recipe))
-    plan_nodes = {n for n, _, _ in want}
+            want.append((u.nodes, u.port, u.recipe, u.tp))
+    # Every node in every span is "in use" — don't stop a node that is part of a
+    # spanning unit even if it isn't the primary node.
+    plan_nodes = {n for nodes, _, _, _ in want for n in nodes}
 
     if not do_launch:
+        span_label = lambda nodes: ",".join(nodes)
         result["note"] = "dry-run: would provision " + ", ".join(
-            f"{r.split('/')[-1]}@{n}:{p}" for n, p, r in want)
-        result["provisioned"] = [f"{n}:{p}:{r}" for n, p, r in want]
+            f"{r.split('/')[-1]}@{span_label(nodes)}:{p}" for nodes, p, r, _ in want)
+        result["provisioned"] = [f"{span_label(nodes)}:{p}:{r}" for nodes, p, r, _ in want]
         return result
 
     # Stop sparkrun containers on nodes the plan does not use.
@@ -325,22 +330,25 @@ def _provision_models(plan: Any, cluster: str = "hscc",
         result["stop_failures"] = stop_failures
         result.setdefault("note", "")
 
-    # Launch each wanted (node, port, recipe). --ensure: skip if already up.
-    for node, port, recipe in want:
+    # Launch each wanted (nodes, port, recipe, tp). --ensure: skip if already up.
+    for nodes, port, recipe, tp in want:
+        hosts_arg = ",".join(nodes)
         try:
-            r = subprocess.run(
-                ["sparkrun", "run", os.path.expanduser(recipe),
-                 "--cluster", cluster, "--hosts", node,
-                 "--port", str(port), "--no-follow", "--ensure"],
-                capture_output=True, text=True, timeout=240)
+            cmd = ["sparkrun", "run", os.path.expanduser(recipe),
+                   "--cluster", cluster, "--hosts", hosts_arg,
+                   "--port", str(port), "--no-follow", "--ensure"]
+            if tp > 1:
+                cmd.extend(["--tp", str(tp)])
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
             if r.returncode == 0:
-                result["provisioned"].append(f"{node}:{port}:{recipe.split('/')[-1]}")
+                result["provisioned"].append(
+                    f"{hosts_arg}:{port}:{recipe.split('/')[-1]}")
             else:
                 result["failed"].append(
-                    {"node": node, "port": port, "recipe": recipe,
+                    {"node": hosts_arg, "port": port, "recipe": recipe,
                      "error": (r.stderr or "").strip()[:200]})
         except Exception as e:
-            result["failed"].append({"node": node, "port": port, "recipe": recipe,
+            result["failed"].append({"node": hosts_arg, "port": port, "recipe": recipe,
                                      "error": str(e)})
 
     if result["failed"]:
