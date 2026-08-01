@@ -186,3 +186,98 @@ def test_all_shipped_templates_resolve_and_fit():
                         [FakeNode(f"10.0.0.{2+i}") for i in range(nnode - 1)])
         plan = ti.resolve(tpl, topo)              # real recipe_cost (files on disk)
         assert ct.validate_resolved_plan(plan) == [], f"{name} did not validate"
+
+
+# ── multi-node tp spanning ───────────────────────────────────────────────────
+
+class TestMultiNodeTP:
+    """tp>1 must claim a real span of nodes, not silently run on one GPU."""
+
+    def test_orchestrator_tp2_claims_two_nodes_and_shrinks_pool(self):
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "orchestrator": {"recipe": "o.yaml", "tp": 2},
+            "families": [{"name": "coding", "models": ["m.yaml"],
+                          "workers": "remaining"}]})
+        plan = ti.resolve(t, _topo(n_workers=3), _coster=_coster())
+        # orchestrator spans its own node + 1 worker taken from the pool front
+        assert plan.orchestrator.nodes == ["10.0.0.1", "10.0.0.2"]
+        assert plan.orchestrator.tp == 2
+        # the borrowed worker must NOT also be handed to the family
+        fam_nodes = {n for u in plan.families[0].units for n in u.nodes}
+        assert "10.0.0.2" not in fam_nodes
+        assert fam_nodes == {"10.0.0.3", "10.0.0.4"}
+
+    def test_family_tp2_yields_one_spanning_unit_not_two(self):
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "orchestrator": {"recipe": "o.yaml"},
+            "families": [{"name": "reasoning",
+                          "models": [{"recipe": "big.yaml", "tp": 2}],
+                          "workers": 2}]})
+        plan = ti.resolve(t, _topo(n_workers=3), _coster=_coster())
+        units = plan.families[0].units
+        assert len(units) == 1, "tp=2 over 2 workers is ONE instance, not two"
+        assert units[0].nodes == ["10.0.0.2", "10.0.0.3"]
+        assert units[0].tp == 2
+
+    def test_orchestrator_tp_exceeding_cluster_raises(self):
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "orchestrator": {"recipe": "o.yaml", "tp": 4}})
+        with pytest.raises(ti.TemplateIntentError) as e:
+            ti.resolve(t, _topo(n_workers=1), _coster=_coster())
+        assert "tp=4" in str(e.value)
+
+    def test_family_tp_exceeding_available_nodes_raises(self):
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "orchestrator": {"recipe": "o.yaml"},
+            "families": [{"name": "reasoning",
+                          "models": [{"recipe": "big.yaml", "tp": 4}],
+                          "workers": "all"}]})
+        with pytest.raises(ti.TemplateIntentError) as e:
+            ti.resolve(t, _topo(n_workers=2), _coster=_coster())
+        assert "tp=4" in str(e.value)
+
+    def test_span_vram_checked_on_every_node(self):
+        """A model that fits the first node but not the second must be refused."""
+        topo = FakeTopo(orchestrator=FakeNode("10.0.0.1"),
+                        workers=[FakeNode("10.0.0.2", 120.0),
+                                 FakeNode("10.0.0.3", 10.0)])
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "orchestrator": {"recipe": "o.yaml"},
+            "families": [{"name": "reasoning",
+                          "models": [{"recipe": "big.yaml", "tp": 2}],
+                          "workers": 2}]})
+        with pytest.raises(ti.TemplateIntentError) as e:
+            ti.resolve(t, topo, _coster=_coster(per_gpu=76.16))
+        assert "10.0.0.3" in str(e.value)
+
+    def test_tp1_behavior_unchanged(self):
+        """Regression: tp=1 still replicates one unit per node, nodes==[ip]."""
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "orchestrator": {"recipe": "o.yaml"},
+            "families": [{"name": "coding", "models": ["m.yaml"],
+                          "workers": "all"}]})
+        plan = ti.resolve(t, _topo(n_workers=3), _coster=_coster())
+        units = plan.families[0].units
+        assert len(units) == 3
+        assert all(len(u.nodes) == 1 and u.tp == 1 for u in units)
+        assert plan.orchestrator.nodes == ["10.0.0.1"]
+
+    def test_serving_json_emits_full_span(self):
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "orchestrator": {"recipe": "o.yaml", "tp": 2},
+            "families": []})
+        plan = ti.resolve(t, _topo(n_workers=2), _coster=_coster())
+        js = ti.to_serving_json(plan)
+        assert js["units"][0]["nodes"] == ["10.0.0.1", "10.0.0.2"]
+
+    def test_validate_catches_collision_on_non_primary_span_node(self):
+        """A conflict on the 2nd node of a span must not slip through."""
+        u1 = ti.ResolvedUnit(role="orchestrator", family=None, recipe="o.yaml",
+                             model="o", nodes=["10.0.0.1", "10.0.0.2"],
+                             port=8000, tp=2, pp=1)
+        u2 = ti.ResolvedUnit(role="worker", family="f", recipe="o.yaml",
+                             model="m", nodes=["10.0.0.2"], port=8000, tp=1, pp=1)
+        plan = ti.ResolvedPlan(template="x", orchestrator=u1,
+                               families=[ti.ResolvedFamily("f", 4000, [u2])])
+        errs = ti.validate_resolved(plan)
+        assert any("collision" in e and "10.0.0.2" in e for e in errs)
