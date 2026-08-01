@@ -169,7 +169,7 @@ class TestInstallProxySparkrun:
 
         with patch.object(subprocess, "run", mock_run):
             fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
-                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", "10.0.0.2", 8000, 1, 1)])
+                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", ["10.0.0.2"], 8000, 1, 1)])
             res = install_proxy(fam)
 
         assert calls[0][0] == "sparkrun"
@@ -195,7 +195,7 @@ class TestInstallProxySparkrun:
 
         with patch.object(subprocess, "run", mock_run):
             fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
-                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", "10.0.0.2", 8000, 1, 1)])
+                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", ["10.0.0.2"], 8000, 1, 1)])
             res = install_proxy(fam)
 
         assert res["loaded"] is False
@@ -213,7 +213,7 @@ class TestInstallProxySparkrun:
 
         with patch.object(subprocess, "run", mock_run):
             fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
-                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", "10.0.0.2", 8000, 1, 1)])
+                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", ["10.0.0.2"], 8000, 1, 1)])
             install_proxy(fam)
 
         # No proxy.plist should be generated
@@ -240,7 +240,7 @@ class TestRemoveProxySparkrun:
 
         with patch.object(subprocess, "run", mock_run):
             fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
-                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", "10.0.0.2", 8000, 1, 1)])
+                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", ["10.0.0.2"], 8000, 1, 1)])
             res = remove_proxy(fam)
 
         assert calls[0][0] == "sparkrun"
@@ -264,7 +264,7 @@ class TestBackwardCompatAliases:
 
         with patch.object(subprocess, "run", mock_run):
             fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
-                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", "10.0.0.2", 8000, 1, 1)])
+                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", ["10.0.0.2"], 8000, 1, 1)])
             res = install_proxy_plist(fam)
 
         assert res["loaded"] is True
@@ -651,3 +651,125 @@ class TestAtomicYamlNoLeak:
         _, changed = ct.atomic_yaml_update(
             path, lambda d: d)  # identity → no change
         assert changed is False
+
+
+# ── Fix 6: tp>1 provisioning across node spans ──────────────────────────────
+
+class TestProvisionMultiNodeSpan:
+    """Fix 6: _provision_models launches tp>1 units across their full node span
+    with comma-joined --hosts and --tp flags. tp=1 units remain unchanged."""
+
+    def _build_plan(self, monkeypatch, orch_nodes, orch_tp, unit_nodes, unit_tp, unit_port=8000):
+        """Build a ResolvedPlan with the given node spans and tp values."""
+        orch = ti.ResolvedUnit("orchestrator", None, "o.yaml", "OrchModel",
+                               orch_nodes, 9000, orch_tp, 1)
+        unit = ti.ResolvedUnit("worker", "coding", "m.yaml", "WorkerModel",
+                               unit_nodes, unit_port, unit_tp, 1)
+        fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[unit])
+        return ti.ResolvedPlan(template="t", orchestrator=orch, families=[fam])
+
+    def test_tp1_unit_no_tp_flag(self, monkeypatch):
+        """A tp=1 unit produces ONE sparkrun call with single host, NO --tp flag."""
+        import subprocess
+        from unittest.mock import MagicMock
+
+        calls = []
+        def mock_run(argv, **kw):
+            calls.append(argv)
+            return MagicMock(returncode=0, stderr="", stdout="")
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        plan = self._build_plan(monkeypatch, ["10.0.0.1"], 1, ["10.0.0.2"], 1)
+        result = cluster_template._provision_models(plan, do_launch=True)
+
+        # 2 calls: 1 orchestrator + 1 worker (status not counted if no IP in output)
+        sparkrun_runs = [c for c in calls if c[0] == "sparkrun" and c[1] == "run"]
+        assert len(sparkrun_runs) == 2
+        # Worker call: single host, no --tp
+        worker_call = [c for c in sparkrun_runs if "8000" in str(c)][0]
+        assert "--hosts" in worker_call
+        hosts_idx = worker_call.index("--hosts")
+        assert worker_call[hosts_idx + 1] == "10.0.0.2"
+        assert "--tp" not in worker_call
+
+    def test_tp2_unit_one_call_comma_hosts_and_tp(self, monkeypatch):
+        """A tp=2 unit spanning 2 nodes produces ONE sparkrun call with
+        comma-joined --hosts and --tp 2."""
+        import subprocess
+        from unittest.mock import MagicMock
+
+        calls = []
+        def mock_run(argv, **kw):
+            calls.append(argv)
+            return MagicMock(returncode=0, stderr="", stdout="")
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        plan = self._build_plan(monkeypatch, ["10.0.0.1"], 1,
+                                ["10.0.0.2", "10.0.0.3"], 2)
+        result = cluster_template._provision_models(plan, do_launch=True)
+
+        sparkrun_runs = [c for c in calls if c[0] == "sparkrun" and c[1] == "run"]
+        assert len(sparkrun_runs) == 2  # orch + 1 spanning worker
+        # Worker call: comma-joined hosts + --tp 2
+        worker_call = [c for c in sparkrun_runs if "8000" in str(c)][0]
+        hosts_idx = worker_call.index("--hosts")
+        assert worker_call[hosts_idx + 1] == "10.0.0.2,10.0.0.3"
+        tp_idx = worker_call.index("--tp")
+        assert worker_call[tp_idx + 1] == "2"
+
+    def test_spanning_nodes_not_stopped(self, monkeypatch):
+        """Nodes that are part of a spanning unit are not stopped."""
+        import subprocess
+        from unittest.mock import MagicMock
+
+        calls = []
+        def mock_run(argv, **kw):
+            calls.append(argv)
+            if "status" in argv:
+                return MagicMock(returncode=0, stderr="",
+                                 stdout="10.0.0.1 10.0.0.2 10.0.0.3 10.0.0.4")
+            return MagicMock(returncode=0, stderr="", stdout="")
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        # tp=2 worker spans 10.0.0.2 and 10.0.0.3
+        plan = self._build_plan(monkeypatch, ["10.0.0.1"], 1,
+                                ["10.0.0.2", "10.0.0.3"], 2)
+        result = cluster_template._provision_models(plan, do_launch=True)
+
+        stop_calls = [c for c in calls if "stop" in c]
+        # 10.0.0.2 and 10.0.0.3 are in-use (part of span) — should not be stopped
+        for sc in stop_calls:
+            assert "10.0.0.2" not in sc
+            assert "10.0.0.3" not in sc
+
+    def test_dry_run_reports_span(self, monkeypatch):
+        """Dry-run provisioned list uses comma-joined node span."""
+        plan = self._build_plan(monkeypatch, ["10.0.0.1"], 1,
+                                ["10.0.0.2", "10.0.0.3"], 2)
+        result = cluster_template._provision_models(plan, do_launch=False)
+
+        prov = result["provisioned"]
+        assert "10.0.0.2,10.0.0.3:8000:m.yaml" in prov
+        assert "10.0.0.1:9000:o.yaml" in prov
+
+    def test_orchestrator_tp2_span(self, monkeypatch):
+        """Orchestrator with tp=2 also gets comma-joined hosts and --tp."""
+        import subprocess
+        from unittest.mock import MagicMock
+
+        calls = []
+        def mock_run(argv, **kw):
+            calls.append(argv)
+            return MagicMock(returncode=0, stderr="", stdout="")
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        plan = self._build_plan(monkeypatch, ["10.0.0.1", "10.0.0.2"], 2,
+                                ["10.0.0.3"], 1)
+        result = cluster_template._provision_models(plan, do_launch=True)
+
+        sparkrun_runs = [c for c in calls if c[0] == "sparkrun" and c[1] == "run"]
+        orch_call = [c for c in sparkrun_runs if "9000" in str(c)][0]
+        hosts_idx = orch_call.index("--hosts")
+        assert orch_call[hosts_idx + 1] == "10.0.0.1,10.0.0.2"
+        tp_idx = orch_call.index("--tp")
+        assert orch_call[tp_idx + 1] == "2"
