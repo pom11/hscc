@@ -105,16 +105,29 @@ class ClusterTemplate:
 
 # ── Resolved plan (concrete nodes + ports, produced at apply) ────────────────
 
-@dataclass
 class ResolvedUnit:
-    role: str            # "orchestrator" | "worker"
-    family: Optional[str]
-    recipe: str
-    model: str
-    node: str
-    port: int
-    tp: int
-    pp: int
+    """A resolved deployment unit — may span multiple nodes when tp > 1."""
+
+    def __init__(self, role: str, family: Optional[str], recipe: str,
+                 model: str, nodes: List[str], port: int, tp: int, pp: int):
+        self.role = role
+        self.family = family
+        self.recipe = recipe
+        self.model = model
+        self.nodes = nodes        # ordered span; len == tp
+        self.port = port
+        self.tp = tp
+        self.pp = pp
+
+    @property
+    def node(self) -> str:
+        """Backward-compat: primary node in the span."""
+        return self.nodes[0]
+
+    def __repr__(self) -> str:
+        return (f"ResolvedUnit(role={self.role!r}, family={self.family!r}, "
+                f"recipe={self.recipe!r}, model={self.model!r}, "
+                f"nodes={self.nodes!r}, port={self.port}, tp={self.tp}, pp={self.pp})")
 
 
 @dataclass
@@ -157,17 +170,32 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
     Raises TemplateIntentError when it can't fit / no workers / etc.
     """
     coster = _coster or _rc.recipe_cost
-    orch_node = topology.orchestrator.ip
+    orch_ip = topology.orchestrator.ip
     orch_model = _model_name(tpl.orchestrator.recipe)
-    orchestrator = ResolvedUnit(
-        role="orchestrator", family=None, recipe=tpl.orchestrator.recipe,
-        model=orch_model, node=orch_node, port=8000,
-        tp=tpl.orchestrator.tp, pp=tpl.orchestrator.pp)
+    orch_tp = tpl.orchestrator.tp
 
     worker_nodes = [{"ip": w.ip, "vram_free_gb": getattr(w, "vram_free_gb", None)}
                     for w in topology.workers]
     pool_ips = [w["ip"] for w in worker_nodes]
-    claimed: set = set()
+
+    # ── Orchestrator spanning ─────────────────────────────────────────────
+    # tp>1: claim the orchestrator node + (tp-1) workers from the front of the pool.
+    orch_span: List[str] = [orch_ip]
+    if orch_tp > 1:
+        needed = orch_tp - 1
+        if needed > len(pool_ips):
+            raise TemplateIntentError(
+                f"orchestrator tp={orch_tp} but only {len(pool_ips)} worker nodes "
+                f"available (need {needed} additional nodes)")
+        orch_span.extend(pool_ips[:needed])
+        pool_ips = pool_ips[needed:]  # remove claimed nodes from the pool
+
+    orchestrator = ResolvedUnit(
+        role="orchestrator", family=None, recipe=tpl.orchestrator.recipe,
+        model=orch_model, nodes=orch_span, port=8000,
+        tp=tpl.orchestrator.tp, pp=tpl.orchestrator.pp)
+
+    claimed: set = set(orch_span[1:])  # workers claimed by orchestrator span
     resolved_families: List[ResolvedFamily] = []
     proxy_port = base_proxy_port
 
@@ -179,37 +207,71 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
                 f"family '{fam.name}': no available worker nodes "
                 f"(pool={pool_ips}, claimed={sorted(claimed)})")
         nodes_for_fam = {w["ip"]: w for w in worker_nodes if w["ip"] in avail}
-        # A family REPLICATES its models across the selected workers: every
-        # selected node hosts the family's full model set. On each node the
-        # co-located models get sequential ports (8000, 8001, …) and their
-        # combined per-GPU cost must fit the node's free VRAM. A tp>1 model can't
-        # co-locate (G3) — it must be the only model in its family.
+
+        # Find the max tp in this family
+        max_tp = max(m.tp for m in fam.models)
+
+        # A family with multi models cannot have tp>1
         multi = len(fam.models) > 1
-        if multi and any(m.tp > 1 for m in fam.models):
+        if multi and max_tp > 1:
             raise TemplateIntentError(
                 f"family '{fam.name}': cannot co-locate when a model has tp>1 "
                 f"(tp>1 needs the node exclusively)")
+
+        # ── Family spanning ───────────────────────────────────────────────
         units: List[ResolvedUnit] = []
-        for ip in avail:
-            free = nodes_for_fam[ip].get("vram_free_gb")
-            need_sum = 0.0
-            for i, m in enumerate(fam.models):
-                cost = coster(m.recipe)
-                if cost.fits is False:
-                    raise TemplateIntentError(
-                        f"family '{fam.name}': {m.recipe} does not fit a DGX Spark")
-                per = cost.per_gpu_total_gb
-                if per is not None:
-                    need_sum += per
-                if free is not None and per is not None and need_sum > free:
-                    raise TemplateIntentError(
-                        f"family '{fam.name}': models overflow node {ip} VRAM "
-                        f"(need {need_sum} GB > {free} GB free)")
-                units.append(ResolvedUnit(
-                    role="worker", family=fam.name, recipe=m.recipe,
-                    model=_model_name(m.recipe), node=ip, port=8000 + i,
-                    tp=m.tp, pp=m.pp))
-            claimed.add(ip)
+        if max_tp > 1:
+            # tp>1: each instance consumes `tp` nodes. `workers: N` means N nodes
+            # total, so number of instances = N // tp.
+            num_instances = len(avail) // max_tp
+            if num_instances == 0:
+                raise TemplateIntentError(
+                    f"family '{fam.name}': tp={max_tp} requires at least {max_tp} "
+                    f"nodes but only {len(avail)} available")
+            for inst in range(num_instances):
+                span = avail[inst * max_tp:(inst + 1) * max_tp]
+                for i, m in enumerate(fam.models):
+                    cost = coster(m.recipe)
+                    if cost.fits is False:
+                        raise TemplateIntentError(
+                            f"family '{fam.name}': {m.recipe} does not fit a DGX Spark")
+                    per = cost.per_gpu_total_gb
+                    # VRAM check: every node in the span
+                    for node_ip in span:
+                        free = nodes_for_fam[node_ip].get("vram_free_gb")
+                        if free is not None and per is not None and per > free:
+                            raise TemplateIntentError(
+                                f"family '{fam.name}': {m.recipe} does not fit node "
+                                f"{node_ip} VRAM (need {per} GB > {free} GB free)")
+                    units.append(ResolvedUnit(
+                        role="worker", family=fam.name, recipe=m.recipe,
+                        model=_model_name(m.recipe), nodes=span, port=8000 + i,
+                        tp=m.tp, pp=m.pp))
+                for node_ip in span:
+                    claimed.add(node_ip)
+        else:
+            # tp==1: existing replication behavior — one unit per node
+            for ip in avail:
+                free = nodes_for_fam[ip].get("vram_free_gb")
+                need_sum = 0.0
+                for i, m in enumerate(fam.models):
+                    cost = coster(m.recipe)
+                    if cost.fits is False:
+                        raise TemplateIntentError(
+                            f"family '{fam.name}': {m.recipe} does not fit a DGX Spark")
+                    per = cost.per_gpu_total_gb
+                    if per is not None:
+                        need_sum += per
+                    if free is not None and per is not None and need_sum > free:
+                        raise TemplateIntentError(
+                            f"family '{fam.name}': models overflow node {ip} VRAM "
+                            f"(need {need_sum} GB > {free} GB free)")
+                    units.append(ResolvedUnit(
+                        role="worker", family=fam.name, recipe=m.recipe,
+                        model=_model_name(m.recipe), nodes=[ip], port=8000 + i,
+                        tp=m.tp, pp=m.pp))
+                claimed.add(ip)
+
         resolved_families.append(ResolvedFamily(
             name=fam.name, proxy_port=proxy_port if fam.proxy else None,
             units=units))
@@ -227,10 +289,15 @@ def validate_resolved(plan: ResolvedPlan) -> List[str]:
     errors: List[str] = []
     seen: set = set()
     for u in plan.all_units:
-        key = (u.node, u.port)
-        if key in seen:
-            errors.append(f"(node,port) collision: {u.node}:{u.port}")
-        seen.add(key)
+        # Check EVERY node in the span, not just the primary: a tp>1 unit
+        # occupies its whole span, so a second unit landing on any spanned node
+        # at the same port is a real conflict. Keying on u.node alone would miss
+        # a collision on the 2nd..Nth node.
+        for node_ip in u.nodes:
+            key = (node_ip, u.port)
+            if key in seen:
+                errors.append(f"(node,port) collision: {node_ip}:{u.port}")
+            seen.add(key)
         if not Path_isfile(u.recipe):
             errors.append(f"{u.role} recipe not found: {u.recipe}")
     return errors
@@ -265,20 +332,20 @@ def to_serving_json(plan: ResolvedPlan) -> dict:
         "role": "orchestrator",
         "model": plan.orchestrator.model,
         "recipe": plan.orchestrator.recipe,
-        "nodes": [plan.orchestrator.node],
+        "nodes": plan.orchestrator.nodes,
         "port": plan.orchestrator.port,
     }]
     for fam in plan.families:
         for u in fam.units:
             short = u.model.split("/")[-1]
-            suffix = u.node.rsplit(".", 1)[-1]
+            suffix = u.nodes[0].rsplit(".", 1)[-1]
             units.append({
                 "id": f"family-{fam.name}-{short}-{suffix}-{u.port}",
                 "role": "worker",
                 "keepalive": True,
                 "model": u.model,
                 "recipe": u.recipe,
-                "nodes": [u.node],
+                "nodes": u.nodes,
                 "port": u.port,
                 "tp": u.tp,
                 "pp": u.pp,
