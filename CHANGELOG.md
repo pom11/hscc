@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] — Native sparkrun proxy + verified runtime v2026.7.30
+
+### Changed
+- **Proxy management now uses native sparkrun proxy (0.3+).** `hscc-cluster/cluster_template.py`
+  drives `sparkrun proxy start/stop` instead of hand-generating a LiteLLM launchd plist.
+  Functions renamed to `install_proxy`/`remove_proxy`; the old names
+  `install_proxy_plist`/`remove_proxy_plist` remain as backward-compat aliases.
+  `DEFAULT_PROXY_PORT` stays 4000.
+- **Verified runtime bumped:** hermes-agent v2026.7.20 → v2026.7.30 (0.19.1), sparkrun
+  v0.2.40 → v0.3.1 in `hscc-bootstrap/runtime-versions.json`. Compatibility audit
+  committed as `docs/COMPAT-7.30.md`: upstream 7.30 still lacks the kanban review-flow,
+  so the pom11 fork + `patches/hermes/0001-0006` are kept (nothing dropped). Plugin
+  lifecycle hooks and kanban_db API are unchanged — the bump is API-compatible for HSCC
+  plugins.
+
+### Added
+- **Compatibility audit report** (`docs/COMPAT-7.30.md`): structured assessment of hermes
+  upstream v2026.7.30 against HSCC's fork, confirming which patches remain required and
+  verifying plugin/API compatibility.
+
+### Fixed
+- README topology table columns corrected for accuracy.
+- README refreshed for the v1.1–v1.3 feature set with sharper landing copy.
+
 ## [1.3.0] — Escalation automation on + auto-unblock repair
 
 ### Added
