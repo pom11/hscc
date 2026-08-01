@@ -180,140 +180,81 @@ def atomic_yaml_update(path: Path, update_fn, backup: bool = True):
     return path, True
 
 
-# ── Proxy plist generation ─────────────────────────────────────────────────
+# ── Proxy management via native sparkrun proxy ────────────────────────────
 
-def _generate_proxy_plist(family) -> str:
-    """Generate a launchd plist for a LiteLLM proxy instance.
-
-    Hardened against respawn storms (the 2026-06-17 watchdog panic):
-
-    - **Dynamic litellm resolution at launch.** launchd runs jobs with a minimal
-      PATH (/usr/bin:/bin:/usr/sbin:/sbin), so a bare ``litellm`` arg fails
-      posix_spawn (error 0x2). Rather than freezing a machine-specific absolute
-      path into the plist, launch via ``/bin/sh -c`` and resolve litellm at each
-      launch: an explicit ``$LITELLM_BIN`` wins, else ``command -v``, else a glob
-      of the usual conda/uv install locations. ``exec`` replaces the shell so
-      launchd supervises the litellm process directly.
-    - **Crash-only KeepAlive** (no relaunch after a clean exit) plus a
-      **ThrottleInterval** so a persistently-failing binary backs off instead of
-      hammering launchd every ~10s."""
-    config_path = str(PROXY_DIR / family.name / "config.json")
-    log_path = str(PROXY_DIR / "logs" / f"{family.name}.log")
-    # Resolve litellm at launch (not generate time) so the plist carries no
-    # frozen binary path and self-heals if the install moves between launches.
-    resolver = (
-        'exec "${LITELLM_BIN:-$(command -v litellm || '
-        'ls $HOME/miniconda3/envs/*/bin/litellm '
-        '$HOME/.cache/uv/archive-v0/*/bin/litellm 2>/dev/null | head -n1)}" '
-        f'--port {family.proxy_port} --config {config_path}'
-    )
-
-    plist = f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.hermes.proxy.{family.name}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/sh</string>
-        <string>-c</string>
-        <string>{resolver}</string>
-    </array>
-    <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
-    <key>ThrottleInterval</key>
-    <integer>30</integer>
-    <key>StandardOutPath</key>
-    <string>{log_path}</string>
-    <key>StandardErrorPath</key>
-    <string>{log_path}</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>LITELLM_LICENSE_KEY</key>
-        <string></string>
-    </dict>
-</dict>
-</plist>"""
-    return plist
+# sparkrun 0.3+ ships a native LiteLLM-based inference proxy that auto-discovers
+# running endpoints and self-supervises (no launchd plist or watchdog needed).
+# We drive it via the CLI instead of hand-rolling plists.
 
 
-def install_proxy_plist(family) -> dict:
-    """Generate, write, AND load a proxy launchd plist. Returns action summary.
+def install_proxy(family) -> dict:
+    """Start the native sparkrun proxy for a family. Returns action summary.
 
-    Writing the plist alone does not start the proxy — it must be loaded into the
-    user's launchd domain. Bootout-then-bootstrap so re-applying reloads cleanly
-    (idempotent) rather than erroring on an already-loaded label.
+    Delegates to ``sparkrun proxy start`` which auto-discovers running endpoints,
+    generates LiteLLM config, and launches the proxy as a daemon. Re-applying is
+    idempotent — if the proxy is already running on the requested port, sparkrun
+    reports success without disruption.
+
+    Returns a dict keyed: port, loaded, error, via.
     """
     import subprocess
 
     proxy_dir = PROXY_DIR / family.name
-    logs_dir = PROXY_DIR / "logs"
     proxy_dir.mkdir(parents=True, exist_ok=True)
-    logs_dir.mkdir(parents=True, exist_ok=True)
 
-    plist_content = _generate_proxy_plist(family)
-    plist_path = proxy_dir / "proxy.plist"
-    with open(plist_path, "w") as f:
-        f.write(plist_content)
-
-    label = f"com.hermes.proxy.{family.name}"
-    domain = f"gui/{os.getuid()}"
     loaded = False
     load_error = ""
     try:
-        # Drop any prior instance (ignore failure: may not be loaded yet).
-        subprocess.run(["launchctl", "bootout", f"{domain}/{label}"],
-                       capture_output=True, timeout=10)
-        r = subprocess.run(["launchctl", "bootstrap", domain, str(plist_path)],
-                           capture_output=True, text=True, timeout=30)
+        r = subprocess.run(
+            ["sparkrun", "proxy", "start",
+             "--port", str(family.proxy_port),
+             "--cluster", "hscc"],
+            capture_output=True, text=True, timeout=30)
         loaded = r.returncode == 0
         if not loaded:
-            load_error = (r.stderr or "").strip() or "launchctl bootstrap failed"
-    except Exception as e:  # subprocess/timeout — report, don't crash apply
+            load_error = (r.stderr or r.stdout or "").strip() or "sparkrun proxy start failed"
+    except Exception as e:
         load_error = str(e)
 
     return {
-        "plist": str(plist_path),
-        "label": label,
         "port": family.proxy_port,
-        "log": str(logs_dir / f"{family.name}.log"),
         "loaded": loaded,
         "error": load_error or None,
+        "via": "sparkrun-proxy",
     }
 
 
-def remove_proxy_plist(family) -> dict:
-    """Stop and remove a proxy launchd plist. Returns action summary."""
+def remove_proxy(family) -> dict:
+    """Stop the native sparkrun proxy. Returns action summary.
+
+    Calls ``sparkrun proxy stop`` (SIGTERM via stored PID). Removes any leftover
+    family config dir under ~/.hscc/proxies/."""
     import subprocess
-    
-    label = f"com.hermes.proxy.{family.name}"
+
     try:
         subprocess.run(
-            ["launchctl", "bootout", "gui/" + str(os.getuid()), label],
-            capture_output=True, timeout=10
-        )
+            ["sparkrun", "proxy", "stop"],
+            capture_output=True, text=True, timeout=15)
     except Exception:
         pass
-    
-    plist_path = PROXY_DIR / family.name / "proxy.plist"
-    if plist_path.exists():
-        plist_path.unlink()
 
-    return {"label": label, "status": "removed"}
+    # Remove family config dir (if any stale artifacts remain).
+    family_dir = PROXY_DIR / family.name
+    if family_dir.is_dir():
+        try:
+            shutil.rmtree(family_dir)
+        except OSError:
+            pass
+
+    return {"status": "removed"}
 
 
 def _prune_orphan_proxies(active_names) -> list:
     """Remove proxy dirs for families no longer in the plan (incl. their backups).
 
     Orphan family dirs (e.g. a 'vision' family dropped from the template) would
-    otherwise keep their config.json + accumulated .bak.* forever. Boots out the
-    stale launchd plist, then removes the whole family dir. Never touches the
-    'logs' dir or an active family. Returns the names pruned."""
-    import subprocess
+    otherwise keep their config.json + accumulated .bak.* forever. Never touches
+    the 'logs' dir or an active family. Returns the names pruned."""
     if not PROXY_DIR.is_dir():
         return []
     keep = set(active_names) | {"logs"}
@@ -322,17 +263,23 @@ def _prune_orphan_proxies(active_names) -> list:
         if not d.is_dir() or d.name in keep:
             continue
         try:
-            subprocess.run(
-                ["launchctl", "bootout", f"gui/{os.getuid()}/com.hermes.proxy.{d.name}"],
-                capture_output=True, timeout=10)
-        except Exception:
-            pass
-        try:
             shutil.rmtree(d)
             pruned.append(d.name)
         except OSError:
             pass
     return pruned
+
+
+# ── Backward-compatible aliases ──────────────────────────────────────────
+
+def install_proxy_plist(family) -> dict:
+    """Alias for install_proxy — kept for backward compat."""
+    return install_proxy(family)
+
+
+def remove_proxy_plist(family) -> dict:
+    """Alias for remove_proxy — kept for backward compat."""
+    return remove_proxy(family)
 
 
 # ── Model provisioning ─────────────────────────────────────────────────────
@@ -635,17 +582,15 @@ def apply_template(template_name: str, confirm: bool = False) -> dict:
         result["steps"].append({"step": "config.yaml", "status": "ok",
                                 "changed": config_changed})
 
-        # Step 4: Write proxy configs and install plists (per resolved family)
+        # Step 4: Start native sparkrun proxy (per resolved family)
+        # The native proxy auto-discovers running endpoints and generates its own
+        # LiteLLM config — no manual config.json write needed.
         proxy_actions = []
         for fam in plan.families:
             if fam.proxy_port is None:
                 continue
-            proxy_config = _build_proxy_config(fam)
-            proxy_dir = PROXY_DIR / fam.name
-            proxy_dir.mkdir(parents=True, exist_ok=True)
-            write_json(proxy_dir / "config.json", proxy_config, backup=True)
-            plist_result = install_proxy_plist(fam)
-            proxy_actions.append(plist_result)
+            proxy_result = install_proxy(fam)
+            proxy_actions.append(proxy_result)
         # Remove proxy dirs (+ their accumulated backups) for families no longer
         # in the plan, so orphan families don't leak config.json.bak.* forever.
         active = [f.name for f in plan.families if f.proxy_port is not None]

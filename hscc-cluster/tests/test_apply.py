@@ -13,7 +13,7 @@ import cluster_template
 from cluster_template import (
     preview_template, apply_template, write_json, atomic_yaml_update,
     validate_resolved_plan, TemplateValidationError, install_proxy_plist,
-    list_templates,
+    install_proxy, remove_proxy, list_templates,
 )
 import template_intent as ti
 from dataclasses import dataclass
@@ -151,76 +151,130 @@ class TestValidateResolvedPlan:
         assert any("not found" in e for e in errs)
 
 
-class TestInstallProxyPlist:
-    def test_writes_and_loads(self, tmp_path, monkeypatch):
+class TestInstallProxySparkrun:
+    """install_proxy delegates to `sparkrun proxy start` instead of writing
+    a launchd plist. The tests verify the subprocess call shape."""
+
+    def test_calls_sparkrun_proxy_start(self, tmp_path, monkeypatch):
         import cluster_template as ct
         import subprocess
-        from unittest.mock import MagicMock
+        from unittest.mock import MagicMock, patch
+
         monkeypatch.setattr(ct, "PROXY_DIR", tmp_path / "proxies")
         calls = []
-        monkeypatch.setattr(subprocess, "run",
-                            lambda argv, **k: calls.append(argv) or MagicMock(returncode=0, stderr=""))
-        fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
-            ti.ResolvedUnit("worker", "coding", "m.yaml", "M", "10.0.0.2", 8000, 1, 1)])
-        res = install_proxy_plist(fam)
-        assert (tmp_path / "proxies" / "coding" / "proxy.plist").is_file()
-        assert any("bootstrap" in str(c) for c in calls)
-        assert res["loaded"] is True and res["port"] == 4000
 
+        def mock_run(argv, **k):
+            calls.append(argv)
+            return MagicMock(returncode=0, stderr="", stdout="")
 
-class TestGenerateProxyPlistHardening:
-    """A generated proxy plist must not crash-loop a missing/failing binary into
-    a memory-exhausting respawn storm (the 2026-06-17 watchdog panic). Guards:
-    resolve litellm at LAUNCH (no machine-specific path frozen into the plist),
-    throttled respawn, crash-only KeepAlive."""
+        with patch.object(subprocess, "run", mock_run):
+            fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
+                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", "10.0.0.2", 8000, 1, 1)])
+            res = install_proxy(fam)
 
-    def _fam(self):
-        return ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
-            ti.ResolvedUnit("worker", "coding", "m.yaml", "M", "10.0.0.2", 8000, 1, 1)])
+        assert calls[0][0] == "sparkrun"
+        assert calls[0][1] == "proxy"
+        assert calls[0][2] == "start"
+        assert "--port" in calls[0]
+        assert "4000" in calls[0]
+        assert "--cluster" in calls[0]
+        assert "hscc" in calls[0]
+        assert res["loaded"] is True
+        assert res["port"] == 4000
+        assert res["via"] == "sparkrun-proxy"
 
-    def _plist(self):
+    def test_records_error_on_failure(self, tmp_path, monkeypatch):
         import cluster_template as ct
-        import plistlib
-        return plistlib.loads(ct._generate_proxy_plist(self._fam()).encode())
+        import subprocess
+        from unittest.mock import MagicMock, patch
 
-    def test_resolves_litellm_dynamically_at_launch(self):
-        argv = self._plist()["ProgramArguments"]
-        # Launched via a shell that resolves litellm live, not a baked path.
-        assert argv[0] == "/bin/sh" and argv[1] == "-c"
-        resolver = argv[2]
-        assert "command -v litellm" in resolver                    # PATH first
-        assert "$HOME/miniconda3/envs/*/bin/litellm" in resolver   # glob fallback (dynamic)
-        assert resolver.startswith("exec ")  # replace sh so launchd supervises litellm
+        monkeypatch.setattr(ct, "PROXY_DIR", tmp_path / "proxies")
 
-    def test_no_machine_specific_litellm_path_baked(self):
-        resolver = self._plist()["ProgramArguments"][2]
-        # The concrete install location must NOT be frozen in; only the wildcard.
-        assert "/miniconda3/envs/r2d2/bin/litellm" not in resolver
-        assert "envs/*/bin/litellm" in resolver
+        def mock_run(argv, **k):
+            return MagicMock(returncode=1, stderr="port already in use", stdout="")
 
-    def test_honors_litellm_bin_override(self):
-        resolver = self._plist()["ProgramArguments"][2]
-        assert "${LITELLM_BIN:-" in resolver   # an explicit pin wins when set
+        with patch.object(subprocess, "run", mock_run):
+            fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
+                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", "10.0.0.2", 8000, 1, 1)])
+            res = install_proxy(fam)
 
-    def test_throttles_respawn(self):
-        plist = self._plist()
-        assert isinstance(plist.get("ThrottleInterval"), int)
-        assert plist["ThrottleInterval"] >= 10
+        assert res["loaded"] is False
+        assert res["error"] is not None
 
-    def test_keepalive_is_crash_only(self):
-        # Must NOT be bare-True (always-respawn). Crash-only: relaunch only on
-        # unsuccessful exit, so a permanently-failing binary backs off.
-        assert self._plist()["KeepAlive"] == {"SuccessfulExit": False}
+    def test_no_plist_written(self, tmp_path, monkeypatch):
+        import cluster_template as ct
+        import subprocess
+        from unittest.mock import MagicMock, patch
+
+        monkeypatch.setattr(ct, "PROXY_DIR", tmp_path / "proxies")
+
+        def mock_run(argv, **k):
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        with patch.object(subprocess, "run", mock_run):
+            fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
+                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", "10.0.0.2", 8000, 1, 1)])
+            install_proxy(fam)
+
+        # No proxy.plist should be generated
+        plist = tmp_path / "proxies" / "coding" / "proxy.plist"
+        assert not plist.exists()
+
+
+class TestRemoveProxySparkrun:
+    """remove_proxy delegates to `sparkrun proxy stop`."""
+
+    def test_calls_sparkrun_proxy_stop(self, tmp_path, monkeypatch):
+        import cluster_template as ct
+        import subprocess
+        from unittest.mock import MagicMock, patch
+
+        monkeypatch.setattr(ct, "PROXY_DIR", tmp_path / "proxies")
+        (tmp_path / "proxies" / "coding").mkdir(parents=True)
+        (tmp_path / "proxies" / "coding" / "config.json").write_text("{}")
+
+        calls = []
+        def mock_run(argv, **k):
+            calls.append(argv)
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        with patch.object(subprocess, "run", mock_run):
+            fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
+                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", "10.0.0.2", 8000, 1, 1)])
+            res = remove_proxy(fam)
+
+        assert calls[0][0] == "sparkrun"
+        assert calls[0][1] == "proxy"
+        assert calls[0][2] == "stop"
+        assert res["status"] == "removed"
+
+
+class TestBackwardCompatAliases:
+    """install_proxy_plist / remove_proxy_plist still work as aliases."""
+
+    def test_install_proxy_plist_alias(self, tmp_path, monkeypatch):
+        import cluster_template as ct
+        import subprocess
+        from unittest.mock import MagicMock, patch
+
+        monkeypatch.setattr(ct, "PROXY_DIR", tmp_path / "proxies")
+
+        def mock_run(argv, **k):
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        with patch.object(subprocess, "run", mock_run):
+            fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
+                ti.ResolvedUnit("worker", "coding", "m.yaml", "M", "10.0.0.2", 8000, 1, 1)])
+            res = install_proxy_plist(fam)
+
+        assert res["loaded"] is True
+        assert res["port"] == 4000
 
 
 class TestPruneOrphanProxies:
     def test_removes_orphan_family_dirs_and_backups(self, tmp_path, monkeypatch):
         import cluster_template as ct
-        import subprocess
-        from unittest.mock import MagicMock
         monkeypatch.setattr(ct, "PROXY_DIR", tmp_path / "proxies")
-        monkeypatch.setattr(subprocess, "run",
-                            lambda *a, **k: MagicMock(returncode=0))
         # active 'coding' + orphan 'vision' (with stale backups) + logs dir
         for fam in ("coding", "vision"):
             d = tmp_path / "proxies" / fam
