@@ -1,0 +1,33 @@
+# 4-node: DeepSeek-V4-Flash (304B NVFP4) as the ORCHESTRATOR, spanning 2 nodes
+# via tp=2, plus a coding family of 2x Qwen3.6-27B-FP8 on :4000.
+#
+# Why the big model is the orchestrator, not a worker: the orchestrator is the
+# strong tier — it decomposes, routes, gates reviews, and is what the escalation
+# watcher escalates TO. Putting the 304B there upgrades judgment where it pays,
+# and still leaves two real coding workers. The alternative (V4 as a worker
+# family) would eat 2 of 3 workers and leave a single coder.
+#
+# Node budget (4 nodes total):
+#   orchestrator  tp=2  -> gateway node + 1 borrowed worker   (76.16 GB/GPU)
+#   coding family tp=1  -> the remaining 2 workers            (60.75 GB/GPU)
+#
+# Requires the multi-node tp support: the resolver claims tp nodes for the
+# orchestrator and removes them from the worker pool, and provisioning launches
+# the span with `--hosts n1,n2 --tp 2`. Without both, tp>1 silently lands on a
+# single GPU.
+#
+# NOTE: cross-node tp=2 does an allreduce over the CX7 link on every token. This
+# has never been benchmarked on this cluster — measure interactive latency before
+# trusting it for always-on Telegram/agent traffic.
+name: 4node-deepseek-v4-orchestrator
+version: 2
+description: "4 nodes: DeepSeek-V4-Flash 304B NVFP4 orchestrator (tp=2, 2 nodes) + coding family (2x 27B-FP8). cluster_size=4."
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-flash-nvfp4-vllm.yaml"
+  tp: 2
+families:
+  - name: coding
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+    workers: remaining
+    proxy: true
