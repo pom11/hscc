@@ -773,3 +773,99 @@ class TestProvisionMultiNodeSpan:
         assert orch_call[hosts_idx + 1] == "10.0.0.1,10.0.0.2"
         tp_idx = orch_call.index("--tp")
         assert orch_call[tp_idx + 1] == "2"
+
+
+# ── Fix: orchestrator model.default in _update_hermes_config ──────────────
+
+class TestUpdateHermesConfigModelBlock:
+    """BUG 1: _update_hermes_config must set the top-level model.default
+    and model.base_url to the resolved orchestrator values."""
+
+    def _make_plan(self, model_id, node="10.0.0.1", port=8000):
+        orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
+                               model_id, [node], port, 1, 1)
+        return ti.ResolvedPlan(template="test", orchestrator=orch, families=[])
+
+    def test_model_default_set_to_orchestrator_model(self):
+        plan = self._make_plan("deepseek-ai/DeepSeek-V4-Flash-0731")
+        config = {"model": {"default": "old-model", "base_url": "http://old:8000/v1"}}
+        result = cluster_template._update_hermes_config(config, plan)
+        assert result["model"]["default"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
+        assert result["model"]["base_url"] == "http://10.0.0.1:8000/v1"
+
+    def test_model_base_url_set_correctly(self):
+        plan = self._make_plan("test-model", "10.0.0.5", 9000)
+        config = {}
+        result = cluster_template._update_hermes_config(config, plan)
+        assert result["model"]["base_url"] == "http://10.0.0.5:9000/v1"
+
+    def test_model_provider_preserved_when_existing(self):
+        plan = self._make_plan("test-model")
+        config = {"model": {"provider": "anthropic"}}
+        result = cluster_template._update_hermes_config(config, plan)
+        assert result["model"]["provider"] == "anthropic"
+
+    def test_model_provider_defaults_to_custom_when_absent(self):
+        plan = self._make_plan("test-model")
+        config = {}
+        result = cluster_template._update_hermes_config(config, plan)
+        assert result["model"]["provider"] == "custom"
+
+    def test_providers_still_rebuilt(self):
+        orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
+                               "test-model", ["10.0.0.1"], 8000, 1, 1)
+        fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[
+            ti.ResolvedUnit("worker", "coding", "m.yaml", "W", ["10.0.0.2"], 8001, 1, 1)])
+        plan = ti.ResolvedPlan(template="test", orchestrator=orch, families=[fam])
+        config = {"providers": [{"name": "stale-provider", "base_url": "http://x"}]}
+        result = cluster_template._update_hermes_config(config, plan)
+        names = [p["name"] for p in result["providers"]]
+        assert "custom" in names
+        assert "family-coding" in names
+        assert "stale-provider" not in names
+
+    def test_idempotent_on_second_call(self):
+        plan = self._make_plan("deepseek-ai/DeepSeek-V4-Flash-0731")
+        config = {"model": {"default": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                            "base_url": "http://10.0.0.1:8000/v1",
+                            "provider": "custom"}}
+        result1 = cluster_template._update_hermes_config(config, plan)
+        result2 = cluster_template._update_hermes_config(result1, plan)
+        assert result2["model"]["default"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
+        assert result2["model"]["base_url"] == "http://10.0.0.1:8000/v1"
+        assert result2["model"]["provider"] == "custom"
+
+    def test_other_model_keys_not_clobbered(self):
+        plan = self._make_plan("test-model")
+        config = {"model": {"default": "old", "some_other_key": "preserve"}}
+        result = cluster_template._update_hermes_config(config, plan)
+        assert result["model"]["some_other_key"] == "preserve"
+
+
+# ── Fix: provision timeout raised to configurable 900s ──────────────────
+
+class TestProvisionTimeout:
+    """BUG 2: per-unit subprocess timeout was 240s (too short for builds + sync).
+    Raised to PROVISION_TIMEOUT_S (default 900s, overridable via HSCC_PROVISION_TIMEOUT)."""
+
+    def test_default_timeout_is_900(self):
+        assert cluster_template.PROVISION_TIMEOUT_S == 900
+
+    def test_provision_uses_module_timeout(self, monkeypatch):
+        """_provision_models passes PROVISION_TIMEOUT_S as subprocess timeout."""
+        import subprocess
+        from unittest.mock import MagicMock
+
+        call_kws = []
+        def mock_run(argv, **kw):
+            call_kws.append(kw)
+            return MagicMock(returncode=0, stderr="", stdout="")
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
+                               "test-model", ["10.0.0.1"], 8000, 1, 1)
+        plan = ti.ResolvedPlan(template="test", orchestrator=orch, families=[])
+        cluster_template._provision_models(plan, do_launch=True)
+
+        timeout_values = [kw.get("timeout") for kw in call_kws]
+        assert cluster_template.PROVISION_TIMEOUT_S in timeout_values
