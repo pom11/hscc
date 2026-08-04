@@ -1,0 +1,22 @@
+# 4-node: ONE DeepSeek-V4-Flash-0731 FP8 orchestrator (tp=2, spanning the gateway
+# node + 1 worker) + a coding family of TWO Qwen3.6-27B-FP8 workers (tp=1 each).
+# The 304B DSV4 is the strong/reasoning tier; the two 27B workers keep a real
+# parallel coding pool on the load-balanced :4000 proxy.
+#
+# Uses the WORKING FP8 DSV4 stack (proven 2026-08-04): FP8 checkpoint +
+# scitrera-hscc container. Costs (sparkrun show): DSV4 fp8 tp=2 = 80.40 GB/GPU,
+# 27B-FP8 = 60.75 GB/GPU. Both fit. Requires the multi-node-tp resolver (orch
+# node spanning) on main. Stage DSV4 weights + scitrera-hscc image on the 2 span
+# nodes; the 27B recipe/image on the 2 coding workers.
+name: 4node-dsv4-plus-coding
+version: 2
+description: "4 nodes: DeepSeek-V4-Flash-0731 FP8 orchestrator (tp=2) + coding family (2x Qwen3.6-27B-FP8). cluster_size=4."
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml"
+  tp: 2
+families:
+  - name: coding
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+    workers: remaining
+    proxy: true

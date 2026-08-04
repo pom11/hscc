@@ -23,7 +23,7 @@ name: 4node-deepseek-v4-orchestrator
 version: 2
 description: "4 nodes: DeepSeek-V4-Flash 304B NVFP4 orchestrator (tp=2, 2 nodes) + coding family (2x 27B-FP8). cluster_size=4."
 orchestrator:
-  recipe: "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-flash-nvfp4-vllm.yaml"
+  recipe: "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml"
   tp: 2
 families:
   - name: coding
