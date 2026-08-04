@@ -822,7 +822,9 @@ class TestUpdateHermesConfigModelBlock:
         names = [p["name"] for p in result["providers"]]
         assert "custom" in names
         assert "family-coding" in names
-        assert "stale-provider" not in names
+        # Existing (non-plan) providers are MERGED, not pruned — the function
+        # rebuilds by name to avoid duplicates but preserves manual providers.
+        assert "stale-provider" in names
 
     def test_idempotent_on_second_call(self):
         plan = self._make_plan("deepseek-ai/DeepSeek-V4-Flash-0731")
