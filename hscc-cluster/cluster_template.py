@@ -35,6 +35,11 @@ CONFIG_YAML = HERMES_HOME / "config.yaml"
 PROXY_DIR = HSCC_DIR / "proxies"
 APPLIED_STATE = HSCC_DIR / "applied_template.json"  # which template is live
 
+# Provisioning timeout per unit (sparkrun run --no-follow --ensure).
+# 15 min covers a mods image build + a ~30 GB multi-node sync.
+# Override via HSCC_PROVISION_TIMEOUT env var (seconds).
+PROVISION_TIMEOUT_S = int(os.environ.get("HSCC_PROVISION_TIMEOUT", "900"))
+
 # Cap timestamped backups per file so re-applies don't accumulate forever
 # (a prior version left 100+ serving.json.bak.* / models.json.bak.* in ~/.hscc).
 MAX_BACKUPS = 5
@@ -339,7 +344,8 @@ def _provision_models(plan: Any, cluster: str = "hscc",
                    "--port", str(port), "--no-follow", "--ensure"]
             if tp > 1:
                 cmd.extend(["--tp", str(tp)])
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=PROVISION_TIMEOUT_S)
             if r.returncode == 0:
                 result["provisioned"].append(
                     f"{hosts_arg}:{port}:{recipe.split('/')[-1]}")
@@ -763,7 +769,21 @@ def _update_hermes_config(config: dict, plan: Any) -> dict:
     """Update Hermes config.yaml providers from a resolved plan.
 
     Idempotent: providers keyed by name and rebuilt, so re-running apply never
-    duplicates (a prior version appended on every call, corrupting config)."""
+    duplicates (a prior version appended on every call, corrupting config).
+
+    Also updates the top-level ``model`` block so the orchestrator's served
+    model id and base_url are correct — vLLM is strict about model identity."""
+    o = plan.orchestrator
+
+    # ── Top-level model block ────────────────────────────────────────
+    model_cfg = config.setdefault("model", {})
+    model_cfg["default"] = o.model
+    model_cfg["base_url"] = f"http://{o.node}:{o.port}/v1"
+    # Preserve existing provider; default to "custom" if absent
+    if "provider" not in model_cfg:
+        model_cfg["provider"] = "custom"
+
+    # ── Providers list ───────────────────────────────────────────────
     existing = config.get("providers")
     by_name: dict = {}
     if isinstance(existing, list):
@@ -771,7 +791,6 @@ def _update_hermes_config(config: dict, plan: Any) -> dict:
             if isinstance(p, dict) and p.get("name"):
                 by_name[p["name"]] = p
 
-    o = plan.orchestrator
     by_name["custom"] = {
         "name": "custom",
         "model": {"default": f"{o.node}:{o.port}"},
