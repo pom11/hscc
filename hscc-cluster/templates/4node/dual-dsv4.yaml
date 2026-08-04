@@ -1,0 +1,22 @@
+# 4-node: TWO DeepSeek-V4-Flash-0731 FP8 instances, each spanning 2 nodes (tp=2).
+# The orchestrator DSV4 claims the gateway node + 1 worker; a `reasoning` family
+# runs a second DSV4 across the remaining 2 workers. All-DeepSeek, no coding tier.
+#
+# Uses the WORKING FP8 stack (proven 2026-08-04): FP8 checkpoint + scitrera-hscc
+# container. DSV4 fp8 tp=2 = 80.40 GB/GPU (sparkrun show), fits every GB10.
+# Requires the multi-node-tp resolver (orchestrator + family node spanning) that
+# shipped on main. Weights (deepseek-ai/DeepSeek-V4-Flash-0731) must be staged
+# node-local on all 4 nodes and the scitrera-hscc image built on each.
+name: 4node-dual-dsv4
+version: 2
+description: "4 nodes: 2x DeepSeek-V4-Flash-0731 FP8 (each tp=2) — orchestrator DSV4 + reasoning family DSV4. cluster_size=4."
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml"
+  tp: 2
+families:
+  - name: reasoning
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml"
+        tp: 2
+    workers: remaining
+    proxy: true
