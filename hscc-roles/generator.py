@@ -76,7 +76,14 @@ def _strong_model_block():
 # summarize fails fast rather than hanging. Env-overridable.
 COMPACT_BASE_URL = os.environ.get(
     "HSCC_COMPACT_URL", "http://10.0.0.244:8000/v1")
-COMPACT_MODEL = os.environ.get("HSCC_COMPACT_MODEL", "orchestrator-model")
+# The compaction model id MUST be a model actually served at COMPACT_BASE_URL.
+# Compaction targets the orchestrator GPU (same node as strong-tier), so it
+# defaults to STRONG_MODEL — one orchestrator-model knob. A placeholder id that
+# the endpoint does not serve 404s the summary call, and the auxiliary-client
+# fallback chain then reaches OpenRouter, whose credential read throws under the
+# multiplexing secret-scope guard → "context length exceeded: max compression
+# attempts reached" with the turn wedged. Keep this a real served id.
+COMPACT_MODEL = os.environ.get("HSCC_COMPACT_MODEL", STRONG_MODEL)
 COMPACT_KEY = os.environ.get("HSCC_COMPACT_KEY", "sk-sparkrun")
 COMPACT_TIMEOUT = int(os.environ.get("HSCC_COMPACT_TIMEOUT", "90"))
 # Compact less often: at this fraction of context (default 0.8 = ~210K of 262K),
