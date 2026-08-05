@@ -846,6 +846,94 @@ class TestUpdateHermesConfigModelBlock:
 
 # ── Fix: provision timeout raised to configurable 900s ──────────────────
 
+class TestProvisionReusedNode:
+    """BUG 3: _provision_models must FREE a reused node before provisioning a
+    different model. If a node in the plan already serves a model that does NOT
+    match the wanted unit's recipe model, the stale container still holds the
+    serve port and the new `sparkrun run` crash-loops with Errno 98. The stale
+    container must be stopped BEFORE the launch. A node already correctly
+    serving the wanted model must be left running (--ensure idempotency)."""
+
+    def _invoke(self, monkeypatch, status_out, *, orch_nodes=("10.0.0.1",),
+                unit_nodes=("10.0.0.2",)):
+        """Run _provision_models with a plan of one orchestrator + one worker,
+        recording every subprocess call. status_out is the `sparkrun status`
+        stdout the mock returns."""
+        import subprocess
+        from unittest.mock import MagicMock
+        calls = []
+
+        def mock_run(argv, **kw):
+            calls.append(argv)
+            if "status" in argv:
+                return MagicMock(returncode=0, stderr="", stdout=status_out)
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
+                               "orch", list(orch_nodes), 8000, 1, 1)
+        unit = ti.ResolvedUnit("worker", "coding", "~/recipes/deepseek.yaml",
+                               "deepseek", list(unit_nodes), 8000, 1, 1)
+        fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[unit])
+        plan = ti.ResolvedPlan(template="test", orchestrator=orch, families=[fam])
+        cluster_template._provision_models(plan, do_launch=True)
+        return calls
+
+    @staticmethod
+    def _stops(calls):
+        return [c for c in calls if c[0] == "sparkrun" and c[1] == "stop"]
+
+    @staticmethod
+    def _run_for(calls, recipe_substr):
+        return [c for c in calls
+                if c[0] == "sparkrun" and c[1] == "run" and recipe_substr in str(c)]
+
+    def test_reused_node_different_model_stopped_before_launch(self, monkeypatch):
+        # A container serving qwen27b is running on the worker node the plan
+        # wants deepseek on → the stale qwen container must be stopped first.
+        status = ("Job: qwen27b\n"
+                  "10.0.0.2\n")
+        calls = self._invoke(monkeypatch, status, unit_nodes=("10.0.0.2",))
+        stops = self._stops(calls)
+        assert len(stops) == 1
+        assert "10.0.0.2" in stops[0]
+        deepseek_run = self._run_for(calls, "deepseek.yaml")
+        assert len(deepseek_run) == 1
+        assert calls.index(stops[0]) < calls.index(deepseek_run[0])
+
+    def test_node_serving_wanted_model_kept_running(self, monkeypatch):
+        # A container already serving the WANTED model (deepseek) is on the node
+        # → no stop, no relaunch (the --ensure run is the only run, and there is
+        # no stop for the node).
+        status = ("Job: ~/recipes/deepseek.yaml\n"
+                  "10.0.0.2\n")
+        calls = self._invoke(monkeypatch, status, unit_nodes=("10.0.0.2",))
+        stops = self._stops(calls)
+        assert stops == []  # idempotent — nothing stopped
+        assert len(self._run_for(calls, "deepseek.yaml")) == 1
+
+    def test_fresh_node_no_spurious_stop(self, monkeypatch):
+        # Nothing running on the worker node → it is just launched, no stop.
+        status = "Idle hosts (...): 0\n"
+        calls = self._invoke(monkeypatch, status, unit_nodes=("10.0.0.2",))
+        stops = self._stops(calls)
+        assert stops == []
+        assert len(self._run_for(calls, "deepseek.yaml")) == 1
+
+    def test_stop_nodes_not_in_plan_still_holds(self, monkeypatch):
+        # A node running a container but NOT part of the plan is still stopped
+        # by the existing not-in-plan logic.
+        status = ("Job: qwen27b\n"
+                  "10.0.0.1 10.0.0.2 10.0.0.3\n")
+        calls = self._invoke(monkeypatch, status,
+                             orch_nodes=("10.0.0.1",), unit_nodes=("10.0.0.2",))
+        # 10.0.0.3 is not in the plan → gets stopped via `_running_nodes_via_sparkrun`
+        stop_nodes = {n for stop in self._stops(calls) for n in stop if n.count(".") == 3}
+        assert "10.0.0.3" in stop_nodes
+        # 10.0.0.2 serves the wanted model → left running
+        assert "10.0.0.2" not in stop_nodes
+
+
 class TestProvisionTimeout:
     """BUG 2: per-unit subprocess timeout was 240s (too short for builds + sync).
     Raised to PROVISION_TIMEOUT_S (default 900s, overridable via HSCC_PROVISION_TIMEOUT)."""
