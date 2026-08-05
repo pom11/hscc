@@ -308,6 +308,7 @@ class TestApplyIntegration:
         for attr, val in [("HSCC_DIR", hscc), ("SERVING_JSON", hscc / "serving.json"),
                           ("MODELS_JSON", hscc / "models.json"),
                           ("CONFIG_YAML", hscc / "config.yaml"),
+                          ("PROFILES_DIR", hscc / "profiles"),
                           ("PROXY_DIR", hscc / "proxies"),
                           ("APPLIED_STATE", hscc / "applied_template.json"),
                           ("ROLLBACK_DIR", hscc / "rollback")]:
@@ -539,6 +540,7 @@ class TestApplyWarnSetsSuccessFalse:
         for attr, val in [("HSCC_DIR", hscc), ("SERVING_JSON", hscc / "serving.json"),
                           ("MODELS_JSON", hscc / "models.json"),
                           ("CONFIG_YAML", hscc / "config.yaml"),
+                          ("PROFILES_DIR", hscc / "profiles"),
                           ("PROXY_DIR", hscc / "proxies"),
                           ("APPLIED_STATE", hscc / "applied_template.json"),
                           ("ROLLBACK_DIR", hscc / "rollback")]:
@@ -842,6 +844,138 @@ class TestUpdateHermesConfigModelBlock:
         config = {"model": {"default": "old", "some_other_key": "preserve"}}
         result = cluster_template._update_hermes_config(config, plan)
         assert result["model"]["some_other_key"] == "preserve"
+
+
+# ── Fix: apply_template rewires worker model ids on a worker-tier switch ────
+
+class TestUpdateWorkerModelIds:
+    """BUG: switching the worker-tier model via a template leaves stale worker
+    model ids, so every worker aborts with HTTP 400 'Invalid model name'.
+    ``_update_worker_model_ids`` must rewire config.yaml (delegation.model +
+    every fallback_providers[].model) and every worker role profile's
+    model.default (profiles whose base_url points at the :4000 worker proxy) to
+    the family (worker) model."""
+
+    WORKER = "deepseek-ai/DeepSeek-V4-Flash-0731"
+
+    def _plan(self, model=None, proxy_port=4000, worker=True):
+        import template_intent as ti
+        orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
+                               "orch-model", ["10.0.0.1"], 8000, 1, 1)
+        families = []
+        if worker:
+            unit = ti.ResolvedUnit("worker", "coding", "m.yaml",
+                                   model or self.WORKER, ["10.0.0.2"], 8001, 1, 1)
+            families.append(ti.ResolvedFamily(name="coding", proxy_port=proxy_port,
+                                              units=[unit]))
+        return ti.ResolvedPlan(template="test", orchestrator=orch, families=families)
+
+    def _write_config(self, path, delegation=None, fallbacks=(), model=None):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if model is not None:
+            data["model"] = dict(model)
+        if delegation is not None:
+            data["delegation"] = dict(delegation)
+        if fallbacks:
+            data["fallback_providers"] = [dict(f) for f in fallbacks]
+        import yaml
+        path.write_text(yaml.safe_dump(data, sort_keys=False))
+
+    def _write_profile(self, profiles_dir, role, base_url, default="old-model"):
+        pdir = profiles_dir / role
+        pdir.mkdir(parents=True, exist_ok=True)
+        import yaml
+        (pdir / "config.yaml").write_text(yaml.safe_dump({
+            "model": {"default": default, "base_url": base_url},
+        }, sort_keys=False))
+
+    # ── config.yaml rewiring ────────────────────────────────────────────
+
+    def test_config_delegation_and_fallbacks_rewired(self, tmp_path):
+        conf = tmp_path / "config.yaml"
+        self._write_config(conf, delegation={"model": "stale"},
+                           fallbacks=[{"model": "stale", "name": "a"},
+                                      {"model": "stale2", "name": "b"}])
+        result = cluster_template._update_worker_model_ids(
+            self._plan(), profiles_dir=tmp_path / "profiles", config_yaml=conf)
+        import yaml
+        data = yaml.safe_load(conf.read_text())
+        assert data["delegation"]["model"] == self.WORKER
+        assert [f["model"] for f in data["fallback_providers"]] == [self.WORKER, self.WORKER]
+        assert result["config_changed"] is True
+
+    def test_config_no_fallback_providers_still_sets_delegation(self, tmp_path):
+        conf = tmp_path / "config.yaml"
+        self._write_config(conf, delegation={"model": "stale"})
+        cluster_template._update_worker_model_ids(
+            self._plan(), profiles_dir=tmp_path / "profiles", config_yaml=conf)
+        import yaml
+        assert yaml.safe_load(conf.read_text())["delegation"]["model"] == self.WORKER
+
+    def test_config_orchestrator_model_default_untouched(self, tmp_path):
+        conf = tmp_path / "config.yaml"
+        self._write_config(conf, delegation={"model": "stale"},
+                           model={"default": "orch-model", "base_url": "http://10.0.0.1:8000/v1"})
+        cluster_template._update_worker_model_ids(
+            self._plan(), profiles_dir=tmp_path / "profiles", config_yaml=conf)
+        import yaml
+        data = yaml.safe_load(conf.read_text())
+        # orchestrator model.default must NOT be clobbered by worker rewiring
+        assert data["model"]["default"] == "orch-model"
+        assert data["delegation"]["model"] == self.WORKER
+
+    # ── profile rewiring ────────────────────────────────────────────────
+
+    def test_worker_facing_profile_rewired_orchestrator_untouched(self, tmp_path):
+        profiles = tmp_path / "profiles"
+        self._write_profile(profiles, "coder", "http://localhost:4000/v1", "stale")
+        self._write_profile(profiles, "reviewer", "http://localhost:4000/v1", "stale")
+        # orchestrator-facing profile (:8000) must be left alone
+        self._write_profile(profiles, "orch-role", "http://10.0.0.1:8000/v1", "orch-model")
+        conf = tmp_path / "config.yaml"
+        self._write_config(conf, delegation={"model": "stale"})
+        result = cluster_template._update_worker_model_ids(
+            self._plan(), profiles_dir=profiles, config_yaml=conf)
+        import yaml
+        coder = yaml.safe_load((profiles / "coder" / "config.yaml").read_text())
+        reviewer = yaml.safe_load((profiles / "reviewer" / "config.yaml").read_text())
+        orch = yaml.safe_load((profiles / "orch-role" / "config.yaml").read_text())
+        assert coder["model"]["default"] == self.WORKER
+        assert reviewer["model"]["default"] == self.WORKER
+        assert orch["model"]["default"] == "orch-model"  # untouched
+        assert result["profiles_changed"] == 2
+        assert coder["model"]["base_url"] == "http://localhost:4000/v1"  # base_url preserved
+
+    def test_idempotent_second_call_is_noop(self, tmp_path):
+        profiles = tmp_path / "profiles"
+        self._write_profile(profiles, "coder", "http://localhost:4000/v1", "stale")
+        conf = tmp_path / "config.yaml"
+        self._write_config(conf, delegation={"model": "stale"},
+                           fallbacks=[{"model": "stale"}])
+        cluster_template._update_worker_model_ids(
+            self._plan(), profiles_dir=profiles, config_yaml=conf)
+        before = conf.read_text() + (profiles / "coder" / "config.yaml").read_text()
+        result = cluster_template._update_worker_model_ids(
+            self._plan(), profiles_dir=profiles, config_yaml=conf)
+        after = conf.read_text() + (profiles / "coder" / "config.yaml").read_text()
+        assert before == after          # no byte churn on re-apply
+        assert result["config_changed"] is False
+        assert result["profiles_changed"] == 0
+
+    def test_no_worker_family_leaves_worker_ids_untouched(self, tmp_path):
+        profiles = tmp_path / "profiles"
+        self._write_profile(profiles, "coder", "http://localhost:4000/v1", "stale")
+        conf = tmp_path / "config.yaml"
+        self._write_config(conf, delegation={"model": "stale"})
+        plan = self._plan(worker=False)  # dual-orchestrator: no worker tier
+        result = cluster_template._update_worker_model_ids(
+            plan, profiles_dir=profiles, config_yaml=conf)
+        import yaml
+        assert result["model_id"] is None
+        assert yaml.safe_load(conf.read_text())["delegation"]["model"] == "stale"
+        assert yaml.safe_load((profiles / "coder" / "config.yaml").read_text())[
+            "model"]["default"] == "stale"
 
 
 # ── Fix: provision timeout raised to configurable 900s ──────────────────
