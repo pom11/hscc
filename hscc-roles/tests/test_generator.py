@@ -110,7 +110,7 @@ def test_model_tier_strong_uses_orch_endpoint(tmp_path, monkeypatch):
     with open(os.path.join(str(tmp_path / "profiles" / "architect"), "config.yaml")) as f:
         cfg = yaml.safe_load(f)
     assert cfg["model"]["base_url"] == "http://10.0.0.244:8000/v1"
-    assert cfg["model"]["default"] == "nvidia/Qwen3.6-35B-A3B-NVFP4"
+    assert cfg["model"]["default"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
 
 
 def test_model_tier_override_via_env(tmp_path, monkeypatch):
@@ -214,7 +214,7 @@ def test_model_endpoint_only_strong_falls_back_to_strong_model(tmp_path, monkeyp
     with open(os.path.join(str(tmp_path / "profiles" / "architect"), "config.yaml")) as f:
         cfg = yaml.safe_load(f)
     assert cfg["model"]["base_url"] == "http://arch:6000/v1"
-    assert cfg["model"]["default"] == "nvidia/Qwen3.6-35B-A3B-NVFP4"
+    assert cfg["model"]["default"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
 
 
 def test_no_override_uses_tier_logic(tmp_path, monkeypatch):

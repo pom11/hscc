@@ -43,8 +43,13 @@ WORKER_PROXY_KEY = os.environ.get("HSCC_WORKER_PROXY_KEY", "sk-sparkrun")
 # Reviewers, coders, and QA stay on the fast worker proxy (:4000).
 STRONG_URL = os.environ.get(
     "HSCC_STRONG_URL", "http://10.0.0.244:8000/v1")
+# Must be a model actually served at STRONG_URL (the orchestrator node). A stale
+# id that the endpoint no longer serves 404s every strong-tier call and (via the
+# same fallback path as compaction) can reach OpenRouter and throw under the
+# multiplexing secret-scope guard. Keep in sync with the orchestrator's served
+# model; override per deployment with HSCC_STRONG_MODEL.
 STRONG_MODEL = os.environ.get(
-    "HSCC_STRONG_MODEL", "nvidia/Qwen3.6-35B-A3B-NVFP4")
+    "HSCC_STRONG_MODEL", "deepseek-ai/DeepSeek-V4-Flash-0731")
 STRONG_KEY = os.environ.get("HSCC_STRONG_KEY", "sk-sparkrun")
 
 
