@@ -32,6 +32,13 @@ SERVING_JSON = HSCC_DIR / "serving.json"
 MODELS_JSON = HSCC_DIR / "models.json"
 CLUSTER_JSON = HSCC_DIR / "cluster.json"
 CONFIG_YAML = HERMES_HOME / "config.yaml"
+# Worker-side profile dir: the :4000-family model id must be mirrored into the
+# top-level model.default of every role profile whose base_url points at the
+# worker proxy. Overridable via env (tests point it at a tmp dir).
+PROFILES_DIR = Path(os.environ.get("HSCC_PROFILES_DIR", str(HERMES_HOME / "profiles")))
+# The worker/family inference proxy port. Workers send model ids to this port,
+# so it is the "which family is the worker tier" discriminator.
+WORKER_PROXY_PORT = int(os.environ.get("HSCC_WORKER_PROXY_PORT", "4000"))
 PROXY_DIR = HSCC_DIR / "proxies"
 APPLIED_STATE = HSCC_DIR / "applied_template.json"  # which template is live
 
@@ -676,8 +683,18 @@ def apply_template(template_name: str, confirm: bool = False) -> dict:
             "details": proxy_actions,
         })
 
-        # Step 5: Update profile routing
-        result["steps"].append({"step": "profiles", "status": "ok", "note": "Profile routing updated"})
+        # Step 5: Rewire worker-facing model ids (config.yaml delegation.* +
+        # fallback_providers; worker role profiles' model.default) to the family
+        # model. A worker-tier switch otherwise leaves stale model ids behind,
+        # so every worker hits the strict proxy with an invalid model name.
+        wm = _update_worker_model_ids(plan)
+        result["steps"].append({
+            "step": "worker-model-ids",
+            "status": "ok",
+            "model_id": wm["model_id"],
+            "config_changed": wm["config_changed"],
+            "profiles_changed": wm["profiles_changed"],
+        })
 
         # Step 6: Provision models via sparkrun
         provision_result = _provision_models(plan)
@@ -866,6 +883,114 @@ def _update_hermes_config(config: dict, plan: Any) -> dict:
         }
     config["providers"] = list(by_name.values())
     return config
+
+
+def _worker_model_id(plan: Any) -> Optional[str]:
+    """Resolve the worker/family model id — the model the worker proxy family
+    serves.
+
+    A family owns the worker proxy when its ``proxy_port`` matches
+    WORKER_PROXY_PORT. All units in that family share the served model
+    (``units[0].model``). Returns None when no family owns the worker proxy
+    (e.g. a dual-orchestrator plan with no worker tier) — callers must then
+    leave worker ids untouched.
+    """
+    for fam in plan.families:
+        if fam.proxy_port == WORKER_PROXY_PORT and fam.units:
+            return fam.units[0].model
+    return None
+
+
+def _is_worker_proxy_url(base_url: Optional[str], port: int) -> bool:
+    """True when ``base_url`` points at the family proxy on ``port``.
+
+    Matched on loopback host + port (e.g. http://localhost:4000/v1) so the
+    orchestrator (:8000) or any remote node is never mistaken for the worker
+    tier.
+    """
+    if not base_url:
+        return False
+    try:
+        host, rest = base_url.split("://", 1)[1].split(":", 1)[:2]
+        port_str = rest.split("/", 1)[0].strip()
+        if not port_str.isdigit() or int(port_str) != port:
+            return False
+    except Exception:
+        return False
+    return host.strip() in ("localhost", "127.0.0.1")
+
+
+def _set_worker_model_in_config(config: dict, model_id: str) -> dict:
+    """Set the worker-facing model fields of config.yaml: ``delegation.model``
+    and every ``fallback_providers[].model``. Idempotent: re-setting an already
+    correct value is a byte no-op, so repeated applies never churn the file.
+    Does NOT touch the orchestrator's top-level model block (handled by
+    ``_update_hermes_config``) or any provider base_urls.
+    """
+    delegation = config.get("delegation")
+    if not isinstance(delegation, dict):
+        delegation = {}
+        config["delegation"] = delegation
+    delegation["model"] = model_id
+
+    fps = config.get("fallback_providers")
+    if isinstance(fps, list):
+        for fp in fps:
+            if isinstance(fp, dict):
+                fp["model"] = model_id
+    return config
+
+
+def _set_worker_model_in_profile(config: dict, model_id: str, port: int) -> dict:
+    """Set a role profile's top-level ``model.default`` to ``model_id`` — but
+    ONLY when that profile's ``model.base_url`` points at the worker proxy on
+    ``port``. Profiles routing to the orchestrator (:8000) or elsewhere are left
+    untouched. Idempotent: no-op when already correct or not worker-facing.
+    """
+    model_cfg = config.get("model")
+    if not isinstance(model_cfg, dict):
+        return config
+    if not _is_worker_proxy_url(model_cfg.get("base_url"), port):
+        return config
+    if model_cfg.get("default") != model_id:
+        model_cfg["default"] = model_id
+    return config
+
+
+def _update_worker_model_ids(plan: Any, *, profiles_dir: Optional[Path] = None,
+                             config_yaml: Optional[Path] = None) -> dict:
+    """Rewire worker-facing model ids to the resolved worker/family model.
+
+    Called from ``apply_template`` after config.yaml is written. Two concerns:
+      1. config.yaml — ``delegation.model`` + every ``fallback_providers[].model``.
+      2. worker role profiles — top-level ``model.default`` for every profile
+         whose ``model.base_url`` points at the worker proxy.
+
+    Both use atomic_yaml_update (backup + tmp + os.replace), and both are
+    idempotent: re-running apply with an already-correct state changes nothing.
+    No worker family in the plan → returns immediately, leaving worker ids
+    untouched. Never touches the orchestrator model.default or provider
+    base_urls.
+    """
+    model_id = _worker_model_id(plan)
+    result = {"model_id": model_id, "config_changed": False, "profiles_changed": 0}
+    if model_id is None:
+        return result
+
+    conf = config_yaml or CONFIG_YAML
+    _, result["config_changed"] = atomic_yaml_update(
+        conf, lambda d: _set_worker_model_in_config(d, model_id))
+
+    pd = profiles_dir or PROFILES_DIR
+    for pfile in sorted(pd.glob("*/config.yaml")):
+        if not pfile.is_file():
+            continue
+        _, changed = atomic_yaml_update(
+            pfile,
+            lambda d, port=WORKER_PROXY_PORT: _set_worker_model_in_profile(d, model_id, port))
+        if changed:
+            result["profiles_changed"] += 1
+    return result
 
 
 def _describe_config_changes(plan, current_models: Optional[dict]) -> list:
