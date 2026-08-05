@@ -336,7 +336,23 @@ def _provision_models(plan: Any, cluster: str = "hscc",
         result.setdefault("note", "")
 
     # Launch each wanted (nodes, port, recipe, tp). --ensure: skip if already up.
+    # Before launching, free each span node of any STALE container serving a
+    # DIFFERENT model — a reused node would otherwise keep its old container on
+    # the serve port, so the new `sparkrun run` crashes with Errno 98
+    # (Address already in use). A node already serving the wanted model is left
+    # running (--ensure idempotency). Nodes with no attributable job are skipped.
+    running_recipes = _running_recipes_via_sparkrun()
     for nodes, port, recipe, tp in want:
+        want_model = _extract_model_name(recipe)
+        for node in nodes:
+            run_recipe = running_recipes.get(node)
+            if run_recipe and _extract_model_name(run_recipe) != want_model:
+                try:
+                    subprocess.run(["sparkrun", "stop", "--all", "--hosts", node],
+                                   capture_output=True, timeout=60)
+                    result["stopped"].append(node)
+                except Exception as e:
+                    stop_failures.append(f"{node}: {e}")
         hosts_arg = ",".join(nodes)
         try:
             cmd = ["sparkrun", "run", os.path.expanduser(recipe),
@@ -380,6 +396,49 @@ def _running_nodes_via_sparkrun() -> List[str]:
     except Exception:
         pass
     return nodes
+
+
+def _running_recipes_via_sparkrun() -> Dict[str, str]:
+    """Best-effort: {node_ip: served recipe} for running sparkrun containers.
+
+    Parses `sparkrun status` into (node, recipe) pairs using the same format as
+    ops._running_by_node: hosts listed under a `Job:` block are running that
+    job's recipe; hosts under the `Idle hosts (...)` section are NOT running.
+    Nodes not attributed to any job (e.g. bare IPs with no surrounding Job
+    block) are skipped. Returns {} on failure or when nothing maps.
+    """
+    import subprocess
+    mapping: Dict[str, str] = {}
+    try:
+        r = subprocess.run(["sparkrun", "status"], capture_output=True,
+                           text=True, timeout=15)
+    except Exception:
+        return mapping
+    in_idle = False
+    recipe = "unknown"
+    for line in (r.stdout or "").split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("Idle hosts"):
+            in_idle = True
+            continue
+        if stripped.startswith("Job:"):
+            in_idle = False
+            parts = stripped.split()
+            recipe = parts[1] if len(parts) > 1 else "unknown"
+            continue
+        if in_idle:
+            continue
+        if recipe == "unknown":
+            # no known job context → can't attribute a served model
+            continue
+        ip = next((tok for tok in line.split()
+                   if tok.count(".") == 3 and tok.replace(".", "").isdigit()),
+                  None)
+        if ip is not None:
+            mapping[ip] = recipe
+    return mapping
 
 
 # ── Template loading ───────────────────────────────────────────────────────
