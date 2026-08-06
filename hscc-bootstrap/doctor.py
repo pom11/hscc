@@ -130,6 +130,221 @@ def _gateway_running() -> Check:
                  fix="Start it after bootstrap.", fatal=False)
 
 
+def _models_url(base_url: str) -> str:
+    """Normalize an endpoint base_url to an OpenAI-style ``/models`` probe URL.
+
+    The version path is PRESERVED: an OpenAI-compatible server serves the
+    model list at ``{base_url}/models`` (e.g. ``http://host:port/v1/models``),
+    NOT at a version-stripped root (``http://host:port/models``). So we append
+    ``/models`` to the base_url as configured, never strip ``/v1``.
+
+    ``http://host:port/v1``   -> ``http://host:port/v1/models``
+    ``http://host:port/v1/``  -> ``http://host:port/v1/models``
+    ``http://host:port``      -> ``http://host:port/models``
+    Returns "" for missing/blank input.
+    """
+    url = (base_url or "").strip()
+    if not url:
+        return ""
+    url = url.rstrip("/")
+    # If the configured base_url carries a /v1 version prefix, keep (exactly)
+    # one of them and append /models to it — do NOT strip the version path.
+    if "/v1" in url:
+        head = url.split("/v1", 1)[0].rstrip("/")
+        return head + "/v1/models"
+    return url + "/models"
+
+
+def _http_get_default(url: str, api_key: str | None = None) -> str:
+    """Fetch ``url`` and return its body as text.
+
+    Sends ``Authorization: Bearer <api_key>`` when a key is provided (the
+    configs carry api_key next to base_url; an endpoint that requires a key
+    returns 401 without it). Raises ``urllib.error.HTTPError`` on a non-2xx
+    HTTP status (endpoint reachable but the path/auth is wrong) and
+    ``urllib.error.URLError``/other for network failures, so callers can tell
+    a probe/config error apart from an unreachable endpoint.
+    """
+    import urllib.request
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return resp.read().decode("utf-8")
+
+
+def _collect_model_entries(cfg: dict) -> list:
+    """Return ``(model_id, base_url, api_key, config_key)`` for every model.
+
+    Sources: top-level ``model``, ``delegation``, each ``fallback_providers[]``,
+    and every ``auxiliary.*`` entry. Entries missing a model id or base_url are
+    skipped (no probe URL means nothing to verify). ``api_key`` is carried from
+    the same config entry so the probe can authenticate.
+    """
+    entries = []
+
+    def add(model, base_url, api_key, key):
+        if model and isinstance(model, str) and model.strip():
+            entries.append((model.strip(), (base_url or "").strip(),
+                            (api_key or "").strip() or None, key))
+
+    top = cfg.get("model")
+    if isinstance(top, dict):
+        add(top.get("default"), top.get("base_url"), top.get("api_key"),
+            "model.default")
+
+    dlg = cfg.get("delegation")
+    if isinstance(dlg, dict):
+        add(dlg.get("model"), dlg.get("base_url"), dlg.get("api_key"),
+            "delegation.model")
+
+    for i, fp in enumerate(cfg.get("fallback_providers") or []):
+        if isinstance(fp, dict):
+            add(fp.get("model"), fp.get("base_url"), fp.get("api_key"),
+                f"fallback_providers[{i}].model")
+
+    aux = cfg.get("auxiliary")
+    if isinstance(aux, dict):
+        for task, ent in aux.items():
+            if isinstance(ent, dict):
+                add(ent.get("model"), ent.get("base_url"), ent.get("api_key"),
+                    f"auxiliary.{task}.model")
+
+    return entries
+
+
+def _check_models_served(hermes_home=None, *, _http_get=None) -> Check:
+    """Verify every configured model id is actually served by its endpoint.
+
+    Non-fatal (warning): a stale model id is drift to fix (every call 404s),
+    not a reason to hard-stop bootstrap.
+
+    Three distinct outcomes are reported (never collapsed):
+      - endpoint UNREACHABLE (network/timeout) -> ok (explain + skip), because
+        we can't verify anything and it must not false-alarm;
+      - endpoint reachable but the ``/models`` path returns 404/401 (or an
+        unparsable body) -> PROBE/CONFIG ERROR, reported loudly as a real
+        problem rather than a non-event;
+      - a model id absent from a successfully-parsed served list -> the
+        mismatch, which names the config key + endpoint + served ids.
+
+    ``_http_get(url, api_key=None) -> str`` receives the RESOLVED probe URL
+    (e.g. ``http://host:port/v1/models``) plus the entry's api_key for auth and
+    returns the response body text; injectable for tests (mirrors how
+    ``_cluster_runner`` is injected elsewhere).
+    """
+    import json
+    from urllib.error import HTTPError
+
+    home = hermes_home or os.path.expanduser("~/.hermes")
+    config_path = os.path.join(home, "config.yaml")
+
+    try:
+        import yaml
+        with open(config_path) as fh:
+            cfg = yaml.safe_load(fh) or {}
+    except Exception as exc:
+        return Check("models served", True,
+                     detail=f"config unreadable ({exc}); skipped", fatal=False)
+
+    if not isinstance(cfg, dict):
+        return Check("models served", True,
+                     detail="config has no model entries; skipped", fatal=False)
+
+    entries = _collect_model_entries(cfg)
+    if not entries:
+        return Check("models served", True,
+                     detail="no configured model ids; nothing to verify",
+                     fatal=False)
+
+    getter = _http_get or _http_get_default
+
+    # Group by resolved probe URL, deduping duplicate endpoints and keeping
+    # first-seen order so detail output is stable. The probe api_key is taken
+    # from the first entry at that endpoint that carries one.
+    by_url = {}
+    for model_id, base_url, api_key, key in entries:
+        url = _models_url(base_url)
+        if not url:
+            continue
+        group = by_url.setdefault(url, [])
+        if not any(entry[2] for entry in group) and api_key:
+            group.insert(0, (model_id, key, api_key))
+            continue
+        group.append((model_id, key, None))
+
+    if not by_url:
+        return Check("models served", True,
+                     detail="no model endpoints found; nothing to verify",
+                     fatal=False)
+
+    unreachable = []
+    probe_errors = []
+    problems = []
+    checked = []
+    for url, pairs in by_url.items():
+        api_key = next((k for _, _, k in pairs if k), None)
+        try:
+            raw = getter(url, api_key=api_key)
+        except HTTPError as exc:
+            # Endpoint reachable but the /models path/auth is wrong -> a real
+            # config/probe problem, report it loudly (not a non-event).
+            probe_errors.append(
+                f"{url} returned HTTP {exc.code} on the /models probe "
+                f"(endpoint reachable; wrong path or missing/bad auth key)")
+            continue
+        except Exception as exc:
+            # Network/timeout -> can't verify, explain and skip, no false alarm.
+            unreachable.append(f"{url} unreachable ({exc}); skipped")
+            continue
+        try:
+            data = json.loads(raw)
+            served = [str(m.get("id")) for m in (data.get("data") or [])
+                      if isinstance(m, dict) and m.get("id")]
+        except Exception:
+            probe_errors.append(
+                f"{url} returned an unparsable body on the /models probe; skipped")
+            continue
+
+        served_line = ", ".join(served) if served else "(none)"
+        served_set = set(served)
+        for model_id, key, _ in pairs:
+            checked.append(f"{key} -> {model_id} @ {url}")
+            if model_id not in served_set:
+                problems.append(
+                    f"{key} ('{model_id}') not served at {url}; "
+                    f"served: {served_line}")
+
+    fail_bits = []
+    fail_bits += problems
+    # Probe/config errors are real problems too — report them alongside
+    # mismatches so the operator sees an unhealthy endpoint, not silence.
+    fail_bits += probe_errors
+
+    if fail_bits:
+        fix = ("Set each misconfigured model id to one already served by its "
+               "endpoint (see detail), or re-run apply_template to regenerate "
+               "the config from current templates. If an endpoint 404s on its "
+               "/models path, fix the base_url (or add the correct auth key).")
+        return Check("models served", False,
+                     detail="; ".join(fail_bits), fix=fix, fatal=False)
+
+    if unreachable and not checked:
+        return Check("models served", True,
+                     detail="; ".join(unreachable) + " — nothing verified",
+                     fatal=False)
+
+    bits = checked + unreachable
+    if not bits:
+        return Check("models served", True,
+                     detail="no endpoints probed", fatal=False)
+
+    return Check("models served", True,
+                 detail="; ".join(bits) + " — all configured models served",
+                 fatal=False)
+
+
 def _run_cluster_list() -> str:
     try:
         r = subprocess.run(["sparkrun", "cluster", "list", "--json"],
@@ -140,7 +355,8 @@ def _run_cluster_list() -> str:
         return ""
 
 
-def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None) -> dict:
+def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
+               _http_get=None) -> dict:
     home = hermes_home or os.path.expanduser("~/.hermes")
     checks: List[Check] = [
         _python_ok(),
@@ -151,6 +367,10 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None) -> di
         _nas_ok(),
         _disk_ok(os.path.expanduser("~")),
         _gateway_running(),
+        # Models-served is non-fatal (warning): drift to fix, not a reason to
+        # hard-stop. It probes each distinct endpoint once; a probe failure is
+        # reported as ok (no false alarm), so it never flips preflight `ok`.
+        _check_models_served(home, _http_get=_http_get),
     ]
     fatal_failed = [c for c in checks if not c.ok and c.fatal]
     return {
