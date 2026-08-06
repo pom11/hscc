@@ -321,6 +321,17 @@ def _provision_models(plan: Any, cluster: str = "hscc",
     # spanning unit even if it isn't the primary node.
     plan_nodes = {n for nodes, _, _, _ in want for n in nodes}
 
+    # Logical-alias advertisement (HSCC v1.5.1). Each endpoint advertises BOTH
+    # its concrete model id and a STABLE alias (orchestrator-model / worker-model)
+    # via vLLM's multi-name `--served-model-name`, so consumers can pin the alias
+    # and a template/tier switch re-aims it without rewiring every copied id.
+    # want[0] is the orchestrator unit (plan.orchestrator); the rest are worker
+    # family units. The concrete id comes from the recipe's `model:` field (same
+    # derivation as want_model below); falls back to the resolved unit's model.
+    unit_alias = {0: "orchestrator-model"}
+    for idx in range(1, len(want)):
+        unit_alias[idx] = "worker-model"
+
     if not do_launch:
         span_label = lambda nodes: ",".join(nodes)
         result["note"] = "dry-run: would provision " + ", ".join(
@@ -349,7 +360,7 @@ def _provision_models(plan: Any, cluster: str = "hscc",
     # (Address already in use). A node already serving the wanted model is left
     # running (--ensure idempotency). Nodes with no attributable job are skipped.
     running_recipes = _running_recipes_via_sparkrun()
-    for nodes, port, recipe, tp in want:
+    for want_idx, (nodes, port, recipe, tp) in enumerate(want):
         want_model = _extract_model_name(recipe)
         for node in nodes:
             run_recipe = running_recipes.get(node)
@@ -362,9 +373,14 @@ def _provision_models(plan: Any, cluster: str = "hscc",
                     stop_failures.append(f"{node}: {e}")
         hosts_arg = ",".join(nodes)
         try:
+            # Concrete id = recipe's model field (fall back to the resolved
+            # unit's model). Always advertise concrete + alias so the endpoint
+            # stays queryable by its real name and by the stable logical alias.
+            concrete = _extract_model_name(recipe) or getattr(plan.all_units[want_idx], "model", "")
             cmd = ["sparkrun", "run", os.path.expanduser(recipe),
                    "--cluster", cluster, "--hosts", hosts_arg,
                    "--port", str(port), "--no-follow", "--ensure"]
+            cmd.extend(["--served-model-name", f"{concrete},{unit_alias[want_idx]}"])
             if tp > 1:
                 cmd.extend(["--tp", str(tp)])
             r = subprocess.run(cmd, capture_output=True, text=True,

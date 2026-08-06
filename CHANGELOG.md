@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] — v1.5.1 logical aliases for model ids
+
+### Added
+- **Logical model aliases advertised at the serving layer.** The orchestrator
+  endpoint now advertises `orchestrator-model` and each worker endpoint
+  advertises `worker-model` as a stable alias alongside its concrete model id,
+  via vLLM's multi-name `--served-model-name` flag (comma-separated in a single
+  flag). `_provision_models` derives the concrete id from each recipe's `model:`
+  field (falling back to the resolved unit's model). Consumers can now pin the
+  alias, so a template/tier switch only re-aims the alias instead of rewiring
+  every copied model id. After apply, `GET {endpoint}/v1/models` lists BOTH the
+  concrete id AND the alias, and a chat completion against the alias
+  (`orchestrator-model` / `worker-model`) returns HTTP 200. Recipes are
+  untouched.
+
 ## [1.5.0] — DSV4 templates + multiplexing secret-scope wedge fixes
 
 ### Added
