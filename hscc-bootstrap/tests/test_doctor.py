@@ -12,6 +12,7 @@ from unittest.mock import patch
 import yaml
 
 import doctor
+import enable_plugins
 
 
 class TestPythonCheck:
@@ -227,6 +228,12 @@ class TestDoctorFixNoopWhenFresh:
                     "api_key": "sk-sparkrun",
                     "timeout": 90,
                 },
+                **{task: {
+                    "provider": "custom",
+                    "base_url": enable_plugins.COMPACT_URL,
+                    "model": enable_plugins.COMPACT_MODEL,
+                    "api_key": enable_plugins.COMPACT_KEY,
+                } for task in enable_plugins._LOCAL_TEXT_AUX_TASKS},
             },
             "fallback_providers": [{
                 "provider": "custom",
