@@ -1093,3 +1093,242 @@ class TestProvisionTimeout:
 
         timeout_values = [kw.get("timeout") for kw in call_kws]
         assert cluster_template.PROVISION_TIMEOUT_S in timeout_values
+
+
+# ── HSCC v1.5.1: logical alias advertisement via --served-model-name ─────────
+#
+# Each endpoint advertises BOTH its concrete model id and a stable logical alias
+# (orchestrator-model / worker-model) via vLLM's multi-name `--served-model-name`
+# (nargs='+', space-separated). HSCC emits the value as ONE argv token to the
+# `sparkrun` CLI: ["--served-model-name", "<concrete> <alias>"].
+#
+# WHY THIS IS THE RIGHT ENCODING (verified empirically against sparkrun v0.3.1
+# with `sparkrun run <recipe> --dry-run`, 2026-08): sparkrun consumes
+# `--served-model-name` as a single-valued option, then renders the command as a
+# STRING on EVERY runtime path — the explicit-command template path
+# (`_augment_served_model_name`: `"%s %s %s" % (cmd, flag, value)`) AND the
+# no-template structured path (`build_flags_from_map` → `_build_base_command`,
+# which does `" ".join(parts)`). That string is base64-encoded into
+# /tmp/sparkrun_serve.sh and executed with `bash --noprofile --norc`. bash then
+# splits the space into SEPARATE argv tokens, so `--served-model-name <concrete>
+# <alias>` registers BOTH names — on BOTH paths. A comma-joined value instead
+# registers ONE model literally named "<concrete>,<alias>" → both 404.
+#
+# The tests BELOW therefore assert the FINAL tokenized argv, not the intermediate
+# string: `_final_tokens()` models sparkrun's shell execution via shlex.split and
+# requires concrete + alias to be TWO separate argv elements after the flag. If a
+# regression ever made the value land as ONE token (`"concrete alias"` as a single
+# argv element — e.g. comma-joining, or sparkrun quoting the whole value), the
+# test FAILS. This is the honest guard the prior attempt lacked (it only checked
+# substrings in a mirror-rendered string, which could not detect token collapse).
+_RENDERED_VLLM_TPL = (
+    "vllm serve {model} --host 0.0.0.0 --port 8000 --trust-remote-code "
+    "--max-model-len 262144 --enable-prefix-caching -tp 1 -pp 1"
+)
+
+
+class TestServedModelNameAliases:
+    """Card A1 (t_ad411703): _provision_models advertises both the concrete model
+    id and a stable logical alias via vLLM's multi-name `--served-model-name`,
+    space-separated in a single flag, and (critically) proves that value reaches
+    vLLM as SEPARATE argv tokens on sparkrun's shell-executed command — not one
+    collapsed token."""
+
+    # ── helpers matching sparkrun's real execution boundary ────────────────
+
+    def _invoke(self, monkeypatch, *, orch_recipe="~/recipes/orch.yaml",
+                worker_recipe="~/recipes/deepseek.yaml", orch_model="orch",
+                worker_model="deepseek"):
+        """Run _provision_models with a plan of one orchestrator + one worker,
+        returning every recorded `sparkrun run` argv."""
+        import subprocess
+        from unittest.mock import MagicMock
+        calls = []
+
+        def mock_run(argv, **kw):
+            calls.append(argv)
+            return MagicMock(returncode=0, stderr="", stdout="")
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        orch = ti.ResolvedUnit("orchestrator", None, orch_recipe,
+                               orch_model, ["10.0.0.1"], 8000, 1, 1)
+        unit = ti.ResolvedUnit("worker", "coding", worker_recipe,
+                               worker_model, ["10.0.0.2"], 8000, 1, 1)
+        fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[unit])
+        plan = ti.ResolvedPlan(template="test", orchestrator=orch, families=[fam])
+        cluster_template._provision_models(plan, do_launch=True)
+        return calls
+
+    @staticmethod
+    def _runs(calls, recipe_substr):
+        return [c for c in calls
+                if c[0] == "sparkrun" and c[1] == "run" and recipe_substr in str(c)]
+
+    @staticmethod
+    def _value_token(argv):
+        """The SINGLE value token HSCC hands to sparkrun for --served-model-name."""
+        idx = argv.index("--served-model-name")
+        return argv[idx + 1]
+
+    @classmethod
+    def _final_tokens(cls, model, served_value):
+        """Return the argv vLLM actually receives, modelled exactly as sparkrun
+        executes it.
+
+        sparkrun renders `vllm serve ... --served-model-name <served_value>`
+        (the string), base64-encodes it into /tmp/sparkrun_serve.sh, and runs it
+        with `bash --noprofile --norc`. shlex.split is the faithful in-process
+        model of that bash word-splitting (honours quotes/escapes, splits on
+        whitespace). The names after --served-model-name must therefore come out
+        as SEPARATE list elements.
+        """
+        import shlex
+        cmd = _RENDERED_VLLM_TPL.format(model=model)
+        rendered = "%s --served-model-name %s" % (cmd.rstrip(), served_value)
+        return shlex.split(rendered)
+
+    @staticmethod
+    def _flag_names(final_tokens):
+        """Return the argv elements following --served-model-name."""
+        idx = final_tokens.index("--served-model-name")
+        return final_tokens[idx + 1:]
+
+    # ── tests ──────────────────────────────────────────────────────────────
+
+    def test_orchestrator_emits_concrete_and_alias(self, monkeypatch):
+        calls = self._invoke(monkeypatch)
+        orch_run = self._runs(calls, "orch.yaml")
+        assert len(orch_run) == 1
+        # HSCC hands sparkrun ONE flag with ONE space-separated value token.
+        assert orch_run[0].count("--served-model-name") == 1
+        assert self._value_token(orch_run[0]) == "orch orchestrator-model"
+
+    def test_worker_emits_concrete_and_alias(self, monkeypatch):
+        calls = self._invoke(monkeypatch)
+        worker_run = self._runs(calls, "deepseek.yaml")
+        assert len(worker_run) == 1
+        assert self._value_token(worker_run[0]) == "deepseek worker-model"
+
+    def test_final_argv_two_separate_names_orchestrator(self, monkeypatch):
+        """THE core guard: the FINAL command vLLM executes must carry the
+        concrete id and alias as TWO SEPARATE argv tokens, never one collapsed
+        token `"concrete alias"` (nor one comma-joined name). Fails if a
+        regression makes the value land as a single argv element."""
+        calls = self._invoke(monkeypatch)
+        orch_run = self._runs(calls, "orch.yaml")[0]
+        served_value = self._value_token(orch_run)
+        assert served_value == "orch orchestrator-model"
+        final_tokens = self._final_tokens("orch", served_value)
+        names = self._flag_names(final_tokens)
+        assert names == ["orch", "orchestrator-model"], (
+            "served-model-name must reach vLLM as SEPARATE argv tokens; "
+            f"got {names!r} from final command {final_tokens!r}"
+        )
+
+    def test_final_argv_two_separate_names_worker(self, monkeypatch):
+        calls = self._invoke(monkeypatch)
+        worker_run = self._runs(calls, "deepseek.yaml")[0]
+        served_value = self._value_token(worker_run)
+        names = self._flag_names(self._final_tokens(
+            "deepseek", served_value))
+        assert names == ["deepseek", "worker-model"]
+
+    def test_comma_joined_would_collapse_to_one_name(self):
+        """Guard against the regression that breaks the feature: if the value were
+        comma-joined, the final tokenized argv would hold ONE name and both the
+        concrete id and the alias would 404. This proves `_final_tokens` actually
+        detects token collapse (it FAILS on the broken encoding)."""
+        names = self._flag_names(self._final_tokens(
+            "orch", "orch,orchestrator-model"))
+        assert names == ["orch,orchestrator-model"]  # one collapsed name, both 404
+
+    def test_quoted_value_collapses_to_one_name(self):
+        """If a value were ever shell-quoted as one token, shlex keeps it ONE argv
+        element — the guard must catch that too (sparkrun appends raw, so this is
+        defensive). This documents that the test FAILS when the token collapses."""
+        names = self._flag_names(self._final_tokens(
+            "orch", '"orch orchestrator-model"'))
+        assert names == ["orch orchestrator-model"]  # one token -> both 404
+
+    def test_concrete_id_read_from_recipe_model_field(self, monkeypatch, tmp_path):
+        """A recipe whose model: field is deepseek-ai/DeepSeek-V4-Flash-0731 must
+        yield that full concrete id (not the filename stem) in the flag, and the
+        final argv must carry it plus the alias as two tokens."""
+        recipe = tmp_path / "quad.yaml"
+        recipe.write_text("model: deepseek-ai/DeepSeek-V4-Flash-0731\n")
+        calls = self._invoke(monkeypatch, worker_recipe=str(recipe))
+        worker_run = self._runs(calls, "quad.yaml")
+        assert len(worker_run) == 1
+        served_value = self._value_token(worker_run[0])
+        assert served_value == "deepseek-ai/DeepSeek-V4-Flash-0731 worker-model"
+        names = self._flag_names(self._final_tokens(
+            "deepseek-ai/DeepSeek-V4-Flash-0731", served_value))
+        assert names == ["deepseek-ai/DeepSeek-V4-Flash-0731", "worker-model"]
+
+    def test_alias_decided_by_identity_not_role_string(self, monkeypatch, tmp_path):
+        """The orchestrator alias is assigned by identity with plan.orchestrator,
+        NOT by the unit's role string or list position — so a worker unit whose
+        role string is literally 'orchestrator' still advertises worker-model, and
+        no worker can ever be aliased as orchestrator-model."""
+        import subprocess
+        from unittest.mock import MagicMock
+        calls = []
+
+        def mock_run(argv, **kw):
+            calls.append(argv)
+            return MagicMock(returncode=0, stderr="", stdout="")
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        # A worker unit with a misleading role "orchestrator".
+        unit = ti.ResolvedUnit("orchestrator", "coding", "~/recipes/deepseek.yaml",
+                               "deepseek", ["10.0.0.2"], 8001, 1, 1)
+        fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[unit])
+        orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
+                               "orch", ["10.0.0.1"], 8000, 1, 1)
+        plan = ti.ResolvedPlan(template="test", orchestrator=orch, families=[fam])
+        cluster_template._provision_models(plan, do_launch=True)
+
+        orch_run = self._runs(calls, "orch.yaml")[0]
+        worker_run = self._runs(calls, "deepseek.yaml")[0]
+        assert self._value_token(orch_run) == "orch orchestrator-model"
+        assert self._value_token(worker_run) == "deepseek worker-model"
+
+    def test_flag_placed_before_tp(self, monkeypatch):
+        """--served-model-name coexists with --tp without disturbing it."""
+        import subprocess
+        from unittest.mock import MagicMock
+        calls = []
+
+        def mock_run(argv, **kw):
+            calls.append(argv)
+            return MagicMock(returncode=0, stderr="", stdout="")
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
+                               "orch", ["10.0.0.1", "10.0.0.2"], 9000, 2, 1)
+        plan = ti.ResolvedPlan(template="test", orchestrator=orch, families=[])
+        cluster_template._provision_models(plan, do_launch=True)
+        orch_run = self._runs(calls, "orch.yaml")[0]
+        assert "--served-model-name" in orch_run
+        assert "--tp" in orch_run
+        assert orch_run.index("--served-model-name") < orch_run.index("--tp")
+        assert self._value_token(orch_run) == "orch orchestrator-model"
+
+    def test_dry_run_not_affected(self, monkeypatch):
+        """do_launch=False never builds sparkrun run argv — no served-model-name
+        launches attempted, dry-run note/provisioned output unchanged."""
+        import subprocess
+        calls = []
+
+        def mock_run(argv, **kw):
+            calls.append(argv)
+            return MagicMock(returncode=0, stderr="", stdout="")
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
+                               "orch", ["10.0.0.1"], 8000, 1, 1)
+        plan = ti.ResolvedPlan(template="test", orchestrator=orch, families=[])
+        result = cluster_template._provision_models(plan, do_launch=False)
+        assert calls == []
+        assert result["provisioned"] == ["10.0.0.1:8000:~/recipes/orch.yaml"]
+        assert result["note"].startswith("dry-run")
+
