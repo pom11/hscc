@@ -97,7 +97,7 @@ def test_model_tier_fast_uses_worker_proxy(tmp_path, monkeypatch):
     with open(os.path.join(str(tmp_path / "profiles" / "coder"), "config.yaml")) as f:
         cfg = yaml.safe_load(f)
     assert cfg["model"]["base_url"] == "http://localhost:4000/v1"
-    assert cfg["model"]["default"] == "Qwen/Qwen3.6-27B-FP8"
+    assert cfg["model"]["default"] == "worker-model"
 
 
 def test_model_tier_strong_uses_orch_endpoint(tmp_path, monkeypatch):
@@ -110,7 +110,7 @@ def test_model_tier_strong_uses_orch_endpoint(tmp_path, monkeypatch):
     with open(os.path.join(str(tmp_path / "profiles" / "architect"), "config.yaml")) as f:
         cfg = yaml.safe_load(f)
     assert cfg["model"]["base_url"] == "http://10.0.0.244:8000/v1"
-    assert cfg["model"]["default"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
+    assert cfg["model"]["default"] == "orchestrator-model"
 
 
 def test_model_tier_override_via_env(tmp_path, monkeypatch):
@@ -200,7 +200,7 @@ def test_model_endpoint_only_falls_back_to_tier_model(tmp_path, monkeypatch):
     with open(os.path.join(str(tmp_path / "profiles" / "coder"), "config.yaml")) as f:
         cfg = yaml.safe_load(f)
     assert cfg["model"]["base_url"] == "http://coding:5000/v1"
-    assert cfg["model"]["default"] == "Qwen/Qwen3.6-27B-FP8"
+    assert cfg["model"]["default"] == "worker-model"
 
 
 def test_model_endpoint_only_strong_falls_back_to_strong_model(tmp_path, monkeypatch):
@@ -214,7 +214,7 @@ def test_model_endpoint_only_strong_falls_back_to_strong_model(tmp_path, monkeyp
     with open(os.path.join(str(tmp_path / "profiles" / "architect"), "config.yaml")) as f:
         cfg = yaml.safe_load(f)
     assert cfg["model"]["base_url"] == "http://arch:6000/v1"
-    assert cfg["model"]["default"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
+    assert cfg["model"]["default"] == "orchestrator-model"
 
 
 def test_no_override_uses_tier_logic(tmp_path, monkeypatch):
@@ -227,7 +227,7 @@ def test_no_override_uses_tier_logic(tmp_path, monkeypatch):
     with open(os.path.join(str(tmp_path / "profiles" / "coder"), "config.yaml")) as f:
         cfg = yaml.safe_load(f)
     assert cfg["model"]["base_url"] == "http://localhost:4000/v1"
-    assert cfg["model"]["default"] == "Qwen/Qwen3.6-27B-FP8"
+    assert cfg["model"]["default"] == "worker-model"
 
 
 def test_model_endpoint_idempotent(tmp_path, monkeypatch):
@@ -256,3 +256,92 @@ def test_model_endpoint_still_has_compaction(tmp_path, monkeypatch):
         cfg = yaml.safe_load(f)
     assert "auxiliary" in cfg
     assert "compression" in cfg["auxiliary"]
+
+
+# -- logical-alias model defaults (v1.5.1) --
+#
+# Constants above evaluate at import time, so these tests reload the module
+# under a controlled HSCC_*_MODEL environment to assert both the alias defaults
+# and the env-override path. Each reload test restores clean alias defaults at
+# the end so the rest of the suite stays deterministic.
+import importlib
+
+
+_MODEL_ENV_VARS = ("HSCC_WORKER_MODEL", "HSCC_STRONG_MODEL", "HSCC_COMPACT_MODEL")
+
+
+def _clear_model_env(monkeypatch):
+    """Drop all model-alias env vars so constants evaluate to their defaults."""
+    for var in _MODEL_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
+def _reload_with_model_env(monkeypatch, overrides):
+    """Set env overrides (monkeypatched), reload generator so constants recompute."""
+    for var, val in overrides.items():
+        monkeypatch.setenv(var, val)
+    return importlib.reload(generator)
+
+
+def _restore_model_defaults(monkeypatch):
+    """Clear env overrides and reload so the module is back to alias defaults."""
+    _clear_model_env(monkeypatch)
+    importlib.reload(generator)
+
+
+def test_model_defaults_are_aliases_without_env(monkeypatch):
+    """With no HSCC_*_MODEL env set, every model default is a logical alias."""
+    _clear_model_env(monkeypatch)
+    mod = importlib.reload(generator)
+    assert mod.WORKER_MODEL == "worker-model"
+    assert mod.STRONG_MODEL == "orchestrator-model"
+    assert mod.COMPACT_MODEL == "orchestrator-model"
+
+
+def test_worker_profile_model_and_compaction_are_aliases(tmp_path, monkeypatch):
+    """A generated worker (fast) profile uses the worker-model alias for its
+    model block and the orchestrator-model alias for compaction."""
+    _clear_model_env(monkeypatch)
+    mod = importlib.reload(generator)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(mod.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    mod.generate_profile(spec, base_identity="BASE")
+    with open(os.path.join(str(tmp_path / "profiles" / "coder"), "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["model"]["default"] == mod.WORKER_MODEL == "worker-model"
+    assert cfg["auxiliary"]["compression"]["model"] == \
+        mod.COMPACT_MODEL == "orchestrator-model"
+
+
+def test_strong_profile_model_is_alias(tmp_path, monkeypatch):
+    """A generated strong-tier profile uses the orchestrator-model alias."""
+    _clear_model_env(monkeypatch)
+    mod = importlib.reload(generator)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(mod.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    spec = {"name": "architect", "identity": "You design.\n",
+            "preload_skills": [], "model_tier": "strong"}
+    mod.generate_profile(spec, base_identity="BASE")
+    with open(os.path.join(str(tmp_path / "profiles" / "architect"), "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["model"]["default"] == mod.STRONG_MODEL == "orchestrator-model"
+
+
+def test_env_override_strong_model_forces_concrete(monkeypatch):
+    """HSCC_STRONG_MODEL env override forces a concrete id; worker alias stays."""
+    mod = _reload_with_model_env(
+        monkeypatch, {"HSCC_STRONG_MODEL": "deepseek-ai/DeepSeek-V4-Flash-0731"})
+    assert mod.STRONG_MODEL == "deepseek-ai/DeepSeek-V4-Flash-0731"
+    assert mod.WORKER_MODEL == "worker-model"  # untouched remains alias
+    _restore_model_defaults(monkeypatch)
+
+
+def test_env_override_worker_model_forces_concrete(monkeypatch):
+    """HSCC_WORKER_MODEL env override forces a concrete id; strong alias stays."""
+    mod = _reload_with_model_env(
+        monkeypatch, {"HSCC_WORKER_MODEL": "Qwen/Qwen3.6-27B-FP8"})
+    assert mod.WORKER_MODEL == "Qwen/Qwen3.6-27B-FP8"
+    assert mod.STRONG_MODEL == "orchestrator-model"  # untouched remains alias
+    _restore_model_defaults(monkeypatch)
