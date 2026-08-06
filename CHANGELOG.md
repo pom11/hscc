@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] — v1.5.1 logical aliases for model ids
+
+### Added
+- **Logical model aliases advertised at the serving layer.** The orchestrator
+  endpoint now advertises `orchestrator-model` and each worker endpoint
+  advertises `worker-model` as a stable alias alongside its concrete model id,
+  via vLLM's multi-name `--served-model-name` flag (comma-separated in a single
+  flag). `_provision_models` derives the concrete id from each recipe's `model:`
+  field (falling back to the resolved unit's model). Consumers can now pin the
+  alias, so a template/tier switch only re-aims the alias instead of rewiring
+  every copied model id. After apply, `GET {endpoint}/v1/models` lists BOTH the
+  concrete id AND the alias, and a chat completion against the alias
+  (`orchestrator-model` / `worker-model`) returns HTTP 200. Recipes are
+  untouched.
+
+### Changed
+- **Config writers emit stable logical aliases, not concrete model ids.** The
+  apply config-writing helpers now write `orchestrator-model` (orchestrator
+  `model.default`) and `worker-model` (`delegation.model`,
+  `fallback_providers[].model`, and worker-facing role profiles' `model.default`)
+  instead of copying a concrete plan id into every consumer. The concrete id
+  stays with the serving layer (provisioning/proxy), which resolves the alias at
+  the endpoint. Env overrides `HSCC_ORCH_MODEL` / `HSCC_WORKER_MODEL` let an
+  operator force a concrete id instead of the alias. base_urls remain concrete
+  from the plan.
+
 ## [1.5.0] — DSV4 templates + multiplexing secret-scope wedge fixes
 
 ### Added

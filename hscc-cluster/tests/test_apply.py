@@ -2,6 +2,7 @@
 
 import json
 import sys
+import importlib
 from pathlib import Path
 
 import pytest
@@ -777,21 +778,40 @@ class TestProvisionMultiNodeSpan:
         assert orch_call[tp_idx + 1] == "2"
 
 
-# ── Fix: orchestrator model.default in _update_hermes_config ──────────────
+# ── HSCC v1.5.1: config writers emit logical aliases, not concrete ids ─────
 
 class TestUpdateHermesConfigModelBlock:
     """BUG 1: _update_hermes_config must set the top-level model.default
-    and model.base_url to the resolved orchestrator values."""
+    and model.base_url to the resolved orchestrator values.
+
+    HSCC v1.5.1: model.default now writes the stable ORCH_ALIAS
+    (``orchestrator-model`` by default), resolved at the serving layer. base_url
+    stays concrete from the plan. Env override HSCC_ORCH_MODEL forces a concrete
+    id instead of the alias."""
 
     def _make_plan(self, model_id, node="10.0.0.1", port=8000):
         orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
                                model_id, [node], port, 1, 1)
         return ti.ResolvedPlan(template="test", orchestrator=orch, families=[])
 
-    def test_model_default_set_to_orchestrator_model(self):
+    def test_model_default_set_to_orchestrator_alias(self):
         plan = self._make_plan("deepseek-ai/DeepSeek-V4-Flash-0731")
         config = {"model": {"default": "old-model", "base_url": "http://old:8000/v1"}}
         result = cluster_template._update_hermes_config(config, plan)
+        assert result["model"]["default"] == "orchestrator-model"
+        assert result["model"]["base_url"] == "http://10.0.0.1:8000/v1"
+
+    def test_orch_alias_env_override_forces_concrete_id(self):
+        import os
+        from unittest.mock import patch
+        plan = self._make_plan("deepseek-ai/DeepSeek-V4-Flash-0731")
+        # ORCH_ALIAS is read at module import, so reload the module while the
+        # override env is set — then reload again AFTER the patch context exits
+        # so the override doesn't leak into sibling tests.
+        with patch.dict(os.environ, {"HSCC_ORCH_MODEL": "deepseek-ai/DeepSeek-V4-Flash-0731"}):
+            reloaded = importlib.reload(cluster_template)
+            result = reloaded._update_hermes_config({}, plan)
+        importlib.reload(cluster_template)
         assert result["model"]["default"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
         assert result["model"]["base_url"] == "http://10.0.0.1:8000/v1"
 
@@ -799,6 +819,7 @@ class TestUpdateHermesConfigModelBlock:
         plan = self._make_plan("test-model", "10.0.0.5", 9000)
         config = {}
         result = cluster_template._update_hermes_config(config, plan)
+        assert result["model"]["default"] == "orchestrator-model"
         assert result["model"]["base_url"] == "http://10.0.0.5:9000/v1"
 
     def test_model_provider_preserved_when_existing(self):
@@ -830,12 +851,12 @@ class TestUpdateHermesConfigModelBlock:
 
     def test_idempotent_on_second_call(self):
         plan = self._make_plan("deepseek-ai/DeepSeek-V4-Flash-0731")
-        config = {"model": {"default": "deepseek-ai/DeepSeek-V4-Flash-0731",
+        config = {"model": {"default": "orchestrator-model",
                             "base_url": "http://10.0.0.1:8000/v1",
                             "provider": "custom"}}
         result1 = cluster_template._update_hermes_config(config, plan)
         result2 = cluster_template._update_hermes_config(result1, plan)
-        assert result2["model"]["default"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
+        assert result2["model"]["default"] == "orchestrator-model"
         assert result2["model"]["base_url"] == "http://10.0.0.1:8000/v1"
         assert result2["model"]["provider"] == "custom"
 
@@ -854,9 +875,14 @@ class TestUpdateWorkerModelIds:
     ``_update_worker_model_ids`` must rewire config.yaml (delegation.model +
     every fallback_providers[].model) and every worker role profile's
     model.default (profiles whose base_url points at the :4000 worker proxy) to
-    the family (worker) model."""
+    the family (worker) model.
+
+    HSCC v1.5.1: the VALUE WRITTEN is now the stable WORKER_ALIAS
+    (``worker-model`` by default), resolved at the serving layer. WORKER stays
+    the concrete family id used by the serving layer (provisioning)."""
 
     WORKER = "deepseek-ai/DeepSeek-V4-Flash-0731"
+    ALIAS = "worker-model"
 
     def _plan(self, model=None, proxy_port=4000, worker=True):
         import template_intent as ti
@@ -901,8 +927,8 @@ class TestUpdateWorkerModelIds:
             self._plan(), profiles_dir=tmp_path / "profiles", config_yaml=conf)
         import yaml
         data = yaml.safe_load(conf.read_text())
-        assert data["delegation"]["model"] == self.WORKER
-        assert [f["model"] for f in data["fallback_providers"]] == [self.WORKER, self.WORKER]
+        assert data["delegation"]["model"] == self.ALIAS
+        assert [f["model"] for f in data["fallback_providers"]] == [self.ALIAS, self.ALIAS]
         assert result["config_changed"] is True
 
     def test_config_no_fallback_providers_still_sets_delegation(self, tmp_path):
@@ -911,7 +937,7 @@ class TestUpdateWorkerModelIds:
         cluster_template._update_worker_model_ids(
             self._plan(), profiles_dir=tmp_path / "profiles", config_yaml=conf)
         import yaml
-        assert yaml.safe_load(conf.read_text())["delegation"]["model"] == self.WORKER
+        assert yaml.safe_load(conf.read_text())["delegation"]["model"] == self.ALIAS
 
     def test_config_orchestrator_model_default_untouched(self, tmp_path):
         conf = tmp_path / "config.yaml"
@@ -923,7 +949,7 @@ class TestUpdateWorkerModelIds:
         data = yaml.safe_load(conf.read_text())
         # orchestrator model.default must NOT be clobbered by worker rewiring
         assert data["model"]["default"] == "orch-model"
-        assert data["delegation"]["model"] == self.WORKER
+        assert data["delegation"]["model"] == self.ALIAS
 
     # ── profile rewiring ────────────────────────────────────────────────
 
@@ -941,8 +967,8 @@ class TestUpdateWorkerModelIds:
         coder = yaml.safe_load((profiles / "coder" / "config.yaml").read_text())
         reviewer = yaml.safe_load((profiles / "reviewer" / "config.yaml").read_text())
         orch = yaml.safe_load((profiles / "orch-role" / "config.yaml").read_text())
-        assert coder["model"]["default"] == self.WORKER
-        assert reviewer["model"]["default"] == self.WORKER
+        assert coder["model"]["default"] == self.ALIAS
+        assert reviewer["model"]["default"] == self.ALIAS
         assert orch["model"]["default"] == "orch-model"  # untouched
         assert result["profiles_changed"] == 2
         assert coder["model"]["base_url"] == "http://localhost:4000/v1"  # base_url preserved
@@ -976,6 +1002,70 @@ class TestUpdateWorkerModelIds:
         assert yaml.safe_load(conf.read_text())["delegation"]["model"] == "stale"
         assert yaml.safe_load((profiles / "coder" / "config.yaml").read_text())[
             "model"]["default"] == "stale"
+
+    # ── HSCC v1.5.1: worker alias + operator env override ────────────────
+
+    def test_worker_alias_default_used_when_env_unset(self, tmp_path):
+        # Default alias is "worker-model" when no HSCC_WORKER_MODEL override was
+        # active when the module loaded.
+        assert cluster_template.WORKER_ALIAS == "worker-model"
+        conf = tmp_path / "config.yaml"
+        self._write_config(conf, delegation={"model": "stale"},
+                           fallbacks=[{"model": "stale", "name": "a"}])
+        result = cluster_template._update_worker_model_ids(
+            self._plan(), profiles_dir=tmp_path / "profiles", config_yaml=conf)
+        import yaml
+        data = yaml.safe_load(conf.read_text())
+        assert data["delegation"]["model"] == "worker-model"
+        assert data["fallback_providers"][0]["model"] == "worker-model"
+        # base_url untouched by the alias switch
+        assert result["model_id"] == "worker-model"
+
+    def test_worker_alias_env_override_forces_concrete_id(self, tmp_path):
+        import os
+        from unittest.mock import patch
+        profiles = tmp_path / "profiles"
+        self._write_profile(profiles, "coder", "http://localhost:4000/v1", "stale")
+        conf = tmp_path / "config.yaml"
+        self._write_config(conf, delegation={"model": "stale"},
+                           fallbacks=[{"model": "stale", "name": "a"}])
+        # Reload while the override env is set so WORKER_ALIAS picks it up, then
+        # reload again AFTER the patch context exits so it doesn't leak.
+        with patch.dict(os.environ, {"HSCC_WORKER_MODEL": "deepseek-ai/DeepSeek-V4-Flash-0731"}):
+            reloaded = importlib.reload(cluster_template)
+            result = reloaded._update_worker_model_ids(
+                self._plan(), profiles_dir=profiles, config_yaml=conf)
+        importlib.reload(cluster_template)
+        import yaml
+        data = yaml.safe_load(conf.read_text())
+        assert data["delegation"]["model"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
+        assert data["fallback_providers"][0]["model"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
+        assert yaml.safe_load((profiles / "coder" / "config.yaml").read_text())[
+            "model"]["default"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
+
+    def test_orchestrator_facing_profile_untouched_with_worker_rewire(self, tmp_path):
+        """End-to-end alias split: orchestrator-facing config/profile gets
+        ORCH_ALIAS, worker-facing gets WORKER_ALIAS. Worker rewiring must not
+        touch the orchestrator-facing profile even though both run in apply."""
+        import yaml
+        plan = self._plan()
+        # orchestrator side: _update_hermes_config writes ORCH_ALIAS + concrete base_url
+        config = {}
+        cluster_template._update_hermes_config(config, plan)
+        assert config["model"]["default"] == "orchestrator-model"
+        assert config["model"]["base_url"] == "http://10.0.0.1:8000/v1"
+        # worker-facing profile + orchestrator-facing profile on disk
+        profiles = tmp_path / "profiles"
+        self._write_profile(profiles, "coder", "http://localhost:4000/v1", "stale")
+        self._write_profile(profiles, "orch-role", "http://10.0.0.1:8000/v1", "orch-model")
+        conf = tmp_path / "config.yaml"
+        self._write_config(conf, delegation={"model": "stale"})
+        result = cluster_template._update_worker_model_ids(
+            plan, profiles_dir=profiles, config_yaml=conf)
+        coder = yaml.safe_load((profiles / "coder" / "config.yaml").read_text())
+        orch = yaml.safe_load((profiles / "orch-role" / "config.yaml").read_text())
+        assert coder["model"]["default"] == "worker-model"
+        assert orch["model"]["default"] == "orch-model"  # untouched by worker rewire
 
 
 # ── Fix: provision timeout raised to configurable 900s ──────────────────

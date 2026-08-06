@@ -47,6 +47,14 @@ APPLIED_STATE = HSCC_DIR / "applied_template.json"  # which template is live
 # Override via HSCC_PROVISION_TIMEOUT env var (seconds).
 PROVISION_TIMEOUT_S = int(os.environ.get("HSCC_PROVISION_TIMEOUT", "900"))
 
+# Stable logical aliases emitted by the config-writing helpers (HSCC v1.5.1).
+# Config consumers pin the ALIAS, not the concrete plan id; the alias is
+# resolved to a concrete served model at the serving layer (Card A1 advertises
+# both via --served-model-name). Env overrides let an operator force a concrete
+# id instead of the alias.
+ORCH_ALIAS = os.environ.get("HSCC_ORCH_MODEL", "orchestrator-model")
+WORKER_ALIAS = os.environ.get("HSCC_WORKER_MODEL", "worker-model")
+
 # Cap timestamped backups per file so re-applies don't accumulate forever
 # (a prior version left 100+ serving.json.bak.* / models.json.bak.* in ~/.hscc).
 MAX_BACKUPS = 5
@@ -886,7 +894,9 @@ def _update_hermes_config(config: dict, plan: Any) -> dict:
 
     # ── Top-level model block ────────────────────────────────────────
     model_cfg = config.setdefault("model", {})
-    model_cfg["default"] = o.model
+    # Config consumers pin the stable logical alias; the serving layer resolves
+    # it to the concrete served model. base_url stays concrete from the plan.
+    model_cfg["default"] = ORCH_ALIAS
     model_cfg["base_url"] = f"http://{o.node}:{o.port}/v1"
     # Preserve existing provider; default to "custom" if absent
     if "provider" not in model_cfg:
@@ -927,6 +937,12 @@ def _worker_model_id(plan: Any) -> Optional[str]:
     (``units[0].model``). Returns None when no family owns the worker proxy
     (e.g. a dual-orchestrator plan with no worker tier) — callers must then
     leave worker ids untouched.
+
+    NOTE (HSCC v1.5.1 split): this returns the CONCRETE family model id for the
+    SERVING layer (provision/proxy logic derives the actual served name from
+    it). It is NOT what the config-writing helpers emit — those write the
+    stable WORKER_ALIAS so config consumers pin a logical name that a
+    template/tier switch simply re-aims at the serving layer.
     """
     for fam in plan.families:
         if fam.proxy_port == WORKER_PROXY_PORT and fam.units:
@@ -1005,10 +1021,16 @@ def _update_worker_model_ids(plan: Any, *, profiles_dir: Optional[Path] = None,
     untouched. Never touches the orchestrator model.default or provider
     base_urls.
     """
-    model_id = _worker_model_id(plan)
-    result = {"model_id": model_id, "config_changed": False, "profiles_changed": 0}
-    if model_id is None:
+    # Detect whether a worker tier exists via the concrete family id; leave ids
+    # untouched when there's no worker family. The VALUE written is the stable
+    # WORKER_ALIAS (config consumer resolution), not the concrete id — the
+    # concrete id stays available for the serving layer (see _worker_model_id).
+    if _worker_model_id(plan) is None:
+        result = {"model_id": None, "config_changed": False, "profiles_changed": 0}
         return result
+
+    model_id = WORKER_ALIAS
+    result = {"model_id": model_id, "config_changed": False, "profiles_changed": 0}
 
     conf = config_yaml or CONFIG_YAML
     _, result["config_changed"] = atomic_yaml_update(
