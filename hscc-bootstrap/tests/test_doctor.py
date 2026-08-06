@@ -120,16 +120,143 @@ class TestNASCheck:
         assert "none configured" in check.detail
 
 
+class TestCheckModelsServed:
+    """Verifies configured model ids are actually served by their endpoints."""
+
+    @staticmethod
+    def _write_config(tmp_path, cfg):
+        conf = tmp_path / "config.yaml"
+        yaml.safe_dump(cfg, conf.open("w"))
+        return str(tmp_path)
+
+    def test_served_model_is_ok(self, tmp_path):
+        cfg = {
+            "model": {"default": "Qwen/Qwen3.6-27B-FP8",
+                      "base_url": "http://localhost:4000/v1"},
+        }
+        home = self._write_config(tmp_path, cfg)
+
+        def fake_get(url):
+            return '{"data": [{"id": "Qwen/Qwen3.6-27B-FP8"}, {"id": "other"}]}'
+
+        check = doctor._check_models_served(home, _http_get=fake_get)
+        assert check.ok is True
+        assert check.fatal is False
+
+    def test_stale_aux_compression_flagged(self, tmp_path):
+        cfg = {
+            "auxiliary": {
+                "compression": {
+                    "base_url": "http://10.0.0.244:8000/v1",
+                    "model": "nvidia/Qwen3.6-35B-A3B-NVFP4",
+                },
+            },
+        }
+        home = self._write_config(tmp_path, cfg)
+
+        def fake_get(url):
+            return '{"data": [{"id": "deepseek-ai/DeepSeek-V4-Flash-0731"}]}'
+
+        check = doctor._check_models_served(home, _http_get=fake_get)
+        assert check.ok is False
+        assert check.fatal is False
+        # detail names the offending config key + endpoint + served ids
+        assert "auxiliary.compression.model" in check.detail
+        assert "nvidia/Qwen3.6-35B-A3B-NVFP4" in check.detail
+        assert "http://10.0.0.244:8000/models" in check.detail
+        assert "deepseek-ai/DeepSeek-V4-Flash-0731" in check.detail
+        assert "fix" in check.fix.lower() or check.fix
+
+    def test_fallback_provider_mismatch_flagged(self, tmp_path):
+        cfg = {
+            "fallback_providers": [{
+                "model": "Qwen/Qwen3.6-27B-FP8",
+                "base_url": "http://localhost:4000/v1",
+            }],
+        }
+        home = self._write_config(tmp_path, cfg)
+
+        def fake_get(url):
+            return '{"data": [{"id": "deepseek-ai/DeepSeek-V4-Flash-0731"}]}'
+
+        check = doctor._check_models_served(home, _http_get=fake_get)
+        assert check.ok is False
+        assert check.fatal is False
+        assert "fallback_providers[0].model" in check.detail
+
+    def test_base_url_v1_hits_models_endpoint(self, tmp_path):
+        cfg = {
+            "model": {"default": "X", "base_url": "http://localhost:8000/v1"},
+        }
+        home = self._write_config(tmp_path, cfg)
+        seen = {}
+
+        def fake_get(url):
+            seen["url"] = url
+            return '{"data": [{"id": "X"}]}'
+
+        doctor._check_models_served(home, _http_get=fake_get)
+        # A base_url ending in /v1 must be probed at .../models, not .../v1/models
+        assert seen["url"] == "http://localhost:8000/models"
+
+    def test_endpoint_unreachable_is_not_a_false_alarm(self, tmp_path):
+        cfg = {
+            "model": {"default": "X", "base_url": "http://localhost:8000/v1"},
+        }
+        home = self._write_config(tmp_path, cfg)
+
+        def fake_get(url):
+            raise ConnectionError("boom")
+
+        check = doctor._check_models_served(home, _http_get=fake_get)
+        assert check.ok is True  # no false alarm on probe failure
+        assert check.fatal is False
+        assert "unreachable" in check.detail
+
+    def test_unreadable_config_is_not_a_false_alarm(self, tmp_path):
+        # config.yaml absent -> ok, explanatory note
+        home = str(tmp_path)
+        check = doctor._check_models_served(home, _http_get=lambda u: "")
+        assert check.ok is True
+        assert "unreadable" in check.detail
+
+    def test_run_doctor_includes_check_and_keeps_ok(self, tmp_path):
+        # A models-served failure is NON-fatal: it must not flip run_doctor ok.
+        cfg = {
+            "model": {"default": "GONE", "base_url": "http://localhost:8000/v1"},
+        }
+        self._write_config(tmp_path, cfg)
+
+        def fake_get(url):
+            return '{"data": [{"id": "X"}]}'
+
+        os.makedirs(os.path.join(str(tmp_path), "hermes-agent"), exist_ok=True)
+        result = doctor.run_doctor(hermes_home=str(tmp_path),
+                                   _cluster_runner=lambda: "[]",
+                                   _http_get=fake_get)
+        names = [c["name"] for c in result["checks"]]
+        assert "models served" in names
+        ms = next(c for c in result["checks"] if c["name"] == "models served")
+        assert ms["ok"] is False
+        assert ms["fatal"] is False
+        assert result["ok"] is True  # non-fatal failure must NOT flip overall ok
+
+
+
 class TestRunDoctor:
-    def test_returns_correct_structure(self):
-        result = doctor.run_doctor(_cluster_runner=lambda: "[]")
+    def test_returns_correct_structure(self, tmp_path):
+        # Hurt-free hermes_home (no config.yaml) keeps the models-served check
+        # from probing live endpoints in tests.
+        result = doctor.run_doctor(hermes_home=str(tmp_path),
+                                   _cluster_runner=lambda: "[]")
         assert "ok" in result
         assert "checks" in result
         assert "fatal_failures" in result
         assert isinstance(result["checks"], list)
 
-    def test_check_structure(self):
-        result = doctor.run_doctor(_cluster_runner=lambda: "[]")
+    def test_check_structure(self, tmp_path):
+        result = doctor.run_doctor(hermes_home=str(tmp_path),
+                                   _cluster_runner=lambda: "[]")
         for c in result["checks"]:
             assert "name" in c
             assert "ok" in c
