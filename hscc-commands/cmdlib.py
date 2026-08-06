@@ -14,6 +14,7 @@ import subprocess
 
 SERVING_JSON = os.path.expanduser("~/.hscc/serving.json")
 APPLIED_TEMPLATE = os.path.expanduser("~/.hscc/applied_template.json")
+CLUSTER_JSON = os.path.expanduser("~/.hscc/cluster.json")
 AUTONOMY_FLAG = os.path.expanduser("~/.hscc/autonomy")
 SPARKRUN = "sparkrun"
 CLUSTER = "hscc"
@@ -302,3 +303,148 @@ def gateway_on_cluster():
         if gateway_runs_on_node(unit_node(u)):
             return True
     return False
+
+
+# ── cluster.json node-state engine ───────────────────────────────────────────
+# The /cluster command enumerates nodes, not just unit primaries. These helpers
+# read the authoritative 4-node cluster.json and classify EVERY node into
+# serving / tp_peer / idle / unreachable. tp classification comes from the
+# serving.json scoreboard (a node that is a peer in a multi-node span is never
+# probed for a model at its own :8000 — it is a tp peer, period).
+
+
+def read_cluster_json():
+    """All hosts from ~/.hscc/cluster.json as a list of dicts.
+
+    The gateway entry plus each worker plus each nasDevice (if present). Each
+    entry carries ip/name/id/role when present in the file. Missing or corrupt
+    file → [] (callers fall back to serving.json unit nodes). Never drops a
+    node.
+    """
+    try:
+        with open(CLUSTER_JSON) as fh:
+            d = json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(d, dict):
+        return []
+    hosts = []
+    gw = d.get("gateway")
+    if isinstance(gw, dict) and gw.get("ip"):
+        hosts.append(gw)
+    for w in d.get("workers") or []:
+        if isinstance(w, dict) and w.get("ip"):
+            hosts.append(w)
+    for n in d.get("nasDevices") or []:
+        if isinstance(n, dict) and n.get("ip"):
+            hosts.append(n)
+    return hosts
+
+
+def serving_unit_scoreboard():
+    """Map every node named in serving.json to its serving-lineage info.
+
+    {node_ip: {"role": <orchestrator|worker>, "unit_id", "model", "port",
+               "tp_peer", "primary_of_unit"}}
+    For a unit with >1 node (or tp>1) the FIRST node is the primary and the
+    REST are tp_peer. A node can only be primary once: if a node is primary in
+    one unit and a peer in another, the primary role wins (dominant). Every
+    unit node appears exactly once.
+    """
+    score = {}
+    for u in read_units():
+        nodes = u.get("nodes") or []
+        tp = int(u.get("tp") or 1)
+        multi = len(nodes) > 1 or tp > 1
+        role = "orchestrator" if u.get("role") == "orchestrator" else "worker"
+        base = {
+            "role": role,
+            "unit_id": u.get("id"),
+            "model": u.get("model"),
+            "port": u.get("port") or PORT,
+        }
+        for i, ip in enumerate(nodes):
+            primary = (i == 0)          # first entry is this unit's primary
+            tp_peer = multi and not primary
+            prev = score.get(ip)
+            if prev is None:
+                entry = dict(base)
+                entry["tp_peer"] = tp_peer
+                entry["primary_of_unit"] = primary
+                score[ip] = entry
+                continue
+            # Already seen. Primary is dominant: never downgrade a primary, and
+            # upgrade a peer to primary if it is primary in this unit.
+            if prev["primary_of_unit"]:
+                continue                 # keep the primary unit's lineage
+            if primary:
+                entry = dict(base)
+                entry["tp_peer"] = False
+                entry["primary_of_unit"] = True
+                score[ip] = entry
+            else:
+                prev["tp_peer"] = True   # peer in another unit too
+    return score
+
+
+def _node_reachable(node_ip):
+    """Reachability probe: local gateway node always reachable, else SSH echo."""
+    if gateway_runs_on_node(node_ip):
+        return True
+    ok, _o, _e = ssh_exec(node_ip, "echo ready", timeout=8)
+    return bool(ok)
+
+
+def classify_node(node_ip, scoreboard, probe_fn=_curl_model, reachability_fn=None):
+    """Classify one node into serving / tp_peer / idle / unreachable.
+
+    Returns {"ip", "state", "model", "detail"} with state ∈ the four classes.
+    Precedence: tp_peer > serving > unreachable > idle. A tp peer is NEVER
+    down — its state is "tp_peer" even if its own :8000 doesn't answer (its
+    model lives on the span's primary). Serving is decided by the endpoint
+    probe (a loaded-but-idle vLLM whose /v1/models answers is still serving);
+    the reachability probe only distinguishes idle from unreachable.
+    """
+    reachability = reachability_fn if reachability_fn is not None else _node_reachable
+    s = (scoreboard or {}).get(node_ip) or {}
+    if s.get("tp_peer"):
+        return {"ip": node_ip, "state": "tp_peer", "model": None,
+                "detail": "tp peer of a multi-node span"}
+    model = probe_fn(node_ip)
+    if model:
+        return {"ip": node_ip, "state": "serving", "model": model, "detail": ""}
+    if not reachability(node_ip):
+        return {"ip": node_ip, "state": "unreachable", "model": None,
+                "detail": "no response on reachability probe"}
+    return {"ip": node_ip, "state": "idle", "model": None,
+            "detail": "reachable, no model served"}
+
+
+def enumerate_cluster_nodes(*, probe_fn=_curl_model, reachability_fn=None):
+    """Enumerate every cluster.json node, each classified. cluster.json-driven.
+
+    The authoritative host list from cluster.json, each classified against the
+    serving.json scoreboard via classify_node. If cluster.json is empty/corrupt,
+    fall back to the serving.json unit nodes (each classified). NEVER omits a
+    node present in cluster.json. Every returned dict carries the classification
+    {"ip","state","model","detail"} plus the node's cluster.json name/id/role
+    when present.
+    """
+    hosts = read_cluster_json()
+    score = serving_unit_scoreboard()
+    if not hosts:
+        # Fallback: enumerate the serving.json unit nodes instead.
+        for ip in score:
+            hosts.append({"ip": ip, "name": None, "id": None, "role": None})
+    out = []
+    for h in hosts:
+        ip = h.get("ip")
+        if not ip:
+            continue
+        node = classify_node(ip, score, probe_fn=probe_fn,
+                             reachability_fn=reachability_fn)
+        node["name"] = h.get("name")
+        node["id"] = h.get("id")
+        node["role"] = h.get("role")
+        out.append(node)
+    return out

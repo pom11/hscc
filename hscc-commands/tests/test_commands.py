@@ -403,3 +403,179 @@ def test_workers_up_no_keepalive_workers(monkeypatch):
     monkeypatch.setattr(cmdlib, "read_units", lambda: units["units"])
     out = plugin.cmd_workers_up("")
     assert "nothing to check" in out
+
+
+# ── cluster.json node-state engine ────────────────────────────────────────────
+# Cluster.json is the authoritative host list; serving.json decides tp roles.
+# These tests use fake 10.0.0.x addresses so real endpoints are never probed.
+
+CLUSTER_LIVE = {
+    "name": "hscc",
+    "gateway": {"ip": "10.0.0.244", "name": "GX10 Gateway",
+                "sshUser": "spark", "id": "gx10-gateway", "role": "gateway"},
+    "workers": [
+        {"ip": "10.0.0.246", "name": "GX10 #1", "sshUser": "spark",
+         "id": "gx10-worker-1", "role": "worker"},
+        {"ip": "10.0.0.247", "name": "GX10 #2", "sshUser": "spark",
+         "id": "gx10-worker-2", "role": "worker"},
+        {"ip": "10.0.0.248", "name": "GX10 #3", "sshUser": "spark",
+         "id": "gx10-worker-3", "role": "worker"},
+    ],
+}
+
+SERVING_LIVE = {
+    "version": 2,
+    "units": [
+        {"id": "orch", "role": "orchestrator",
+         "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+         "recipe": "~/r/v4.yaml",
+         "nodes": ["10.0.0.244", "10.0.0.246"], "port": 8000},
+        {"id": "family-reasoning-247-8000", "role": "worker", "keepalive": True,
+         "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+         "recipe": "~/r/v4.yaml",
+         "nodes": ["10.0.0.247", "10.0.0.248"], "port": 8000, "tp": 2, "pp": 1},
+    ],
+}
+
+
+# read_cluster_json ────────────────────────────────────────────────────────────
+
+def test_read_cluster_json_all_hosts(tmp_path, monkeypatch):
+    f = tmp_path / "cluster.json"
+    f.write_text(json.dumps(CLUSTER_LIVE))
+    monkeypatch.setattr(cmdlib, "CLUSTER_JSON", str(f))
+    hosts = cmdlib.read_cluster_json()
+    ips = [h["ip"] for h in hosts]
+    assert ips == ["10.0.0.244", "10.0.0.246", "10.0.0.247", "10.0.0.248"]
+    assert hosts[0]["name"] == "GX10 Gateway"
+    assert hosts[0]["id"] == "gx10-gateway"
+
+
+def test_read_cluster_json_includes_nas(tmp_path, monkeypatch):
+    d = dict(CLUSTER_LIVE)
+    d["nasDevices"] = [{"ip": "10.0.0.249", "name": "nas"}]
+    f = tmp_path / "cluster.json"
+    f.write_text(json.dumps(d))
+    monkeypatch.setattr(cmdlib, "CLUSTER_JSON", str(f))
+    hosts = cmdlib.read_cluster_json()
+    assert any(h["ip"] == "10.0.0.249" for h in hosts)
+
+
+def test_read_cluster_json_empty_on_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(cmdlib, "CLUSTER_JSON", str(tmp_path / "nope.json"))
+    assert cmdlib.read_cluster_json() == []
+
+
+def test_read_cluster_json_empty_on_corrupt(tmp_path, monkeypatch):
+    f = tmp_path / "cluster.json"
+    f.write_text("{ not json")
+    monkeypatch.setattr(cmdlib, "CLUSTER_JSON", str(f))
+    assert cmdlib.read_cluster_json() == []
+
+
+# serving_unit_scoreboard ──────────────────────────────────────────────────────
+
+def test_serving_unit_scoreboard_marks_tp_peers(monkeypatch):
+    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING_LIVE["units"])
+    score = cmdlib.serving_unit_scoreboard()
+    assert sorted(score) == ["10.0.0.244", "10.0.0.246", "10.0.0.247", "10.0.0.248"]
+    assert score["10.0.0.246"]["tp_peer"] is True
+    assert score["10.0.0.248"]["tp_peer"] is True
+    assert score["10.0.0.244"]["primary_of_unit"] is True
+    assert score["10.0.0.247"]["primary_of_unit"] is True
+    assert score["10.0.0.246"]["primary_of_unit"] is False
+    assert score["10.0.0.244"]["role"] == "orchestrator"
+    assert score["10.0.0.247"]["role"] == "worker"
+
+
+def test_scoreboard_primary_dominates_peer(monkeypatch):
+    """A node primary in one unit and peer in another stays primary."""
+    units = [
+        {"id": "u1", "role": "worker", "model": "m",
+         "nodes": ["10.0.0.2", "10.0.0.3"], "tp": 2},       # 10.0.0.3 is peer
+        {"id": "u2", "role": "worker", "model": "other",
+         "nodes": ["10.0.0.3", "10.0.0.4"], "tp": 2},       # 10.0.0.3 primary here
+    ]
+    monkeypatch.setattr(cmdlib, "read_units", lambda: units)
+    score = cmdlib.serving_unit_scoreboard()
+    assert score["10.0.0.3"]["primary_of_unit"] is True
+    assert score["10.0.0.3"]["tp_peer"] is False
+    assert score["10.0.0.3"]["model"] == "other"            # dominant unit's lineage
+
+
+def test_scoreboard_tp1_single_node_not_peer(monkeypatch):
+    monkeypatch.setattr(cmdlib, "read_units",
+                        lambda: [{"id": "w1", "role": "worker", "model": "m",
+                                  "nodes": ["10.0.0.2"], "tp": 1}])
+    score = cmdlib.serving_unit_scoreboard()
+    s = score["10.0.0.2"]
+    assert s["tp_peer"] is False and s["primary_of_unit"] is True
+
+
+# classify_node ────────────────────────────────────────────────────────────────
+
+def test_classify_serving_when_probe_returns_model():
+    res = cmdlib.classify_node("10.0.0.1", {}, probe_fn=lambda ip: "Qwen/27B")
+    assert res["state"] == "serving" and res["model"] == "Qwen/27B"
+
+
+def test_classify_tp_peer_never_down():
+    """tp_peer honored even when probe returns None — a tp peer is never down."""
+    score = {"10.0.0.6": {"tp_peer": True, "primary_of_unit": False}}
+    res = cmdlib.classify_node("10.0.0.6", score,
+                               probe_fn=lambda ip: None,          # no model at :8000
+                               reachability_fn=lambda ip: False)  # unreachable too
+    assert res["state"] == "tp_peer"
+
+
+def test_classify_idle_when_reachable_probe_none():
+    res = cmdlib.classify_node("10.0.0.7", {}, probe_fn=lambda ip: None,
+                               reachability_fn=lambda ip: True)
+    assert res["state"] == "idle"
+
+
+def test_classify_unreachable_when_probe_fails():
+    res = cmdlib.classify_node("10.0.0.8", {}, probe_fn=lambda ip: None,
+                               reachability_fn=lambda ip: False)
+    assert res["state"] == "unreachable"
+
+
+# enumerate_cluster_nodes ──────────────────────────────────────────────────────
+
+def test_enumerate_cluster_nodes_all_present(monkeypatch):
+    """probe serves only primaries → states [serving, tp_peer, serving, tp_peer]."""
+    monkeypatch.setattr(cmdlib, "read_cluster_json", lambda: [
+        {"ip": "10.0.0.244", "name": "GX10 Gateway", "id": "gx10-gateway",
+         "role": "gateway"},
+        {"ip": "10.0.0.246", "name": "GX10 #1", "id": "gx10-worker-1",
+         "role": "worker"},
+        {"ip": "10.0.0.247", "name": "GX10 #2", "id": "gx10-worker-2",
+         "role": "worker"},
+        {"ip": "10.0.0.248", "name": "GX10 #3", "id": "gx10-worker-3",
+         "role": "worker"},
+    ])
+    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING_LIVE["units"])
+
+    def probe(ip):
+        return "deepseek-ai/DeepSeek-V4-Flash-0731" if ip in ("10.0.0.244", "10.0.0.247") else None
+
+    nodes = cmdlib.enumerate_cluster_nodes(probe_fn=probe,
+                                           reachability_fn=lambda ip: True)
+    ips = [n["ip"] for n in nodes]
+    assert ips == ["10.0.0.244", "10.0.0.246", "10.0.0.247", "10.0.0.248"]
+    assert [n["state"] for n in nodes] == ["serving", "tp_peer", "serving", "tp_peer"]
+    assert nodes[0]["model"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
+    assert nodes[1]["model"] is None
+    assert nodes[0]["name"] == "GX10 Gateway"
+    assert nodes[1]["role"] == "worker"
+
+
+def test_enumerate_falls_back_to_serving_nodes(monkeypatch):
+    """Empty cluster.json → fall back to serving.json unit nodes, classified."""
+    monkeypatch.setattr(cmdlib, "read_cluster_json", lambda: [])
+    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING_LIVE["units"])
+    nodes = cmdlib.enumerate_cluster_nodes(probe_fn=lambda ip: None,
+                                           reachability_fn=lambda ip: True)
+    ips = [n["ip"] for n in nodes]
+    assert sorted(ips) == ["10.0.0.244", "10.0.0.246", "10.0.0.247", "10.0.0.248"]
+    assert [n["state"] for n in nodes] == ["idle", "tp_peer", "idle", "tp_peer"]
