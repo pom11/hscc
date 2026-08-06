@@ -223,11 +223,10 @@ def test_dashboard_default_targets_gateway(tmp_path):
 
 
 def test_compaction_model_defaults_to_orch_model(tmp_path):
-    """When COMPACT_URL defaults to orch :8000, COMPACT_MODEL must default to
-    the ORCH_MODEL (nvidia/Qwen3.6-35B-A3B-NVFP4), NOT the worker model
-    (Qwen/Qwen3.6-27B-FP8). A mismatch causes every compression call to 404.
-    Only when COMPACT_URL is overridden to a non-orch URL does COMPACT_MODEL
-    fall back to WORKER_MODEL."""
+    """When COMPACT_URL defaults to orch :8000, COMPACT_MODEL must resolve to
+    the orchestrator-model alias, NOT the worker-model alias. A mismatch
+    causes every compression call to 404. Only when COMPACT_URL is overridden
+    to a non-orch URL does COMPACT_MODEL fall back to worker-model."""
     assert enable_plugins.COMPACT_URL == f"http://{enable_plugins.ORCH_MODEL_HOST}:8000/v1"
     assert enable_plugins.COMPACT_MODEL == enable_plugins.ORCH_MODEL
     assert enable_plugins.COMPACT_MODEL != enable_plugins.WORKER_MODEL
@@ -253,6 +252,74 @@ def test_compaction_url_customized_keeps_model_override(monkeypatch):
     import enable_plugins as ep
     importlib.reload(ep)
     assert ep.COMPACT_MODEL == "my/custom-model"
+
+
+# ── Card B1: model-alias defaults ───────────────────────────────────────────
+
+def test_defaults_are_aliases_when_env_unset():
+    """With no HSCC_* env overrides, the defaults are the stable LOGICAL
+    ALIASES, not concrete model ids."""
+    import importlib
+    import enable_plugins as ep
+    importlib.reload(ep)   # re-read with a clean env (prior reload tests may have
+                           # left stale module-level constants)
+    assert ep.ORCH_MODEL == "orchestrator-model"
+    assert ep.WORKER_MODEL == "worker-model"
+    assert ep.FALLBACK_MODEL == "worker-model"
+    # Compaction pointing at the default orch endpoint resolves to the orch alias.
+    assert ep.COMPACT_MODEL == "orchestrator-model"
+    # Sanity: the whole point — aliases, not the old concrete ids.
+    assert ep.ORCH_MODEL != "deepseek-ai/DeepSeek-V4-Flash-0731"
+    assert ep.WORKER_MODEL != "Qwen/Qwen3.6-27B-FP8"
+
+
+def test_worker_model_override_wins(monkeypatch):
+    """HSCC_WORKER_MODEL forces a concrete id, bypassing the alias default."""
+    monkeypatch.setenv("HSCC_WORKER_MODEL", "my-org/my-worker-concrete")
+    import importlib
+    import enable_plugins as ep
+    importlib.reload(ep)
+    assert ep.WORKER_MODEL == "my-org/my-worker-concrete"
+    # Drop the override and re-read so later tests see the clean aliases again
+    # (the module-level constant is not auto-reverted by monkeypatch).
+    monkeypatch.delenv("HSCC_WORKER_MODEL", raising=False)
+    importlib.reload(ep)
+    assert ep.WORKER_MODEL == "worker-model"
+
+
+def test_orch_model_override_wins(monkeypatch):
+    """HSCC_ORCH_MODEL forces a concrete id, bypassing the alias default."""
+    monkeypatch.setenv("HSCC_ORCH_MODEL", "my-org/my-orch-concrete")
+    import importlib
+    import enable_plugins as ep
+    importlib.reload(ep)
+    assert ep.ORCH_MODEL == "my-org/my-orch-concrete"
+    # Restore clean aliases for later tests.
+    monkeypatch.delenv("HSCC_ORCH_MODEL", raising=False)
+    importlib.reload(ep)
+    assert ep.ORCH_MODEL == "orchestrator-model"
+
+
+def test_compaction_model_aliased_written_into_config(tmp_path):
+    """_ensure_compaction writes the resolved ALIAS into aux.compression when
+    the field is empty (not a concrete id)."""
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"]})
+    enable_plugins.enable(path)
+    aux = yaml.safe_load(open(path))["auxiliary"]["compression"]
+    assert aux["model"] == enable_plugins.COMPACT_MODEL
+    assert aux["model"] == "orchestrator-model"   # alias, not a concrete id
+
+
+def test_text_auxiliaries_aliased_written_into_config(tmp_path):
+    """_ensure_text_auxiliaries writes the resolved ALIAS into each text aux
+    task's model field, not a concrete id."""
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"]})
+    enable_plugins.enable(path)
+    aux_root = yaml.safe_load(open(path))["auxiliary"]
+    for task in enable_plugins._LOCAL_TEXT_AUX_TASKS:
+        assert aux_root[task]["model"] == enable_plugins.COMPACT_MODEL
 
 
 def test_auto_review_seeded_when_absent(tmp_path):
