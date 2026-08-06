@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] — DSV4 templates + multiplexing secret-scope wedge fixes
+
+### Added
+- **DeepSeek-V4 FP8 multi-node templates.** `deepseek-v4-orchestrator`,
+  `dual-dsv4`, and `dsv4-plus-coding` (4-node FP8) added to the template set for
+  serving DSV4-Flash on the orchestrator with tp>1 spanning multiple nodes.
+
+### Fixed
+- **Multiplexing secret-scope wedge (auxiliary LLM tasks).** Compaction and the
+  text orchestration auxiliaries (`kanban_decomposer`, `triage_specifier`,
+  `profile_describer`, `curator`, `title_generation`, `skills_hub`, `approval`,
+  `mcp`) were left at Hermes' default `provider: auto`. Under multiplexing, `auto`
+  falls through the auxiliary-client chain to a cloud provider whose credential
+  read runs with no active secret scope and **throws** — silently breaking the
+  task (e.g. `kanban_decomposer` could not decompose any card, and long sessions
+  reported "max compression attempts (3) reached"). `enable_plugins.py` now routes
+  these to the local orchestrator model via `_ensure_text_auxiliaries()`
+  (`provider` auto→custom, fill-empty so operator choices survive). `vision` and
+  `web_extract` are intentionally excluded.
+- **Stale orchestrator-model defaults that 404 → cloud fall-through.**
+  `ORCH_MODEL` (`enable_plugins.py`) and `COMPACT_MODEL`/`STRONG_MODEL`
+  (`hscc-roles/generator.py`) defaulted to `nvidia/Qwen3.6-35B-A3B-NVFP4` /
+  the placeholder `orchestrator-model` — ids the orchestrator node no longer
+  serves. Every compaction/strong-tier call 404'd and hit the same cloud
+  fall-through. Defaults now point at the served `deepseek-ai/DeepSeek-V4-Flash-0731`;
+  `COMPACT_MODEL` follows `STRONG_MODEL` (one orchestrator-model knob).
+- **Cluster provisioning:** worker model-id rewire on a worker-tier switch, stop a
+  stale wrong-model container on a reused node before provisioning, wire
+  `model.default` for the orchestrator in `apply` + raise the provision timeout,
+  and make `tp>1` units span multiple nodes in the resolver.
+
 ## [1.4.0] — Native sparkrun proxy + verified runtime v2026.7.30
 
 ### Changed
