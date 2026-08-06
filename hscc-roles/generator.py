@@ -34,7 +34,7 @@ import rolelib
 # proxy/host without editing code.
 WORKER_PROXY_BASE_URL = os.environ.get(
     "HSCC_WORKER_PROXY_URL", "http://localhost:4000/v1")
-WORKER_MODEL = os.environ.get("HSCC_WORKER_MODEL", "Qwen/Qwen3.6-27B-FP8")
+WORKER_MODEL = os.environ.get("HSCC_WORKER_MODEL", "worker-model")
 WORKER_PROXY_KEY = os.environ.get("HSCC_WORKER_PROXY_KEY", "sk-sparkrun")
 
 # Strong-tier roles (model_tier: strong) route to the orchestrator GPU directly.
@@ -43,13 +43,12 @@ WORKER_PROXY_KEY = os.environ.get("HSCC_WORKER_PROXY_KEY", "sk-sparkrun")
 # Reviewers, coders, and QA stay on the fast worker proxy (:4000).
 STRONG_URL = os.environ.get(
     "HSCC_STRONG_URL", "http://10.0.0.244:8000/v1")
-# Must be a model actually served at STRONG_URL (the orchestrator node). A stale
-# id that the endpoint no longer serves 404s every strong-tier call and (via the
-# same fallback path as compaction) can reach OpenRouter and throw under the
-# multiplexing secret-scope guard. Keep in sync with the orchestrator's served
-# model; override per deployment with HSCC_STRONG_MODEL.
+# Default to the stable logical alias "orchestrator-model", resolved at the
+# serving layer: the endpoint advertises that alias via --served-model-name, so
+# the alias IS served as long as the serving layer's alias→id mapping is
+# correct. Override per deployment with HSCC_STRONG_MODEL to force a concrete id.
 STRONG_MODEL = os.environ.get(
-    "HSCC_STRONG_MODEL", "deepseek-ai/DeepSeek-V4-Flash-0731")
+    "HSCC_STRONG_MODEL", "orchestrator-model")
 STRONG_KEY = os.environ.get("HSCC_STRONG_KEY", "sk-sparkrun")
 
 
@@ -81,13 +80,15 @@ def _strong_model_block():
 # summarize fails fast rather than hanging. Env-overridable.
 COMPACT_BASE_URL = os.environ.get(
     "HSCC_COMPACT_URL", "http://10.0.0.244:8000/v1")
-# The compaction model id MUST be a model actually served at COMPACT_BASE_URL.
-# Compaction targets the orchestrator GPU (same node as strong-tier), so it
-# defaults to STRONG_MODEL — one orchestrator-model knob. A placeholder id that
-# the endpoint does not serve 404s the summary call, and the auxiliary-client
-# fallback chain then reaches OpenRouter, whose credential read throws under the
-# multiplexing secret-scope guard → "context length exceeded: max compression
-# attempts reached" with the turn wedged. Keep this a real served id.
+# The compaction model ID defaults to STRONG_MODEL, which is the stable logical
+# alias "orchestrator-model", resolved at the serving layer — one orchestrator
+# knob for both strong-tier and compaction. The endpoint advertises the alias
+# via --served-model-name, so the alias IS served as long as the serving layer's
+# alias→id mapping is correct. A placeholder id that the endpoint does not serve
+# 404s the summary call, and the auxiliary-client fallback chain then reaches
+# OpenRouter, whose credential read throws under the multiplexing secret-scope
+# guard → "context length exceeded: max compression attempts reached" with the
+# turn wedged. Override per deployment with HSCC_COMPACT_MODEL.
 COMPACT_MODEL = os.environ.get("HSCC_COMPACT_MODEL", STRONG_MODEL)
 COMPACT_KEY = os.environ.get("HSCC_COMPACT_KEY", "sk-sparkrun")
 COMPACT_TIMEOUT = int(os.environ.get("HSCC_COMPACT_TIMEOUT", "90"))
