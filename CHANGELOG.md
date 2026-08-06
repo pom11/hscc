@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] — Logical model aliases + full node visibility
+
+### Added
+- **Serving-layer logical model aliases.** `orchestrator-model` and
+  `worker-model` aliases advertised via the multi-name `--served-model-name`
+  flag (space-separated multi-name).
+- **Alias defaults** wired into the bootstrap and roles config writers.
+- **Doctor models-served check** that flags any configured model id its
+  endpoint does not serve.
+- **cmdlib node-state engine.**
+
+### Fixed
+- `/cluster` and `/status` now render every `cluster.json` node with an explicit
+  state (`serving` / `tp peer` / `idle` / `unreachable`); tp peers are never
+  reported down.
+- Loaded-but-idle nodes labelled explicitly so 0% GPU utilisation is not
+  misread as a broken worker.
+- NAS excluded from compute-node enumeration.
+- `ops.py` `pick_node` never targets a tp peer.
+
+> **Upgrade note:** `hscc template apply` MUST run before anything writes
+> alias-valued config — the alias only resolves once the serving layer
+> advertises it; `hscc doctor` flags the mismatch if done out of order.
+
 ## [1.5.0] — DSV4 templates + multiplexing secret-scope wedge fixes
 
 ### Added
