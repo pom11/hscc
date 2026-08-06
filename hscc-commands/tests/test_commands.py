@@ -157,6 +157,38 @@ def test_status_handles_discovery_failure(monkeypatch):
     assert "discovery unavailable" in out and "down" in out
 
 
+def test_status_tp_peer_worker_never_false_down(monkeypatch):
+    """A tp-peer worker has vllm_healthy False (its model lives on the span's
+    primary) — /status must render it as 'tp peer', NEVER ❌/unhealthy."""
+    monkeypatch.setattr(cmdlib, "serving_unit_scoreboard", lambda: {
+        "10.0.0.247": {"role": "worker", "unit_id": "family-reasoning-247-8000",
+                       "model": "m", "tp_peer": False, "primary_of_unit": True},
+        "10.0.0.248": {"role": "worker", "unit_id": "family-reasoning-247-8000",
+                       "model": "m", "tp_peer": True, "primary_of_unit": False},
+    })
+    monkeypatch.setattr(cmdlib, "discovery_snapshot", lambda probe=True: {
+        "ok": True, "source": "live",
+        "orchestrator": {"ip": "10.0.0.244", "name": "gw"},
+        "workers": [
+            {"ip": "10.0.0.247", "vram_free_gb": 20.0, "power_draw_w": 300.0,
+             "idle": False, "vllm_healthy": True},
+            {"ip": "10.0.0.248", "vram_free_gb": 30.0, "power_draw_w": 310.0,
+             "idle": False, "vllm_healthy": False},   # peer: False is NORMAL
+        ],
+    })
+    monkeypatch.setattr(cmdlib, "proxy_health", lambda: True)
+    monkeypatch.setattr(cmdlib, "applied_template", lambda: {"template": "hscc-live"})
+    monkeypatch.setattr(cmdlib, "autonomy_flag", lambda: "on")
+    out = plugin.cmd_status("")
+    # the peer renders as tp peer with its span, never ❌ / unhealthy
+    assert "🔗 tp peer (member of family-reasoning-247-8000/10.0.0.247 span) 10.0.0.248" in out
+    assert "❌" not in out
+    # healthy primary still shows ✅ worker
+    assert "✅ worker 10.0.0.247" in out
+    # free-VRAM line kept
+    assert "30.0GB free" in out
+
+
 def test_heal_reports_unhealthy_and_gates(monkeypatch):
     monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
     monkeypatch.setattr(cmdlib, "_curl_model",
@@ -205,31 +237,175 @@ def test_template_usage_on_bad_subcommand():
 # ── /cluster read-only ───────────────────────────────────────────────────────
 
 def test_cluster_status_never_mutates(monkeypatch):
-    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
-    monkeypatch.setattr(cmdlib, "_curl_model",
-                        lambda node: "nvidia/Qwen3.6-35B-A3B-NVFP4"
-                        if node == "10.0.0.1" else None)
+    """cmd_cluster renders every node from the engine, distinct states, tp peer
+    never down. Read-only — no mutation, no live endpoints hit."""
+    hosts, score, nodes = _four_node_engine()
+    monkeypatch.setattr(cmdlib, "read_cluster_json", lambda: hosts)
+    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING_LIVE["units"])
+    monkeypatch.setattr(cmdlib, "serving_unit_scoreboard", lambda: score)
+    monkeypatch.setattr(cmdlib, "enumerate_cluster_nodes", lambda *a, **k: nodes)
     monkeypatch.setattr(cmdlib, "cluster_metrics", lambda: {})  # no live sparkrun
+
     out = plugin.cmd_cluster("")
-    assert "Orchestrator" in out and "10.0.0.1" in out
-    assert "❌" in out                          # a down worker shows
+    assert "Orchestrator" in out and "10.0.0.244" in out
+    # tp peer rendered as tp peer, NEVER as down/❌
+    assert "🔗 tp peer" in out and "tp peer" in out
+    assert "serving" in out
+    assert "idle" in out
 
 
 def test_cluster_status_shows_metrics(monkeypatch):
-    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
-    monkeypatch.setattr(cmdlib, "_curl_model", lambda node: "m")
+    """Metrics attach per-node from cluster_metrics, incl. the VRAM-used line."""
+    monkeypatch.setattr(cmdlib, "read_cluster_json", lambda: [
+        {"ip": "10.0.0.1", "name": "gw", "id": "gw", "role": "gateway"},
+        {"ip": "10.0.0.2", "name": "w1", "id": "w1", "role": "worker"},
+    ])
+    monkeypatch.setattr(cmdlib, "read_units",
+                        lambda: [{"id": "u1", "role": "worker", "model": "m",
+                                  "nodes": ["10.0.0.1"]}])
+    monkeypatch.setattr(cmdlib, "serving_unit_scoreboard", lambda: {
+        "10.0.0.1": {"role": "worker", "unit_id": "u1", "model": "m",
+                     "tp_peer": False, "primary_of_unit": True},
+        "10.0.0.2": {"role": "worker", "unit_id": "u1", "model": "m",
+                     "tp_peer": True, "primary_of_unit": False},
+    })
+    monkeypatch.setattr(cmdlib, "enumerate_cluster_nodes", lambda *a, **k: [
+        {"ip": "10.0.0.1", "state": "serving", "model": "m", "name": "gw",
+         "id": "gw", "role": "gateway", "detail": ""},
+        {"ip": "10.0.0.2", "state": "tp_peer", "model": None, "name": "w1",
+         "id": "w1", "role": "worker", "detail": "tp peer of a multi-node span"},
+    ])
     monkeypatch.setattr(cmdlib, "cluster_metrics", lambda: {
         "10.0.0.1": {"cpu_usage_pct": "12", "cpu_temp_c": "55",
                      "cpu_load_1m": "0.5", "mem_used_pct": "40",
                      "mem_available_mb": "90000", "gpu_name": "GB10",
-                     "gpu_util_pct": "30", "gpu_temp_c": "60", "gpu_power_w": "40"}})
+                     "gpu_util_pct": "30", "gpu_temp_c": "60", "gpu_power_w": "40",
+                     "gpu_mem_used_pct": "80"}})
     out = plugin.cmd_cluster("")
     assert "GPU GB10" in out and "30% util" in out
+    assert "VRAM: 80% used by model" in out   # loaded-but-idle is unambiguous
 
 
 def test_cluster_metrics_empty_on_failure(monkeypatch):
     monkeypatch.setattr(cmdlib, "_run", lambda *a, **k: (False, "", "boom"))
     assert cmdlib.cluster_metrics() == {}
+
+
+def _four_node_engine():
+    """4-node, live-topology-shaped engine result.
+
+    - .244 orchestrator primary (serving)
+    - .246 orchestrator tp peer
+    - .247 worker primary (serving)
+    - .248 worker idle (reachable, no model)
+
+    Returns (hosts_from_cluster_json, scoreboard, engine_nodes)."""
+    hosts = [
+        {"ip": "10.0.0.244", "name": "GX10 Gateway", "id": "gx10-gateway", "role": "gateway"},
+        {"ip": "10.0.0.246", "name": "GX10 #1", "id": "gx10-worker-1", "role": "worker"},
+        {"ip": "10.0.0.247", "name": "GX10 #2", "id": "gx10-worker-2", "role": "worker"},
+        {"ip": "10.0.0.248", "name": "GX10 #3", "id": "gx10-worker-3", "role": "worker"},
+    ]
+    score = {
+        "10.0.0.244": {"role": "orchestrator", "unit_id": "orch", "model": "m",
+                       "tp_peer": False, "primary_of_unit": True},
+        "10.0.0.246": {"role": "worker", "unit_id": "orch", "model": "m",
+                       "tp_peer": True, "primary_of_unit": False},
+        "10.0.0.247": {"role": "worker", "unit_id": "family-reasoning-247-8000",
+                       "model": "m", "tp_peer": False, "primary_of_unit": True},
+        "10.0.0.248": {"role": "worker", "unit_id": "family-reasoning-247-8000",
+                       "model": "m", "tp_peer": False, "primary_of_unit": True},
+    }
+    nodes = [
+        {"ip": "10.0.0.244", "state": "serving", "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+         "name": "GX10 Gateway", "id": "gx10-gateway", "role": "gateway", "detail": ""},
+        {"ip": "10.0.0.246", "state": "tp_peer", "model": None,
+         "name": "GX10 #1", "id": "gx10-worker-1", "role": "worker",
+         "detail": "tp peer of a multi-node span"},
+        {"ip": "10.0.0.247", "state": "serving", "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+         "name": "GX10 #2", "id": "gx10-worker-2", "role": "worker", "detail": ""},
+        {"ip": "10.0.0.248", "state": "idle", "model": None,
+         "name": "GX10 #3", "id": "gx10-worker-3", "role": "worker", "detail": "reachable, no model served"},
+    ]
+    return hosts, score, nodes
+
+
+def test_cluster_renders_all_nodes_with_distinct_states(monkeypatch):
+    """4-node live-topology-shaped engine output → all 4 IPs, count is 4,
+    tp peers shown as 'tp peer' (never down), states distinguish serving vs
+    idle vs unreachable."""
+    hosts, score, nodes = _four_node_engine()
+    monkeypatch.setattr(cmdlib, "read_cluster_json", lambda: hosts)
+    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING_LIVE["units"])
+    monkeypatch.setattr(cmdlib, "serving_unit_scoreboard", lambda: score)
+    monkeypatch.setattr(cmdlib, "enumerate_cluster_nodes", lambda *a, **k: nodes)
+    monkeypatch.setattr(cmdlib, "cluster_metrics", lambda: {})
+
+    out = plugin.cmd_cluster("")
+    for ip in ("10.0.0.244", "10.0.0.246", "10.0.0.247", "10.0.0.248"):
+        assert ip in out, f"missing node {ip}"
+    assert "*Nodes (4)*" in out             # header counts NODES, not units
+    assert "source: cluster.json" in out    # authoritative source, labeled
+    # tp peers distinct & never down
+    assert "🔗 tp peer (member of orch/10.0.0.244 span) @ 10.0.0.246" in out
+    assert "✅ serving `deepseek-ai/DeepSeek-V4-Flash-0731` @ 10.0.0.247" in out
+    # serving vs idle states distinguishable
+    assert "○ idle @ 10.0.0.248  (model not loaded)" in out
+
+
+def test_cluster_renders_unreachable_distinctly(monkeypatch):
+    """An unreachable node shows as ❌ unreachable, distinct from idle/serving."""
+    hosts, score, nodes = _four_node_engine()
+    # make 248 unreachable instead of idle
+    for n in nodes:
+        if n["ip"] == "10.0.0.248":
+            n["state"], n["model"], n["detail"] = "unreachable", None, "no response on reachability probe"
+    monkeypatch.setattr(cmdlib, "read_cluster_json", lambda: hosts)
+    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING_LIVE["units"])
+    monkeypatch.setattr(cmdlib, "serving_unit_scoreboard", lambda: score)
+    monkeypatch.setattr(cmdlib, "enumerate_cluster_nodes", lambda *a, **k: nodes)
+    monkeypatch.setattr(cmdlib, "cluster_metrics", lambda: {})
+    out = plugin.cmd_cluster("")
+    assert "❌ unreachable @ 10.0.0.248" in out
+
+
+def test_cluster_falls_back_to_legacy_when_engine_empty(monkeypatch):
+    """Engine returns [] (no cluster.json AND no serving.json units) → the old
+    serving.json-primary rendering is used, clearly labeled, no crash."""
+    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING["units"])
+    monkeypatch.setattr(cmdlib, "enumerate_cluster_nodes", lambda *a, **k: [])
+    monkeypatch.setattr(cmdlib, "serving_unit_scoreboard", lambda: {})
+    monkeypatch.setattr(cmdlib, "_curl_model",
+                        lambda node: "nvidia/Qwen3.6-35B-A3B-NVFP4"
+                        if node == "10.0.0.1" else None)
+    monkeypatch.setattr(cmdlib, "cluster_metrics", lambda: {})
+    out = plugin.cmd_cluster("")
+    assert "legacy serving.json-primary rendering" in out  # clearly labeled
+    assert "Orchestrator" in out and "10.0.0.1" in out
+    assert "Workers" in out and "10.0.0.2" in out and "10.0.0.3" in out
+
+
+def test_cluster_loaded_but_idle_label(monkeypatch):
+    """A serving node reading 0% GPU util is labeled 'model loaded, idle between
+    requests' — the label is the fix, never a tampered 0% number (2b)."""
+    hosts, score, nodes = _four_node_engine()
+    # keep 247 serving and give IT the 0%-util metric
+    monkeypatch.setattr(cmdlib, "read_cluster_json", lambda: hosts)
+    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING_LIVE["units"])
+    monkeypatch.setattr(cmdlib, "serving_unit_scoreboard", lambda: score)
+    monkeypatch.setattr(cmdlib, "enumerate_cluster_nodes", lambda *a, **k: nodes)
+    monkeypatch.setattr(cmdlib, "cluster_metrics", lambda: {
+        "10.0.0.247": {"gpu_name": "GB10", "gpu_util_pct": "0", "gpu_temp_c": "60",
+                       "gpu_power_w": "40", "gpu_mem_used_pct": "85",
+                       "cpu_usage_pct": "1", "cpu_temp_c": "50", "cpu_load_1m": "0.1",
+                       "mem_used_pct": "70", "mem_available_mb": "30000"}})
+    out = plugin.cmd_cluster("")
+    # state line already says serving + the loaded-but-idle note appears
+    assert "✅ serving `deepseek-ai/DeepSeek-V4-Flash-0731` @ 10.0.0.247" in out
+    assert "(model loaded, idle between requests)" in out
+    # 0% util is kept as the true number, not tampered
+    assert "0% util" in out
+    assert "VRAM: 85% used by model" in out
 
 
 # ── restart_one shells out correctly ─────────────────────────────────────────
