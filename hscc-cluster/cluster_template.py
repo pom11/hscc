@@ -368,22 +368,70 @@ def _provision_models(plan: Any, cluster: str = "hscc",
     # Launch each wanted (nodes, port, recipe, tp). --ensure: skip if already up.
     # Before launching, free each span node of any STALE container serving a
     # DIFFERENT model — a reused node would otherwise keep its old container on
-    # the serve port, so the new `sparkrun run` crashes with Errno 98
-    # (Address already in use). A node already serving the wanted model is left
-    # running (--ensure idempotency). Nodes with no attributable job are skipped.
+    # the serve port, so the new `sparkrun run` crashes with Errno 98 (Address
+    # already in use). Nodes with no attributable job are skipped. On top of that
+    # (card t_7733c4cc):
+    #   • A unit whose RENDERED serve command drifted from the running
+    #     container's actual command (e.g. a new --served-model-name alias) is
+    #     RECREATED, never silently "ensured up" — serving flags only take
+    #     effect on a FRESH container.
+    #   • A SOLO unit is never launched on a node that is already a member of a
+    #     tp span (double-provision on one GPU). Such a unit is refused loudly
+    #     and reported, so apply surfaces it instead of hiding the drift.
     running_recipes = _running_recipes_via_sparkrun()
+    existing_span_members = _existing_span_member_ips()
+    recreated: list = []
+    refused: list = []
     for unit, nodes, port, recipe, tp, alias in want:
         want_model = _extract_model_name(recipe)
-        for node in nodes:
-            run_recipe = running_recipes.get(node)
-            if run_recipe and _extract_model_name(run_recipe) != want_model:
-                try:
-                    subprocess.run(["sparkrun", "stop", "--all", "--hosts", node],
-                                   capture_output=True, timeout=60)
-                    result["stopped"].append(node)
-                except Exception as e:
-                    stop_failures.append(f"{node}: {e}")
+        concrete = _extract_model_name(recipe) or getattr(unit, "model", "")
         hosts_arg = ",".join(nodes)
+
+        # ── Part 2: never give a tp-span member its own SOLO unit ──────────
+        # A node already reserved by a multi-node / tp>1 span has its GPU
+        # claimed by that span even when `sparkrun status` shows it idle (tp
+        # peers report idle, not down). Launching a SOLO unit on it would
+        # double-provision one GPU (the orphan incident). Refuse loudly rather
+        # than let apply look like it succeeded.
+        if tp <= 1 and nodes and nodes[0] in existing_span_members:
+            refused.append({
+                "node": nodes[0], "port": port, "recipe": recipe,
+                "reason": (f"{nodes[0]} is already a member of a tensor-parallel "
+                           f"span; refusing to give it a solo unit (would "
+                           f"double-provision one GPU)"),
+            })
+            continue
+
+        # ── Part 1: detect serve-command drift vs the RUNNING container ────
+        # Derive the running container's original command from the actual
+        # container (docker exec of the rendered serve script / docker inspect
+        # Config.Cmd) on the span's primary node — never assume it. If the
+        # wanted serve command differs, recreate the whole unit (stop the span,
+        # then fresh launch below). [] drift = ensure-up as before.
+        drift: List[str] = []
+        running_cmd = None
+        if nodes:
+            running_cmd = _running_container_cmd(nodes[0])
+            drift = _serve_command_drift(unit, alias, running_cmd)
+        if drift:
+            # Recreate: stop the whole span; the fresh `sparkrun run --ensure`
+            # below then launches with the NEW command (the only way serving
+            # flags take effect). Recorded as recreated so apply reports it.
+            for node in nodes:
+                _stop_node(node, result, stop_failures)
+            recreated.append({
+                "nodes": nodes, "port": port, "recipe": recipe,
+                "reason": "serve command changed: " + "; ".join(drift),
+            })
+        else:
+            # No command drift: replicate the existing stale-wrong-model stop.
+            # A node already serving the wanted model is left running (--ensure
+            # idempotency). Nodes with no attributable job are skipped.
+            for node in nodes:
+                run_recipe = running_recipes.get(node)
+                if run_recipe and _extract_model_name(run_recipe) != want_model:
+                    _stop_node(node, result, stop_failures)
+
         try:
             # Concrete id = recipe's model field (fall back to the resolved
             # unit's model). Always advertise concrete + alias so the endpoint
@@ -393,7 +441,6 @@ def _provision_models(plan: Any, cluster: str = "hscc",
             # rendered command on every path, so the space reaches vLLM's
             # nargs='+' `--served-model-name` as SEPARATE argv tokens and both
             # names register.
-            concrete = _extract_model_name(recipe) or getattr(unit, "model", "")
             cmd = ["sparkrun", "run", os.path.expanduser(recipe),
                    "--cluster", cluster, "--hosts", hosts_arg,
                    "--port", str(port), "--no-follow", "--ensure"]
@@ -413,12 +460,23 @@ def _provision_models(plan: Any, cluster: str = "hscc",
             result["failed"].append({"node": hosts_arg, "port": port, "recipe": recipe,
                                      "error": str(e)})
 
+    if recreated:
+        result["recreated"] = recreated
+    if refused:
+        result["refused"] = refused
+
     if result["failed"]:
         result["status"] = "warn"
         result["note"] = f"{len(result['failed'])} model(s) failed to launch"
+    elif refused:
+        result["status"] = "warn"
+        result["note"] = f"{len(refused)} unit(s) refused (span-member solo)"
     else:
         result["note"] = f"{len(result['provisioned'])} model(s) ensured up"
+    if recreated:
+        result["note"] += f"; {len(recreated)} recreated (serve command changed)"
     return result
+
 
 
 def _running_nodes_via_sparkrun() -> List[str]:
@@ -479,6 +537,197 @@ def _running_recipes_via_sparkrun() -> Dict[str, str]:
         if ip is not None:
             mapping[ip] = recipe
     return mapping
+
+
+# ── Serve-command drift + span-membership guards (apply path) ────────────
+#
+# Two related gaps on the apply path, fixed together (card t_7733c4cc):
+#
+#   1. RECREATE on serve-command change: apply used --ensure semantics (its own
+#      output said "N model(s) ensured up"), which NO-OPs on an already-running
+#      container. Serving flags — notably the --served-model-name alias — only
+#      take effect on a FRESH container, so an operator who upgrades and re-runs
+#      apply believed aliases were live when they were not (completions vs the
+#      alias 404'd). A changed serve command must never result in a silent
+#      "ensured up": we recreate the drifted unit.
+#
+#   2. Never double-provision a span member: apply once spawned a SOLO unit on
+#      a node that was already a member of a tp span (two containers on one
+#      GPU). That is the same span-membership blind spot fixed for /cluster
+#      (ops._tp_peer_nodes) / /status: a tp peer reports idle in `sparkrun
+#      status`, so it reads as a free worker, but its GPU is reserved by its
+#      span. A node that is a span member is never given its own solo unit.
+
+def _read_serving_units() -> List[dict]:
+    """Read the applied serving.json units. Tolerate missing/corrupt -> []."""
+    try:
+        data = json.loads(SERVING_JSON.read_text())
+        return data.get("units", []) if isinstance(data, dict) else []
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return []
+
+
+def _existing_span_member_ips(units: Optional[List[dict]] = None) -> set:
+    """Nodes whose GPU is already reserved as a member of a multi-node / tp>1
+    span in the applied serving.json.
+
+    A unit that spans more than one node (len(nodes) > 1) or that runs tp>1
+    reserves the GPU of EVERY node in its span — primary and peers alike. Each
+    such node holds a role in the span, so it must never be handed a NEW solo
+    unit (that would double-provision one GPU — the orphan incident). A lone
+    tp=1 unit does NOT reserve its node against future assignment (its node is
+    genuinely single-tenant and reassignable).
+
+    Returns a set that is empty when serving.json is missing/corrupt — the
+    guard then can't block anything, but it also can't falsely block a legit
+    re-apply.
+    """
+    members: set = set()
+    for u in (units if units is not None else _read_serving_units()):
+        nodes = u.get("nodes") or []
+        tp = u.get("tp") or 1
+        if len(nodes) > 1 or tp > 1:
+            members.update(nodes)
+    return members
+
+
+def _flags_from_running_cmd(tokens: List[str]) -> Dict[str, str]:
+    """Reduce a running container's argv (from the rendered serve script / docker
+    Config.Cmd) to the (flag -> value) fingerprint family used for drift
+    comparison. Only the flags HSCC controls and that change the served
+    endpoint are material: the model, --port, tp size, and --served-model-name
+    (the alias). Tolerates a missing flag → the key is simply absent. Handles
+    both -tp N and --tensor-parallel-size N; --served-model-name takes one or
+    more names (nargs='+')."""
+    flags: Dict[str, str] = {}
+    n = len(tokens)
+    # Model: first token after the `serve` subcommand (before any -flag).
+    for j, tok in enumerate(tokens):
+        if tok == "serve" and j + 1 < n and not tokens[j + 1].startswith("-"):
+            flags["model"] = tokens[j + 1]
+            break
+    i = 0
+    while i < n:
+        tok = tokens[i]
+        if tok in ("--port", "-port"):
+            if i + 1 < n:
+                flags["port"] = tokens[i + 1]
+        elif tok in ("-tp", "--tp", "--tensor-parallel-size"):
+            if i + 1 < n:
+                flags["tp"] = tokens[i + 1]
+        elif tok == "--served-model-name":
+            names = []
+            j = i + 1
+            while j < n and not tokens[j].startswith("-"):
+                names.append(tokens[j])
+                j += 1
+            flags["served-model-name"] = " ".join(names) if names else ""
+        i += 1
+    return flags
+
+
+def _unit_serve_flags(unit: Any, alias: str) -> Dict[str, str]:
+    """The canonical serve-command fingerprint HSCC would launch for a resolved
+    unit. This is the *wanted* side of the drift comparison — the HSCC-level
+    inputs that become the sparkrun-rendered vLLM command (reused per-node
+    command generation + the sparkrun render path). Pure and testable, no I/O.
+
+    The `--served-model-name` value is the single space-separated token HSCC
+    hands sparkrun (`concrete alias`), per the tokenization note above.
+    """
+    concrete = _extract_model_name(unit.recipe) or getattr(unit, "model", "")
+    flags: Dict[str, str] = {"model": concrete, "port": str(unit.port)}
+    if unit.tp and unit.tp > 1:
+        flags["tp"] = str(unit.tp)
+    if concrete:
+        flags["served-model-name"] = f"{concrete} {alias}"
+    else:
+        flags["served-model-name"] = alias
+    return flags
+
+
+def _serve_command_drift(unit: Any, alias: str, running_cmd: Optional[List[str]],
+                         want_flags: Optional[Dict[str, str]] = None) -> List[str]:
+    """Return human-readable descriptions of how the serve command HSCC would
+    launch for `unit` differs from the command the running container was started
+    with (`running_cmd`: argv list from the container's rendered serve script /
+    docker Config.Cmd). [] = no drift.
+
+    `running_cmd is None` (no container running / unreachable) → [] : there is
+    nothing up to correct, so the caller does a normal (fresh or ensure) launch.
+    Any non-empty result means the unit MUST be recreated — a changed serve
+    command is never a silent "ensured up"."""
+    if running_cmd is None:
+        return []
+    # If the running command is not a recognizable vLLM serve command (the
+    # `serve` subcommand token is absent), we can't make a meaningful per-flag
+    # comparison — treat it like an uninspectable container (no forced
+    # recreation). Real drift ALWAYS manifests as a vLLM serve flag, which is
+    # caught below; this only prevents a false-positive recreation loop on
+    # non-vLLM runtimes.
+    if "serve" not in running_cmd:
+        return []
+    want = want_flags if want_flags is not None else _unit_serve_flags(unit, alias)
+    have = _flags_from_running_cmd(running_cmd)
+    diffs = []
+    for key in ("model", "port", "tp", "served-model-name"):
+        w, h = want.get(key), have.get(key)
+        if key == "tp":
+            if "tp" not in want and "tp" not in have:
+                continue  # both tp=1: no --tp flag either side, not a diff
+        if w != h:
+            diffs.append(f"{key}: running={h!r} wanted={w!r}")
+    return diffs
+
+
+def _running_container_cmd(node: str) -> Optional[List[str]]:
+    """The actual argv the running sparkrun vLLM container on `node` was started
+    with — from the RENDERED serve script sparkrun wrote into the container
+    (`/tmp/sparkrun_serve.sh`), the authoritative vLLM command — falling back
+    to `docker inspect` of `.Config.Cmd`/`.Args`. Returned as a token list, or
+    None when no container is running / the node is unreachable (so a never-live
+    node still gets a fresh launch). Delegate the fetch to SSH; the gateway
+    orchestrates all four hosts. Tests monkeypatch this function."""
+    import subprocess as _sp
+    try:
+        r = _sp.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+             f"spark@{node}",
+             "docker ps --format '{{.Names}}' | grep -i sparkrun | head -1 | "
+             "xargs -I{} docker exec {} cat /tmp/sparkrun_serve.sh 2>/dev/null"
+             " || "
+             "docker ps --format '{{.Names}}' | grep -i sparkrun | head -1 | "
+             "xargs -I{} docker inspect --format '{{.Config.Cmd}}' {}"],
+            capture_output=True, text=True, timeout=20)
+    except Exception:
+        return None
+    text = (r.stdout or "").strip()
+    if not text:
+        return None
+    if text.startswith("["):  # docker inspect printed a JSON argv array
+        try:
+            return json.loads(text)
+        except Exception:
+            return None
+    # else: it's the rendered serve script — tokenize like bash would.
+    import shlex
+    try:
+        tokens = shlex.split(text)
+    except Exception:
+        return None
+    return tokens
+
+
+def _stop_node(node: str, result: dict, stop_failures: list) -> None:
+    """Best-effort `sparkrun stop --all` on one node; record outcome in result."""
+    import subprocess as _sp
+    try:
+        _sp.run(["sparkrun", "stop", "--all", "--hosts", node],
+                capture_output=True, timeout=60)
+        result["stopped"].append(node)
+    except Exception as e:
+        stop_failures.append(f"{node}: {e}")
+
 
 
 # ── Template loading ───────────────────────────────────────────────────────

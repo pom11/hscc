@@ -161,8 +161,42 @@ def _select_workers(spec: Union[str, int], pool: List[str]) -> List[str]:
     return pool[:n]
 
 
+# ── Existing span-membership (the apply-time orphan guard) ─────────────────
+#
+# A node that is already a member of a multi-node / tp>1 span has its GPU
+# reserved by that span, even though `sparkrun status` shows tp peers as idle.
+# The resolver must never hand such a node a NEW SOLO unit (that would
+# double-provision one GPU). Re-apply of the SAME topology is still fine — the
+# spanning branches reclaim the same nodes as spans (Part 1 recreates them);
+# only the solo tp==1 branch is restricted.
+
+def _serving_json_path() -> str:
+    return os.path.join(os.path.expanduser("~/.hscc"), "serving.json")
+
+
+def _existing_span_member_ips(units=None) -> set:
+    """Nodes reserved as members of any multi-node / tp>1 unit in the applied
+    serving.json. Empty set when serving.json is missing/corrupt."""
+    if units is None:
+        try:
+            import json as _j
+            with open(_serving_json_path()) as fh:
+                data = _j.load(fh)
+            units = data.get("units", []) if isinstance(data, dict) else []
+        except Exception:
+            return set()
+    members: set = set()
+    for u in units or []:
+        nodes = u.get("nodes") or []
+        tp = u.get("tp") or 1
+        if len(nodes) > 1 or tp > 1:
+            members.update(nodes)
+    return members
+
+
 def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
-            base_proxy_port: int = 4000) -> ResolvedPlan:
+            base_proxy_port: int = 4000,
+            existing_span_members: Optional[set] = None) -> ResolvedPlan:
     """Map an intent template onto the live cluster topology.
 
     topology: a discovery.ClusterTopology (orchestrator + workers[, vram_free]).
@@ -196,6 +230,15 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
         tp=tpl.orchestrator.tp, pp=tpl.orchestrator.pp)
 
     claimed: set = set(orch_span[1:])  # workers claimed by orchestrator span
+
+    # Existing span membership (card t_7733c4cc): nodes already reserved by a
+    # multi-node / tp>1 unit in the applied serving.json. We only restrict SOLO
+    # assignment below — the spanning branches may still reclaim these nodes as
+    # spans (that is the legitimate re-apply / recreate path). Default to the
+    # applied serving.json; callers/tests may inject a set (incl. empty).
+    if existing_span_members is None:
+        existing_span_members = _existing_span_member_ips()
+
     resolved_families: List[ResolvedFamily] = []
     proxy_port = base_proxy_port
 
@@ -250,8 +293,19 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
                 for node_ip in span:
                     claimed.add(node_ip)
         else:
-            # tp==1: existing replication behavior — one unit per node
-            for ip in avail:
+            # tp==1: existing replication behavior — one unit per node.
+            # Card t_7733c4cc: never give a node that is ALREADY a member of a
+            # tp span its own SOLO unit (would double-provision one GPU). Exclude
+            # existing span members from the solo pool. If the requested workers
+            # land entirely on span members, raise (loud) instead of silently
+            # emitting an orphan solo plan.
+            solo_pool = [ip for ip in avail if ip not in existing_span_members]
+            if not solo_pool and avail:
+                raise TemplateIntentError(
+                    f"family '{fam.name}': all {len(avail)} candidate nodes are "
+                    f"already members of a tensor-parallel span; cannot place a "
+                    f"solo unit without double-provisioning one GPU")
+            for ip in solo_pool:
                 free = nodes_for_fam[ip].get("vram_free_gb")
                 need_sum = 0.0
                 for i, m in enumerate(fam.models):
