@@ -69,9 +69,12 @@ ORCH_MODEL_HOST = os.environ.get("HSCC_ORCH_MODEL_HOST", "10.0.0.244")
 GATEWAY_HOST = os.environ.get("HSCC_GATEWAY_HOST", "10.0.0.245")
 
 # Orchestrator model: the vLLM model served on ORCH_MODEL_HOST:8000/v1.
-# Used by compaction when COMPACT_URL defaults to the orchestrator endpoint.
-# Env-overridable; default matches the live HSCC orch (Qwen3.6-35B-A3B-NVFP4).
-ORCH_MODEL = os.environ.get("HSCC_ORCH_MODEL", "nvidia/Qwen3.6-35B-A3B-NVFP4")
+# Used by compaction + the text auxiliaries when their URL defaults to the
+# orchestrator endpoint. MUST be a model actually served there — a stale id
+# 404s every call and the auxiliary-client fallback chain then reaches a cloud
+# provider, whose credential read throws under the multiplexing secret-scope
+# guard. Env-overridable; keep in sync with the orchestrator's served model.
+ORCH_MODEL = os.environ.get("HSCC_ORCH_MODEL", "deepseek-ai/DeepSeek-V4-Flash-0731")
 
 # Context-compaction: compact rarely (high threshold) and run the summarization
 # on a dedicated endpoint, not the main model — otherwise a big summary prompt
@@ -258,6 +261,54 @@ def _ensure_compaction(cfg):
             if not isinstance(aux.get("timeout"), int):
                 aux["timeout"] = COMPACT_TIMEOUT
                 changed.append("aux.timeout")
+    return changed
+
+
+# Text-only auxiliary LLM tasks that run in the orchestration path. Left at the
+# Hermes default (provider: auto), each falls through the auxiliary-client chain
+# to a cloud provider (OpenAI/OpenRouter); under multiplexing that credential
+# read runs with no active secret scope and THROWS, silently breaking the task
+# (e.g. kanban_decomposer could not decompose any card). Route them to the local
+# orchestrator model like compaction. vision + web_extract are intentionally
+# excluded — they need capability-specific providers, not a text model.
+_LOCAL_TEXT_AUX_TASKS = (
+    "kanban_decomposer", "triage_specifier", "profile_describer",
+    "curator", "title_generation", "skills_hub", "approval", "mcp",
+)
+
+
+def _ensure_text_auxiliaries(cfg):
+    """Point the text orchestration auxiliaries at the local orchestrator model.
+
+    Mirrors _ensure_compaction: only fills EMPTY fields (operator choices and any
+    pre-set provider survive) and only when a local endpoint is available.
+    Prevents the multiplexing secret-scope throw from an auto→cloud fall-through.
+    """
+    changed = []
+    if not COMPACT_URL:
+        return changed
+    aux_root = cfg.setdefault("auxiliary", {})
+    if not isinstance(aux_root, dict):
+        return changed
+    for task in _LOCAL_TEXT_AUX_TASKS:
+        aux = aux_root.setdefault(task, {})
+        if not isinstance(aux, dict):
+            continue
+        # Only claim a task still at the default auto/empty provider — never
+        # override an operator who deliberately set a provider for it.
+        prov = (aux.get("provider") or "").strip()
+        if prov not in ("", "auto"):
+            continue
+        # provider must become 'custom': 'auto' is the very value that triggers
+        # the cloud fall-through, so it is replaced (not fill-empty-preserved).
+        if prov != "custom":
+            aux["provider"] = "custom"
+            changed.append(f"aux.{task}.provider")
+        for key, want in (("base_url", COMPACT_URL),
+                          ("model", COMPACT_MODEL), ("api_key", COMPACT_KEY)):
+            if want and not (aux.get(key) or "").strip():
+                aux[key] = want
+                changed.append(f"aux.{task}.{key}")
     return changed
 
 
@@ -594,7 +645,7 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
         )
 
     empty = {"plugins": [], "toolsets": [], "kanban": [], "delegation": [],
-             "compaction": [], "fallback": [], "bitwarden": [],
+             "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [],
              "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": []}
     if not os.path.exists(config_path):
         return empty
@@ -608,6 +659,7 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
     changed_kanban = _ensure_kanban_routing(cfg)
     changed_delegation = _ensure_delegation(cfg)
     changed_compaction = _ensure_compaction(cfg)
+    changed_text_aux = _ensure_text_auxiliaries(cfg)
     changed_fallback = _ensure_fallback(cfg)
     changed_bitwarden = _ensure_bitwarden(cfg)
     changed_prompt_caching = _ensure_prompt_caching(cfg)
@@ -623,9 +675,9 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
     hooks_file_result = _ensure_hooks_file(hooks_source)
 
     if (added_plugins or added_toolsets or changed_kanban or changed_delegation
-            or changed_compaction or changed_fallback or changed_bitwarden
-            or changed_prompt_caching or changed_dashboard or changed_multiplex
-            or changed_hooks):
+            or changed_compaction or changed_text_aux or changed_fallback
+            or changed_bitwarden or changed_prompt_caching or changed_dashboard
+            or changed_multiplex or changed_hooks):
         import shutil
         import time
         shutil.copy(config_path,
@@ -635,7 +687,8 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
 
     return {"plugins": added_plugins, "toolsets": added_toolsets,
             "kanban": changed_kanban, "delegation": changed_delegation,
-            "compaction": changed_compaction, "fallback": changed_fallback,
+            "compaction": changed_compaction, "text_aux": changed_text_aux,
+            "fallback": changed_fallback,
             "bitwarden": changed_bitwarden,
             "prompt_caching": changed_prompt_caching,
             "dashboard": changed_dashboard,
