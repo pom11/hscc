@@ -121,7 +121,14 @@ class TestNASCheck:
 
 
 class TestCheckModelsServed:
-    """Verifies configured model ids are actually served by their endpoints."""
+    """Verifies configured model ids are actually served by their endpoints.
+
+    The probe must hit the REAL path an OpenAI-compatible server serves the
+    model list on — ``{base_url}/models`` preserving the /v1 version prefix
+    (e.g. ``http://host:port/v1/models``), NOT a version-stripped root. An
+    endpoint reachable but 404/401 on that path must be reported loudly, not
+    swallowed as ok (that would make the whole check inert).
+    """
 
     @staticmethod
     def _write_config(tmp_path, cfg):
@@ -136,7 +143,7 @@ class TestCheckModelsServed:
         }
         home = self._write_config(tmp_path, cfg)
 
-        def fake_get(url):
+        def fake_get(url, api_key=None):
             return '{"data": [{"id": "Qwen/Qwen3.6-27B-FP8"}, {"id": "other"}]}'
 
         check = doctor._check_models_served(home, _http_get=fake_get)
@@ -154,7 +161,7 @@ class TestCheckModelsServed:
         }
         home = self._write_config(tmp_path, cfg)
 
-        def fake_get(url):
+        def fake_get(url, api_key=None):
             return '{"data": [{"id": "deepseek-ai/DeepSeek-V4-Flash-0731"}]}'
 
         check = doctor._check_models_served(home, _http_get=fake_get)
@@ -163,7 +170,7 @@ class TestCheckModelsServed:
         # detail names the offending config key + endpoint + served ids
         assert "auxiliary.compression.model" in check.detail
         assert "nvidia/Qwen3.6-35B-A3B-NVFP4" in check.detail
-        assert "http://10.0.0.244:8000/models" in check.detail
+        assert "http://10.0.0.244:8000/v1/models" in check.detail
         assert "deepseek-ai/DeepSeek-V4-Flash-0731" in check.detail
         assert "fix" in check.fix.lower() or check.fix
 
@@ -176,7 +183,7 @@ class TestCheckModelsServed:
         }
         home = self._write_config(tmp_path, cfg)
 
-        def fake_get(url):
+        def fake_get(url, api_key=None):
             return '{"data": [{"id": "deepseek-ai/DeepSeek-V4-Flash-0731"}]}'
 
         check = doctor._check_models_served(home, _http_get=fake_get)
@@ -184,28 +191,66 @@ class TestCheckModelsServed:
         assert check.fatal is False
         assert "fallback_providers[0].model" in check.detail
 
-    def test_base_url_v1_hits_models_endpoint(self, tmp_path):
+    def test_base_url_with_v1_hits_v1_models_endpoint(self, tmp_path):
+        # JSON: a base_url ending in /v1 must be probed at .../v1/models — the
+        # REAL path OpenAI-compatible servers serve the list on — never at a
+        # version-stripped .../models (which 404s, see the reviewer's repro).
         cfg = {
             "model": {"default": "X", "base_url": "http://localhost:8000/v1"},
         }
         home = self._write_config(tmp_path, cfg)
         seen = {}
 
-        def fake_get(url):
+        def fake_get(url, api_key=None):
             seen["url"] = url
             return '{"data": [{"id": "X"}]}'
 
-        doctor._check_models_served(home, _http_get=fake_get)
-        # A base_url ending in /v1 must be probed at .../models, not .../v1/models
+        check = doctor._check_models_served(home, _http_get=fake_get)
+        assert check.ok is True
+        assert seen["url"] == "http://localhost:8000/v1/models"
+        assert seen["url"].endswith("/v1/models")
+
+    def test_base_url_without_v1_hits_models_endpoint(self, tmp_path):
+        cfg = {
+            "model": {"default": "X", "base_url": "http://localhost:8000"},
+        }
+        home = self._write_config(tmp_path, cfg)
+        seen = {}
+
+        def fake_get(url, api_key=None):
+            seen["url"] = url
+            return '{"data": [{"id": "X"}]}'
+
+        check = doctor._check_models_served(home, _http_get=fake_get)
+        assert check.ok is True
         assert seen["url"] == "http://localhost:8000/models"
 
+    def test_api_key_is_forwarded_for_auth(self, tmp_path):
+        # Endpoints requiring a key return 401 without it; the probe must send
+        # Authorization: Bearer <api_key> taken from the same config entry.
+        cfg = {
+            "model": {"default": "X", "base_url": "http://localhost:8000/v1",
+                      "api_key": "sk-secret"},
+        }
+        home = self._write_config(tmp_path, cfg)
+        seen = {}
+
+        def fake_get(url, api_key=None):
+            seen["api_key"] = api_key
+            return '{"data": [{"id": "X"}]}'
+
+        check = doctor._check_models_served(home, _http_get=fake_get)
+        assert check.ok is True
+        assert seen["api_key"] == "sk-secret"
+
     def test_endpoint_unreachable_is_not_a_false_alarm(self, tmp_path):
+        # Network/timeout failure -> ok (can't verify, don't false alarm).
         cfg = {
             "model": {"default": "X", "base_url": "http://localhost:8000/v1"},
         }
         home = self._write_config(tmp_path, cfg)
 
-        def fake_get(url):
+        def fake_get(url, api_key=None):
             raise ConnectionError("boom")
 
         check = doctor._check_models_served(home, _http_get=fake_get)
@@ -213,10 +258,29 @@ class TestCheckModelsServed:
         assert check.fatal is False
         assert "unreachable" in check.detail
 
+    def test_reachable_but_404_on_models_path_reports_loudly(self, tmp_path):
+        # Endpoint reachable but /models 404s (wrong path) -> a REAL probe/
+        # config error, reported loudly (ok False). This is the defect that
+        # made the previous version inert — every probe 404ed and passed.
+        cfg = {
+            "model": {"default": "X", "base_url": "http://localhost:8000/v1"},
+        }
+        home = self._write_config(tmp_path, cfg)
+        from urllib.error import HTTPError
+
+        def fake_get(url, api_key=None):
+            raise HTTPError(url, 404, "Not Found", None, None)
+
+        check = doctor._check_models_served(home, _http_get=fake_get)
+        assert check.ok is False
+        assert check.fatal is False
+        assert "404" in check.detail
+        assert "http://localhost:8000/v1/models" in check.detail
+
     def test_unreadable_config_is_not_a_false_alarm(self, tmp_path):
         # config.yaml absent -> ok, explanatory note
         home = str(tmp_path)
-        check = doctor._check_models_served(home, _http_get=lambda u: "")
+        check = doctor._check_models_served(home, _http_get=lambda u, a=None: "")
         assert check.ok is True
         assert "unreadable" in check.detail
 
@@ -227,7 +291,7 @@ class TestCheckModelsServed:
         }
         self._write_config(tmp_path, cfg)
 
-        def fake_get(url):
+        def fake_get(url, api_key=None):
             return '{"data": [{"id": "X"}]}'
 
         os.makedirs(os.path.join(str(tmp_path), "hermes-agent"), exist_ok=True)
