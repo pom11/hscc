@@ -20,6 +20,15 @@ Bootstrap calls this so a fresh install is fully wired, not half-wired and
 silently dumping all work onto the orchestrator. Safe to re-run: only fills
 missing/default values, never clobbers a value the operator deliberately set,
 preserves the rest of the config, backs up once before writing.
+
+Model aliases: the defaults below name STABLE LOGICAL ALIASES
+(``orchestrator-model``, ``worker-model``), NOT concrete model ids. The aliases
+are resolved to a real served model id at the serving layer, so swapping a
+model or template changes ONE thing (the alias mapping) instead of ~35 copied
+concrete ids scattered across the config. An operator who wants a concrete id
+regardless can still force one via the ``HSCC_*_MODEL`` env overrides — those
+bypass the alias and are written verbatim. Bootstrap only emits the alias; the
+serving layer is what resolves alias → concrete id.
 """
 import os
 import sys
@@ -44,7 +53,7 @@ HSCC_TOOLSETS = ["hscc-cluster", "sparkrun", "delegation"]
 # Fleet-routing defaults. The worker proxy (sparkrun LiteLLM LB) load-balances
 # every worker GPU behind one URL; env-overridable to match the generator.
 WORKER_PROXY_URL = os.environ.get("HSCC_WORKER_PROXY_URL", "http://localhost:4000/v1")
-WORKER_MODEL = os.environ.get("HSCC_WORKER_MODEL", "Qwen/Qwen3.6-27B-FP8")
+WORKER_MODEL = os.environ.get("HSCC_WORKER_MODEL", "worker-model")
 WORKER_PROXY_KEY = os.environ.get("HSCC_WORKER_PROXY_KEY", "sk-sparkrun")
 DEFAULT_ASSIGNEE = os.environ.get("HSCC_DEFAULT_ASSIGNEE", "worker")
 # Concurrency: board-wide cap + per-profile cap. Defaults sized so the single
@@ -68,13 +77,17 @@ MAX_CONCURRENT_CHILDREN = int(os.environ.get("HSCC_MAX_CONCURRENT_CHILDREN", "9"
 ORCH_MODEL_HOST = os.environ.get("HSCC_ORCH_MODEL_HOST", "10.0.0.244")
 GATEWAY_HOST = os.environ.get("HSCC_GATEWAY_HOST", "10.0.0.245")
 
-# Orchestrator model: the vLLM model served on ORCH_MODEL_HOST:8000/v1.
+# Orchestrator model alias: the vLLM model served on ORCH_MODEL_HOST:8000/v1.
 # Used by compaction + the text auxiliaries when their URL defaults to the
-# orchestrator endpoint. MUST be a model actually served there — a stale id
-# 404s every call and the auxiliary-client fallback chain then reaches a cloud
-# provider, whose credential read throws under the multiplexing secret-scope
-# guard. Env-overridable; keep in sync with the orchestrator's served model.
-ORCH_MODEL = os.environ.get("HSCC_ORCH_MODEL", "deepseek-ai/DeepSeek-V4-Flash-0731")
+# orchestrator endpoint. Defaults to the STABLE ALIAS ``orchestrator-model``
+# (resolved to a concrete served id at the serving layer), so swapping the
+# orchestrator's served model changes ONE thing — the alias mapping — not
+# every copied concrete id. MUST resolve to a model actually served there: a
+# stale id 404s every call and the auxiliary-client fallback chain then
+# reaches a cloud provider, whose credential read throws under the
+# multiplexing secret-scope guard. Env-overridable via HSCC_ORCH_MODEL to
+# force a concrete id and short-circuit the alias resolution.
+ORCH_MODEL = os.environ.get("HSCC_ORCH_MODEL", "orchestrator-model")
 
 # Context-compaction: compact rarely (high threshold) and run the summarization
 # on a dedicated endpoint, not the main model — otherwise a big summary prompt
@@ -83,8 +96,11 @@ ORCH_MODEL = os.environ.get("HSCC_ORCH_MODEL", "deepseek-ai/DeepSeek-V4-Flash-07
 # the busy worker proxy; override with HSCC_COMPACT_URL/_MODEL.
 COMPACT_THRESHOLD = float(os.environ.get("HSCC_COMPACT_THRESHOLD", "0.8"))
 # When COMPACT_URL defaults to the orch endpoint (:8000), the model MUST be the
-# orch model — the worker model (27B-FP8) is not registered on the orchestrator
-# and every compaction call returns 404.
+# orchestrator-model alias — the worker-model alias resolves to a model not
+# registered on the orchestrator, so every compaction call would 404. The
+# derivation below reads both aliases end-to-end: orch URL → orchestrator-model,
+# any other URL → worker-model. The COMPACT_MODEL env override (HSCC_COMPACT_MODEL)
+# still forces a concrete id at runtime.
 _DEFAULT_COMPACT_URL = f"http://{ORCH_MODEL_HOST}:8000/v1"
 _COMPACT_URL_RAW = os.environ.get("HSCC_COMPACT_URL", _DEFAULT_COMPACT_URL)
 _COMPACT_MODEL_DEFAULT = ORCH_MODEL if _COMPACT_URL_RAW == _DEFAULT_COMPACT_URL else WORKER_MODEL
@@ -94,7 +110,8 @@ COMPACT_KEY = os.environ.get("HSCC_COMPACT_KEY", "sk-sparkrun")
 COMPACT_TIMEOUT = int(os.environ.get("HSCC_COMPACT_TIMEOUT", "90"))
 
 # M5: a wedged orchestrator (200-but-hangs) should degrade to the worker LB
-# instead of hanging. Seed one fallback provider = the worker proxy.
+# instead of hanging. Seed one fallback provider = the worker proxy, using the
+# worker-model alias (resolved to a concrete id at the serving layer).
 FALLBACK_MODEL = os.environ.get("HSCC_FALLBACK_MODEL", WORKER_MODEL)
 FALLBACK_URL = os.environ.get("HSCC_FALLBACK_URL", WORKER_PROXY_URL)
 FALLBACK_KEY = os.environ.get("HSCC_FALLBACK_KEY", "sk-sparkrun")
