@@ -130,6 +130,158 @@ def _gateway_running() -> Check:
                  fix="Start it after bootstrap.", fatal=False)
 
 
+def _models_url(base_url: str) -> str:
+    """Normalize an endpoint base_url to an OpenAI-style ``/models`` probe URL.
+
+    ``http://host:port/v1`` -> ``http://host:port/models``
+    ``http://host:port``   -> ``http://host:port/models``
+    Returns "" for missing/blank input.
+    """
+    url = (base_url or "").strip()
+    if not url:
+        return ""
+    url = url.rstrip("/")
+    if url.endswith("/v1"):
+        url = url[: -len("/v1")]
+    return url + "/models"
+
+
+def _http_get_default(url: str) -> str:
+    """Fetch ``url`` and return its body as text. Raises on any failure."""
+    import urllib.request
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return resp.read().decode("utf-8")
+
+
+def _collect_model_entries(cfg: dict) -> list:
+    """Return ``(model_id, base_url, config_key)`` for every configured model.
+
+    Sources: top-level ``model``, ``delegation``, each ``fallback_providers[]``,
+    and every ``auxiliary.*`` entry. Entries missing a model id or base_url are
+    skipped (no probe URL means nothing to verify).
+    """
+    entries = []
+
+    def add(model, base_url, key):
+        if model and isinstance(model, str) and model.strip():
+            entries.append((model.strip(), (base_url or "").strip(), key))
+
+    top = cfg.get("model")
+    if isinstance(top, dict):
+        add(top.get("default"), top.get("base_url"), "model.default")
+
+    dlg = cfg.get("delegation")
+    if isinstance(dlg, dict):
+        add(dlg.get("model"), dlg.get("base_url"), "delegation.model")
+
+    for i, fp in enumerate(cfg.get("fallback_providers") or []):
+        if isinstance(fp, dict):
+            add(fp.get("model"), fp.get("base_url"),
+                f"fallback_providers[{i}].model")
+
+    aux = cfg.get("auxiliary")
+    if isinstance(aux, dict):
+        for task, ent in aux.items():
+            if isinstance(ent, dict):
+                add(ent.get("model"), ent.get("base_url"),
+                    f"auxiliary.{task}.model")
+
+    return entries
+
+
+def _check_models_served(hermes_home=None, *, _http_get=None) -> Check:
+    """Verify every configured model id is actually served by its endpoint.
+
+    Non-fatal (warning): a stale model id is drift to fix (every call 404s),
+    not a reason to hard-stop bootstrap. Config unreadable or endpoint
+    unreachable are NOT flagged — those would be false alarms, not evidence.
+
+    ``_http_get(url) -> str`` receives the RESOLVED probe URL (``/v1`` already
+    stripped, ``/models`` appended) and returns the response body text; it is
+    injectable for tests (mirrors how ``_cluster_runner`` is injected elsewhere).
+    """
+    import json
+
+    home = hermes_home or os.path.expanduser("~/.hermes")
+    config_path = os.path.join(home, "config.yaml")
+
+    try:
+        import yaml
+        with open(config_path) as fh:
+            cfg = yaml.safe_load(fh) or {}
+    except Exception as exc:
+        return Check("models served", True,
+                     detail=f"config unreadable ({exc}); skipped", fatal=False)
+
+    if not isinstance(cfg, dict):
+        return Check("models served", True,
+                     detail="config has no model entries; skipped", fatal=False)
+
+    entries = _collect_model_entries(cfg)
+    if not entries:
+        return Check("models served", True,
+                     detail="no configured model ids; nothing to verify",
+                     fatal=False)
+
+    getter = _http_get or _http_get_default
+
+    # Group by resolved probe URL, deduping duplicate endpoints and keeping
+    # first-seen order so detail output is stable.
+    by_url = {}
+    for model_id, base_url, key in entries:
+        url = _models_url(base_url)
+        if not url:
+            continue
+        by_url.setdefault(url, []).append((model_id, key))
+
+    if not by_url:
+        return Check("models served", True,
+                     detail="no model endpoints found; nothing to verify",
+                     fatal=False)
+
+    problems = []
+    checked = []
+    for url, pairs in by_url.items():
+        try:
+            raw = getter(url)
+        except Exception as exc:
+            # Endpoint unreachable -> explain and continue, no false alarm.
+            checked.append(f"{url} unreachable ({exc}); skipped")
+            continue
+        try:
+            data = json.loads(raw)
+            served = [str(m.get("id")) for m in (data.get("data") or [])
+                      if isinstance(m, dict) and m.get("id")]
+        except Exception:
+            checked.append(f"{url} returned unparsable response; skipped")
+            continue
+
+        served_line = ", ".join(served) if served else "(none)"
+        served_set = set(served)
+        for model_id, key in pairs:
+            checked.append(f"{key} -> {model_id} @ {url}")
+            if model_id not in served_set:
+                problems.append(
+                    f"{key} ('{model_id}') not served at {url}; "
+                    f"served: {served_line}")
+
+    if problems:
+        fix = ("Set each misconfigured model id to one already served by its "
+               "endpoint (see detail), or re-run apply_template to regenerate "
+               "the config from current templates.")
+        return Check("models served", False,
+                     detail="; ".join(problems), fix=fix, fatal=False)
+
+    if not checked:
+        return Check("models served", True,
+                     detail="no endpoints probed", fatal=False)
+
+    return Check("models served", True,
+                 detail="; ".join(checked) + " — all configured models served",
+                 fatal=False)
+
+
 def _run_cluster_list() -> str:
     try:
         r = subprocess.run(["sparkrun", "cluster", "list", "--json"],
@@ -140,7 +292,8 @@ def _run_cluster_list() -> str:
         return ""
 
 
-def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None) -> dict:
+def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
+               _http_get=None) -> dict:
     home = hermes_home or os.path.expanduser("~/.hermes")
     checks: List[Check] = [
         _python_ok(),
@@ -151,6 +304,10 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None) -> di
         _nas_ok(),
         _disk_ok(os.path.expanduser("~")),
         _gateway_running(),
+        # Models-served is non-fatal (warning): drift to fix, not a reason to
+        # hard-stop. It probes each distinct endpoint once; a probe failure is
+        # reported as ok (no false alarm), so it never flips preflight `ok`.
+        _check_models_served(home, _http_get=_http_get),
     ]
     fatal_failed = [c for c in checks if not c.ok and c.fatal]
     return {
