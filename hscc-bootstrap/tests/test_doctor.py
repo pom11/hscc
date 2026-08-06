@@ -15,6 +15,31 @@ import doctor
 import enable_plugins
 
 
+def _fake_http(served_names):
+    """Return an injectable ``_http_get(url, api_key=None)`` that simulates a
+    `/models` endpoint serving ``served_names``. Matches the doctor.py probe
+    contract (Bearer auth is a no-op here). Makes the alias-served happy path
+    for conversion tests and lets the refusal path be exercised with a
+    different served list."""
+    def _get(url, api_key=None):
+        body = {"object": "list", "data": [
+            {"id": m, "object": "model"} for m in served_names
+        ]}
+        return json.dumps(body)
+    return _get
+
+
+def _fake_http_unreachable(url, api_key=None):
+    """Simulate an endpoint that cannot be reached (network/timeout)."""
+    raise OSError("Connection refused (simulated)")
+
+
+def _fake_http_bad_body(url, api_key=None):
+    """Simulate an endpoint reachable but returning a non-parseable /models
+    body (probe/config error — never a silent refuse)."""
+    return "not json at all"
+
+
 class TestPythonCheck:
     def test_passes(self):
         check = doctor._python_ok()
@@ -385,6 +410,374 @@ class TestGetNested:
                                   "b") == "[1, 2]"
 
 
+class TestConvertOrchestratorIdsToAlias:
+    """Card D: one-time CONCRETE → alias migration helper."""
+
+    def test_root_model_default_orch_pointing(self):
+        cfg = {
+            "model": {
+                "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                "base_url": "http://10.0.0.244:8000/v1",
+            }
+        }
+        changed = doctor._convert_orchestrator_ids_to_alias(
+            cfg, _http_get=_fake_http(["orchestrator-model"]))
+        assert changed == ["model.default"]
+        assert cfg["model"]["default"] == "orchestrator-model"
+
+    def test_loopback_orch_pointing(self):
+        cfg = {
+            "model": {
+                "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                "base_url": "http://localhost:8000/v1",
+            }
+        }
+        changed = doctor._convert_orchestrator_ids_to_alias(
+            cfg, _http_get=_fake_http(["orchestrator-model"]))
+        assert "model.default" in changed
+        assert cfg["model"]["default"] == "orchestrator-model"
+
+    def test_aux_compression_orch_pointing(self):
+        cfg = {
+            "auxiliary": {
+                "compression": {
+                    "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                    "base_url": "http://10.0.0.244:8000/v1",
+                }
+            }
+        }
+        changed = doctor._convert_orchestrator_ids_to_alias(
+            cfg, _http_get=_fake_http(["orchestrator-model"]))
+        assert "auxiliary.compression.model" in changed
+        assert cfg["auxiliary"]["compression"]["model"] == "orchestrator-model"
+
+    def test_delegation_model_worker_proxy(self):
+        cfg = {
+            "delegation": {
+                "model": "Qwen/Qwen3.6-27B-FP8",
+                "base_url": "http://localhost:4000/v1",
+            }
+        }
+        changed = doctor._convert_orchestrator_ids_to_alias(
+            cfg, _http_get=_fake_http(["worker-model"]))
+        assert changed == ["delegation.model"]
+        assert cfg["delegation"]["model"] == "worker-model"
+
+    def test_remote_cloud_endpoint_untouched(self):
+        # Remote/cloud endpoints are classified None -> never probed, never
+        # converted. Indeterminate endpoints are NEVER guessed at.
+        cfg = {
+            "model": {
+                "default": "gpt-4o",
+                "base_url": "https://api.openai.com/v1",
+            },
+            "delegation": {
+                "model": "claude-3-5-sonnet",
+                "base_url": "https://api.anthropic.com",
+            },
+        }
+        changed = doctor._convert_orchestrator_ids_to_alias(
+            cfg, _http_get=_fake_http(["orchestrator-model", "worker-model"]))
+        assert changed == []
+        assert cfg["model"]["default"] == "gpt-4o"
+        assert cfg["delegation"]["model"] == "claude-3-5-sonnet"
+
+    def test_vision_web_extract_orch_pointing(self):
+        cfg = {
+            "auxiliary": {
+                "vision": {
+                    "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                    "base_url": "http://localhost:8000/v1",
+                },
+                "web_extract": {
+                    "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                    "base_url": "http://127.0.0.1:8000/v1",
+                },
+            }
+        }
+        changed = doctor._convert_orchestrator_ids_to_alias(
+            cfg, _http_get=_fake_http(["orchestrator-model"]))
+        assert "auxiliary.vision.model" in changed
+        assert "auxiliary.web_extract.model" in changed
+        assert cfg["auxiliary"]["vision"]["model"] == "orchestrator-model"
+        assert cfg["auxiliary"]["web_extract"]["model"] == "orchestrator-model"
+
+    def test_already_alias_idempotent(self):
+        cfg = {
+            "model": {
+                "default": "orchestrator-model",
+                "base_url": "http://10.0.0.244:8000/v1",
+            },
+            "delegation": {
+                "model": "worker-model",
+                "base_url": "http://localhost:4000/v1",
+            },
+        }
+        changed = doctor._convert_orchestrator_ids_to_alias(
+            cfg, _http_get=_fake_http(["orchestrator-model", "worker-model"]))
+        assert changed == []
+        assert cfg["model"]["default"] == "orchestrator-model"
+        assert cfg["delegation"]["model"] == "worker-model"
+
+    def test_fallback_provider_worker_proxy(self):
+        cfg = {
+            "fallback_providers": [{
+                "model": "Qwen/Qwen3.6-27B-FP8",
+                "base_url": "http://localhost:4000/v1",
+            }]
+        }
+        changed = doctor._convert_orchestrator_ids_to_alias(
+            cfg, _http_get=_fake_http(["worker-model"]))
+        assert changed == ["fallback_providers[0].model"]
+        assert cfg["fallback_providers"][0]["model"] == "worker-model"
+
+    def test_non_dict_cfg_noop(self):
+        assert doctor._convert_orchestrator_ids_to_alias([]) == []
+        assert doctor._convert_orchestrator_ids_to_alias(None) == []
+
+    # ---- SAFETY GATE refusal paths ----
+
+    def test_alias_absent_refuses_and_reports(self):
+        # Endpoint reachable but does NOT serve the alias -> entry stays
+        # UNCONVERTED and is reported loudly (names the key, endpoint, served).
+        cfg = {
+            "model": {
+                "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                "base_url": "http://10.0.0.244:8000/v1",
+            }
+        }
+        refused = []
+        changed = doctor._convert_orchestrator_ids_to_alias(
+            cfg,
+            _http_get=_fake_http(["Qwen/Qwen3.6-27B-FP8"]),
+            refused=refused)
+        assert changed == []
+        assert cfg["model"]["default"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
+        assert len(refused) == 1
+        assert refused[0].startswith("! NOT CONVERTED model.default")
+        assert "orchestrator-model" in refused[0]  # names the alias
+        assert "Qwen" in refused[0]  # names what IS served
+
+    def test_unreachable_endpoint_refuses(self):
+        cfg = {
+            "model": {
+                "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                "base_url": "http://10.0.0.244:8000/v1",
+            }
+        }
+        refused = []
+        changed = doctor._convert_orchestrator_ids_to_alias(
+            cfg, _http_get=_fake_http_unreachable, refused=refused)
+        assert changed == []
+        assert cfg["model"]["default"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
+        assert len(refused) == 1
+        assert "unreachable" in refused[0]
+        assert "refusing to convert" in refused[0]
+
+    def test_probe_error_refuses(self):
+        cfg = {
+            "delegation": {
+                "model": "Qwen/Qwen3.6-27B-FP8",
+                "base_url": "http://localhost:4000/v1",
+            }
+        }
+        refused = []
+        changed = doctor._convert_orchestrator_ids_to_alias(
+            cfg, _http_get=_fake_http_bad_body, refused=refused)
+        assert changed == []
+        assert cfg["delegation"]["model"] == "Qwen/Qwen3.6-27B-FP8"
+        assert len(refused) == 1
+        assert "probe of" in refused[0]
+
+    def test_orch_endpoint_not_serving_orch_alias(self):
+        # The orchestrator endpoint serves ONLY worker-model (wrong/orphaned
+        # serving). The migration must NOT write orchestrator-model and must
+        # refuse loudly — converting would produce a 404 on every call.
+        cfg = {
+            "model": {
+                "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                "base_url": "http://10.0.0.244:8000/v1",
+            }
+        }
+        refused = []
+        changed = doctor._convert_orchestrator_ids_to_alias(
+            cfg, _http_get=_fake_http(["worker-model"]), refused=refused)
+        assert changed == []
+        assert cfg["model"]["default"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
+        assert len(refused) == 1
+        assert "orchestrator-model" in refused[0]   # names wanted alias
+        assert "worker-model" in refused[0]          # names what IS served
+
+    def test_root_model_at_worker_proxy_converts_to_worker(self):
+        # Conservative superset: a root model.default pointing at the WORKER
+        # proxy is converted to worker-model (the generic pair handling).
+        cfg = {
+            "model": {
+                "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                "base_url": "http://localhost:4000/v1",
+            }
+        }
+        changed = doctor._convert_orchestrator_ids_to_alias(
+            cfg, _http_get=_fake_http(["worker-model"]))
+        assert changed == ["model.default"]
+        assert cfg["model"]["default"] == "worker-model"
+
+    def test_caching_probes_once_per_endpoint(self):
+        # Multiple entries pointing at the same endpoint probe it exactly once.
+        calls = []
+
+        def counting_http(url, api_key=None):
+            calls.append(url)
+            return json.dumps({"object": "list", "data": [
+                {"id": "orchestrator-model", "object": "model"}]})
+
+        cfg = {
+            "model": {
+                "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                "base_url": "http://localhost:8000/v1",
+            },
+            "auxiliary": {
+                "compression": {
+                    "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                    "base_url": "http://localhost:8000/v1",
+                },
+                "vision": {
+                    "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                    "base_url": "http://localhost:8000/v1",
+                },
+            },
+        }
+        changed = doctor._convert_orchestrator_ids_to_alias(
+            cfg, _http_get=counting_http)
+        assert changed == ["model.default",
+                           "auxiliary.compression.model",
+                           "auxiliary.vision.model"]
+        assert calls == ["http://localhost:8000/v1/models"]
+
+
+class TestAliasMigrationInFix:
+    """Card D wired into run_doctor_fix."""
+
+    def test_fix_includes_conversion_and_writes(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        cfg = {
+            "plugins": {"enabled": []},
+            "model": {
+                "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                "base_url": "http://10.0.0.244:8000/v1",
+            },
+        }
+        with open(config_path, "w") as fh:
+            yaml.safe_dump(cfg, fh)
+
+        hermes_home = str(tmp_path)
+        os.makedirs(os.path.join(hermes_home, "hermes-agent"), exist_ok=True)
+
+        res = doctor.run_doctor_fix(
+            config_path=str(config_path),
+            hermes_home=hermes_home,
+            _cluster_runner=lambda: '[{"name":"x"}]',
+            _http_get=_fake_http(["orchestrator-model"]),
+        )
+        msgs = [m for m in res["fixes_applied"]
+                if "-> set orchestrator-model" in m]
+        assert msgs, res["fixes_applied"]
+        # Conversion is written back to disk.
+        final_cfg = yaml.safe_load(open(config_path))
+        assert final_cfg["model"]["default"] == "orchestrator-model"
+
+    def test_fix_refuses_conversion_when_alias_not_served(self, tmp_path):
+        # SAFETY GATE: an endpoint that does NOT serve the alias must come back
+        # UNCONVERTED, with a loud report surfaced on alias_conversion_refused.
+        config_path = tmp_path / "config.yaml"
+        cfg = {
+            "plugins": {"enabled": []},
+            "model": {
+                "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                "base_url": "http://10.0.0.244:8000/v1",
+            },
+        }
+        with open(config_path, "w") as fh:
+            yaml.safe_dump(cfg, fh)
+
+        hermes_home = str(tmp_path)
+        os.makedirs(os.path.join(hermes_home, "hermes-agent"), exist_ok=True)
+
+        res = doctor.run_doctor_fix(
+            config_path=str(config_path),
+            hermes_home=hermes_home,
+            _cluster_runner=lambda: '[{"name":"x"}]',
+            _http_get=_fake_http(["Qwen/Qwen3.6-27B-FP8"]),  # alias NOT served
+        )
+        # No conversion applied; the concrete id survives on disk.
+        final_cfg = yaml.safe_load(open(config_path))
+        assert final_cfg["model"]["default"] == \
+            "deepseek-ai/DeepSeek-V4-Flash-0731"
+        # Loud report surfaced.
+        assert res["alias_conversion_refused"], \
+            res["alias_conversion_refused"]
+        assert any("model.default" in r for r in res["alias_conversion_refused"])
+
+    def test_fix_refuses_conversion_when_endpoint_unreachable(self, tmp_path):
+        # SAFETY GATE: endpoint unreachable -> no conversion, never convert blind.
+        config_path = tmp_path / "config.yaml"
+        cfg = {
+            "plugins": {"enabled": []},
+            "model": {
+                "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                "base_url": "http://10.0.0.244:8000/v1",
+            },
+        }
+        with open(config_path, "w") as fh:
+            yaml.safe_dump(cfg, fh)
+
+        hermes_home = str(tmp_path)
+        os.makedirs(os.path.join(hermes_home, "hermes-agent"), exist_ok=True)
+
+        res = doctor.run_doctor_fix(
+            config_path=str(config_path),
+            hermes_home=hermes_home,
+            _cluster_runner=lambda: '[{"name":"x"}]',
+            _http_get=_fake_http_unreachable,
+        )
+        final_cfg = yaml.safe_load(open(config_path))
+        assert final_cfg["model"]["default"] == \
+            "deepseek-ai/DeepSeek-V4-Flash-0731"
+        assert any("unreachable" in r for r in res["alias_conversion_refused"])
+
+    def test_fix_no_config_path_has_empty_refused(self, tmp_path):
+        os.makedirs(os.path.join(str(tmp_path), "hermes-agent"), exist_ok=True)
+        res = doctor.run_doctor_fix(
+            config_path=None, hermes_home=str(tmp_path),
+            _cluster_runner=lambda: "[]",
+        )
+        assert "alias_conversion_refused" in res
+        assert res["alias_conversion_refused"] == []
+
+    def test_fix_does_not_touch_hermes_home_config(self, tmp_path):
+        # A pre-existing ~/.hermes/config.yaml (here simulated by a file in
+        # hermes_home) must never be modified by the --fix path; only the
+        # explicit config_path is a target.
+        config_path = tmp_path / "config.yaml"
+        cfg = {"plugins": {"enabled": []}}
+        with open(config_path, "w") as fh:
+            yaml.safe_dump(cfg, fh)
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "hermes-agent").mkdir()
+        live_config = hermes_home / "config.yaml"
+        live_config.write_text("model:\n  default: gpt-4o\n")
+
+        doctor.run_doctor_fix(
+            config_path=str(config_path),
+            hermes_home=str(hermes_home),
+            _cluster_runner=lambda: '[{"name":"x"}]',
+        )
+        # The live config is untouched; only the explicit config_path changed.
+        assert "gpt-4o" in live_config.read_text()
+
+
 class TestDoctorFixNoopWhenFresh:
     def test_fix_noop_when_fresh(self, tmp_path, monkeypatch):
         config_path = tmp_path / "config.yaml"
@@ -405,7 +798,7 @@ class TestDoctorFixNoopWhenFresh:
             },
             "delegation": {
                 "base_url": "http://localhost:4000/v1",
-                "model": "Qwen/Qwen3.6-27B-FP8",
+                "model": "worker-model",
                 "provider": "custom",
                 "api_key": "sk-sparkrun",
                 "max_concurrent_children": 9,
@@ -414,7 +807,7 @@ class TestDoctorFixNoopWhenFresh:
             "auxiliary": {
                 "compression": {
                     "base_url": "http://10.0.0.244:8000/v1",
-                    "model": "nvidia/Qwen3.6-35B-A3B-NVFP4",
+                    "model": "orchestrator-model",
                     "provider": "custom",
                     "api_key": "sk-sparkrun",
                     "timeout": 90,
@@ -422,13 +815,13 @@ class TestDoctorFixNoopWhenFresh:
                 **{task: {
                     "provider": "custom",
                     "base_url": enable_plugins.COMPACT_URL,
-                    "model": enable_plugins.COMPACT_MODEL,
+                    "model": "orchestrator-model",
                     "api_key": enable_plugins.COMPACT_KEY,
                 } for task in enable_plugins._LOCAL_TEXT_AUX_TASKS},
             },
             "fallback_providers": [{
                 "provider": "custom",
-                "model": "Qwen/Qwen3.6-27B-FP8",
+                "model": "worker-model",
                 "base_url": "http://localhost:4000/v1",
                 "api_key": "sk-sparkrun",
             }],

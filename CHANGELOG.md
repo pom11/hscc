@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] — Logical model aliases + full cluster visibility
+
+### Added
+- **Logical model aliases advertised at the serving layer.** Each endpoint now
+  advertises a stable alias (`orchestrator-model` for the orchestrator unit,
+  `worker-model` for worker-family units) *alongside* its concrete model id, via
+  vLLM's multi-name `--served-model-name`. The two names are passed
+  **space-separated** — sparkrun bash-executes the rendered command on every
+  path (`utils/shell.py` pipes it through `bash`), so the space reaches vLLM's
+  `nargs='+'` flag as two separate argv tokens. Consumers can pin the alias, so
+  switching model or template re-aims the alias instead of rewiring every copied
+  id. The alias is derived by role identity, not list position, so it stays
+  correct when a plan has no orchestrator or units are filtered.
+- **Config writers emit aliases.** `enable_plugins.py` and `hscc-roles/generator.py`
+  default to the aliases instead of concrete ids. `HSCC_ORCH_MODEL` /
+  `HSCC_WORKER_MODEL` / `HSCC_COMPACT_MODEL` still force a concrete id.
+- **`doctor` models-served check.** Verifies every configured model id
+  (`model.default`, `delegation.model`, `fallback_providers[].model`, and each
+  `auxiliary.*.model`) is actually served by its endpoint — probing
+  `{base_url}/models` with the `/v1` prefix preserved and `Authorization: Bearer`
+  from the same config entry. Non-fatal; names the offending key, the endpoint,
+  and the ids that *are* served. This check caught a live misconfiguration within
+  an hour of being written.
+- **Node-state engine** (`hscc-commands/cmdlib.py`): enumerates every node in
+  `cluster.json` and classifies it `serving` / `tp_peer` / `idle` / `unreachable`,
+  with tp membership read from serving.json spans rather than endpoint probing.
+
+### Fixed
+- **`/cluster` and `/status` hid nodes.** Both iterated serving.json unit *primary*
+  nodes only, so tensor-parallel peer nodes were structurally invisible — a
+  4-node cluster reported "Workers (1)". Now every node is rendered with an
+  explicit state, and a tp peer shows as `tp peer` rather than a false ❌ down.
+- **0% GPU util read as a broken worker.** A loaded-but-idle vLLM legitimately
+  reports 0% between requests; it is now labelled `(model loaded, idle between
+  requests)` so it cannot be misread. The number was always correct — the label
+  was missing.
+- **NAS listed as a failed compute node.** `cluster.json` `nasDevices` entries were
+  enumerated alongside workers and reported `unreachable`.
+- **`pick_node` could target a tp peer.** `ops.cluster_status` now exposes
+  `tp_peer_nodes` and excludes span members from the idle pool, so a node already
+  participating in a tp span is never handed out for new work.
+
+### Upgrade notes
+- **Deploy ordering matters.** `hscc template apply` must run *before* anything
+  writes alias-valued config: an alias only resolves once the serving layer
+  advertises it. Out of order, every call 404s and the auxiliary-client fallback
+  chain can reach a cloud provider, which throws under the multiplexing
+  secret-scope guard. `hscc doctor` flags the mismatch.
+- **Aliases do not activate on an already-running fleet.** `apply` uses ensure
+  semantics: a unit that is already up is left alone ("model(s) ensured up"), so
+  a changed serve flag such as `--served-model-name` never reaches vLLM. Aliases
+  take effect on the next *fresh* provision of each unit. Until then `/v1/models`
+  lists only the concrete id — verify with
+  `curl {endpoint}/v1/models` before pointing config at an alias. Recreate-on-drift
+  is tracked as a follow-up.
+
 ## [1.5.0] — DSV4 templates + multiplexing secret-scope wedge fixes
 
 ### Added
