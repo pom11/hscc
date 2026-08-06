@@ -314,12 +314,14 @@ def gateway_on_cluster():
 
 
 def read_cluster_json():
-    """All hosts from ~/.hscc/cluster.json as a list of dicts.
+    """Compute nodes only from ~/.hscc/cluster.json, as a list of dicts.
 
-    The gateway entry plus each worker plus each nasDevice (if present). Each
-    entry carries ip/name/id/role when present in the file. Missing or corrupt
-    file → [] (callers fall back to serving.json unit nodes). Never drops a
-    node.
+    The gateway entry plus each worker — the authoritative compute-node list
+    that /cluster renders. nasDevices (NAS/storage) are deliberately EXCLUDED:
+    they are not compute nodes, so including them would render a storage device
+    as a failed/unreachable worker row. Each entry carries ip/name/id/role when
+    present in the file. Missing or corrupt file → [] (callers fall back to
+    serving.json unit nodes). Never drops a compute node.
     """
     try:
         with open(CLUSTER_JSON) as fh:
@@ -335,9 +337,6 @@ def read_cluster_json():
     for w in d.get("workers") or []:
         if isinstance(w, dict) and w.get("ip"):
             hosts.append(w)
-    for n in d.get("nasDevices") or []:
-        if isinstance(n, dict) and n.get("ip"):
-            hosts.append(n)
     return hosts
 
 
@@ -421,14 +420,16 @@ def classify_node(node_ip, scoreboard, probe_fn=_curl_model, reachability_fn=Non
 
 
 def enumerate_cluster_nodes(*, probe_fn=_curl_model, reachability_fn=None):
-    """Enumerate every cluster.json node, each classified. cluster.json-driven.
+    """Enumerate every cluster.json compute node, each classified. cluster.json-driven.
 
-    The authoritative host list from cluster.json, each classified against the
-    serving.json scoreboard via classify_node. If cluster.json is empty/corrupt,
-    fall back to the serving.json unit nodes (each classified). NEVER omits a
-    node present in cluster.json. Every returned dict carries the classification
-    {"ip","state","model","detail"} plus the node's cluster.json name/id/role
-    when present.
+    The authoritative host list from cluster.json (gateway + workers — NAS is
+    deliberately excluded at read_cluster_json, so a storage device can never
+    surface as a failed node), each classified against the serving.json
+    scoreboard via classify_node. If cluster.json is empty/corrupt, fall back
+    to the serving.json unit nodes (each classified). NEVER omits a compute
+    node present in cluster.json. Every returned dict carries the
+    classification {"ip","state","model","detail"} plus the node's
+    cluster.json name/id/role when present.
     """
     hosts = read_cluster_json()
     score = serving_unit_scoreboard()

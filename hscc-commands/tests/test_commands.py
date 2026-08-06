@@ -451,14 +451,16 @@ def test_read_cluster_json_all_hosts(tmp_path, monkeypatch):
     assert hosts[0]["id"] == "gx10-gateway"
 
 
-def test_read_cluster_json_includes_nas(tmp_path, monkeypatch):
+def test_read_cluster_json_excludes_nas(tmp_path, monkeypatch):
     d = dict(CLUSTER_LIVE)
     d["nasDevices"] = [{"ip": "10.0.0.249", "name": "nas"}]
     f = tmp_path / "cluster.json"
     f.write_text(json.dumps(d))
     monkeypatch.setattr(cmdlib, "CLUSTER_JSON", str(f))
     hosts = cmdlib.read_cluster_json()
-    assert any(h["ip"] == "10.0.0.249" for h in hosts)
+    ips = [h["ip"] for h in hosts]
+    assert ips == ["10.0.0.244", "10.0.0.246", "10.0.0.247", "10.0.0.248"]
+    assert not any(h["ip"] == "10.0.0.249" for h in hosts)
 
 
 def test_read_cluster_json_empty_on_missing(tmp_path, monkeypatch):
@@ -578,4 +580,20 @@ def test_enumerate_falls_back_to_serving_nodes(monkeypatch):
                                            reachability_fn=lambda ip: True)
     ips = [n["ip"] for n in nodes]
     assert sorted(ips) == ["10.0.0.244", "10.0.0.246", "10.0.0.247", "10.0.0.248"]
+    assert [n["state"] for n in nodes] == ["idle", "tp_peer", "idle", "tp_peer"]
+
+
+def test_enumerate_excludes_nas_from_node_list(tmp_path, monkeypatch):
+    """nasDevices in cluster.json must NOT surface as a failed node (no NAS row)."""
+    d = dict(CLUSTER_LIVE)
+    d["nasDevices"] = [{"ip": "10.0.0.249", "name": "nas"}]
+    f = tmp_path / "cluster.json"
+    f.write_text(json.dumps(d))
+    monkeypatch.setattr(cmdlib, "CLUSTER_JSON", str(f))
+    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING_LIVE["units"])
+    nodes = cmdlib.enumerate_cluster_nodes(probe_fn=lambda ip: None,
+                                           reachability_fn=lambda ip: True)
+    ips = [n["ip"] for n in nodes]
+    assert ips == ["10.0.0.244", "10.0.0.246", "10.0.0.247", "10.0.0.248"]
+    assert "10.0.0.249" not in ips           # NAS never rendered as a node
     assert [n["state"] for n in nodes] == ["idle", "tp_peer", "idle", "tp_peer"]
