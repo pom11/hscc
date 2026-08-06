@@ -11,11 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Logical model aliases advertised at the serving layer.** The orchestrator
   endpoint now advertises `orchestrator-model` and each worker endpoint
   advertises `worker-model` as a stable alias alongside its concrete model id,
-  via vLLM's multi-name `--served-model-name` flag (comma-separated in a single
-  flag). `_provision_models` derives the concrete id from each recipe's `model:`
-  field (falling back to the resolved unit's model). Consumers can now pin the
-  alias, so a template/tier switch only re-aims the alias instead of rewiring
-  every copied model id. After apply, `GET {endpoint}/v1/models` lists BOTH the
+  via vLLM's multi-name `--served-model-name` flag. The names are encoded
+  SPACE-separated in a single flag value (`--served-model-name <concrete>
+  <alias>`), because these recipes use an explicit command template and
+  sparkrun appends the override verbatim, so the space is what yields the two
+  separate argv tokens vLLM's `nargs='+'` expects (a comma would register one
+  literal `<concrete>,<alias>` name and both ids would 404). `_provision_models`
+  derives the concrete id from each recipe's `model:` field (falling back to the
+  resolved unit's model), and the alias is assigned by role identity against the
+  plan's orchestrator — never by list position. Consumers can now pin the alias,
+  so a template/tier switch only re-aims the alias instead of rewiring every
+  copied model id. After apply, `GET {endpoint}/v1/models` lists BOTH the
   concrete id AND the alias, and a chat completion against the alias
   (`orchestrator-model` / `worker-model`) returns HTTP 200. Recipes are
   untouched.

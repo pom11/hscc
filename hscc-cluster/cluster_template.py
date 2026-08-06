@@ -310,33 +310,29 @@ def _provision_models(plan: Any, cluster: str = "hscc",
     result = {"stopped": [], "provisioned": [], "failed": [],
               "status": "ok", "note": ""}
 
-    # (nodes, port, recipe, tp) the plan wants serving.
+    # (unit, nodes, port, recipe, tp, alias) the plan wants serving.
     #   nodes is a List[str] — the full span (len == tp).
-    want = [(plan.orchestrator.nodes, plan.orchestrator.port,
-             plan.orchestrator.recipe, plan.orchestrator.tp)]
-    for fam in plan.families:
-        for u in fam.units:
-            want.append((u.nodes, u.port, u.recipe, u.tp))
-    # Every node in every span is "in use" — don't stop a node that is part of a
-    # spanning unit even if it isn't the primary node.
-    plan_nodes = {n for nodes, _, _, _ in want for n in nodes}
-
+    #
     # Logical-alias advertisement (HSCC v1.5.1). Each endpoint advertises BOTH
     # its concrete model id and a STABLE alias (orchestrator-model / worker-model)
     # via vLLM's multi-name `--served-model-name`, so consumers can pin the alias
     # and a template/tier switch re-aims it without rewiring every copied id.
-    # want[0] is the orchestrator unit (plan.orchestrator); the rest are worker
-    # family units. The concrete id comes from the recipe's `model:` field (same
-    # derivation as want_model below); falls back to the resolved unit's model.
-    unit_alias = {0: "orchestrator-model"}
-    for idx in range(1, len(want)):
-        unit_alias[idx] = "worker-model"
+    # The alias is decided by ROLE at construction time (identity against
+    # plan.orchestrator), NOT by magic list index — so a worker-only or reordered
+    # plan can never alias a worker unit as "orchestrator-model".
+    want = []
+    for u in [plan.orchestrator] + [unit for fam in plan.families for unit in fam.units]:
+        alias = "orchestrator-model" if u is plan.orchestrator else "worker-model"
+        want.append((u, u.nodes, u.port, u.recipe, u.tp, alias))
+    # Every node in every span is "in use" — don't stop a node that is part of a
+    # spanning unit even if it isn't the primary node.
+    plan_nodes = {n for _, nodes, _, _, _, _ in want for n in nodes}
 
     if not do_launch:
         span_label = lambda nodes: ",".join(nodes)
         result["note"] = "dry-run: would provision " + ", ".join(
-            f"{r.split('/')[-1]}@{span_label(nodes)}:{p}" for nodes, p, r, _ in want)
-        result["provisioned"] = [f"{span_label(nodes)}:{p}:{r}" for nodes, p, r, _ in want]
+            f"{r.split('/')[-1]}@{span_label(nodes)}:{p}" for _, nodes, p, r, _, _ in want)
+        result["provisioned"] = [f"{span_label(nodes)}:{p}:{r}" for _, nodes, p, r, _, _ in want]
         return result
 
     # Stop sparkrun containers on nodes the plan does not use.
@@ -360,7 +356,7 @@ def _provision_models(plan: Any, cluster: str = "hscc",
     # (Address already in use). A node already serving the wanted model is left
     # running (--ensure idempotency). Nodes with no attributable job are skipped.
     running_recipes = _running_recipes_via_sparkrun()
-    for want_idx, (nodes, port, recipe, tp) in enumerate(want):
+    for unit, nodes, port, recipe, tp, alias in want:
         want_model = _extract_model_name(recipe)
         for node in nodes:
             run_recipe = running_recipes.get(node)
@@ -376,11 +372,24 @@ def _provision_models(plan: Any, cluster: str = "hscc",
             # Concrete id = recipe's model field (fall back to the resolved
             # unit's model). Always advertise concrete + alias so the endpoint
             # stays queryable by its real name and by the stable logical alias.
-            concrete = _extract_model_name(recipe) or getattr(plan.all_units[want_idx], "model", "")
+            #
+            # Encoding: the value is SPACE-separated (`concrete alias`), NOT
+            # comma-joined, because these recipes use an explicit command
+            # template without a {served_model_name} placeholder. sparkrun's
+            # `_augment_served_model_name` then appends the value verbatim as a
+            # single string token; when that rendered command is executed, the
+            # space splits it into SEPARATE argv tokens, so vLLM's nargs='+'
+            # `--served-model-name` registers <concrete> AND <alias> as two
+            # models. Comma-joined would register ONE model literally named
+            # "<concrete>,<alias>" → both concrete and alias 404 (fleet outage).
+            # Verify: after apply, `GET {endpoint}/v1/models` lists both the
+            # concrete id and the alias, and a chat completion against the alias
+            # returns HTTP 200.
+            concrete = _extract_model_name(recipe) or getattr(unit, "model", "")
             cmd = ["sparkrun", "run", os.path.expanduser(recipe),
                    "--cluster", cluster, "--hosts", hosts_arg,
                    "--port", str(port), "--no-follow", "--ensure"]
-            cmd.extend(["--served-model-name", f"{concrete},{unit_alias[want_idx]}"])
+            cmd.extend(["--served-model-name", f"{concrete} {alias}"])
             if tp > 1:
                 cmd.extend(["--tp", str(tp)])
             r = subprocess.run(cmd, capture_output=True, text=True,

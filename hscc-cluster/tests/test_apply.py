@@ -1097,20 +1097,32 @@ class TestProvisionTimeout:
 
 # ── HSCC v1.5.1: logical alias advertisement via --served-model-name ─────────
 
+# vLLM `--served-model-name` is nargs='+' (SPACE-separated names). Sparkrun
+# appends the CLI override to an explicit-command recipe verbatim as a single
+# string token (`_augment_served_model_name`: `"%s %s %s" % (cmd, flag, value)`),
+# and the rendered command is then shell-executed — so a comma-joined value
+# registers ONE model literally named "<concrete>,<alias>" and both the concrete
+# id and the alias 404. This test doubles as the mirror of sparkrun's append so
+# a comma-vs-space regression FAILS the suite.
+_RENDERED_VLLM_TPL = (
+    "vllm serve {model} --host 0.0.0.0 --port 8000 --trust-remote-code "
+    "--max-model-len 262144 --enable-prefix-caching -tp 2 -pp 1"
+)
+
+
 class TestServedModelNameAliases:
     """Card A1: _provision_models advertises BOTH the concrete model id and a
     stable logical alias (orchestrator-model / worker-model) via vLLM's multi-name
-    `--served-model-name`, comma-separated in a single flag. This makes the alias
+    `--served-model-name`, SPACE-separated in a single flag. This makes the alias
     real: after apply, `GET {endpoint}/v1/models` lists the concrete id AND the
     alias, and a chat completion against the alias returns HTTP 200. The alias is
     resolved at the serving layer, so a template/tier switch only re-aims the
     alias instead of rewiring every copied model id."""
 
     def _invoke(self, monkeypatch, status_out="", *, orch_recipe="~/recipes/orch.yaml",
-                worker_recipe="~/recipes/deepseek.yaml"):
+                worker_recipe="~/recipes/deepseek.yaml", orch_model="orch"):
         """Run _provision_models with a plan of one orchestrator + one worker,
         returning every recorded `sparkrun run` argv."""
-
         import subprocess
         from unittest.mock import MagicMock
         calls = []
@@ -1121,7 +1133,7 @@ class TestServedModelNameAliases:
 
         monkeypatch.setattr(subprocess, "run", mock_run)
         orch = ti.ResolvedUnit("orchestrator", None, orch_recipe,
-                               "orch", ["10.0.0.1"], 8000, 1, 1)
+                               orch_model, ["10.0.0.1"], 8000, 1, 1)
         unit = ti.ResolvedUnit("worker", "coding", worker_recipe,
                                "deepseek", ["10.0.0.2"], 8000, 1, 1)
         fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[unit])
@@ -1135,31 +1147,49 @@ class TestServedModelNameAliases:
                 if c[0] == "sparkrun" and c[1] == "run" and recipe_substr in str(c)]
 
     @staticmethod
-    def _name_flag(argv):
+    def _name_value(argv):
+        """The single value token sparkrun will receive for --served-model-name."""
         idx = argv.index("--served-model-name")
         return argv[idx + 1]
+
+    @staticmethod
+    def _rendered_command(model, served_value):
+        """Mirror sparkrun's explicit-command path: render the recipe's command
+        template, then `_augment_served_model_name` appends the served value
+        verbatim (`"%s %s %s" % (cmd, flag, value)`). The returned string is what
+        the shell actually executes, so the space-separated names must survive as
+        TWO argv tokens."""
+        cmd = _RENDERED_VLLM_TPL.format(model=model)
+        return f"{cmd.rstrip()} --served-model-name {served_value}"
 
     def test_orchestrator_advertises_concrete_and_alias(self, monkeypatch):
         calls = self._invoke(monkeypatch)
         orch_run = self._run_for(calls, "orch.yaml")
         assert len(orch_run) == 1
-        flag = self._name_flag(orch_run[0])
         # concrete id comes from _extract_model_name(recipe) → filename stem here
-        assert flag == "orch,orchestrator-model"
+        assert self._name_value(orch_run[0]) == "orch orchestrator-model"
 
     def test_worker_advertises_concrete_and_alias(self, monkeypatch):
         calls = self._invoke(monkeypatch)
         worker_run = self._run_for(calls, "deepseek.yaml")
         assert len(worker_run) == 1
-        assert self._name_flag(worker_run[0]) == "deepseek,worker-model"
+        assert self._name_value(worker_run[0]) == "deepseek worker-model"
 
-    def test_multi_name_is_single_comma_separated_flag(self, monkeypatch):
+    def test_rendered_command_has_two_space_separated_names(self, monkeypatch):
+        """The FINAL command that reaches vLLM must carry the concrete id and the
+        alias as SEPARATE space-separated argv tokens, never a comma-joined single
+        name (which would make both concrete and alias 404)."""
         calls = self._invoke(monkeypatch)
         orch_run = self._run_for(calls, "orch.yaml")[0]
-        # Both names live in ONE --served-model-name value, comma-separated.
+        # Both names live in ONE --served-model-name flag, space-separated.
         assert orch_run.count("--served-model-name") == 1
-        assert orch_run[orch_run.index("--served-model-name") + 1] == \
-            "orch,orchestrator-model"
+        served_value = self._name_value(orch_run)
+        assert served_value == "orch orchestrator-model"
+        # Replay sparkrun's explicit-command append and check the executable
+        # command string: the space must survive into two distinct tokens.
+        rendered = self._rendered_command("orch", served_value)
+        assert "--served-model-name orch orchestrator-model" in rendered
+        assert "--served-model-name orch,orchestrator-model" not in rendered
 
     def test_concrete_id_read_from_recipe_model_field(self, monkeypatch, tmp_path):
         """A recipe whose model: field is deepseek-ai/DeepSeek-V4-Flash-0731 must
@@ -1169,7 +1199,44 @@ class TestServedModelNameAliases:
         calls = self._invoke(monkeypatch, worker_recipe=str(recipe))
         worker_run = self._run_for(calls, "quad.yaml")
         assert len(worker_run) == 1
-        assert "deepseek-ai/DeepSeek-V4-Flash-0731,worker-model" in self._name_flag(worker_run[0])
+        self._assert_rendered_serves(
+            worker_run[0], "deepseek-ai/DeepSeek-V4-Flash-0731", "worker-model")
+
+    def _assert_rendered_serves(self, argv, concrete, alias):
+        """Assert the full rendered vllm command exposes concrete and alias as two
+        separate space-separated names (so both /v1/models entries exist)."""
+        served_value = self._name_value(argv)  # model field carries concrete here
+        rendered = self._rendered_command(concrete, served_value)
+        assert f"--served-model-name {concrete} {alias}" in rendered
+        assert f"--served-model-name {concrete},{alias}" not in rendered
+
+    def test_alias_decided_by_identity_not_role_string(self, monkeypatch, tmp_path):
+        """The orchestrator alias is assigned by identity with plan.orchestrator,
+        NOT by the unit's role string or list position — so a worker unit whose
+        role string is literally 'orchestrator' still advertises worker-model, and
+        no worker can ever be aliased as orchestrator-model."""
+        import subprocess
+        from unittest.mock import MagicMock
+        calls = []
+
+        def mock_run(argv, **kw):
+            calls.append(argv)
+            return MagicMock(returncode=0, stderr="", stdout="")
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        # A worker unit with a misleading role "orchestrator".
+        unit = ti.ResolvedUnit("orchestrator", "coding", "~/recipes/deepseek.yaml",
+                               "deepseek", ["10.0.0.2"], 8001, 1, 1)
+        fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[unit])
+        orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
+                               "orch", ["10.0.0.1"], 8000, 1, 1)
+        plan = ti.ResolvedPlan(template="test", orchestrator=orch, families=[fam])
+        cluster_template._provision_models(plan, do_launch=True)
+
+        orch_run = self._run_for(calls, "orch.yaml")[0]
+        worker_run = self._run_for(calls, "deepseek.yaml")[0]
+        assert self._name_value(orch_run) == "orch orchestrator-model"
+        assert self._name_value(worker_run) == "deepseek worker-model"
 
     def test_flag_placed_before_tp(self, monkeypatch):
         """--served-model-name coexists with --tp without disturbing it."""
@@ -1192,8 +1259,7 @@ class TestServedModelNameAliases:
         with_index = orch_run.index("--served-model-name")
         tp_index = orch_run.index("--tp")
         assert with_index < tp_index
-        assert orch_run[orch_run.index("--served-model-name") + 1] == \
-            "orch,orchestrator-model"
+        assert self._name_value(orch_run) == "orch orchestrator-model"
 
     def test_dry_run_not_affected(self, monkeypatch):
         """do_launch=False never builds sparkrun run argv — no served-model-name
