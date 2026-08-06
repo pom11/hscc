@@ -31,7 +31,11 @@ def _fmt_units(units, label):
 
 
 def _fmt_metrics(m):
-    """Format a metrics dict into a compact per-node block."""
+    """Format a metrics dict into a compact per-node block.
+
+    Surfaces VRAM used by the model when available so a loaded-but-idle node
+    (0% GPU util, high VRAM) is never misread as broken — see 2b.
+    """
     parts = []
     cpu_temp = m.get("cpu_temp_c", "")
     cpu_load = m.get("cpu_load_1m", "")
@@ -47,17 +51,70 @@ def _fmt_metrics(m):
     parts.append(f"  MEM: {mem_used}% used ({mem_avail} MB free)")
     if gpu:
         parts.append(f"  GPU {gpu}: {gpu_util}% util | {gpu_temp}°C | {gpu_power}W")
+        vram_pct = m.get("gpu_mem_used_pct", "")
+        vram_used = m.get("gpu_mem_used_mb", "")
+        vram_total = m.get("gpu_mem_total_mb", "")
+        if vram_pct not in ("", None):
+            parts.append(f"  VRAM: {vram_pct}% used by model")
+        elif vram_used not in ("", None) and vram_total not in ("", None):
+            parts.append(f"  VRAM: {vram_used} MB used by model")
     return "\n".join(parts)
 
 
-def cmd_cluster(raw_args):
-    """Read-only cluster resource snapshot. Never mutates."""
-    units = cmdlib.read_units()
-    orch = cmdlib.orchestrator_unit(units)
-    workers = cmdlib.worker_units(units)
-    metrics = cmdlib.cluster_metrics()
-    lines = ["🖥️  *HSCC cluster*", ""]
+def _tp_peer_span(scoreboard, ip):
+    """'member of <unit>/<primary> span' for a tp-peer node, or '' if no lineage."""
+    s = scoreboard.get(ip) or {}
+    if not s.get("tp_peer"):
+        return ""
+    unit_id = s.get("unit_id")
+    primary = None
+    for other_ip, v in scoreboard.items():
+        if other_ip == ip:
+            continue
+        if v.get("unit_id") == unit_id and v.get("primary_of_unit"):
+            primary = other_ip
+            break
+    if not unit_id:
+        return ""
+    return f"member of {unit_id}/{primary} span"
 
+
+def _node_state_line(node, scoreboard):
+    """One line labelling a node's distinct state. A tp peer is NEVER rendered
+    down — its state is 'tp peer', so a working peer can't show a ❌."""
+    ip = node["ip"]
+    state = node["state"]
+    model = node.get("model")
+    if state == "serving":
+        return f"  ✅ serving `{model}` @ {ip}"
+    if state == "tp_peer":
+        span = _tp_peer_span(scoreboard, ip)
+        return (f"  🔗 tp peer ({span}) @ {ip}" if span
+                else f"  🔗 tp peer @ {ip}")
+    if state == "idle":
+        return f"  ○ idle @ {ip}  (model not loaded)"
+    if state == "unreachable":
+        return f"  ❌ unreachable @ {ip}"
+    return f"  ? {state} @ {ip}"
+
+
+def _gpu_idle_note(node, m):
+    """'model loaded (idle between requests)' when a serving node reads 0% util
+    this instant — the label is the fix, never the number (2b)."""
+    if node.get("state") != "serving":
+        return ""
+    util = m.get("gpu_util_pct")
+    if util in (0, 0.0, "0", "0.0", "0%"):
+        return "  (model loaded, idle between requests)"
+    return ""
+
+
+def _cmd_cluster_legacy(lines, units, orch, metrics):
+    """Old serving.json unit-primary rendering, used only when the node engine
+    returns [] (no cluster.json AND no serving.json units). Clearly labeled."""
+    workers = cmdlib.worker_units(units)
+    lines.append("*⚠️ node engine returned no nodes — legacy serving.json-primary rendering*")
+    lines.append("  (cluster.json empty and no serving.json units; nothing newer to enumerate)")
     if orch:
         node = cmdlib.unit_node(orch)
         live = cmdlib._curl_model(node)
@@ -66,9 +123,8 @@ def cmd_cluster(raw_args):
         lines.append(f"  serving.json: `{orch.get('model')}`")
         m = metrics.get(node, {})
         if m:
-            lines.append(_fmt_metrics(m))
+            lines.append("  " + _fmt_metrics(m).replace("\n", "\n  "))
         lines.append("")
-
     lines.append(f"*Workers* ({len(workers)}):")
     if not workers:
         lines.append("  (none)")
@@ -78,6 +134,67 @@ def cmd_cluster(raw_args):
         mark = "✅" if live else "❌"
         lines.append(f"  {mark} {node}: {live or 'down'}")
         m = metrics.get(node, {})
+        if m:
+            lines.append("  " + _fmt_metrics(m).replace("\n", "\n  "))
+    return "\n".join(lines)
+
+
+def cmd_cluster(raw_args):
+    """Read-only cluster resource snapshot. Renders EVERY cluster.json node with
+    its distinct state (serving / 🔗 tp peer / ○ idle / ❌ unreachable), grouped
+    under Orchestrator / Workers headers per cluster.json role. A tp peer is
+    never down. Never mutates."""
+    units = cmdlib.read_units()
+    orch = cmdlib.orchestrator_unit(units)
+    score = cmdlib.serving_unit_scoreboard()
+    metrics = cmdlib.cluster_metrics()
+    lines = ["🖥️  *HSCC cluster*", ""]
+
+    nodes = cmdlib.enumerate_cluster_nodes()
+    if not nodes:
+        return _cmd_cluster_legacy(lines, units, orch, metrics)
+
+    using_cluster_json = bool(cmdlib.read_cluster_json())
+    header = f"*Nodes ({len(nodes)})* — "
+    header += ("source: cluster.json" if using_cluster_json else
+               "⚠️ cluster.json empty — serving.json unit nodes")
+    lines.append(header)
+    lines.append("")
+
+    orch_nodes, worker_nodes = [], []
+    for n in nodes:
+        s = score.get(n["ip"]) or {}
+        eff_role = s.get("role") or n.get("role") or ""
+        if eff_role in ("orchestrator", "gateway"):
+            orch_nodes.append(n)
+        else:
+            worker_nodes.append(n)
+
+    if orch_nodes:
+        lines.append("*Orchestrator*")
+        for n in orch_nodes:
+            lines.append(_node_state_line(n, score))
+            # Keep the serving.json declared-model note for the orchestrator
+            # PRIMARY only (a tp peer in the same span shares that declaration).
+            if n["state"] == "serving" and orch and n["ip"] == cmdlib.unit_node(orch):
+                lines.append(f"  serving.json: `{orch.get('model')}`")
+            m = metrics.get(n["ip"], {})
+            idle_note = _gpu_idle_note(n, m)
+            if idle_note:
+                lines.append(idle_note)
+            if m:
+                lines.append("  " + _fmt_metrics(m).replace("\n", "\n  "))
+        lines.append("")
+
+    lines.append(f"*Workers* ({len(worker_nodes)}):")
+    if not worker_nodes:
+        lines.append("  (none)")
+    for n in worker_nodes:
+        lines.append(_node_state_line(n, score))
+        m = metrics.get(n["ip"], {})
+        idle_note = _gpu_idle_note(n, m)
+        if idle_note:
+            lines.append(idle_note)
         if m:
             lines.append("  " + _fmt_metrics(m).replace("\n", "\n  "))
 
@@ -160,12 +277,14 @@ def cmd_cluster_restart(raw_args):
 def cmd_status(raw_args):
     """Rich one-glance dashboard: topology + free-VRAM + proxy + daemon + template."""
     snap = cmdlib.discovery_snapshot(probe=True)
+    score = cmdlib.serving_unit_scoreboard()
     lines = ["📊 *HSCC status*", ""]
     if snap.get("ok"):
         lines.append(f"*Topology* (source: {snap.get('source')})")
         o = snap.get("orchestrator") or {}
         lines.append(f"  orchestrator {o.get('ip')} {o.get('name') or ''}".rstrip())
         for w in snap.get("workers") or []:
+            ip = w.get("ip")
             vram = w.get("vram_free_gb")
             pw = w.get("power_draw_w")
             idle = w.get("idle")
@@ -174,8 +293,20 @@ def cmd_status(raw_args):
                 extra.append(f"{vram}GB free")
             if pw is not None:
                 extra.append(f"{pw}W{' idle' if idle else ''}")
-            hp = "✅" if w.get("vllm_healthy") else "❌"
-            lines.append(f"  {hp} worker {w.get('ip')}" + (f" — {', '.join(extra)}" if extra else ""))
+            # A tp-peer worker's OWN :8000 shares the span with its primary, so
+            # vllm_healthy is legitimately False there — never render a working
+            # peer as ❌/unhealthy (classify via the serving.json scoreboard).
+            s = (score or {}).get(ip) or {}
+            if s.get("tp_peer"):
+                hp = "🔗"
+                label = "tp peer"
+                span = _tp_peer_span(score, ip)
+                if span:
+                    label += f" ({span})"
+            else:
+                hp = "✅" if w.get("vllm_healthy") else "❌"
+                label = "worker"
+            lines.append(f"  {hp} {label} {ip}" + (f" — {', '.join(extra)}" if extra else ""))
         if snap.get("nas"):
             lines.append(f"  NAS {snap['nas'].get('ip')}")
     else:
