@@ -157,3 +157,74 @@ def test_stop_head_with_force_executes(monkeypatch):
     out = ops.stop_model({"recipe": "orch-27b", "node": "192.0.2.10",
                           "confirm": True, "force": True})
     assert out["executed"] is True
+
+
+# ── tp-peer handling (Card 3: v1.5.1 cluster status) ───────────────────────
+
+_LIVE_TOPOLOGY_UNITS = [
+    # orch: head (.244) primary, .246 is the tp peer
+    {"id": "orch", "nodes": ["10.0.0.244", "10.0.0.246"]},
+    # reasoning family: .247 primary, .248 is the tp peer (tp=2 span)
+    {"id": "family-reasoning-DeepSeek-V4-Flash-0731-247-8000",
+     "nodes": ["10.0.0.247", "10.0.0.248"], "tp": 2, "pp": 1},
+]
+
+def test_tp_peer_nodes_live_topology():
+    # The live-topology-shaped serving.json must yield exactly {.246, .248}.
+    assert ops._tp_peer_nodes(_LIVE_TOPOLOGY_UNITS) == {"10.0.0.246", "10.0.0.248"}
+
+def test_tp_peer_nodes_empty_when_no_span():
+    assert ops._tp_peer_nodes([{"id": "a", "nodes": ["1.2.3.4"]},
+                               {"id": "b", "nodes": ["5.6.7.8"], "tp": 1}]) == set()
+    assert ops._tp_peer_nodes([]) == set()
+    assert ops._tp_peer_nodes(None) == set()
+    # tp>1 with a single resolved node has no non-primary member -> no peer
+    assert ops._tp_peer_nodes([{"id": "a", "nodes": ["1.2.3.4"], "tp": 2}]) == set()
+
+def test_tp_peer_nodes_ignores_units_without_nodes():
+    assert ops._tp_peer_nodes([{"id": "a"}, {"id": "b", "tp": 4}]) == set()
+
+# Pinned test topology (conftest): HEAD=192.0.2.10, NODES=[.11, .12, .13].
+# orch spans .10(head)+.11(peer); reasoning spans .12(primary)+.13(peer,tp=2).
+_TP_UNITS_PINNED = [
+    {"id": "orch", "nodes": ["192.0.2.10", "192.0.2.11"]},
+    {"id": "family-reasoning-27b-12-8000",
+     "nodes": ["192.0.2.12", "192.0.2.13"], "tp": 2, "pp": 1},
+]
+
+def test_cluster_status_exposes_tp_peer_nodes(monkeypatch):
+    # sparkrun status shows every node idle, but .11/.13 hold tp-peer roles
+    # in spans -> they must not read as plain idle workers.
+    monkeypatch.setattr(ops, "_running_by_node", lambda: {})
+    monkeypatch.setattr(ops.cl, "read_serving_units", lambda: _TP_UNITS_PINNED)
+    out = ops.cluster_status({})
+    assert set(out["tp_peer_nodes"]) == {"192.0.2.11", "192.0.2.13"}
+    assert "192.0.2.11" not in out["idle_nodes"]
+    assert "192.0.2.13" not in out["idle_nodes"]
+    assert out["idle_nodes"] == ["192.0.2.12"]
+    # existing result keys preserved (ADD don't remove)
+    for k in ("head", "running", "idle_nodes", "serving_units", "source"):
+        assert k in out
+
+def test_pick_node_never_targets_tp_peer(monkeypatch):
+    # .11/.13 are tp peers but sparkrun shows them idle; auto-pick must not
+    # provision onto them (would collide with / corrupt the tp span).
+    monkeypatch.setattr(ops, "_running_by_node", lambda: {})
+    monkeypatch.setattr(ops.cl, "read_serving_units", lambda: _TP_UNITS_PINNED)
+    node = ops.pick_node({})["node"]
+    assert node == "192.0.2.12"
+    assert node not in ("192.0.2.11", "192.0.2.13")
+
+def test_pick_node_tp_peer_reserved_even_when_idle(monkeypatch):
+    # .13 looks idle in sparkrun but is a tp peer -> still excluded from idle
+    monkeypatch.setattr(ops, "_running_by_node",
+                        lambda: {"192.0.2.11": "orch-recipe"})
+    monkeypatch.setattr(ops.cl, "read_serving_units", lambda: _TP_UNITS_PINNED)
+    assert ops.pick_node({})["node"] == "192.0.2.12"
+
+def test_pick_node_no_tp_span_behaves_as_before(monkeypatch):
+    # no serving units / no tp spans -> tp peers empty, pick_node unchanged
+    monkeypatch.setattr(ops, "_running_by_node", lambda: {"192.0.2.11": "qwenX"})
+    monkeypatch.setattr(ops.cl, "read_serving_units", lambda: [])
+    assert ops.pick_node({})["node"] in ("192.0.2.12", "192.0.2.13")
+

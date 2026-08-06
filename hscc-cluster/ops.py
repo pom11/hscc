@@ -36,12 +36,33 @@ def _running_by_node():
     return mapping
 
 
+def _tp_peer_nodes(units):
+    """Nodes that are NON-primary members of a multi-node / multi-tp serving unit.
+
+    Authoritative tp-peer detection from the applied serving.json / template
+    (NOT endpoint probing): a unit that spans more than one node (``len(nodes)>1``)
+    or more than one GPU (``tp>1``) reserves the GPUs of every node after the
+    primary (``nodes[1:]``) as tensor-parallel peers. Each such peer holds a role
+    in the span even if `sparkrun status` currently lists it idle; it must never
+    be mistaken for a free/down worker. Defensive: tolerates units without a
+    'nodes' key and missing/corrupt input -> empty set."""
+    peers = set()
+    for u in units or []:
+        nodes = u.get("nodes") or []
+        tp = u.get("tp") or 1
+        if len(nodes) > 1 or tp > 1:
+            peers.update(nodes[1:])
+    return peers
+
+
 def cluster_status(args, **kwargs):
     running = _running_by_node()
     units = cl.read_serving_units()
-    idle = [n for n in cl.NODES if n not in running]
+    tp_peers = _tp_peer_nodes(units)
+    idle = [n for n in cl.NODES if n not in running and n not in tp_peers]
     result = {"head": cl.HEAD, "running": running, "idle_nodes": idle,
-              "serving_units": [u.get("id") or u.get("name") for u in units]}
+              "serving_units": [u.get("id") or u.get("name") for u in units],
+              "tp_peer_nodes": [n for n in _tp_peer_nodes(units)]}
     # Surface discovery source + free-VRAM when available (best-effort; never
     # fail cluster_status if discovery/probe is unavailable).
     try:
@@ -70,7 +91,8 @@ def list_recipes(args, **kwargs):
 
 def pick_node(args, **kwargs):
     running = _running_by_node()
-    idle = [n for n in cl.NODES if n not in running]
+    tp_peers = _tp_peer_nodes(cl.read_serving_units())
+    idle = [n for n in cl.NODES if n not in running and n not in tp_peers]
     if not idle:
         return {"node": None, "reason": "no idle worker nodes available"}
     return {"node": idle[0], "reason": f"idle nodes: {idle}"}
