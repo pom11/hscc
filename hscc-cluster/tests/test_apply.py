@@ -500,11 +500,17 @@ class TestSnapshotRollback:
 class TestValidateAndStatusHelpers:
     def test_validate_good(self, stub_cluster):
         r = cluster_template.validate_template("single-family")
-        assert r["ok"] is True and r["errors"] == []
+        # Both layers green → top-level ok. New spec shape: per-layer reports.
+        assert r["ok"] is True
+        assert r["structural"]["ok"] is True
+        assert r["structural"]["errors"] == []
+        assert r["placement"]["ok"] is True
 
     def test_validate_unknown(self):
         r = cluster_template.validate_template("does-not-exist")
         assert r["ok"] is False
+        assert r["structural"]["ok"] is False
+        assert r["structural"]["errors"] == ["Template not found: does-not-exist"]
 
 
 if __name__ == "__main__":

@@ -679,6 +679,8 @@ def cmd_template(raw_args):
         if len(parts) < 2:
             return f"Usage: /template {sub} <name>"
         argv = ["x", sub, parts[1]]
+        if sub == "validate":
+            argv += [a for a in parts[2:] if a.startswith("--")]
     elif sub in ("list", "status"):
         argv = ["x", sub]
     else:
