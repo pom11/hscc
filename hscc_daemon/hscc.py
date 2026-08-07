@@ -293,7 +293,7 @@ Cluster & templates
   template list        List available cluster templates (declared fleet layouts)
   template status      Which template is currently applied
   template preview <name>    Dry-run: what applying <name> would change
-  template validate <name>   Preflight-check a template is deployable
+  template validate <name> [--structural-only] [--json]   Validate a template: structural (offline) layer always; placement (live) layer unless --structural-only. Exit non-zero if either layer fails.
   template apply <name> [--confirm] [--force-recreate]   Apply a template (--confirm executes; --force-recreate stops+reruns units so changed serve flags reach vLLM)
   profiles             Running kanban task counts per profile
 
@@ -338,7 +338,7 @@ COMMAND_HELP = {
     "triggers": "Show trigger-engine rules and recent firings",
     "notify": "Send a desktop notification. Usage: hscc notify <message>",
     "cluster": "Cluster management commands.\n  Subcommands: status hosts monitor jobs info stop <id>\n  Usage: hscc cluster <subcommand> [args]",
-    "template": "Cluster template commands.\n  Subcommands: list status preview <name> validate <name> apply <name> [--confirm]\n  Usage: hscc template <subcommand> [args]",
+    "template": "Cluster template commands.\n  Subcommands: list status preview <name> validate <name> [--structural-only] [--json] apply <name> [--confirm]\n  Usage: hscc template <subcommand> [args]",
     "profiles": "Running kanban task counts per profile",
     "help": "Show help. Usage: hscc help [command]\n  Use 'hscc help advanced' for internal commands.",
     "verify": "Run a full compatibility/health smoke-test of the cluster.\n  Usage: hscc verify [--json]",
@@ -452,7 +452,7 @@ def _handle_template():
         print("  hscc template list                 List available cluster templates")
         print("  hscc template status               Which template is currently applied")
         print("  hscc template preview <name>       Dry-run: what applying <name> would change")
-        print("  hscc template validate <name>      Preflight-check a template is deployable")
+        print("  hscc template validate <name> [--structural-only] [--json]  Validate: structural (offline) layer always; placement (live) layer unless --structural-only")
         print("  hscc template apply <name> [--confirm] [--force-recreate]  Apply a template (--force-recreate re-applies changed serve flags)")
         if len(sys.argv) < 3:
             return 0
@@ -474,7 +474,15 @@ def _handle_template():
         print(f"Error: hscc-cluster plugin not found at {_resolve_cluster_dir()}",
               file=sys.stderr)
         return 1
-    return _emit(cmd_cluster_template([sub, *sys.argv[3:]]))
+    result = cmd_cluster_template([sub, *sys.argv[3:]])
+    # _emit exits non-zero on an ``error`` key; validate instead reports the
+    # layer results and MUST exit non-zero when EITHER layer fails (spec: "Exit
+    # non-zero if either layer fails, so it scripts cleanly"). So check the
+    # validate result's top-level ``ok`` explicitly before delegating to _emit.
+    rc = _emit(result)
+    if sub == "validate" and isinstance(result, dict) and result.get("ok") is False:
+        return 1
+    return rc
 
 
 def _handle_verify():
