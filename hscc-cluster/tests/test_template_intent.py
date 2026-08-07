@@ -574,3 +574,191 @@ def test_v2_templates_parse_byte_identical_to_golden():
     for name in golden:
         assert parsed[name] == golden[name], \
             f"template '{name}' parsed output differs from pre-v3 golden"
+
+
+# ── schema v3: explicit NODES → placement (T2, t_083b6cf8) ──────────────────
+# When a unit declares `nodes:`, resolve() uses that list VERBATIM and BYPASSES
+# the resolver's placement inference. nodes[0] is the span PRIMARY (exposes the
+# endpoint); the rest are tp peers — the same convention as
+# cmdlib.serving_unit_scoreboard(), so /cluster, self-heal and ops.pick_node
+# stay consistent with the template.
+#
+# The critical assertion: explicit placement must resolve to exactly the named
+# spans in BOTH states — with the target nodes RUNNING (reserved) and with them
+# FREE. The resolver historically got the free case wrong (t_16dcceb4), so
+# proving only one state would prove nothing. Bypassing the resolver means the
+# result is identical regardless of node state.
+
+class TestExplicitPlacement:
+    """T2: `nodes:` on a unit is used verbatim, bypassing resolver inference."""
+
+    def _explicit_template(self, *, orch_nodes=None, fam_nodes=None, fam_tp=2):
+        orch = {"recipe": "o.yaml"}
+        if orch_nodes is not None:
+            orch["nodes"] = orch_nodes
+            orch["tp"] = len(orch_nodes)
+        fam = {"name": "reasoning",
+               "models": [{"recipe": "big.yaml", "tp": fam_tp}]}
+        if fam_nodes is not None:
+            fam["nodes"] = fam_nodes
+        return ti.ClusterTemplate.from_dict({
+            "name": "x", "version": 3, "orchestrator": orch, "families": [fam]})
+
+    def _topo4(self):
+        # 4-node cluster: gateway .1 + workers .2/.3/.4 (like 4node-dual-dsv4)
+        return FakeTopo(orchestrator=FakeNode("10.0.0.1"),
+                        workers=[FakeNode(f"10.0.0.{2+i}") for i in range(3)])
+
+    def _running_reasoning(self, nodes):
+        # Running-family reserved bookkeeping — mirrors serving.json.
+        return {ip: {"kind": "worker", "family": "reasoning", "model": "big"}
+                for ip in nodes}
+
+    # NOTE on discriminating power: these tests deliberately use explicit spans
+    # that the BROKEN resolver would NOT produce. With a tp=2 family on workers
+    # .2/.3/.4, inference independently chooses [.2,.3] before any spanning.
+    # By naming [.3,.4] explicitly we make the bypass observable: if the
+    # explicit branch were disabled, resolve() would fall back to inference and
+    # emit [.2,.3] (or, in the reserved/free states, whatever inference yields)
+    # — NOT [.3,.4]. So disabling the feature makes these fail loudly instead
+    # of coincidentally passing. This is the honesty the task demands: testing
+    # a span that happens to equal the inferred one proves nothing.
+
+    EXPLICIT_FAM = ["10.0.0.3", "10.0.0.4"]   # != inferrable [.2,.3]
+
+    def test_explicit_family_nodes_source_family_targets_running(self):
+        """Explicit nodes with the targets RUNNING (reserved) → exactly those spans.
+        The named span is one inference would NOT produce, so a resolver fallback
+        cannot sneak past this assertion."""
+        t = self._explicit_template(fam_nodes=self.EXPLICIT_FAM)
+        plan = ti.resolve(t, self._topo4(), _coster=_coster(),
+                          reserved={"10.0.0.1": {"kind": "orchestrator", "family": None,
+                                                 "model": "o"},
+                                    **self._running_reasoning(self.EXPLICIT_FAM)})
+        units = plan.families[0].units
+        assert len(units) == 1
+        assert units[0].nodes == self.EXPLICIT_FAM
+        assert units[0].tp == 2
+
+    def test_explicit_family_nodes_identical_when_targets_free(self):
+        """Explicit nodes with the targets FREE → exactly those spans (identical
+        to the running case). This is the case the resolver historically got
+        wrong (pool=[] on free nodes); explicit placement must not depend on it.
+        Red-green guard: the free path bypasses the resolver entirely, so FREE
+        and RUNNING give the same answer — and it's NOT the inferred one."""
+        t = self._explicit_template(fam_nodes=self.EXPLICIT_FAM)
+        plan = ti.resolve(t, self._topo4(), _coster=_coster())   # no reserved
+        units = plan.families[0].units
+        assert len(units) == 1
+        assert units[0].nodes == self.EXPLICIT_FAM
+        assert units[0].tp == 2
+
+    def test_explicit_nodes0_is_primary_rest_are_tp_peers(self):
+        """nodes[0] is the span primary (exposes the endpoint); the rest are tp
+        peers — matching serving_unit_scoreboard, which reads the span with
+        index 0 as primary. The span order must survive into serving.json so
+        /cluster and self-heal classify the same way."""
+        t = self._explicit_template(fam_nodes=self.EXPLICIT_FAM)
+        plan = ti.resolve(t, self._topo4(), _coster=_coster())
+        unit = plan.families[0].units[0]
+        # primary is FIRST in the ordered span; everything after is a tp peer
+        assert unit.nodes == self.EXPLICIT_FAM
+        assert unit.nodes[0] == "10.0.0.3"
+        assert unit.nodes[1:] == ["10.0.0.4"]
+        # serving.json keeps the same order: scoreboard reads nodes[0] as primary
+        js = ti.to_serving_json(plan)
+        worker = [u for u in js["units"] if u["role"] == "worker"][0]
+        assert worker["nodes"] == self.EXPLICIT_FAM
+        assert worker["tp"] == 2
+
+    def test_explicit_orchestrator_nodes_verbatim(self):
+        """Orchestrator explicit nodes bypass the resolver and claim the whole
+        span (peers never handed to an inferred family)."""
+        t = self._explicit_template(orch_nodes=["10.0.0.1", "10.0.0.4"],
+                                    fam_nodes=None)   # family stays inferred
+        plan = ti.resolve(t, self._topo4(), _coster=_coster())
+        assert plan.orchestrator.nodes == ["10.0.0.1", "10.0.0.4"]
+        assert plan.orchestrator.tp == 2
+        # the orchestrator's peer .4 must not leak into the inferred family
+        fam_nodes = {n for u in plan.families[0].units for n in u.nodes}
+        assert "10.0.0.4" not in fam_nodes
+        assert "10.0.0.1" not in fam_nodes
+        # family resolves to the two remaining free workers .2 .3
+        assert fam_nodes == {"10.0.0.2", "10.0.0.3"}
+
+    def test_explicit_nodes_both_units_disjoint_spans(self):
+        """The canonical 4node-dual-dsv4 layout: orchestrator [.1,.4] and family
+        [.2,.3] land on exactly their named spans, each primary-first."""
+        t = ti.ClusterTemplate.from_dict({
+            "name": "4node-dual-dsv4", "version": 3,
+            "orchestrator": {"recipe": "o.yaml", "tp": 2,
+                             "nodes": ["10.0.0.1", "10.0.0.4"]},
+            "families": [{"name": "reasoning",
+                          "models": [{"recipe": "big.yaml", "tp": 2}],
+                          "nodes": ["10.0.0.2", "10.0.0.3"]}]})
+        plan = ti.resolve(t, self._topo4(), _coster=_coster())
+        assert plan.orchestrator.nodes == ["10.0.0.1", "10.0.0.4"]
+        assert plan.families[0].units[0].nodes == ["10.0.0.2", "10.0.0.3"]
+
+    def test_explicit_family_node_count_mismatch_tp_raises(self):
+        """An explicit span whose length != model tp is an impossible placement —
+        resolve() refuses it rather than emitting an incoherent unit."""
+        t = self._explicit_template(fam_nodes=["10.0.0.2", "10.0.0.3"],
+                                    fam_tp=3)
+        with pytest.raises(ti.TemplateIntentError) as e:
+            ti.resolve(t, self._topo4(), _coster=_coster())
+        assert "2 nodes listed but model tp=3" in str(e.value)
+
+    def test_explicit_orchestrator_node_count_mismatch_tp_raises(self):
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "version": 3,
+            "orchestrator": {"recipe": "o.yaml", "tp": 2,
+                             "nodes": ["10.0.0.1"]}})   # 1 node but tp=2
+        with pytest.raises(ti.TemplateIntentError) as e:
+            ti.resolve(t, self._topo4(), _coster=_coster())
+        assert "1 nodes listed but tp=2" in str(e.value)
+
+    def test_explicit_family_omitting_nodes_resolves_exactly_as_today(self):
+        """A v3 template that OMITS nodes on the family must resolve EXACTLY as
+        today's inferred resolver — explicit placement must not perturb the
+        omission path. Compare against the hand-computed inferred result."""
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "version": 3, "orchestrator": "o.yaml",
+            "families": [{"name": "reasoning",
+                          "models": [{"recipe": "big.yaml", "tp": 1}],
+                          "workers": "remaining"}]})
+        plan = ti.resolve(t, self._topo4(), _coster=_coster())
+        # inferred: one tp=1 unit per worker node, all three workers (.2 .3 .4)
+        units = plan.families[0].units
+        assert len(units) == 3
+        assert sorted(u.nodes[0] for u in units) == ["10.0.0.2", "10.0.0.3", "10.0.0.4"]
+        assert all([len(u.nodes) == 1 and u.tp == 1] for u in units)
+
+    def test_explicit_nodes_mixed_with_inferred_siblings(self):
+        """One family with explicit nodes and a later family without: the explicit
+        span is claimed, so the inferred sibling can only use what remains."""
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "version": 3, "orchestrator": "o.yaml",
+            "families": [
+                {"name": "reasoning",
+                 "models": [{"recipe": "big.yaml", "tp": 2}],
+                 "nodes": ["10.0.0.3", "10.0.0.4"]},
+                {"name": "vision", "models": [{"recipe": "v.yaml", "tp": 1}],
+                 "workers": "all"},
+            ]})
+        plan = ti.resolve(t, self._topo4(), _coster=_coster())
+        reasoning, vision = plan.families
+        assert reasoning.units[0].nodes == ["10.0.0.3", "10.0.0.4"]
+        # explicit reasoning claimed .3/.4; vision can only reach the free .2
+        assert {u.node for u in vision.units} == {"10.0.0.2"}
+
+    def test_explicit_tp1_family_on_single_node(self):
+        """A tp=1 model on a one-node explicit span resolves to that exact node,
+        primary (index 0) — len(nodes)==tp==1 is valid. Uses a node inference
+        would NOT lead with (.3), so a resolver fallback cannot pass it."""
+        t = self._explicit_template(fam_nodes=["10.0.0.3"], fam_tp=1)
+        plan = ti.resolve(t, self._topo4(), _coster=_coster())
+        assert len(plan.families[0].units) == 1     # exactly ONE unit, not 3
+        unit = plan.families[0].units[0]
+        assert unit.nodes == ["10.0.0.3"]
+        assert unit.tp == 1

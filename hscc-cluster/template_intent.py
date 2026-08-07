@@ -297,32 +297,83 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
         return reserved.get(ip, {}).get("kind")
 
     # ── Orchestrator spanning ─────────────────────────────────────────────
-    # tp>1: the orchestrator claims its own node + (tp-1) span peers. A node
-    # may be a span peer iff it is FREE or already a tp-peer of the
-    # orchestrator's own span (re-apply idempotency). A node serving a worker
-    # family is never borrowed as an orchestrator peer (double-provision guard).
-    orch_span: List[str] = [orch_ip]
-    if orch_tp > 1:
-        needed = orch_tp - 1
-        candidates = [ip for ip in pool_ips
-                      if _kind(ip) in (None, "orchestrator")]
-        if len(candidates) < needed:
+    # v3: explicit nodes BYPASS the resolver — the span is used verbatim.
+    # nodes[0] is the span primary (exposes the endpoint); the rest are tp
+    # peers, consistent with serving_unit_scoreboard() and ops.pick_node.
+    if tpl.orchestrator.nodes is not None:
+        orch_span = list(tpl.orchestrator.nodes)
+        if len(orch_span) != tpl.orchestrator.tp:
             raise TemplateIntentError(
-                f"orchestrator tp={orch_tp} but only {len(candidates)} worker "
-                f"nodes available (need {needed} additional nodes)")
-        orch_span.extend(candidates[:needed])
-        pool_ips = [ip for ip in pool_ips if ip not in orch_span[1:]]
+                f"orchestrator: {len(orch_span)} nodes listed but tp="
+                f"{tpl.orchestrator.tp}")
+        orch_tp = len(orch_span)          # span length is the authoritative tp
+        applied_explicit = True
+    else:
+        # tp>1: the orchestrator claims its own node + (tp-1) span peers. A node
+        # may be a span peer iff it is FREE or already a tp-peer of the
+        # orchestrator's own span (re-apply idempotency). A node serving a worker
+        # family is never borrowed as an orchestrator peer (double-provision guard).
+        orch_span: List[str] = [orch_ip]
+        applied_explicit = False
+        if orch_tp > 1:
+            needed = orch_tp - 1
+            candidates = [ip for ip in pool_ips
+                          if _kind(ip) in (None, "orchestrator")]
+            if len(candidates) < needed:
+                raise TemplateIntentError(
+                    f"orchestrator tp={orch_tp} but only {len(candidates)} worker "
+                    f"nodes available (need {needed} additional nodes)")
+            orch_span.extend(candidates[:needed])
+            pool_ips = [ip for ip in pool_ips if ip not in orch_span[1:]]
 
     orchestrator = ResolvedUnit(
         role="orchestrator", family=None, recipe=tpl.orchestrator.recipe,
         model=orch_model, nodes=orch_span, port=8000,
-        tp=tpl.orchestrator.tp, pp=tpl.orchestrator.pp)
+        tp=orch_tp, pp=tpl.orchestrator.pp)
 
     claimed: set = set(orch_span[1:])  # workers claimed by orchestrator span
+    if applied_explicit:
+        # The whole explicit span is verbatim-occupied, so every member is
+        # claimed against later inferred units (the primary is the gateway node,
+        # which is never handed to a worker anyway — peers are what matter).
+        claimed = set(orch_span)
     resolved_families: List[ResolvedFamily] = []
     proxy_port = base_proxy_port
 
     for fam in tpl.families:
+        # ── v3: explicit family nodes BYPASS the resolver — verbatim span. ──
+        # nodes[0] is the span primary (exposes the endpoint); the rest are tp
+        # peers — the same convention as serving_unit_scoreboard() and
+        # ops.pick_node(), so /cluster and self-heal stay consistent with the
+        # template. Every model in the family co-locates across this span.
+        if fam.nodes is not None:
+            explicit = list(fam.nodes)
+            if not explicit:
+                raise TemplateIntentError(
+                    f"family '{fam.name}': nodes list is empty")
+            units: List[ResolvedUnit] = []
+            for i, m in enumerate(fam.models):
+                if len(explicit) != m.tp:
+                    raise TemplateIntentError(
+                        f"family '{fam.name}': {len(explicit)} nodes listed "
+                        f"but model tp={m.tp}")
+                cost = coster(m.recipe)
+                if cost.fits is False:
+                    raise TemplateIntentError(
+                        f"family '{fam.name}': {m.recipe} does not fit a DGX Spark")
+                units.append(ResolvedUnit(
+                    role="worker", family=fam.name, recipe=m.recipe,
+                    model=_model_name(m.recipe), nodes=list(explicit),
+                    port=8000 + i, tp=m.tp, pp=m.pp))
+            for ip in explicit:
+                claimed.add(ip)
+            resolved_families.append(ResolvedFamily(
+                name=fam.name, proxy_port=proxy_port if fam.proxy else None,
+                units=units))
+            if fam.proxy:
+                proxy_port += 1
+            continue
+
         # Unit-aware avail: FREE nodes + nodes already serving THIS family
         # (re-apply keeps its own nodes), minus anything already claimed by an
         # earlier unit. A node serving a DIFFERENT family is never handed to
