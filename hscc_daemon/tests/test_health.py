@@ -491,6 +491,112 @@ class TestCheckWorkers:
         warn_logs = [m for m, l in log_calls if l == "WARN"]
         assert any("stop" in m.lower() and "stop error" in m for m in warn_logs)
 
+    def _setup_span(self, tmp_hfcc_dir, monkeypatch):
+        """Setup a keep-alive worker unit spanning TWO nodes (tp=2):
+        10.0.0.2 = primary (binds the endpoint), 10.0.0.3 = tp peer (no endpoint
+        of its own). Returns (health, serving, state_dir)."""
+        from hscc_daemon import health, serving
+        from hscc_daemon import state as state_mod
+        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        units = [
+            {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"],
+             "recipe": "~/r/orch.yaml", "model": "M"},
+            {"id": "w-span", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.2", "10.0.0.3"], "tp": 2,
+             "recipe": "~/r/span.yaml", "model": "S"},
+        ]
+        monkeypatch.setattr(serving, "ORCH_NODES", {"10.0.0.1"})
+        monkeypatch.setattr(serving, "load_serving",
+                            lambda: {"version": 2, "units": units})
+        health._worker_relaunch_at.clear()
+        monkeypatch.setattr(health, "_WORKER_RELATCH_FILE",
+                            str(tmp_hfcc_dir / "worker_relaunch.json"))
+        # Redirect relaunch-log write into tmp so the test never touches the
+        # real ~/.hscc on this machine.
+        def fake_expanduser(p):
+            if p.startswith("~/.hscc/"):
+                return str(tmp_hfcc_dir / p[len("~/.hscc/"):])
+            return p
+        monkeypatch.setattr(os.path, "expanduser", fake_expanduser)
+        return health, serving, state_dir
+
+    def test_tp_peer_with_no_endpoint_report_ok_never_down(self, tmp_hfcc_dir, monkeypatch):
+        """A tp-peer span member has NO endpoint of its own but must be reported
+        online, never down, and never relaunched as a solo unit. The span's
+        PRIMARY answers its own :8000; the peer's :8000 does not."""
+        health, _, state_dir = self._setup_span(tmp_hfcc_dir, monkeypatch)
+        # Scoreboard marks 10.0.0.3 the tp peer of the 10.0.0.2 span
+        monkeypatch.setattr(health, "_tp_peer_nodes", lambda: {"10.0.0.3"})
+        # Primary .2 answers; peer .3 has no endpoint (http_check to .3 -> False)
+        monkeypatch.setattr(health, "http_check",
+                            lambda url, timeout=5: {"ok": ".2:8000" in url})
+        ran = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(args) or {"ok": True})
+        popen_calls = []
+        def fake_popen(*a, **k):
+            popen_calls.append(a)
+            raise RuntimeError("should not relaunch a tp peer")
+        monkeypatch.setattr(health.subprocess, "Popen", fake_popen)
+
+        ok = health.check_workers()
+        state = json.loads((state_dir / "workers.json").read_text())
+        assert ok is True
+        # both primary and peer reported online (peer's online count = 2 total)
+        assert state["online"] == 2
+        assert state["down"] == []
+        assert state["relaunched"] == []
+        assert popen_calls == []
+
+    def test_span_member_never_given_solo_unit(self, tmp_hfcc_dir, monkeypatch):
+        """A span member whose OWN endpoint is down is still never relaunched as
+        a solo unit — it serves as part of the span, not standalone."""
+        health, _, state_dir = self._setup_span(tmp_hfcc_dir, monkeypatch)
+        monkeypatch.setattr(health, "_tp_peer_nodes", lambda: {"10.0.0.3"})
+        # Both endpoints down — but the peer must NOT be solo-relaunched
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
+        ran = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(args) or {"ok": True})
+        popen_calls = []
+        def fake_popen(*a, **k):
+            popen_calls.append(a)
+            return None  # success — the code never uses the Popen handle
+        monkeypatch.setattr(health.subprocess, "Popen", fake_popen)
+
+        health.check_workers()
+        state = json.loads((state_dir / "workers.json").read_text())
+        # exactly ONE sparkrun run launched (the down primary .2) — the peer .3
+        # is never solo-provisioned
+        assert len(popen_calls) == 1
+        assert any("10.0.0.2" in str(x) for x in popen_calls[0][0])
+        assert not any("10.0.0.3" in str(x) for x in popen_calls[0][0])
+        assert state["down"] == []                # peer never counted down
+        assert state["relaunched"] != []          # primary relaunch still works
+
+    def test_genuinely_down_primary_still_relaunched(self, tmp_hfcc_dir, monkeypatch):
+        """Regression: real self-heal must be preserved — a genuinely down
+        PRIMARY (single-node unit, not a span peer) is still relaunched."""
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        monkeypatch.setattr(health, "_tp_peer_nodes", lambda: set())  # no peers
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: {"ok": True})
+        popen_calls = []
+        def fake_popen(*args, **kwargs):
+            popen_calls.append((args, kwargs))
+            return None  # success — never uses the Popen handle
+        monkeypatch.setattr(health.subprocess, "Popen", fake_popen)
+
+        health.check_workers()
+        # solo single-node primary IS relaunched (self-heal intact)
+        assert len(popen_calls) == 1
+        popen_args = popen_calls[0][0][0]
+        assert "10.0.0.2" in popen_args
+
 
 class TestCheckProxy:
     """check_proxy() keeps the worker load-balancer alive."""
