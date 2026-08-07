@@ -513,6 +513,118 @@ class TestValidateAndStatusHelpers:
         assert r["structural"]["errors"] == ["Template not found: does-not-exist"]
 
 
+# ── T5: apply's pre-flight gate IS validate_template (t_2924a905) ──────────
+# apply must call the SAME two-layer validation as `hscc template validate`
+# (validate_template) as its gate — one implementation, not two — and block
+# before stopping or starting ANYTHING when it fails. This behaviour saved the
+# fleet on 2026-08-07: a failed apply left it completely untouched.
+
+INVALID_YAML = (
+    "name: bad\nversion: 3\n"
+    "orchestrator:\n  recipe: o.yaml\n  tp: 1\n  nodes: [10.0.0.244]\n"
+    "families:\n  - name: f\n    models:\n      - recipe: m.yaml\n"
+    "        tp: 1\n    nodes: [10.0.0.250]\n"  # .250 not in cluster.json
+)
+VALID_YAML = (
+    "name: good\nversion: 3\n"
+    "orchestrator:\n  recipe: o.yaml\n  tp: 2\n"
+    "  nodes: [10.0.0.244, 10.0.0.246]\n"
+    "families:\n  - name: f\n    models:\n      - recipe: m.yaml\n"
+    "        tp: 1\n    nodes: [10.0.0.247]\n"
+)
+CLUSTER_OBJ = {
+    "gateway": {"ip": "10.0.0.244"},
+    "workers": [{"ip": "10.0.0.246"}, {"ip": "10.0.0.247"}],
+}
+
+
+class TestApplyUsesValidateGate:
+    """T5: apply's pre-flight gate delegates to validate_template — the same
+    function behind `hscc template validate`. Invalid → block before any write
+    / provision / stop; valid → proceed; the gate and the standalone validate
+    command return identical results for the same template."""
+
+    def _setup(self, tmp_path, monkeypatch, name, yaml_text):
+        import cluster_template as ct
+        import subprocess
+        from unittest.mock import MagicMock
+        tdir = tmp_path / "templates"
+        tdir.mkdir(parents=True, exist_ok=True)
+        (tdir / f"{name}.yaml").write_text(yaml_text)
+        cj = tmp_path / "cluster.json"
+        cj.write_text(json.dumps(CLUSTER_OBJ))
+        hscc = tmp_path / "hscc"; hscc.mkdir()
+        for attr, val in [("TEMPLATE_DIR", tdir), ("CLUSTER_JSON", cj),
+                          ("HSCC_DIR", hscc),
+                          ("SERVING_JSON", hscc / "serving.json"),
+                          ("MODELS_JSON", hscc / "models.json"),
+                          ("CONFIG_YAML", hscc / "config.yaml"),
+                          ("PROFILES_DIR", hscc / "profiles"),
+                          ("PROXY_DIR", hscc / "proxies"),
+                          ("APPLIED_STATE", hscc / "applied_template.json"),
+                          ("ROLLBACK_DIR", hscc / "rollback")]:
+            monkeypatch.setattr(ct, attr, val)
+        # recipes exist (structural layer's disk check)
+        monkeypatch.setattr(ct.Path, "is_file", lambda self: True)
+        # resolver wiring so the placement layer / apply steps work offline
+        monkeypatch.setattr(ct, "_discover", lambda probe=False: _topo(2))
+        import recipe_cost as rc
+        monkeypatch.setattr(ti._rc, "recipe_cost",
+                            lambda r: rc.RecipeCost(r, per_gpu_total_gb=30,
+                                                    fits=True))
+        monkeypatch.setattr(subprocess, "run",
+                            lambda *a, **k: MagicMock(returncode=0,
+                                                      stderr="", stdout=""))
+        # provision stub that FAILS the test if it is ever reached — the gate
+        # must block before any stop/provision call is made.
+        calls = {"provision": 0}
+
+        def prov(plan, **k):
+            calls["provision"] += 1
+            return {"status": "ok", "provisioned": [], "note": "test"}
+        monkeypatch.setattr(ct, "_provision_models", prov)
+        return ct, calls
+
+    def test_invalid_blocks_and_touches_nothing(self, tmp_path, monkeypatch):
+        ct, calls = self._setup(tmp_path, monkeypatch, "bad", INVALID_YAML)
+        res = ct.apply_template("bad", confirm=True)
+        assert res["status"] == "blocked"
+        assert res["success"] is False
+        # the gate blocked BEFORE any stop/provision call — fleet untouched
+        assert calls["provision"] == 0, "gate must block before provisioning"
+        assert any("not defined in cluster.json" in e for e in res["errors"])
+        # and no writes happened either
+        assert not (tmp_path / "hscc" / "serving.json").exists()
+        assert not (tmp_path / "hscc" / "models.json").exists()
+
+    def test_valid_proceeds(self, tmp_path, monkeypatch):
+        ct, calls = self._setup(tmp_path, monkeypatch, "good", VALID_YAML)
+        res = ct.apply_template("good", confirm=True)
+        assert res["success"] is True, res
+        assert "provision" in [s["step"] for s in res["steps"]]
+        assert (tmp_path / "hscc" / "serving.json").exists()
+
+    def test_gate_matches_standalone_validate_invalid(self, tmp_path, monkeypatch):
+        ct, _ = self._setup(tmp_path, monkeypatch, "bad", INVALID_YAML)
+        apply_res = ct.apply_template("bad", confirm=True)
+        val = ct.validate_template("bad")
+        assert apply_res["status"] == "blocked"
+        assert not val["ok"]
+        # identical errors: the gate IS the standalone validate's result
+        assert (apply_res["errors"]
+                == val["structural"]["errors"] + val["placement"]["errors"])
+        assert apply_res["validation"] == val
+
+    def test_gate_matches_standalone_validate_valid(self, tmp_path, monkeypatch):
+        ct, _ = self._setup(tmp_path, monkeypatch, "good", VALID_YAML)
+        apply_res = ct.apply_template("good", confirm=True)
+        val = ct.validate_template("good")
+        assert apply_res["success"] is True
+        assert val["ok"] is True
+        assert val["structural"]["ok"] is True
+        assert val["placement"]["ok"] is True
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 

@@ -878,8 +878,28 @@ def apply_template(template_name: str, confirm: bool = False,
     already-running fleet. Each recreated unit is reported loudly. Units that
     are already serving the current command are still left alone.
     """
-    # Load + resolve against the live topology. Bad shape or unresolvable
-    # (no workers, overcommit, …) is a hard, pre-write failure.
+    # PRE-FLIGHT GATE — the SAME two-layer validation as `hscc template
+    # validate` (validate_template is that command's implementation). One
+    # implementation, not two: apply delegates its gate here so the standalone
+    # validate command and apply always agree on a template. The gate runs
+    # BEFORE anything is loaded, resolved, stopped or started, and blocks —
+    # returning without touching the fleet — whenever either layer fails
+    # (this saved the fleet on 2026-08-07: a failed apply left it untouched).
+    validation = validate_template(template_name)
+    if not validation["ok"]:
+        return {
+            "status": "blocked",
+            "success": False,
+            "note": "Template is NOT deployable.",
+            "errors": (validation["structural"]["errors"]
+                       + validation["placement"]["errors"]),
+            "validation": validation,
+        }
+
+    # Load + resolve against the live topology. The gate above guarantees this
+    # resolves clean, so we re-resolve here only to obtain the concrete plan
+    # object the apply steps (serving.json, models.json, routing, provision)
+    # operate on — not to re-validate.
     try:
         tpl = _load_intent(template_name)
         plan = _resolve(template_name, probe=True)
