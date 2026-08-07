@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.1] — Self-heal tp-peer awareness, real drift detection, migration safety gate
+
+### Fixed
+- **Self-heal double-provisioned tensor-parallel peers.** `hscc_daemon/health.py`
+  had no tp-peer awareness, so a non-primary span member — which serves through
+  the span's primary and exposes no endpoint of its own — was counted as a DOWN
+  worker (`Workers check: 2/3 online, down ['10.0.0.248']`) and relaunched as
+  a *solo* unit. That put two containers on one GPU, re-staged weights on every
+  cycle, and respawned within minutes of being stopped. Peers are now classified
+  via `cmdlib.serving_unit_scoreboard()` (the same source `/cluster` uses) and are
+  never relaunched; a genuinely down **primary** is still relaunched, covered by
+  its own regression test.
+- **`apply` reported "command drift" on every unchanged unit.** Drift was inferred
+  from "is this unit already running the same recipe", so an unchanged fleet
+  warned on every apply and trained operators to ignore the message. The rendered
+  serve command is now recorded in `serving.json` at provision time and compared
+  on the next apply: an unchanged unit produces **no** warning, a genuinely
+  changed unit is reported as real drift (with a diff of what changed), and a unit
+  with no recorded command falls back to explicit "drift not checked" wording
+  rather than asserting drift it never verified.
+
+### Added
+- **Served-alias safety gate on `doctor --fix` alias migration.** Before converting
+  any config entry to an alias, the endpoint is probed (reusing `_models_url` +
+  Bearer auth from the models-served check) and the entry is converted **only** if
+  the alias is actually in the served list. Alias absent, or endpoint unreachable,
+  leaves the entry unconverted and reports why. Converting on the assumption that
+  "the serving layer resolves the alias" is what wrote unresolvable ids into a live
+  config twice; that assumption is now checked, not trusted.
+- **`--force-recreate` for `apply`.** Stops a unit's span before the `--ensure` run
+  so a changed serve command actually reaches vLLM. Without it, `apply` leaves a
+  running unit alone and a changed flag is silently never applied.
+
+### Operational note
+A merged fix is not a live fix. The tp-peer self-heal bug persisted because the
+process actually performing self-heal was an **orphaned, unsupervised `hscc start`**
+running days-old code from a non-Hermes Python environment, with no `launchctl`
+job loaded. Updating the repo would not have changed its behaviour. When
+diagnosing recurring cluster behaviour, verify what is *running* (`ps`,
+`launchctl list`) — not only what is installed.
+
 ## [1.6.0] — Logical model aliases + full cluster visibility
 
 ### Added
