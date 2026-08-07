@@ -981,6 +981,25 @@ class TestUpdateWorkerModelIds:
             "model": {"default": default, "base_url": base_url},
         }, sort_keys=False))
 
+    def _proxy_serving(self, *served):
+        """An injectable ``_http_get`` simulating the worker proxy '/v1/models'
+        serving exactly ``served`` ids — mirrors doctor's _probe_served_models
+        contract (Bearer auth is a no-op in the fake)."""
+        import json
+        def get(url, api_key=None):
+            return json.dumps({"object": "list", "data": [
+                {"id": m, "object": "model"} for m in served]})
+        return get
+
+    def _apply(self, plan, conf, profiles=None, served=None):
+        """Run _update_worker_model_ids with the worker proxy serving ``served``
+        (default: just the concrete WORKER id — the real :4000 proxy's shape)."""
+        if served is None:
+            served = (self.WORKER,)
+        return cluster_template._update_worker_model_ids(
+            plan, profiles_dir=profiles or (conf.parent / "profiles"),
+            config_yaml=conf, _http_get=self._proxy_serving(*served))
+
     # ── config.yaml rewiring ────────────────────────────────────────────
 
     def test_config_delegation_and_fallbacks_rewired(self, tmp_path):
@@ -988,19 +1007,68 @@ class TestUpdateWorkerModelIds:
         self._write_config(conf, delegation={"model": "stale"},
                            fallbacks=[{"model": "stale", "name": "a"},
                                       {"model": "stale2", "name": "b"}])
-        result = cluster_template._update_worker_model_ids(
-            self._plan(), profiles_dir=tmp_path / "profiles", config_yaml=conf)
+        result = self._apply(self._plan(), conf)
         import yaml
         data = yaml.safe_load(conf.read_text())
         assert data["delegation"]["model"] == self.WORKER
         assert [f["model"] for f in data["fallback_providers"]] == [self.WORKER, self.WORKER]
         assert result["config_changed"] is True
 
+    def test_config_delegation_and_fallback_base_url_reaimed_to_worker_proxy(self, tmp_path):
+        """The routing regression: delegation/fallback base_url pointing at the
+        ORCHESTRATOR (:8000) must be re-aimed at the worker proxy (:4000) when
+        the writer runs. Otherwise apply fixes the model id but subagents still
+        land on the orchestrator GPU. Model AND base_url must move together."""
+        conf = tmp_path / "config.yaml"
+        self._write_config(
+            conf,
+            delegation={"model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                        "base_url": "http://10.0.0.244:8000/v1"},
+            fallbacks=[{"model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                        "base_url": "http://10.0.0.244:8000/v1"}])
+        self._apply(self._plan(), conf)
+        import yaml
+        data = yaml.safe_load(conf.read_text())
+        assert data["delegation"]["base_url"] == "http://localhost:4000/v1"
+        assert data["delegation"]["model"] == self.WORKER
+        assert data["fallback_providers"][0]["base_url"] == "http://localhost:4000/v1"
+        assert data["fallback_providers"][0]["model"] == self.WORKER
+
+    def test_config_already_on_worker_proxy_is_noop(self, tmp_path):
+        """Idempotency holds when delegation/fallback ALREADY point at the
+        worker proxy with the right model — a re-apply must not churn bytes."""
+        conf = tmp_path / "config.yaml"
+        self._write_config(
+            conf,
+            delegation={"model": self.WORKER,
+                        "base_url": "http://localhost:4000/v1"},
+            fallbacks=[{"model": self.WORKER,
+                        "base_url": "http://localhost:4000/v1"}])
+        before = conf.read_text()
+        result = self._apply(self._plan(), conf)
+        assert conf.read_text() == before
+        assert result["config_changed"] is False
+
+    def test_no_worker_family_leaves_delegation_base_url_untouched(self, tmp_path):
+        """No worker family (dual-orchestrator) ⇒ base_url is NOT re-aimed; the
+        writer must never guess a worker proxy that does not exist."""
+        conf = tmp_path / "config.yaml"
+        self._write_config(
+            conf,
+            delegation={"model": "orch-model",
+                        "base_url": "http://10.0.0.1:8000/v1"})
+        plan = self._plan(worker=False)
+        cluster_template._update_worker_model_ids(
+            plan, profiles_dir=tmp_path / "profiles", config_yaml=conf)
+        import yaml
+        data = yaml.safe_load(conf.read_text())
+        assert data["delegation"]["base_url"] == "http://10.0.0.1:8000/v1"
+        assert data["delegation"]["model"] == "orch-model"
+
     def test_config_no_fallback_providers_still_sets_delegation(self, tmp_path):
         conf = tmp_path / "config.yaml"
         self._write_config(conf, delegation={"model": "stale"})
-        cluster_template._update_worker_model_ids(
-            self._plan(), profiles_dir=tmp_path / "profiles", config_yaml=conf)
+        self._apply(self._plan(), conf)
         import yaml
         assert yaml.safe_load(conf.read_text())["delegation"]["model"] == self.WORKER
 
@@ -1008,13 +1076,75 @@ class TestUpdateWorkerModelIds:
         conf = tmp_path / "config.yaml"
         self._write_config(conf, delegation={"model": "stale"},
                            model={"default": "orch-model", "base_url": "http://10.0.0.1:8000/v1"})
-        cluster_template._update_worker_model_ids(
-            self._plan(), profiles_dir=tmp_path / "profiles", config_yaml=conf)
+        self._apply(self._plan(), conf)
         import yaml
         data = yaml.safe_load(conf.read_text())
         # orchestrator model.default must NOT be clobbered by worker rewiring
         assert data["model"]["default"] == "orch-model"
         assert data["delegation"]["model"] == self.WORKER
+
+    def test_alias_declared_but_proxy_serves_only_concrete_writes_concrete(self, tmp_path):
+        """PROBE-BEFORE-WRITE / risk path: the template declares the worker unit
+        model as the alias ``worker-model`` (the post-v1.6.0 'normal' case), but
+        the :4000 proxy serves ONLY the concrete id. The writer must probe the
+        proxy and write the CONCRETE id — never the alias the endpoint would 404
+        on. If the probe is removed (and the alias blindly written), this test
+        FAILS: it asserts the concrete id ended up in delegation/fallback/profiles.
+        """
+        conf = tmp_path / "config.yaml"
+        self._write_config(
+            conf,
+            delegation={"model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                        "base_url": "http://10.0.0.244:8000/v1"},
+            fallbacks=[{"model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                        "base_url": "http://10.0.0.244:8000/v1"}])
+        profiles = tmp_path / "profiles"
+        self._write_profile(profiles, "coder", "http://localhost:4000/v1", "stale")
+        # plan declares the ALIAS as the worker unit model
+        plan = self._plan(model="worker-model")
+        result = self._apply(plan, conf, profiles=profiles,
+                             served=(self.WORKER,))  # proxy serves ONLY concrete
+        import yaml
+        data = yaml.safe_load(conf.read_text())
+        # delegation + fallback get the CONCRETE id the proxy serves, not the alias
+        assert data["delegation"]["model"] == self.WORKER
+        assert data["delegation"]["base_url"] == "http://localhost:4000/v1"
+        assert data["fallback_providers"][0]["model"] == self.WORKER
+        # worker profile default likewise resolved to concrete
+        coder = yaml.safe_load((profiles / "coder" / "config.yaml").read_text())
+        assert coder["model"]["default"] == self.WORKER
+        assert result["model_id"] == "worker-model"   # template-declared candidate
+        assert result["probe_status"] == "ok"
+        assert result["probe_served"] == [self.WORKER]
+
+    def test_proxy_unreachable_does_not_write_any_model_id(self, tmp_path):
+        """PROBE-BEFORE-WRITE / safety: when the worker proxy cannot be probed
+        (unreachable / probe error), the writer must NOT write an id it cannot
+        confirm the endpoint resolves — leaving delegation/fallback untouched is
+        safer than writing an id every delegated call 404s on."""
+        def _get(url, api_key=None):
+            raise OSError("connection refused")   # simulate unreachable proxy
+        conf = tmp_path / "config.yaml"
+        self._write_config(
+            conf,
+            delegation={"model": "stale",
+                        "base_url": "http://10.0.0.244:8000/v1"},
+            fallbacks=[{"model": "stale",
+                        "base_url": "http://10.0.0.244:8000/v1"}])
+        profiles = tmp_path / "profiles"
+        self._write_profile(profiles, "coder", "http://localhost:4000/v1", "stale")
+        result = cluster_template._update_worker_model_ids(
+            self._plan(), profiles_dir=profiles, config_yaml=conf, _http_get=_get)
+        import yaml
+        data = yaml.safe_load(conf.read_text())
+        assert data["delegation"]["model"] == "stale"          # untouched
+        assert data["delegation"]["base_url"] == "http://10.0.0.244:8000/v1"
+        assert data["fallback_providers"][0]["model"] == "stale"
+        assert yaml.safe_load((profiles / "coder" / "config.yaml").read_text())[
+            "model"]["default"] == "stale"
+        assert result["config_changed"] is False
+        assert "refused" in result
+        assert result["probe_status"] == "unreachable"
 
     # ── profile rewiring ────────────────────────────────────────────────
 
@@ -1026,8 +1156,7 @@ class TestUpdateWorkerModelIds:
         self._write_profile(profiles, "orch-role", "http://10.0.0.1:8000/v1", "orch-model")
         conf = tmp_path / "config.yaml"
         self._write_config(conf, delegation={"model": "stale"})
-        result = cluster_template._update_worker_model_ids(
-            self._plan(), profiles_dir=profiles, config_yaml=conf)
+        result = self._apply(self._plan(), conf, profiles=profiles)
         import yaml
         coder = yaml.safe_load((profiles / "coder" / "config.yaml").read_text())
         reviewer = yaml.safe_load((profiles / "reviewer" / "config.yaml").read_text())
@@ -1044,11 +1173,9 @@ class TestUpdateWorkerModelIds:
         conf = tmp_path / "config.yaml"
         self._write_config(conf, delegation={"model": "stale"},
                            fallbacks=[{"model": "stale"}])
-        cluster_template._update_worker_model_ids(
-            self._plan(), profiles_dir=profiles, config_yaml=conf)
+        self._apply(self._plan(), conf, profiles=profiles)
         before = conf.read_text() + (profiles / "coder" / "config.yaml").read_text()
-        result = cluster_template._update_worker_model_ids(
-            self._plan(), profiles_dir=profiles, config_yaml=conf)
+        result = self._apply(self._plan(), conf, profiles=profiles)
         after = conf.read_text() + (profiles / "coder" / "config.yaml").read_text()
         assert before == after          # no byte churn on re-apply
         assert result["config_changed"] is False
