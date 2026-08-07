@@ -1185,6 +1185,116 @@ def _worker_proxy_url(plan: Any) -> Optional[str]:
     return f"http://localhost:{fam.proxy_port}/v1"
 
 
+def _models_probe_url(base_url: str) -> str:
+    """Normalize an endpoint base_url to an OpenAI-style ``/models`` probe URL.
+
+    Mirrors ``hscc-bootstrap.doctor._models_url`` exactly: the version path is
+    PRESERVED (an OpenAI-compatible server serves the model list at
+    ``{base_url}/models``, e.g. ``http://host:port/v1/models``, NOT at a
+    version-stripped root), so we append ``/models`` and never strip ``/v1``.
+
+    ``http://host:port/v1``  -> ``http://host:port/v1/models``
+    ``http://host:port/v1/`` -> ``http://host:port/v1/models``
+    ``http://host:port``     -> ``http://host:port/models``
+    Returns "" for missing/blank input.
+    """
+    url = (base_url or "").strip()
+    if not url:
+        return ""
+    url = url.rstrip("/")
+    if "/v1" in url:
+        head = url.split("/v1", 1)[0].rstrip("/")
+        return head + "/v1/models"
+    return url + "/models"
+
+
+def _http_get_default(url: str, api_key: Optional[str] = None) -> str:
+    """Fetch ``url`` and return its body as text.
+
+    Mirrors ``hscc-bootstrap.doctor._http_get_default``: sends ``Authorization:
+    Bearer <key>`` when a key is provided (the configs carry api_key next to
+    base_url; an endpoint that requires a key returns 401 without it), and
+    raises ``urllib.error`` on failure so callers can tell a probe/config error
+    apart from an unreachable endpoint.
+    """
+    import urllib.request
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return resp.read().decode("utf-8")
+
+
+def _probe_served_models(base_url, *, _http_get=None):
+    """Probe an endpoint's ``/v1/models`` and report what it serves.
+
+    Mirrors ``hscc-bootstrap.doctor._probe_served_models`` so the probe CONTRACT
+    (correct ``/v1/models`` path + Bearer auth) is shared across the fleet. It is
+    intentionally NOT a literal cross-plugin import: each HSCC plugin deploys
+    standalone into ``~/.hermes/plugins`` (hyphenated dirs are not importable
+    package names), so hscc-cluster cannot ``import doctor`` from hscc-bootstrap.
+    Keeping the probe byte-compatible with doctor's lets both stay in lockstep.
+
+    Returns ``(status, served_ids)`` where ``status`` is one of:
+      - ``"ok"``          - endpoint reachable and ``/models`` parsed; ``served_ids``
+                            is the list of served model ids (possibly empty).
+      - ``"unreachable"`` - network/timeout; nothing could be verified.
+      - ``"error"``       - endpoint reachable but ``/models`` returned a non-2xx
+                            HTTP status or an unparseable body (probe/config problem).
+
+    ``_http_get(url, api_key=None) -> str`` is injectable for tests, so the
+    probe-before-write safety gate below can be exercised without the network.
+    """
+    getter = _http_get or _http_get_default
+    url = _models_probe_url(base_url)
+    if not url:
+        return ("error", [])
+    import json
+    from urllib.error import HTTPError
+    try:
+        raw = getter(url, api_key=None)
+    except HTTPError as exc:
+        return ("error", [f"{url} returned HTTP {exc.code} on /models probe"])
+    except Exception as exc:
+        return ("unreachable", [f"{url} unreachable ({exc})"])
+    try:
+        data = json.loads(raw)
+        served = [m.get("id") for m in (data.get("data") or [])
+                  if isinstance(m, dict) and m.get("id")]
+    except Exception as exc:
+        return ("error", [f"{url} body not parseable as /models JSON ({exc})"])
+    return ("ok", served)
+
+
+def _resolve_worker_model_id(model_id: Optional[str], served) -> Optional[str]:
+    """Probe-before-write: resolve the model id to write against the worker proxy.
+
+    ``model_id`` is the template-declared worker unit model (``units[0].model``).
+    It MAY be the stable alias ``worker-model`` or the concrete id depending on
+    how the template was authored — and the worker proxy (:4000, sparkrun
+    LiteLLM balancer) serves ONLY the concrete id, NOT the alias. Writing an
+    alias the endpoint does not advertise makes every delegated call 404.
+
+    So we only ever write an id the endpoint actually serves:
+      - if the declared ``model_id`` is served → use it (today's fleet: the
+        concrete id, since ``units[0].model`` = recipe ``model:`` field);
+      - else if the proxy serves exactly one concrete id → use that (the
+        "write CONCRETE when the endpoint does not advertise the alias" path);
+      - else → ``None``: refuse to write anything we cannot confirm the
+        endpoint resolves (never write an id that 404s).
+
+    ``served`` comes from ``_probe_served_models``. Requires a probe result.
+    """
+    if not served:
+        return None
+    if model_id in served:
+        return model_id
+    if len(served) == 1:
+        return served[0]
+    return None
+
+
 def _is_worker_proxy_url(base_url: Optional[str], port: int) -> bool:
     """True when ``base_url`` points at the family proxy on ``port``.
 
@@ -1252,7 +1362,8 @@ def _set_worker_model_in_profile(config: dict, model_id: str, port: int) -> dict
 
 
 def _update_worker_model_ids(plan: Any, *, profiles_dir: Optional[Path] = None,
-                             config_yaml: Optional[Path] = None) -> dict:
+                             config_yaml: Optional[Path] = None,
+                             _http_get=None) -> dict:
     """Rewire worker-facing routing to the resolved worker/family model.
 
     Called from ``apply_template`` after config.yaml is written. Two concerns:
@@ -1265,7 +1376,16 @@ def _update_worker_model_ids(plan: Any, *, profiles_dir: Optional[Path] = None,
       2. worker role profiles — top-level ``model.default`` for every profile
          whose ``model.base_url`` points at the worker proxy.
 
-    Both use atomic_yaml_update (backup + tmp + os.replace), and both are
+    PROBE-BEFORE-WRITE: before writing an id to the worker proxy, this probes
+    the proxy's ``/v1/models`` and only writes an id the endpoint actually
+    serves (``_resolve_worker_model_id``). The worker proxy serves ONLY the
+    concrete id — NOT the alias ``worker-model`` — so if the template declared
+    an alias, the CONCRETE id the proxy serves is written instead. If the probe
+    fails or no resolvable id is found, nothing is written (the id would 404
+    every delegated call). ``_http_get`` is injectable for tests; default is a
+    real network probe.
+
+    All writes use atomic_yaml_update (backup + tmp + os.replace) and are
     idempotent: re-running apply with an already-correct state changes nothing.
     No worker family in the plan → returns immediately, leaving worker-facing
     fields untouched. Never touches the orchestrator model.default.
@@ -1278,6 +1398,21 @@ def _update_worker_model_ids(plan: Any, *, profiles_dir: Optional[Path] = None,
     # A worker family exists (model_id is not None) ⇒ it owns the proxy, so the
     # base_url is always resolved here.
     proxy_url = _worker_proxy_url(plan) or f"http://localhost:{WORKER_PROXY_PORT}/v1"
+
+    # Probe the worker proxy /v1/models BEFORE writing. Resolve to the declared
+    # model if it is served, else to the CONCRETE id the proxy serves, else
+    # None (refuse to write an id the endpoint cannot resolve). Unreachable /
+    # probe-error also resolves to None — never write blind.
+    status, served = _probe_served_models(proxy_url, _http_get=_http_get)
+    resolved = _resolve_worker_model_id(model_id, served if status == "ok" else [])
+    result["probe_status"] = status
+    result["probe_served"] = list(served) if isinstance(served, list) else []
+    if resolved is None:
+        result["refused"] = (
+            f"worker proxy {proxy_url} did not confirm it serves '{model_id}' "
+            f"(probe {status}); leaving delegation/fallback untouched")
+        return result
+    model_id = resolved
 
     conf = config_yaml or CONFIG_YAML
     _, result["config_changed"] = atomic_yaml_update(

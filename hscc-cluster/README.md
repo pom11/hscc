@@ -55,13 +55,25 @@ family exists in the plan, `_update_worker_model_ids` keeps `model` **and
 `delegation.base_url` / `fallback_providers[].base_url` from the orchestrator
 (`:8000`) back to the worker proxy.
 
-**Ordering requirement:** the worker proxy must expose the stable `worker-model`
-alias BEFORE delegation repoints there (otherwise every delegated call 404s).
-Since HSCC v1.5.1 the proxy advertises both the concrete id and `worker-model`
-via vLLM's multi-name `--served-model-name`, so a worker-tier apply may repoint
-safely. This is what the probe-gated doctor migration (`doctor.py` Card D)
-enforces on live configs: it only converts a concrete id to an alias once the
-endpoint confirms it serves that alias.
+**Probe-before-write (the 404 guard).** The `:4000` worker proxy is the sparkrun
+LiteLLM load-balancer that fronts the worker span. It advertises **only the
+CONCRETE id** (e.g. `deepseek-ai/DeepSeek-V4-Flash-0731`) — it does NOT publish
+the stable `worker-model` alias. (The alias IS advertised, but by a DIFFERENT
+endpoint: the worker span's primary vLLM on the `.247` node, which registers
+both the concrete id and `worker-model` via multi-name `--served-model-name`.
+Those are two endpoints with two different model registries; do not conflate
+them.) A worker-tier apply therefore derives `delegation.model` /
+`fallback_providers[].model` from what the **proxy actually serves**: it probes
+the proxy's `/v1/models` and writes the declared model id when the proxy serves
+it, else the CONCRETE id the proxy serves. If a template ever declares the
+alias `worker-model` as the worker unit model, an apply still writes the
+concrete id the proxy resolves — never an alias the endpoint would 404 on. If
+the probe fails or finds no resolvable id, nothing is written (blinding an
+apply mid-flight is safer than writing an id every delegated call 404s on).
+
+The probe machinery (correct `/v1/models` path + Bearer auth) mirrors
+`hscc-bootstrap/doctor.py`'s `_probe_served_models` / `_models_url` so the
+fleet shares one probe contract across the standalone plugins.
 
 **Tests**
 `tests/` — run: `python -m pytest tests/ -q`. Integration tests assert
