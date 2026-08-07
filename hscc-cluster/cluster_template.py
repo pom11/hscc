@@ -1145,20 +1145,44 @@ def _update_hermes_config(config: dict, plan: Any) -> dict:
     return config
 
 
+def _owned_worker_family(plan: Any) -> Optional[Any]:
+    """The family that owns the worker proxy (:4000), or None.
+
+    A family owns the worker proxy when its ``proxy_port`` matches
+    WORKER_PROXY_PORT and it has at least one unit. None when no family owns
+    the worker proxy (e.g. a dual-orchestrator plan with no worker tier) —
+    callers must then leave worker-facing fields untouched.
+    """
+    for fam in plan.families:
+        if fam.proxy_port == WORKER_PROXY_PORT and fam.units:
+            return fam
+    return None
+
+
 def _worker_model_id(plan: Any) -> Optional[str]:
     """Resolve the worker/family model id — the model the worker proxy family
     serves.
 
-    A family owns the worker proxy when its ``proxy_port`` matches
-    WORKER_PROXY_PORT. All units in that family share the served model
-    (``units[0].model``). Returns None when no family owns the worker proxy
-    (e.g. a dual-orchestrator plan with no worker tier) — callers must then
-    leave worker ids untouched.
+    Returns ``units[0].model`` for the family that owns the worker proxy
+    (see ``_owned_worker_family``). All units in that family share the served
+    model. Returns None when no family owns the worker proxy — callers must
+    then leave worker ids untouched.
     """
-    for fam in plan.families:
-        if fam.proxy_port == WORKER_PROXY_PORT and fam.units:
-            return fam.units[0].model
-    return None
+    fam = _owned_worker_family(plan)
+    return fam.units[0].model if fam is not None else None
+
+
+def _worker_proxy_url(plan: Any) -> Optional[str]:
+    """The worker proxy base_url from the plan, or None when no worker tier.
+
+    Derived from the family that owns the worker proxy — same identity test as
+    ``_worker_model_id`` — so the re-aimed base_url is always consistent with
+    the rewired model id. Returns None when no family owns the worker proxy.
+    """
+    fam = _owned_worker_family(plan)
+    if fam is None:
+        return None
+    return f"http://localhost:{fam.proxy_port}/v1"
 
 
 def _is_worker_proxy_url(base_url: Optional[str], port: int) -> bool:
@@ -1180,24 +1204,34 @@ def _is_worker_proxy_url(base_url: Optional[str], port: int) -> bool:
     return host.strip() in ("localhost", "127.0.0.1")
 
 
-def _set_worker_model_in_config(config: dict, model_id: str) -> dict:
-    """Set the worker-facing model fields of config.yaml: ``delegation.model``
-    and every ``fallback_providers[].model``. Idempotent: re-setting an already
-    correct value is a byte no-op, so repeated applies never churn the file.
+def _set_worker_model_in_config(config: dict, model_id: str, proxy_url: str) -> dict:
+    """Set the worker-facing routing fields of config.yaml.
+
+    Rewires ``delegation`` and every ``fallback_providers[].model`` to
+    ``model_id`` AND their ``base_url`` to ``proxy_url`` (the worker proxy on
+    :4000). Keeping all three in lockstep is what routes delegated subagents to
+    the worker pool instead of the orchestrator GPU: rewiring only the model id
+    while the base_url still points at the orchestrator (:8000) leaves
+    subagents running on the orchestrator. Idempotent: re-setting already
+    correct values is a byte no-op, so repeated applies never churn the file.
+
     Does NOT touch the orchestrator's top-level model block (handled by
-    ``_update_hermes_config``) or any provider base_urls.
+    ``_update_hermes_config``).
     """
     delegation = config.get("delegation")
     if not isinstance(delegation, dict):
         delegation = {}
         config["delegation"] = delegation
     delegation["model"] = model_id
+    delegation["base_url"] = proxy_url
 
     fps = config.get("fallback_providers")
     if isinstance(fps, list):
         for fp in fps:
             if isinstance(fp, dict):
                 fp["model"] = model_id
+                if isinstance(proxy_url, str) and proxy_url:
+                    fp["base_url"] = proxy_url
     return config
 
 
@@ -1219,27 +1253,35 @@ def _set_worker_model_in_profile(config: dict, model_id: str, port: int) -> dict
 
 def _update_worker_model_ids(plan: Any, *, profiles_dir: Optional[Path] = None,
                              config_yaml: Optional[Path] = None) -> dict:
-    """Rewire worker-facing model ids to the resolved worker/family model.
+    """Rewire worker-facing routing to the resolved worker/family model.
 
     Called from ``apply_template`` after config.yaml is written. Two concerns:
-      1. config.yaml — ``delegation.model`` + every ``fallback_providers[].model``.
+      1. config.yaml — ``delegation.model`` + every ``fallback_providers[].model``
+         AND their ``base_url``. The base_url is re-aimed at the worker proxy
+         (:4000) so that delegating subagents and the first fallback hit the
+         WORKER pool, not the orchestrator GPU — a worker-tier apply otherwise
+         fixes the model id but leaves subagents still running on the
+         orchestrator (the :8000 routing regression).
       2. worker role profiles — top-level ``model.default`` for every profile
          whose ``model.base_url`` points at the worker proxy.
 
     Both use atomic_yaml_update (backup + tmp + os.replace), and both are
     idempotent: re-running apply with an already-correct state changes nothing.
-    No worker family in the plan → returns immediately, leaving worker ids
-    untouched. Never touches the orchestrator model.default or provider
-    base_urls.
+    No worker family in the plan → returns immediately, leaving worker-facing
+    fields untouched. Never touches the orchestrator model.default.
     """
     model_id = _worker_model_id(plan)
     result = {"model_id": model_id, "config_changed": False, "profiles_changed": 0}
     if model_id is None:
         return result
 
+    # A worker family exists (model_id is not None) ⇒ it owns the proxy, so the
+    # base_url is always resolved here.
+    proxy_url = _worker_proxy_url(plan) or f"http://localhost:{WORKER_PROXY_PORT}/v1"
+
     conf = config_yaml or CONFIG_YAML
     _, result["config_changed"] = atomic_yaml_update(
-        conf, lambda d: _set_worker_model_in_config(d, model_id))
+        conf, lambda d: _set_worker_model_in_config(d, model_id, proxy_url))
 
     pd = profiles_dir or PROFILES_DIR
     for pfile in sorted(pd.glob("*/config.yaml")):
