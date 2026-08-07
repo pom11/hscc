@@ -1062,20 +1062,253 @@ def applied_status() -> dict:
             "note": "" if state else "No template applied yet (or applied before status tracking)."}
 
 
-def validate_template(template_name: str) -> dict:
-    """Standalone preflight: is this template deployable against the live cluster?
-    No writes. Resolves intent → plan, then validates the plan."""
+# ── Layer 1: structural validation (offline, no cluster state, no resolver) ──
+
+# Recognised template schema versions. The engine understands v2 (topology-free,
+# parsed unchanged) and v3 (adds explicit nodes/allow_colocation/routing). Any
+# other version is a structural error — a template is not trustworthy if we
+# cannot decide what its keys mean.
+RECOGNISED_VERSIONS = (2, 3)
+
+# Known keys per level. Anything else is a typo and a hard structural error
+# (spec: "unknown keys rejected"). Kept in sync with template_intent schema.
+_KNOWN_TOP_KEYS = {"name", "version", "description", "orchestrator", "families",
+                   "routing"}
+_KNOWN_MODEL_KEYS = {"recipe", "tp", "pp", "nodes"}
+_KNOWN_FAMILY_KEYS = {"name", "models", "workers", "proxy", "nodes",
+                      "allow_colocation"}
+
+
+def _cluster_node_ips() -> List[str]:
+    """Compute node IPs defined in cluster.json (gateway + workers), or [] on a
+    missing/corrupt file.
+
+    This is STATIC config, not live cluster state — reading it needs no
+    discovery, no resolver, no ssh. NAS storage devices are deliberately NOT
+    included (a vLLM model cannot be placed on a storage box), so naming a NAS
+    IP in ``nodes:`` is a structural error.
+    """
+    data = read_json(CLUSTER_JSON)
+    if not isinstance(data, dict):
+        return []
+    ips: List[str] = []
+    gw = data.get("gateway")
+    if isinstance(gw, dict) and gw.get("ip"):
+        ips.append(str(gw["ip"]))
+    for w in data.get("workers") or []:
+        if isinstance(w, dict) and w.get("ip"):
+            ips.append(str(w["ip"]))
+    return ips
+
+
+def _structural_validate(raw: dict, tpl: Any,
+                         cluster_ips: Optional[List[str]] = None,
+                         recipe_exists: Optional[Any] = None) -> Tuple[List[str], List[str]]:
+    """Layer 1 — structural validation. Offline: uses only the static
+    cluster.json node list, never discovery/resolver/live state. Returns
+    ``(errors, warnings)``. Every error names the offending unit and value so a
+    reviewer can fix the template without re-deriving which key is wrong.
+
+    Checks (spec Validation → Layer 1):
+      - version recognised
+      - unknown keys rejected (typo protection), at every level
+      - every node in ``nodes:`` exists in cluster.json
+      - ``len(nodes) == tp`` for each unit that names nodes
+      - no node claimed by two units unless BOTH set allow_colocation: true
+        (when permitted, a warning about VRAM contention, not an error)
+      - routing targets resolve to a unit the template defines
+      - recipe paths exist on disk
+
+    ``raw`` is the original YAML dict (unknown-key detection needs keys that
+    parsing already discarded); ``tpl`` is the parsed ClusterTemplate.
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+    defined = set(cluster_ips) if cluster_ips is not None else set(_cluster_node_ips())
+
+    # ── version recognised ────────────────────────────────────────────────
+    if tpl.version not in RECOGNISED_VERSIONS:
+        errors.append(
+            f"version {tpl.version}: unrecognised (supported versions: "
+            f"{', '.join(str(v) for v in RECOGNISED_VERSIONS)})")
+
+    # ── unknown keys (typo protection), every level ───────────────────────
+    for k in raw:
+        if k not in _KNOWN_TOP_KEYS:
+            errors.append(f"template '{tpl.name}': unknown key '{k}'")
+    orch_raw = raw.get("orchestrator")
+    if isinstance(orch_raw, dict):
+        for k in orch_raw:
+            if k not in _KNOWN_MODEL_KEYS:
+                errors.append(f"orchestrator: unknown key '{k}'")
+    fam_raw_list = raw.get("families") or []
+    for i, fam_raw in enumerate(fam_raw_list):
+        fam = tpl.families[i] if i < len(tpl.families) else None
+        label = f"family '{fam.name}'" if fam else f"families[{i}]"
+        if not isinstance(fam_raw, dict):
+            continue
+        for k in fam_raw:
+            if k not in _KNOWN_FAMILY_KEYS:
+                errors.append(f"{label}: unknown key '{k}'")
+        models_raw = fam_raw.get("models")
+        if isinstance(models_raw, list):
+            for j, m in enumerate(models_raw):
+                if isinstance(m, dict):
+                    for k in m:
+                        if k not in _KNOWN_MODEL_KEYS:
+                            errors.append(
+                                f"{label} model {j}: unknown key '{k}'")
+
+    # ── recipe paths exist on disk ────────────────────────────────────────
+    def _recipe_ok(recipe: str, label: str) -> None:
+        exists = (recipe_exists(recipe) if recipe_exists is not None
+                  else Path(os.path.expanduser(recipe)).is_file())
+        if not exists:
+            errors.append(f"{label} recipe not found: {recipe}")
+
+    _recipe_ok(tpl.orchestrator.recipe, "orchestrator")
+    for fam in tpl.families:
+        for m in fam.models:
+            _recipe_ok(m.recipe, f"family '{fam.name}'")
+
+    # ── explicit nodes: exist in cluster.json + len(nodes) == tp ──────────
+    # Collect every named span with its colocation flag for the collision check.
+    # (full_label, bare_name, node_list, allow_colocation)
+    spans: List[Tuple[str, str, List[str], bool]] = []
+    if tpl.orchestrator.nodes is not None:
+        n = tpl.orchestrator.nodes
+        if len(n) != tpl.orchestrator.tp:
+            errors.append(
+                f"orchestrator: {len(n)} nodes listed but tp={tpl.orchestrator.tp}")
+        spans.append(("orchestrator", "orchestrator", n, False))
+    for fam in tpl.families:
+        if fam.nodes is None:
+            continue
+        for m in fam.models:
+            if len(fam.nodes) != m.tp:
+                errors.append(
+                    f"family '{fam.name}': {len(fam.nodes)} nodes listed but "
+                    f"model tp={m.tp}")
+        # Colocation is the cross-UNIT question; the family's own flag is what
+        # "both units must set allow_colocation" refers to.
+        spans.append((f"family '{fam.name}'", fam.name, fam.nodes,
+                      fam.allow_colocation))
+
+    # Every named node must be a compute node defined in cluster.json.
+    for label, _, nodes, _ in spans:
+        for node in nodes:
+            if node not in defined:
+                errors.append(
+                    f"node '{node}' in {label} is not defined in cluster.json")
+
+    # ── colocation: no node claimed by two units unless BOTH say allow ────
+    # The message uses BARE unit names ('orchestrator' / 'reasoning') to match
+    # the spec's exact phrasing.
+    claims: Dict[str, Tuple[str, bool]] = {}
+    for _, bare, nodes, allow in spans:
+        for node in nodes:
+            if node in claims:
+                prev_bare, prev_allow = claims[node]
+                if allow and prev_allow:
+                    warnings.append(
+                        f"node '{node}' claimed by both '{prev_bare}' and "
+                        f"'{bare}' "
+                        f"(allow_colocation: true on both) — VRAM contention")
+                else:
+                    errors.append(
+                        f"node '{node}' claimed by both '{prev_bare}' and "
+                        f"'{bare}' "
+                        f"(set allow_colocation: true on both to permit)")
+            else:
+                claims[node] = (bare, allow)
+
+    # ── routing targets resolve to a unit the template defines ────────────
+    if tpl.routing is not None:
+        defined_units = {"orchestrator"} | {f"family-{f.name}" for f in tpl.families}
+        for consumer, target in tpl.routing.items():
+            if target in defined_units:
+                continue
+            if target.startswith("family-"):
+                errors.append(
+                    f"routing.{consumer} -> '{target}': no such family in "
+                    f"this template")
+            else:
+                errors.append(
+                    f"routing.{consumer} -> '{target}': must be 'orchestrator' "
+                    f"or 'family-<name>'")
+
+    return errors, warnings
+
+
+def validate_template(template_name: str, *,
+                      structural_only: bool = False) -> dict:
+    """Two-layer preflight of a template — answers different questions.
+
+    Layer 1 (structural) runs ALWAYS and is OFFLINE: version recognised, unknown
+    keys rejected, nodes exist in cluster.json, len(nodes)==tp, no unflagged
+    colocation, routing targets resolve, recipes exist. It needs no live cluster
+    and no resolver, so the template that is currently running the live fleet
+    validates deterministically instead of failing on a resolver pool=[] error.
+
+    Layer 2 (placement) requires live cluster state and uses the resolver —
+    capacity/occupancy/availability ("can these units be placed right now").
+    ``structural_only=True`` skips it (usable in CI / when the cluster is down).
+
+    Returns the spec's JSON shape: ``{template, structural: {ok, errors,
+    warnings}, placement: {ok, errors, warnings}, ok}`` where top-level ``ok``
+    is the AND of both layers. No writes.
+    """
+    # Load raw dict + parsed intent ONCE. Raw is needed for unknown-key
+    # detection (parse discards unknown keys); parsed for the semantic checks.
+    try:
+        path = _find_template_file(template_name)
+        if path is None:
+            raise FileNotFoundError(f"Template not found: {template_name}")
+        import yaml
+        with open(path) as f:
+            raw = yaml.safe_load(f) or {}
+        tpl = _ti().ClusterTemplate.from_dict(raw)
+    except FileNotFoundError as e:
+        err = str(e)
+        return {"template": template_name,
+                "structural": {"ok": False, "errors": [err], "warnings": []},
+                "placement": {"ok": True, "errors": [], "warnings": []},
+                "ok": False}
+    except _ti().TemplateIntentError as e:
+        err = str(e)
+        return {"template": template_name,
+                "structural": {"ok": False, "errors": [err], "warnings": []},
+                "placement": {"ok": True, "errors": [], "warnings": []},
+                "ok": False}
+
+    # ── Layer 1: structural (offline) ─────────────────────────────────────
+    s_errors, s_warnings = _structural_validate(raw, tpl)
+    structural = {"ok": not s_errors, "errors": s_errors, "warnings": s_warnings}
+
+    # ── Layer 2: placement (resolver-dependent, live) ─────────────────────
+    if structural_only:
+        placement = {"ok": True, "errors": [], "warnings": [],
+                     "skipped": True}
+        return {"template": tpl.name, "structural": structural,
+                "placement": placement,
+                "ok": structural["ok"]}
+
     try:
         plan = _resolve(template_name, probe=True)
     except FileNotFoundError as e:
-        return {"template": template_name, "ok": False, "errors": [str(e)]}
+        placement = {"ok": False, "errors": [str(e)], "warnings": []}
     except _ti().TemplateIntentError as e:
-        return {"template": template_name, "ok": False, "errors": [str(e)]}
+        placement = {"ok": False, "errors": [str(e)], "warnings": []}
     except Exception as e:
-        return {"template": template_name, "ok": False,
-                "errors": [f"template invalid: {e}"]}
-    problems = validate_resolved_plan(plan)
-    return {"template": template_name, "ok": not problems, "errors": problems}
+        placement = {"ok": False, "errors": [f"template invalid: {e}"],
+                     "warnings": []}
+    else:
+        problems = validate_resolved_plan(plan)
+        placement = {"ok": not problems, "errors": problems, "warnings": []}
+
+    return {"template": tpl.name, "structural": structural,
+            "placement": placement,
+            "ok": structural["ok"] and placement["ok"]}
 
 
 # ── Config generation helpers ──────────────────────────────────────────────
