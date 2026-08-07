@@ -717,45 +717,52 @@ def _load_intent(template_name: str):
     return _ti().ClusterTemplate.from_dict(data)
 
 
-def _existing_tp_peer_nodes():
-    """IPs currently reserved as tp peers of a live serving span (serving.json).
+def _existing_serving_units():
+    """{node_ip: {"kind": "orchestrator"|"worker", "family": <name|None>,
+    "model": <str>}} for every node currently named in serving.json.
 
-    Reuses cmdlib.serving_unit_scoreboard() — the same helper /cluster and
-    enumerate_cluster_nodes use — rather than re-implementing tp-peer detection.
-    cmdlib lives in the sibling hscc-commands plugin; we import it bare like
-    the daemon does. Best-effort: any failure -> empty set (the pre-fix
-    behaviour), never a hard failure of resolve/apply.
+    Built from serving.json units directly (not the scoreboard) so each unit's
+    FAMILY lineage is available — resolve()'s unit-aware guard needs to know
+    which family a reserved worker node belongs to, so it can let that node
+    back into its OWN family while refusing to hand it to a DIFFERENT one.
+    Reads the same recorded plan as _existing_tp_peer_nodes did, but carries
+    ownership instead of bluntly ejecting every tp-peer from the pool (which
+    emptied the pool on re-apply of the same template). Best-effort: any
+    failure -> empty dict (no guard), never a hard failure of resolve/apply.
     """
     try:
-        _ensure_cmdlib_on_path()
-        from cmdlib import serving_unit_scoreboard
-        score = serving_unit_scoreboard()
+        serving = _load_serving()
     except Exception:
-        return set()
-    if not isinstance(score, dict):
-        return set()
-    return {ip for ip, s in score.items() if s and s.get("tp_peer")}
-
-
-def _ensure_cmdlib_on_path():
-    """Put the sibling hscc-commands plugin dir on sys.path for the cmdlib import."""
-    cmd_dir = os.path.realpath(
-        os.path.join(os.path.dirname(__file__), "..", "hscc-commands"))
-    if cmd_dir not in sys.path:
-        sys.path.insert(0, cmd_dir)
+        return {}
+    reserved: Dict[str, dict] = {}
+    for u in serving.get("units", []):
+        nodes = u.get("nodes") or []
+        if not nodes:
+            continue
+        kind = "orchestrator" if u.get("role") == "orchestrator" else "worker"
+        fam = u.get("family")
+        model = u.get("model")
+        for ip in nodes:
+            # First wins: a node is primary in one unit; a later unit claiming
+            # the same node must not overwrite the dominant lineage in a way
+            # that could let that node be double-assigned to two families.
+            if ip not in reserved:
+                reserved[ip] = {"kind": kind, "family": fam, "model": model}
+    return reserved
 
 
 def _resolve(template_name: str, *, topology=None, probe: bool = False):
     """Load + resolve a template against the live cluster → ResolvedPlan.
 
-    Nodes that are currently tp peers of a live serving span are excluded from
-    the assignable pool (resolve's exclude_nodes), so a span member is never
-    given a solo unit — the plan/provision guard for the double-provision bug.
+    Feeds resolve()'s unit-aware `reserved` (which nodes currently serve which
+    unit, from serving.json) so a node is only ever assigned to the SAME unit
+    it already serves — re-applying a template keeps its own nodes (the
+    --force-recreate path) while a span member is still never handed to a
+    DIFFERENT unit (the double-provision guard).
     """
     tpl = _load_intent(template_name)
     topo = topology if topology is not None else _discover(probe=probe)
-    return _ti().resolve(tpl, topo,
-                         exclude_nodes=_existing_tp_peer_nodes())
+    return _ti().resolve(tpl, topo, reserved=_existing_serving_units())
 
 
 def list_templates():
@@ -812,13 +819,15 @@ def preview_template(template_name: str) -> dict:
             "file": "proxies/", "action": "create",
             "summary": f"{len(proxy_fams)} proxy configs",
             "details": [f"  {f.name}: port {f.proxy_port}, "
-                        f"nodes {sorted({u.node for u in f.units})}"
+                        f"nodes {sorted({n for u in f.units for n in u.nodes})}"
                         for f in proxy_fams],
         })
+    # Node count reflects the FULL tp span of every unit, not the family's unit
+    # count (a single tp=2 unit spans 2 nodes — report 2, not 1).
+    worker_node_count = sum(len(u.nodes) for f in resolved.families for u in f.units)
     out["changes"].append({
         "file": "models (provision)", "action": "provision",
-        "summary": f"1 orchestrator + "
-                   f"{sum(len(f.units) for f in resolved.families)} worker units",
+        "summary": f"1 orchestrator + {worker_node_count} worker nodes",
     })
     return out
 
@@ -1259,7 +1268,9 @@ def _describe_config_changes(plan, current_models: Optional[dict]) -> list:
     changes = [f"  orchestrator: {o.node}:{o.port} (model: {o.model})"]
     for fam in plan.families:
         port = fam.proxy_port if fam.proxy_port is not None else "—"
-        nodes = sorted({u.node for u in fam.units})
+        # Node count covers the FULL tp span of every unit, not just primaries —
+        # a single tp=2 unit spans 2 nodes, so report 2, not 1 (t_16dcceb4).
+        nodes = sorted({n for u in fam.units for n in u.nodes})
         changes.append(
             f"  family-{fam.name}: localhost:{port} "
             f"({len(fam.units)} units, {len(nodes)} nodes)")
