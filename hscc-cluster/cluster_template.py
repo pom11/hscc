@@ -297,17 +297,26 @@ def remove_proxy_plist(family) -> dict:
 # ── Model provisioning ─────────────────────────────────────────────────────
 
 def _provision_models(plan: Any, cluster: str = "hscc",
-                      do_launch: bool = True) -> dict:
+                      do_launch: bool = True,
+                      recreate: bool = False) -> dict:
     """Bring the cluster to the resolved plan's model layout via sparkrun.
 
     For each unit (orchestrator + each worker unit) launch the model with
     `sparkrun run <recipe> --cluster <c> --hosts <node> --port <port> --ensure`
     (--ensure = no-op if already serving). Stop sparkrun containers on nodes the
     plan does not use. do_launch=False = dry plan (preview/tests).
+
+    recreate=True forces every wanted unit to be stopped before its --ensure
+    run, so the FULL rendered serve command (including --served-model-name and
+    any other flag change) reaches vLLM on an already-running fleet. Without it
+    a container already serving the same recipe is left untouched by --ensure,
+    so a changed flag — the v1.6.0 alias being the motivating case — never
+    activates. Every recreated unit is reported loudly in ``recreated``.
     """
     import subprocess
 
     result = {"stopped": [], "provisioned": [], "failed": [],
+              "recreated": [], "warnings": [],
               "status": "ok", "note": ""}
 
     # (unit, nodes, port, recipe, tp, alias) the plan wants serving.
@@ -371,9 +380,44 @@ def _provision_models(plan: Any, cluster: str = "hscc",
     # the serve port, so the new `sparkrun run` crashes with Errno 98
     # (Address already in use). A node already serving the wanted model is left
     # running (--ensure idempotency). Nodes with no attributable job are skipped.
+    #
+    # DRIFT (t_5b0f4d2d): --ensure only compares the recipe, not the rendered
+    # serve command. A unit already running the SAME recipe therefore keeps its
+    # old flags (--served-model-name included) forever — the v1.6.0 alias never
+    # activates on an already-running fleet. Two guards:
+    #   * recreate=True → stop the unit's span first, so the --ensure run applies
+    #     the FULL current command. Reported loudly in ``recreated``.
+    #   * recreate=False → do NOT silently claim success. If a unit is found
+    #     already serving the same recipe (so --ensure WILL skip it) we emit a
+    #     warning that any flag change is NOT being applied and tell the operator
+    #     to use --force-recreate. Apply then flips to warn, never silent success.
     running_recipes = _running_recipes_via_sparkrun()
+    drift_skipped: List[str] = []
     for unit, nodes, port, recipe, tp, alias in want:
         want_model = _extract_model_name(recipe)
+        want_span = list(nodes)
+        hosts_arg = ",".join(nodes)
+        # Was this unit already running the SAME recipe (so --ensure will skip it)?
+        already_running_same = any(
+            running_recipes.get(n) and _extract_model_name(running_recipes[n]) == want_model
+            for n in want_span)
+        if recreate and already_running_same:
+            # Force-recreate: stop the whole span so --ensure relaunches with the
+            # current rendered command. Same-recipe containers are normally left
+            # alone by --ensure, so without this stop a flag change never applies.
+            for node in want_span:
+                try:
+                    subprocess.run(["sparkrun", "stop", "--all", "--hosts", node],
+                                   capture_output=True, timeout=60)
+                    result["stopped"].append(node)
+                except Exception as e:
+                    stop_failures.append(f"{node}: {e}")
+            result["recreated"].append(f"{hosts_arg}:{port}:{recipe.split('/')[-1]}")
+        elif not recreate and already_running_same:
+            # Not recreating and the unit is already up on the same recipe →
+            # --ensure WILL skip it, so a changed serve command is left unapplied.
+            # That is exactly the silent-success defect this guards against.
+            drift_skipped.append(f"{hosts_arg}:{port}:{recipe.split('/')[-1]}")
         for node in nodes:
             run_recipe = running_recipes.get(node)
             if run_recipe and _extract_model_name(run_recipe) != want_model:
@@ -383,7 +427,6 @@ def _provision_models(plan: Any, cluster: str = "hscc",
                     result["stopped"].append(node)
                 except Exception as e:
                     stop_failures.append(f"{node}: {e}")
-        hosts_arg = ",".join(nodes)
         try:
             # Concrete id = recipe's model field (fall back to the resolved
             # unit's model). Always advertise concrete + alias so the endpoint
@@ -413,9 +456,30 @@ def _provision_models(plan: Any, cluster: str = "hscc",
             result["failed"].append({"node": hosts_arg, "port": port, "recipe": recipe,
                                      "error": str(e)})
 
+    # Loud drift reporting (t_5b0f4d2d): if any unit was already running the same
+    # recipe and was NOT force-recreated, its serve command may not match the
+    # plan. That is precisely the silent-success defect this task fixes — apply
+    # must never claim success while a changed flag was left unapplied. Surface
+    # these as warnings AND flip status to warn so apply reports loudly.
+    if drift_skipped:
+        result["warnings"].append(
+            "serve command drift NOT applied: " + ", ".join(drift_skipped) +
+            " — already running the same recipe; --ensure will skip them. "
+            "Re-run apply with --force-recreate to re-apply changed flags "
+            "(e.g. a new served-model-name alias).")
+
     if result["failed"]:
         result["status"] = "warn"
         result["note"] = f"{len(result['failed'])} model(s) failed to launch"
+    elif drift_skipped:
+        result["status"] = "warn"
+        result["note"] = (f"{len(result['provisioned'])} model(s) ensured up; "
+                          f"{len(drift_skipped)} unit(s) skipped with command drift "
+                          f"(re-run with --force-recreate to apply).")
+    elif result["recreated"]:
+        result["note"] = (f"{len(result['provisioned'])} model(s) ensured up; "
+                          f"{len(result['recreated'])} unit(s) recreated to apply "
+                          f"the current serve command.")
     else:
         result["note"] = f"{len(result['provisioned'])} model(s) ensured up"
     return result
@@ -641,9 +705,18 @@ def validate_resolved_plan(plan: Any) -> List[str]:
     return errors
 
 
-def apply_template(template_name: str, confirm: bool = False) -> dict:
+def apply_template(template_name: str, confirm: bool = False,
+                   recreate: bool = False) -> dict:
     """Apply a cluster template (v2 intent). Resolves it against the live cluster,
-    then writes configs, provisions models, sets up proxies — transactionally."""
+    then writes configs, provisions models, sets up proxies — transactionally.
+
+    recreate=True is forwarded to _provision_models: every unit whose serve
+    command differs from what the running container was started with is forced
+    to be recreated (stopped first, then re-run), so a changed flag — the
+    v1.6.0 alias being the motivating case — actually reaches vLLM on an
+    already-running fleet. Each recreated unit is reported loudly. Units that
+    are already serving the current command are still left alone.
+    """
     # Load + resolve against the live topology. Bad shape or unresolvable
     # (no workers, overcommit, …) is a hard, pre-write failure.
     try:
@@ -730,12 +803,14 @@ def apply_template(template_name: str, confirm: bool = False) -> dict:
         })
 
         # Step 6: Provision models via sparkrun
-        provision_result = _provision_models(plan)
+        provision_result = _provision_models(plan, recreate=recreate)
         result["steps"].append({
             "step": "provision",
             "status": provision_result.get("status", "ok"),
             "stopped": provision_result.get("stopped", []),
             "provisioned": provision_result.get("provisioned", []),
+            "recreated": provision_result.get("recreated", []),
+            "warnings": provision_result.get("warnings", []),
             "note": provision_result.get("note", ""),
         })
         
