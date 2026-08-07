@@ -1196,6 +1196,289 @@ class TestUpdateWorkerModelIds:
             "model"]["default"] == "stale"
 
 
+# ── T3: apply the template's routing: block to config.yaml ──────────────
+
+class TestApplyRouting:
+    """T3 routing. A ``routing:`` block maps a consumer to a UNIT NAME (not a
+    URL); apply resolves it to that unit's live endpoint and writes the consumer's
+    config keys with probe-before-write.
+
+    HARD REQUIREMENT: a routing key that is OMITTED — or the whole block absent —
+    means the config key is NOT WRITTEN AT ALL (stricter than fill-empty).
+    assert NOT-WRITTEN (a value that happens to match must not count as pass).
+    """
+
+    CONCRETE = "deepseek-ai/DeepSeek-V4-Flash-0731"
+    ALIAS = "worker-model"
+    ORCH_ALIAS = "orchestrator-model"
+
+    def _plan(self, *, fam_proxy=None, family="reasoning"):
+        """Plan: orchestrator on 10.0.0.1:8000; one worker family 'reasoning'
+        with a unit on 10.0.0.2:8001 and (optionally) a proxy on ``fam_proxy``
+        (None = no proxy)."""
+        orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
+                               self.ORCH_ALIAS, ["10.0.0.1"], 8000, 1, 1)
+        unit = ti.ResolvedUnit("worker", family, "w.yaml", self.ALIAS,
+                               ["10.0.0.2"], 8001, 1, 1)
+        fam = ti.ResolvedFamily(name=family, proxy_port=fam_proxy, units=[unit])
+        return ti.ResolvedPlan(template="t", orchestrator=orch, families=[fam])
+
+    def _tpl(self, routing=None):
+        """ClusterTemplate with the given routing block (None = block absent)."""
+        return ti.ClusterTemplate(name="t", version=3,
+                                  orchestrator=ti.ModelIntent("o.yaml"),
+                                  families=[ti.FamilyIntent("reasoning",
+                                                           [ti.ModelIntent("w.yaml")])],
+                                  routing=routing)
+
+    def _serving(self, *served):
+        """Injectable _http_get simulating /v1/models serving ``served`` ids."""
+        import json
+        def get(url, api_key=None):
+            return json.dumps({"object": "list", "data": [
+                {"id": m, "object": "model"} for m in served]})
+        return get
+
+    def _apply(self, tpl, plan, conf, served):
+        """Run _apply_routing against ``conf`` with endpoint serving ``served``."""
+        return cluster_template._apply_routing(
+            tpl, plan, config_yaml=conf, _http_get=self._serving(*served))
+
+    def _write(self, path, **sections):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        import yaml
+        data = dict(sections)
+        path.write_text(yaml.safe_dump(data, sort_keys=False))
+
+    # ── present routing key writes correct endpoint + model ──────────────
+
+    def test_delegation_routes_to_family_proxy(self, tmp_path):
+        """delegation: family-reasoning (proxy:true) → base_url localhost:4000,
+        model = the alias the proxy advertises."""
+        conf = tmp_path / "config.yaml"
+        self._write(conf, delegation={"model": "stale", "base_url": "http://stale/v1"})
+        tpl = self._tpl(routing={"delegation": "family-reasoning"})
+        plan = self._plan(fam_proxy=4000)
+        result = self._apply(tpl, plan, conf, served=(self.ALIAS,))
+        import yaml
+        d = yaml.safe_load(conf.read_text())
+        assert d["delegation"]["base_url"] == "http://localhost:4000/v1"
+        assert d["delegation"]["model"] == self.ALIAS
+        assert "delegation.model" in result["keys_written"]
+        assert result["changed"] is True
+
+    def test_delegation_routes_to_orchestrator(self, tmp_path):
+        """delegation: orchestrator → base_url 10.0.0.1:8000, model = orch alias."""
+        conf = tmp_path / "config.yaml"
+        self._write(conf, delegation={"model": "stale", "base_url": "http://stale/v1"})
+        tpl = self._tpl(routing={"delegation": "orchestrator"})
+        result = self._apply(tpl, self._plan(), conf, served=(self.ORCH_ALIAS,))
+        import yaml
+        d = yaml.safe_load(conf.read_text())
+        assert d["delegation"]["base_url"] == "http://10.0.0.1:8000/v1"
+        assert d["delegation"]["model"] == self.ORCH_ALIAS
+
+    def test_compaction_routes_to_orchestrator(self, tmp_path):
+        """compaction: orchestrator → auxiliary.compression.{base_url,model}."""
+        conf = tmp_path / "config.yaml"
+        self._write(conf, auxiliary={"compression": {"model": "x"}})
+        tpl = self._tpl(routing={"compaction": "orchestrator"})
+        result = self._apply(tpl, self._plan(), conf, served=(self.ORCH_ALIAS,))
+        import yaml
+        aux = yaml.safe_load(conf.read_text())["auxiliary"]["compression"]
+        assert aux["base_url"] == "http://10.0.0.1:8000/v1"
+        assert aux["model"] == self.ORCH_ALIAS
+        assert "auxiliary.compression.model" in result["keys_written"]
+
+    def test_auxiliaries_write_all_8_text_tasks_not_vision_web(self, tmp_path):
+        """auxiliaries: <target> → auxiliary.<task>.{base_url,model} for the 8
+        TEXT tasks ONLY — never vision or web_extract."""
+        conf = tmp_path / "config.yaml"
+        self._write(conf, auxiliary={})
+        tpl = self._tpl(routing={"auxiliaries": "orchestrator"})
+        result = self._apply(tpl, self._plan(), conf, served=(self.ORCH_ALIAS,))
+        import yaml
+        aux = yaml.safe_load(conf.read_text())["auxiliary"]
+        tasks = cluster_template.ROUTING_AUX_TEXT_TASKS
+        assert len(tasks) == 8
+        for t in tasks:
+            assert aux[t]["base_url"] == "http://10.0.0.1:8000/v1"
+            assert aux[t]["model"] == self.ORCH_ALIAS
+        # vision / web_extract must NOT have been written by the auxiliaries consumer
+        assert "vision" not in aux
+        assert "web_extract" not in aux
+
+    def test_family_without_proxy_routes_to_primary_endpoint(self, tmp_path):
+        """family-<name> with proxy:false → its PRIMARY node's endpoint, not a
+        proxy URL (there is none)."""
+        conf = tmp_path / "config.yaml"
+        self._write(conf, delegation={"model": "stale", "base_url": "http://stale/v1"})
+        tpl = self._tpl(routing={"delegation": "family-reasoning"})
+        plan = self._plan(fam_proxy=None)  # family has NO proxy
+        result = self._apply(tpl, plan, conf, served=(self.ALIAS,))
+        import yaml
+        d = yaml.safe_load(conf.read_text())
+        assert d["delegation"]["base_url"] == "http://10.0.0.2:8001/v1"
+        assert d["delegation"]["model"] == self.ALIAS
+
+    # ── hard requirement: OMISSION means NOT-WRITTEN ─────────────────────
+
+    def test_omitted_routing_key_is_absent_from_write_set(self, tmp_path):
+        """routing omits delegation (states compaction only). delegation must be
+        NOT WRITTEN — even asserting 'it kept its old value' is not enough; the
+        key must literally not appear in the write set and stay byte-identical."""
+        conf = tmp_path / "config.yaml"
+        # config has NO delegation key at all — if routing wrote it, it would appear.
+        self._write(conf, model={"default": "orch"})
+        tpl = self._tpl(routing={"compaction": "orchestrator"})
+        result = self._apply(tpl, self._plan(), conf, served=(self.ORCH_ALIAS,))
+        import yaml
+        d = yaml.safe_load(conf.read_text())
+        # delegation.absent-assertion: filled but absent-before means it must stay
+        # absent (this is what 'not written' means, stricter than 'unchanged').
+        assert "delegation" not in d
+        # only the stated consumer was written (base_url + model, nothing else)
+        assert result["keys_written"] == [
+            "auxiliary.compression.base_url", "auxiliary.compression.model"]
+        # compaction WAS written (positive control: routing still works)
+        assert d["auxiliary"]["compression"]["base_url"] == "http://10.0.0.1:8000/v1"
+
+    def test_absent_routing_block_writes_nothing(self, tmp_path):
+        """Whole routing block absent (tpl.routing is None) → zero writes; the
+        live config survives byte-for-byte."""
+        conf = tmp_path / "config.yaml"
+        self._write(conf, delegation={"model": "hand-tuned",
+                                      "base_url": "http://hand/v1"},
+                    auxiliary={"compression": {"model": "hand2"}})
+        before = conf.read_text()
+        tpl = self._tpl(routing=None)  # block absent
+        result = self._apply(tpl, self._plan(), conf, served=(self.ALIAS,))
+        assert result["keys_written"] == []
+        assert result["changed"] is False
+        assert conf.read_text() == before   # nothing touched, even the bytes
+
+    def test_omitted_key_keeps_matching_value_but_still_not_written(self, tmp_path):
+        """A value that HAPPENS to match must still not count as a write. routing
+        omits delegation; config.delegation already equals what routing would
+        have written. It must still be ABSENT from the write set (proves we did
+        not 'write' it, we merely left it)."""
+        conf = tmp_path / "config.yaml"
+        self._write(conf, delegation={"model": self.ORCH_ALIAS,
+                                      "base_url": "http://10.0.0.1:8000/v1"})
+        before = conf.read_text()
+        tpl = self._tpl(routing={"compaction": "orchestrator"})
+        result = self._apply(tpl, self._plan(), conf, served=(self.ORCH_ALIAS,))
+        import yaml
+        d = yaml.safe_load(conf.read_text())
+        # delegation matched, but routing did NOT state it → must not be in write set
+        assert "delegation.model" not in result["keys_written"]
+        assert "delegation.base_url" not in result["keys_written"]
+        # and its (matching) bytes are untouched — it was left, not rewritten
+        assert d["delegation"] == {"model": self.ORCH_ALIAS,
+                                   "base_url": "http://10.0.0.1:8000/v1"}
+
+    # ── probe-before-write (RISK: alias not advertised at target) ────────
+
+    def test_alias_not_advertised_at_target_writes_concrete(self, tmp_path):
+        """The template declares the alias ``worker-model`` for the family, but
+        the endpoint serves ONLY the concrete id. probe-before-write must write
+        the CONCRETE id, never the alias the endpoint would 404 on. If the probe
+        is removed and the alias blindly written, this test FAILS."""
+        conf = tmp_path / "config.yaml"
+        self._write(conf, delegation={"model": "stale", "base_url": "http://stale/v1"})
+        tpl = self._tpl(routing={"delegation": "family-reasoning"})
+        plan = self._plan(fam_proxy=4000)
+        # candidate = ALIAS, proxy serves ONLY the CONCRETE id
+        result = self._apply(tpl, plan, conf, served=(self.CONCRETE,))
+        import yaml
+        d = yaml.safe_load(conf.read_text())
+        assert d["delegation"]["base_url"] == "http://localhost:4000/v1"
+        assert d["delegation"]["model"] == self.CONCRETE   # written, not the alias
+
+    def test_proxy_unreachable_refuses_consumer(self, tmp_path):
+        """Unreachable target: refuse to write the consumer (touch nothing) rather
+        than write a model id the endpoint might 404 on. The refused consumer is
+        surfaced in notes and is not a silent no-op."""
+        def _get(url, api_key=None):
+            raise OSError("connection refused")
+        conf = tmp_path / "config.yaml"
+        self._write(conf, delegation={"model": "hand", "base_url": "http://hand/v1"})
+        before = conf.read_text()
+        tpl = self._tpl(routing={"delegation": "family-reasoning"})
+        result = cluster_template._apply_routing(
+            tpl, self._plan(), config_yaml=conf, _http_get=_get)
+        import yaml
+        d = yaml.safe_load(conf.read_text())
+        assert d["delegation"] == {"model": "hand", "base_url": "http://hand/v1"}
+        # no actual config key was written — only a refused marker recorded
+        assert result["keys_written"] == ["delegation:refused:(unreachable)"]
+        assert result["changed"] is False
+        assert any("refused" in n for n in result["notes"])
+
+    def test_dangling_routing_target_raises(self, tmp_path):
+        """routing.delegation -> 'family-noexist': no such family → hard block."""
+        with pytest.raises(ti.TemplateIntentError):
+            cluster_template._routing_target_endpoint("family-noexist", self._plan())
+
+    def test_idempotent_rerun_writes_nothing(self, tmp_path):
+        """Re-applying the same template with routing already applied is a byte
+        no-op (atomic_yaml_update returns changed=False)."""
+        conf = tmp_path / "config.yaml"
+        self._write(conf, delegation={"model": "stale", "base_url": "http://stale/v1"})
+        tpl = self._tpl(routing={"delegation": "family-reasoning"})
+        served = (self.CONCRETE,)
+        self._apply(tpl, self._plan(), conf, served=served)   # first apply
+        before = conf.read_text()
+        result = self._apply(tpl, self._plan(), conf, served=served)  # second
+        assert result["changed"] is False
+        assert conf.read_text() == before
+
+    # ── routing block governs delegation: Step 5 must not clobber omission ──
+
+    def test_routing_present_skips_worker_delegation_rewrite(self, tmp_path):
+        """END-TO-END hard requirement: when a routing: block is present, the
+        worker-model Step 5 must NOT silently rewrite delegation. If routing omits
+        delegation (operator tuned it by hand), delegation must survive untouched
+        — despite _update_worker_model_ids normally rewriting it. Here we drive
+        _update_worker_model_ids with skip_delegation=True (what apply_template
+        passes when tpl.routing is not None) and assert delegation is left as-is.
+        """
+        conf = tmp_path / "config.yaml"
+        self._write(conf, delegation={"model": "hand-tuned",
+                                      "base_url": "http://hand/v1"},
+                    fallback_providers=[{"model": "hand", "name": "fb"}])
+        before = conf.read_text()
+        result = cluster_template._update_worker_model_ids(
+            self._plan(fam_proxy=4000), profiles_dir=tmp_path / "profiles",
+            config_yaml=conf, _http_get=self._serving(self.CONCRETE),
+            skip_delegation=True)
+        import yaml
+        d = yaml.safe_load(conf.read_text())
+        # delegation + fallback left byte-for-byte untouched (routing owns it)
+        assert d["delegation"] == {"model": "hand-tuned", "base_url": "http://hand/v1"}
+        assert d["fallback_providers"] == [{"model": "hand", "name": "fb"}]
+        assert result["delegation_routed"] is True
+        assert result["config_changed"] is False
+
+    def test_no_routing_block_still_rewrites_delegation_via_step5(self, tmp_path):
+        """Without a routing block, the legacy Step 5 behaviour is preserved:
+        delegation/fallback get rewritten to the worker proxy. skip_delegation
+        defaults False so this path is unchanged for routing-less templates.
+        """
+        conf = tmp_path / "config.yaml"
+        self._write(conf, delegation={"model": "stale",
+                                      "base_url": "http://stale/v1"})
+        result = cluster_template._update_worker_model_ids(
+            self._plan(fam_proxy=4000), profiles_dir=tmp_path / "profiles",
+            config_yaml=conf, _http_get=self._serving(self.CONCRETE))
+        import yaml
+        d = yaml.safe_load(conf.read_text())
+        # unchanged legacy path: delegation rewritten to the worker proxy
+        assert d["delegation"]["model"] == self.CONCRETE
+        assert d["delegation"]["base_url"] == "http://localhost:4000/v1"
+        assert result["config_changed"] is True
+
+
 # ── Fix: provision timeout raised to configurable 900s ──────────────────
 
 class TestProvisionReusedNode:
