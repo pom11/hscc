@@ -954,13 +954,33 @@ def apply_template(template_name: str, confirm: bool = False,
         # fallback_providers; worker role profiles' model.default) to the family
         # model. A worker-tier switch otherwise leaves stale model ids behind,
         # so every worker hits the strict proxy with an invalid model name.
-        wm = _update_worker_model_ids(plan)
+        # When the template carries a routing: block, that block is the SOLE
+        # authority for the delegation consumer, so Step 5's delegation/fallback
+        # rewrite is skipped (routing handles present; omission means untouched).
+        # Profiles still rewritten — routing has no 'profiles' consumer.
+        wm = _update_worker_model_ids(plan, skip_delegation=(tpl.routing is not None))
         result["steps"].append({
             "step": "worker-model-ids",
             "status": "ok",
             "model_id": wm["model_id"],
             "config_changed": wm["config_changed"],
             "profiles_changed": wm["profiles_changed"],
+        })
+
+        # Step 5b: Apply the template's routing: block (T3). Resolves each
+        # symbolic target to its live endpoint and writes the consumer's config
+        # keys with probe-before-write. Runs AFTER the worker-model rewrite so an
+        # explicit routing target always wins over the default worker re-aim.
+        # A routing config change also counts toward the gateway-restart decision.
+        ro = _apply_routing(tpl, plan)
+        if ro["changed"]:
+            config_changed = True
+        result["steps"].append({
+            "step": "routing",
+            "status": "ok",
+            "keys_written": ro["keys_written"],
+            "config_changed": ro["changed"],
+            "notes": ro["notes"],
         })
 
         # Step 6: Provision models via sparkrun
@@ -1372,7 +1392,7 @@ def _set_worker_model_in_profile(config: dict, model_id: str, port: int) -> dict
 
 def _update_worker_model_ids(plan: Any, *, profiles_dir: Optional[Path] = None,
                              config_yaml: Optional[Path] = None,
-                             _http_get=None) -> dict:
+                             _http_get=None, skip_delegation: bool = False) -> dict:
     """Rewire worker-facing routing to the resolved worker/family model.
 
     Called from ``apply_template`` after config.yaml is written. Two concerns:
@@ -1393,6 +1413,13 @@ def _update_worker_model_ids(plan: Any, *, profiles_dir: Optional[Path] = None,
     fails or no resolvable id is found, nothing is written (the id would 404
     every delegated call). ``_http_get`` is injectable for tests; default is a
     real network probe.
+
+    ``skip_delegation=True`` (set by apply_template when the template carries a
+    ``routing:`` block): the config.yaml delegation/fallback rewrite is SKIPPED,
+    because the routing block is then the sole authority for the ``delegation``
+    consumer (a present key routes it; an OMITTED key must leave it untouched —
+    the routing hard requirement). The worker role profiles rewrite still runs:
+    routing has no ``profiles`` consumer, so it cannot express that concern.
 
     All writes use atomic_yaml_update (backup + tmp + os.replace) and are
     idempotent: re-running apply with an already-correct state changes nothing.
@@ -1423,9 +1450,14 @@ def _update_worker_model_ids(plan: Any, *, profiles_dir: Optional[Path] = None,
         return result
     model_id = resolved
 
-    conf = config_yaml or CONFIG_YAML
-    _, result["config_changed"] = atomic_yaml_update(
-        conf, lambda d: _set_worker_model_in_config(d, model_id, proxy_url))
+    if skip_delegation:
+        # routing block governs the delegation consumer — do NOT touch
+        # delegation/fallback here. Profiles still rewritten below.
+        result["delegation_routed"] = True
+    else:
+        conf = config_yaml or CONFIG_YAML
+        _, result["config_changed"] = atomic_yaml_update(
+            conf, lambda d: _set_worker_model_in_config(d, model_id, proxy_url))
 
     pd = profiles_dir or PROFILES_DIR
     for pfile in sorted(pd.glob("*/config.yaml")):
@@ -1437,6 +1469,173 @@ def _update_worker_model_ids(plan: Any, *, profiles_dir: Optional[Path] = None,
         if changed:
             result["profiles_changed"] += 1
     return result
+
+
+# ── T3: apply the template's routing: block to config.yaml ────────────────
+# Symbolic target -> that unit's live endpoint, with probe-before-write on the
+# model id and strict omission semantics (an absent key is NEVER written).
+
+# The 8 TEXT auxiliaries routing may target. Deliberately NOT vision or
+# web_extract — those need capability-specific providers (spec schema table).
+ROUTING_AUX_TEXT_TASKS = [
+    "kanban_decomposer", "triage_specifier", "profile_describer", "curator",
+    "title_generation", "skills_hub", "approval", "mcp",
+]
+
+
+def _routing_target_endpoint(target: str, plan: Any) -> Tuple[str, str]:
+    """Resolve a symbolic routing target to that unit's live endpoint.
+
+    Returns ``(base_url, candidate_model_id)``. ``orchestrator`` -> orchestrator
+    host:port; ``family-<name>`` -> that family's proxy port when ``proxy: true``
+    (``proxy_port`` is not None), else its primary node's endpoint
+    (``units[0].node:units[0].port``). The model candidate is the unit's
+    configured model id (normally the logical alias post-v1.6.0).
+
+    A target that names no unit the template defines is a hard structural error
+    (spec: ``routing.delegation -> 'family-coding': no such family``).
+    """
+    if target == "orchestrator":
+        o = plan.orchestrator
+        return f"http://{o.node}:{o.port}/v1", o.model
+    if target.startswith("family-"):
+        name = target[len("family-"):]
+        for fam in plan.families:
+            if fam.name == name:
+                if fam.proxy_port is not None:
+                    # route to the family's proxy; model = the family's unit model
+                    model = fam.units[0].model if fam.units else ""
+                    return f"http://localhost:{fam.proxy_port}/v1", model
+                # no proxy: the family's primary node exposes the endpoint
+                u = fam.units[0]
+                return f"http://{u.node}:{u.port}/v1", u.model
+        # Dangling routing target -> hard block, never silently ignored.
+        raise _ti().TemplateIntentError(
+            f"routing target '{target}': no such family in this template")
+    raise _ti().TemplateIntentError(
+        f"routing target '{target}': must be 'orchestrator' or 'family-<name>'")
+
+
+def _routing_model_to_write(candidate: str, base_url: str, *, _http_get=None) -> Tuple[Optional[str], str, list]:
+    """Probe-before-write: resolve the model id to actually write at ``base_url``.
+
+    The endpoint (esp. a sparkrun proxy) may serve ONLY the concrete id, not the
+    logical alias ``candidate``. Writing an alias the endpoint does not advertise
+    makes every call 404. So the id written is probe-resolved:
+      - candidate IS served -> write candidate (alias or concrete);
+      - else exactly one served id -> write that (the concrete fallback);
+      - else -> None (refuse: empty or ambiguous /endpoints served list).
+
+    ``None`` for status != "ok" too (unreachable/error) — never write a model id
+    we could not confirm the endpoint resolves (standing 404 guard, same posture
+    as ``_update_worker_model_ids``). Returns ``(resolved_model, probe_status,
+    served_ids)``.
+    """
+    status, served = _probe_served_models(base_url, _http_get=_http_get)
+    if status != "ok":
+        return None, status, list(served) if isinstance(served, list) else []
+    resolved = _resolve_worker_model_id(candidate, served)
+    return resolved, status, list(served)
+
+
+def _set_config_path(config: dict, path: str, value) -> None:
+    """Set ``config['a']['b']['c'] = value`` (dotted path), creating dicts.
+
+    Mutates ``config`` in place. Does not create the path on a scalar/non-dict
+    blockage (rare malformed config) — it raises so apply surfaces the error.
+    """
+    parts = path.split(".")
+    node = config
+    for part in parts[:-1]:
+        nxt = node.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            node[part] = nxt
+        node = nxt
+    node[parts[-1]] = value
+
+
+def _routing_config_keys(consumer: str):
+    """Map a consumer -> list of (base_url_path, model_path) config key paths.
+
+    ``None`` for an unrecognised consumer — it is NEVER written (the spec table
+    is exhaustive; unknown keys are a typo, and apply must not invent keys).
+    """
+    if consumer == "delegation":
+        return [("delegation.base_url", "delegation.model")]
+    if consumer == "compaction":
+        return [("auxiliary.compression.base_url", "auxiliary.compression.model")]
+    if consumer == "auxiliaries":
+        return [(f"auxiliary.{t}.base_url", f"auxiliary.{t}.model")
+                for t in ROUTING_AUX_TEXT_TASKS]
+    return None
+
+
+def _routing_update_config(config: dict, tpl: Any, plan: Any, *, _http_get=None,
+                           written: Optional[list] = None) -> dict:
+    """Mutate ``config`` for every routing consumer PRESENT in ``tpl.routing``.
+
+    Omission semantics (STRICTER than fill-empty): a consumer absent from
+    ``tpl.routing`` — or the whole block absent, which the caller checks before
+    invoking — is NEVER written, regardless of the live value (even if blank).
+    Only consumers explicitly stated in the routing block are touched.
+
+    For a present consumer, ``base_url`` is the resolved symbolic endpoint and
+    ``model`` is probe-resolved (see ``_routing_model_to_write``): the alias is
+    written when the endpoint advertises it, else the single concrete id, else
+    the consumer is refused (nothing written) rather than writing an id the
+    endpoint might 404 on. ``written`` collects the concrete key paths touched
+    (for tests / reporting).
+    """
+    written = written if written is not None else []
+    for consumer, target in (tpl.routing or {}).items():
+        keys = _routing_config_keys(consumer)
+        if keys is None:
+            continue  # unrecognised consumer: never invent a config key
+        try:
+            base_url, candidate = _routing_target_endpoint(target, plan)
+        except _ti().TemplateIntentError as e:
+            written.append(f"{consumer}:error:{e}")
+            raise
+        model, status, served = _routing_model_to_write(
+            candidate, base_url, _http_get=_http_get)
+        if model is None:
+            # Probe could not confirm a model the endpoint resolves. Refuse this
+            # consumer (touch NOTHING) — never write an id the endpoint 404s on.
+            written.append(f"{consumer}:refused:({status})")
+            continue
+        for base_path, model_path in keys:
+            _set_config_path(config, base_path, base_url)
+            _set_config_path(config, model_path, model)
+            written.append(base_path)
+            written.append(model_path)
+    return config
+
+
+def _apply_routing(tpl: Any, plan: Any, *, config_yaml: Optional[Path] = None,
+                   _http_get=None) -> dict:
+    """Apply the template's ``routing:`` block to config.yaml (atomic).
+
+    Whole block absent (``tpl.routing is None``) writes NOTHING and returns
+    ``{"keys_written": [], "changed": False}``. Otherwise one atomic_yaml_update
+    over config.yaml mutates only the consumers the block states — an omitted
+    consumer keeps its live value byte-for-byte (hard requirement). ``_http_get``
+    injectable for tests (probe-before-write without the network).
+
+    Returns ``{"keys_written": [...], "changed": bool, "notes": [...]}``.
+    """
+    notes: list = []
+    if tpl.routing is None:
+        return {"keys_written": [], "changed": False, "notes": notes}
+    written: list = []
+    conf = config_yaml or CONFIG_YAML
+    _, changed = atomic_yaml_update(
+        conf, lambda d: _routing_update_config(
+            d, tpl, plan, _http_get=_http_get, written=written))
+    for w in written:
+        if ":refused:" in w or ":error:" in w:
+            notes.append(w)
+    return {"keys_written": written, "changed": changed, "notes": notes}
 
 
 def _describe_config_changes(plan, current_models: Optional[dict]) -> list:
