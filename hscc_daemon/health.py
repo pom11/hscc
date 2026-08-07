@@ -227,6 +227,44 @@ def check_gateway():
 PROXY_PORT = int(os.environ.get("HSCC_PROXY_PORT", "4000"))
 
 
+def _ensure_cmdlib_on_path():
+    """Put the sibling hscc-commands plugin dir on sys.path for the cmdlib import.
+
+    cmdlib lives in the hscc-commands plugin (deployed beside hscc_daemon under
+    ~/.hermes/plugins). We mirror hscc_daemon.hscc._load_cluster_engine, which
+    resolves the hscc-cluster plugin as a sibling and imports it bare.
+    Idempotent: the dir is inserted once.
+    """
+    cmd_dir = os.path.realpath(
+        os.path.join(os.path.dirname(__file__), "..", "hscc-commands"))
+    if cmd_dir not in sys.path:
+        sys.path.insert(0, cmd_dir)
+
+
+def _tp_peer_nodes():
+    """IPs that are NON-primary members of a multi-node / multi-tp serving span.
+
+    A tp peer serves its model through the span's PRIMARY and exposes no
+    endpoint of its own, so a health check must never treat it as a down worker
+    nor relaunch it as a solo unit. Reuses cmdlib.serving_unit_scoreboard() —
+    the SAME single source of truth /cluster, /status, and
+    enumerate_cluster_nodes use — rather than re-implementing tp-peer detection
+    here. Best-effort: any failure (plugin missing, import error, empty/corrupt
+    serving.json) yields an empty set, degrading to the pre-fix behaviour
+    instead of crashing the worker check.
+    """
+    try:
+        _ensure_cmdlib_on_path()
+        from cmdlib import serving_unit_scoreboard
+        score = serving_unit_scoreboard()
+    except Exception:
+        return set()
+    if not isinstance(score, dict):
+        return set()
+    return {ip for ip, s in score.items() if s and s.get("tp_peer")}
+
+
+
 def check_proxy():
     """Keep the sparkrun LiteLLM worker proxy alive (worker load-balancer).
 
@@ -578,6 +616,13 @@ def check_workers():
     # Load persisted grace timestamps on each check (survives restarts)
     _load_worker_relaunch_timestamps()
 
+    # tp-peer awareness (the SAME primary-node-only blind spot /cluster had
+    # before v1.6.0): a node that is a NON-primary member of a multi-node /
+    # multi-tp span reports no endpoint of its own and must NEVER be counted
+    # down nor relaunched as a solo unit. Compute the peer set once per check,
+    # reusing cmdlib.serving_unit_scoreboard() (see _tp_peer_nodes).
+    tp_peers = _tp_peer_nodes()
+
     online, relaunched, down = [], [], []
     now_wall = time.time()
     grace_secs = VLLM_LOAD_GRACE_MINUTES * 60
@@ -585,6 +630,12 @@ def check_workers():
         node, port, recipe = u["node"], u["port"], u["recipe"]
         key = (node, port)
         label = u["id"]
+        if node in tp_peers:
+            # Span member: its endpoint lives on the span's primary, so no
+            # standalone health probe applies. Report it online (not down);
+            # never relaunch it as a solo unit.
+            online.append(label)
+            continue
         url = f"http://{node}:{port}/health"
         if http_check(url, timeout=5).get("ok"):
             online.append(label)
