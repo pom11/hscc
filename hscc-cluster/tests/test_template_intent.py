@@ -281,3 +281,47 @@ class TestMultiNodeTP:
                                families=[ti.ResolvedFamily("f", 4000, [u2])])
         errs = ti.validate_resolved(plan)
         assert any("collision" in e and "10.0.0.2" in e for e in errs)
+
+
+# ── existing-span guard (exclude_nodes) ──────────────────────────────────────
+
+class TestExistingSpanGuard:
+    """A node that is ALREADY a tp peer of a live serving span must never be
+    handed a new unit by resolve() (the plan/provision side of the
+    double-provision bug)."""
+
+    def test_span_member_excluded_from_pool_not_assigned_solo(self):
+        """resolve() given exclude_nodes=[peer] drops it from the pool, so it is
+        never assigned a solo (tp=1) unit."""
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "orchestrator": "o.yaml",
+            "families": [{"name": "coding", "models": ["m.yaml"],
+                          "workers": "all"}]})
+        plan = ti.resolve(t, _topo(3), _coster=_coster(),
+                          exclude_nodes={"10.0.0.4"})   # .4 is a live span peer
+        fam_nodes = {u.node for u in plan.families[0].units}
+        assert "10.0.0.4" not in fam_nodes               # never assigned
+        assert fam_nodes == {"10.0.0.2", "10.0.0.3"}      # only truly-free workers
+
+    def test_no_exclude_nodes_behavior_unchanged(self):
+        """Without exclude_nodes, the pool is untouched (regression guard)."""
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "orchestrator": "o.yaml",
+            "families": [{"name": "coding", "models": ["m.yaml"],
+                          "workers": "all"}]})
+        plan = ti.resolve(t, _topo(3), _coster=_coster())
+        assert {u.node for u in plan.families[0].units} == \
+            {"10.0.0.2", "10.0.0.3", "10.0.0.4"}
+
+    def test_span_member_never_picked_as_tp_peer_of_new_span(self):
+        """exclude_nodes also keeps a span member out of the peer slot of a NEW
+        spanning unit (it can't be borrowed for orchestrator tp-spanning)."""
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "orchestrator": {"recipe": "o.yaml", "tp": 2},
+            "families": [{"name": "coding", "models": ["m.yaml"],
+                          "workers": "remaining"}]})
+        plan = ti.resolve(t, _topo(3), _coster=_coster(),
+                          exclude_nodes={"10.0.0.2"})
+        # orchestrator spans its own node + a FREE worker (not the excluded peer)
+        assert plan.orchestrator.nodes == ["10.0.0.1", "10.0.0.3"]
+        assert "10.0.0.2" not in plan.orchestrator.nodes
