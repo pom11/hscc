@@ -32,7 +32,7 @@ def cmd_cluster_template(args):
                 "status": "Show which template is currently applied",
                 "validate <name>": "Preflight-check a template (is it deployable?)",
                 "preview <name>": "Preview what applying a template would change",
-                "apply <name> [--confirm]": "Apply a cluster template (use --confirm to execute)",
+                "apply <name> [--confirm] [--force-recreate]": "Apply a cluster template (use --confirm to execute; --force-recreate to stop+rerun units so changed serve flags reach vLLM)",
             },
         }
 
@@ -59,10 +59,12 @@ def cmd_cluster_template(args):
 
     elif subcmd == "apply":
         if len(args) < 2:
-            return {"error": "Missing template name", "usage": "cluster-template apply <name> [--confirm]"}
+            return {"error": "Missing template name",
+                    "usage": "cluster-template apply <name> [--confirm] [--force-recreate]"}
         confirm = "--confirm" in args
+        recreate = ("--force-recreate" in args) or ("--recreate-on-change" in args)
         try:
-            return apply_template(args[1], confirm=confirm)
+            return apply_template(args[1], confirm=confirm, recreate=recreate)
         except FileNotFoundError as e:
             return {"error": str(e)}
 
