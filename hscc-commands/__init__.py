@@ -665,14 +665,16 @@ def cmd_cluster_prune(raw_args):
 
 def cmd_template(raw_args):
     """List / preview / validate / apply cluster templates from chat.
-    Usage: /template [list|status|validate <name>|preview <name>|apply <name> [confirm]]"""
+    Usage: /template [list|status|validate <name>|preview <name>|apply <name> [confirm] [--force-recreate]]"""
     import json as _json
     parts = (raw_args or "").split()
     sub = parts[0] if parts else "list"
     if sub == "apply":
         if len(parts) < 2:
-            return "Usage: /template apply <name> [confirm]"
+            return "Usage: /template apply <name> [confirm] [--force-recreate]"
         argv = ["x", "apply", parts[1]] + (["--confirm"] if _confirmed(raw_args) else [])
+        if "--force-recreate" in parts or "--recreate-on-change" in parts:
+            argv.append("--force-recreate")
     elif sub in ("preview", "validate"):
         if len(parts) < 2:
             return f"Usage: /template {sub} <name>"
@@ -681,7 +683,7 @@ def cmd_template(raw_args):
         argv = ["x", sub]
     else:
         return ("Usage: /template [list|status|validate <name>|preview <name>|"
-                "apply <name> [confirm]]")
+                "apply <name> [confirm] [--force-recreate]]")
     res = cmdlib.template_cli(argv)
     return "📦 *HSCC template*\n```\n" + _json.dumps(res, indent=2, default=str)[:3000] + "\n```"
 
