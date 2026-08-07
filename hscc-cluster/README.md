@@ -46,6 +46,35 @@ The idempotent-resume probe (`probe_task_state`) + the `kanban_task_claimed` hoo
 handler that posts a "resume, don't redo" note to a re-dispatched worker, built
 from its task branch's committed state.
 
-## Tests
-`tests/` — 145 tests. Run: `python -m pytest tests/ -q`. Integration tests assert
+## Delegation routing — `_update_worker_model_ids`
+Delegated subagents and the first fallback are supposed to run on the WORKER
+pool, not the orchestrator GPU (`delegation.base_url`/`fallback_providers[0]`
+→ the `:4000` worker proxy; `model` → the served worker id). Once a worker
+family exists in the plan, `_update_worker_model_ids` keeps `model` **and
+`base_url`** in lockstep, so a worker-tier apply re-aims any drifted
+`delegation.base_url` / `fallback_providers[].base_url` from the orchestrator
+(`:8000`) back to the worker proxy.
+
+**Probe-before-write (the 404 guard).** The `:4000` worker proxy is the sparkrun
+LiteLLM load-balancer that fronts the worker span. It advertises **only the
+CONCRETE id** (e.g. `deepseek-ai/DeepSeek-V4-Flash-0731`) — it does NOT publish
+the stable `worker-model` alias. (The alias IS advertised, but by a DIFFERENT
+endpoint: the worker span's primary vLLM on the `.247` node, which registers
+both the concrete id and `worker-model` via multi-name `--served-model-name`.
+Those are two endpoints with two different model registries; do not conflate
+them.) A worker-tier apply therefore derives `delegation.model` /
+`fallback_providers[].model` from what the **proxy actually serves**: it probes
+the proxy's `/v1/models` and writes the declared model id when the proxy serves
+it, else the CONCRETE id the proxy serves. If a template ever declares the
+alias `worker-model` as the worker unit model, an apply still writes the
+concrete id the proxy resolves — never an alias the endpoint would 404 on. If
+the probe fails or finds no resolvable id, nothing is written (blinding an
+apply mid-flight is safer than writing an id every delegated call 404s on).
+
+The probe machinery (correct `/v1/models` path + Bearer auth) mirrors
+`hscc-bootstrap/doctor.py`'s `_probe_served_models` / `_models_url` so the
+fleet shares one probe contract across the standalone plugins.
+
+**Tests**
+`tests/` — run: `python -m pytest tests/ -q`. Integration tests assert
 generated files / real git, not mocks.
