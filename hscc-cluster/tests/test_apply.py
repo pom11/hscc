@@ -905,6 +905,59 @@ class TestUpdateWorkerModelIds:
         assert [f["model"] for f in data["fallback_providers"]] == [self.WORKER, self.WORKER]
         assert result["config_changed"] is True
 
+    def test_config_delegation_and_fallback_base_url_reaimed_to_worker_proxy(self, tmp_path):
+        """The routing regression: delegation/fallback base_url pointing at the
+        ORCHESTRATOR (:8000) must be re-aimed at the worker proxy (:4000) when
+        the writer runs. Otherwise apply fixes the model id but subagents still
+        land on the orchestrator GPU. Model AND base_url must move together."""
+        conf = tmp_path / "config.yaml"
+        self._write_config(
+            conf,
+            delegation={"model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                        "base_url": "http://10.0.0.244:8000/v1"},
+            fallbacks=[{"model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                        "base_url": "http://10.0.0.244:8000/v1"}])
+        cluster_template._update_worker_model_ids(
+            self._plan(), profiles_dir=tmp_path / "profiles", config_yaml=conf)
+        import yaml
+        data = yaml.safe_load(conf.read_text())
+        assert data["delegation"]["base_url"] == "http://localhost:4000/v1"
+        assert data["delegation"]["model"] == self.WORKER
+        assert data["fallback_providers"][0]["base_url"] == "http://localhost:4000/v1"
+        assert data["fallback_providers"][0]["model"] == self.WORKER
+
+    def test_config_already_on_worker_proxy_is_noop(self, tmp_path):
+        """Idempotency holds when delegation/fallback ALREADY point at the
+        worker proxy with the right model — a re-apply must not churn bytes."""
+        conf = tmp_path / "config.yaml"
+        self._write_config(
+            conf,
+            delegation={"model": self.WORKER,
+                        "base_url": "http://localhost:4000/v1"},
+            fallbacks=[{"model": self.WORKER,
+                        "base_url": "http://localhost:4000/v1"}])
+        before = conf.read_text()
+        result = cluster_template._update_worker_model_ids(
+            self._plan(), profiles_dir=tmp_path / "profiles", config_yaml=conf)
+        assert conf.read_text() == before
+        assert result["config_changed"] is False
+
+    def test_no_worker_family_leaves_delegation_base_url_untouched(self, tmp_path):
+        """No worker family (dual-orchestrator) ⇒ base_url is NOT re-aimed; the
+        writer must never guess a worker proxy that does not exist."""
+        conf = tmp_path / "config.yaml"
+        self._write_config(
+            conf,
+            delegation={"model": "orch-model",
+                        "base_url": "http://10.0.0.1:8000/v1"})
+        plan = self._plan(worker=False)
+        cluster_template._update_worker_model_ids(
+            plan, profiles_dir=tmp_path / "profiles", config_yaml=conf)
+        import yaml
+        data = yaml.safe_load(conf.read_text())
+        assert data["delegation"]["base_url"] == "http://10.0.0.1:8000/v1"
+        assert data["delegation"]["model"] == "orch-model"
+
     def test_config_no_fallback_providers_still_sets_delegation(self, tmp_path):
         conf = tmp_path / "config.yaml"
         self._write_config(conf, delegation={"model": "stale"})

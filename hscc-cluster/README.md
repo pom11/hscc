@@ -46,6 +46,23 @@ The idempotent-resume probe (`probe_task_state`) + the `kanban_task_claimed` hoo
 handler that posts a "resume, don't redo" note to a re-dispatched worker, built
 from its task branch's committed state.
 
-## Tests
-`tests/` — 145 tests. Run: `python -m pytest tests/ -q`. Integration tests assert
+## Delegation routing — `_update_worker_model_ids`
+Delegated subagents and the first fallback are supposed to run on the WORKER
+pool, not the orchestrator GPU (`delegation.base_url`/`fallback_providers[0]`
+→ the `:4000` worker proxy; `model` → the served worker id). Once a worker
+family exists in the plan, `_update_worker_model_ids` keeps `model` **and
+`base_url`** in lockstep, so a worker-tier apply re-aims any drifted
+`delegation.base_url` / `fallback_providers[].base_url` from the orchestrator
+(`:8000`) back to the worker proxy.
+
+**Ordering requirement:** the worker proxy must expose the stable `worker-model`
+alias BEFORE delegation repoints there (otherwise every delegated call 404s).
+Since HSCC v1.5.1 the proxy advertises both the concrete id and `worker-model`
+via vLLM's multi-name `--served-model-name`, so a worker-tier apply may repoint
+safely. This is what the probe-gated doctor migration (`doctor.py` Card D)
+enforces on live configs: it only converts a concrete id to an alias once the
+endpoint confirms it serves that alias.
+
+**Tests**
+`tests/` — run: `python -m pytest tests/ -q`. Integration tests assert
 generated files / real git, not mocks.
