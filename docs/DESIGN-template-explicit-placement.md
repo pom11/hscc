@@ -234,9 +234,89 @@ when validation fails.
   Either expose the alias on the proxy first, or have routing write the concrete
   id when the target endpoint does not advertise the alias. Implementation must
   probe before writing, reusing `doctor._check_models_served` / `_models_url`.
+
+  **Resolution (card `t_b65d97df`).** Investigation confirmed this is a *stale
+  config*, not a structural limitation — the proxy CAN advertise the alias, see
+  the dedicated section below. Probe-before-write (above) remains the standing
+  guard regardless; the two are complementary, not alternatives.
 - **Explicit placement can encode a stale layout.** A template naming nodes that
   have been repurposed fails structural validation — which is the intended
   outcome, but means templates need maintaining alongside the cluster.
 - **Bypassing the resolver hides `t_16dcceb4`.** Templates that adopt explicit
   `nodes:` stop exercising the broken path. The resolver bug must still be fixed
   on its own merit.
+
+## Proxy alias advertisement — root cause and recommendation
+
+**Card `t_b65d97df`** (investigate-propose only; no proxy config or running
+behaviour changed here — operator applies any live fix after review).
+
+### Root cause: why the proxy (:4000) and the span primaries disagree
+
+The proxy's advertised model ids are **not independently configured** — they are
+a *derived pass-through* of what each backend actually serves. Verified live
+2026-08-07 (read-only GETs):
+
+| Endpoint | `/v1/models` |
+|---|---|
+| worker span primary `10.0.0.247:8000` | `deepseek-ai/DeepSeek-V4-Flash-0731`, `worker-model` |
+| orchestrator span primary `10.0.0.244:8000` | `deepseek-ai/DeepSeek-V4-Flash-0731`, `orchestrator-model` |
+| sparkrun proxy `:4000` | `deepseek-ai/DeepSeek-V4-Flash-0731` only |
+
+The span primaries are the vLLM servers themselves. Each was launched with the
+multi-name `--served-model-name "<concrete> <alias>"` (job metadata confirms
+`served_model_name: deepseek-ai/DeepSeek-V4-Flash-0731 worker-model` / `...
+orchestrator-model`), so both names appear in their `/v1/models`.
+
+The proxy is a LiteLLM gateway whose model list is produced by sparkrun's
+`build_litellm_config` (`sparkrun/proxy/engine.py`). That function registers **one
+entry per name** the backend advertises: it reads `ep.actual_models`, which the
+discovery health-check populates from the backend's `/v1/models`
+(`sparkrun/proxy/discovery.py` `_check_single_health`). So the proxy *would*
+advertise `worker-model` too — **if its config were generated after the aliases
+existed.**
+
+It was not. The on-disk
+`~/.cache/sparkrun/proxy/litellm_config.yaml` (mtime 2026-08-06 16:08)
+registers only the concrete id against both `.244` and `.247`, and the running
+proxy loaded that stale file. The aliases were added to the serve commands
+*after* that config was written, and the proxy has never regenerated since.
+Hence the asymmetry: the *mechanism* already supports aliases; the *running
+instance* is serving an outdated snapshot.
+
+### Can the proxy advertise `worker-model`? Yes — no sparkrun code change needed
+
+The discovery-driven mechanism already enumerates every advertised name. A
+config refresh is sufficient for the proxy to publish `worker-model` →
+`http://10.0.0.247:8000/v1` (and `orchestrator-model` → `.244`), with the
+concrete id preserved as the first entry (LiteLLM preserves `model_list` order,
+so the existing `data[0]` readers are undisturbed).
+
+### Recommendation and rollout ordering
+
+1. **Advertise the alias on the proxy** (free; an ops action, not a code change).
+   Refresh the proxy's config so it picks up the aliases: `sparkrun proxy stop`
+   then `sparkrun proxy start --cluster hscc --port 4000`, or `sparkrun proxy
+   models --refresh` (which falls back to config regen + restart). **Operator
+   executes this after review** — no agent edits the live proxy directly.
+2. **Verify before converging.** Confirm `GET :4000/v1/models` now shows
+   `[deepseek-ai/DeepSeek-V4-Flash-0731, worker-model]`. Only with the alias
+   advertised can worker-facing configs be authoritatively switched to it.
+3. **Keep probe-before-write active throughout** (card `t_ccd21e9b`). It is the
+   standing 404-wedge guard and costs nothing — a refresh makes the alias
+   available, but every writer should still confirm the *actual* endpoint advertises
+   the id it writes. Reordering (refresh before any convergent write) means the
+   alias becomes available to resolve before anything depends on it, so existing
+   concrete-id consumers are unaffected.
+4. **Hold the "one proxy port = one homogeneous family" invariant.** `worker-model`
+   on `:4000` routes to a single homogeneous backend today. Never fabricate a
+   single `worker-model` over a heterogeneous pool on one port (LiteLLM would
+   load-balance it across *different* models); if that is ever needed it must be
+   a distinct per-family alias, and each family keeps its own proxy port.
+
+Not introducing the alias is a defensible fallback (`t_ccd21e9b` documents the
+proxy as concrete-only and probes instead) — but it is strictly weaker: the alias
+indirection the spec asks for stays unavailable on the proxy, and consumers must
+probe everywhere. Since the proxy already *can* advertise the alias for free,
+refreshing it is the recommended end state, with probe-before-write retained as
+the guard.
