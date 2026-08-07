@@ -296,6 +296,75 @@ def remove_proxy_plist(family) -> dict:
 
 # ── Model provisioning ─────────────────────────────────────────────────────
 
+def _serving_unit_id(u: Any, is_orch: bool) -> str:
+    """The serving.json unit id for a resolved unit — MUST match
+    template_intent.to_serving_json's id formula, since drift comparison
+    correlates recorded serve commands to units by this id."""
+    if is_orch:
+        return "orch"
+    short = u.model.split("/")[-1]
+    suffix = u.nodes[0].rsplit(".", 1)[-1]
+    return f"family-{u.family}-{short}-{suffix}-{u.port}"
+
+
+def _render_serve_cmd(cluster: str, hosts_arg: str, port: int, recipe: str,
+                      alias: str, tp: int, model: str = "") -> List[str]:
+    """Canonical serve argv for a wanted unit — the exact argv that gets run.
+
+    This is the SINGLE source of truth shared by both (a) recording at
+    provision time and (b) drift comparison on the next apply, so the two
+    always agree on what "the rendered serve command" is. Keeping it a pure
+    function of (cluster, hosts, port, recipe, alias, tp) means a recorded
+    value only ever changes when one of those inputs actually changes.
+    """
+    concrete = _extract_model_name(recipe) or model
+    cmd = ["sparkrun", "run", os.path.expanduser(recipe),
+           "--cluster", cluster, "--hosts", hosts_arg,
+           "--port", str(port), "--no-follow", "--ensure"]
+    cmd.extend(["--served-model-name", f"{concrete} {alias}"])
+    if tp > 1:
+        cmd.extend(["--tp", str(tp)])
+    return cmd
+
+
+def _diff_serve_cmds(old_cmd: List[str], new_cmd: List[str]) -> str:
+    """Human-readable description of WHAT changed between two rendered serve
+    commands (flag: old -> new), or '' when they are identical."""
+    def flag_map(cmd: List[str]) -> dict:
+        out: dict = {}
+        i = 0
+        while i < len(cmd):
+            tok = cmd[i]
+            if tok.startswith("--"):
+                if i + 1 < len(cmd) and not cmd[i + 1].startswith("--"):
+                    out[tok] = cmd[i + 1]
+                    i += 2
+                else:
+                    out[tok] = True
+                    i += 1
+            else:
+                out.setdefault("positional", []).append(tok)
+                i += 1
+        return out
+    om, nm = flag_map(old_cmd), flag_map(new_cmd)
+    if om == nm:
+        return ""
+    changes = [f"{k}: {om.get(k)!r} -> {nm.get(k)!r}"
+               for k in sorted(set(om) | set(nm)) if om.get(k) != nm.get(k)]
+    return "; ".join(changes) if changes else "command differs"
+
+
+def _load_serving() -> dict:
+    """Read serving.json defensively (missing/corrupt → empty unit list)."""
+    try:
+        data = read_json(SERVING_JSON)
+        if isinstance(data, dict) and isinstance(data.get("units"), list):
+            return data
+    except Exception:
+        pass
+    return {"version": 2, "units": []}
+
+
 def _provision_models(plan: Any, cluster: str = "hscc",
                       do_launch: bool = True,
                       recreate: bool = False) -> dict:
@@ -348,16 +417,17 @@ def _provision_models(plan: Any, cluster: str = "hscc",
     want = []
     for u in [plan.orchestrator] + [unit for fam in plan.families for unit in fam.units]:
         alias = "orchestrator-model" if u is plan.orchestrator else "worker-model"
-        want.append((u, u.nodes, u.port, u.recipe, u.tp, alias))
+        want.append((u, u.nodes, u.port, u.recipe, u.tp, alias,
+                     _serving_unit_id(u, u is plan.orchestrator)))
     # Every node in every span is "in use" — don't stop a node that is part of a
     # spanning unit even if it isn't the primary node.
-    plan_nodes = {n for _, nodes, _, _, _, _ in want for n in nodes}
+    plan_nodes = {n for _, nodes, _, _, _, _, _ in want for n in nodes}
 
     if not do_launch:
         span_label = lambda nodes: ",".join(nodes)
         result["note"] = "dry-run: would provision " + ", ".join(
-            f"{r.split('/')[-1]}@{span_label(nodes)}:{p}" for _, nodes, p, r, _, _ in want)
-        result["provisioned"] = [f"{span_label(nodes)}:{p}:{r}" for _, nodes, p, r, _, _ in want]
+            f"{r.split('/')[-1]}@{span_label(nodes)}:{p}" for _, nodes, p, r, _, _, _ in want)
+        result["provisioned"] = [f"{span_label(nodes)}:{p}:{r}" for _, nodes, p, r, _, _, _ in want]
         return result
 
     # Stop sparkrun containers on nodes the plan does not use.
@@ -392,8 +462,14 @@ def _provision_models(plan: Any, cluster: str = "hscc",
     #     warning that any flag change is NOT being applied and tell the operator
     #     to use --force-recreate. Apply then flips to warn, never silent success.
     running_recipes = _running_recipes_via_sparkrun()
-    drift_skipped: List[str] = []
-    for unit, nodes, port, recipe, tp, alias in want:
+    # Load recorded serve commands (from the PREVIOUS provision) so we can tell
+    # a genuinely-unmodified unit apart from a genuinely-drifted one.
+    serving = _load_serving()
+    serving_records = {u.get("id"): u for u in serving.get("units", [])}
+    drift_real: List[str] = []        # recorded cmd differs from current render
+    drift_unchecked: List[str] = []   # no recorded cmd (pre-upgrade unit)
+    recorded: List[str] = []          # unit ids whose serve_cmd we (re)stamped
+    for unit, nodes, port, recipe, tp, alias, unit_id in want:
         want_model = _extract_model_name(recipe)
         want_span = list(nodes)
         hosts_arg = ",".join(nodes)
@@ -415,9 +491,25 @@ def _provision_models(plan: Any, cluster: str = "hscc",
             result["recreated"].append(f"{hosts_arg}:{port}:{recipe.split('/')[-1]}")
         elif not recreate and already_running_same:
             # Not recreating and the unit is already up on the same recipe →
-            # --ensure WILL skip it, so a changed serve command is left unapplied.
-            # That is exactly the silent-success defect this guards against.
-            drift_skipped.append(f"{hosts_arg}:{port}:{recipe.split('/')[-1]}")
+            # --ensure WILL skip it, so only a genuinely-changed serve command is
+            # left unapplied. Compare the freshly rendered command against the
+            # one recorded at the last provision:
+            #   * identical      → unit truly unchanged → NO drift warning (this
+            #     is the important half: silence on the unchanged fleet is what
+            #     makes the warning meaningful).
+            #   * differs        → REAL drift: name the unit AND what changed.
+            #   * no record      → pre-upgrade unit: fall back to conservative
+            #     "drift not checked", never a false "command drift" claim.
+            rendered = _render_serve_cmd(cluster, hosts_arg, port, recipe,
+                                         alias, tp, getattr(unit, "model", ""))
+            rec = serving_records.get(unit_id)
+            rec_cmd = (rec or {}).get("serve_cmd")
+            if rec_cmd is None:
+                drift_unchecked.append(f"{hosts_arg}:{port}:{recipe.split('/')[-1]}")
+            elif rec_cmd != rendered:
+                diff = _diff_serve_cmds(rec_cmd, rendered)
+                drift_real.append(f"{hosts_arg}:{port}:{recipe.split('/')[-1]}" +
+                                  (f" ({diff})" if diff else ""))
         for node in nodes:
             run_recipe = running_recipes.get(node)
             if run_recipe and _extract_model_name(run_recipe) != want_model:
@@ -427,6 +519,13 @@ def _provision_models(plan: Any, cluster: str = "hscc",
                     result["stopped"].append(node)
                 except Exception as e:
                     stop_failures.append(f"{node}: {e}")
+        # True when this unit's span is being (re)launched with the CURRENT
+        # rendered command — a fresh launch or a recreate-forced relaunch. False
+        # when it's an already-running-same-recipe --ensure no-op. We only record
+        # serve_cmd for actually-(re)launched units; a skipped unit keeps its
+        # prior record (which is what we just compared against), so we never
+        # overwrite "what's running" with a command that did NOT take effect.
+        actually_relaunched = recreate or not already_running_same
         try:
             # Concrete id = recipe's model field (fall back to the resolved
             # unit's model). Always advertise concrete + alias so the endpoint
@@ -436,18 +535,22 @@ def _provision_models(plan: Any, cluster: str = "hscc",
             # rendered command on every path, so the space reaches vLLM's
             # nargs='+' `--served-model-name` as SEPARATE argv tokens and both
             # names register.
-            concrete = _extract_model_name(recipe) or getattr(unit, "model", "")
-            cmd = ["sparkrun", "run", os.path.expanduser(recipe),
-                   "--cluster", cluster, "--hosts", hosts_arg,
-                   "--port", str(port), "--no-follow", "--ensure"]
-            cmd.extend(["--served-model-name", f"{concrete} {alias}"])
-            if tp > 1:
-                cmd.extend(["--tp", str(tp)])
+            cmd = _render_serve_cmd(cluster, hosts_arg, port, recipe, alias, tp,
+                                    getattr(unit, "model", ""))
             r = subprocess.run(cmd, capture_output=True, text=True,
                                timeout=PROVISION_TIMEOUT_S)
             if r.returncode == 0:
                 result["provisioned"].append(
                     f"{hosts_arg}:{port}:{recipe.split('/')[-1]}")
+                # Record the rendered serve command ONLY for units we actually
+                # (re)launched, so the record stays truthful about what the
+                # running container was started with. An --ensure no-op on an
+                # already-running unit must NOT overwrite its prior record.
+                if actually_relaunched:
+                    rec = serving_records.setdefault(unit_id, {"id": unit_id})
+                    if rec.get("serve_cmd") != cmd:
+                        rec["serve_cmd"] = cmd
+                        recorded.append(unit_id)
             else:
                 result["failed"].append(
                     {"node": hosts_arg, "port": port, "recipe": recipe,
@@ -456,26 +559,41 @@ def _provision_models(plan: Any, cluster: str = "hscc",
             result["failed"].append({"node": hosts_arg, "port": port, "recipe": recipe,
                                      "error": str(e)})
 
-    # Loud drift reporting (t_5b0f4d2d): if any unit was already running the same
-    # recipe and was NOT force-recreated, its serve command may not match the
-    # plan. That is precisely the silent-success defect this task fixes — apply
-    # must never claim success while a changed flag was left unapplied. Surface
-    # these as warnings AND flip status to warn so apply reports loudly.
-    if drift_skipped:
+    # Persist any serve_cmd stamps we recorded back to serving.json.
+    if recorded:
+        write_json(SERVING_JSON, serving, backup=True)
+
+    # Loud drift reporting. A unit whose rendered serve command DIFFERS from what
+    # was recorded at its last provision is real drift — name it and what
+    # changed. A pre-upgrade unit with no recorded command gets the conservative
+    # "drift not checked" wording, never a false "command drift" claim. A unit
+    # whose command is unchanged is silence (not in either list).
+    if drift_real:
         result["warnings"].append(
-            "serve command drift NOT applied: " + ", ".join(drift_skipped) +
-            " — already running the same recipe; --ensure will skip them. "
-            "Re-run apply with --force-recreate to re-apply changed flags "
-            "(e.g. a new served-model-name alias).")
+            "serve command drift NOT applied: " + ", ".join(drift_real) +
+            " — rendered serve command differs from what the running unit was "
+            "started with. Re-run apply with --force-recreate to re-apply "
+            "changed flags (e.g. a new served-model-name alias).")
+    if drift_unchecked:
+        result["warnings"].append(
+            "drift not checked for: " + ", ".join(drift_unchecked) +
+            " — no previously recorded serve command (pre-upgrade unit); "
+            "re-run apply with --force-recreate to re-apply changed flags.")
 
     if result["failed"]:
         result["status"] = "warn"
         result["note"] = f"{len(result['failed'])} model(s) failed to launch"
-    elif drift_skipped:
+    elif drift_real:
         result["status"] = "warn"
         result["note"] = (f"{len(result['provisioned'])} model(s) ensured up; "
-                          f"{len(drift_skipped)} unit(s) skipped with command drift "
+                          f"{len(drift_real)} unit(s) skipped with command drift "
                           f"(re-run with --force-recreate to apply).")
+    elif drift_unchecked:
+        result["status"] = "warn"
+        result["note"] = (f"{len(result['provisioned'])} model(s) ensured up; "
+                          f"{len(drift_unchecked)} unit(s) with unrecorded serve "
+                          f"command (drift not checked; re-run with "
+                          f"--force-recreate to apply).")
     elif result["recreated"]:
         result["note"] = (f"{len(result['provisioned'])} model(s) ensured up; "
                           f"{len(result['recreated'])} unit(s) recreated to apply "
