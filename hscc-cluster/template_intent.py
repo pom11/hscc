@@ -10,6 +10,17 @@ Schema v2:
   ModelIntent   {recipe, tp, pp}
   FamilyIntent  {name, models[], workers: "all"|N|"remaining", proxy: bool}
   ClusterTemplate {name, version, description, orchestrator: ModelIntent, families[]}
+
+Schema v3 (all new keys optional; v2 templates parse byte-identically):
+  ModelIntent   adds nodes: [ip,...] | None        (explicit span; nodes[0]=primary)
+  FamilyIntent  adds nodes: [ip,...] | None, allow_colocation: bool=False
+  ClusterTemplate adds routing: {consumer: unit_name} | None
+
+The new keys default to None/False so that a template which OMITS them parses
+with them absent (None) — deliberately distinguishable from an empty list `[]`,
+because omission means "do not touch" at apply time. `to_dict()` omits any key
+that is None / default-False, so a v2 template round-trips to byte-identical
+output before and after the v3 additions.
 """
 
 from __future__ import annotations
@@ -35,6 +46,11 @@ class ModelIntent:
     recipe: str
     tp: int = 1
     pp: int = 1
+    # v3: explicit node span. None = not specified (resolver infers as before);
+    # []  = explicitly empty (distinguishable from None); [ip,...] = used verbatim.
+    # nodes[0] is the span primary (exposes the endpoint); the rest are tp peers
+    # — consistent with serving_unit_scoreboard() and ops.pick_node.
+    nodes: Optional[List[str]] = None
 
     @staticmethod
     def from_dict(d: Union[str, dict]) -> "ModelIntent":
@@ -42,8 +58,32 @@ class ModelIntent:
             return ModelIntent(recipe=d)
         if not isinstance(d, dict) or not d.get("recipe"):
             raise TemplateIntentError(f"model needs a recipe: {d!r}")
-        return ModelIntent(recipe=d["recipe"], tp=int(d.get("tp", 1)),
-                           pp=int(d.get("pp", 1)))
+        return ModelIntent(
+            recipe=d["recipe"], tp=int(d.get("tp", 1)),
+            pp=int(d.get("pp", 1)),
+            nodes=_nodes_from(d))
+
+    def to_dict(self) -> dict:
+        """Canonical round-trip form. Omits default/absent v3 keys so a v2
+        template reproduces its pre-v3 dict exactly (byte-identical)."""
+        out: dict = {"recipe": self.recipe}
+        if self.tp != 1:
+            out["tp"] = self.tp
+        if self.pp != 1:
+            out["pp"] = self.pp
+        if self.nodes is not None:
+            out["nodes"] = list(self.nodes)
+        return out
+
+
+def _nodes_from(d: dict) -> Optional[List[str]]:
+    """Extract ``nodes`` from a v3 dict. Absent → None; ``[]`` → [] ; list → list.
+    Absence is preserved as None so "do not touch" is distinguishable from an
+    explicitly-empty list."""
+    raw = d.get("nodes")
+    if raw is None:
+        return None
+    return [str(x) for x in raw]
 
 
 @dataclass
@@ -52,6 +92,11 @@ class FamilyIntent:
     models: List[ModelIntent]
     workers: Union[str, int] = "all"   # "all" | N | "remaining"
     proxy: bool = True
+    # v3: explicit node span (used verbatim when present); None = not specified.
+    nodes: Optional[List[str]] = None
+    # v3: default false. When two units name the same node, apply blocks unless
+    # BOTH set allow_colocation: true. (Carried; application is a later card.)
+    allow_colocation: bool = False
 
     @staticmethod
     def from_dict(d: dict) -> "FamilyIntent":
@@ -65,7 +110,25 @@ class FamilyIntent:
             raise TemplateIntentError(
                 f"family '{d['name']}' workers must be 'all', 'remaining', or an int")
         return FamilyIntent(name=d["name"], models=models, workers=workers,
-                            proxy=bool(d.get("proxy", True)))
+                            proxy=bool(d.get("proxy", True)),
+                            nodes=_nodes_from(d),
+                            allow_colocation=bool(d.get("allow_colocation", False)))
+
+    def to_dict(self) -> dict:
+        """Canonical round-trip form. Omits default/absent v3 keys so a v2
+        family reproduces its pre-v3 dict exactly (byte-identical)."""
+        out: dict = {"name": self.name}
+        if self.models:
+            out["models"] = [m.to_dict() for m in self.models]
+        if self.workers != "all":
+            out["workers"] = self.workers
+        if self.proxy is not True:
+            out["proxy"] = self.proxy
+        if self.nodes is not None:
+            out["nodes"] = list(self.nodes)
+        if self.allow_colocation:
+            out["allow_colocation"] = True
+        return out
 
 
 @dataclass
@@ -75,6 +138,9 @@ class ClusterTemplate:
     families: List[FamilyIntent] = field(default_factory=list)
     version: int = 2
     description: str = ""
+    # v3: consumer -> unit name (e.g. {"delegation": "family-reasoning"}).
+    # None = whole block absent = "do not touch" any routing config at apply.
+    routing: Optional[Dict[str, str]] = None
 
     @staticmethod
     def from_dict(d: dict) -> "ClusterTemplate":
@@ -83,24 +149,51 @@ class ClusterTemplate:
         orch = d.get("orchestrator")
         if not orch:
             raise TemplateIntentError("template needs an orchestrator")
+        version = int(d.get("version", 2))
         # Reject legacy topology keys so an old template fails loudly, not silently.
         legacy = [k for k in ("orchestrator_node", "cluster_size") if k in d]
         for fam in (d.get("families") or []):
-            if isinstance(fam, dict) and "nodes" in fam:
-                legacy.append(f"families.{fam.get('name','?')}.nodes")
             if isinstance(fam, dict) and isinstance(fam.get("proxy"), dict):
                 legacy.append(f"families.{fam.get('name','?')}.proxy.port")
+        # The v3-only keys are still topology pins on v1/v2 templates: refuse so
+        # an operator doesn't silently have them dropped. v3 parses them instead.
+        if version < 3:
+            if "routing" in d:
+                legacy.append("routing")
+            for fam in (d.get("families") or []):
+                if isinstance(fam, dict) and "nodes" in fam:
+                    legacy.append(f"families.{fam.get('name','?')}.nodes")
+            if isinstance(orch, dict) and "nodes" in orch:
+                legacy.append("orchestrator.nodes")
         if legacy:
             raise TemplateIntentError(
                 "v2 templates are topology-free — remove pinned keys: "
                 + ", ".join(legacy))
+        routing = None
+        raw_routing = d.get("routing")
+        if raw_routing is not None:
+            routing = {str(k): str(v) for k, v in raw_routing.items()}
         return ClusterTemplate(
             name=d["name"],
             orchestrator=ModelIntent.from_dict(orch),
             families=[FamilyIntent.from_dict(f) for f in (d.get("families") or [])],
-            version=int(d.get("version", 2)),
+            version=version,
             description=d.get("description", ""),
+            routing=routing,
         )
+
+    def to_dict(self) -> dict:
+        """Canonical round-trip form. Omits default/absent v3 keys so a v2
+        template reproduces its pre-v3 dict exactly (byte-identical)."""
+        out: dict = {"name": self.name, "version": self.version}
+        if self.description:
+            out["description"] = self.description
+        out["orchestrator"] = self.orchestrator.to_dict()
+        if self.families:
+            out["families"] = [f.to_dict() for f in self.families]
+        if self.routing is not None:
+            out["routing"] = dict(self.routing)
+        return out
 
 
 # ── Resolved plan (concrete nodes + ports, produced at apply) ────────────────

@@ -400,3 +400,177 @@ class TestUnitAwareReserved:
         # vision family still gets its own node
         assert {u.node for u in plan.families[0].units} == {"10.0.0.3", "10.0.0.4"}
 
+
+# ── schema v3: nodes / allow_colocation / routing (PARSING ONLY) ──────────────
+# T1 (t_30b1e1ee) parses and carries the three optional v3 keys through the
+# template model. It does NOT act on them — placement/routing/validation are
+# later cards. Two invariants are enforced here:
+#   * a v3 template exposes the keys when present
+#   * omission is DISTINGUISHABLE from empty (None != []) because omission
+#     means "do not touch" at apply time
+#   * every shipped v2 template round-trips to byte-identical output (golden)
+
+V3_FULL = {
+    "name": "4node-dual-dsv4",
+    "version": 3,
+    "orchestrator": {
+        "recipe": "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
+        "tp": 2,
+        "nodes": ["10.0.0.244", "10.0.0.246"],
+    },
+    "families": [
+        {
+            "name": "reasoning",
+            "nodes": ["10.0.0.247", "10.0.0.248"],
+            "allow_colocation": False,
+            "proxy": True,
+            "models": [
+                {"recipe": "~/.sparkrun-local/recipes/local-fixed/"
+                           "deepseek-v4-fp8-scitrera-hscc.yaml",
+                 "tp": 2}
+            ],
+        }
+    ],
+    "routing": {"delegation": "family-reasoning",
+                "compaction": "orchestrator",
+                "auxiliaries": "orchestrator"},
+}
+
+
+class TestSchemaV3:
+    """v3 parsing — carries the keys through the model, does not act on them."""
+
+    def test_full_v3_exposes_all_keys(self):
+        t = ti.ClusterTemplate.from_dict(V3_FULL)
+        assert t.version == 3
+        # orchestrator nodes
+        assert t.orchestrator.nodes == ["10.0.0.244", "10.0.0.246"]
+        assert t.orchestrator.tp == 2
+        # family nodes + allow_colocation
+        fam = t.families[0]
+        assert fam.name == "reasoning"
+        assert fam.nodes == ["10.0.0.247", "10.0.0.248"]
+        assert fam.allow_colocation is False
+        assert fam.proxy is True
+        assert fam.models[0].tp == 2
+        # routing block
+        assert t.routing == {"delegation": "family-reasoning",
+                             "compaction": "orchestrator",
+                             "auxiliaries": "orchestrator"}
+
+    def test_v3_explicitly_allows_colocation(self):
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "version": 3,
+            "orchestrator": {"recipe": "o.yaml"},
+            "families": [{"name": "c", "models": ["m.yaml"],
+                          "allow_colocation": True}]})
+        assert t.families[0].allow_colocation is True
+
+    def test_v3_omissions_are_absent_not_empty(self):
+        """A v3 template omitting the keys parses with them ABSENT (None), NOT
+        defaulted to empty lists — absence must be distinguishable from empty,
+        because omission means do-not-touch later."""
+        t = ti.ClusterTemplate.from_dict({"name": "x", "version": 3,
+                                          "orchestrator": "o.yaml"})
+        assert t.orchestrator.nodes is None          # absent, not []
+        assert t.routing is None                     # absent, not {}
+        # and with a family present, both family keys are absent (None/False)
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "version": 3, "orchestrator": "o.yaml",
+            "families": [{"name": "c", "models": ["m.yaml"]}]})
+        assert t.families[0].nodes is None           # absent, not []
+        assert t.families[0].allow_colocation is False  # default false
+
+    def test_absent_nodes_distinguishable_from_empty_list(self):
+        """None (omitted) and [] (explicitly empty) must round-trip differently."""
+        omitted = ti.ClusterTemplate.from_dict(
+            {"name": "x", "version": 3, "orchestrator": {"recipe": "o.yaml"}})
+        empty = ti.ClusterTemplate.from_dict(
+            {"name": "x", "version": 3,
+             "orchestrator": {"recipe": "o.yaml", "nodes": []}})
+        assert omitted.orchestrator.nodes is None
+        assert empty.orchestrator.nodes == []
+        assert omitted.orchestrator.to_dict() != empty.orchestrator.to_dict()
+        # omitted serializes WITHOUT the key; empty serializes WITH "nodes": []
+        assert "nodes" not in omitted.orchestrator.to_dict()
+        assert empty.orchestrator.to_dict()["nodes"] == []
+
+    def test_roundtrip_stable(self):
+        """from_dict(to_dict(x)) == x — the model is self-consistent."""
+        a = ti.ClusterTemplate.from_dict(V3_FULL)
+        b = ti.ClusterTemplate.from_dict(a.to_dict())
+        assert a.to_dict() == b.to_dict()
+        assert b.orchestrator.nodes == a.orchestrator.nodes
+        assert b.families[0].nodes == a.families[0].nodes
+        assert b.routing == a.routing
+
+    def test_v2_still_rejects_new_keys(self):
+        """v3 keys on a v1/v2 template are still topology pins → refused loudly
+        (an operator must bump version: 3 to use them, not silently drop them)."""
+        with pytest.raises(ti.TemplateIntentError) as e:
+            ti.ClusterTemplate.from_dict({
+                "name": "x", "version": 2, "orchestrator": "o.yaml",
+                "families": [{"name": "c", "models": ["m.yaml"],
+                              "nodes": ["10.0.0.246"]}]})
+        assert "nodes" in str(e.value)
+
+        with pytest.raises(ti.TemplateIntentError) as e:
+            ti.ClusterTemplate.from_dict({
+                "name": "x", "version": 2, "orchestrator": "o.yaml",
+                "routing": {"delegation": "orchestrator"}})
+        assert "routing" in str(e.value)
+
+    def test_v3_does_not_reject_nodes_keys(self):
+        """version: 3 must NOT be refused for having nodes/routing (they're valid)."""
+        t = ti.ClusterTemplate.from_dict(V3_FULL)
+        assert t.version == 3 and t.routing
+
+    def test_v3_legacy_topology_keys_still_rejected(self):
+        """v3 does not resurrect pre-v2 topology pins."""
+        with pytest.raises(ti.TemplateIntentError) as e:
+            ti.ClusterTemplate.from_dict({
+                "name": "x", "version": 3, "orchestrator": "o.yaml",
+                "orchestrator_node": "10.0.0.244"})
+        assert "orchestrator_node" in str(e.value)
+        with pytest.raises(ti.TemplateIntentError) as e:
+            ti.ClusterTemplate.from_dict({
+                "name": "x", "version": 3, "orchestrator": "o.yaml",
+                "families": [{"name": "c", "models": ["m.yaml"],
+                              "proxy": {"port": 4001}}]})
+        assert "proxy.port" in str(e.value)
+
+
+# ── schema v3 byte-identical regression (every shipped v2 template) ─────────
+
+def test_v2_templates_parse_byte_identical_to_golden():
+    """Every existing v2 template in templates/ must parse to BYTE-IDENTICAL
+    output as before the v3 additions. Guarded against a stored golden snapshot
+    captured from the pre-v3 code: if v3 parsing changed ANYTHING about how a
+    v2 template parses (dropped a field, added a spurious one, reordered), this
+    fails. This is the regression guard that makes any honest breakage loud."""
+    import glob, json, os, yaml
+    here = os.path.dirname(os.path.abspath(__file__))
+    golden_path = os.path.join(here, "_v2_parsed_golden.json")
+    assert os.path.exists(golden_path), "missing golden snapshot"
+    with open(golden_path) as fh:
+        golden = json.load(fh)
+    assert golden, "empty golden snapshot"
+
+    templates = sorted(glob.glob(
+        os.path.join(os.path.dirname(here), "templates", "**", "*.yaml"),
+        recursive=True))
+    parsed = {}
+    for f in templates:
+        with open(f) as fh:
+            data = yaml.safe_load(fh) or {}
+        name = data.get("name")
+        if not name:
+            continue
+        parsed[name] = ti.ClusterTemplate.from_dict(data).to_dict()
+
+    assert set(parsed) == set(golden), \
+        f"template set changed vs golden: missing={set(golden)-set(parsed)} " \
+        f"extra={set(parsed)-set(golden)}"
+    for name in golden:
+        assert parsed[name] == golden[name], \
+            f"template '{name}' parsed output differs from pre-v3 golden"
