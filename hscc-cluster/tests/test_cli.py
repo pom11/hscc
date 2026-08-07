@@ -140,9 +140,16 @@ class TestCmdClusterTemplateApply:
         assert "Missing template name" in result["error"]
 
     def test_apply_nonexistent_returns_error(self):
+        # A nonexistent template flows through the SAME gate as `template
+        # validate` — it is a structural failure, so apply blocks rather than
+        # raising, and reports the not-found error in the unified shape. This
+        # is deliberate (T5): apply and validate share one implementation, so
+        # they agree on a missing template exactly as on any other.
         result = cmd_cluster_template(["apply", "nonexistent"])
-        assert "error" in result
-        assert "not found" in result["error"].lower()
+        assert result["status"] == "blocked"
+        assert result["success"] is False
+        combined = result["errors"] + result["validation"]["structural"]["errors"]
+        assert any("not found" in e.lower() for e in combined)
 
 
 class TestStatusAndValidateCommands:
