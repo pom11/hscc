@@ -535,11 +535,45 @@ def _load_intent(template_name: str):
     return _ti().ClusterTemplate.from_dict(data)
 
 
+def _existing_tp_peer_nodes():
+    """IPs currently reserved as tp peers of a live serving span (serving.json).
+
+    Reuses cmdlib.serving_unit_scoreboard() — the same helper /cluster and
+    enumerate_cluster_nodes use — rather than re-implementing tp-peer detection.
+    cmdlib lives in the sibling hscc-commands plugin; we import it bare like
+    the daemon does. Best-effort: any failure -> empty set (the pre-fix
+    behaviour), never a hard failure of resolve/apply.
+    """
+    try:
+        _ensure_cmdlib_on_path()
+        from cmdlib import serving_unit_scoreboard
+        score = serving_unit_scoreboard()
+    except Exception:
+        return set()
+    if not isinstance(score, dict):
+        return set()
+    return {ip for ip, s in score.items() if s and s.get("tp_peer")}
+
+
+def _ensure_cmdlib_on_path():
+    """Put the sibling hscc-commands plugin dir on sys.path for the cmdlib import."""
+    cmd_dir = os.path.realpath(
+        os.path.join(os.path.dirname(__file__), "..", "hscc-commands"))
+    if cmd_dir not in sys.path:
+        sys.path.insert(0, cmd_dir)
+
+
 def _resolve(template_name: str, *, topology=None, probe: bool = False):
-    """Load + resolve a template against the live cluster → ResolvedPlan."""
+    """Load + resolve a template against the live cluster → ResolvedPlan.
+
+    Nodes that are currently tp peers of a live serving span are excluded from
+    the assignable pool (resolve's exclude_nodes), so a span member is never
+    given a solo unit — the plan/provision guard for the double-provision bug.
+    """
     tpl = _load_intent(template_name)
     topo = topology if topology is not None else _discover(probe=probe)
-    return _ti().resolve(tpl, topo)
+    return _ti().resolve(tpl, topo,
+                         exclude_nodes=_existing_tp_peer_nodes())
 
 
 def list_templates():

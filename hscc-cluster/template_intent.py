@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional, Union, Any, Dict
+from typing import List, Optional, Union, Any, Dict, Iterable
 
 try:
     from . import recipe_cost as _rc
@@ -162,11 +162,15 @@ def _select_workers(spec: Union[str, int], pool: List[str]) -> List[str]:
 
 
 def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
-            base_proxy_port: int = 4000) -> ResolvedPlan:
+            base_proxy_port: int = 4000,
+            exclude_nodes: Optional[Iterable[str]] = None) -> ResolvedPlan:
     """Map an intent template onto the live cluster topology.
 
     topology: a discovery.ClusterTopology (orchestrator + workers[, vram_free]).
     Assigns nodes from discovery and ports via recipe_cost.plan_placement.
+    exclude_nodes: node IPs that are ALREADY reserved (tp peers of a currently
+    serving multi-node span) and must never be assigned a unit. Drops them from
+    the assignable worker pool, so a span member can't be handed a solo unit.
     Raises TemplateIntentError when it can't fit / no workers / etc.
     """
     coster = _coster or _rc.recipe_cost
@@ -176,6 +180,12 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
 
     worker_nodes = [{"ip": w.ip, "vram_free_gb": getattr(w, "vram_free_gb", None)}
                     for w in topology.workers]
+    # Existing-span guard: exclude already-reserved tp-peer nodes from the pool
+    # before assigning anything, so a currently-serving span member is never
+    # given a fresh (solo or spanning) unit over the live span.
+    if exclude_nodes:
+        exclude = set(exclude_nodes)
+        worker_nodes = [w for w in worker_nodes if w["ip"] not in exclude]
     pool_ips = [w["ip"] for w in worker_nodes]
 
     # ── Orchestrator spanning ─────────────────────────────────────────────
