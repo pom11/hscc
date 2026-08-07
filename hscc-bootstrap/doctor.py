@@ -7,10 +7,30 @@ standalone: `python3 doctor.py`.
 Each check returns a Check(name, ok, detail, fix, fatal). `run_doctor()` returns
 a summary dict; `main()` prints a ✓/✗ checklist and exits non-zero if any FATAL
 check failed (so bootstrap can hard-stop).
+
+## ONE-TIME migration to the alias scheme (Card D, v1.5.1)
+Existing live configs (pre-v1.5.1) hold CONCRETE model ids — that was the
+original bug. After the serving layer advertises stable aliases
+(`orchestrator-model` / `worker-model`) and writers emit aliases, the fleet
+converges on aliases. `doctor --fix` performs a ONE-TIME conversion of existing
+live configs: any concrete model id whose paired `base_url` is UNAMBIGUOUSLY
+the orchestrator or worker proxy endpoint is replaced with the matching alias.
+Remote/cloud endpoints are never guessed at — operator-chosen endpoints
+survive untouched.
+
+SAFETY GATE: before any entry is converted, the endpoint is PROBED (reusing the
+`/models` machinery of the "models served" check — `_models_url` + Bearer auth)
+and confirmed to actually serve the target alias. If the alias is absent from
+the served list, or the endpoint is unreachable, that entry is left UNCONVERTED
+and reported loudly (never convert blind — an alias the serving layer does not
+resolve would fail every call with 404). Once converged, the serving layer
+resolves the alias back to the concrete served id, so converting a confirmed
+alias is safe.
 """
 
 from __future__ import annotations
 
+import copy
 import os
 import shutil
 import subprocess
@@ -380,19 +400,286 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
     }
 
 
+# ---------------------------------------------------------------------------
+# Card D: one-time CONCRETE → alias conversion for live configs.
+# See module docstring. Conservative endpoint-based mapping plus a SAFETY
+# GATE: an entry is converted ONLY after the endpoint is probed (`/models`,
+# reusing `_models_url` + Bearer auth from the "models served" check above,
+# via `_probe_served_models`) and confirmed to serve the target alias.
+# ---------------------------------------------------------------------------
+
+# Stable logical aliases the serving layer advertises (Card A1).
+ORCHESTRATOR_ALIAS = "orchestrator-model"
+WORKER_ALIAS = "worker-model"
+
+# Endpoint discriminators — mirror enable_plugins / generator topology:
+#   orchestrator = loopback/local at the orch vLLM port, or the known orch host.
+#   worker       = loopback/proxy at :4000 (sparkrun LiteLLM load-balancer).
+_ORCH_HOST = "10.0.0.244"
+_ORCH_PORT = 8000
+_WORKER_HOST = "10.0.0.245"
+_WORKER_PORT = 4000
+
+
+def _classify_endpoint(base_url):
+    """Classify a base_url as 'orchestrator', 'worker', or None (indeterminate).
+
+    Conservative: only unambiguous loopback / localnode / known-cluster-host
+    matches resolve. Any remote/cloud base_url (e.g. api.openai.com,
+    api.anthropic.com) or anything we cannot clearly attribute returns None, so
+    the migration never guesses an endpoint.
+    """
+    if not base_url or not isinstance(base_url, str):
+        return None
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(base_url.strip())
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+    except Exception:
+        return None
+    if not host or port is None:
+        return None
+
+    if host in ("localhost", "127.0.0.1"):
+        if port == _ORCH_PORT:
+            return "orchestrator"
+        if port == _WORKER_PORT:
+            return "worker"
+        return None
+    if host == _ORCH_HOST:
+        return "orchestrator" if port == _ORCH_PORT else None
+    if host == _WORKER_HOST:
+        return "worker" if port == _WORKER_PORT else None
+    return None
+
+
+def _probe_served_models(base_url, api_key=None, *, _http_get=None):
+    """Probe an endpoint's ``/models`` and report what it serves.
+
+    Reuses the same probe machinery as the ``models served`` doctor check
+    (``_models_url`` for URL normalization preserving ``/v1``, and
+    ``_http_get`` / ``_http_get_default`` for the Bearer-authenticated GET) -
+    endpoint probing is NOT re-implemented here.
+
+    Returns ``(status, served_ids)`` where ``status`` is one of:
+      - ``"ok"``          - endpoint reachable and ``/models`` parsed; ``served_ids``
+                            is the list of served model ids (possibly empty).
+      - ``"unreachable"`` - network/timeout; nothing could be verified.
+      - ``"error"``       - endpoint reachable but ``/models`` returned a non-2xx
+                            HTTP status or an unparseable body (probe/config
+                            problem).
+
+    ``_http_get(url, api_key=None) -> str`` is injectable for tests (mirrors
+    ``_check_models_served``) so the gate can be exercised without the network.
+    """
+    getter = _http_get or _http_get_default
+    url = _models_url(base_url)
+    if not url:
+        return ("error", [])
+    import json
+    from urllib.error import HTTPError
+    try:
+        raw = getter(url, api_key=api_key)
+    except HTTPError as exc:
+        return ("error", [f"{url} returned HTTP {exc.code} on /models probe"])
+    except Exception as exc:
+        return ("unreachable", [f"{url} unreachable ({exc})"])
+    try:
+        data = json.loads(raw)
+        served = [m.get("id") for m in (data.get("data") or [])
+                  if isinstance(m, dict) and m.get("id")]
+    except Exception as exc:
+        return ("error", [f"{url} body not parseable as /models JSON ({exc})"])
+    return ("ok", served)
+
+
+def _convert_orchestrator_ids_to_alias(cfg, alias=ORCHESTRATOR_ALIAS,
+                                       worker_alias=WORKER_ALIAS, *,
+                                       _http_get=None,
+                                       refused=None) -> list[str]:
+    """Convert concrete model ids pointing at orch/worker endpoints to aliases.
+
+    SAFETY GATE (Card D revision): an entry is ONLY converted after the endpoint
+    is probed and the target alias is confirmed present in the served ``/models``
+    list. This directly guards the failure mode that caused the 404 incident -
+    converting to an alias the serving layer does not actually resolve.
+
+    Per entry:
+      - endpoint is remote/indeterminate (see ``_classify_endpoint``) -> left
+        untouched, never guessed (no probe needed).
+      - endpoint reachable and serves the alias -> model id set to the alias.
+      - endpoint reachable but the alias is ABSENT from the served list -> NOT
+        converted, and reported loudly on ``refused`` (which key/endpoint and
+        what IS served).
+      - endpoint unreachable -> NOT converted, reported loudly (never convert
+        blind).
+
+    Returns the list of changed key paths (e.g. ``["model.default"]``).
+    Already-alias values are skipped (idempotent). ``cfg`` is mutated in place;
+    callers write back (with backup) only if the returned list is non-empty.
+    ``_http_get`` is injectable for tests; ``refused`` (a list) collects the
+    loud skip reports when provided.
+    """
+    changed: list[str] = []
+    if refused is None:
+        refused = []
+    if not isinstance(cfg, dict):
+        return changed
+
+    # Probe results keyed by base_url so several entries sharing one endpoint
+    # do not re-hit the network. Each value is (status, served_ids, detail).
+    _cache: dict = {}
+
+    def gate(pair, key_path, want):
+        """Probe-gate one candidate. Returns True only if we may convert."""
+        base_url = pair.get("base_url")
+        if not isinstance(base_url, str) or not base_url.strip():
+            refused.append(
+                f"! NOT CONVERTED {key_path}: no base_url; cannot probe endpoint")
+            return False
+        if base_url not in _cache:
+            status, served = _probe_served_models(
+                base_url, api_key=pair.get("api_key"), _http_get=_http_get)
+            _cache[base_url] = (status, served)
+        status, served = _cache[base_url]
+        if status == "unreachable":
+            refused.append(
+                f"! NOT CONVERTED {key_path}: endpoint {base_url} unreachable "
+                "- refusing to convert blind")
+            return False
+        if status == "error":
+            refused.append(
+                f"! NOT CONVERTED {key_path}: probe of {base_url} failed "
+                "(reachable but /models problem); refusing to convert")
+            return False
+        if want not in served:
+            served_str = ", ".join(served) if served else "(none reported)"
+            refused.append(
+                f"! NOT CONVERTED {key_path}: alias '{want}' NOT served by "
+                f"{base_url} - served: {served_str}; refusing to convert "
+                "(would produce a 404). Operator must resolve before migrate.")
+            return False
+        return True
+
+    def convert_pair(pair, key_path, model_key, want):
+        """Probe-gate and (if safe) convert one model/base_url pair in place."""
+        if not isinstance(pair, dict):
+            return False
+        model = pair.get(model_key)
+        if not isinstance(model, str) or not model:
+            return False
+        if model in (alias, worker_alias):
+            return False  # already an alias - idempotent
+        if not gate(pair, key_path, want):
+            return False
+        pair[model_key] = want
+        changed.append(key_path)
+        return True
+
+    def _treat(pair, orch_kind, alias, worker_alias):
+        """Resolve the target alias for ``pair``, or None if indeterminate.
+
+        Returns the alias when the paired base_url is UNAMBIGUOUSLY the
+        orchestrator or worker proxy. Returns None for a remote/cloud or
+        otherwise indeterminate endpoint — such entries are never probed and
+        never guessed at (operator-chosen endpoints survive untouched).
+        """
+        kind = _classify_endpoint(pair.get("base_url"))
+        if kind is None:
+            return None
+        return alias if kind == orch_kind else worker_alias
+
+    # Root model block - orchestrator-pointing in a live fleet.
+    root_m = cfg.get("model")
+    if isinstance(root_m, dict) and "default" in root_m:
+        want = _treat(root_m, "orchestrator", alias, worker_alias)
+        if want is not None:
+            convert_pair(root_m, "model.default", "default", want)
+
+    # Delegation - worker proxy usually.
+    dlg = cfg.get("delegation")
+    if isinstance(dlg, dict) and "model" in dlg:
+        want = _treat(dlg, "orchestrator", alias, worker_alias)
+        if want is not None:
+            convert_pair(dlg, "delegation.model", "model", want)
+
+    # fallback_providers[] - each may point at orch or worker.
+    fps = cfg.get("fallback_providers")
+    if isinstance(fps, list):
+        for i, fp in enumerate(fps):
+            if not isinstance(fp, dict):
+                continue
+            want = _treat(fp, "orchestrator", alias, worker_alias)
+            if want is not None:
+                convert_pair(fp, f"fallback_providers[{i}].model", "model",
+                             want)
+
+    # Every auxiliary.<task> block (compression + text aux + vision/web_extract).
+    aux_root = cfg.get("auxiliary")
+    if isinstance(aux_root, dict):
+        for task, aux in aux_root.items():
+            if not isinstance(aux, dict):
+                continue
+            want = _treat(aux, "orchestrator", alias, worker_alias)
+            if want is not None:
+                convert_pair(aux, f"auxiliary.{task}.model", "model", want)
+
+    return changed
+
+
+def _walk_path(cfg, path):
+    """Resolve a key path in ``cfg``; supports '.' and '[i]' (e.g.
+    'fallback_providers[0].model', 'auxiliary.compression.model')."""
+    import re
+    # Tokenize "fallback_providers[0].model" -> ["fallback_providers", "0", "model"]
+    tokens = [
+        t for t in re.split(r"[.\[]", path.replace("]", "")) if t != ""
+    ]
+    cur = cfg
+    for t in tokens:
+        if isinstance(cur, dict):
+            if t not in cur:
+                return None
+            cur = cur[t]
+        elif isinstance(cur, list):
+            try:
+                cur = cur[int(t)]
+            except (ValueError, IndexError):
+                return None
+        else:
+            return None
+    return cur
+
+
+def _write_yaml(config_path, cfg):
+    """Backup + write ``cfg`` to ``config_path`` (mirror enable_plugins)."""
+    import shutil
+    import time
+    import yaml
+    shutil.copy(config_path,
+                f"{config_path}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+    with open(config_path, "w") as fh:
+        yaml.safe_dump(cfg, fh, sort_keys=False, default_flow_style=False)
+
+
 def run_doctor_fix(config_path: Optional[str] = None,
                    hermes_home: Optional[str] = None,
-                   *, _cluster_runner=None) -> dict:
+                   *, _cluster_runner=None, _http_get=None) -> dict:
     """Run doctor + fix all non-fatal HSCC config drift.
 
     Reads the current config, runs checks, then calls enable_plugins.enable()
     if there are non-fatal failures. Reports what was wrong and what was fixed.
 
     Returns the same dict as run_doctor() plus "fixes_applied" list describing
-    each corrected key.
+    each corrected key and "alias_conversion_refused" (the loud safety-gate skip
+    reports from the Card D migration). ``_http_get`` is injectable for tests
+    (mirrors ``_check_models_served``) so the endpoint probe never needs the
+    real network in the test suite.
     """
     checks_result = run_doctor(hermes_home, _cluster_runner=_cluster_runner)
     fixes_applied: list[str] = []
+    alias_conversion_refused: list[str] = []
 
     has_nonfatal_failures = any(
         not c["ok"] and not c.get("fatal") for c in checks_result["checks"]
@@ -437,7 +724,36 @@ def run_doctor_fix(config_path: Optional[str] = None,
                         f"{section}/{k}: was {old_val} -> set {new_val}"
                     )
 
-    return {**checks_result, "fixes_applied": fixes_applied}
+        # Card D: one-time CONCRETE → alias migration. Runs on the reconciled
+        # config only; never touches ~/.hermes directly (config_path is the
+        # sole target). SAFETY GATE: an entry is converted ONLY when the
+        # endpoint is probed and confirmed to serve the alias (see
+        # _convert_orchestrator_ids_to_alias). Concrete ids pointing
+        # unambiguously at the orchestrator or worker proxy are replaced with
+        # the alias; remote/cloud endpoints are left untouched; endpoints that
+        # are unreachable or do not serve the alias are left UNCONVERTED and
+        # reported loudly on alias_conversion_refused.
+        try:
+            import yaml
+            with open(config_path) as fh:
+                cur_cfg = yaml.safe_load(fh) or {}
+        except Exception:
+            cur_cfg = {}
+        if isinstance(cur_cfg, dict):
+            pre_cfg = copy.deepcopy(cur_cfg)
+            alias_changes = _convert_orchestrator_ids_to_alias(
+                cur_cfg, _http_get=_http_get, refused=alias_conversion_refused)
+            for path in alias_changes:
+                old_val = _walk_path(pre_cfg, path)
+                new_val = _walk_path(cur_cfg, path)
+                fixes_applied.append(
+                    f"{path}: was {old_val} -> set {new_val}"
+                )
+            if alias_changes:
+                _write_yaml(config_path, cur_cfg)
+
+    return {**checks_result, "fixes_applied": fixes_applied,
+            "alias_conversion_refused": alias_conversion_refused}
 
 
 def _get_nested(cfg: dict, section: str, key: str):
@@ -482,6 +798,14 @@ def main(argv=None) -> int:
         print(f"\n  🛠 Applied fixes:")
         for fix_line in res["fixes_applied"]:
             print(f"    {fix_line}")
+
+    # Print safety-gate refusals LOUDLY (Card D): entries we deliberately did
+    # NOT convert because the endpoint did not serve the alias or was
+    # unreachable. These need operator attention before re-running --fix.
+    if fix_mode and res.get("alias_conversion_refused"):
+        print("\n  ⚠ ALIAS MIGRATION SKIPPED (safety gate):")
+        for line in res["alias_conversion_refused"]:
+            print(f"    {line}")
 
     if not res["ok"]:
         print(f"\n  ✗ preflight FAILED: {', '.join(res['fatal_failures'])}")
