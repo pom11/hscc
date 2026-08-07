@@ -325,3 +325,78 @@ class TestExistingSpanGuard:
         # orchestrator spans its own node + a FREE worker (not the excluded peer)
         assert plan.orchestrator.nodes == ["10.0.0.1", "10.0.0.3"]
         assert "10.0.0.2" not in plan.orchestrator.nodes
+
+
+# ── unit-aware reserved guard (re-apply idempotency) ─────────────────────────
+
+class TestUnitAwareReserved:
+    """resolve() must let a node back into the SAME unit it already serves
+    (re-apply idempotency), while still refusing to hand it to a DIFFERENT
+    unit. This replaces the blunt exclude-every-tp-peer approach, which emptied
+    the pool on a re-apply of the same template (issue t_16dcceb4)."""
+
+    def test_reserved_own_family_node_kept_for_reapply(self):
+        """A node already serving family 'reasoning' as a tp peer stays in its
+        own unit's pool — re-applying the same template does NOT drop it."""
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "orchestrator": {"recipe": "o.yaml", "tp": 2},
+            "families": [{"name": "reasoning",
+                          "models": [{"recipe": "big.yaml", "tp": 2}],
+                          "workers": "remaining"}]})
+        # 4-node cluster; serving.json records orch=[.1,.2], reasoning=[.3,.4].
+        topo = FakeTopo(orchestrator=FakeNode("10.0.0.1"),
+                        workers=[FakeNode(f"10.0.0.{2+i}") for i in range(3)])
+        reserved = {
+            "10.0.0.1": {"kind": "orchestrator", "family": None, "model": "o"},
+            "10.0.0.2": {"kind": "orchestrator", "family": None, "model": "o"},
+            "10.0.0.3": {"kind": "worker", "family": "reasoning", "model": "big"},
+            "10.0.0.4": {"kind": "worker", "family": "reasoning", "model": "big"},
+        }
+        plan = ti.resolve(t, topo, _coster=_coster(), reserved=reserved)
+        # orchestrator keeps its own tp peer .2 (same unit), NOT dropped.
+        assert plan.orchestrator.nodes == ["10.0.0.1", "10.0.0.2"]
+        assert len(plan.families[0].units) == 1
+        # reasoning re-gets BOTH its tp=2 nodes.
+        assert plan.families[0].units[0].nodes == ["10.0.0.3", "10.0.0.4"]
+        assert plan.families[0].units[0].tp == 2
+
+    def test_reserved_node_never_handed_to_different_family(self):
+        """A node serving family 'vision' is never handed to family 'coding'
+        (double-provision guard preserved)."""
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "orchestrator": "o.yaml",
+            "families": [{"name": "coding", "models": ["m.yaml"],
+                          "workers": "remaining"}]})
+        topo = FakeTopo(orchestrator=FakeNode("10.0.0.1"),
+                        workers=[FakeNode("10.0.0.2"), FakeNode("10.0.0.3"),
+                                 FakeNode("10.0.0.4")])
+        # .3 and .4 are currently serving family 'vision' — they must not be
+        # reassigned to 'coding'. Only the free .2 is available.
+        reserved = {
+            "10.0.0.3": {"kind": "worker", "family": "vision", "model": "v"},
+            "10.0.0.4": {"kind": "worker", "family": "vision", "model": "v"},
+        }
+        plan = ti.resolve(t, topo, _coster=_coster(), reserved=reserved)
+        fam_nodes = {u.node for u in plan.families[0].units}
+        assert fam_nodes == {"10.0.0.2"}          # reserved stays out of the pool
+        assert "10.0.0.3" not in fam_nodes and "10.0.0.4" not in fam_nodes
+
+    def test_reserved_worker_not_borrowed_as_orchestrator_peer(self):
+        """A node serving a worker family can't be silently consumed as the
+        orchestrator's tp peer over its live span."""
+        t = ti.ClusterTemplate.from_dict({
+            "name": "x", "orchestrator": {"recipe": "o.yaml", "tp": 2},
+            "families": [{"name": "vision", "models": ["v.yaml"], "tp": 1,
+                          "workers": "remaining"}]})
+        topo = FakeTopo(orchestrator=FakeNode("10.0.0.1"),
+                        workers=[FakeNode("10.0.0.2"), FakeNode("10.0.0.3"),
+                                 FakeNode("10.0.0.4")])
+        # .3 is currently serving family 'vision'; orchestrator needs 1 peer.
+        reserved = {"10.0.0.3": {"kind": "worker", "family": "vision", "model": "v"}}
+        plan = ti.resolve(t, topo, _coster=_coster(), reserved=reserved)
+        # orchestrator borrows a FREE worker (.2), not the live span member .3
+        assert plan.orchestrator.nodes == ["10.0.0.1", "10.0.0.2"]
+        assert "10.0.0.3" not in plan.orchestrator.nodes
+        # vision family still gets its own node
+        assert {u.node for u in plan.families[0].units} == {"10.0.0.3", "10.0.0.4"}
+

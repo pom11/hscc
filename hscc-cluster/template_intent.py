@@ -163,42 +163,62 @@ def _select_workers(spec: Union[str, int], pool: List[str]) -> List[str]:
 
 def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
             base_proxy_port: int = 4000,
-            exclude_nodes: Optional[Iterable[str]] = None) -> ResolvedPlan:
+            exclude_nodes: Optional[Iterable[str]] = None,
+            reserved: Optional[Dict[str, dict]] = None) -> ResolvedPlan:
     """Map an intent template onto the live cluster topology.
 
     topology: a discovery.ClusterTopology (orchestrator + workers[, vram_free]).
     Assigns nodes from discovery and ports via recipe_cost.plan_placement.
-    exclude_nodes: node IPs that are ALREADY reserved (tp peers of a currently
-    serving multi-node span) and must never be assigned a unit. Drops them from
-    the assignable worker pool, so a span member can't be handed a solo unit.
+    exclude_nodes: node IPs that must ALWAYS be dropped from the assignable
+    pool, no matter what (hard exclusion). Dropped before any assignment, so
+    such a node can never be handed any unit.
+    reserved: {node_ip: {"kind": "orchestrator"|"worker", "family": <name|None>,
+    "model": <str>}} — nodes that CURRENTLY serve a unit (from serving.json).
+    UNIT-AWARE guard: a reserved node may only be assigned to the SAME unit it
+    already serves — a worker node may rejoin its own family's span, and an
+    orchestrator tp-peer may rejoin the orchestrator span (re-apply
+    idempotency). It is NEVER handed to a DIFFERENT unit (the double-provision
+    guard: a span member of another family is not silently consumed as a peer
+    or solo unit). A node NOT in `reserved` is free and assignable to any unit.
+    This replaces the blunt exclude-every-tp-peer approach, which emptied the
+    pool on a re-apply of the same template.
     Raises TemplateIntentError when it can't fit / no workers / etc.
     """
     coster = _coster or _rc.recipe_cost
+    reserved = reserved or {}
     orch_ip = topology.orchestrator.ip
     orch_model = _model_name(tpl.orchestrator.recipe)
     orch_tp = tpl.orchestrator.tp
 
     worker_nodes = [{"ip": w.ip, "vram_free_gb": getattr(w, "vram_free_gb", None)}
                     for w in topology.workers]
-    # Existing-span guard: exclude already-reserved tp-peer nodes from the pool
-    # before assigning anything, so a currently-serving span member is never
-    # given a fresh (solo or spanning) unit over the live span.
+    # Hard exclusion: drop nodes that must NEVER be assigned, no matter what.
+    # This is the explicit caller override; `reserved` (below) is the unit-aware
+    # guard that keeps a node out of a DIFFERENT unit without dropping it.
     if exclude_nodes:
         exclude = set(exclude_nodes)
         worker_nodes = [w for w in worker_nodes if w["ip"] not in exclude]
     pool_ips = [w["ip"] for w in worker_nodes]
 
+    def _kind(ip: str) -> Optional[str]:
+        return reserved.get(ip, {}).get("kind")
+
     # ── Orchestrator spanning ─────────────────────────────────────────────
-    # tp>1: claim the orchestrator node + (tp-1) workers from the front of the pool.
+    # tp>1: the orchestrator claims its own node + (tp-1) span peers. A node
+    # may be a span peer iff it is FREE or already a tp-peer of the
+    # orchestrator's own span (re-apply idempotency). A node serving a worker
+    # family is never borrowed as an orchestrator peer (double-provision guard).
     orch_span: List[str] = [orch_ip]
     if orch_tp > 1:
         needed = orch_tp - 1
-        if needed > len(pool_ips):
+        candidates = [ip for ip in pool_ips
+                      if _kind(ip) in (None, "orchestrator")]
+        if len(candidates) < needed:
             raise TemplateIntentError(
-                f"orchestrator tp={orch_tp} but only {len(pool_ips)} worker nodes "
-                f"available (need {needed} additional nodes)")
-        orch_span.extend(pool_ips[:needed])
-        pool_ips = pool_ips[needed:]  # remove claimed nodes from the pool
+                f"orchestrator tp={orch_tp} but only {len(candidates)} worker "
+                f"nodes available (need {needed} additional nodes)")
+        orch_span.extend(candidates[:needed])
+        pool_ips = [ip for ip in pool_ips if ip not in orch_span[1:]]
 
     orchestrator = ResolvedUnit(
         role="orchestrator", family=None, recipe=tpl.orchestrator.recipe,
@@ -210,12 +230,21 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
     proxy_port = base_proxy_port
 
     for fam in tpl.families:
-        avail = [ip for ip in _select_workers(fam.workers, pool_ips)
-                 if ip not in claimed]
+        # Unit-aware avail: FREE nodes + nodes already serving THIS family
+        # (re-apply keeps its own nodes), minus anything already claimed by an
+        # earlier unit. A node serving a DIFFERENT family is never handed to
+        # this one (double-provision guard) — but it is still a live member of
+        # its own unit, so it is NOT subtracted from the family's own pool.
+        fam_pool = [ip for ip in pool_ips
+                    if ip not in claimed
+                    and (_kind(ip) is None
+                         or (_kind(ip) == "worker"
+                             and reserved[ip].get("family") == fam.name))]
+        avail = _select_workers(fam.workers, fam_pool)
         if not avail:
             raise TemplateIntentError(
                 f"family '{fam.name}': no available worker nodes "
-                f"(pool={pool_ips}, claimed={sorted(claimed)})")
+                f"(pool={fam_pool}, claimed={sorted(claimed)})")
         nodes_for_fam = {w["ip"]: w for w in worker_nodes if w["ip"] in avail}
 
         # Find the max tp in this family

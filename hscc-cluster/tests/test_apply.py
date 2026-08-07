@@ -129,6 +129,97 @@ class TestPreviewAndApply:
             assert "confirm=true" in res["note"]
 
 
+class TestApplyReapplySamePlan:
+    """apply_template must resolve (not block) when re-applying the SAME plan —
+    the --force-recreate path. The unit-aware reserved guard keeps a node in its
+    own unit's pool instead of ejecting every live tp-peer (issue t_16dcceb4)."""
+
+    # The real dual-dsv4 template: orchestrator tp=2 + reasoning family tp=2,
+    # over a 4-node cluster (gateway .245 + workers .246/.247/.248).
+    TEMPLATE = "4node-dual-dsv4"
+    RECIPE = ("~/.sparkrun-local/recipes/local-fixed/"
+              "deepseek-v4-fp8-scitrera-hscc.yaml")
+
+    def _reserved(self, recording=False):
+        """serving.json recorded state — orch=[.245,.246], reasoning=[.247,.248].
+        Present regardless of whether the spans are live (recording) or stopped.
+        """
+        g = "10.0.0.245"; w1 = "10.0.0.246"
+        w2 = "10.0.0.247"; w3 = "10.0.0.248"
+        return {
+            g: {"kind": "orchestrator", "family": None, "model": "dsv4"},
+            w1: {"kind": "orchestrator", "family": None, "model": "dsv4"},
+            w2: {"kind": "worker", "family": "reasoning", "model": "dsv4"},
+            w3: {"kind": "worker", "family": "reasoning", "model": "dsv4"},
+        }
+
+    def _four_node_topo(self):
+        return FakeTopo(FakeNode("10.0.0.245"),
+                        [FakeNode("10.0.0.246"), FakeNode("10.0.0.247"),
+                         FakeNode("10.0.0.248")])
+
+    def test_resolves_when_target_spans_running(self, monkeypatch):
+        monkeypatch.setattr(cluster_template, "_discover",
+                            lambda probe=False: self._four_node_topo())
+        monkeypatch.setattr(cluster_template, "_existing_serving_units",
+                            lambda: self._reserved())
+        import recipe_cost as rc
+        monkeypatch.setattr(ti._rc, "recipe_cost",
+                            lambda r: rc.RecipeCost(r, per_gpu_total_gb=80.4,
+                                                    fits=True))
+        monkeypatch.setattr(cluster_template.Path, "is_file", lambda self: True)
+        plan = cluster_template._resolve(self.TEMPLATE)
+        assert plan.orchestrator.nodes == ["10.0.0.245", "10.0.0.246"]
+        assert plan.orchestrator.tp == 2
+        assert len(plan.families) == 1
+        units = plan.families[0].units
+        assert len(units) == 1                       # one tp=2 unit, not two
+        assert units[0].nodes == ["10.0.0.247", "10.0.0.248"]
+        assert units[0].tp == 2
+        assert cluster_template.validate_resolved_plan(plan) == []
+
+    def test_resolves_when_target_spans_stopped(self, monkeypatch):
+        """After the span is stopped the serving.json RECORD persists; the same
+        plan must still resolve (the record is not a live-occupancy signal)."""
+        monkeypatch.setattr(cluster_template, "_discover",
+                            lambda probe=False: self._four_node_topo())
+        monkeypatch.setattr(cluster_template, "_existing_serving_units",
+                            lambda: self._reserved())
+        import recipe_cost as rc
+        monkeypatch.setattr(ti._rc, "recipe_cost",
+                            lambda r: rc.RecipeCost(r, per_gpu_total_gb=80.4,
+                                                    fits=True))
+        monkeypatch.setattr(cluster_template.Path, "is_file", lambda self: True)
+        plan = cluster_template._resolve(self.TEMPLATE)
+        assert plan.families[0].units[0].nodes == ["10.0.0.247", "10.0.0.248"]
+        assert cluster_template.validate_resolved_plan(plan) == []
+
+    def test_preview_reports_two_nodes_for_tp2_family(self, monkeypatch):
+        """preview's provision summary + proxy node list count the FULL tp span,
+        so a tp=2 reasoning family reports 2 nodes, not 1 (issue t_16dcceb4)."""
+        monkeypatch.setattr(cluster_template, "_discover",
+                            lambda probe=False: self._four_node_topo())
+        monkeypatch.setattr(cluster_template, "_existing_serving_units",
+                            lambda: self._reserved())
+        import recipe_cost as rc
+        monkeypatch.setattr(ti._rc, "recipe_cost",
+                            lambda r: rc.RecipeCost(r, per_gpu_total_gb=80.4,
+                                                    fits=True))
+        prom = preview_template(self.TEMPLATE)["changes"]
+        prov = next(c for c in prom if c["file"] == "models (provision)")
+        # 1 orchestrator (its own node) + reasoning spans BOTH .247/.248 → 2 worker nodes
+        assert "2 worker nodes" in prov["summary"], prov["summary"]
+        proxy = next(c for c in prom if c["file"] == "proxies/")
+        # per-family proxy node list includes every span node, not just the primary
+        reason_detail = proxy["details"][0]
+        assert "10.0.0.247" in reason_detail and "10.0.0.248" in reason_detail
+        cfg = next(c for c in prom if c["file"] == "config.yaml")
+        # config detail was the "1 units, 1 nodes" site — now reports the full span
+        fam_line = next(l for l in cfg["details"] if "family-reasoning" in l)
+        assert "2 nodes" in fam_line, fam_line
+
+
+
 class TestValidateResolvedPlan:
     def _plan(self, monkeypatch, exists=True):
         monkeypatch.setattr(cluster_template.Path, "is_file", lambda self: exists)
