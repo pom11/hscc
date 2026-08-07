@@ -56,7 +56,7 @@ class TestCmdClusterTemplateMissingSubcommand:
         subcommands = result["subcommands"]
         assert "list" in subcommands
         assert "preview <name>" in subcommands
-        assert "apply <name> [--confirm]" in subcommands
+        assert any("apply <name>" in k and "--confirm" in k for k in subcommands)
 
     def test_unknown_subcommand_returns_error(self):
         result = cmd_cluster_template(["bogus"])

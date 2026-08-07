@@ -1332,3 +1332,248 @@ class TestServedModelNameAliases:
         assert result["provisioned"] == ["10.0.0.1:8000:~/recipes/orch.yaml"]
         assert result["note"].startswith("dry-run")
 
+
+# ── t_5b0f4d2d: apply must recreate a unit when its serve command changes ────
+# ENSURE semantics leave an already-running-same-recipe container alone, so a
+# changed serve flag (the v1.6.0 alias being the motivating case) never reaches
+# vLLM on a live fleet. recreate=True forces those units to be stopped first and
+# re-run so the FULL rendered command applies; the units are reported loudly in
+# ``recreated``. Without the flag, apply must NOT silently claim success — it
+# reports drift-skipped units as warnings.
+
+class TestProvisionRecreateOnChange:
+    """BUG: apply must recreate a unit when its serve command changes.
+
+    The scenario that motivated this: a fleet is already running the SAME
+    recipe with an OLD --served-model-name (no alias). The template is updated
+    to advertise a NEW alias, apply runs, reports "N model(s) ensured up" — but
+    ENSURE sees the same recipe already running and skips every unit, so the
+    alias never reaches vLLM.
+
+    recreate=True forces the stop+rerun so the change actually applies, and the
+    unit is reported loudly. An unchanged unit is still left alone (no stop).
+    Without recreate, an already-running-same-recipe unit is reported as
+    skipped-with-drift (status flips to warn), never silent success.
+    """
+
+    def _invoke(self, monkeypatch, status_out, *, recreate=False,
+                orch_nodes=("10.0.0.1",), unit_nodes=("10.0.0.2",)):
+        """Run _provision_models with a plan of one orchestrator + one worker,
+        recording every subprocess call. status_out is the `sparkrun status`
+        stdout the mock returns. Returns (calls, result)."""
+        import subprocess
+        from unittest.mock import MagicMock
+        calls = []
+
+        def mock_run(argv, **kw):
+            calls.append(argv)
+            if "status" in argv:
+                return MagicMock(returncode=0, stderr="", stdout=status_out)
+            return MagicMock(returncode=0, stderr="", stdout="")
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
+                               "orch", list(orch_nodes), 8000, 1, 1)
+        unit = ti.ResolvedUnit("worker", "coding", "~/recipes/deepseek.yaml",
+                               "deepseek", list(unit_nodes), 8000, 1, 1)
+        fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[unit])
+        plan = ti.ResolvedPlan(template="test", orchestrator=orch, families=[fam])
+        result = cluster_template._provision_models(
+            plan, do_launch=True, recreate=recreate)
+        return calls, result
+
+    @staticmethod
+    def _stops(calls):
+        return [c for c in calls if c[0] == "sparkrun" and c[1] == "stop"]
+
+    @staticmethod
+    def _run_for(calls, recipe_substr):
+        return [c for c in calls
+                if c[0] == "sparkrun" and c[1] == "run" and recipe_substr in str(c)]
+
+    # ── recreate=True: a changed unit's command reaches vLLM ────────────────
+
+    def test_recreate_forces_stop_and_relaunch_of_running_same_recipe(self, monkeypatch):
+        """The worker already serves the SAME recipe deepseek (so a plain --ensure
+        would skip it). With recreate=True the unit MUST be stopped first and
+        re-run, so a changed serve command actually reaches vLLM, and it is
+        reported loudly in ``recreated``."""
+        status = ("Job: ~/recipes/deepseek.yaml\n"
+                  "10.0.0.2\n")
+        calls, result = self._invoke(monkeypatch, status, recreate=True,
+                                     unit_nodes=("10.0.0.2",))
+        # the running unit is stopped (force-recreate) then re-run
+        stops = self._stops(calls)
+        assert len(stops) >= 1
+        assert "10.0.0.2" in stops[0]
+        run = self._run_for(calls, "deepseek.yaml")
+        assert len(run) == 1
+        # stop happens BEFORE the relaunch
+        assert calls.index(stops[0]) < calls.index(run[0])
+        # reported loudly
+        assert result["recreated"] == ["10.0.0.2:8000:deepseek.yaml"]
+        assert "recreated" in result["note"]
+        assert result["status"] == "ok"  # it actually applied, so no drift warning
+        assert result["warnings"] == []
+
+    def test_recreate_reach_vllm_with_rendered_command(self, monkeypatch):
+        """The recreated deepseek unit carries the CURRENT rendered serve command
+        (concrete + alias) — proving the alias reaches vLLM after the recreate."""
+        status = ("Job: ~/recipes/deepseek.yaml\n"
+                  "10.0.0.2\n")
+        calls, result = self._invoke(monkeypatch, status, recreate=True,
+                                     unit_nodes=("10.0.0.2",))
+        run = self._run_for(calls, "deepseek.yaml")[0]
+        idx = run.index("--served-model-name")
+        assert run[idx + 1] == "deepseek worker-model"
+
+    def test_recreate_leaves_unchanged_unit_alone(self, monkeypatch):
+        """Not the config-file apply; the pure _provision guard: when recreate is
+        False (the default ENSURE path) and a unit is NOT running yet (nothing to
+        skip), it is launched exactly once with no stray stop — an unchanged/fresh
+        unit is simply left to --ensure's normal handling (no stop)."""
+        status = ("Idle hosts (...): 0\n")
+        calls, result = self._invoke(monkeypatch, status, recreate=False,
+                                     unit_nodes=("10.0.0.2",))
+        assert self._stops(calls) == []      # nothing running → nothing stopped
+        assert len(self._run_for(calls, "deepseek.yaml")) == 1
+        assert result["status"] == "ok"
+        assert result["warnings"] == []
+
+    def test_unchanged_unit_left_alone_with_recreate(self, monkeypatch):
+        """recreate=True only forces recreation of units that are ALREADY running.
+        A unit with nothing running on its node is simply launched once — no
+        spurious stop, no recreate entry (nothing pre-existed to recreate)."""
+        status = ("Idle hosts (...): 0\n")
+        calls, result = self._invoke(monkeypatch, status, recreate=True,
+                                     unit_nodes=("10.0.0.2",))
+        # idle → nothing already running → fresh --ensure launch, no stop
+        assert self._stops(calls) == []
+        assert len(self._run_for(calls, "deepseek.yaml")) == 1
+        assert result["recreated"] == []
+
+    # ── default path: drift MUST be reported loudly, never silently ─────────
+
+    def test_default_skipped_with_drift_reports_loudly(self, monkeypatch):
+        """WITHOUT recreate, a unit already running the same recipe is skipped by
+        --ensure — and apply MUST say so loudly. status flips to warn, the note
+        names the drifted unit, and a warning is emitted (NOT silent success)."""
+        status = ("Job: ~/recipes/deepseek.yaml\n"
+                  "10.0.0.2\n")
+        calls, result = self._invoke(monkeypatch, status, recreate=False,
+                                     unit_nodes=("10.0.0.2",))
+        # same recipe already running → no stop, single --ensure run
+        assert self._stops(calls) == []
+        assert len(self._run_for(calls, "deepseek.yaml")) == 1
+        # ...but apply must NOT claim success: it reports the skip with drift
+        assert result["status"] == "warn"
+        assert "skipped with command drift" in result["note"]
+        assert len(result["warnings"]) == 1
+        assert "--force-recreate" in result["warnings"][0]
+        assert "10.0.0.2:8000:deepseek.yaml" in result["warnings"][0]
+
+    def test_idempotent_unchanged_apply_is_not_loud(self, monkeypatch):
+        """Control: an already-running-same-recipe unit is reported as
+        skipped-with-drift only when it would have been skipped. The drift report
+        is the honest mirror of ENSURE — the point being apply is no longer
+        silently claiming the alias is active when it is not."""
+        status = ("Job: ~/recipes/deepseek.yaml\n"
+                  "10.0.0.2\n")
+        _, result = self._invoke(monkeypatch, status, recreate=False,
+                                 unit_nodes=("10.0.0.2",))
+        # The unit ran the same recipe → --ensure would skip it → drift warning.
+        # This is intended behavior, not a regression: it surfaces the alias
+        # not being active instead of hiding it.
+        assert result["status"] == "warn"
+        assert result["warnings"]
+
+
+# ── t_5b0f4d2d: recreate flag threading through apply → provision ──────────
+
+class TestApplyRecreateFlag:
+    """The --force-recreate flag must reach _provision_models's recreate kwarg
+    through apply_template and the CLI, and be surfaced in the provision step."""
+
+    def test_apply_template_forwards_recreate_to_provision(self, tmp_path, monkeypatch):
+        import cluster_template as ct
+        import subprocess
+        from unittest.mock import MagicMock
+        hscc = tmp_path / "hscc"; hscc.mkdir()
+        for attr, val in [("HSCC_DIR", hscc), ("SERVING_JSON", hscc / "serving.json"),
+                          ("MODELS_JSON", hscc / "models.json"),
+                          ("CONFIG_YAML", hscc / "config.yaml"),
+                          ("PROFILES_DIR", hscc / "profiles"),
+                          ("PROXY_DIR", hscc / "proxies"),
+                          ("APPLIED_STATE", hscc / "applied_template.json"),
+                          ("ROLLBACK_DIR", hscc / "rollback")]:
+            monkeypatch.setattr(ct, attr, val)
+        monkeypatch.setattr(ct, "_discover", lambda probe=False: _topo(2))
+        import recipe_cost as rc
+        monkeypatch.setattr(ti._rc, "recipe_cost",
+                            lambda r: rc.RecipeCost(r, per_gpu_total_gb=30, fits=True))
+        monkeypatch.setattr(ct.Path, "is_file", lambda self: True)
+        monkeypatch.setattr(subprocess, "run",
+                            lambda *a, **k: MagicMock(returncode=0, stderr="", stdout=""))
+
+        seen = {}
+        def fake_provision(plan, **k):
+            seen.update(k)
+            return {"status": "ok", "provisioned": [], "recreated": [],
+                    "warnings": [], "note": "test"}
+        monkeypatch.setattr(ct, "_provision_models", fake_provision)
+
+        res = ct.apply_template("single-family", confirm=True, recreate=True)
+        assert res["success"] is True
+        assert seen.get("recreate") is True
+
+        # and the provision step surfaces recreated/warnings keys
+        prov = [s for s in res["steps"] if s["step"] == "provision"][0]
+        assert "recreated" in prov and "warnings" in prov
+
+    def test_apply_default_recreate_false(self, tmp_path, monkeypatch):
+        import cluster_template as ct
+        import subprocess
+        from unittest.mock import MagicMock
+        hscc = tmp_path / "hscc"; hscc.mkdir()
+        for attr, val in [("HSCC_DIR", hscc), ("SERVING_JSON", hscc / "serving.json"),
+                          ("MODELS_JSON", hscc / "models.json"),
+                          ("CONFIG_YAML", hscc / "config.yaml"),
+                          ("PROFILES_DIR", hscc / "profiles"),
+                          ("PROXY_DIR", hscc / "proxies"),
+                          ("APPLIED_STATE", hscc / "applied_template.json"),
+                          ("ROLLBACK_DIR", hscc / "rollback")]:
+            monkeypatch.setattr(ct, attr, val)
+        monkeypatch.setattr(ct, "_discover", lambda probe=False: _topo(1))
+        import recipe_cost as rc
+        monkeypatch.setattr(ti._rc, "recipe_cost",
+                            lambda r: rc.RecipeCost(r, per_gpu_total_gb=30, fits=True))
+        monkeypatch.setattr(ct.Path, "is_file", lambda self: True)
+        monkeypatch.setattr(subprocess, "run",
+                            lambda *a, **k: MagicMock(returncode=0, stderr="", stdout=""))
+        seen = {}
+        def fake_provision(plan, **k):
+            seen.update(k)
+            return {"status": "ok", "provisioned": [], "recreated": [],
+                    "warnings": [], "note": "test"}
+        monkeypatch.setattr(ct, "_provision_models", fake_provision)
+        ct.apply_template("single-family", confirm=True)
+        assert seen.get("recreate") is False
+
+    def test_cli_parses_force_recreate_flag(self, monkeypatch):
+        """cluster_template_cli maps --force-recreate / --recreate-on-change to
+        apply_template(recreate=True)."""
+        from cluster_template_cli import cmd_cluster_template
+        import cluster_template as ct
+        captured = {}
+        def fake_apply(name, confirm=False, recreate=False):
+            captured.update(name=name, confirm=confirm, recreate=recreate)
+            return {"status": "ok"}
+        monkeypatch.setattr(ct, "apply_template", fake_apply)
+        monkeypatch.setattr("cluster_template_cli.apply_template", fake_apply)
+
+        cmd_cluster_template(["apply", "3node-coding", "--confirm", "--force-recreate"])
+        assert captured == {"name": "3node-coding", "confirm": True, "recreate": True}
+
+        cmd_cluster_template(["apply", "3node-coding", "--confirm", "--recreate-on-change"])
+        assert captured["recreate"] is True
+
+

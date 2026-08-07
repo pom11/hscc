@@ -294,7 +294,7 @@ Cluster & templates
   template status      Which template is currently applied
   template preview <name>    Dry-run: what applying <name> would change
   template validate <name>   Preflight-check a template is deployable
-  template apply <name> [--confirm]   Apply a template (--confirm to execute)
+  template apply <name> [--confirm] [--force-recreate]   Apply a template (--confirm executes; --force-recreate stops+reruns units so changed serve flags reach vLLM)
   profiles             Running kanban task counts per profile
 
 Utility
@@ -453,7 +453,7 @@ def _handle_template():
         print("  hscc template status               Which template is currently applied")
         print("  hscc template preview <name>       Dry-run: what applying <name> would change")
         print("  hscc template validate <name>      Preflight-check a template is deployable")
-        print("  hscc template apply <name> [--confirm]  Apply a template")
+        print("  hscc template apply <name> [--confirm] [--force-recreate]  Apply a template (--force-recreate re-applies changed serve flags)")
         if len(sys.argv) < 3:
             return 0
         else:
