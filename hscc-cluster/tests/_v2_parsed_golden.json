@@ -1,0 +1,277 @@
+{
+  "1node-orchestrator-only": {
+    "description": "1 node: A3B-NVFP4 orchestrator only (no worker family). cluster_size=1.",
+    "name": "1node-orchestrator-only",
+    "orchestrator": {
+      "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+    },
+    "version": 2
+  },
+  "2node-coding": {
+    "description": "2 nodes: orchestrator + 1 coding worker (27B-FP8). cluster_size=2.",
+    "families": [
+      {
+        "models": [
+          {
+            "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+          }
+        ],
+        "name": "coding"
+      }
+    ],
+    "name": "2node-coding",
+    "orchestrator": {
+      "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+    },
+    "version": 2
+  },
+  "3node-coding": {
+    "description": "3 nodes: orchestrator + 2 coding workers (27B-FP8). cluster_size=3.",
+    "families": [
+      {
+        "models": [
+          {
+            "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+          }
+        ],
+        "name": "coding"
+      }
+    ],
+    "name": "3node-coding",
+    "orchestrator": {
+      "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+    },
+    "version": 2
+  },
+  "4node-coding": {
+    "description": "4 nodes: orchestrator + 3 coding workers (27B-FP8). The live setup. cluster_size=4.",
+    "families": [
+      {
+        "models": [
+          {
+            "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+          }
+        ],
+        "name": "coding"
+      }
+    ],
+    "name": "4node-coding",
+    "orchestrator": {
+      "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+    },
+    "version": 2
+  },
+  "4node-coding-plus-fast": {
+    "description": "4 nodes: orchestrator + coding family (2× 27B-FP8) + fast family (1× A3B-FP8). cluster_size=4.",
+    "families": [
+      {
+        "models": [
+          {
+            "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+          }
+        ],
+        "name": "coding",
+        "workers": 2
+      },
+      {
+        "models": [
+          {
+            "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-fp8-vllm.yaml"
+          }
+        ],
+        "name": "fast",
+        "workers": "remaining"
+      }
+    ],
+    "name": "4node-coding-plus-fast",
+    "orchestrator": {
+      "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+    },
+    "version": 2
+  },
+  "4node-colocated-dual": {
+    "description": "4 nodes: orchestrator + 3 workers EACH co-locating 2× A3B-FP8 (ports 8000/8001). cluster_size=4.",
+    "families": [
+      {
+        "models": [
+          {
+            "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-fp8-vllm.yaml"
+          },
+          {
+            "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-fp8-vllm.yaml"
+          }
+        ],
+        "name": "dual"
+      }
+    ],
+    "name": "4node-colocated-dual",
+    "orchestrator": {
+      "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+    },
+    "version": 2
+  },
+  "4node-deepseek-v4-orchestrator": {
+    "description": "4 nodes: DeepSeek-V4-Flash 304B NVFP4 orchestrator (tp=2, 2 nodes) + coding family (2x 27B-FP8). cluster_size=4.",
+    "families": [
+      {
+        "models": [
+          {
+            "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+          }
+        ],
+        "name": "coding",
+        "workers": "remaining"
+      }
+    ],
+    "name": "4node-deepseek-v4-orchestrator",
+    "orchestrator": {
+      "recipe": "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
+      "tp": 2
+    },
+    "version": 2
+  },
+  "4node-dsv4-plus-coding": {
+    "description": "4 nodes: DeepSeek-V4-Flash-0731 FP8 orchestrator (tp=2) + coding family (2x Qwen3.6-27B-FP8). cluster_size=4.",
+    "families": [
+      {
+        "models": [
+          {
+            "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+          }
+        ],
+        "name": "coding",
+        "workers": "remaining"
+      }
+    ],
+    "name": "4node-dsv4-plus-coding",
+    "orchestrator": {
+      "recipe": "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
+      "tp": 2
+    },
+    "version": 2
+  },
+  "4node-dual-dsv4": {
+    "description": "4 nodes: 2x DeepSeek-V4-Flash-0731 FP8 (each tp=2) — orchestrator DSV4 + reasoning family DSV4. cluster_size=4.",
+    "families": [
+      {
+        "models": [
+          {
+            "recipe": "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
+            "tp": 2
+          }
+        ],
+        "name": "reasoning",
+        "workers": "remaining"
+      }
+    ],
+    "name": "4node-dual-dsv4",
+    "orchestrator": {
+      "recipe": "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
+      "tp": 2
+    },
+    "version": 2
+  },
+  "8node-coding": {
+    "description": "8 nodes: orchestrator + 7 coding workers (27B-FP8). cluster_size=8.",
+    "families": [
+      {
+        "models": [
+          {
+            "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+          }
+        ],
+        "name": "coding"
+      }
+    ],
+    "name": "8node-coding",
+    "orchestrator": {
+      "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+    },
+    "version": 2
+  },
+  "8node-coding-plus-fast": {
+    "description": "8 nodes: orchestrator + coding (4× 27B-FP8) + fast (3× A3B-FP8). cluster_size=8.",
+    "families": [
+      {
+        "models": [
+          {
+            "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+          }
+        ],
+        "name": "coding",
+        "workers": 4
+      },
+      {
+        "models": [
+          {
+            "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-fp8-vllm.yaml"
+          }
+        ],
+        "name": "fast",
+        "workers": "remaining"
+      }
+    ],
+    "name": "8node-coding-plus-fast",
+    "orchestrator": {
+      "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+    },
+    "version": 2
+  },
+  "colocated-two-models": {
+    "description": "One family, two co-located models per worker on distinct ports behind one proxy.",
+    "families": [
+      {
+        "models": [
+          {
+            "recipe": "qwen3.6-27b-fp8-vllm"
+          },
+          {
+            "recipe": "qwen3.6-27b-fp8-vllm"
+          }
+        ],
+        "name": "dual"
+      }
+    ],
+    "name": "colocated-two-models",
+    "orchestrator": {
+      "recipe": "qwen3.6-35b-a3b-nvfp4-vllm"
+    },
+    "version": 2
+  },
+  "hscc-live": {
+    "description": "Live cluster: A3B-NVFP4 orchestrator + one coding family (27B-FP8) across all workers, behind the proxy.",
+    "families": [
+      {
+        "models": [
+          {
+            "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+          }
+        ],
+        "name": "coding"
+      }
+    ],
+    "name": "hscc-live",
+    "orchestrator": {
+      "recipe": "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+    },
+    "version": 2
+  },
+  "single-family": {
+    "description": "Orchestrator + one coding family across all workers, load-balanced behind a proxy.",
+    "families": [
+      {
+        "models": [
+          {
+            "recipe": "qwen3.6-27b-fp8-vllm"
+          }
+        ],
+        "name": "coding"
+      }
+    ],
+    "name": "single-family",
+    "orchestrator": {
+      "recipe": "qwen3.6-35b-a3b-nvfp4-vllm"
+    },
+    "version": 2
+  }
+}
