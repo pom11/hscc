@@ -1356,14 +1356,23 @@ class TestProvisionRecreateOnChange:
     skipped-with-drift (status flips to warn), never silent success.
     """
 
-    def _invoke(self, monkeypatch, status_out, *, recreate=False,
-                orch_nodes=("10.0.0.1",), unit_nodes=("10.0.0.2",)):
+    def _invoke(self, monkeypatch, tmp_path, status_out, *, recreate=False,
+                orch_nodes=("10.0.0.1",), unit_nodes=("10.0.0.2",),
+                worker_serve_cmd="__UNSET__", orch_serve_cmd="__UNSET__"):
         """Run _provision_models with a plan of one orchestrator + one worker,
         recording every subprocess call. status_out is the `sparkrun status`
-        stdout the mock returns. Returns (calls, result)."""
+        stdout the mock returns. Returns (calls, result).
+
+        SERVING_JSON is redirected to a tmp file (test isolation) and optionally
+        seeded so the drift comparison has something to compare against:
+        worker_serve_cmd / orch_serve_cmd seed the recorded serve_cmd for the
+        worker / orchestrator unit — "__UNSET__" (default) = don't seed at all,
+        None = seed the unit WITHOUT a serve_cmd (pre-upgrade), any other value
+        = seed that serve_cmd (a list argv or a string)."""
         import subprocess
         from unittest.mock import MagicMock
         calls = []
+        any_seed = worker_serve_cmd != "__UNSET__" or orch_serve_cmd != "__UNSET__"
 
         def mock_run(argv, **kw):
             calls.append(argv)
@@ -1371,6 +1380,24 @@ class TestProvisionRecreateOnChange:
                 return MagicMock(returncode=0, stderr="", stdout=status_out)
             return MagicMock(returncode=0, stderr="", stdout="")
         monkeypatch.setattr(subprocess, "run", mock_run)
+
+        serving_path = tmp_path / "serving.json"
+        monkeypatch.setattr(cluster_template, "SERVING_JSON", serving_path)
+        units = []
+        if orch_serve_cmd != "__UNSET__":
+            rec = {"id": "orch"}
+            if orch_serve_cmd is not None:
+                rec["serve_cmd"] = orch_serve_cmd
+            units.append(rec)
+        if worker_serve_cmd != "__UNSET__":
+            rec = {"id": "family-coding-deepseek-2-8000"}
+            if worker_serve_cmd is not None:
+                rec["serve_cmd"] = worker_serve_cmd
+            units.append(rec)
+        if any_seed:
+            serving_path.write_text(
+                __import__("json").dumps({"version": 2, "units": units}))
+
         orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
                                "orch", list(orch_nodes), 8000, 1, 1)
         unit = ti.ResolvedUnit("worker", "coding", "~/recipes/deepseek.yaml",
@@ -1390,16 +1417,30 @@ class TestProvisionRecreateOnChange:
         return [c for c in calls
                 if c[0] == "sparkrun" and c[1] == "run" and recipe_substr in str(c)]
 
+    @staticmethod
+    def _expected_worker_cmd():
+        """The rendered serve command for the worker unit in _invoke's plan."""
+        return cluster_template._render_serve_cmd(
+            "hscc", "10.0.0.2", 8000, "~/recipes/deepseek.yaml",
+            "worker-model", 1, "deepseek")
+
+    @staticmethod
+    def _expected_orch_cmd():
+        """The rendered serve command for the orchestrator in _invoke's plan."""
+        return cluster_template._render_serve_cmd(
+            "hscc", "10.0.0.1", 8000, "~/recipes/orch.yaml",
+            "orchestrator-model", 1, "orch")
+
     # ── recreate=True: a changed unit's command reaches vLLM ────────────────
 
-    def test_recreate_forces_stop_and_relaunch_of_running_same_recipe(self, monkeypatch):
+    def test_recreate_forces_stop_and_relaunch_of_running_same_recipe(self, monkeypatch, tmp_path):
         """The worker already serves the SAME recipe deepseek (so a plain --ensure
         would skip it). With recreate=True the unit MUST be stopped first and
         re-run, so a changed serve command actually reaches vLLM, and it is
         reported loudly in ``recreated``."""
         status = ("Job: ~/recipes/deepseek.yaml\n"
                   "10.0.0.2\n")
-        calls, result = self._invoke(monkeypatch, status, recreate=True,
+        calls, result = self._invoke(monkeypatch, tmp_path, status, recreate=True,
                                      unit_nodes=("10.0.0.2",))
         # the running unit is stopped (force-recreate) then re-run
         stops = self._stops(calls)
@@ -1415,76 +1456,141 @@ class TestProvisionRecreateOnChange:
         assert result["status"] == "ok"  # it actually applied, so no drift warning
         assert result["warnings"] == []
 
-    def test_recreate_reach_vllm_with_rendered_command(self, monkeypatch):
+    def test_recreate_reach_vllm_with_rendered_command(self, monkeypatch, tmp_path):
         """The recreated deepseek unit carries the CURRENT rendered serve command
         (concrete + alias) — proving the alias reaches vLLM after the recreate."""
         status = ("Job: ~/recipes/deepseek.yaml\n"
                   "10.0.0.2\n")
-        calls, result = self._invoke(monkeypatch, status, recreate=True,
+        calls, result = self._invoke(monkeypatch, tmp_path, status, recreate=True,
                                      unit_nodes=("10.0.0.2",))
         run = self._run_for(calls, "deepseek.yaml")[0]
         idx = run.index("--served-model-name")
         assert run[idx + 1] == "deepseek worker-model"
 
-    def test_recreate_leaves_unchanged_unit_alone(self, monkeypatch):
+    def test_recreate_leaves_unchanged_unit_alone(self, monkeypatch, tmp_path):
         """Not the config-file apply; the pure _provision guard: when recreate is
         False (the default ENSURE path) and a unit is NOT running yet (nothing to
         skip), it is launched exactly once with no stray stop — an unchanged/fresh
         unit is simply left to --ensure's normal handling (no stop)."""
         status = ("Idle hosts (...): 0\n")
-        calls, result = self._invoke(monkeypatch, status, recreate=False,
+        calls, result = self._invoke(monkeypatch, tmp_path, status, recreate=False,
                                      unit_nodes=("10.0.0.2",))
         assert self._stops(calls) == []      # nothing running → nothing stopped
         assert len(self._run_for(calls, "deepseek.yaml")) == 1
         assert result["status"] == "ok"
         assert result["warnings"] == []
 
-    def test_unchanged_unit_left_alone_with_recreate(self, monkeypatch):
+    def test_unchanged_unit_left_alone_with_recreate(self, monkeypatch, tmp_path):
         """recreate=True only forces recreation of units that are ALREADY running.
         A unit with nothing running on its node is simply launched once — no
         spurious stop, no recreate entry (nothing pre-existed to recreate)."""
         status = ("Idle hosts (...): 0\n")
-        calls, result = self._invoke(monkeypatch, status, recreate=True,
+        calls, result = self._invoke(monkeypatch, tmp_path, status, recreate=True,
                                      unit_nodes=("10.0.0.2",))
         # idle → nothing already running → fresh --ensure launch, no stop
         assert self._stops(calls) == []
         assert len(self._run_for(calls, "deepseek.yaml")) == 1
         assert result["recreated"] == []
 
-    # ── default path: drift MUST be reported loudly, never silently ─────────
+    # ── real drift detection (t_13f077e4): compare, don't assume ──────────
 
-    def test_default_skipped_with_drift_reports_loudly(self, monkeypatch):
-        """WITHOUT recreate, a unit already running the same recipe is skipped by
-        --ensure — and apply MUST say so loudly. status flips to warn, the note
-        names the drifted unit, and a warning is emitted (NOT silent success)."""
+    def test_unchanged_unit_produces_no_drift_warning(self, monkeypatch, tmp_path):
+        """THE key half: a unit already running the same recipe whose RECORDED
+        serve command equals the freshly rendered one is genuinely unchanged —
+        apply must NOT emit any drift warning. Silence here is what makes the
+        warning meaningful."""
         status = ("Job: ~/recipes/deepseek.yaml\n"
                   "10.0.0.2\n")
-        calls, result = self._invoke(monkeypatch, status, recreate=False,
-                                     unit_nodes=("10.0.0.2",))
+        # The worker's previous provision recorded the SAME command we render now.
+        calls, result = self._invoke(
+            monkeypatch, tmp_path, status, recreate=False,
+            unit_nodes=("10.0.0.2",),
+            worker_serve_cmd=self._expected_worker_cmd())
+        # no stop (already running), single --ensure no-op run
+        assert self._stops(calls) == []
+        assert len(self._run_for(calls, "deepseek.yaml")) == 1
+        # ...and critically NO drift warning: unchanged is silence.
+        assert result["status"] == "ok"
+        assert result["warnings"] == []
+        assert "drift" not in result["note"].lower()
+
+    def test_changed_unit_reported_as_real_drift(self, monkeypatch, tmp_path):
+        """A unit whose RECORDED serve command differs from the freshly rendered
+        one is REAL drift: it is named, WHAT changed is reported, and it is
+        skipped-with-warning (status flips to warn) unless --force-recreate."""
+        status = ("Job: ~/recipes/deepseek.yaml\n"
+                  "10.0.0.2\n")
+        # Recorded with the OLD alias-less command — the current render adds the
+        # worker-model alias, so the two genuinely differ.
+        old_cmd = ["sparkrun", "run", "~/recipes/deepseek.yaml",
+                   "--cluster", "hscc", "--hosts", "10.0.0.2",
+                   "--port", "8000", "--no-follow", "--ensure",
+                   "--served-model-name", "deepseek"]
+        calls, result = self._invoke(
+            monkeypatch, tmp_path, status, recreate=False,
+            unit_nodes=("10.0.0.2",), worker_serve_cmd=old_cmd)
         # same recipe already running → no stop, single --ensure run
         assert self._stops(calls) == []
         assert len(self._run_for(calls, "deepseek.yaml")) == 1
-        # ...but apply must NOT claim success: it reports the skip with drift
+        # ...but apply must NOT claim success: real drift is reported loudly.
         assert result["status"] == "warn"
         assert "skipped with command drift" in result["note"]
         assert len(result["warnings"]) == 1
-        assert "--force-recreate" in result["warnings"][0]
-        assert "10.0.0.2:8000:deepseek.yaml" in result["warnings"][0]
+        w0 = result["warnings"][0]
+        assert "10.0.0.2:8000:deepseek.yaml" in w0
+        assert "--force-recreate" in w0
+        # WHAT changed is named: the alias flag differs (old alias-less → alias)
+        assert "--served-model-name" in w0
+        # The drifted unit's record is NOT overwritten — it still reflects what's
+        # actually running (the old command), so a later apply still sees drift.
+        import json
+        persisted = json.loads((tmp_path / "serving.json").read_text())
+        worker = [u for u in persisted["units"]
+                  if u.get("id") == "family-coding-deepseek-2-8000"][0]
+        assert worker["serve_cmd"] == old_cmd
 
-    def test_idempotent_unchanged_apply_is_not_loud(self, monkeypatch):
-        """Control: an already-running-same-recipe unit is reported as
-        skipped-with-drift only when it would have been skipped. The drift report
-        is the honest mirror of ENSURE — the point being apply is no longer
-        silently claiming the alias is active when it is not."""
+    def test_no_recorded_command_uses_unchecked_wording(self, monkeypatch, tmp_path):
+        """A pre-upgrade unit with a recorded unit entry but NO serve_cmd falls
+        back to the conservative 'drift not checked' wording — never a false
+        'command drift' claim."""
         status = ("Job: ~/recipes/deepseek.yaml\n"
                   "10.0.0.2\n")
-        _, result = self._invoke(monkeypatch, status, recreate=False,
-                                 unit_nodes=("10.0.0.2",))
-        # The unit ran the same recipe → --ensure would skip it → drift warning.
-        # This is intended behavior, not a regression: it surfaces the alias
-        # not being active instead of hiding it.
+        # seed the worker unit present but WITHOUT a serve_cmd (pre-upgrade).
+        calls, result = self._invoke(
+            monkeypatch, tmp_path, status, recreate=False,
+            unit_nodes=("10.0.0.2",), worker_serve_cmd=None)
+        assert self._stops(calls) == []
+        assert len(self._run_for(calls, "deepseek.yaml")) == 1
         assert result["status"] == "warn"
-        assert result["warnings"]
+        assert len(result["warnings"]) == 1
+        assert "drift not checked" in result["warnings"][0]
+        assert "command drift" not in result["warnings"][0]
+        assert "command drift" not in result["note"]
+        assert "--force-recreate" in result["warnings"][0]
+
+    def test_force_recreate_applies_changed_command_and_updates_record(self, monkeypatch, tmp_path):
+        """--force-recreate on a drifted unit stops+relaunches it, applies the
+        current command, reports it in ``recreated`` (OK not warn), AND refreshes
+        its recorded serve_cmd so a later apply sees no drift."""
+        status = ("Job: ~/recipes/deepseek.yaml\n"
+                  "10.0.0.2\n")
+        old_cmd = ["sparkrun", "run", "~/recipes/deepseek.yaml",
+                   "--cluster", "hscc", "--hosts", "10.0.0.2",
+                   "--port", "8000", "--no-follow", "--ensure",
+                   "--served-model-name", "deepseek"]
+        calls, result = self._invoke(
+            monkeypatch, tmp_path, status, recreate=True,
+            unit_nodes=("10.0.0.2",), worker_serve_cmd=old_cmd)
+        assert len(self._stops(calls)) >= 1          # stopped first
+        assert result["status"] == "ok"              # actually applied, no drift
+        assert result["warnings"] == []
+        assert result["recreated"] == ["10.0.0.2:8000:deepseek.yaml"]
+        # record refreshed to the current command
+        import json
+        persisted = json.loads((tmp_path / "serving.json").read_text())
+        worker = [u for u in persisted["units"]
+                  if u.get("id") == "family-coding-deepseek-2-8000"][0]
+        assert worker["serve_cmd"] == self._expected_worker_cmd()
 
 
 # ── t_5b0f4d2d: recreate flag threading through apply → provision ──────────
