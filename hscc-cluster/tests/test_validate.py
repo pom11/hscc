@@ -15,6 +15,7 @@ that: it answers only about the template file, deterministically.
 """
 
 import json
+import os
 
 import cluster_template as ct
 import template_intent as ti
@@ -246,6 +247,37 @@ class TestFourNodeDual:
         assert res["placement"]["ok"] is False
         assert any("pool=[]" in e for e in res["placement"]["errors"])
         assert res["ok"] is False
+
+    def test_shipped_dual_dsv4_parses_v3_and_validates(self, monkeypatch):
+        """The SHIPPED templates/4node/dual-dsv4.yaml parses as version 3 with
+        the routing block (delegation → family-reasoning) and NO explicit nodes,
+        and passes structural validation. This is the durable encoding of the
+        live-config fix: delegation must route to the reasoning family, not the
+        orchestrator. Structural (offline) — no resolver, no live state."""
+        import yaml as _yaml
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(os.path.dirname(here), "templates", "4node",
+                            "dual-dsv4.yaml")
+        with open(path) as fh:
+            raw = _yaml.safe_load(fh)
+
+        # parses as v3 with the declared routing block
+        tpl = ti.ClusterTemplate.from_dict(raw)
+        assert tpl.version == 3
+        assert tpl.routing == {"delegation": "family-reasoning",
+                               "compaction": "orchestrator",
+                               "auxiliaries": "orchestrator"}
+        # symbolic + portable: no explicit node pins (else reusable 1-8 node
+        # library would be broken by this cluster's hardcoded IPs)
+        assert tpl.orchestrator.nodes is None
+        assert tpl.families[0].nodes is None
+
+        # structural validation of the shipped file (offline)
+        monkeypatch.setattr(ct.Path, "is_file", lambda self: True)  # recipes exist
+        errs, warns = ct._structural_validate(raw, tpl, cluster_ips=COMPUTE,
+                                              recipe_exists=EXISTS)
+        assert errs == []
+        assert warns == []
 
 
 # ── validate_template end-to-end (real template file, real cluster.json) ─────

@@ -7,8 +7,21 @@
 # Requires the multi-node-tp resolver (orchestrator + family node spanning) that
 # shipped on main. Weights (deepseek-ai/DeepSeek-V4-Flash-0731) must be staged
 # node-local on all 4 nodes and the scitrera-hscc image built on each.
+#
+# ROUTING (v3): delegated subagents and kanban worker traffic are routed to the
+# SECOND DSV4 — the `reasoning` family, served behind its proxy on :4000, which
+# now advertises `worker-model`. Delegated work belongs on the worker pool, not
+# the orchestrator's GPU. Compaction and the text auxiliaries stay on the
+# orchestrator so a big summarization prompt never competes with worker
+# throughput.
+#
+# This template deliberately declares NO explicit `nodes:` — it ships as part of
+# a reusable 1-8 node library, and hardcoding this cluster's IPs would break it
+# for every other deployment. Placement stays inferred (`workers: remaining`);
+# the resolver bug that made inference unreliable was fixed in t_16dcceb4.
+# `routing:` is symbolic and therefore portable, which is why it is safe to ship.
 name: 4node-dual-dsv4
-version: 2
+version: 3
 description: "4 nodes: 2x DeepSeek-V4-Flash-0731 FP8 (each tp=2) — orchestrator DSV4 + reasoning family DSV4. cluster_size=4."
 orchestrator:
   recipe: "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml"
@@ -20,3 +33,7 @@ families:
         tp: 2
     workers: remaining
     proxy: true
+routing:
+  delegation: family-reasoning
+  compaction: orchestrator
+  auxiliaries: orchestrator
