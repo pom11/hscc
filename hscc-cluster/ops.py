@@ -153,6 +153,35 @@ def stop_model(args, **kwargs):
             "stdout_tail": r["stdout"][-2000:], "error": r["stderr"] or None}
 
 
+# Since v1.6.0 every vLLM endpoint advertises its concrete model id ALONGSIDE a
+# stable role alias (orchestrator-model / worker-model) via multi-name
+# --served-model-name. Health/display readers pick the concrete id (what the
+# node is genuinely running), never the role alias, and never by list position.
+_ROLE_ALIASES = frozenset({"orchestrator-model", "worker-model"})
+
+
+def _pick_served_model(payload):
+    """Return the served model id, choosing EXPLICITLY by name (never by order).
+
+    An endpoint may advertise both its concrete id and a role alias; which lands
+    at index 0 is not guaranteed. This reader wants the CONCRETE id, so it
+    returns the first served id that is NOT a known role alias, falling back to
+    the first entry if every name is an alias. None when empty/unparseable.
+    """
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, list) or not data:
+        return None
+    ids = [m.get("id") for m in data if isinstance(m, dict) and m.get("id")]
+    if not ids:
+        return None
+    for name in ids:
+        if name not in _ROLE_ALIASES:
+            return name
+    return ids[0]
+
+
 def model_health(args, **kwargs):
     node = args.get("node", cl.HEAD)
     r = cl.run_cmd(["curl", "-s", "--max-time", "8",
@@ -161,7 +190,7 @@ def model_health(args, **kwargs):
     if r["ok"] and r["stdout"].strip():
         import json as _j
         try:
-            served = _j.loads(r["stdout"])["data"][0]["id"]
+            served = _pick_served_model(_j.loads(r["stdout"]))
         except Exception:
             served = None
     return {"node": node, "reachable": r["ok"] and served is not None,
