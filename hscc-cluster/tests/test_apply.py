@@ -1513,6 +1513,119 @@ class TestApplyRouting:
         assert d["delegation"]["base_url"] == "http://localhost:4000/v1"
         assert d["delegation"]["model"] == self.CONCRETE   # written, not the alias
 
+    # ── t_f7740ae0: alias is the canonical WRITE candidate (probe decides) ──
+    # The candidate offered to the probe is the unit's STABLE LOGICAL ALIAS
+    # (by role identity via ``_unit_alias``), NOT the recipe's concrete id — so
+    # apply and the doctor alias-migration converge on the same config value.
+    # A plan resolved from a real template has ``unit.model`` = the CONCRETE id
+    # (``_model_name(recipe)``); the endpoint advertises the alias alongside it.
+    # Each test FAILS if the change is reverted (candidate falls back to u.model).
+
+    def _plan_concrete(self, *, fam_proxy=None, family="reasoning"):
+        """Same skeleton as ``_plan`` but every unit's ``model`` = the CONCRETE
+        id (what real ``resolve()`` produces from the recipe). With a concrete
+        ``u.model``, routing must derive the ALIAS candidate from role identity,
+        not from the recipe's id — otherwise the alias can never win."""
+        orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
+                               self.CONCRETE, ["10.0.0.1"], 8000, 1, 1)
+        unit = ti.ResolvedUnit("worker", family, "w.yaml", self.CONCRETE,
+                               ["10.0.0.2"], 8001, 1, 1)
+        fam = ti.ResolvedFamily(name=family, proxy_port=fam_proxy, units=[unit])
+        return ti.ResolvedPlan(template="t", orchestrator=orch, families=[fam])
+
+    def test_endpoint_advertises_alias_writes_alias(self, tmp_path):
+        """TARGET ENDPOINT ADVERTISES THE ALIAS → the ALIAS is written (the new
+        behaviour). Real plan (unit.model=CONCRETE), endpoint serves BOTH the
+        concrete id and worker-model. The alias must win. Without the change the
+        candidate was u.model=CONCRETE and served has CONCRETE → concrete
+        written, so this FAILS on revert."""
+        conf = tmp_path / "config.yaml"
+        self._write(conf, delegation={"model": "stale", "base_url": "http://stale/v1"})
+        tpl = self._tpl(routing={"delegation": "family-reasoning"})
+        plan = self._plan_concrete(fam_proxy=4000)
+        result = self._apply(tpl, plan, conf, served=(self.CONCRETE, self.ALIAS))
+        import yaml
+        d = yaml.safe_load(conf.read_text())
+        assert d["delegation"]["base_url"] == "http://localhost:4000/v1"
+        assert d["delegation"]["model"] == self.ALIAS   # alias wins when advertised
+
+    def test_orchestrator_target_advertises_alias_writes_orch_alias(self, tmp_path):
+        """orchestrator target, concrete-model plan, endpoint serves (concrete,
+        orchestrator-model) → the ORCH ALIAS is written, not the concrete id."""
+        conf = tmp_path / "config.yaml"
+        self._write(conf, delegation={"model": "stale", "base_url": "http://stale/v1"})
+        tpl = self._tpl(routing={"delegation": "orchestrator"})
+        plan = self._plan_concrete()
+        result = self._apply(tpl, plan, conf, served=(self.CONCRETE, self.ORCH_ALIAS))
+        import yaml
+        d = yaml.safe_load(conf.read_text())
+        assert d["delegation"]["model"] == self.ORCH_ALIAS
+        assert d["delegation"]["base_url"] == "http://10.0.0.1:8000/v1"
+
+    def test_ambiguous_served_refuses_consumer(self, tmp_path):
+        """Ambiguous probe (≥2 ids served, neither the alias) → refuse to write
+        this consumer (touch nothing), never guess which concrete id to use."""
+        conf = tmp_path / "config.yaml"
+        self._write(conf, delegation={"model": "hand", "base_url": "http://hand/v1"})
+        before = conf.read_text()
+        tpl = self._tpl(routing={"delegation": "family-reasoning"})
+        result = self._apply(tpl, self._plan_concrete(fam_proxy=4000), conf,
+                             served=("some-other-a", "some-other-b"))
+        import yaml
+        d = yaml.safe_load(conf.read_text())
+        assert d["delegation"] == {"model": "hand", "base_url": "http://hand/v1"}
+        assert result["keys_written"] == ["delegation:refused:(ok)"]
+        assert result["changed"] is False
+        assert conf.read_text() == before
+
+    def test_routing_candidate_is_alias_by_role_identity(self):
+        """The write candidate is the alias by ROLE IDENTITY, not u.model: from
+        a concrete-model plan, an orchestrator target yields orchestrator-model
+        and a family target yields worker-model — the concrete id in u.model is
+        never the candidate."""
+        plan = self._plan_concrete(fam_proxy=4000)
+        _base, cand = cluster_template._routing_target_endpoint("orchestrator", plan)
+        assert cand == self.ORCH_ALIAS      # not self.CONCRETE (u.model)
+        _base, cand = cluster_template._routing_target_endpoint(
+            "family-reasoning", plan)
+        assert cand == self.ALIAS           # not self.CONCRETE (units[0].model)
+
+    def test_alias_identity_never_misaliases_worker(self):
+        """Alias is decided by identity against plan.orchestrator, NOT by role
+        string / index / name — so a worker unit whose role string is literally
+        'orchestrator' still gets worker-model, and no worker is ever aliased
+        orchestrator-model."""
+        unit = ti.ResolvedUnit("orchestrator", "reasoning", "w.yaml", self.CONCRETE,
+                               ["10.0.0.2"], 8001, 1, 1)
+        orch = ti.ResolvedUnit("orchestrator", None, "orch.yaml", self.CONCRETE,
+                               ["10.0.0.1"], 8000, 1, 1)
+        plan = ti.ResolvedPlan(template="t", orchestrator=orch,
+                               families=[ti.ResolvedFamily("reasoning", 4000, [unit])])
+        assert cluster_template._unit_alias(orch, plan) == self.ORCH_ALIAS
+        assert cluster_template._unit_alias(unit, plan) == self.ALIAS
+
+    def test_apply_then_migration_agree_noop_second_time(self, tmp_path):
+        """END-TO-END regression motivator: apply converges config to the ALIAS,
+        exactly as the doctor alias-migration does — so a second pass is a byte
+        no-op. Before the change apply wrote CONCRETE, so a subsequent
+        alias-migrate pass (and any re-apply) kept fighting; now they agree."""
+        conf = tmp_path / "config.yaml"
+        self._write(conf, delegation={"model": "stale", "base_url": "http://stale/v1"})
+        tpl = self._tpl(routing={"delegation": "family-reasoning"})
+        plan = self._plan_concrete(fam_proxy=4000)
+        served = (self.CONCRETE, self.ALIAS)
+        r1 = self._apply(tpl, plan, conf, served=served)   # first apply
+        import yaml
+        after_apply = yaml.safe_load(conf.read_text())
+        assert after_apply["delegation"]["model"] == self.ALIAS
+        assert r1["changed"] is True
+        # "doctor migration" converges to the alias — which apply already wrote
+        # (they agree), so re-applying is a byte no-op.
+        before = conf.read_text()
+        r2 = self._apply(tpl, plan, conf, served=served)   # second pass
+        assert r2["changed"] is False
+        assert conf.read_text() == before
+
     def test_proxy_unreachable_refuses_consumer(self, tmp_path):
         """Unreachable target: refuse to write the consumer (touch nothing) rather
         than write a model id the endpoint might 404 on. The refused consumer is
