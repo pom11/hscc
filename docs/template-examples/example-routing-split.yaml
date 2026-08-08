@@ -1,0 +1,67 @@
+# EXAMPLE — not a shipped layout. Lives in docs/ deliberately: templates are
+# discovered with TEMPLATE_DIR.rglob("*.yaml"), so anything under
+# hscc-cluster/templates/ becomes applyable. These files are teaching material,
+# so they sit outside that path and cannot be applied by accident.
+#
+# WHAT THIS SHOWS: splitting traffic between two model instances so that
+# delegated work and summarization never compete for the same GPU.
+#
+#   delegation  -> the worker family. Delegated subagents are the bulk of
+#                  fleet traffic; running them on the orchestrator's GPU
+#                  starves the thing that coordinates everything else. This
+#                  exact drift happened in production: delegation silently
+#                  pointed at the orchestrator and every subagent burned
+#                  orchestrator GPU until the template was made to say
+#                  otherwise.
+#   compaction  -> the orchestrator. The opposite argument: a context-
+#                  compaction prompt is large and bursty, and running it on the
+#                  busy worker pool competes with real task throughput. The
+#                  orchestrator is comparatively idle, so it absorbs it well.
+#
+# NOTE the `auxiliaries` consumer is deliberately ABSENT below. See the comment
+# on the routing block — that omission is the most important thing here.
+
+name: example-routing-split
+version: 3
+description: "EXAMPLE ONLY — routing split: delegated work on the workers, compaction on the orchestrator."
+
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/example-orchestrator.yaml"
+  tp: 2
+
+families:
+  - name: reasoning
+    models:
+      - recipe: "~/.sparkrun-local/recipes/example-worker.yaml"
+        tp: 2
+    workers: remaining
+    # proxy: true puts the family behind a load-balanced endpoint, which is what
+    # `family-reasoning` resolves to in the routing block below.
+    proxy: true
+
+routing:
+  # A routing target is a SYMBOLIC unit name — `orchestrator`, or
+  # `family-<name>` — never a URL. Apply resolves it to that unit's live
+  # endpoint. Symbolic targets are why this file stays correct when the family
+  # moves to different nodes or ports: nothing here needs editing.
+  delegation: family-reasoning
+  compaction: orchestrator
+
+  # `auxiliaries:` IS OMITTED ON PURPOSE.
+  #
+  # Omission means DO-NOT-TOUCH. Apply does not write those config keys at all —
+  # it does not reset them, it does not fill them in, it does not "helpfully"
+  # point them somewhere. Whatever ~/.hermes/config.yaml already says for the
+  # auxiliary tasks survives this apply untouched.
+  #
+  # That is what makes it safe to hand-tune a value and then keep applying
+  # templates: apply can never silently re-route something you set deliberately.
+  # It is stricter than the older fill-empty behaviour, which wrote whenever a
+  # value happened to be blank.
+  #
+  # If you DID want the text auxiliaries routed, you would add:
+  #     auxiliaries: orchestrator
+  # which covers the 8 TEXT tasks only (kanban_decomposer, triage_specifier,
+  # profile_describer, curator, title_generation, skills_hub, approval, mcp).
+  # `vision` and `web_extract` are never included — they need capability-
+  # specific providers, not whichever text model a unit happens to serve.

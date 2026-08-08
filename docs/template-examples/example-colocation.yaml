@@ -1,0 +1,59 @@
+# EXAMPLE — not a shipped layout. See the note in example-routing-split.yaml
+# about why these live in docs/ rather than under hscc-cluster/templates/.
+#
+# WHAT THIS SHOWS: two small models deliberately sharing one node.
+#
+# By default, two units naming the same node is a HARD ERROR and apply blocks
+# before touching the fleet:
+#
+#     node '10.0.0.3' claimed by both 'fast' and 'embed'
+#       (set allow_colocation: true on both to permit)
+#
+# That default exists because of a real incident: a solo unit was provisioned
+# onto a node that was already serving as a tensor-parallel peer, putting two
+# containers on one GPU. The node survived, but it was starved and the duplicate
+# respawned on every self-heal cycle until the cause was found.
+#
+# Colocation is legitimate when the models are genuinely small enough to share
+# the GPU — which is the case below. It is not a way to squeeze a large model
+# onto a busy node. Both units must opt in, and apply warns about VRAM
+# contention when they do; check `sparkrun show` for each recipe and confirm the
+# combined footprint fits before relying on it.
+#
+# The addresses here are documentation placeholders (10.0.0.x), not a real
+# cluster. Explicit `nodes:` pins placement and bypasses resolver inference,
+# which is why the SHIPPED templates omit it — hardcoding one cluster's
+# addresses would break them everywhere else.
+
+name: example-colocation
+version: 3
+description: "EXAMPLE ONLY — two small models sharing a node via allow_colocation."
+
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/example-orchestrator.yaml"
+  tp: 1
+  nodes: [10.0.0.1]
+
+families:
+  - name: fast
+    # Both units name 10.0.0.3, so BOTH must set allow_colocation: true.
+    # Remove the flag from either one and apply blocks with the error above.
+    nodes: [10.0.0.3]
+    allow_colocation: true
+    models:
+      - recipe: "~/.sparkrun-local/recipes/example-small-fast.yaml"
+        tp: 1
+    proxy: true
+
+  - name: embed
+    nodes: [10.0.0.3]
+    allow_colocation: true
+    models:
+      - recipe: "~/.sparkrun-local/recipes/example-small-embed.yaml"
+        tp: 1
+    proxy: true
+
+# No routing block at all here — so apply writes NO routing config keys, and
+# every routing-related value in the live config is left exactly as it is.
+# Omitting the block entirely is the same do-not-touch guarantee as omitting a
+# single consumer.
