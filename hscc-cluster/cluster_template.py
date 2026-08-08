@@ -307,6 +307,21 @@ def _serving_unit_id(u: Any, is_orch: bool) -> str:
     return f"family-{u.family}-{short}-{suffix}-{u.port}"
 
 
+def _unit_alias(u: Any, plan: Any) -> str:
+    """The stable logical alias for a unit, decided by ROLE IDENTITY against
+    ``plan.orchestrator`` — NEVER by index, role string, or name matching (a
+    worker whose role string is literally 'orchestrator' still gets
+    worker-model).
+
+    The orchestrator advertises ``orchestrator-model``; every family/worker
+    unit advertises ``worker-model``. Shared by ``_provision_models`` (which
+    builds the serve commands that advertise the alias) and
+    ``_routing_target_endpoint`` (which offers the alias as the write
+    candidate) so the two can never disagree about a unit's alias.
+    """
+    return "orchestrator-model" if u is plan.orchestrator else "worker-model"
+
+
 def _render_serve_cmd(cluster: str, hosts_arg: str, port: int, recipe: str,
                       alias: str, tp: int, model: str = "") -> List[str]:
     """Canonical serve argv for a wanted unit — the exact argv that gets run.
@@ -416,7 +431,7 @@ def _provision_models(plan: Any, cluster: str = "hscc",
     # model literally named "<concrete>,<alias>" → both concrete and alias 404.
     want = []
     for u in [plan.orchestrator] + [unit for fam in plan.families for unit in fam.units]:
-        alias = "orchestrator-model" if u is plan.orchestrator else "worker-model"
+        alias = _unit_alias(u, plan)
         want.append((u, u.nodes, u.port, u.recipe, u.tp, alias,
                      _serving_unit_id(u, u is plan.orchestrator)))
     # Every node in every span is "in use" — don't stop a node that is part of a
@@ -1758,26 +1773,30 @@ def _routing_target_endpoint(target: str, plan: Any) -> Tuple[str, str]:
     Returns ``(base_url, candidate_model_id)``. ``orchestrator`` -> orchestrator
     host:port; ``family-<name>`` -> that family's proxy port when ``proxy: true``
     (``proxy_port`` is not None), else its primary node's endpoint
-    (``units[0].node:units[0].port``). The model candidate is the unit's
-    configured model id (normally the logical alias post-v1.6.0).
+    (``units[0].node:units[0].port``). The model candidate is the unit's STABLE
+    LOGICAL ALIAS (``orchestrator-model`` / ``worker-model``, decided by role
+    identity via ``_unit_alias``) — NOT the recipe's concrete id. The probe in
+    ``_routing_model_to_write`` then writes the alias when the endpoint
+    advertises it and falls back to the concrete id when it does not, so apply
+    converges config to the alias exactly as the doctor alias-migration does.
 
     A target that names no unit the template defines is a hard structural error
     (spec: ``routing.delegation -> 'family-coding': no such family``).
     """
     if target == "orchestrator":
         o = plan.orchestrator
-        return f"http://{o.node}:{o.port}/v1", o.model
+        return f"http://{o.node}:{o.port}/v1", _unit_alias(o, plan)
     if target.startswith("family-"):
         name = target[len("family-"):]
         for fam in plan.families:
             if fam.name == name:
                 if fam.proxy_port is not None:
-                    # route to the family's proxy; model = the family's unit model
-                    model = fam.units[0].model if fam.units else ""
+                    # route to the family's proxy; candidate = the family's alias
+                    model = _unit_alias(fam.units[0], plan) if fam.units else ""
                     return f"http://localhost:{fam.proxy_port}/v1", model
                 # no proxy: the family's primary node exposes the endpoint
                 u = fam.units[0]
-                return f"http://{u.node}:{u.port}/v1", u.model
+                return f"http://{u.node}:{u.port}/v1", _unit_alias(u, plan)
         # Dangling routing target -> hard block, never silently ignored.
         raise _ti().TemplateIntentError(
             f"routing target '{target}': no such family in this template")
