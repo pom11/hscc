@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.2] — Multi-name endpoints handled correctly by readers and migration
+
+Since v1.6.0 every endpoint advertises more than one name — its concrete model
+id plus a stable role alias — and the sparkrun proxy advertises three. Two places
+still assumed a single name.
+
+### Fixed
+- **`/v1/models` readers selected by list position.** Two readers took `data[0]`,
+  which was correct when an endpoint advertised exactly one model and is not
+  correct now: whichever entry happens to land first could be the alias where the
+  concrete id was meant. Both now choose **explicitly by name, never by order**,
+  and are covered for both orderings (concrete-first and alias-first).
+
+### Changed
+- **`doctor --fix` alias migration converges worker-facing config.** Worker
+  entries pointing at the sparkrun proxy were previously left on the concrete id,
+  because at the time the proxy advertised only that. The proxy now advertises the
+  aliases, so those entries converge to `worker-model`. The alias follows the
+  **endpoint**, not a global default — proxy-pointing entries get the worker
+  alias, orchestrator-pointing entries get the orchestrator alias — and the
+  served-alias probe gate is unchanged, so an entry whose endpoint does not
+  advertise the alias is still left alone.
+
+### Known gap
+`hscc template preview` still does not disclose routing (carried from v1.7.1).
+It reports placement changes but not which endpoint each consumer resolves to,
+so `apply` can write routing config that preview never showed. `validate` and
+`apply` are unaffected. Tracked; the fix was in progress when this was cut.
+
 ## [1.7.1] — dual-dsv4 declares its routing; template schema documented
 
 ### Changed
