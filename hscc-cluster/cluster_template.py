@@ -787,11 +787,16 @@ def list_templates():
     return {"count": len(templates), "templates": templates}
 
 
-def preview_template(template_name: str) -> dict:
+def preview_template(template_name: str, *, _http_get=None) -> dict:
     """Preview what applying a template would change (dry-run). No writes.
 
     Resolves the intent template against the LIVE cluster so the preview shows
-    the concrete nodes/ports that would be used.
+    the concrete nodes/ports that would be used. When the template declares a
+    routing: block, the preview also discloses routing — the RESOLVED target
+    (symbolic unit name) and endpoint + probe-resolved model id for each
+    consumer, plus which consumers the block OMITS (left untouched) — built from
+    the same resolution + write-set apply uses (``_plan_routing``), so the two
+    cannot drift. ``_http_get`` is injectable for tests (probe without network).
     """
     resolved = _resolve(template_name, probe=True)
     tpl = _load_intent(template_name)
@@ -813,6 +818,12 @@ def preview_template(template_name: str) -> dict:
              "details": _describe_config_changes(resolved, read_json(MODELS_JSON))},
         ],
     }
+    # Routing disclosure: ONLY when the template declares a routing: block. A
+    # routing-less template shows NO routing section at all (disclose presence
+    # and absence, never fabricate a routing intent the template lacks).
+    routing_section = _describe_routing_changes(tpl, resolved, _http_get=_http_get)
+    if routing_section is not None:
+        out["routing"] = routing_section
     proxy_fams = [f for f in resolved.families if f.proxy_port is not None]
     if proxy_fams:
         out["changes"].append({
@@ -1824,45 +1835,149 @@ def _routing_config_keys(consumer: str):
     return None
 
 
-def _routing_update_config(config: dict, tpl: Any, plan: Any, *, _http_get=None,
-                           written: Optional[list] = None) -> dict:
-    """Mutate ``config`` for every routing consumer PRESENT in ``tpl.routing``.
+def _plan_routing(tpl: Any, plan: Any, *, _http_get=None) -> dict:
+    """Resolve the template's ``routing:`` block WITHOUT writing (pure compute).
 
-    Omission semantics (STRICTER than fill-empty): a consumer absent from
-    ``tpl.routing`` — or the whole block absent, which the caller checks before
-    invoking — is NEVER written, regardless of the live value (even if blank).
-    Only consumers explicitly stated in the routing block are touched.
+    THE single source of truth for routing resolution + write-set, shared by
+    apply (which writes what this plans) and preview (which discloses what apply
+    would write), so the two can NEVER drift. No file IO, no side effects —
+    callers decide whether to act on the plan.
+
+    Omission semantics (STRICTER than fill-empty): only consumers explicitly
+    stated in ``tpl.routing`` produce a plan. A consumer the block omits — or
+    the whole block absent, signalled by ``present=False`` — is NEVER written,
+    regardless of the live value (even if blank).
 
     For a present consumer, ``base_url`` is the resolved symbolic endpoint and
     ``model`` is probe-resolved (see ``_routing_model_to_write``): the alias is
-    written when the endpoint advertises it, else the single concrete id, else
-    the consumer is refused (nothing written) rather than writing an id the
-    endpoint might 404 on. ``written`` collects the concrete key paths touched
-    (for tests / reporting).
+    planned when the endpoint advertises it, else the single concrete id, else
+    the consumer is REFUSED (model None) rather than planning a write the
+    endpoint might 404 on.
+
+    Returns:
+      {
+        "present": bool,               # tpl.routing is not None
+        "consumers": {consumer: dict}, # per-present-consumer resolved plan
+        "keys_written": [...],         # flat key paths apply would report
+        "notes": [...],                # refusal / error / unknown-consumer lines
+      }
+
+    Each per-consumer dict:
+      {
+        "target": str,                 # symbolic unit name ("family-reasoning")
+        "base_url": str,               # resolved endpoint (http://host:port/v1)
+        "candidate": str,              # unit's configured model id (usually alias)
+        "model": str | None,           # id that would be written (None=refused)
+        "probe_status": str,           # "ok" | "unreachable" | ...
+        "served": [...],               # ids the endpoint advertised (probe)
+        "refused": bool,
+        "error": str | None,           # hard error (dangling target) if any
+        "unknown": bool,               # unrecognised consumer name
+        "key_pairs": [(base, model)],  # (base_url_path, model_path) pairs to write
+      }
     """
-    written = written if written is not None else []
+    notes: list = []
+    consumers: dict = {}
+    keys_written: list = []
+    if tpl.routing is None:
+        return {"present": False, "consumers": consumers,
+                "keys_written": keys_written, "notes": notes}
+
     for consumer, target in (tpl.routing or {}).items():
         keys = _routing_config_keys(consumer)
         if keys is None:
-            continue  # unrecognised consumer: never invent a config key
+            # Unrecognised consumer: apply never invents a config key. Record it
+            # so preview can disclose it as unknown/untouched rather than hiding
+            # it (which would look like a silent write).
+            consumers[consumer] = {
+                "target": target, "base_url": None, "candidate": None,
+                "model": None, "probe_status": None, "served": [],
+                "refused": False, "error": None, "unknown": True,
+                "key_pairs": [],
+            }
+            notes.append(f"{consumer}: unknown routing consumer — never written")
+            continue
         try:
             base_url, candidate = _routing_target_endpoint(target, plan)
         except _ti().TemplateIntentError as e:
-            written.append(f"{consumer}:error:{e}")
+            notes.append(f"{consumer}:error:{e}")
+            keys_written.append(f"{consumer}:error:{e}")
+            consumers[consumer] = {
+                "target": target, "base_url": None, "candidate": None,
+                "model": None, "probe_status": None, "served": [],
+                "refused": False, "error": str(e), "unknown": False,
+                "key_pairs": [],
+            }
             raise
         model, status, served = _routing_model_to_write(
             candidate, base_url, _http_get=_http_get)
         if model is None:
             # Probe could not confirm a model the endpoint resolves. Refuse this
             # consumer (touch NOTHING) — never write an id the endpoint 404s on.
-            written.append(f"{consumer}:refused:({status})")
+            notes.append(f"{consumer}:refused:({status})")
+            keys_written.append(f"{consumer}:refused:({status})")
+            consumers[consumer] = {
+                "target": target, "base_url": base_url, "candidate": candidate,
+                "model": None, "probe_status": status, "served": served,
+                "refused": True, "error": None, "unknown": False,
+                "key_pairs": [],
+            }
             continue
-        for base_path, model_path in keys:
-            _set_config_path(config, base_path, base_url)
-            _set_config_path(config, model_path, model)
-            written.append(base_path)
-            written.append(model_path)
-    return config
+        # Successful resolution: the exact key strings apply will write.
+        pairs = list(keys)
+        for base_path, model_path in pairs:
+            keys_written.append(base_path)
+            keys_written.append(model_path)
+        consumers[consumer] = {
+            "target": target, "base_url": base_url, "candidate": candidate,
+            "model": model, "probe_status": status, "served": served,
+            "refused": False, "error": None, "unknown": False,
+            "key_pairs": pairs,
+        }
+    return {"present": True, "consumers": consumers,
+            "keys_written": keys_written, "notes": notes}
+
+
+def _describe_routing_changes(tpl: Any, plan: Any, *, _http_get=None) -> Optional[dict]:
+    """Routing disclosure for preview — what apply WOULD write to config.yaml.
+
+    Built entirely from ``_plan_routing`` (the SAME resolution + write-set the
+    apply path uses), so preview and apply can never disagree: each disclosed
+    base_url/model is exactly the value apply writes. ``probe-before-write``
+    holds — a target that does not advertise the alias is disclosed with the
+    CONCRETE id apply would write, and a target that cannot be probed is marked
+    ``refused`` (nothing written).
+
+    Returns None when the template declares NO routing block, so the caller
+    omits the routing section entirely (absence is disclosed by omission).
+    Otherwise returns the routing section dict.
+    """
+    plan_r = _plan_routing(tpl, plan, _http_get=_http_get)
+    if not plan_r["present"]:
+        return None
+    consumers = {}
+    for name, info in plan_r["consumers"].items():
+        consumers[name] = {
+            "target": info["target"],
+            "base_url": info["base_url"],
+            "model": info["model"],
+            "keys": [p for pair in info["key_pairs"] for p in pair],
+            "refused": info["refused"],
+            "unknown": info["unknown"],
+        }
+    # Omission means do-not-touch: every OTHER consumer the block omits is
+    # disclosed as untouched, making "absent = left alone" visible rather than
+    # folklore. The known universe is exactly the consumers _routing_config_keys
+    # recognises (delegation / compaction / auxiliaries).
+    known = [c for c in ("delegation", "compaction", "auxiliaries")
+             if _routing_config_keys(c) is not None]
+    omitted = [c for c in known if c not in plan_r["consumers"]]
+    return {
+        "present": True,
+        "consumers": consumers,
+        "omitted": omitted,
+        "notes": plan_r["notes"],
+    }
 
 
 def _apply_routing(tpl: Any, plan: Any, *, config_yaml: Optional[Path] = None,
@@ -1875,20 +1990,28 @@ def _apply_routing(tpl: Any, plan: Any, *, config_yaml: Optional[Path] = None,
     consumer keeps its live value byte-for-byte (hard requirement). ``_http_get``
     injectable for tests (probe-before-write without the network).
 
+    Resolution + write-set come from ``_plan_routing`` (the SAME call preview
+    uses to disclose), so apply can never write something preview did not show.
     Returns ``{"keys_written": [...], "changed": bool, "notes": [...]}``.
     """
-    notes: list = []
-    if tpl.routing is None:
+    plan_r = _plan_routing(tpl, plan, _http_get=_http_get)
+    notes = plan_r["notes"]
+    if not plan_r["present"]:
         return {"keys_written": [], "changed": False, "notes": notes}
-    written: list = []
     conf = config_yaml or CONFIG_YAML
-    _, changed = atomic_yaml_update(
-        conf, lambda d: _routing_update_config(
-            d, tpl, plan, _http_get=_http_get, written=written))
-    for w in written:
-        if ":refused:" in w or ":error:" in w:
-            notes.append(w)
-    return {"keys_written": written, "changed": changed, "notes": notes}
+
+    def _apply_to(d: dict) -> dict:
+        # Write exactly what _plan_routing decided: each present consumer's
+        # resolved base_url + probe-resolved model to its key pairs.
+        for info in plan_r["consumers"].values():
+            for base_path, model_path in info["key_pairs"]:
+                _set_config_path(d, base_path, info["base_url"])
+                _set_config_path(d, model_path, info["model"])
+        return d
+
+    _, changed = atomic_yaml_update(conf, _apply_to)
+    return {"keys_written": plan_r["keys_written"], "changed": changed,
+            "notes": notes}
 
 
 def _describe_config_changes(plan, current_models: Optional[dict]) -> list:

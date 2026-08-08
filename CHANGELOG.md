@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **`hscc template preview` now discloses routing.** Preview previously showed
+  only placement, so applying a template that declared a `routing:` block wrote
+  `delegation.*` / `auxiliary.*.base_url|model` config the operator was never
+  shown — precisely the silent-config-change class this epic set out to
+  eliminate. Preview now shows, for each declared consumer, the **resolved
+  target** (symbolic unit name) and the endpoint + **probe-resolved** model id
+  it would write, plus which consumers the block omits (left untouched), so
+  "omission means do-not-touch" is visible rather than folklore. A template
+  with no `routing` block shows no routing section. Resolution + write-set come
+  from the same `_plan_routing` both apply and preview consume, so the two
+  cannot drift.
+
 ## [1.7.0] — Explicit placement and routing in cluster templates
 
 Templates previously said nothing about *where* anything runs — placement was

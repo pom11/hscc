@@ -1597,7 +1597,197 @@ class TestApplyRouting:
         assert result["config_changed"] is True
 
 
-# ── Fix: provision timeout raised to configurable 900s ──────────────────
+# ── R1: preview must disclose routing (resolved targets + what it will NOT write) ─
+
+class TestPreviewRoutingDisclosure:
+    """Preview's routing section discloses each DECLARED consumer's RESOLVED
+    target (symbolic unit name + endpoint + probe-resolved model id), and what
+    it will NOT write (omitted consumers + refused/unknown). Built from the SAME
+    resolution + write-set apply uses (_plan_routing), so the two cannot drift.
+    A template with NO routing block shows NO routing section at all.
+    """
+
+    CONCRETE = "deepseek-ai/DeepSeek-V4-Flash-0731"
+    ALIAS = "worker-model"
+    ORCH_ALIAS = "orchestrator-model"
+
+    def _serving(self, *served):
+        import json
+        def get(url, api_key=None):
+            return json.dumps({"object": "list", "data": [
+                {"id": m, "object": "model"} for m in served]})
+        return get
+
+    def _plan(self, *, fam_proxy=4000, family="reasoning"):
+        orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
+                               self.ORCH_ALIAS, ["10.0.0.1"], 8000, 1, 1)
+        unit = ti.ResolvedUnit("worker", family, "w.yaml", self.ALIAS,
+                               ["10.0.0.2"], 8001, 1, 1)
+        fam = ti.ResolvedFamily(name=family, proxy_port=fam_proxy, units=[unit])
+        return ti.ResolvedPlan(template="t", orchestrator=orch, families=[fam])
+
+    def _tpl(self, routing=None):
+        return ti.ClusterTemplate(name="t", version=3,
+                                  orchestrator=ti.ModelIntent("o.yaml"),
+                                  families=[ti.FamilyIntent("reasoning",
+                                                           [ti.ModelIntent("w.yaml")])],
+                                  routing=routing)
+
+    def _preview(self, tpl, plan, served):
+        """Run _describe_routing_changes (preview's routing section builder)."""
+        sec = cluster_template._describe_routing_changes(
+            tpl, plan, _http_get=self._serving(*served))
+        assert sec is not None          # caller expects a present routing block
+        return sec
+
+    # ── declaring routing shows each consumer with resolved endpoint + model ──
+
+    def test_preview_shows_each_consumer_resolved_endpoint_and_model(self):
+        tpl = self._tpl(routing={"delegation": "family-reasoning",
+                                 "compaction": "orchestrator",
+                                 "auxiliaries": "orchestrator"})
+        plan = self._plan()
+        sec = self._preview(tpl, plan,
+                            served=(self.ORCH_ALIAS, self.ALIAS))
+        assert sec["present"] is True
+        d = sec["consumers"]["delegation"]
+        assert d["target"] == "family-reasoning"
+        assert d["base_url"] == "http://localhost:4000/v1"
+        assert d["model"] == self.ALIAS
+        assert d["keys"] == ["delegation.base_url", "delegation.model"]
+        c = sec["consumers"]["compaction"]
+        assert c["target"] == "orchestrator"
+        assert c["base_url"] == "http://10.0.0.1:8000/v1"
+        assert c["model"] == self.ORCH_ALIAS
+        aux = sec["consumers"]["auxiliaries"]
+        assert aux["base_url"] == "http://10.0.0.1:8000/v1"
+        assert aux["model"] == self.ORCH_ALIAS
+        # auxiliaries expands to exactly the 8 text-task key pairs
+        assert len(aux["keys"]) == 2 * len(cluster_template.ROUTING_AUX_TEXT_TASKS)
+
+    # ── omitted consumer is disclosed as NOT written ──────────────────────
+
+    def test_omitted_consumer_is_not_listed_as_written(self):
+        """routing states compaction ONLY → delegation/auxiliaries are omitted
+        (left untouched) and never appear as written keys."""
+        tpl = self._tpl(routing={"compaction": "orchestrator"})
+        sec = self._preview(tpl, self._plan(), served=(self.ORCH_ALIAS,))
+        assert sorted(sec["omitted"]) == ["auxiliaries", "delegation"]
+        # delegation's keys must NOT appear in any consumer's write list
+        assert all("delegation." not in k
+                   for c in sec["consumers"].values() for k in c["keys"])
+        # compaction (the one stated consumer) IS disclosed as a write
+        assert sec["consumers"]["compaction"]["keys"] == [
+            "auxiliary.compression.base_url", "auxiliary.compression.model"]
+
+    def test_no_routing_block_shows_no_routing_section(self):
+        tpl = self._tpl(routing=None)
+        sec = cluster_template._describe_routing_changes(
+            tpl, self._plan(), _http_get=self._serving(self.ALIAS))
+        assert sec is None
+
+    def test_refused_consumer_disclosed_as_untouched(self):
+        """Unreachable target → the consumer is disclosed, marked refused, with
+        no keys it would write (probe-before-write holds in preview)."""
+        def _get(url, api_key=None):
+            # refuse only the delegation endpoint (family proxy :4000);
+            # compaction's orchestrator endpoint (:8000) stays reachable.
+            if "localhost:4000" in url:
+                raise OSError("connection refused")
+            return json.dumps({"object": "list", "data": [
+                {"id": self.ORCH_ALIAS, "object": "model"}]})
+        tpl = self._tpl(routing={"delegation": "family-reasoning",
+                                 "compaction": "orchestrator"})
+        sec = cluster_template._describe_routing_changes(
+            tpl, self._plan(), _http_get=_get)
+        assert sec is not None
+        d = sec["consumers"]["delegation"]
+        assert d["refused"] is True
+        assert d["model"] is None
+        assert d["keys"] == []
+        # compaction still resolves (its probe is independent) — not silently lost
+        assert sec["consumers"]["compaction"]["keys"] != []
+
+    # ── probe-before-write: alias not advertised → disclose CONCRETE id ──
+
+    def test_preview_discloses_concrete_id_when_alias_not_advertised(self):
+        """The family is tuned to the alias, but the endpoint serves ONLY the
+        concrete id → preview must show the CONCRETE id, not the alias (it is
+        what apply would actually write)."""
+        tpl = self._tpl(routing={"delegation": "family-reasoning"})
+        sec = self._preview(tpl, self._plan(), served=(self.CONCRETE,))
+        d = sec["consumers"]["delegation"]
+        assert d["model"] == self.CONCRETE       # concrete, never the alias
+        assert d["model"] != self.ALIAS
+
+    # ── preview == apply: same write set, cannot drift ────────────────────
+
+    def test_preview_matches_apply_write_set(self, tmp_path):
+        """The endpoints/models preview discloses are byte-identical to what
+        apply writes for the same template. Compare the routing section against
+        _plan_routing's keys AND against the config apply actually produced —
+        the two derive from one resolution, so they cannot drift."""
+        conf = tmp_path / "config.yaml"
+        conf.parent.mkdir(parents=True, exist_ok=True)
+        conf.write_text("model:\n  default: x\n")
+        tpl = self._tpl(routing={"delegation": "family-reasoning",
+                                 "compaction": "orchestrator",
+                                 "auxiliaries": "orchestrator"})
+        plan = self._plan()
+        served = (self.ORCH_ALIAS, self.ALIAS)
+
+        sec = self._preview(tpl, plan, served)
+        applied = cluster_template._apply_routing(
+            tpl, plan, config_yaml=conf, _http_get=self._serving(*served))
+        import yaml
+        d = yaml.safe_load(conf.read_text())
+
+        # every disclosed write appears in apply's actual written set ...
+        for name, info in sec["consumers"].items():
+            for k in info["keys"]:
+                assert k in applied["keys_written"], f"{name} key {k}"
+        # ... and the VALUES match: disclosed base_url/model == what landed in config
+        for name, info in sec["consumers"].items():
+            for base_path, model_path in zip(
+                    info["keys"][0::2], info["keys"][1::2]):
+                node = d
+                for p in base_path.split("."):
+                    node = node[p]
+                assert node == info["base_url"], base_path
+                node = d
+                for p in model_path.split("."):
+                    node = node[p]
+                assert node == info["model"], model_path
+
+    def test_preview_template_e2e_shows_routing_section(self, tmp_path, monkeypatch):
+        """End-to-end: preview_template on a template that declares routing puts
+        the routing section in its top-level output (JSON-serialisable)."""
+        import yaml
+        tdir = tmp_path / "templates"
+        tdir.mkdir(parents=True, exist_ok=True)
+        (tdir / "rt.yaml").write_text(yaml.safe_dump({
+            "name": "rt", "version": 3,
+            "orchestrator": {"recipe": "o.yaml"},
+            "families": [{"name": "reasoning",
+                          "models": [{"recipe": "w.yaml"}],
+                          "proxy": True}],
+            "routing": {"delegation": "family-reasoning",
+                        "compaction": "orchestrator"},
+        }, sort_keys=False))
+        monkeypatch.setattr(cluster_template, "TEMPLATE_DIR", tdir)
+        monkeypatch.setattr(cluster_template, "_discover",
+                            lambda probe=False: _topo(3))
+        import recipe_cost as rc
+        monkeypatch.setattr(ti._rc, "recipe_cost",
+                            lambda r: rc.RecipeCost(r, per_gpu_total_gb=30, fits=True))
+        monkeypatch.setattr(cluster_template.Path, "is_file", lambda self: True)
+        res = preview_template("rt", _http_get=self._serving(self.ALIAS))
+        assert "routing" in res
+        d = res["routing"]["consumers"]["delegation"]
+        assert d["target"] == "family-reasoning"
+        assert d["base_url"] == "http://localhost:4000/v1"
+        # JSON-serialisable: the preview dict is what the CLI dumps
+        json.dumps(res)
 
 class TestProvisionReusedNode:
     """BUG 3: _provision_models must FREE a reused node before provisioning a
