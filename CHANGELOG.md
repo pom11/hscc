@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] — Explicit placement and routing in cluster templates
+
+Templates previously said nothing about *where* anything runs — placement was
+inferred entirely by the resolver, and routing was not expressed at all. Two
+consequences, both hit in production: the inference could fail with no way
+around it (`pool=[]` whether target nodes were busy or free, which made
+`apply --force-recreate` unusable), and `delegation` silently drifted onto the
+orchestrator GPU with nothing to detect or correct it. A template can now state
+both, and anything it does not state is left exactly as it is.
+
+Design: `docs/DESIGN-template-explicit-placement.md`.
+
+### Added
+- **Explicit node placement.** A unit may declare `nodes:`; when present the
+  resolver's inference is bypassed and the list is used verbatim. `nodes[0]` is
+  the span primary (it exposes the endpoint), the rest are tp peers — consistent
+  with `serving_unit_scoreboard()`, so `/cluster`, self-heal and
+  `ops.pick_node` agree with the template. Explicit placement resolves whether
+  the target nodes are running **or** free.
+- **`allow_colocation:`** (default `false`). Two units naming the same node is a
+  hard error unless **both** opt in, in which case apply warns about VRAM
+  contention. This is the guard against a solo unit being provisioned onto a
+  node already serving as a tp peer.
+- **`routing:` block.** Maps a consumer (`delegation`, `compaction`,
+  `auxiliaries`) to a **unit name** — `orchestrator` or `family-<name>` — which
+  is resolved to that unit's live endpoint at apply time. Symbolic rather than
+  URL-valued, so moving a family to different nodes needs no template edit.
+  `auxiliaries` covers the 8 **text** tasks only; `vision` and `web_extract` are
+  deliberately excluded because they need capability-specific providers.
+  Probe-before-write: an id is never written to an endpoint that does not
+  advertise it, so a config value can never name a model its endpoint cannot
+  resolve.
+- **Two-layer `hscc template validate`.** *Structural* runs offline with no
+  cluster state and no resolver: schema/version, unknown keys, node existence,
+  `len(nodes) == tp`, unflagged collisions, dangling routing targets, recipe
+  paths. *Placement* is the existing resolver-dependent check. Reported
+  separately, with `--structural-only` (usable in CI and with the cluster down)
+  and `--json`; non-zero exit if either layer fails. Previously validate was
+  resolver-coupled, so the template running the live fleet failed its own
+  validation and the command could not distinguish "template is malformed" from
+  "resolver is broken".
+
+### Changed
+- **`apply` reuses `validate` as its single pre-flight gate** — one
+  implementation, not two — and blocks before stopping or starting anything.
+  The gate returns the identical result to the standalone command.
+- **Omission means do-not-touch.** An omitted `routing` key, or an absent
+  `routing` block, means apply does **not write that config key at all**; the
+  live value survives untouched. This is stricter than fill-empty, which writes
+  when a value is blank. Apply can never silently re-route something tuned by
+  hand.
+
+### Compatibility
+`version: 3` is additive and every new key is optional. Existing v2 templates
+parse and apply byte-identically, guarded by a golden snapshot of all 14 shipped
+templates captured before the change.
+
 ## [1.6.1] — Self-heal tp-peer awareness, real drift detection, migration safety gate
 
 ### Fixed
