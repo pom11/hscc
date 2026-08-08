@@ -799,7 +799,7 @@ class TestDoctorFixNoopWhenFresh:
             },
             "delegation": {
                 "base_url": "http://localhost:4000/v1",
-                "model": "Qwen/Qwen3.6-27B-FP8",
+                "model": "worker-model",
                 "provider": "custom",
                 "api_key": "sk-sparkrun",
                 "max_concurrent_children": 9,
@@ -808,7 +808,7 @@ class TestDoctorFixNoopWhenFresh:
             "auxiliary": {
                 "compression": {
                     "base_url": "http://10.0.0.244:8000/v1",
-                    "model": "nvidia/Qwen3.6-35B-A3B-NVFP4",
+                    "model": "orchestrator-model",
                     "provider": "custom",
                     "api_key": "sk-sparkrun",
                     "timeout": 90,
@@ -822,7 +822,7 @@ class TestDoctorFixNoopWhenFresh:
             },
             "fallback_providers": [{
                 "provider": "custom",
-                "model": "Qwen/Qwen3.6-27B-FP8",
+                "model": "worker-model",
                 "base_url": "http://localhost:4000/v1",
                 "api_key": "sk-sparkrun",
             }],
