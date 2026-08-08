@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.1] — dual-dsv4 declares its routing; template schema documented
+
+### Changed
+- **`4node-dual-dsv4` now declares routing** (template `version: 3`). Delegated
+  subagents and kanban worker traffic route to the **second DSV4** — the
+  `reasoning` family, served behind its proxy on `:4000` — while compaction and
+  the text auxiliaries stay on the orchestrator, so a large summarization prompt
+  never competes with worker throughput.
+
+  ```yaml
+  routing:
+    delegation: family-reasoning
+    compaction: orchestrator
+    auxiliaries: orchestrator
+  ```
+
+  This was previously *implicit*: the live config had drifted so `delegation`
+  pointed at the orchestrator, meaning every delegated subagent consumed
+  orchestrator GPU rather than the worker pool. Repairing the running config did
+  not stop the drift recurring, because nothing expressed the intent — a later
+  apply could silently undo it. The template now states it.
+
+  The template deliberately declares **no** explicit `nodes:`. It ships as part
+  of a reusable 1–8 node library, and hardcoding one cluster's addresses would
+  break it everywhere else. `routing:` is symbolic and therefore portable, which
+  is why it is safe to ship while pinned placement is not.
+
+### Added
+- **Template schema documentation** in `README.md` and
+  `hscc-cluster/templates/README.md`: `nodes:`, `allow_colocation:` and
+  `routing:`; the two-layer `validate` with `--structural-only` and `--json`;
+  `apply` reusing validate as its pre-flight gate; and — stated prominently
+  because it is the least obvious behaviour — **omission means do-not-touch**:
+  an omitted routing key is never written, so hand-tuned config survives.
+
+### Known gap
+`hscc template preview` does not yet disclose routing: it reports placement
+changes but says nothing about which endpoint each consumer resolves to. Since
+routing writes real config keys, preview should show them (and show what it will
+*not* write). Tracked as a follow-up; `validate` and `apply` are unaffected.
+
 ## [1.7.0] — Explicit placement and routing in cluster templates
 
 Templates previously said nothing about *where* anything runs — placement was
