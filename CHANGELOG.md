@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.8.0] — apply writes the logical alias; apply and doctor --fix now agree
+
+### Changed
+- **`apply` writes the logical alias per consumer, not the concrete model id.**
+  Previously `apply` wrote whatever a unit's recipe named — the concrete id —
+  while `doctor --fix` converged the same keys to the aliases. The two pulled in
+  opposite directions: applying a template silently undid a migration, and
+  migrating silently undid an apply. Both values resolved, so nothing broke
+  outright; it simply meant config could never settle.
+
+  The alias is now the canonical config value. `apply` writes
+  `orchestrator-model` / `worker-model` when the target endpoint advertises it,
+  and the two commands converge instead of overwriting each other — applying and
+  then migrating is a no-op the second time, which is the regression test that
+  defines this change.
+
+  This completes the intent of the v1.6.0 aliases: config names a **stable** id,
+  so swapping the model behind an endpoint no longer means rewriting every copied
+  value. Previously an apply would quietly undo that property.
+
+  ```
+  delegation  -> family-reasoning | worker-model
+  compaction  -> orchestrator     | orchestrator-model
+  auxiliaries -> orchestrator     | orchestrator-model
+  ```
+
+  **The probe-before-write safety net is unchanged.** Only the candidate handed
+  to it changed. `_routing_model_to_write` still decides what is actually
+  written: if the endpoint does not advertise the alias, the concrete id is
+  written exactly as before, and an unreachable or ambiguous endpoint still
+  results in nothing being written. An id is never written that its endpoint
+  cannot resolve.
+
+  The alias is derived by **role identity** (orchestrator versus family unit)
+  through a single helper shared with the serving layer, so provisioning and
+  routing cannot disagree about which alias a unit has — and a plan with no
+  orchestrator cannot mis-alias a worker unit.
+
 ## [1.7.3] — preview discloses routing; template examples
 
 ### Added
