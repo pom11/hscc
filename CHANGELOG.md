@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.3] — preview discloses routing; template examples
+
+### Added
+- **`hscc template preview` now discloses routing.** For every declared consumer
+  it shows the symbolic target, the endpoint it resolves to, the model id it
+  would actually write, and the config keys it would touch:
+
+  ```
+  delegation  -> family-reasoning | http://localhost:4000/v1      | deepseek-ai/DeepSeek-V4-Flash-0731
+  compaction  -> orchestrator     | http://10.0.0.244:8000/v1 | deepseek-ai/DeepSeek-V4-Flash-0731
+  auxiliaries -> orchestrator     | http://10.0.0.244:8000/v1 | deepseek-ai/DeepSeek-V4-Flash-0731
+  ```
+
+  Consumers the template does **not** declare are listed under
+  `routing_untouched`, so "omission means do-not-touch" is visible rather than
+  folklore. Because the model id comes from the same probe-aware helper apply
+  uses, preview shows the **concrete** id whenever the target endpoint does not
+  advertise the alias — what would really be written, not the aspiration.
+
+  This **closes the Known gap** carried in the 1.7.1 and 1.7.2 notes. Previously
+  preview reported placement only, so routing could be declared, previewed with
+  no visible difference, and then written to config the operator had never been
+  shown — the silent-config-change class this work exists to remove.
+
+  Preview calls apply's own `_routing_target_endpoint`, `_routing_model_to_write`
+  and `_routing_config_keys` rather than re-deriving anything, and a regression
+  test asserts preview's consumer→keys mapping equals `_apply_routing`'s
+  `keys_written`, so the two cannot drift apart and start disagreeing.
+
+- **Template examples** under `docs/template-examples/`: a routing split that
+  deliberately omits a consumer to demonstrate do-not-touch, and a colocation
+  example with `allow_colocation` on both units. They live in `docs/` rather
+  than `hscc-cluster/templates/` because templates are discovered with
+  `rglob("*.yaml")` — anything under that path becomes applyable, and these are
+  illustrations, not layouts.
+
 ## [1.7.2] — Multi-name endpoints handled correctly by readers and migration
 
 Since v1.6.0 every endpoint advertises more than one name — its concrete model
