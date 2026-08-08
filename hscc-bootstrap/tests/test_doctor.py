@@ -622,6 +622,88 @@ class TestConvertOrchestratorIdsToAlias:
         assert changed == ["model.default"]
         assert cfg["model"]["default"] == "worker-model"
 
+    def test_mixed_config_converges_each_to_its_own_alias_one_pass(self):
+        # The choice must follow the ENDPOINT, not a global default: a single
+        # config with one worker-proxy (:4000) entry and one orchestrator
+        # (.244:8000) entry converts each to ITS OWN alias in one pass.
+        cfg = {
+            "model": {
+                "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                "base_url": "http://10.0.0.244:8000/v1",
+            },
+            "delegation": {
+                "model": "Qwen/Qwen3.6-27B-FP8",
+                "base_url": "http://localhost:4000/v1",
+            },
+        }
+        # The proxy at :4000 advertises the worker alias; the orch at .244:8000
+        # advertises the orchestrator alias.
+        changed = doctor._convert_orchestrator_ids_to_alias(
+            cfg,
+            _http_get=_fake_http(
+                ["deepseek-ai/DeepSeek-V4-Flash-0731",
+                 "orchestrator-model", "worker-model"]))
+        assert sorted(changed) == sorted(
+            ["model.default", "delegation.model"])
+        assert cfg["model"]["default"] == "orchestrator-model"
+        assert cfg["delegation"]["model"] == "worker-model"
+
+    def test_mixed_config_worker_gets_worker_not_orch_default(self):
+        # Guard against a regression where the migration picked the orchestrator
+        # alias for worker-proxy entries. Here the orch endpoint serves BOTH
+        # aliases; the worker-proxy entry must STILL resolve to worker-model,
+        # following the endpoint, not a process-wide orchestrator default.
+        cfg = {
+            "model": {
+                "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                "base_url": "http://10.0.0.244:8000/v1",
+            },
+            "delegation": {
+                "model": "Qwen/Qwen3.6-27B-FP8",
+                "base_url": "http://localhost:4000/v1",
+            },
+            "fallback_providers": [{
+                "model": "Qwen/Qwen3.6-27B-FP8",
+                "base_url": "http://127.0.0.1:4000/v1",
+            }],
+        }
+        changed = doctor._convert_orchestrator_ids_to_alias(
+            cfg, _http_get=_fake_http(["orchestrator-model", "worker-model"]))
+        assert sorted(changed) == sorted(
+            ["model.default", "delegation.model",
+             "fallback_providers[0].model"])
+        # orch -> orchestrator-model; every worker-proxy entry -> worker-model.
+        assert cfg["model"]["default"] == "orchestrator-model"
+        assert cfg["delegation"]["model"] == "worker-model"
+        assert cfg["fallback_providers"][0]["model"] == "worker-model"
+
+    def test_mixed_config_probe_gate_holds_per_entry(self):
+        # One endpoint no longer advertises its alias: that entry must be left
+        # UNCONVERTED (loud refusal) while the sibling entry that DOES serve its
+        # alias still converges in the same pass. The gate is per-endpoint, not
+        # all-or-nothing.
+        cfg = {
+            "model": {
+                "default": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                "base_url": "http://10.0.0.244:8000/v1",
+            },
+            "delegation": {
+                "model": "Qwen/Qwen3.6-27B-FP8",
+                "base_url": "http://localhost:4000/v1",
+            },
+        }
+        refused = []
+        # Orch endpoint now serves only worker-model (orchestrator alias
+        # dropped); the worker proxy keeps serving worker-model.
+        changed = doctor._convert_orchestrator_ids_to_alias(
+            cfg, _http_get=_fake_http(["worker-model"]), refused=refused)
+        # Only the delegation (worker) entry converted; the orch entry refused.
+        assert changed == ["delegation.model"]
+        assert cfg["model"]["default"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
+        assert cfg["delegation"]["model"] == "worker-model"
+        assert any("model.default" in r for r in refused)
+        assert any("orchestrator-model" in r for r in refused)
+
     def test_caching_probes_once_per_endpoint(self):
         # Multiple entries pointing at the same endpoint probe it exactly once.
         calls = []
