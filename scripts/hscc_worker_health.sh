@@ -25,9 +25,16 @@ for entry in "${EXPECTED[@]}"; do
 
   GOT_MODEL=$(/usr/bin/python3 -c "
 import json,sys
+# Endpoints advertise the concrete id alongside a role alias
+# (orchestrator-model / worker-model); which lands at index 0 is not
+# guaranteed. This check compares against the CONCRETE expected id, so pick the
+# first served id that is NOT a role alias (fall back to the first if all are).
+ALIASES={'orchestrator-model','worker-model'}
 try:
     d=json.loads(sys.argv[1])
-    print(d['data'][0]['id'] if d.get('data') else '')
+    names=[m.get('id') for m in (d.get('data') or []) if isinstance(m,dict) and m.get('id')]
+    got=next((n for n in names if n not in ALIASES), names[0] if names else '')
+    print(got)
 except Exception:
     print('')
 " "$RESP" 2>/dev/null)
