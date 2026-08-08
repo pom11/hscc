@@ -787,11 +787,13 @@ def list_templates():
     return {"count": len(templates), "templates": templates}
 
 
-def preview_template(template_name: str) -> dict:
+def preview_template(template_name: str, *, _http_get=None) -> dict:
     """Preview what applying a template would change (dry-run). No writes.
 
     Resolves the intent template against the LIVE cluster so the preview shows
-    the concrete nodes/ports that would be used.
+    the concrete nodes/ports that would be used. ``_http_get`` is injectable
+    for tests so the probe-aware routing disclosure can run without the
+    network.
     """
     resolved = _resolve(template_name, probe=True)
     tpl = _load_intent(template_name)
@@ -829,6 +831,14 @@ def preview_template(template_name: str) -> dict:
         "file": "models (provision)", "action": "provision",
         "summary": f"1 orchestrator + {worker_node_count} worker nodes",
     })
+    # Routing disclosure: show exactly what apply would write — and which
+    # consumers it will NOT touch — reusing the SAME resolution helpers apply
+    # uses so the two cannot drift (see _preview_routing). Read-only: probing
+    # /v1/models is a GET; nothing is written, provisioned, or restarted.
+    routing_disc = _preview_routing(tpl, resolved, _http_get=_http_get)
+    if routing_disc["routing"]:
+        out["routing"] = routing_disc["routing"]
+        out["routing_untouched"] = routing_disc["routing_untouched"]
     return out
 
 
@@ -1735,6 +1745,12 @@ ROUTING_AUX_TEXT_TASKS = [
     "title_generation", "skills_hub", "approval", "mcp",
 ]
 
+# Every consumer the routing block MAY target (the recognisable set in
+# ``_routing_config_keys``). Anything outside this set is a typo apply refuses
+# to invent a key for. Used by preview to expose OMISSION as routing_untouched
+# rather than folklore.
+ROUTING_CONSUMERS = ["delegation", "compaction", "auxiliaries"]
+
 
 def _routing_target_endpoint(target: str, plan: Any) -> Tuple[str, str]:
     """Resolve a symbolic routing target to that unit's live endpoint.
@@ -1889,6 +1905,55 @@ def _apply_routing(tpl: Any, plan: Any, *, config_yaml: Optional[Path] = None,
         if ":refused:" in w or ":error:" in w:
             notes.append(w)
     return {"keys_written": written, "changed": changed, "notes": notes}
+
+
+def _preview_routing(tpl: Any, plan: Any, *, _http_get=None) -> dict:
+    """Build preview's routing disclosure (READ-ONLY).
+
+    Reuses the EXACT SAME three resolution helpers apply uses —
+    ``_routing_target_endpoint``, ``_routing_model_to_write``,
+    ``_routing_config_keys`` — per declared consumer, so preview can never
+    drift from what apply would write. Probe-aware: the ``model`` shown is the
+    id that would ACTUALLY be written (the concrete fallback when the endpoint
+    does not advertise the alias), not the aspiration. ``_http_get`` is
+    injectable for tests, mirroring the apply path.
+
+    Nothing here writes config, provisions, or restarts anything — probing
+    ``/v1/models`` is a read-only GET.
+
+    Returns ``{"routing": [...], "routing_untouched": [...]}``. When the whole
+    block is absent (``tpl.routing is None``) ``routing`` is ``[]`` and the
+    caller omits the section from the preview output entirely.
+    """
+    if tpl.routing is None:
+        return {"routing": [], "routing_untouched": []}
+    entries = []
+    for consumer, target in tpl.routing.items():
+        key_paths = _routing_config_keys(consumer)
+        if key_paths is None:
+            continue  # unrecognised consumer — apply never invents a key for it
+        entry = {"consumer": consumer, "target": target}
+        try:
+            base_url, candidate = _routing_target_endpoint(target, plan)
+        except _ti().TemplateIntentError as exc:
+            entry["base_url"] = None
+            entry["model"] = None
+            entry["note"] = f"error: {exc}"
+        else:
+            model, status, _served = _routing_model_to_write(
+                candidate, base_url, _http_get=_http_get)
+            entry["base_url"] = base_url
+            entry["model"] = model
+            if model is None:
+                # apply refuses this consumer (writes NOTHING) when the probe
+                # cannot confirm a model the endpoint resolves — say so.
+                entry["note"] = f"refused:({status})"
+        entry["keys"] = [path for base_path, model_path in key_paths
+                         for path in (base_path, model_path)]
+        entries.append(entry)
+    declared = set(tpl.routing.keys())
+    untouched = [c for c in ROUTING_CONSUMERS if c not in declared]
+    return {"routing": entries, "routing_untouched": untouched}
 
 
 def _describe_config_changes(plan, current_models: Optional[dict]) -> list:
