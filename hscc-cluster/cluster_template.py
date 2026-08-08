@@ -26,6 +26,12 @@ from typing import List, Dict, Any, Optional, Tuple
 
 PLUGIN_DIR = Path(__file__).parent
 TEMPLATE_DIR = PLUGIN_DIR / "templates"
+# templates/examples/ is a TEACHING namespace, not a supported layout. Files
+# there use obviously-fake documentation node addresses (10.0.0.x) and must
+# never be applied to a real fleet. Both discovery (list) and apply/preview
+# resolution skip it; only validate reaches in (so example syntax can still be
+# checked). See templates/examples/README-ish header comments.
+EXAMPLES_SUBDIR = "examples"
 HSCC_DIR = Path(os.path.expanduser("~/.hscc"))
 HERMES_HOME = Path(os.path.expanduser("~/.hermes"))
 SERVING_JSON = HSCC_DIR / "serving.json"
@@ -686,15 +692,31 @@ def _discover(probe: bool = False):
         return m.discover()
 
 
-def _find_template_file(template_name: str):
+def _find_template_file(template_name: str, include_examples: bool = False):
     """Locate a template yaml by name, searching TEMPLATE_DIR + one level of
     subdirs (e.g. templates/4node/coding.yaml). Match by filename stem OR by the
-    template's own ``name:`` field, so both 'coding' and '4node-coding' resolve."""
+    template's own ``name:`` field, so both 'coding' and '4node-coding' resolve.
+
+    Examples (templates/examples/*) are excluded by default so apply/preview can
+    never resolve a teaching artifact — only validate opts in via
+    include_examples=True to syntax-check them.
+    """
+    if not include_examples:
+        def _skip(p):
+            try:
+                return p.relative_to(TEMPLATE_DIR).parts[0] == EXAMPLES_SUBDIR
+            except ValueError:
+                return False
+    else:
+        _skip = lambda p: False
+
     direct = TEMPLATE_DIR / f"{template_name}.yaml"
-    if direct.exists():
+    if direct.exists() and not _skip(direct):
         return direct
     import yaml
     for f in sorted(TEMPLATE_DIR.rglob("*.yaml")):
+        if _skip(f):
+            continue
         if f.stem == template_name:
             return f
         try:
@@ -771,6 +793,8 @@ def list_templates():
     templates = []
     for f in sorted(TEMPLATE_DIR.rglob("*.yaml")):
         try:
+            if f.relative_to(TEMPLATE_DIR).parts[0] == EXAMPLES_SUBDIR:
+                continue  # teaching artifacts — never advertised as applyable
             with open(f) as fh:
                 data = yaml.safe_load(fh) or {}
             if data.get("name"):
@@ -878,6 +902,25 @@ def apply_template(template_name: str, confirm: bool = False,
     already-running fleet. Each recreated unit is reported loudly. Units that
     are already serving the current command are still left alone.
     """
+    # Examples (templates/examples/*) are TEACHING artifacts with fake node
+    # addresses — never applyable. Hard-block before anything else so a stray
+    # `apply example-*` is refused with an unmistakable message, not a confusing
+    # validation error.
+    ex_path = _find_template_file(template_name, include_examples=True)
+    if ex_path is not None:
+        try:
+            if ex_path.relative_to(TEMPLATE_DIR).parts[0] == EXAMPLES_SUBDIR:
+                return {
+                    "status": "blocked",
+                    "success": False,
+                    "note": (f"'{template_name}' is an EXAMPLE in "
+                             f"templates/{EXAMPLES_SUBDIR}/ — a teaching artifact "
+                             f"with fake 10.0.0.x node addresses, never a supported "
+                             f"layout. It cannot be applied."),
+                }
+        except ValueError:
+            pass
+
     # PRE-FLIGHT GATE — the SAME two-layer validation as `hscc template
     # validate` (validate_template is that command's implementation). One
     # implementation, not two: apply delegates its gate here so the standalone
@@ -1281,7 +1324,7 @@ def validate_template(template_name: str, *,
     # Load raw dict + parsed intent ONCE. Raw is needed for unknown-key
     # detection (parse discards unknown keys); parsed for the semantic checks.
     try:
-        path = _find_template_file(template_name)
+        path = _find_template_file(template_name, include_examples=True)
         if path is None:
             raise FileNotFoundError(f"Template not found: {template_name}")
         import yaml
@@ -1302,7 +1345,19 @@ def validate_template(template_name: str, *,
                 "ok": False}
 
     # ── Layer 1: structural (offline) ─────────────────────────────────────
-    s_errors, s_warnings = _structural_validate(raw, tpl)
+    # For files under templates/examples/ the node addresses are fake docs
+    # values by design (10.0.0.1–10.0.0.4), so validate them against that
+    # mock range instead of the real cluster.json — otherwise every example
+    # would (correctly, but uselessly) fail with "not defined in cluster.json".
+    # Real templates still validate against the live cluster.json untouched.
+    ex_cluster_ips = None
+    try:
+        if path.relative_to(TEMPLATE_DIR).parts[0] == EXAMPLES_SUBDIR:
+            ex_cluster_ips = [
+                f"10.0.0.{i}" for i in range(1, 5)]  # the doc-address range
+    except ValueError:
+        pass
+    s_errors, s_warnings = _structural_validate(raw, tpl, cluster_ips=ex_cluster_ips)
     structural = {"ok": not s_errors, "errors": s_errors, "warnings": s_warnings}
 
     # ── Layer 2: placement (resolver-dependent, live) ─────────────────────

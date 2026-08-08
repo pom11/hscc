@@ -1,0 +1,57 @@
+# =============================================================================
+# EXAMPLE (teaching artifact) — not a supported layout. Do NOT apply.
+#
+# Demonstrates `allow_colocation:` — two small units deliberately sharing ONE
+# node. A genuinely sensible scenario: two small, low-VRAM models co-located on
+# a single GPU that could not comfortably host either paired with anything large.
+#
+# This is the SECOND example in templates/examples/ — that directory is EXCLUDED
+# from `hscc template list` discovery, and `apply`/`preview` hard-refuse anything
+# under it. So this file can never be applied by accident. Node addresses here
+# are the obviously-fake documentation range 10.0.0.1–10.0.0.4 — this example
+# cannot describe a real cluster.
+#
+# WHY colocation is sensible HERE (small models, not a pathological case):
+#   Each `codex` and `draft` family runs only a single small A3B-NVFP4 model
+#   (~31.8 GB/GPU). Two of them together (~64 GB) fit comfortably on one
+#   ~110 GB DGX Spark GPU. Splitting them across two dedicated nodes would
+#   waste an entire second node to host ~32 GB. Sharing one node uses the
+#   hardware far more honestly — this is the legitimate use of colocation.
+#
+# WITHOUT the flag this is a HARD ERROR naming BOTH units:
+#   apply blocks with something like:
+#     node '10.0.0.1' claimed by both 'codex' and 'draft'
+#       (set allow_colocation: true on both to permit)
+#   The guard requires the flag on BOTH units — one alone is still an error. It
+#   exists to stop a solo container silently landing on a node that is already
+#   serving as a tp peer of another span.
+#
+# WITH the flag on both, sharing is permitted but apply WARNS about VRAM
+# contention — the two units now share one GPU's memory/bandwidth, so real
+# throughput is partitioned between them. Colocation is a deliberate capacity
+# trade-off, not a free lunch.
+# =============================================================================
+name: example-colocation
+version: 3
+description: "TEACHING EXAMPLE (do not apply): two small models co-located on one node via allow_colocation: true on BOTH units (fake 10.0.0.x addresses)."
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml"
+  tp: 2
+  # NOTE: the orchestrator's span is NOT shown here with explicit nodes — only
+  # the two colocated worker families matter for this example. The orchestrator
+  # stays inferred (topology-free) like the shipped templates.
+families:
+  - name: codex
+    nodes: [10.0.0.1]          # fake doc address — shared node
+    allow_colocation: true     # REQUIRED on BOTH units sharing a node
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+        tp: 1
+    proxy: true
+  - name: draft
+    nodes: [10.0.0.1]          # same fake node — deliberate sharing
+    allow_colocation: true     # without this on BOTH: hard error naming both units
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+        tp: 1
+    proxy: true

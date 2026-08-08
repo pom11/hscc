@@ -560,7 +560,12 @@ def test_v2_templates_parse_byte_identical_to_golden():
         os.path.join(os.path.dirname(here), "templates", "**", "*.yaml"),
         recursive=True))
     parsed = {}
+    examples_seg = os.path.sep + "examples" + os.path.sep
     for f in templates:
+        # templates/examples/ is a teaching namespace excluded from discovery;
+        # it is not part of the shipped library the golden guards.
+        if examples_seg in f:
+            continue
         with open(f) as fh:
             data = yaml.safe_load(fh) or {}
         name = data.get("name")

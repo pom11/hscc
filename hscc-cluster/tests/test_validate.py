@@ -19,11 +19,17 @@ import os
 
 import cluster_template as ct
 import template_intent as ti
+import yaml as _yaml
 
 # Cluster.json compute nodes used across these tests (gateway .1 + workers.
 # The exact same addresses the placement tests use for the 4-node layout).
 COMPUTE = ["10.0.0.244", "10.0.0.245", "10.0.0.246",
            "10.0.0.247", "10.0.0.248"]
+
+# The mock documentation-address range that templates/examples/ uses for node
+# names (10.0.0.1–10.0.0.4). validate injects these for example files so their
+# syntax can be checked without a real cluster side effect.
+DOC_ADDRS = [f"10.0.0.{i}" for i in range(1, 5)]
 
 
 def _raw_tpl(d: dict):
@@ -374,6 +380,72 @@ class TestValidateTemplateE2E:
         assert res["structural"]["ok"] is False
         assert any("node '10.0.0.99' in family 'f' is not defined in cluster.json"
                    in e for e in res["structural"]["errors"])
+
+
+# ── templates/examples/ — teaching artifacts, structurally validated ────────
+# The two EXAMPLE templates under templates/examples/ use fake documentation
+# node addresses (10.0.0.x) and are EXCLUDED from discovery/apply. validate
+# still reaches them and validates their syntax against the mock doc-address
+# range. These tests encode "the examples must pass --structural-only" so a
+# broken YAML or stale key fails the suite instead of shipping.
+
+EXAMPLES_DIR = os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "templates", "examples")
+
+
+def _load_example(name: str):
+    path = os.path.join(EXAMPLES_DIR, f"{name}.yaml")
+    with open(path) as fh:
+        raw = _yaml.safe_load(fh)
+    return path, raw, ti.ClusterTemplate.from_dict(raw)
+
+
+class TestShippedExamples:
+    def test_routing_split_example(self, monkeypatch):
+        path, raw, tpl = _load_example("example-routing-split")
+        assert tpl.version == 3
+        # routing block exactly as specified: delegation -> worker family,
+        # compaction -> orchestrator, auxiliaries OMITTED (do-not-touch).
+        assert tpl.routing == {"delegation": "family-coder",
+                               "compaction": "orchestrator"}
+        assert tpl.routing is not None and "auxiliaries" not in tpl.routing
+        # symbolic + portable: no explicit node pins anywhere.
+        assert tpl.orchestrator.nodes is None
+        assert tpl.families[0].nodes is None
+        monkeypatch.setattr(ct.Path, "is_file", lambda self: True)  # recipes exist
+        errs, warns = ct._structural_validate(raw, tpl, cluster_ips=DOC_ADDRS,
+                                              recipe_exists=EXISTS)
+        assert errs == []
+        assert warns == []
+
+    def test_colocation_example(self, monkeypatch):
+        path, raw, tpl = _load_example("example-colocation")
+        assert tpl.version == 3
+        # two units share the SAME fake node and BOTH allow colocation.
+        codex, draft = tpl.families
+        assert codex.nodes == ["10.0.0.1"] and codex.allow_colocation is True
+        assert draft.nodes == ["10.0.0.1"] and draft.allow_colocation is True
+        # every named node exists in the mock doc-address range, len(nodes)==tp.
+        monkeypatch.setattr(ct.Path, "is_file", lambda self: True)
+        errs, warns = ct._structural_validate(raw, tpl, cluster_ips=DOC_ADDRS,
+                                              recipe_exists=EXISTS)
+        # sharing with the flag on BOTH is a warning about VRAM contention, NOT
+        # an error — this is the whole teaching point.
+        assert errs == []
+        assert any("allow_colocation: true on both" in w for w in warns)
+
+    def test_examples_not_listed(self, monkeypatch):
+        # Discovery must never advertise examples as applyable layouts.
+        res = ct.list_templates()
+        names = {t["name"] for t in res["templates"]}
+        assert "example-routing-split" not in names
+        assert "example-colocation" not in names
+
+    def test_examples_not_applyable(self):
+        # apply hard-refuses any template under templates/examples/.
+        res = ct.apply_template("example-colocation", confirm=True)
+        assert res["status"] == "blocked"
+        assert "EXAMPLE" in res["note"]
 
 
 def _write_cluster(tmp_path, cj: dict):

@@ -1,0 +1,65 @@
+# =============================================================================
+# EXAMPLE (teaching artifact) — not a supported layout. Do NOT apply.
+#
+# The `routing:` block that HSCC actually runs in production (as
+# templates/4node/dual-dsv4.yaml), isolated here so the semantics are easy to
+# read in one place.
+#
+# This is the FIRST example in templates/examples/ — that directory is EXCLUDED
+# from `hscc template list` discovery, and `apply`/`preview` hard-refuse
+# anything under it. So this file can never be applied by accident. It exists
+# purely to document the routing feature's exact behaviour.
+#
+# WHY DELEGATION -> family-coder (a WORKER family), not the orchestrator:
+#   Delegated subagents are exactly the kind of work that should NOT burn the
+#   orchestrator's GPU. The orchestrator/gateway node is the single point of
+#   control — every command, heartbeat and admin call flows through it — and
+#   its single vLLM instance is the one consumers depend on for continuity. If
+#   a delegated subagent competes with the orchestrator's real traffic for the
+#   same VRAM/throughput, latency on the control plane spikes. Delegation
+#   therefore routes to the dedicated worker family, whose entire job is to
+#   absorb that bursty secondary load.
+#
+# WHY COMPACTION stays on the orchestrator:
+#   The reverse argument. A compaction prompt can be a LARGE summarization of a
+#   long conversation, and it runs while the worker pool is presumably busy with
+#   real task throughput. Landing it on a busy worker would make it contend
+#   with actual work (token-by-token against active tasks); on the orchestrator
+#   it competes only with the relatively light control-plane traffic.
+#
+#   The two decisions are two sides of one principle — route each consumer to
+#   whichever unit can absorb it without stealing resources a different role
+#   genuinely needs. There is no single "fastest model" answer.
+#
+# OMISSION IS MEANINGFUL (the least obvious part of this feature):
+#   `auxiliaries` is deliberately LEFT OUT of this routing block. Omission means
+#   "do not touch": apply does NOT write the auxiliary.* config keys at all, so
+#   a value an operator tuned by hand in ~/.hermes/config.yaml SURVIVES an
+#   apply untouched. This is stricter than the old fill-empty behaviour (which
+#   wrote when a value was blank) — an omitted routing key is never written,
+#   even if blank. Note it would also be valid to route auxiliaries to any unit
+#   here; we simply choose not to, to show the semantics.
+#
+# Note: this example deliberately declares NO explicit `nodes:` on any unit —
+# exactly like the production template. Placement stays inferred (the default,
+# `workers: ...`), keeping the template portable across any cluster size. `routing:`
+# is symbolic (unit names, not URLs), which is why it can ship in a reusable
+# template while explicit node pins cannot.
+# =============================================================================
+name: example-routing-split
+version: 3
+description: "TEACHING EXAMPLE (do not apply): the production routing block — delegation → worker family, compaction → orchestrator, auxiliaries omitted. No explicit nodes (inferred, portable)."
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml"
+  tp: 2
+families:
+  - name: coder
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+    workers: remaining
+    proxy: true
+routing:
+  delegation: family-coder      # delegated subagents -> worker pool (not orch GPU)
+  compaction: orchestrator      # big summarization prompts stay off the busy workers
+  # auxiliaries deliberately OMITTED -> apply leaves auxiliary.* untouched,
+  # so a hand-tuned value in ~/.hermes/config.yaml survives this apply.
