@@ -690,6 +690,41 @@ def test_scoreboard_tp1_single_node_not_peer(monkeypatch):
     assert s["tp_peer"] is False and s["primary_of_unit"] is True
 
 
+# _pick_served_model ───────────────────────────────────────────────────────────
+# An endpoint advertises its concrete id alongside a role alias; which lands at
+# index 0 is not guaranteed. The reader must return the CONCRETE id regardless
+# of ordering (concrete-first vs alias-first).
+
+def test_pick_served_model_concrete_first():
+    assert cmdlib._pick_served_model({"data": [
+        {"id": "deepseek-ai/DeepSeek-V4-Flash-0731"},
+        {"id": "worker-model"},
+    ]}) == "deepseek-ai/DeepSeek-V4-Flash-0731"
+
+def test_pick_served_model_alias_first():
+    # alias at [0] — data[0] would have returned the alias; the helper must not
+    assert cmdlib._pick_served_model({"data": [
+        {"id": "worker-model"},
+        {"id": "deepseek-ai/DeepSeek-V4-Flash-0731"},
+    ]}) == "deepseek-ai/DeepSeek-V4-Flash-0731"
+
+def test_pick_served_model_known_role_aliases_both():
+    # both role aliases, no concrete id -> fall back to first entry
+    assert cmdlib._pick_served_model({"data": [
+        {"id": "worker-model"},
+        {"id": "orchestrator-model"},
+    ]}) == "worker-model"
+
+def test_pick_served_model_empty_and_malformed():
+    assert cmdlib._pick_served_model({"data": []}) is None
+    assert cmdlib._pick_served_model({}) is None
+    assert cmdlib._pick_served_model(None) is None
+    assert cmdlib._pick_served_model("not a dict") is None
+    # entries without an id are skipped
+    assert cmdlib._pick_served_model({"data": [{"model": "x"}, {"id": "concrete"}]}) \
+        == "concrete"
+
+
 # classify_node ────────────────────────────────────────────────────────────────
 
 def test_classify_serving_when_probe_returns_model():
