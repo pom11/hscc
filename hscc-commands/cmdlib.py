@@ -23,6 +23,13 @@ PROXY_PORT = 4000
 HEALTH_TIMEOUT = 6
 RUN_TIMEOUT = 240
 
+# Since v1.6.0 every vLLM endpoint advertises its concrete model id ALONGSIDE a
+# stable role alias (orchestrator-model / worker-model) via multi-name
+# --served-model-name. These are the known aliases; the concrete id is any other
+# name in the served list. Health/display readers pick the concrete id (what the
+# node is genuinely running), never the role alias, and never by list position.
+ROLE_ALIASES = frozenset({"orchestrator-model", "worker-model"})
+
 # The hscc-cluster plugin dir (sibling of this plugin in ~/.hermes/plugins or
 # ~/dev/hscc). Used to import the template engine + discovery by path.
 _PLUGINS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -86,8 +93,38 @@ def _run(args, timeout=RUN_TIMEOUT):
         return False, "", str(e)
 
 
+def _pick_served_model(payload):
+    """Return the served model id from a parsed `/v1/models` body, choosing
+    EXPLICITLY by name (never by list order).
+
+    Since v1.6.0 each endpoint advertises its concrete id ALONGSIDE a role alias
+    (orchestrator-model / worker-model); which name lands at index 0 is not
+    guaranteed. This reader wants the CONCRETE id (what the node is genuinely
+    running) for liveness/display, so it returns the first served id that is NOT
+    a known role alias, falling back to the first entry if every name is an
+    alias. Returns None when the list is empty/unparseable.
+    """
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, list) or not data:
+        return None
+    ids = [m.get("id") for m in data if isinstance(m, dict) and m.get("id")]
+    if not ids:
+        return None
+    for name in ids:
+        if name not in ROLE_ALIASES:
+            return name
+    return ids[0]
+
+
 def _curl_model(node):
-    """Return the served model id on a node, or None if unreachable/empty."""
+    """Return the served model id on a node, or None if unreachable/empty.
+
+    When the endpoint advertises multiple names (concrete id + role alias), the
+    CONCRETE id is returned — see ``_pick_served_model``. Never relies on which
+    name the server happens to list first.
+    """
     ok, out, _ = _run(
         ["ssh", "-o", "ConnectTimeout=6", f"spark@{node}",
          f"curl -s --max-time {HEALTH_TIMEOUT} http://localhost:{PORT}/v1/models"],
@@ -96,7 +133,7 @@ def _curl_model(node):
     if not ok or not out:
         return None
     try:
-        return json.loads(out)["data"][0]["id"]
+        return _pick_served_model(json.loads(out))
     except (json.JSONDecodeError, KeyError, IndexError, TypeError):
         return None
 

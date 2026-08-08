@@ -228,3 +228,52 @@ def test_pick_node_no_tp_span_behaves_as_before(monkeypatch):
     monkeypatch.setattr(ops.cl, "read_serving_units", lambda: [])
     assert ops.pick_node({})["node"] in ("192.0.2.12", "192.0.2.13")
 
+
+# ── _pick_served_model: concrete id chosen by name, not list order ─────────────
+# An endpoint advertises its concrete id alongside a role alias; which lands at
+# index 0 is not guaranteed. The reader must return the CONCRETE id regardless
+# of ordering (concrete-first vs alias-first).
+
+def test_pick_served_model_concrete_first():
+    assert ops._pick_served_model({"data": [
+        {"id": "deepseek-ai/DeepSeek-V4-Flash-0731"},
+        {"id": "worker-model"},
+    ]}) == "deepseek-ai/DeepSeek-V4-Flash-0731"
+
+def test_pick_served_model_alias_first():
+    # alias at [0] — data[0] would have returned the alias; the helper must not
+    assert ops._pick_served_model({"data": [
+        {"id": "worker-model"},
+        {"id": "deepseek-ai/DeepSeek-V4-Flash-0731"},
+    ]}) == "deepseek-ai/DeepSeek-V4-Flash-0731"
+
+def test_pick_served_model_known_role_aliases_both():
+    # both role aliases, no concrete id -> fall back to first entry (endpoint
+    # is still alive, so report something rather than None)
+    assert ops._pick_served_model({"data": [
+        {"id": "worker-model"},
+        {"id": "orchestrator-model"},
+    ]}) == "worker-model"
+
+def test_pick_served_model_empty_and_malformed():
+    assert ops._pick_served_model({"data": []}) is None
+    assert ops._pick_served_model({}) is None
+    assert ops._pick_served_model(None) is None
+    assert ops._pick_served_model("not a dict") is None
+    # entries without an id are skipped
+    assert ops._pick_served_model({"data": [{"model": "x"}, {"id": "concrete"}]}) \
+        == "concrete"
+
+def test_model_health_uses_concrete_id(monkeypatch):
+    """model_health reports the concrete id even when the alias is at [0]."""
+    monkeypatch.setattr(ops.cl, "run_cmd",
+                        lambda a, timeout=30: {"ok": True,
+                                               "stdout": json.dumps({"data": [
+                                                   {"id": "worker-model"},
+                                                   {"id": "deepseek-ai/DeepSeek-V4-Flash-0731"},
+                                               ]}),
+                                               "stderr": "", "code": 0})
+    out = ops.model_health({"node": "192.0.2.12"})
+    assert out["served_model"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
+    assert out["reachable"] is True
+
