@@ -169,7 +169,12 @@
       "recipe": "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
       "tp": 2
     },
-    "version": 2
+    "routing": {
+      "delegation": "family-reasoning",
+      "compaction": "orchestrator",
+      "auxiliaries": "orchestrator"
+    },
+    "version": 3
   },
   "8node-coding": {
     "description": "8 nodes: orchestrator + 7 coding workers (27B-FP8). cluster_size=8.",
