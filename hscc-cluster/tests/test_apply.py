@@ -1597,6 +1597,164 @@ class TestApplyRouting:
         assert result["config_changed"] is True
 
 
+# ── preview discloses routing: reuse apply's resolution helpers ─────────────
+
+class TestPreviewRouting:
+    """preview must disclose what apply's routing block would write — and which
+    consumers it will NOT touch — reusing THE SAME three helpers apply uses
+    (``_routing_target_endpoint`` / ``_routing_model_to_write`` /
+    ``_routing_config_keys``), so preview can never drift from apply. Preview is
+    READ-ONLY: it never writes config, provisions, or restarts anything.
+
+    If the feature were completely broken (preview computed routing
+    independently, or not at all), every test below would fail: no entry would
+    show the resolved base_url/model/keys, omission wouldn't surface as
+    routing_untouched, the no-routing template would wrongly get a section, and
+    the anti-drift assertion (test 4) could not be satisfied.
+    """
+
+    CONCRETE = "deepseek-ai/DeepSeek-V4-Flash-0731"
+    ALIAS = "worker-model"
+    ORCH_ALIAS = "orchestrator-model"
+
+    def _plan(self, *, fam_proxy=4000, family="reasoning"):
+        """Plan: orchestrator on 10.0.0.1:8000; one worker family 'reasoning'
+        with a unit on 10.0.0.2:8001 and a proxy on ``fam_proxy``."""
+        orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
+                               self.ORCH_ALIAS, ["10.0.0.1"], 8000, 1, 1)
+        unit = ti.ResolvedUnit("worker", family, "w.yaml", self.ALIAS,
+                               ["10.0.0.2"], 8001, 1, 1)
+        fam = ti.ResolvedFamily(name=family, proxy_port=fam_proxy, units=[unit])
+        return ti.ResolvedPlan(template="t", orchestrator=orch, families=[fam])
+
+    def _tpl(self, routing=None):
+        """ClusterTemplate with the given routing block (None = block absent)."""
+        return ti.ClusterTemplate(name="t", version=3,
+                                  orchestrator=ti.ModelIntent("o.yaml"),
+                                  families=[ti.FamilyIntent("reasoning",
+                                                           [ti.ModelIntent("w.yaml")])],
+                                  routing=routing)
+
+    def _serving(self, *served):
+        """Injectable _http_get simulating /v1/models serving ``served`` ids."""
+        import json
+        def get(url, api_key=None):
+            return json.dumps({"object": "list", "data": [
+                {"id": m, "object": "model"} for m in served]})
+        return get
+
+    # 1. a template declaring routing shows each consumer resolved + keys
+
+    def test_declared_routing_consumer_shows_resolved(self):
+        """delegation: family-reasoning → base_url localhost:4000, model = the
+        id the proxy actually advertises, keys = delegation.{base_url,model}."""
+        tpl = self._tpl(routing={"delegation": "family-reasoning"})
+        disc = cluster_template._preview_routing(
+            tpl, self._plan(fam_proxy=4000), _http_get=self._serving(self.ALIAS))
+        entry = disc["routing"][0]
+        assert entry["consumer"] == "delegation"
+        assert entry["target"] == "family-reasoning"
+        assert entry["base_url"] == "http://localhost:4000/v1"
+        assert entry["model"] == self.ALIAS
+        assert entry["keys"] == ["delegation.base_url", "delegation.model"]
+
+    def test_each_declared_consumer_resolves(self):
+        """Every declared consumer gets a resolved base_url + model + keys
+        (delegation→family proxy; compaction + auxiliaries→orchestrator)."""
+        tpl = self._tpl(routing={
+            "delegation": "family-reasoning",
+            "compaction": "orchestrator",
+            "auxiliaries": "orchestrator"})
+        disc = cluster_template._preview_routing(
+            tpl, self._plan(fam_proxy=4000),
+            _http_get=self._serving(self.ALIAS, self.ORCH_ALIAS))
+        by_consumer = {e["consumer"]: e for e in disc["routing"]}
+        assert by_consumer["delegation"]["base_url"] == "http://localhost:4000/v1"
+        assert by_consumer["delegation"]["model"] == self.ALIAS
+        assert by_consumer["delegation"]["keys"] == [
+            "delegation.base_url", "delegation.model"]
+        assert by_consumer["compaction"]["base_url"] == "http://10.0.0.1:8000/v1"
+        assert by_consumer["compaction"]["model"] == self.ORCH_ALIAS
+        assert by_consumer["compaction"]["keys"] == [
+            "auxiliary.compression.base_url", "auxiliary.compression.model"]
+        tasks = cluster_template.ROUTING_AUX_TEXT_TASKS
+        assert by_consumer["auxiliaries"]["base_url"] == "http://10.0.0.1:8000/v1"
+        assert by_consumer["auxiliaries"]["model"] == self.ORCH_ALIAS
+        assert len(by_consumer["auxiliaries"]["keys"]) == 2 * len(tasks)
+        for t in tasks:
+            assert f"auxiliary.{t}.base_url" in by_consumer["auxiliaries"]["keys"]
+
+    # 2. omitted consumer → routing_untouched; its keys NOWHERE in the write list
+
+    def test_omitted_consumer_in_untouched_and_keys_absent(self):
+        """routing declares compaction only: delegation + auxiliaries are
+        routing_untouched, and their config keys appear NOWHERE in the preview
+        routing section (so preview promises only the writes apply will do)."""
+        tpl = self._tpl(routing={"compaction": "orchestrator"})
+        disc = cluster_template._preview_routing(
+            tpl, self._plan(), _http_get=self._serving(self.ORCH_ALIAS))
+        assert disc["routing_untouched"] == ["delegation", "auxiliaries"]
+        written_keys = [k for e in disc["routing"] for k in e["keys"]]
+        for k in ("delegation.base_url", "delegation.model"):
+            assert k not in written_keys
+        for t in cluster_template.ROUTING_AUX_TEXT_TASKS:
+            assert f"auxiliary.{t}.base_url" not in written_keys
+            assert f"auxiliary.{t}.model" not in written_keys
+
+    # 3. no routing block → no routing section at all
+
+    def test_no_routing_block_produces_no_routing_section(self):
+        disc = cluster_template._preview_routing(self._tpl(routing=None), self._plan())
+        assert disc["routing"] == []
+
+    def test_preview_template_no_routing_has_no_routing_section(self, stub_cluster):
+        """End-to-end: single-family.yaml declares NO routing → the preview dict
+        carries no routing / routing_untouched keys at all."""
+        res = preview_template("single-family")
+        assert "routing" not in res
+        assert "routing_untouched" not in res
+
+    # probe-aware: show the concrete id when the endpoint doesn't advertise the alias
+
+    def test_preview_shows_concrete_when_alias_not_advertised(self):
+        """When the endpoint serves ONLY the concrete id, preview shows the
+        CONCRETE id — what apply would actually write, not the aspirational
+        alias. If preview resolved the model independently (without the probe)
+        this test FAILS."""
+        tpl = self._tpl(routing={"delegation": "family-reasoning"})
+        disc = cluster_template._preview_routing(
+            tpl, self._plan(fam_proxy=4000), _http_get=self._serving(self.CONCRETE))
+        assert disc["routing"][0]["model"] == self.CONCRETE
+
+    # 4. THE ANTI-DRIFT TEST
+
+    def test_preview_keys_equal_apply_keys_written(self, tmp_path):
+        """THE ANTI-DRIFT TEST: for the same template, the (consumer -> keys)
+        preview reports must equal _apply_routing's keys_written. Both flow
+        through the same three resolution helpers, so neither can diverge from
+        the other without this failing."""
+        tpl = self._tpl(routing={
+            "delegation": "family-reasoning",
+            "compaction": "orchestrator",
+            "auxiliaries": "orchestrator"})
+        plan = self._plan(fam_proxy=4000)
+        getter = self._serving(self.ALIAS, self.ORCH_ALIAS)
+
+        disc = cluster_template._preview_routing(tpl, plan, _http_get=getter)
+        conf = tmp_path / "config.yaml"
+        conf.write_text("auxiliary: {}\n")
+        appl = cluster_template._apply_routing(
+            tpl, plan, config_yaml=conf, _http_get=getter)
+
+        preview_consumer_keys = {e["consumer"]: set(e["keys"]) for e in disc["routing"]}
+        apply_written = set(appl["keys_written"])
+        for keys in preview_consumer_keys.values():
+            for k in keys:
+                assert k in apply_written
+        # every key apply wrote was disclosed by preview (no hidden writes)
+        assert apply_written == set().union(*preview_consumer_keys.values())
+
+
 # ── Fix: provision timeout raised to configurable 900s ──────────────────
 
 class TestProvisionReusedNode:
