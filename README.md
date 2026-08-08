@@ -118,12 +118,30 @@ The model name is read from the recipe's `model:` field and recorded in `serving
 
 ### Cluster templates
 
-Instead of provisioning by hand, apply a **topology-free template** that describes intent (which recipes, how many workers) and resolves to the live cluster at apply — auto-assigning nodes + ports, and refusing layouts that don't fit (checked against `sparkrun show` VRAM). A node-count library ships for 1–8 nodes, including multi-family and 2-models-per-node layouts. See [hscc-cluster/templates/](hscc-cluster/templates/README.md).
+Instead of provisioning by hand, apply a template that describes intent (which recipes, how many workers) and resolves to the live cluster at apply — auto-assigning nodes + ports, and refusing layouts that don't fit (checked against `sparkrun show` VRAM). A node-count library ships for 1–8 nodes, including multi-family and 2-models-per-node layouts. See [hscc-cluster/templates/](hscc-cluster/templates/README.md).
+
+Templates are **topology-free by default** (schema v2): no IPs, no ports — placement is inferred against the live cluster at apply. Since **v1.7.0** (schema v3) a template may also state placement and routing *explicitly*:
+
+- **`nodes:`** per unit — optional. When present the resolver's inference is bypassed and the list is used verbatim; `nodes[0]` is the span primary (exposes the endpoint), the rest are tp peers. Explicit nodes make placement deterministic but hardcode a specific cluster, so the **shipped templates deliberately omit them** and stay portable.
+- **`allow_colocation:`** — default `false`. Two units naming the same node is a hard error unless *both* opt in, in which case apply warns about VRAM contention.
+- **`routing:`** — maps a consumer (`delegation`, `compaction`, `auxiliaries`) to a symbolic unit (`orchestrator` or `family-<name>`), resolved to that unit's live endpoint at apply time. `auxiliaries` covers the 8 **text** tasks only — never `vision`/`web_extract` — and an id is never written to an endpoint that doesn't advertise it (probe-before-write).
+
+**Key semantic:** *omission means do-not-touch.* An omitted `routing` key means apply does not write that config key at all — the live value survives. Apply never silently re-routes something tuned by hand.
+
+```yaml
+routing:
+  delegation: family-reasoning
+  compaction: orchestrator
+  auxiliaries: orchestrator
+```
+
+`hscc template validate` is now two layers — **structural** (offline: no cluster state, no resolver) and **placement** (live) — and reports them separately. `--structural-only` skips the live layer (usable in CI), and a non-zero exit means either layer failed. `apply` runs the same validation as its pre-flight gate and blocks before touching anything. Full schema detail: [docs/DESIGN-template-explicit-placement.md](docs/DESIGN-template-explicit-placement.md) and [hscc-cluster/templates/README.md](hscc-cluster/templates/README.md).
 
 ```
-hscc template list                        # see the shipped layouts
-hscc template preview 4node-coding        # dry-run against the live cluster
+hscc template list                          # see the shipped layouts
+hscc template preview 4node-coding          # dry-run against the live cluster
 hscc template apply 4node-coding --confirm  # = the live setup
+hscc template validate 4node-coding --structural-only  # offline, CI-friendly
 ```
 
 ---
