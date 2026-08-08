@@ -1,0 +1,87 @@
+# =============================================================================
+# EXAMPLE — routing split: subagents on the worker pool, compaction on the
+# orchestrator  (teaching artifact — NOT for production use)
+# -----------------------------------------------------------------------------
+# THIS FILE IS AN EXAMPLE. It is auto-discovered by `hscc template list` (the
+# loader globs every *.yaml under templates/, including this subdirectory) but
+# the `example-` filename prefix is the signal that it is a teaching template,
+# not a supported layout. DO NOT `hscc template apply` it on a live cluster.
+# =============================================================================
+#
+# WHY THIS TEMPLATE EXISTS
+# ------------------------
+# This is the routing pattern HSCC actually runs. The v1.7.0 `routing:` block
+# was born from a real production drift: delegated subagents and gateway
+# traffic were silently landing on the ORCHESTRATOR's GPU instead of the worker
+# pool, because `delegation.model` and `fallback_providers[0]` pointed at the
+# orchestrator endpoint. Every delegated subagent burned orchestrator GPU, and
+# nothing in any template expressed the intent, so nothing caught or corrected
+# it. `routing:` names the target UNIT (a role), not a URL, so apply rewires the
+# config and drift becomes impossible in a template that declares the intent.
+#
+# THE TWO-WAY SPLIT AND WHY EACH SIDE IS WHERE IT IS
+# --------------------------------------------------
+#   * delegation  -> family-workers   Delegated subagents are short-lived,
+#     high-turnover tasks. They should spread across the worker pool (via the
+#     family proxy), NOT occupy the orchestrator. The orchestrator GPU is for
+#     the top-level interactive agent.
+#   * compaction  -> orchestrator     Compaction / summarization is a BIG
+#     prompt against a large context. Running it on the busy worker pool
+#     competes with real task throughput and can stall active subagents.
+#     Compaction is a deliberate, occasional act, so it belongs on the
+#     orchestrator where it does not contend with delegation.
+#   * auxiliaries -> orchestrator     The lightweight text auxiliaries
+#     (triage, curator, title generation, ...) are short and few; they ride on
+#     the orchestrator so the worker pool stays free for actual delegated work.
+#
+# This is the exact drift that bit us in production on 2026-08-06/07: a big
+# summarization prompt on the worker pool competing with real throughput, and
+# subagents burning orchestrator GPU. Read it as the before/after — `routing:`
+# makes explicit what the fleet should have been doing all along.
+#
+name: example-routing-split
+version: 3
+description: "EXAMPLE (teaching): routing split — subagents on the worker family proxy, compaction + text auxiliaries on the orchestrator."
+
+# ── Orchestrator ────────────────────────────────────────────────────────────
+# The orchestrator runs the interactive agent's model. We give it just tp=1 and
+# NO nodes: — placement is left to the resolver (`workers: remaining` on the
+# family below infers a worker span; the orchestrator takes what is free). Omitting
+# `nodes:` is deliberate here: this example is about ROUTING, not placement, and
+# leaving placement inferred keeps it portable to any cluster size.
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml"
+  tp: 1
+
+families:
+  # ── The worker pool ────────────────────────────────────────────────────────
+  # A single family serving the smaller worker model. `proxy: true` means a
+  # LiteLLM proxy fronts all of the family's nodes, so routing subagents here is
+  # as simple as pointing `delegation` at `family-workers` — the proxy load
+  # balances across the nodes. This is the "second model instance" the task
+  # pattern calls for.
+  - name: workers
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+        tp: 1
+    workers: remaining
+    proxy: true
+
+# ── ROUTING — who sends its work where ──────────────────────────────────────
+# Consumers map to a UNIT NAME (orchestrator | family-<name>), never a raw URL.
+# The indirection is the point: name the role, apply resolves the address at
+# apply-time, so moving a family to different nodes needs no template edit.
+#
+# The asymmetric split above. delegation leaves the orchestrator; the bulk
+# summarization prompt (compaction) and the small auxiliaries stay put.
+routing:
+  delegation: family-workers   # subagents → worker pool (proxy-load-balanced)
+  compaction: orchestrator     # big summarization prompt → orchestrator
+  auxiliaries: orchestrator    # text auxiliaries → orchestrator
+
+# NOTE ON OMISSION (the least obvious semantic — see example-pinned-placement.yaml
+# for a live demonstration): any consumer you do NOT list here is LEFT UNTOUCHED
+# at apply. apply does not write that config key at all — it does not fill it,
+# and it does not overwrite it. So a `compaction` tuned by hand to a different
+# endpoint survives an apply that omits `routing.compaction`. Declare a consumer
+# only when you want apply to OWN it.

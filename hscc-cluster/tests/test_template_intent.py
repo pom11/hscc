@@ -556,9 +556,14 @@ def test_v2_templates_parse_byte_identical_to_golden():
         golden = json.load(fh)
     assert golden, "empty golden snapshot"
 
+    # Scope to the SHIPPED library only: templates/examples/ is a deliberately
+    # separate v3 teaching directory (example-*.yaml), out of scope for the
+    # pre-v3 byte-identical regression guard.
     templates = sorted(glob.glob(
         os.path.join(os.path.dirname(here), "templates", "**", "*.yaml"),
         recursive=True))
+    templates = [f for f in templates
+                 if os.path.sep + "examples" + os.path.sep not in f]
     parsed = {}
     for f in templates:
         with open(f) as fh:

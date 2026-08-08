@@ -1,0 +1,103 @@
+# =============================================================================
+# EXAMPLE — pinned placement: explicit nodes, deterministic layout
+# (teaching artifact — NOT for production use)
+# -----------------------------------------------------------------------------
+# THIS FILE IS AN EXAMPLE. The loader auto-discovers every *.yaml under
+# templates/, so this file appears in `hscc template list` — but the `example-`
+# filename prefix marks it as a teaching template, not a supported layout.
+# It uses documentation-range IPs (10.0.0.x) that exist NOWHERE. DO NOT apply it.
+# =============================================================================
+#
+# WHY EXPLICIT NODES
+# ------------------
+# Normally HSCC infers placement: the resolver reads live cluster state and
+# decides which node each unit occupies (`workers: remaining`, capacity
+# fitting, and so on). That inference is the DEFAULT and usually right. But
+# when you need a layout to be REPRODUCIBLE — the same template on the same
+# cluster always schedules the same way, regardless of what the resolver
+# happens to infer today — you can BYPASS inference by naming the nodes
+# explicitly.
+#
+#   * nodes PRESENT  -> the list is used VERBATIM, resolver inference bypassed.
+#   * nodes ABSENT   -> current inference applies, unchanged.
+#
+# Order matters for a multi-node span: nodes[0] is the span PRIMARY (it exposes
+# the endpoint / proxy); the rest are tensor-parallel peers. This matches
+# serving_unit_scoreboard() and keeps /cluster, self-heal and ops.pick_node
+# consistent with the template.
+#
+# THE TRADE-OFF (read this before you use it)
+# ------------------------------------------
+# Explicit nodes make placement deterministic and REPRODUCIBLE — the same
+# template always schedules the same way, independent of resolver health. This
+# is exactly the property that makes validation trustworthy: a pinned template
+# validates deterministically instead of failing with the resolver's pool=[]
+# bug (tracked separately as t_16dcceb4).
+#
+# The cost: a `nodes:` list HARDCODES a specific cluster's addresses. Rename a
+# node, repurpose it, grow the cluster — and this template goes stale and fails
+# structural validation ("node '...' not defined in cluster.json"), which is
+# the intended guard but means you must maintain the template alongside the
+# cluster. That fragility is precisely why the SHIPPED 1-8 node library omits
+# `nodes:` — it stays topology-free and portable. Use explicit nodes only when
+# reproducibility outranks portability, and you accept the maintenance.
+#
+# The addresses below are DOCUMENTATION-RANGE (RFC 5737-adjacent 10.0.0.x),
+# NOT this cluster's real .244/.246/.247/.248 — reinvented so no example ever
+# encodes a live layout.
+#
+name: example-pinned-placement
+version: 3
+description: "EXAMPLE (teaching): deterministic placement via explicit nodes (doc-range 10.0.0.x IPs) + a routing block that demonstrates omission."
+
+# ── Orchestrator, pinned ─────────────────────────────────────────────────────
+# tp=1 on one node. len(nodes) MUST equal tp — state machinery refuses a
+# mismatch ("orchestrator: 1 nodes listed but tp=2", naming the unit and the
+# values). Pinning the orchestrator to the gateway (.1) keeps the interactive
+# agent's endpoint stable across applies.
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml"
+  tp: 1
+  nodes: [10.0.0.1]          # NEW (v3): explicit span. One node, tp=1.
+
+families:
+  # ── A family pinned to two nodes ───────────────────────────────────────────
+  # tp=2 spans two nodes; nodes[0] (10.0.0.2) is the primary. len(nodes)==tp or
+  # structural validation fails. Note allow_colocation defaults to FALSE — flag
+  # it true on BOTH units only when you truly want shared placement (see
+  # example-colocation.yaml).
+  - name: reasoning
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml"
+        tp: 2
+    nodes: [10.0.0.2, 10.0.0.3]
+    proxy: true
+
+# ── ROUTING WITH OMISSION — the least obvious, most valuable semantic ────────
+# This routing block deliberately declares ONLY ONE consumer: `delegation`.
+# `compaction` and `auxiliaries` are OMITTED on purpose, and that omission has
+# real meaning:
+#
+#     routing:
+#       delegation: family-reasoning
+#       # compaction:    <-- NOT here
+#       # auxiliaries:   <-- NOT here
+#
+#   * delegation  -> family-reasoning   apply OWNS these two keys
+#     (delegation.base_url, delegation.model) and will (re)write them to the
+#     reasoning family's proxy endpoint + model each apply.
+#
+#   * compaction  -> OMITTED            apply does NOT write
+#     auxiliary.compression.{base_url,model} at all. Whatever value sits in
+#     ~/.hermes/config.yaml today SURVIVES untouched — even if it is blank.
+#     This is STRICTER than fill-empty (which writes when a value is blank):
+#     an omitted routing key is never written, full stop.
+#
+# Why deliberately omit? Suppose an operator hand-tuned compaction to a
+# specific endpoint during an incident. If this template declared
+# `compaction: orchestrator`, the next apply would silently overwrite that
+# hand-tuned value. Leaving it out means apply respects the operator's tuning.
+# apply must never silently re-route something tuned by hand — `hscc doctor`
+# is where drift is surfaced, not `apply`.
+routing:
+  delegation: family-reasoning

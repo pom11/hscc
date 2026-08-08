@@ -1,0 +1,88 @@
+# =============================================================================
+# EXAMPLE — colocation: two small units sharing one node deliberately
+# (teaching artifact — NOT for production use)
+# -----------------------------------------------------------------------------
+# THIS FILE IS AN EXAMPLE. The loader auto-discovers every *.yaml under
+# templates/, so this file appears in `hscc template list` — the `example-`
+# filename prefix marks it as a teaching template, not a supported layout.
+# It uses documentation-range IPs (10.0.0.x). DO NOT apply it.
+# =============================================================================
+#
+# WHY COLOCATION EXISTS
+# ---------------------
+# By default no two units may occupy the same node: `nodes:` are the unit's
+# private span, and the resolver never double-books. The `allow_colocation`
+# flag is the explicit opt-out for cases where sharing is SENSIBLE — small
+# models that each fit comfortably in the VRAM of one node alongside the other.
+#
+# THE CONTRACT — BOTH UNITS MUST OPT IN
+# -------------------------------------
+# When two units name the same node, apply BLOCKS unless BOTH units set
+# `allow_colocation: true`. One flag is not enough:
+#
+#     node '10.0.0.4' claimed by both 'fast-coder' and 'fast-tier'
+#       (set allow_colocation: true on both to permit)
+#
+# That is a HARD ERROR (apply refuses, nothing is started or stopped) and it
+# names BOTH units so you know exactly which pair collides. If you remove the
+# flag from either one (see the line marked ⚠ below), structural validation
+# reports exactly that error.
+#
+# When BOTH opt in, apply PERMITS the sharing and emits a WARNING, not an
+# error, about VRAM contention:
+#
+#     node '10.0.0.4' claimed by both 'fast-coder' and 'fast-tier'
+#       (allow_colocation: true on both) — VRAM contention
+#
+# The warning is the honest cost of sharing: two models on one GPU compete for
+# memory and bandwidth. The flag declares you have checked and accepted that.
+#
+# WHY THIS EXAMPLE IS NOT PATHOLOGICAL
+# ------------------------------------
+# This is two SMALL models (a 27B fp8 coder + a 27B fp8 assistant tier) sharing
+# one worker node. Each is a single-node tp=1 unit that fits alongside the
+# other — the exact case where colocation is a legitimate resource-utilisation
+# win, not a failure. We deliberately did NOT make this a big tp=2 model sharing
+# with a critical orchestrator span, which would be a misuse.
+#
+name: example-colocation
+version: 3
+description: "EXAMPLE (teaching): two small units deliberately colocated on one node via allow_colocation: true on BOTH."
+
+# ── Orchestrator ────────────────────────────────────────────────────────────
+# Resolver-placed (no nodes:) so it stays portable — colocation is about the
+# two worker families below.
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml"
+  tp: 1
+
+families:
+  # ── Two small worker families, both pinned onto node 10.0.0.4 ─────────────
+  # Each names the SAME single node (10.0.0.4). That is what triggers the
+  # collision check. On their own they are trivial single-node units — the
+  # collision comes from naming the same node.
+  #
+  # fast-coder: a 27B fp8 coding model, tp=1, one node.
+  - name: fast-coder
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+        tp: 1
+    nodes: [10.0.0.4]          # shares .4 with fast-tier below
+    allow_colocation: true     # ⚠ the flag. Remove THIS one (or the one in
+                               # fast-tier) and structural validation reports
+                               # the hard collision error above.
+    proxy: true
+
+  # fast-tier: a second 27B fp8 model, also tp=1, on the SAME node.
+  - name: fast-tier
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-27b-fp8-vllm.yaml"
+        tp: 1
+    nodes: [10.0.0.4]          # same node as fast-coder → collision by default
+    allow_colocation: true     # BOTH must say yes, or apply refuses to start
+    proxy: true
+
+# The lesson: colocation is a deliberate, BOTH-sided opt-in, and the reward is
+# matched with an explicit VRAM-contention warning. Neither side gets to assume;
+# the template states the sharing outright, so no operator is surprised by two
+# models silently competing on one GPU.
