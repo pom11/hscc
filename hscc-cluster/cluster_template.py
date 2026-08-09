@@ -892,9 +892,15 @@ def validate_resolved_plan(plan: Any) -> List[str]:
 
 
 def apply_template(template_name: str, confirm: bool = False,
-                   recreate: bool = False) -> dict:
+                   recreate: bool = False, *, _http_get=None) -> dict:
     """Apply a cluster template (v2 intent). Resolves it against the live cluster,
     then writes configs, provisions models, sets up proxies — transactionally.
+
+    ``_http_get`` is injectable for tests and threaded down to every
+    probe-before-write gate on the apply path (``_update_hermes_config``,
+    ``_update_worker_model_ids``, ``_apply_routing``) so the suite exercises
+    the probes deterministically without real network I/O. Default None → real
+    network probe.
 
     recreate=True is forwarded to _provision_models: every unit whose serve
     command differs from what the running container was started with is forced
@@ -970,7 +976,7 @@ def apply_template(template_name: str, confirm: bool = False,
 
         # Step 3: Update Hermes config.yaml
         _, config_changed = atomic_yaml_update(
-            CONFIG_YAML, lambda d: _update_hermes_config(d, plan))
+            CONFIG_YAML, lambda d: _update_hermes_config(d, plan, _http_get=_http_get))
         result["steps"].append({"step": "config.yaml", "status": "ok",
                                 "changed": config_changed})
 
@@ -1003,7 +1009,8 @@ def apply_template(template_name: str, confirm: bool = False,
         # authority for the delegation consumer, so Step 5's delegation/fallback
         # rewrite is skipped (routing handles present; omission means untouched).
         # Profiles still rewritten — routing has no 'profiles' consumer.
-        wm = _update_worker_model_ids(plan, skip_delegation=(tpl.routing is not None))
+        wm = _update_worker_model_ids(plan, skip_delegation=(tpl.routing is not None),
+                                      _http_get=_http_get)
         result["steps"].append({
             "step": "worker-model-ids",
             "status": "ok",
@@ -1017,7 +1024,7 @@ def apply_template(template_name: str, confirm: bool = False,
         # keys with probe-before-write. Runs AFTER the worker-model rewrite so an
         # explicit routing target always wins over the default worker re-aim.
         # A routing config change also counts toward the gateway-restart decision.
-        ro = _apply_routing(tpl, plan)
+        ro = _apply_routing(tpl, plan, _http_get=_http_get)
         if ro["changed"]:
             config_changed = True
         result["steps"].append({
