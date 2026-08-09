@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.8.1] — the last alias gap: model.default and worker ids
+
+### Fixed
+- **`apply` no longer reverts `model.default` to the concrete id.** v1.8.0 made
+  the alias canonical for the *routing* keys, but two write paths still emitted
+  the recipe's concrete id, so `apply` and `doctor --fix` continued to disagree
+  on them. Observed in production: applying `4node-dual-dsv4` flipped
+  `model.default` from `orchestrator-model` back to
+  `deepseek-ai/DeepSeek-V4-Flash-0731`, and the migration had to be re-run by
+  hand to converge it.
+
+  - `_update_hermes_config` wrote `model.default` directly from the plan with
+    **no probe at all**;
+  - `_update_worker_model_ids` probed correctly but was handed the concrete id
+    as its candidate, so the alias never got a chance.
+
+  Both now take the candidate from the shared `_unit_alias(u, plan)` helper —
+  the same role-identity rule the serving and routing paths use, so none of them
+  can disagree about which alias a unit has — and the probe decides what is
+  actually written. `apply` followed by `doctor --fix` is now a no-op on **every**
+  key, not all-but-one. Verified against the live cluster: a real apply now
+  leaves `model.default` on `orchestrator-model`.
+
+  **Probe-before-write is unchanged**: an endpoint that does not advertise the
+  alias still receives the concrete id, and an unreachable or ambiguous endpoint
+  still results in nothing being written.
+
+- **Corrected a docstring that had become false.** `_resolve_worker_model_id`
+  still asserted the worker proxy serves only the concrete id and never the
+  alias. That stopped being true when the proxy picked up its refreshed config;
+  a stale comment in this area had already contributed to one defective fix.
+
+### Changed
+- `_http_get` is threaded from `apply_template` through to every probe it
+  reaches, so the apply path performs no network I/O under test. The new probe
+  had pushed six integration tests into ~10s network timeouts each and the
+  cluster suite from 2.2s to 72.4s; it is back to ~2.2s.
+
 ## [1.8.0] — apply writes the logical alias; apply and doctor --fix now agree
 
 ### Changed
