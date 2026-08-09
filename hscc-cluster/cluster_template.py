@@ -1408,23 +1408,41 @@ def _build_proxy_config(resolved_family) -> dict:
     }
 
 
-def _update_hermes_config(config: dict, plan: Any) -> dict:
+def _update_hermes_config(config: dict, plan: Any, *, _http_get=None) -> dict:
     """Update Hermes config.yaml providers from a resolved plan.
 
     Idempotent: providers keyed by name and rebuilt, so re-running apply never
     duplicates (a prior version appended on every call, corrupting config).
 
     Also updates the top-level ``model`` block so the orchestrator's served
-    model id and base_url are correct — vLLM is strict about model identity."""
+    model id and base_url are correct — vLLM is strict about model identity.
+    The model id written is probe-resolved, exactly parallel to the routing and
+    worker paths: the candidate is the orchestrator's STABLE LOGICAL ALIAS
+    (``_unit_alias`` → ``orchestrator-model``), and the probe decides what is
+    actually written — the alias when the orchestrator endpoint advertises it,
+    else the concrete id it serves, else NOTHING (never write an id the endpoint
+    cannot resolve). ``_http_get`` is injectable for tests; default is a real
+    network probe."""
     o = plan.orchestrator
+    orch_url = f"http://{o.node}:{o.port}/v1"
 
     # ── Top-level model block ────────────────────────────────────────
     model_cfg = config.setdefault("model", {})
-    model_cfg["default"] = o.model
-    model_cfg["base_url"] = f"http://{o.node}:{o.port}/v1"
+    model_cfg["base_url"] = orch_url
     # Preserve existing provider; default to "custom" if absent
     if "provider" not in model_cfg:
         model_cfg["provider"] = "custom"
+
+    # PROBE-BEFORE-WRITE for model.default (same guard as the routing and worker
+    # paths). Candidate = the orchestrator's stable alias; write the alias when
+    # the orchestrator endpoint advertises it, else the single concrete id it
+    # serves, else leave model.default untouched — never write an id the
+    # endpoint cannot resolve.
+    status, served = _probe_served_models(orch_url, _http_get=_http_get)
+    resolved = _resolve_worker_model_id(
+        _unit_alias(o, plan), served if status == "ok" else [])
+    if resolved is not None:
+        model_cfg["default"] = resolved
 
     # ── Providers list ───────────────────────────────────────────────
     existing = config.get("providers")
@@ -1467,16 +1485,19 @@ def _owned_worker_family(plan: Any) -> Optional[Any]:
 
 
 def _worker_model_id(plan: Any) -> Optional[str]:
-    """Resolve the worker/family model id — the model the worker proxy family
-    serves.
+    """The worker/family model CANDIDATE — the stable LOGICAL ALIAS the worker
+    proxy family should advertise.
 
-    Returns ``units[0].model`` for the family that owns the worker proxy
-    (see ``_owned_worker_family``). All units in that family share the served
-    model. Returns None when no family owns the worker proxy — callers must
-    then leave worker ids untouched.
+    Returns the unit's role-identity alias via ``_unit_alias``
+    (``u is plan.orchestrator`` → ``worker-model``) for the family that owns the
+    worker proxy (see ``_owned_worker_family``) — NOT the recipe's concrete id.
+    All units in that family share the served model. The probe in
+    ``_update_worker_model_ids`` then decides whether the alias or the concrete
+    id the proxy actually serves is written. Returns None when no family owns
+    the worker proxy — callers must then leave worker ids untouched.
     """
     fam = _owned_worker_family(plan)
-    return fam.units[0].model if fam is not None else None
+    return _unit_alias(fam.units[0], plan) if fam is not None else None
 
 
 def _worker_proxy_url(plan: Any) -> Optional[str]:
@@ -1575,17 +1596,15 @@ def _probe_served_models(base_url, *, _http_get=None):
 
 
 def _resolve_worker_model_id(model_id: Optional[str], served) -> Optional[str]:
-    """Probe-before-write: resolve the model id to write against the worker proxy.
+    """Probe-before-write: resolve the model id to write against a proxy.
 
-    ``model_id`` is the template-declared worker unit model (``units[0].model``).
-    It MAY be the stable alias ``worker-model`` or the concrete id depending on
-    how the template was authored — and the worker proxy (:4000, sparkrun
-    LiteLLM balancer) serves ONLY the concrete id, NOT the alias. Writing an
-    alias the endpoint does not advertise makes every delegated call 404.
+    ``model_id`` is the probe candidate — the unit's STABLE LOGICAL ALIAS
+    (``orchestrator-model`` / ``worker-model``, via ``_unit_alias``). The proxy
+    may serve the alias, the concrete id, or both. Writing an id the endpoint
+    does not advertise makes every call 404.
 
     So we only ever write an id the endpoint actually serves:
-      - if the declared ``model_id`` is served → use it (today's fleet: the
-        concrete id, since ``units[0].model`` = recipe ``model:`` field);
+      - if the declared ``model_id`` is served → use it (the alias or concrete);
       - else if the proxy serves exactly one concrete id → use that (the
         "write CONCRETE when the endpoint does not advertise the alias" path);
       - else → ``None``: refuse to write anything we cannot confirm the
@@ -1685,12 +1704,13 @@ def _update_worker_model_ids(plan: Any, *, profiles_dir: Optional[Path] = None,
 
     PROBE-BEFORE-WRITE: before writing an id to the worker proxy, this probes
     the proxy's ``/v1/models`` and only writes an id the endpoint actually
-    serves (``_resolve_worker_model_id``). The worker proxy serves ONLY the
-    concrete id — NOT the alias ``worker-model`` — so if the template declared
-    an alias, the CONCRETE id the proxy serves is written instead. If the probe
-    fails or no resolvable id is found, nothing is written (the id would 404
-    every delegated call). ``_http_get`` is injectable for tests; default is a
-    real network probe.
+    serves (``_resolve_worker_model_id``). The probe candidate is the worker
+    unit's stable ALIAS (``worker-model``, via ``_unit_alias``); the proxy may
+    advertise the alias, the concrete id, or both. The alias is written when the
+    proxy advertises it (post-config-refresh norm); the CONCRETE id the proxy
+    serves is written when it does not. If the probe fails or no resolvable id
+    is found, nothing is written (the id would 404 every delegated call).
+    ``_http_get`` is injectable for tests; default is a real network probe.
 
     ``skip_delegation=True`` (set by apply_template when the template carries a
     ``routing:`` block): the config.yaml delegation/fallback rewrite is SKIPPED,
@@ -1978,7 +1998,10 @@ def _preview_routing(tpl: Any, plan: Any, *, _http_get=None) -> dict:
 def _describe_config_changes(plan, current_models: Optional[dict]) -> list:
     """Describe what config changes will be made (from a resolved plan)."""
     o = plan.orchestrator
-    changes = [f"  orchestrator: {o.node}:{o.port} (model: {o.model})"]
+    # Disclose the orchestrator's STABLE LOGICAL ALIAS (the id that will be
+    # written to model.default), not the recipe's concrete id — same role-identity
+    # helper provisioning and apply use, so preview can never drift from apply.
+    changes = [f"  orchestrator: {o.node}:{o.port} (model: {_unit_alias(o, plan)})"]
     for fam in plan.families:
         port = fam.proxy_port if fam.proxy_port is not None else "—"
         # Node count covers the FULL tp span of every unit, not just primaries —

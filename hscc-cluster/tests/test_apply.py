@@ -990,36 +990,86 @@ class TestProvisionMultiNodeSpan:
 
 class TestUpdateHermesConfigModelBlock:
     """BUG 1: _update_hermes_config must set the top-level model.default
-    and model.base_url to the resolved orchestrator values."""
+    and model.base_url to the resolved orchestrator values. Since the v1.8.0
+    alias gap close, model.default is PROBE-RESOLVED: the candidate is the
+    orchestrator's alias and the probe decides what is actually written."""
 
     def _make_plan(self, model_id, node="10.0.0.1", port=8000):
         orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
                                model_id, [node], port, 1, 1)
         return ti.ResolvedPlan(template="test", orchestrator=orch, families=[])
 
+    def _serving(self, *served):
+        """Injectable _http_get simulating the orchestrator endpoint
+        '/v1/models' serving exactly ``served`` ids."""
+        import json
+        def get(url, api_key=None):
+            return json.dumps({"object": "list", "data": [
+                {"id": m, "object": "model"} for m in served]})
+        return get
+
     def test_model_default_set_to_orchestrator_model(self):
         plan = self._make_plan("deepseek-ai/DeepSeek-V4-Flash-0731")
         config = {"model": {"default": "old-model", "base_url": "http://old:8000/v1"}}
-        result = cluster_template._update_hermes_config(config, plan)
+        result = cluster_template._update_hermes_config(
+            config, plan, _http_get=self._serving("deepseek-ai/DeepSeek-V4-Flash-0731"))
         assert result["model"]["default"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
         assert result["model"]["base_url"] == "http://10.0.0.1:8000/v1"
+
+    def test_model_default_writes_alias_when_orchestrator_advertises_it(self):
+        """THE new behaviour: when the orchestrator endpoint advertises the
+        alias, model.default is written as the ALIAS (orchestrator-model), not
+        the recipe's concrete id. This is the exact key that reverted on apply —
+        the alias gap this task closes. FAILS if reverted to concrete."""
+        plan = self._make_plan("deepseek-ai/DeepSeek-V4-Flash-0731")
+        config = {"model": {"default": "old-model", "base_url": "http://old:8000/v1"}}
+        result = cluster_template._update_hermes_config(
+            config, plan,
+            _http_get=self._serving("orchestrator-model", "deepseek-ai/DeepSeek-V4-Flash-0731"))
+        assert result["model"]["default"] == "orchestrator-model"
+
+    def test_model_default_refused_when_orchestrator_unreachable(self):
+        """Unreachable orchestrator endpoint → model.default is NOT written
+        (left untouched), never an unconfirmed id. FAILS if a concrete id is
+        written when the endpoint cannot be probed."""
+        def _get(url, api_key=None):
+            raise OSError("connection refused")
+        plan = self._make_plan("deepseek-ai/DeepSeek-V4-Flash-0731")
+        config = {"model": {"default": "old-model", "base_url": "http://old:8000/v1"}}
+        result = cluster_template._update_hermes_config(config, plan, _http_get=_get)
+        # model.default is untouched (NOT reverted to concrete on an unreachable probe)
+        assert result["model"]["default"] == "old-model"
+
+    def test_model_default_refused_when_orchestrator_ambiguous(self):
+        """Ambiguous orchestrator endpoint (serves >1 id, none the alias) →
+        model.default is NOT written at all; refuse over writing a 404ing id."""
+        plan = self._make_plan("deepseek-ai/DeepSeek-V4-Flash-0731")
+        config = {}   # no model.default key at all
+        result = cluster_template._update_hermes_config(
+            config, plan,
+            _http_get=self._serving("other-a", "other-b"))
+        # NOT written: the arbitrary multi-served endpoint cannot confirm our alias
+        assert "default" not in result["model"]
 
     def test_model_base_url_set_correctly(self):
         plan = self._make_plan("test-model", "10.0.0.5", 9000)
         config = {}
-        result = cluster_template._update_hermes_config(config, plan)
+        result = cluster_template._update_hermes_config(
+            config, plan, _http_get=self._serving("test-model"))
         assert result["model"]["base_url"] == "http://10.0.0.5:9000/v1"
 
     def test_model_provider_preserved_when_existing(self):
         plan = self._make_plan("test-model")
         config = {"model": {"provider": "anthropic"}}
-        result = cluster_template._update_hermes_config(config, plan)
+        result = cluster_template._update_hermes_config(
+            config, plan, _http_get=self._serving("test-model"))
         assert result["model"]["provider"] == "anthropic"
 
     def test_model_provider_defaults_to_custom_when_absent(self):
         plan = self._make_plan("test-model")
         config = {}
-        result = cluster_template._update_hermes_config(config, plan)
+        result = cluster_template._update_hermes_config(
+            config, plan, _http_get=self._serving("test-model"))
         assert result["model"]["provider"] == "custom"
 
     def test_providers_still_rebuilt(self):
@@ -1029,7 +1079,8 @@ class TestUpdateHermesConfigModelBlock:
             ti.ResolvedUnit("worker", "coding", "m.yaml", "W", ["10.0.0.2"], 8001, 1, 1)])
         plan = ti.ResolvedPlan(template="test", orchestrator=orch, families=[fam])
         config = {"providers": [{"name": "stale-provider", "base_url": "http://x"}]}
-        result = cluster_template._update_hermes_config(config, plan)
+        result = cluster_template._update_hermes_config(
+            config, plan, _http_get=self._serving("test-model"))
         names = [p["name"] for p in result["providers"]]
         assert "custom" in names
         assert "family-coding" in names
@@ -1042,8 +1093,9 @@ class TestUpdateHermesConfigModelBlock:
         config = {"model": {"default": "deepseek-ai/DeepSeek-V4-Flash-0731",
                             "base_url": "http://10.0.0.1:8000/v1",
                             "provider": "custom"}}
-        result1 = cluster_template._update_hermes_config(config, plan)
-        result2 = cluster_template._update_hermes_config(result1, plan)
+        serving = self._serving("deepseek-ai/DeepSeek-V4-Flash-0731")
+        result1 = cluster_template._update_hermes_config(config, plan, _http_get=serving)
+        result2 = cluster_template._update_hermes_config(result1, plan, _http_get=serving)
         assert result2["model"]["default"] == "deepseek-ai/DeepSeek-V4-Flash-0731"
         assert result2["model"]["base_url"] == "http://10.0.0.1:8000/v1"
         assert result2["model"]["provider"] == "custom"
@@ -1051,7 +1103,8 @@ class TestUpdateHermesConfigModelBlock:
     def test_other_model_keys_not_clobbered(self):
         plan = self._make_plan("test-model")
         config = {"model": {"default": "old", "some_other_key": "preserve"}}
-        result = cluster_template._update_hermes_config(config, plan)
+        result = cluster_template._update_hermes_config(
+            config, plan, _http_get=self._serving("test-model"))
         assert result["model"]["some_other_key"] == "preserve"
 
 
@@ -1234,6 +1287,33 @@ class TestUpdateWorkerModelIds:
         assert result["model_id"] == "worker-model"   # template-declared candidate
         assert result["probe_status"] == "ok"
         assert result["probe_served"] == [self.WORKER]
+
+    def test_proxy_advertises_worker_alias_writes_alias(self, tmp_path):
+        """THE new behaviour (post config-refresh norm): the worker proxy
+        advertises ``worker-model`` — so the ALIAS is written to delegation /
+        fallback / worker profiles, not the concrete id. This is how apply
+        converges to exactly what doctor --fix migrates to. FAILS if reverted to
+        always-write-concrete."""
+        conf = tmp_path / "config.yaml"
+        self._write_config(
+            conf,
+            delegation={"model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                        "base_url": "http://10.0.0.244:8000/v1"},
+            fallbacks=[{"model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                        "base_url": "http://10.0.0.244:8000/v1"}])
+        profiles = tmp_path / "profiles"
+        self._write_profile(profiles, "coder", "http://localhost:4000/v1", "stale")
+        result = self._apply(self._plan(), conf, profiles=profiles,
+                             served=(self.WORKER, "worker-model"))  # proxy advertises BOTH
+        import yaml
+        data = yaml.safe_load(conf.read_text())
+        # alias is the candidate and the proxy advertises it → alias written
+        assert data["delegation"]["model"] == "worker-model"
+        assert data["delegation"]["base_url"] == "http://localhost:4000/v1"
+        assert data["fallback_providers"][0]["model"] == "worker-model"
+        coder = yaml.safe_load((profiles / "coder" / "config.yaml").read_text())
+        assert coder["model"]["default"] == "worker-model"
+        assert result["probe_status"] == "ok"
 
     def test_proxy_unreachable_does_not_write_any_model_id(self, tmp_path):
         """PROBE-BEFORE-WRITE / safety: when the worker proxy cannot be probed
@@ -1625,6 +1705,55 @@ class TestApplyRouting:
         r2 = self._apply(tpl, plan, conf, served=served)   # second pass
         assert r2["changed"] is False
         assert conf.read_text() == before
+
+    def test_apply_then_migration_agree_noop_second_time_covers_model_default_and_worker_ids(self, tmp_path):
+        """EXTENDS the routing-only migration-noop test to the two remaining
+        alias gaps: model.default (orchestrator) and the worker ids (delegation /
+        fallback / worker profiles). Before this change, apply wrote CONCRETE for
+        model.default on every apply, so a second pass was NOT a no-op there —
+        the exact blind spot this task closes. Now ALL keys converge to the alias
+        on the first pass and a second pass is a byte no-op."""
+        conf = tmp_path / "config.yaml"
+        profiles = tmp_path / "profiles"
+        pfile = profiles / "coder" / "config.yaml"
+        # START: concrete ids everywhere (the state that used to get re-emitted)
+        self._write(conf,
+                    model={"default": self.CONCRETE,
+                           "base_url": "http://10.0.0.1:8000/v1", "provider": "custom"},
+                    delegation={"model": self.CONCRETE,
+                                "base_url": "http://10.0.0.244:8000/v1"},
+                    fallback_providers=[{"model": self.CONCRETE, "name": "fb"}])
+        pfile.parent.mkdir(parents=True, exist_ok=True)
+        import yaml
+        pfile.write_text(yaml.safe_dump({
+            "model": {"default": self.CONCRETE, "base_url": "http://localhost:4000/v1"}},
+            sort_keys=False))
+        plan = self._plan_concrete(fam_proxy=4000)   # real plan: unit.model = CONCRETE
+
+        def apply_pass():
+            """Simulate the apply-template write steps 3+5 for this config."""
+            _, ch_hermes = cluster_template.atomic_yaml_update(
+                conf, lambda d, _g=self._serving(self.CONCRETE, self.ORCH_ALIAS):
+                    cluster_template._update_hermes_config(d, plan, _http_get=_g))
+            wm = cluster_template._update_worker_model_ids(
+                plan, profiles_dir=profiles, config_yaml=conf,
+                _http_get=self._serving(self.CONCRETE, self.ALIAS))
+            return ch_hermes or wm["config_changed"] or bool(wm["profiles_changed"])
+
+        # FIRST pass: everything converges to its ALIAS
+        assert apply_pass() is True
+        d = yaml.safe_load(conf.read_text())
+        assert d["model"]["default"] == self.ORCH_ALIAS          # was reverting to CONCRETE
+        assert d["delegation"]["model"] == self.ALIAS
+        assert d["fallback_providers"][0]["model"] == self.ALIAS
+        coder = yaml.safe_load(pfile.read_text())
+        assert coder["model"]["default"] == self.ALIAS
+
+        # SECOND pass: "doctor --fix migration" has already converged to the
+        # alias, and apply wrote exactly that — so re-applying is a byte no-op.
+        before = conf.read_text() + pfile.read_text()
+        assert apply_pass() is False
+        assert conf.read_text() + pfile.read_text() == before
 
     def test_proxy_unreachable_refuses_consumer(self, tmp_path):
         """Unreachable target: refuse to write the consumer (touch nothing) rather
