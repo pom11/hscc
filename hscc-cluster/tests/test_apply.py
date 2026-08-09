@@ -405,6 +405,16 @@ class TestApplyIntegration:
                           ("ROLLBACK_DIR", hscc / "rollback")]:
             monkeypatch.setattr(ct, attr, val)
         monkeypatch.setattr(ct, "_discover", lambda probe=False: _topo(n_workers))
+        # Stub the default network probe so NO apply-integration test touches the
+        # live cluster (the probe falls back to _http_get_default whenever the
+        # apply path has no injected _http_get). Deterministic + fast: advertise
+        # both aliases plus a concrete so every probe-before-write gate resolves
+        # to the alias (the post-config-refresh norm).
+        def _stub_http_get(_url, api_key=None):
+            return json.dumps({"data": [
+                {"id": "orchestrator-model"}, {"id": "worker-model"},
+                {"id": "deepseek-ai/DeepSeek-V4-Flash-0731"}]})
+        monkeypatch.setattr(ct, "_http_get_default", _stub_http_get)
         import recipe_cost as rc
         monkeypatch.setattr(ti._rc, "recipe_cost",
                             lambda r: rc.RecipeCost(r, per_gpu_total_gb=30, fits=True))
@@ -455,6 +465,38 @@ class TestApplyIntegration:
         assert res["success"] is False and res["rolled_back"] is True
         restored = json.loads((hscc / "serving.json").read_text())
         assert restored["units"][0]["id"] == "prior"
+
+    def test_apply_uses_injected_probe_not_default(self, tmp_path, monkeypatch):
+        """The injectable ``_http_get`` threaded through apply_template is what
+        every probe-before-write gate uses — NOT the network default. To prove
+        this deterministically (and catch a silent threading regression): the
+        injected probe advertises ONLY the aliases, while ``_http_get_default``
+        (were it inspected) would advertise a DIFFERENT concrete id. If the
+        injection were dropped anywhere on the apply path, the written ids would
+        come from the default and this test would FAIL. No real network I/O."""
+        import cluster_template as ct
+        from unittest.mock import MagicMock
+        ct, hscc = self._setup(tmp_path, monkeypatch, n_workers=2)
+
+        injected = MagicMock(side_effect=lambda url, api_key=None: json.dumps(
+            {"data": [{"id": "orchestrator-model"}, {"id": "worker-model"}]}))
+        # If apply ever fell back to _http_get_default, it would advertise this
+        # (different) concrete id — making the assertions below fail.
+        monkeypatch.setattr(
+            ct, "_http_get_default",
+            lambda url, api_key=None: json.dumps(
+                {"data": [{"id": "SOME-OTHER-CONCRETE"}]}))
+
+        res = ct.apply_template("single-family", confirm=True, _http_get=injected)
+        assert res["success"] is True
+        import yaml
+        cfg = yaml.safe_load((hscc / "config.yaml").read_text())
+        # model.default came from the INJECTED probe (alias), not the default
+        # (SOME-OTHER-CONCRETE) — proving the injection is threaded through.
+        assert cfg["model"]["default"] == "orchestrator-model"
+        assert cfg["delegation"]["model"] == "worker-model"
+        # The default getter was genuinely never consulted.
+        assert injected.called is True
 
 
 class TestSnapshotRollback:
@@ -568,6 +610,11 @@ class TestApplyUsesValidateGate:
         monkeypatch.setattr(ct.Path, "is_file", lambda self: True)
         # resolver wiring so the placement layer / apply steps work offline
         monkeypatch.setattr(ct, "_discover", lambda probe=False: _topo(2))
+        # Stub the default probe so a VALID apply reaching the probe-before-write
+        # gates never touches the live cluster (deterministic, no network I/O).
+        monkeypatch.setattr(ct, "_http_get_default",
+                            lambda _u, api_key=None: json.dumps({"data": [
+                                {"id": "orchestrator-model"}, {"id": "worker-model"}]}))
         import recipe_cost as rc
         monkeypatch.setattr(ti._rc, "recipe_cost",
                             lambda r: rc.RecipeCost(r, per_gpu_total_gb=30,
@@ -755,6 +802,16 @@ class TestApplyWarnSetsSuccessFalse:
                           ("ROLLBACK_DIR", hscc / "rollback")]:
             monkeypatch.setattr(ct, attr, val)
         monkeypatch.setattr(ct, "_discover", lambda probe=False: _topo(n_workers))
+        # Stub the default network probe so NO apply-integration test touches the
+        # live cluster (the probe falls back to _http_get_default whenever the
+        # apply path has no injected _http_get). Deterministic + fast: advertise
+        # both aliases plus a concrete so every probe-before-write gate resolves
+        # to the alias (the post-config-refresh norm).
+        def _stub_http_get(_url, api_key=None):
+            return json.dumps({"data": [
+                {"id": "orchestrator-model"}, {"id": "worker-model"},
+                {"id": "deepseek-ai/DeepSeek-V4-Flash-0731"}]})
+        monkeypatch.setattr(ct, "_http_get_default", _stub_http_get)
         import recipe_cost as rc
         monkeypatch.setattr(ti._rc, "recipe_cost",
                             lambda r: rc.RecipeCost(r, per_gpu_total_gb=30, fits=True))
@@ -2646,7 +2703,14 @@ class TestApplyRecreateFlag:
                     "warnings": [], "note": "test"}
         monkeypatch.setattr(ct, "_provision_models", fake_provision)
 
-        res = ct.apply_template("single-family", confirm=True, recreate=True)
+        # Injected probe so the apply path's probe-before-write gates never touch
+        # the live cluster (no real network I/O in tests).
+        def _stub(url, api_key=None):
+            return json.dumps({"data": [
+                {"id": "orchestrator-model"}, {"id": "worker-model"}]})
+
+        res = ct.apply_template("single-family", confirm=True, recreate=True,
+                                _http_get=_stub)
         assert res["success"] is True
         assert seen.get("recreate") is True
 
@@ -2680,7 +2744,11 @@ class TestApplyRecreateFlag:
             return {"status": "ok", "provisioned": [], "recreated": [],
                     "warnings": [], "note": "test"}
         monkeypatch.setattr(ct, "_provision_models", fake_provision)
-        ct.apply_template("single-family", confirm=True)
+        # Injected probe so the apply path's probe gates never hit the network.
+        def _stub(url, api_key=None):
+            return json.dumps({"data": [
+                {"id": "orchestrator-model"}, {"id": "worker-model"}]})
+        ct.apply_template("single-family", confirm=True, _http_get=_stub)
         assert seen.get("recreate") is False
 
     def test_cli_parses_force_recreate_flag(self, monkeypatch):
