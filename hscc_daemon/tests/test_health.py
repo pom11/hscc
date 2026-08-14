@@ -4,6 +4,7 @@ Tests isolate I/O by mocking run_cmd, ssh_cmd, http_check, and file reads.
 """
 import json
 import os
+import types
 import pytest
 from pathlib import Path
 
@@ -178,6 +179,12 @@ class TestCheckWorkers:
         # Clear in-memory state and point persistence file at tmp dir so
         # _load_worker_relaunch_timestamps() does not pick up real timestamps.
         health._worker_relaunch_at.clear()
+        # WD1: each test is a FRESH daemon — reset the debounce/cooldown auto-heal
+        # bookkeeping too, or a streak left by an earlier test can fire the
+        # auto-heal prematurely (a premature auto-heal `continue`s and skips the
+        # gentle relaunch this class's other tests assert on).
+        health._worker_down_streak.clear()
+        health._worker_last_autoheal.clear()
         monkeypatch.setattr(health, "_WORKER_RELATCH_FILE",
                             str(tmp_hfcc_dir / "worker_relaunch.json"))
         return health, serving
@@ -596,6 +603,188 @@ class TestCheckWorkers:
         assert len(popen_calls) == 1
         popen_args = popen_calls[0][0][0]
         assert "10.0.0.2" in popen_args
+
+
+class TestCheckWorkersAutoHeal:
+    """WD1: check_workers() debounced auto-heal of a down worker unit.
+
+    A unit down across N CONSECUTIVE checks (default 3 ≈ 90s) is force-recreated
+    via the REAL template-apply path (--force-recreate); a single blip or a
+    flapping (down→up→down) unit does NOT trigger; a cooldown stops the same unit
+    from being re-healed within the window even if it stays down. The down-check
+    history and the heal call are injected — never touches a real node/docker.
+    Debounce + cooldown are read from config, not hardcoded.
+    """
+
+    def _setup(self, tmp_hfcc_dir, monkeypatch, nodes, recipe="~/r/27b.yaml"):
+        from hscc_daemon import health, serving
+        from hscc_daemon import state as state_mod
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        units = [{"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"],
+                  "recipe": "~/r/orch.yaml", "model": "M"}]
+        for n in nodes:
+            units.append({"id": f"w-{n}", "role": "worker", "keepalive": True,
+                          "nodes": [n], "recipe": recipe, "model": "W"})
+        monkeypatch.setattr(serving, "ORCH_NODES", {"10.0.0.1"})
+        monkeypatch.setattr(serving, "load_serving",
+                            lambda: {"version": 1, "units": units})
+        # Reset module-level auto-heal + relaunch state so a test starts clean.
+        health._worker_relaunch_at.clear()
+        health._worker_down_streak.clear()
+        health._worker_last_autoheal.clear()
+        monkeypatch.setattr(health, "_WORKER_RELATCH_FILE",
+                            str(tmp_hfcc_dir / "worker_relaunch.json"))
+        return health, serving
+
+    def _down(self, health, monkeypatch):
+        """Force every probe down; stub the gentle sparkrun relaunch so only the
+        auto-heal path under test is observable."""
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
+        monkeypatch.setattr(health, "run_cmd", lambda args, **k: {"ok": True})
+        monkeypatch.setattr(health.subprocess, "Popen", lambda *a, **k: None)
+
+    def test_single_down_check_does_not_trigger(self, tmp_hfcc_dir, monkeypatch):
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        self._down(health, monkeypatch)
+        heals = []
+        monkeypatch.setattr(health, "_autoheal_worker_fn",
+                            lambda *a: heals.append(a) or {"status": "ok"})
+        health.check_workers()          # 1 down-check < debounce
+        assert heals == []             # no auto-heal on a single blip
+
+    def test_n_consecutive_down_checks_triggers(self, tmp_hfcc_dir, monkeypatch):
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        self._down(health, monkeypatch)
+        heals = []
+        monkeypatch.setattr(health, "_autoheal_worker_fn",
+                            lambda *a: heals.append(a) or {"status": "ok"})
+        # up to N-1 consecutive downs: debounce not yet reached
+        for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE - 1):
+            health.check_workers()
+        assert heals == []
+        # the Nth consecutive down fires the auto-heal FOR THIS UNIT
+        health.check_workers()
+        assert len(heals) == 1
+        key, label, node, port = heals[0]
+        assert key == ("10.0.0.2", 8000)   # unit identity (node, port)
+        assert node == "10.0.0.2"
+        assert port == 8000
+        assert "w-10.0.0.2" in label
+
+    def test_flapping_resets_consecutive_count(self, tmp_hfcc_dir, monkeypatch):
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        heals = []
+        monkeypatch.setattr(health, "_autoheal_worker_fn",
+                            lambda *a: heals.append(a) or {"status": "ok"})
+        monkeypatch.setattr(health, "run_cmd", lambda args, **k: {"ok": True})
+        monkeypatch.setattr(health.subprocess, "Popen", lambda *a, **k: None)
+        # down (streak 1)
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
+        health.check_workers()
+        # up (streak reset)
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": True})
+        health.check_workers()
+        # down again (streak restarts at 1), then down (2) — STILL < debounce
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
+        health.check_workers()
+        health.check_workers()
+        # 3 total downs across a flap, but never 3 CONSECUTIVE -> no auto-heal
+        assert heals == []
+
+    def test_cooldown_blocks_second_heal(self, tmp_hfcc_dir, monkeypatch):
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        self._down(health, monkeypatch)
+        heals = []
+        monkeypatch.setattr(health, "_autoheal_worker_fn",
+                            lambda *a: heals.append(a) or {"status": "ok"})
+        # fire the first auto-heal (N consecutive downs)
+        for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
+            health.check_workers()
+        assert len(heals) == 1
+        # rebuild the streak within the cooldown window (still down) — must NOT re-fire
+        for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE * 2):
+            health.check_workers()
+        assert len(heals) == 1          # cooldown prevented a second auto-heal
+
+    def test_action_logged_distinctly(self, tmp_hfcc_dir, monkeypatch):
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        self._down(health, monkeypatch)
+        log_calls = []
+        monkeypatch.setattr(health, "log",
+                            lambda msg, level="INFO": log_calls.append(msg))
+        monkeypatch.setattr(health, "_autoheal_worker_fn",
+                            lambda *a: {"status": "ok", "template": "candy"})
+        for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
+            health.check_workers()
+        assert any("Auto-heal" in m for m in log_calls)   # auditable distinct action
+        assert any("force-recreate" in m for m in log_calls)
+
+    def test_config_values_are_read_not_hardcoded(self, tmp_hfcc_dir, monkeypatch):
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        self._down(health, monkeypatch)
+        heals = []
+        monkeypatch.setattr(health, "_autoheal_worker_fn",
+                            lambda *a: heals.append(a) or {"status": "ok"})
+        # Override the debounce threshold to 2 (from config) — NOT hardcoded 3.
+        monkeypatch.setattr(health, "WORKER_AUTOHEAL_DEBOUNCE", 2)
+        health.check_workers()          # streak 1 < 2 -> no heal
+        assert heals == []
+        health.check_workers()          # streak 2 -> fires
+        assert len(heals) == 1
+
+    def test_default_heal_calls_real_apply_with_force_recreate(self, tmp_hfcc_dir, monkeypatch):
+        """The default heal action reaches the REAL apply path (cmd_cluster_template)
+        with --force-recreate for the currently applied template — no real node
+        or docker is touched (the plugin modules are injected as fakes)."""
+        import sys as _sys
+        from hscc_daemon import health
+        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
+        fake_calls = []
+
+        def fake_cmd_cluster_template(argv):
+            fake_calls.append(argv)
+            return {"status": "ok", "template": "candy", "success": True}
+
+        cli_mod = types.ModuleType("cluster_template_cli")
+        cli_mod.cmd_cluster_template = fake_cmd_cluster_template
+        tpl_mod = types.ModuleType("cluster_template")
+        tpl_mod.applied_status = lambda: {"applied": {"template": "candy"}}
+        monkeypatch.setitem(_sys.modules, "cluster_template_cli", cli_mod)
+        monkeypatch.setitem(_sys.modules, "cluster_template", tpl_mod)
+
+        res = health._default_autoheal_worker(
+            ("10.0.0.2", 8000), "w-1", "10.0.0.2", 8000)
+
+        # the real apply path is reached with force-recreate for the applied template
+        assert fake_calls == [["apply", "candy", "--confirm", "--force-recreate"]]
+        assert res["template"] == "candy"
+
+    def test_default_heal_no_op_when_no_applied_template(self, tmp_hfcc_dir, monkeypatch):
+        """Without a recorded applied template there is nothing to force-recreate —
+        the heal reports 'no applied template' and never calls the apply CLI."""
+        import sys as _sys
+        from hscc_daemon import health
+        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
+        fake_calls = []
+
+        def fake_cmd_cluster_template(argv):
+            fake_calls.append(argv)
+            return {"status": "ok"}
+        cli_mod = types.ModuleType("cluster_template_cli")
+        cli_mod.cmd_cluster_template = fake_cmd_cluster_template
+        tpl_mod = types.ModuleType("cluster_template")
+        tpl_mod.applied_status = lambda: {"applied": None}
+        monkeypatch.setitem(_sys.modules, "cluster_template_cli", cli_mod)
+        monkeypatch.setitem(_sys.modules, "cluster_template", tpl_mod)
+
+        res = health._default_autoheal_worker(
+            ("10.0.0.2", 8000), "w-1", "10.0.0.2", 8000)
+
+        assert fake_calls == []
+        assert res.get("ok") is False
+        assert "no applied template" in res.get("error", "")
 
 
 class TestCheckProxy:
