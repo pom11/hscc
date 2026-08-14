@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.8.2] — 2026-08-14 — watchdog self-heals a down worker unit
+
 ### Added
 - **Watchdog now self-heals a down worker unit (WD1).** When a keep-alive
   worker unit stays DOWN across `HSCC_WORKER_AUTOHEAL_DEBOUNCE` consecutive
