@@ -8,6 +8,7 @@ import subprocess
 import sys
 import datetime
 import time
+from pathlib import Path
 
 from . import serving
 from .daemon_ops import log
@@ -36,6 +37,35 @@ IDLE_TIMEOUT_MINUTES = 30
 NAS_MOUNT = os.environ.get(
     "HSCC_NAS_MOUNT",
     "/Volumes/NAS" if sys.platform == "darwin" else "/mnt/nas")
+
+# ── Worker auto-heal (WD1) ─────────────────────────────────────────────────
+# A worker unit that stays DOWN across WORKER_AUTOHEAL_DEBOUNCE CONSECUTIVE
+# checks is force-recreated via `template apply <applied-template>
+# --confirm --force-recreate` — the REAL apply path (no reimplementation).
+# This fixes the "container stays Up in docker but the vLLM server inside
+# never answers (stuck past the CUDA banner)" class of failure that a plain
+# sparkrun --ensure relaunch cannot: --ensure sees the container already
+# "running" and no-ops, so the unit is detected-down every cycle forever.
+#
+#   * DEBOUNCE — a single down-blip must NOT fire. We need N consecutive
+#     confirmed-down checks of the SAME unit (default 3 ~= 90s), so a
+#     legitimate slow load or a transient probe timeout doesn't thrash the
+#     fleet. A unit that comes back UP resets its streak (flapping counts 0).
+#   * COOLDOWN — after an auto-heal fires, we do NOT fire again for the same
+#     unit within the window (default 10min) even if it stays down, so a
+#     genuinely-broken unit escalates instead of spinning in a fight with a
+#     slow model load. A unit still down after that should alert, not loop.
+#
+# Both are CONFIGURABLE via env — same pattern as VLLM_LOAD_GRACE_MINUTES /
+# WATCHDOG_BACKOFF_MINUTES in lifecycle.py, never hardcoded.
+WORKER_AUTOHEAL_DEBOUNCE = int(os.environ.get("HSCC_WORKER_AUTOHEAL_DEBOUNCE", "3"))
+WORKER_AUTOHEAL_COOLDOWN_MINUTES = int(
+    os.environ.get("HSCC_WORKER_AUTOHEAL_COOLDOWN_MINUTES", "10"))
+
+# In-memory per-unit debounce/cooldown bookkeeping (reset on daemon start, so a
+# restart begins clean). Keyed by (node, port) — the unit identity.
+_worker_down_streak = {}     # (node, port) -> consecutive down-checks
+_worker_last_autoheal = {}   # (node, port) -> wall-clock ts of last auto-heal
 
 
 def check_dgx():
@@ -586,6 +616,53 @@ def _save_worker_relaunch_timestamps():
         pass
 
 
+# ── Worker auto-heal helper ────────────────────────────────────────────────
+# The heal ACTION is injectable (``_autoheal_worker_fn``) so tests can stub it;
+# production uses the REAL template-apply path via cmd_cluster_template — the
+# exact function ``hscc template apply`` dispatches to, no reimplementation.
+
+def _autoheal_cluster_dir():
+    """Sibling hscc-cluster plugin dir (same resolution as hscc.py)."""
+    return Path(__file__).resolve().parent.parent / "hscc-cluster"
+
+
+def _default_autoheal_worker(key, label, node, port):
+    """REAL auto-heal: force-recreate the down unit by re-applying the currently
+    applied template with ``--force-recreate``.
+
+    Reuses the existing apply path (``cmd_cluster_template`` → the same function
+    ``hscc template apply <name> --confirm --force-recreate`` dispatches to) —
+    NOT a parallel mechanism. Resolves the currently-applied template from the
+    same state ``hscc template status`` reads (``~/.hscc/applied_template.json``).
+    Returns the apply result dict.
+
+    Injectable for tests via monkeypatching ``_autoheal_worker_fn``; a test that
+    exercises THIS function patches ``cmd_cluster_template`` to prove the real
+    path is reached with force-recreate, never touching a real node/docker.
+    """
+    cluster_dir = str(_autoheal_cluster_dir())
+    if cluster_dir not in sys.path:
+        sys.path.insert(0, cluster_dir)
+    try:
+        from cluster_template_cli import cmd_cluster_template
+        from cluster_template import applied_status
+    except ImportError as e:
+        log(f"Auto-heal {label}: cannot load apply path ({e})", "ERROR")
+        return {"ok": False, "error": f"apply path unavailable: {e}"}
+    # The currently applied template (what `hscc template status` reports).
+    state = applied_status().get("applied") or {}
+    name = state.get("template")
+    if not name:
+        log(f"Auto-heal {label}: no applied template recorded — cannot force-recreate", "WARN")
+        return {"ok": False, "error": "no applied template recorded"}
+    log(f"Auto-heal {label}: force-recreating via template apply '{name}' --force-recreate")
+    return cmd_cluster_template(["apply", name, "--confirm", "--force-recreate"])
+
+
+# Production default; tests monkeypatch this to inject the heal call.
+_autoheal_worker_fn = _default_autoheal_worker
+
+
 def check_workers():
     """Keep-alive worker check (UNIT-keyed, G1): health-check each serving.json
     keep-alive worker UNIT on its own port and relaunch a crashed one with its
@@ -640,6 +717,49 @@ def check_workers():
         if http_check(url, timeout=5).get("ok"):
             online.append(label)
             _worker_relaunch_at.pop(key, None)
+            # Back UP — reset the consecutive-down debounce so a flapping unit
+            # (down→up→down) never accumulates toward an auto-heal. The cooldown
+            # timestamp is deliberately NOT reset: it still guards against an
+            # immediate re-fire if this unit flaps back down within the window.
+            _worker_down_streak.pop(key, None)
+            continue
+        # DEBOUNCED AUTO-HEAL (WD1): the unit is DOWN. Increment its
+        # consecutive-down streak and, once it crosses the debounce threshold
+        # AND is out of this unit's cooldown, force-recreate it via the REAL
+        # template-apply path (--force-recreate). This is what fixes a unit
+        # that stays "Up" in docker but whose vLLM never answers — a plain
+        # sparkrun --ensure relaunch no-ops on it (--ensure sees the container
+        # already running). Debounce/cooldown are configurable, not hardcoded.
+        # The streak counts REGARDLESS of the gentle-relaunch grace below:
+        # mid-load a unit is still not-serving, but the debounce (3 checks
+        # ≈ 90s) is far shorter than a load (minutes), so a slow load alone can
+        # never trip it — yet a genuinely wedged unit will.
+        streak = _worker_down_streak.get(key, 0) + 1
+        _worker_down_streak[key] = streak
+        cooldown_s = WORKER_AUTOHEAL_COOLDOWN_MINUTES * 60
+        if (streak >= WORKER_AUTOHEAL_DEBOUNCE
+                and now_wall - _worker_last_autoheal.get(key, 0.0) >= cooldown_s):
+            log(f"Auto-heal: worker {label} ({node}:{port}) down {streak}x "
+                f"consecutively — force-recreate via template apply")
+            _worker_last_autoheal[key] = now_wall
+            _worker_down_streak[key] = 0  # finalise this debounce round
+            heal_result = _autoheal_worker_fn(key, label, node, port)
+            heal_note = (heal_result.get("status") or heal_result.get("ok")
+                         or heal_result.get("error") or "?")
+            log(f"Auto-heal result for {label}: {heal_note} "
+                f"{heal_result.get('note') or ''}".strip())
+            # Announce through the existing watchdog notification channel (the
+            # Telegram ops topic) — reuse it, do not build a new one.
+            try:
+                from .telegram import notify_operations
+                notify_operations(
+                    f"🤖 HSCC auto-heal: worker `{label}` ({node}:{port}) down "
+                    f"{streak}x consecutively — re-applied template "
+                    f"`{heal_result.get('template') or '?'}` with --force-recreate "
+                    f"→ {heal_note}")
+            except Exception as e:
+                log(f"Auto-heal notify failed: {e}", "WARN")
+            down.append(label)
             continue
         # Down. Respect the grace window after a relaunch (mid-load == not dead).
         last = _worker_relaunch_at.get(key)
