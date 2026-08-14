@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Watchdog now self-heals a down worker unit (WD1).** When a keep-alive
+  worker unit stays DOWN across `HSCC_WORKER_AUTOHEAL_DEBOUNCE` consecutive
+  checks (default 3 ≈ 90s of confirmed-down, not a single blip), the watchdog
+  force-recreates it by re-applying the currently applied template via the
+  real apply path (`template apply <applied> --confirm --force-recreate`). This
+  fixes the class of failure where the container stays "Up" in docker but the
+  vLLM server inside never answers (`/v1/models` never responds) — a plain
+  `sparkrun run --ensure` relaunch no-ops on such a unit because `--ensure` sees
+  the container already running and leaves it alone, so the unit is detected
+  down forever with no action. Previously that required a manual
+  `hscc template apply <name> --confirm --force-recreate`.
+
+  - **Debounced** — a single down-blip or a flapping unit (down→up→down)
+    resets the streak and does not fire.
+  - **Cooldown** — after an auto-heal fires, the same unit is not re-healed
+    within `HSCC_WORKER_AUTOHEAL_COOLDOWN_MINUTES` (default 10) even if it
+    stays down, so a genuinely-broken unit escalates/ alerts instead of
+    spinning. A slow model load cannot fight it.
+  - **Auditable** — every auto-heal is logged distinctly (`Auto-heal:` /
+    `Auto-heal result:`) and announced through the existing Telegram ops
+    channel (no new notification path).
+
 ## [1.8.1] — the last alias gap: model.default and worker ids
 
 ### Fixed
