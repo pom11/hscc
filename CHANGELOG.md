@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.8.3] — 2026-08-15 — DGX check reads structured cluster status, not text
+
+### Fixed
+- The DGX health check's sparkrun workload detection shelled out to
+  `sparkrun status` and text-parsed lines starting with `Job:` — fragile to
+  any cosmetic change in sparkrun's human-readable output, since a formatting
+  tweak could silently break workload detection with no error, just an empty
+  or wrong `results["workloads"]`. Now calls sparkrun's own structured
+  `query_cluster_status()` API (`ClusterStatusResult.to_dict()`), invoked
+  under sparkrun's own venv interpreter (resolved from the `sparkrun` binary's
+  shebang — hscc_daemon runs under the Hermes agent venv, where the sparkrun
+  package isn't installed) and parses JSON instead of text. The old text-parse
+  is kept as a defensive fallback for environments where the `sparkrun` CLI
+  isn't on PATH at all. Output shape (`[{"name", "container"}, ...]`) is
+  unchanged, so nothing downstream needed to change.
+
 ## [1.8.2] — 2026-08-14 — watchdog self-heals a down worker unit
 
 ### Added
