@@ -186,9 +186,10 @@ def _workloads_from_cluster_status(data):
 def _sparkrun_workloads_textparse():
     """Legacy fallback: shell out to `sparkrun status` and text-parse.
 
-    Only reached when sparkrun's Python API import fails — keeps workload
-    detection working in a future environment where sparkrun's package is not
-    on sys.path, at the cost of the old text-parsing fragility.
+    Only reached when the structured cluster-status query is unreachable
+    (no `sparkrun` CLI on PATH to resolve its venv python) or fails. Keeps
+    workload detection working in such degraded environments at the cost of
+    the old text-parsing fragility.
     """
     spark_result = run_cmd(["sparkrun", "status"], timeout=10)
     if not spark_result.get("ok"):
