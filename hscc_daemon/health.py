@@ -68,6 +68,146 @@ _worker_down_streak = {}     # (node, port) -> consecutive down-checks
 _worker_last_autoheal = {}   # (node, port) -> wall-clock ts of last auto-heal
 
 
+# Inline script run under sparkrun's OWN venv python to invoke the structured
+# cluster-status API. We cannot `import sparkrun` in this process: hscc_daemon
+# runs under the Hermes agent venv, and sparkrun is installed (with its
+# transitive deps) only in sparkrun's dedicated venv (include-system-site-
+# packages=false). So we shell out to sparkrun's own interpreter — resolved
+# dynamically from the `sparkrun` CLI binary's shebang, never hardcoded — and
+# parse its structured JSON output. This mirrors EXACTLY how `sparkrun status`
+# resolves its own defaults (SparkrunConfig → ClusterManager → resolve_hosts →
+# build_ssh_kwargs → query_cluster_status) but emits structured JSON instead of
+# the human-readable text we used to string-parse.
+_SPARKRUN_STATUS_SCRIPT = (
+    "import json,sys\n"
+    "from sparkrun.core.config import SparkrunConfig,get_config_root\n"
+    "from sparkrun.core.cluster_manager import ClusterManager,query_cluster_status\n"
+    "from sparkrun.core.hosts import resolve_hosts\n"
+    "from sparkrun.orchestration.primitives import build_ssh_kwargs\n"
+    "config=SparkrunConfig()\n"
+    "mgr=ClusterManager(get_config_root())\n"
+    "hosts=resolve_hosts(None,None,None,mgr,config.default_hosts)\n"
+    "if not hosts:\n"
+    "    print(json.dumps({'host_list':[]})); sys.exit(0)\n"
+    "ssh_kwargs=build_ssh_kwargs(config)\n"
+    "r=query_cluster_status(hosts,ssh_kwargs=ssh_kwargs,cache_dir=str(config.cache_dir))\n"
+    "print(json.dumps(r.to_dict()))\n"
+)
+
+
+def _sparkrun_venv_python():
+    """Return the python interpreter that owns the `sparkrun` CLI.
+
+    Resolved from the `sparkrun` executable's shebang (``#!/path/to/python``)
+    so we reuse sparkrun's own venv — where the sparkrun package and its
+    transitive deps actually live. Returns None if `sparkrun` is not on PATH.
+    """
+    sparkrun_bin = shutil.which("sparkrun")
+    if not sparkrun_bin:
+        return None
+    try:
+        with open(sparkrun_bin, "rb") as f:
+            first = f.readline().decode("utf-8", "replace").strip()
+        if first.startswith("#!"):
+            interp = first[2:].strip()
+            if interp and (shutil.which(interp) is not None or os.path.exists(interp)):
+                return interp
+    except OSError:
+        pass
+    return None
+
+
+def _sparkrun_workloads():
+    """Return running sparkrun workloads as [{name, container}, ...].
+
+    Replaces the former `sparkrun status` shell-out + `Job:` text-parsing in
+    the DGX check, which was fragile to any cosmetic change in sparkrun's
+    human-readable output. Instead we invoke sparkrun's own structured
+    ``query_cluster_status`` API — run under sparkrun's own venv python
+    (resolved from the `sparkrun` binary shebang, see ``_SPARKRUN_STATUS_SCRIPT``)
+    so it is reachable at daemon runtime — and read its JSON ``to_dict()``
+    output.
+
+    We map ``ClusterStatusResult.to_dict()``'s ``groups`` (cluster members
+    with job metadata) + ``solo_entries`` onto the SAME shape the old
+    text-parsing produced — ``[{"name": ..., "container": ...}]`` — so nothing
+    downstream that reads ``results["workloads"]`` needs to change.
+
+    Defensive fallback: if the structured query is unreachable (no sparkrun CLI,
+    unresolvable interpreter, query failure), fall back to the legacy shell-out
+    text-parse path rather than reporting an empty workload list. Any other
+    failure returns [] — the check degrades gracefully instead of crashing.
+    """
+    venv_py = _sparkrun_venv_python()
+    if venv_py:
+        try:
+            res = run_cmd([venv_py, "-c", _SPARKRUN_STATUS_SCRIPT], timeout=25)
+            if res.get("ok") and res.get("output"):
+                data = json.loads(res["output"])
+                return _workloads_from_cluster_status(data)
+        except (ValueError, TypeError, json.JSONDecodeError) as e:
+            log(f"sparkrun cluster-status JSON parse failed ({e})", "WARN")
+        except Exception as e:
+            log(f"sparkrun cluster-status query failed ({e})", "WARN")
+
+    # Last resort: legacy `sparkrun status` text-parse (only if the structured
+    # path is unavailable — e.g. sparkrun not on PATH at all).
+    log("structured sparkrun status unavailable — falling back to "
+        f"`sparkrun status` text-parse (venv_py={venv_py!r})", "WARN")
+    return _sparkrun_workloads_textparse()
+
+
+def _workloads_from_cluster_status(data):
+    """Map a ClusterStatusResult.to_dict() into the legacy [{name, container}] shape.
+
+    The legacy `Job:` text-parse produced ONE entry per Job line — i.e. one per
+    cluster/job (cluster_id), not one per container. So we emit exactly one
+    entry per ``groups`` entry and one per ``solo_entries`` entry, keeping the
+    count identical to the old output. ``container`` carries the job/cluster id
+    (e.g. ``sparkrun_1b6e77192e59``→ the old ``[122ebe6fc4a2]`` hash) and the
+    ``name`` carries the recipe label from job metadata when available.
+    """
+    workloads = []
+    for cid, group in (data.get("groups") or {}).items():
+        meta = group.get("meta") or {}
+        recipe = meta.get("recipe") or ""
+        name = f"{recipe} ({cid})" if recipe else cid
+        workloads.append({"name": name, "container": cid})
+    for entry in data.get("solo_entries") or []:
+        meta = entry.get("meta") or {}
+        recipe = meta.get("recipe") or ""
+        host = entry.get("host", "?")
+        cid = entry.get("cluster_id", "?")
+        name = f"{recipe} ({host})" if recipe else f"{cid} ({host})"
+        workloads.append({"name": name, "container": cid})
+    return workloads
+
+
+def _sparkrun_workloads_textparse():
+    """Legacy fallback: shell out to `sparkrun status` and text-parse.
+
+    Only reached when the structured cluster-status query is unreachable
+    (no `sparkrun` CLI on PATH to resolve its venv python) or fails. Keeps
+    workload detection working in such degraded environments at the cost of
+    the old text-parsing fragility.
+    """
+    spark_result = run_cmd(["sparkrun", "status"], timeout=10)
+    if not spark_result.get("ok"):
+        return []
+    workloads = []
+    for line in spark_result["output"].split("\n"):
+        line = line.strip()
+        if line.startswith("Job:"):
+            parts = line.split()
+            name = parts[1] if len(parts) > 1 else "?"
+            container = "?"
+            for p in parts:
+                if p.startswith("[") and p.endswith("]"):
+                    container = p.strip("[]")
+            workloads.append({"name": name, "container": container})
+    return workloads
+
+
 def check_dgx():
     """DGX check (every 5s): SSH to primary node, check GPU status, sparkrun workloads."""
     log("Running DGX check")
@@ -105,24 +245,9 @@ def check_dgx():
         results["gpus"] = []
     
     # 3. Sparkrun workloads
-    spark_result = run_cmd(["sparkrun", "status"], timeout=10)
-    if spark_result.get("ok"):
-        workloads = []
-        for line in spark_result["output"].split("\n"):
-            line = line.strip()
-            if line.startswith("Job:"):
-                parts = line.split()
-                name = parts[1] if len(parts) > 1 else "?"
-                container = "?"
-                for p in parts:
-                    if p.startswith("[") and p.endswith("]"):
-                        container = p.strip("[]")
-                workloads.append({"name": name, "container": container})
-        results["workloads"] = workloads
-        results["workload_count"] = len(workloads)
-    else:
-        results["workloads"] = []
-        results["workload_count"] = 0
+    workloads = _sparkrun_workloads()
+    results["workloads"] = workloads
+    results["workload_count"] = len(workloads)
     
     # 4. vLLM health
     health = http_check(serving.VLLM_HEALTH_URL, timeout=5)
