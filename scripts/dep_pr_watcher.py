@@ -17,6 +17,7 @@ Config via env (sensible defaults):
   HSCC_PR_LABEL        label the Action sets         (default: needs-cluster-check)
   HSCC_PR_REVIEWER     required review request       (default: repo owner)
   HSCC_DEP_ASSIGNEE    profile to run the card       (default: backend-engineer)
+  HSCC_KANBAN_BOARD    board to create verification  (default: hscc)
   HSCC_WORKDIR         repo worktree for the card    (default: ~/dev/hscc)
 """
 
@@ -35,6 +36,7 @@ REPO = os.environ.get("HSCC_REPO", "pom11/hscc")
 LABEL = os.environ.get("HSCC_PR_LABEL", "needs-cluster-check")
 REVIEWER = os.environ.get("HSCC_PR_REVIEWER", REPO.split("/")[0])
 ASSIGNEE = os.environ.get("HSCC_DEP_ASSIGNEE", "backend-engineer")
+BOARD = os.environ.get("HSCC_KANBAN_BOARD", "hscc")
 WORKDIR = os.path.expanduser(os.environ.get("HSCC_WORKDIR", "~/dev/hscc"))
 
 
@@ -92,7 +94,7 @@ def ensure_cards(prs, *, _kb=None):
     if _kb is None:
         from hermes_cli import kanban_db as _kb
     created = []
-    with _kb.connect_closing() as conn:
+    with _kb.connect_closing(board=BOARD) as conn:
         for pr in prs:
             num = pr["number"]
             key = f"dep-check-pr-{num}"
@@ -104,6 +106,7 @@ def ensure_cards(prs, *, _kb=None):
                 created_by="hscc-dep-watcher",
                 session_id="hscc_dep_watcher",
                 idempotency_key=key,
+                board=BOARD,
             )
             conn.execute(
                 "UPDATE tasks SET workspace_kind='worktree', workspace_path=? "
