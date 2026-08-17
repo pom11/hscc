@@ -18,7 +18,7 @@ class _FakeKB:
         self.updates = []
         self._n = 0
 
-    def connect_closing(self):
+    def connect_closing(self, *, board=None):
         kb = self
 
         class _Ctx:
@@ -30,7 +30,7 @@ class _FakeKB:
         return _Ctx()
 
     def create_task(self, conn, *, title, body, assignee, created_by,
-                    session_id, idempotency_key):
+                    session_id, idempotency_key, board=None):
         if idempotency_key in self.tasks:
             return self.tasks[idempotency_key]
         self._n += 1
