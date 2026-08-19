@@ -2,6 +2,18 @@
 
 # Flightdeck
 
+> **Where does this run now?** As of the flightdeck→hscc port, flightdeck is
+> no longer installed and used as a standalone `flightdeck` console script.
+> It lives inside the hscc repo under `hscc-project/` and is reached through
+> the hscc CLI as **`hscc project …`**. Every command below still works —
+> just type `hscc project <command>` instead of `flightdeck <command>`
+> (e.g. `hscc project standup`, `hscc project review <card>`). See
+> [docs/COMMANDS.md](docs/COMMANDS.md) for the full reference and
+> [`../docs/PROJECT-COMMANDS.md`](../docs/PROJECT-COMMANDS.md) for
+> the `flightdeck X` ↔ `hscc project X` mapping and the naming-collision
+> notes. The rest of this README remains accurate reference material for the
+> underlying commands and configuration.
+
 Flightdeck is a terminal tool that answers the one question you have every
 morning when a fleet of AI agents works across many projects: **what actually
 needs me right now?** Instead of opening every project's kanban board, git
