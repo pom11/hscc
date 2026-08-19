@@ -1,0 +1,58 @@
+# Flightdeck project registry -- example / seed copy.
+#
+# This file is a reference you can copy to ~/.flightdeck/registry.yaml
+# (`cp docs/registry.example.yaml ~/.flightdeck/registry.yaml`). It is NOT
+# written to ~/.flightdeck by anything in this repo; seeding the live registry
+# is an operator action.
+#
+# One entry per project. `repo` is the only required field -- every other
+# field is optional and, when absent, means "unknown" (never an error, and
+# never a reason to drop the project from output).
+#
+# Fields:
+#   name:       project key
+#   repo:       local git checkout path (REQUIRED; `~` is expanded)
+#   board:      Hermes kanban board slug
+#   topic:      Telegram topic id
+#   topic_name: expected Telegram topic NAME for the audit. When absent, the
+#               audit falls back to the project `name`. Set it when the topic's
+#               human title differs from the project key (e.g. topic "Project
+#               Alpha cluster" under project key `project-a`).
+#   verify:     shell command that proves the project works (optional)
+#   roadmap:    ROADMAP.md path within the repo (optional)
+#   install_cmd: opaque install command run by `release --apply` AFTER the
+#               release is cut, so the installed artifact actually carries the
+#               released version. Absent means the release can never be
+#               verified and is reported UNVERIFIED (optional)
+#   installed_version_cmd: shell command printing the deployed version (optional)
+#   version_file:          file in the repo holding the source version (default VERSION)
+#   deployed_at_cmd:       shell command printing the unix timestamp of last deploy (optional)
+#
+# Placeholder names and paths below -- replace with your own project keys,
+# checkout paths, board slugs, and Telegram topic ids.
+
+projects:
+  - name: project-a
+    repo: ~/dev/project-a
+    board: project-a
+    topic: 120
+    topic_name: Project Alpha cluster
+  - name: project-b
+    repo: ~/dev/project-b
+    topic: 505
+  - name: project-c
+    repo: ~/dev/project-c
+    topic: 221
+    topic_name: app.project-c.example
+  - name: project-d
+    repo: ~/dev/project-d
+    topic: 2
+  - name: project-e
+    repo: ~/dev/project-e
+    topic: 7074
+  - name: project-f
+    repo: ~/dev/project-f
+    topic: 7253
+  - name: project-g
+    repo: ~/dev/project-g
+    topic: 6366
