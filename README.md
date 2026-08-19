@@ -88,7 +88,20 @@ hscc autoscale                            # scaling advice from current queue de
 hscc template list                        # see shipped cluster layouts (1-8 nodes)
 hscc template preview 4node-coding        # dry-run against the live cluster
 hscc template apply 4node-coding --confirm  # apply the layout
+hscc project standup                      # fleet-wide project/kanban digest
+hscc project review <card>                # review + merge a card
+hscc project --help                       # full flightdeck command list under the project verb
 ```
+
+`hscc project …` is the project/kanban orchestration domain (formerly the
+standalone `flightdeck` tool, physically relocated into `hscc-project/` and
+reached through the `project` verb group). Use `hscc project standup` for your
+daily fleet digest (NEEDS YOU / FAILING / STALE / RUNNING / DRIFT), `hscc
+project review <card>` to review and merge a finished card, and `hscc project
+--help` for the full flightdeck command surface. The complete reference lives
+in [`hscc-project/docs/COMMANDS.md`](hscc-project/docs/COMMANDS.md), and the
+`flightdeck X` ↔ `hscc project X` mapping plus the naming-collision notes are
+in [`docs/PROJECT-COMMANDS.md`](docs/PROJECT-COMMANDS.md).
 
 `hscc --help` shows the full grouped command reference with examples. The orchestrator agent also has parity — it can call these same capabilities (verify, stats, throughput, autoscale, templates) directly as tools, not just the operator CLI.
 
