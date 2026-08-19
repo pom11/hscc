@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flightdeck"
+version = "0.6.0"
+description = "Mission control for a multi-project agent fleet."
+readme = "README.md"
+# setuptools 70.x predates PEP 639 string licenses; the table form is
+# accepted by both old and new builds.
+license = { text = "MIT" }
+authors = [
+    {name = "pom11"},
+]
+keywords = ["kanban", "deploy", "flightdeck", "hermes", "devops"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Topic :: Software Development",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "PyYAML>=6.0",
+    # `mcp` (the Model Context Protocol client SDK) is required ONLY for the
+    # telegram transport in core/telegram.py. Flightdeck talks to the existing
+    # single-writer Telegram MCP daemon (~/.hermes-tg/mcp_server.py) over HTTP;
+    # it must NOT open its own Telethon session (a second client on the same
+    # session file raises "database is locked"). `mcp` is the standard client
+    # for that daemon and is already present in the environment as the MCP
+    # server's own dependency. It is imported lazily inside _default_client(),
+    # so the test suite (which stubs _client) never loads it.
+    "mcp>=1.0",
+]
+
+[project.optional-dependencies]
+# Test-only deps. CI installs `.[test]`; the runtime install stays lean.
+# setuptools/build are needed by the packaging tests: 3.12+ no longer
+# bundles setuptools, so the import fails without it. tomli backports
+# tomllib (stdlib only from 3.11) for the 3.10 matrix entry.
+test = ["pytest>=7", "setuptools>=61", "build>=1", "tomli>=2; python_version<'3.11'", "exceptiongroup; python_version<'3.11'"]
+
+[project.urls]
+Homepage = "https://github.com/pom11/flightdeck"
+Repository = "https://github.com/pom11/flightdeck"
+
+[project.scripts]
+flightdeck = "flightdeck.cli:main"
+flightdeck-mcp = "flightdeck.mcp_server:main"
+
+[tool.setuptools.packages.find]
+include = ["flightdeck*"]
+
+# The shipped template set (flightdeck/templates/*.md) is package data so the
+# `ask` command can seed the user-editable store from an installed package, not
+# just a source checkout.
+[tool.setuptools.package-data]
+flightdeck = ["templates/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
