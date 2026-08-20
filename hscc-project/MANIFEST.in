@@ -1,0 +1,4 @@
+# Include the banner referenced by README.md in source distributions so the
+# README renders correctly and builds are reproducible from the sdist.
+include docs/assets/banner.png
+include LICENSE
