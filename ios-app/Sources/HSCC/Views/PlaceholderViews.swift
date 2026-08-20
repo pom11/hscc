@@ -1,34 +1,13 @@
 import SwiftUI
 
-/// Placeholder tabs that Phase B3 / B4 will fill with real feature views.
+/// Placeholder tabs that Phase B4 will fill with real feature views.
 ///
-/// B3 — kanban views.
 /// B4 — actions (confirm-gated dispatch/merge/stop).
 /// B5 — Siri App Intents + spoken summaries.
 ///
 /// (Phase B2 moved the cluster + fleet views into `ClusterView.swift` /
-/// `FleetView.swift`, so there is no cluster placeholder here anymore.)
-
-// MARK: - Kanban (B3)
-
-struct KanbanPlaceholderView: View {
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Label("Coming soon", systemImage: "hammer")
-                        .font(.headline)
-                    Text("Kanban cards, standup, and review queues arrive in Phase B3.")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding()
-            }
-            .navigationTitle("Kanban")
-        }
-    }
-}
+/// `FleetView.swift`, and Phase B3 moved kanban into `KanbanView.swift`, so
+/// the only placeholder left here is the actions surface.)
 
 // MARK: - Actions (B4) — not yet a tab; reserved for the actions card.
 

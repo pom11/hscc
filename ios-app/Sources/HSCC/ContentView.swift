@@ -22,8 +22,8 @@ struct ContentView: View {
                 .tabItem { Label("Cluster", systemImage: "bolt") }
                 .tag(Tab.cluster)
 
-            // B3 — kanban views (placeholder for now).
-            KanbanPlaceholderView()
+            // B3 — kanban views (standup, cards, review, qa — all read-only).
+            KanbanView()
                 .safeAreaInset(edge: .top) { connectionBanner }
                 .tabItem { Label("Kanban", systemImage: "list.bullet") }
                 .tag(Tab.kanban)
