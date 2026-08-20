@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.8.4] — 2026-08-20 — Pre-release audit: three silent-success / caps bugs fixed
+
+A full correctness + business-logic audit of the core plugins and the
+bootstrap, run before this release. **No release-blocking (BLOCKER/MAJOR)
+issue was found** — the audited surface is clean, and the historical
+bootstrap footguns (kanban-caps reversion, venv `rm -rf`, patch application)
+were all verified genuinely fixed with tests. Three real MINOR bugs surfaced
+by the audit are fixed here (each with a regression test); several
+false-positive / by-design findings were traced and discarded, and a few
+genuinely-marginal findings were deliberately deferred (see below).
+
+### Fixed
+- **bootstrap: corrupt default trigger rules no longer report success.**
+  `install_triggers.py` returned `{ok: True, total: 0}` when
+  `triggers.default.json` was *present but unparseable* — silently leaving the
+  fleet with zero alert rules behind a green checkmark. A genuinely-absent
+  defaults file stays a soft OK (unchanged, intentional), but a corrupt one
+  now returns `ok: False` + an error, so bootstrap warns instead of claiming
+  success.
+- **bootstrap: an int-like concurrency cap is no longer clobbered.**
+  `enable_plugins.py`'s cap-preservation guard only accepted
+  `isinstance(cur, int)`, so an operator cap stored as `"6"` or `6.0` was
+  silently raised back to the 30/10 default — the exact concurrency-reversion
+  footgun the guard exists to prevent. It now accepts int-like values
+  (int / whole-float / digit-string) via a new `_is_int_like` helper.
+- **template apply: a non-deployed fleet no longer exits 0.**
+  `hscc template apply <bad> --confirm` that was BLOCKED by pre-flight
+  validation — or that only PARTIALLY applied — returned `{success: False}`
+  with no `error` key, so it exited 0 and a script chaining `apply && proceed`
+  treated a non-deployed fleet as a successful apply. `_handle_template` now
+  exits non-zero whenever an apply result has `success is False` (generalising
+  the existing `validate` special-case).
+
+### Notes
+- **Deferred (known-minor, non-blocking):** autoscale advice feeds
+  `nodes_ok` (reachable endpoints, which includes the orchestrator) as
+  `current_workers` — advisory-only, nothing scales off it yet; a
+  failed auto-reassign in `escalate_watcher` isn't paged/retried — but that
+  path is only reached via the dry-run `hscc escalate`, not a live daemon
+  loop; and `execlib`'s `startswith("sparkrun")` guard is loose but not
+  exploitable (argv list, no `shell=True`). These are tracked for a later
+  release, not fixed here.
+- README refreshed with a plain-language **"In plain words (ELI5)"** section,
+  and the version badge corrected (was stale at 1.3.0).
+
 ## [1.8.3] — 2026-08-15 — DGX check reads structured cluster status, not text
 
 ### Fixed
