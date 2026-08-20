@@ -139,6 +139,32 @@ def test_missing_defaults_file_returns_empty(tmp_path):
     assert result["total"] == 0
 
 
+def test_absent_defaults_is_soft_ok(tmp_path):
+    """A genuinely-absent defaults file is a soft OK (nothing to install)."""
+    target = str(tmp_path / "triggers.json")
+    result = IT.install_triggers(
+        triggers_path=target, defaults_path="/nonexistent/triggers.default.json"
+    )
+    assert result["ok"] is True
+
+
+def test_corrupt_defaults_file_reports_failure(tmp_path):
+    """A PRESENT-but-corrupt defaults file must NOT report success with zero
+    rules — that would silently leave the fleet with no alert rules behind a
+    green checkmark. It must fail loud (ok=False + error) so bootstrap warns."""
+    target = str(tmp_path / "triggers.json")
+    corrupt_defaults = tmp_path / "triggers.default.json"
+    corrupt_defaults.write_text("{ this is not valid json", encoding="utf-8")
+
+    result = IT.install_triggers(
+        triggers_path=target, defaults_path=str(corrupt_defaults)
+    )
+
+    assert result["ok"] is False
+    assert "error" in result
+    assert result["total"] == 0
+
+
 # ── Corrupt existing triggers.json ────────────────────────────────────
 
 
