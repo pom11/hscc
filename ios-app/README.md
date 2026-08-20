@@ -8,16 +8,18 @@ the Tailscale tailnet.
 distributed, and is deliberately NOT App Store–ready.**
 
 > ⚠️ **STATUS: UNBUILT, UNTESTED.** No one has compiled or run this app yet.
-> This is Phase **B3** — an app skeleton, an API client, a Settings screen,
+> This is Phase **B5** — an app skeleton, an API client, a Settings screen,
 > read-only **cluster + fleet + kanban/project views** (health / hosts /
 > workloads / stats / throughput / streams / autoscale / cards / standup /
-> review + QA queues). Not yet landed: **B4** (confirm-gated actions) and
-> **B5** (Siri App Intents). The first `xcodegen` / Xcode build is expected to
-> need small fixes. All code has been syntax-checked (`swiftc -parse`) but
-> **not built, run, or installed on a device**. Do not assume it works until a
-> real build has been done.
+> review + QA queues), **B4** confirm-gated actions (dispatch / merge /
+> template-apply / stop), and **B5** Siri App Intents + spoken summaries.
+> The first `xcodegen` / Xcode build is expected to need small fixes. All code
+> has been syntax-checked (`swiftc -parse`) but **not built, run, or installed
+> on a device**. Siri App Intents are unverified until a real signed build
+> exists on the owner's device. Do not assume it works until a real build has
+> been done.
 
-## What's here (Phase B3)
+## What's here (Phase B5)
 
 - `Sources/HSCC/` — Swift sources (SwiftUI, iOS 17+).
   - `HSCCApp.swift` — app entry point.
@@ -49,6 +51,13 @@ distributed, and is deliberately NOT App Store–ready.**
     `Views/ReviewQueueView.swift`, `Views/QAQueueView.swift` — the individual
     kanban read panels (standup, cards, review queue, QA queue), each with
     loading / error / empty states.
+  - `Intents/` — the **B5** Siri App Intents surface (in-car, hands-free):
+    `ClusterStatusIntent` + `ReviewQueueIntent` (speak each endpoint's `speak`
+    one-liner), `CannedCard` (an `AppEnum` of pre-defined cards) +
+    `DispatchCannedCardIntent` (voice-dispatches a KNOWN card via B4's
+    confirm-gated client, never free-form dictation), `AppShortcuts`
+    (the `AppShortcutsProvider` with natural phrases), and `IntentClient`
+    (builds the client from the same stored settings the app uses).
 - `project.yml` — XcodeGen spec (all sources listed explicitly).
 
 No third-party dependencies. Sideload-friendly.
@@ -258,6 +267,7 @@ No tailnet IP, token, or API key is hardcoded anywhere in this repo.
 ## Scope of later phases
 
 - ~~**B3** — kanban views (cards, standup, review/QA queues).~~ ✅ landed.
-- **B4** — actions (confirm-gated dispatch / merge / stop) — *pending*.
-- **B5** — Siri App Intents + spoken `speak` summaries (in-car, via Siri —
-  deliberately NOT a CarPlay text/keyboard surface) — *pending*.
+- ~~**B4** — actions (confirm-gated dispatch / merge / stop).~~ ✅ landed.
+- ~~**B5** — Siri App Intents + spoken `speak` summaries (in-car, via Siri —
+  deliberately NOT a CarPlay text/keyboard surface).~~ ✅ landed (unverified —
+  needs a real signed build on a device).

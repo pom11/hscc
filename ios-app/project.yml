@@ -57,6 +57,11 @@ targets:
       - path: Sources/HSCC/Views/ReviewQueueView.swift
       - path: Sources/HSCC/Views/QAQueueView.swift
       - path: Sources/HSCC/Views/MutationSupport.swift
+      - path: Sources/HSCC/Intents/IntentClient.swift
+      - path: Sources/HSCC/Intents/ClusterStatusIntent.swift
+      - path: Sources/HSCC/Intents/ReviewQueueIntent.swift
+      - path: Sources/HSCC/Intents/CannedCard.swift
+      - path: Sources/HSCC/Intents/AppShortcuts.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios
