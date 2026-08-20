@@ -152,6 +152,35 @@ struct HSCCClient {
         try await read("/v1/cluster/info")
     }
 
+    /// GET /v1/cards/{card_id} — one card's full detail (B3).
+    func cardDetail(_ cardID: String) async throws -> CardDetailResponse {
+        try await get("/v1/cards/\(cardID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? cardID)",
+                      as: CardDetailResponse.self)
+    }
+
+    /// GET /v1/standup — the daily digest (B3).
+    func standup() async throws -> StandupResponse {
+        try await get("/v1/standup", as: StandupResponse.self)
+    }
+
+    /// GET /v1/review/queue — cards genuinely awaiting review (B3).
+    func reviewQueue() async throws -> ReviewQueueResponse {
+        try await get("/v1/review/queue", as: ReviewQueueResponse.self)
+    }
+
+    /// GET /v1/review/{card_id} — DRY-RUN review facts, read-only (B3).
+    /// This endpoint never merges or closes; only the confirm-gated POST in B4
+    /// can mutate, and no view here calls it.
+    func reviewDetail(_ cardID: String) async throws -> ReviewDetailResponse {
+        try await get("/v1/review/\(cardID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? cardID)",
+                      as: ReviewDetailResponse.self)
+    }
+
+    /// GET /v1/qa/queue — the pre-merge QA queue + manual-QA store (B3).
+    func qaQueue() async throws -> QAQueueResponse {
+        try await get("/v1/qa/queue", as: QAQueueResponse.self)
+    }
+
     /// GET /v1/health — fleet smoke test (B2).
     func health() async throws -> HealthResponse {
         try await get("/v1/health", as: HealthResponse.self)

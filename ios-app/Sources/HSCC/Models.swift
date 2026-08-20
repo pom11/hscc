@@ -197,11 +197,151 @@ struct CardDetailResponse: Decodable, Speakable {
     let speak: String
 }
 
-/// GET /v1/standup — the daily digest.
+/// ONE standup digest row. Sections vary in shape (standup.py:960 `_render_row`):
+///
+/// * Card sections (needs_you / stale / running) carry ``id`` + ``title``;
+///   needs_you/failing add ``project``; stale adds ``kind`` (starved | stale)
+///   and ``age_seconds``.
+/// * Project sections (failing / drift / unreadable) carry ``project`` and a
+///   status-ish key (``status`` | ``drift`` | ``reason``).
+///
+/// We read only the safe, common keys and let the rest be ignored, so one
+/// generic row serves every section without guessing at a unifying contract.
+struct StandupRow: Decodable, Identifiable {
+    /// The card id from the API (a project-style row may have none).
+    let rawID: String?
+    let title: String?
+    let project: String?
+    let kind: String?
+    let status: String?
+    let reason: String?
+    let drift: String?
+    let age_seconds: Int?
+    let board: String?
+
+    enum CodingKeys: String, CodingKey {
+        case rawID = "id"
+        case title, project, kind, status, reason, drift, age_seconds, board
+    }
+
+    /// Row identity for List iteration. Cards have a real id; project rows
+    /// fall back to their project name so the list still works.
+    var id: String { rawID ?? project ?? title ?? UUID().uuidString }
+
+    var displayTitle: String { title ?? project ?? "(untitled)" }
+    var displayKind: String { kind ?? status ?? drift ?? reason ?? "" }
+}
+
+/// GET /v1/standup — the daily digest (what needs attention).
 struct StandupResponse: Decodable, Speakable {
-    let needs_you: [Card]?
-    let running: [Card]?
-    let failing: [Card]?
+    let needs_you: [StandupRow]?
+    let failing: [StandupRow]?
+    let stale: [StandupRow]?
+    let running: [StandupRow]?
+    let drift: [StandupRow]?
+    let unreadable: [StandupRow]?
+    let speak: String
+}
+
+/// GET /v1/review/queue — one row awaiting review (newest first).
+/// ``age_seconds`` may be null when the card has no created_at (sorted last).
+struct ReviewQueueRow: Decodable, Identifiable {
+    let project: String?
+    let card_id: String?
+    let title: String?
+    let branch: String?
+    let age_seconds: Int?
+
+    var id: String { card_id ?? title ?? project ?? UUID().uuidString }
+    var displayTitle: String { title ?? card_id ?? "(untitled)" }
+}
+
+/// GET /v1/review/queue.
+struct ReviewQueueResponse: Decodable, Speakable {
+    let queue: [ReviewQueueRow]
+    let count: Int
+    let speak: String
+}
+
+/// GET /v1/review/{card_id} — DRY-RUN review facts. Read-only by construction:
+/// the endpoint never merges or closes. ``conflicts`` is null when merge status
+/// is unknown (0 = clean). ``landed`` reflects whether the branch is already an
+/// ancestor of the base. ``verify`` is the card's VERIFY: line (may be empty);
+/// ``verify_present`` tells whether one was found.
+struct ReviewDetailResponse: Decodable, Speakable {
+    let id: String?
+    let title: String?
+    let board: String?
+    let project: String?
+    let repo: String?
+    let branch: String?
+    let base: String?
+    let subject: String?
+    let files_changed: Int?
+    let insertions: Int?
+    let deletions: Int?
+    let conflicts: Int?
+    let landed: Bool?
+    let verify_present: Bool?
+    let verify: String?
+    let dependents: [String]?
+    let speak: String
+
+    var displayTitle: String { title ?? subject ?? id ?? "(untitled)" }
+
+    /// A human, server-derived conflict verdict already computed by the API.
+    var mergeClause: String {
+        if let landed, landed { return "Already merged into \(base ?? "main")." }
+        if let conflicts {
+            return conflicts == 0 ? "Merges cleanly into \(base ?? "main")."
+                                  : "\(conflicts) conflict\(conflicts == 1 ? "" : "s") to resolve."
+        }
+        return "Merge status unknown."
+    }
+}
+
+/// GET /v1/qa/queue — one pre-merge QA row.
+struct QARow: Decodable, Identifiable {
+    let project: String?
+    let card_id: String?
+    let title: String?
+    let status: String?
+    let branch: String?
+    let unverifiable: Bool?
+    let verify: String?
+    let files_changed: Int?
+    let verify_configured: Bool?
+    let verify_run: Bool?
+    let verify_passed: Bool?
+    let created_at: Double?
+
+    var id: String { card_id ?? title ?? project ?? UUID().uuidString }
+    var displayTitle: String { title ?? card_id ?? "(untitled)" }
+}
+
+/// GET /v1/qa/queue — one manual-QA store entry.
+struct ManualQARow: Decodable, Identifiable {
+    /// The API `id` field (may be absent for some entries).
+    let rawID: String?
+    let project: String?
+    let description: String?
+    let card_id: String?
+    let added_at: Double?
+    let checked: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case rawID = "id"
+        case project, description, card_id, added_at, checked
+    }
+
+    var id: String { rawID ?? card_id ?? description ?? UUID().uuidString }
+    var displayDescription: String { description ?? card_id ?? "(untitled)" }
+}
+
+/// GET /v1/qa/queue.
+struct QAQueueResponse: Decodable, Speakable {
+    let queue: [QARow]
+    let manual_qa: [ManualQARow]?
     let speak: String
 }
 
