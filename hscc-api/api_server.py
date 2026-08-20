@@ -543,3 +543,8 @@ _load_cluster_routes()
 # (its module-level `ROUTES.append(...)` calls run at import). Import must come
 # after ROUTES is defined above.
 import routes_project  # noqa: E402,F401  (registers /v1 project+kanban read routes)
+
+# A4: the mutating, confirm-gated POST endpoints. Module-level ROUTES.append()
+# calls register them at import. Imported last so ROUTES/ApiError exist first.
+import routes_actions  # noqa: E402,F401  (registers /v1 mutating POST routes)
+
