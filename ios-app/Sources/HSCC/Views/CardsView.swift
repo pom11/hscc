@@ -11,6 +11,7 @@ struct CardsView: View {
     @State private var cards: CardsResponse?
     @State private var loadError: HSCCError?
     @State private var isLoading = false
+    @State private var showDispatch = false
 
     var body: some View {
         NavigationStack {
@@ -33,6 +34,16 @@ struct CardsView: View {
                     }
                     .disabled(isLoading)
                 }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showDispatch = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                }
+            }
+            .sheet(isPresented: $showDispatch) {
+                DispatchCardView(settings: settings)
             }
             .task { await load() }
         }

@@ -410,3 +410,57 @@ private struct DynamicCodingKey: CodingKey {
     init?(stringValue: String) { self.stringValue = stringValue }
     init?(intValue: Int) { self.intValue = intValue; self.stringValue = String(intValue) }
 }
+
+// ---------------------------------------------------------------------------
+// B4 — mutating (confirm-gated) response models.
+//
+// These match the ACTUAL response shapes in the mutating API:
+//   hscc-api/routes_actions.py  (POST /v1/cards, /v1/review/{id}/merge,
+//                                /v1/template/apply, /v1/cluster/stop)
+//
+// Every one of these endpoints requires `"confirm": true` in the request body
+// and returns 409 without it. The client ALWAYS sends `confirm: true`; the
+// view is responsible for gating the call behind an explicit confirm UI.
+// ---------------------------------------------------------------------------
+
+/// POST /v1/cards — the created card's id + a human message.
+struct DispatchCardResponse: Decodable {
+    let id: String?
+    let message: String?
+}
+
+/// POST /v1/review/{card_id}/merge — merge + close result.
+///
+/// `merged` reflects whether the branch actually landed; `card_closed` whether
+/// the card was archived. On a failed merge the API returns a NON-2xx (502) and
+/// the client throws — this struct is only ever decoded from a 2xx, so a
+/// failure can never be rendered as a merged success. `warning` is set when the
+/// merge landed but the card could not be archived (still a 2xx — callers show
+/// the warning rather than claiming the card is closed).
+struct MergeCardResponse: Decodable {
+    let message: String?
+    let merged: Bool?
+    let card_closed: Bool?
+    let warning: String?
+}
+
+/// POST /v1/template/apply — template application result.
+///
+/// The API returns `{ success: true, ... }` on a clean apply and a non-2xx (or
+/// `success: false`) for a blocked/partial apply, which the client throws. This
+/// struct is only decoded from a 2xx success. `message` is the human summary.
+struct TemplateApplyResponse: Decodable {
+    let success: Bool?
+    let message: String?
+}
+
+/// POST /v1/cluster/stop — workload stop result.
+///
+/// The API returns `{ message, container_id, success: true, ... }` on a clean
+/// stop and a non-2xx for a failure, which the client throws. This struct is
+/// only decoded from a 2xx success.
+struct StopClusterResponse: Decodable {
+    let message: String?
+    let container_id: String?
+    let success: Bool?
+}
