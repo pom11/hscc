@@ -14,10 +14,16 @@ LOG_FILE = os.path.expanduser("~/.hscc/daemon.log")
 STATE_DIR = os.path.expanduser("~/.hscc/state")
 
 
-def get_pid():
-    """Read PID from file, return None if not running."""
+def get_pid(pid_file=None):
+    """Read PID from file, return None if not running.
+
+    ``pid_file`` defaults to the daemon's PID_FILE. Pass an explicit path to
+    reuse the same read/verify logic for a different service (e.g. the API
+    server's ``~/.hscc/api.pid``) — one mechanism, not a parallel one.
+    """
+    pid_file = pid_file or PID_FILE
     try:
-        with open(PID_FILE) as f:
+        with open(pid_file) as f:
             pid = int(f.read().strip())
         try:
             os.kill(pid, 0)
@@ -28,16 +34,16 @@ def get_pid():
         return None
 
 
-def save_pid():
+def save_pid(pid_file=None):
     """Write current PID to file."""
-    with open(PID_FILE, "w") as f:
+    with open(pid_file or PID_FILE, "w") as f:
         f.write(str(os.getpid()))
 
 
-def write_stopped():
+def write_stopped(pid_file=None):
     """Remove PID file."""
     try:
-        os.remove(PID_FILE)
+        os.remove(pid_file or PID_FILE)
     except FileNotFoundError:
         pass
 
@@ -137,17 +143,24 @@ def prune_dead_files(hscc_dir=None):
     return {"removed_dead": removed_dead, "pruned_bak": pruned_bak}
 
 
-def log(msg, level="INFO"):
-    """Write a timestamped log line to the daemon log file."""
+def log(msg, level="INFO", log_file=None, pid_file=None):
+    """Write a timestamped log line to the daemon log file.
+
+    ``log_file`` / ``pid_file`` default to the daemon's LOG_FILE / PID_FILE.
+    Pass explicit paths to reuse the same timestamped format for a different
+    service's log (~/.hscc/api.log) — one log convention, not a parallel one.
+    """
+    log_file = log_file or LOG_FILE
+    pid_file = pid_file or PID_FILE
     ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
     line = f"[{ts}] [{level:>5s}] {msg}"
     try:
-        with open(LOG_FILE, "a") as f:
+        with open(log_file, "a") as f:
             f.write(line + "\n")
     except IOError:
         pass
     # Also print if daemon is running in foreground mode
-    if not os.path.exists(PID_FILE):
+    if not os.path.exists(pid_file):
         print(line)
 
 
