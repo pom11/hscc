@@ -150,3 +150,11 @@ def test_default_payload_ships_version_marker():
     """The runtime version marker must be shipped so ~/.hermes/plugins/VERSION
     tracks releases instead of going stale."""
     assert "VERSION" in install_payload.DEFAULT_PAYLOAD
+
+
+def test_default_payload_ships_hscc_project():
+    """hscc-project (the relocated flightdeck) must deploy alongside hscc_daemon,
+    which imports it as a sibling for the `hscc project ...` verb — otherwise the
+    installed CLI's project commands break with 'package not found'."""
+    assert "hscc-project" in install_payload.DEFAULT_PAYLOAD
+    assert "hscc_daemon" in install_payload.DEFAULT_PAYLOAD
