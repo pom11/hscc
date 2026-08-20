@@ -118,6 +118,10 @@ def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None):
 DEFAULT_PAYLOAD = [
     "hscc-cluster", "hscc-commands", "hscc-roles", "hscc-skills",
     "hscc_daemon", "hscc-bootstrap", "sparkrun-hermes",
+    # hscc-project is the relocated flightdeck; `hscc project ...` (in
+    # hscc_daemon/hscc.py:_handle_project) imports it as a SIBLING of
+    # hscc_daemon, so it must deploy alongside it or the verb breaks.
+    "hscc-project",
     "memori", "memori_byodb",
     "install", "docs", "assets", "configs",
     "README.md", "CHANGELOG.md", "LICENSE", "requirements.txt", "VERSION",
