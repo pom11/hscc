@@ -468,13 +468,25 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
         return self.rfile.read(length)
 
     def _dispatch(self, method, path, query, body):
-        """Match (method,path) against ROUTES and call the handler."""
+        """Match (method,path) against ROUTES and call the handler.
+
+        Named path-parameter groups (``(?P<name>...)``) from the matched route
+        are merged into the ``query`` dict handed to the handler, so endpoints
+        with ``{card_id}``-style path segments receive them like any other
+        query/filter parameter. Existing query keys are preserved; a matched
+        group overrides only its own name (path params are more specific than
+        the query string).
+        """
         for route_method, pattern, handler in ROUTES:
             if route_method != method:
                 continue
             m = pattern.match(path)
             if m:
-                return handler(self.server, self.ctx, query, body)
+                merged = dict(query)
+                merged.update(
+                    {k: v for k, v in m.groupdict().items() if v is not None}
+                )
+                return handler(self.server, self.ctx, merged, body)
         # Path matched nothing. Unknown/unsupported -> method_not_allowed if the
         # path exists for another method, else not_found.
         for route_method, pattern, _handler in ROUTES:
@@ -526,3 +538,8 @@ def create_server(
 # ROUTES; imported last so ROUTES/ApiError exist before it runs.
 from routes_cluster import load as _load_cluster_routes  # noqa: E402
 _load_cluster_routes()
+
+# A3: registering this module wires the project/kanban READ routes into ROUTES
+# (its module-level `ROUTES.append(...)` calls run at import). Import must come
+# after ROUTES is defined above.
+import routes_project  # noqa: E402,F401  (registers /v1 project+kanban read routes)
