@@ -3,9 +3,9 @@ import SwiftUI
 /// A generic async-load container for a single resource fetch.
 ///
 /// Standard lifecycle: `idle → loading → loaded(Value) | failed(message)`.
-/// On refresh we re-enter `loading`; if a previous value is cached we keep it
-/// on screen while refreshing (see `keepValueWhileRefreshing` view modifier in
-/// `ClusterView.swift`).
+/// On refresh we re-enter `loading` and show a spinner. (Keeping the stale
+/// value on screen during a refresh is not implemented — an earlier comment
+/// here referenced a `keepValueWhileRefreshing` modifier that does not exist.)
 ///
 /// The `failed` message is ALWAYS a human-readable string derived from
 /// `HSCCError.localizedDescription` (or a stable placeholder) — never a raw
