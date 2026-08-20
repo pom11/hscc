@@ -134,6 +134,28 @@ DASHBOARD_PUBLIC_URL = os.environ.get(
     f"http://{GATEWAY_HOST}:3000")
 
 
+def _is_int_like(v) -> bool:
+    """True if ``v`` is a whole number stored as int, float (``6.0``), or a
+    digit string (``"6"``).
+
+    Used to decide whether a concurrency cap is an operator-set value worth
+    preserving. Purely additive over ``isinstance(v, int)`` — everything that
+    was int before still qualifies, plus whole-valued floats and digit
+    strings — so a cap stored as ``"6"`` or ``6.0`` is no longer silently
+    clobbered back to the default.
+    """
+    if isinstance(v, int):  # includes bool, matching the prior isinstance check
+        return True
+    if isinstance(v, float):
+        try:
+            return v == int(v)
+        except (ValueError, OverflowError):  # nan / inf
+            return False
+    if isinstance(v, str):
+        return v.strip().isdigit()
+    return False
+
+
 def _ensure_plugins_enabled(cfg, plugins):
     """Append missing plugin names to plugins.enabled. Returns names added.
 
@@ -201,8 +223,11 @@ def _ensure_kanban_routing(cfg):
                       ("max_in_progress_per_profile", MAX_IN_PROGRESS_PER_PROFILE)):
         cur = k.get(key)
         # Mirror the failure_limit pattern: a lower operator value is
-        # deliberate — STRICTER concurrency. Only fill when absent / not an int.
-        if not isinstance(cur, int):
+        # deliberate — STRICTER concurrency. Only fill when absent / not a
+        # number. Accept int-like values (a cap stored as "6" or 6.0 is still
+        # an operator-set cap) so we never clobber a deliberate low cap back to
+        # the default — the exact concurrency-reversion footgun this guards.
+        if not _is_int_like(cur):
             k[key] = want
             changed.append(key)
     # WS4: auto_review pairing — only fill when absent (operator override kept).
