@@ -246,6 +246,43 @@ class TestTemplateRouting:
         assert self._run(["template", "apply", "X", "--confirm"], monkeypatch) == [["apply", "X", "--confirm"]]
 
 
+class TestTemplateApplyExitCode:
+    """`hscc template apply` must exit non-zero when the fleet was NOT deployed
+    (blocked by pre-flight, or only partially applied) — a script chaining
+    `apply && proceed` must not treat a non-deployment as success."""
+
+    def _exit_code(self, result, args, monkeypatch):
+        import types
+        fake = types.ModuleType("cluster_template_cli")
+        fake.cmd_cluster_template = lambda a: result
+        monkeypatch.setitem(sys.modules, "cluster_template_cli", fake)
+        from hscc_daemon import hscc as hscc_mod
+        monkeypatch.setattr(sys, "argv", ["hscc", *args])
+        out = io.StringIO()
+        code = None
+        try:
+            with redirect_stdout(out):
+                hscc_mod.main()
+        except SystemExit as e:
+            code = e.code
+        return code
+
+    def test_blocked_apply_exits_nonzero(self, monkeypatch):
+        result = {"status": "blocked", "success": False, "errors": ["bad layout"]}
+        assert self._exit_code(result, ["template", "apply", "X", "--confirm"], monkeypatch) == 1
+
+    def test_partial_apply_failure_exits_nonzero(self, monkeypatch):
+        # steps had a warn/error -> success flipped False, but NO "error" key,
+        # so _emit alone would have returned 0.
+        result = {"template": "X", "success": False,
+                  "steps": [{"step": "serve", "status": "error"}]}
+        assert self._exit_code(result, ["template", "apply", "X", "--confirm"], monkeypatch) == 1
+
+    def test_successful_apply_exits_zero(self, monkeypatch):
+        result = {"template": "X", "success": True, "steps": []}
+        assert self._exit_code(result, ["template", "apply", "X", "--confirm"], monkeypatch) == 0
+
+
 class TestDaemonDispatchPreserved:
     """Existing daemon commands still route to cmd_* functions."""
 
