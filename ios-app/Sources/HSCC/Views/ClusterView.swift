@@ -19,6 +19,8 @@ struct ClusterView: View {
     @State private var status = LoadState<ClusterStatusResponse>.idle
     @State private var hosts = LoadState<ClusterHostsResponse>.idle
     @State private var info = LoadState<ReadResponse>.idle
+    @State private var templateName = ""
+    @State private var templateForceRecreate = false
 
     var body: some View {
         NavigationStack {
@@ -28,6 +30,7 @@ struct ClusterView: View {
                         statusSection
                         workloadsSection
                         infoSection
+                        templateSection
                         hostsSection
                         fleetLink(client: client)
                     }
@@ -188,8 +191,28 @@ struct ClusterView: View {
                         .foregroundColor(.secondary)
                 }
             }
+            if let cid = w.container_id, cid != "?" {
+                stopButton(for: cid)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The confirm-gated Stop button for a workload. Never fires without the
+    /// user's explicit confirmation, and never claims a failed stop succeeded.
+    private func stopButton(for containerID: String) -> some View {
+        MutationButton(
+            title: "Stop",
+            systemImage: "stop.circle",
+            destructive: true,
+            prompt: "Stop container \\(containerID)?",
+            run: {
+                let result = try await client!.stopCluster(containerID: containerID)
+                return result.message ?? "Stopped container \\(containerID)."
+            }
+        )
+        .font(.caption)
+        .buttonStyle(.borderless)
     }
 
     // MARK: - Hosts
@@ -242,6 +265,52 @@ struct ClusterView: View {
         default:
             EmptyView()
         }
+    }
+
+    // MARK: - Template apply (B4, confirm-gated)
+
+    @ViewBuilder
+    private var templateSection: some View {
+        if let client {
+            sectionCard(title: "Template", systemImage: "rectangle.stack.badge.plus") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Apply an HSCC project template to (re)deploy the fleet.")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+
+                    TextField("Template name", text: $templateName)
+                        .textFieldStyle(.roundedBorder)
+                        .autocapitalization(.none)
+                        .disableAutocorrection(true)
+
+                    Toggle("Force recreate", isOn: $templateForceRecreate)
+                        .font(.subheadline)
+
+                    // The confirm-gated apply. The closure captures the current
+                    // name/force at call time — which only happens after the
+                    // user confirms. Never fires from a single tap.
+                    MutationButton(
+                        title: "Apply Template",
+                        systemImage: "play.rectangle.on.rectangle",
+                        prompt: templatePrompt(),
+                        run: {
+                            let result = try await client.applyTemplate(
+                                name: templateName,
+                                forceRecreate: templateForceRecreate
+                            )
+                            return result.message ?? "Applied template \\(templateName)."
+                        }
+                    )
+                    .disabled(templateName.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+        }
+    }
+
+    /// Confirmation wording for the template apply — names the template.
+    private func templatePrompt() -> String {
+        let name = templateName.trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? "Apply this template?" : "Apply template \\\"\\(name)\\\" and (re)deploy the fleet?"
     }
 
     // MARK: - Fleet link

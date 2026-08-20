@@ -53,8 +53,10 @@ targets:
       - path: Sources/HSCC/Views/KanbanView.swift
       - path: Sources/HSCC/Views/StandupView.swift
       - path: Sources/HSCC/Views/CardsView.swift
+      - path: Sources/HSCC/Views/DispatchCardView.swift
       - path: Sources/HSCC/Views/ReviewQueueView.swift
       - path: Sources/HSCC/Views/QAQueueView.swift
+      - path: Sources/HSCC/Views/MutationSupport.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios

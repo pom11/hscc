@@ -204,12 +204,59 @@ struct ReviewDetailView: View {
                 }
             }
 
+            // B4 — the confirm-gated merge. ONLY fires after the user confirms.
+            Section {
+                if let client = mutationClient() {
+                    MutationButton(
+                        title: "Merge & Close",
+                        systemImage: "arrow.triangle.branch",
+                        prompt: mergePrompt(review),
+                        run: {
+                            let result = try await client.mergeCard(cardID)
+                            return mergeSuccessMessage(result)
+                        }
+                    )
+                } else {
+                    Text("Configure host/port/token in Settings to act.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            } footer: {
+                Text("Merges the branch into main and closes the card. Requires confirmation — a tap never fires it directly.")
+            }
+
             Section {
                 Text("Read-only dry run — nothing is merged or changed here.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
         }
+    }
+
+    /// A client for mutation, or nil when settings aren't configured yet.
+    private func mutationClient() -> HSCCClient? {
+        guard settings.isConfigured,
+              let token = settings.token,
+              let port = Int(settings.port) else { return nil }
+        return HSCCClient(host: settings.host, port: port, token: token)
+    }
+
+    /// The confirmation wording — names exactly what the merge will do.
+    private func mergePrompt(_ review: ReviewDetailResponse) -> String {
+        let id = review.id ?? cardID
+        let base = review.base ?? "main"
+        return "Merge card \(id) into \(base) and close it?"
+    }
+
+    /// The success message shown only when the merge actually landed (2xx).
+    /// A `card_closed: false` warning (merge landed but archive failed) is
+    /// surfaced honestly rather than claiming the card is closed.
+    private func mergeSuccessMessage(_ result: MergeCardResponse) -> String {
+        if let warning = result.warning, !warning.isEmpty {
+            return "\(result.message ?? "Merged.") (\(warning))"
+        }
+        let closed = (result.card_closed == true) ? " and closed" : ""
+        return result.message ?? "Card merged\(closed)."
     }
 
     @ViewBuilder
