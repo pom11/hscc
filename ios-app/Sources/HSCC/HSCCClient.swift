@@ -95,6 +95,57 @@ struct HSCCClient {
         throw Self.error(from: data, status: status)
     }
 
+    // MARK: - Core POST helper (mutating, confirm-gated)
+
+    /// Perform a mutating POST with a JSON body and decode into `T`.
+    ///
+    /// Every B4 mutating endpoint requires `"confirm": true` in the body and
+    /// returns 409 without it. Each mutating method below ALWAYS includes
+    /// `confirm: true`, so there is no code path in this client that can send a
+    /// mutating request without an explicit confirmation — the caller (the view)
+    /// is responsible for gating the call behind the confirm UI first.
+    ///
+    /// - Throws: `HSCCError` on transport failure, HTTP error (409 for a missing
+    ///   confirm, 502 for a failed merge/apply/stop), or decoding failure. A
+    ///   non-2xx NEVER yields a decoded success value.
+    func post<T: Decodable>(_ path: String,
+                            body: [String: Any],
+                            as type: T.Type = T.self) async throws -> T {
+        var req = try request(for: path)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        do {
+            req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        } catch {
+            throw HSCCError.decoding(String(describing: error))
+        }
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: req)
+        } catch {
+            throw HSCCError.transport(underlying: error)
+        }
+
+        guard let http = response as? HTTPURLResponse else {
+            throw HSCCError.decoding("non-HTTP response")
+        }
+
+        let status = http.statusCode
+        if (200...299).contains(status) {
+            do {
+                return try Self.decoder.decode(T.self, from: data)
+            } catch {
+                throw HSCCError.decoding(String(describing: error))
+            }
+        }
+
+        // Non-2xx (409 confirm missing/refused, 502 merge/apply/stop failed):
+        // surface the real error. Never a success value.
+        throw Self.error(from: data, status: status)
+    }
+
     // MARK: - Error decoding (design §C)
 
     /// Decode the unified error envelope `{ "error": { code, message, speak } }`.
@@ -211,5 +262,68 @@ struct HSCCClient {
     /// summary even before the strong type exists.
     func read(_ path: String) async throws -> ReadResponse {
         try await get(path, as: ReadResponse.self)
+    }
+
+    // MARK: - Mutating endpoints (B4, ALL confirm-gated)
+
+    /// POST /v1/cards — dispatch a card (create a kanban card).
+    ///
+    /// Body: `{ board, title, assignee?, body?, confirm: true }`. Never fires
+    /// unless the caller has walked the user through the confirm UI. B5 reuses
+    /// this for voice dispatch.
+    func dispatchCard(board: String,
+                      title: String,
+                      assignee: String? = nil,
+                      body: String? = nil) async throws -> DispatchCardResponse {
+        var payload: [String: Any] = [
+            "board": board,
+            "title": title,
+            "confirm": true,
+        ]
+        if let assignee, !assignee.isEmpty {
+            payload["assignee"] = assignee
+        }
+        if let body, !body.isEmpty {
+            payload["body"] = body
+        }
+        return try await post("/v1/cards", body: payload, as: DispatchCardResponse.self)
+    }
+
+    /// POST /v1/review/{card_id}/merge — merge + close a card.
+    ///
+    /// Body: `{ confirm: true }`. On success returns `{ merged, card_closed }`.
+    /// A 502 (merge failed) throws and the card stays open — it is NEVER
+    /// presented as merged. Never fires without the confirm UI gate.
+    func mergeCard(_ cardID: String) async throws -> MergeCardResponse {
+        // URL-encode the card id so a slash or space can't break the route.
+        let encoded = cardID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? cardID
+        return try await post("/v1/review/\\(encoded)/merge",
+                              body: ["confirm": true],
+                              as: MergeCardResponse.self)
+    }
+
+    /// POST /v1/template/apply — apply a cluster template.
+    ///
+    /// Body: `{ name, force_recreate?, confirm: true }`. A blocked or partially
+    /// applied template returns a non-2xx / `success: false`, which throws and
+    /// is surfaced as a failure (never a success checkmark). Never fires without
+    /// the confirm UI gate.
+    func applyTemplate(name: String,
+                       forceRecreate: Bool = false) async throws -> TemplateApplyResponse {
+        var payload: [String: Any] = ["name": name, "confirm": true]
+        if forceRecreate {
+            payload["force_recreate"] = true
+        }
+        return try await post("/v1/template/apply", body: payload, as: TemplateApplyResponse.self)
+    }
+
+    /// POST /v1/cluster/stop — stop a running workload.
+    ///
+    /// Body: `{ container_id, confirm: true }`. A failure throws and is surfaced
+    /// as a failure. Never fires without the confirm UI gate.
+    func stopCluster(containerID: String) async throws -> StopClusterResponse {
+        return try await post("/v1/cluster/stop",
+                              body: ["container_id": containerID, "confirm": true],
+                              as: StopClusterResponse.self)
     }
 }
