@@ -8,6 +8,7 @@ status: now
 - [x] _http_get threaded through apply for zero network I/O under test (v1.8.1)
 - [x] probe-before-write safety net: an endpoint that does not advertise an alias keeps the concrete id (v1.8.x)
 - [x] adopt sparkrun's structured cluster-status API (`--json` / ClusterStatus dataclass) in place of text-parsing `Job:`/`Idle hosts:` in ops text parsing (v1.8.3)
+- [x] pre-release audit (core + bootstrap): fixed corrupt-trigger-defaults silent success, int-like cap preservation, and non-zero exit for a blocked/partial `template apply`; ELI5 README (v1.8.4)
 
 ## Milestone: Explicit placement and routing in cluster templates <!-- id: template-routing -->
 status: next

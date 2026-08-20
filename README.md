@@ -8,7 +8,7 @@
 
 Say *"build X"* in chat and a fleet of role-specialized agents brainstorms, decomposes, codes, reviews, and lands it — across multiple GPU nodes, hands-off.
 
-[![v1.3.0](https://img.shields.io/badge/version-1.3.0-blue.svg)](CHANGELOG.md)
+[![v1.8.4](https://img.shields.io/badge/version-1.8.4-blue.svg)](CHANGELOG.md)
 [![MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![pure-stdlib](https://img.shields.io/badge/python-pure--stdlib-orange.svg)](README.md)
 [![1000+ tests](https://img.shields.io/badge/tests-1000%2B-brightgreen.svg)](https://github.com/pom11/hscc)
@@ -16,6 +16,10 @@ Say *"build X"* in chat and a fleet of role-specialized agents brainstorms, deco
 HSCC runs on a cluster of DGX Spark (GB10 / Grace-Blackwell, `sm_121a`) nodes serving LLMs via vLLM, orchestrated by [Hermes](https://github.com/NousResearch/hermes-agent) agents. It is a set of pure-stdlib Python plugins — no pip dependencies. You develop in a work repo (`~/dev/hscc`); bootstrap copies the plugins into the Hermes runtime (`~/.hermes/plugins/`), with runtime state in `~/.hscc/`.
 
 The design is **native-Hermes-first**: agent work runs on Hermes' built-in kanban dispatcher and git worktrees. HSCC does not build a dispatcher — it *hooks into* the one Hermes already ships, adding the thin physical layer (cluster control, monitoring, model lifecycle), a role framework for specialized workers, and a review gate on the dispatch path.
+
+## In plain words (ELI5)
+
+You have a few powerful computers and a team of AI helpers. **HSCC is the manager that runs them for you.** You say what you want built; it splits the work across the computers, hands each piece to the right specialist — one plans, one writes the code, one checks it — and keeps the whole thing running: it restarts anything that crashes, and only pings you when it's genuinely stuck. One command gives you a whole working team, instead of babysitting a single chatbot.
 
 ## What it does
 
