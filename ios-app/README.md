@@ -8,30 +8,41 @@ the Tailscale tailnet.
 distributed, and is deliberately NOT App Store–ready.**
 
 > ⚠️ **STATUS: UNBUILT, UNTESTED.** No one has compiled or run this app yet.
-> This is Phase B1 — an app skeleton, an API client, and a Settings screen only.
-> The first `xcodegen` / Xcode build is expected to need small fixes. The code
-> has been syntax-checked (`swiftc -parse`) but **not built, run, or installed
-> on a device**. Do not assume it works until a real build has been done.
+> This is Phase B2 — an app skeleton, an API client, a Settings screen, and
+> read-only **cluster + fleet views** (health / hosts / workloads / stats /
+> throughput / streams / autoscale). The first `xcodegen` / Xcode build is
+> expected to need small fixes. All code has been syntax-checked
+> (`swiftc -parse`) but **not built, run, or installed on a device**. Do not
+> assume it works until a real build has been done.
 
-## What's here (Phase B1)
+## What's here (Phase B2)
 
 - `Sources/HSCC/` — Swift sources (SwiftUI, iOS 17+).
   - `HSCCApp.swift` — app entry point.
-  - `ContentView.swift` — root view: connection banner + placeholder tabs
-    (Cluster, Kanban, Settings). B2/B3 fill in the feature tabs.
+  - `ContentView.swift` — root view: connection banner + tabs (Cluster,
+    Kanban, Settings). B2 implemented the Cluster tab; B3 fills in Kanban.
   - `HSCCClient.swift` — `async/await` URLSession API client; Bearer auth on
     every request; builds URLs from a configurable host + port over plain
-    HTTP; decodes the unified error shape; exposes the `speak` field on reads.
+    HTTP; decodes the unified error shape; exposes the `speak` field on reads
+    (B2 added cluster + fleet read methods).
   - `Models.swift` — `Codable` models matching the actual `/v1` response
-    shapes.
+    shapes (B2 added fleet stats / throughput / streams models).
   - `APIError.swift` — the typed error surfaced by the client.
   - `KeychainStore.swift` — stores the API token in the iOS Keychain.
-  - `SettingsStore.swift` — observable settings (host/port  in `UserDefaults`,
+  - `SettingsStore.swift` — observable settings (host/port in `UserDefaults`,
     token in the Keychain).
   - `Views/SettingsView.swift` — enter/persist host, port, token + **Test
     connection** (calls `GET /v1/ping`).
-  - `Views/PlaceholderViews.swift` — placeholder tabs for B2/B3/B4.
-- `project.yml` — XcodeGen spec.
+  - `Views/ClusterView.swift` — Cluster tab (B2): overall health at a glance
+    (hosts up / workloads running / idle), running workload list, registered
+    hosts, cluster config, pull-to-refresh, and a link to the Fleet view.
+    Replaces the old cluster placeholder.
+  - `Views/FleetView.swift` — Fleet view (B2): health (5-check verify),
+    throughput, stats, daemon streams, autoscale — each with its own
+    loading / error / empty state.
+  - `Views/LoadState.swift` — a small generic async-load container shared by
+    the B2 views.
+- `project.yml` — XcodeGen spec (all sources listed explicitly).
 
 No third-party dependencies. Sideload-friendly.
 
@@ -101,7 +112,6 @@ No tailnet IP, token, or API key is hardcoded anywhere in this repo.
 
 ## Scope of later phases
 
-- **B2** — cluster + fleet views (status, hosts, health, monitor).
 - **B3** — kanban views (cards, standup, review/QA queues).
 - **B4** — actions (confirm-gated dispatch / merge / stop).
 - **B5** — Siri App Intents + spoken `speak` summaries (in-car, via Siri —
