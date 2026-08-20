@@ -131,9 +131,50 @@ struct HSCCClient {
         try await get("/v1/cards", as: CardsResponse.self)
     }
 
+    /// GET /v1/cluster/hosts — registered hosts + saved clusters + live status (B2).
+    func clusterHosts() async throws -> ClusterHostsResponse {
+        try await get("/v1/cluster/hosts", as: ClusterHostsResponse.self)
+    }
+
+    /// GET /v1/cluster/monitor — fleet monitor snapshot (aggregate metrics).
+    /// Shape is dynamic; use the generic `ReadResponse` for `speak` + payload.
+    func clusterMonitor() async throws -> ReadResponse {
+        try await read("/v1/cluster/monitor")
+    }
+
+    /// GET /v1/cluster/jobs — Spark job list. Shape is dynamic; `ReadResponse`.
+    func clusterJobs() async throws -> ReadResponse {
+        try await read("/v1/cluster/jobs")
+    }
+
+    /// GET /v1/cluster/info — cluster configuration summary. `ReadResponse`.
+    func clusterInfo() async throws -> ReadResponse {
+        try await read("/v1/cluster/info")
+    }
+
     /// GET /v1/health — fleet smoke test (B2).
     func health() async throws -> HealthResponse {
         try await get("/v1/health", as: HealthResponse.self)
+    }
+
+    /// GET /v1/fleet/stats?days=N — fleet completions & tool activity (B2).
+    func fleetStats(days: Int = 7) async throws -> FleetStatsResponse {
+        try await get("/v1/fleet/stats?days=\(days)", as: FleetStatsResponse.self)
+    }
+
+    /// GET /v1/fleet/throughput — vLLM token throughput + per-node queue depth (B2).
+    func fleetThroughput() async throws -> FleetThroughputResponse {
+        try await get("/v1/fleet/throughput", as: FleetThroughputResponse.self)
+    }
+
+    /// GET /v1/fleet/streams — daemon stream health (B2).
+    func fleetStreams() async throws -> FleetStreamsResponse {
+        try await get("/v1/fleet/streams", as: FleetStreamsResponse.self)
+    }
+
+    /// GET /v1/autoscale — scaling advice, read-only (B2).
+    func autoscale() async throws -> AutoscaleResponse {
+        try await get("/v1/autoscale", as: AutoscaleResponse.self)
     }
 
     /// Generic read for endpoints without a dedicated typed model yet.

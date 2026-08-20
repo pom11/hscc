@@ -95,6 +95,76 @@ struct AutoscaleResponse: Decodable, Speakable {
     let speak: String
 }
 
+// MARK: - Fleet stats
+
+/// GET /v1/fleet/stats — fleet completions & tool activity over the last N days.
+struct FleetStatsResponse: Decodable, Speakable {
+    let since_days: Int?
+    let completions: FleetCompletions?
+    let activity: FleetActivity?
+    let speak: String
+}
+
+/// The `completions` bucket of /v1/fleet/stats.
+struct FleetCompletions: Decodable {
+    let total: Int
+    let by_profile: [String: Int]?
+    let by_day: [String: Int]?
+}
+
+/// The `activity` bucket of /v1/fleet/stats.
+struct FleetActivity: Decodable {
+    let tool_calls_by_profile: [String: Int]?
+    /// Pairs of [toolName, count] as returned by the API.
+    let top_tools: [[JSONValue]]?
+}
+
+// MARK: - Fleet throughput
+
+/// GET /v1/fleet/throughput — vLLM token throughput + per-node queue depth.
+struct FleetThroughputResponse: Decodable, Speakable {
+    let fleet: FleetTotals?
+    let by_node: [String: NodeMetrics]?
+    let speak: String
+}
+
+/// The aggregate `fleet` bucket of /v1/fleet/throughput.
+struct FleetTotals: Decodable {
+    let prompt_tokens: Double?
+    let generation_tokens: Double?
+    let running: Double?
+    let waiting: Double?
+    let nodes_ok: Int?
+    let nodes_total: Int?
+}
+
+/// Per-endpoint metrics inside /v1/fleet/throughput's `by_node` map.
+struct NodeMetrics: Decodable {
+    let prompt_tokens: Double?
+    let generation_tokens: Double?
+    let running: Double?
+    let waiting: Double?
+}
+
+// MARK: - Fleet streams
+
+/// GET /v1/fleet/streams — daemon stream health (stream name -> status dict).
+/// Each status dict is written by the daemon via `write_state`, so it carries a
+/// stable `ok` flag plus whatever check-specific keys that stream emits; extra
+/// keys are ignored on decode.
+struct FleetStreamsResponse: Decodable, Speakable {
+    let streams: [String: StreamStatus]
+    let speak: String
+}
+
+/// One daemon stream's status entry.
+struct StreamStatus: Decodable {
+    let ok: Bool?
+    let timestamp: String?
+    let stream: String?
+    let message: String?
+}
+
 // MARK: - Projects / kanban
 
 /// A single flightdeck card. This is the full flightdeck card dict; only the

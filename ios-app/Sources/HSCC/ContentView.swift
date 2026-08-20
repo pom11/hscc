@@ -16,8 +16,8 @@ struct ContentView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            // B2 — cluster + fleet views (placeholder for now).
-            ClusterPlaceholderView()
+            // B2 — cluster + fleet views.
+            ClusterView(client: makeClient())
                 .safeAreaInset(edge: .top) { connectionBanner }
                 .tabItem { Label("Cluster", systemImage: "bolt") }
                 .tag(Tab.cluster)
@@ -94,6 +94,17 @@ struct ContentView: View {
         case .failure: return .red
         case .checking, .idle: return .secondary
         }
+    }
+
+    /// Build the client from current settings, or nil when not configured/useful.
+    /// Views receive this client so networking stays in the client layer.
+    private func makeClient() -> HSCCClient? {
+        guard settings.isConfigured,
+              let token = settings.token,
+              let port = Int(settings.port) else {
+            return nil
+        }
+        return HSCCClient(host: settings.host, port: port, token: token)
     }
 
     private func refreshConnection() {
