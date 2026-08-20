@@ -297,7 +297,7 @@ struct HSCCClient {
     func mergeCard(_ cardID: String) async throws -> MergeCardResponse {
         // URL-encode the card id so a slash or space can't break the route.
         let encoded = cardID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? cardID
-        return try await post("/v1/review/\\(encoded)/merge",
+        return try await post("/v1/review/\(encoded)/merge",
                               body: ["confirm": true],
                               as: MergeCardResponse.self)
     }

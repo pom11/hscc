@@ -89,6 +89,14 @@ struct DispatchCannedCardIntent: AppIntent {
         guard let client = IntentClient.make() else {
             return .result(dialog: IntentSettingsMessage.notConfigured)
         }
+        // EXPLICIT confirmation before any mutation. Every other mutating
+        // surface in the app is fronted by MutationButton's confirmationDialog;
+        // this is the voice equivalent. Do NOT rely on Siri implicitly
+        // confirming an AppIntent — it does not reliably do so, which would
+        // let a stray invocation dispatch a real card with no user assent.
+        try await requestConfirmation(
+            result: .result(dialog: "Dispatch \(card.title) onto \(card.boardName)?")
+        )
         do {
             // ALWAYS confirm: true — B4's client sends it on every mutation.
             let result = try await client.dispatchCard(
@@ -99,13 +107,13 @@ struct DispatchCannedCardIntent: AppIntent {
             // Speak from the REAL response only (the API's message or the id it
             // actually returned) — never a fabricated success.
             let spoken = result.message
-                ?? "Dispatched card \\(result.id ?? \"\") onto \\(card.boardName)."
+                ?? "Dispatched card \(result.id ?? "") onto \(card.boardName)."
             return .result(dialog: spoken)
         } catch {
             // Non-2xx makes the client throw — say it failed, never claim success.
             let message = (error as? HSCCError)?.localizedDescription
                 ?? "The card could not be dispatched."
-            return .result(dialog: "Dispatch failed. \\(message)")
+            return .result(dialog: "Dispatch failed. \(message)")
         }
     }
 }

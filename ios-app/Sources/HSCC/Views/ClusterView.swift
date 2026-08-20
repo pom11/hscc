@@ -205,10 +205,10 @@ struct ClusterView: View {
             title: "Stop",
             systemImage: "stop.circle",
             destructive: true,
-            prompt: "Stop container \\(containerID)?",
+            prompt: "Stop container \(containerID)?",
             run: {
                 let result = try await client!.stopCluster(containerID: containerID)
-                return result.message ?? "Stopped container \\(containerID)."
+                return result.message ?? "Stopped container \(containerID)."
             }
         )
         .font(.caption)
@@ -298,7 +298,7 @@ struct ClusterView: View {
                                 name: templateName,
                                 forceRecreate: templateForceRecreate
                             )
-                            return result.message ?? "Applied template \\(templateName)."
+                            return result.message ?? "Applied template \(templateName)."
                         }
                     )
                     .disabled(templateName.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -310,7 +310,7 @@ struct ClusterView: View {
     /// Confirmation wording for the template apply — names the template.
     private func templatePrompt() -> String {
         let name = templateName.trimmingCharacters(in: .whitespaces)
-        return name.isEmpty ? "Apply this template?" : "Apply template \\\"\\(name)\\\" and (re)deploy the fleet?"
+        return name.isEmpty ? "Apply this template?" : "Apply template \"\(name)\" and (re)deploy the fleet?"
     }
 
     // MARK: - Fleet link
