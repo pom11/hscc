@@ -520,3 +520,9 @@ def create_server(
         addr = (config["host"], config["port"])
     server = _ApiServer(addr, ApiHandler, ctx)
     return server
+
+
+# A2: load cluster + fleet read routes. routes_cluster.py's load() appends to
+# ROUTES; imported last so ROUTES/ApiError exist before it runs.
+from routes_cluster import load as _load_cluster_routes  # noqa: E402
+_load_cluster_routes()
