@@ -373,6 +373,37 @@ def test_caps_preserved_when_operator_set_low(tmp_path):
     assert out["kanban"]["max_in_progress_per_profile"] == 2
 
 
+def test_caps_preserved_when_stored_as_string_or_float(tmp_path):
+    """An int-LIKE operator cap ("6" / 6.0) is still an operator-set cap and
+    must NOT be clobbered back to the default — the isinstance(int)-only guard
+    used to silently raise these to 30/10 (the concurrency-reversion footgun)."""
+    cfg = _fully_wired_cfg()
+    cfg["kanban"]["max_in_progress"] = "6"          # string digit
+    cfg["kanban"]["max_in_progress_per_profile"] = 2.0  # whole float
+    path = _write(tmp_path / "config.yaml", cfg)
+    res = enable_plugins.enable(path)
+    assert "max_in_progress" not in res["kanban"]
+    assert "max_in_progress_per_profile" not in res["kanban"]
+    out = yaml.safe_load(open(path))
+    assert out["kanban"]["max_in_progress"] == "6"
+    assert out["kanban"]["max_in_progress_per_profile"] == 2.0
+
+
+def test_is_int_like():
+    """The int-like predicate: ints/whole-floats/digit-strings qualify;
+    non-numeric strings, fractional floats, None, and nan/inf do not."""
+    assert enable_plugins._is_int_like(6) is True
+    assert enable_plugins._is_int_like(6.0) is True
+    assert enable_plugins._is_int_like("6") is True
+    assert enable_plugins._is_int_like(" 6 ") is True
+    assert enable_plugins._is_int_like(6.5) is False
+    assert enable_plugins._is_int_like("six") is False
+    assert enable_plugins._is_int_like("6.0") is False
+    assert enable_plugins._is_int_like(None) is False
+    assert enable_plugins._is_int_like(float("nan")) is False
+    assert enable_plugins._is_int_like(float("inf")) is False
+
+
 def test_caps_just_set_to_defaults_is_noop(tmp_path):
     """Caps already equal to defaults → no change."""
     cfg = _fully_wired_cfg()

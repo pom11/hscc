@@ -48,8 +48,17 @@ def install_triggers(
         with open(defaults_path) as f:
             defaults = json.load(f)
         default_rules = defaults.get("rules", [])
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except FileNotFoundError:
+        # Defaults genuinely absent: nothing to install — a soft OK (the
+        # deliberate tolerance asserted by test_missing_defaults_file_returns_empty).
         result["ok"] = True
+        return result
+    except (json.JSONDecodeError, OSError) as e:
+        # Defaults PRESENT but unreadable/corrupt is a REAL failure: reporting
+        # success with zero rules would silently leave the fleet with no alert
+        # rules while showing a green checkmark. Fail loud so bootstrap warns.
+        result["ok"] = False
+        result["error"] = f"could not read default trigger rules from {defaults_path}: {e}"
         return result
 
     # --- Load existing ---
