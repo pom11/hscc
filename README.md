@@ -95,6 +95,8 @@ hscc template apply 4node-coding --confirm  # apply the layout
 hscc project standup                      # fleet-wide project/kanban digest
 hscc project review <card>                # review + merge a card
 hscc project --help                       # full flightdeck command list under the project verb
+hscc api start                            # HTTP API for external apps (iOS client)
+hscc api status                           # show API running/stopped + bound host:port
 ```
 
 `hscc project …` is the project/kanban orchestration domain (formerly the
@@ -106,6 +108,13 @@ project review <card>` to review and merge a finished card, and `hscc project
 in [`hscc-project/docs/COMMANDS.md`](hscc-project/docs/COMMANDS.md), and the
 `flightdeck X` ↔ `hscc project X` mapping plus the naming-collision notes are
 in [`docs/PROJECT-COMMANDS.md`](docs/PROJECT-COMMANDS.md).
+
+`hscc api …` runs the **HSCC HTTP API** (`hscc-api/`), a
+bearer-token-authenticated JSON interface on loopback that external apps —
+chiefly the private iOS companion — use to read fleet/kanban state and drive
+confirm-gated actions. Start it with `hscc api start`, expose it on the
+tailnet with `hscc api start --tailscale`, and see the full operator/client
+reference in [`docs/API.md`](docs/API.md).
 
 `hscc --help` shows the full grouped command reference with examples. The orchestrator agent also has parity — it can call these same capabilities (verify, stats, throughput, autoscale, templates) directly as tools, not just the operator CLI.
 
