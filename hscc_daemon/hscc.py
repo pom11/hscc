@@ -482,6 +482,13 @@ def _handle_template():
     rc = _emit(result)
     if sub == "validate" and isinstance(result, dict) and result.get("ok") is False:
         return 1
+    # An apply that was BLOCKED by pre-flight validation, or only PARTIALLY
+    # succeeded, must exit non-zero. _emit only flags an "error" key, but a
+    # blocked/partial apply returns {"success": False} with no "error" — so
+    # `hscc template apply <bad> --confirm` would otherwise exit 0 and a script
+    # chaining `apply && proceed` would treat a NON-deployed fleet as success.
+    if sub == "apply" and isinstance(result, dict) and result.get("success") is False:
+        return 1
     return rc
 
 
