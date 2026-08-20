@@ -296,6 +296,7 @@ Cluster & templates
   template validate <name> [--structural-only] [--json]   Validate a template: structural (offline) layer always; placement (live) layer unless --structural-only. Exit non-zero if either layer fails.
   template apply <name> [--confirm] [--force-recreate]   Apply a template (--confirm executes; --force-recreate stops+reruns units so changed serve flags reach vLLM)
   profiles             Running kanban task counts per profile
+  project <cmd>        Project-portfolio (flightdeck) commands: standup verify doctor ...
 
 Utility
   notify <message>     Send a desktop notification
@@ -340,6 +341,7 @@ COMMAND_HELP = {
     "cluster": "Cluster management commands.\n  Subcommands: status hosts monitor jobs info stop <id>\n  Usage: hscc cluster <subcommand> [args]",
     "template": "Cluster template commands.\n  Subcommands: list status preview <name> validate <name> [--structural-only] [--json] apply <name> [--confirm]\n  Usage: hscc template <subcommand> [args]",
     "profiles": "Running kanban task counts per profile",
+    "project": "Project-portfolio (flightdeck) commands.\n  Delegates to the relocated flightdeck CLI under hscc-project/. Try 'hscc project --help' for the full subcommand surface.\n  Usage: hscc project <subcommand> [args]",
     "help": "Show help. Usage: hscc help [command]\n  Use 'hscc help advanced' for internal commands.",
     "verify": "Run a full compatibility/health smoke-test of the cluster.\n  Usage: hscc verify [--json]",
     "stats": "Fleet activity — completions & tool usage over N days (default 7).\n  Usage: hscc stats [days] [--json]",
@@ -362,6 +364,16 @@ def _resolve_cluster_dir():
     """Locate the hscc-cluster plugin as a sibling of hscc_daemon."""
     cluster_dir = Path(__file__).resolve().parent.parent / "hscc-cluster"
     return cluster_dir
+
+
+def _resolve_project_dir():
+    """Locate the relocated flightdeck package as a sibling of hscc_daemon.
+
+    Phase 1 relocated flightdeck's source into ``hscc-project/`` at the repo
+    root (sibling of ``hscc_daemon/``). That is the parent dir whose
+    ``flightdeck/`` package is imported by :func:`_handle_project`.
+    """
+    return Path(__file__).resolve().parent.parent / "hscc-project"
 
 
 def _load_cluster_engine():
@@ -629,6 +641,54 @@ def _handle_profiles():
     return _emit(eng.cmd_profile_status())
 
 
+def _handle_project():
+    """Route 'project ...' to the relocated flightdeck CLI as a library.
+
+    Everything after ``project`` on the command line (``sys.argv[2:]``) is
+    handed to flightdeck's argv-driven entry point
+    (:func:`flightdeck.cli.main`). That builds its OWN argparse parser
+    (including flightdeck's own ``--registry``/``--apply``/etc flags),
+    auto-discovers every command module under ``flightdeck/commands/*.py``,
+    and dispatches — so we do not reimplement any of flightdeck's argument
+    parsing here. Its exit code becomes ours.
+
+    The relocated package lives in ``hscc-project/`` (a sibling of
+    ``hscc_daemon/``). We put that dir on ``sys.path`` if not already present,
+    mirroring how flightdeck itself vendors Hermes in
+    ``flightdeck/core/kanban.py`` (``_load_kanban_db``): insert once, import,
+    done. If the import fails we surface a clear, actionable error rather than
+    a raw traceback and never swallow the failure.
+    """
+    project_dir = _resolve_project_dir()
+    if not project_dir.is_dir():
+        print(
+            f"Error: relocated flightdeck package not found at {project_dir}",
+            file=sys.stderr,
+        )
+        return 1
+    if str(project_dir) not in sys.path:
+        sys.path.insert(0, str(project_dir))
+    try:
+        from flightdeck.cli import main as flightdeck_main
+    except ImportError as exc:
+        print(
+            "Error: could not import flightdeck from "
+            f"{project_dir}: {exc}\n"
+            "  flightdeck's dependencies may be missing. Install them and "
+            "retry:\n"
+            "    pip install -e hscc-project/   (or: pip install hscc-project/)",
+            file=sys.stderr,
+        )
+        return 1
+    # Everything after `hscc project`.
+    remaining = sys.argv[2:]
+    try:
+        return flightdeck_main(remaining)
+    except SystemExit as exc:
+        # argparse raises SystemExit(code) for --help / bad usage; surface it.
+        return exc.code if isinstance(exc.code, int) else 0
+
+
 # Per-command --help support
 DAEMON_COMMANDS = {
     "start", "stop", "status", "install", "uninstall", "plist",
@@ -665,6 +725,11 @@ def main():
     # 'profiles'
     if cmd == "profiles":
         rc = _handle_profiles()
+        sys.exit(rc)
+
+    # 'project' group (relocated flightdeck CLI)
+    if cmd == "project":
+        rc = _handle_project()
         sys.exit(rc)
 
     # Per-command --help (daemon commands)
@@ -751,7 +816,7 @@ def main():
         cmd_ed_uninstall()
     else:
         print(f"Unknown command: {cmd}")
-        print(f"Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, verify, stats, throughput, autoscale, escalate, start-daemon")
+        print(f"Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, project, verify, stats, throughput, autoscale, escalate, start-daemon")
         sys.exit(1)
 
 

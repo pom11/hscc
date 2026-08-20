@@ -909,5 +909,87 @@ class TestThroughputAutoscaleEscalateHelp:
         assert "hscc escalate" in out.getvalue()
 
 
+class TestProjectRouting:
+    """'project' routes the raw argv slice to the relocated flightdeck.cli.main.
+
+    The wrapper hands everything after ``hscc project`` straight to
+    flightdeck's argv-driven entry point and returns its exit code. We stub
+    ``flightdeck.cli.main`` (no real registry / hscc-project needed), then
+    assert the argv slice is forwarded unmodified and the exit code flows
+    through ``main()`` unchanged.
+    """
+
+    def _run(self, args, monkeypatch, tmp_path):
+        import types
+        captured: list = []
+
+        fake_cli = types.ModuleType("flightdeck.cli")
+
+        def fake_main(argv=None):
+            captured.append(list(argv) if argv is not None else None)
+            return 42  # a distinctive sentinel rc
+
+        fake_cli.main = fake_main
+        # Provide a fake flightdeck.cli so the wrapper's import finds it.
+        monkeypatch.setitem(sys.modules, "flightdeck.cli", fake_cli)
+        # Point _resolve_project_dir at a harmless temp dir (the fake import
+        # never touches disk), avoiding any real sys.path manipulation.
+        monkeypatch.setattr(
+            "hscc_daemon.hscc._resolve_project_dir",
+            lambda: tmp_path,
+        )
+        from hscc_daemon import hscc as hscc_mod
+
+        monkeypatch.setattr(sys, "argv", ["hscc", *args])
+        out = io.StringIO()
+        rc = None
+        try:
+            with redirect_stdout(out):
+                hscc_mod.main()
+        except SystemExit as exc:
+            rc = exc.code
+        return captured, rc
+
+    def test_project_standup_forwards_argv(self, monkeypatch, tmp_path):
+        captured, rc = self._run(["project", "standup"], monkeypatch, tmp_path)
+        # The whole arg slice after `project` is forwarded, untransformed.
+        assert captured == [["standup"]]
+        # flightdeck's sentinel rc propagates through main() unchanged.
+        assert rc == 42
+
+    def test_project_full_argv_slice(self, monkeypatch, tmp_path):
+        captured, rc = self._run(
+            ["project", "verify", "ecofire-app", "--json"], monkeypatch, tmp_path
+        )
+        assert captured == [["verify", "ecofire-app", "--json"]]
+        assert rc == 42
+
+    def test_project_help_returns_flightdeck_rc(self, monkeypatch, tmp_path):
+        captured, rc = self._run(["project", "--help"], monkeypatch, tmp_path)
+        assert captured == [["--help"]]
+        assert rc == 42
+
+    def test_full_help_lists_project(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(sys, "argv", ["hscc"])
+        from hscc_daemon import hscc as hscc_mod
+
+        out = io.StringIO()
+        with redirect_stdout(out), pytest.raises(SystemExit) as exc:
+            hscc_mod.main()
+        assert exc.value.code == 0
+        assert "project <cmd>" in out.getvalue()
+
+    def test_help_project(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(sys, "argv", ["hscc", "help", "project"])
+        from hscc_daemon import hscc as hscc_mod
+
+        out = io.StringIO()
+        with redirect_stdout(out), pytest.raises(SystemExit) as exc:
+            hscc_mod.main()
+        assert exc.value.code == 0
+        assert "hscc project" in out.getvalue()
+        assert "flightdeck" in out.getvalue()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
