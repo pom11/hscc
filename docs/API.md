@@ -218,6 +218,62 @@ Without `"confirm": true` the same call returns:
 { "error": { "code": "confirm_required", "message": "this action is destructive and requires \"confirm\": true in the request body to dispatch a card", "speak": "Confirmation required to dispatch a card." } }
 ```
 
+### Orchestrator chat (POST — confirm-gated)
+
+`POST /v1/orchestrator/chat` talks to a project's **orchestrator directly**,
+bypassing Telegram. This is the conversational endpoint of the API — the one
+where an operator can say "go build X" and the orchestrator decomposes it and
+dispatches real work onto its board. Because it can dispatch real work it is a
+**mutation**, and therefore requires `"confirm": true` (409 otherwise) exactly
+like every other mutating endpoint.
+
+**Body:**
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `project` | string \| null | no | Project name; absent/`null` → the catch-all **`general`** orchestrator. Unknown project → `400 unknown_project`. |
+| `prompt` | string | yes | What to ask the orchestrator. Missing/empty → `400 bad_request`. |
+| `confirm` | bool | yes | Must be `true`, else `409 confirm_required`. |
+
+Project → orchestrator resolution follows the C1 convention
+(`hscc-roles/orchestrators.py`): a named project resolves to profile
+**`<project>-orch`** / named session **`<project>`**; `general` →
+**`general-orch`** / **`general`**.
+
+**Transport:** the API invokes Hermes directly —
+
+```bash
+hermes -p <profile> chat -Q --continue <session> -q "<prompt>"
+```
+
+— with the prompt passed as an argv element (never shell-interpolated), a
+180 s timeout, and quiet mode so the reply is the only thing on stdout.
+`chat --continue` resolves the session by title from the profile's `state.db`
+and persists the exchange into it (the Telegram-topic analog). The
+`localhost:4000` proxy is litellm — a stateless OpenAI-compatible inference
+relay with no Hermes session store, so it is NOT used here.
+
+**Response `200`:**
+
+```json
+{
+  "reply": "<the orchestrator's reply text>",
+  "profile": "hscc-orch",
+  "session": "hscc",
+  "speak": "hscc-orch says: <short summary>"
+}
+```
+
+The `server` never crashes and never leaks a traceback or token on a bad
+orchestrator call:
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `unknown_project` | `project` is neither a registry project nor `general` |
+| 502 | `orchestrator_error` | the hermes invocation failed (empty reply / bad exit) |
+| 503 | `orchestrator_unavailable` | the orchestrator profile/session is not reachable (e.g. the named session hasn't been created yet) |
+| 504 | `orchestrator_timeout` | the orchestrator did not reply within 180 s |
+
 ---
 
 ## Error contract
@@ -231,13 +287,16 @@ Every error response shares one shape:
 | Status | `code` | When |
 |---|---|---|
 | 400 | `bad_request` | malformed/missing field, non-object body, body > 1 MiB |
+| 400 | `unknown_project` | orchestrator chat `project` is neither a registry project nor `general` |
 | 401 | `unauthorized` | missing or invalid bearer token |
 | 404 | `not_found` | unknown route, unknown card, card not reviewable |
 | 405 | `method_not_allowed` | valid path, wrong HTTP method |
 | 409 | `confirm_required` | mutating call without `confirm: true` |
 | 409 | `already_landed` | merge target already merged |
 | 500 | `internal_error` | unhandled exception (traceback logged server-side only) |
-| 502 | `merge_failed` / `apply_failed` / `stop_failed` | a mutation did not land |
+| 502 | `merge_failed` / `apply_failed` / `stop_failed` / `orchestrator_error` | a mutation did not land / the orchestrator call failed |
+| 503 | `orchestrator_unavailable` | orchestrator profile/session not reachable |
+| 504 | `orchestrator_timeout` | orchestrator did not reply within the timeout |
 
 Errors never leak the token or a raw traceback. A 500 logs the traceback to
 `~/.hscc/api.log` and returns a neutral pointer to it.
