@@ -11,7 +11,7 @@ struct ContentView: View {
     @State private var pingState: PingState = .idle
 
     enum Tab: Hashable {
-        case cluster, kanban, settings
+        case cluster, kanban, chat, settings
     }
 
     var body: some View {
@@ -27,6 +27,13 @@ struct ContentView: View {
                 .safeAreaInset(edge: .top) { connectionBanner }
                 .tabItem { Label("Kanban", systemImage: "list.bullet") }
                 .tag(Tab.kanban)
+
+            // C5 — orchestrator chat (confirm-gated mutation).
+            NavigationStack {
+                OrchestratorChatView()
+            }
+            .tabItem { Label("Chat", systemImage: "bubble.left.and.bubble.right") }
+            .tag(Tab.chat)
 
             // Settings — implemented in B1.
             SettingsView()

@@ -345,6 +345,24 @@ struct QAQueueResponse: Decodable, Speakable {
     let speak: String
 }
 
+// MARK: - Orchestrator chat (C5)
+
+/// POST /v1/orchestrator/chat — the orchestrator's reply.
+///
+/// Matches the ACTUAL 200 response shape in
+/// `hscc-api/routes_orchestrator.py`:
+///   { "reply": "<text>", "profile": "<P>-orch", "session": "<P>", "speak": "..." }
+/// `reply` is the full orchestrator reply the transcript shows; `speak` is the
+/// short server-derived one-liner (B5 may read it aloud). A non-2xx makes the
+/// client throw, so this is only ever decoded from a 2xx success — a failed or
+/// timed-out chat is never rendered as a reply.
+struct OrchestratorChatResponse: Decodable, Speakable {
+    let reply: String
+    let profile: String?
+    let session: String?
+    let speak: String
+}
+
 // MARK: - Generic / untyped bucket
 
 /// A catch-all for read responses we haven't given a dedicated strong type
