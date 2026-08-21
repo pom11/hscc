@@ -96,7 +96,8 @@ fi
 # Telegram: OPTIONAL out-of-band fallback. ASK rather than assume, default No.
 # Resolved by telegram_choice.py — HSCC_TELEGRAM env override → --yes documented
 # default (No) → interactive prompt. Declining must never break an install.
-TG_JSON=$(HSCC_TELEGRAM="${HSCC_TELEGRAM:-}" "$PYBIN" "$BOOT_DIR/telegram_choice.py" 2>/dev/null)
+TG_ARGS=""; $ASSUME_YES && TG_ARGS="--yes"
+TG_JSON=$(HSCC_TELEGRAM="${HSCC_TELEGRAM:-}" "$PYBIN" "$BOOT_DIR/telegram_choice.py" $TG_ARGS 2>/dev/null)
 TELEGRAM=$(echo "$TG_JSON" | "$PYBIN" -c 'import sys,json;print(json.load(sys.stdin)["telegram"])' 2>/dev/null || echo no)
 if [ "$TELEGRAM" = "yes" ]; then
   ok "telegram: enabled (optional out-of-band fallback)"
