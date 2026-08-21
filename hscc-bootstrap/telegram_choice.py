@@ -41,7 +41,15 @@ def resolve_telegram(env=None, assume_yes=False, prompt=None):
     if env is None:
         env = os.environ
     if prompt is None:
-        prompt = input
+        # The prompt MUST go to stderr, not stdout. bootstrap.sh captures this
+        # script's stdout with $(...) and json.load()s it — a prompt written to
+        # stdout lands inside that capture, the JSON parse fails, and the shell
+        # silently falls back to "no". That made answering "y" a no-op AND hid
+        # the prompt from the operator (it was swallowed by the capture).
+        def prompt(text):
+            sys.stderr.write(text)
+            sys.stderr.flush()
+            return input()
 
     override = (env.get("HSCC_TELEGRAM") or "").strip().lower()
     if override:
@@ -63,4 +71,16 @@ def resolve_telegram(env=None, assume_yes=False, prompt=None):
 
 
 if __name__ == "__main__":
-    print(json.dumps(resolve_telegram()))
+    # `--yes` must reach resolve_telegram(), otherwise the assume_yes branch is
+    # dead code from the real bootstrap path and an unattended `--yes` run on a
+    # TTY blocks forever at the prompt. bootstrap.sh passes --yes through.
+    import sys as _sys
+
+    _assume_yes = "--yes" in _sys.argv[1:] or "-y" in _sys.argv[1:]
+    try:
+        _result = resolve_telegram(assume_yes=_assume_yes)
+    except EOFError:
+        # No stdin (CI / closed stdin): decline rather than dying with a
+        # traceback. Declining must never break an install.
+        _result = {"telegram": "no", "source": "no-stdin"}
+    print(json.dumps(_result))
