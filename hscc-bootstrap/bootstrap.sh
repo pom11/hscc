@@ -155,6 +155,20 @@ if $SKIP_ROLES; then warn "skipped"; else
   "$PYBIN" "$PLUGINS/hscc-roles/hscc.py" generate >/dev/null 2>&1 && ok "role profiles generated" || warn "role generate reported issues"
 fi
 
+# Per-project orchestrators come from a SEPARATE bulk command (`orch-all`), not
+# from `generate` (which only builds the role profiles from roles/*.yaml).
+# Without this, a fresh bootstrap run produces ZERO per-project orchestrators —
+# the whole per-project architecture is absent until someone runs `orch` by
+# hand, once per project. `orch-all` provisions every registry project plus the
+# `general` catch-all in one shot and is idempotent (re-running never clobbers
+# an existing profile's memory/sessions). Inside the same --skip-roles guard so
+# both role provision stages are skipped together. Non-fatal: a missing/unreadable
+# registry still ensures `general`, and the step warns rather than dies.
+hdr "Install: per-project orchestrators"
+if $SKIP_ROLES; then warn "skipped"; else
+  "$PYBIN" "$PLUGINS/hscc-roles/hscc.py" orch-all >/dev/null 2>&1 && ok "per-project orchestrators provisioned" || warn "orchestrator provisioning reported issues"
+fi
+
 hdr "Install: ~/.hscc state + serving.json"
 mkdir -p "$HSCC_DIR"
 [ -f "$HSCC_DIR/autonomy" ] || { echo off > "$HSCC_DIR/autonomy"; ok "autonomy flag seeded (off)"; }
