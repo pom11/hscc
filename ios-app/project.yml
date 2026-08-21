@@ -57,6 +57,7 @@ targets:
       - path: Sources/HSCC/Views/ReviewQueueView.swift
       - path: Sources/HSCC/Views/QAQueueView.swift
       - path: Sources/HSCC/Views/MutationSupport.swift
+      - path: Sources/HSCC/Views/OrchestratorChatView.swift
       - path: Sources/HSCC/Intents/IntentClient.swift
       - path: Sources/HSCC/Intents/ClusterStatusIntent.swift
       - path: Sources/HSCC/Intents/ReviewQueueIntent.swift
