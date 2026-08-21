@@ -58,7 +58,7 @@ enum CannedCard: String, AppEnum, CaseIterable {
     }
 
     var displayRepresentation: DisplayRepresentation {
-        Self.caseDisplayRepresentation[self] ?? DisplayRepresentation(stringLiteral: rawValue)
+        Self.caseDisplayRepresentations[self] ?? DisplayRepresentation(stringLiteral: rawValue)
     }
 }
 
