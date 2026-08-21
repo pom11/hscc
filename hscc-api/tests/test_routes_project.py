@@ -1,0 +1,420 @@
+"""Unit tests for hscc-api Phase A3 — project/kanban READ endpoints.
+
+The suite is hermetic: every flightdeck backing call is replaced with a fake
+namespace (SimpleNamespace) via monkeypatch, so NO test ever reads the real
+live kanban DB, a real git repo, or a real registry file. Handlers are driven
+over real loopback HTTP (loopback port 0) exactly like A1's suite, so auth and
+the route dispatcher are exercised end-to-end.
+
+Coverage required by the card:
+  * each of the 6 project/kanban endpoints -> 200 + expected shape + non-empty
+    ``speak``;
+  * 404 for an unknown / unresolvable card id;
+  * auth enforced (401 without a token) on these routes too;
+  * graceful degradation on a backing error (200 with an honest ``speak``,
+    never a crash, never fabricated values);
+  * ``/v1/review/{id}`` is a DRY-RUN: no merge / no close-card (no mutation).
+"""
+
+import json
+import types
+
+import pytest
+
+import api_server
+import routes_project
+
+
+# --------------------------------------------------------------------------- #
+# Fakes for the flightdeck backing modules
+# --------------------------------------------------------------------------- #
+#
+# routes_project holds the flightdeck modules as module-level names
+# (`_kanban`, `_review_cmd`, `_qa_cmd`, `_standup_cmd`, `_review_core`,
+# `_registry`). Each test replaces those names with a SimpleNamespace fake so
+# the real library (which would read the live board/git) never runs.
+
+def _fake_module(**attrs):
+    return types.SimpleNamespace(**attrs)
+
+
+def _card(cid="t_abc123", title="Do a thing", status="running", board="default",
+          branch="wt/t_abc123", body="", created_at=1000):
+    d = {
+        "id": cid,
+        "title": title,
+        "status": status,
+        "board": board,
+        "branch": branch,
+        "body": body,
+        "created_at": created_at,
+        "workspace_path": "/tmp/repo",
+    }
+    return d
+
+
+# --- standup ---
+
+def _standup_data():
+    return {
+        "needs_you": [_card(cid="t_rev1", status="review")],
+        "running": [_card(cid="t_run1", status="running")],
+        "stale": [],
+        "failing": [_card(cid="t_fail1", status="failing")],
+        "drift": [],
+        "unreadable": [],
+    }
+
+
+# --- review ---
+
+def _review_facts(exists=True):
+    return {
+        "exists": exists,
+        "subject": "Add the thing",
+        "files": 2,
+        "insertions": 10,
+        "deletions": 1,
+        "conflicts": 0,
+    }
+
+
+def _project(name="hscc", repo="/tmp/repo", board="default"):
+    return types.SimpleNamespace(name=name, repo=repo, board=board)
+
+
+# --------------------------------------------------------------------------- #
+# Fixtures: a running server + full set of fakes
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def fakes(monkeypatch):
+    """Install hermetic fakes for every flightdeck backing module.
+
+    Returns a dict of the fakes keyed by the routes_project attribute name so
+    tests can mutate a single fake (e.g. make it raise) per case.
+    """
+    fd = {
+        "_kanban": _fake_module(
+            list_cards=lambda board=None, include_archived=False: [_card()],
+            find_card=lambda cid: _card(cid=cid) if cid == "t_abc123" else None,
+        ),
+        "_registry": _fake_module(
+            load_registry=lambda path=None: [_project()],
+        ),
+        "_standup_cmd": _fake_module(
+            gather_data=lambda registry_path: _standup_data(),
+        ),
+        "_review_cmd": _fake_module(
+            ReviewError=type("ReviewError", (Exception,), {}),
+            git_state=_fake_module(is_merged=lambda repo, branch, base: False),
+            _enrich_project_cards=lambda projects, _run=None: [
+                dict(_card(cid="t_r1", status="review", branch="wt/t_r1"))
+            ],
+            _resolve=lambda cards, projects, card_id: (
+                _card(cid=card_id), _project(), "wt/" + card_id
+            ),
+            _branch_facts=lambda repo, branch, base="main": _review_facts(),
+            _verify_line=lambda body: (True, "pytest"),
+            _render_json=lambda *a, **k: {
+                "id": "t_abc123", "title": "Add the thing", "board": "default",
+                "project": "hscc", "repo": "/tmp/repo", "branch": "wt/t_abc123",
+                "base": "main", "subject": "Add the thing", "files_changed": 2,
+                "insertions": 10, "deletions": 1, "conflicts": 0, "landed": False,
+                "verify_present": True, "verify": "pytest", "apply_outcome": None,
+                "dependents": None,
+            },
+        ),
+        "_review_core": _fake_module(
+            review_queue=lambda cards, now=None: [
+                {"project": (d.get("project") or "hscc"),
+                 "card_id": d.get("id"), "branch": d.get("branch"),
+                 "age_seconds": 300, "title": d.get("title")}
+                for d in (cards or [])
+            ],
+        ),
+        "_qa_cmd": _fake_module(
+            _collect=lambda cards, projects, _run=None, _run_verify=None: [
+                {"project": "hscc", "repo": "/tmp/repo", "id": "t_q1",
+                 "title": "QA me", "status": "review", "branch": "wt/t_q1",
+                 "unattributed": False, "verify_present": True, "verify": "pytest",
+                 "files": 1, "verify_configured": True, "verify_run": True,
+                 "verify_passed": True, "created_at": 1000},
+            ],
+            _load_manual=lambda _path=None: [
+                {"id": "mqa-1", "project": "hscc", "description": "check it",
+                 "card_id": None, "added_at": "2026-08-20T00:00:00",
+                 "checked": False, "checked_at": None},
+            ],
+            _render_json=lambda rows, manual: {
+                "queue": [{"project": "hscc", "card_id": "t_q1", "title": "QA me",
+                           "status": "review", "branch": "wt/t_q1",
+                           "unverifiable": False, "verify": "pytest",
+                           "files_changed": 1, "verify_configured": True,
+                           "verify_run": True, "verify_passed": True,
+                           "created_at": 1000}],
+                "manual_qa": [{"id": "mqa-1", "project": "hscc",
+                               "description": "check it", "card_id": None,
+                               "added_at": "2026-08-20T00:00:00", "checked": False,
+                               "checked_at": None}],
+            },
+        ),
+    }
+    for name, fake in fd.items():
+        monkeypatch.setattr(routes_project, name, fake)
+    return fd
+
+
+@pytest.fixture
+def running(tmp_path, fakes):
+    srv = types.SimpleNamespace()
+    srv.server = api_server.create_server(hscc_dir=str(tmp_path), addr=("127.0.0.1", 0))
+    srv.host, srv.port = srv.server.server_address[:2]
+    import threading
+
+    thread = threading.Thread(target=srv.server.serve_forever, daemon=True)
+    thread.start()
+    yield srv
+    srv.server.shutdown()
+    srv.server.server_close()
+
+
+@pytest.fixture
+def token(running):
+    return api_server.load_token(running.server.ctx.hscc_dir)
+
+
+def _request(running, token, method="GET", path="/v1/standup"):
+    import http.client
+
+    conn = http.client.HTTPConnection(running.host, running.port, timeout=5)
+    headers = {}
+    if token is not None:
+        headers["Authorization"] = "Bearer " + token
+    conn.request(method, path, headers=headers)
+    resp = conn.getresponse()
+    raw = resp.read()
+    conn.close()
+    try:
+        payload: dict = json.loads(raw) if raw else {}
+    except ValueError:
+        payload = {"raw": raw}
+    return resp.status, payload
+
+
+# --------------------------------------------------------------------------- #
+# Each endpoint: 200 + expected shape + non-empty speak
+# --------------------------------------------------------------------------- #
+
+def test_standup_200_shape(running, token, fakes):
+    status, payload = _request(running, token, path="/v1/standup")
+    assert status == 200
+    assert "needs_you" in payload and "running" in payload and "failing" in payload
+    assert isinstance(payload["speak"], str) and payload["speak"]
+
+
+def test_cards_200_shape(running, token, fakes):
+    status, payload = _request(running, token, path="/v1/cards")
+    assert status == 200
+    assert isinstance(payload["cards"], list) and len(payload["cards"]) == 1
+    assert payload["count"] == 1
+    assert isinstance(payload["speak"], str) and payload["speak"]
+
+
+def test_cards_status_filter(running, token, fakes):
+    # Real cards have status running; filtering for 'review' yields zero.
+    status, payload = _request(running, token, path="/v1/cards?status=review")
+    assert status == 200
+    assert payload["count"] == 0
+    assert payload["cards"] == []
+    assert "0" in payload["speak"]
+
+
+def test_cards_board_param_passed(running, token, fakes, monkeypatch):
+    seen = {}
+
+    def fake_list(board=None, include_archived=False):
+        seen["board"] = board
+        return [_card()]
+    monkeypatch.setattr(fakes["_kanban"], "list_cards", fake_list)
+    status, payload = _request(running, token, path="/v1/cards?board=myboard")
+    assert status == 200
+    assert seen.get("board") == "myboard"
+
+
+def test_card_detail_200(running, token, fakes):
+    status, payload = _request(running, token, path="/v1/cards/t_abc123")
+    assert status == 200
+    assert payload["id"] == "t_abc123"
+    assert payload["title"] == "Do a thing"
+    assert isinstance(payload["speak"], str) and payload["speak"]
+    assert "t_abc123" in payload["speak"]
+
+
+def test_card_detail_404_unknown(running, token, fakes):
+    status, payload = _request(running, token, path="/v1/cards/nope")
+    assert status == 404
+    assert payload["error"]["code"] == "not_found"
+
+
+def test_review_queue_200(running, token, fakes):
+    status, payload = _request(running, token, path="/v1/review/queue")
+    assert status == 200
+    assert isinstance(payload["queue"], list) and len(payload["queue"]) == 1
+    assert payload["count"] == 1
+    # Row shape from the design.
+    row = payload["queue"][0]
+    for key in ("project", "card_id", "branch", "age_seconds", "title"):
+        assert key in row
+    assert isinstance(payload["speak"], str) and payload["speak"]
+
+
+def test_review_queue_empty_speak(running, token, fakes, monkeypatch):
+    monkeypatch.setattr(fakes["_review_cmd"], "_enrich_project_cards",
+                        lambda projects, _run=None: [])
+    status, payload = _request(running, token, path="/v1/review/queue")
+    assert status == 200
+    assert payload["count"] == 0
+    assert payload["speak"] == "Nothing awaiting review."
+
+
+def test_review_detail_200(running, token, fakes):
+    status, payload = _request(running, token, path="/v1/review/t_abc123")
+    assert status == 200
+    assert payload["id"] == "t_abc123"
+    assert payload["conflicts"] == 0
+    assert "merges cleanly" in payload["speak"]
+    assert isinstance(payload["speak"], str) and payload["speak"]
+
+
+def test_review_detail_404_unresolvable(running, token, fakes, monkeypatch):
+    def raises(cards, projects, card_id):
+        raise fakes["_review_cmd"].ReviewError("no card")
+    monkeypatch.setattr(fakes["_review_cmd"], "_resolve", raises)
+    status, payload = _request(running, token, path="/v1/review/ghost")
+    assert status == 404
+    assert payload["error"]["code"] == "not_found"
+
+
+def test_review_detail_is_dry_run_no_mutation(running, token, fakes, monkeypatch):
+    """Proof the read path never merges or closes a card.
+
+    We replace the review backing module with one whose _do_apply /
+    _real_close_card are BOMBS that raise if ever invoked. A successful 200
+    proves the handler never reached them. (The real handler has no call site
+    for either; this guards against a future regression that wires merge into
+    the GET.)
+    """
+    calls = []
+
+    def bomb_apply(*a, **k):
+        calls.append("_do_apply")
+        raise AssertionError("MUTATION: review GET called _do_apply")
+
+    def bomb_close(*a, **k):
+        calls.append("_real_close_card")
+        raise AssertionError("MUTATION: review GET called _real_close_card")
+
+    base = fakes["_review_cmd"]
+    monkeypatch.setattr(
+        routes_project, "_review_cmd",
+        _fake_module(
+            ReviewError=base.ReviewError,
+            git_state=base.git_state,
+            _enrich_project_cards=base._enrich_project_cards,
+            _resolve=base._resolve,
+            _branch_facts=base._branch_facts,
+            _verify_line=base._verify_line,
+            _render_json=base._render_json,
+            _do_apply=bomb_apply,
+            _real_close_card=bomb_close,
+        ),
+    )
+
+    status, payload = _request(running, token, path="/v1/review/t_abc123")
+    assert status == 200
+    assert calls == []  # neither mutation seam was invoked
+
+
+def test_qa_queue_200(running, token, fakes):
+    status, payload = _request(running, token, path="/v1/qa/queue")
+    assert status == 200
+    assert isinstance(payload["queue"], list) and len(payload["queue"]) == 1
+    assert isinstance(payload["manual_qa"], list) and len(payload["manual_qa"]) == 1
+    assert isinstance(payload["speak"], str) and payload["speak"]
+
+
+# --------------------------------------------------------------------------- #
+# Auth enforced on these routes too
+# --------------------------------------------------------------------------- #
+
+def test_auth_enforced_401(running, fakes):
+    status, payload = _request(running, token=None, path="/v1/cards")
+    assert status == 401
+    assert payload["error"]["code"] == "unauthorized"
+
+
+def test_auth_enforced_wrong_token(running, fakes):
+    status, payload = _request(running, token="bad", path="/v1/qa/queue")
+    assert status == 401
+    assert payload["error"]["code"] == "unauthorized"
+
+
+# --------------------------------------------------------------------------- #
+# Graceful degradation on backing error
+# --------------------------------------------------------------------------- #
+
+def test_standup_degrades_on_backing_error(running, token, fakes, monkeypatch):
+    def boom(registry_path):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(fakes["_standup_cmd"], "gather_data", boom)
+    status, payload = _request(running, token, path="/v1/standup")
+    assert status == 200
+    assert "error" in payload  # honest degraded marker, never fabricated counts
+    assert isinstance(payload["speak"], str) and payload["speak"]
+
+
+def test_cards_degrades_on_backing_error(running, token, fakes, monkeypatch):
+    def boom(board=None, include_archived=False):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(fakes["_kanban"], "list_cards", boom)
+    status, payload = _request(running, token, path="/v1/cards")
+    assert status == 200
+    assert payload["cards"] == [] and payload["count"] == 0
+    assert "unavailable" in payload["speak"]
+
+
+def test_review_queue_degrades_on_backing_error(running, token, fakes, monkeypatch):
+    def boom(projects, _run=None):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(fakes["_review_cmd"], "_enrich_project_cards", boom)
+    status, payload = _request(running, token, path="/v1/review/queue")
+    assert status == 200
+    assert payload["queue"] == [] and payload["count"] == 0
+    assert "unavailable" in payload["speak"]
+
+
+def test_qa_queue_degrades_on_backing_error(running, token, fakes, monkeypatch):
+    def boom(cards, projects, _run=None, _run_verify=None):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(fakes["_qa_cmd"], "_collect", boom)
+    status, payload = _request(running, token, path="/v1/qa/queue")
+    assert status == 200
+    assert payload["queue"] == [] and payload["manual_qa"] == []
+    assert "unavailable" in payload["speak"]
+
+
+# --------------------------------------------------------------------------- #
+# speak helpers are pure / unit-testable with no I/O
+# --------------------------------------------------------------------------- #
+
+def test_speak_pure_helpers():
+    assert "Nothing needs attention." == routes_project._speak_standup(
+        {"needs_you": [], "running": [], "failing": []}
+    )
+    s = routes_project._speak_standup(
+        {"needs_you": [1], "running": [1, 2], "failing": [1]}
+    )
+    assert "1 card" in s and "2 are running" in s and "1 failing" in s
+    assert routes_project._speak_review_queue({"count": 0}) == "Nothing awaiting review."
+    assert "3 cards await review" in routes_project._speak_review_queue({"count": 3})

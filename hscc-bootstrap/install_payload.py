@@ -122,6 +122,11 @@ DEFAULT_PAYLOAD = [
     # hscc_daemon/hscc.py:_handle_project) imports it as a SIBLING of
     # hscc_daemon, so it must deploy alongside it or the verb breaks.
     "hscc-project",
+    # hscc-api ships the `hscc api ...` HTTP server (hscc_daemon/hscc.py:
+    # _handle_api). Its server imports the cluster/project plugins as siblings
+    # at runtime, so it must deploy alongside them or the installed `hscc api`
+    # verb fails with 'package not found' — the same gap that bit hscc-project.
+    "hscc-api",
     "memori", "memori_byodb",
     "install", "docs", "assets", "configs",
     "README.md", "CHANGELOG.md", "LICENSE", "requirements.txt", "VERSION",

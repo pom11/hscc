@@ -297,6 +297,7 @@ Cluster & templates
   template apply <name> [--confirm] [--force-recreate]   Apply a template (--confirm executes; --force-recreate stops+reruns units so changed serve flags reach vLLM)
   profiles             Running kanban task counts per profile
   project <cmd>        Project-portfolio (flightdeck) commands: standup verify doctor ...
+  api <cmd>            HSCC HTTP API server: start stop status (external apps)
 
 Utility
   notify <message>     Send a desktop notification
@@ -342,6 +343,7 @@ COMMAND_HELP = {
     "template": "Cluster template commands.\n  Subcommands: list status preview <name> validate <name> [--structural-only] [--json] apply <name> [--confirm]\n  Usage: hscc template <subcommand> [args]",
     "profiles": "Running kanban task counts per profile",
     "project": "Project-portfolio (flightdeck) commands.\n  Delegates to the relocated flightdeck CLI under hscc-project/. Try 'hscc project --help' for the full subcommand surface.\n  Usage: hscc project <subcommand> [args]",
+    "api": "HSCC HTTP API server lifecycle.\n  Subcommands: start [--tailscale] [--bind <ip>] [--port <n>] stop status\n  Usage: hscc api <subcommand> [args]",
     "help": "Show help. Usage: hscc help [command]\n  Use 'hscc help advanced' for internal commands.",
     "verify": "Run a full compatibility/health smoke-test of the cluster.\n  Usage: hscc verify [--json]",
     "stats": "Fleet activity — completions & tool usage over N days (default 7).\n  Usage: hscc stats [days] [--json]",
@@ -732,6 +734,12 @@ def main():
         rc = _handle_project()
         sys.exit(rc)
 
+    # 'api' group (HSCC HTTP API server lifecycle)
+    if cmd == "api":
+        from hscc_daemon.api_cli import cmd_api
+        rc = cmd_api(args[1:])
+        sys.exit(rc)
+
     # Per-command --help (daemon commands)
     if cmd in DAEMON_COMMANDS and len(args) > 1 and args[1] == "--help":
         help_text = COMMAND_HELP.get(cmd, f"Run 'hscc help {cmd}' for details.")
@@ -816,7 +824,7 @@ def main():
         cmd_ed_uninstall()
     else:
         print(f"Unknown command: {cmd}")
-        print(f"Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, project, verify, stats, throughput, autoscale, escalate, start-daemon")
+        print(f"Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, project, api, verify, stats, throughput, autoscale, escalate, start-daemon")
         sys.exit(1)
 
 
