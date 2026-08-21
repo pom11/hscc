@@ -9,6 +9,8 @@ Commands:
   list                     List role specs and whether their profile exists
   validate                 Validate every role spec (load + required fields)
   autonomy [on|off]        Show or set the fleet autonomy flag
+  orch <project|general>   Ensure a project's orchestrator profile exists
+                           (idempotent) and print its resolved identity
 """
 import json
 import os
@@ -19,6 +21,7 @@ import rolelib
 import generator
 import author
 import autonomy
+import orchestrators
 
 
 def _base_identity():
@@ -85,6 +88,36 @@ def cmd_autonomy(argv):
     return 0
 
 
+def cmd_orch(argv):
+    """Ensure + report a project's orchestrator profile (single project).
+
+    Usage: hscc.py orch <project|general> [--registry PATH]
+    Idempotent — re-running never clobbers an existing profile's memory/sessions.
+    """
+    registry = None
+    rest = list(argv)
+    if "--registry" in rest:
+        i = rest.index("--registry")
+        if i + 1 >= len(rest):
+            print("Usage: hscc.py orch <project|general> [--registry PATH]")
+            return 1
+        registry = rest[i + 1]
+        del rest[i:i + 2]
+    if len(rest) != 1:
+        print("Usage: hscc.py orch <project|general> [--registry PATH]")
+        return 1
+    project = rest[0] or None
+    base = _base_identity()
+    try:
+        result = orchestrators.ensure_orchestrator(project, base_identity=base,
+                                                    path=registry)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0
+    except orchestrators.OrchestratorError as e:
+        print({"error": str(e)})
+        return 1
+
+
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
         print(__doc__)
@@ -100,6 +133,8 @@ def main():
         return cmd_validate()
     if cmd == "autonomy":
         return cmd_autonomy(sys.argv[2:])
+    if cmd == "orch":
+        return cmd_orch(sys.argv[2:])
     print(f"Unknown command: {cmd}")
     print(__doc__)
     return 1
