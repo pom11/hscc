@@ -326,4 +326,38 @@ struct HSCCClient {
                               body: ["container_id": containerID, "confirm": true],
                               as: StopClusterResponse.self)
     }
+
+    /// POST /v1/orchestrator/chat — send a prompt to a project's orchestrator.
+    ///
+    /// Body: `{ project: "<name>"|null, prompt: "...", confirm: true }`.
+    /// This is a MUTATION: the orchestrator can decompose the prompt and
+    /// dispatch real work onto its board, so `confirm` is ALWAYS sent as `true`
+    /// here and the caller (the chat view) MUST gate the call behind the same
+    /// explicit confirm UI as every other mutating surface before calling.
+    ///
+    /// `project` may be `nil` (or `"general"`) → the catch-all `general`
+    /// orchestrator (`general-orch` / `general` session / `default` board).
+    /// Unknown project → 400; missing/empty prompt → 400; missing confirm →
+    /// 409. On success returns the orchestrator's `reply` (the transcript text).
+    ///
+    /// Honest failures — a non-2xx ALWAYS throws and is surfaced as a failure,
+    /// never as a reply:
+    ///   * 409 — confirm missing/refused (shouldn't happen here; we always send it)
+    ///   * 400 bad_request / unknown_project — bad prompt or unknown project
+    ///   * 502 orchestrator_error — the hermes invocation failed (empty reply / bad exit)
+    ///   * 503 orchestrator_unavailable — the named session hasn't been created yet
+    ///   * 504 orchestrator_timeout — no reply within 180 s (a real, distinct state)
+    /// Callers distinguish timeout (504) from a normal failure so a timeout is
+    /// surfaced as a timeout, not a silent empty reply.
+    func orchestratorChat(project: String? = nil,
+                          prompt: String) async throws -> OrchestratorChatResponse {
+        var payload: [String: Any] = ["prompt": prompt, "confirm": true]
+        if let project, !project.isEmpty {
+            payload["project"] = project
+        }
+        // `project` absent ⇒ the general orchestrator. Always confirms.
+        return try await post("/v1/orchestrator/chat",
+                              body: payload,
+                              as: OrchestratorChatResponse.self)
+    }
 }
