@@ -548,3 +548,8 @@ import routes_project  # noqa: E402,F401  (registers /v1 project+kanban read rou
 # calls register them at import. Imported last so ROUTES/ApiError exist first.
 import routes_actions  # noqa: E402,F401  (registers /v1 mutating POST routes)
 
+# C2: the conversational orchestrator-chat endpoint (confirm-gated mutation).
+# Module-level ROUTES.append() registers it at import; the C1 resolver in
+# hscc-roles/orchestrators.py is loaded via sys.path inside the module.
+import routes_orchestrator  # noqa: E402,F401  (registers /v1/orchestrator/chat)
+
