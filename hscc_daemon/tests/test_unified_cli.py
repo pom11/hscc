@@ -991,5 +991,164 @@ class TestProjectRouting:
         assert "flightdeck" in out.getvalue()
 
 
+class TestApiVerb:
+    """`hscc api` no-subcommand/--help/unknown-subcommand group behavior, plus
+    its presence in the help text — mirroring how cluster/template/project are
+    exercised. No real API server is ever started or bound here.
+    """
+
+    def _run_main(self, args, monkeypatch):
+        """Run hscc.main() with the given argv slice; return (stdout, rc)."""
+        from hscc_daemon import hscc as hscc_mod
+        monkeypatch.setattr(sys, "argv", ["hscc", *args])
+        out = io.StringIO()
+        err = io.StringIO()
+        rc = None
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                hscc_mod.main()
+        except SystemExit as exc:
+            rc = exc.code
+        return out.getvalue(), rc
+
+    def test_api_no_subcommand_exits_0(self, monkeypatch):
+        out, rc = self._run_main(["api"], monkeypatch)
+        assert rc == 0
+        assert "HSCC API server" in out
+        assert "start" in out and "status" in out
+
+    def test_api_help_flag_exits_0(self, monkeypatch):
+        out, rc = self._run_main(["api", "--help"], monkeypatch)
+        assert rc == 0
+        assert "HSCC API server" in out
+
+    def test_api_unknown_subcommand_exits_1(self, monkeypatch):
+        out, rc = self._run_main(["api", "bogus"], monkeypatch)
+        assert rc == 1
+        assert "unknown api subcommand" in out
+
+    def test_full_help_lists_api(self, monkeypatch):
+        out, rc = self._run_main([], monkeypatch)
+        assert rc == 0
+        assert "api <cmd>" in out
+        assert "HSCC HTTP API server" in out
+
+    def test_help_api_subcommand(self, monkeypatch):
+        out, rc = self._run_main(["help", "api"], monkeypatch)
+        assert rc == 0
+        assert "hscc api" in out
+        assert "start" in out and "stop" in out and "status" in out
+
+
+class TestApiRouting:
+    """`hscc api start|stop|status` route to api_cli.cmd_api, which dispatches
+    to the right _handle_* functions. We stub the actual server start so no
+    test ever binds a real port or spawns a real background server.
+    """
+
+    def _run_cmd_api(self, subcmd, monkeypatch, tmp_path):
+        """Run main() for `hscc api <subcmd>` with handlers stubbed to record.
+        Returns (recorded_handlers, rc)."""
+        import hscc_daemon.api_cli as api_cli_mod
+
+        # Stub the handlers so nothing actually binds/starts a server;
+        # each records which handler ran and with what argv.
+        called = []
+        monkeypatch.setattr(api_cli_mod, "_handle_start",
+                            lambda argv=[]: called.append(("start", argv)) or 0)
+        monkeypatch.setattr(api_cli_mod, "_handle_stop",
+                            lambda argv=[]: called.append(("stop", argv)) or 0)
+        monkeypatch.setattr(api_cli_mod, "_handle_status",
+                            lambda argv=[]: called.append(("status", argv)) or 0)
+
+        from hscc_daemon import hscc as hscc_mod
+        monkeypatch.setattr(sys, "argv", ["hscc", "api", *subcmd])
+        out = io.StringIO()
+        rc = None
+        try:
+            with redirect_stdout(out):
+                hscc_mod.main()
+        except SystemExit as exc:
+            rc = exc.code
+        return called, rc
+
+    def test_api_start_routes(self, monkeypatch, tmp_path):
+        called, rc = self._run_cmd_api(["start"], monkeypatch, tmp_path)
+        assert rc == 0
+        assert called == [("start", [])]
+
+    def test_api_stop_routes(self, monkeypatch, tmp_path):
+        called, rc = self._run_cmd_api(["stop"], monkeypatch, tmp_path)
+        assert rc == 0
+        assert called == [("stop", [])]
+
+    def test_api_status_routes(self, monkeypatch, tmp_path):
+        called, rc = self._run_cmd_api(["status"], monkeypatch, tmp_path)
+        assert rc == 0
+        assert called == [("status", [])]
+
+    def test_api_start_forwards_flags(self, monkeypatch, tmp_path):
+        called, rc = self._run_cmd_api(
+            ["start", "--tailscale", "--port", "9999"], monkeypatch, tmp_path
+        )
+        assert rc == 0
+        assert called == [("start", ["--tailscale", "--port", "9999"])]
+
+
+class TestApiStatusNeverPrintsToken:
+    """`hscc api status` reports running/stopped + host:port and MUST NEVER
+    print the auth token — even when a token is present on disk. Uses a stubbed
+    server module + a stubbed PID file; no real server is bound.
+    """
+
+    def _run_status(self, monkeypatch, tmp_path, pid_value, token_value):
+        import hscc_daemon.api_cli as api_cli_mod
+
+        # Stub the api server module so we never load the real one (which would
+        # pull in routes_cluster/routes_project). resolve_config returns the
+        # resolved loopback bind; pid-file existence comes from a monkeypatched
+        # API_PID_FILE in the tmp dir.
+        class _FakeApi:
+            def resolve_config(self, **kw):
+                return {"host": "127.0.0.1", "port": 8787}
+
+        monkeypatch.setattr(api_cli_mod, "_load_api_server", lambda: _FakeApi())
+        pid_file = str(tmp_path / "api.pid")
+        monkeypatch.setattr(api_cli_mod, "API_PID_FILE", pid_file)
+        if pid_value is not None:
+            (tmp_path / "api.pid").write_text(str(pid_value))
+        # Write a token on disk to prove status doesn't echo it.
+        (tmp_path / "api-token").write_text(token_value)
+
+        out = io.StringIO()
+        err = io.StringIO()
+        rc = None
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = api_cli_mod._handle_status([])
+        except SystemExit as exc:
+            rc = exc.code
+        return out.getvalue(), err.getvalue(), rc
+
+    def test_status_not_running_never_prints_token(self, monkeypatch, tmp_path):
+        out, err, rc = self._run_status(monkeypatch, tmp_path, None, "SUPERSECRETTOKEN")
+        assert rc == 0
+        assert "not running" in out
+        assert "127.0.0.1:8787" in out
+        assert "SUPERSECRETTOKEN" not in out
+        assert "SUPERSECRETTOKEN" not in err
+
+    def test_status_running_never_prints_token(self, monkeypatch, tmp_path):
+        import os
+        out, err, rc = self._run_status(
+            monkeypatch, tmp_path, os.getpid(), "TOPSECRETABC"
+        )
+        assert rc == 0
+        assert "running" in out
+        assert "127.0.0.1:8787" in out
+        assert "TOPSECRETABC" not in out
+        assert "TOPSECRETABC" not in err
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
