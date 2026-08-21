@@ -8,11 +8,13 @@ the Tailscale tailnet.
 distributed, and is deliberately NOT App Store–ready.**
 
 > ⚠️ **STATUS: UNBUILT, UNTESTED.** No one has compiled or run this app yet.
-> This is Phase **B5** — an app skeleton, an API client, a Settings screen,
+> This is Phase **B5/C5** — an app skeleton, an API client, a Settings screen,
 > read-only **cluster + fleet + kanban/project views** (health / hosts /
 > workloads / stats / throughput / streams / autoscale / cards / standup /
 > review + QA queues), **B4** confirm-gated actions (dispatch / merge /
-> template-apply / stop), and **B5** Siri App Intents + spoken summaries.
+> template-apply / stop), **B5** Siri App Intents + spoken summaries, and
+> **C5** a confirm-gated **Orchestrator chat** view that talks to a project's
+> orchestrator directly.
 > The first `xcodegen` / Xcode build is expected to need small fixes. All code
 > has been syntax-checked (`swiftc -parse`) but **not built, run, or installed
 > on a device**. Siri App Intents are unverified until a real signed build
@@ -51,6 +53,10 @@ distributed, and is deliberately NOT App Store–ready.**
     `Views/ReviewQueueView.swift`, `Views/QAQueueView.swift` — the individual
     kanban read panels (standup, cards, review queue, QA queue), each with
     loading / error / empty states.
+  - `Views/OrchestratorChatView.swift` — the **C5** Chat tab: send a prompt to
+    a project's orchestrator (`POST /v1/orchestrator/chat`, project picker
+    defaulting to `general`), confirm-gated like every other mutation, with a
+    prompt→reply transcript and honest failure rendering.
   - `Intents/` — the **B5** Siri App Intents surface (in-car, hands-free):
     `ClusterStatusIntent` + `ReviewQueueIntent` (speak each endpoint's `speak`
     one-liner), `CannedCard` (an `AppEnum` of pre-defined cards) +
