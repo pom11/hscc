@@ -65,6 +65,21 @@ def _load_projects(path: Optional[str]) -> list[dict]:
     return projects if isinstance(projects, list) else []
 
 
+def list_registry_projects(path: Optional[str] = None) -> list[str]:
+    """Return the name of every project in the registry.
+
+    Missing/unreadable registry -> empty list (never raises), so a caller that
+    wants to provision "every project plus the general catch-all" degrades to
+    just the catch-all on a bare machine instead of dying.
+    """
+    names = []
+    for row in _load_projects(path):
+        name = row.get("name")
+        if name:
+            names.append(str(name))
+    return names
+
+
 def resolve_orchestrator(project: Optional[str] = None, path: Optional[str] = None) -> dict:
     """Resolve a project to its orchestrator identity.
 

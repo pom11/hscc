@@ -31,6 +31,20 @@ def registry_file(tmp_path):
 
 
 @pytest.fixture
+def registry_file_no_noboard(tmp_path):
+    """A clean registry with only well-formed projects (no broken entries)."""
+    doc = {
+        "projects": [
+            {"name": "ecofire-app", "repo": "/tmp/ecofire", "board": "ecofire-app"},
+            {"name": "hscc", "repo": "/tmp/hscc", "board": "hscc"},
+        ],
+    }
+    p = tmp_path / "registry-clean.yaml"
+    p.write_text(yaml.safe_dump(doc), encoding="utf-8")
+    return str(p)
+
+
+@pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
     """Point the generator at a tmp profile root (BOTH native + fallback paths)."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -298,3 +312,155 @@ def test_project_orch_points_at_orchestrator_gpu_not_worker_proxy(
     assert cfg["model"]["base_url"] == generator.STRONG_URL
     assert cfg["model"]["default"] == generator.STRONG_MODEL
     assert "auxiliary" not in cfg          # no worker compaction repoint
+
+
+# -- bulk provisioning (orch-all) ----------------------------------------------
+
+
+def test_list_registry_projects(registry_file):
+    assert sorted(orchestrators.list_registry_projects(registry_file)) == \
+        ["ecofire-app", "hscc", "noboard"]
+
+
+def test_list_registry_projects_missing_file(tmp_path):
+    """A missing/unreadable registry yields an empty list, never a raise."""
+    assert orchestrators.list_registry_projects(
+        str(tmp_path / "does-not-exist.yaml")) == []
+
+
+def _run_orch_all(registry, isolated_home):
+    """Drive hscc.py main() with argv=['orch-all', ...] inside a tmp home.
+
+    The isolated_home fixture has already redirected HERMES_HOME/PROFILES_DIR
+    to a tmp root, so nothing touches the real ~/.hermes/profiles. Returns
+    (exit_code, report_dict) where report_dict is parsed from the JSON stdout.
+    """
+    import io
+    import contextlib
+    import json as _json
+    import hscc
+    old_argv = hscc.sys.argv
+    hscc.sys.argv = ["hscc.py", "orch-all", "--registry", registry]
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            code = hscc.main()
+    finally:
+        hscc.sys.argv = old_argv
+    return code, _json.loads(buf.getvalue())
+
+
+def test_orch_all_ensures_every_project_plus_general(
+    registry_file, isolated_home
+):
+    """orch-all provisions every registry project AND the general catch-all."""
+    # The fixture registry has a 'noboard' project too — an orchestrator
+    # cannot be resolved for it, so it must land in failures while the others
+    # still get ensured.
+    code, report = _run_orch_all(registry_file, isolated_home)
+    assert code == 1  # noboard failed -> non-zero exit
+    ensured = {e["profile"] for e in report["ensured"]}
+    assert ensured == {"ecofire-app-orch", "hscc-orch", "general-orch"}
+    assert "noboard" in {f["project"] for f in report["failures"]}
+    for name in ("ecofire-app", "hscc", "general"):
+        assert os.path.isdir(os.path.join(isolated_home, f"{name}-orch"))
+    # no orchestrator was half-written for the failing project
+    assert not os.path.isdir(os.path.join(isolated_home, "noboard-orch"))
+
+
+def test_orch_all_insured_all_success(registry_file_no_noboard, isolated_home):
+    """With a clean registry (no broken project), orch-all exits 0 and ensures all."""
+    code, report = _run_orch_all(registry_file_no_noboard, isolated_home)
+    assert code == 0
+    assert "failures" not in report
+    assert len(report["ensured"]) == len(report["requested"]) == 3
+
+
+def test_orch_all_idempotent_second_run_changed_false(
+    registry_file_no_noboard, isolated_home
+):
+    """Re-running orch-all on an already-provisioned registry changes nothing."""
+    code1, r1 = _run_orch_all(registry_file_no_noboard, isolated_home)
+    code2, r2 = _run_orch_all(registry_file_no_noboard, isolated_home)
+    assert code1 == code2 == 0
+    assert all(e["changed"] for e in r1["ensured"])       # first run created
+    assert all(e["changed"] is False for e in r2["ensured"])  # second run no-op
+
+
+def test_orch_all_missing_registry_still_ensures_general(tmp_path, isolated_home):
+    """A missing registry still provisions `general` and exits sanely (0)."""
+    missing = str(tmp_path / "missing-registry.yaml")
+    code, report = _run_orch_all(missing, isolated_home)
+    assert code == 0
+    assert report["requested"] == ["general"]
+    assert report["ensured"][0]["profile"] == "general-orch"
+    assert os.path.isdir(os.path.join(isolated_home, "general-orch"))
+
+
+def test_orch_all_stdout_is_pure_json(registry_file_no_noboard, isolated_home):
+    """stdout carries ONLY the JSON report — warnings go to stderr, never stdout."""
+    import io
+    import contextlib
+    import json as _json
+    import hscc
+    old_argv = hscc.sys.argv
+    hscc.sys.argv = ["hscc.py", "orch-all", "--registry", registry_file_no_noboard]
+    out = io.StringIO()
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = hscc.main()
+    finally:
+        hscc.sys.argv = old_argv
+    assert code == 0
+    # Stdout must be a single parseable JSON doc (what a $(...) + json.load
+    # caller expects) — no prose leaked in front of it.
+    report = _json.loads(out.getvalue())
+    assert report["requested"] == ["ecofire-app", "hscc", "general"]
+
+
+# -- orch-all as a SUBPROCESS (the bootstrap->script path) ---------------------
+# Two bugs this week hid because tests called an inner function directly while
+# the actual bootstrap->script path was broken. Drive hscc.py orch-all as a real
+# subprocess so the CLI dispatch, imports, and argv plumbing are all exercised.
+
+def _subprocess_orch_all(registry, tmp_path, monkeypatch):
+    import subprocess
+    import sys as _sys
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HSCC_REGISTRY", registry)
+    plugin_dir = os.path.dirname(os.path.abspath(generator.__file__))
+    result = subprocess.run(
+        [_sys.executable, os.path.join(plugin_dir, "hscc.py"), "orch-all",
+         "--registry", registry],
+        capture_output=True, text=True, env=dict(os.environ), cwd=plugin_dir,
+    )
+    return result
+
+
+def test_cli_orch_all_subprocess_ensures_fleet(registry_file_no_noboard,
+                                                tmp_path, monkeypatch):
+    """`python hscc.py orch-all --registry <fixture>` provisions the whole fleet
+    PLUS general, reported as pure JSON on stdout, exit 0."""
+    result = _subprocess_orch_all(registry_file_no_noboard, tmp_path, monkeypatch)
+    assert result.returncode == 0, result.stderr
+    import json as _json
+    report = _json.loads(result.stdout)   # stdout must be pure JSON
+    assert {e["profile"] for e in report["ensured"]} == \
+        {"ecofire-app-orch", "hscc-orch", "general-orch"}
+    assert result.stderr == ""  # ssh into registry present, no warnings
+    home = tmp_path / "home"
+    assert (home / "profiles" / "hscc-orch").is_dir()
+    assert (home / "profiles" / "general-orch").is_dir()
+
+
+def test_cli_orch_all_subprocess_missing_registry(tmp_path, monkeypatch):
+    """Subprocess with a missing registry still ensures general and exits 0."""
+    result = _subprocess_orch_all(str(tmp_path / "nope.yaml"), tmp_path, monkeypatch)
+    assert result.returncode == 0, result.stderr
+    import json as _json
+    report = _json.loads(result.stdout)
+    assert report["requested"] == ["general"]
+    assert (tmp_path / "home" / "profiles" / "general-orch").is_dir()
+    # the warning about the missing registry is on STDERR, keeping stdout pure
+    assert "warn" in result.stderr
