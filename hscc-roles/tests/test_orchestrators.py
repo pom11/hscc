@@ -134,12 +134,16 @@ def test_ensure_orchestrator_creates_profile_with_empty_memory(
         assert entries == []
     assert got["changed"] is True
 
-    # No worker-proxy repoint: project orchestrator is gateway-node, like the
-    # cluster-wide orchestrator → config.yaml has NO model block / compaction.
+    # No worker-proxy repoint: a project orchestrator is gateway-node, so it
+    # gets NO worker compaction routing. It DOES need an explicit model block
+    # though — it was previously left to "inherit the root config", but that
+    # block carries no api_key, so `hermes -p <p>-orch chat` died with "No
+    # inference provider configured" and the profile could not run at all.
     with open(os.path.join(pdir, "config.yaml")) as f:
         cfg = yaml.safe_load(f)
-    assert "model" not in cfg
-    assert "auxiliary" not in cfg
+    assert "auxiliary" not in cfg          # still not repointed at the worker proxy
+    assert cfg["model"]["base_url"] == generator.STRONG_URL   # orchestrator GPU
+    assert cfg["model"]["api_key"]                            # runnable
     # ...but it MUST carry the kanban + delegation toolsets an orchestrator needs.
     toolsets = cfg["toolsets"]
     assert "kanban" in toolsets
@@ -260,3 +264,37 @@ def test_cli_orch_unknown_project(registry_file, tmp_path, monkeypatch):
     assert "unknown project" in result.stdout
     # nothing rescued into the profile tree
     assert not os.path.exists(os.path.join(str(tmp_path), "profiles", "nope-orch"))
+
+
+# ── A per-project orchestrator must be RUNNABLE, not merely present ─────────
+# Regression: the generator lumped `<project>-orch` in with the cluster-wide
+# `orchestrator` and skipped the model block, so every generated orchestrator
+# died with "No inference provider configured". Provisioning "succeeded" and
+# structural checks passed — only actually RUNNING one surfaced it.
+
+def test_project_orch_model_block_is_usable_not_just_present(
+    registry_file, isolated_home
+):
+    """The model block must carry every field a direct invocation needs."""
+    orchestrators.ensure_orchestrator("hscc", base_identity="BASE",
+                                      path=registry_file)
+    with open(os.path.join(isolated_home, "hscc-orch", "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    model = cfg.get("model")
+    assert model, "no model block — the profile cannot run"
+    for key in ("default", "provider", "base_url", "api_key"):
+        assert model.get(key), f"model.{key} missing/empty — direct invocation fails"
+
+
+def test_project_orch_points_at_orchestrator_gpu_not_worker_proxy(
+    registry_file, isolated_home
+):
+    """It must use the orchestrator GPU (same target the root config intends),
+    never the load-balanced worker proxy — an orchestrator is not a worker."""
+    orchestrators.ensure_orchestrator("hscc", base_identity="BASE",
+                                      path=registry_file)
+    with open(os.path.join(isolated_home, "hscc-orch", "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["model"]["base_url"] == generator.STRONG_URL
+    assert cfg["model"]["default"] == generator.STRONG_MODEL
+    assert "auxiliary" not in cfg          # no worker compaction repoint
