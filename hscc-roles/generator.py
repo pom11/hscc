@@ -139,6 +139,16 @@ def _is_orchestrator(name):
     return name == "orchestrator" or name.endswith("-orch")
 
 
+def _is_project_orchestrator(name):
+    """A PER-PROJECT orchestrator (`<project>-orch`), not the cluster-wide one.
+
+    The cluster-wide `orchestrator` deliberately keeps the root config and is
+    never repointed. Per-project orchestrators are separate profiles that must
+    carry their own model block to be invocable directly.
+    """
+    return name != "orchestrator" and name.endswith("-orch")
+
+
 def compose_soul(spec, base_identity):
     """Compose a profile SOUL from base + role disposition + thin operational.
 
@@ -244,7 +254,21 @@ def generate_profile(spec, base_identity):
     # on worker GPUs, not the orchestrator. The orchestrator role keeps the root
     # config (its own gateway-node model) and is never repointed; per-project
     # orchestrators (<project>-orch) likewise keep the gateway-node model.
-    if not _is_orchestrator(name):
+    if _is_project_orchestrator(name):
+        # Per-project orchestrators (<project>-orch) need an EXPLICIT model
+        # block. They were previously lumped in with the cluster-wide
+        # `orchestrator` and left to "inherit the root config" — but the root
+        # config's model block carries no api_key, so `hermes -p <p>-orch chat`
+        # dies with "No inference provider configured" and the profile cannot
+        # run at all outside the gateway. This block is the SAME model/endpoint
+        # the root config points at (orchestrator-model on the orchestrator
+        # GPU), just with the api_key that a direct invocation requires.
+        #
+        # Deliberately NOT given worker-proxy compaction routing: an
+        # orchestrator is not a kanban worker and must not be repointed at the
+        # worker proxy.
+        config["model"] = _strong_model_block()
+    elif not _is_orchestrator(name):
         model_tier = spec.get("model_tier", "fast")
         model_endpoint = spec.get("model_endpoint")
         model_name = spec.get("model_name")
