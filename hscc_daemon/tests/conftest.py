@@ -18,10 +18,106 @@ Usage::
 """
 
 import json
+import os
 import subprocess
 import sys
 
 import pytest
+
+
+# ---------------------------------------------------------------------------
+# Autouse ~/.hscc isolation (RELEASE BLOCKER regression)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _isolate_hscc(tmp_path, monkeypatch):
+    """Redirect EVERY ~/.hscc write path to a per-test tmp dir.
+
+    Runs for EVERY test in the package (autouse), so no test can reach the
+    operator's real ~/.hscc even when it forgets to patch individually.
+
+    Why this exists (RELEASE BLOCKER): test_daemon_ops.py patched
+    ``autodown.load_config`` to return {"enabled": True} but did NOT patch
+    ``save_config`` / ``autodown.AUTODOWN_FILE``. Phase 6 added activity probes
+    to ``cycle()``, so the timing had ``record_activity()`` running during
+    those tests, calling the PATCHED loader and ``save_config``-ing the partial
+    3-key dict straight to the REAL ``~/.hscc/autodown.json`` — silently arming
+    idle-teardown on the live cluster. A later variant leaked into the LIVE
+    ``~/.hscc/watchdog-block.json`` (test_trigger.py / test_health.py did not
+    patch ``lifecycle.WATCHDOG_BLOCK_FILE``): the suite wrote
+    {"blocked": true, "intentional": "autodown"} over the real block, silently
+    disabling cluster supervision for ~1 hour.
+
+    Belt-and-braces, covering the DIRECTORY AS A WHOLE:
+      (a) Patch ``os.path.expanduser`` so any ``~/.hscc/...`` path computed at
+          RUNTIME (function-scoped ``expanduser`` calls, e.g.
+          lifecycle.py:30/:87, verify.py:132, daemon_ops usage) resolves under
+          the per-test tmp dir. Everything outside ``~/.hscc`` is delegated to
+          the real expanduser unchanged.
+      (b) Patch every module-level ``~/.hscc``-rooted constant (each module
+          computes its own copy at IMPORT time, so they are already baked in
+          before this fixture runs and must be overwritten explicitly). See
+          ``_module_attrs()`` — the enumerated audit in the card.
+      (c) Redirect ``state.STATE_DIR`` to the tmp state dir too, so the common
+          ``state.write_state`` funnel can never reach ``~/.hscc/state``.
+
+    Function-scoped monkeypatch is torn down after each test, and any test
+    that patches its own tmp path simply overrides (LIFO teardown → the test's
+    patch wins during the test).
+    """
+    base = str(tmp_path / "hscc")
+
+    # (a) Runtime expanduser redirect for the whole ~/.hscc directory tree.
+    real_hscc = os.path.expanduser("~/.hscc")
+    _real_expanduser = os.path.expanduser
+
+    def _redirect_expanduser(path):
+        expanded = _real_expanduser(path)
+        if expanded == real_hscc:
+            return base
+        if expanded.startswith(real_hscc + os.sep):
+            return os.path.join(base, expanded[len(real_hscc) + 1:])
+        return expanded
+
+    monkeypatch.setattr(os.path, "expanduser", _redirect_expanduser)
+
+    # (b) Module-level constants already computed at import — overwrite each.
+    def _module_attrs():
+        from hscc_daemon import (
+            autodown, daemon_ops, desktop, hscc, lifecycle, state, trigger,
+        )
+        def p(sub):
+            return os.path.join(base, sub)
+        return [
+            # autodown.py
+            (autodown, "AUTODOWN_FILE", p("autodown.json")),
+            (autodown, "AUTODOWN_LOCK", p("autodown.lock")),
+            (autodown, "AGENTS_FILE", p("agents.json")),
+            (autodown, "HTTP_ACTIVITY_STATE", p("activity.json")),
+            (autodown, "TELEGRAM_OFFSET_FILE", p("state/telegram_probe.offset")),
+            # lifecycle.py
+            (lifecycle, "BRIDGE_FILE", p("bridge.json")),
+            (lifecycle, "WATCHDOG_BLOCK_FILE", p("watchdog-block.json")),
+            # state.py (the write_state/read_state funnel)
+            (state, "STATE_DIR", p("state")),
+            # trigger.py
+            (trigger, "EVENTS_FILE", p("events.jsonl")),
+            (trigger, "TRIGGERS_FILE", p("triggers.json")),
+            (trigger, "COOLDOWN_FILE", p("cooldowns.json")),
+            # daemon_ops.py
+            (daemon_ops, "PID_FILE", p("daemon.pid")),
+            (daemon_ops, "LOG_FILE", p("daemon.log")),
+            (daemon_ops, "STATE_DIR", p("state")),
+            (daemon_ops, "HSCC_DIR", base),
+            # desktop.py (emit_event / notifications live under HSCC_DIR)
+            (desktop, "HSCC_DIR", base),
+            # hscc.py CLI module
+            (hscc, "BRIDGE_FILE", p("bridge.json")),
+            (hscc, "ORCH_ENDPOINT_STATE", p("orch-endpoint")),
+        ]
+
+    for mod, attr, val in _module_attrs():
+        monkeypatch.setattr(mod, attr, val, raising=False)
 
 
 class _SubprocessResult:
