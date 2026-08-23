@@ -1820,6 +1820,25 @@ class TestSelfHeal:
                                         "autodown", "reason": "x"})
         assert ad._self_heal_intentional_block() is False
 
+    def test_reasserts_when_blocked_false_intentional_present(self, tmp_path, monkeypatch):
+        """FIX 2 (defense-in-depth, §8 forbids the silent half-state): a block
+        with ``blocked`` False but ``intentional == \"autodown\"`` (the
+        split-brain the watchdog's backoff-elapsed path used to leave behind)
+        is NOT already-asserted — it must be treated as NEEDING RE-ASSERT and
+        re-set ``blocked: true``. Otherwise autodown believes it is still down
+        while the next watchdog tick can resurrect the orchestrator."""
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        # blocked False + intentional autodown survives (the historical wedge).
+        _lifecycle.save_watchdog_block({"blocked": False,
+                                        "intentional": "autodown",
+                                        "reason": "x"})
+        assert ad._self_heal_intentional_block() is True   # NOT a no-op
+        with open(block_file) as f:
+            blk = json.load(f)
+        assert blk.get("blocked") is True                  # re-asserted
+        assert blk.get("intentional") == "autodown"
+
     def test_cycle_down_reasserts_block(self, autodown_file, tmp_path,
                                         monkeypatch):
         """Full cycle() while state:down with a missing block ⇒ block

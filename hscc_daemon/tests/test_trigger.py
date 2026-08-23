@@ -262,6 +262,63 @@ class TestFireTriggerAction:
         assert len(events_emitted) == 1
         assert events_emitted[0]["type"] == "custom.alert"
 
+    # -- auto_restart gated on intentional autodown (§5 C2, audit finding 5) --
+
+    def _restart_rule(self):
+        return {
+            "id": "r-restart",
+            "trigger_type": "auto_restart",
+            "trigger_params": {},
+        }
+
+    def test_auto_restart_suppressed_while_intentional(self, tmp_hfcc_dir, monkeypatch):
+        """§5 C2: an intentional autodown must suppress automated restarts from
+        EVERY path, including the trigger engine. auto_restart on vllm_down while
+        the block carries intentional:autodown ⇒ restart_vllm_fn NOT called."""
+        from hscc_daemon import trigger
+        from hscc_daemon import state as state_mod
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir()
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        monkeypatch.setattr(trigger, "send_macos_notification",
+                            lambda *a, **kw: None)
+        monkeypatch.setattr(trigger, "log", lambda *a, **kw: None)
+
+        restart_calls = []
+        # watchdog_block_fn returns a block carrying intentional autodown.
+        def intentional_block():
+            return {"blocked": True, "intentional": "autodown",
+                    "reason": "autodown: intentional idle teardown"}
+        trigger.fire_trigger_action(
+            self._restart_rule(), {"severity": "critical"},
+            watchdog_block_fn=intentional_block,
+            restart_vllm_fn=lambda: restart_calls.append(1) or {"ok": True},
+        )
+        assert restart_calls == []      # resurrect suppressed
+
+    def test_auto_restart_allowed_when_not_intentional(self, tmp_hfcc_dir, monkeypatch):
+        """§5 C2 negative control: auto_restart on vllm_down WITHOUT an
+        intentional block ⇒ restart_vllm_fn IS called (ordinary healing)."""
+        from hscc_daemon import trigger
+        from hscc_daemon import state as state_mod
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir()
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        monkeypatch.setattr(trigger, "send_macos_notification",
+                            lambda *a, **kw: None)
+        monkeypatch.setattr(trigger, "log", lambda *a, **kw: None)
+
+        restart_calls = []
+        # watchdog_block_fn returns a plain (non-intentional) block.
+        def plain_block():
+            return {"blocked": False, "reason": "", "failures": []}
+        trigger.fire_trigger_action(
+            self._restart_rule(), {"severity": "critical"},
+            watchdog_block_fn=plain_block,
+            restart_vllm_fn=lambda: restart_calls.append(1) or {"ok": True},
+        )
+        assert len(restart_calls) == 1   # ordinary healing still fires
+
 
 class TestTriggerEngine:
     """trigger_engine() evaluates all rules against events."""

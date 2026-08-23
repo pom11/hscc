@@ -673,6 +673,32 @@ class TestCheckWorkersAutoHeal:
         assert port == 8000
         assert "w-10.0.0.2" in label
 
+    def test_keepalive_healing_proceeds_while_intentional(self, tmp_hfcc_dir, monkeypatch):
+        """§5 C2: keepalive/other-unit healing must continue while an
+        intentional autodown is in effect. The fork is "don't resurrect the
+        intentionally-down orchestrator", NOT "do nothing" — a keepalive worker
+        that autodown did NOT stop must still be auto-healed when it crashes.
+        This exercises the REAL check_workers (the function responsible for
+        keepalive supervision) with an intentional watchdog block present."""
+        from hscc_daemon import health, serving, lifecycle
+        # Set up a keepalive worker unit (never a teardown target).
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        self._down(health, monkeypatch)
+        # An intentional autodown block is latched (orchestrator deliberately
+        # down by autodown) — the exact state during an idle teardown.
+        block_file = str(tmp_hfcc_dir / "watchdog-block.json")
+        monkeypatch.setattr(lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        lifecycle.save_watchdog_block({"blocked": True, "intentional": "autodown",
+                                       "reason": "autodown: intentional idle teardown"})
+        # keepalive unit down across the debounce ⇒ auto-heal still fires
+        heals = []
+        monkeypatch.setattr(health, "_autoheal_worker_fn",
+                            lambda *a: heals.append(a) or {"status": "ok"})
+        for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
+            health.check_workers()
+        assert len(heals) == 1
+        assert heals[0][2] == "10.0.0.2"    # keepalive unit healed despite intentional
+
     def test_flapping_resets_consecutive_count(self, tmp_hfcc_dir, monkeypatch):
         health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
         heals = []
