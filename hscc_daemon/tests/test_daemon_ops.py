@@ -4,8 +4,213 @@ All tests isolated: PID_FILE, LOG_FILE, STATE_DIR are monkeypatched to tmp_path.
 """
 import json
 import os
+import threading
+import time
+
 import pytest
 from pathlib import Path
+
+
+class TestAutodownLoop:
+    """run_autodown_loop / _autodown_tick — the Phase 2 idle timer thread.
+
+    Tests never sleep the real 30s cadence: the interval is injected, and the
+    per-tick logic (_autodown_tick) is exercised directly with a monkeypatched
+    config + cycle so the real ~/.hscc and ~/.hermes are never touched.
+    """
+
+    def _patch_enabled(self, monkeypatch, enabled):
+        """Point autodown.load_config at a fake config; return the counter."""
+        from hscc_daemon import autodown
+        calls = {"n": 0}
+
+        def fake_load_config():
+            return {"enabled": enabled}
+
+        def fake_cycle():
+            calls["n"] += 1
+
+        monkeypatch.setattr(autodown, "load_config", fake_load_config)
+        monkeypatch.setattr(autodown, "cycle", fake_cycle, raising=False)
+        return calls
+
+    def test_tick_disabled_never_calls_cycle(self, monkeypatch):
+        """Disabled config ⇒ cycle() is never invoked."""
+        from hscc_daemon import daemon_ops
+        calls = self._patch_enabled(monkeypatch, enabled=False)
+        daemon_ops._autodown_tick()   # must not raise, must not call cycle
+        assert calls["n"] == 0
+
+    def test_tick_enabled_calls_cycle(self, monkeypatch):
+        """Enabled config ⇒ cycle() is invoked once per tick."""
+        from hscc_daemon import daemon_ops
+        calls = self._patch_enabled(monkeypatch, enabled=True)
+        daemon_ops._autodown_tick()
+        daemon_ops._autodown_tick()
+        assert calls["n"] == 2
+
+    def test_tick_missing_cycle_is_noop(self, monkeypatch):
+        """Enabled config but no cycle() yet (Phase 3) ⇒ silent no-op, no raise."""
+        from hscc_daemon import autodown, daemon_ops
+        monkeypatch.setattr(autodown, "load_config",
+                            lambda: {"enabled": True})
+        # cycle does not exist yet — getattr returns None, tick must not raise.
+        daemon_ops._autodown_tick()
+
+    def test_raising_cycle_survives_and_ticks_again(self, monkeypatch):
+        """A raising cycle() is caught; the loop keeps ticking."""
+        from hscc_daemon import autodown, daemon_ops
+        calls = {"n": 0}
+        monkeypatch.setattr(autodown, "load_config",
+                            lambda: {"enabled": True})
+
+        def flaky_cycle():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("boom in cycle")
+        monkeypatch.setattr(autodown, "cycle", flaky_cycle, raising=False)
+
+        # First tick: cycle raises inside _autodown_tick — must not propagate.
+        daemon_ops._autodown_tick()
+        # Second tick: loop survives and cycle runs again.
+        daemon_ops._autodown_tick()
+        assert calls["n"] == 2
+
+    def test_loop_starts_and_stops_cleanly(self, monkeypatch):
+        """run_autodown_loop exits cleanly once stop_event is set."""
+        from hscc_daemon import autodown, daemon_ops
+        monkeypatch.setattr(autodown, "load_config",
+                            lambda: {"enabled": False})
+
+        stop_event = threading.Event()
+        t = threading.Thread(
+            target=daemon_ops.run_autodown_loop,
+            args=(stop_event,),
+            kwargs={"interval": 0.005},
+            daemon=True,
+        )
+        t.start()
+        assert t.is_alive()
+        time.sleep(0.03)  # let it tick a few times
+        stop_event.set()
+        t.join(timeout=2)
+        assert not t.is_alive()  # exited cleanly
+
+
+class TestNoLiveHsccLeak:
+    """RELEASE BLOCKER regression — the suite must never touch real ~/.hscc.
+
+    The historical bug: patching ``autodown.load_config`` to ``{"enabled":
+    True}`` without patching ``save_config``/``AUTODOWN_FILE`` let Phase 6's
+    activity probes drive ``record_activity()`` → ``save_config()`` straight
+    into the operator's REAL ``~/.hscc/autodown.json``, arming idle-teardown.
+
+    These tests replay that EXACT path (patched loader returning a partial
+    3-key dict + real record_activity/save_config/cycle) and assert the real
+    file is untouched. Green because the autouse ``_isolate_hscc`` fixture
+    redirects ``AUTODOWN_FILE`` (and the activity/telegram state paths) to a
+    tmp dir for every test. If that isolation is ever removed or weakened,
+    these FAIL.
+    """
+
+    @staticmethod
+    def _real_state_path():
+        import os as _os
+        # Bypass the autouse fixture's os.path.expanduser redirect: expand
+        # "~" (NOT under ~/.hscc, so delegated to the real home dir) and join
+        # the literal ".hscc/autodown.json" to REACH the operator's real file.
+        # The fixture redirects "~/.hscc/..." via expanduser; this must not.
+        return _os.path.join(_os.path.expanduser("~"), ".hscc/autodown.json")
+
+    @staticmethod
+    def _real_hash_or_absent(path):
+        import hashlib
+        try:
+            with open(path, "rb") as f:
+                return ("present", hashlib.sha256(f.read()).hexdigest())
+        except FileNotFoundError:
+            # Untouched means: if it didn't exist before, it must not exist now.
+            return ("absent", None)
+
+    def test_patched_loader_record_activity_does_not_touch_real_file(
+            self, monkeypatch):
+        """Replay the documented leak: patched loader + real record_activity."""
+        from hscc_daemon import autodown
+        real = self._real_state_path()
+        before = self._real_hash_or_absent(real)
+        # The historical partial 3-key dict a patched loader returns.
+        monkeypatch.setattr(autodown, "load_config",
+                            lambda: {"enabled": True})
+        # Force the leak path through the REAL record_activity → save_config.
+        autodown.record_activity("http")
+        autodown.record_activity("kanban")
+        after = self._real_hash_or_absent(real)
+        assert before == after, (
+            "TEST SUITE WROTE TO REAL ~/.hscc/autodown.json! "
+            "before=%r after=%r" % (before, after)
+        )
+
+    def test_cycle_with_default_probes_does_not_touch_real_file(
+            self, monkeypatch, tmp_path):
+        """A full enabled cycle() with default probes must stay contained."""
+        from hscc_daemon import autodown
+        real = self._real_state_path()
+        before = self._real_hash_or_absent(real)
+        # Enabled, up, long-idle config with a fake kanban board that reports
+        # live work — the exact conditions under which the leak fired.
+        monkeypatch.setattr(autodown, "load_config",
+                            lambda: {"enabled": True, "state": "up",
+                                     "last_activity_iso": "2000-01-01T00:00:00+00:00"})
+        # Inject an in-memory kanban lib so probe_kanban_activity fires and
+        # stamps (reaching record_activity + save_config like the real cycle).
+        import sqlite3
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT)")
+        conn.execute("INSERT INTO tasks (id, status) VALUES ('t-1', 'running')")
+        conn.commit()
+
+        class _Kb:
+            from contextlib import contextmanager
+            @contextmanager
+            def connect_closing(self):
+                yield conn
+
+        # stop() is never reached because active work blocks teardown, but the
+        # probes + record_activity run first — the leak surface.
+        autodown.cycle(kanban_db=_Kb(), agents_file=str(tmp_path / "agents.json"),
+                       probes=None)
+        after = self._real_hash_or_absent(real)
+        assert before == after, (
+            "TEST SUITE WROTE TO REAL ~/.hscc/autodown.json! "
+            "before=%r after=%r" % (before, after)
+        )
+
+
+class TestAutodownStartupRecovery:
+    """Phase 8 wiring — a broken autodown must never stop the daemon booting.
+
+    ``run_daemon_loop`` calls ``autodown.resume_from_restart_defensive()`` at
+    startup (daemon_ops.py:173-183). That wrapper is the daemon's boot
+    guarantee: even if ``resume_from_restart`` raises (corrupt config, I/O
+    error, anything), the daemon proceeds. The autouse ``_isolate_hscc``
+    fixture redirects the real ~/.hscc, and these tests call the wrapper
+    directly (the full ``run_daemon_loop`` is a monolithic thread-spawning
+    function not practically testable in-process).
+    """
+
+    def test_startup_wrapper_swallows_raise(self, monkeypatch):
+        """A raising resume_from_restart does NOT propagate — the daemon can
+        still boot (daemon_ops's startup hook contract)."""
+        from hscc_daemon import autodown
+        # resume raising (e.g. corrupt autodown.json blew up load/save).
+        monkeypatch.setattr(autodown, "resume_from_restart",
+                            lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        # The wrapper must swallow it — this is what run_daemon_loop calls.
+        autodown.resume_from_restart_defensive()  # must not raise
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
 
 
 class TestGetPid:

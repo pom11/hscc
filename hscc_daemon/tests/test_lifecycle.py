@@ -399,6 +399,110 @@ class TestPipelineWatchdog:
         )
         assert result is False
 
+    # -- intentional-autodown fork (§5 C2, audit findings 1+2) ----------------
+
+    def _blocked(self, lifecycle, path, blocked=True, intentional="autodown",
+                 blocked_at=None):
+        """Seed a watchdog block dict and persist it to the patched path."""
+        lifecycle.save_watchdog_block({
+            "blocked": blocked,
+            "intentional": intentional,
+            "reason": "autodown: intentional idle teardown",
+            "blocked_at": blocked_at,
+            "failures": [],
+            "auto_restart_count": 0,
+        })
+    def _recent_ts(self, minutes_ago=1):
+        import datetime as _dt
+        return (_dt.datetime.now(_dt.timezone.utc)
+                - _dt.timedelta(minutes=minutes_ago)).isoformat()
+
+    def test_intentional_down_no_restart(self, tmp_hfcc_dir, monkeypatch):
+        """§5: block intentional:autodown + dgx/gateway failing ⇒ restart_vllm_fn
+        is NEVER called (0 calls). The watchdog must not resurrect a
+        deliberately-down orchestrator, even while backing off."""
+        from hscc_daemon import lifecycle
+        monkeypatch.setattr(lifecycle, "log", lambda *a, **kw: None)
+        from hscc_daemon import state as state_mod
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(parents=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        block_path = str(tmp_hfcc_dir / "block.json")
+        monkeypatch.setattr(lifecycle, "WATCHDOG_BLOCK_FILE", block_path)
+        self._blocked(lifecycle, block_path, blocked=True,
+                      intentional="autodown",
+                      blocked_at=self._recent_ts(minutes_ago=1))
+
+        restart_calls = []
+        result = lifecycle.pipeline_watchdog(
+            check_dgx_fn=lambda: False,
+            check_gateway_fn=lambda: False,
+            restart_vllm_fn=lambda: restart_calls.append(1) or {"ok": True},
+            send_macos_notification_fn=lambda *a, **kw: None,
+        )
+        assert restart_calls == []          # orchestrator NOT resurrected
+        # block stays latched (still intentional + blocked on disk)
+        blk = lifecycle.load_watchdog_block()
+        assert blk.get("blocked") is True
+        assert blk.get("intentional") == "autodown"
+
+    def test_intentional_down_backoff_elapsed_no_clear_no_restart(self, tmp_hfcc_dir, monkeypatch):
+        """§5: backoff elapsed (blocked_at old) + intentional ⇒ block NOT
+        cleared and restart still NOT called — the backoff-elapsed path must
+        not clear an intentional block, or the next tick would resurrect it."""
+        from hscc_daemon import lifecycle
+        monkeypatch.setattr(lifecycle, "log", lambda *a, **kw: None)
+        from hscc_daemon import state as state_mod
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(parents=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        block_path = str(tmp_hfcc_dir / "block.json")
+        monkeypatch.setattr(lifecycle, "WATCHDOG_BLOCK_FILE", block_path)
+        # blocked_at far in the past ⇒ backoff long elapsed.
+        self._blocked(lifecycle, block_path, blocked=True,
+                      intentional="autodown",
+                      blocked_at=self._recent_ts(minutes_ago=60))
+
+        restart_calls = []
+        result = lifecycle.pipeline_watchdog(
+            check_dgx_fn=lambda: False,
+            check_gateway_fn=lambda: False,
+            restart_vllm_fn=lambda: restart_calls.append(1) or {"ok": True},
+            send_macos_notification_fn=lambda *a, **kw: None,
+        )
+        assert restart_calls == []          # orchestrator NOT resurrected
+        # block NOT cleared — still latched with blocked+intentional on disk.
+        blk = lifecycle.load_watchdog_block()
+        assert blk.get("blocked") is True
+        assert blk.get("intentional") == "autodown"
+
+    def test_no_intentional_restart_still_runs(self, tmp_hfcc_dir, monkeypatch):
+        """NEGATIVE CONTROL: a block WITHOUT intentional + dgx failing ⇒
+        restart IS called (ordinary healing must not regress)."""
+        from hscc_daemon import lifecycle
+        monkeypatch.setattr(lifecycle, "log", lambda *a, **kw: None)
+        from hscc_daemon import state as state_mod
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(parents=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        block_path = str(tmp_hfcc_dir / "block.json")
+        monkeypatch.setattr(lifecycle, "WATCHDOG_BLOCK_FILE", block_path)
+        # A plain (non-intentional) block — no `intentional` key at all.
+        lifecycle.save_watchdog_block({
+            "blocked": False, "reason": "", "blocked_at": None,
+            "failures": [], "auto_restart_count": 0,
+        })
+
+        restart_calls = []
+        result = lifecycle.pipeline_watchdog(
+            check_dgx_fn=lambda: False,
+            check_gateway_fn=lambda: True,
+            restart_vllm_fn=lambda: restart_calls.append(1) or {"ok": True},
+            send_macos_notification_fn=lambda *a, **kw: None,
+        )
+        assert result is False
+        assert len(restart_calls) == 1      # ordinary healing still fires
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

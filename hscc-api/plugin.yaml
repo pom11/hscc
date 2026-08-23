@@ -1,0 +1,5 @@
+name: hscc-api
+version: 0.1.0
+description: "HSCC HTTP API — bearer-token-authenticated, Tailscale-optional, pure-stdlib JSON API for external apps (e.g. the iOS client). Phase A1: server skeleton, auth, bind/config resolution, error contract, /v1/ping."
+author: NousResearch
+kind: backend

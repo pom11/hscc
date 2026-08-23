@@ -1,0 +1,84 @@
+# XcodeGen project spec for the HSCC iOS app.
+#
+# Generate the Xcode project reproducibly with:
+#   brew install xcodegen
+#   xcodegen generate
+#
+# See README.md for both build paths (xcodegen, or manual Xcode project).
+#
+# This spec drives a single iOS app target: SwiftUI lifecycle, iOS 17+
+# deployment target, no third-party dependencies (self-contained + sideload
+# friendly). Sources are listed explicitly (not via a folder glob) so a source
+# added without updating this file is easy to spot in review. Info.plist keys
+# are generated from the `info` block below; a physical `Info.plist` is not
+# required (XcodeGen emits one at build time).
+
+name: HSCC
+options:
+  bundleIdPrefix: com.hscc
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.9"
+    TARGETED_DEVICE_FAMILY: "1"          # iPhone only (sideload onto owner's device)
+    SWIFT_EMIT_LOC_STRINGS: YES
+
+targets:
+  HSCC:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      # Listed explicitly so a source added without updating this file is
+      # obvious in review. Keep this list in sync with Sources/ (the build will
+      # fail to compile if a referenced file is missing; a file here that isn't
+      # listed is simply not compiled).
+      - path: Sources/HSCC/HSCCApp.swift
+      - path: Sources/HSCC/ContentView.swift
+      - path: Sources/HSCC/HSCCClient.swift
+      - path: Sources/HSCC/Models.swift
+      - path: Sources/HSCC/APIError.swift
+      - path: Sources/HSCC/KeychainStore.swift
+      - path: Sources/HSCC/SettingsStore.swift
+      - path: Sources/HSCC/Views/SettingsView.swift
+      - path: Sources/HSCC/Views/PlaceholderViews.swift
+      - path: Sources/HSCC/Views/LoadState.swift
+      - path: Sources/HSCC/Views/ClusterView.swift
+      - path: Sources/HSCC/Views/FleetView.swift
+      - path: Sources/HSCC/Views/KanbanView.swift
+      - path: Sources/HSCC/Views/StandupView.swift
+      - path: Sources/HSCC/Views/CardsView.swift
+      - path: Sources/HSCC/Views/DispatchCardView.swift
+      - path: Sources/HSCC/Views/ReviewQueueView.swift
+      - path: Sources/HSCC/Views/QAQueueView.swift
+      - path: Sources/HSCC/Views/MutationSupport.swift
+      - path: Sources/HSCC/Views/OrchestratorChatView.swift
+      - path: Sources/HSCC/Intents/IntentClient.swift
+      - path: Sources/HSCC/Intents/ClusterStatusIntent.swift
+      - path: Sources/HSCC/Intents/ReviewQueueIntent.swift
+      - path: Sources/HSCC/Intents/CannedCard.swift
+      - path: Sources/HSCC/Intents/AppShortcuts.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        # Allow plain-HTTP loads over the Tailscale tailnet (App Transport
+        # Security). Tailscale is the encrypted transport, so HTTP is intended.
+        INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads: YES
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: HSCC
+        UILaunchScreen: {}
+        NSAppTransportSecurity:
+          # HTTP is fine — Tailscale provides the encrypted transport (design
+          # §D rules TLS out of scope). Do NOT add pinning/cert handling.
+          NSAllowsArbitraryLoads: true

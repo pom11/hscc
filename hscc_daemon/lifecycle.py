@@ -208,6 +208,16 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
 
     block = load_watchdog_block()
 
+    # Intentional-autodown fork (§5, C2): ``autodown.classify()`` is the single
+    # decision-table for the serving layer; the watchdog consults its verdict
+    # instead of re-deriving the rule. While an intentional autodown is in
+    # effect the orchestrator unit is DOWN BY DESIGN — the watchdog must never
+    # resurrect it (that is exactly the C2 mid-teardown-resurrection class this
+    # file historically got wrong). Keepalive/other units are supervised by the
+    # separate check_workers thread (health.py:791) which is intentionally NOT
+    # here — so "don't resurrect the orchestrator" is NOT "do nothing".
+    intentional = block.get("intentional") == "autodown"
+
     # If currently blocked, stay backed off until the backoff window elapses,
     # then auto-clear and resume — instead of giving up permanently. This makes
     # the breaker a backoff, not a dead-end: a transient outage self-heals once
@@ -233,6 +243,22 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
             })
             return False
         # Backoff elapsed — clear the breaker and resume checking this cycle.
+        if intentional:
+            # Intentional autodown owns the block lifecycle: autoup clears it
+            # after readiness (or autodown.disable releases it). Never let the
+            # watchdog's backoff-elapsed path clear it, or the very next tick
+            # would resurrect a deliberately-down orchestrator. The block stays
+            # latched; keepalive supervision (check_workers) is unaffected.
+            log("Watchdog: intentional autodown in effect — block NOT cleared, "
+                "orchestrator left down")
+            write_state("watchdog", {
+                "ok": False, "blocked": True, "reason": block.get("reason", ""),
+                "intentional": "autodown",
+                "auto_restart_count": block.get("auto_restart_count", 0),
+                "last_check": now_iso(),
+                "message": f"Intentional autodown: {block.get('reason', '')}",
+            })
+            return False
         log("Watchdog: backoff elapsed, clearing block and resuming checks")
         block["blocked"] = False
         block["failures"] = []
@@ -315,8 +341,11 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
         )
         return False
 
-    # 1-2 failures — try auto-restart vLLM via its sparkrun recipe
-    if not dgx_ok:
+    # 1-2 failures — try auto-restart vLLM via its sparkrun recipe.
+    # Skipped while an intentional autodown is in effect (§5): the orchestrator
+    # is down by design, so restarting it would resurrect a layer autodown
+    # deliberately stopped — independent of whether the block is still latched.
+    if not dgx_ok and not intentional:
         log("Watchdog: attempting vLLM auto-restart via sparkrun")
         restart_result = restart_vllm_fn()
         restart_ok = restart_result.get("ok", False)
@@ -350,14 +379,28 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
             priority="high",
         )
     else:
-        write_state("watchdog", {
-            "ok": False,
-            "blocked": False,
-            "dgx": dgx_ok,
-            "gateway": gw_ok,
-            "last_check": now_iso(),
-            "auto_restart_count": block.get("auto_restart_count", 0),
-            "message": "Degraded — gateway not reachable",
-        })
+        if intentional:
+            # Orchestrator down by design — report reality, do NOT restart.
+            write_state("watchdog", {
+                "ok": False,
+                "blocked": False,
+                "intentional": "autodown",
+                "dgx": dgx_ok,
+                "gateway": gw_ok,
+                "last_check": now_iso(),
+                "auto_restart_count": block.get("auto_restart_count", 0),
+                "message": "Intentional autodown — orchestrator left down "
+                           "(auto-restart suppressed)",
+            })
+        else:
+            write_state("watchdog", {
+                "ok": False,
+                "blocked": False,
+                "dgx": dgx_ok,
+                "gateway": gw_ok,
+                "last_check": now_iso(),
+                "auto_restart_count": block.get("auto_restart_count", 0),
+                "message": "Degraded — gateway not reachable",
+            })
 
     return dgx_ok and gw_ok
