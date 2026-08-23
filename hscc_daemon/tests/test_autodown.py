@@ -477,3 +477,345 @@ class TestCycle:
         )
         assert calls == []
 
+
+# ---------------------------------------------------------------------------
+# Phase 4 — teardown sequence + watchdog block coordination (§3, §5)
+# ---------------------------------------------------------------------------
+
+import hscc_daemon.lifecycle as _lifecycle
+
+
+def _write_serving(tmp_path):
+    """Write a 3-unit serving.json fixture and return its path.
+
+    Units:
+      - orchestrator unit "orch": nodes [.244, .246], port 8000
+      - NON-keepalive worker "wk1": nodes [.247], port 8000  (teardown target)
+      - KEEPALIVE worker "wk-keep": nodes [.248], port 8000  (C4 EXEMPT)
+    Top-level port 8000 (for the serving_port fallback path).
+    """
+    data = {
+        "port": 8000,
+        "units": [
+            {"id": "orch", "role": "orchestrator",
+             "nodes": ["10.0.0.244", "10.0.0.246"], "port": 8000},
+            {"id": "wk1", "role": "worker", "keepalive": False,
+             "nodes": ["10.0.0.247"], "port": 8000},
+            {"id": "wk-keep", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.248"], "port": 8000},
+        ],
+    }
+    path = tmp_path / "serving.json"
+    path.write_text(json.dumps(data))
+    return str(path)
+
+
+class _FakeRunner:
+    """Fake sparkrun command runner that records every call + the block file.
+
+    On each ``__call__`` it snapshots the watchdog block file (the moment the
+    stop was issued) so a test can assert the block was written BEFORE every
+    stop. ``results`` is an optional list of per-call ``ok`` values (defaults to
+    True); extra calls beyond ``results`` default to True.
+    """
+
+    def __init__(self, block_file, results=None):
+        self.block_file = block_file
+        self.results = list(results or [])
+        self.calls = []
+        self._i = 0
+
+    def __call__(self, cmd, timeout=30):
+        block = None
+        try:
+            with open(self.block_file) as f:
+                block = json.load(f)
+        except Exception:
+            block = None
+        ok = self.results[self._i] if self._i < len(self.results) else True
+        self._i += 1
+        self.calls.append({"cmd": list(cmd), "block": block, "ok": ok})
+        return {"ok": ok, "output": "" if ok else "stop command failed"}
+
+
+def _write_idle_cfg(autodown_file, cancel=False):
+    """Write an enabled, up, idle-window-elapsed config (teardown-able)."""
+    back = NOW - _dt.timedelta(minutes=15)
+    cfg = dict(ad.DEFAULT_CONFIG)
+    cfg["enabled"] = True
+    cfg["state"] = "up"
+    cfg["idle_minutes"] = 10
+    cfg["last_activity_iso"] = back.isoformat()
+    cfg["cancel_requested"] = cancel
+    ad.save_config(cfg)
+    return cfg
+
+
+class TestTeardown:
+    """teardown() with injected fakes — ZERO real sparkrun commands.
+
+    Every test injects a fake command runner and a fixture serving.json; the
+    watchdog block file and autodown.json are monkeypatched to tmp paths and
+    the notifiers are stubbed, so NOTHING touches the live cluster.
+    """
+
+    def _setup(self, tmp_path, monkeypatch, autodown_file, results=None):
+        """Common wiring: block file, serving fixture, idle config, stub notifiers.
+
+        Returns (serving_path, runner, block_file).
+        """
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        serving = _write_serving(tmp_path)
+        _write_idle_cfg(autodown_file)
+        runner = _FakeRunner(block_file, results=results)
+        # Stub notifiers so no notification is actually attempted.
+        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
+        monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
+        return serving, runner, block_file
+
+    def _agents(self, tmp_path):
+        p = tmp_path / "agents.json"
+        p.write_text(json.dumps({"agents": [{"name": "a", "status": "idle"}]}))
+        return str(p)
+
+    # -- abort when re-verify finds work (no stop issued at all) ----------
+    def test_abort_when_reverify_finds_work(self, tmp_path, monkeypatch,
+                                            autodown_file):
+        """Work arrived after the timer decided ⇒ ABORT, NO stops issued."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        # Idle predicate breaks because kanban now has a running card.
+        res = ad.teardown(
+            serving_path=serving, run_cmd_fn=runner,
+            kanban_db=_FakeKb(["running"]),   # the changed signal
+            agents_file=self._agents(tmp_path),
+            now=NOW, keepalive_ok=lambda: True,
+        )
+        assert res["result"] == "aborted"
+        assert runner.calls == []        # no stop issued at all
+        assert res["issued"] == []
+        # No block written on abort (re-verify runs before the block write,
+        # so on a failed re-verify the block file is never even created).
+        import os as _os
+        assert not _os.path.exists(block_file)
+
+    def test_abort_when_busy_agent(self, tmp_path, monkeypatch, autodown_file):
+        """Agent busy during re-verify ⇒ ABORT, no stops issued."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        res = ad.teardown(
+            serving_path=serving, run_cmd_fn=runner,
+            kanban_db=_FakeKb([]),
+            agents_file=self._agents(tmp_path),
+            now=NOW, keepalive_ok=lambda: False,  # keepalive went sick
+        )
+        assert res["result"] == "aborted"
+        assert runner.calls == []
+
+    # -- block written BEFORE any stop (explicit call ordering) ------------
+    def test_block_written_before_any_stop(self, tmp_path, monkeypatch,
+                                           autodown_file):
+        """The watchdog block is on disk (intentional) before EVERY stop.
+
+        The fake runner snapshots the block file at each stop; a valid teardown
+        must have the intentional autodown block present for every single one.
+        """
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        res = ad.teardown(
+            serving_path=serving, run_cmd_fn=runner,
+            kanban_db=_FakeKb([]), agents_file=self._agents(tmp_path),
+            now=NOW, keepalive_ok=lambda: True,
+            http_check_fn=lambda *a, **k: {"ok": False},  # ports down
+        )
+        assert res["result"] == "down"
+        assert len(runner.calls) == 2      # wk1 + orch
+        for call in runner.calls:
+            blk = call["block"]
+            assert blk is not None
+            assert blk.get("blocked") is True
+            assert blk.get("intentional") == "autodown"
+            assert blk.get("reason") == ad.WATCHDOG_TEARDOWN_REASON
+        # Explicit: the block (with intentional) was saved before the first stop.
+        assert runner.calls[0]["block"]["intentional"] == "autodown"
+
+    # -- keepalive units NEVER appear in issued stop commands ---------------
+    def test_keepalive_never_in_stop_commands(self, tmp_path, monkeypatch,
+                                              autodown_file):
+        """The keepalive unit's nodes (.248) are never in any stop command."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        res = ad.teardown(
+            serving_path=serving, run_cmd_fn=runner,
+            kanban_db=_FakeKb([]), agents_file=self._agents(tmp_path),
+            now=NOW, keepalive_ok=lambda: True,
+            http_check_fn=lambda *a, **k: {"ok": False},
+        )
+        assert res["result"] == "down"
+        all_hosts = []
+        for call in runner.calls:
+            all_hosts += call["cmd"]
+        joined = " ".join(all_hosts)
+        assert "10.0.0.248" not in joined     # keepalive node excluded
+        assert "10.0.0.247" in joined          # non-keepalive worker stopped
+        # Plan (teardown set) never contains the keepalive unit id.
+        plan_ids = {e["unit_id"] for e in res["plan"]}
+        assert "wk-keep" not in plan_ids
+        assert {"wk1", "orch"} == plan_ids
+
+    # -- orchestrator stopped LAST -----------------------------------------
+    def test_orchestrator_stopped_last(self, tmp_path, monkeypatch,
+                                       autodown_file):
+        """Workers (non-keepalive) stop before the orchestrator unit."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        res = ad.teardown(
+            serving_path=serving, run_cmd_fn=runner,
+            kanban_db=_FakeKb([]), agents_file=self._agents(tmp_path),
+            now=NOW, keepalive_ok=lambda: True,
+            http_check_fn=lambda *a, **k: {"ok": False},
+        )
+        kinds = [call["cmd"] for call in runner.calls]
+        assert res["result"] == "down"
+        assert kinds[0][-1] == "10.0.0.247"        # worker first
+        assert "10.0.0.244" in kinds[-1][-1]       # orchestrator last
+        assert res["issued"][0]["kind"] == "worker"
+        assert res["issued"][-1]["kind"] == "orchestrator"
+
+    # -- stop failure ⇒ block rolled back + failure recorded ----------------
+    def test_stop_failure_rolls_back_and_records(self, tmp_path, monkeypatch,
+                                                 autodown_file):
+        """A failed stop ⇒ no latched block, failure recorded, not state down."""
+        # Make the FIRST stop (worker) fail.
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file,
+                                                  results=[False])
+        res = ad.teardown(
+            serving_path=serving, run_cmd_fn=runner,
+            kanban_db=_FakeKb([]), agents_file=self._agents(tmp_path),
+            now=NOW, keepalive_ok=lambda: True,
+            http_check_fn=lambda *a, **k: {"ok": False},
+        )
+        assert res["result"] == "failed"
+        # Block rolled back → intentional removed, blocked back to False.
+        with open(block_file) as f:
+            rolled = json.load(f)
+        assert rolled.get("intentional") is None
+        assert rolled.get("blocked") is False
+        # Failure recorded in autodown.json: state up (reality), reason set.
+        cfg = ad.load_config()
+        assert cfg["state"] == "up"
+        assert "failed" in cfg["reason"]
+        assert cfg["down_since"] is None
+        # Notified.
+        # Stop issued for the failed worker only, orchestrator never attempted.
+        assert len(runner.calls) == 1
+
+    def test_stop_failure_recorded(self, tmp_path, monkeypatch, autodown_file,
+                                   capsys):
+        """Failure path persists a reason mentioning the failure into config."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file,
+                                                  results=[True, False])
+        # First stop ok, second (orchestrator) fails.
+        res = ad.teardown(
+            serving_path=serving, run_cmd_fn=runner,
+            kanban_db=_FakeKb([]), agents_file=self._agents(tmp_path),
+            now=NOW, keepalive_ok=lambda: True,
+            http_check_fn=lambda *a, **k: {"ok": False},
+        )
+        assert res["result"] == "failed"
+        cfg = ad.load_config()
+        assert cfg["state"] == "up"
+        assert "teardown failed" in cfg["reason"]
+
+    # -- cancel_requested mid-teardown ⇒ stops, rolls back, cancelled -------
+    def test_cancel_mid_teardown(self, tmp_path, monkeypatch, autodown_file):
+        """cancel_requested before a stop ⇒ stop issuing, roll block back,
+        report cancelled."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        # cancel_requested set on disk so the loop's pre-stop check sees it.
+        cfg = ad.load_config()
+        cfg["cancel_requested"] = True
+        ad.save_config(cfg)
+        res = ad.teardown(
+            serving_path=serving, run_cmd_fn=runner,
+            kanban_db=_FakeKb([]), agents_file=self._agents(tmp_path),
+            now=NOW, keepalive_ok=lambda: True,
+            http_check_fn=lambda *a, **k: {"ok": False},
+        )
+        assert res["result"] == "cancelled"
+        # No stop was issued — cancel was set before the first stop check.
+        assert runner.calls == []
+        # Block rolled back → intentional removed.
+        with open(block_file) as f:
+            rolled = json.load(f)
+        assert rolled.get("intentional") is None
+        # State reflects reality (not down), reason recorded, cancel persisted.
+        cfg = ad.load_config()
+        assert cfg["state"] == "up"
+        assert "cancelled" in cfg["reason"]
+
+    def test_cancel_after_first_stop(self, tmp_path, monkeypatch, autodown_file):
+        """Cancel set between stops ⇒ first stop issued, subsequent not."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        # After the FIRST stop issues (via runner), set cancel on disk.
+        class _RunnerWithCancel:
+            def __init__(self, inner, set_cancel):
+                self.inner = inner
+                self.set_cancel = set_cancel
+            def __call__(self, cmd, timeout=30):
+                out = self.inner(cmd, timeout=timeout)
+                self.set_cancel()   # set cancel_requested AFTER this stop
+                return out
+
+        def set_cancel():
+            c = ad.load_config()
+            c["cancel_requested"] = True
+            ad.save_config(c)
+
+        r2 = _RunnerWithCancel(runner, set_cancel)
+        res = ad.teardown(
+            serving_path=serving, run_cmd_fn=r2,
+            kanban_db=_FakeKb([]), agents_file=self._agents(tmp_path),
+            now=NOW, keepalive_ok=lambda: True,
+            http_check_fn=lambda *a, **k: {"ok": False},
+        )
+        assert res["result"] == "cancelled"
+        # Only the worker (first) was stopped; orchestrator never attempted.
+        assert len(runner.calls) == 1
+        assert runner.calls[0]["cmd"][-1] == "10.0.0.247"
+        # Block rolled back.
+        with open(block_file) as f:
+            rolled = json.load(f)
+        assert rolled.get("intentional") is None
+
+    # -- success ⇒ autodown.json state == "down" with down_since set -------
+    def test_success_sets_state_down(self, tmp_path, monkeypatch, autodown_file):
+        """A clean teardown writes state=down + down_since + reason, and the
+        intended watchdog block stays latched (intentional)."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        res = ad.teardown(
+            serving_path=serving, run_cmd_fn=runner,
+            kanban_db=_FakeKb([]), agents_file=self._agents(tmp_path),
+            now=NOW, keepalive_ok=lambda: True,
+            http_check_fn=lambda *a, **k: {"ok": False},
+        )
+        assert res["result"] == "down"
+        cfg = ad.load_config()
+        assert cfg["state"] == "down"
+        assert cfg["down_since"] is not None
+        assert cfg["reason"] == "autodown: intentional idle teardown"
+        # No intentional field duplicated into autodown.json (one source of
+        # truth per fact — it lives in the watchdog block only, §3.5).
+        assert "intentional" not in cfg
+        # The watchdog block remains latched with intentional autodown.
+        with open(block_file) as f:
+            blk = json.load(f)
+        assert blk.get("blocked") is True
+        assert blk.get("intentional") == "autodown"
+

@@ -19,6 +19,8 @@ import os
 
 from .daemon_ops import log
 from .state import now_iso
+from .desktop import send_macos_notification
+from .telegram import notify_operations
 
 # Path to the autodown state+config file. Overridden in tests via
 # monkeypatch, mirroring lifecycle.WATCHDOG_BLOCK_FILE
@@ -400,3 +402,269 @@ def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None):
         return
     # All interlocks clear ⇒ teardown (Phase 4, called lazily).
     _invoke_teardown()
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — teardown sequence + watchdog block coordination (§3, §5)
+# ---------------------------------------------------------------------------
+
+# Reason string written into the watchdog block on intentional teardown (§3.2).
+WATCHDOG_TEARDOWN_REASON = "autodown: intentional idle teardown"
+
+
+def _worker_stop_cmd(nodes):
+    """`sparkrun stop --hosts <nodes>` for one non-keepalive unit (§3.3).
+
+    Mirrors the real orchestrator stop form ``serving.VLLM_STOP_CMD``
+    (serving.py:150): ``sparkrun stop --hosts <node>``. We pass the EXACT
+    per-unit node list from serving.json (never a catch-all that could touch
+    keepalive nodes, C4). The positional port form from the design prose isn't
+    used because the actual command in code carries no port.
+    """
+    return ["sparkrun", "stop", "--hosts", ",".join(nodes)]
+
+
+def _build_teardown_plan(serving):
+    """Ordered stop commands for the NON-keepalive serving units (§3).
+
+    Returns a list of dicts, one entry per unit to stop::
+
+        {"kind": "worker"|"orchestrator", "nodes": [...], "port": int,
+         "unit_id": str, "cmd": [str, ...]}
+
+    Order is critical: non-keepalive worker units FIRST (sorted by unit id for
+    determinism), the orchestrator unit LAST (§3.3) so nothing is mid-request
+    into a stopped orchestrator. Keepalive units (C4 — ``serving.keepalive_units``,
+    serving.py:172) are NEVER in the set — filtered out explicitly.
+
+    ``serving`` is the parsed serving.json dict (None/absent ⇒ empty plan,
+    fail-safe: stop nothing). ``port`` is kept per entry for the verify-down
+    probe in step 4 of teardown().
+    """
+    if not isinstance(serving, dict):
+        return []
+    from .serving import serving_port
+    workers = []
+    orch = []
+    for u in (serving.get("units", []) or []):
+        if not isinstance(u, dict):
+            continue
+        nodes = [n for n in (u.get("nodes") or []) if n]
+        if not nodes:
+            continue  # no nodes ⇒ nothing to stop
+        role = u.get("role")
+        port = u.get("port") or serving_port(serving)
+        unit_id = u.get("id") or ",".join(nodes)
+        if role == "orchestrator":
+            # The orchestrator unit is never keepalive — stop it LAST.
+            orch.append({"kind": "orchestrator", "nodes": nodes, "port": port,
+                         "unit_id": unit_id, "cmd": _worker_stop_cmd(nodes)})
+        elif role == "worker" and not u.get("keepalive"):
+            # NON-keepalive worker ⇒ teardown target. Keepalive workers are
+            # exempt (C4) and never appear here.
+            workers.append({"kind": "worker", "nodes": nodes, "port": port,
+                            "unit_id": unit_id, "cmd": _worker_stop_cmd(nodes)})
+        # keepalive worker / unknown role ⇒ never in the teardown set.
+    workers.sort(key=lambda e: e["unit_id"])
+    return workers + orch
+
+
+def _probe_down(node, port, http_check_fn):
+    """True iff ``node:port`` no longer responds (verify-down, §3.4)."""
+    try:
+        res = http_check_fn(f"http://{node}:{port}/health", timeout=5)
+        # Down means NOT ok — the unit is no longer answering. A probe that
+        # itself errors (returns not-ok) counts as down for verification.
+        return not bool(res.get("ok"))
+    except Exception:
+        # Unreachable / probe error ⇒ treat as down (the unit is not answering).
+        return True
+
+
+def _record_failure(cfg_msg):
+    """Persist a teardown failure/cancel into autodown.json (§8).
+
+    Sets ``state`` to reflect reality — the layer is NOT fully down — so
+    ``classify()`` (autodown.py:191) routes the watchdog to ``should_be_up``
+    (resume supervision / heal) rather than a silently-broken ``expected_down``.
+    """
+    cfg = load_config()
+    cfg["state"] = "up"
+    cfg["down_since"] = None
+    cfg["reason"] = cfg_msg
+    save_config(cfg)
+
+
+def _notify(msg, title, priority="normal"):
+    """Best-effort operator notify (desktop + ops Telegram). Never raises."""
+    try:
+        notify_operations(msg)
+    except Exception:
+        pass
+    try:
+        send_macos_notification(title, msg, priority=priority)
+    except Exception:
+        pass
+
+
+def _rollback_block(original_block):
+    """Restore the pre-teardown watchdog block (§3/§8 rollback).
+
+    Wipes the ``intentional`` marker and returns ``blocked``/``reason``/
+    ``blocked_at`` to their pre-teardown values (as the watchdog left them), so
+    the watchdog resumes ordinary supervision and can heal whatever partial
+    state a failed/cancelled teardown left behind. A half-down cluster with a
+    latched intentional block is the worst possible state — never leave it.
+    """
+    from . import lifecycle
+    lifecycle.save_watchdog_block(original_block)
+
+
+def teardown(serving_path=None, run_cmd_fn=None, kanban_db=None,
+             agents_file=None, now=None, keepalive_ok=None,
+             http_check_fn=None):
+    """Execute the idle teardown sequence (§3/§5).
+
+    Runs in the autodown thread. Order is critical (C2) and each step is
+    logged via daemon_ops.log:
+
+      1. Re-verify idle (§6 last-line guard): re-run the full ``_is_idle``
+         conjunction. If anything changed since the timer decided ⇒ ABORT,
+         NO stops issued.
+      2. Write the watchdog block BEFORE stopping anything (§3.2, C2):
+         ``blocked:true``, reason §3.2, ``blocked_at: now``, and the NEW field
+         ``intentional: "autodown"``. Block first, THEN stop — stopping first
+         lets the watchdog resurrect units mid-teardown (has actually happened).
+      3. Stop non-keepalive units — workers first, orchestrator LAST (§3.3),
+         using the exact per-unit node list from serving.json. Keepalive units
+         (C4, serving.py:172) are NEVER in the set. No catch-all sparkrun stop.
+      4. Verify down: confirm the stopped ports no longer respond (§3.4).
+      5. Record state: ``autodown.json`` ⇒ ``state:"down"``, ``down_since``,
+         ``reason``. (``intentional:"autodown"`` lives in the WATCHDOG BLOCK
+         file only — one source of truth per fact.)
+      6. Notify the operator (desktop + ops Telegram; both CPU-side).
+
+    All external side-effects are injectable (serving.json path, command
+    runner, health probe, kanban/agents/clock/keepalive inputs) so tests run
+    with fakes and ZERO real commands — this never touches the live cluster.
+
+    ``cancel_requested`` in autodown.json is re-checked BEFORE each stop; if
+    set, we stop cleanly, roll the block back, and report ``cancelled`` (§6).
+
+    Returns a result dict with ``result`` in
+    (``down`` | ``aborted`` | ``cancelled`` | ``failed``) plus
+    ``issued`` (the list of stop commands actually issued) and the original
+    ``plan``.
+    """
+    from . import lifecycle   # noqa: F401  (used via module)
+    from . import serving as serving_mod
+    from .util import http_check as _util_http_check, run_cmd as _util_run_cmd
+
+    run_cmd = run_cmd_fn or _util_run_cmd
+    http_check = http_check_fn or _util_http_check
+    serving = serving_mod.load_serving(serving_path)
+
+    # -- 1. Re-verify idle (§6 last-line guard) ---------------------------
+    # Re-run the FULL idle conjunction. If anything changed since the timer
+    # decided (a card arrived, an agent went busy, the window reset, a
+    # keepalive unit went sick), ABORT — no stops issued at all.
+    cfg = load_config()
+    if not _is_idle(cfg, kanban_db=kanban_db, agents_file=agents_file,
+                    now=now, keepalive_ok=keepalive_ok):
+        msg = "Autodown teardown ABORTED: idle predicate no longer holds " \
+              "(work/activity arrived)".strip()
+        log(msg, "ERROR")
+        _notify(msg, "HSCC Autodown Aborted", priority="high")
+        return {"result": "aborted", "issued": [], "plan": []}
+
+    # Build the teardown set (non-keepalive units only; keepalive excluded).
+    plan = _build_teardown_plan(serving)
+
+    # -- 2. Write the watchdog block BEFORE stopping anything (§3.2, C2) ----
+    # Snapshot the current block so a failure/cancel can roll it back and hand
+    # supervision back to the watchdog untouched (§3/§8). Block first, THEN
+    # stop — stopping first would let the watchdog resurrect units mid-teardown.
+    block = lifecycle.load_watchdog_block()
+    original_block = dict(block)
+    block["blocked"] = True
+    block["reason"] = WATCHDOG_TEARDOWN_REASON
+    block["blocked_at"] = now_iso()
+    block["intentional"] = "autodown"    # NEW field (§5)
+    lifecycle.save_watchdog_block(block)
+    log("Autodown: watchdog block written (intentional teardown)")
+
+    # -- 3. Stop non-keepalive units — workers first, orchestrator LAST -----
+    issued = []
+    for entry in plan:
+        # Re-check cancel_requested BEFORE each stop (§6 manual abort).
+        if load_config().get("cancel_requested"):
+            _rollback_block(original_block)
+            _record_failure("teardown cancelled by operator")
+            log("Autodown teardown CANCELLED mid-way; block rolled back")
+            _notify("HSCC autodown: teardown CANCELLED mid-way — block rolled "
+                    "back so the watchdog resumes supervision",
+                    "HSCC Autodown Cancelled", priority="normal")
+            return {"result": "cancelled", "issued": issued, "plan": plan}
+        res = run_cmd(entry["cmd"], timeout=30)
+        issued.append({"kind": entry["kind"], "nodes": entry["nodes"],
+                       "port": entry["port"], "cmd": entry["cmd"],
+                       "ok": bool(res.get("ok"))})
+        if not res.get("ok"):
+            return _handle_stop_failure(entry, res, original_block, issued,
+                                        plan)
+        log(f"Autodown: stopped {entry['kind']} unit {entry['unit_id']}")
+
+    # -- 4. Verify down (§3.4) — confirm stopped ports no longer respond. ---
+    # Best-effort confirmation: the issued ``sparkrun stop`` is authoritative;
+    # a still-responding probe is a warning, not a reason to refuse to record
+    # the intentional down (the block gates the watchdog either way).
+    all_down = True
+    for entry in plan:
+        if not _probe_down(entry["nodes"][0], entry["port"], http_check):
+            all_down = False
+            log(f"Autodown verify-down: WARN {entry['nodes'][0]}:"
+                f"{entry['port']} still responding after stop", "WARN")
+    if all_down:
+        log("Autodown: all non-keepalive units verified down")
+    else:
+        log("Autodown: verify-down found some ports still responding (warned)",
+            "WARN")
+
+    # -- 5. Record state: down (§3.5) ---------------------------------------
+    cfg = load_config()
+    cfg["state"] = "down"
+    cfg["down_since"] = now_iso()
+    cfg["reason"] = "autodown: intentional idle teardown"
+    cfg["cancel_requested"] = False
+    # NOTE: no ``intentional`` field here — that marker belongs to the
+    # watchdog-block file only (one source of truth per fact, §3.5).
+    save_config(cfg)
+    log("Autodown: recorded state=down")
+
+    # -- 6. Notify the operator (desktop + ops Telegram) --------------------
+    _notify("HSCC serving layer brought DOWN by idle autodown "
+            "(non-keepalive units stopped; keepalive units left up)",
+            "HSCC Autodown — Serving Down", priority="high")
+    return {"result": "down", "issued": issued, "plan": plan}
+
+
+def _handle_stop_failure(entry, res, original_block, issued, plan):
+    """Roll back + record + notify on a failed stop (§8 teardown-fails).
+
+    A stop failure must NOT leave a half-torn cluster with the block latched:
+    roll the block back (clear intentional) so the watchdog resumes and can
+    heal the remaining units, record the failure in autodown.json (state is
+    reality — not fully down), and notify.
+    """
+    _rollback_block(original_block)
+    out = (res.get("output") or "")[:200]
+    _record_failure(
+        f"teardown failed stopping {entry['kind']} unit {entry['unit_id']}: {out}")
+    log(f"Autodown teardown FAILED at {entry['kind']} unit "
+        f"{entry['unit_id']}; block rolled back — watchdog resuming", "ERROR")
+    _notify(f"HSCC autodown: teardown FAILED stopping {entry['kind']} unit "
+            f"{entry['unit_id']} — block rolled back so the watchdog can heal "
+            f"the remaining units",
+            "HSCC Autodown Teardown Failed", priority="high")
+    return {"result": "failed", "failed_at": entry["unit_id"],
+            "issued": issued, "plan": plan}
