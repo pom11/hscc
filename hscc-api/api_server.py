@@ -124,10 +124,18 @@ def _do_stamp_http_activity():
 
     The daemon's idle timer (hscc_daemon/autodown.py) polls this file each
     cycle and, on a newer timestamp, calls ``record_activity(\"http\")`` —
-    resetting the idle window. Writing here is CPU-side and needs no model. The
-    ``hscc_daemon`` import is deferred and needs the repo root on sys.path
-    (which ``routes_cluster`` already installs at import, but we re-assert so
-    this helper is robust standalone).
+    resetting the idle window. Writing here is CPU-side and needs no model.
+
+    The signal lives at ``~/.hscc/activity.json`` — OUTSIDE ``~/.hscc/state/``
+    — because activity is EVENT-DRIVEN (stale by definition between requests
+    and carries no ``ok`` key), so it must not sit in the daemon-streams dir
+    that ``verify.py::check_daemon_streams`` requires to be fresh ok streams.
+    Deliberately NOT written via ``state.write_state``: that funnel targets the
+    periodic-streams dir. We compute the path at runtime through
+    ``os.path.expanduser`` so the test isolation fixture redirects it to a tmp
+    dir (the ``hscc_daemon`` import is deferred and needs the repo root on
+    sys.path, which ``routes_cluster`` already installs at import, but we
+    re-assert so this helper is robust standalone).
     """
     import sys
     from pathlib import Path
@@ -135,8 +143,30 @@ def _do_stamp_http_activity():
     root_s = str(root)
     if root_s not in sys.path:
         sys.path.insert(0, root_s)
-    from hscc_daemon import state  # noqa: PLC0415
-    state.write_state("activity", {"source": "http"})
+    import json
+    import os
+    # Not state.write_state — that writes into the periodic-streams dir. Runtime
+    # expanduser so tests redirect it under the autouse _isolate_hscc fixture.
+    path = os.path.expanduser("~/.hscc/activity.json")
+    entry = {
+        "timestamp": _now_utc_iso(),
+        "stream": "activity",
+        "source": "http",
+    }
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(entry, f, indent=2)
+    except (OSError, IOError):
+        # A stamp failure is swallowed upstream (defensive wrap) — but never
+        # fabricate a signal. Log and drop.
+        log.debug("autodown activity stamp failed (ignored)")
+        return
+
+
+def _now_utc_iso():
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
 def _stamp_http_activity():

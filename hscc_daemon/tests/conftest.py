@@ -93,7 +93,7 @@ def _isolate_hscc(tmp_path, monkeypatch):
             (autodown, "AUTODOWN_FILE", p("autodown.json")),
             (autodown, "AUTODOWN_LOCK", p("autodown.lock")),
             (autodown, "AGENTS_FILE", p("agents.json")),
-            (autodown, "HTTP_ACTIVITY_STATE", p("state/activity.json")),
+            (autodown, "HTTP_ACTIVITY_STATE", p("activity.json")),
             (autodown, "TELEGRAM_OFFSET_FILE", p("state/telegram_probe.offset")),
             # lifecycle.py
             (lifecycle, "BRIDGE_FILE", p("bridge.json")),

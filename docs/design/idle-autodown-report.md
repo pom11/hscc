@@ -35,10 +35,11 @@ root. New files are marked (new).
 - `hscc_daemon/autodown.py` (new, additions): probe/dispatch glue tying the
   four sources (§1d) into `record_activity`.
 - `hscc-api/api_server.py`: `ApiHandler._route()` / request handling (line
-  412) — stamp `state.write_state('activity', ...)` on each authenticated
-  request.
-- `hscc_daemon/state.py`: `write_state()` (line 20) — used for the activity
-  file.
+  412) — stamp `~/.hscc/activity.json` (via `_do_stamp_http_activity`) on each
+  authenticated request.
+- `hscc_daemon/autodown.py`: `HTTP_ACTIVITY_STATE` constant — the event-driven
+  activity file path, deliberately OUTSIDE `~/.hscc/state/` (see verify_streams
+  note in idle-autodown.md §1d.1).
 - Telegram inbound stamp: contract hook in the always-on Telegram MCP daemon
   (`~/.hermes-tg/mcp_server.py`, external) — interop confirmed in this phase.
 
