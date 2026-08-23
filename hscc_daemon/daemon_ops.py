@@ -173,6 +173,17 @@ def run_daemon_loop():
 
     ensure_state_dir()
     log("Daemon loop started")
+    # Autodown daemon-start recovery (§8): if the layer was intentionally down
+    # or mid-wake when the previous daemon process died, reconcile it now —
+    # re-assert the intentional block (so this daemon's watchdog doesn't
+    # resurrect it) or finish the wake. Fully defensive: a broken autodown can
+    # never prevent the daemon from booting.
+    try:
+        from . import autodown
+        autodown.resume_from_restart_defensive()
+    except Exception as e:
+        log(f"Autodown startup hook error (daemon starting anyway): {e}",
+            "ERROR")
     # Self-clean dead cruft on startup: .corrupt-*/.stale + uncapped .bak.* groups.
     try:
         pruned = prune_dead_files()
