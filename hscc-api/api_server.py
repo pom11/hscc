@@ -116,6 +116,49 @@ def token_valid(supplied, expected) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Autodown activity stamp (§1d.1) — authenticated requests reset the idle timer
+# ---------------------------------------------------------------------------
+
+def _do_stamp_http_activity():
+    """Write the autodown HTTP-activity signal for the daemon to observe.
+
+    The daemon's idle timer (hscc_daemon/autodown.py) polls this file each
+    cycle and, on a newer timestamp, calls ``record_activity(\"http\")`` —
+    resetting the idle window. Writing here is CPU-side and needs no model. The
+    ``hscc_daemon`` import is deferred and needs the repo root on sys.path
+    (which ``routes_cluster`` already installs at import, but we re-assert so
+    this helper is robust standalone).
+    """
+    import sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    root_s = str(root)
+    if root_s not in sys.path:
+        sys.path.insert(0, root_s)
+    from hscc_daemon import state  # noqa: PLC0415
+    state.write_state("activity", {"source": "http"})
+
+
+def _stamp_http_activity():
+    """Best-effort autodown activity stamp on an AUTHENTICATED request (§1d.1).
+
+    Called by ``_route`` only AFTER ``_authorize()`` succeeds, so
+    unauthenticated / failed-auth requests (which raise in ``_authorize``) never
+    reach it — a port scanner cannot keep the cluster awake. Deliberately
+    DEFENSIVE: a failure to stamp (import error, disk error, anything) is
+    swallowed and must NEVER break the request being served.
+    """
+    try:
+        _do_stamp_http_activity()
+    except Exception:
+        # A stamp failure must never take the API down or fail a request. The
+        # only cost of a silent miss is the idle timer not resetting for this
+        # one request — acceptable and self-healing on the next successful one.
+        log.debug("autodown activity stamp failed (ignored)")
+        return
+
+
+# ---------------------------------------------------------------------------
 # Bind / config resolution (design §Hard constraints #2, §C config)
 # ---------------------------------------------------------------------------
 
@@ -412,6 +455,11 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
     def _route(self, method):
         try:
             self._authorize()
+            # Authenticated ⇒ stamp autodown activity (§1d.1). Wrapped so a
+            # stamp failure can NEVER break the request. Placed AFTER
+            # _authorize() so unauthenticated requests (which raise above) do
+            # not count — a port scanner can't keep the cluster awake.
+            _stamp_http_activity()
             path, query = self._parse_path()
             body = self._read_body()
             status, payload = self._dispatch(method, path, query, body)
