@@ -265,3 +265,215 @@ class TestClassify:
         """None/missing inputs ⇒ healthy (never invented down)."""
         assert ad.classify(None, None) == "healthy"
         assert ad.classify({}, {}) == "healthy"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — cycle() idle evaluation + safety interlocks (§1, §6)
+# ---------------------------------------------------------------------------
+
+import datetime as _dt
+
+NOW = _dt.datetime(2026, 8, 23, 12, 0, 0, tzinfo=_dt.timezone.utc)
+
+
+class TestCycle:
+    """cycle() decision + interlock conjunction tests.
+
+    cycle() is tiny and thin: it guards config/state, then defers the predicate
+    to _is_idle and the teardown to _invoke_teardown. So the tests exercise the
+    real conjunction (every interlock), the real window math, the real agents
+    loader, and the lazy teardown seam — with everything injected off the real
+    ~/.hscc / ~/.hermes.
+    """
+
+    def _ready(self, autodown_file, idle_minutes=10, age_minutes=15):
+        """Write an ENABLED, up config whose window has elapsed (idle-able).
+
+        ``last_activity_iso`` is ``age_minutes`` before NOW so the elapsed
+        window is satisfied; each individual test then breaks ONE interlock to
+        assert it independently blocks teardown.
+        """
+        back = NOW - _dt.timedelta(minutes=age_minutes)
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["enabled"] = True
+        cfg["state"] = "up"
+        cfg["idle_minutes"] = idle_minutes
+        cfg["last_activity_iso"] = back.isoformat()
+        ad.save_config(cfg)
+        return cfg
+
+    def _write_agents(self, tmp_path, agents):
+        """Write an agents.json to a tmp path and return it."""
+        p = tmp_path / "agents.json"
+        p.write_text(json.dumps({"agents": agents}))
+        return str(p)
+
+    # --- disabled ⇒ cycle does nothing -----------------------------------
+    def test_disabled_does_nothing(self, autodown_file, tmp_path, monkeypatch):
+        """enabled:false ⇒ cycle returns immediately, never touches anything."""
+        calls = []
+        monkeypatch.setattr(ad, "teardown", lambda: calls.append("teardown"),
+                 raising=False)
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["enabled"] = False
+        cfg["state"] = "up"
+        cfg["last_activity_iso"] = "2000-01-01T00:00:00+00:00"  # ancient
+        ad.save_config(cfg)
+
+        # Even with every interlock clear, disabled ⇒ no teardown.
+        agents = self._write_agents(tmp_path, [{"name": "a", "status": "idle"}])
+        ad.cycle(
+            kanban_db=_FakeKb([]),
+            agents_file=agents,
+            now=NOW,
+            keepalive_ok=lambda: True,
+        )
+        assert calls == []
+
+    # --- each interlock INDEPENDENTLY blocks teardown ---------------------
+    def test_active_kanban_work_blocks(self, autodown_file, tmp_path, monkeypatch):
+        """Active kanban work (running) ⇒ not idle ⇒ no teardown."""
+        calls = []
+        monkeypatch.setattr(ad, "teardown", lambda: calls.append("teardown"),
+                 raising=False)
+        self._ready(autodown_file)
+        agents = self._write_agents(tmp_path, [{"name": "a", "status": "idle"}])
+        ad.cycle(
+            kanban_db=_FakeKb(["running"]),  # active work — the broken interlock
+            agents_file=agents,
+            now=NOW,
+            keepalive_ok=lambda: True,
+        )
+        assert calls == []
+
+    def test_busy_agent_blocks(self, autodown_file, tmp_path, monkeypatch):
+        """An enabled agent that is not idle ⇒ no teardown."""
+        calls = []
+        monkeypatch.setattr(ad, "teardown", lambda: calls.append("teardown"),
+                 raising=False)
+        self._ready(autodown_file)
+        agents = self._write_agents(
+            tmp_path, [{"name": "a", "status": "idle"},
+                       {"name": "b", "status": "working"}])  # broken interlock
+        ad.cycle(
+            kanban_db=_FakeKb([]),
+            agents_file=agents,
+            now=NOW,
+            keepalive_ok=lambda: True,
+        )
+        assert calls == []
+
+    def test_window_not_elapsed_blocks(self, autodown_file, tmp_path, monkeypatch):
+        """now - last_activity_iso < idle_minutes ⇒ no teardown."""
+        calls = []
+        monkeypatch.setattr(ad, "teardown", lambda: calls.append("teardown"),
+                 raising=False)
+        self._ready(autodown_file, idle_minutes=10, age_minutes=5)  # only 5m < 10m
+        agents = self._write_agents(tmp_path, [{"name": "a", "status": "idle"}])
+        ad.cycle(
+            kanban_db=_FakeKb([]),
+            agents_file=agents,
+            now=NOW,
+            keepalive_ok=lambda: True,
+        )
+        assert calls == []
+
+    def test_unhealthy_keepalive_blocks(self, autodown_file, tmp_path, monkeypatch):
+        """Unhealthy keepalive unit ⇒ abort, no teardown."""
+        calls = []
+        monkeypatch.setattr(ad, "teardown", lambda: calls.append("teardown"),
+                 raising=False)
+        self._ready(autodown_file)
+        agents = self._write_agents(tmp_path, [{"name": "a", "status": "idle"}])
+        ad.cycle(
+            kanban_db=_FakeKb([]),
+            agents_file=agents,
+            now=NOW,
+            keepalive_ok=lambda: False,  # broken interlock
+        )
+        assert calls == []
+
+    # --- conjunction: all-clear ⇒ teardown exactly once -------------------
+    def test_all_clear_tears_down_exactly_once(
+            self, autodown_file, tmp_path, monkeypatch):
+        """Every interlock clear ⇒ teardown invoked exactly once."""
+        calls = []
+        monkeypatch.setattr(ad, "teardown", lambda: calls.append("teardown"),
+                 raising=False)
+        self._ready(autodown_file)
+        agents = self._write_agents(tmp_path, [{"name": "a", "status": "idle"}])
+        ad.cycle(
+            kanban_db=_FakeKb([]),
+            agents_file=agents,
+            now=NOW,
+            keepalive_ok=lambda: True,
+        )
+        assert calls == ["teardown"]
+
+    # --- warm-up / first-boot guard ---------------------------------------
+    def test_null_last_activity_does_not_teardown(
+            self, autodown_file, tmp_path, monkeypatch):
+        """NULL last_activity_iso ⇒ treated as activity just now, so no teardown.
+
+        Also asserts the warm-up guard STAMPS the timestamp so the next window
+        is measured from "now", per §1e.
+        """
+        calls = []
+        monkeypatch.setattr(ad, "teardown", lambda: calls.append("teardown"),
+                 raising=False)
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["enabled"] = True
+        cfg["state"] = "up"
+        cfg["idle_minutes"] = 10
+        cfg["last_activity_iso"] = None  # empty — the warm-up case
+        ad.save_config(cfg)
+        agents = self._write_agents(tmp_path, [{"name": "a", "status": "idle"}])
+
+        ad.cycle(
+            kanban_db=_FakeKb([]),
+            agents_file=agents,
+            now=NOW,
+            keepalive_ok=lambda: True,
+        )
+        assert calls == []
+        # Warm-up guard stamped last_activity_iso with "now" (our injected NOW).
+        assert ad.load_config()["last_activity_iso"] == NOW.isoformat()
+
+    # --- unreadable agents.json ⇒ fail-safe -------------------------------
+    def test_unreadable_agents_does_not_teardown(
+            self, autodown_file, tmp_path, monkeypatch):
+        """Missing/unreadable agents.json ⇒ NOT idle ⇒ no teardown."""
+        calls = []
+        monkeypatch.setattr(ad, "teardown", lambda: calls.append("teardown"),
+                 raising=False)
+        self._ready(autodown_file)
+        missing = str(tmp_path / "no-such-agents.json")  # does not exist
+        ad.cycle(
+            kanban_db=_FakeKb([]),
+            agents_file=missing,
+            now=NOW,
+            keepalive_ok=lambda: True,
+        )
+        assert calls == []
+
+    # --- state down/waking ⇒ returns without teardown ---------------------
+    @pytest.mark.parametrize("state", ["down", "waking"])
+    def test_down_or_waking_returns_without_teardown(
+            self, state, autodown_file, tmp_path, monkeypatch):
+        """state down/waking ⇒ Phase 3 does NOT handle wake ⇒ no teardown."""
+        calls = []
+        monkeypatch.setattr(ad, "teardown", lambda: calls.append("teardown"),
+                 raising=False)
+        cfg = self._ready(autodown_file)
+        cfg["state"] = state
+        ad.save_config(cfg)
+        agents = self._write_agents(tmp_path, [{"name": "a", "status": "idle"}])
+        # Even fully idle, down/waking never triggers teardown this phase.
+        ad.cycle(
+            kanban_db=_FakeKb([]),
+            agents_file=agents,
+            now=NOW,
+            keepalive_ok=lambda: True,
+        )
+        assert calls == []
+
