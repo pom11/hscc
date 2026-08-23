@@ -288,9 +288,11 @@ def run_autodown_loop(stop_event, interval=30):
     while not stop_event.is_set():
         try:
             _autodown_tick()
-        except Exception:
-            # Defensive outer guard: a raising tick must never kill the loop.
-            pass
+        except Exception as e:
+            # Defensive outer guard: a raising tick must never kill the loop —
+            # swallow it and continue. But make it LOUD: a silent pass hides the
+            # failure (e.g. load_config blowing up). (Phase 3 fix.)
+            log(f"Autodown tick error: {e}", "ERROR")
         stop_event.wait(interval)
 
 
