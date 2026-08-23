@@ -13,9 +13,11 @@ testable without the daemon running and without touching the real ~/.hscc or
 ~/.hermes.
 """
 
+import datetime
 import json
 import os
 
+from .daemon_ops import log
 from .state import now_iso
 
 # Path to the autodown state+config file. Overridden in tests via
@@ -192,3 +194,209 @@ def classify(idle_state_block, autodown_state):
         # Block latched but layer not confirmed down (waking/up/missing).
         return "should_be_up"
     return "healthy"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — cycle() idle evaluation + safety interlocks (§1, §6)
+# ---------------------------------------------------------------------------
+
+# Default path to the fleet agents.json (health.py:551). Overridable in tests
+# so cycle() never reads the real ~/.hscc.
+AGENTS_FILE = os.path.expanduser("~/.hscc/agents.json")
+
+
+def _parse_iso(ts):
+    """Parse an ISO 8601 timestamp into an aware datetime, or None on failure.
+
+    Fail-safe helper for the elapsed-window measure (§1c): a value we cannot
+    parse is NOT idle. ``fromisoformat`` accepts the ``+00:00`` / ``Z`` / offset
+    forms produced by ``now_iso()``.
+    """
+    try:
+        return datetime.datetime.fromisoformat(ts)
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def _window_elapsed(cfg, now=None):
+    """True when ``now - last_activity_iso >= idle_minutes`` (§1c/§6.3).
+
+    Fail-safe in both ambiguous directions:
+    - A NULL/absent ``last_activity_iso`` does NOT count as \"infinitely idle\"
+      (§1e warm-up/first-boot guard). We treat it as \"activity just now\" — stamp
+      it with ``now`` and return False — so a fresh install can never
+      immediately tear down.
+    - An unparseable timestamp ⇒ not idle (never tear down on a signal we
+      cannot verify).
+    - ``idle_minutes <= 0`` (§7: \"0 = only via explicit wake/never auto\") ⇒
+      never auto-teardown.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    idle_minutes = cfg.get("idle_minutes") or 0
+    last = cfg.get("last_activity_iso")
+    if not last:
+        # Warm-up guard: NULL/absent ⇒ activity \"just now\". Stamp it.
+        cfg["last_activity_iso"] = now.isoformat()
+        try:
+            save_config(cfg)
+        except Exception:
+            pass  # stamping best-effort; fail-safe regardless
+        return False
+    if idle_minutes <= 0:
+        return False
+    last_dt = _parse_iso(last)
+    if last_dt is None:
+        # Unparseable timestamp ⇒ NOT idle.
+        return False
+    elapsed_min = (now - last_dt).total_seconds() / 60.0
+    return elapsed_min >= idle_minutes
+
+
+def _agents_idle(agents_file=None):
+    """True when EVERY enabled agent in agents.json is ``idle`` (§1b/§6.2).
+
+    Idle requires no enabled agent to be mid-turn (working) or failed — the
+    same status vocabulary ``health.check_heartbeat`` tallies (health.py:561,
+    statuses ``idle``/``working``/``failed``). Disabled agents are not running,
+    so they cannot be mid-work and do not gate idle.
+
+    Fail-safe (mirrors §1a): an unreadable / missing / corrupt agents.json, or
+    an unexpected shape, means we cannot positively verify all agents are idle
+    ⇒ False (NOT idle, never tear down).
+    """
+    path = agents_file or AGENTS_FILE
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    agents = data.get("agents", [])
+    if not isinstance(agents, list):
+        return False
+    for a in agents:
+        if not isinstance(a, dict):
+            continue
+        if not a.get("enabled", True):
+            continue  # disabled agent never gates idle
+        if a.get("status") != "idle":
+            # working / failed / anything-else ⇒ NOT idle.
+            return False
+    return True
+
+
+def _default_keepalive_ok():
+    """True iff every present keepalive unit answers healthy (§1f/§6.4).
+
+    Keepalive units are exempt from teardown (C4), but if one is itself
+    unhealthy we abort — do not tear down the orchestrator while a worker is
+    mid-flight relying on it (§6.4). Fail-safe: any inability to load serving,
+    resolve the unit set, or probe a port ⇒ False (abort) — we never tear down
+    on an unverifiable keepalive signal. With no keepalive units present, there
+    is nothing to protect ⇒ True.
+    """
+    try:
+        from . import serving
+        from .util import http_check
+    except Exception:
+        return False
+    try:
+        units = serving.keepalive_units(serving.load_serving())
+    except Exception:
+        return False
+    if not units:
+        return True  # no keepalive units to be unhealthy
+    for u in units:
+        try:
+            url = f"http://{u['node']}:{u['port']}/health"
+            if not http_check(url, timeout=5).get("ok"):
+                return False
+        except Exception:
+            return False
+    return True
+
+
+def _is_idle(cfg, kanban_db=None, agents_file=None, now=None,
+             keepalive_ok=None):
+    """Evaluate the FULL idle conjunction (§1/§6) — all must hold.
+
+    ``True`` only when every interlock positively clears. Any single false, or
+    any signal we could not verify, ⇒ ``False`` (not idle, no teardown).
+    Small helpers are injectable (Phase 1 ``_has_active_work(kanban_db=...)``,
+    ``agents_file`` for §1b, ``now`` for the clock, ``keepalive_ok`` for §6.4)
+    so cycle() is unit-testable without the daemon or the real ~/.hscc /
+    ~/.hermes.
+    """
+    # 6.1 Kanban work (§1a) — _has_active_work True ⇒ active ⇒ not idle.
+    if _has_active_work(kanban_db):
+        return False
+    # 6.2 Agent liveness (§1b) — every enabled agent must be idle.
+    if not _agents_idle(agents_file):
+        return False
+    # 6.3 Elapsed window (§1c/§6.3).
+    if not _window_elapsed(cfg, now):
+        return False
+    # 6.4 Keepalive health (§1f) — keepalive units exempt from teardown but a
+    #     sick one aborts (don't tear the orchestrator out from under a worker).
+    kh = keepalive_ok or _default_keepalive_ok
+    try:
+        if not kh():
+            return False
+    except Exception:
+        return False  # fail-safe: unverifiable keepalive health ⇒ not idle
+    return True
+
+
+def _invoke_teardown():
+    """Drive ``teardown()`` lazily — the Phase 4 seam.
+
+    Phase 2 calls ``cycle`` the same way (``getattr``, missing ⇒ no-op, raising
+    ⇒ caught + logged). ``teardown`` does not exist until Phase 4, so when it is
+    absent cycle's idle decision simply ends the call. The full stop-order /
+    watchdog-block sequence is Phase 4's job.
+    """
+    teardown = globals().get("teardown")
+    if teardown is None:
+        return  # Phase 4 not implemented yet → no teardown to run
+    try:
+        teardown()
+    except Exception as e:
+        log(f"Autodown teardown error: {e}", "ERROR")
+
+
+def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None):
+    """Idle autodown decision function (Phase 3, §1/§6).
+
+    Called each daemon tick by ``daemon_ops.run_autodown_loop``
+    (daemon_ops.py:307-317). Pure-ish and testable: every external input
+    (kanban DB, agents.json path, clock) is injectable, and with no args it
+    reads the real config from disk and uses the real clock — no running daemon
+    required.
+
+    Decision order:
+    1. Disabled ⇒ do nothing (§7 C5, fail-closed).
+    2. ``state`` in (``down``, ``waking``) ⇒ wake is Phase 5, NOT this phase.
+       Return without touching anything. Clear seam for Phase 5 to hook.
+    3. ``state == up`` ⇒ evaluate the full idle conjunction (§1/§6). Any single
+       false, or any unverifiable signal, ⇒ NOT idle ⇒ return without teardown
+       (fail-safe direction is mandatory).
+    4. All clear ⇒ teardown the serving layer. ``teardown()`` is Phase 4 and
+       does not exist yet — called lazily via ``_invoke_teardown`` (missing ⇒
+       no-op, raising ⇒ caught + logged).
+    """
+    cfg = load_config()
+    if not cfg.get("enabled"):
+        # §7 C5: OFF by default. Do nothing, never touch the serving layer.
+        return
+    state = cfg.get("state")
+    if state in ("down", "waking"):
+        # Phase 5 owns wake/autoup. This phase does NOT touch anything.
+        return
+    # state == "up": evaluate the full idle predicate (§1/§6).
+    if not _is_idle(cfg, kanban_db=kanban_db, agents_file=agents_file,
+                    now=now, keepalive_ok=keepalive_ok):
+        # Not idle — no teardown.
+        return
+    # All interlocks clear ⇒ teardown (Phase 4, called lazily).
+    _invoke_teardown()
