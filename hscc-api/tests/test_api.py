@@ -345,3 +345,70 @@ def test_internal_error_is_sanitized(running, token):
         assert "Traceback" not in json.dumps(payload)
     finally:
         api_server.ROUTES.pop()
+
+
+# ---------------------------------------------------------------------------
+# Autodown activity stamp (§1d.1) — authenticated requests reset the idle timer
+# ---------------------------------------------------------------------------
+
+class TestAutodownActivityStamp:
+    """The API stamps autodown activity only on AUTHENTICATED requests, and a
+    stamp failure can never break the request.
+
+    We patch ``_stamp_http_activity`` (the seam _route calls) with a recorder to
+    assert the AUTH-GATING contract, and patch ``_do_stamp_http_activity`` to a
+    raising function to assert the DEFENSIVE wrap. A real-file test verifies the
+    recorder actually writes the activity state file the daemon polls.
+    """
+
+    def test_authed_request_stamps(self, running, token, monkeypatch):
+        """A valid-token request ⇒ the autodown stamp fires."""
+        calls = []
+        monkeypatch.setattr(api_server, "_stamp_http_activity",
+                            lambda: calls.append("stamp"))
+        status, _ = running.request(path="/v1/ping", token=token)
+        assert status == 200
+        assert calls == ["stamp"]
+
+    def test_unauthed_request_does_not_stamp(self, running, monkeypatch):
+        """A request with no/wrong token (401) ⇒ the stamp NEVER fires — a port
+        scanner cannot keep the cluster awake."""
+        calls = []
+        monkeypatch.setattr(api_server, "_stamp_http_activity",
+                            lambda: calls.append("stamp"))
+        # Missing token.
+        status, _ = running.request(token=None)
+        assert status == 401
+        # Wrong token.
+        status, _ = running.request(token="totally-wrong")
+        assert status == 401
+        assert calls == []   # not stamped either time
+
+    def test_stamp_failure_does_not_break_request(self, running, token,
+                                                  monkeypatch):
+        """A raising recorder is swallowed inside _stamp_http_activity, so the
+        authenticated request still completes with a normal 200."""
+        def boom():
+            raise RuntimeError("recorder is broken")
+        monkeypatch.setattr(api_server, "_do_stamp_http_activity", boom)
+        status, payload = running.request(path="/v1/ping", token=token)
+        # The request is NOT broken by the stamp failure — 200, normal body.
+        assert status == 200
+        assert payload.get("ok") is True
+
+    def test_stamp_writes_real_activity_file(self, hscc_dir, monkeypatch):
+        """The real _stamp_http_activity writes the activity state file the
+        daemon polls, with source http + a timestamp."""
+        import hscc_daemon.state as hstate
+        from pathlib import Path
+        # Redirect the hscc_daemon state dir to a tmp location.
+        state_dir = str(Path(hscc_dir) / "state")
+        monkeypatch.setattr(hstate, "STATE_DIR", state_dir)
+        api_server._stamp_http_activity()
+        activity_file = Path(state_dir) / "activity.json"
+        assert activity_file.exists()
+        data = json.loads(activity_file.read_text())
+        assert data.get("source") == "http"
+        assert data.get("timestamp")          # ISO string written
+        assert data.get("stream") == "activity"
+

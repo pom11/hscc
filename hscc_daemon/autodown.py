@@ -367,8 +367,9 @@ def _invoke_teardown():
         log(f"Autodown teardown error: {e}", "ERROR")
 
 
-def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None):
-    """Idle autodown decision function (Phase 3, §1/§6).
+def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
+          probes=None):
+    """Idle autodown decision function (Phase 3, §1/§6; Phase 6 probes §1d).
 
     Called each daemon tick by ``daemon_ops.run_autodown_loop``
     (daemon_ops.py:307-317). Pure-ish and testable: every external input
@@ -378,19 +379,46 @@ def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None):
 
     Decision order:
     1. Disabled ⇒ do nothing (§7 C5, fail-closed).
-    2. ``state`` in (``down``, ``waking``) ⇒ wake is Phase 5, NOT this phase.
-       Return without touching anything. Clear seam for Phase 5 to hook.
-    3. ``state == up`` ⇒ evaluate the full idle conjunction (§1/§6). Any single
+    2. Phase 6 activity probes ⇒ run FIRST (after the disabled guard) so fresh
+       inbound activity resets ``last_activity_iso`` before the window is
+       evaluated. Each probe stamps via ``record_activity`` — the single choke
+       point (§1d). A raising/broken probe is caught + logged and never breaks
+       the cycle.
+       ``probes`` (an injectable sequence of zero-arg callables returning True
+       if they stamped) defaults to the three real sources: HTTP API request,
+       new kanban card / task activity, inbound Telegram. Pass ``probes=[]`` to
+       run the pure idle evaluation without any source polling.
+    3. ``state`` in (``down``, ``waking``) ⇒ wake is Phase 5. Return without
+       touching the serving layer.
+    4. ``state == down`` ⇒ wake seam (§4): if an activity event arrived since
+       we went down, bring the serving layer back up via autoup() (Phase 5,
+       called lazily).
+    5. ``state == up`` ⇒ evaluate the full idle conjunction (§1/§6). Any single
        false, or any unverifiable signal, ⇒ NOT idle ⇒ return without teardown
        (fail-safe direction is mandatory).
-    4. All clear ⇒ teardown the serving layer. ``teardown()`` is Phase 4 and
-       does not exist yet — called lazily via ``_invoke_teardown`` (missing ⇒
-       no-op, raising ⇒ caught + logged).
+    6. All clear ⇒ teardown the serving layer (Phase 4, called lazily).
     """
     cfg = load_config()
     if not cfg.get("enabled"):
         # §7 C5: OFF by default. Do nothing, never touch the serving layer.
         return
+
+    # Phase 6 activity probes — run after the disabled guard so fresh inbound
+    # activity resets last_activity_iso before the window is evaluated. A
+    # broken probe is caught + logged, never breaks the cycle.
+    if probes is None:
+        probes = _default_probes(kanban_db)
+    for probe in probes:
+        try:
+            probe()
+        except Exception as e:
+            # A broken probe must never break the cycle — log + continue.
+            log(f"Autodown activity probe error: {e}", "ERROR")
+
+    # Reload AFTER probes: record_activity (called by a probe) advances
+    # last_activity_iso on disk, which the window math and wake seam below must
+    # see.
+    cfg = load_config()
     state = cfg.get("state")
     if state == "waking":
         # A wake is already in flight (autoup set state=waking). Do NOT start
@@ -837,6 +865,11 @@ def _wait_ready(plan, http_check_fn=None, clock=None, timeout_seconds=None,
     deadline = clock() + timeout_seconds
 
     ready = []
+    # Units whose readiness probe raised — logged ONCE each so a broken probe
+    # is visible instead of silently busy-spinning the full grace window. A
+    # set (not a bool) gives per-unit diagnostics while staying bounded: every
+    # probe that raises every round logs exactly one line, never a flood.
+    logged_raises = set()
     while True:
         for entry in plan:
             if entry["unit_id"] in ready:
@@ -847,8 +880,18 @@ def _wait_ready(plan, http_check_fn=None, clock=None, timeout_seconds=None,
                     timeout=5)
                 if res.get("ok"):
                     ready.append(entry["unit_id"])
-            except Exception:
-                pass  # not ready this round — keep polling
+            except Exception as e:
+                # Not ready this round — keep polling. But surface the first
+                # failure per unit so a probe that raises EVERY round does not
+                # look like "the model is just slow" for the whole 20-minute
+                # grace window with zero diagnostics (real defect fixed here).
+                if entry["unit_id"] not in logged_raises:
+                    log(
+                        "Autodown _wait_ready: readiness probe for "
+                        f"{entry['unit_id']} raised: {e}",
+                        "WARN",
+                    )
+                    logged_raises.add(entry["unit_id"])
         if all(e["unit_id"] in ready for e in plan):
             return ready, True
         if clock() >= deadline:
@@ -1065,3 +1108,204 @@ def _handle_wake_timeout(plan, ready, msg, notify=True):
                 "up; watchdog resuming to heal",
                 "HSCC Autodown Wake Timeout", priority="critical")
     return {"result": "not-ready", "ready": ready, "plan": plan}
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — activity-source probes into record_activity (§1d)
+# ---------------------------------------------------------------------------
+#
+# Each probe detects one of the §1d activity sources and, when it fires, calls
+# ``record_activity(source)`` — the single choke point that advances
+# ``last_activity_iso`` on disk (resetting the idle window). cycle() runs all
+# three every tick (autodown.py:399-421), each wrapped in try/except so a
+# broken probe can never break the cycle. All probes are fail-safe: missing /
+# unreadable signals never fabricate activity.
+
+# §1d.1 — the HSCC API server writes an authenticated-request timestamp here
+# (via state.write_state('activity', ...) in hscc-api/api_server.py). Override
+# in tests.
+HTTP_ACTIVITY_STATE = os.path.expanduser("~/.hscc/state/activity.json")
+
+# §1d.2 — the Hermes gateway log. The design correction: we do NOT edit
+# ~/.hermes-tg/mcp_server.py (external, untracked by git). Instead we observe
+# its effect indirectly through Hermes' OWN gateway log, which writes an
+# ``inbound message: platform=telegram`` line for every inbound Telegram
+# message. Read-only, cheap to poll. Overridable in tests.
+GATEWAY_LOG = os.path.expanduser("~/.hermes/logs/gateway.log")
+TELEGRAM_MARKER = "inbound message: platform=telegram"
+# Byte offset up to which the gateway log has been scanned for the marker,
+# persisted so a restarted daemon does not re-stamp old mail as fresh.
+TELEGRAM_OFFSET_FILE = os.path.expanduser(
+    "~/.hscc/state/telegram_probe.offset")
+
+
+def _read_activity_ts(activity_file=None):
+    """Best-effort parse of the API activity file's ``timestamp`` (§1d.1).
+
+    Returns an aware datetime, or None if the file is missing/unreadable/not a
+    dict/no timestamp. Never raises.
+    """
+    path = activity_file or HTTP_ACTIVITY_STATE
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    ts = data.get("timestamp")
+    return _parse_iso(ts) if ts else None
+
+
+def probe_http_activity(activity_file=None):
+    """Stamp ``record_activity(\"http\")`` when the API server logged a request
+    newer than our last activity (§1d.1).
+
+    Called each cycle. Compares the API state file's ``timestamp`` (written on
+    every AUTHENTICATED request) against the config's ``last_activity_iso``;
+    stamps only when the API activity is NEWER than what we last recorded, so a
+    steady stream of requests keeps the window rolling without redundant writes.
+
+    Returns True if it stamped. Fail-safe: no file / unparseable timestamp ⇒
+    do NOT stamp (never fabricate API activity from an unreadable signal).
+    """
+    ts = _read_activity_ts(activity_file)
+    if ts is None:
+        return False
+    cfg = load_config()
+    last = _parse_iso(cfg.get("last_activity_iso"))
+    if last is not None and ts <= last:
+        return False   # no NEW API activity since we last recorded
+    record_activity("http")
+    return True
+
+
+def probe_kanban_activity(kanban_db=None):
+    """Stamp ``record_activity(\"kanban\")`` when the board has live/imminent
+    work (§1d.3: \"new kanban card / task is activity\").
+
+    The fleet drives work through the kanban DB; a board with any
+    running/ready/review/qa/... card is the operator working. We stamp whenever
+    the board has live/imminent work, which resets the idle timer while a
+    pipeline is in flight — an active board keeps the cluster awake, and a card
+    that arrives while DOWN is detected by the wake seam (a fresh last_activity
+    beats down_since) and triggers autoup.
+
+    Counting activity only when there IS work (vs. a transition detector)
+    is intentional and safe: the idle interlock §6.1 already blocks teardown
+    while work is active, so the probe's only real effect is keeping the
+    window rolled while work runs and firing the wake seam on a new card.
+
+    NOTE the failure semantics differ from ``_has_active_work`` (the teardown
+    predicate, which returns True on an unreadable DB — conservative for
+    teardown). For an ACTIVITY signal that polarity is backwards: stamping on an
+    unreadable DB would fabricate perpetual activity from a dead board. So we
+    query the DB directly and only stamp when the board is POSITIVELY readable
+    AND has active work; an unreadable board returns False (no stamp).
+    """
+    if kanban_db is None:
+        kb = _load_kanban_db_or_default()
+        if kb is None:
+            return False   # can't read the board ⇒ can't verify activity
+        kanban_db = kb
+    try:
+        with kanban_db.connect_closing() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM tasks "
+                "WHERE status IS NULL "
+                "   OR status NOT IN ('done', 'archived', 'blocked') "
+                "LIMIT 1"
+            ).fetchone()
+    except Exception:
+        # Unreadable board ⇒ cannot positively confirm activity ⇒ no stamp.
+        return False
+    if row is not None:
+        record_activity("kanban")
+        return True
+    return False
+
+
+def _load_telegram_offset(offset_file=None):
+    """Read the last-scanned byte offset of the gateway log, or None."""
+    path = offset_file or TELEGRAM_OFFSET_FILE
+    try:
+        with open(path) as f:
+            return int(f.read().strip())
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+
+
+def _save_telegram_offset(offset, offset_file=None):
+    """Atomically persist the gateway-log scan offset (best-effort)."""
+    path = offset_file or TELEGRAM_OFFSET_FILE
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(str(offset))
+        os.replace(tmp, path)
+    except OSError:
+        pass   # best-effort; a missing offset just re-baselines next poll
+
+
+def probe_telegram_activity(gateway_log=None, offset_file=None):
+    """Stamp ``record_activity(\"telegram\")`` on NEW inbound Telegram messages
+    (§1d.2 — design correction).
+
+    We do NOT edit ~/.hermes-tg/mcp_server.py (external, untracked by git —
+    an edit there is silently lost on rebuild and is a trap, not a design). We
+    observe Telegram inbound traffic indirectly: the Hermes gateway writes an
+    ``inbound message: platform=telegram`` line to ~/.hermes/logs/gateway.log
+    for every inbound Telegram message. This probe scans that log from the last
+    scanned byte offset; any NEW marker line = fresh inbound Telegram ⇒ stamp.
+
+    The offset is persisted in ~/.hscc/state/telegram_probe.offset so a
+    restarted daemon does not re-stamp old mail. Log rotation (size shrinking /
+    truncation) is handled by re-baselining from offset 0.
+
+    Returns True if it stamped. Fail-safe: missing log or unreadable offset ⇒
+    baseline-reset, no stamp (never fabricate Telegram activity).
+    """
+    log_path = gateway_log or GATEWAY_LOG
+    offset_path = offset_file or TELEGRAM_OFFSET_FILE
+    try:
+        size = os.path.getsize(log_path)
+    except OSError:
+        return False   # no log ⇒ no telegram signal
+    offset = _load_telegram_offset(offset_path)
+    if offset is None:
+        # First poll (or lost offset): baseline at current EOF — do NOT treat
+        # the log's existing content as fresh inbound activity.
+        _save_telegram_offset(size, offset_path)
+        return False
+    if size < offset:
+        offset = 0    # log rotated/truncated — re-baseline from the start
+    if size == offset:
+        return False  # nothing new since last scan
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(offset)
+            chunk = f.read(size - offset)
+    except OSError:
+        return False
+    count = chunk.count(TELEGRAM_MARKER.encode())
+    _save_telegram_offset(size, offset_path)
+    if count > 0:
+        record_activity("telegram")
+        return True
+    return False
+
+
+def _default_probes(kanban_db=None):
+    """Build the default cycle() probe closures (§1d).
+
+    probe_kanban_activity needs the injectable kanban_db (tests pass a fake);
+    the others read module-level paths. Each closure takes NO args and returns
+    True if it stamped, so cycle() can run them uniformly.
+    """
+    return [
+        lambda: probe_http_activity(),
+        lambda: probe_kanban_activity(kanban_db),
+        lambda: probe_telegram_activity(),
+    ]
+
