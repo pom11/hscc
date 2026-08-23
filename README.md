@@ -172,6 +172,39 @@ hscc template validate 4node-coding --structural-only  # offline, CI-friendly
 
 ---
 
+## Idle autodown
+
+When your cluster is just sitting there idle — no kanban work moving, no agent busy, nobody talking to it — the **GPU serving layer** (the vLLM containers that power your models) is still drawing power for nothing. **Idle autodown** watches for that. After the cluster has been quiet for X minutes, it shuts the serving layer down to save power, and brings it back up automatically the moment anything comes in — a Telegram message, an HTTP API request, a new kanban card, or you running `hscc autodown wake`.
+
+**It is OFF by default.** Nothing tears anything down until you arm it deliberately — that's the single most important thing to know. You opt in:
+
+```
+hscc autodown status [--json]            # armed? what state? idle window? last activity?
+hscc autodown enable [--idle-minutes N]  # arm it (default: 10 minutes of quiet)
+hscc autodown wake                       # bring the serving layer back up now
+hscc autodown cancel                     # abort a teardown that is in progress
+hscc autodown disable                    # disarm it — stop the automation
+```
+
+`status` is read-only (pass `--json` for machine-readable output). `enable` only arms the timer — it never shuts the layer down immediately, and if the layer is already down it won't start it either. `disable` just disarms the automation and hands supervision back to the watchdog; it doesn't restart anything, so if the layer is down and you want it up, run `hscc autodown wake`.
+
+### What it will never do
+
+Autodown is deliberately conservative. It will **never** tear the layer down:
+
+- while any kanban work is **running**, **ready** to dispatch, or sitting in **review**;
+- while any agent is **busy** (working or failed) — only an all-idle fleet counts;
+- for a **keepalive** unit — a keepalive flag in `serving.json` is a standing "keep this up" that beats the idle timer;
+- if any signal can't be verified — it stays **up** rather than guessing.
+
+**Keepalive caveat, honestly:** on a cluster where a worker unit is marked keepalive, autodown only frees the *non-keepalive* nodes — keepalive units stay up by design. If you want those nodes freed too, clear the `keepalive` flag in `~/.hscc/serving.json`.
+
+When it does tear down, it tells the watchdog to back off first, so your health-check daemon doesn't fight it and resurrect the layer mid-teardown. And be aware: this is brand-new (v1.9.0) and has never run a real teardown on this cluster — treat it as untested-at-scale until you've watched it cycle once.
+
+For the full design — idle definition, teardown/wake sequencing, watchdog coordination, failure modes — see [docs/design/idle-autodown.md](docs/design/idle-autodown.md).
+
+---
+
 ## The fleet
 
 Agent work flows through native Hermes kanban — HSCC adds a pre-dispatch hook (cluster-aware host routing) and the review gate, but the dispatch loop is Hermes'. An idea is brainstormed into a spec, decomposed into a dependency-ordered task graph, and each task dispatches to a **role-specialized worker** running in its own git worktree.
