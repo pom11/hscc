@@ -819,3 +819,460 @@ class TestTeardown:
         assert blk.get("blocked") is True
         assert blk.get("intentional") == "autodown"
 
+
+# ---------------------------------------------------------------------------
+# Phase 5 — autoup() wake sequence + cycle wake seam (§4, §4.5, §8)
+# ---------------------------------------------------------------------------
+
+# Health probes (injected, no real HTTP).
+class _HealthyProbe:
+    """health probe that reports healthy for every unit (immediate ready)."""
+    def __call__(self, url, timeout=5):
+        return {"ok": True, "status": 200}
+
+
+class _DownProbe:
+    """health probe that never reports a unit ready (forces timeout)."""
+    def __call__(self, url, timeout=5):
+        return {"ok": False, "output": "not ready"}
+
+
+class _AdvancingClock:
+    """monotonic-style clock that advances ``step`` on every read, so a poll
+    loop progresses (and eventually crosses the deadline) without real time."""
+    def __init__(self, start=0.0, step=1.0):
+        self.t = start
+        self.step = step
+    def __call__(self):
+        t = self.t
+        self.t += self.step
+        return t
+
+
+def _noop_sleep(_seconds):
+    """Do not actually sleep — tests must never block."""
+    return None
+
+
+def _cmd_hosts(cmd):
+    """Extract the node list a start/stop command targets.
+
+    Both command forms carry ``--hosts <nodes>`` (start: sparkrun run ... --
+    hosts <comma-list> ...; stop: sparkrun stop --hosts <comma-list>). Returns
+    a frozenset of host strings.
+    """
+    for i, tok in enumerate(cmd):
+        if tok == "--hosts" and i + 1 < len(cmd):
+            return frozenset(cmd[i + 1].split(","))
+    return frozenset()
+
+
+def _write_down_cfg(autodown_file, last_activity_iso=None):
+    """Write an enabled, DOWN config (the wake-seam precondition)."""
+    down = NOW - _dt.timedelta(minutes=30)
+    cfg = dict(ad.DEFAULT_CONFIG)
+    cfg["enabled"] = True
+    cfg["state"] = "down"
+    cfg["idle_minutes"] = 10
+    cfg["down_since"] = down.isoformat()
+    cfg["last_activity_iso"] = last_activity_iso or down.isoformat()
+    ad.save_config(cfg)
+    return cfg
+
+
+class TestAutoup:
+    """autoup() with injected fakes — ZERO real sparkrun commands."""
+
+    def _setup(self, tmp_path, monkeypatch, autodown_file, results=None):
+        """Common wiring: block file, serving fixture, stub notifiers.
+
+        The config does NOT need to be pre-written (autoup creates what it
+        needs); but we pre-write a DOWN config + latched block so call-ordering
+        assertions have a realistic starting point. Returns
+        (serving_path, runner, block_file).
+        """
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        serving = _write_serving(tmp_path)
+        # Seed a latched intentional block (as teardown left it).
+        _lifecycle.save_watchdog_block(
+            {"blocked": True, "intentional": "autodown",
+             "reason": ad.WATCHDOG_TEARDOWN_REASON,
+             "blocked_at": NOW.isoformat(), "failures": []})
+        _write_down_cfg(autodown_file)
+        runner = _FakeRunner(block_file, results=results)
+        # Stub notifiers (both channels) so nothing is actually sent.
+        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
+        monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
+        return serving, runner, block_file
+
+    # -- starts EXACTLY what teardown stopped; keepalive never started -------
+    def test_starts_units_teardown_stopped_keepalive_exempt(
+            self, tmp_path, monkeypatch, autodown_file):
+        """autoup starts the non-keepalive set (wk1 + orch); keepalive never.
+
+        The wake set must equal the teardown set (round-trip symmetry): the
+        keepalive unit (.248) that was never stopped is never started either.
+        """
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        res = ad.autoup(
+            serving_path=serving, run_cmd_fn=runner,
+            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+            sleep_fn=_noop_sleep, notify=False,
+        )
+        assert res["result"] == "up"
+        assert len(runner.calls) == 2      # wk1 + orch
+        # Keepalive node never appears in any start command.
+        all_hosts = " ".join(" ".join(c["cmd"]) for c in runner.calls)
+        assert "10.0.0.248" not in all_hosts      # keepalive exempt
+        assert "10.0.0.247" in all_hosts          # non-keepalive worker
+        assert "10.0.0.244" in all_hosts          # orchestrator
+        # Wake set (unit_ids) exactly equals the teardown set.
+        plan_ids = set(res["ready"])
+        assert plan_ids == {"wk1", "orch"}
+        assert "wk-keep" not in plan_ids
+
+    def test_each_start_cmd_is_sparkrun_run_ensure(
+            self, tmp_path, monkeypatch, autodown_file):
+        """Every start command is the sparkrun run --ensure form (§4.3)."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        ad.autoup(
+            serving_path=serving, run_cmd_fn=runner,
+            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+            sleep_fn=_noop_sleep, notify=False,
+        )
+        for call in runner.calls:
+            cmd = call["cmd"]
+            assert cmd[0] == "sparkrun"
+            assert cmd[1] == "run"
+            assert "--ensure" in cmd
+            assert "--no-follow" in cmd
+
+    # -- orchestrator started FIRST (reverse of teardown) -------------------
+    def test_orchestrator_started_first(
+            self, tmp_path, monkeypatch, autodown_file):
+        """The orchestrator unit's start command comes FIRST (§4.3)."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        res = ad.autoup(
+            serving_path=serving, run_cmd_fn=runner,
+            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+            sleep_fn=_noop_sleep, notify=False,
+        )
+        assert res["result"] == "up"
+        first = " ".join(runner.calls[0]["cmd"])
+        # Orchestrator host (.244) is in the FIRST start command.
+        assert "10.0.0.244" in first
+        assert res["started"][0]["kind"] == "orchestrator"
+        # Worker starts after the orchestrator.
+        assert "10.0.0.247" in " ".join(runner.calls[1]["cmd"])
+
+    # -- block cleared ONLY after readiness confirmed ------------------------
+    def test_block_latched_through_starts_then_cleared(
+            self, tmp_path, monkeypatch, autodown_file):
+        """The intentional block is present at EVERY start, and only cleared
+        (blocked:false, intentional removed, failures cleared) AFTER readiness
+        was confirmed — i.e. after all starts issued."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        # Readiness is NOT confirmed until after both starts issue: probe reads
+        # a flag that is only flipped by the runner after the LAST start.
+        ready = {"ok": False}
+        orig_runner = runner
+
+        class _FlipOnFirstStart:
+            def __init__(self):
+                self.calls = 0
+            def __call__(self, cmd, timeout=30):
+                out = orig_runner(cmd, timeout=timeout)
+                self.calls += 1
+                if self.calls == 2:   # after the LAST (2nd) start issued
+                    ready["ok"] = True
+                return out
+
+        ad.autoup(
+            serving_path=serving, run_cmd_fn=_FlipOnFirstStart(),
+            http_check_fn=lambda url, timeout=5: {"ok": ready["ok"],
+                                                  "status": 200},
+            clock=lambda: 0.0, sleep_fn=_noop_sleep, notify=False,
+        )
+        # Block was latched (intentional autodown) at EVERY start call.
+        for call in orig_runner.calls:
+            assert call["block"]["intentional"] == "autodown"
+            assert call["block"]["blocked"] is True
+        # After autoup returns, the block is cleared: not blocked, no
+        # intentional, failures emptied.
+        with open(block_file) as f:
+            cleared = json.load(f)
+        assert cleared.get("blocked") is False
+        assert cleared.get("intentional") is None
+        assert cleared.get("failures") == []
+
+    def test_readiness_timeout_failure_path(
+            self, tmp_path, monkeypatch, autodown_file):
+        """Readiness timeout ⇒ failure: state NOT down/waking, intentional
+        cleared (watchdog resumes), loud notify."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        notes = []
+        monkeypatch.setattr(
+            ad, "notify_operations",
+            lambda msg, *a, **k: notes.append(("tg", str(msg))))
+        monkeypatch.setattr(
+            ad, "send_macos_notification",
+            lambda title, msg, *a, **k: notes.append(("desk", str(msg))))
+        # Units never become ready + a small deadline (wake_grace_minutes=0 ⇒
+        # timeout_seconds=0) so the poll loop times out without real time.
+        res = ad.autoup(
+            serving_path=serving, run_cmd_fn=runner,
+            http_check_fn=_DownProbe(), clock=_AdvancingClock(start=0, step=1),
+            sleep_fn=_noop_sleep, wake_grace_minutes=0, notify=True,
+        )
+        assert res["result"] == "not-ready"
+        # NOT left stuck in waking (the invisible wedge).
+        cfg = ad.load_config()
+        assert cfg["state"] != "waking"
+        assert cfg["state"] == "up"          # reality-ish, operator-actionable
+        assert "READINESS TIMEOUT" in cfg["reason"]
+        # wake bookkeeping kept so the operator sees the trigger.
+        assert cfg["wake_source"] == "cycle"
+        assert cfg["wake_at"] is not None
+        # Block cleared (intentional removed) so the watchdog resumes + heals.
+        with open(block_file) as f:
+            blk = json.load(f)
+        assert blk.get("blocked") is False
+        assert blk.get("intentional") is None
+        # Loud notify: critical-priority desktop + ops Telegram both fired.
+        assert len(notes) == 2
+        assert "TIMEOUT" in notes[0][1] or "TIMEOUT" in notes[1][1]
+        assert "TIMEOUT" in notes[1][1] or "TIMEOUT" in notes[0][1]
+
+    def test_start_failure_failure_path(self, tmp_path, monkeypatch,
+                                        autodown_file):
+        """A start command failure ⇒ failure path: intentional cleared, state up
+        (not down/waking), loud notify, no readiness wait entered."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file,
+                                                  results=[False])
+        notes = []
+        monkeypatch.setattr(ad, "notify_operations",
+                            lambda msg, *a, **k: notes.append(msg))
+        monkeypatch.setattr(ad, "send_macos_notification",
+                            lambda *a, **k: notes.append("desk"))
+        res = ad.autoup(
+            serving_path=serving, run_cmd_fn=runner,
+            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+            sleep_fn=_noop_sleep, notify=True,
+        )
+        assert res["result"] == "start-failed"
+        # Only the orchestrator (first) was attempted; worker never started.
+        assert len(runner.calls) == 1
+        # Not stuck waking; state reflects reality (up), reason recorded.
+        cfg = ad.load_config()
+        assert cfg["state"] == "up"
+        assert "start-failed" not in cfg  # result is return-value only
+        assert "wake FAILED" in cfg["reason"]
+        # Intentional cleared so the watchdog resumes + can heal.
+        with open(block_file) as f:
+            blk = json.load(f)
+        assert blk.get("intentional") is None
+        assert blk.get("blocked") is False
+        assert notes, "loud notify must fire on start failure"
+
+    # -- already waking ⇒ second call is a no-op ----------------------------
+    def test_already_waking_is_noop(self, tmp_path, monkeypatch,
+                                    autodown_file):
+        """state==waking ⇒ autoup returns already-waking, starts NOTHING.
+
+        The guard is for concurrent triggers while a wake is in flight: a second
+        autoup() call while state is still "waking" must not start a duplicate
+        set. We seed state=waking (the in-flight state) and assert no starts.
+        """
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        # Seed state=waking — as if a previous wake is still in flight.
+        cfg = ad.load_config()
+        cfg["state"] = "waking"
+        ad.save_config(cfg)
+        res = ad.autoup(
+            serving_path=serving, run_cmd_fn=runner,
+            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+            sleep_fn=_noop_sleep, notify=False,
+        )
+        assert res["result"] == "already-waking"
+        assert res["started"] == []
+        assert res["ready"] == []
+        # No start command issued at all.
+        assert runner.calls == []
+
+    # -- success ⇒ state up + wake bookkeeping cleared -----------------------
+    def test_success_sets_state_up_clears_wake(self, tmp_path, monkeypatch,
+                                              autodown_file):
+        """A clean wake: state=up, wake_source/wake_at cleared, block cleared."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        cfg = ad.load_config()
+        cfg["wake_source"] = "telegram"   # will be cleared on success
+        cfg["wake_at"] = "2026-08-23T09:00:00+00:00"
+        ad.save_config(cfg)
+        res = ad.autoup(
+            serving_path=serving, run_cmd_fn=runner,
+            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+            sleep_fn=_noop_sleep, notify=False,
+        )
+        assert res["result"] == "up"
+        cfg = ad.load_config()
+        assert cfg["state"] == "up"
+        assert cfg["wake_source"] is None
+        assert cfg["wake_at"] is None
+        assert cfg["reason"] == ""
+
+    # -- round trip: teardown() then autoup() -------------------------------
+    def test_round_trip_teardown_then_autoup(self, tmp_path, monkeypatch,
+                                             autodown_file):
+        """teardown() then autoup() with the SAME fixture returns the cluster
+        to the starting unit set: the units stopped == the units started, and
+        end state is up with the block cleared."""
+        serving = _write_serving(tmp_path)
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        _write_idle_cfg(autodown_file)
+        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
+        monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
+        agents = tmp_path / "agents.json"
+        agents.write_text(json.dumps({"agents": [{"name": "a",
+                                                  "status": "idle"}]}))
+        down_runner = _FakeRunner(block_file)
+        stop_result = ad.teardown(
+            serving_path=serving, run_cmd_fn=down_runner,
+            kanban_db=_FakeKb([]), agents_file=str(agents),
+            now=NOW, keepalive_ok=lambda: True,
+            http_check_fn=lambda *a, **k: {"ok": False},  # ports down
+        )
+        assert stop_result["result"] == "down"
+        stopped_ids = {e["unit_id"] for e in stop_result["plan"]}
+
+        # Now wake with the same serving fixture. Readiness healthy immediately.
+        up_runner = _FakeRunner(block_file)
+        up_result = ad.autoup(
+            serving_path=serving, run_cmd_fn=up_runner,
+            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+            sleep_fn=_noop_sleep, notify=False,
+        )
+        assert up_result["result"] == "up"
+        # The starting non-keepalive set is fully restored.
+        assert set(up_result["ready"]) == stopped_ids == {"wk1", "orch"}
+        # Every unit stopped was started again (same command hostsets).
+        stopped_hosts = {_cmd_hosts(c["cmd"]) for c in down_runner.calls}
+        started_hosts = {_cmd_hosts(c["cmd"]) for c in up_runner.calls}
+        assert started_hosts == stopped_hosts
+        # End state: up + block cleared.
+        assert ad.load_config()["state"] == "up"
+        with open(block_file) as f:
+            blk = json.load(f)
+        assert blk.get("blocked") is False
+        assert blk.get("intentional") is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — cycle() wake seam (§4): state=down + fresh activity ⇒ autoup
+# ---------------------------------------------------------------------------
+
+class TestCycleWakeSeam:
+    """cycle() triggers autoup exactly when it should (state=down + fresh
+    activity), and never otherwise. autoup is monkeypatched — the seam is what
+    is under test, not autoup's internals."""
+
+    def _cfg(self, autodown_file, last_activity_iso):
+        """Write an enabled, DOWN config with the given last_activity_iso."""
+        down = NOW - _dt.timedelta(minutes=30)
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["enabled"] = True
+        cfg["state"] = "down"
+        cfg["idle_minutes"] = 10
+        cfg["down_since"] = down.isoformat()
+        cfg["last_activity_iso"] = last_activity_iso
+        ad.save_config(cfg)
+        return cfg
+
+    def test_down_fresh_activity_triggers_autoup_once(
+            self, autodown_file, monkeypatch):
+        """state=down + last_activity AFTER down_since ⇒ autoup called once."""
+        calls = []
+        monkeypatch.setattr(ad, "autoup", lambda: calls.append("autoup"),
+                            raising=False)
+        # Activity stamped AFTER down_since (a wake event arrived).
+        fresh = NOW - _dt.timedelta(minutes=5)   # after down (30m ago)
+        self._cfg(autodown_file, fresh.isoformat())
+        ad.cycle()
+        assert calls == ["autoup"]
+
+    def test_down_no_new_activity_does_not_trigger(
+            self, autodown_file, monkeypatch):
+        """state=down + NO new activity (last_activity == down_since) ⇒ autoup
+        NOT called."""
+        calls = []
+        monkeypatch.setattr(ad, "autoup", lambda: calls.append("autoup"),
+                            raising=False)
+        down = NOW - _dt.timedelta(minutes=30)
+        self._cfg(autodown_file, down.isoformat())  # last_activity == down_since
+        ad.cycle()
+        assert calls == []
+
+    def test_down_no_last_activity_does_not_trigger(
+            self, autodown_file, monkeypatch):
+        """state=down with NULL last_activity_iso ⇒ can't verify fresh activity
+        ⇒ autoup NOT called (fail-safe)."""
+        calls = []
+        monkeypatch.setattr(ad, "autoup", lambda: calls.append("autoup"),
+                            raising=False)
+        self._cfg(autodown_file, None)
+        ad.cycle()
+        assert calls == []
+
+    def test_waking_does_not_trigger(self, autodown_file, monkeypatch):
+        """state=waking ⇒ autoup NOT called (a wake is already in flight)."""
+        calls = []
+        monkeypatch.setattr(ad, "autoup", lambda: calls.append("autoup"),
+                            raising=False)
+        down = NOW - _dt.timedelta(minutes=30)
+        self._cfg(autodown_file, down.isoformat())
+        ad.load_config  # noqa
+        cfg = ad.load_config()
+        cfg["state"] = "waking"
+        ad.save_config(cfg)
+        ad.cycle()
+        assert calls == []
+
+    def test_disabled_down_fresh_activity_does_not_trigger(
+            self, autodown_file, monkeypatch):
+        """Disabled ⇒ cycle returns before the wake seam: even a fresh-activity
+        DOWN state never auto-wakes while autodown is off."""
+        calls = []
+        monkeypatch.setattr(ad, "autoup", lambda: calls.append("autoup"),
+                            raising=False)
+        down = NOW - _dt.timedelta(minutes=30)
+        fresh = NOW - _dt.timedelta(minutes=5)
+        self._cfg(autodown_file, fresh.isoformat())
+        cfg = ad.load_config()
+        cfg["enabled"] = False
+        ad.save_config(cfg)
+        ad.cycle()
+        assert calls == []
+
+    def test_up_does_not_trigger_wake(self, autodown_file, monkeypatch):
+        """state=up ⇒ wake seam not entered (idle path evaluates instead)."""
+        calls = []
+        monkeypatch.setattr(ad, "autoup", lambda: calls.append("autoup"),
+                            raising=False)
+        down = NOW - _dt.timedelta(minutes=30)
+        self._cfg(autodown_file, down.isoformat())
+        cfg = ad.load_config()
+        cfg["state"] = "up"
+        ad.save_config(cfg)
+        # Even if last_activity > down_since, state=up never auto-wakes.
+        ad.cycle(kanban_db=_FakeKb([]), agents_file="",
+                 now=NOW, keepalive_ok=lambda: True)
+        assert calls == []

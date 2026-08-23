@@ -392,8 +392,17 @@ def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None):
         # §7 C5: OFF by default. Do nothing, never touch the serving layer.
         return
     state = cfg.get("state")
-    if state in ("down", "waking"):
-        # Phase 5 owns wake/autoup. This phase does NOT touch anything.
+    if state == "waking":
+        # A wake is already in flight (autoup set state=waking). Do NOT start
+        # a second parallel wake — return and let the in-flight one finish.
+        return
+    if state == "down":
+        # Wake seam (§4): if an activity event arrived since we went down,
+        # bring the serving layer back up via autoup(). autoup() is Phase 5;
+        # call it lazily (missing ⇒ no-op, raising ⇒ caught + logged), mirroring
+        # how _invoke_teardown handles the Phase 4 seam.
+        if _fresh_activity_since_down(cfg):
+            _invoke_autoup()
         return
     # state == "up": evaluate the full idle predicate (§1/§6).
     if not _is_idle(cfg, kanban_db=kanban_db, agents_file=agents_file,
@@ -668,3 +677,391 @@ def _handle_stop_failure(entry, res, original_block, issued, plan):
             "HSCC Autodown Teardown Failed", priority="high")
     return {"result": "failed", "failed_at": entry["unit_id"],
             "issued": issued, "plan": plan}
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — autoup() wake sequence + cycle wake seam (§4, §5/§4.5, §8)
+# ---------------------------------------------------------------------------
+
+# Default interval between readiness polls during a wake (§4.4). Injectable in
+# tests so they never sleep.
+READY_POLL_INTERVAL = 5
+
+
+def _fresh_activity_since_down(cfg):
+    """True iff an activity event arrived AFTER the cluster went down (§4).
+
+    The wake seam's trigger: ``last_activity_iso`` vs ``down_since`` —
+    ``record_activity()`` (Phase 1) is the single choke point every activity
+    source stamps, and ``down_since`` is when teardown confirmed the layer down
+    (§3.5). Any activity stamped after that point means a fresh inbound event
+    wants serving back up.
+
+    Fail-safe (never auto-wake on an unverifiable signal): if either timestamp
+    is absent/unparseable we return False — we only auto-wake on a positively
+    verifiable fresh-activity signal.
+    """
+    down = _parse_iso(cfg.get("down_since"))
+    last = _parse_iso(cfg.get("last_activity_iso"))
+    if down is None or last is None:
+        return False  # can't verify fresh activity ⇒ don't auto-wake
+    return last > down
+
+
+def _invoke_autoup():
+    """Drive ``autoup()`` lazily — the Phase 5 seam.
+
+    Mirrors ``_invoke_teardown`` (autodown.py:353): if autoup is not yet
+    defined (Phase 5 missing) it is a no-op; a raising autoup is caught + logged
+    so the cycle keeps running.
+    """
+    autoup = globals().get("autoup")
+    if autoup is None:
+        return  # Phase 5 not implemented yet → no wake to run
+    try:
+        autoup()
+    except Exception as e:
+        log(f"Autodown autoup error: {e}", "ERROR")
+
+# The readiness deadline for a wake reuses the watchdog's model-load grace
+# window (lifecycle.py:125, VLLM_LOAD_GRACE_MINUTES default 20 — model load is
+# genuinely slow). Read at CALL time via a function so monkeypatching the env /
+# lifecycle attribute is respected, matching how lifecycle reads it.
+def _wake_ready_grace_minutes():
+    from . import lifecycle
+    return getattr(lifecycle, "VLLM_LOAD_GRACE_MINUTES", 20)
+
+
+def _unit_start_cmd(u, serving):
+    """`sparkrun run <recipe> --cluster hscc --hosts <nodes> --port <port>
+    --no-follow --ensure` for one serving unit (§4.3).
+
+    Mirrors the real orchestrator start form ``serving.VLLM_START_CMD``
+    (serving.py:151-153). The recipe is the unit's OWN recipe
+    (``serving.orchestrator_recipe`` for the orchestrator, ``u.recipe`` for a
+    worker), falling back to the orchestrator recipe global so a unit missing a
+    recipe can still be started. ``--hosts`` carries the EXACT per-unit node
+    list from serving.json so the set that comes UP matches what went DOWN.
+    """
+    from .serving import orchestrator_recipe, serving_port
+    from .serving import VLLM_RECIPE, HSCC_CLUSTER
+    if u.get("role") == "orchestrator":
+        recipe = orchestrator_recipe(serving) or VLLM_RECIPE
+    else:
+        recipe = u.get("recipe") or VLLM_RECIPE
+    nodes = [n for n in (u.get("nodes") or []) if n]
+    port = u.get("port") or serving_port(serving)
+    return ["sparkrun", "run", recipe, "--cluster", HSCC_CLUSTER,
+            "--hosts", ",".join(nodes), "--port", str(port),
+            "--no-follow", "--ensure"]
+
+
+def _build_wake_plan(serving):
+    """Ordered start commands for the NON-keepalive serving units (§4).
+
+    The EXACT mirror of ``_build_teardown_plan`` (autodown.py:427) but in WAKE
+    order: orchestrator unit FIRST, then non-keepalive workers (§4.3 — reverse
+    of teardown; there is no in-flight request when waking from zero). It picks
+    out the SAME unit set teardown stopped, so what comes UP equals exactly what
+    went DOWN. Keepalive units (C4) are NEVER in the set.
+
+    Each entry: ``{"kind", "nodes", "port", "unit_id", "cmd"}`` (same shape as
+    the teardown plan so the round-trip teardown→autoup is symmetric).
+    """
+    if not isinstance(serving, dict):
+        return []
+    from .serving import serving_port
+    orch = []
+    workers = []
+    for u in (serving.get("units", []) or []):
+        if not isinstance(u, dict):
+            continue
+        nodes = [n for n in (u.get("nodes") or []) if n]
+        if not nodes:
+            continue  # no nodes ⇒ nothing to start
+        role = u.get("role")
+        unit_id = u.get("id") or ",".join(nodes)
+        port = u.get("port") or serving_port(serving)
+        if role == "orchestrator":
+            orch.append({"kind": "orchestrator", "nodes": nodes,
+                         "port": port, "unit_id": unit_id,
+                         "cmd": _unit_start_cmd(u, serving)})
+        elif role == "worker" and not u.get("keepalive"):
+            workers.append({"kind": "worker", "nodes": nodes,
+                            "port": port, "unit_id": unit_id,
+                            "cmd": _unit_start_cmd(u, serving)})
+        # keepalive worker / unknown role ⇒ never in the wake set.
+    workers.sort(key=lambda e: e["unit_id"])
+    return orch + workers
+
+
+def _all_units_ready(plan, http_check_fn):
+    """True iff EVERY unit in ``plan`` answers healthy on its port (§4.4).
+
+    A unit is ready when ``GET http://<nodes[0]>:<port>/health`` returns ok.
+    Keepalive units are not in ``plan`` and are not probed here (they were never
+    stopped, so they are not being woken). An unreachable/probe-error unit is
+    NOT ready.
+    """
+    for entry in plan:
+        try:
+            res = http_check_fn(
+                f"http://{entry['nodes'][0]}:{entry['port']}/health", timeout=5)
+            if not res.get("ok"):
+                return False
+        except Exception:
+            return False
+    return True
+
+
+def _wait_ready(plan, http_check_fn=None, clock=None, timeout_seconds=None,
+                sleep_fn=None):
+    """Poll each unit's port until healthy or the readiness deadline (§4.4).
+
+    Returns ``(ready_unit_ids, ok)``: ``ready_unit_ids`` is the ordered list of
+    units confirmed healthy; ``ok`` is False when the deadline passed with some
+    unit still not ready (readiness timeout, §8 wake-fails).
+
+    Injectable so tests never sleep: ``clock()`` returns the current time
+    (default time.monotonic), ``sleep_fn(seconds)`` is the poll wait (default
+    ``time.sleep``; tests pass a no-op / advancing fake), ``http_check_fn`` is
+    the health probe (default util.http_check), and ``timeout_seconds`` caps
+    the window (default ``VLLM_LOAD_GRACE_MINUTES * 60``).
+    """
+    import time
+    http_check = http_check_fn or _util_http_check_probe()
+    clock = clock or time.monotonic
+    sleep_fn = sleep_fn or time.sleep
+    if timeout_seconds is None:
+        timeout_seconds = _wake_ready_grace_minutes() * 60
+    deadline = clock() + timeout_seconds
+
+    ready = []
+    while True:
+        for entry in plan:
+            if entry["unit_id"] in ready:
+                continue
+            try:
+                res = http_check(
+                    f"http://{entry['nodes'][0]}:{entry['port']}/health",
+                    timeout=5)
+                if res.get("ok"):
+                    ready.append(entry["unit_id"])
+            except Exception:
+                pass  # not ready this round — keep polling
+        if all(e["unit_id"] in ready for e in plan):
+            return ready, True
+        if clock() >= deadline:
+            return ready, False
+        sleep_fn(READY_POLL_INTERVAL)
+
+
+def _util_http_check_probe():
+    """Deferred import of util.http_check (avoids import churn at module top)."""
+    from .util import http_check
+    return http_check
+
+
+def _clear_intentional_block(reason=None):
+    """Clear the watchdog's intentional-autodown block so it resumes supervision.
+
+    Sets ``blocked: false``, removes ``intentional``, and clears ``failures``,
+    restoring the watchdog to ordinary supervision (§4.5 / §5 transition
+    "Serving verified up → clear block"). Used on BOTH a successful wake (after
+    readiness confirmed) and a failed wake (§8: clear ``intentional`` so the
+    watchdog resumes and can heal).
+    """
+    from . import lifecycle
+    block = lifecycle.load_watchdog_block()
+    block["blocked"] = False
+    block.pop("intentional", None)
+    block.setdefault("failures", []).clear()
+    if reason:
+        block["reason"] = reason
+    lifecycle.save_watchdog_block(block)
+    return block
+
+
+def _record_wake_failure(msg):
+    """Persist a wake failure into autodown.json (§8 wake-fails).
+
+    Sets ``state`` to reflect reality — the layer is NOT confirmed up — and
+    records ``reason`` so ``hscc autodown status`` is an honest report an
+    operator can act on. ``wake_source``/``wake_at`` are KEPT so the operator
+    can still see what triggered the wake.
+    """
+    cfg = load_config()
+    cfg["state"] = "up"
+    cfg["reason"] = msg
+    save_config(cfg)
+
+
+def _record_wake_success():
+    """Persist the resumed-up state into autodown.json (§4.6).
+
+    Sets ``state: \"up\"`` and clears the ``wake`` bookkeeping (``wake_source``,
+    ``wake_at``) — the wake is done, the trigger no longer needs to be surfaced.
+    """
+    cfg = load_config()
+    cfg["state"] = "up"
+    cfg["wake_source"] = None
+    cfg["wake_at"] = None
+    cfg["reason"] = ""
+    save_config(cfg)
+
+
+def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
+           clock=None, sleep_fn=None, wake_grace_minutes=None, now=None,
+           notify=True):
+    """Bring the serving layer back up (§4/§4.5/§5) + handle failure (§8).
+
+    Idempotent: if ``autodown.json.state`` is already ``waking`` we return a
+    ``already-waking`` result WITHOUT starting anything, so two wake triggers
+    can never start two parallel wakes.
+
+    Sequence (§4):
+      1. Mark ``state: \"waking\"`` (idempotent guard on entry).
+      2. Record ``wake_source`` + ``wake_at``.
+      3. Start the serving layer: the units teardown() stopped, orchestrator
+         FIRST (§4.3) — the exact reverse of teardown order. The wake plan is
+         built from the same unit table ``_build_teardown_plan`` derives from,
+         so the set that comes UP equals exactly the set that went DOWN.
+         Keepalive units were never stopped, so they are never started here.
+      4. Wait for readiness — poll each unit's port until healthy or timeout
+         (§4.4, ``VLLM_LOAD_GRACE_MINUTES`` window; injectable probe + clock).
+      5. Clear the watchdog block ONLY after serving is confirmed up (§4.5):
+         ``blocked: false``, remove ``intentional``, clear ``failures``. Order
+         is critical — clearing before units are ready would let the first
+         watchdog tick see a not-yet-ready cluster and latch the breaker.
+      6. Set ``state: \"up\"``, clear ``wake`` bookkeeping.
+      7. Notify operator (desktop + ops Telegram; both CPU-side).
+
+    Failure handling (§8 wake-fails) — if a start fails OR readiness times out,
+    do NOT silently leave ``state:\"waking\"`` forever with the block latched
+    (an invisible wedge). We: record the failure, clear ``intentional`` so the
+    watchdog resumes and can heal, notify loudly, and leave ``state: \"up\"``
+    (reality-ish: the layer is not confirmed down) with a clear ``reason`` an
+    operator can act on.
+
+    Returns a result dict with ``result`` in
+    (``up`` | ``already-waking`` | ``start-failed`` | ``not-ready``) plus
+    ``started`` (the units issued start) and ``ready`` (the units confirmed
+    healthy).
+
+    All external side-effects are injectable, so running this NEVER touches the
+    live cluster.
+    """
+    from . import serving as serving_mod
+
+    run_cmd = run_cmd_fn or _util_run_cmd()
+    http_check = http_check_fn or _util_http_check_probe()
+    serving = serving_mod.load_serving(serving_path)
+    ts = now or now_iso()
+
+    # -- 1. Mark waking — idempotent guard --------------------------------
+    cfg = load_config()
+    if cfg.get("state") == "waking":
+        # Another wake is already in flight. No-op: never start two parallel
+        # wakes from one trigger set.
+        log("Autodown autoup: already waking — no-op (wake in flight)")
+        return {"result": "already-waking", "started": [], "ready": []}
+    cfg["state"] = "waking"
+    save_config(cfg)
+
+    # -- 2. Record the wake trigger (§4.2) ---------------------------------
+    cfg["wake_source"] = cfg.get("wake_source") or "cycle"
+    cfg["wake_at"] = ts
+    save_config(cfg)
+    log("Autodown autoup: state=waking, wake recorded")
+
+    # -- 3. Start the serving layer back up (orchestrator FIRST, §4.3) -----
+    plan = _build_wake_plan(serving)
+    started = []
+    for entry in plan:
+        res = run_cmd(entry["cmd"], timeout=30)
+        started.append({"kind": entry["kind"], "nodes": entry["nodes"],
+                        "port": entry["port"], "cmd": entry["cmd"],
+                        "ok": bool(res.get("ok"))})
+        if not res.get("ok"):
+            return _handle_start_failure(entry, res, notify=notify)
+        log(f"Autodown autoup: started {entry['kind']} unit {entry['unit_id']}")
+
+    # -- 4. Wait for readiness (§4.4) ---------------------------------------
+    ready, ok = _wait_ready(plan, http_check_fn=http_check, clock=clock,
+                            timeout_seconds=(
+                                wake_grace_minutes * 60
+                                if wake_grace_minutes is not None else None),
+                            sleep_fn=sleep_fn)
+    if not ok:
+        msg = ("autodown: wake READINESS TIMEOUT after "
+               f"{_wake_ready_grace_minutes()}m — units not all healthy")
+        return _handle_wake_timeout(plan, ready, msg, notify=notify)
+
+    # -- 5. Clear the watchdog block ONLY after serving confirmed up (§4.5) -
+    # Order is critical: clearing before units are ready would let the very
+    # first watchdog tick see a not-yet-ready cluster and latch the breaker.
+    # By construction we are here only after _all units_ answered healthy.
+    _clear_intentional_block(reason="serving layer up (autodown wake complete)")
+    log("Autodown autoup: watchdog block cleared after readiness confirmed")
+
+    # -- 6. Set state up + clear wake bookkeeping (§4.6) --------------------
+    _record_wake_success()
+
+    # -- 7. Notify operator (§4.7) ------------------------------------------
+    if notify:
+        _notify("HSCC serving layer is back UP (idle autodown wake complete)",
+                "HSCC Autodown — Serving Up", priority="normal")
+    return {"result": "up", "started": started,
+            "ready": [e["unit_id"] for e in plan]}
+
+
+def _util_run_cmd():
+    """Deferred import of util.run_cmd (avoids import churn at module top)."""
+    from .util import run_cmd
+    return run_cmd
+
+
+def _handle_start_failure(entry, res, notify=True):
+    """Wake-fails path when a ``sparkrun run`` returns non-ok (§8).
+
+    Do NOT leave ``state:\"waking\"`` forever with the block latched. Clear the
+    ``intentional`` marker so the watchdog resumes and can heal, record the
+    failure, notify loudly, and leave ``state: \"up\"`` (not confirmed down) with
+    a reason an operator can act on. ``wake_source``/``wake_at`` are kept so the
+    operator can see the trigger.
+    """
+    out = (res.get("output") or "")[:200]
+    msg = (f"autodown: wake FAILED starting {entry['kind']} unit "
+           f"{entry['unit_id']}: {out}")
+    # Clear intentional so the watchdog resumes supervision + can heal.
+    _clear_intentional_block(reason="autodown: wake failed — watchdog resuming")
+    _record_wake_failure(msg)
+    log("Autodown autoup FAILED at " + f"{entry['kind']} unit "
+        f"{entry['unit_id']}; state=up, intentional cleared", "ERROR")
+    if notify:
+        _notify(f"HSCC autodown: wake FAILED starting {entry['kind']} unit "
+                f"{entry['unit_id']} — serving layer NOT up, watchdog resuming",
+                "HSCC Autodown Wake Failed", priority="critical")
+    return {"result": "start-failed", "failed_at": entry["unit_id"],
+            "started": [], "ready": []}
+
+
+def _handle_wake_timeout(plan, ready, msg, notify=True):
+    """Wake-fails path when readiness times out (§8).
+
+    Same principle: do NOT leave ``state:\"waking\"`` forever with the block
+    latched (invisible wedge). Clear ``intentional`` so the watchdog resumes and
+    can heal whatever failed to come up, record the failure, notify loudly, and
+    leave ``state: \"up\"`` with a reason. ``wake_source``/``wake_at`` kept so the
+    operator can see the trigger.
+    """
+    _clear_intentional_block(reason="autodown: wake readiness timeout — "
+                                    "watchdog resuming")
+    _record_wake_failure(msg)
+    log(f"Autodown autoup READINESS TIMEOUT; state=up, intentional cleared "
+        f"(ready={ready})", "ERROR")
+    if notify:
+        _notify("HSCC autodown: wake READINESS TIMEOUT — serving NOT confirmed "
+                "up; watchdog resuming to heal",
+                "HSCC Autodown Wake Timeout", priority="critical")
+    return {"result": "not-ready", "ready": ready, "plan": plan}
