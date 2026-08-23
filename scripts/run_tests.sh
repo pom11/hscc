@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Run the HSCC test suite.
 #
-# HSCC ships six INDEPENDENT plugins (hscc-bootstrap, hscc-commands, hscc-roles,
-# hscc-cluster, hscc_daemon, sparkrun-hermes). Their dirs are deployed
+# HSCC ships SEVEN INDEPENDENT plugins (hscc-bootstrap, hscc-commands, hscc-roles,
+# hscc-cluster, hscc_daemon, sparkrun-hermes, hscc-api). Their dirs are deployed
 # standalone into ~/.hermes/plugins, so several are hyphenated (not importable
 # package names) and each tests/conftest.py puts its OWN dir on sys.path and
 # imports its module bare (`import clusterlib`, `import __init__`, `import
@@ -19,7 +19,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="${HSCC_TEST_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 [ -x "$PY" ] || PY="python3"
 
-DIRS=(hscc-bootstrap hscc-commands hscc-roles hscc-cluster hscc_daemon sparkrun-hermes)
+DIRS=(hscc-bootstrap hscc-commands hscc-roles hscc-cluster hscc_daemon sparkrun-hermes hscc-api)
 
 rc=0
 declare -a summary

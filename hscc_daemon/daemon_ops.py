@@ -14,10 +14,16 @@ LOG_FILE = os.path.expanduser("~/.hscc/daemon.log")
 STATE_DIR = os.path.expanduser("~/.hscc/state")
 
 
-def get_pid():
-    """Read PID from file, return None if not running."""
+def get_pid(pid_file=None):
+    """Read PID from file, return None if not running.
+
+    ``pid_file`` defaults to the daemon's PID_FILE. Pass an explicit path to
+    reuse the same read/verify logic for a different service (e.g. the API
+    server's ``~/.hscc/api.pid``) — one mechanism, not a parallel one.
+    """
+    pid_file = pid_file or PID_FILE
     try:
-        with open(PID_FILE) as f:
+        with open(pid_file) as f:
             pid = int(f.read().strip())
         try:
             os.kill(pid, 0)
@@ -28,16 +34,16 @@ def get_pid():
         return None
 
 
-def save_pid():
+def save_pid(pid_file=None):
     """Write current PID to file."""
-    with open(PID_FILE, "w") as f:
+    with open(pid_file or PID_FILE, "w") as f:
         f.write(str(os.getpid()))
 
 
-def write_stopped():
+def write_stopped(pid_file=None):
     """Remove PID file."""
     try:
-        os.remove(PID_FILE)
+        os.remove(pid_file or PID_FILE)
     except FileNotFoundError:
         pass
 
@@ -137,17 +143,24 @@ def prune_dead_files(hscc_dir=None):
     return {"removed_dead": removed_dead, "pruned_bak": pruned_bak}
 
 
-def log(msg, level="INFO"):
-    """Write a timestamped log line to the daemon log file."""
+def log(msg, level="INFO", log_file=None, pid_file=None):
+    """Write a timestamped log line to the daemon log file.
+
+    ``log_file`` / ``pid_file`` default to the daemon's LOG_FILE / PID_FILE.
+    Pass explicit paths to reuse the same timestamped format for a different
+    service's log (~/.hscc/api.log) — one log convention, not a parallel one.
+    """
+    log_file = log_file or LOG_FILE
+    pid_file = pid_file or PID_FILE
     ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
     line = f"[{ts}] [{level:>5s}] {msg}"
     try:
-        with open(LOG_FILE, "a") as f:
+        with open(log_file, "a") as f:
             f.write(line + "\n")
     except IOError:
         pass
     # Also print if daemon is running in foreground mode
-    if not os.path.exists(PID_FILE):
+    if not os.path.exists(pid_file):
         print(line)
 
 
@@ -160,6 +173,17 @@ def run_daemon_loop():
 
     ensure_state_dir()
     log("Daemon loop started")
+    # Autodown daemon-start recovery (§8): if the layer was intentionally down
+    # or mid-wake when the previous daemon process died, reconcile it now —
+    # re-assert the intentional block (so this daemon's watchdog doesn't
+    # resurrect it) or finish the wake. Fully defensive: a broken autodown can
+    # never prevent the daemon from booting.
+    try:
+        from . import autodown
+        autodown.resume_from_restart_defensive()
+    except Exception as e:
+        log(f"Autodown startup hook error (daemon starting anyway): {e}",
+            "ERROR")
     # Self-clean dead cruft on startup: .corrupt-*/.stale + uncapped .bak.* groups.
     try:
         pruned = prune_dead_files()
@@ -236,6 +260,11 @@ def run_daemon_loop():
             threads.append(t)
             log(f"Started {stream_name} check thread (interval={interval}s)")
 
+    ad = threading.Thread(target=run_autodown_loop, args=(stop_event,), daemon=True)
+    ad.start()
+    threads.append(ad)
+    log("Started autodown thread (interval=30s)")
+
     wd = threading.Thread(target=run_watchdog_loop, daemon=True)
     wd.start()
     threads.append(wd)
@@ -253,3 +282,51 @@ def run_daemon_loop():
 
     log("Daemon loop stopped")
     write_stopped()
+
+
+def run_autodown_loop(stop_event, interval=30):
+    """Idle autodown/autoup daemon thread (Phase 2).
+
+    Runs at ``interval`` seconds (default 30, matching the watchdog cadence)
+    as a sibling of the watchdog and trigger threads inside
+    ``run_daemon_loop``. Exits cleanly when ``stop_event`` is set.
+
+    All *real* logic lives in ``_autodown_tick``. A raising tick must NEVER
+    kill the thread or take the daemon down — we swallow it here and just
+    continue to the next wait, so a crashed autodown tick cannot disrupt the
+    other loops.
+    """
+    while not stop_event.is_set():
+        try:
+            _autodown_tick()
+        except Exception as e:
+            # Defensive outer guard: a raising tick must never kill the loop —
+            # swallow it and continue. But make it LOUD: a silent pass hides the
+            # failure (e.g. load_config blowing up). (Phase 3 fix.)
+            log(f"Autodown tick error: {e}", "ERROR")
+        stop_event.wait(interval)
+
+
+def _autodown_tick():
+    """One autodown cycle invocation — short-circuits when disabled.
+
+    Each tick reloads the config from disk (so a mid-run ``hscc autodown
+    enable/disable`` takes effect on the next tick without a daemon restart).
+    When ``enabled`` is false (C5: OFF by default) we return immediately and
+    never touch the serving layer. When enabled, we call ``autodown.cycle()``
+    lazily — ``cycle`` is Phase 3 and does not exist yet, so a missing cycle is
+    a no-op, and a raising cycle is caught, logged, and the thread lives on.
+    """
+    from . import autodown
+
+    cfg = autodown.load_config()
+    if not cfg.get("enabled"):
+        # OFF by default — do nothing, never touch the serving layer.
+        return
+
+    try:
+        cycle = getattr(autodown, "cycle", None)
+        if cycle is not None:
+            cycle()
+    except Exception as e:
+        log(f"Autodown cycle error: {e}", "ERROR")

@@ -95,6 +95,8 @@ hscc template apply 4node-coding --confirm  # apply the layout
 hscc project standup                      # fleet-wide project/kanban digest
 hscc project review <card>                # review + merge a card
 hscc project --help                       # full flightdeck command list under the project verb
+hscc api start                            # HTTP API for external apps (iOS client)
+hscc api status                           # show API running/stopped + bound host:port
 ```
 
 `hscc project …` is the project/kanban orchestration domain (formerly the
@@ -106,6 +108,13 @@ project review <card>` to review and merge a finished card, and `hscc project
 in [`hscc-project/docs/COMMANDS.md`](hscc-project/docs/COMMANDS.md), and the
 `flightdeck X` ↔ `hscc project X` mapping plus the naming-collision notes are
 in [`docs/PROJECT-COMMANDS.md`](docs/PROJECT-COMMANDS.md).
+
+`hscc api …` runs the **HSCC HTTP API** (`hscc-api/`), a
+bearer-token-authenticated JSON interface on loopback that external apps —
+chiefly the private iOS companion — use to read fleet/kanban state and drive
+confirm-gated actions. Start it with `hscc api start`, expose it on the
+tailnet with `hscc api start --tailscale`, and see the full operator/client
+reference in [`docs/API.md`](docs/API.md).
 
 `hscc --help` shows the full grouped command reference with examples. The orchestrator agent also has parity — it can call these same capabilities (verify, stats, throughput, autoscale, templates) directly as tools, not just the operator CLI.
 
@@ -160,6 +169,39 @@ hscc template preview 4node-coding          # dry-run against the live cluster
 hscc template apply 4node-coding --confirm  # = the live setup
 hscc template validate 4node-coding --structural-only  # offline, CI-friendly
 ```
+
+---
+
+## Idle autodown
+
+When your cluster is just sitting there idle — no kanban work moving, no agent busy, nobody talking to it — the **GPU serving layer** (the vLLM containers that power your models) is still drawing power for nothing. **Idle autodown** watches for that. After the cluster has been quiet for X minutes, it shuts the serving layer down to save power, and brings it back up automatically the moment anything comes in — a Telegram message, an HTTP API request, a new kanban card, or you running `hscc autodown wake`.
+
+**It is OFF by default.** Nothing tears anything down until you arm it deliberately — that's the single most important thing to know. You opt in:
+
+```
+hscc autodown status [--json]            # armed? what state? idle window? last activity?
+hscc autodown enable [--idle-minutes N]  # arm it (default: 10 minutes of quiet)
+hscc autodown wake                       # bring the serving layer back up now
+hscc autodown cancel                     # abort a teardown that is in progress
+hscc autodown disable                    # disarm it — stop the automation
+```
+
+`status` is read-only (pass `--json` for machine-readable output). `enable` only arms the timer — it never shuts the layer down immediately, and if the layer is already down it won't start it either. `disable` just disarms the automation and hands supervision back to the watchdog; it doesn't restart anything, so if the layer is down and you want it up, run `hscc autodown wake`.
+
+### What it will never do
+
+Autodown is deliberately conservative. It will **never** tear the layer down:
+
+- while any kanban work is **running**, **ready** to dispatch, or sitting in **review**;
+- while any agent is **busy** (working or failed) — only an all-idle fleet counts;
+- for a **keepalive** unit — a keepalive flag in `serving.json` is a standing "keep this up" that beats the idle timer;
+- if any signal can't be verified — it stays **up** rather than guessing.
+
+**Keepalive caveat, honestly:** on a cluster where a worker unit is marked keepalive, autodown only frees the *non-keepalive* nodes — keepalive units stay up by design. If you want those nodes freed too, clear the `keepalive` flag in `~/.hscc/serving.json`.
+
+When it does tear down, it tells the watchdog to back off first, so your health-check daemon doesn't fight it and resurrect the layer mid-teardown. And be aware: this is brand-new (v1.9.0) and has never run a real teardown on this cluster — treat it as untested-at-scale until you've watched it cycle once.
+
+For the full design — idle definition, teardown/wake sequencing, watchdog coordination, failure modes — see [docs/design/idle-autodown.md](docs/design/idle-autodown.md).
 
 ---
 

@@ -1,0 +1,624 @@
+# HSCC Idle Autodown / Autoup — design for the serving layer
+
+**Date:** 2026-08-23
+**Status:** Draft — design doc only. No implementation code is produced by this card.
+**Branch:** `dev`
+**Authoritative reference:** every claim below cites the real file + line. If a
+referenced function changes, re-verify before implementing.
+
+## Purpose
+
+Bring the HSCC **serving layer** (the GPU vLLM containers that serve the
+orchestrator + worker models) DOWN when the cluster is idle for a configurable
+window, freeing GPU memory and power, and bring it back UP automatically on the
+next observable inbound activity. Opt-in, off by default.
+
+The **serving layer** is precisely the set of sparkrun vLLM units defined in
+`~/.hscc/serving.json` (`serving.load_serving()`, `hscc_daemon/serving.py:37`),
+which are the units the watchdog and keep-alive health checks supervise:
+
+- **orchestrator unit** (`role: orchestrator`) — currently spans nodes
+  `10.0.0.244` (head) + `10.0.0.246`, port 8000. This is the model
+  C1 calls "A3B on 10.0.0.244". Stopped by `serving.VLLM_STOP_CMD`
+  (`sparkrun stop --hosts <primary>`, `serving.py:150`), started by
+  `serving.VLLM_START_CMD` (`sparkrun run <recipe>...`, `serving.py:151`).
+- **worker unit** (`role: worker`, `keepalive: true`) — currently spans nodes
+  `10.0.0.247` + `10.0.0.248`, port 8000 (see C4 for how autodown
+  treats keepalive units).
+
+## Hard constraints (restated from the card, grounded in real code)
+
+### C1 — the wake path must not depend on anything autodown turns off
+The wake trigger and the idle timer **must** live in the always-on CPU-side
+daemon (`hscc_daemon`), never in a model/agent prompt. Verified: the daemon
+runs on the macOS gateway (its loop is `daemon_ops.run_daemon_loop()`,
+`hscc_daemon/daemon_ops.py:167`); the Hermes gateway supervisor
+(`ai.hermes.gateway` launchd job, `health.py:263`) is also CPU-side and stays
+up. The only thing autodown turns off is the **GPU serving layer** (remote vLLM
+containers). The daemon + gateway supervisor survive a teardown, so they *are*
+available to observe the wake event. There is no dependency on a model in the
+wake path.
+
+### C2 — the watchdog will fight an intentional teardown
+`pipeline_watchdog()` at `hscc_daemon/lifecycle.py:191` auto-heals the
+pipeline. When not blocked, a failed DGX/gateway check auto-restarts vLLM
+(`lifecycle.py:319-351`) and health-check threads (`check_workers`,
+`health.py:791`) relaunch crashed keep-alive worker units, previously with
+wrong, uncoordinated solo containers. An idle teardown therefore MUST set the
+watchdog block (`blocked: true`) via `save_watchdog_block()`
+(`lifecycle.py:141`) so the watchdog backs off instead of resurrecting, and
+autoup MUST clear it. Distinguished from a crash-while-down in §7.
+
+### C3 — never auto-down while there is work
+Idle requires zero running/ready/review work AND an elapsed inactivity window.
+Activity timestamp sources are defined precisely in §2.
+
+### C4 — respect existing keepalive
+`serving.keepalive_nodes()` / `serving.keepalive_units()` (`serving.py:162,172`)
+designate worker units NOT to be torn down. This design **exempts keepalive
+units from teardown** (§3). Decision and rationale in §3.
+
+### C5 — opt-in, off by default
+Defaults to disabled. An operator must explicitly `hscc autodown enable`. The
+default for every mode/flag is non-acting. §7.
+
+---
+
+## 1. Idle definition + exact activity sources
+
+"Idle" is a conjunction, per C3. Autodown MAY proceed only when **all** of the
+following hold. Any single condition false ⇒ not idle ⇒ no teardown.
+
+### 1a. No dispatched work in the kanban pipeline
+The fleet drives work through the kanban DB. Autodown must see zero work in any
+in-flight or about-to-be-picked-up state. The **authoritative source is the
+kanban SQLite DB `~/.hermes/kanban.db`** (the shared board both orchestrators
+and workers read/write). Inspect it via a read-only helper that reuses the same
+logic path as the fleet's own `flightdeck/core/kanban.py` (`_load_kanban_db`) —
+**do not** shell out to `hermes kanban ...` and parse text (same fragility the
+HSCC codebase already removed elsewhere; see `hscc_daemon/hscc.py:76`
+`_kanban_task_status`, which shells out — that is the legacy pattern we do NOT
+copy).
+
+The exact "no work" predicate (all required):
+- zero tasks in `running`
+- zero tasks in `ready` / `in_progress` awaiting dispatch
+- zero tasks in `review` / `qa` that a reviewer/QA profile is about to pick up
+  (matches the exclusion list already used by `live_dispatch_hosts()`,
+  `hscc_daemon/hscc.py:90-114`: `done, review, archived, blocked` are the
+  terminal/parked statuses that do NOT count as active work)
+
+Helper shape (new): `autodown.hscc idle._has_active_work(kanban_db) -> bool`
+mirroring the status vocabulary in `hscc.py:112`. Because the dispatcher can
+claim `ready` cards at any moment, this predicate is (correctly) conservative:
+any ambiguous state counts as "work".
+
+### 1b. No agent currently executing
+Beyond kanban, an agent may be mid-turn on a direct (non-kanban) request (e.g.
+a Telegram DM conversation in progress). Source: `~/.hscc/agents.json`
+(`health.py:551`). Idle requires **every** enabled agent's `status` to be
+`idle` (i.e. no agent `working`/`failed`, `health.py:561-564`). This is the
+already-maintained fleet status used by `check_heartbeat`.
+
+### 1c. The measured inactivity window has elapsed
+A **single monotonic "activity timestamp"** is maintained on disk at
+`~/.hscc/autodown.json`, field `last_activity_iso`, updated by every activity
+source in §1d/§1e. Idle-window-elapsed = `now - last_activity_iso >=
+idle_minutes`. Re-reading the clock is not enough — the timestamp must be
+*advanced by actual events*, so that a long stretch of silence (no events at
+all) does NOT count as idle-only-after-a-silent-cluster. Wait: a cluster with
+zero events is by definition idle for measurement purposes, but the precedent
+here is important — see §1d on what "activity" means and the 1e "warm-up"
+guard so autodown never fires on a freshly-booted, never-touched cluster.
+
+### 1d. Activity sources that RESET the idle timer
+Any of these advances `last_activity_iso` (and cancels any in-progress teardown
+countdown):
+
+1. **Inbound HSCC HTTP API request** — the daemon must be able to see it. Today
+   the API server (`hscc-api/api_server.py`) is a separate process and the
+   daemon does not watch it. The design adds a wake/activity probe (§4): an
+   API request writes a "last seen" timestamp the daemon polls, OR the API
+   server pokes the daemon. Recommend the file-based signal so no new RPC:
+   `api_server` writes `last_activity` to `~/.hscc/activity.json` on every
+   authenticated request (single write, `api_server._do_stamp_http_activity`),
+   and the daemon's idle timer reads it. This is CPU-side-writable and needs no
+   model. *The marker lives at `~/.hscc/activity.json` — OUTSIDE
+   `~/.hscc/state/` — because activity is event-driven (updates only on a
+   request) and carries no `ok` key, so it must not share the periodic-streams
+   dir that `verify.py::check_daemon_streams` requires to be fresh ok streams.*
+2. **Inbound Telegram message** — the fleet's Telegram is owned by a
+   single-writer MCP daemon (`~/.hermes-tg/mcp_server.py`), not by the daemon.
+   The daemon does NOT parse Telegram. Instead the **gateway supervisor or the
+   Telegram MCP daemon stamps an "inbound activity" file** whenever it receives
+   a message. Design: a tiny CPU-side watcher in the daemon polls a heartbeat
+   file, e.g. the Telegram MCP daemon is extended to touch
+   `~/.hscc/activity.json` (field `telegram_ts`) on an inbound update.
+   This is a **model-free observable event** the CPU daemon can see.
+   *(If that MCP integration proves infeasible in Phase 1, an acceptable
+   Phase-1 fallback is: the daemon treats a Telegram-aware event via
+   `api_server`'s `/mcp` route as an activity source — but the primary design
+   is the MCP daemon stamping the file. Honest note: the exact wiring into the
+   Telegram MCP daemon needs one interop card to confirm the hook point; the
+   design keeps the contract abstract so the implementation can pick the hook.)
+3. **New kanban card** — a card created/ready in the DB changes kanban state.
+   The idle monitor reads the DB (§1a) each cycle; a transition from
+   "no active work" to "new ready card" is activity. Additionally, the kanban
+   DB mtime in `~/.hermes/kanban.db` serves as a coarse proxy: any write to the
+   DB resets the timer. Both are model-free and CPU-side.
+4. **Explicit CLI command** — `hscc autodown wake` (and any `enable`, or any
+   `hscc` invocation that touches the serving layer) directly sets
+   `last_activity_iso` and, if down, triggers autoup. Model-free: the CLI runs
+   on the CPU gateway.
+
+### 1e. Warm-up / first-boot guard
+`last_activity_iso` starts as the moment autodown is enabled (or daemon start).
+Autodown will therefore not fire for at least `idle_minutes` after enablement,
+and never on a never-used cluster — because idle requires an elapsed window
+measured from an actual activity timestamp, not from boot. This prevents a
+just-enabled or just-booted, touched-once-then-silent cluster from tearing down
+while an operator is mid-setup.
+
+### 1f. Keepalive-nodes are inherently "active"
+Because keepalive worker units are exempt from teardown (§3), they do not
+advance the idle timer themselves, but they also never make the cluster "idle":
+their presence is orthogonal to autodown (autodown only ever considers tearing
+down the *non-keepalive* serving units). The idle predicate in §1a–1d applies
+to work/activity, not to whether keepalive servers exist.
+
+---
+
+## 2. Where the timer runs (+ evaluation of PERIODIC_STREAMS reuse)
+
+**Decision: run the timer as a NEW thread inside `run_daemon_loop()`**
+(`daemon_ops.py:167`), NOT as a launchd `PERIODIC_STREAMS` entry.
+
+Rationale (grounded in the code):
+
+- `PERIODIC_STREAMS` (`event_driven.py:47`) installs fixed-interval **launchd
+  jobs** — each becomes a separate short-lived `hscc check <stream>` process
+  (`event_driven.py:437-447` generates the plist with the interval baked in).
+  These are stateless per-invocation checks. Autodown needs **stateful,
+  in-process coordination**: it must correlate the watchdog block file, the
+  activity timestamp, teardown/wake sequencing, and in-flight guard against the
+  same daemon's watchdog thread. A stateless launchd job cannot hold that
+  state across invocations without re-reading/rewriting the world each tick and
+  cannot atomically coordinate with an in-process watchdog thread it doesn't
+  share memory with.
+- The daemon's own `run_daemon_loop()` already runs a watchdog thread at a
+  30s cadence (`daemon_ops.py:217-223`) and a trigger thread at 15s
+  (`daemon_ops.py:225-237`). A dedicated `run_autodown_loop()` thread at,
+  say, 30s is the natural sibling — same daemon, same state dir, same
+  `stop_event` shutdown discipline.
+- The timer must run on the **always-on CPU daemon**. A launchd `PERIODIC_STREAMS`
+  entry also runs on the CPU gateway, so it is *technically* viable — but it
+  loses the in-process coordination with `pipeline_watchdog` that C2 demands
+  (the teardown must set the block in the same state the watchdog reads).
+  Reusing `PERIODIC_STREAMS` would force the timer logic to be a self-contained
+  CLI-callable check that communicates only through files.
+
+**Decision recorded:** a new `run_autodown_loop()` thread in
+`daemon_ops.run_daemon_loop()`, cadence 30s (matching the watchdog), calling a
+new `autodown.cycle()` function. It is OFF by default: the thread short-circuits
+immediately when `autodown.json` has `enabled: false`.
+
+Minimum cadence: since activity is written on events and the idle window is `N`
+minutes (default 10), a 30s timer gives ample slack and never re-actively tears
+down after a recent event.
+
+---
+
+## 3. Teardown sequence
+
+Goal: free every GPU that the non-keepalive serving units occupy, in a defined,
+reversible order, marking the teardown intentional so the watchdog doesn't
+fight it (C2).
+
+What is **preserved** (never torn down, never stopped):
+- the daemon itself (CPU, on the Mac gateway)
+- the Hermes gateway supervisor job `ai.hermes.gateway` (CPU, reads Telegram)
+- the Telegram MCP daemon (CPU, `~/.hermes-tg/mcp_server.py`)
+- the HSCC HTTP API server (CPU, `hscc-api`)
+- **keepalive worker units** (C4 exemption — see below)
+- NAS, state files, kanban DB, profile configs — all on disk
+
+Order of operations (all inside one `autodown.teardown()` that runs in the
+autodown thread; each step is logged via `daemon_ops.log`, `daemon_ops.py:146`):
+
+1. **Re-verify idle** (C3 interlocks, §6). If any work appeared since the timer
+   decided to teardown, abort. This is the last-line guard.
+2. **Write the watchdog block BEFORE stopping anything** (C2). Set
+   `blocked: true`, `reason: "autodown: intentional idle teardown"`,
+   `blocked_at: now`, and a new field `intentional: "autodown"`. Persist via
+   `save_watchdog_block()`. From this instant the watchdog backs off
+   (`lifecycle.py:215-234`) and `check_workers` must be taught to skip
+   keepalive-relaunch while this block is set (§5).
+3. **Stop non-keepalive serving units in dependency order**, orchestrator last
+   (workers first so nothing is mid-request into a stopped orchestrator):
+   - stop each **non-keepalive worker unit** via its own
+     `sparkrun stop --hosts <unit nodes> <unit port>` (per-unit recipe/port
+     from `serving.keepalive_units()`/unit table — reuse the unit iteration,
+     filtered to `keepalive != true`).
+   - stop the **orchestrator unit** via `serving.VLLM_STOP_CMD`
+     (`sparkrun stop --hosts <primary>`, `serving.py:150`).
+   Each stop uses `sparkrun stop` on the exact node list from `serving.json`;
+   do NOT issue a single catch-all `sparkrun stop` that could touch keepalive
+   nodes. Concretely: stop worker unit nodes, then orchestrator nodes.
+4. **Verify down**: after stops, confirm the units' ports no longer respond
+   (reuse `health.http_check` / `serving.VLLM_HEALTH_URL`-style probe per port).
+   Record final serving state in `~/.hscc/autodown.json` (`state: "down"`).
+5. **Write `~/.hscc/autodown.json` state** with `state: "down"`,
+   `down_since`, `reason`, `intentional: true`. This file is the single source
+   of truth for "we are intentionally down" that autoup, status, and the
+   watchdog all read.
+6. **Notify the operator** (desktop + Telegram ops topic):
+   `send_macos_notification` (`desktop.py`) + `notify_operations`
+   (`telegram.py:58`). Note the Telegram notify itself is outbound-only and
+   does not require the serving layer.
+
+**Failure mid-teardown:** if a stop fails (step 3), the design does NOT leave a
+half-torn cluster with the block latched. §8 failure modes covers it: roll the
+block back (clear intentional flag, leave `blocked` as the watchdog would) and
+report, so the watchdog resumes and can heal the remaining units back up.
+
+### C4 decision: keepalive units are EXEMPT from teardown
+Keepalive worker units (`serving.keepalive_units()`, `serving.py:172`) are
+**not** torn down by autodown, no exception. Rationale: the keepalive flag is
+an explicit operator declaration "this model must stay up" (used by
+`check_workers`, `health.py:791`, to relaunch it no matter what). Autodown's
+whole point is to *free the GPU*; a keepalive unit is a standing commitment
+that beats an idle timer. The design therefore:
+- never lists keepalive units in the teardown set,
+- keepalive presence does NOT gate whether the non-keepalive layer may go
+  down (§1f): it is the operator's choice that keepalive workers stay up, and
+  a cluster whose only live serving is keepalive workers is still "idle" for
+  the orchestrator unit.
+- documents that `hscc autodown` only ever tears down non-keepalive units; an
+  operator who wants a keepalive unit down must clear its `keepalive` flag in
+  `serving.json` (or use the normal `sparkrun stop` directly).
+
+---
+
+## 4. Wake sequence + first-message handling (C1)
+
+Wake is triggered by an **observable event the CPU daemon sees without a
+model** (see §1d). When `autodown.cycle()` observes an activity event while
+`state == "down"`, it calls `autodown.autoup()`.
+
+`autodown.autoup()` sequence:
+
+1. **Load config + mark waking.** Set `autodown.json` state to `"waking"`
+   (idempotent; if already waking, no-op).
+2. **Record the event that woke us** in `autodown.json` (`wake_source`,
+   `wake_at`) so the operator can see the trigger after the fact.
+3. **Start the serving layer back up**, orchestrator units first in reverse
+   of the teardown order (orchestrator before workers is fine here; there is
+   no in-flight request because we are waking from zero):
+   - start the **orchestrator unit** via `serving.VLLM_START_CMD` /
+     `serving.orchestrator_recipe()` (`sparkrun run <recipe> --ensure`).
+   - start any **keepalive/NON-keepalive worker units** that are expected up.
+4. **Wait for readiness** — poll `serving.VLLM_HEALTH_URL` (and each unit's
+   port) with `health.http_check` until healthy or a timeout (reuse the load
+   grace pattern, `lifecycle.py:125`, `VLLM_LOAD_GRACE_MINUTES` default 20).
+   This is the model-load window.
+5. **Clear the watchdog block** (C2). ONCE serving is confirmed up, set
+   `blocked: false`, clear `intentional`, clear `failures`
+   (`save_watchdog_block`), restoring the watchdog to normal supervision.
+   **Order matters**: only clear the block after the units are demonstrably
+   up — otherwise the very first watchdog tick after the block clears could
+   see a not-yet-ready cluster and latch the breaker.
+6. **Flush the held wake reason** and set `state: "up"`.
+7. **Notify** desktop + ops Telegram "serving layer is back up".
+
+### First-message handling — the critical C1 case
+The wake event itself ("inbound Telegram message", "inbound HTTP request",
+"new kanban card") arrives **before** the serving layer is up. The daemon must
+NOT drop it (a dropped first message is a FAILED design). Because the daemon
+cannot itself answer the message (answering needs a model), the design makes
+the point of arrival the *signal*, and the handling depends on the source:
+
+- **Inbound Telegram message.** The Telegram MCP daemon is CPU-side and
+  always-on, so it already received and stored the message. It does NOT need
+  the serving layer to have ACKed it. The wake triggers autoup; the message
+  sits in Telegram's inbox (Telegram is the queue). When the gateway comes up,
+  the gateway's normal inbound flow reads the message → processes it. The
+  daemon additionally asks the MCP daemon to post a short
+  "cluster is waking (idle autodown); back in ~1-2 min" notice to the ops
+  topic so the human isn't left hanging. **The message is never dropped — it
+  is durably queued by Telegram itself and processed once the model is up.**
+- **Inbound HTTP API request.** The HSCC API server is CPU-side and always-on;
+  it receives the request immediately. For a request that needs the serving
+  layer (e.g. a generation request), the API handler synchronously triggers
+  `autodown.autoup()`, then either:
+  - **blocks** until readiness (bounded by the load-grace timeout) and then
+    serves the request, or
+  - returns `202 Accepted` + `{"status": "waking", "retry_after": 90}` and the
+    client polls `/v1/status` until `"up"`, then retries.
+  Recommend the **`202 + retry_after`** path: it never holds a connection open
+  across a multi-minute model load, and the request is preserved client-side.
+  A pure READ endpoint (`/v1/ping`, `/v1/status`) does not need the serving
+  layer and is served immediately (it also resets the idle timer, which is
+  desirable — the API is being used).
+- **New kanban card.** New cards are work created on disk; the dispatcher
+  (also CPU-side / always-on) is what actually picks them up. Autodown's
+  discovery of the card only triggers autoup; the card itself is safe in the
+  DB. The dispatcher will claim and dispatch it once profiles are serving
+  again. `live_dispatch_hosts()` (`hscc.py:90`) continues to function.
+- **CLI `hscc autodown wake`.** The CLI call is synchronous; it triggers
+  autoup (in-process or via writing the wake marker), and returns a status
+  line. There is no first-message problem because the CLI invocation prompted
+  the wake itself.
+
+**Rule for all sources:** the daemon's ONLY job on wake is to (a) persist the
+event, (b) bring serving up, (c) signal "waking". It never fabricates an answer
+and never drops the trigger — the trigger is durably held either by Telegram's
+inbox, the HTTP client's retry, or the kanban DB.
+
+**A dropped-first-message cannot happen by construction:** every wake source is
+an always-on CPU process that buffers/stores the inbound item independently of
+the serving layer. The serving layer going down never loses the message.
+
+---
+
+## 5. Watchdog coordination (C2)
+
+The single source of truth for "intentional down" is
+`~/.hscc/watchdog-block.json` (read by `load_watchdog_block`,
+`lifecycle.py:132`) with the existing `blocked` flag + a NEW field the design
+adds: `intentional` (value `"autodown"` when autodown tore the layer down,
+else absent).
+
+### How a crash-while-intentionally-down is distinguished from normal intentional down
+- **Normal intentional down:** autodown set `blocked: true` AND `intentional:
+  "autodown"` AND `state == "down"` in `autodown.json`, with the teardown
+  verified complete. The watchdog sees `blocked` and backs off
+  (`lifecycle.py:215-234`) — it does NOT resurrect anything. This is exactly
+  the desired state: the cluster can stay down indefinitely without the
+  watchdog fighting it.
+- **Crash-while-intentionally-down:** something the daemon does NOT control
+  died — e.g. the keepalive worker unit (which autodown did NOT tear down)
+  crashes, or a *different* non-keepalive unit crashes after teardown, or the
+  NAS drops. How we tell them apart:
+  - The watchdog's job while `intentional == "autodown"` is NOT "do nothing".
+    It should **still health-check the units that autodown did NOT tear down**
+    (keepalive units) and re-heal THOSE, while leaving the intentionally-down
+    non-keepalive units alone. This is a behavioral fork inside
+    `pipeline_watchdog` / `check_workers` keyed on `intentional`.
+  - Distinguisher: a unit that autodown **explicitly stopped** and recorded as
+    down (`state == "down"` in autodown.json) is NOT a crash — it's expected.
+    A unit autodown did NOT stop (keepalive unit, or a unit whose intended
+    targets list does not include it) that is down IS a crash and must be
+    healed.
+  - Concretely: `check_workers` (`health.py:791`) iterates keepalive units —
+    those are never in the teardown set, so it heals them as normal, but ONLY
+    if the block's `intentional` doesn't cover the whole fleet. Because
+    keepalive units are exempt, `check_workers` needs NO change for the
+    intentional flag — keepalive re-healing is always correct. The only change
+    is that `pipeline_watchdog` must skip the **orchestrator** auto-restart
+    (`lifecycle.py:319`) while `intentional == "autodown"`, since the
+    orchestrator unit is the one we deliberately stopped.
+  - A decision table lives in `autodown.py` (`classify(idle_state_block,
+    autodown_state)`): given the watchdog block + autodown state, classify each
+    unit as `expected_down`, `should_be_up` (heal), or `healthy`. Autodown
+    writes this; the watchdog's intentional-aware fork consults it.
+
+### State transitions that matter
+- Idle teardown requested → write block (`blocked:true, intentional:"autodown"`)
+- All stops done + verified → `autodown.json` `state:"down"`, `down_since`
+- Wake event → `state:"waking"`
+- Serving verified up → clear block (`blocked:false, intentional: removed`)
+  → `state:"up"`
+- Operator `hscc autodown disable` while down → **leave serving down** (don't
+  auto-restart on disable) but clear the `intentional` block so the watchdog
+  resumes supervision; the operator then decides when to bring it up. This is
+  explicit in the CLI design §7.
+
+---
+
+## 6. Safety interlocks (C3)
+
+Before EVERY teardown (both at the timer's trigger decision and again
+immediately before the first stop), `autodown.cycle()` evaluates the full idle
+predicate §1. It is a conjunction; any false ⇒ abort. Sources:
+
+1. **Kanban work** — read `~/.hermes/kanban.db` (`_has_active_work`), zero
+   running/ready/review/qa.
+2. **Agent liveness** — read `~/.hscc/agents.json`, all enabled agents `idle`
+   (no working/failed).
+3. **Elapsed window** — `now - last_activity_iso >= idle_minutes`.
+4. **Keepalive units ready** — not a teardown target, but if a keepalive unit
+   is itself unhealthy, abort (do not tear down the orchestrator while a worker
+   is mid-flight relying on it). Cautious and simple.
+
+The double-evaluation (timer + pre-stop) closes the race where a card is
+created between the cycle's idle decision and the first `sparkrun stop`. If the
+pre-stop re-check fails, teardown is cancelled cleanly (block already written —
+roll it back, §3 failure handling) and the operator is notified
+"aborted: work arrived during teardown".
+
+A **manual abort button** is provided: `hscc autodown cancel` sets a
+`cancel_requested: true` flag in `autodown.json` that the teardown checks
+between steps. Teardown is stepped and re-checks `cancel_requested` before each
+stop, so an operator can interrupt a teardown mid-way. (§7)
+
+---
+
+## 7. Config file + CLI surface + defaults (C5)
+
+### Config file: `~/.hscc/autodown.json`
+A state + config JSON, read/written by a new `autodown.py` module (analogous
+to how `lifecycle.py` owns `watchdog-block.json`). Schema:
+
+```json
+{
+  "enabled": false,             // C5: OFF by default. New file starts disabled.
+  "idle_minutes": 10,           // default 10; 0 = only via explicit wake/never auto
+  "state": "up",                // one of: up | waking | down
+  "last_activity_iso": null,    // advanced by every activity source (§1d)
+  "down_since": null,
+  "wake_source": null,
+  "wake_at": null,
+  "cancel_requested": false,
+  "reason": ""
+}
+```
+
+Defaults: `enabled: false`, `idle_minutes: 10`, `state: "up"`. Absent file ⇒
+treated as disabled (fail-closed, matching C5). The file is created when autodown
+is first enabled.
+
+### CLI surface (design only — following the `api` verb-group pattern)
+Mirror exactly how `hscc api` is wired: `hscc.py:main()` dispatches the `api`
+group (hscc.py:738-741) to `api_cli.cmd_api(argv[1:])`. Add `autodown` the same
+way, dispatching to a new `hscc_daemon/autodown_cli.py:cmd_autodown(argv)`.
+
+```
+hscc autodown status                       # enabled? state? idle_minutes? last activity? down_since?
+hscc autodown enable [--idle-minutes N]    # turn ON (default idle_minutes=10)
+hscc autodown disable                      # turn OFF; clears intentional block; does NOT restart serving
+hscc autodown wake                         # force autoup now (also resets idle timer)
+hscc autodown cancel                       # abort an in-progress teardown
+hscc autodown --help                       # group help
+```
+
+Flag/group conventions kept consistent with existing HSCC style:
+- verb groups dispatch a `cmd_<group>` function and exit non-zero on unknown
+  subcommands (see `api_cli.cmd_api`, `api_cli.py:275-297`).
+- `--json` flag (as `status`/`autoscale` do, `hscc.py:578`) for scripting.
+- `--idle-minutes N` matches the `--port N` / `--bind` style of
+  `api_cli._parse_start_flags` (`api_cli.py:70-96`).
+- All mutating verbs are explicit; `status` is read-only.
+
+`enable --idle-minutes N` persists to `autodown.json` and resets
+`last_activity_iso = now` (start of the first window, §1e). `enable` when the
+serving layer is currently down does NOT auto-restart it — it only arms the
+automation; a separate `wake` (or an inbound event) brings it up. This keeps
+`enable` non-acting.
+
+`disable` semantics (C2/C5): set `enabled: false`, set `state` to the current
+reality, and **clear the `intentional` marker + `blocked` flag in the watchdog
+block** so the watchdog resumes ordinary supervision. It does NOT run autoup —
+if the layer is down and the operator wants it up, they run `hscc autodown wake`
+(or the normal `hscc template apply` path). Document this in the CLI help.
+
+---
+
+## 8. Failure modes + the SAFE state for each
+
+Principle: when in doubt, **favor UP and supervised over down and unsupervised**.
+Autodown is a power optimization — it must never make the cluster less reliable
+than leaving it on. Every recovery path ends in either (a) serving restored +
+watchdog supervising, or (b) a clear, loudly-notified blocked state requiring a
+human, never a silent half-state.
+
+| Failure | Detection | SAFE state / recovery |
+|---|---|---|
+| **Wake fails** (autoup can't bring units up, or readiness timeout expires) | autoup watches readiness; timeout = `VLLM_LOAD_GRACE_MINUTES` | Leave `state:"up-or-error"`, log + notify critical. Do NOT re-latch the block (that would hide it). Keep retrying on each new wake event / each cycle, with backoff. SAFE = up-when-possible with loud alerts. If a unit genuinely cannot come up, the normal watchdog logic takes over once `intentional` is cleared — but autoup must NOT clear `intentional` until at least one serving unit is confirmed healthy (clearing it early would let the breaker latch while we're mid-load). So: clear the intentional block only after the FIRST unit reports healthy. |
+| **Teardown fails** (a `sparkrun stop` errors) | per-stop return code | Abort remaining stops. Clear `intentional` marker but preserve `blocked` state as watchdog would (leave the block as a normal failure so the watchdog resumes + can heal whatever partial state remains). Set `autodown.json.state = "up"` (reality: not fully down). Notify. SAFE = watchdog resumes supervision over whatever's left; nothing silently half-down. |
+| **Daemon dies while down** (daemon process exits while `state:"down"`) | daemon restart on next boot/launchd | On daemon startup (`run_daemon_loop` / autodown.cycle first run), read `autodown.json`. If `state == "down"`, the cluster is intentionally down but NOTHING supervises it now. **SAFE = restore the block + resume autodown supervision.** The new daemon re-writes the watchdog block (`blocked:true, intentional:"autodown"`) so the watchdog (now running under the new daemon) doesn't fight it, and resumes the idle/wake monitoring. The serving layer stays down (it was the operator's intent), guarded. Autoup still works on the next event. |
+| **Daemon dies while waking** | same as above | On startup, if `state == "waking"`: the autoup may or may not have completed. Resume: re-run autoup (idempotent — starting `--ensure` units that exist is a no-op). SAFE = finish the wake. |
+| **Watchdog-block file corrupt/missing while down** | `load_watchdog_block` returns default (`blocked:false`) | autodown.cycle, when `state=="down"` and block lacks `intentional`, RE-asserts the block each cycle. SAFE = the intentional marker is self-healing (re-written on every cycle while down), so a lost/deleted block file cannot cause the watchdog to resurrect a deliberately-down layer. |
+| **Power/thermal edge** (GPU thermal trip, node reboot, cluster loss while down) | daemon's DGX/gateway health checks | These are failures of machinery, not of autodown. The layer is down by intent; when a wake comes, autoup tries to bring it up; if the node is genuinely gone, autoup's readiness timeout fires → "wake fails" row. SAFE = same as wake-fails: loud, supervised, not silently half-up. |
+| **Config corrupt** (`autodown.json` unparseable) | read returns parse error | Fail-closed to DISABLED + report (C5). Never act on corrupt config. SAFE = no automation; operator fixes file or re-enables. |
+| **Double teardown** (two daemon instances, or operator + autodown both) | `state` guard + `intentional` check | Teardown is gated on `state != "down"` and a lockfile (atomic `O_EXCL` on `~/.hscc/autodown.lock`) so only one teardown runs. Second requester blocks/returns. SAFE = exactly one teardown at a time. |
+| **Keepalive/teardown node overlap** (C4 invariant violated) | `_teardown_locked` step 1b (autodown.py) compares the teardown plan's node set against `serving.keepalive_units()` | `_worker_stop_cmd` issues a NODE-level `sparkrun stop --hosts <nodes>` (serving.py:150), so the C4 keepalive-exemption holds ONLY while keepalive nodes are disjoint from the orchestrator/non-keepalive-worker nodes. Teardown ASSERTS this invariant in code before issuing any stop: if any keepalive node is in the teardown set, ABORT loudly with NO stop issued. SAFE = never kill a keepalive unit, even if a future config co-locates one. |
+
+**Overall SAFE state for the system:** idle→down is only ever allowed while
+the interlock holds AND sets an intentional block; any deviation routes to
+supervised healthy or a loud human-visible block. The cluster self-describes its
+state in `autodown.json` at all times, so `hscc autodown status` is always an
+honest report of the current reality.
+
+---
+
+## 9. Phase breakdown into small, single-file implementation cards
+
+Each phase is one file + its tests, implementable from this doc alone.
+
+### Phase 1 — config + core state module
+**File:** `hscc_daemon/autodown.py` (new)
+- `load_config()`, `save_config()` for `~/.hscc/autodown.json`
+  (fail-closed default disabled; schema §7).
+- `record_activity(source)` — advance `last_activity_iso` (+ optional
+  `source`); the single choke point every activity source (§1d) calls.
+- `classify(...)` — unit classification table for watchdog coordination (§5).
+- `_has_active_work(kanban_db)` — kanban idle predicate (§1a).
+- Tests: `hscc_daemon/tests/test_autodown.py` — config read/write, fail-closed
+  on absent/corrupt config, `record_activity` timestamp advance, kanban
+  predicate for each status.
+
+### Phase 2 — the idle timer thread in the daemon loop
+**File:** `hscc_daemon/daemon_ops.py`
+- Add `run_autodown_loop()` (30s cadence) to `run_daemon_loop()` (daemon_ops.py:167);
+  short-circuits when `enabled: false`; calls `autodown.cycle()`.
+- SDG integration via the same `stop_event`.
+- Tests: loop starts/stops, off-by-default short-circuit, cycle called on
+  cadence (monkeypatched cycle counter).
+
+### Phase 3 — idle evaluation + safety interlocks
+**File:** `hscc_daemon/autodown.py` (additions)
+- `cycle()` — the decision function: read config → if disabled, return → if
+  down/waking, check wake sources (§4) → if up, evaluate idle predicate §1 →
+  if idle-and-elapsed, run teardown().
+- Full interlock evaluation (§6): kanban DB query + agents.json + window.
+- Tests: each interlock independently blocks teardown; conjunction semantics.
+
+### Phase 4 — teardown sequence + watchdog coordination
+**File:** `hscc_daemon/autodown.py` (additions)
+- `teardown()` — interlock re-check, write watchdog block (`intentional:
+  "autodown"`), stop non-keepalive units (workers then orchestrator via
+  `sparkrun stop`), verify down, write `state:"down"`, notify, handle
+  cancel/failure per §3/§8.
+- Tests: ordering (workers before orchestrator), keepalive exemption,
+  block written before any stop, cancel flag honored between steps, failed-stop
+  rollback.
+
+### Phase 5 — wake sequence + first-message handling
+**File:** `hscc_daemon/autodown.py` (additions)
+- `autoup()` — waking→start units (orchestrator via `VLLM_START_CMD`, workers) →
+  readiness wait via `health.http_check` → clear watchdog block on first healthy
+  → flush state:"up" → notify.
+- `_handle_http_wake(`202`+`retry_after`)`, `_notify_waking()` for Telegram.
+- Tests: idempotent autoup, block cleared only after healthy, waking→up.
+
+### Phase 6 — activity-source probe for inbound signals
+**File:** `hscc_daemon/autodown.py` or `hscc-api/api_server.py` (small touch)
+- Wire the four activity sources (§1d): API request stamp, Telegram MCP stamp,
+  kanban create/ready detection, CLI wake.
+- HTTP: `api_server` writes `~/.hscc/activity.json` (event-driven, OUTSIDE
+  `~/.hscc/state/`) on each authenticated request (one extra write per request,
+  cheap). See the §1d.1 note in this doc.
+- Tests: each source advances `last_activity_iso` / triggers autoup when down.
+
+### Phase 7 — CLI verb group `hscc autodown`
+**File:** `hscc_daemon/autodown_cli.py` (new) + `hscc_daemon/hscc.py` (wiring)
+- `cmd_autodown(argv)` handling `status|enable|disable|wake|cancel` (+ `--json`,
+  `--idle-minutes N`), per §7.
+- `hscc.py:main()` adds an `autodown` branch dispatching to `cmd_autodown`
+  (mirror the `api` block, hscc.py:738-741), plus help text entries.
+- Tests: `hscc_daemon/tests/test_autodown_cli.py` — each subcommand's
+  side-effects on `autodown.json` + watchdog block + serving state, no-subcommand
+  help, unknown-subcommand exit non-zero, `disable` semantics (§7).
+
+### Phase 8 — daemon-start recovery (daemon died while down)
+**File:** `hscc_daemon/daemon_ops.py` (tiny) + `hscc_daemon/autodown.py`
+- On `run_daemon_loop` startup: if `autodown.json.state == "down"`, re-assert
+  the intentional block + resume monitoring (§8, "daemon dies while down").
+- Tests: startup with `state:"down"` re-writes block; `state:"waking"` resumes
+  autoup; `state:"up"` unchanged.
+
+---
+
+## Ordering / dependencies between phases
+1 → 2 → 3 → 4 → 5 sequentially (each builds on the previous). Phase 6 is
+independent-ish (can land after 5, or parallel). Phase 7 depends only on 1+4+5
+(the CLI calls into config/teardown/autoup). Phase 8 depends on 2+4. Suggested
+dispatch: 1,2,3,4,5 then 6 and 7 (parallelizable), then 8.
+
+## Things intentionally NOT in scope
+- Auto-tearing down keepalive units (C4 — exempt unless operator clears the flag).
+- Tearing down the CPU-side daemon/gateway/API/Telegram processes (C1 — they
+  must stay up to wake).
+- Any model/agent-in-the-loop wake decision (C1 — daemon-only).
+- Autoscale worker count changes (separate feature; `autoscale.py` exists but
+  is engine-only today) — autodown is all-or-nothing for non-keepalive units.

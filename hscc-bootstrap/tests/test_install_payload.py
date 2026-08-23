@@ -158,3 +158,12 @@ def test_default_payload_ships_hscc_project():
     installed CLI's project commands break with 'package not found'."""
     assert "hscc-project" in install_payload.DEFAULT_PAYLOAD
     assert "hscc_daemon" in install_payload.DEFAULT_PAYLOAD
+
+
+def test_default_payload_ships_hscc_api():
+    """hscc-api must deploy alongside hscc_daemon — hscc_daemon/api_cli.py's
+    `hscc api` verb locates the server as a SIBLING of hscc_daemon (a fresh
+    checkout has hscc-api/ next to hscc_daemon/), so it remains installed and
+    the verb does NOT break with 'package not found' on a deployed host."""
+    assert "hscc-api" in install_payload.DEFAULT_PAYLOAD
+    assert "hscc_daemon" in install_payload.DEFAULT_PAYLOAD
