@@ -8,6 +8,7 @@ import time
 from .state import read_state, read_all_states, now_iso, write_state
 from .lifecycle import save_watchdog_block
 from .desktop import send_macos_notification, emit_event
+from .daemon_ops import log
 
 
 EVENTS_FILE = os.path.expanduser("~/.hscc/events.jsonl")
@@ -113,6 +114,27 @@ def evaluate_trigger(rule, event):
     return False
 
 
+def _intentional_autodown(watchdog_block_fn=None):
+    """True when an intentional autodown is in effect (§5 C2).
+
+    The serving layer's orchestrator is deliberately down by autodown when the
+    watchdog block carries ``intentional == \"autodown\"``. Consult the SAME
+    single source of truth as the watchdog's intentional-aware fork
+    (lifecycle.pipeline_watchdog), never a parallel rule. Fail-safe: an
+    unreadable/absent block (or a None loader) is NOT treated as intentional —
+    only a positively-asserted ``intentional: \"autodown\"`` marker suppresses
+    an automated restart.
+    """
+    if watchdog_block_fn is None:
+        from .lifecycle import load_watchdog_block
+        watchdog_block_fn = load_watchdog_block
+    try:
+        block = watchdog_block_fn()
+    except Exception:
+        return False
+    return bool(block) and block.get("intentional") == "autodown"
+
+
 def fire_trigger_action(rule, event, watchdog_block_fn=None, restart_vllm_fn=None):
     """Fire the action defined by a trigger rule."""
     rule_id = rule.get("id", "?")
@@ -131,6 +153,15 @@ def fire_trigger_action(rule, event, watchdog_block_fn=None, restart_vllm_fn=Non
         emit_event(event_type, payload, source="trigger_engine")
 
     elif action_type == "auto_restart":
+        # §5 C2: an intentional autodown must suppress automated restarts from
+        # EVERY path. This trigger engine runs every 15s and its ``vllm_down``
+        # / ``failed_dgx`` metrics read True while the orchestrator is down, so
+        # an auto_restart rule on those would otherwise resurrect a
+        # deliberately-down layer — independent of the watchdog. Gate on the
+        # same intentional marker the watchdog's fork consults.
+        if _intentional_autodown(watchdog_block_fn):
+            log(f"Trigger {rule_id}: auto_restart suppressed — intentional autodown")
+            return
         if restart_vllm_fn:
             restart_result = restart_vllm_fn()
             send_macos_notification(

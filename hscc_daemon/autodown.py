@@ -1357,14 +1357,23 @@ def _self_heal_intentional_block():
     """Re-assert the intentional block only when it is missing/corrupt (§8).
 
     Called EVERY cycle while ``state == \"down\"``. Returns True when it rewrote
-    the block (it was deleted, corrupt, or reset — ``intentional != \"autodown\"``),
-    False when the block was already correctly asserted. This self-healing
-    means a lost block file can never let the watchdog resurrect a
+    the block (it was deleted, corrupt, or reset — ``intentional != \"autodown\"``
+    OR ``blocked`` is False), False when the block was already correctly asserted
+    (``blocked: true`` AND ``intentional: \"autodown\"``). This self-healing means
+    a lost OR half-cleared block file can never let the watchdog resurrect a
     deliberately-down layer.
+
+    The ``blocked`` clause is the defense-in-depth for FINDING 2 (§8 forbids the
+    silent half-state): the watchdog's backoff-elapsed path historically popped
+    ``blocked_at``/``reason`` but NOT ``intentional``, leaving a ``blocked: False
+    + intentional: "autodown"`` block. A block with ``blocked`` False but
+    ``intentional == "autodown"`` is NOT already-asserted — it is a split-brain
+    wedge that would let the next watchdog tick resurrect the orchestrator. Treat
+    it as needing re-assert.
     """
     from . import lifecycle
     block = lifecycle.load_watchdog_block()
-    if block.get("intentional") == "autodown":
+    if block.get("intentional") == "autodown" and block.get("blocked"):
         return False  # already correctly asserted — leave it untouched
     _assert_intentional_block()
     return True
