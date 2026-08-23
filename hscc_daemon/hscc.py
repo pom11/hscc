@@ -298,6 +298,7 @@ Cluster & templates
   profiles             Running kanban task counts per profile
   project <cmd>        Project-portfolio (flightdeck) commands: standup verify doctor ...
   api <cmd>            HSCC HTTP API server: start stop status (external apps)
+  autodown <cmd>       Idle autodown/autoup: status enable disable wake cancel
 
 Utility
   notify <message>     Send a desktop notification
@@ -344,6 +345,7 @@ COMMAND_HELP = {
     "profiles": "Running kanban task counts per profile",
     "project": "Project-portfolio (flightdeck) commands.\n  Delegates to the relocated flightdeck CLI under hscc-project/. Try 'hscc project --help' for the full subcommand surface.\n  Usage: hscc project <subcommand> [args]",
     "api": "HSCC HTTP API server lifecycle.\n  Subcommands: start [--tailscale] [--bind <ip>] [--port <n>] stop status\n  Usage: hscc api <subcommand> [args]",
+    "autodown": "Idle autodown/autoup for the GPU serving layer.\n  Subcommands: status enable [--idle-minutes <n>] disable wake cancel\n  Usage: hscc autodown <subcommand> [args]",
     "help": "Show help. Usage: hscc help [command]\n  Use 'hscc help advanced' for internal commands.",
     "verify": "Run a full compatibility/health smoke-test of the cluster.\n  Usage: hscc verify [--json]",
     "stats": "Fleet activity — completions & tool usage over N days (default 7).\n  Usage: hscc stats [days] [--json]",
@@ -738,6 +740,12 @@ def main():
     if cmd == "api":
         from hscc_daemon.api_cli import cmd_api
         rc = cmd_api(args[1:])
+        sys.exit(rc)
+
+    # 'autodown' group (idle autodown/autoup for the serving layer)
+    if cmd == "autodown":
+        from hscc_daemon.autodown_cli import cmd_autodown
+        rc = cmd_autodown(args[1:])
         sys.exit(rc)
 
     # Per-command --help (daemon commands)
