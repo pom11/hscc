@@ -97,6 +97,91 @@ class TestAutodownLoop:
         assert not t.is_alive()  # exited cleanly
 
 
+class TestNoLiveHsccLeak:
+    """RELEASE BLOCKER regression — the suite must never touch real ~/.hscc.
+
+    The historical bug: patching ``autodown.load_config`` to ``{"enabled":
+    True}`` without patching ``save_config``/``AUTODOWN_FILE`` let Phase 6's
+    activity probes drive ``record_activity()`` → ``save_config()`` straight
+    into the operator's REAL ``~/.hscc/autodown.json``, arming idle-teardown.
+
+    These tests replay that EXACT path (patched loader returning a partial
+    3-key dict + real record_activity/save_config/cycle) and assert the real
+    file is untouched. Green because the autouse ``_isolate_hscc`` fixture
+    redirects ``AUTODOWN_FILE`` (and the activity/telegram state paths) to a
+    tmp dir for every test. If that isolation is ever removed or weakened,
+    these FAIL.
+    """
+
+    @staticmethod
+    def _real_state_path():
+        import os as _os
+        return _os.path.expanduser("~/.hscc/autodown.json")
+
+    @staticmethod
+    def _real_hash_or_absent(path):
+        import hashlib
+        try:
+            with open(path, "rb") as f:
+                return ("present", hashlib.sha256(f.read()).hexdigest())
+        except FileNotFoundError:
+            # Untouched means: if it didn't exist before, it must not exist now.
+            return ("absent", None)
+
+    def test_patched_loader_record_activity_does_not_touch_real_file(
+            self, monkeypatch):
+        """Replay the documented leak: patched loader + real record_activity."""
+        from hscc_daemon import autodown
+        real = self._real_state_path()
+        before = self._real_hash_or_absent(real)
+        # The historical partial 3-key dict a patched loader returns.
+        monkeypatch.setattr(autodown, "load_config",
+                            lambda: {"enabled": True})
+        # Force the leak path through the REAL record_activity → save_config.
+        autodown.record_activity("http")
+        autodown.record_activity("kanban")
+        after = self._real_hash_or_absent(real)
+        assert before == after, (
+            "TEST SUITE WROTE TO REAL ~/.hscc/autodown.json! "
+            "before=%r after=%r" % (before, after)
+        )
+
+    def test_cycle_with_default_probes_does_not_touch_real_file(
+            self, monkeypatch, tmp_path):
+        """A full enabled cycle() with default probes must stay contained."""
+        from hscc_daemon import autodown
+        real = self._real_state_path()
+        before = self._real_hash_or_absent(real)
+        # Enabled, up, long-idle config with a fake kanban board that reports
+        # live work — the exact conditions under which the leak fired.
+        monkeypatch.setattr(autodown, "load_config",
+                            lambda: {"enabled": True, "state": "up",
+                                     "last_activity_iso": "2000-01-01T00:00:00+00:00"})
+        # Inject an in-memory kanban lib so probe_kanban_activity fires and
+        # stamps (reaching record_activity + save_config like the real cycle).
+        import sqlite3
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT)")
+        conn.execute("INSERT INTO tasks (id, status) VALUES ('t-1', 'running')")
+        conn.commit()
+
+        class _Kb:
+            from contextlib import contextmanager
+            @contextmanager
+            def connect_closing(self):
+                yield conn
+
+        # stop() is never reached because active work blocks teardown, but the
+        # probes + record_activity run first — the leak surface.
+        autodown.cycle(kanban_db=_Kb(), agents_file=str(tmp_path / "agents.json"),
+                       probes=None)
+        after = self._real_hash_or_absent(real)
+        assert before == after, (
+            "TEST SUITE WROTE TO REAL ~/.hscc/autodown.json! "
+            "before=%r after=%r" % (before, after)
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
