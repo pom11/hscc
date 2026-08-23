@@ -1392,9 +1392,13 @@ def _handle_wake_timeout(plan, ready, msg, notify=True):
 # unreadable signals never fabricate activity.
 
 # §1d.1 — the HSCC API server writes an authenticated-request timestamp here
-# (via state.write_state('activity', ...) in hscc-api/api_server.py). Override
-# in tests.
-HTTP_ACTIVITY_STATE = os.path.expanduser("~/.hscc/state/activity.json")
+# (hscc-api/api_server.py::_do_stamp_http_activity). This lives at
+# ~/.hscc/activity.json — OUTSIDE ~/.hscc/state/ — deliberately: activity is
+# event-driven (updated only on a request), not a periodic stream, so it must
+# not sit in the daemon-streams dir that verify.py::check_daemon_streams
+# treats as requiring fresh ok:true entries. state/ means exactly "periodic
+# streams the daemon refreshes". Override in tests.
+HTTP_ACTIVITY_STATE = os.path.expanduser("~/.hscc/activity.json")
 
 # §1d.2 — the Hermes gateway log. The design correction: we do NOT edit
 # ~/.hermes-tg/mcp_server.py (external, untracked by git). Instead we observe

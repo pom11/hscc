@@ -60,8 +60,8 @@ def test_suite_never_writes_live_hscc(tmp_path):
     # Plant realistic ~/.hscc top-level + state files. These mirror the real
     # cluster's files (watchdog-block.json, autodown.json, agents.json,
     # lifecycle.json, events.jsonl, triggers.json, cooldowns.json, bridge.json,
-    # daemon.pid, daemon.log, orch-endpoint, state/dgx.json, gateway.json,
-    # watchdog.json, activity.json, telegram_probe.offset). Any test leaking
+    # daemon.pid, daemon.log, orch-endpoint, activity.json, state/dgx.json,
+    # gateway.json, watchdog.json, telegram_probe.offset). Any test leaking
     # even one write/delete against these MUST trip the manifest diff.
     _plant(ws, "watchdog-block.json", '{"blocked": false, "failures": []}\n')
     _plant(ws, "autodown.json", '{"enabled": false}\n')
@@ -77,7 +77,8 @@ def test_suite_never_writes_live_hscc(tmp_path):
     _plant(ws, "state/dgx.json", '{"ok": true}\n')
     _plant(ws, "state/gateway.json", '{"ok": true}\n')
     _plant(ws, "state/watchdog.json", '{"ok": true}\n')
-    _plant(ws, "state/activity.json", '{"ts": "planted"}\n')
+    # activity.json is EVENT-DRIVEN and lives OUTSIDE state/ (at ~/.hscc root):
+    _plant(ws, "activity.json", '{"ts": "planted"}\n')
     _plant(ws, "state/telegram_probe.offset", "0\n")
 
     before = _manifest(os.path.join(ws, ".hscc"))
