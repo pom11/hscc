@@ -4,8 +4,101 @@ All tests isolated: PID_FILE, LOG_FILE, STATE_DIR are monkeypatched to tmp_path.
 """
 import json
 import os
+import threading
+import time
+
 import pytest
 from pathlib import Path
+
+
+class TestAutodownLoop:
+    """run_autodown_loop / _autodown_tick — the Phase 2 idle timer thread.
+
+    Tests never sleep the real 30s cadence: the interval is injected, and the
+    per-tick logic (_autodown_tick) is exercised directly with a monkeypatched
+    config + cycle so the real ~/.hscc and ~/.hermes are never touched.
+    """
+
+    def _patch_enabled(self, monkeypatch, enabled):
+        """Point autodown.load_config at a fake config; return the counter."""
+        from hscc_daemon import autodown
+        calls = {"n": 0}
+
+        def fake_load_config():
+            return {"enabled": enabled}
+
+        def fake_cycle():
+            calls["n"] += 1
+
+        monkeypatch.setattr(autodown, "load_config", fake_load_config)
+        monkeypatch.setattr(autodown, "cycle", fake_cycle, raising=False)
+        return calls
+
+    def test_tick_disabled_never_calls_cycle(self, monkeypatch):
+        """Disabled config ⇒ cycle() is never invoked."""
+        from hscc_daemon import daemon_ops
+        calls = self._patch_enabled(monkeypatch, enabled=False)
+        daemon_ops._autodown_tick()   # must not raise, must not call cycle
+        assert calls["n"] == 0
+
+    def test_tick_enabled_calls_cycle(self, monkeypatch):
+        """Enabled config ⇒ cycle() is invoked once per tick."""
+        from hscc_daemon import daemon_ops
+        calls = self._patch_enabled(monkeypatch, enabled=True)
+        daemon_ops._autodown_tick()
+        daemon_ops._autodown_tick()
+        assert calls["n"] == 2
+
+    def test_tick_missing_cycle_is_noop(self, monkeypatch):
+        """Enabled config but no cycle() yet (Phase 3) ⇒ silent no-op, no raise."""
+        from hscc_daemon import autodown, daemon_ops
+        monkeypatch.setattr(autodown, "load_config",
+                            lambda: {"enabled": True})
+        # cycle does not exist yet — getattr returns None, tick must not raise.
+        daemon_ops._autodown_tick()
+
+    def test_raising_cycle_survives_and_ticks_again(self, monkeypatch):
+        """A raising cycle() is caught; the loop keeps ticking."""
+        from hscc_daemon import autodown, daemon_ops
+        calls = {"n": 0}
+        monkeypatch.setattr(autodown, "load_config",
+                            lambda: {"enabled": True})
+
+        def flaky_cycle():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("boom in cycle")
+        monkeypatch.setattr(autodown, "cycle", flaky_cycle, raising=False)
+
+        # First tick: cycle raises inside _autodown_tick — must not propagate.
+        daemon_ops._autodown_tick()
+        # Second tick: loop survives and cycle runs again.
+        daemon_ops._autodown_tick()
+        assert calls["n"] == 2
+
+    def test_loop_starts_and_stops_cleanly(self, monkeypatch):
+        """run_autodown_loop exits cleanly once stop_event is set."""
+        from hscc_daemon import autodown, daemon_ops
+        monkeypatch.setattr(autodown, "load_config",
+                            lambda: {"enabled": False})
+
+        stop_event = threading.Event()
+        t = threading.Thread(
+            target=daemon_ops.run_autodown_loop,
+            args=(stop_event,),
+            kwargs={"interval": 0.005},
+            daemon=True,
+        )
+        t.start()
+        assert t.is_alive()
+        time.sleep(0.03)  # let it tick a few times
+        stop_event.set()
+        t.join(timeout=2)
+        assert not t.is_alive()  # exited cleanly
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
 
 
 class TestGetPid:
