@@ -182,6 +182,29 @@ class TestNoLiveHsccLeak:
         )
 
 
+class TestAutodownStartupRecovery:
+    """Phase 8 wiring — a broken autodown must never stop the daemon booting.
+
+    ``run_daemon_loop`` calls ``autodown.resume_from_restart_defensive()`` at
+    startup (daemon_ops.py:173-183). That wrapper is the daemon's boot
+    guarantee: even if ``resume_from_restart`` raises (corrupt config, I/O
+    error, anything), the daemon proceeds. The autouse ``_isolate_hscc``
+    fixture redirects the real ~/.hscc, and these tests call the wrapper
+    directly (the full ``run_daemon_loop`` is a monolithic thread-spawning
+    function not practically testable in-process).
+    """
+
+    def test_startup_wrapper_swallows_raise(self, monkeypatch):
+        """A raising resume_from_restart does NOT propagate — the daemon can
+        still boot (daemon_ops's startup hook contract)."""
+        from hscc_daemon import autodown
+        # resume raising (e.g. corrupt autodown.json blew up load/save).
+        monkeypatch.setattr(autodown, "resume_from_restart",
+                            lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        # The wrapper must swallow it — this is what run_daemon_loop calls.
+        autodown.resume_from_restart_defensive()  # must not raise
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 

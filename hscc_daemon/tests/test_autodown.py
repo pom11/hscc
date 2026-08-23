@@ -1612,3 +1612,272 @@ class TestWaitReadySilentSpin:
         assert ok is True
         assert not any("raised" in m for m in logs)
 
+
+# ---------------------------------------------------------------------------
+# Phase 8 — daemon-start recovery + self-healing intentional block
+#           (§8 "daemon dies while down" / "while waking" /
+#            "watchdog-block file corrupt/missing")
+# ---------------------------------------------------------------------------
+
+
+class TestResumeFromRestart:
+    """resume_from_restart() — the once-on-startup recovery hook (§8).
+
+    Each test monkeypatches AUTODOWN_FILE + the lifecycle WATCHDOG_BLOCK_FILE
+    to tmp paths (the autouse _isolate_hscc fixture already redirects the real
+    ~/.hscc paths), stubs notifiers, and asserts the reconciliation side effects
+    WITHOUT any real sparkrun command or HTTP probe.
+    """
+
+    def _setup(self, tmp_path, monkeypatch):
+        """Point autodown + lifecycle file paths at tmp paths; stub notifiers.
+
+        Returns (autodown path via fixture, block_file path).
+        """
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
+        monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
+        return block_file
+
+    def _cfg(self, autodown_file, **overrides):
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg.update(overrides)
+        ad.save_config(cfg)
+        return cfg
+
+    # -- disabled ⇒ do nothing at all, regardless of state -----------------
+    @pytest.mark.parametrize("state", ["down", "waking", "up"])
+    def test_disabled_does_nothing(self, autodown_file, tmp_path, monkeypatch,
+                                   state):
+        """enabled:false ⇒ no block re-assert, no autoup, no state change."""
+        block_file = self._setup(tmp_path, monkeypatch)
+        self._cfg(autodown_file, enabled=False, state=state)
+        up_calls = []
+        monkeypatch.setattr(ad, "autoup", lambda: up_calls.append("autoup"),
+                            raising=False)
+
+        ad.resume_from_restart()
+
+        # No autoup, no block file created, config untouched on disk.
+        assert up_calls == []
+        import os as _os
+        assert not _os.path.exists(block_file)
+        assert ad.load_config()["state"] == state
+        assert ad.load_config()["enabled"] is False
+
+    # -- state=down ⇒ block re-asserted, NO start commands -----------------
+    def test_down_reasserts_block_no_starts(self, autodown_file, tmp_path,
+                                            monkeypatch):
+        """startup with state:down ⇒ block re-asserted (intentional), and NO
+        autoup / start command is issued — the serving layer stays down."""
+        block_file = self._setup(tmp_path, monkeypatch)
+        self._cfg(autodown_file, enabled=True, state="down")
+        up_calls = []
+        monkeypatch.setattr(ad, "autoup", lambda: up_calls.append("autoup"),
+                            raising=False)
+        # The block file was deleted while down (the corrupt/missing case).
+        assert not _os_exists(block_file)
+
+        ad.resume_from_restart()
+
+        assert up_calls == []          # no start issued at all
+        # Block re-asserted: blocked + intentional autodown with teardown reason.
+        with open(block_file) as f:
+            blk = json.load(f)
+        assert blk.get("blocked") is True
+        assert blk.get("intentional") == "autodown"
+        assert blk.get("reason") == ad.WATCHDOG_TEARDOWN_REASON
+        # Config state unchanged — still down (the operator's intent preserved).
+        assert ad.load_config()["state"] == "down"
+
+    def test_down_reasserts_resetting_block(self, autodown_file, tmp_path,
+                                            monkeypatch):
+        """startup with state:down + a corrupt/reset block (intentional wiped)
+        ⇒ the block is re-asserted back to intentional autodown."""
+        block_file = self._setup(tmp_path, monkeypatch)
+        self._cfg(autodown_file, enabled=True, state="down")
+        monkeypatch.setattr(ad, "autoup", lambda: None, raising=False)
+        # A reset/corrupt block: blocked but no intentional marker.
+        _lifecycle.save_watchdog_block({"blocked": False, "reason": "",
+                                        "blocked_at": None, "failures": []})
+        # Sanity: the block on disk currently lacks intentional.
+        with open(block_file) as f:
+            assert "intentional" not in json.load(f)
+
+        ad.resume_from_restart()
+
+        with open(block_file) as f:
+            blk = json.load(f)
+        assert blk.get("blocked") is True
+        assert blk.get("intentional") == "autodown"
+
+    # -- state=waking ⇒ autoup invoked ------------------------------------
+    def test_waking_runs_autoup(self, autodown_file, tmp_path, monkeypatch,
+                                serving_path=None):
+        """startup with state:waking ⇒ autoup is invoked to finish the wake."""
+        block_file = self._setup(tmp_path, monkeypatch)
+        self._cfg(autodown_file, enabled=True, state="waking")
+        up_calls = []
+        monkeypatch.setattr(ad, "autoup", lambda: up_calls.append("autoup"),
+                            raising=False)
+
+        ad.resume_from_restart()
+
+        assert up_calls == ["autoup"]
+
+    def test_waking_clears_stale_state_before_autoup(
+            self, autodown_file, tmp_path, monkeypatch):
+        """The stale ``waking`` is cleared (to up) BEFORE autoup so autoup's
+        already-waking guard does not no-op the recovery wake."""
+        block_file = self._setup(tmp_path, monkeypatch)
+        self._cfg(autodown_file, enabled=True, state="waking")
+        seen = {}
+        monkeypatch.setattr(
+            ad, "autoup",
+            lambda: seen.update({"state_at_call": ad.load_config()["state"]}),
+            raising=False)
+
+        ad.resume_from_restart()
+
+        # autoup saw state=up (not waking), so it will actually run the wake.
+        assert seen["state_at_call"] == "up"
+
+    # -- state=up ⇒ nothing happens ---------------------------------------
+    def test_up_does_nothing(self, autodown_file, tmp_path, monkeypatch):
+        """startup with state:up ⇒ no block write, no autoup, config intact."""
+        block_file = self._setup(tmp_path, monkeypatch)
+        self._cfg(autodown_file, enabled=True, state="up")
+        up_calls = []
+        monkeypatch.setattr(ad, "autoup", lambda: up_calls.append("autoup"),
+                            raising=False)
+
+        ad.resume_from_restart()
+
+        assert up_calls == []
+        import os as _os
+        assert not _os.path.exists(block_file)   # nothing written
+        assert ad.load_config()["state"] == "up"
+
+    # -- resume_from_restart raising ⇒ defensive wrapper swallows it ------
+    def test_defensive_swallows_raise(self, autodown_file, tmp_path,
+                                      monkeypatch):
+        """resume_from_restart raising ⇒ resume_from_restart_defensive logs and
+        swallows it — the daemon startup proceeds."""
+        logs = []
+        monkeypatch.setattr(ad, "log", lambda msg, level="INFO": logs.append(msg))
+        monkeypatch.setattr(ad, "resume_from_restart",
+                            lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+        # Must NOT raise — this is the daemon's startup hook contract.
+        ad.resume_from_restart_defensive()
+
+        assert any("resume_from_restart error" in m for m in logs)
+
+    def test_defensive_delegates_to_resume(self, autodown_file, tmp_path,
+                                           monkeypatch):
+        """A healthy resume_from_restart is called through the wrapper."""
+        block_file = self._setup(tmp_path, monkeypatch)
+        self._cfg(autodown_file, enabled=True, state="down")
+        called = []
+        monkeypatch.setattr(ad, "resume_from_restart",
+                            lambda: called.append("resume"))
+        ad.resume_from_restart_defensive()
+        assert called == ["resume"]
+
+
+class TestSelfHeal:
+    """The per-cycle self-healing intentional block (§8 corrupt/missing)."""
+
+    def test_reasserts_when_block_missing(self, tmp_path, monkeypatch):
+        """cycle with state:down + no block file ⇒ block re-asserted."""
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        assert not _os_exists(block_file)
+        # Direct helper check.
+        assert ad._self_heal_intentional_block() is True
+        with open(block_file) as f:
+            assert json.load(f).get("intentional") == "autodown"
+
+    def test_reasserts_when_intentional_absent(self, tmp_path, monkeypatch):
+        """cycle with state:down + a reset block (blocked but no intentional)
+        ⇒ block re-asserted."""
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        _lifecycle.save_watchdog_block({"blocked": False, "reason": "",
+                                        "blocked_at": None, "failures": []})
+        assert ad._self_heal_intentional_block() is True
+        with open(block_file) as f:
+            blk = json.load(f)
+        assert blk.get("blocked") is True
+        assert blk.get("intentional") == "autodown"
+
+    def test_no_rewrite_when_already_asserted(self, tmp_path, monkeypatch):
+        """An already-correct block ⇒ self-heal is a no-op (False)."""
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        _lifecycle.save_watchdog_block({"blocked": True, "intentional":
+                                        "autodown", "reason": "x"})
+        assert ad._self_heal_intentional_block() is False
+
+    def test_cycle_down_reasserts_block(self, autodown_file, tmp_path,
+                                        monkeypatch):
+        """Full cycle() while state:down with a missing block ⇒ block
+        re-asserted every cycle (self-heal)."""
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
+        monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
+        # Enabled, down, no fresh activity (so autoup is not triggered).
+        down = NOW - _dt.timedelta(minutes=30)
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["enabled"] = True
+        cfg["state"] = "down"
+        cfg["idle_minutes"] = 10
+        cfg["down_since"] = down.isoformat()
+        cfg["last_activity_iso"] = down.isoformat()   # no fresh activity
+        ad.save_config(cfg)
+        monkeypatch.setattr(ad, "autoup", lambda: None, raising=False)
+        assert not _os_exists(block_file)
+
+        ad.cycle(probes=[])
+
+        # The block was re-asserted during the down cycle.
+        with open(block_file) as f:
+            blk = json.load(f)
+        assert blk.get("blocked") is True
+        assert blk.get("intentional") == "autodown"
+
+    def test_cycle_down_keeps_healthy_block(self, autodown_file, tmp_path,
+                                            monkeypatch):
+        """cycle while state:down with an already-correct block ⇒ left as-is."""
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
+        monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
+        _lifecycle.save_watchdog_block({"blocked": True, "intentional":
+                                        "autodown", "reason": "x",
+                                        "blocked_at": "2026-01-01T00:00:00+00:00"})
+        down = NOW - _dt.timedelta(minutes=30)
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["enabled"] = True
+        cfg["state"] = "down"
+        cfg["idle_minutes"] = 10
+        cfg["down_since"] = down.isoformat()
+        cfg["last_activity_iso"] = down.isoformat()
+        ad.save_config(cfg)
+        monkeypatch.setattr(ad, "autoup", lambda: None, raising=False)
+        orig_blocked_at = None
+
+        ad.cycle(probes=[])
+
+        with open(block_file) as f:
+            blk = json.load(f)
+        assert blk.get("blocked") is True
+        assert blk.get("intentional") == "autodown"
+
+
+def _os_exists(path):
+    import os as _os
+    return _os.path.exists(path)
+
