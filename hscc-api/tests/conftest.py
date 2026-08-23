@@ -33,10 +33,38 @@ def _isolate_hscc(tmp_path, monkeypatch):
     hscc_dir, it would write the activity file into the operator's real
     ~/.hscc. This autouse fixture makes that impossible by redirecting
     ``state.STATE_DIR`` off the live home dir for every test.
+
+    Directory-wide belt-and-braces (covers ~/.hscc AS A WHOLE):
+      (a) Patch ``os.path.expanduser`` so any ``~/.hscc/...`` path (module
+          constant ``api_server.DEFAULT_HSCC_DIR`` or a runtime call like
+          routes_project.py:75) resolves under the per-test tmp dir. Nothing
+          outside ``~/.hscc`` is touched.
+      (b) Overwrite the module-level ``api_server.DEFAULT_HSCC_DIR`` constant
+          (baked in at import) too.
+      (c) Redirect ``state.STATE_DIR`` to the tmp state dir.
     """
     base = str(tmp_path / "hscc")
-    # Do NOT eagerly mkdir — a test might create the same dir without
-    # exist_ok=True; writes that need a parent create it themselves.
+
+    # (a) Runtime expanduser redirect for the whole ~/.hscc directory tree.
+    real_hscc = os.path.expanduser("~/.hscc")
+    _real_expanduser = os.path.expanduser
+
+    def _redirect_expanduser(path):
+        expanded = _real_expanduser(path)
+        if expanded == real_hscc:
+            return base
+        if expanded.startswith(real_hscc + os.sep):
+            return os.path.join(base, expanded[len(real_hscc) + 1:])
+        return expanded
+
+    monkeypatch.setattr(os.path, "expanduser", _redirect_expanduser)
+
+    # (b) Module-level constant baked in at import — overwrite. The api tests
+    # always pass an explicit hscc_dir, so DEFAULT_HSCC_DIR is only a fallback;
+    # still pin it so a forgotten path can never reach the live home dir.
+    monkeypatch.setattr(api_server, "DEFAULT_HSCC_DIR", base, raising=False)
+
+    # (c) The write_state funnel.
     from hscc_daemon import state
-    monkeypatch.setattr(state, "STATE_DIR", os.path.join(base, "state"),
-                        raising=False)
+    monkeypatch.setattr(state, "STATE_DIR",
+                        os.path.join(base, "state"), raising=False)
