@@ -249,6 +249,11 @@ def run_daemon_loop():
             threads.append(t)
             log(f"Started {stream_name} check thread (interval={interval}s)")
 
+    ad = threading.Thread(target=run_autodown_loop, args=(stop_event,), daemon=True)
+    ad.start()
+    threads.append(ad)
+    log("Started autodown thread (interval=30s)")
+
     wd = threading.Thread(target=run_watchdog_loop, daemon=True)
     wd.start()
     threads.append(wd)
@@ -266,3 +271,49 @@ def run_daemon_loop():
 
     log("Daemon loop stopped")
     write_stopped()
+
+
+def run_autodown_loop(stop_event, interval=30):
+    """Idle autodown/autoup daemon thread (Phase 2).
+
+    Runs at ``interval`` seconds (default 30, matching the watchdog cadence)
+    as a sibling of the watchdog and trigger threads inside
+    ``run_daemon_loop``. Exits cleanly when ``stop_event`` is set.
+
+    All *real* logic lives in ``_autodown_tick``. A raising tick must NEVER
+    kill the thread or take the daemon down — we swallow it here and just
+    continue to the next wait, so a crashed autodown tick cannot disrupt the
+    other loops.
+    """
+    while not stop_event.is_set():
+        try:
+            _autodown_tick()
+        except Exception:
+            # Defensive outer guard: a raising tick must never kill the loop.
+            pass
+        stop_event.wait(interval)
+
+
+def _autodown_tick():
+    """One autodown cycle invocation — short-circuits when disabled.
+
+    Each tick reloads the config from disk (so a mid-run ``hscc autodown
+    enable/disable`` takes effect on the next tick without a daemon restart).
+    When ``enabled`` is false (C5: OFF by default) we return immediately and
+    never touch the serving layer. When enabled, we call ``autodown.cycle()``
+    lazily — ``cycle`` is Phase 3 and does not exist yet, so a missing cycle is
+    a no-op, and a raising cycle is caught, logged, and the thread lives on.
+    """
+    from . import autodown
+
+    cfg = autodown.load_config()
+    if not cfg.get("enabled"):
+        # OFF by default — do nothing, never touch the serving layer.
+        return
+
+    try:
+        cycle = getattr(autodown, "cycle", None)
+        if cycle is not None:
+            cycle()
+    except Exception as e:
+        log(f"Autodown cycle error: {e}", "ERROR")
