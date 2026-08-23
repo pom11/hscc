@@ -433,6 +433,14 @@ def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
         # a second parallel wake — return and let the in-flight one finish.
         return
     if state == "down":
+        # §8 self-heal: while down, re-assert the intentional watchdog block
+        # EVERY cycle so a deleted/corrupt/reset block file can never let the
+        # watchdog resurrect a deliberately-down layer (C2).
+        try:
+            _self_heal_intentional_block()
+        except Exception as e:
+            # Defensive — a broken block read must not break the cycle.
+            log(f"Autodown self-heal block error: {e}", "ERROR")
         # Wake seam (§4): if an activity event arrived since we went down,
         # bring the serving layer back up via autoup(). autoup() is Phase 5;
         # call it lazily (missing ⇒ no-op, raising ⇒ caught + logged), mirroring
@@ -1316,4 +1324,107 @@ def _default_probes(kanban_db=None):
         lambda: probe_kanban_activity(kanban_db),
         lambda: probe_telegram_activity(),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 — daemon-start recovery + self-healing intentional block
+#           (§8 "daemon dies while down" / "while waking" /
+#            "watchdog-block file corrupt/missing")
+# ---------------------------------------------------------------------------
+
+
+def _assert_intentional_block():
+    """(Re)write the watchdog block as an intentional autodown (§8/§3.2).
+
+    Loads the current block, sets ``blocked: true`` + ``intentional:
+    \"autodown\"`` with the teardown reason and a fresh ``blocked_at``, and
+    persists it — so the (new) daemon's watchdog backs off instead of
+    resurrecting an intentionally-down serving layer (C2). Idempotent:
+    re-asserting an already-correct block is a harmless rewrite. Never raises
+    (load/save are self-contained).
+    """
+    from . import lifecycle
+    block = lifecycle.load_watchdog_block()
+    block["blocked"] = True
+    block["intentional"] = "autodown"
+    block["reason"] = WATCHDOG_TEARDOWN_REASON
+    block["blocked_at"] = now_iso()
+    lifecycle.save_watchdog_block(block)
+    return block
+
+
+def _self_heal_intentional_block():
+    """Re-assert the intentional block only when it is missing/corrupt (§8).
+
+    Called EVERY cycle while ``state == \"down\"``. Returns True when it rewrote
+    the block (it was deleted, corrupt, or reset — ``intentional != \"autodown\"``),
+    False when the block was already correctly asserted. This self-healing
+    means a lost block file can never let the watchdog resurrect a
+    deliberately-down layer.
+    """
+    from . import lifecycle
+    block = lifecycle.load_watchdog_block()
+    if block.get("intentional") == "autodown":
+        return False  # already correctly asserted — leave it untouched
+    _assert_intentional_block()
+    return True
+
+
+def resume_from_restart():
+    """Recover autodown state ONCE on daemon startup (§8).
+
+    Read ``~/.hscc/autodown.json`` and reconcile reality with the new
+    daemon's supervision. Never touch the serving layer when disarmed.
+
+    - ``enabled == false`` ⇒ do nothing at all (C5 — never act when disarmed).
+    - ``state == \"down\"`` ⇒ the layer is intentionally down but NOTHING
+      supervises it after a daemon restart. Re-assert the watchdog block
+      (``blocked: true, intentional: \"autodown\"``) so the new daemon's
+      watchdog doesn't resurrect it, and resume monitoring (the normal cycle
+      loop takes over). The serving layer STAYS down — that was the operator's
+      intent; wake still works on the next event.
+    - ``state == \"waking\"`` ⇒ a wake may or may not have finished. Clear the
+      stale ``\"waking\"`` (it would trip ``autoup``'s already-waking guard) and
+      RE-RUN autoup — idempotent (``--ensure`` on already-running units is a
+      no-op) — to finish the wake. SAFE = finish the wake.
+    - ``state == \"up\"`` (or unknown) ⇒ do nothing.
+
+    Fully defensive: if anything here raises, callers that need to guarantee
+    the daemon boots use ``resume_from_restart_defensive()`` — a broken
+    autodown must never stop the daemon starting (§8 guiding principle).
+    """
+    cfg = load_config()
+    if not cfg.get("enabled"):
+        # Disarmed — do nothing at all. Never re-assert the block, never wake.
+        return
+    state = cfg.get("state")
+    if state == "down":
+        _assert_intentional_block()
+        log("Autodown startup: state=down → watchdog block re-asserted "
+            "(intentional autodown); monitoring resumed, serving stays down")
+    elif state == "waking":
+        # A wake may or may not have finished after the daemon died. Clear the
+        # stale ``waking`` (riding on the dead daemon's in-flight wake) so
+        # autoup's already-waking guard doesn't no-op it, then re-run autoup
+        # to finish the wake. ``--ensure`` makes re-running idempotent.
+        cfg = load_config()
+        cfg["state"] = "up"
+        save_config(cfg)
+        autoup()
+        log("Autodown startup: state=waking → autoup re-run to finish the wake")
+    # state == "up" / unknown: nothing to recover.
+
+
+def resume_from_restart_defensive():
+    """Startup hook for daemon_ops.run_daemon_loop — never blocks the boot (§8).
+
+    Wraps ``resume_from_restart`` so ANY exception is logged and swallowed: the
+    daemon must start even if autodown is broken. This is the ONLY function
+    ``daemon_ops.run_daemon_loop`` calls at startup.
+    """
+    try:
+        resume_from_restart()
+    except Exception as e:
+        log(f"Autodown resume_from_restart error — daemon starting anyway: {e}",
+            "ERROR")
 
