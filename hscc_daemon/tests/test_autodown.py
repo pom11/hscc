@@ -327,6 +327,7 @@ class TestCycle:
             agents_file=agents,
             now=NOW,
             keepalive_ok=lambda: True,
+            probes=[],
         )
         assert calls == []
 
@@ -343,6 +344,7 @@ class TestCycle:
             agents_file=agents,
             now=NOW,
             keepalive_ok=lambda: True,
+            probes=[],
         )
         assert calls == []
 
@@ -360,6 +362,7 @@ class TestCycle:
             agents_file=agents,
             now=NOW,
             keepalive_ok=lambda: True,
+            probes=[],
         )
         assert calls == []
 
@@ -375,6 +378,7 @@ class TestCycle:
             agents_file=agents,
             now=NOW,
             keepalive_ok=lambda: True,
+            probes=[],
         )
         assert calls == []
 
@@ -407,6 +411,7 @@ class TestCycle:
             agents_file=agents,
             now=NOW,
             keepalive_ok=lambda: True,
+            probes=[],
         )
         assert calls == ["teardown"]
 
@@ -434,6 +439,7 @@ class TestCycle:
             agents_file=agents,
             now=NOW,
             keepalive_ok=lambda: True,
+            probes=[],
         )
         assert calls == []
         # Warm-up guard stamped last_activity_iso with "now" (our injected NOW).
@@ -453,6 +459,7 @@ class TestCycle:
             agents_file=missing,
             now=NOW,
             keepalive_ok=lambda: True,
+            probes=[],
         )
         assert calls == []
 
@@ -474,6 +481,7 @@ class TestCycle:
             agents_file=agents,
             now=NOW,
             keepalive_ok=lambda: True,
+            probes=[],
         )
         assert calls == []
 
@@ -1206,7 +1214,7 @@ class TestCycleWakeSeam:
         # Activity stamped AFTER down_since (a wake event arrived).
         fresh = NOW - _dt.timedelta(minutes=5)   # after down (30m ago)
         self._cfg(autodown_file, fresh.isoformat())
-        ad.cycle()
+        ad.cycle(probes=[])
         assert calls == ["autoup"]
 
     def test_down_no_new_activity_does_not_trigger(
@@ -1218,7 +1226,7 @@ class TestCycleWakeSeam:
                             raising=False)
         down = NOW - _dt.timedelta(minutes=30)
         self._cfg(autodown_file, down.isoformat())  # last_activity == down_since
-        ad.cycle()
+        ad.cycle(probes=[])
         assert calls == []
 
     def test_down_no_last_activity_does_not_trigger(
@@ -1229,7 +1237,7 @@ class TestCycleWakeSeam:
         monkeypatch.setattr(ad, "autoup", lambda: calls.append("autoup"),
                             raising=False)
         self._cfg(autodown_file, None)
-        ad.cycle()
+        ad.cycle(probes=[])
         assert calls == []
 
     def test_waking_does_not_trigger(self, autodown_file, monkeypatch):
@@ -1243,7 +1251,7 @@ class TestCycleWakeSeam:
         cfg = ad.load_config()
         cfg["state"] = "waking"
         ad.save_config(cfg)
-        ad.cycle()
+        ad.cycle(probes=[])
         assert calls == []
 
     def test_disabled_down_fresh_activity_does_not_trigger(
@@ -1259,7 +1267,7 @@ class TestCycleWakeSeam:
         cfg = ad.load_config()
         cfg["enabled"] = False
         ad.save_config(cfg)
-        ad.cycle()
+        ad.cycle(probes=[])
         assert calls == []
 
     def test_up_does_not_trigger_wake(self, autodown_file, monkeypatch):
@@ -1274,5 +1282,313 @@ class TestCycleWakeSeam:
         ad.save_config(cfg)
         # Even if last_activity > down_since, state=up never auto-wakes.
         ad.cycle(kanban_db=_FakeKb([]), agents_file="",
-                 now=NOW, keepalive_ok=lambda: True)
+                 now=NOW, keepalive_ok=lambda: True, probes=[])
         assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — activity-source probes (§1d) + _wait_ready silent-spin fix
+# ---------------------------------------------------------------------------
+
+class TestProbeKanbanActivity:
+    """probe_kanban_activity stamps record_activity('kanban') iff the board has
+    live/imminent work (§1d.3)."""
+
+    def test_stamps_when_active_work(self, autodown_file):
+        """A board with a running/ready card ⇒ activity stamped: last_activity
+        advances."""
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["last_activity_iso"] = "2000-01-01T00:00:00+00:00"
+        ad.save_config(cfg)
+        # Board starts quiet, then a card becomes active (running).
+        assert ad.probe_kanban_activity(_FakeKb([])) is False
+        before = ad.load_config()["last_activity_iso"]
+        assert ad.probe_kanban_activity(_FakeKb(["running"])) is True
+        loaded = ad.load_config()
+        assert loaded["last_activity_iso"] != before
+        assert loaded["wake_source"] == "kanban"
+
+    def test_no_stamp_when_board_quiet(self, autodown_file):
+        """Board with only terminal statuses ⇒ no stamp, timestamp unchanged."""
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["last_activity_iso"] = "2000-01-01T00:00:00+00:00"
+        ad.save_config(cfg)
+        before = ad.load_config()["last_activity_iso"]
+        assert ad.probe_kanban_activity(_FakeKb(["done", "blocked"])) is False
+        assert ad.load_config()["last_activity_iso"] == before
+
+    def test_no_stamp_when_unreadable(self, autodown_file):
+        """Unreadable board ⇒ NO stamp (we never fabricate activity from an
+        unreadable signal)."""
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["last_activity_iso"] = "2000-01-01T00:00:00+00:00"
+        ad.save_config(cfg)
+        before = ad.load_config()["last_activity_iso"]
+        assert ad.probe_kanban_activity(_UnreachableKb()) is False
+        assert ad.load_config()["last_activity_iso"] == before
+
+    def test_kanban_probe_in_cycle_resets_window(
+            self, autodown_file, tmp_path, monkeypatch):
+        """Wired through cycle(): active work stamps activity → the window
+        resets → teardown is NOT invoked (fresh activity beats the elapsed
+        window, §1c/§1d)."""
+        calls = []
+        monkeypatch.setattr(ad, "teardown", lambda: calls.append("teardown"),
+                            raising=False)
+        # Enabled, up, and the window HAS elapsed on paper (15m old).
+        self_cfg = dict(ad.DEFAULT_CONFIG)
+        self_cfg["enabled"] = True
+        self_cfg["state"] = "up"
+        self_cfg["idle_minutes"] = 10
+        self_cfg["last_activity_iso"] = (
+            NOW - _dt.timedelta(minutes=15)).isoformat()
+        ad.save_config(self_cfg)
+        # Default probes include the kanban probe, which sees active work and
+        # stamps (record_activity uses real now_iso) — resetting the window so
+        # the elapsed check at NOW fails ⇒ no teardown.
+        ad.cycle(kanban_db=_FakeKb(["running"]), agents_file="",
+                 now=NOW, keepalive_ok=lambda: True)
+        assert calls == []          # no teardown: probe reset the window
+        # last_activity_iso was advanced by the kanban probe.
+        assert ad.load_config()["last_activity_iso"] is not None
+
+    def test_kanban_wake_seam_when_down(
+            self, autodown_file, monkeypatch):
+        """When DOWN, a fresh kanban card (active work) triggers autoup via the
+        default probes: the probe stamps last_activity > down_since ⇒ wake.
+
+        down_since is a fixed ANCIENT time (before any real `now_iso` the probe
+        might stamp), so the wake decision is deterministic regardless of the
+        machine clock.
+        """
+        calls = []
+        monkeypatch.setattr(ad, "autoup", lambda: calls.append("autoup"),
+                            raising=False)
+        down = "2020-01-01T00:00:00+00:00"
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["enabled"] = True
+        cfg["state"] = "down"
+        cfg["idle_minutes"] = 10
+        cfg["down_since"] = down
+        cfg["last_activity_iso"] = down   # initially no fresh activity
+        ad.save_config(cfg)
+        # The default kanban probe sees a running card → stamps real now (after
+        # 2020) → fresh activity > down_since → wake seam fires autoup.
+        ad.cycle(kanban_db=_FakeKb(["running"]), agents_file="",
+                 now=NOW, keepalive_ok=lambda: True)
+        assert calls == ["autoup"]
+
+
+class TestProbeHttpActivity:
+    """probe_http_activity stamps record_activity('http') when the API server
+    logged a request newer than our last activity (§1d.1)."""
+
+    def _write_api_activity(self, tmp_path, ts_iso):
+        p = tmp_path / "activity.json"
+        p.write_text(json.dumps({"timestamp": ts_iso, "source": "http",
+                                 "stream": "activity"}))
+        return str(p)
+
+    def test_stamps_on_newer_api_ts(self, autodown_file, tmp_path):
+        """API activity newer than our last stamp ⇒ http activity recorded."""
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["last_activity_iso"] = "2000-01-01T00:00:00+00:00"
+        ad.save_config(cfg)
+        newer = (NOW - _dt.timedelta(minutes=5)).isoformat()
+        activity_file = self._write_api_activity(tmp_path, newer)
+        assert ad.probe_http_activity(activity_file) is True
+        loaded = ad.load_config()
+        assert loaded["wake_source"] == "http"
+        assert loaded["last_activity_iso"] is not None
+
+    def test_no_stamp_when_api_ts_stale(self, autodown_file, tmp_path):
+        """API ts NOT newer than our last stamp ⇒ no http activity."""
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["last_activity_iso"] = (NOW - _dt.timedelta(minutes=5)).isoformat()
+        ad.save_config(cfg)
+        stale = (NOW - _dt.timedelta(minutes=15)).isoformat()
+        activity_file = self._write_api_activity(tmp_path, stale)
+        assert ad.probe_http_activity(activity_file) is False
+
+    def test_no_stamp_when_file_absent(self, autodown_file, tmp_path):
+        """Missing activity file ⇒ no stamp (fail-safe)."""
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["last_activity_iso"] = "2000-01-01T00:00:00+00:00"
+        ad.save_config(cfg)
+        before = ad.load_config()["last_activity_iso"]
+        missing = str(tmp_path / "no-activity.json")
+        assert ad.probe_http_activity(missing) is False
+        assert ad.load_config()["last_activity_iso"] == before
+
+
+class TestProbeTelegramActivity:
+    """probe_telegram_activity stamps record_activity('telegram') on NEW
+    inbound Telegram messages observed via the Hermes gateway log (§1d.2,
+    design correction). Reads a fake gateway log — never the real one."""
+
+    def _setup(self, tmp_path):
+        gw = tmp_path / "gateway.log"
+        off = tmp_path / "telegram_probe.offset"
+        return str(gw), str(off)
+
+    def test_baselines_first_call_no_stamp(self, tmp_path, autodown_file):
+        """First probe on an existing log with markers baselines at EOF and
+        stamps NOTHING (old mail is not fresh activity)."""
+        gw, off = self._setup(tmp_path)
+        with open(gw, "w") as f:
+            f.write("blah\n" + ad.TELEGRAM_MARKER + " old msg\n")
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["last_activity_iso"] = "2000-01-01T00:00:00+00:00"
+        ad.save_config(cfg)
+        before = ad.load_config()["last_activity_iso"]
+        assert ad.probe_telegram_activity(gw, off) is False
+        assert ad.load_config()["last_activity_iso"] == before
+        # Offset now pinned to EOF (measured by the probe having consumed it).
+        assert ad._load_telegram_offset(off) == len(
+            "blah\n" + ad.TELEGRAM_MARKER + " old msg\n")
+
+    def test_stamps_on_new_marker(self, tmp_path, autodown_file):
+        """After the baseline, a NEW inbound marker line ⇒ telegram activity
+        stamped, last_activity advances."""
+        gw, off = self._setup(tmp_path)
+        with open(gw, "w") as f:
+            f.write("noise line\n")
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["last_activity_iso"] = "2000-01-01T00:00:00+00:00"
+        ad.save_config(cfg)
+        ad.probe_telegram_activity(gw, off)   # baseline
+        before = ad.load_config()["last_activity_iso"]
+
+        with open(gw, "a") as f:
+            f.write(ad.TELEGRAM_MARKER + " new inbound\n")
+        assert ad.probe_telegram_activity(gw, off) is True
+        loaded = ad.load_config()
+        assert loaded["wake_source"] == "telegram"
+        assert loaded["last_activity_iso"] != before
+
+    def test_no_stamp_when_nothing_new(self, tmp_path, autodown_file):
+        """Second probe with no appended content ⇒ no stamp (idempotent)."""
+        gw, off = self._setup(tmp_path)
+        with open(gw, "w") as f:
+            f.write(ad.TELEGRAM_MARKER + " one\n")
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["last_activity_iso"] = "2000-01-01T00:00:00+00:00"
+        ad.save_config(cfg)
+        ad.probe_telegram_activity(gw, off)   # baseline
+        before = ad.load_config()["last_activity_iso"]
+        assert ad.probe_telegram_activity(gw, off) is False
+        assert ad.load_config()["last_activity_iso"] == before
+
+    def test_log_rotation_rebaselines(self, tmp_path, autodown_file):
+        """Truncated log (size < offset) re-baselines from 0 and can stamp."""
+        gw, off = self._setup(tmp_path)
+        with open(gw, "w") as f:
+            f.write("A" * 100 + "\n")
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["last_activity_iso"] = "2000-01-01T00:00:00+00:00"
+        ad.save_config(cfg)
+        ad.probe_telegram_activity(gw, off)   # baseline offset=100+
+        assert ad._load_telegram_offset(off) == 101  # 100 A's + 1 newline
+
+        # Rotate: fresh (smaller) file with a marker line (no trailing giant
+        # prefix). Offset (101) > new size ⇒ re-baseline from 0 and stamp.
+        with open(gw, "w") as f:
+            f.write(ad.TELEGRAM_MARKER + " post-rotation\n")
+        assert ad.probe_telegram_activity(gw, off) is True
+        assert ad.load_config()["wake_source"] == "telegram"
+        # Offset re-pinned to the new EOF.
+        assert ad._load_telegram_offset(off) == len(
+            ad.TELEGRAM_MARKER + " post-rotation\n")
+
+    def test_missing_log_no_stamp(self, tmp_path, autodown_file):
+        """Missing gateway log ⇒ no stamp, no crash."""
+        gw, off = self._setup(tmp_path)
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["last_activity_iso"] = "2000-01-01T00:00:00+00:00"
+        ad.save_config(cfg)
+        before = ad.load_config()["last_activity_iso"]
+        assert ad.probe_telegram_activity(gw, off) is False
+        assert ad.load_config()["last_activity_iso"] == before
+
+    def test_telegram_probe_in_cycle_wakes_when_down(
+            self, tmp_path, monkeypatch, autodown_file):
+        """Wired through cycle(): when DOWN, a fresh inbound telegram marker
+        (via the default telegram probe) triggers autoup."""
+        calls = []
+        monkeypatch.setattr(ad, "autoup", lambda: calls.append("autoup"),
+                            raising=False)
+        gw, off = self._setup(tmp_path)
+        with open(gw, "w") as f:
+            f.write("seed line\n")
+        # Point the module-level paths at the fake log/offset so the DEFAULT
+        # probes (which read module globals) observe it.
+        monkeypatch.setattr(ad, "GATEWAY_LOG", gw)
+        monkeypatch.setattr(ad, "TELEGRAM_OFFSET_FILE", off)
+        # Baseline first (outside a cycle), as the daemon would on first run.
+        ad.probe_telegram_activity()
+        # DOWN config with an ANCIENT down_since so the probe's real-clock stamp
+        # is deterministically fresh (> down_since) regardless of the clock.
+        down = "2020-01-01T00:00:00+00:00"
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["enabled"] = True
+        cfg["state"] = "down"
+        cfg["idle_minutes"] = 10
+        cfg["down_since"] = down
+        cfg["last_activity_iso"] = down
+        ad.save_config(cfg)
+        with open(gw, "a") as f:
+            f.write(ad.TELEGRAM_MARKER + " fresh while down\n")
+        ad.cycle(kanban_db=_FakeKb([]), agents_file="",
+                 now=NOW, keepalive_ok=lambda: True)
+        assert calls == ["autoup"]
+
+
+class TestWaitReadySilentSpin:
+    """_wait_ready must not swallow probe errors silently (the real defect
+    confirmed by live testing)."""
+
+    def _plan(self):
+        return [
+            {"kind": "orchestrator", "unit_id": "orch",
+             "nodes": ["10.0.0.244"], "port": 8000},
+            {"kind": "worker", "unit_id": "wk1",
+             "nodes": ["10.0.0.247"], "port": 8000},
+        ]
+
+    def test_raising_probe_logs_once_and_returns_not_ok(
+            self, monkeypatch):
+        """A probe that raises every round is logged ONCE (not per-round) and
+        _wait_ready still returns (ready=[], ok=False) at the deadline — it does
+        NOT spin silently."""
+        logs = []
+        monkeypatch.setattr(ad, "log",
+                            lambda msg, level="INFO": logs.append(msg))
+        def boom(url, timeout=5):
+            raise RuntimeError("probe is broken")
+        # Two units raise every round; advancing clock crosses the deadline.
+        ready, ok = ad._wait_ready(
+            self._plan(), http_check_fn=boom,
+            clock=_AdvancingClock(start=0, step=1), sleep_fn=_noop_sleep,
+            timeout_seconds=5)
+        assert ready == []          # nothing became ready
+        assert ok is False          # not silently ok — timed out not-ready
+        # Logged the raise, but ONCE PER UNIT (bounded, not per-round).
+        raise_lines = [m for m in logs if "raised" in m]
+        assert len(raise_lines) == 2      # orch + wk1, half-a-dozen rounds
+        assert "probe is broken" in raise_lines[0]
+        assert "orch" in raise_lines[0]
+        assert "wk1" in raise_lines[1]
+
+    def test_no_log_when_probe_healthy(self, monkeypatch):
+        """A healthy probe ⇒ no raise logged, returns ready immediately."""
+        logs = []
+        monkeypatch.setattr(ad, "log",
+                            lambda msg, level="INFO": logs.append(msg))
+        healthy = lambda url, timeout=5: {"ok": True, "status": 200}
+        ready, ok = ad._wait_ready(
+            self._plan(), http_check_fn=healthy,
+            clock=lambda: 0.0, sleep_fn=_noop_sleep, timeout_seconds=5)
+        assert ready == ["orch", "wk1"]
+        assert ok is True
+        assert not any("raised" in m for m in logs)
+
