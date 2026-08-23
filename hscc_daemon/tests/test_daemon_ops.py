@@ -116,7 +116,11 @@ class TestNoLiveHsccLeak:
     @staticmethod
     def _real_state_path():
         import os as _os
-        return _os.path.expanduser("~/.hscc/autodown.json")
+        # Bypass the autouse fixture's os.path.expanduser redirect: expand
+        # "~" (NOT under ~/.hscc, so delegated to the real home dir) and join
+        # the literal ".hscc/autodown.json" to REACH the operator's real file.
+        # The fixture redirects "~/.hscc/..." via expanduser; this must not.
+        return _os.path.join(_os.path.expanduser("~"), ".hscc/autodown.json")
 
     @staticmethod
     def _real_hash_or_absent(path):
