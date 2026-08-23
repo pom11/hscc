@@ -85,11 +85,19 @@ def save_config(cfg):
     confuse the operator. Reuses the exact atomic pattern of
     state.write_state (hscc_daemon/state.py:31-35) and
     lifecycle.save_watchdog_block (hscc_daemon/lifecycle.py:143-146).
+
+    Hardening: the dict on disk is ALWAYS the complete §7 schema. ``cfg`` is
+    merged over ``DEFAULT_CONFIG`` and only the merged result is persisted, so
+    a partial dict (from a patched loader, a hand-edit, or a future caller)
+    can never write a config file missing keys. ``DEFAULT_CONFIG`` is copied
+    fresh each call so the caller's dict is not mutated.
     """
+    merged = dict(DEFAULT_CONFIG)
+    merged.update(cfg)
     os.makedirs(os.path.dirname(AUTODOWN_FILE) or ".", exist_ok=True)
     tmp = AUTODOWN_FILE + ".tmp"
     with open(tmp, "w") as f:
-        json.dump(cfg, f, indent=2, default=str)
+        json.dump(merged, f, indent=2, default=str)
     os.replace(tmp, AUTODOWN_FILE)
 
 
