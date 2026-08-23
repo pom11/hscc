@@ -27,21 +27,22 @@ def _isolate_hscc(tmp_path, monkeypatch):
 
     Belt-and-braces, mirroring hscc_daemon/tests/conftest.py::_isolate_hscc.
     An authenticated request stamps autodown activity via
-    ``state.write_state(\"activity\", ...)`` (api_server._do_stamp_http_activity),
-    which writes to ``~/.hscc/state/activity.json`` through ``state.STATE_DIR``.
-    If an api test ever exercises an authenticated request without pinning
-    hscc_dir, it would write the activity file into the operator's real
-    ~/.hscc. This autouse fixture makes that impossible by redirecting
-    ``state.STATE_DIR`` off the live home dir for every test.
+    ``api_server._do_stamp_http_activity``, which writes
+    ``~/.hscc/activity.json`` (computed at runtime through
+    ``os.path.expanduser``). If an api test ever exercises an authenticated
+    request without pinning hscc_dir, it would write the activity file into the
+    operator's real ~/.hscc. This autouse fixture makes that impossible by
+    redirecting every ``~/.hscc`` path off the live home dir for every test.
 
     Directory-wide belt-and-braces (covers ~/.hscc AS A WHOLE):
       (a) Patch ``os.path.expanduser`` so any ``~/.hscc/...`` path (module
           constant ``api_server.DEFAULT_HSCC_DIR`` or a runtime call like
-          routes_project.py:75) resolves under the per-test tmp dir. Nothing
-          outside ``~/.hscc`` is touched.
+          routes_project.py:75 or the activity stamp) resolves under the
+          per-test tmp dir. Nothing outside ``~/.hscc`` is touched.
       (b) Overwrite the module-level ``api_server.DEFAULT_HSCC_DIR`` constant
           (baked in at import) too.
-      (c) Redirect ``state.STATE_DIR`` to the tmp state dir.
+      (c) Redirect ``state.STATE_DIR`` to the tmp state dir (the periodic
+          stream funnel — the activity marker is NOT written there).
     """
     base = str(tmp_path / "hscc")
 

@@ -396,18 +396,22 @@ class TestAutodownActivityStamp:
         assert status == 200
         assert payload.get("ok") is True
 
-    def test_stamp_writes_real_activity_file(self, hscc_dir, monkeypatch):
-        """The real _stamp_http_activity writes the activity state file the
-        daemon polls, with source http + a timestamp."""
-        import hscc_daemon.state as hstate
-        from pathlib import Path
-        # Redirect the hscc_daemon state dir to a tmp location.
-        state_dir = str(Path(hscc_dir) / "state")
-        monkeypatch.setattr(hstate, "STATE_DIR", state_dir)
+    def test_stamp_writes_real_activity_file(self, monkeypatch):
+        """The real _stamp_http_activity writes the activity file the daemon
+        polls — with source http + a timestamp, OUTSIDE state/ (event-driven,
+        so it must not live in the periodic-streams dir verify.py scans)."""
+        import os
+        import json
         api_server._stamp_http_activity()
-        activity_file = Path(state_dir) / "activity.json"
-        assert activity_file.exists()
-        data = json.loads(activity_file.read_text())
+        # Runtime expanduser resolves ~/.hscc under the autouse isolate fixture,
+        # so this is a per-test tmp path — never the operator's real ~/.hscc.
+        activity_file = os.path.expanduser("~/.hscc/activity.json")
+        assert os.path.exists(activity_file), activity_file
+        # It must NOT be under the state/ periodic-streams dir.
+        state_dir = os.path.expanduser("~/.hscc/state")
+        assert not os.path.exists(os.path.join(state_dir, "activity.json"))
+        with open(activity_file) as f:
+            data = json.load(f)
         assert data.get("source") == "http"
         assert data.get("timestamp")          # ISO string written
         assert data.get("stream") == "activity"

@@ -120,17 +120,20 @@ countdown):
    daemon does not watch it. The design adds a wake/activity probe (§4): an
    API request writes a "last seen" timestamp the daemon polls, OR the API
    server pokes the daemon. Recommend the file-based signal so no new RPC:
-   `api_server` writes `last_activity` to `~/.hscc/state/activity.json` on every
-   authenticated request (single write, `state.write_state('activity', ...)`),
+   `api_server` writes `last_activity` to `~/.hscc/activity.json` on every
+   authenticated request (single write, `api_server._do_stamp_http_activity`),
    and the daemon's idle timer reads it. This is CPU-side-writable and needs no
-   model.
+   model. *The marker lives at `~/.hscc/activity.json` — OUTSIDE
+   `~/.hscc/state/` — because activity is event-driven (updates only on a
+   request) and carries no `ok` key, so it must not share the periodic-streams
+   dir that `verify.py::check_daemon_streams` requires to be fresh ok streams.*
 2. **Inbound Telegram message** — the fleet's Telegram is owned by a
    single-writer MCP daemon (`~/.hermes-tg/mcp_server.py`), not by the daemon.
    The daemon does NOT parse Telegram. Instead the **gateway supervisor or the
    Telegram MCP daemon stamps an "inbound activity" file** whenever it receives
    a message. Design: a tiny CPU-side watcher in the daemon polls a heartbeat
    file, e.g. the Telegram MCP daemon is extended to touch
-   `~/.hscc/state/activity.json` (field `telegram_ts`) on an inbound update.
+   `~/.hscc/activity.json` (field `telegram_ts`) on an inbound update.
    This is a **model-free observable event** the CPU daemon can see.
    *(If that MCP integration proves infeasible in Phase 1, an acceptable
    Phase-1 fallback is: the daemon treats a Telegram-aware event via
@@ -582,8 +585,9 @@ Each phase is one file + its tests, implementable from this doc alone.
 **File:** `hscc_daemon/autodown.py` or `hscc-api/api_server.py` (small touch)
 - Wire the four activity sources (§1d): API request stamp, Telegram MCP stamp,
   kanban create/ready detection, CLI wake.
-- HTTP: `api_server` writes `state.write_state('activity', {ts, source})` on
-  each authenticated request (one extra write per request, cheap).
+- HTTP: `api_server` writes `~/.hscc/activity.json` (event-driven, OUTSIDE
+  `~/.hscc/state/`) on each authenticated request (one extra write per request,
+  cheap). See the §1d.1 note in this doc.
 - Tests: each source advances `last_activity_iso` / triggers autoup when down.
 
 ### Phase 7 — CLI verb group `hscc autodown`
