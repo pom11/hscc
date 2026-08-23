@@ -222,6 +222,15 @@ def _cmd_wake(rest, json_mode):
             print("  watchdog block cleared; supervision resumed.")
         elif res == "already-waking":
             print("autodown: a wake is already in flight (no-op)")
+        elif res == "busy":
+            print("autodown: another teardown/wake is in progress, or the "
+                  "layer is already up — no starts issued.")
+            return 1
+        elif res == "no-units":
+            print("autodown: wake did NOT complete — empty wake plan "
+                  "(no serving units to start).")
+            print("  Check ~/.hscc/serving.json.")
+            return 1
         else:
             # start-failed / not-ready — autoup() has recorded the failure and
             # cleared the block so the watchdog can heal. Report it.
