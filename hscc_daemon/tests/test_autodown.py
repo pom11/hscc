@@ -1900,3 +1900,242 @@ def _os_exists(path):
     import os as _os
     return _os.path.exists(path)
 
+
+
+# ---------------------------------------------------------------------------
+# F3/F4/F6/F7 — autodown O_EXCL lock, state gates, empty-plan vacuous-state
+# guards, keepalive-node invariant (safety audit card t_c00c4d02).
+# ---------------------------------------------------------------------------
+
+class TestLockAndGates:
+    """Fixes 3/4/6/7: O_EXCL lockfile, state gates on teardown/autoup,
+    empty-plan vacuous-state guards, keepalive-node C4 invariant.
+
+    Everything runs against the patched per-test ``~/.hscc`` (tmp), so the
+    operator's live autodown.json / autodown.lock are never touched.
+    """
+
+    def _agents(self, tmp_path):
+        p = tmp_path / "agents.json"
+        p.write_text(json.dumps({"agents": [{"name": "a", "status": "idle"}]}))
+        return str(p)
+
+    def _block_file(self, tmp_path, monkeypatch):
+        bf = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", bf)
+        return bf
+
+    def _setup(self, tmp_path, monkeypatch, autodown_file, results=None):
+        bf = self._block_file(tmp_path, monkeypatch)
+        serving = _write_serving(tmp_path)
+        runner = _FakeRunner(bf, results=results)
+        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
+        monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
+        return serving, runner, bf
+
+    # -- F3: teardown while state==down ⇒ busy, no stops --------------------
+    def test_teardown_while_state_down_returns_busy(self, tmp_path, monkeypatch,
+                                                    autodown_file):
+        """state=="down" ⇒ teardown returns busy and issues NO stops."""
+        serving, runner, bf = self._setup(tmp_path, monkeypatch, autodown_file)
+        _write_down_cfg(autodown_file)          # state="down"
+        res = ad.teardown(serving_path=serving, run_cmd_fn=runner,
+                          kanban_db=_FakeKb([]),
+                          agents_file=self._agents(tmp_path),
+                          now=NOW, keepalive_ok=lambda: True)
+        assert res["result"] == "busy"
+        assert res["issued"] == []
+        assert runner.calls == []               # no stop issued at all
+        cfg = ad.load_config()
+        assert cfg["state"] == "down"           # untouched
+
+    # -- F3: autoup while teardown holds the lock ⇒ busy, no starts ---------
+    def test_autoup_while_teardown_holds_lock_busy(self, tmp_path, monkeypatch,
+                                                   autodown_file):
+        """While teardown holds the O_EXCL lock, autoup returns busy, no starts."""
+        serving, runner, bf = self._setup(tmp_path, monkeypatch, autodown_file)
+        _write_down_cfg(autodown_file)
+        # Simulate an in-flight teardown holding the autodown lock.
+        assert ad._acquire_lock() is True
+        try:
+            res = ad.autoup(serving_path=serving, run_cmd_fn=runner,
+                            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+                            sleep_fn=_noop_sleep, notify=False)
+            assert res["result"] == "busy"
+            assert res["started"] == []
+            assert res["ready"] == []
+            assert runner.calls == []           # no start issued at all
+        finally:
+            ad._release_lock()
+
+    # -- F3: lock released on success AND every failure/abort path (no leak) -
+    def test_lock_released_on_all_paths_no_leak(self, tmp_path, monkeypatch,
+                                                autodown_file):
+        """The O_EXCL lock must never leak on ANY exit path (success, abort,
+        failed, no-targets, no-units) — a leaked lock wedges the daemon."""
+        import os as _os
+        # teardown SUCCESS path (→ down).
+        s1, r1, _ = self._setup(tmp_path, monkeypatch, autodown_file)
+        _write_idle_cfg(autodown_file)
+        res = ad.teardown(serving_path=s1, run_cmd_fn=r1, kanban_db=_FakeKb([]),
+                          agents_file=self._agents(tmp_path), now=NOW,
+                          keepalive_ok=lambda: True,
+                          http_check_fn=lambda *a, **k: {"ok": False})
+        assert res["result"] == "down"
+        assert not _os.path.exists(ad.AUTODOWN_LOCK), "leak after teardown success"
+        # teardown ABORT (idle predicate broke during re-verify).
+        s2, r2, _ = self._setup(tmp_path, monkeypatch, autodown_file)
+        _write_idle_cfg(autodown_file)
+        res = ad.teardown(serving_path=s2, run_cmd_fn=r2,
+                          kanban_db=_FakeKb(["running"]),
+                          agents_file=self._agents(tmp_path), now=NOW,
+                          keepalive_ok=lambda: True)
+        assert res["result"] == "aborted"
+        assert not _os.path.exists(ad.AUTODOWN_LOCK), "leak after teardown abort"
+        # teardown FAILED (stop failed).
+        s3, r3, _ = self._setup(tmp_path, monkeypatch, autodown_file,
+                                results=[False])
+        _write_idle_cfg(autodown_file)
+        res = ad.teardown(serving_path=s3, run_cmd_fn=r3, kanban_db=_FakeKb([]),
+                          agents_file=self._agents(tmp_path), now=NOW,
+                          keepalive_ok=lambda: True)
+        assert res["result"] == "failed"
+        assert not _os.path.exists(ad.AUTODOWN_LOCK), "leak after teardown failed"
+        # teardown no-targets (empty plan).
+        s4, r4, _ = self._setup(tmp_path, monkeypatch, autodown_file)
+        _write_idle_cfg(autodown_file)
+        missing = str(tmp_path / "nope" / "serving.json")
+        res = ad.teardown(serving_path=missing, run_cmd_fn=r4,
+                          kanban_db=_FakeKb([]),
+                          agents_file=self._agents(tmp_path), now=NOW,
+                          keepalive_ok=lambda: True)
+        assert res["result"] == "no-targets"
+        assert not _os.path.exists(ad.AUTODOWN_LOCK), "leak after teardown no-targets"
+        # autoup SUCCESS path (→ up).
+        s5, r5, bf5 = self._setup(tmp_path, monkeypatch, autodown_file)
+        _write_down_cfg(autodown_file)
+        _lifecycle.save_watchdog_block({"blocked": True, "intentional": "autodown",
+                                        "reason": ad.WATCHDOG_TEARDOWN_REASON,
+                                        "blocked_at": NOW.isoformat(),
+                                        "failures": []})
+        res = ad.autoup(serving_path=s5, run_cmd_fn=r5,
+                        http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+                        sleep_fn=_noop_sleep, notify=False)
+        assert res["result"] == "up"
+        assert not _os.path.exists(ad.AUTODOWN_LOCK), "leak after autoup success"
+        # autoup no-units (empty plan).
+        s6, r6, _ = self._setup(tmp_path, monkeypatch, autodown_file)
+        _write_down_cfg(autodown_file)
+        res = ad.autoup(serving_path=missing, run_cmd_fn=r6,
+                        http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+                        sleep_fn=_noop_sleep, notify=False)
+        assert res["result"] == "no-units"
+        assert not _os.path.exists(ad.AUTODOWN_LOCK), "leak after autoup no-units"
+
+    # -- F3: stale lock does not deadlock forever ----------------------------
+    def test_stale_lock_broken_not_deadlock(self, tmp_path, monkeypatch):
+        """A lock older than the staleness threshold is broken and re-acquired,
+        so a crashed holder can never wedge the daemon forever."""
+        import os as _os
+        lock = str(tmp_path / "hscc" / "autodown.lock")
+        monkeypatch.setattr(ad, "AUTODOWN_LOCK", lock)
+        _os.makedirs(_os.path.dirname(lock), exist_ok=True)
+        with open(lock, "w") as f:
+            f.write("pid=999999 acquired=0")     # from a "dead" process
+        now = NOW.timestamp()
+        _os.utime(lock, (now - 100000, now - 100000))   # 100000s old ⇒ stale
+        assert ad._acquire_lock(now=now) is True  # stale broken + acquired
+        ad._release_lock()
+        assert not _os.path.exists(lock)          # released cleanly
+
+    # -- F3: with a FRESH (non-stale) lock, acquire fails (busy) ------------
+    def test_fresh_lock_blocks_acquirer(self, tmp_path, monkeypatch):
+        """A live (fresh) lock held by another actor ⇒ acquire fails (busy)."""
+        import os as _os
+        lock = str(tmp_path / "hscc" / "autodown.lock")
+        monkeypatch.setattr(ad, "AUTODOWN_LOCK", lock)
+        _os.makedirs(_os.path.dirname(lock), exist_ok=True)
+        assert ad._acquire_lock(now=NOW.timestamp()) is True
+        try:
+            assert ad._acquire_lock(now=NOW.timestamp()) is False   # busy
+        finally:
+            ad._release_lock()
+
+    # -- F4: serving.json missing ⇒ teardown aborts, no block, not down ------
+    def test_serving_missing_teardown_aborts_no_block_not_down(
+            self, tmp_path, monkeypatch, autodown_file):
+        """serving.json absent ⇒ empty plan ⇒ ABORT before block; never down."""
+        import os as _os
+        serving, runner, bf = self._setup(tmp_path, monkeypatch, autodown_file)
+        missing = str(tmp_path / "nope" / "serving.json")   # does not exist
+        _write_idle_cfg(autodown_file)         # state="up", idle, window elapsed
+        res = ad.teardown(serving_path=missing, run_cmd_fn=runner,
+                          kanban_db=_FakeKb([]),
+                          agents_file=self._agents(tmp_path), now=NOW,
+                          keepalive_ok=lambda: True)
+        assert res["result"] == "no-targets"
+        assert runner.calls == []                       # no stop issued
+        assert not _os.path.exists(bf)                  # block NOT written
+        cfg = ad.load_config()
+        assert cfg["state"] != "down"                   # NOT recorded down
+        assert cfg["state"] == "up"                     # reality unchanged
+
+    # -- F7: empty wake plan ⇒ no block clear, no "up" -----------------------
+    def test_empty_wake_plan_no_block_clear_no_up(self, tmp_path, monkeypatch,
+                                                  autodown_file):
+        """Empty wake plan ⇒ FAILURE: block NOT cleared, result NOT "up"."""
+        serving, runner, bf = self._setup(tmp_path, monkeypatch, autodown_file)
+        # Seed a latched intentional block, as teardown left it.
+        _lifecycle.save_watchdog_block({"blocked": True, "intentional": "autodown",
+                                        "reason": ad.WATCHDOG_TEARDOWN_REASON,
+                                        "blocked_at": NOW.isoformat(),
+                                        "failures": []})
+        _write_down_cfg(autodown_file)
+        missing = str(tmp_path / "nope" / "serving.json")
+        res = ad.autoup(serving_path=missing, run_cmd_fn=runner,
+                        http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+                        sleep_fn=_noop_sleep, notify=False)
+        assert res["result"] == "no-units"              # NOT "up"
+        assert res["started"] == []
+        assert res["ready"] == []
+        assert runner.calls == []                       # no start issued
+        # Block NOT cleared — still latched with intentional autodown.
+        with open(bf) as f:
+            blk = json.load(f)
+        assert blk.get("blocked") is True
+        assert blk.get("intentional") == "autodown"
+        # Failure recorded with an honest reason (state up-with-reason).
+        cfg = ad.load_config()
+        assert cfg["state"] == "up"
+        assert "empty wake plan" in cfg["reason"]
+
+    # -- F6: keepalive node overlapping teardown set ⇒ abort, no stop --------
+    def test_keepalive_overlap_aborts_no_stop(self, tmp_path, monkeypatch,
+                                              autodown_file):
+        """A keepalive node in the teardown set (co-located config) ⇒ abort,
+        no stop issued, block NOT written."""
+        import os as _os
+        serving, runner, bf = self._setup(tmp_path, monkeypatch, autodown_file)
+        # Co-located config: the keepalive worker shares .244 with the
+        # orchestrator ⇒ teardown would stop a keepalive node.
+        data = {
+            "port": 8000,
+            "units": [
+                {"id": "orch", "role": "orchestrator",
+                 "nodes": ["10.0.0.244"], "port": 8000},
+                {"id": "wk-keep", "role": "worker", "keepalive": True,
+                 "nodes": ["10.0.0.244"], "port": 8000},
+            ],
+        }
+        collision = tmp_path / "serving.json"
+        collision.write_text(json.dumps(data))
+        _write_idle_cfg(autodown_file)         # state="up", idle
+        res = ad.teardown(serving_path=str(collision), run_cmd_fn=runner,
+                          kanban_db=_FakeKb([]),
+                          agents_file=self._agents(tmp_path), now=NOW,
+                          keepalive_ok=lambda: True)
+        assert res["result"] == "aborted"
+        assert runner.calls == []                       # no stop issued
+        assert not _os.path.exists(bf)                  # block NOT written
+        cfg = ad.load_config()
+        assert cfg["state"] != "down"                   # never recorded down

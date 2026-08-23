@@ -63,6 +63,7 @@ def _isolate_hscc(tmp_path, monkeypatch):
         from hscc_daemon import autodown
         return [
             (autodown, "AUTODOWN_FILE", os.path.join(base, "autodown.json")),
+            (autodown, "AUTODOWN_LOCK", os.path.join(base, "autodown.lock")),
             (autodown, "AGENTS_FILE", os.path.join(base, "agents.json")),
             (autodown, "HTTP_ACTIVITY_STATE",
              os.path.join(base, "state", "activity.json")),

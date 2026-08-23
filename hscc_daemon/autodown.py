@@ -27,6 +27,13 @@ from .telegram import notify_operations
 # (hscc_daemon/lifecycle.py:124).
 AUTODOWN_FILE = os.path.expanduser("~/.hscc/autodown.json")
 
+# Atomic O_EXCL lockfile guarding the teardown/autoup critical sections (§8
+# double-teardown row). Only ONE teardown OR autoup may run at a time — they
+# are mutually exclusive, not just teardown-vs-teardown. A second caller
+# returns a ``busy`` result instead of proceeding concurrently. Overridden in
+# tests via monkeypatch, mirroring AUTODOWN_FILE.
+AUTODOWN_LOCK = os.path.expanduser("~/.hscc/autodown.lock")
+
 # Default configuration (docs/design/idle-autodown.md §7). C5: OFF by default.
 # A new file starts disabled; the file is created when autodown is first
 # enabled.
@@ -465,6 +472,87 @@ def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
 WATCHDOG_TEARDOWN_REASON = "autodown: intentional idle teardown"
 
 
+# ---------------------------------------------------------------------------
+# Autodown lockfile — atomic O_EXCL mutex between teardown() and autoup()
+# ---------------------------------------------------------------------------
+
+def _lock_stale_seconds():
+    """How old a lock may be before it is presumed abandoned (§8).
+
+    A teardown or autoup may legitimately hold the lock for up to the wake
+    readiness grace window (a model load, ``VLLM_LOAD_GRACE_MINUTES``, default
+    20 min) — the longest bounded critical section. Any lock OLDER than that
+    window plus a fixed margin is presumed abandoned by a dead/blocked holder
+    and is broken, so a crashed process can NEVER deadlock the daemon forever.
+    Read at call time so monkeypatching lifecycle is respected.
+    """
+    from . import lifecycle
+    grace = getattr(lifecycle, "VLLM_LOAD_GRACE_MINUTES", 20)
+    return int(grace) * 60 + 300   # 20m model-load window + 5m margin
+
+
+def _acquire_lock(now=None):
+    """Atomically acquire the autodown O_EXCL lockfile (§8).
+
+    Returns True on success (the lock is now held by this process), or False
+    if another teardown/autoup holds it (busy). A stale lock — older than
+    ``_lock_stale_seconds()``, i.e. abandoned by a dead/blocked holder — is
+    broken (unlinked) and acquire is retried once before giving up, so the
+    daemon can never deadlock forever.
+    """
+    import time
+    now = now if now is not None else time.time()
+    # The lock's parent dir (~/.hscc) may not exist on a fresh machine; create
+    # it lazily like save_config does, so os.open(O_CREAT) never raises.
+    try:
+        os.makedirs(os.path.dirname(AUTODOWN_LOCK) or ".", exist_ok=True)
+    except OSError:
+        return False
+    try:
+        fd = os.open(AUTODOWN_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        # Already held — is it stale (abandoned)?
+        try:
+            age = now - os.path.getmtime(AUTODOWN_LOCK)
+        except OSError:
+            age = None
+        if age is not None and age > _lock_stale_seconds():
+            # Presumed abandoned by a dead/blocked holder — break it and retry
+            # once. If the retry still races another acquirer, report busy.
+            try:
+                os.unlink(AUTODOWN_LOCK)
+            except OSError:
+                return False
+            try:
+                fd = os.open(AUTODOWN_LOCK,
+                             os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                return False
+        else:
+            return False  # live lock held by a concurrent teardown/autoup
+    # Record the holder's pid + acquire time for diagnostics / staleness.
+    try:
+        os.write(fd, f"pid={os.getpid()} acquired={now}".encode())
+    except OSError:
+        pass
+    os.close(fd)
+    return True
+
+
+def _release_lock():
+    """Release the autodown lockfile if it exists. Never raises.
+
+    Called on EVERY exit path (success and failure/abort alike) via the
+    callers' ``finally``, so a lock is never leaked — a leaked lock would
+    otherwise wedge the daemon (the exact failure §8 guards against).
+    """
+    try:
+        if os.path.exists(AUTODOWN_LOCK):
+            os.unlink(AUTODOWN_LOCK)
+    except OSError:
+        pass
+
+
 def _worker_stop_cmd(nodes):
     """`sparkrun stop --hosts <nodes>` for one non-keepalive unit (§3.3).
 
@@ -575,15 +663,33 @@ def _rollback_block(original_block):
 
 def teardown(serving_path=None, run_cmd_fn=None, kanban_db=None,
              agents_file=None, now=None, keepalive_ok=None,
-             http_check_fn=None):
-    """Execute the idle teardown sequence (§3/§5).
+             http_check_fn=None, lock_now=None):
+    """Execute the idle teardown sequence (§3/§5), under the autodown lock.
 
-    Runs in the autodown thread. Order is critical (C2) and each step is
-    logged via daemon_ops.log:
+    Entry point wraps the real sequence in the autodown O_EXCL lockfile so
+    teardown is mutually exclusive with autoup (a ``hscc autodown wake`` must
+    never race an in-flight teardown) and with a second teardown (§8
+    double-teardown). The lock is released on EVERY exit path (success,
+    abort, busy, failure) so it can never leak and wedge the daemon.
+
+    Two gates run before any stop is issued:
+      * ``state == "down"`` ⇒ the layer is already down — re-issuing stops
+        would be pointless and would race a concurrent wake. Return ``busy``.
+      * another teardown/autoup holds the lock ⇒ ``busy``.
+
+    The sequence itself (inside the lock) is ordered per §3/§5 (C2), and each
+    step is logged via daemon_ops.log:
 
       1. Re-verify idle (§6 last-line guard): re-run the full ``_is_idle``
          conjunction. If anything changed since the timer decided ⇒ ABORT,
          NO stops issued.
+      1a. Build the teardown plan. An EMPTY plan means we cannot determine
+          what to tear down (serving.json missing/corrupt ⇒ ``load_serving``
+          returned None) ⇒ ABORT before writing the block. Never record
+          ``down`` having stopped nothing (§8 — no silent half-state).
+      1b. Assert the C4 keepalive invariant: no keepalive node may appear in
+          the teardown node set. If a future co-located config would make us
+          stop a keepalive unit, ABORT loudly rather than trusting topology.
       2. Write the watchdog block BEFORE stopping anything (§3.2, C2):
          ``blocked:true``, reason §3.2, ``blocked_at: now``, and the NEW field
          ``intentional: "autodown"``. Block first, THEN stop — stopping first
@@ -605,9 +711,34 @@ def teardown(serving_path=None, run_cmd_fn=None, kanban_db=None,
     set, we stop cleanly, roll the block back, and report ``cancelled`` (§6).
 
     Returns a result dict with ``result`` in
-    (``down`` | ``aborted`` | ``cancelled`` | ``failed``) plus
-    ``issued`` (the list of stop commands actually issued) and the original
-    ``plan``.
+    (``down`` | ``aborted`` | ``busy`` | ``cancelled`` | ``failed`` |
+    ``no-targets``) plus ``issued`` (the list of stop commands actually
+    issued) and the original ``plan``.
+    """
+    if not _acquire_lock(now=lock_now):
+        log("Autodown teardown: autodown.lock held by another teardown/autoup "
+            "— returning busy (no stops issued)")
+        return {"result": "busy", "issued": [], "plan": []}
+    try:
+        return _teardown_locked(serving_path=serving_path,
+                                run_cmd_fn=run_cmd_fn, kanban_db=kanban_db,
+                                agents_file=agents_file, now=now,
+                                keepalive_ok=keepalive_ok,
+                                http_check_fn=http_check_fn)
+    finally:
+        _release_lock()
+
+
+def _teardown_locked(serving_path=None, run_cmd_fn=None, kanban_db=None,
+                     agents_file=None, now=None, keepalive_ok=None,
+                     http_check_fn=None):
+    """The teardown sequence itself, run while holding the autodown lock.
+
+    Split out of ``teardown()`` so the O_EXCL lock acquisition + release live
+    in exactly two places (the wrapper's begin / ``finally``) and every gate
+    and early-return here runs under the lock. All existing behavior
+    (ordering, block-before-stop, cancel, rollback) is unchanged; only the
+    state gate, empty-plan abort, and keepalive-invariant abort (§8) are new.
     """
     from . import lifecycle   # noqa: F401  (used via module)
     from . import serving as serving_mod
@@ -617,11 +748,23 @@ def teardown(serving_path=None, run_cmd_fn=None, kanban_db=None,
     http_check = http_check_fn or _util_http_check
     serving = serving_mod.load_serving(serving_path)
 
+    # -- 0. State gate (§8 double-teardown) -------------------------------
+    # Re-check state UNDER the lock so the check is atomic with a concurrent
+    # autoup (which also holds the lock to write its result). If the layer is
+    # already recorded down, there is nothing to tear down — re-issuing stops
+    # would be pointless and would race a wake already in progress.
+    cfg = load_config()
+    if cfg.get("state") == "down":
+        log("Autodown teardown: state is already \"down\" — returning busy "
+            "(no stops issued)")
+        _notify("Autodown teardown skipped: serving layer is already down",
+                "HSCC Autodown", priority="normal")
+        return {"result": "busy", "issued": [], "plan": []}
+
     # -- 1. Re-verify idle (§6 last-line guard) ---------------------------
     # Re-run the FULL idle conjunction. If anything changed since the timer
     # decided (a card arrived, an agent went busy, the window reset, a
     # keepalive unit went sick), ABORT — no stops issued at all.
-    cfg = load_config()
     if not _is_idle(cfg, kanban_db=kanban_db, agents_file=agents_file,
                     now=now, keepalive_ok=keepalive_ok):
         msg = "Autodown teardown ABORTED: idle predicate no longer holds " \
@@ -633,6 +776,41 @@ def teardown(serving_path=None, run_cmd_fn=None, kanban_db=None,
     # Build the teardown set (non-keepalive units only; keepalive excluded).
     plan = _build_teardown_plan(serving)
 
+    # -- 1a. EMPTY plan ⇒ abort before writing the block (§8) -------------
+    # An empty plan means we could not determine what to tear down
+    # (serving.json missing/corrupt ⇒ load_serving returned None ⇒
+    # _build_teardown_plan returned []). Issuing ZERO stops yet recording
+    # state:"down" would mark the still-running orchestrator down with the
+    # block latched — a silent half-state (audit F4). ABORT instead, before
+    # touching the block, so the watchdog keeps supervising reality.
+    if not plan:
+        msg = ("Autodown teardown ABORTED: empty teardown plan — cannot "
+               "determine what to tear down (serving.json missing/corrupt?)")
+        log(msg, "ERROR")
+        _notify(msg, "HSCC Autodown Aborted", priority="high")
+        return {"result": "no-targets", "issued": [], "plan": []}
+
+    # -- 1b. Assert the C4 keepalive invariant (§8) ------------------------
+    # _worker_stop_cmd issues a NODE-level `sparkrun stop --hosts <nodes>`
+    # (not a recipe-scoped stop), so the C4 keepalive-exemption holds ONLY
+    # while no keepalive node appears in what we are about to stop. On today's
+    # topology the keepalive nodes are disjoint from the teardown set; a future
+    # co-located config would have teardown kill a keepalive unit. Assert the
+    # invariant in code and abort loudly if it would be violated — do NOT
+    # silently rely on topology (audit F6).
+    teardown_nodes = set()
+    for e in plan:
+        teardown_nodes.update(e.get("nodes") or [])
+    keepalive_node_set = {u["node"] for u in serving_mod.keepalive_units(serving)}
+    overlap = teardown_nodes & keepalive_node_set
+    if overlap:
+        msg = ("Autodown teardown ABORTED: keepalive node(s) "
+               f"{sorted(overlap)} in the teardown set — refusing to stop a "
+               "keepalive unit (C4 invariant violated)")
+        log(msg, "ERROR")
+        _notify(msg, "HSCC Autodown Aborted", priority="high")
+        return {"result": "aborted", "issued": [], "plan": []}
+
     # -- 2. Write the watchdog block BEFORE stopping anything (§3.2, C2) ----
     # Snapshot the current block so a failure/cancel can roll it back and hand
     # supervision back to the watchdog untouched (§3/§8). Block first, THEN
@@ -642,7 +820,7 @@ def teardown(serving_path=None, run_cmd_fn=None, kanban_db=None,
     block["blocked"] = True
     block["reason"] = WATCHDOG_TEARDOWN_REASON
     block["blocked_at"] = now_iso()
-    block["intentional"] = "autodown"    # NEW field (§5)
+    block["intentional"] = "autodown"    # new field (§5)
     lifecycle.save_watchdog_block(block)
     log("Autodown: watchdog block written (intentional teardown)")
 
@@ -971,15 +1149,33 @@ def _record_wake_success():
 
 def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
            clock=None, sleep_fn=None, wake_grace_minutes=None, now=None,
-           notify=True):
-    """Bring the serving layer back up (§4/§4.5/§5) + handle failure (§8).
+           notify=True, lock_now=None):
+    """Bring the serving layer back up (§4/§4.5/§5), under the autodown lock.
 
-    Idempotent: if ``autodown.json.state`` is already ``waking`` we return a
+    Entry point wraps the real sequence in the autodown O_EXCL lockfile so
+    autoup is mutually exclusive with teardown (a wake must never race an
+    in-flight teardown) and with a second autoup (§8 double-teardown). The
+    lock is released on EVERY exit path so it can never leak and wedge the
+    daemon.
+
+    Two gates run before any start is issued:
+      * ``state == "up"`` ⇒ the layer is already up — re-issuing starts would
+        be pointless. Return ``busy``.
+      * another teardown/autoup holds the lock ⇒ ``busy``.
+
+    Idempotent: if ``autodown.json.state`` is already ``waking`` we return an
     ``already-waking`` result WITHOUT starting anything, so two wake triggers
     can never start two parallel wakes.
 
-    Sequence (§4):
-      1. Mark ``state: \"waking\"`` (idempotent guard on entry).
+    The sequence itself (inside the lock) is per §4/§4.5/§5, and each step is
+    logged via daemon_ops.log:
+
+      1. Mark ``state: "waking"`` (idempotent guard on entry).
+      1a. Build the wake plan. An EMPTY plan means we cannot determine what
+          to start (serving.json missing/corrupt ⇒ ``load_serving`` returned
+          None). This is a FAILURE, not a success: do NOT clear the block and
+          do NOT claim ``up`` when zero units were started/confirmed (§8,
+          audit F7). Record the failure loudly and leave the block latched.
       2. Record ``wake_source`` + ``wake_at``.
       3. Start the serving layer: the units teardown() stopped, orchestrator
          FIRST (§4.3) — the exact reverse of teardown order. The wake plan is
@@ -992,23 +1188,51 @@ def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
          ``blocked: false``, remove ``intentional``, clear ``failures``. Order
          is critical — clearing before units are ready would let the first
          watchdog tick see a not-yet-ready cluster and latch the breaker.
-      6. Set ``state: \"up\"``, clear ``wake`` bookkeeping.
+      6. Set ``state: "up"``, clear ``wake`` bookkeeping.
       7. Notify operator (desktop + ops Telegram; both CPU-side).
 
     Failure handling (§8 wake-fails) — if a start fails OR readiness times out,
-    do NOT silently leave ``state:\"waking\"`` forever with the block latched
+    do NOT silently leave ``state:"waking"`` forever with the block latched
     (an invisible wedge). We: record the failure, clear ``intentional`` so the
-    watchdog resumes and can heal, notify loudly, and leave ``state: \"up\"``
+    watchdog resumes and can heal, notify loudly, and leave ``state: "up"``
     (reality-ish: the layer is not confirmed down) with a clear ``reason`` an
-    operator can act on.
+    operator can act on. The ONE exception is the empty-plan failure (§1a):
+    there we do NOT clear the block, because we cannot even determine what to
+    start — clearing it would let the watchdog resurrect an unquantified set.
 
     Returns a result dict with ``result`` in
-    (``up`` | ``already-waking`` | ``start-failed`` | ``not-ready``) plus
-    ``started`` (the units issued start) and ``ready`` (the units confirmed
-    healthy).
+    (``up`` | ``busy`` | ``already-waking`` | ``start-failed`` | ``not-ready`` |
+    ``no-units``) plus ``started`` (the units issued start) and ``ready`` (the
+    units confirmed healthy).
 
     All external side-effects are injectable, so running this NEVER touches the
     live cluster.
+    """
+    if not _acquire_lock(now=lock_now):
+        log("Autodown autoup: autodown.lock held by another teardown/autoup "
+            "— returning busy (no starts issued)")
+        return {"result": "busy", "started": [], "ready": []}
+    try:
+        return _autoup_locked(serving_path=serving_path, run_cmd_fn=run_cmd_fn,
+                              http_check_fn=http_check_fn, clock=clock,
+                              sleep_fn=sleep_fn,
+                              wake_grace_minutes=wake_grace_minutes, now=now,
+                              notify=notify)
+    finally:
+        _release_lock()
+
+
+def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
+                   clock=None, sleep_fn=None, wake_grace_minutes=None, now=None,
+                   notify=True):
+    """The wake sequence itself, run while holding the autodown lock.
+
+    Split out of ``autoup()`` so the O_EXCL lock acquisition + release live in
+    exactly two places (the wrapper's begin / ``finally``) and every gate and
+    early-return here runs under the lock. All existing behavior (idempotent
+    waking guard, start order, block-clear-after-ready, failure recovery) is
+    unchanged; only the ``state=="up"`` gate and the empty-plan failure (§8)
+    are new.
     """
     from . import serving as serving_mod
 
@@ -1017,8 +1241,17 @@ def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     serving = serving_mod.load_serving(serving_path)
     ts = now or now_iso()
 
-    # -- 1. Mark waking — idempotent guard --------------------------------
+    # -- 0. State gate (§8 double-teardown) -------------------------------
+    # If the layer is already recorded up, there is nothing to wake — re-issue
+    # starts would be pointless. Check UNDER the lock so it is atomic with a
+    # concurrent teardown (which also holds the lock to write its "down").
     cfg = load_config()
+    if cfg.get("state") == "up":
+        log("Autodown autoup: state is already \"up\" — returning busy "
+            "(no starts issued)")
+        return {"result": "busy", "started": [], "ready": []}
+
+    # -- 1. Mark waking — idempotent guard --------------------------------
     if cfg.get("state") == "waking":
         # Another wake is already in flight. No-op: never start two parallel
         # wakes from one trigger set.
@@ -1027,6 +1260,28 @@ def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     cfg["state"] = "waking"
     save_config(cfg)
 
+    # Build the wake plan (non-keepalive units only; keepalive excluded).
+    plan = _build_wake_plan(serving)
+
+    # -- 1a. EMPTY plan ⇒ failure, not success (§8 / audit F7) -------------
+    # An empty wake plan means we could not determine what to start
+    # (serving.json missing/corrupt ⇒ load_serving returned None). Reporting
+    # state:"up" while starting nothing would be a vacuous success (audit F7).
+    # This is a FAILURE: do NOT clear the block and do NOT claim "up". Record
+    # the failure loudly (state back to a sane value with a reason) — but the
+    # block STAYS latched, per the audit's explicit instruction, since clearing
+    # it with an unquantified start set is worse than leaving it supervised-off.
+    if not plan:
+        # State was set to "waking" at step 1; _record_wake_failure resets it
+        # to a sane value ("up") with the failure reason. The block is NOT
+        # cleared here (see comment above).
+        msg = ("autodown: wake FAILED — empty wake plan; cannot determine "
+               "what to start (serving.json missing/corrupt?)")
+        _record_wake_failure(msg)
+        _notify(msg, "HSCC Autodown Wake Failed", priority="critical")
+        log(msg, "ERROR")
+        return {"result": "no-units", "started": [], "ready": []}
+
     # -- 2. Record the wake trigger (§4.2) ---------------------------------
     cfg["wake_source"] = cfg.get("wake_source") or "cycle"
     cfg["wake_at"] = ts
@@ -1034,7 +1289,6 @@ def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     log("Autodown autoup: state=waking, wake recorded")
 
     # -- 3. Start the serving layer back up (orchestrator FIRST, §4.3) -----
-    plan = _build_wake_plan(serving)
     started = []
     for entry in plan:
         res = run_cmd(entry["cmd"], timeout=30)
