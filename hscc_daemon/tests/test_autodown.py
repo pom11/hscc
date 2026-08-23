@@ -131,6 +131,26 @@ class TestConfig:
         assert autodown_file.exists()
         assert not (autodown_file.parent / "autodown.json.tmp").exists()
 
+    def test_partial_save_completes_schema(self, autodown_file):
+        """To-Do #2 hardening: saving a partial dict always writes the full schema.
+
+        The historical leak wrote a partial ``{"enabled": True}`` dict to disk
+        because save_config persisted exactly what it was handed. Now the file
+        must ALWAYS carry every §7 key — a config file is never missing keys.
+        """
+        ad.save_config({"enabled": True})  # partial — e.g. a patched loader
+        loaded = ad.load_config()
+        # Every DEFAULT_CONFIG key present on disk after a partial save.
+        assert set(ad.DEFAULT_CONFIG) <= set(loaded)
+        assert loaded["enabled"] is True      # the partial field preserved
+        assert loaded["state"] == "up"        # defaults filled in
+        assert loaded["idle_minutes"] == 10
+        assert loaded["wake_source"] is None
+        assert loaded["reason"] == ""
+        # And the on-disk JSON itself contains every key too.
+        on_disk = json.loads(autodown_file.read_text())
+        assert set(ad.DEFAULT_CONFIG) <= set(on_disk)
+
 
 # ---------------------------------------------------------------------------
 # record_activity

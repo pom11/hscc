@@ -18,10 +18,60 @@ Usage::
 """
 
 import json
+import os
 import subprocess
 import sys
 
 import pytest
+
+
+# ---------------------------------------------------------------------------
+# Autouse ~/.hscc isolation (RELEASE BLOCKER regression)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _isolate_hscc(tmp_path, monkeypatch):
+    """Redirect EVERY ~/.hscc write path to a per-test tmp dir.
+
+    Runs for EVERY test in the package (autouse), so no test can reach the
+    operator's real ~/.hscc even when it forgets to patch individually.
+
+    Why this exists (RELEASE BLOCKER): test_daemon_ops.py patched
+    ``autodown.load_config`` to return ``{"enabled": True}`` but did NOT patch
+    ``save_config`` / ``autodown.AUTODOWN_FILE``. Phase 6 added activity probes
+    to ``cycle()``, so the timing had ``record_activity()`` running during
+    those tests, calling the PATCHED loader and ``save_config``-ing the partial
+    3-key dict straight to the REAL ``~/.hscc/autodown.json`` — silently arming
+    idle-teardown on the live cluster.
+
+    Belt-and-braces: patch module-level ``~/.hscc``-rooted file constants in
+    every hscc_daemon module that holds its own copy (each module computes its
+    own constant at import). Function-scoped monkeypatch is torn down after
+    each test, and any test that patches its own tmp path simply overrides.
+    """
+    base = str(tmp_path / "hscc")
+
+    # NOTE: do NOT eagerly mkdir tmp_path/"hscc" here — the existing
+    # ``tmp_hfcc_dir`` fixture creates that exact directory with
+    # ``mkdir(parents=True)`` (exist_ok=False) and would FileExistsError if we
+    # pre-created it. Writes that need a parent dir create it themselves
+    # (save_config / _save_telegram_offset use os.makedirs(exist_ok=True)).
+
+    # Map module -> {attr: tmp-path}. Each entry is a real ~/.hscc-rooted
+    # constant that could otherwise leak to the live home dir.
+    def _module_attrs():
+        from hscc_daemon import autodown
+        return [
+            (autodown, "AUTODOWN_FILE", os.path.join(base, "autodown.json")),
+            (autodown, "AGENTS_FILE", os.path.join(base, "agents.json")),
+            (autodown, "HTTP_ACTIVITY_STATE",
+             os.path.join(base, "state", "activity.json")),
+            (autodown, "TELEGRAM_OFFSET_FILE",
+             os.path.join(base, "state", "telegram_probe.offset")),
+        ]
+
+    for mod, attr, val in _module_attrs():
+        monkeypatch.setattr(mod, attr, val, raising=False)
 
 
 class _SubprocessResult:
