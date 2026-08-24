@@ -2080,10 +2080,12 @@ class TestLockAndGates:
         assert cfg["state"] != "down"                   # NOT recorded down
         assert cfg["state"] == "up"                     # reality unchanged
 
-    # -- F7: empty wake plan ⇒ no block clear, no "up" -----------------------
-    def test_empty_wake_plan_no_block_clear_no_up(self, tmp_path, monkeypatch,
-                                                  autodown_file):
-        """Empty wake plan ⇒ FAILURE: block NOT cleared, result NOT "up"."""
+    # -- F7 (residual fix): empty wake plan ⇒ block CLEARED, state "error" --
+    def test_empty_wake_plan_clears_block_error_state(
+            self, tmp_path, monkeypatch, autodown_file):
+        """Empty wake plan ⇒ FAILURE (result NOT "up"), but the intentional
+        block IS cleared so the watchdog resumes supervision, and state is the
+        honest "error" (NOT "up" — nothing was started)."""
         serving, runner, bf = self._setup(tmp_path, monkeypatch, autodown_file)
         # Seed a latched intentional block, as teardown left it.
         _lifecycle.save_watchdog_block({"blocked": True, "intentional": "autodown",
@@ -2099,15 +2101,84 @@ class TestLockAndGates:
         assert res["started"] == []
         assert res["ready"] == []
         assert runner.calls == []                       # no start issued
-        # Block NOT cleared — still latched with intentional autodown.
+        # Block IS cleared — intentional removed, blocked false — so the
+        # watchdog resumes ordinary supervision (the residual half-state fix).
         with open(bf) as f:
             blk = json.load(f)
-        assert blk.get("blocked") is True
-        assert blk.get("intentional") == "autodown"
-        # Failure recorded with an honest reason (state up-with-reason).
+        assert blk.get("blocked") is False
+        assert blk.get("intentional") is None
+        # State is honest: "error" (NOT "up" — nothing was started), with the
+        # failure reason recorded for status.
         cfg = ad.load_config()
-        assert cfg["state"] == "up"
+        assert cfg["state"] == "error"
         assert "empty wake plan" in cfg["reason"]
+
+    # -- F7 residual: empty wake plan ⇒ LOUD notify -------------------------
+    def test_empty_wake_plan_notifies_loudly(self, tmp_path, monkeypatch,
+                                             autodown_file):
+        """Empty wake plan ⇒ critical notify delivered (desktop + ops)."""
+        serving, runner, bf = self._setup(tmp_path, monkeypatch, autodown_file)
+        _lifecycle.save_watchdog_block({"blocked": True, "intentional": "autodown",
+                                        "reason": ad.WATCHDOG_TEARDOWN_REASON,
+                                        "blocked_at": NOW.isoformat(),
+                                        "failures": []})
+        _write_down_cfg(autodown_file)
+        notified = []
+        monkeypatch.setattr(ad, "notify_operations",
+                            lambda m: notified.append(("ops", m)))
+        monkeypatch.setattr(ad, "send_macos_notification",
+                            lambda t, m, priority="normal": (
+                                notified.append((t, m, priority))))
+        missing = str(tmp_path / "nope" / "serving.json")
+        res = ad.autoup(serving_path=missing, run_cmd_fn=runner,
+                        http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+                        sleep_fn=_noop_sleep, notify=True)
+        assert res["result"] == "no-units"
+        assert len(notified) >= 2            # ops + desktop both fired
+        assert any(t == "HSCC Autodown Wake Failed" for t, *_ in notified)
+
+    # -- F7 residual: subsequent normal cycle() not wedged — can recover -----
+    def test_cycle_not_wedged_after_empty_plan(self, tmp_path, monkeypatch,
+                                               autodown_file):
+        """After a no-units failure, a subsequent normal cycle() is NOT wedged:
+        the block stays clear (no re-latch) and the system can recover — a
+        later wake with a repaired serving.json brings serving back up."""
+        serving, runner, bf = self._setup(tmp_path, monkeypatch, autodown_file)
+        _lifecycle.save_watchdog_block({"blocked": True, "intentional": "autodown",
+                                        "reason": ad.WATCHDOG_TEARDOWN_REASON,
+                                        "blocked_at": NOW.isoformat(),
+                                        "failures": []})
+        _write_down_cfg(autodown_file)
+        missing = str(tmp_path / "nope" / "serving.json")
+        # 1. Trigger the empty-plan failure (state accounting above step 1:
+        #    cycle() sees state "down" + fresh activity ⇒ autoup ⇒ no-units).
+        r1 = ad.autoup(serving_path=missing, run_cmd_fn=runner,
+                       http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+                       sleep_fn=_noop_sleep, notify=False)
+        assert r1["result"] == "no-units"
+        assert ad.load_config()["state"] == "error"
+        # 2. Next cycle(): state=="error" ⇒ must NOT re-latch the block, must
+        #    NOT tear down, must NOT wedge. Run it with no probes and an idle
+        #    predicate that would otherwise tear down — it must do nothing.
+        ad.cycle(kanban_db=_FakeKb([]), agents_file=self._agents(tmp_path),
+                 now=NOW, keepalive_ok=lambda: True, probes=[])
+        # Block still cleared — cycle() did NOT re-latch intentional.
+        with open(bf) as f:
+            blk = json.load(f)
+        assert blk.get("blocked") is False
+        assert blk.get("intentional") is None
+        assert ad.load_config()["state"] == "error"   # unchanged, not wedged
+        # 3. Recovery: serving.json repaired ⇒ a fresh wake succeeds.
+        _write_down_cfg(autodown_file)
+        _lifecycle.save_watchdog_block({"blocked": True, "intentional": "autodown",
+                                        "reason": ad.WATCHDOG_TEARDOWN_REASON,
+                                        "blocked_at": NOW.isoformat(),
+                                        "failures": []})
+        res = ad.autoup(serving_path=serving, run_cmd_fn=runner,
+                        http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+                        sleep_fn=_noop_sleep, notify=False)
+        assert res["result"] == "up"                   # system recovered
+        assert ad.load_config()["state"] == "up"
 
     # -- F6: keepalive node overlapping teardown set ⇒ abort, no stop --------
     def test_keepalive_overlap_aborts_no_stop(self, tmp_path, monkeypatch,
