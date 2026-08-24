@@ -230,6 +230,8 @@ def _cmd_wake(rest, json_mode):
             print("autodown: wake did NOT complete — empty wake plan "
                   "(no serving units to start).")
             print("  Check ~/.hscc/serving.json.")
+            print("  Watchdog block cleared — normal supervision resumed so "
+                  "the watchdog can heal whatever is actually there.")
             return 1
         else:
             # start-failed / not-ready — autoup() has recorded the failure and
