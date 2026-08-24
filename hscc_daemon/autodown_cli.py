@@ -93,6 +93,10 @@ def _cmd_status(rest, json_mode):
     from hscc_daemon import lifecycle
     block = lifecycle.load_watchdog_block()
 
+    # Kanban interlock resolution — lets an operator see that the interlock is
+    # unevaluable (and why) instead of guessing why autodown never fires.
+    kc = autodown.kanban_check_state()
+
     status = {
         "enabled": bool(cfg.get("enabled")),
         "state": cfg.get("state"),
@@ -103,6 +107,8 @@ def _cmd_status(rest, json_mode):
         "reason": cfg.get("reason"),
         "watchdog_blocked": bool(block.get("blocked")),
         "watchdog_intentional": block.get("intentional"),
+        "kanban_ok": kc["ok"] if kc else None,
+        "kanban_reason": kc["reason"] if kc else "",
     }
     if json_mode:
         print(json.dumps(status))
@@ -126,6 +132,10 @@ def _cmd_status(rest, json_mode):
         print(f"  reason:          {status['reason']}")
     print(f"  watchdog block:  {'set' if status['watchdog_blocked'] else 'clear'}"
           f"{' (intentional: ' + str(status['watchdog_intentional']) + ')' if status['watchdog_intentional'] else ''}")
+    if kc is not None and kc["ok"] is False:
+        print(f"  kanban interlock: UNEVALUABLE — {kc['reason']}")
+    elif kc is not None and kc["ok"]:
+        print("  kanban interlock: ok (board readable)")
     return 0
 
 
