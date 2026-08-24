@@ -75,6 +75,91 @@ class TestKeepaliveNodes:
         assert nodes == set()
 
 
+class TestKeepaliveUnits:
+    """keepalive_units() contract: ONE entry PER NODE keyed ``node`` (singular),
+    i.e. ``{node, port, recipe, id}`` for every member of every keep-alive
+    worker unit (serving.py:172-196).
+
+    A multi-node / multi-tp keep-alive unit yields one entry PER MEMBER, not
+    one per unit — consumers (health.check_workers, through, autodown
+    ``_default_keepalive_ok``) expand and judge each node themselves (skipping
+    tp-peer span members, which serve through the unit's head and expose no
+    endpoint of their own).
+    """
+
+    def _serving(self, units):
+        return {"version": 2, "units": units}
+
+    def test_one_entry_per_node_singular_key(self, monkeypatch):
+        """A multi-node keep-alive unit yields one entry PER NODE, keyed
+        ``node`` (singular) — NOT one per unit with a ``nodes`` list."""
+        from hscc_daemon import serving
+        monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
+        sd = self._serving([
+            {"id": "ka-1", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.247", "10.0.0.248"], "port": 8000, "recipe": "r"},
+        ])
+        units = serving.keepalive_units(sd)
+        assert len(units) == 2                      # one per node, not one per unit
+        assert {u["node"] for u in units} == {"10.0.0.247", "10.0.0.248"}
+        assert all(u["port"] == 8000 for u in units)
+        assert all(u["id"] == "ka-1" for u in units)
+        assert all(u["recipe"] == "r" for u in units)
+        assert all(set(u.keys()) == {"node", "port", "recipe", "id"} for u in units)
+
+    def test_dedupes_dup_nodes_same_unit(self, monkeypatch):
+        """The same unit listed twice is not double-emitted per node."""
+        from hscc_daemon import serving
+        monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
+        sd = self._serving([
+            {"id": "ka-1", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.247"], "port": 8000, "recipe": "r"},
+            {"id": "ka-1", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.247"], "port": 8000, "recipe": "r"},
+        ])
+        units = serving.keepalive_units(sd)
+        assert len(units) == 1
+        assert units[0]["node"] == "10.0.0.247"
+
+    def test_co_located_units_distinct_ports(self, monkeypatch):
+        """Two units sharing a node on different ports yield two entries."""
+        from hscc_daemon import serving
+        monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
+        sd = self._serving([
+            {"id": "ka-a", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.247"], "port": 8000, "recipe": "ra"},
+            {"id": "ka-b", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.247"], "port": 8001, "recipe": "rb"},
+        ])
+        units = serving.keepalive_units(sd)
+        assert {(u["node"], u["port"]) for u in units} == {
+            ("10.0.0.247", 8000), ("10.0.0.247", 8001)}
+
+    def test_non_keepalive_and_orchestrator_excluded(self, monkeypatch):
+        from hscc_daemon import serving
+        monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
+        sd = self._serving([
+            {"id": "wk", "role": "worker", "keepalive": False,
+             "nodes": ["10.0.0.1"], "port": 8000, "recipe": "r"},
+            {"id": "orch", "role": "orchestrator", "keepalive": True,
+             "nodes": ["10.0.0.2"], "port": 8000, "recipe": "r"},
+        ])
+        assert serving.keepalive_units(sd) == []
+
+    def test_env_nodes_emitted(self, monkeypatch):
+        from hscc_daemon import serving
+        monkeypatch.setenv("HSCC_KEEPALIVE_NODES", "10.0.0.9")
+        units = serving.keepalive_units(self._serving([]))
+        assert len(units) == 1
+        assert units[0]["node"] == "10.0.0.9"
+        assert units[0]["id"] == "10.0.0.9:8000"
+
+    def test_none_serving(self, monkeypatch):
+        from hscc_daemon import serving
+        monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
+        assert serving.keepalive_units(None) == []
+
+
 class TestOrchestratorEndpoint:
     """orchestrator_endpoint() constructs the serving URL."""
 

@@ -16,6 +16,7 @@ testable without the daemon running and without touching the real ~/.hscc or
 import datetime
 import json
 import os
+import sys
 
 from .daemon_ops import log
 from .state import now_iso
@@ -159,19 +160,87 @@ def _has_active_work(kanban_db=None):
     return row is not None
 
 
+# Nominal location of the Hermes agent source tree, which holds
+# ``hermes_cli/kanban_db.py``. Mirrors flightdeck/core/kanban.py:77
+# (``_HERMES_AGENT_PATH``) and lifecycle.py:62 / install.py:88,102 which build
+# the same ``~/.hermes/hermes-agent`` tree. Overridable via env so unusual
+# installs and tests can point at it (same override flightdeck respects).
+_HERMES_AGENT_PATH = "~/.hermes/hermes-agent"
+
+# Last outcome of resolving the Hermes kanban library. Surfaced by
+# ``hscc autodown status`` so an operator is never left wondering why the
+# kanban interlock never clears. ``ok`` is None until first resolution, then
+# True/False; ``reason`` describes a failure; ``warned`` guards the
+# once-per-process log (not one line per daemon tick).
+_KANBAN_LOAD = {"ok": None, "reason": "", "warned": False}
+
+
+def _note_kanban_unavailable(reason):
+    """Record that the kanban interlock is unevaluable and log it ONCE.
+
+    Updates the module-level ``_KANBAN_LOAD`` so ``hscc autodown status`` can
+    show the truth, and emits a single WARN log line (not one per daemon tick)
+    via ``daemon_ops.log``. Does not raise — the caller still fails safe (the
+    interlock stays active).
+    """
+    _KANBAN_LOAD["ok"] = False
+    _KANBAN_LOAD["reason"] = reason
+    if not _KANBAN_LOAD["warned"]:
+        _KANBAN_LOAD["warned"] = True
+        try:
+            log(f"Autodown kanban interlock unevaluable: {reason}", "WARN")
+        except Exception:
+            pass  # logging must never break the fail-safe
+
+
 def _load_kanban_db_or_default():
     """Import Hermes' ``hermes_cli.kanban_db`` lazily, or None on failure.
 
     Kept in its own function so ``_has_active_work`` (and this module) never
     depend on Hermes being installed at import time, and so tests can inject.
-    Mirrors flightdeck/core/kanban.py::_load_kanban_db (line 86) which does the
-    same deferred import.
+    Resolves the Hermes runtime dir and puts it on ``sys.path`` only for the
+    duration of this one import — mirroring flightdeck/core/kanban.py:86-111
+    — because ``hermes_cli`` lives under ~/.hermes/hermes-agent and is never
+    on the daemon's ``sys.path``. Honours ``HOME`` (via expanduser) and the
+    ``HERMES_AGENT_PATH`` override the way flightdeck does.
+
+    On any failure it returns None WITHOUT raising; the caller
+    (``_has_active_work``) then fails safe to True (never treat an
+    unevaluable interlock as idle). The failure is recorded + logged once via
+    ``_note_kanban_unavailable`` so ``status`` surfaces it.
     """
+    hermes_path = os.path.expanduser(
+        os.environ.get("HERMES_AGENT_PATH", _HERMES_AGENT_PATH))
+    if not os.path.isdir(hermes_path):
+        _note_kanban_unavailable(
+            f"Hermes agent source not found at {hermes_path!r} — cannot import "
+            f"hermes_cli.kanban_db. Set HERMES_AGENT_PATH if it lives elsewhere.")
+        return None
+    if hermes_path not in sys.path:
+        sys.path.insert(0, hermes_path)
     try:
         from hermes_cli import kanban_db  # noqa: PLC0415
-    except Exception:
+    except Exception as e:
+        _note_kanban_unavailable(
+            f"could not import hermes_cli.kanban_db from {hermes_path!r}: {e}")
         return None
+    _KANBAN_LOAD["ok"] = True
+    _KANBAN_LOAD["reason"] = ""
     return kanban_db
+
+
+def kanban_check_state():
+    """Report the kanban interlock resolution for ``hscc autodown status``.
+
+    Returns None when the daemon has not yet evaluated it, otherwise a dict
+    ``{ok: bool, reason: str}`` describing the last resolution. This lets an
+    operator see — from ``status`` — that the kanban interlock is unevaluable
+    and why, instead of guessing why autodown never fires.
+    """
+    if _KANBAN_LOAD.get("ok") is None:
+        return None
+    return {"ok": _KANBAN_LOAD["ok"], "reason": _KANBAN_LOAD["reason"]}
+
 
 
 def classify(idle_state_block, autodown_state):
@@ -306,32 +375,66 @@ def _agents_idle(agents_file=None):
 
 
 def _default_keepalive_ok():
-    """True iff every present keepalive unit answers healthy (§1f/§6.4).
+    """True iff every present keepalive unit's HEAD node answers healthy (§1f/§6.4).
+
+    A keepalive unit may span multiple nodes (tensor-parallel across two GPUs);
+    only the HEAD node (the span primary) serves an HTTP API — TP peers expose
+    no endpoint of their own and must NOT be probed individually. So we probe
+    the head (first node) of each unit, not every node, reusing how
+    ``health.check_workers`` (health.py:1002) already judges the same units:
+    it computes ``_tp_peer_nodes`` (health.py:407, via cmdlib's
+    ``serving_unit_scoreboard`` — the single source of truth) and treats any
+    NON-primary span member as healthy without a standalone probe. A node that
+    is a TP peer this run is skipped; every remaining (head) node must answer
+    ``/health``.
 
     Keepalive units are exempt from teardown (C4), but if one is itself
     unhealthy we abort — do not tear down the orchestrator while a worker is
     mid-flight relying on it (§6.4). Fail-safe: any inability to load serving,
-    resolve the unit set, or probe a port ⇒ False (abort) — we never tear down
-    on an unverifiable keepalive signal. With no keepalive units present, there
-    is nothing to protect ⇒ True.
+    resolve the unit set, resolve tp-peers, or probe a unit's head ⇒ False
+    (abort teardown) AND log why — we never tear down on an unverifiable
+    keepalive signal. With no keepalive units present, there is nothing to
+    protect ⇒ True.
     """
     try:
         from . import serving
         from .util import http_check
-    except Exception:
+        from .health import _tp_peer_nodes
+    except Exception as e:
+        log(f"Autodown keepalive check unavailable: {e}", "WARN")
         return False
     try:
         units = serving.keepalive_units(serving.load_serving())
-    except Exception:
+    except Exception as e:
+        log(f"Autodown keepalive: cannot resolve unit set: {e} — aborting "
+            f"teardown", "WARN")
         return False
     if not units:
         return True  # no keepalive units to be unhealthy
+    try:
+        # Non-primary members of multi-node/tp spans serve through their head
+        # and expose no endpoint of their own — reusing check_workers' exact
+        # health judgment for the same units.
+        tp_peers = _tp_peer_nodes()
+    except Exception as e:
+        log(f"Autodown keepalive: tp-peer resolution failed: {e} — aborting "
+            f"teardown", "WARN")
+        return False
     for u in units:
+        node = u["node"]
+        if node in tp_peers:
+            # TP peer serves through the unit's head — no standalone endpoint,
+            # so it cannot independently be down. Do not probe it.
+            continue
         try:
-            url = f"http://{u['node']}:{u['port']}/health"
+            url = f"http://{node}:{u['port']}/health"
             if not http_check(url, timeout=5).get("ok"):
+                log(f"Autodown keepalive: unit {u['id']} head "
+                    f"{node}:{u['port']} unhealthy — aborting teardown", "WARN")
                 return False
-        except Exception:
+        except Exception as e:
+            log(f"Autodown keepalive: probe of {u['id']} "
+                f"({node}:{u['port']}) failed: {e} — aborting teardown", "WARN")
             return False
     return True
 

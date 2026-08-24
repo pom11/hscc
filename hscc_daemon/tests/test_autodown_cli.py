@@ -133,6 +133,32 @@ class TestStatus:
         assert "idle_minutes=7" in out
         assert "down" in out.lower()
 
+    def test_status_surfaces_unevaluable_kanban_interlock(
+            self, capsys, autodown_file, block_file, monkeypatch, tmp_path):
+        """When the kanban lib cannot be resolved, status shows the interlock
+        is UNEVALUABLE and why — the operator is never left guessing."""
+        monkeypatch.setenv("HERMES_AGENT_PATH", str(tmp_path / "missing"))
+        from hscc_daemon import autodown
+        autodown._load_kanban_db_or_default()  # records the failure
+        rc = cmd_autodown(["status"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "UNEVALUABLE" in out
+        assert "missing" in out
+
+    def test_status_json_has_kanban_fields(self, capsys, autodown_file,
+                                           block_file, monkeypatch):
+        # A pristine resolution state — nothing evaluated yet this "run".
+        from hscc_daemon import autodown
+        monkeypatch.setitem(autodown._KANBAN_LOAD, "ok", None)
+        monkeypatch.setitem(autodown._KANBAN_LOAD, "reason", "")
+        rc = cmd_autodown(["status", "--json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        # kanban_ok is None until the daemon evaluates the interlock.
+        assert data["kanban_ok"] is None
+        assert "kanban_reason" in data
+
 
 # ---------------------------------------------------------------------------
 # enable — resets the idle timer, non-acting

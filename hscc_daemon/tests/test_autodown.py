@@ -6,6 +6,7 @@ daemon.
 """
 
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 
@@ -242,6 +243,210 @@ class TestHasActiveWork:
         kb = _FakeKb([])
         ad._has_active_work(kb)
         assert kb.conn_closed == 1
+
+
+# ---------------------------------------------------------------------------
+# _load_kanban_db_or_default — path resolution + fail-safe + status surfacing
+# ---------------------------------------------------------------------------
+
+class TestLoadKanbanDb:
+    """``_load_kanban_db_or_default`` must find ``hermes_cli`` even when the
+    daemon's ``sys.path`` holds only the repo (no hermes-agent), honour
+    ``HERMES_AGENT_PATH``/``HOME``, fail safe to None when genuinely
+    unreachable, and record the outcome for ``hscc autodown status``."""
+
+    def _write_fake_hermes_cli(self, tmp_path):
+        """Plant a fake ``hermes_cli/kanban_db.py`` under tmp_path/hermes-agent
+        so the resolver finds it exactly the way it finds the real tree."""
+        agent = tmp_path / "hermes-agent"
+        cli = agent / "hermes_cli"
+        cli.mkdir(parents=True)
+        (cli / "__init__.py").write_text("")
+        (cli / "kanban_db.py").write_text(
+            "# fake\n"
+            "def connect_closing():\n"
+            "    raise NotImplementedError\n"
+        )
+        return agent
+
+    def test_resolves_from_hermes_agent_path(self, tmp_path, monkeypatch):
+        """HERMES_AGENT_PATH points at a dir with hermes_cli ⇒ it resolves and
+        works, even though the dir is not on sys.path by default."""
+        agent = self._write_fake_hermes_cli(tmp_path)
+        # Remove any pre-existing hermes_cli so we exercise the resolution, not
+        # a leftover on sys.path.
+        import hscc_daemon.autodown as _ad  # noqa: F401
+        monkeypatch.delenv("HERMES_AGENT_PATH", raising=False)
+        monkeypatch.setattr(ad, "_HERMES_AGENT_PATH", str(agent))
+        kb1 = ad._load_kanban_db_or_default()
+        # Force a fresh sys.path without the agent dir, then re-resolve via env.
+        monkeypatch.setenv("HERMES_AGENT_PATH", str(agent))
+        kb2 = ad._load_kanban_db_or_default()
+        assert kb1 is not None
+        assert kb2 is not None
+        assert ad.kanban_check_state() == {"ok": True, "reason": ""}
+
+    def test_calls_real_kanban_connect(self, tmp_path, monkeypatch):
+        """The resolved lib is genuinely importable and usable (has
+        connect_closing), not a stub — the path resolution reaches the real
+        hermes_cli package structure."""
+        kb = ad._load_kanban_db_or_default()
+        if kb is None:
+            pytest.skip("real hermes_cli not present in this environment")
+        assert hasattr(kb, "connect_closing")
+
+    def test_unreachable_failsafe_true_and_surfaced(
+            self, tmp_path, monkeypatch, capsys):
+        """Unreachable kanban ⇒ None ⇒ _has_active_work stays True (fail-safe),
+        the state is surfaced via kanban_check_state for status, no raise."""
+        monkeypatch.setenv("HERMES_AGENT_PATH", str(tmp_path / "does-not-exist"))
+        kb = ad._load_kanban_db_or_default()
+        assert kb is None
+        assert ad._has_active_work() is True  # fail-safe preserved
+        state = ad.kanban_check_state()
+        assert state is not None and state["ok"] is False
+        assert "does-not-exist" in state["reason"]
+
+    def test_logged_once_not_per_tick(self, tmp_path, monkeypatch, capsys):
+        """Repeated resolution of an unreachable lib logs ONCE, not per call."""
+        import hscc_daemon.daemon_ops as do
+        monkeypatch.setenv("HERMES_AGENT_PATH", str(tmp_path / "missing"))
+        # reset the log-once guard so this test's count is independent
+        monkeypatch.setitem(ad._KANBAN_LOAD, "warned", False)
+        # The autouse _isolate_hscc fixture redirects do.LOG_FILE to the tmp
+        # ~/.hscc/daemon.log but may not create its parent — ensure it exists
+        # so log() actually writes the file (it silently no-ops otherwise).
+        os.makedirs(os.path.dirname(do.LOG_FILE), exist_ok=True)
+        ad._load_kanban_db_or_default()
+        ad._load_kanban_db_or_default()
+        ad._load_kanban_db_or_default()
+        logfile = do.LOG_FILE
+        txt = ""
+        if os.path.exists(logfile):
+            with open(logfile) as f:
+                txt = f.read()
+        n = txt.count("kanban interlock unevaluable")
+        assert n == 1, f"expected exactly one log line, got {n}: {txt!r}"
+
+    def test_state_resets_to_ok_on_success(self, tmp_path, monkeypatch):
+        """After a failure, a later success restores ok=True / empty reason."""
+        agent = self._write_fake_hermes_cli(tmp_path)
+        monkeypatch.setattr(ad, "_HERMES_AGENT_PATH", str(tmp_path / "missing"))
+        assert ad._load_kanban_db_or_default() is None
+        monkeypatch.setattr(ad, "_HERMES_AGENT_PATH", str(agent))
+        assert ad._load_kanban_db_or_default() is not None
+        assert ad.kanban_check_state() == {"ok": True, "reason": ""}
+
+
+# ---------------------------------------------------------------------------
+# _default_keepalive_ok — head-only probing for multi-node/tp keepalive units
+# ---------------------------------------------------------------------------
+
+class TestDefaultKeepaliveOk:
+    """``_default_keepalive_ok`` must probe each keepalive unit's HEAD (the
+    span primary) and treat TP-peer members as healthy through it — reusing
+    health.check_workers' tp-peer judgment, never inventing a second one.
+
+    Fixtures here monkeypatch ``serving.keepalive_units`` / ``serving.load_serving``
+    and ``health._tp_peer_nodes`` so the REAL code paths (http_check) run."""
+
+    def _patch(self, monkeypatch, units, tp_peers, probes):
+        import hscc_daemon.health as health_mod
+        import hscc_daemon.serving as serving_mod
+        monkeypatch.setattr(serving_mod, "load_serving",
+                            lambda: {"units": units or []})
+        monkeypatch.setattr(serving_mod, "keepalive_units",
+                            lambda s: self._flatten(units or []))
+        monkeypatch.setattr(health_mod, "_tp_peer_nodes",
+                            lambda: set(tp_peers or []))
+
+        calls = []
+
+        def _probe(url, timeout=5):
+            calls.append(url)
+            return {"ok": probes.get(url, False),
+                    "status": 200 if probes.get(url, False) else 0}
+
+        import hscc_daemon.util as util_mod
+        monkeypatch.setattr(util_mod, "http_check", _probe)
+        return calls
+
+    def _flatten(self, units):
+        """Keepalive units contract: ONE entry per node {node, port, recipe,
+        id} (serving.py:172-196). Simulates the real flattening."""
+        out = []
+        for u in units:
+            port = u.get("port", 8000)
+            for node in (u.get("nodes") or []):
+                out.append({"node": node, "port": port,
+                            "recipe": u.get("recipe"),
+                            "id": u.get("id") or f"{node}:{port}"})
+        return out
+
+    def test_tp_head_healthy_peer_not_serving_ok(
+            self, monkeypatch):
+        """A multi-node keepalive unit (247 head, 248 TP peer): the peer does
+        not serve HTTP and is a known tp_peer, so it is NOT probed; the head
+        answers ⇒ keepalive_ok True."""
+        units = [{"id": "ka-1", "nodes": ["247", "248"], "port": 8000,
+                  "recipe": "r"}]
+        calls = self._patch(
+            monkeypatch, units, tp_peers=["248"],
+            probes={"http://247:8000/health": True})
+        assert ad._default_keepalive_ok() is True
+        # Only the head was probed; the tp peer was never hit.
+        assert calls == ["http://247:8000/health"]
+
+    def test_head_down_failsafe_false(self, monkeypatch):
+        """The unit's head does not answer ⇒ False (abort teardown)."""
+        units = [{"id": "ka-1", "nodes": ["247", "248"], "port": 8000,
+                  "recipe": "r"}]
+        calls = self._patch(
+            monkeypatch, units, tp_peers=["248"],
+            probes={"http://247:8000/health": False})
+        assert ad._default_keepalive_ok() is False
+        assert calls == ["http://247:8000/health"]
+
+    def test_single_node_unit_still_works(self, monkeypatch):
+        """A single-node keepalive unit (no tp peers) still answers ⇒ True."""
+        units = [{"id": "ka-solo", "nodes": ["200"], "port": 8001,
+                  "recipe": "r"}]
+        calls = self._patch(
+            monkeypatch, units, tp_peers=[],
+            probes={"http://200:8001/health": True})
+        assert ad._default_keepalive_ok() is True
+        assert calls == ["http://200:8001/health"]
+
+    def test_single_node_down_false(self, monkeypatch):
+        """A single-node unit whose only node is down ⇒ False."""
+        units = [{"id": "ka-solo", "nodes": ["200"], "port": 8001,
+                  "recipe": "r"}]
+        self._patch(monkeypatch, units, tp_peers=[],
+                    probes={"http://200:8001/health": False})
+        assert ad._default_keepalive_ok() is False
+
+    def test_no_keepalive_units_ok(self, monkeypatch):
+        """No keepalive units ⇒ nothing to protect ⇒ True."""
+        self._patch(monkeypatch, [], tp_peers=[], probes={})
+        assert ad._default_keepalive_ok() is True
+
+    def test_probe_error_failsafe_false(self, monkeypatch):
+        """A probe that raises (network error) ⇒ False (abort), not ignored."""
+        units = [{"id": "ka-1", "nodes": ["247"], "port": 8000, "recipe": "r"}]
+        import hscc_daemon.serving as serving_mod
+        import hscc_daemon.health as health_mod
+        monkeypatch.setattr(serving_mod, "load_serving",
+                            lambda: {"units": units})
+        monkeypatch.setattr(serving_mod, "keepalive_units",
+                            lambda s: self._flatten(units))
+        monkeypatch.setattr(health_mod, "_tp_peer_nodes", lambda: set())
+        import hscc_daemon.util as util_mod
+
+        def _boom(url, timeout=5):
+            raise OSError("conn refused")
+
+        monkeypatch.setattr(util_mod, "http_check", _boom)
+        assert ad._default_keepalive_ok() is False
 
 
 # ---------------------------------------------------------------------------
