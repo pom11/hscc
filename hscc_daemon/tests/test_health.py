@@ -1211,5 +1211,127 @@ class TestCheckLocal:
         assert svc["hscc_daemon"]["running"] is False
 
 
+class TestCheckNas:
+    """check_nas() must verify the NAS path is a REAL NFS mount, not just an
+    existing directory (silent-failure bug fix: a bare local dir left behind
+    when the NFS export/mount is lost must report ok=False, and local disk
+    figures must never be surfaced as NAS figures)."""
+
+    def _check(self, monkeypatch, tmp_hfcc_dir, mount_entries, *, nas_subpath="nas",
+               probe=None):
+        """Run check_nas with a controlled mount table and a tmp NAS dir.
+
+        Returns (health_module, state_calls_list, nas_mount_path).
+        """
+        from hscc_daemon import health
+        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
+        monkeypatch.setattr(health, "_mount_table", lambda: mount_entries)
+        state_calls = []
+        monkeypatch.setattr(
+            health, "write_state",
+            lambda name, data: state_calls.append((name, data)))
+        if probe is not None:
+            monkeypatch.setattr(health, "_probe_mount", probe)
+        nas_mount = tmp_hfcc_dir / nas_subpath
+        nas_mount.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(health, "NAS_MOUNT", str(nas_mount))
+        monkeypatch.setattr(health, "NAS_PROBE_TIMEOUT", 5.0)
+        return health, state_calls, nas_mount
+
+    def test_exists_not_a_mount_reports_false(self, tmp_hfcc_dir, monkeypatch):
+        """Bare existing directory NOT in the mount table => ok False, and the
+        message says not-mounted (the silent-failure bug)."""
+        health, state_calls, nas_mount = self._check(
+            monkeypatch, tmp_hfcc_dir, mount_entries=[])
+        assert health.check_nas() is False
+        _, data = state_calls[-1]
+        assert data["ok"] is False
+        assert "not an NFS mount" in data["details"]["message"]
+        assert data["details"]["in_mount_table"] is False
+        assert data["details"]["mount_is_distinct_device"] is False
+
+    def test_not_a_mount_surfaces_no_local_disk_figures(self, tmp_hfcc_dir, monkeypatch):
+        """No LOCAL disk figures may be reported as NAS figures when unmounted
+        (df on an unmounted path silently resolves to the parent filesystem)."""
+        health, state_calls, nas_mount = self._check(
+            monkeypatch, tmp_hfcc_dir, mount_entries=[])
+        health.check_nas()
+        _, data = state_calls[-1]
+        details = data["details"]
+        for key in ("disk_total", "disk_used", "disk_avail", "disk_pct"):
+            assert key not in details, f"{key} must not appear when unmounted"
+
+    def test_real_mount_with_expected_content_reports_true(self, tmp_hfcc_dir, monkeypatch):
+        """Path listed in the mount table with expected content => ok True."""
+        health, state_calls, nas_mount = self._check(
+            monkeypatch, tmp_hfcc_dir, mount_entries=[])
+        monkeypatch.setattr(health, "_mount_table",
+                            lambda: [(str(nas_mount), "nfs", "//nas/export")])
+        # Provide expected content marker
+        (nas_mount / "hub").mkdir(parents=True, exist_ok=True)
+        assert health.check_nas() is True
+        _, data = state_calls[-1]
+        assert data["ok"] is True
+        assert data["details"]["has_hub"] is True
+        assert data["details"]["in_mount_table"] is True
+
+    def test_real_mount_without_content_distinguished(self, tmp_hfcc_dir, monkeypatch):
+        """A genuinely-mounted-but-EMPTY NAS is a different condition from "not
+        mounted": it is still a real mount => ok True, with a note that the
+        expected content markers are absent."""
+        health, state_calls, nas_mount = self._check(
+            monkeypatch, tmp_hfcc_dir, mount_entries=[])
+        monkeypatch.setattr(health, "_mount_table",
+                            lambda: [(str(nas_mount), "nfs", "//nas/export")])
+        assert health.check_nas() is True
+        _, data = state_calls[-1]
+        assert data["ok"] is True
+        assert "empty NAS" in data["details"]["message"]
+
+    def test_missing_directory_reports_false(self, tmp_hfcc_dir, monkeypatch):
+        """Directory missing entirely => ok False."""
+        from hscc_daemon import health
+        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
+        state_calls = []
+        monkeypatch.setattr(
+            health, "write_state",
+            lambda name, data: state_calls.append((name, data)))
+        monkeypatch.setattr(health, "NAS_MOUNT",
+                            str(tmp_hfcc_dir / "does-not-exist"))
+        monkeypatch.setattr(health, "NAS_PROBE_TIMEOUT", 5.0)
+        assert health.check_nas() is False
+        _, data = state_calls[-1]
+        assert data["ok"] is False
+        assert "missing" in data["details"]["message"]
+
+    def test_probe_timeout_reports_false_promptly(self, tmp_hfcc_dir, monkeypatch):
+        """A hung filesystem probe (wedged NFS handle) must time out, report
+        ok False, and return promptly — the test does NOT actually sleep."""
+        import time as _time
+
+        def hanging_probe(path):            # blocks forever (daemon-thread bound)
+            while True:
+                _time.sleep(1)
+
+        nas_mount = tmp_hfcc_dir / "nas"
+        nas_mount.mkdir(parents=True, exist_ok=True)
+        health, state_calls, nas_mount = self._check(
+            monkeypatch, tmp_hfcc_dir,
+            mount_entries=[(str(nas_mount), "nfs", "//nas/export")],
+            probe=hanging_probe)
+        monkeypatch.setattr(health, "NAS_PROBE_TIMEOUT", 0.05)  # don't wait 5s
+        start = _time.monotonic()
+        assert health.check_nas() is False
+        elapsed = _time.monotonic() - start
+        assert elapsed < 3.0, f"check_nas took {elapsed:.2f}s on a hung probe"
+        _, data = state_calls[-1]
+        assert data["ok"] is False
+        assert "timed out" in data["details"]["message"]
+        # No figures must be surfaced from a timed-out probe
+        details = data["details"]
+        for key in ("disk_total", "disk_used", "disk_avail", "disk_pct"):
+            assert key not in details
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import datetime
 import time
+import threading
 from pathlib import Path
 
 from . import serving
@@ -37,6 +38,13 @@ IDLE_TIMEOUT_MINUTES = 30
 NAS_MOUNT = os.environ.get(
     "HSCC_NAS_MOUNT",
     "/Volumes/NAS" if sys.platform == "darwin" else "/mnt/nas")
+
+# Upper bound on any single filesystem probe of the NAS (stat/listdir/df and
+# the mount-table read). A stale/wedged NFS handle can block these calls
+# indefinitely, so every probe runs inside a timeout-bounded daemon thread (see
+# _run_bounded). Env-overridable; default 5s. A timeout reports ok=False, never
+# hangs the daemon thread and never surfaces stale figures as NAS data.
+NAS_PROBE_TIMEOUT = float(os.environ.get("HSCC_NAS_PROBE_TIMEOUT", "5"))
 
 # ── Worker auto-heal (WD1) ─────────────────────────────────────────────────
 # A worker unit that stays DOWN across WORKER_AUTOHEAL_DEBOUNCE CONSECUTIVE
@@ -624,45 +632,248 @@ def check_heartbeat():
 
 
 def check_nas():
-    """NAS check (every 30s): check the local NAS mount point."""
+    """NAS check (every 30s): verify the local NAS path is a REAL NFS mount.
+
+    Fix for a silent-failure bug: the old check reported ok=true whenever the
+    directory existed, so a bare local directory left behind after the NFS
+    export/mount was lost looked perfectly healthy — and `df` on an unmounted
+    path silently resolved to the LOCAL boot disk, reporting local figures as
+    NAS figures. The new check requires the path to actually be in the OS mount
+    table and/or to sit on a different device than its parent, NEVER reports
+    local disk figures as NAS figures when unmounted, and bounds every
+    filesystem probe in a timeout so a wedged (stale-handle) NFS mount cannot
+    hang the daemon thread.
+    """
     log("Running NAS check")
-    results = {}
+    results = {"local_mount": NAS_MOUNT}
 
-    # Check local NFS mount (module-level NAS_MOUNT, env-overridable)
+    # The path must at least exist on disk. (Existence alone is NOT enough —
+    # a bare directory satisfies it — but if it does not exist at all, we're
+    # done immediately.)
     exists = os.path.exists(NAS_MOUNT)
-    results["local_mount"] = NAS_MOUNT
     results["mount_exists"] = exists
+    results["is_dir"] = os.path.isdir(NAS_MOUNT)
+    if not exists:
+        results["message"] = f"{NAS_MOUNT} missing (NAS not mounted)"
+        _write_nas(False, results)
+        return False
 
-    if exists:
-        try:
-            st = shutil.disk_usage(NAS_MOUNT)
-            results["disk_total"] = f"{st.total // (1024**3)}G"
-            results["disk_used"] = f"{st.used // (1024**3)}G"
-            results["disk_avail"] = f"{st.free // (1024**3)}G"
-            results["disk_pct"] = f"{st.used * 100 / st.total:.1f}%"
-        except OSError:
-            results["disk_error"] = "df failed"
+    # Signal 1 — the OS mount table. Parsing the table never touches the NAS
+    # filesystem, so a wedged (stale-handle) NFS mount cannot block it. This is
+    # authoritative for "is it actually mounted": a bare directory does not
+    # appear in the table; a real mount does.
+    entry = _mount_entry_for(NAS_MOUNT)
+    results["in_mount_table"] = entry is not None
+    results["mount_fstype"] = entry[1] if entry else None
+    results["mount_source"] = entry[2] if entry else None
 
-        # Check key directories exist
-        results["has_huggingface"] = os.path.isdir(os.path.join(NAS_MOUNT, "huggingface"))
-        results["has_hub"] = os.path.isdir(os.path.join(NAS_MOUNT, "hub"))
-        results["has_memori"] = os.path.isfile(os.path.join(NAS_MOUNT, "hermes_memori_byodb.db"))
+    # Signal 2 — the filesystem probe, wrapped in a timeout-bound daemon thread
+    # so a wedged handle cannot hang the daemon. A timeout reports ok=False and
+    # surfaces NO figures (never treats a stale read as NAS data).
+    done, probe = _run_bounded(_probe_mount, NAS_PROBE_TIMEOUT, NAS_MOUNT)
+    if not done:
+        results["message"] = (
+            f"NAS probe timed out after {NAS_PROBE_TIMEOUT:g}s — "
+            "stale/wedged mount?"
+        )
+        _write_nas(False, results)
+        return False
 
-        # Try to count cached models
-        try:
-            hf_dir = os.path.join(NAS_MOUNT, "huggingface")
-            if os.path.isdir(hf_dir):
-                hf_items = [d for d in os.listdir(hf_dir) if not d.startswith(".")]
-                results["huggingface_cached_items"] = len(hf_items)
-        except OSError:
-            pass
+    # Signal 3 — device id. A real mount changes st_dev vs. its parent; an
+    # empty local directory does not. Cheap and robust corroboration.
+    results["mount_is_distinct_device"] = (
+        probe.get("st_dev") is not None
+        and probe.get("parent_dev") is not None
+        and probe.get("st_dev") != probe.get("parent_dev")
+    )
+
+    # A path is a real NAS mount iff it is in the mount table OR sits on a
+    # distinct device from its parent (covers the rare case where the mount
+    # table is unreachable in a restricted environment).
+    is_mount = (entry is not None) or results["mount_is_distinct_device"]
+    if not is_mount:
+        # Bare local directory where the NFS mount used to be — the silent-
+        # failure bug. Do NOT surface the probe's disk figures: in this state
+        # `df` resolves to the LOCAL boot disk, which we must not report as NAS.
+        results["message"] = (
+            f"{NAS_MOUNT} exists but is not an NFS mount (export/mount lost)"
+        )
+        _write_nas(False, results)
+        return False
+
+    # Genuine mount — safe to surface probe figures as NAS figures.
+    for _k in ("st_dev", "parent_dev"):
+        probe.pop(_k, None)
+    results.update(probe)
+
+    # A genuinely-mounted-but-empty NAS is a DIFFERENT (healthy) condition from
+    # "not mounted" — it is still a real mount, so ok stays True; we just note
+    # that the expected content markers are absent.
+    if not (probe.get("has_hub") or probe.get("has_huggingface")):
+        results["message"] = (
+            f"{NAS_MOUNT} is an NFS mount but no expected content found "
+            "(hub/ or huggingface/) — genuinely empty NAS?"
+        )
     else:
-        results["error"] = f"{NAS_MOUNT} not mounted"
+        results["message"] = f"{NAS_MOUNT} is an NFS mount"
 
-    ok = exists
+    _write_nas(True, results)
+    return True
+
+
+def _write_nas(ok, results):
+    """Persist a NAS check result and emit its log line."""
     write_state("nas", {"ok": ok, "details": results})
-    log(f"NAS check: ok={ok} mount_exists={exists}")
-    return ok
+    log(f"NAS check: ok={ok} {results.get('message', '')}")
+
+
+def _norm_path(path):
+    """Normalize a path for string comparison (never touches the filesystem)."""
+    return os.path.normpath(path.rstrip("/")) if isinstance(path, str) else path
+
+
+def _mount_table():
+    """Return [(mount_point, fstype, source), ...] parsed from the OS mount table.
+
+    Reads the platform mount table WITHOUT touching the NAS filesystem, so a
+    wedged (stale-handle) NFS mount can never block this. Linux reads
+    /proc/mounts (a plain file read that never blocks); macOS and other
+    platforms shell out to `mount` (which reads the kernel mount table, not the
+    NFS server) through a timeout-bounded run_cmd. Any failure returns [] so
+    the caller still corroborates with the st_dev signal.
+    """
+    try:
+        if sys.platform == "linux":
+            with open("/proc/mounts") as f:
+                lines = f.read().splitlines()
+            parse = _parse_linux_mount_line
+        else:
+            r = run_cmd(["mount"], timeout=NAS_PROBE_TIMEOUT)
+            if not r.get("ok"):
+                return []
+            lines = r["output"].splitlines()
+            parse = _parse_osx_mount_line
+    except OSError:
+        return []
+
+    entries = []
+    for line in lines:
+        e = parse(line)
+        if e is not None:
+            entries.append(e)
+    return entries
+
+
+def _parse_linux_mount_line(line):
+    """Parse a /proc/mounts line ``device mount_point fstype opts ...``."""
+    parts = line.split()
+    if len(parts) < 3:
+        return None
+    return (parts[1], parts[2], parts[0])   # (mount_point, fstype, source)
+
+
+def _parse_osx_mount_line(line):
+    """Parse a macOS `mount` line ``source on /mount/point (options...)``.
+
+    macOS reports the filesystem type as a bare option among the parentheses
+    (e.g. ``(nfs, ...)``, ``(apfs, ...)``); options with ``=`` are key=value and
+    not the type.
+    """
+    m = re.match(r"^(\S+)\s+on\s+(\S+)\s+\(([^)]*)\)", line)
+    if not m:
+        return None
+    source, mount_point, options = m.group(1), m.group(2), m.group(3)
+    fstype = None
+    for opt in options.split(","):
+        opt = opt.strip()
+        if opt and "=" not in opt:
+            fstype = opt
+            break
+    return (mount_point, fstype or "unknown", source)
+
+
+def _mount_entry_for(path):
+    """Return (mount_point, fstype, source) for `path` from the mount table, or None.
+
+    Matches on the normalized mount point, so a bare directory that is not
+    actually mounted returns None. For our use the mount point is the NAS path
+    itself, so an exact (normalized) string match is correct — no prefix
+    matching of the penultimate directory. This runs string-only (never touches
+    the NAS filesystem), so it cannot block on a wedged handle.
+    """
+    target = _norm_path(path)
+    for (mp, fstype, source) in _mount_table():
+        if _norm_path(mp) == target:
+            return (mp, fstype, source)
+    return None
+
+
+def _run_bounded(fn, timeout, *args):
+    """Run fn(*args) in a daemon thread; return (True, result) or (False, None).
+
+    The worker thread is daemonised, so if it has not finished within `timeout`
+    (e.g. a wedged NFS mount blocking stat/listdir/df) it is abandoned and this
+    returns (False, None) — the caller reports a timeout and never hangs the
+    daemon. Any exception raised by fn is re-raised in the caller thread.
+    """
+    box = {"done": False, "value": None, "exc": None}
+
+    def _target():
+        try:
+            box["value"] = fn(*args)
+        except BaseException as e:  # capture any blocking error
+            box["exc"] = e
+        finally:
+            box["done"] = True
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(timeout)
+    if not box["done"]:
+        return False, None
+    if box["exc"] is not None:
+        raise box["exc"]
+    return True, box["value"]
+
+
+def _probe_mount(path):
+    """Gather NAS filesystem facts for `path`. Returns a dict.
+
+    Assumes `path` exists (checked by the caller). May block if the NFS handle
+    is wedged, which is exactly why the caller runs it inside a timeout-bound
+    daemon thread. Fully exception-safe: any OSError yields a partial dict with
+    a probe_error note rather than raising. disk_* figures are only surfaced by
+    the caller once it has confirmed `path` is a real mount — otherwise `df`
+    would resolve to the LOCAL boot disk.
+    """
+    r = {}
+    try:
+        try:
+            r["parent_dev"] = os.stat(os.path.dirname(path)).st_dev
+        except OSError:
+            r["parent_dev"] = None
+        try:
+            r["st_dev"] = os.stat(path).st_dev
+        except OSError:
+            r["st_dev"] = None
+        try:
+            du = shutil.disk_usage(path)
+            r["disk_total"] = f"{du.total // (1024**3)}G"
+            r["disk_used"] = f"{du.used // (1024**3)}G"
+            r["disk_avail"] = f"{du.free // (1024**3)}G"
+            r["disk_pct"] = f"{du.used * 100 / du.total:.1f}%"
+        except OSError:
+            r["disk_error"] = "df failed"
+        r["has_huggingface"] = os.path.isdir(os.path.join(path, "huggingface"))
+        r["has_hub"] = os.path.isdir(os.path.join(path, "hub"))
+        r["has_memori"] = os.path.isfile(os.path.join(path, "hermes_memori_byodb.db"))
+        hf_dir = os.path.join(path, "huggingface")
+        if os.path.isdir(hf_dir):
+            hf_items = [d for d in os.listdir(hf_dir) if not d.startswith(".")]
+            r["huggingface_cached_items"] = len(hf_items)
+    except OSError:
+        r["probe_error"] = "filesystem probe failed"
+    return r
 
 
 def check_idle_monitor():
