@@ -40,7 +40,7 @@ AUTODOWN_LOCK = os.path.expanduser("~/.hscc/autodown.lock")
 DEFAULT_CONFIG = {
     "enabled": False,            # C5: OFF by default
     "idle_minutes": 10,          # default 10; 0 = only via explicit wake
-    "state": "up",               # one of: up | waking | down
+    "state": "up",               # one of: up | waking | down | error
     "last_activity_iso": None,   # advanced by every activity source (§1d)
     "down_since": None,
     "wake_source": None,
@@ -188,11 +188,13 @@ def classify(idle_state_block, autodown_state):
         The watchdog must NOT resurrect it.
     ``should_be_up``
         The block is latched with ``intentional == "autodown"`` but the layer
-        is not confirmed down (state is ``waking``/``up``/missing) — an
+        is not confirmed down (state is ``waking``/``up``/``error``/missing) — an
         in-progress or failed transition. The layer should be up: finish the
         wake (or resume supervision). Never leave it parked.
     ``healthy``
-        No intentional autodown block — the watchdog supervises normally.
+        No intentional autodown block — the watchdog supervises normally. A
+        wake-failure ``state: \"error\"`` lands here once its block is cleared:
+        the watchdog supervises and can heal whatever is actually there.
 
     Later phases extend this per-unit (which specific units are in the
     teardown set); Phase 1 provides the layer-level decision table the
@@ -408,6 +410,10 @@ def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
     4. ``state == down`` ⇒ wake seam (§4): if an activity event arrived since
        we went down, bring the serving layer back up via autoup() (Phase 5,
        called lazily).
+    4a. ``state == error`` ⇒ a wake failed to determine any units; autoup has
+       cleared the intentional block and released the layer to the watchdog.
+       Do nothing (no re-latch, no teardown, no wake seam) — the watchdog
+       owns supervision until serving.json is repaired.
     5. ``state == up`` ⇒ evaluate the full idle conjunction (§1/§6). Any single
        false, or any unverifiable signal, ⇒ NOT idle ⇒ return without teardown
        (fail-safe direction is mandatory).
@@ -454,6 +460,15 @@ def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
         # how _invoke_teardown handles the Phase 4 seam.
         if _fresh_activity_since_down(cfg):
             _invoke_autoup()
+        return
+    if state == "error":
+        # §8 residual: a wake failed to determine ANY units to start and
+        # autoup has cleared the intentional block, releasing the layer to
+        # ordinary watchdog supervision. cycle() must NOT re-latch the block
+        # (that would re-suppress the watchdog with nothing running), must NOT
+        # tear down (there is nothing to tear down and the layer may be down),
+        # and must NOT run the wake seam (there are no units to start until
+        # serving.json is fixed). The watchdog owns supervision; do nothing.
         return
     # state == "up": evaluate the full idle predicate (§1/§6).
     if not _is_idle(cfg, kanban_db=kanban_db, agents_file=agents_file,
@@ -1119,16 +1134,25 @@ def _clear_intentional_block(reason=None):
     return block
 
 
-def _record_wake_failure(msg):
+def _record_wake_failure(msg, state="up"):
     """Persist a wake failure into autodown.json (§8 wake-fails).
 
     Sets ``state`` to reflect reality — the layer is NOT confirmed up — and
     records ``reason`` so ``hscc autodown status`` is an honest report an
     operator can act on. ``wake_source``/``wake_at`` are KEPT so the operator
     can still see what triggered the wake.
+
+    The ``state`` written is a judgment call per failure path:
+      * "up" (default) — the start-failed / readiness-timeout paths DID
+        start (or partially start) units, so the layer is best described as
+        "not confirmed down; the block is cleared and the watchdog owns
+        supervision" (the §8 ``up-or-error`` semantic).
+      * "error" — the empty-wake-plan path started NOTHING, so claiming
+        ``up`` would be an aspiration, not reality. ``"error"`` is the honest
+        label (layer not up; autodown has released it to the watchdog).
     """
     cfg = load_config()
-    cfg["state"] = "up"
+    cfg["state"] = state
     cfg["reason"] = msg
     save_config(cfg)
 
@@ -1195,10 +1219,16 @@ def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     do NOT silently leave ``state:"waking"`` forever with the block latched
     (an invisible wedge). We: record the failure, clear ``intentional`` so the
     watchdog resumes and can heal, notify loudly, and leave ``state: "up"``
-    (reality-ish: the layer is not confirmed down) with a clear ``reason`` an
-    operator can act on. The ONE exception is the empty-plan failure (§1a):
-    there we do NOT clear the block, because we cannot even determine what to
-    start — clearing it would let the watchdog resurrect an unquantified set.
+    (the §8 ``up-or-error`` semantic: the layer is not confirmed down) with a
+    clear ``reason`` an operator can act on.
+
+    The empty-plan failure (§1a) follows the SAME principle: with NOTHING
+    started, the layer is down and nothing supervises it if the block stays
+    latched — the worst half-state (per §8, "favor UP and supervised over
+    down and unsupervised"). It clears ``intentional`` too, letting the
+    watchdog resume and heal whatever is actually there, and records an
+    honest ``state: "error"`` (NOT ``"up"`` — nothing was started) with the
+    reason.
 
     Returns a result dict with ``result`` in
     (``up`` | ``busy`` | ``already-waking`` | ``start-failed`` | ``not-ready`` |
@@ -1263,21 +1293,27 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     # Build the wake plan (non-keepalive units only; keepalive excluded).
     plan = _build_wake_plan(serving)
 
-    # -- 1a. EMPTY plan ⇒ failure, not success (§8 / audit F7) -------------
+    # -- 1a. EMPTY plan ⇒ failure, not success (§8 / audit F7 / residual) --
     # An empty wake plan means we could not determine what to start
     # (serving.json missing/corrupt ⇒ load_serving returned None). Reporting
     # state:"up" while starting nothing would be a vacuous success (audit F7).
-    # This is a FAILURE: do NOT clear the block and do NOT claim "up". Record
-    # the failure loudly (state back to a sane value with a reason) — but the
-    # block STAYS latched, per the audit's explicit instruction, since clearing
-    # it with an unquantified start set is worse than leaving it supervised-off.
+    # This is a FAILURE, and it must NOT leave the watchdog suppressed with
+    # nothing running (the v1.9.0 residual): clearing ``intentional`` so
+    # ordinary supervision resumes and the watchdog can heal whatever is
+    # actually there, recording the failure loudly, and setting an HONEST
+    # ``state: "error"`` — NOT ``"up"``, since zero units were started, and
+    # NOT ``"down"``, which cycle()'s self-heal would immediately re-latch
+    # and re-suppress the watchdog (undoing this fix). "error" means "the
+    # layer is not up; autodown has released it to the watchdog".
     if not plan:
-        # State was set to "waking" at step 1; _record_wake_failure resets it
-        # to a sane value ("up") with the failure reason. The block is NOT
-        # cleared here (see comment above).
+        # The block was latched intentional (as teardown left it); clear it so
+        # the watchdog resumes supervision. State → "error" (honest: nothing
+        # started), reason records the failure for status + operator action.
+        _clear_intentional_block(
+            reason="autodown: wake failed — empty wake plan; watchdog resuming")
         msg = ("autodown: wake FAILED — empty wake plan; cannot determine "
                "what to start (serving.json missing/corrupt?)")
-        _record_wake_failure(msg)
+        _record_wake_failure(msg, state="error")
         _notify(msg, "HSCC Autodown Wake Failed", priority="critical")
         log(msg, "ERROR")
         return {"result": "no-units", "started": [], "ready": []}
@@ -1655,6 +1691,10 @@ def resume_from_restart():
       RE-RUN autoup — idempotent (``--ensure`` on already-running units is a
       no-op) — to finish the wake. SAFE = finish the wake.
     - ``state == \"up\"`` (or unknown) ⇒ do nothing.
+    - ``state == \"error\"`` ⇒ a wake failed to determine units; autoup already
+      cleared the intentional block and released the layer to the watchdog.
+      Do nothing on restart either (do NOT re-latch) — the watchdog owns
+      supervision until serving.json is repaired.
 
     Fully defensive: if anything here raises, callers that need to guarantee
     the daemon boots use ``resume_from_restart_defensive()`` — a broken
@@ -1679,7 +1719,9 @@ def resume_from_restart():
         save_config(cfg)
         autoup()
         log("Autodown startup: state=waking → autoup re-run to finish the wake")
-    # state == "up" / unknown: nothing to recover.
+    # state == "up" / "error" / unknown: nothing to recover. For "error",
+    # the intentional block was already cleared by autoup's failure handling;
+    # re-asserting it here would re-suppress the watchdog with nothing running.
 
 
 def resume_from_restart_defensive():
