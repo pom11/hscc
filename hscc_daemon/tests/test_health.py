@@ -201,6 +201,80 @@ class TestCheckWorkers:
         assert health.check_workers() is True
         assert calls == []                      # healthy -> no relaunch
 
+    def test_intentional_autodown_suppresses_relaunch(self, tmp_hfcc_dir, monkeypatch):
+        """Fix 1 (SAFETY BLOCKER): while autodown has DELIBERATELY torn the
+        fleet down (watchdog block intentional=autodown + autodown state=down),
+        check_workers must NOT relaunch the keep-alive unit it stopped. This is
+        the third resurrection vector (after pipeline_watchdog + trigger_engine)."""
+        import time as _time
+        from hscc_daemon import lifecycle as _lc
+        from hscc_daemon import autodown as _ad
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        # Worker is DOWN (would normally be relaunched).
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
+        ran = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(args) or {"ok": True})
+        popen_calls = []
+        def fake_popen(*args, **kwargs):
+            popen_calls.append((args, kwargs))
+            raise AssertionError("must NOT relaunch under intentional autodown")
+        monkeypatch.setattr(health.subprocess, "Popen", fake_popen)
+        # Intentional autodown is in effect: watchdog block latched intentional +
+        # autodown confirmed DOWN — the exact live-state that preceded the 23s
+        # resurrection (12:02:42 recorded state=down, 12:03:05 check_workers
+        # relaunched).
+        block_file = str(tmp_hfcc_dir / "watchdog-block.json")
+        monkeypatch.setattr(_lc, "WATCHDOG_BLOCK_FILE", block_file)
+        _lc.save_watchdog_block({"blocked": True, "intentional": "autodown",
+                                 "reason": "autodown: intentional idle teardown"})
+        ad_file = str(tmp_hfcc_dir / "autodown.json")
+        monkeypatch.setattr(_ad, "AUTODOWN_FILE", ad_file)
+        _ad.save_config({**_ad.DEFAULT_CONFIG, "enabled": True,
+                         "state": "down", "down_since": "2026-01-01T00:00:00+00:00"})
+        monkeypatch.setattr(health, "time", _time)
+
+        ok = health.check_workers()
+
+        # Deliberately-down unit NOT relaunched — no stop, no Popen run.
+        assert popen_calls == []
+        assert not any(a[:2] == ["sparkrun", "stop"] for a in ran)
+        # The check reports ok (it is correctly doing nothing, not failing).
+        assert ok is True
+
+    def test_intentional_autodown_helper_true_only_when_confirmed_down(
+            self, tmp_hfcc_dir, monkeypatch):
+        """_intentional_autodown_down() consults classify(): True only when the
+        block is intentional AND autodown state is confirmed down. Any other
+        state (no block, waking, up) ⇒ False so supervision proceeds."""
+        from hscc_daemon import lifecycle as _lc
+        from hscc_daemon import autodown as _ad
+        health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
+        block_file = str(tmp_hfcc_dir / "watchdog-block.json")
+        monkeypatch.setattr(_lc, "WATCHDOG_BLOCK_FILE", block_file)
+        ad_file = str(tmp_hfcc_dir / "autodown.json")
+        monkeypatch.setattr(_ad, "AUTODOWN_FILE", ad_file)
+        monkeypatch.setattr(health, "_tp_peer_nodes", lambda: set())
+
+        def write_cfg(**over):
+            _ad.save_config({**_ad.DEFAULT_CONFIG, **over})
+
+        # No block at all ⇒ False (ordinary supervision).
+        assert health._intentional_autodown_down() is False
+        # Intentional block but NOT down (blocked-intentional + state up ⇒
+        # should_be_up) ⇒ False.
+        _lc.save_watchdog_block({"blocked": True, "intentional": "autodown"})
+        write_cfg(enabled=True, state="up")
+        assert health._intentional_autodown_down() is False
+        # Intentional block + state waking ⇒ False (transition in progress).
+        write_cfg(enabled=True, state="waking")
+        assert health._intentional_autodown_down() is False
+        # Intentional block + state DOWN ⇒ True (the resurrection guard).
+        write_cfg(enabled=True, state="down")
+        assert health._intentional_autodown_down() is True
+        # Block latched but AUTODOWN not disabled-state... state down + intent
+        # ⇒ True even if enabled flag irrelevant to classify. Confirmed above.
+
     def test_crashed_worker_relaunched(self, tmp_hfcc_dir, monkeypatch):
         import time as _time
         health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
