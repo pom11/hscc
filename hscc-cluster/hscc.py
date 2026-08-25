@@ -236,20 +236,43 @@ def _load_daemon_serving():
             return None
 
 
-def _run_or_print(cmd, dry_run):
+def _fleet_op_timeout_seconds():
+    """Generous subprocess timeout for a full fleet start/stop.
+
+    A fleet `sparkrun run` on real hardware takes far longer than a quick
+    status call: the launch phase alone is 40s+ (before the model even begins
+    loading) and a model load can take minutes. run_cmd's default timeout=30 is
+    for quick status calls and would kill a fleet start every time. Size the
+    subprocess timeout against the daemon's model-load grace window
+    (lifecycle.VLLM_LOAD_GRACE_MINUTES, default 20 ⇒ 1200s) — reusing that
+    natural knob rather than inventing a new one. Falls back to 1200s if the
+    daemon can't be imported (standalone mode).
+    """
+    try:
+        from hscc_daemon import lifecycle
+        return getattr(lifecycle, "VLLM_LOAD_GRACE_MINUTES", 20) * 60
+    except Exception:
+        return 1200
+
+
+def _run_or_print(cmd, dry_run, timeout=None):
     """Print the command; execute it unless ``dry_run``. Returns a result dict.
 
     ``cmd`` is a list of argv tokens. Always prints the exact command line.
     With ``dry_run`` prints ``--dry-run: not executing`` and returns
     ``{"dry_run": True, "command": cmd, "issued": []}`` — nothing is run. The
     real path runs via ``run_cmd`` (which captures BOTH stdout and stderr, so a
-    failure is diagnosable without a manual probe).
+    failure is diagnosable without a manual probe). ``timeout`` defaults to a
+    generous fleet-op timeout — these call sites issue `sparkrun run`/`stop`
+    for the whole fleet, which take far longer than the 30s default meant for
+    quick status calls.
     """
     print(f"Will run: {' '.join(cmd)}")
     if dry_run:
         print("  --dry-run: not executing")
         return {"dry_run": True, "command": cmd, "issued": []}
-    res = run_cmd(cmd, timeout=120)
+    res = run_cmd(cmd, timeout=timeout if timeout is not None
+                  else _fleet_op_timeout_seconds())
     return {
         "success": bool(res.get("success", res.get("ok", False))),
         "returncode": res.get("returncode"),
