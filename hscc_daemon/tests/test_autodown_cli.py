@@ -148,16 +148,47 @@ class TestStatus:
 
     def test_status_json_has_kanban_fields(self, capsys, autodown_file,
                                            block_file, monkeypatch):
-        # A pristine resolution state — nothing evaluated yet this "run".
+        # Status evaluates the kanban interlock itself (to name the blocker).
+        # Stub the predicate so no real board is touched and the result is
+        # deterministic: quiet ⇒ no blocker, kanban resolution untouched.
         from hscc_daemon import autodown
         monkeypatch.setitem(autodown._KANBAN_LOAD, "ok", None)
         monkeypatch.setitem(autodown._KANBAN_LOAD, "reason", "")
+        monkeypatch.setattr(autodown, "_has_active_work", lambda *a, **k: False)
         rc = cmd_autodown(["status", "--json"])
         assert rc == 0
         data = json.loads(capsys.readouterr().out)
-        # kanban_ok is None until the daemon evaluates the interlock.
+        # kanban_ok is None until something resolves the kanban lib.
         assert data["kanban_ok"] is None
         assert "kanban_reason" in data
+        # No live work ⇒ no blocking signal.
+        assert data["blocked_by"] is None
+
+    def test_status_names_blocking_signal(self, capsys, autodown_file,
+                                          block_file, monkeypatch):
+        """When kanban work blocks teardown, status names the board — the
+        operator can tell healthy-and-waiting from stuck-on-an-interlock."""
+        from hscc_daemon import autodown
+
+        def _fake_active(kanban_db=None):
+            autodown._note_blocking("hscc")
+            return True
+
+        autodown_file.write_text(json.dumps({
+            "enabled": True, "idle_minutes": 10, "state": "up",
+            "last_activity_iso": "2026-08-25T09:19:51+00:00",
+        }))
+        monkeypatch.setattr(autodown, "_has_active_work", _fake_active)
+        rc = cmd_autodown(["status"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "blocked by:      kanban work on board 'hscc'" in out
+
+        # --json carries the same machine-readable signal.
+        rc = cmd_autodown(["status", "--json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["blocked_by"] == "kanban work on board 'hscc'"
 
     def test_status_no_down_since_line_when_null(self, capsys, autodown_file,
                                                  block_file):
