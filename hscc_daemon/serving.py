@@ -203,6 +203,83 @@ def keepalive_units(serving):
     return out
 
 
+def fleet_down_cmd():
+    """`sparkrun stop --all` — stop ALL sparkrun workloads fleet-wide.
+
+    The SINGLE fleet-down command. The raw sparkrun stop string for a full
+    fleet down is built HERE and here only, then consumed by BOTH the
+    ``hscc cluster down`` CLI wrapper (hscc-cluster/hscc.py) and
+    ``autodown.teardown()`` — autodown no longer constructs its own raw
+    per-unit stop strings. ``--all`` stops every sparkrun container on the
+    configured cluster, so a full teardown powers the ENTIRE serving layer
+    down (orchestrator AND keepalive workers) — the whole point of the feature.
+    """
+    return ["sparkrun", "stop", "--all", "--cluster", HSCC_CLUSTER]
+
+
+def fleet_up_plan(serving=None):
+    """Ordered start plan for EVERY serving.json unit (orchestrator FIRST, then
+    workers sorted by id) — the full fleet-up set.
+
+    **Fleet-up restores the WHOLE serving layer**, not just the non-keepalive
+    non-orchestrator units: orchestrator AND keepalive AND non-keepalive
+    workers all come back up. This is the exact reverse of ``fleet_down_cmd``
+    (which takes everything down). Kept alive: there is no C4 exemption on the
+    way up.
+
+    Start commands reuse the existing start path (no new mechanism): the
+    ``serving.VLLM_START_CMD`` form (serving.py:150-153) — ``sparkrun run
+    <recipe> --cluster hscc --hosts <nodes> --port <port> --no-follow
+    --ensure`` — with the unit's OWN recipe (``orchestrator_recipe`` for the
+    orchestrator, ``u.recipe`` for a worker), falling back to the hardcoded
+    ``VLLM_RECIPE`` (the same form autodown's per-unit start used before the
+    fleet wrapper absorbed it).
+
+    Each returned entry: ``{"kind", "nodes", "port", "unit_id", "cmd",
+    "keepalive"}`` (``keepalive`` True for a keepalive worker). Empty/missing
+    ``serving`` ⇒ ``[]`` (nothing to start). Used by BOTH ``hscc cluster up``
+    and ``autodown.autoup()``.
+    """
+    if serving is None:
+        serving = load_serving()
+    if not isinstance(serving, dict):
+        return []
+    orch = []
+    workers = []
+    for u in (serving.get("units", []) or []):
+        if not isinstance(u, dict):
+            continue
+        nodes = [n for n in (u.get("nodes") or []) if n]
+        if not nodes:
+            continue
+        role = u.get("role")
+        unit_id = u.get("id") or ",".join(nodes)
+        port = u.get("port") or serving_port(serving)
+        if role == "orchestrator":
+            recipe = orchestrator_recipe(serving) or VLLM_RECIPE
+            orch.append({"kind": "orchestrator", "nodes": nodes, "port": port,
+                         "unit_id": unit_id, "recipe": recipe,
+                         "keepalive": False})
+        elif role == "worker":
+            # BOTH keepalive and non-keepalive workers come up on fleet-up.
+            recipe = u.get("recipe") or VLLM_RECIPE
+            recipe = os.path.expanduser(recipe) if recipe else None
+            workers.append({"kind": "worker", "nodes": nodes, "port": port,
+                            "unit_id": unit_id, "recipe": recipe,
+                            "keepalive": bool(u.get("keepalive"))})
+    workers.sort(key=lambda e: e["unit_id"])
+    plan = orch + workers
+    cmds = []
+    for e in plan:
+        cmd = ["sparkrun", "run", e["recipe"], "--cluster", HSCC_CLUSTER,
+               "--hosts", ",".join(e["nodes"]), "--port", str(e["port"]),
+               "--no-follow", "--ensure"]
+        cmds.append({"kind": e["kind"], "nodes": e["nodes"], "port": e["port"],
+                     "unit_id": e["unit_id"], "cmd": cmd,
+                     "keepalive": e["keepalive"]})
+    return cmds
+
+
 def _resolve_serving_overlay():
     """Overlay serving.json onto PRIMARY_NODE + ORCH_NODES.
 
