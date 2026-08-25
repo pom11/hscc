@@ -225,6 +225,147 @@ class TestCheckDaemonStreams:
         assert "unparseable timestamp" in result["detail"]
 
 
+class TestCheckDaemonStreamsIntentional:
+    """An intentional autodown must NOT make check_daemon_streams fail, while
+    real faults still do. Each excused stream is gated on the intentional block
+    being latched AND autodown state confirmed down (classify()==expected_down).
+
+    The excuse is a two-condition AND: the stream itself carries
+    ``intentional == "autodown"`` (the writer tags it is down because of the
+    intentional teardown) AND an intentional autodown is confirmed in effect.
+    Either missing ⇒ the ``ok: False`` is a genuine failure, exactly as before.
+    """
+
+    def _arm_intentional(self, tmp_hfcc_dir, monkeypatch, state="down"):
+        """Latched intentional watchdog block + autodown config at state."""
+        from hscc_daemon import lifecycle as _lc
+        from hscc_daemon import autodown as _ad
+        block_file = str(tmp_hfcc_dir / "watchdog-block.json")
+        monkeypatch.setattr(_lc, "WATCHDOG_BLOCK_FILE", block_file)
+        _lc.save_watchdog_block({
+            "blocked": True, "intentional": "autodown",
+            "reason": "autodown: intentional idle teardown"})
+        ad_file = str(tmp_hfcc_dir / "autodown.json")
+        monkeypatch.setattr(_ad, "AUTODOWN_FILE", ad_file)
+        _ad.save_config({**_ad.DEFAULT_CONFIG, "enabled": True,
+                         "state": state, "down_since": "2026-01-01T00:00:00+00:00"})
+
+    def _write_stream(self, state_dir, name, ok, **extra):
+        from hscc_daemon.state import now_iso
+        data = {"ok": ok, "timestamp": now_iso(), "last_check": now_iso(),
+                "stream": name, **extra}
+        (state_dir / f"{name}.json").write_text(json.dumps(data))
+
+    def test_intentional_block_fleet_down_passes_and_names_reason(
+            self, tmp_hfcc_dir, monkeypatch):
+        from hscc_daemon.verify import check_daemon_streams
+        self._arm_intentional(tmp_hfcc_dir, monkeypatch)
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir()
+        # Every serving stream truthfully reports down WITH the intentional
+        # marker — the exact healthy power-save state.
+        for name in ("watchdog", "dgx", "gateway", "proxy", "workers"):
+            self._write_stream(state_dir, name, False,
+                               intentional="autodown",
+                               message=f"intentional autodown ({name})")
+        result = check_daemon_streams(state_dir=str(state_dir))
+        assert result["ok"] is True
+        # The human output still SAYS the cluster is intentionally down.
+        assert "intentionally down by autodown" in result["detail"]
+
+    def test_intentional_block_plus_real_unrelated_failure_still_fails(
+            self, tmp_hfcc_dir, monkeypatch):
+        from hscc_daemon.verify import check_daemon_streams
+        self._arm_intentional(tmp_hfcc_dir, monkeypatch)
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir()
+        # One intentionally-down stream (excused) ...
+        self._write_stream(state_dir, "watchdog", False,
+                           intentional="autodown",
+                           message="intentional autodown (watchdog)")
+        # ... plus a REAL unrelated failure in a stream NOT tagged intentional
+        # (heartbeat) => still fails, and the real fault stays visible.
+        self._write_stream(state_dir, "heartbeat", False)
+        result = check_daemon_streams(state_dir=str(state_dir))
+        assert result["ok"] is False
+        assert "heartbeat" in result["detail"]     # real fault still visible
+        assert "REAL FAILURES" in result["detail"]
+        assert "intentionally down by autodown" in result["detail"]
+
+    def test_no_intentional_block_watchdog_unhealthy_still_fails(
+            self, tmp_hfcc_dir, monkeypatch):
+        # Negative control: NO intentional block ⇒ an unhealthy watchdog stream
+        # (even one carrying an intentional-ish message) is a REAL failure.
+        from hscc_daemon.verify import check_daemon_streams
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir()
+        self._write_stream(state_dir, "watchdog", False)
+        result = check_daemon_streams(state_dir=str(state_dir))
+        assert result["ok"] is False
+        assert "watchdog.json: ok=False" in result["detail"]
+
+    def test_intentional_stream_excused_only_when_block_confirmed_down(
+            self, tmp_hfcc_dir, monkeypatch):
+        """Per-stream gating: a stream carrying the intentional marker is
+        excused ONLY when classify()==expected_down (block latched AND autodown
+        down). With the block latched but autodown only 'up' (should_be_up —
+        the layer should be coming up, not parked), the marker must NOT excuse
+        it: a genuine failure while the layer should be up still fails."""
+        from hscc_daemon.verify import check_daemon_streams
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir()
+        self._write_stream(state_dir, "watchdog", False,
+                           intentional="autodown",
+                           message="intentional autodown (watchdog)")
+        # Intentional block, but autodown NOT down (state=up => should_be_up).
+        self._arm_intentional(tmp_hfcc_dir, monkeypatch, state="up")
+        result = check_daemon_streams(state_dir=str(state_dir))
+        assert result["ok"] is False
+        assert "watchdog.json: ok=False" in result["detail"]
+
+    def test_writer_check_dgx_tags_stream_only_when_intentional_down(
+            self, tmp_hfcc_dir, monkeypatch):
+        """Writer-level gating: check_dgx adds the intentional marker to the
+        dgx stream ONLY when an intentional autodown is confirmed down. With no
+        block a failing check writes a plain ok:False (a real fault); with the
+        intentional block confirmed down it tags the stream so verify excuses
+        it."""
+        from hscc_daemon import health
+        from hscc_daemon import lifecycle as _lc
+        from hscc_daemon import autodown as _ad
+        monkeypatch.setattr(health, "ssh_cmd",
+                            lambda *a, **k: {"ok": False, "output": ""})
+        monkeypatch.setattr(health, "http_check",
+                            lambda *a, **k: {"ok": False})
+        monkeypatch.setattr(health, "_sparkrun_workloads", lambda: [])
+        monkeypatch.setattr(health.serving, "PRIMARY_NODE", "10.0.0.2")
+        monkeypatch.setattr(health.serving, "VLLM_HEALTH_URL",
+                            "http://10.0.0.2/health")
+        block_file = str(tmp_hfcc_dir / "watchdog-block.json")
+        monkeypatch.setattr(_lc, "WATCHDOG_BLOCK_FILE", block_file)
+        ad_file = str(tmp_hfcc_dir / "autodown.json")
+        monkeypatch.setattr(_ad, "AUTODOWN_FILE", ad_file)
+        state_dir = tmp_hfcc_dir / "state"
+
+        # No intentional block ⇒ plain failure, NO marker (genuine fault).
+        health.check_dgx()
+        entry = json.loads((state_dir / "dgx.json").read_text())
+        assert entry["ok"] is False
+        assert entry.get("intentional") != "autodown"
+
+        # Intentional block + autodown down ⇒ tagged intentional.
+        _lc.save_watchdog_block({
+            "blocked": True, "intentional": "autodown",
+            "reason": "autodown: intentional idle teardown"})
+        _ad.save_config({**_ad.DEFAULT_CONFIG, "enabled": True,
+                         "state": "down"})
+        health.check_dgx()
+        entry = json.loads((state_dir / "dgx.json").read_text())
+        assert entry["ok"] is False
+        assert entry.get("intentional") == "autodown"
+        assert "intentional autodown" in entry.get("message", "")
+
+
 class TestCheckProxy:
     """check_proxy — ok on 200 + data, fail on errors (monkeypatched urllib)."""
 
