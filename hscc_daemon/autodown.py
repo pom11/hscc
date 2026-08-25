@@ -1233,13 +1233,18 @@ def _record_wake_failure(msg, state="up"):
 def _record_wake_success():
     """Persist the resumed-up state into autodown.json (§4.6).
 
-    Sets ``state: \"up\"`` and clears the ``wake`` bookkeeping (``wake_source``,
-    ``wake_at``) — the wake is done, the trigger no longer needs to be surfaced.
+    Sets ``state: \\\"up\\\"`` and clears the ``wake`` bookkeeping (``wake_source``,
+    ``wake_at``) plus ``down_since`` — the wake is done, the trigger no longer
+    needs to be surfaced, and ``down_since`` (set iff the fleet is down/waking)
+    is no longer valid because the fleet is confirmed UP. This is what keeps
+    ``hscc autodown status`` honest: after a successful wake, ``state: up`` and
+    ``down since`` can never coexist (the §8 self-describing-reality rule).
     """
     cfg = load_config()
     cfg["state"] = "up"
     cfg["wake_source"] = None
     cfg["wake_at"] = None
+    cfg["down_since"] = None
     cfg["reason"] = ""
     save_config(cfg)
 
@@ -1287,7 +1292,7 @@ def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
          ``blocked: false``, remove ``intentional``, clear ``failures``. Order
          is critical — clearing before units are ready would let the first
          watchdog tick see a not-yet-ready cluster and latch the breaker.
-      6. Set ``state: "up"``, clear ``wake`` bookkeeping.
+      6. Set ``state: "up"``, clear ``wake`` bookkeeping AND ``down_since``.
       7. Notify operator (desktop + ops Telegram; both CPU-side).
 
     Failure handling (§8 wake-fails) — if a start fails OR readiness times out,
@@ -1439,7 +1444,7 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     _clear_intentional_block(reason="serving layer up (autodown wake complete)")
     log("Autodown autoup: watchdog block cleared after readiness confirmed")
 
-    # -- 6. Set state up + clear wake bookkeeping (§4.6) --------------------
+    # -- 6. Set state up + clear wake bookkeeping AND down_since (§4.6) ------
     _record_wake_success()
 
     # -- 7. Notify operator (§4.7) ------------------------------------------

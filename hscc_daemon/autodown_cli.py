@@ -125,7 +125,10 @@ def _cmd_status(rest, json_mode):
         print(f"autodown: ENABLED (idle_minutes={status['idle_minutes']})")
     print(f"  state:           {status['state']}")
     print(f"  last activity:   {status['last_activity_iso']}")
-    print(f"  down since:      {status['down_since']}")
+    if status["down_since"]:
+        # Only show the down-since line when there is a value — a null/absent
+        # down_since means the fleet is not down (never printed 'None').
+        print(f"  down since:      {status['down_since']}")
     if status["wake_source"]:
         print(f"  wake source:     {status['wake_source']}")
     if status["reason"]:
