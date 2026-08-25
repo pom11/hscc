@@ -214,7 +214,7 @@ def fleet_down_cmd():
     configured cluster, so a full teardown powers the ENTIRE serving layer
     down (orchestrator AND keepalive workers) — the whole point of the feature.
     """
-    return ["sparkrun", "stop", "--all"]
+    return ["sparkrun", "stop", "--all", "--cluster", HSCC_CLUSTER]
 
 
 def fleet_up_plan(serving=None):
@@ -263,6 +263,7 @@ def fleet_up_plan(serving=None):
         elif role == "worker":
             # BOTH keepalive and non-keepalive workers come up on fleet-up.
             recipe = u.get("recipe") or VLLM_RECIPE
+            recipe = os.path.expanduser(recipe) if recipe else None
             workers.append({"kind": "worker", "nodes": nodes, "port": port,
                             "unit_id": unit_id, "recipe": recipe,
                             "keepalive": bool(u.get("keepalive"))})
