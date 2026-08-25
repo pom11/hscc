@@ -587,6 +587,122 @@ def _invoke_teardown():
         log(f"Autodown teardown error: {e}", "ERROR")
 
 
+# ---------------------------------------------------------------------------
+# §8 reconcile-to-reality — state must self-describe what is actually running
+# ---------------------------------------------------------------------------
+# Fix 2 (SAFETY BLOCKER): even with check_workers gated, autodown must not sit
+# in a "down" state while the serving layer is actually UP (something outside
+# autodown started it — an operator manual `hscc cluster up`, an external
+# sparkrun, a leftover wake, etc.). §8 forbids the silent half-state where a
+# "down" autodown.json contradicts a serving fleet. So cycle() — when
+# state == "down" — probes the layer and, if it is ACTUALLY up, reconciles to
+# the truth: clears the intentional block (so the watchdog supervises what is
+# running), sets state=up, and logs + notifies LOUDLY.
+
+# Consecutive ``state == down`` cycles during which the serving layer must probe
+# FULLY UP before we reconcile. Debounced so we never reconcile while a
+# teardown's slow-draining stop is still in progress (verify-down is
+# best-effort — health.py may briefly answer a draining container). 2 × ~30s
+# cadence ≈ 60s: longer than a normal drain, short enough that a genuinely
+# resurrected fleet reconciles within about a minute instead of sitting in the
+# lying half-state. Configurable via env, not hardcoded (matches the project's
+# knob convention).
+RECONCILE_UP_DEBOUNCE = int(
+    os.environ.get("HSCC_AUTODOWN_RECONCILE_DEBOUNCE", "2"))
+
+# In-memory consecutive-up counter for the reconcile debounce (reset on daemon
+# start). Incremented while state==down AND the layer probes up; reset to 0
+# whenever any unit probes down (a real teardown is still draining ⇒ keep
+# waiting).
+_reconcile_up_streak = 0
+
+# Production default for the "actually up" probe; tests monkeypatch this (like
+# health._autoheal_worker_fn) so a state==down cycle() test never probes the
+# real cluster — the fleet's up/down is dynamic and must not leak into tests.
+_reconcile_up_fn = None
+
+
+def _serving_actually_up(serving_path=None, http_check_fn=None):
+    """True iff the serving layer is ACTUALLY up (§8 "actually up" definition).
+
+    We define "actually up" as: the ORCHESTRATOR unit's head node answers
+    healthy. Rationale:
+      * The orchestrator is the fleet's serving head — the endpoint
+        ``check_gateway`` / ``sparkrun status`` probe. If it answers, the fleet
+        is serving, so a ``state: down`` autodown.json is unambiguously a lie.
+      * The orchestrator is the ONE serving unit neither ``check_workers`` nor
+        ``check_proxy`` automatically keeps alive, so its being up is a
+        definitive sign an external actor (operator ``hscc cluster up``, an
+        external sparkrun, a leftover wake) started it.
+      * It is a single cheap head-node probe per down-cycle — exactly the
+        "head-node probe per unit is already available" of the task, kept cheap
+        at the 30s cadence.
+    ``_build_wake_plan`` returns the orchestrator FIRST (serving.fleet_up_plan
+    puts orchestrator before workers, serving.py:271), so plan[0] is the
+    orchestrator. Fail-safe: unreadable serving / no orchestrator unit ⇒ False
+    (do not reconcile on an unverifiable signal).
+    """
+    from .serving import load_serving
+    serving = load_serving(serving_path)
+    plan = _build_wake_plan(serving)
+    if not plan or plan[0].get("kind") != "orchestrator":
+        return False
+    if http_check_fn is None:
+        http_check_fn = _util_http_check_probe()
+    try:
+        res = http_check_fn(
+            f"http://{plan[0]['nodes'][0]}:{plan[0]['port']}/health", timeout=5)
+        return bool(res.get("ok"))
+    except Exception:
+        # Unreachable / probe error ⇒ NOT confidently up ⇒ don't reconcile.
+        return False
+
+
+def _reconcile_if_actually_up(serving_path=None, http_check_fn=None):
+    """§8 reconcile-to-reality: if state is down but the layer is actually up,
+    stop lying and reconcile to the truth. Returns True iff it reconciled.
+
+    Debounced (``RECONCILE_UP_DEBOUNCE`` consecutive up-cycles) so we never
+    reconcile while a teardown's slow-draining stop is legitimately in progress
+    — the layer must probe UP consistently, not once. Only reached while
+    ``state == down`` (cycle() resets this before running).
+    """
+    global _reconcile_up_streak
+    probe = _reconcile_up_fn or _serving_actually_up
+    try:
+        up = probe(serving_path=serving_path, http_check_fn=http_check_fn)
+    except Exception as e:
+        # An unexpected exception in the probe must not wedge the cycle.
+        log(f"Autodown reconcile probe error: {e}", "ERROR")
+        return False
+    if not up:
+        # Layer not actually up — a real drain is (or may be) still in progress.
+        _reconcile_up_streak = 0
+        return False
+    _reconcile_up_streak += 1
+    if _reconcile_up_streak < RECONCILE_UP_DEBOUNCE:
+        return False   # not yet sustained — keep waiting
+    # Debounce met — the layer is up and stays up. Reconcile to reality.
+    _reconcile_up_streak = 0
+    _clear_intentional_block(
+        reason="autodown: state was down but layer is actually up — reconciled "
+               "to reality")
+    cfg = load_config()
+    cfg["state"] = "up"
+    cfg["down_since"] = None
+    cfg["reason"] = ("autodown: reconciled to reality — layer is UP despite "
+                     "state:down (something outside autodown started it)")
+    save_config(cfg)
+    # LOUD — a surprise up is exactly the silent half-state §8 forbids.
+    log("Autodown RECONCILED: state was down but serving layer is actually up "
+        "— cleared intentional block, state=up", "ERROR")
+    _notify("HSCC autodown RECONCILED: state was 'down' but serving layer is "
+            "actually UP — cleared the intentional block and set state=up. "
+            "Something outside autodown started the fleet.",
+            "HSCC Autodown — Reconciled to reality", priority="high")
+    return True
+
+
 def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
           probes=None):
     """Idle autodown decision function (Phase 3, §1/§6; Phase 6 probes §1d).
@@ -657,6 +773,15 @@ def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
         except Exception as e:
             # Defensive — a broken block read must not break the cycle.
             log(f"Autodown self-heal block error: {e}", "ERROR")
+        # §8 reconcile-to-reality (Fix 2): before the wake seam — if the layer
+        # is ACTUALLY up (something outside autodown started it) despite a
+        # recorded "down", autodown must NOT keep lying. When it reconciles it
+        # clears the intentional block + sets state=up and returns, so it is
+        # mutually exclusive with the wake seam below (a layer that is already
+        # up does not also need autoup). Debounced so a slow-draining teardown
+        # (still answering briefly) is never misread as a reconciliation.
+        if _reconcile_if_actually_up():
+            return
         # Wake seam (§4): if an activity event arrived since we went down,
         # bring the serving layer back up via autoup(). autoup() is Phase 5;
         # call it lazily (missing ⇒ no-op, raising ⇒ caught + logged), mirroring

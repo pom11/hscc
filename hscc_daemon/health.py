@@ -999,6 +999,38 @@ def _default_autoheal_worker(key, label, node, port):
 _autoheal_worker_fn = _default_autoheal_worker
 
 
+def _intentional_autodown_down():
+    """True when an intentional autodown is in effect AND the layer is down.
+
+    The resurrection guard for ``check_workers`` (SAFETY BLOCKER, third vector):
+    reuses ``autodown.classify()`` — the SAME single decision table the watchdog
+    fork (lifecycle.py:219) and trigger engine (trigger.py:162) consult — rather
+    than inventing a parallel rule. ``classify()`` returns ``expected_down`` only
+    when the watchdog block is latched with ``intentional == "autodown"`` AND
+    autodown state is confirmed ``"down"``.
+
+    When this is True the ENTIRE serving layer (incl. keepalive units — C4
+    reversed: fleet-down takes keepalive units too) is deliberately down by
+    autodown, so ``check_workers`` must NOT relaunch anything. It became
+    reachable as a resurrection vector only when the C4 keepalive exemption was
+    removed (v1.10.0): autodown now tears keepalive units down, but check_workers
+    still treated them as must-always-be-up.
+
+    Returns False in every other state (no intentional block, or a transition in
+    progress such as ``waking``/``should_be_up``) so ordinary keep-alive
+    supervision proceeds exactly as before. Fail-safe direction: an unreadable
+    block/state (or classify() raising) ⇒ False ⇒ check_workers keeps
+    self-healing — we never suppress healing on an unverifiable signal.
+    """
+    try:
+        from . import autodown
+        from .lifecycle import load_watchdog_block
+        return autodown.classify(load_watchdog_block(), autodown.load_config()) \
+            == "expected_down"
+    except Exception:
+        return False
+
+
 def check_workers():
     """Keep-alive worker check (UNIT-keyed, G1): health-check each serving.json
     keep-alive worker UNIT on its own port and relaunch a crashed one with its
@@ -1012,6 +1044,12 @@ def check_workers():
     Relaunch uses subprocess.Popen (detached, fire-and-forget) so the long
     weight-staging phase (5–10+ min) is not killed by a subprocess timeout.
     Output is captured in ~/.hscc/relaunch-<node>-<port>.log.
+
+    §8 / Fix 1 (SAFETY BLOCKER): while autodown has deliberately torn the whole
+    serving layer down (``classify() == expected_down``) this check MUST NOT
+    relaunch the keep-alive units autodown stopped. That was the third
+    resurrection vector. With NO intentional block it behaves exactly as before
+    (the negative control the suite pins).
     """
     from .state import write_state
     from .lifecycle import VLLM_LOAD_GRACE_MINUTES
@@ -1024,6 +1062,21 @@ def check_workers():
     if not units:
         write_state("workers", {"ok": True, "message": "no keep-alive workers",
                                 "last_check": now_iso()})
+        return True
+
+    # §8 intentional-autodown gate (Fix 1): if the whole fleet is deliberately
+    # down by autodown (confirmed), do NOT resurrect the keep-alive units it
+    # stopped. Any other state (no block / should_be_up) falls through to
+    # ordinary supervision below.
+    if _intentional_autodown_down():
+        log("Workers check: intentional autodown in effect — fleet (incl. "
+            "keepalive units) deliberately down, NOT relaunching")
+        write_state("workers", {
+            "ok": True, "total": len(units), "online": 0, "relaunched": [],
+            "down": [], "last_check": now_iso(),
+            "message": f"intentional autodown — {len(units)} keepalive unit(s) "
+                       "deliberately down, not relaunching",
+        })
         return True
 
     # Load persisted grace timestamps on each check (survives restarts)
