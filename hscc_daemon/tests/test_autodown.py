@@ -1129,6 +1129,33 @@ class TestTeardown:
         assert blk.get("blocked") is True
         assert blk.get("intentional") == "autodown"
 
+    def test_stop_command_uses_timeout_well_above_default(
+            self, tmp_path, monkeypatch, autodown_file):
+        """The fleet `sparkrun stop --all` is invoked with an explicit, generous
+        timeout — NOT run_cmd's 30s default (audit of the mirror-image bug: a
+        slow graceful stop must not be killed mid-way and misread as a hard
+        failure)."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        seen = []
+
+        class _RecordingRunner:
+            def __call__(self, cmd, timeout=30):
+                seen.append(timeout)
+                return {"ok": True, "output": ""}
+
+        res = ad.teardown(
+            serving_path=serving, run_cmd_fn=_RecordingRunner(),
+            kanban_db=_FakeKb([]), agents_file=self._agents(tmp_path),
+            now=NOW, keepalive_ok=lambda: True,
+            http_check_fn=lambda *a, **k: {"ok": False},  # ports down
+        )
+        assert res["result"] == "down"
+        assert len(seen) == 1
+        # Well above the 30s default (the historic defect threshold).
+        assert seen[0] > 30
+        assert seen[0] == 180
+
 
 # ---------------------------------------------------------------------------
 # Phase 5 — autoup() wake sequence + cycle wake seam (§4, §4.5, §8)
@@ -1446,6 +1473,92 @@ class TestAutoup:
         assert cfg["wake_source"] is None
         assert cfg["wake_at"] is None
         assert cfg["reason"] == ""
+
+    # -- start timeout / slow-launch readiness (the wake-fails fix) ----------
+    def test_start_command_uses_timeout_well_above_default(
+            self, tmp_path, monkeypatch, autodown_file):
+        """Every `sparkrun run` start is invoked with an explicit timeout well
+        above run_cmd's 30s default (the wake-fails incident: a 40s+ launch
+        phase was killed at 30s). Sourced from VLLM_LOAD_GRACE_MINUTES (def 20
+        ⇒ 1200s)."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+
+        seen = []
+
+        class _RecordingRunner:
+            def __call__(self, cmd, timeout=30):
+                seen.append(timeout)
+                return {"ok": True, "output": ""}
+
+        res = ad.autoup(
+            serving_path=serving, run_cmd_fn=_RecordingRunner(),
+            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+            sleep_fn=_noop_sleep, notify=False,
+        )
+        assert res["result"] == "up"
+        assert len(seen) == 3                     # one start per unit
+        # Every start got the grace-scaled timeout, NOT the 30s default.
+        assert all(t >= _lifecycle.VLLM_LOAD_GRACE_MINUTES * 60 for t in seen)
+
+    def test_slow_launch_but_becomes_ready_succeeds(
+            self, tmp_path, monkeypatch, autodown_file):
+        """A start that takes its time but whose units eventually answer healthy
+        ⇒ wake SUCCEEDS. Readiness, not process exit, is the success signal —
+        the command never errors (ok), readiness just takes a few poll rounds.
+        This is exactly the case the 30s start-timeout used to kill."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        # Readiness probe returns ok on the 2nd round (slow-but-successful
+        # launch), within a generous grace window. NO start ever fails.
+        probes = {"n": 0}
+
+        def _slow_healthy(url, timeout=5):
+            probes["n"] += 1
+            return {"ok": probes["n"] > 1, "status": 200}
+
+        res = ad.autoup(
+            serving_path=serving, run_cmd_fn=runner,
+            http_check_fn=_slow_healthy, clock=_AdvancingClock(start=0, step=1),
+            sleep_fn=_noop_sleep, notify=False,
+        )
+        assert res["result"] == "up"
+        assert set(res["ready"]) == {"orch", "wk1", "wk-keep"}
+        # Block cleared + state up (readiness confirmed ⇒ success).
+        cfg = ad.load_config()
+        assert cfg["state"] == "up"
+        with open(block_file) as f:
+            blk = json.load(f)
+        assert blk.get("blocked") is False
+        assert blk.get("intentional") is None
+
+    def test_start_timeout_does_not_abort_before_readiness(
+            self, tmp_path, monkeypatch, autodown_file):
+        """The pipe is NOT 'start must succeed within N seconds or the whole
+        wake aborts'. Even with wake_grace_minutes=0 (readiness window forced
+        to zero), the START commands still run with the full grace-scaled
+        timeout and the wake degrades to the honest readiness-timeout
+        failure path — it never prematurely reports the starts themselves as
+        failed on the 30s default."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        seen = []
+
+        class _RecordingRunner:
+            def __call__(self, cmd, timeout=30):
+                seen.append(timeout)
+                return {"ok": True, "output": ""}
+
+        res = ad.autoup(
+            serving_path=serving, run_cmd_fn=_RecordingRunner(),
+            http_check_fn=_DownProbe(), clock=_AdvancingClock(start=0, step=1),
+            sleep_fn=_noop_sleep, wake_grace_minutes=0, notify=False,
+        )
+        # Readiness window is 0 ⇒ readiness timeout, NOT start failure.
+        assert res["result"] == "not-ready"
+        # But every start still used the full grace-scaled timeout (>30s).
+        assert len(seen) == 3
+        assert all(t >= _lifecycle.VLLM_LOAD_GRACE_MINUTES * 60 for t in seen)
 
     # -- round trip: teardown() then autoup() -------------------------------
     def test_round_trip_teardown_then_autoup(self, tmp_path, monkeypatch,
