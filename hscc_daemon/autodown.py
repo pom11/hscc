@@ -628,6 +628,25 @@ _reconcile_up_streak = 0
 # real cluster — the fleet's up/down is dynamic and must not leak into tests.
 _reconcile_up_fn = None
 
+# Consecutive ``state == waking`` cycles during which there is NO live lock
+# holder before a stalled wake is acted upon (§8 Fix, extended to waking). A
+# real wake holds the autodown O_EXCL lock for its whole duration, so a live
+# holder means it is making progress. But when the wake process is KILLED the
+# lock leaks with a dead holder PID and ``state`` stays ``waking`` forever —
+# nothing is progressing. We debounce the no-live-holder signal before acting
+# so a just-transitioning wake is never misread as stalled. 2 × ~30s cadence ≈
+# 60s: short enough that a genuinely stalled wake (the reproduced wedge) is
+# recovered within about a minute, not the 20+ min grace window. Configurable
+# via env, matching RECONCILE_UP_DEBOUNCE's knob convention.
+WAKE_STALL_DEBOUNCE = int(
+    os.environ.get("HSCC_AUTODOWN_WAKE_STALL_DEBOUNCE", "2"))
+
+# In-memory consecutive-no-live-holder counter for the stalled-wake debounce
+# (reset on daemon start). Incremented while state==waking AND no live lock
+# holder; reset to 0 whenever a live holder appears (a wake is genuinely in
+# flight ⇒ keep waiting).
+_wake_stall_streak = 0
+
 
 def _serving_actually_up(serving_path=None, http_check_fn=None):
     """True iff the serving layer is ACTUALLY up (§8 "actually up" definition).
@@ -710,6 +729,64 @@ def _reconcile_if_actually_up(serving_path=None, http_check_fn=None):
     return True
 
 
+def _handle_stalled_wake(serving_path=None, http_check_fn=None):
+    """Act on a STALLED wake (state=waking, no live lock holder, debounced).
+
+    Called from ``cycle()`` once ``WAKE_STALL_DEBOUNCE`` consecutive waking
+    cycles have seen NO live lock holder — the wake process died (the
+    reproduced wedge: killed mid-wake, ``state: waking`` + dead holder PID +
+    block latched forever). Decide by reality, never leave a latched ``waking``
+    suppressing the watchdog:
+
+      * units ACTUALLY HEALTHY ⇒ reconcile: clear the intentional block, set
+        ``state: up``, log + notify LOUDLY — the existing reconcile path
+        (``_reconcile_if_actually_up``) extended to ``waking``. The fleet is up
+        and autodown was lying; the watchdog must supervise what is running.
+      * NOT healthy ⇒ resume the wake via ``autoup()`` — idempotent
+        (``--ensure`` on already-running units is a no-op), so re-running is
+        safe and finishes the interrupted wake.
+
+    Returns True after acting (reconciled or resumed); False if the probe
+    itself raised (logged, do not act on an unverifiable signal).
+
+    ``_reconcile_up_fn`` (or the real ``_serving_actually_up``) judges
+    "actually up" the same way the ``down`` reconcile does — orchestator head
+    node healthy, debounced there. Here the waking-stall debounce already
+    supplies the bounded period, so no second streak is required.
+    """
+    probe = _reconcile_up_fn or _serving_actually_up
+    try:
+        up = probe(serving_path=serving_path, http_check_fn=http_check_fn)
+    except Exception as e:
+        log(f"Autodown stalled-wake probe error: {e}", "ERROR")
+        return False
+    if up:
+        # Units are actually healthy — the reconcile path, extended to waking.
+        _clear_intentional_block(
+            reason="autodown: stalled wake — layer is actually up, reconciled "
+                   "to reality")
+        cfg = load_config()
+        cfg["state"] = "up"
+        cfg["down_since"] = None
+        cfg["reason"] = ("autodown: reconciled to reality — stalled wake "
+                         "(wake process died) but layer is UP despite "
+                         "state:waking")
+        save_config(cfg)
+        # LOUD — the fleet is up while autodown said waking with the watchdog
+        # suppressed: exactly the silent half-state §8 forbids.
+        log("Autodown RECONCILED: stalled wake (state was waking, holder dead) "
+            "but serving layer is actually up — cleared intentional block, "
+            "state=up", "ERROR")
+        _notify("HSCC autodown RECONCILED: a wake stalled (the wake process "
+                "died) but the serving layer is actually UP — cleared the "
+                "intentional block and set state=up.",
+                "HSCC Autodown — Reconciled to reality", priority="high")
+        return True
+    # Units NOT healthy — resume the interrupted wake (idempotent).
+    _invoke_autoup()
+    return True
+
+
 def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
           probes=None):
     """Idle autodown decision function (Phase 3, §1/§6; Phase 6 probes §1d).
@@ -768,8 +845,29 @@ def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
     cfg = load_config()
     state = cfg.get("state")
     if state == "waking":
-        # A wake is already in flight (autoup set state=waking). Do NOT start
-        # a second parallel wake — return and let the in-flight one finish.
+        global _wake_stall_streak
+        # Distinguish a LEGITIMATE in-flight wake from a STALLED one by holder
+        # LIVENESS, not wall-clock alone (§8 Fix, extended to waking). autoup
+        # holds the autodown O_EXCL lock for the WHOLE duration of a real wake,
+        # so a live lock holder means the wake is genuinely making progress —
+        # never start a second parallel wake and never reconcile. But when the
+        # wake process DIES (the reproduced wedge: killed mid-wake leaves
+        # state=waking, a dead holder PID, and the intentional block latched
+        # forever while the fleet is actually up), nothing is progressing and
+        # cycle() must act after a bounded debounce: reconcile to up if the
+        # units are actually healthy, else resume the wake (autoup is
+        # idempotent). Never leave a latched waking suppressing the watchdog.
+        if _lock_holder_alive():
+            # Authentic in-flight wake — reset the stall counter and let it run.
+            _wake_stall_streak = 0
+            return
+        # No live lock holder ⇒ the wake may be stalled. Debounce so a
+        # just-transitioning wake is never misread as stalled, then act.
+        _wake_stall_streak += 1
+        if _wake_stall_streak < WAKE_STALL_DEBOUNCE:
+            return
+        _wake_stall_streak = 0
+        _handle_stalled_wake()
         return
     if state == "down":
         # §8 self-heal: while down, re-assert the intentional watchdog block
@@ -841,14 +939,79 @@ def _lock_stale_seconds():
     return int(grace) * 60 + 300   # 20m model-load window + 5m margin
 
 
+def _lock_holder_alive(lock_path=None):
+    """Is the lock's RECORDED holder PID a live process? True/False/None.
+
+    Returns:
+      * True  — a live holder PID was parsed and the process exists.
+      * False — a holder PID was parsed and the process is PROVABLY dead
+                (``ProcessLookupError`` => POSIX ``kill(pid, 0)`` says no such
+                process). A dead holder can never block the daemon.
+      * None  — indeterminate: lock absent / unreadable / no parseable
+                ``pid=`` (a holder on ANOTHER host, or a legacy/foreign lock).
+                The caller must fall back to another rule (the age rule).
+
+    ``os.kill(pid, 0)`` is a pure liveness probe (POSIX signal 0) — it sends
+    no signal, it only checks existence/permission. ``PermissionError`` means
+    the process exists but is owned by another user — treat as alive (do NOT
+    break a lock merely because we may not own its holder).
+    """
+    path = lock_path or AUTODOWN_LOCK
+    try:
+        with open(path) as f:
+            content = f.read()
+    except OSError:
+        return None   # absent/unreadable ⇒ cannot adjudicate liveness
+    m = re.search(r"\bpid=(\d+)", content)
+    if not m:
+        return None   # unparseable/missing pid ⇒ age-rule fallback
+    pid = int(m.group(1))
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False  # provably dead
+    except PermissionError:
+        return True   # exists, owned by another user — treat as alive
+    except OSError:
+        return None   # indeterminate (unsupported platform) ⇒ age-rule fallback
+    return True
+
+
+def _lock_is_stale(now):
+    """True iff the EXISTING autodown lock is abandoned (broken before retry).
+
+    Evidence priority (holder liveness FIRST, then the age fallback):
+      1. Holder PID PROVABLY DEAD ⇒ stale IMMEDIATELY, regardless of age — a
+         dead holder must never block the daemon (the reproduced defect: a
+         killed wake left ``state: waking`` + a dead holder PID for 20+ min).
+      2. Holder PID ALIVE ⇒ NOT stale — an in-flight teardown/autoup is making
+         progress; respect it (a live holder must never be interrupted).
+      3. Indeterminate (no lock, unreadable, unparseable pid — e.g. a holder
+         on ANOTHER host) ⇒ fall back to the age rule (``_lock_stale_seconds``).
+    """
+    alive = _lock_holder_alive()
+    if alive is True:
+        return False
+    if alive is False:
+        return True
+    # alive is None — cannot adjudicate by liveness ⇒ age rule.
+    try:
+        age = now - os.path.getmtime(AUTODOWN_LOCK)
+    except OSError:
+        age = None
+    return age is not None and age > _lock_stale_seconds()
+
+
 def _acquire_lock(now=None):
     """Atomically acquire the autodown O_EXCL lockfile (§8).
 
     Returns True on success (the lock is now held by this process), or False
-    if another teardown/autoup holds it (busy). A stale lock — older than
-    ``_lock_stale_seconds()``, i.e. abandoned by a dead/blocked holder — is
-    broken (unlinked) and acquire is retried once before giving up, so the
-    daemon can never deadlock forever.
+    if another teardown/autoup holds it (busy). A stale lock — one whose
+    RECORDED HOLDER PID IS PROVABLY DEAD, or (fallback) older than
+    ``_lock_stale_seconds()`` for an indeterminate holder — is broken
+    (unlinked) and acquire is retried once before giving up, so the daemon can
+    never deadlock forever. A LIVE holder is NEVER broken, no matter its age:
+    liveness, not wall-clock, is what distinguishes \"in-flight\" from \"stalled\".
     """
     import time
     now = now if now is not None else time.time()
@@ -861,25 +1024,20 @@ def _acquire_lock(now=None):
     try:
         fd = os.open(AUTODOWN_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     except FileExistsError:
-        # Already held — is it stale (abandoned)?
-        try:
-            age = now - os.path.getmtime(AUTODOWN_LOCK)
-        except OSError:
-            age = None
-        if age is not None and age > _lock_stale_seconds():
-            # Presumed abandoned by a dead/blocked holder — break it and retry
-            # once. If the retry still races another acquirer, report busy.
-            try:
-                os.unlink(AUTODOWN_LOCK)
-            except OSError:
-                return False
-            try:
-                fd = os.open(AUTODOWN_LOCK,
-                             os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            except FileExistsError:
-                return False
-        else:
+        # Already held — is it stale (abandoned by a dead/indeterminate holder)?
+        if not _lock_is_stale(now):
             return False  # live lock held by a concurrent teardown/autoup
+        # Stale — break it and retry once. If the retry still races another
+        # acquirer, report busy.
+        try:
+            os.unlink(AUTODOWN_LOCK)
+        except OSError:
+            return False
+        try:
+            fd = os.open(AUTODOWN_LOCK,
+                         os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            return False
     # Record the holder's pid + acquire time for diagnostics / staleness.
     try:
         os.write(fd, f"pid={os.getpid()} acquired={now}".encode())
