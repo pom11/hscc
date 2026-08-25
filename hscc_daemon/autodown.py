@@ -23,6 +23,7 @@ from .daemon_ops import log
 from .state import now_iso
 from .desktop import send_macos_notification
 from .telegram import notify_operations
+from . import replay
 
 # Path to the autodown state+config file. Overridden in tests via
 # monkeypatch, mirroring lifecycle.WATCHDOG_BLOCK_FILE
@@ -1547,7 +1548,7 @@ def _record_wake_success():
 
 def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
            clock=None, sleep_fn=None, wake_grace_minutes=None, now=None,
-           notify=True, lock_now=None):
+           notify=True, lock_now=None, deliver_message=None):
     """Bring the serving layer back up (§4/§4.5/§5), under the autodown lock.
 
     Entry point wraps the real sequence in the autodown O_EXCL lockfile so
@@ -1623,14 +1624,14 @@ def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
                               http_check_fn=http_check_fn, clock=clock,
                               sleep_fn=sleep_fn,
                               wake_grace_minutes=wake_grace_minutes, now=now,
-                              notify=notify)
+                              notify=notify, deliver_message=deliver_message)
     finally:
         _release_lock()
 
 
 def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
                    clock=None, sleep_fn=None, wake_grace_minutes=None, now=None,
-                   notify=True):
+                   notify=True, deliver_message=None):
     """The wake sequence itself, run while holding the autodown lock.
 
     Split out of ``autoup()`` so the O_EXCL lock acquisition + release live in
@@ -1755,6 +1756,19 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     # Telegram message. ``cfg`` still holds wake_source/wake_trigger_text here
     # (it was loaded at the top; step 2 set wake_source on it).
     _record_wake_success()
+
+    # -- 6a. Replay queued inbound messages (§4 card t_a4e700ee) ----------
+    # The serving layer is confirmed up and the watchdog block is cleared — the
+    # readiness point after which queued messages can be processed. Replay them
+    # in arrival order through the delivery seam (injectable in tests; the
+    # production default hands them to the gateway). Failure-safe: any message
+    # that cannot be handed off STAYS queued and is reported — see replay.py.
+    try:
+        replay.replay_queued(deliver_message=deliver_message)
+    except Exception as e:
+        # Replay must never crash the wake itself — loudly report and keep the
+        # queue intact so no message is silently lost.
+        log(f"Autodown autoup: replay_queued raised: {e}", "ERROR")
 
     # -- 7. Notify operator (§4.7) ------------------------------------------
     if notify:
@@ -1986,16 +2000,85 @@ def _extract_telegram_msg(line):
     return m.group(2)
 
 
+def _should_capture_inbound():
+    """True when an inbound message should be queued for replay.
+
+    Disabled ⇒ nothing is ever queued (C5); and we only queue while the
+    serving layer is DOWN or WAKING — when state is ``up`` the gateway itself
+    processes messages normally, so there is nothing to buffer.
+    """
+    cfg = load_config()
+    if not cfg.get("enabled"):
+        return False
+    return cfg.get("state") in ("down", "waking")
+
+
+def _waking_notice():
+    """Send the once-per-wake \"cluster is waking; your message is queued\".
+
+    Uses the existing best-effort notifier (desktop + ops Telegram). Returns
+    None; never raises (the consumer guards around it too).
+    """
+    _notify(
+        "The HSCC cluster was idle and is waking from autodown — this takes a "
+        "few minutes. Your message is queued and will be processed "
+        "automatically once the cluster is up; no need to re-send.",
+        "HSCC Autodown — Waking",
+        priority="normal",
+    )
+
+
+def _capture_inbound_messages(chunk):
+    """Queue every fresh inbound-message line in ``chunk`` when appropriate.
+
+    Parses each complete ``inbound message: platform=telegram ...`` line in the
+    chunk read by ``probe_telegram_activity`` and, when the serving layer is
+    down or waking, durably enqueues it (full routing metadata, arrival order)
+    so it can be replayed once the wake completes. Returns the number queued.
+    """
+    queued = 0
+    if not _should_capture_inbound():
+        return 0
+    try:
+        text = chunk.decode("utf-8", errors="replace")
+    except Exception:
+        return 0
+    for raw_line in text.splitlines():
+        meta = replay.parse_gateway_line(raw_line)
+        if meta is None or not meta.get("text"):
+            continue
+        # Only queue real platform inbound (telegram lines; anything else that
+        # matches the prefix is treated as a generic inbound too).
+        try:
+            res = replay.enqueue_inbound(meta, notify_fn=_waking_notice)
+            if res.get("queued"):
+                queued += 1
+        except Exception as e:
+            try:
+                log(f"Autodown queue: failed to enqueue inbound message: {e}",
+                    "ERROR")
+            except Exception:
+                pass
+    return queued
+
+
 def probe_telegram_activity(gateway_log=None, offset_file=None):
     """Stamp ``record_activity("telegram")`` on NEW inbound Telegram messages
-    (§1d.2 — design correction).
-
+    (§1d.2 — design correction) and queue them for replay while down/waking.
     We do NOT edit ~/.hermes-tg/mcp_server.py (external, untracked by git —
     an edit there is silently lost on rebuild and is a trap, not a design). We
     observe Telegram inbound traffic indirectly: the Hermes gateway writes an
     ``inbound message: platform=telegram`` line to ~/.hermes/logs/gateway.log
     for every inbound Telegram message. This probe scans that log from the last
     scanned byte offset; any NEW marker line = fresh inbound Telegram ⇒ stamp.
+
+    While the cluster state is ``down``/``waking`` the probe ALSO captures the
+    routing metadata of each fresh message into the durable replay queue
+    (``~/.hscc/queued_messages.json``) — this is the fix for the long-standing
+    dropped-first-message bug: the message is not lost, it is queued and
+    replayed once the wake completes (see docs/design/idle-autodown.md §4). On
+    the first queued message of a wake it posts a once-per-wake \"waking; your
+    message is queued\" notice.
 
     The offset is persisted in ~/.hscc/state/telegram_probe.offset so a
     restarted daemon does not re-stamp old mail. Log rotation (size shrinking /
@@ -2046,8 +2129,11 @@ def probe_telegram_activity(gateway_log=None, offset_file=None):
             cfg = load_config()
             cfg["wake_trigger_text"] = trigger[:120]
             save_config(cfg)
-        return True
-    return False
+    # Queue captured messages for replay while down/waking (the major fix: the
+    # wake-triggering message is not lost, it is queued and replayed once the
+    # wake completes — see replay.py and docs/design/idle-autodown.md §4).
+    _capture_inbound_messages(chunk)
+    return count > 0
 
 
 def _first_marker_line(text):

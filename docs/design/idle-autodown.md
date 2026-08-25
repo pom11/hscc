@@ -320,32 +320,47 @@ The wake event itself ("inbound Telegram message", "inbound HTTP request",
 cannot itself answer the message (answering needs a model), so the design makes
 the point of arrival the *signal*, and the handling depends on the source.
 
-**Corrected behaviour (2026-08-25, BLOCKER t_d6bdec0e):** contrary to the
+**Corrected behaviour (2026-08-25, design card t_a4e700ee — supersedes the
+interim t_d6bdec0e "notify, do not replay" approach):** contrary to the
 original claim below, the wake-triggering **Telegram message is NOT durably
-queued and processed once the model is up.** The Hermes gateway *drains*
-Telegram on arrival: it consumes the message, calls the not-yet-loaded model,
-fails, and replies with an error — the original text is persisted only for
-session context and is **never retried**. Reproduced live 3/3 times. The
-operator must **re-send** the message. Autodown's job is therefore to make that
-unmissable, not to replay it:
+queued by Telegram itself.** Telegram is not a queue — the Hermes gateway
+*drains* each message on arrival: it consumes it, calls the not-yet-loaded
+model, fails, and replies with an error. The original text is persisted only
+for session context and is **never retried**. Reproduced live 3/3 times. If
+autodown simply notifies, the user must re-send. The operator has since decided
+the better fix: **queue the messages while the cluster is down/waking and
+replay them automatically once it is up**, exactly as they would have arrived.
+That is what this design now specifies and what `hscc_daemon/replay.py`
+implements.
 
 - **Inbound Telegram message.** The wake is triggered by the daemon's
   `probe_telegram_activity` (§1d.2) observing the gateway log line
-  `inbound message: platform=telegram`. That probe does NOT just note the
-  fact — it captures the message text (`msg='...'`, first 120 chars) into the
-  config's `wake_trigger_text`. Autodown then notifies the operator on the ops
-  Telegram topic (`telegram.notify_operations`, `telegram.py:58` — CPU-side,
-  works with the fleet down):
-  1. **On wake trigger** (`state -> waking`): one "cluster is waking; models
-     take several minutes; **this message will NOT be processed**" notice,
-     sent once at the state transition (not per tick).
-  2. **On wake complete**: a "cluster is up" notice that **quotes** the
-     triggering message text so the operator can re-send it without hunting.
-  Autodown does **NOT auto-replay the message into the orchestrator** — this
-  is a deliberate choice. Re-executing a user instruction automatically,
-  minutes later, without confirmation is not safe: the operator may have moved
-  on, and a stale instruction could act on a changed cluster. Notify, quote,
-  let them decide. Auto-replay is recorded as a possible future opt-in.
+  `inbound message: platform=telegram ...`. That probe does NOT just note the
+  fact — while the cluster state is `down` or `waking` it captures each fresh
+  inbound line's full routing metadata (text, platform, chat id, `reply_to_id`,
+  user, arrival timestamp) into a **durable HSCC-side queue** at
+  `~/.hscc/queued_messages.json` (`replay.enqueue_inbound`, `replay.py:280`),
+  preserving **arrival order** via a monotonic `seq`. This is the real fix for
+  the dropped-first-message bug: the message is not lost, it is queued and
+  replayed once the wake completes. Details:
+  1. **Once-per-wake waking notice.** On the FIRST message queued in a wake
+     (`replay.enqueue_inbound`, when `notice_sent_this_wake` is still false)
+     the daemon posts one "cluster is waking from idle autodown; this takes a
+     few minutes; your message is queued and will be processed automatically —
+     no need to re-send" notice via the best-effort notifier (desktop + ops
+     Telegram, `telegram.notify_operations`, `telegram.py:58` — CPU-side,
+     works with the fleet down). Fired **once per wake**, not per message and
+     not per tick. The flag resets when the queue is emptied on a successful
+     wake, readying the next wake.
+  2. **Replay on readiness.** After `autoup()` confirms readiness (the point
+     where the watchdog block is cleared — `_autoup_locked` step 6a,
+     `autodown.py`), `replay.replay_queued` (`replay.py:360`) delivers each
+     queued message **in arrival order** through a delivery seam, then clears
+     the queue. Delivery is via the operator-configured path (see §4.4 below on
+     the production default and its runtime requirement).
+  3. **Wake-complete notice.** After replay, `_notify_wake_complete` still
+     posts a "cluster is up" notice quoting the original triggering message for
+     the operator's record.
 - **Inbound HTTP API request.** The HSCC API server is CPU-side and always-on;
   it receives the request immediately. For a request that needs the serving
   layer (e.g. a generation request), the API handler synchronously triggers
@@ -371,16 +386,66 @@ unmissable, not to replay it:
 
 **Rule for all sources:** the daemon's ONLY job on wake is to (a) persist the
 event, (b) bring serving up, (c) signal "waking", and (d) — for Telegram —
-notify the operator that their message will not be processed and quote it so
-they can re-send. It never fabricates an answer, never auto-replays a user
-instruction, and never sends an empty quote.
+capture the message into the durable replay queue (see §4.4 for bounds,
+the once-per-wake notice, and the failure contract). It never fabricates an
+answer, and it never silently drops a queued message: if a queued message
+cannot be replayed it is retained and reported loudly, never discarded.
 
-**Corrected guarantee (telegram):** the wake-triggering message is NOT
-automatically answered. The operator is told, in the waking notice, that their
-message will not be processed, and the wake-complete notice quotes the message
-so they can re-send it with one tap. What is guaranteed by construction is that
-the operator is **never left thinking the message was handled when it was not**
-— the notifications are the honest contract, not a silent drop-and-process.
+**Corrected guarantee (telegram):** while the cluster is down/waking, every
+inbound Telegram message is durably queued (in ~/.hscc/queued_messages.json)
+with full routing metadata and replayed automatically in arrival order once the
+wake completes — it is NOT lost to a dropped first message. The contract is
+now a real queue + replay, not a silent drop-and-process and not just a
+notification asking the user to re-send. Bounds and failure modes are in §4.4.
+
+### 4.4 Queue bounds, delivery, and the failure contract
+
+Implementation: `hscc_daemon/replay.py` (queue file `~/.hscc/queued_messages.json`,
+atomic writes via tmp + `os.replace`, exactly the `save_config` pattern). The
+queue is capped and age-bounded so it can never grow unbounded or execute a
+stale instruction against a changed cluster:
+
+- **Capacity.** `MAX_QUEUED_MESSAGES = 100` (`replay.py:44`). When a new message
+  arrives while the queue is already full, the **oldest** queued message is
+  dropped with a clear `WARN` log. The newest messages win, so the most recent
+  user intent is never evicted.
+- **Age.** `MAX_MESSAGE_AGE_MINUTES = 180` (`replay.py:49`, i.e. 3 hours). A
+  message that has been queued longer than this is **not** replayed; at replay
+  time it is dropped with a `WARN` log ("not executed") rather than silently
+  run against a cluster that has moved on hours later. Fresh messages under the
+  bound are always replayed.
+- **Ordering** is guaranteed by a monotonic `seq` stamped at enqueue time;
+  replay iterates strictly in `seq` order.
+- **Idempotency / no double-send.** A message is removed from the durable queue
+  only *after* its delivery handoff succeeds. The queue file is persisted after
+  each successful dequeue, so a crash between replaying one message and the
+  next cannot re-send an already-handed-off message: the handoff is durable
+  before the dequeue, and the dequeue is durable before the next handoff. The
+  residual window — a crash precisely between an external handoff returning
+  success and the local atomic write landing — yields at-least-once delivery,
+  the industry-standard guarantee for a non-idempotent remote.
+- **Failure-safe.** If a delivery fails (returns False or raises), the message
+  **stays queued** and a loud `ERROR` is logged; replay stops, so a
+  cluster-side problem cannot silently eat every message. `replay_queued`
+  raising inside `autoup` is caught (`autodown.py`) so a delivery problem never
+  crashes the wake itself.
+- **Delivery seam.** `replay.replay_queued(deliver_message=...)` hands each
+  queued message to an injectable callable. In tests this is a fake; in
+  production the default (`replay.default_deliver_message`, `replay.py:518`)
+  POSTs the message to the Hermes gateway's **webhook platform**
+  (`http://127.0.0.1:8644/webhooks/<route>` by default) with a `deliver_extra`
+  carrying `chat_id`/`thread_id`/`reply_to_id` so the reply is routed to the
+  original chat/topic. **Runtime requirement:** the gateway's webhook platform
+  must be enabled and a route configured for the queue's delivery URL (see
+  `install/hscc-skills/devops/webhook-subscriptions/SKILL.md`); the URL/secret
+  are overridable via `HSCC_REPLAY_WEBHOOK_URL` / `HSCC_REPLAY_WEBHOOK_SECRET`.
+  If the webhook platform is unavailable, delivery returns False and every
+  message is retained + reported loudly — fail-closed, never silently dropped.
+
+### 4.5 No-op on empty queue
+A wake via CLI/HTTP/kanban with an empty (or absent) queue is a clean no-op —
+`replay.replay_queued` returns `empty=True` and `autoup` proceeds normally. No
+crash, no spurious notice.
 
 ---
 
