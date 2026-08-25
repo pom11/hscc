@@ -9,21 +9,38 @@ import urllib.error
 
 
 def run_cmd(args, timeout=30, as_json=False, shell=False):
-    """Run a command and return structured output."""
+    """Run a command and return structured output.
+
+    On a non-zero exit, ``output`` folds stdout AND stderr together so the
+    error text is never lost (tools like sparkrun write their errors to stderr
+    — autodown's failure reason was empty for exactly this reason); a separate
+    ``stderr`` field is also kept for structured access. ``as_json`` parses
+    stdout as JSON instead.
+    """
     try:
         result = subprocess.run(
             args, capture_output=True, text=True, timeout=timeout, shell=shell
         )
-        if as_json and result.stdout.strip():
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+        if as_json and stdout:
             try:
-                return {"ok": True, "output": json.loads(result.stdout.strip())}
+                return {"ok": True, "output": json.loads(stdout),
+                        "stderr": stderr}
             except json.JSONDecodeError:
-                return {"ok": False, "output": result.stdout.strip()}
-        return {"ok": result.returncode == 0, "output": result.stdout.strip()}
+                return {"ok": False, "output": stdout, "stderr": stderr}
+        if result.returncode != 0:
+            # Fold stderr into output on failure so diagnostics are never lost
+            # (sparkrun writes errors to stderr — the empty-reason bug). Keep a
+            # separate `stderr` field too for structured access.
+            folded = "\n".join(p for p in (stdout, stderr) if p)
+            return {"ok": False, "output": folded, "stderr": stderr}
+        return {"ok": True, "output": stdout, "stderr": stderr}
     except subprocess.TimeoutExpired:
-        return {"ok": False, "output": f"Command timed out after {timeout}s"}
+        return {"ok": False, "output": f"Command timed out after {timeout}s",
+                "stderr": ""}
     except Exception as e:
-        return {"ok": False, "output": f"Command failed: {e}"}
+        return {"ok": False, "output": f"Command failed: {e}", "stderr": ""}
 
 
 def ssh_cmd(host, command, timeout=20):

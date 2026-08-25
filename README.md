@@ -194,10 +194,9 @@ Autodown is deliberately conservative. It will **never** tear the layer down:
 
 - while any kanban work is **running**, **ready** to dispatch, or sitting in **review**;
 - while any agent is **busy** (working or failed) — only an all-idle fleet counts;
-- for a **keepalive** unit — a keepalive flag in `serving.json` is a standing "keep this up" that beats the idle timer;
 - if any signal can't be verified — it stays **up** rather than guessing.
 
-**Keepalive caveat, honestly:** on a cluster where a worker unit is marked keepalive, autodown only frees the *non-keepalive* nodes — keepalive units stay up by design. If you want those nodes freed too, clear the `keepalive` flag in `~/.hscc/serving.json`.
+**Whole-fleet down (v1.9.3+):** autodown takes the *entire* serving layer down — the orchestrator **and** all worker units, **including keepalive units**. Powering everything down is the point of the feature, so keepalive units are no longer exempt. It does this with a single `sparkrun stop --all` (`hscc cluster down` / `serving.fleet_down_cmd()`), and a wake brings every unit back up (`hscc cluster up` / `serving.fleet_up_plan()`), orchestrator first. The one remaining guard is an **interlock**, not an exemption: if a keepalive unit is *sick* when a teardown is about to run, autodown aborts rather than shut the fleet down mid-problem.
 
 When it does tear down, it tells the watchdog to back off first, so your health-check daemon doesn't fight it and resurrect the layer mid-teardown. And be aware: this is brand-new (v1.9.0) and has never run a real teardown on this cluster — treat it as untested-at-scale until you've watched it cycle once.
 
