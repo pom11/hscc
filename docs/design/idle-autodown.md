@@ -316,20 +316,36 @@ model** (see §1d). When `autodown.cycle()` observes an activity event while
 
 ### First-message handling — the critical C1 case
 The wake event itself ("inbound Telegram message", "inbound HTTP request",
-"new kanban card") arrives **before** the serving layer is up. The daemon must
-NOT drop it (a dropped first message is a FAILED design). Because the daemon
-cannot itself answer the message (answering needs a model), the design makes
-the point of arrival the *signal*, and the handling depends on the source:
+"new kanban card") arrives **before** the serving layer is up. The daemon
+cannot itself answer the message (answering needs a model), so the design makes
+the point of arrival the *signal*, and the handling depends on the source.
 
-- **Inbound Telegram message.** The Telegram MCP daemon is CPU-side and
-  always-on, so it already received and stored the message. It does NOT need
-  the serving layer to have ACKed it. The wake triggers autoup; the message
-  sits in Telegram's inbox (Telegram is the queue). When the gateway comes up,
-  the gateway's normal inbound flow reads the message → processes it. The
-  daemon additionally asks the MCP daemon to post a short
-  "cluster is waking (idle autodown); back in ~1-2 min" notice to the ops
-  topic so the human isn't left hanging. **The message is never dropped — it
-  is durably queued by Telegram itself and processed once the model is up.**
+**Corrected behaviour (2026-08-25, BLOCKER t_d6bdec0e):** contrary to the
+original claim below, the wake-triggering **Telegram message is NOT durably
+queued and processed once the model is up.** The Hermes gateway *drains*
+Telegram on arrival: it consumes the message, calls the not-yet-loaded model,
+fails, and replies with an error — the original text is persisted only for
+session context and is **never retried**. Reproduced live 3/3 times. The
+operator must **re-send** the message. Autodown's job is therefore to make that
+unmissable, not to replay it:
+
+- **Inbound Telegram message.** The wake is triggered by the daemon's
+  `probe_telegram_activity` (§1d.2) observing the gateway log line
+  `inbound message: platform=telegram`. That probe does NOT just note the
+  fact — it captures the message text (`msg='...'`, first 120 chars) into the
+  config's `wake_trigger_text`. Autodown then notifies the operator on the ops
+  Telegram topic (`telegram.notify_operations`, `telegram.py:58` — CPU-side,
+  works with the fleet down):
+  1. **On wake trigger** (`state -> waking`): one "cluster is waking; models
+     take several minutes; **this message will NOT be processed**" notice,
+     sent once at the state transition (not per tick).
+  2. **On wake complete**: a "cluster is up" notice that **quotes** the
+     triggering message text so the operator can re-send it without hunting.
+  Autodown does **NOT auto-replay the message into the orchestrator** — this
+  is a deliberate choice. Re-executing a user instruction automatically,
+  minutes later, without confirmation is not safe: the operator may have moved
+  on, and a stale instruction could act on a changed cluster. Notify, quote,
+  let them decide. Auto-replay is recorded as a possible future opt-in.
 - **Inbound HTTP API request.** The HSCC API server is CPU-side and always-on;
   it receives the request immediately. For a request that needs the serving
   layer (e.g. a generation request), the API handler synchronously triggers
@@ -354,13 +370,17 @@ the point of arrival the *signal*, and the handling depends on the source:
   the wake itself.
 
 **Rule for all sources:** the daemon's ONLY job on wake is to (a) persist the
-event, (b) bring serving up, (c) signal "waking". It never fabricates an answer
-and never drops the trigger — the trigger is durably held either by Telegram's
-inbox, the HTTP client's retry, or the kanban DB.
+event, (b) bring serving up, (c) signal "waking", and (d) — for Telegram —
+notify the operator that their message will not be processed and quote it so
+they can re-send. It never fabricates an answer, never auto-replays a user
+instruction, and never sends an empty quote.
 
-**A dropped-first-message cannot happen by construction:** every wake source is
-an always-on CPU process that buffers/stores the inbound item independently of
-the serving layer. The serving layer going down never loses the message.
+**Corrected guarantee (telegram):** the wake-triggering message is NOT
+automatically answered. The operator is told, in the waking notice, that their
+message will not be processed, and the wake-complete notice quotes the message
+so they can re-send it with one tap. What is guaranteed by construction is that
+the operator is **never left thinking the message was handled when it was not**
+— the notifications are the honest contract, not a silent drop-and-process.
 
 ---
 
@@ -454,6 +474,7 @@ to how `lifecycle.py` owns `watchdog-block.json`). Schema:
   "down_since": null,
   "wake_source": null,
   "wake_at": null,
+  "wake_trigger_text": null,      // first ~120 chars of the telegram message that woke us (§4)
   "cancel_requested": false,
   "reason": ""
 }
