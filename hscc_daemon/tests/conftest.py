@@ -67,6 +67,10 @@ def _isolate_hscc(tmp_path, monkeypatch):
     """
     base = str(tmp_path / "hscc")
 
+    from hscc_daemon import (
+        autodown, daemon_ops, desktop, hscc, lifecycle, replay, state, trigger,
+    )
+
     # (a) Runtime expanduser redirect for the whole ~/.hscc directory tree.
     real_hscc = os.path.expanduser("~/.hscc")
     _real_expanduser = os.path.expanduser
@@ -84,7 +88,8 @@ def _isolate_hscc(tmp_path, monkeypatch):
     # (b) Module-level constants already computed at import — overwrite each.
     def _module_attrs():
         from hscc_daemon import (
-            autodown, daemon_ops, desktop, hscc, lifecycle, state, trigger,
+            autodown, daemon_ops, desktop, hscc, lifecycle, replay, state,
+            trigger,
         )
         def p(sub):
             return os.path.join(base, sub)
@@ -95,6 +100,11 @@ def _isolate_hscc(tmp_path, monkeypatch):
             (autodown, "AGENTS_FILE", p("agents.json")),
             (autodown, "HTTP_ACTIVITY_STATE", p("activity.json")),
             (autodown, "TELEGRAM_OFFSET_FILE", p("state/telegram_probe.offset")),
+            # replay.py (inbound-message queue — never touch the real one)
+            (replay, "QUEUE_FILE", p("queued_messages.json")),
+            (replay, "WEBHOOK_DELIVER_URL",
+             "http://127.0.0.1:9/webhooks/autodown-replay"),
+            (replay, "WEBHOOK_DELIVER_SECRET", ""),
             # lifecycle.py
             (lifecycle, "BRIDGE_FILE", p("bridge.json")),
             (lifecycle, "WATCHDOG_BLOCK_FILE", p("watchdog-block.json")),
@@ -118,6 +128,21 @@ def _isolate_hscc(tmp_path, monkeypatch):
 
     for mod, attr, val in _module_attrs():
         monkeypatch.setattr(mod, attr, val, raising=False)
+
+    # (c) Hermetic delivery stub so NO test can ever reach a live gateway.
+    # Replay's default production delivery POSTs to the gateway webhook; the
+    # WEBHOOK_DELIVER_URL module-attr redirect above already points it at a dead
+    # port (9), and this stub is belt-and-suspenders so even an accidental call
+    # to default_deliver_message returns False (fail-closed → message retained)
+    # instead of attempting any network egress. We deliberately do NOT stub
+    # autodown._notify / _waking_notice here: existing notification tests patch
+    # notify_operations/send_macos_notification themselves and assert on them
+    # firing, and the new replay tests pass their own injectable notify_fn /
+    # notify=False — so a blanket _notify stub would silently swallow those and
+    # break real assertions. Individual tests that want a no-op notifier still
+    # patch it (LIFO teardown -> the test's patch wins during the test).
+    monkeypatch.setattr(replay, "default_deliver_message",
+                        lambda msg: False, raising=False)
 
 
 class _SubprocessResult:
