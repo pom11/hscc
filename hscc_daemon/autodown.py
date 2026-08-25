@@ -16,6 +16,7 @@ testable without the daemon running and without touching the real ~/.hscc or
 import datetime
 import json
 import os
+import re
 import sys
 
 from .daemon_ops import log
@@ -46,6 +47,11 @@ DEFAULT_CONFIG = {
     "down_since": None,
     "wake_source": None,
     "wake_at": None,
+    # First ~120 chars of the Telegram message that triggered the current wake
+    # (set by probe_telegram_activity, quoted by the wake-complete notice so
+    # the operator can re-send it §4). Cleared on wake success like the other
+    # wake bookkeeping.
+    "wake_trigger_text": None,
     "cancel_requested": False,
     "reason": "",
 }
@@ -974,6 +980,73 @@ def _notify(msg, title, priority="normal"):
         pass
 
 
+# How much of the triggering Telegram message a notice quotes (§4). Matches
+# the probe's capture/truncation (probe_telegram_activity stores 120 chars).
+TG_QUOTE_CHARS = 120
+
+
+def _notify_wake_triggered(cfg):
+    """Tell the operator their triggering Telegram message will NOT be
+    processed, posted the moment a telegram-triggered wake starts (§4).
+
+    Only fires when the wake was triggered by an inbound Telegram message
+    (``wake_source == "telegram"``) AND autodown is enabled. A CLI/HTTP/kanban
+    wake has no Telegram message to be lost (nothing to warn about), and a
+    disabled autodown sends nothing. Best-effort via ``notify_operations``
+    only — never raises, and deliberately does NOT auto-replay the message
+    into the orchestrator (auto-re-executing a user instruction minutes later
+    without confirmation is not safe; see §4 design note).
+    """
+    if not cfg.get("enabled"):
+        return
+    if cfg.get("wake_source") != "telegram":
+        return
+    try:
+        notify_operations(
+            "HSCC cluster is waking from idle autodown — the GPU serving layer "
+            "is starting and models take several minutes to load. "
+            "IMPORTANT: the Telegram message that triggered this wake will "
+            "NOT be processed. Please re-send it once the cluster reports up."
+        )
+    except Exception:
+        pass
+
+
+def _notify_wake_complete(cfg):
+    """Tell the operator the cluster is up and QUOTE the triggering Telegram
+    message so they can re-send it without hunting (§4).
+
+    Only fires when the wake was triggered by Telegram (``wake_source ==
+    "telegram"``) AND autodown is enabled. Quotes the first ``TG_QUOTE_CHARS``
+    chars of the captured trigger text; if none was captured it omits the quote
+    (it never sends an empty quote and never crashes). Best-effort; never
+    raises. There is deliberately NO auto-replay of the message — the operator
+    decides whether to re-send (§4 design note).
+    """
+    if not cfg.get("enabled"):
+        return
+    if cfg.get("wake_source") != "telegram":
+        return
+    text = (cfg.get("wake_trigger_text") or "").strip()
+    if text:
+        body = (
+            "HSCC cluster is UP (idle autodown wake complete). The Telegram "
+            "message that triggered the wake was NOT processed:\n\n"
+            f"> {text[:TG_QUOTE_CHARS]}\n\n"
+            "Please re-send it if it still needs attention."
+        )
+    else:
+        body = (
+            "HSCC cluster is UP (idle autodown wake complete). The Telegram "
+            "message that triggered the wake was NOT processed — please "
+            "re-send it if it still needs attention."
+        )
+    try:
+        notify_operations(body)
+    except Exception:
+        pass
+
+
 def _rollback_block(original_block):
     """Restore the pre-teardown watchdog block (§3/§8 rollback).
 
@@ -1466,6 +1539,7 @@ def _record_wake_success():
     cfg["state"] = "up"
     cfg["wake_source"] = None
     cfg["wake_at"] = None
+    cfg["wake_trigger_text"] = None   # no longer needed once the wake is done
     cfg["down_since"] = None
     cfg["reason"] = ""
     save_config(cfg)
@@ -1620,6 +1694,15 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
         log(msg, "ERROR")
         return {"result": "no-units", "started": [], "ready": []}
 
+    # -- 1b. Telegram wake notice (§4) --------------------------------------
+    # The state has just transitioned UP -> waking and we are committed to a
+    # REAL wake (the plan is non-empty). If this wake was triggered by a
+    # Telegram inbound message, post the "waking" notice NOW — once, at the
+    # state transition (not per tick) — so the operator knows their message
+    # will NOT be processed. A CLI/HTTP/kanban wake is silent here (no message
+    # to be lost). Best-effort; never interferes with the wake itself.
+    _notify_wake_triggered(cfg)
+
     # -- 2. Record the wake trigger (§4.2) ---------------------------------
     cfg["wake_source"] = cfg.get("wake_source") or "cycle"
     cfg["wake_at"] = ts
@@ -1667,10 +1750,21 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     log("Autodown autoup: watchdog block cleared after readiness confirmed")
 
     # -- 6. Set state up + clear wake bookkeeping AND down_since (§4.6) ------
+    # Capture the wake trigger BEFORE _record_wake_success clears the wake
+    # bookkeeping, so the wake-complete notice can quote the triggering
+    # Telegram message. ``cfg`` still holds wake_source/wake_trigger_text here
+    # (it was loaded at the top; step 2 set wake_source on it).
     _record_wake_success()
 
     # -- 7. Notify operator (§4.7) ------------------------------------------
     if notify:
+        # Telegram-triggered wake: post the "cluster is UP" notice AND quote
+        # the triggering message (read from cfg before it was cleared) so the
+        # operator can re-send it without hunting. Only fires for a telegram
+        # trigger, and only NOW after readiness is confirmed (a failed wake
+        # returns earlier, so the honest failure notice wins and no false
+        # "cluster is up" is ever sent).
+        _notify_wake_complete(cfg)
         _notify("HSCC serving layer is back UP (idle autodown wake complete)",
                 "HSCC Autodown — Serving Up", priority="normal")
     return {"result": "up", "started": started,
@@ -1871,8 +1965,29 @@ def _save_telegram_offset(offset, offset_file=None):
         pass   # best-effort; a missing offset just re-baselines next poll
 
 
+# The gateway log's ``inbound message: platform=telegram ... msg='<text>'``
+# line carries the message text after ``msg=`` in single OR double quotes.
+_TELEGRAM_MSG_RE = re.compile(r"\bmsg=('|\")(.*?)\1", re.DOTALL)
+
+
+def _extract_telegram_msg(line):
+    """Best-effort pull of the message text out of a gateway-log line.
+
+    The Hermes gateway writes ``msg='<text>'`` (or ``msg=\"<text>\"``) on its
+    ``inbound message: platform=telegram`` line. Returns the decoded text, or
+    None if the line has no ``msg=`` field. Fail-safe: a malformed line never
+    raises — it just yields None (nothing to quote).
+    """
+    if not line:
+        return None
+    m = _TELEGRAM_MSG_RE.search(line)
+    if not m:
+        return None
+    return m.group(2)
+
+
 def probe_telegram_activity(gateway_log=None, offset_file=None):
-    """Stamp ``record_activity(\"telegram\")`` on NEW inbound Telegram messages
+    """Stamp ``record_activity("telegram")`` on NEW inbound Telegram messages
     (§1d.2 — design correction).
 
     We do NOT edit ~/.hermes-tg/mcp_server.py (external, untracked by git —
@@ -1885,6 +2000,12 @@ def probe_telegram_activity(gateway_log=None, offset_file=None):
     The offset is persisted in ~/.hscc/state/telegram_probe.offset so a
     restarted daemon does not re-stamp old mail. Log rotation (size shrinking /
     truncation) is handled by re-baselining from offset 0.
+
+    When it stamps, it ALSO captures the text of the triggering Telegram
+    message (``msg='...'`` from the first matched line) and persists it to the
+    config's ``wake_trigger_text`` (truncated to first 120 chars), so the
+    wake-complete notice can quote it and the operator can re-send the message
+    without hunting. The byte-offset behaviour is unchanged.
 
     Returns True if it stamped. Fail-safe: missing log or unreadable offset ⇒
     baseline-reset, no stamp (never fabricate Telegram activity).
@@ -1911,12 +2032,30 @@ def probe_telegram_activity(gateway_log=None, offset_file=None):
             chunk = f.read(size - offset)
     except OSError:
         return False
-    count = chunk.count(TELEGRAM_MARKER.encode())
+    text = chunk.decode("utf-8", errors="replace")
+    count = text.count(TELEGRAM_MARKER)
     _save_telegram_offset(size, offset_path)
     if count > 0:
         record_activity("telegram")
+        # Capture the triggering message text (first ~120 chars) for the
+        # wake-complete quote. Only persist when we actually extracted text —
+        # a marker with no msg= field leaves wake_trigger_text as-is (nothing
+        # to quote, not an empty quote).
+        trigger = _extract_telegram_msg(_first_marker_line(text))
+        if trigger:
+            cfg = load_config()
+            cfg["wake_trigger_text"] = trigger[:120]
+            save_config(cfg)
         return True
     return False
+
+
+def _first_marker_line(text):
+    """Return the line containing the first telegram marker, or None."""
+    for line in text.splitlines():
+        if TELEGRAM_MARKER in line:
+            return line
+    return None
 
 
 def _default_probes(kanban_db=None):
