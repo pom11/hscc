@@ -122,7 +122,20 @@ fi
 PID0="$(daemon_pid)"
 
 STOP_OUT="$(run_daemon_cmd stop)"
-START_OUT="$(run_daemon_cmd start)"
+# `start` MUST NOT be captured via $(...): `hscc start` double-forks and the
+# daemon grandchild inherits stdout, so the command-substitution pipe never
+# reaches EOF while the daemon runs — the subshell blocks forever, which is
+# exactly the bootstrap hang (>10 min, no summary) this script fixes. So we
+# DETACH the daemon instead: run start with stdin from /dev/null and stdout/
+# stderr redirected to a temp regular file. The forked daemon inherits fd 1/2
+# pointing at a regular file, not a pipe (so no EOF-wait), the parent `hscc
+# start` writes its banner there and returns immediately, and we read the file
+# back afterwards so real errors still surface in the outcome line. We drop the
+# tmp after reading; the daemon keeps a harmless fd to the unlinked file.
+START_LOG="$(mktemp "${TMPDIR:-/tmp}/hscc-restart-start.XXXXXX")"
+run_daemon_cmd start </dev/null >"$START_LOG" 2>&1
+START_OUT="$(cat "$START_LOG")"
+rm -f "$START_LOG"
 # Real reason a restart may have failed, trimmed to a readable single line
 # (first non-blank lines of captured stop/start output).
 ERR="$(printf '%s\n' "$STOP_OUT" "$START_OUT" | sed '/^[[:space:]]*$/d' | head -n 4 | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
