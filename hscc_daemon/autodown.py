@@ -936,6 +936,11 @@ def _teardown_locked(serving_path=None, run_cmd_fn=None, kanban_db=None,
                     "back so the watchdog resumes supervision",
                     "HSCC Autodown Cancelled", priority="normal")
             return {"result": "cancelled", "issued": issued, "plan": plan}
+        # `sparkrun stop --all` is also NOT a quick status call: it tears down
+        # the whole fleet and a graceful container stop can take a while. An
+        # explicit, generous timeout here (well above run_cmd's 30s default) is
+        # what keeps a slow stop from being killed mid-way and misread as a
+        # hard failure — the mirror-image of the autoup start bug.
         res = run_cmd(entry["cmd"], timeout=180)
         issued.append({"kind": entry["kind"], "nodes": entry["nodes"],
                        "port": entry["port"], "cmd": entry["cmd"],
@@ -1395,9 +1400,20 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     log("Autodown autoup: state=waking, wake recorded")
 
     # -- 3. Start the serving layer back up (orchestrator FIRST, §4.3) -----
+    # The start subprocess (`sparkrun run --no-follow`) is NOT a quick status
+    # call. On real hardware the launch phase alone takes 40s+ (the wake-fails
+    # incident), before the model even begins loading — and run_cmd's default
+    # timeout=30 is meant for quick status calls and would kill the start every
+    # time. Size the subprocess timeout against the model-load grace window
+    # (VLLM_LOAD_GRACE_MINUTES, default 20), the same knob the readiness poll
+    # below uses — NOT wake_grace_minutes, which is the readiness-window
+    # override only and may be 0 in tests without meaning \"kill the start\".
+    # Readiness, not process exit, is the real success signal (step 4): a slow
+    # launch that eventually becomes ready still wakes successfully.
+    start_timeout = _wake_ready_grace_minutes() * 60
     started = []
     for entry in plan:
-        res = run_cmd(entry["cmd"], timeout=30)
+        res = run_cmd(entry["cmd"], timeout=start_timeout)
         started.append({"kind": entry["kind"], "nodes": entry["nodes"],
                         "port": entry["port"], "cmd": entry["cmd"],
                         "ok": bool(res.get("ok"))})
