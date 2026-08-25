@@ -188,6 +188,10 @@ hscc autodown disable                    # disarm it — stop the automation
 
 `status` is read-only (pass `--json` for machine-readable output). `enable` only arms the timer — it never shuts the layer down immediately, and if the layer is already down it won't start it either. `disable` just disarms the automation and hands supervision back to the watchdog; it doesn't restart anything, so if the layer is down and you want it up, run `hscc autodown wake`.
 
+### If a Telegram message wakes a down cluster
+
+A Telegram message sent while the serving layer is down will wake it up, but the **message itself is not processed** — the gateway consumes it on arrival while the model is still loading and replies with an error. Autodown posts two notices to the ops Telegram topic so you're never left wondering: (1) a "cluster is waking, this message will not be processed" notice the moment the wake starts, and (2) a "cluster is up" notice when the wake completes, **quoting the message** so you can re-send it with one tap. Autodown deliberately does **not** auto-replay the message — re-executing your instruction minutes later without confirmation isn't safe. Just send it again once the cluster is up.
+
 ### What it will never do
 
 Autodown is deliberately conservative. It will **never** tear the layer down:
