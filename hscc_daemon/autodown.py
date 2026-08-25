@@ -671,16 +671,17 @@ def _release_lock():
         pass
 
 
-def _worker_stop_cmd(nodes):
-    """`sparkrun stop --hosts <nodes>` for one non-keepalive unit (§3.3).
+def _worker_stop_cmd(recipe, nodes):
+    """`sparkrun stop <recipe> --hosts <nodes>` for one non-keepalive unit (§3.3).
 
-    Mirrors the real orchestrator stop form ``serving.VLLM_STOP_CMD``
-    (serving.py:150): ``sparkrun stop --hosts <node>``. We pass the EXACT
-    per-unit node list from serving.json (never a catch-all that could touch
-    keepalive nodes, C4). The positional port form from the design prose isn't
-    used because the actual command in code carries no port.
+    Mirrors the established HSCC unit-stop form ``sparkrun stop <recipe>
+    --hosts <node>`` used by ``health.check_workers`` (health.py:1112) and
+    ``hscc-cluster/ops.py`` (ops.py:151). ``<recipe>`` is the TARGET sparkrun
+    requires — the unit's OWN recipe/container identifier, scoped so we never
+    issue a catch-all ``--all`` that could touch keepalive nodes (C4). The
+    ``--hosts`` list carries the EXACT per-unit node set from serving.json.
     """
-    return ["sparkrun", "stop", "--hosts", ",".join(nodes)]
+    return ["sparkrun", "stop", recipe, "--hosts", ",".join(nodes)]
 
 
 def _build_teardown_plan(serving):
@@ -689,12 +690,19 @@ def _build_teardown_plan(serving):
     Returns a list of dicts, one entry per unit to stop::
 
         {"kind": "worker"|"orchestrator", "nodes": [...], "port": int,
-         "unit_id": str, "cmd": [str, ...]}
+         "unit_id": str, "recipe": str, "cmd": [str, ...]}
 
     Order is critical: non-keepalive worker units FIRST (sorted by unit id for
     determinism), the orchestrator unit LAST (§3.3) so nothing is mid-request
     into a stopped orchestrator. Keepalive units (C4 — ``serving.keepalive_units``,
     serving.py:172) are NEVER in the set — filtered out explicitly.
+
+    ``recipe`` is the unit's OWN sparkrun recipe, resolved exactly as
+    ``_unit_start_cmd`` (autodown.py:1075) resolves it for the matching start
+    (orchestrator ⇒ ``serving.orchestrator_recipe``, worker ⇒ ``u.recipe``,
+    each falling back to the global ``VLLM_RECIPE``), so the stop targets the
+    same container that teardown's mirror wake will start. It becomes the
+    TARGET of the ``sparkrun stop <recipe> --hosts ...`` command.
 
     ``serving`` is the parsed serving.json dict (None/absent ⇒ empty plan,
     fail-safe: stop nothing). ``port`` is kept per entry for the verify-down
@@ -702,7 +710,7 @@ def _build_teardown_plan(serving):
     """
     if not isinstance(serving, dict):
         return []
-    from .serving import serving_port
+    from .serving import serving_port, orchestrator_recipe, VLLM_RECIPE
     workers = []
     orch = []
     for u in (serving.get("units", []) or []):
@@ -715,14 +723,22 @@ def _build_teardown_plan(serving):
         port = u.get("port") or serving_port(serving)
         unit_id = u.get("id") or ",".join(nodes)
         if role == "orchestrator":
-            # The orchestrator unit is never keepalive — stop it LAST.
+            # The orchestrator unit is never keepalive — stop it LAST. Its
+            # recipe is the orchestrator's authoritative recipe (matching
+            # _unit_start_cmd's resolution) so the stop targets the same
+            # container the wake will start.
+            recipe = orchestrator_recipe(serving) or VLLM_RECIPE
             orch.append({"kind": "orchestrator", "nodes": nodes, "port": port,
-                         "unit_id": unit_id, "cmd": _worker_stop_cmd(nodes)})
+                         "unit_id": unit_id, "recipe": recipe,
+                         "cmd": _worker_stop_cmd(recipe, nodes)})
         elif role == "worker" and not u.get("keepalive"):
             # NON-keepalive worker ⇒ teardown target. Keepalive workers are
-            # exempt (C4) and never appear here.
+            # exempt (C4) and never appear here. Recipe is the unit's own,
+            # matching the start command's resolution.
+            recipe = u.get("recipe") or VLLM_RECIPE
             workers.append({"kind": "worker", "nodes": nodes, "port": port,
-                            "unit_id": unit_id, "cmd": _worker_stop_cmd(nodes)})
+                            "unit_id": unit_id, "recipe": recipe,
+                            "cmd": _worker_stop_cmd(recipe, nodes)})
         # keepalive worker / unknown role ⇒ never in the teardown set.
     workers.sort(key=lambda e: e["unit_id"])
     return workers + orch

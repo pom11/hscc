@@ -9,7 +9,13 @@ import urllib.error
 
 
 def run_cmd(args, timeout=30, as_json=False, shell=False):
-    """Run a command and return structured output."""
+    """Run a command and return structured output.
+
+    ``output`` is stdout on success; on a non-zero exit it folds stdout AND
+    stderr together so the error text is never lost (tools like sparkrun write
+    their errors to stderr — autodown's failure reason was empty for exactly
+    this reason). ``as_json`` parses stdout as JSON instead.
+    """
     try:
         result = subprocess.run(
             args, capture_output=True, text=True, timeout=timeout, shell=shell
@@ -19,7 +25,7 @@ def run_cmd(args, timeout=30, as_json=False, shell=False):
                 return {"ok": True, "output": json.loads(result.stdout.strip())}
             except json.JSONDecodeError:
                 return {"ok": False, "output": result.stdout.strip()}
-        return {"ok": result.returncode == 0, "output": result.stdout.strip()}
+        return {"ok": result.returncode == 0, "output": result.stdout.strip() if result.returncode == 0 else (result.stdout + "\n" + result.stderr).strip()}
     except subprocess.TimeoutExpired:
         return {"ok": False, "output": f"Command timed out after {timeout}s"}
     except Exception as e:

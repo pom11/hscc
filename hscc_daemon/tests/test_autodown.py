@@ -726,16 +726,21 @@ def _write_serving(tmp_path):
       - NON-keepalive worker "wk1": nodes [.247], port 8000  (teardown target)
       - KEEPALIVE worker "wk-keep": nodes [.248], port 8000  (C4 EXEMPT)
     Top-level port 8000 (for the serving_port fallback path).
+    Each unit carries its own ``recipe`` (scoped stop TARGET), mirroring the
+    real serving.json.
     """
     data = {
         "port": 8000,
         "units": [
             {"id": "orch", "role": "orchestrator",
-             "nodes": ["10.0.0.244", "10.0.0.246"], "port": 8000},
+             "nodes": ["10.0.0.244", "10.0.0.246"], "port": 8000,
+             "recipe": "~/.sparkrun-local/recipes/orch.yaml"},
             {"id": "wk1", "role": "worker", "keepalive": False,
-             "nodes": ["10.0.0.247"], "port": 8000},
+             "nodes": ["10.0.0.247"], "port": 8000,
+             "recipe": "~/.sparkrun-local/recipes/wk.yaml"},
             {"id": "wk-keep", "role": "worker", "keepalive": True,
-             "nodes": ["10.0.0.248"], "port": 8000},
+             "nodes": ["10.0.0.248"], "port": 8000,
+             "recipe": "~/.sparkrun-local/recipes/wk.yaml"},
         ],
     }
     path = tmp_path / "serving.json"
@@ -916,6 +921,48 @@ class TestTeardown:
         assert res["issued"][0]["kind"] == "worker"
         assert res["issued"][-1]["kind"] == "orchestrator"
 
+    # -- each stop carries a recipe TARGET sparkrun accepts -------------------
+    def test_stop_cmd_has_recipe_target(self, tmp_path, monkeypatch,
+                                        autodown_file):
+        """Every stop is ``sparkrun stop <recipe> --hosts <nodes>``.
+
+        sparkrun requires a TARGET (recipe or cluster id) — the OLD form
+        ``sparkrun stop --hosts <nodes>`` failed 100% of the time with
+        "Must specify TARGET or --all". The recipe is the unit's OWN, scoped so
+        teardown never issues a catch-all ``--all`` that could reach keepalive
+        nodes (C4).
+        """
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        res = ad.teardown(
+            serving_path=serving, run_cmd_fn=runner,
+            kanban_db=_FakeKb([]), agents_file=self._agents(tmp_path),
+            now=NOW, keepalive_ok=lambda: True,
+            http_check_fn=lambda *a, **k: {"ok": False},
+        )
+        assert res["result"] == "down"
+        assert len(runner.calls) == 2      # wk1 + orch
+        for call in runner.calls:
+            cmd = call["cmd"]
+            assert cmd[0] == "sparkrun"
+            assert cmd[1] == "stop"
+            assert cmd[2]               # TARGET recipe is non-empty
+            assert "--hosts" in cmd
+        # Orchestrator stop targets the orchestrator's own recipe (expanded by
+        # orchestrator_recipe, exactly as _unit_start_cmd resolves it).
+        orch_cmd = runner.calls[-1]["cmd"]
+        assert orch_cmd[1] == "stop"
+        assert orch_cmd[2] == os.path.expanduser("~/.sparkrun-local/recipes/orch.yaml")
+        assert orch_cmd[4] == "10.0.0.244,10.0.0.246"  # orchestrator nodes
+        # Worker stop (issued first) targets the worker's own recipe.
+        assert runner.calls[0]["cmd"][2] == "~/.sparkrun-local/recipes/wk.yaml"
+        # Never --all (could hit keepalive nodes); never keepalive recipe issue.
+        for call in runner.calls:
+            assert "--all" not in call["cmd"]
+        plan_recipes = {e["recipe"] for e in res["plan"]}
+        assert plan_recipes == {os.path.expanduser("~/.sparkrun-local/recipes/orch.yaml"),
+                                "~/.sparkrun-local/recipes/wk.yaml"}
+
     # -- stop failure ⇒ block rolled back + failure recorded ----------------
     def test_stop_failure_rolls_back_and_records(self, tmp_path, monkeypatch,
                                                  autodown_file):
@@ -1091,8 +1138,8 @@ def _cmd_hosts(cmd):
     """Extract the node list a start/stop command targets.
 
     Both command forms carry ``--hosts <nodes>`` (start: sparkrun run ... --
-    hosts <comma-list> ...; stop: sparkrun stop --hosts <comma-list>). Returns
-    a frozenset of host strings.
+    hosts <comma-list> ...; stop: sparkrun stop <recipe> --hosts <comma-list>).
+    Returns a frozenset of host strings.
     """
     for i, tok in enumerate(cmd):
         if tok == "--hosts" and i + 1 < len(cmd):
