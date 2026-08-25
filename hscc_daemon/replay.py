@@ -497,72 +497,262 @@ def _finalize(state, path):
 # The replay engine hands each queued message to a model/session via an
 # injectable ``deliver_message`` callable so it stays testable without any real
 # Telegram or model. In production the default is ``default_deliver_message``,
-# which delivers the message through the Hermes gateway's WEBHOOK platform — the
-# supported, existing interface for an external process to trigger an agent run
-# whose reply is routed to a specific platform chat/topic (``_deliver_cross_platform``
-# in gateway/platforms/webhook.py). Faithful topic routing depends on the route's
-# ``deliver_extra`` carrying the chat_id/topic from the queued message; enabling
-# + configuring that webhook route is an OPERATOR step (the gateway's webhook
-# platform is not on by default — see docs/design/idle-autodown.md §4.4).
+# which delivers the message through components that ACTUALLY exist on this
+# host:
 #
-# When no webhook platform is available/configured this function fails LOUDLY
-# (returns False) so the message stays queued — never silently discarded. It
-# never raises so the replay engine's own try/except stays clean.
-WEBHOOK_DELIVER_URL = os.environ.get(
-    "HSCC_REPLAY_WEBHOOK_URL",
-    "http://127.0.0.1:8644/webhooks/autodown-replay",
-)
-WEBHOOK_DELIVER_SECRET = os.environ.get("HSCC_REPLAY_WEBHOOK_SECRET", "")
+#   1. Map the message's chat/topic to an orchestrator profile+session (the
+#      ``<project>-orch`` / session ``<project>`` convention from
+#      hscc-roles/orchestrators.py, catch-all ``general-orch`` / ``general``),
+#      resolved via the flightdeck registry's per-project ``topic`` binding.
+#   2. Run the message through that orchestrator exactly the way the HSCC API
+#      does (routes_orchestrator.py:_backing_invoke): shell Hermes headlessly as
+#      the orchestrator profile in its NAMED session, quiet mode so the reply
+#      is the only thing on stdout:
+#
+#          hermes -p <profile> chat -Q --continue <session> -q <text>
+#
+#   3. Post the resulting reply back to the message's ORIGINAL chat/topic via
+#      the telegram adapter path HSCC already uses for operator notices
+#      (telegram.send_message / notify_operations — Bot API, CPU-side, proven
+#      working).
+#
+# Mapping policy (deliberate, documented in docs/design/idle-autodown.md §4.4):
+#   * platform != "telegram"            -> UNMAPPABLE (delivery FAILURE). The
+#     installed reply path is telegram-only, so a non-telegram message has no
+#     chat/topic we can route a reply back to. It stays queued + reported
+#     loudly — never guessed.
+#   * telegram + thread/topic id equals a registry project's ``topic``
+#     -> that project's orchestrator (<project>-orch / <project>).
+#   * telegram + no project topic matches (General topic, direct chat, or an
+#     unbound topic) -> the catch-all general-orch / general. This is NOT a
+#     silent guess: the ``general`` orchestrator exists precisely to own
+#     messages with no specific project.
+#
+# Like the old webhook seam, this function fails LOUDLY (returns False) on any
+# failure so the message stays queued — never silently discarded. It never
+# raises so the replay engine's own try/except stays clean.
+#
+# ``default_deliver_message`` returns True only on the FULL round trip
+# (orchestrator produced a non-empty reply AND the reply was posted back to the
+# original chat/topic). If the orchestrator ran but the reply could not be
+# delivered, we still return False (the user's message was not faithfully
+# answered in their chat) — the message is retained and the retained-
+# replay is at-least-once, consistent with the documented contract. A
+# pathological orchestrator-ran-reply-failed case logs VERY loudly so the
+# operator sees the double-process risk is theirs to clear.
+
+# Registry path mirrors hscc-roles/orchestrators.py (REGISTRY_PATH resolves
+# ``~/.flightdeck/registry.yaml``, overridable via HSCC_REGISTRY) — the source
+# of truth for which project owns which Telegram topic. Overridable so tests
+# can point at a fixture without touching the real registry.
+REGISTRY_PATH = os.environ.get("HSCC_REGISTRY", "~/.flightdeck/registry.yaml")
+
+# Catch-all orchestrator identity (mirrors hscc-roles/orchestrators.py).
+GENERAL_PROFILE = "general-orch"
+GENERAL_SESSION = "general"
+
+# How long to wait for the orchestrator's reply before treating delivery as
+# failed (matches routes_orchestrator.py::_DEFAULT_TIMEOUT — an orchestrator
+# can legitimately take a while).
+ORCHESTRATOR_TIMEOUT = 180.0
+
+# Path to the ``hermes`` executable. ``shutil.which`` would resolve it, but an
+# explicit, overridable constant keeps the subprocess argv deterministic for
+# tests and lets an operator point at a specific install if ``hermes`` is not
+# on PATH.
+HERMES_BIN = os.environ.get("HSCC_HERMES_BIN", "hermes")
+
+
+def _registry_projects(path=None):
+    """Read the flightdeck registry's ``projects:`` list, fail-closed.
+
+    Returns a list of dicts ``{"name", "topic"}`` for projects that have a
+    bound ``topic``. A missing/unreadable registry or a missing ``topic`` leads
+    to that project being absent from the result — never an error, so an
+    unmappable message degrades to the catch-all (or, for a non-telegram
+    message, a hard delivery failure) instead of crashing.
+
+    Reads the SAME registry file the hscc-roles resolver uses
+    (``~/.flightdeck/registry.yaml``), matching its ``HSCC_REGISTRY`` env
+    override, so the daemon never drifts from the operator's project source of
+    truth. Uses ``yaml`` lazily (already an optional import elsewhere in this
+    package, e.g. verify.py:15, health.py:307) — no new dependency.
+    """
+    p = os.path.expanduser(path or REGISTRY_PATH)
+    out = []
+    try:
+        import yaml
+        with open(p) as f:
+            data = yaml.safe_load(f) or {}
+    except (FileNotFoundError, OSError, ValueError):
+        return out
+    except Exception:
+        # Any parse oddity — fail closed to no projects (catch-all / failure).
+        return out
+    projects = data.get("projects") if isinstance(data, dict) else None
+    if not isinstance(projects, list):
+        return out
+    for row in projects:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("name")
+        topic = row.get("topic")
+        if name and topic is not None:
+            out.append({"name": str(name).strip(), "topic": str(topic).strip()})
+    return out
+
+
+def _resolve_identity(msg):
+    """Map a queued message to an orchestrator identity, or None if unmappable.
+
+    Returns a dict ``{"profile", "session", "project"}`` (``project`` is None
+    for the catch-all) or None when the message cannot be mapped at all — a
+    delivery FAILURE, never a silent guess. See the mapping policy above.
+    """
+    if (msg.get("platform") or "").lower() != "telegram":
+        # Installed reply path is telegram-only: a non-telegram message has no
+        # chat/topic to route a reply back to.
+        return None
+    thread = str(msg.get("thread_id") or msg.get("topic") or "").strip()
+    if thread:
+        for row in _registry_projects():
+            if row["topic"] == thread:
+                return {
+                    "profile": f"{row['name']}-orch",
+                    "session": row["name"],
+                    "project": row["name"],
+                }
+    # No project topic matched (General topic / direct chat / unbound topic):
+    # deliberate catch-all, not a guess.
+    return {
+        "profile": GENERAL_PROFILE,
+        "session": GENERAL_SESSION,
+        "project": None,
+    }
+
+
+def _invoke_orchestrator(profile, session, prompt, timeout=ORCHESTRATOR_TIMEOUT):
+    """Run a prompt through an orchestrator and return its reply text.
+
+    Mirrors routes_orchestrator.py::_backing_invoke: shell Hermes headlessly
+    as the orchestrator profile in its NAMED session, quiet mode so stdout is
+    only the reply. argv is a LIST — ``prompt`` is a plain element, never
+    interpolated into a shell string (no shell-injection). Returns the reply
+    text. Raises on failure (caller decides), never returns a partial reply.
+    """
+    argv = [HERMES_BIN, "-p", profile, "chat", "-Q", "--continue", session,
+            "-q", prompt]
+    import subprocess
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    err = (proc.stderr or "").strip()
+    # A clean "no such session yet" failure — the orchestrator's named session
+    # must exist before it can be continued. Surface honestly, never synthesise.
+    if proc.returncode != 0 or "Session not found" in err:
+        raise RuntimeError(
+            f"orchestrator session {session!r} not ready (create it first): "
+            f"{err or ('exit ' + str(proc.returncode))}"
+        )
+    reply = (proc.stdout or "").strip()
+    if not reply:
+        raise RuntimeError(
+            f"orchestrator {profile!r} returned an empty reply"
+        )
+    return reply
 
 
 def default_deliver_message(msg):
-    """Production default delivery: POST the message to the gateway webhook.
+    """Production default delivery: orchestrator round-trip to the original chat.
 
-    Attempts faithful delivery through the gateway's supported webhook platform
-    (external HTTP -> agent run -> reply routed to the message's chat/topic).
-    ``msg`` is a parsed queue entry (platform/chat_id/thread_id/reply_to_id/
-    text). Returns True only on a 2xx; on any error or when the webhook platform
-    is unavailable it returns False so ``replay_queued`` retains the message.
+    Delivers the queued message through components that exist on this host:
 
-    Uses stdlib ``urllib.request`` (no new dependencies).
+      1. Resolve the message's chat/topic to an orchestrator profile/session
+         (:func:`_resolve_identity`). Unmappable => return False (retained).
+      2. Run the message through that orchestrator (:func:`_invoke_orchestrator`).
+      3. Post the reply back to the message's original chat/topic via
+         ``telegram.send_message``.
+
+    Returns True only when the full round trip succeeds (orchestrator produced
+    a non-empty reply AND the reply was posted). On ANY failure it logs loudly
+    and returns False so ``replay_queued`` retains the message — never silently
+    discarded. Never raises: exceptions are caught and converted to False so
+    the replay engine's own try/except stays clean.
+
+    Uses only stdlib + the same telegram/yaml transport the daemon already
+    uses — no new dependencies.
     """
-    text = (msg.get("text") or "").strip()
-    if not text:
-        return False
-    chat_id = msg.get("chat_id") or ""
-    if not chat_id:
-        return False
-    # Build a webhook payload: the target chat/topic is carried in deliver_extra
-    # so the gateway routes the reply to where the user expects.
-    payload = {
-        "prompt": text,
-        "deliver_extra": {
-            "chat_id": chat_id,
-            "thread_id": msg.get("thread_id"),
-            "reply_to_id": msg.get("reply_to_id"),
-        },
-    }
-    import urllib.request
-    data = json.dumps(payload).encode()
-    headers = {"Content-Type": "application/json"}
-    if WEBHOOK_DELIVER_SECRET:
-        import hmac
-        digest = hmac.new(WEBHOOK_DELIVER_SECRET.encode(), data,
-                          "sha256").hexdigest()
-        headers["X-Hub-Signature-256"] = "sha256=" + digest
-    req = urllib.request.Request(
-        WEBHOOK_DELIVER_URL, data=data, headers=headers, method="POST")
+    # Resolve, invoke, notify are module-level seams so tests can monkeypatch
+    # them without spawning a real agent or touching Telegram.
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return 200 <= resp.status < 300
-    except Exception:
-        # Webhook platform unavailable / route not configured → fail loudly;
-        # the caller retains the message in the queue.
+        identity = _resolve_identity(msg)
+    except Exception as e:
         try:
-            log(f"Autodown replay: gateway webhook delivery unavailable at "
-                f"{WEBHOOK_DELIVER_URL} — message RETAINED (is the gateway "
-                f"webhook platform enabled for the autodown-replay route?)",
+            log(f"Autodown replay: cannot resolve orchestrator for "
+                f"seq={msg.get('seq')}: {e}", "ERROR")
+        except Exception:
+            pass
+        return False
+    if identity is None:
+        # Delivery FAILURE — keep the message queued and report loudly.
+        try:
+            log(f"Autodown replay: message seq={msg.get('seq')} platform="
+                f"{msg.get('platform')!r} cannot be mapped to an orchestrator "
+                f"(the reply path is telegram-only) — RETAINED, NOT replayed",
                 "ERROR")
         except Exception:
             pass
         return False
+
+    text = (msg.get("text") or "").strip()
+    chat_id = msg.get("chat_id") or ""
+    if not text or not chat_id:
+        # A message with no text or no chat_id cannot be faithfully delivered.
+        try:
+            log(f"Autodown replay: message seq={msg.get('seq')} missing text "
+                f"or chat_id — RETAINED, NOT replayed", "ERROR")
+        except Exception:
+            pass
+        return False
+    thread_id = msg.get("thread_id") or msg.get("topic")
+    profile = identity["profile"]
+    session = identity["session"]
+
+    # Step 2 — run the message through the orchestrator.
+    try:
+        reply = _invoke_orchestrator(profile, session, text)
+    except Exception as e:
+        try:
+            log(f"Autodown replay: orchestrator {profile!r} failed for "
+                f"seq={msg.get('seq')}: {e} — message RETAINED (not replayed)",
+                "ERROR")
+        except Exception:
+            pass
+        return False
+
+    # Step 3 — post the reply back to the message's original chat/topic.
+    from .telegram import send_message
+    delivered = False
+    try:
+        delivered = send_message(chat_id, reply, thread_id=thread_id,
+                                 reply_to_id=msg.get("reply_to_id"))
+    except Exception as e:
+        delivered = False
+        try:
+            log(f"Autodown replay: reply-post to chat {chat_id} raised: {e}",
+                "ERROR")
+        except Exception:
+            pass
+    if not delivered:
+        # The orchestrator ran, but the user never got the reply in their chat.
+        # This is NOT a faithful delivery — retain the message and say so VERY
+        # loudly (a later replay would re-run the orchestrator = at-least-once;
+        # the operator sees the risk and can clear the queue deliberately).
+        try:
+            log(f"Autodown replay: orchestrator processed seq={msg.get('seq')} "
+                f"but the reply could NOT be posted to chat {chat_id} "
+                f"(thread_id={thread_id!r}) — message RETAINED for manual "
+                f"review; re-running it would re-process the prompt "
+                f"(at-least-once)", "CRITICAL")
+        except Exception:
+            pass
+        return False
+    return True
