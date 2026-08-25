@@ -22,9 +22,11 @@ RESTART = BOOT / "restart_daemon.sh"
 # A stub daemon CLI (Python, matching the real hscc.py which the helper runs
 # via $HSCC_PYBIN $HSCC_CMD) that simulates stop/start on a pid file, recording
 # every command it is asked to run. Mode controls how `start` behaves:
-#   normal    : writes a fresh pid (last+1)          -> restart turns over
-#   same-pid  : writes back the SAME pid             -> "restart" is a no-op
-#   no-return : never writes a pid file              -> daemon does not come back
+#   normal      : writes a fresh pid (last+1)          -> restart turns over
+#   same-pid    : writes back the SAME pid             -> "restart" is a no-op
+#   no-return   : never writes a pid file              -> daemon does not come back
+#   start-error : writes back the SAME pid AND emits an error to stderr, so the
+#                 helper must surface that text in its outcome line (rc 2)
 STUB = """#!/usr/bin/env python3
 import os, sys
 mode = os.environ.get("STUB_MODE", "normal")
@@ -38,7 +40,9 @@ if cmd == "stop":
     if os.path.exists(pid_file):
         os.remove(pid_file)
 elif cmd == "start":
-    if mode == "same-pid":
+    if mode in ("same-pid", "start-error"):
+        if mode == "start-error":
+            sys.stderr.write("hscc_daemon: failed to (re)start (simulated)\\n")
         with open(pid_file, "w") as f:
             f.write("42")
     elif mode == "no-return":
@@ -53,6 +57,45 @@ elif cmd == "start":
         with open(pid_file, "w") as f:
             f.write(nxt)
 """
+
+# A stub CLI that imports its OWN package (like the real hscc_daemon/hscc.py,
+# which does `from hscc_daemon.serving import ...`). The CLI lives in a
+# `hscc_daemon/` subdir and imports a package (`stublib`) that sits at the
+# parent level — so run by bare path (script dir on sys.path) it raises
+# ModuleNotFoundError, exactly the failure this fix addresses. With the helper's
+# PYTHONPATH fallback (path A, package root = parent of hscc_daemon/) it must
+# import and run fine.
+IMPORT_STUB = {
+    "hscc_daemon/hscc.py": """#!/usr/bin/env python3
+from stublib.cli import main
+import sys
+sys.exit(main())
+""",
+    "stublib/__init__.py": "",
+    "stublib/cli.py": """import os, sys
+def main():
+    mode = os.environ.get("STUB_MODE", "normal")
+    calls = os.environ["STUB_CALLS"]
+    pid_file = os.environ["STUB_PID_FILE"]
+    last_pid = os.environ["STUB_LAST_PID"]
+    cmd = sys.argv[1]
+    with open(calls, "a") as f:
+        f.write(cmd + "\\n")
+    if cmd == "stop":
+        if os.path.exists(pid_file):
+            os.remove(pid_file)
+    elif cmd == "start":
+        prev = 0
+        if os.path.exists(last_pid):
+            prev = int(open(last_pid).read().strip())
+        nxt = str(prev + 1)
+        with open(last_pid, "w") as f:
+            f.write(nxt)
+        with open(pid_file, "w") as f:
+            f.write(nxt)
+    return 0
+""",
+}
 
 
 def _setup(tmp_path, mode="normal", preexisting_pid=None):
@@ -151,6 +194,50 @@ def test_fresh_install_no_existing_pid_starts_ok(tmp_path):
     assert res.returncode == 0
     assert calls.read_text().splitlines() == ["stop", "start"]
     assert "daemon started (pid" in res.stdout
+
+
+def test_import_package_stub_succeeds_with_pythonpath(tmp_path):
+    """A CLI that imports its OWN package (like the real hscc.py) must work —
+    this is the exact ModuleNotFoundError the fix addresses. On a bare path with
+    no PYTHONPATH the import fails; the helper's fallback (path A) sets
+    PYTHONPATH to the package root so it must run and turn the pid over."""
+    for rel, content in IMPORT_STUB.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+    cli = tmp_path / "hscc_daemon" / "hscc.py"
+    cli.chmod(cli.stat().st_mode | stat.S_IEXEC)
+
+    # sanity: bare path, no PYTHONPATH -> ModuleNotFoundError (reproduces bug)
+    bare = subprocess.run(
+        ["python3", str(cli), "start"],
+        env={**os.environ, "STUB_CALLS": str(tmp_path / "calls.txt"),
+             "STUB_PID_FILE": str(tmp_path / "daemon.pid"),
+             "STUB_LAST_PID": str(tmp_path / "last.pid")},
+        capture_output=True, text=True,
+    )
+    assert "ModuleNotFoundError" in bare.stderr
+
+    env, calls = _setup(tmp_path, preexisting_pid=7)
+    env["HSCC_CMD"] = str(cli)
+    res = _run(env)
+
+    assert res.returncode == 0
+    assert calls.read_text().splitlines() == ["stop", "start"]
+    assert "daemon restarted (pid 7 -> 8)" in res.stdout
+
+
+def test_restart_failure_surfaces_error_text(tmp_path):
+    """When restart fails, the helper must surface the underlying error text in
+    its outcome line instead of only "PID unchanged" — the silent
+    `>/dev/null 2>&1` is what hid the original bug."""
+    env, calls = _setup(tmp_path, mode="start-error", preexisting_pid=42)
+    res = _run(env)
+
+    assert res.returncode == 2
+    assert calls.read_text().splitlines() == ["stop", "start"]
+    assert "PID unchanged after restart" in res.stdout
+    assert "failed to (re)start (simulated)" in res.stdout
 
 
 def test_bootstrap_wires_restart_inside_daemon_block_only(tmp_path):
