@@ -33,6 +33,13 @@ import os
 
 from .state import now_iso
 from .daemon_ops import log
+# Module-level indirection for the reply-post transport (§4/§5 hardening).
+# ``default_deliver_message`` references this module attribute at CALL time
+# instead of a bare ``from .telegram import send_message`` inside the function,
+# so tests monkeypatch ``replay.send_message`` (module-level seam) and are
+# guaranteed no real Telegram message can ever be sent — an accidental real
+# delivery on a test run is a hard failure, not a silent side effect.
+from .telegram import send_message
 
 
 # Path to the durable queue file. Overridden in tests via monkeypatch, exactly
@@ -728,8 +735,10 @@ def default_deliver_message(msg):
             pass
         return False
 
-    # Step 3 — post the reply back to the message's original chat/topic.
-    from .telegram import send_message
+    # Step 3 — post the reply back to the message's original chat/topic. Uses
+    # the MODULE-LEVEL ``send_message`` seam (imported at replay module scope,
+    # not inside this function) so tests can monkeypatch ``replay.send_message``
+    # and be sure no real Telegram message is ever sent on a test run.
     delivered = False
     try:
         delivered = send_message(chat_id, reply, thread_id=thread_id,
