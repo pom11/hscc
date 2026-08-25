@@ -125,39 +125,104 @@ def record_activity(source):
 
 
 def _has_active_work(kanban_db=None):
-    """True if ANY kanban task is in a state meaning work is live or imminent.
+    """True if ANY live/imminent kanban task exists across ALL boards.
 
     The idle predicate of design §1a. True ⇒ NOT idle ⇒ never tear down. False
-    only when the board is genuinely quiet (every task is in a terminal/parked
+    only when every board is genuinely quiet (every task is in a terminal/parked
     status: done / archived / blocked).
 
-    ``kanban_db`` is an injectable Hermes kanban library (an object exposing a
-    ``connect_closing()`` context manager yielding a sqlite connection), so
-    tests never touch the real ~/.hermes/kanban.db. When omitted, it imports
-    the Hermes ``hermes_cli.kanban_db`` module lazily (same logic path as the
-    fleet's flightdeck/core/kanban.py::_load_kanban_db). Reads the live +
-    parked tables only, never ``archived`` cards. Any DB read failure returns
-    True (conservative — treat unreadable as active so we never tear down on a
-    signal we could not verify).
+    Real work lives in PER-BOARD databases (``<root>/kanban/boards/<slug>/``),
+    NOT just the legacy flat ``<root>/kanban.db``. So this scans every board,
+    using Hermes' own ``kanban_db.list_boards()`` to enumerate them — the same
+    seam flightdeck/core/kanban.py::list_boards uses, resolving ``default``
+    (the legacy flat DB) plus every per-board DB. We never hardcode a glob
+    over ``boards/``; enumeration is owned by Hermes.
+
+    ``kanban_db`` is an injectable Hermes kanban library (exposing
+    ``list_boards()`` and a ``connect_closing(board=...)`` context manager that
+    yields a sqlite connection), so tests never touch the real ~/.hermes. When
+    omitted it imports ``hermes_cli.kanban_db`` lazily (same logic path as
+    flightdeck/core/kanban.py::_load_kanban_db). A minimal injected lib that
+    only exposes ``connect_closing()`` (no ``list_boards``) is treated as a
+    single (default) board — back-compat for older callers/tests.
+
+    Fail-safe direction is preserved everywhere: any board we cannot read, or
+    the lib we cannot reach ⇒ True (never tear down on an unverifiable signal).
+    Unreadable boards are surfaced + logged via ``_note_kanban_unavailable``.
+    Cost: one ``LIMIT 1`` per board, short-circuiting on the first hit — this
+    runs every 30s in the daemon loop.
     """
     if kanban_db is None:
         kanban_db = _load_kanban_db_or_default()
     if kanban_db is None:
         # Could not reach Hermes' kanban lib — fail safe, do not consider idle.
+        _note_blocking(_UNREADABLE_BOARD)
         return True
 
+    # Does this lib enumerate boards? The real hermes_cli.kanban_db does. A
+    # minimal injected lib (older tests/callers) exposes only connect_closing()
+    # — treat it as the single default board so we stay compatible.
+    multi = hasattr(kanban_db, "list_boards")
+    if multi:
+        try:
+            boards = [str(e["slug"]) for e in kanban_db.list_boards()] or [None]
+        except Exception as e:
+            # Could not even enumerate boards — fail safe + surface it.
+            _note_blocking(_UNREADABLE_BOARD)
+            _note_kanban_unavailable(
+                f"could not enumerate kanban boards: {e}")
+            return True
+    else:
+        boards = [None]
+
+    for board in boards:
+        if _board_has_active_work(kanban_db, board, multi):
+            return True
+    _note_blocking(None)
+    return False
+
+
+def _board_has_active_work(kanban_db, board, multi):
+    """LIMIT-1 probe of ONE board; returns True iff it holds live work.
+
+    Records the blocking board for ``hscc autodown status``. Any exception
+    (unreadable/missing DB) ⇒ True (fail-safe: never tear down on a signal we
+    could not verify) AND is recorded + logged once via
+    ``_note_kanban_unavailable`` so status surfaces the unreadable board's
+    reason the same way the unreachable-kanban case already is.
+    """
     try:
-        with kanban_db.connect_closing() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM tasks "
-                "WHERE status IS NULL "
-                "   OR status NOT IN ('done', 'archived', 'blocked') "
-                "LIMIT 1"
-            ).fetchone()
-    except Exception:
-        # Unreadable / missing DB ⇒ treat as active (safe: never tear down).
+        if multi:
+            with kanban_db.connect_closing(board=board) as conn:
+                row = _probe_active(conn)
+        else:
+            with kanban_db.connect_closing() as conn:
+                row = _probe_active(conn)
+    except Exception as e:
+        label = board if board else "default"
+        _note_kanban_unavailable(f"board {label!r} unreadable: {e}")
+        # Unreadable board is a fail-safe blocker. Name it — status also
+        # carries the "unreadable" reason via kanban_check_state.
+        _note_blocking(label)
         return True
-    return row is not None
+    if row is not None:
+        _note_blocking(board if board else "default")
+        return True
+    return False
+
+
+def _probe_active(conn):
+    """Cheap active-work probe for one board connection.
+
+    ``LIMIT 1`` so we never scan a whole table, and short-circuit is left to
+    the caller (it stops probing the moment this returns a hit).
+    """
+    return conn.execute(
+        "SELECT 1 FROM tasks "
+        "WHERE status IS NULL "
+        "   OR status NOT IN ('done', 'archived', 'blocked') "
+        "LIMIT 1"
+    ).fetchone()
 
 
 # Nominal location of the Hermes agent source tree, which holds
@@ -173,6 +238,38 @@ _HERMES_AGENT_PATH = "~/.hermes/hermes-agent"
 # True/False; ``reason`` describes a failure; ``warned`` guards the
 # once-per-process log (not one line per daemon tick).
 _KANBAN_LOAD = {"ok": None, "reason": "", "warned": False}
+
+# Sentinel recorded as the "blocking board" when the kanban interlock is
+# active but we cannot say which board (unreachable lib / unenumerable boards /
+# unknown). Surfaced by ``hscc autodown status`` as "blocked by: kanban work
+# (board unknown)".
+_UNREADABLE_BOARD = "<unknown>"
+
+# Which board's live work is CURRENTLY keeping the interlock active, i.e. the
+# signal that (last) blocked teardown. ``blocking`` is a board slug (``default``
+# for the legacy flat DB) or ``_UNREADABLE_BOARD`` when we couldn't evaluate;
+# None when nothing blocks. Read by ``kanban_blocking_board`` so ``hscc
+# autodown status`` can name the blocking signal instead of showing a bare
+# ``state: up`` that hides whether autodown is healthy-waiting or stuck on an
+# interlock.
+_KANBAN_WORK = {"blocking": None}
+
+
+def _note_blocking(board):
+    """Record which board's work is blocking teardown (or None if none)."""
+    _KANBAN_WORK["blocking"] = board
+
+
+def kanban_blocking_board():
+    """Return the slug blocking teardown right now, or None.
+
+    Read by ``hscc autodown status`` to name WHICH signal is keeping the
+    interlock active (e.g. ``'hscc'``). Returns ``_UNREADABLE_BOARD`` when the
+    interlock is active for an unverifiable reason. After a clean pass with no
+    live work it returns None (autodown is healthy-and-waiting). Only
+    populated in the process that ran ``_has_active_work``.
+    """
+    return _KANBAN_WORK["blocking"]
 
 
 def _note_kanban_unavailable(reason):

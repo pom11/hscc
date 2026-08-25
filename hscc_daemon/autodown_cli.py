@@ -93,8 +93,22 @@ def _cmd_status(rest, json_mode):
     from hscc_daemon import lifecycle
     block = lifecycle.load_watchdog_block()
 
-    # Kanban interlock resolution — lets an operator see that the interlock is
-    # unevaluable (and why) instead of guessing why autodown never fires.
+    # Which signal is CURRENTLY blocking teardown. This actively evaluates the
+    # (read-only) kanban idle predicate in this process so status always shows
+    # the truth rather than a bare ``state: up`` that hides whether autodown is
+    # healthy-and-waiting or stuck on an interlock. Never mutates anything.
+    blocking = None
+    if autodown._has_active_work():
+        blocking_board = autodown.kanban_blocking_board()
+        if blocking_board and blocking_board != autodown._UNREADABLE_BOARD:
+            blocking = f"kanban work on board '{blocking_board}'"
+        else:
+            blocking = "kanban work (board unknown)"
+
+    # Kanban interlock resolution — read AFTER the predicate above, which
+    # resolves the lib, so ok/reason reflect the live evaluation and let an
+    # operator see when the interlock is unevaluable (and why) instead of
+    # guessing why autodown never fires.
     kc = autodown.kanban_check_state()
 
     status = {
@@ -109,6 +123,7 @@ def _cmd_status(rest, json_mode):
         "watchdog_intentional": block.get("intentional"),
         "kanban_ok": kc["ok"] if kc else None,
         "kanban_reason": kc["reason"] if kc else "",
+        "blocked_by": blocking,
     }
     if json_mode:
         print(json.dumps(status))
@@ -124,6 +139,8 @@ def _cmd_status(rest, json_mode):
     else:
         print(f"autodown: ENABLED (idle_minutes={status['idle_minutes']})")
     print(f"  state:           {status['state']}")
+    if status["blocked_by"]:
+        print(f"  blocked by:      {status['blocked_by']}")
     print(f"  last activity:   {status['last_activity_iso']}")
     if status["down_since"]:
         # Only show the down-since line when there is a value — a null/absent
