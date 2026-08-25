@@ -25,6 +25,9 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
    HSCC identity + doc-driven/review-gate guidance (sentinel-managed blocks).
 8. **Install: daemon** — launchd (macOS) / systemd --user (Linux); resolves a
    real python (venv-preferred), so it won't respawn-loop on Homebrew-only hosts.
+   Then **restarts** the daemon via `hscc stop`/`hscc start` so freshly-installed
+   code is ALWAYS loaded (the setup script leaves an already-running daemon
+   alone) and verifies the PID turned over; a failed restart warns, never aborts.
 
 **Telegram is optional.** During configuration bootstrap asks
 `Add Telegram integration? [y/N]` (default **No**). Declining skips Telegram
@@ -46,6 +49,7 @@ later run.
 | `suggest_template.py` | suggest a node-count template |
 | `apply_patches.py` | reapply the WS8 upstream patch set (see `../patches/`) |
 | `telegram_choice.py` | resolve the optional Telegram decision (env → --yes → prompt) |
+| `restart_daemon.sh` | restart the daemon via `hscc stop`/`hscc start` + verify PID turned over |
 
 ## Flags
 `--yes` non-interactive · `--force` regenerate serving.json · `--no-backup` ·
@@ -55,4 +59,4 @@ without prompting (unattended runs); otherwise `--yes` declines (documented
 default) and an interactive run asks `Add Telegram integration? [y/N]`.
 
 ## Tests
-`tests/` — 78 tests incl. an end-to-end stage-sequence test. `python -m pytest tests/ -q`.
+`tests/` — 258 tests incl. an end-to-end stage-sequence test and the daemon-restart helper tests. `python -m pytest tests/ -q`.
