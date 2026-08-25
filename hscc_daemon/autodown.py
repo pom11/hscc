@@ -55,6 +55,14 @@ DEFAULT_CONFIG = {
     "wake_trigger_text": None,
     "cancel_requested": False,
     "reason": "",
+    # Set when autodown was armed with --force despite active Hermes cron jobs
+    # (feat t_2b711a94 §7). ``force_armed`` is True only when the operator
+    # explicitly overrode the cron-abort guard; ``force_armed_overrides`` holds
+    # the names of the jobs that existed at the moment of arming. Surfaced by
+    # ``hscc autodown status`` so the operator can always see WHY it is armed
+    # despite scheduled jobs.
+    "force_armed": False,
+    "force_armed_overrides": [],
 }
 
 # Statuses that are terminal/parked — the only ones that do NOT count as live
@@ -129,6 +137,69 @@ def record_activity(source):
     cfg["wake_source"] = source
     save_config(cfg)
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# Hermes cron job source of truth (feat t_2b711a94 §7)
+# ---------------------------------------------------------------------------
+# Hermes scheduled jobs fire on a clock and (some) are written expecting a
+# healthy GPU serving layer. Arming autodown while such a job is active is the
+# conflict this feature makes explicit, so ``hscc autodown enable`` reads
+# Hermes' OWN source of truth for scheduled jobs and aborts when any are
+# active (unless force-armed).
+#
+# We read the ON-DISK store ``~/.hermes/cron/jobs.json`` rather than shelling
+# out to ``hermes cron list``. Investigated on this host (2026-08-26): the
+# ``hermes`` binary resolves a profile whose cron view returns "No scheduled
+# jobs" even though jobs.json clearly holds 2 active jobs (hscc-dep-watcher,
+# hscc-escalate-watcher) plus 9 paused ones. The CLI is therefore NOT a
+# reliable interface here — jobs.json _is_ the source of truth the cron engine
+# actually schedules from. Fail-closed: an unreadable OR absent jobs.json
+# yields ``CRON_UNREADABLE`` so the caller aborts on "cannot determine" —
+# never arm on a signal we cannot verify.
+CRON_JOBS_FILE = os.path.expanduser("~/.hermes/cron/jobs.json")
+
+# Sentinel returned by ``list_active_cron_jobs`` when the cron config is
+# unreadable or absent ⇒ "cannot determine". The CLI must NOT arm on it.
+CRON_UNREADABLE = "<unreadable>"
+
+
+def list_active_cron_jobs(jobs_file=None):
+    """Return ACTIVE Hermes cron jobs, or ``CRON_UNREADABLE`` if undeterminable.
+
+    Reads ``~/.hermes/cron/jobs.json`` — Hermes' on-disk source of truth for
+    scheduled jobs — and returns a list of dicts for the jobs that are ACTIVE,
+    each ``{id, name, schedule_display, next_run_at}``. Only active/enabled
+    jobs count: a paused/disabled job cannot fire and poses no scheduling
+    conflict. ``jobs_file`` is injectable so tests never touch the real store.
+
+    Fail-closed: an unreadable OR absent OR malformed jobs.json (non-dict, or
+    ``jobs`` not a list) yields ``CRON_UNREADABLE`` — never an empty list — so
+    the caller can abort on "cannot determine" instead of arming on a signal
+    it could not verify.
+    """
+    p = os.path.expanduser(jobs_file or CRON_JOBS_FILE)
+    try:
+        with open(p) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return CRON_UNREADABLE
+    jobs = data.get("jobs") if isinstance(data, dict) else None
+    if not isinstance(jobs, list):
+        return CRON_UNREADABLE
+    active = []
+    for j in jobs:
+        if not isinstance(j, dict) or not j.get("enabled"):
+            continue  # disabled/paused jobs neither fire nor conflict
+        sch = j.get("schedule") if isinstance(j.get("schedule"), dict) else {}
+        active.append({
+            "id": j.get("id"),
+            "name": j.get("name") or j.get("id"),
+            "schedule_display": j.get("schedule_display")
+                or sch.get("display") or sch.get("expr"),
+            "next_run_at": j.get("next_run_at"),
+        })
+    return active
 
 
 def _has_active_work(kanban_db=None):

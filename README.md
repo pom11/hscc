@@ -181,12 +181,17 @@ When your cluster is just sitting there idle — no kanban work moving, no agent
 ```
 hscc autodown status [--json]            # armed? what state? idle window? last activity?
 hscc autodown enable [--idle-minutes N]  # arm it (default: 10 minutes of quiet)
+hscc autodown enable --force             # arm despite active Hermes scheduled jobs
 hscc autodown wake                       # bring the serving layer back up now
 hscc autodown cancel                     # abort a teardown that is in progress
 hscc autodown disable                    # disarm it — stop the automation
 ```
 
 `status` is read-only (pass `--json` for machine-readable output). `enable` only arms the timer — it never shuts the layer down immediately, and if the layer is already down it won't start it either. `disable` just disarms the automation and hands supervision back to the watchdog; it doesn't restart anything, so if the layer is down and you want it up, run `hscc autodown wake`.
+
+**Scheduled Hermes cron jobs (v1.10+).** Autodown and scheduled jobs are in direct conflict: autodown may power the GPU serving layer down exactly when a job is due. So `enable` will **abort** — non-zero, listing each active job's name, schedule, and next run — if any active Hermes cron job exists (read from `~/.hermes/cron/jobs.json`, Hermes' own source of truth). If the cron config is unreadable or absent, `enable` also aborts, treating it as "cannot determine" — autodown never arms on a signal it can't verify. `enable --force` arms anyway, records that it was force-armed in `autodown.json`, and `status` shows `force-armed: YES` plus the overridden jobs so you can always see why it's armed despite them.
+
+Note on `--force`: the active jobs on this cluster today (e.g. `hscc-dep-watcher`, `hscc-escalate-watcher`) are `no_agent` CPU-side script watchdogs — they do NOT need the GPU serving layer, so they run fine while the cluster is down, and autodown does **not** wake the cluster for them (waking a ~9-min model load for a no-model script job would waste GPU and, for the every-15-min watcher, defeat idle teardown entirely). The abort guard exists so *you* make the explicit call — disable/pause the jobs, or `--force`.
 
 ### If a Telegram message wakes a down cluster
 
