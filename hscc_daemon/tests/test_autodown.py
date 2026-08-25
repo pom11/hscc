@@ -854,10 +854,13 @@ class TestTeardown:
     # -- block written BEFORE any stop (explicit call ordering) ------------
     def test_block_written_before_any_stop(self, tmp_path, monkeypatch,
                                            autodown_file):
-        """The watchdog block is on disk (intentional) before EVERY stop.
+        """The watchdog block is on disk (intentional) before the fleet stop.
 
         The fake runner snapshots the block file at each stop; a valid teardown
-        must have the intentional autodown block present for every single one.
+        must have the intentional autodown block present for every single stop
+        issued. With the whole-fleet decision the teardown issues ONE
+        ``sparkrun stop --all`` covering every unit, so there is exactly one
+        call and it must see the block latched.
         """
         serving, runner, block_file = self._setup(tmp_path, monkeypatch,
                                                   autodown_file)
@@ -868,7 +871,7 @@ class TestTeardown:
             http_check_fn=lambda *a, **k: {"ok": False},  # ports down
         )
         assert res["result"] == "down"
-        assert len(runner.calls) == 2      # wk1 + orch
+        assert len(runner.calls) == 1      # the single fleet stop
         for call in runner.calls:
             blk = call["block"]
             assert blk is not None
@@ -878,59 +881,13 @@ class TestTeardown:
         # Explicit: the block (with intentional) was saved before the first stop.
         assert runner.calls[0]["block"]["intentional"] == "autodown"
 
-    # -- keepalive units NEVER appear in issued stop commands ---------------
-    def test_keepalive_never_in_stop_commands(self, tmp_path, monkeypatch,
-                                              autodown_file):
-        """The keepalive unit's nodes (.248) are never in any stop command."""
-        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
-                                                  autodown_file)
-        res = ad.teardown(
-            serving_path=serving, run_cmd_fn=runner,
-            kanban_db=_FakeKb([]), agents_file=self._agents(tmp_path),
-            now=NOW, keepalive_ok=lambda: True,
-            http_check_fn=lambda *a, **k: {"ok": False},
-        )
-        assert res["result"] == "down"
-        all_hosts = []
-        for call in runner.calls:
-            all_hosts += call["cmd"]
-        joined = " ".join(all_hosts)
-        assert "10.0.0.248" not in joined     # keepalive node excluded
-        assert "10.0.0.247" in joined          # non-keepalive worker stopped
-        # Plan (teardown set) never contains the keepalive unit id.
-        plan_ids = {e["unit_id"] for e in res["plan"]}
-        assert "wk-keep" not in plan_ids
-        assert {"wk1", "orch"} == plan_ids
+    # -- keepalive units ARE in the whole-fleet stop (C4 reversed) ----------
+    def test_fleet_stop_covers_all_units_incl_keepalive(
+            self, tmp_path, monkeypatch, autodown_file):
+        """The whole-fleet stop uses ``--all`` and covers keepalive units too.
 
-    # -- orchestrator stopped LAST -----------------------------------------
-    def test_orchestrator_stopped_last(self, tmp_path, monkeypatch,
-                                       autodown_file):
-        """Workers (non-keepalive) stop before the orchestrator unit."""
-        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
-                                                  autodown_file)
-        res = ad.teardown(
-            serving_path=serving, run_cmd_fn=runner,
-            kanban_db=_FakeKb([]), agents_file=self._agents(tmp_path),
-            now=NOW, keepalive_ok=lambda: True,
-            http_check_fn=lambda *a, **k: {"ok": False},
-        )
-        kinds = [call["cmd"] for call in runner.calls]
-        assert res["result"] == "down"
-        assert kinds[0][-1] == "10.0.0.247"        # worker first
-        assert "10.0.0.244" in kinds[-1][-1]       # orchestrator last
-        assert res["issued"][0]["kind"] == "worker"
-        assert res["issued"][-1]["kind"] == "orchestrator"
-
-    # -- each stop carries a recipe TARGET sparkrun accepts -------------------
-    def test_stop_cmd_has_recipe_target(self, tmp_path, monkeypatch,
-                                        autodown_file):
-        """Every stop is ``sparkrun stop <recipe> --hosts <nodes>``.
-
-        sparkrun requires a TARGET (recipe or cluster id) — the OLD form
-        ``sparkrun stop --hosts <nodes>`` failed 100% of the time with
-        "Must specify TARGET or --all". The recipe is the unit's OWN, scoped so
-        teardown never issues a catch-all ``--all`` that could reach keepalive
-        nodes (C4).
+        C4 is reversed: autodown powers the ENTIRE serving layer down, so the
+        keepalive unit's nodes (.248) ARE in the set — nothing is exempt.
         """
         serving, runner, block_file = self._setup(tmp_path, monkeypatch,
                                                   autodown_file)
@@ -941,27 +898,71 @@ class TestTeardown:
             http_check_fn=lambda *a, **k: {"ok": False},
         )
         assert res["result"] == "down"
-        assert len(runner.calls) == 2      # wk1 + orch
-        for call in runner.calls:
-            cmd = call["cmd"]
-            assert cmd[0] == "sparkrun"
-            assert cmd[1] == "stop"
-            assert cmd[2]               # TARGET recipe is non-empty
-            assert "--hosts" in cmd
-        # Orchestrator stop targets the orchestrator's own recipe (expanded by
-        # orchestrator_recipe, exactly as _unit_start_cmd resolves it).
-        orch_cmd = runner.calls[-1]["cmd"]
-        assert orch_cmd[1] == "stop"
-        assert orch_cmd[2] == os.path.expanduser("~/.sparkrun-local/recipes/orch.yaml")
-        assert orch_cmd[4] == "10.0.0.244,10.0.0.246"  # orchestrator nodes
-        # Worker stop (issued first) targets the worker's own recipe.
-        assert runner.calls[0]["cmd"][2] == "~/.sparkrun-local/recipes/wk.yaml"
-        # Never --all (could hit keepalive nodes); never keepalive recipe issue.
-        for call in runner.calls:
-            assert "--all" not in call["cmd"]
-        plan_recipes = {e["recipe"] for e in res["plan"]}
-        assert plan_recipes == {os.path.expanduser("~/.sparkrun-local/recipes/orch.yaml"),
-                                "~/.sparkrun-local/recipes/wk.yaml"}
+        # Exactly ONE fleet stop, using the accepted `--all` (no TARGET needed).
+        assert len(runner.calls) == 1
+        assert runner.calls[0]["cmd"] == ["sparkrun", "stop", "--all"]
+        # Plan verifies EVERY unit's head node goes down — including keepalive.
+        verify = res["plan"][0]["verify"]
+        verify_ids = {v["unit_id"] for v in verify}
+        assert verify_ids == {"wk1", "orch", "wk-keep"}
+        assert res["issued"][0]["kind"] == "fleet"
+
+    # -- whole-fleet down: one `--all` stop, no per-unit ordering -------------
+    def test_teardown_issues_single_fleet_stop(self, tmp_path, monkeypatch,
+                                               autodown_file):
+        """Teardown issues ONE `sparkrun stop --all` — no per-unit ordering.
+
+        The old orchestrator-last ordering was per-unit; with the whole-fleet
+        ``--all`` stop there is a single command covering every unit, so there
+        is no per-unit order to assert beyond the one fleet stop.
+        """
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        res = ad.teardown(
+            serving_path=serving, run_cmd_fn=runner,
+            kanban_db=_FakeKb([]), agents_file=self._agents(tmp_path),
+            now=NOW, keepalive_ok=lambda: True,
+            http_check_fn=lambda *a, **k: {"ok": False},
+        )
+        assert res["result"] == "down"
+        # The single fleet stop is exactly the shared builder's command.
+        assert runner.calls == [{"cmd": ["sparkrun", "stop", "--all"],
+                                 "block": runner.calls[0]["block"],
+                                 "ok": True}]
+        assert res["issued"][0]["kind"] == "fleet"
+        assert res["issued"][0]["cmd"] == ["sparkrun", "stop", "--all"]
+
+    # -- each stop carries a recipe TARGET sparkrun accepts -------------------
+    def test_stop_cmd_is_whole_fleet_all(self, tmp_path, monkeypatch,
+                                         autodown_file):
+        """The single stop is ``sparkrun stop --all`` — no per-unit TARGET.
+
+        sparkrun requires a TARGET (recipe or cluster id) or ``--all`` — the
+        OLD per-unit form ``sparkrun stop --hosts <nodes>`` failed 100% of the
+        time with "Must specify TARGET or --all". The operator decision is a
+        WHOLE-FLEET down: one ``sparkrun stop --all`` (built by
+        ``serving.fleet_down_cmd()``) that stops EVERY unit, including keepalive
+        units — no per-unit recipe TARGET, no keepalive exemption (C4 reversed).
+        """
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        res = ad.teardown(
+            serving_path=serving, run_cmd_fn=runner,
+            kanban_db=_FakeKb([]), agents_file=self._agents(tmp_path),
+            now=NOW, keepalive_ok=lambda: True,
+            http_check_fn=lambda *a, **k: {"ok": False},
+        )
+        assert res["result"] == "down"
+        # Exactly one stop using the `--all` form sparkrun accepts.
+        assert len(runner.calls) == 1
+        assert runner.calls[0]["cmd"] == ["sparkrun", "stop", "--all"]
+        # Plan is the single fleet entry (unit_id "fleet"), whose verify set
+        #   covers every unit (orch + wk1 + keepalive wk-keep) for the
+        #   verify-down probes.
+        assert len(res["plan"]) == 1
+        assert res["plan"][0]["unit_id"] == "fleet"
+        verify_ids = {v["unit_id"] for v in res["plan"][0]["verify"]}
+        assert verify_ids == {"wk1", "orch", "wk-keep"}
 
     # -- stop failure ⇒ block rolled back + failure recorded ----------------
     def test_stop_failure_rolls_back_and_records(self, tmp_path, monkeypatch,
@@ -994,13 +995,25 @@ class TestTeardown:
 
     def test_stop_failure_recorded(self, tmp_path, monkeypatch, autodown_file,
                                    capsys):
-        """Failure path persists a reason mentioning the failure into config."""
+        """Failure path persists a NON-EMPTY, diagnosable reason into config.
+
+        PART 3: the recorded reason was previously empty because only stdout
+        was read and sparkrun's diagnostic went to stderr. The failure reason
+        must capture BOTH stdout and stderr so it is diagnosable without a
+        manual probe. With the whole-fleet down there is one stop, so a single
+        failure on it exercises the capture path.
+        """
         serving, runner, block_file = self._setup(tmp_path, monkeypatch,
                                                   autodown_file,
-                                                  results=[True, False])
-        # First stop ok, second (orchestrator) fails.
+                                                  results=[False])
+
+        class _StderrRunner:
+            def __call__(self, cmd, timeout=30):
+                return {"ok": False, "output": "stdout-noise",
+                        "stderr": "sparkrun: Must specify TARGET or --all"}
+
         res = ad.teardown(
-            serving_path=serving, run_cmd_fn=runner,
+            serving_path=serving, run_cmd_fn=_StderrRunner(),
             kanban_db=_FakeKb([]), agents_file=self._agents(tmp_path),
             now=NOW, keepalive_ok=lambda: True,
             http_check_fn=lambda *a, **k: {"ok": False},
@@ -1009,6 +1022,10 @@ class TestTeardown:
         cfg = ad.load_config()
         assert cfg["state"] == "up"
         assert "teardown failed" in cfg["reason"]
+        # PART 3: the reason carries the non-empty stderr text (the actual
+        # sparkrun diagnostic), not a truncated empty string.
+        assert "Must specify TARGET or --all" in cfg["reason"]
+        assert "stop command failed" not in cfg["reason"]
 
     # -- cancel_requested mid-teardown ⇒ stops, rolls back, cancelled -------
     def test_cancel_mid_teardown(self, tmp_path, monkeypatch, autodown_file):
@@ -1039,10 +1056,17 @@ class TestTeardown:
         assert "cancelled" in cfg["reason"]
 
     def test_cancel_after_first_stop(self, tmp_path, monkeypatch, autodown_file):
-        """Cancel set between stops ⇒ first stop issued, subsequent not."""
+        """Cancel set after the single fleet stop issues ⇒ teardown completes.
+
+        With the whole-fleet down there is ONE ``sparkrun stop --all`` (no
+        per-unit sequence), so once it issues there are no more stops to cancel.
+        A cancel_requested that lands after the stop does not un-run it: the
+        teardown completes as "down". (Cancel set BEFORE the stop is the
+        ``test_cancel_mid_teardown`` path — no stop issued.)
+        """
         serving, runner, block_file = self._setup(tmp_path, monkeypatch,
                                                   autodown_file)
-        # After the FIRST stop issues (via runner), set cancel on disk.
+        # After the (single) fleet stop issues (via runner), set cancel on disk.
         class _RunnerWithCancel:
             def __init__(self, inner, set_cancel):
                 self.inner = inner
@@ -1064,14 +1088,14 @@ class TestTeardown:
             now=NOW, keepalive_ok=lambda: True,
             http_check_fn=lambda *a, **k: {"ok": False},
         )
-        assert res["result"] == "cancelled"
-        # Only the worker (first) was stopped; orchestrator never attempted.
+        # The single fleet stop already issued — result is "down", not "cancelled".
+        assert res["result"] == "down"
         assert len(runner.calls) == 1
-        assert runner.calls[0]["cmd"][-1] == "10.0.0.247"
-        # Block rolled back.
+        assert runner.calls[0]["cmd"] == ["sparkrun", "stop", "--all"]
+        # Block stays latched (autodown proceeded to record down), not rolled back.
         with open(block_file) as f:
-            rolled = json.load(f)
-        assert rolled.get("intentional") is None
+            blk = json.load(f)
+        assert blk.get("intentional") == "autodown"
 
     # -- success ⇒ autodown.json state == "down" with down_since set -------
     def test_success_sets_state_down(self, tmp_path, monkeypatch, autodown_file):
@@ -1186,13 +1210,15 @@ class TestAutoup:
         monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
         return serving, runner, block_file
 
-    # -- starts EXACTLY what teardown stopped; keepalive never started -------
-    def test_starts_units_teardown_stopped_keepalive_exempt(
+    # -- autoup restores EVERY unit incl. keepalive (C4 reversed) ------------
+    def test_starts_every_unit_incl_keepalive(
             self, tmp_path, monkeypatch, autodown_file):
-        """autoup starts the non-keepalive set (wk1 + orch); keepalive never.
+        """autoup starts EVERY serving.json unit — orch, non-keepalive AND
+        keepalive workers.
 
-        The wake set must equal the teardown set (round-trip symmetry): the
-        keepalive unit (.248) that was never stopped is never started either.
+        Fleet down powered the whole layer down (C4 reversed), so fleet up
+        restores the whole layer: the keepalive unit (.248) IS started. The
+        wake set equals the full serving.json unit set.
         """
         serving, runner, block_file = self._setup(tmp_path, monkeypatch,
                                                   autodown_file)
@@ -1202,16 +1228,15 @@ class TestAutoup:
             sleep_fn=_noop_sleep, notify=False,
         )
         assert res["result"] == "up"
-        assert len(runner.calls) == 2      # wk1 + orch
-        # Keepalive node never appears in any start command.
+        assert len(runner.calls) == 3      # orch + wk1 + wk-keep
+        # Keepalive node IS in a start command now (C4 reversed).
         all_hosts = " ".join(" ".join(c["cmd"]) for c in runner.calls)
-        assert "10.0.0.248" not in all_hosts      # keepalive exempt
-        assert "10.0.0.247" in all_hosts          # non-keepalive worker
-        assert "10.0.0.244" in all_hosts          # orchestrator
-        # Wake set (unit_ids) exactly equals the teardown set.
+        assert "10.0.0.248" in all_hosts      # keepalive restored
+        assert "10.0.0.247" in all_hosts      # non-keepalive worker
+        assert "10.0.0.244" in all_hosts      # orchestrator
+        # Wake set (ready) is the FULL unit set.
         plan_ids = set(res["ready"])
-        assert plan_ids == {"wk1", "orch"}
-        assert "wk-keep" not in plan_ids
+        assert plan_ids == {"wk1", "orch", "wk-keep"}
 
     def test_each_start_cmd_is_sparkrun_run_ensure(
             self, tmp_path, monkeypatch, autodown_file):
@@ -1246,8 +1271,15 @@ class TestAutoup:
         # Orchestrator host (.244) is in the FIRST start command.
         assert "10.0.0.244" in first
         assert res["started"][0]["kind"] == "orchestrator"
-        # Worker starts after the orchestrator.
-        assert "10.0.0.247" in " ".join(runner.calls[1]["cmd"])
+        # Worker starts (kind == worker) come after the orchestrator.
+        kinds = [res["started"][i]["kind"] for i in range(len(runner.calls))]
+        assert kinds[0] == "orchestrator"
+        assert set(kinds[1:]) == {"worker"}
+        # All worker hosts present across the worker start commands.
+        all_worker_hosts = " ".join(
+            " ".join(runner.calls[i]["cmd"]) for i in range(1, len(runner.calls)))
+        assert "10.0.0.247" in all_worker_hosts
+        assert "10.0.0.248" in all_worker_hosts
 
     # -- block cleared ONLY after readiness confirmed ------------------------
     def test_block_latched_through_starts_then_cleared(
@@ -1413,8 +1445,8 @@ class TestAutoup:
     def test_round_trip_teardown_then_autoup(self, tmp_path, monkeypatch,
                                              autodown_file):
         """teardown() then autoup() with the SAME fixture returns the cluster
-        to the starting unit set: the units stopped == the units started, and
-        end state is up with the block cleared."""
+        to the starting unit set: the whole fleet goes down and comes fully
+        back up, and end state is up with the block cleared."""
         serving = _write_serving(tmp_path)
         block_file = str(tmp_path / "watchdog-block.json")
         monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
@@ -1432,7 +1464,14 @@ class TestAutoup:
             http_check_fn=lambda *a, **k: {"ok": False},  # ports down
         )
         assert stop_result["result"] == "down"
-        stopped_ids = {e["unit_id"] for e in stop_result["plan"]}
+        # One whole-fleet stop, using `--all` (the shared builder's command).
+        assert down_runner.calls == [{"cmd": ["sparkrun", "stop", "--all"],
+                                      "block": down_runner.calls[0]["block"],
+                                      "ok": True}]
+        # The teardown plan's verify set covers EVERY unit incl. keepalive.
+        all_down_units = {v["unit_id"]
+                          for v in stop_result["plan"][0]["verify"]}
+        assert all_down_units == {"wk1", "orch", "wk-keep"}
 
         # Now wake with the same serving fixture. Readiness healthy immediately.
         up_runner = _FakeRunner(block_file)
@@ -1442,12 +1481,9 @@ class TestAutoup:
             sleep_fn=_noop_sleep, notify=False,
         )
         assert up_result["result"] == "up"
-        # The starting non-keepalive set is fully restored.
-        assert set(up_result["ready"]) == stopped_ids == {"wk1", "orch"}
-        # Every unit stopped was started again (same command hostsets).
-        stopped_hosts = {_cmd_hosts(c["cmd"]) for c in down_runner.calls}
-        started_hosts = {_cmd_hosts(c["cmd"]) for c in up_runner.calls}
-        assert started_hosts == stopped_hosts
+        # The ENTIRE serving layer is restored — orch + keepalive + workers.
+        assert set(up_result["ready"]) == {"wk1", "orch", "wk-keep"}
+        assert len(up_runner.calls) == 3      # one start per unit
         # End state: up + block cleared.
         assert ad.load_config()["state"] == "up"
         with open(block_file) as f:
@@ -2432,15 +2468,20 @@ class TestLockAndGates:
         assert res["result"] == "up"                   # system recovered
         assert ad.load_config()["state"] == "up"
 
-    # -- F6: keepalive node overlapping teardown set ⇒ abort, no stop --------
-    def test_keepalive_overlap_aborts_no_stop(self, tmp_path, monkeypatch,
+    # -- F6 (C4 reversed): keepalive node overlap NO LONGER aborts ----------
+    def test_keepalive_overlap_does_not_abort(self, tmp_path, monkeypatch,
                                               autodown_file):
-        """A keepalive node in the teardown set (co-located config) ⇒ abort,
-        no stop issued, block NOT written."""
-        import os as _os
+        """A keepalive node in the set does NOT abort — fleet `--all` covers it.
+
+        C4 is reversed: autodown powers the ENTIRE serving layer down including
+        keepalive units, so a co-located config (keepalive worker sharing a node
+        with the orchestrator) is fine — the whole-fleet ``sparkrun stop --all``
+        stops it. The old keepalive-overlap abort guard is REMOVED (it would
+        abort on every teardown, since `--all` always touches keepalive nodes).
+        """
         serving, runner, bf = self._setup(tmp_path, monkeypatch, autodown_file)
         # Co-located config: the keepalive worker shares .244 with the
-        # orchestrator ⇒ teardown would stop a keepalive node.
+        # orchestrator — previously this triggered the (now removed) guard.
         data = {
             "port": 8000,
             "units": [
@@ -2457,8 +2498,12 @@ class TestLockAndGates:
                           kanban_db=_FakeKb([]),
                           agents_file=self._agents(tmp_path), now=NOW,
                           keepalive_ok=lambda: True)
-        assert res["result"] == "aborted"
-        assert runner.calls == []                       # no stop issued
-        assert not _os.path.exists(bf)                  # block NOT written
+        # NOT aborted: the single `--all` stop runs, teardown completes down.
+        assert res["result"] == "down"
+        assert runner.calls == [{"cmd": ["sparkrun", "stop", "--all"],
+                                 "block": runner.calls[0]["block"], "ok": True}]
+        # Verify set covers BOTH units (orchestrator + the keepalive worker).
+        verify_ids = {v["unit_id"] for v in res["plan"][0]["verify"]}
+        assert verify_ids == {"orch", "wk-keep"}
         cfg = ad.load_config()
-        assert cfg["state"] != "down"                   # never recorded down
+        assert cfg["state"] == "down"               # recorded down
