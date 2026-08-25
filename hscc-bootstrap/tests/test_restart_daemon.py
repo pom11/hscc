@@ -28,7 +28,7 @@ RESTART = BOOT / "restart_daemon.sh"
 #   start-error : writes back the SAME pid AND emits an error to stderr, so the
 #                 helper must surface that text in its outcome line (rc 2)
 STUB = """#!/usr/bin/env python3
-import os, sys
+import os, sys, time
 mode = os.environ.get("STUB_MODE", "normal")
 calls = os.environ["STUB_CALLS"]
 pid_file = os.environ["STUB_PID_FILE"]
@@ -47,6 +47,26 @@ elif cmd == "start":
             f.write("42")
     elif mode == "no-return":
         pass
+    elif mode == "daemonize":
+        # Simulate the REAL `hscc start` (cli.cmd_start): double-fork a
+        # grandchild that keeps running (and keeps fd 1/2 open) AFTER the
+        # parent `hscc start` process exits. This is exactly the scenario that
+        # used to hang restart_daemon.sh's `$(...)` capture of start output.
+        pid = os.fork()
+        if pid > 0:
+            # parent (the `hscc start` CLI) returns immediately, like cmd_start
+            pass
+        else:
+            pid2 = os.fork()
+            if pid2 > 0:
+                os._exit(0)
+            # grandchild: record pid, then stay alive like the daemon
+            with open(pid_file, "w") as f:
+                f.write(str(os.getpid()))
+            with open(last_pid, "w") as f:
+                f.write(str(os.getpid()))
+            while True:
+                time.sleep(5)
     else:
         prev = 0
         if os.path.exists(last_pid):
@@ -238,6 +258,38 @@ def test_restart_failure_surfaces_error_text(tmp_path):
     assert calls.read_text().splitlines() == ["stop", "start"]
     assert "PID unchanged after restart" in res.stdout
     assert "failed to (re)start (simulated)" in res.stdout
+
+
+def test_start_returns_promptly_and_daemon_survives_when_it_daemonizes(tmp_path):
+    """The REAL `hscc start` double-forks a grandchild daemon that keeps running
+    (and keeps fd 1/2 open) after the `hscc start` process exits. restart_
+    daemon.sh must still return promptly — it must NOT block on a
+    command-substitution pipe held open by that daemon — and the daemon must
+    survive the script exiting. This is a regression test for the bootstrap
+    hang: before the detach fix, this timed out (the start `$(...)` blocked)."""
+    import signal as _sig
+    env, calls = _setup(tmp_path, mode="daemonize", preexisting_pid=7)
+    try:
+        res = subprocess.run(
+            ["bash", str(RESTART)],
+            env=env, capture_output=True, text=True, timeout=20,
+        )
+    except subprocess.TimeoutExpired:
+        raise AssertionError(
+            "restart_daemon.sh blocked on `start`: daemon inherited the pipe"
+        )
+    assert res.returncode == 0
+    assert calls.read_text().splitlines() == ["stop", "start"]
+    pid = int(open(env["HSCC_PID_FILE"]).read().strip())
+    assert pid != 7  # it must be a NEW daemon pid (the grandchild's own pid)
+    # ...and the daemon must still be alive AFTER restart_daemon.sh exited
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        raise AssertionError("daemon died when restart_daemon.sh exited")
+    assert "daemon restarted (pid 7 ->" in res.stdout
+    # clean up the spawned daemon so it can't leak into other tests
+    os.kill(pid, _sig.SIGKILL)
 
 
 def test_bootstrap_wires_restart_inside_daemon_block_only(tmp_path):
