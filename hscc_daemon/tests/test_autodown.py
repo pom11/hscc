@@ -180,6 +180,60 @@ class TestConfig:
 
 
 # ---------------------------------------------------------------------------
+# list_active_cron_jobs — Hermes cron source of truth (feat t_2b711a94 §7)
+# ---------------------------------------------------------------------------
+
+class TestListActiveCronJobs:
+    """list_active_cron_jobs reads Hermes' jobs.json and returns ACTIVE jobs,
+    or CRON_UNREADABLE on an unreadable/absent/malformed store — fail-closed,
+    so the CLI can abort on 'cannot determine' instead of arming on an
+    unverifiable signal."""
+
+    def _write(self, tmp_path, jobs):
+        p = tmp_path / "jobs.json"
+        p.write_text(json.dumps({"jobs": jobs}))
+        return str(p)
+
+    def test_active_jobs_only(self, tmp_path):
+        p = self._write(tmp_path, [
+            {"id": "a", "name": "active-one", "enabled": True,
+             "schedule_display": "0 8 * * *", "next_run_at": "2026-08-26T08:00:00+03:00"},
+            {"id": "b", "name": "paused-two", "enabled": False,
+             "schedule_display": "0 9 * * *", "next_run_at": "..."},
+            {"id": "c", "name": "also-active", "enabled": True,
+             "schedule": {"kind": "cron", "expr": "*/15 * * * *",
+                          "display": "*/15 * * * *"},
+             "next_run_at": "2026-08-26T00:45:00+03:00"},
+        ])
+        active = ad.list_active_cron_jobs(p)
+        assert active == [
+            {"id": "a", "name": "active-one", "schedule_display": "0 8 * * *",
+             "next_run_at": "2026-08-26T08:00:00+03:00"},
+            {"id": "c", "name": "also-active", "schedule_display": "*/15 * * * *",
+             "next_run_at": "2026-08-26T00:45:00+03:00"},
+        ]
+
+    def test_absent_file_is_unreadable(self, tmp_path):
+        res = ad.list_active_cron_jobs(str(tmp_path / "nope.json"))
+        assert res is ad.CRON_UNREADABLE
+
+    def test_corrupt_json_is_unreadable(self, tmp_path):
+        p = tmp_path / "jobs.json"
+        p.write_text("{ not json")
+        assert ad.list_active_cron_jobs(str(p)) is ad.CRON_UNREADABLE
+
+    def test_top_level_not_dict_is_unreadable(self, tmp_path):
+        p = tmp_path / "jobs.json"
+        p.write_text("[1,2,3]")
+        assert ad.list_active_cron_jobs(str(p)) is ad.CRON_UNREADABLE
+
+    def test_jobs_not_list_is_unreadable(self, tmp_path):
+        p = tmp_path / "jobs.json"
+        p.write_text(json.dumps({"jobs": {"a": 1}}))
+        assert ad.list_active_cron_jobs(str(p)) is ad.CRON_UNREADABLE
+
+
+# ---------------------------------------------------------------------------
 # record_activity
 # ---------------------------------------------------------------------------
 

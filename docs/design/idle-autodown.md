@@ -563,7 +563,9 @@ to how `lifecycle.py` owns `watchdog-block.json`). Schema:
   "wake_at": null,
   "wake_trigger_text": null,      // first ~120 chars of the telegram message that woke us (§4)
   "cancel_requested": false,
-  "reason": ""
+  "reason": "",
+  "force_armed": false,           // true only when armed with --force despite active cron jobs (§7)
+  "force_armed_overrides": []     // names of the jobs overridden at arming time (§7)
 }
 ```
 
@@ -579,6 +581,7 @@ way, dispatching to a new `hscc_daemon/autodown_cli.py:cmd_autodown(argv)`.
 ```
 hscc autodown status                       # enabled? state? idle_minutes? last activity? down_since?
 hscc autodown enable [--idle-minutes N]    # turn ON (default idle_minutes=10)
+hscc autodown enable --force               # arm EVEN IF active Hermes cron jobs exist
 hscc autodown disable                      # turn OFF; clears intentional block; does NOT restart serving
 hscc autodown wake                         # force autoup now (also resets idle timer)
 hscc autodown cancel                       # abort an in-progress teardown
@@ -599,11 +602,91 @@ serving layer is currently down does NOT auto-restart it — it only arms the
 automation; a separate `wake` (or an inbound event) brings it up. This keeps
 `enable` non-acting.
 
+**Cron-job guard (feat t_2b711a94 §7).** A scheduled Hermes job and an
+idle-down cluster are in direct conflict: autodown may power the GPU serving
+layer down exactly when a job is due. So before arming, `enable` enumerates
+ACTIVE Hermes jobs and ABORTS (non-zero, printing each job's name, schedule,
+and next run) if any exist, explaining that autodown may power the cluster
+down when they are due. It reads Hermes' OWN on-disk source of truth,
+`~/.hermes/cron/jobs.json` (`autodown.list_active_cron_jobs`,
+`hscc_daemon/autodown.py`) — NOT the `hermes cron list` CLI, which on this host
+resolves a profile that reports "No scheduled jobs" even though jobs.json
+holds 2 active jobs (so the CLI is not a reliable interface; jobs.json is what
+the scheduler actually fires from). Only jobs with `enabled: true` count; a
+paused/disabled job cannot fire and poses no conflict. **Fail-closed:** an
+unreadable OR absent jobs.json is treated as "cannot determine" and `enable`
+also aborts with that reason — autodown never arms on a signal it cannot
+verify.
+
+`--force` overrides the guard (feat t_2b711a94 §7): `enable --force` arms
+anyway, prints each override, and records `force_armed: true` +
+`force_armed_overrides` (the overridden job names) in `autodown.json`.
+`hscc autodown status` then surfaces `force-armed: YES` and the overridden
+jobs, so the operator can always see WHY autodown is armed despite scheduled
+jobs. A later clean `enable` (when no active jobs remain) clears the markers.
+
 `disable` semantics (C2/C5): set `enabled: false`, set `state` to the current
 reality, and **clear the `intentional` marker + `blocked` flag in the watchdog
 block** so the watchdog resumes ordinary supervision. It does NOT run autoup —
 if the layer is down and the operator wants it up, they run `hscc autodown wake`
 (or the normal `hscc template apply` path). Document this in the CLI help.
+
+### 7.1 Cron jobs and wake-on-cron — part 3 investigation (feat t_2b711a94)
+
+The card's part 3 asked whether a scheduled job that fires while the fleet is
+down should **wake the cluster** (and whether the job should be **queued and
+executed once it is ready**). We investigated the observable signals on this
+host on 2026-08-26 and reached the finding below; **no wake-on-cron path was
+built**, and this subsection records why.
+
+**Cron firings ARE observable by the CPU-side daemon.** The Hermes cron engine
+writes one row per execution to `~/.hermes/cron/executions.db` (SQLite table
+`executions`) with a `claimed_at` timestamp in local time. A daemon probe could
+scan this exactly like `probe_telegram_activity` scans the gateway log
+(§1d.2): remember the last-seen `claimed_at`/high-watermark, and treat any new
+row for an ACTIVE job as a firing. This is additively written, so a byte-offset
+style watermark works. So observability is NOT the obstacle — a firing is
+readily detectable.
+
+**The obstacle is that the jobs that would trigger it do not need the GPU
+serving layer, and waking for them would be actively harmful.** The two ACTIVE
+jobs on this host are both `no_agent: true` pure-script watchdogs with
+`model: null`:
+
+| job | schedule | kind | runs on |
+|---|---|---|---|
+| `hscc-dep-watcher` (bdf1af7e169e) | `0 8 * * *` (daily 08:00) | `no_agent`, `model:null` | CPU, ~1s, completed 10× |
+| `hscc-escalate-watcher` (6407ea32e1dd) | `*/15 * * * *` (every 15 min) | `no_agent`, `model:null` | CPU, <1s, completed 990× |
+
+Both are CPU-side Hermes cron script jobs that run **entirely independent of
+the GPU serving layer** — they shell a script, post the result to Telegram, and
+complete in well under a second. They do NOT "run against a dead cluster and
+fail": they succeed identically whether or not autodown has powered the fleet
+down. There is therefore **no lost job to queue** — the job already executed to
+completion on the CPU side. "Queue the job so it executes once the fleet is
+ready" would mean re-running an already-completed CPU-side job after a ~9-min
+GPU model load, doubling it for zero benefit.
+
+Worse, the wake itself would be counterproductive: waking the whole fleet (a
+~9-minute model-load window) for a `no_agent` script job that needs no model is
+pure GPU waste, and the every-15-min `hscc-escalate-watcher` would re-trigger
+the wake faster than idle could ever count down — permanently defeating idle
+teardown and running up a large power/GPU bill for nothing.
+
+**Decision:** implement parts 1 and 2 (the abort guard + `--force` override)
+and NOT part 3 (wake-on-cron). The conflict the feature set out to make
+explicit is handled at the arming gate: the operator either disables/pauses the
+offending scheduled jobs, or explicitly `--force`-arms knowing the cluster may
+be down when they fire. Part 3's "wake + queue the job" was the riskiest, least
+valuable piece — a reliable-but-harmful wake is covered by documenting the
+limitation rather than half-building it (the card's own guidance: an unreliable
+"we'll wake for crons" promise is worse than a documented limitation). If a
+GPU-model cron job (`no_agent: false`, a real `model`) is ever added, wake-on-
+cron would become meaningful — revisit then, keyed on `model` presence, not
+on every firing. **Ordering risk documented:** a GPU-model job that fires at
+08:00 but only runs at 08:09 after the model load — the ~9-min gap — would need
+the operator to decide whether a late run is acceptable before relying on
+wake-on-cron; that decision is deferred until such a job exists.
 
 ---
 
