@@ -1384,6 +1384,9 @@ class TestAutoup:
         # wake bookkeeping kept so the operator sees the trigger.
         assert cfg["wake_source"] == "cycle"
         assert cfg["wake_at"] is not None
+        # FAILED wake ⇒ the fleet is NOT confirmed up, so down_since is STILL
+        # retained (set iff down/waking — the honesty fix).
+        assert cfg["down_since"] is not None
         # Block cleared (intentional removed) so the watchdog resumes + heals.
         with open(block_file) as f:
             blk = json.load(f)
@@ -1419,6 +1422,8 @@ class TestAutoup:
         assert cfg["state"] == "up"
         assert "start-failed" not in cfg  # result is return-value only
         assert "wake FAILED" in cfg["reason"]
+        # FAILED wake ⇒ fleet NOT confirmed up ⇒ down_since retained (honest).
+        assert cfg["down_since"] is not None
         # Intentional cleared so the watchdog resumes + can heal.
         with open(block_file) as f:
             blk = json.load(f)
@@ -1455,12 +1460,13 @@ class TestAutoup:
     # -- success ⇒ state up + wake bookkeeping cleared -----------------------
     def test_success_sets_state_up_clears_wake(self, tmp_path, monkeypatch,
                                               autodown_file):
-        """A clean wake: state=up, wake_source/wake_at cleared, block cleared."""
+        """A clean wake: state=up, wake_source/wake_at/down_since cleared."""
         serving, runner, block_file = self._setup(tmp_path, monkeypatch,
                                                   autodown_file)
         cfg = ad.load_config()
         cfg["wake_source"] = "telegram"   # will be cleared on success
         cfg["wake_at"] = "2026-08-23T09:00:00+00:00"
+        cfg["down_since"] = "2026-08-23T07:59:00+00:00"  # stale; cleared on success
         ad.save_config(cfg)
         res = ad.autoup(
             serving_path=serving, run_cmd_fn=runner,
@@ -1472,6 +1478,7 @@ class TestAutoup:
         assert cfg["state"] == "up"
         assert cfg["wake_source"] is None
         assert cfg["wake_at"] is None
+        assert cfg["down_since"] is None   # the honesty fix — no stale down
         assert cfg["reason"] == ""
 
     # -- start timeout / slow-launch readiness (the wake-fails fix) ----------
@@ -1605,6 +1612,8 @@ class TestAutoup:
         assert len(up_runner.calls) == 3      # one start per unit
         # End state: up + block cleared.
         assert ad.load_config()["state"] == "up"
+        end_cfg = ad.load_config()
+        assert end_cfg["down_since"] is None  # cleared after successful wake
         with open(block_file) as f:
             blk = json.load(f)
         assert blk.get("blocked") is False
@@ -2519,6 +2528,8 @@ class TestLockAndGates:
         cfg = ad.load_config()
         assert cfg["state"] == "error"
         assert "empty wake plan" in cfg["reason"]
+        # FAILED wake ⇒ fleet NOT confirmed up ⇒ down_since retained (honest).
+        assert cfg["down_since"] is not None
 
     # -- F7 residual: empty wake plan ⇒ LOUD notify -------------------------
     def test_empty_wake_plan_notifies_loudly(self, tmp_path, monkeypatch,

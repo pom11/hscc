@@ -159,6 +159,48 @@ class TestStatus:
         assert data["kanban_ok"] is None
         assert "kanban_reason" in data
 
+    def test_status_no_down_since_line_when_null(self, capsys, autodown_file,
+                                                 block_file):
+        """Up state ⇒ down_since null ⇒ NO 'down since' line at all (the old
+        code printed 'down since: None'). --json carries down_since: null,
+        reflecting the same truth: the fleet is up."""
+        autodown_file.write_text(json.dumps({
+            "enabled": True, "idle_minutes": 10, "state": "up",
+            "last_activity_iso": "2026-08-25T09:19:51+00:00",
+            "down_since": None,
+        }))
+        rc = cmd_autodown(["status"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "down since" not in out          # no line when null
+        # Human output is unambiguous: state up, no down-since contradiction.
+        assert "state:           up" in out
+        # --json shows the same truth: down_since is null, state up.
+        rc = cmd_autodown(["status", "--json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["state"] == "up"
+        assert data["down_since"] is None
+
+    def test_status_shows_down_since_when_present(self, capsys, autodown_file,
+                                                  block_file):
+        """Down ⇒ down_since set ⇒ the 'down since' line IS printed with the
+        value (both human and --json)."""
+        autodown_file.write_text(json.dumps({
+            "enabled": True, "idle_minutes": 10, "state": "down",
+            "last_activity_iso": "2026-08-25T09:19:51+00:00",
+            "down_since": "2026-08-25T07:59:01+00:00",
+        }))
+        rc = cmd_autodown(["status"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "down since:      2026-08-25T07:59:01+00:00" in out
+        rc = cmd_autodown(["status", "--json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["state"] == "down"
+        assert data["down_since"] == "2026-08-25T07:59:01+00:00"
+
 
 # ---------------------------------------------------------------------------
 # enable — resets the idle timer, non-acting
