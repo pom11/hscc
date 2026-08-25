@@ -9,6 +9,7 @@ import json
 import os
 import sqlite3
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -1719,8 +1720,14 @@ class TestCycleWakeSeam:
     activity), and never otherwise. autoup is monkeypatched — the seam is what
     is under test, not autoup's internals."""
 
-    def _cfg(self, autodown_file, last_activity_iso):
+    def _cfg(self, autodown_file, last_activity_iso, monkeypatch):
         """Write an enabled, DOWN config with the given last_activity_iso."""
+        # Hermetic: the reconcile probe reports the layer NOT up and the streak
+        # is reset, so every state=down cycle here only exercises the wake seam
+        # regardless of the live fleet's up/down (no real-cluster read, no
+        # cross-test contamination).
+        monkeypatch.setattr(ad, "_reconcile_up_fn", lambda **kw: False)
+        ad._reconcile_up_streak = 0
         down = NOW - _dt.timedelta(minutes=30)
         cfg = dict(ad.DEFAULT_CONFIG)
         cfg["enabled"] = True
@@ -1739,7 +1746,7 @@ class TestCycleWakeSeam:
                             raising=False)
         # Activity stamped AFTER down_since (a wake event arrived).
         fresh = NOW - _dt.timedelta(minutes=5)   # after down (30m ago)
-        self._cfg(autodown_file, fresh.isoformat())
+        self._cfg(autodown_file, fresh.isoformat(), monkeypatch)
         ad.cycle(probes=[])
         assert calls == ["autoup"]
 
@@ -1751,7 +1758,7 @@ class TestCycleWakeSeam:
         monkeypatch.setattr(ad, "autoup", lambda: calls.append("autoup"),
                             raising=False)
         down = NOW - _dt.timedelta(minutes=30)
-        self._cfg(autodown_file, down.isoformat())  # last_activity == down_since
+        self._cfg(autodown_file, down.isoformat(), monkeypatch)  # == down_since
         ad.cycle(probes=[])
         assert calls == []
 
@@ -1762,7 +1769,7 @@ class TestCycleWakeSeam:
         calls = []
         monkeypatch.setattr(ad, "autoup", lambda: calls.append("autoup"),
                             raising=False)
-        self._cfg(autodown_file, None)
+        self._cfg(autodown_file, None, monkeypatch)
         ad.cycle(probes=[])
         assert calls == []
 
@@ -1772,7 +1779,7 @@ class TestCycleWakeSeam:
         monkeypatch.setattr(ad, "autoup", lambda: calls.append("autoup"),
                             raising=False)
         down = NOW - _dt.timedelta(minutes=30)
-        self._cfg(autodown_file, down.isoformat())
+        self._cfg(autodown_file, down.isoformat(), monkeypatch)
         ad.load_config  # noqa
         cfg = ad.load_config()
         cfg["state"] = "waking"
@@ -1789,7 +1796,7 @@ class TestCycleWakeSeam:
                             raising=False)
         down = NOW - _dt.timedelta(minutes=30)
         fresh = NOW - _dt.timedelta(minutes=5)
-        self._cfg(autodown_file, fresh.isoformat())
+        self._cfg(autodown_file, fresh.isoformat(), monkeypatch)
         cfg = ad.load_config()
         cfg["enabled"] = False
         ad.save_config(cfg)
@@ -1802,7 +1809,7 @@ class TestCycleWakeSeam:
         monkeypatch.setattr(ad, "autoup", lambda: calls.append("autoup"),
                             raising=False)
         down = NOW - _dt.timedelta(minutes=30)
-        self._cfg(autodown_file, down.isoformat())
+        self._cfg(autodown_file, down.isoformat(), monkeypatch)
         cfg = ad.load_config()
         cfg["state"] = "up"
         ad.save_config(cfg)
@@ -1810,6 +1817,164 @@ class TestCycleWakeSeam:
         ad.cycle(kanban_db=_FakeKb([]), agents_file="",
                  now=NOW, keepalive_ok=lambda: True, probes=[])
         assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# §8 Fix 2 — reconcile-to-reality: state must self-describe what is running
+# ---------------------------------------------------------------------------
+
+class TestReconcileToReality:
+    """SAFETY BLOCKER (Fix 2): even with check_workers gated, a recorded "down"
+    state must NOT contradict a serving layer that is actually UP (§8 forbids
+    the silent half-state). When state==down but the orchestrator head probes
+    healthy across the debounce, cycle() reconciles: clears the intentional
+    block (so the watchdog supervises what is running) and sets state=up, loud.
+
+    The "actually up" definition is documented in _serving_actually_up: the
+    ORCHESTRATOR unit's head node answers healthy — the definitive serving head
+    (and the one unit neither check_workers nor check_proxy auto-keeps alive).
+    """
+
+    def _down_cfg(self, autodown_file):
+        down = "2026-01-01T00:00:00+00:00"
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["enabled"] = True
+        cfg["state"] = "down"
+        cfg["idle_minutes"] = 10
+        cfg["down_since"] = down
+        cfg["last_activity_iso"] = down   # no fresh activity ⇒ no wake seam
+        ad.save_config(cfg)
+        return cfg
+
+    # ── the "actually up" predicate (the definition we chose + documented) ──
+    def test_actually_up_true_when_orch_up(self, tmp_path, monkeypatch):
+        """Orchestrator head probe ok ⇒ the layer is actually up."""
+        serving_path = _write_serving(tmp_path)
+        monkeypatch.setattr(ad, "_util_http_check_probe",
+                            lambda: _HealthyProbe())
+        assert ad._serving_actually_up(serving_path=serving_path) is True
+
+    def test_actually_up_false_when_orch_down(self, tmp_path, monkeypatch):
+        """Orchestrator head probe not-ok ⇒ the layer is NOT actually up (a
+        real drain may still be in progress)."""
+        serving_path = _write_serving(tmp_path)
+        monkeypatch.setattr(ad, "_util_http_check_probe", lambda: _DownProbe())
+        assert ad._serving_actually_up(serving_path=serving_path) is False
+
+    def test_actually_up_false_when_no_serving(self, tmp_path):
+        """Missing serving.json / no orchestrator unit ⇒ NOT confidently up
+        (do not reconcile on an unverifiable signal)."""
+        missing = str(tmp_path / "nope" / "serving.json")
+        assert ad._serving_actually_up(serving_path=missing) is False
+
+    # ── debounce + reconcile via the real cycle() ──────────────────────────
+    def test_down_reconciles_to_up_when_layer_actually_up(
+            self, autodown_file, tmp_path, monkeypatch):
+        """state=down but the layer probes UP across the debounce ⇒ reconcile:
+        clear intentional block, set state=up, clear down_since, log loudly."""
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
+        monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
+        monkeypatch.setattr(ad, "autoup", lambda: None, raising=False)
+        self._down_cfg(autodown_file)
+        # latch an intentional block, as a real teardown leaves behind
+        _lifecycle.save_watchdog_block({"blocked": True, "intentional": "autodown",
+                                        "reason": ad.WATCHDOG_TEARDOWN_REASON})
+        # The layer is ACTUALLY up — simulate something external starting it.
+        monkeypatch.setattr(ad, "_reconcile_up_fn", lambda **kw: True)
+        ad._reconcile_up_streak = 0
+
+        # First (DEBOUNCE-1) down-cycles: still recording the sustained-up signal,
+        # no reconcile yet — state stays down, block stays latched.
+        for _ in range(ad.RECONCILE_UP_DEBOUNCE - 1):
+            ad.cycle(probes=[])
+            assert ad.load_config()["state"] == "down"
+        # Nth consecutive up-cycle: reconcile fires to reality.
+        ad.cycle(probes=[])
+        cfg = ad.load_config()
+        assert cfg["state"] == "up"
+        assert cfg["down_since"] is None
+        # intentional block cleared so the watchdog supervises what is running
+        blk = json.loads(Path(block_file).read_text())
+        assert blk.get("blocked") is False
+        assert blk.get("intentional") is None
+        assert "reconciled" in blk.get("reason", "").lower() or \
+            "actually up" in blk.get("reason", "").lower()
+
+    def test_reconcile_not_fire_while_drain_still_in_progress(
+            self, autodown_file, tmp_path, monkeypatch):
+        """reconcile does NOT fire while a teardown is still draining: if the
+        layer flips up once then back down, the debounce never accumulates —
+        state stays honestly down (a real drain or a flaky one-off up)."""
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
+        monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
+        monkeypatch.setattr(ad, "autoup", lambda: None, raising=False)
+        self._down_cfg(autodown_file)
+        _lifecycle.save_watchdog_block({"blocked": True, "intentional": "autodown",
+                                        "reason": ad.WATCHDOG_TEARDOWN_REASON})
+        # Flaky probe: up once, then down (a slow-draining stop that briefly
+        # answered) — simulate by toggling _reconcile_up_fn between cycles.
+        state = {"up": True}
+        def flaky(**kw):
+            return state["up"]
+        monkeypatch.setattr(ad, "_reconcile_up_fn", flaky)
+        ad._reconcile_up_streak = 0
+
+        # cycle 1: up (streak 1) — never crosses debounce alone
+        ad.cycle(probes=[])
+        # now it drains back down before the next cycle
+        state["up"] = False
+        # cycle 2 (and several more): all down ⇒ streak resets to 0
+        for _ in range(ad.RECONCILE_UP_DEBOUNCE * 2):
+            ad.cycle(probes=[])
+        # Never reconciled — state stays honestly down, block stays latched.
+        assert ad.load_config()["state"] == "down"
+        blk = json.loads(Path(block_file).read_text())
+        assert blk.get("intentional") == "autodown"
+
+    def test_reconcile_not_fire_while_waking(self, autodown_file, tmp_path,
+                                             monkeypatch):
+        """reconcile does NOT fire while a wake is legitimately in progress:
+        state=waking returns from cycle() BEFORE the reconcile probe runs."""
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
+        monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
+        monkeypatch.setattr(ad, "autoup", lambda: None, raising=False)
+        self._down_cfg(autodown_file)
+        _lifecycle.save_watchdog_block({"blocked": True, "intentional": "autodown",
+                                        "reason": ad.WATCHDOG_TEARDOWN_REASON})
+        cfg = ad.load_config()
+        cfg["state"] = "waking"
+        ad.save_config(cfg)
+        # Even a layer that is actually up must NOT reconcile while waking.
+        monkeypatch.setattr(ad, "_reconcile_up_fn", lambda **kw: True)
+        ad._reconcile_up_streak = 0
+        ad.cycle(probes=[])
+        assert ad.load_config()["state"] == "waking"   # untouched
+        blk = json.loads(Path(block_file).read_text())
+        assert blk.get("intentional") == "autodown"     # block not cleared
+
+    def test_reconcile_logs_loudly(self, autodown_file, tmp_path, monkeypatch):
+        """A reconciliation is logged at ERROR (loud) — the surprise up is the
+        silent half-state §8 forbids, so it must be unmissable."""
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
+        monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
+        self._down_cfg(autodown_file)
+        _lifecycle.save_watchdog_block({"blocked": True, "intentional": "autodown"})
+        logs = []
+        monkeypatch.setattr(ad, "log",
+                            lambda msg, level="INFO": logs.append((msg, level)))
+        monkeypatch.setattr(ad, "_reconcile_up_fn", lambda **kw: True)
+        ad._reconcile_up_streak = 0
+        for _ in range(ad.RECONCILE_UP_DEBOUNCE):
+            ad.cycle(probes=[])
+        assert any("RECONCILED" in m and l == "ERROR" for m, l in logs)
 
 
 # ---------------------------------------------------------------------------
@@ -2043,6 +2208,10 @@ class TestProbeTelegramActivity:
         calls = []
         monkeypatch.setattr(ad, "autoup", lambda: calls.append("autoup"),
                             raising=False)
+        # Hermetic: reconcile probe reports NOT up so this only exercises the
+        # wake seam (no real-cluster read, no cross-test contamination).
+        monkeypatch.setattr(ad, "_reconcile_up_fn", lambda **kw: False)
+        ad._reconcile_up_streak = 0
         gw, off = self._setup(tmp_path)
         with open(gw, "w") as f:
             f.write("seed line\n")
@@ -2353,6 +2522,10 @@ class TestSelfHeal:
         monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
         monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
         monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
+        # Hermetic: the reconcile probe reports the layer NOT up, so this test
+        # only exercises the self-heal-block path regardless of the live fleet.
+        monkeypatch.setattr(ad, "_reconcile_up_fn", lambda **kw: False)
+        ad._reconcile_up_streak = 0
         # Enabled, down, no fresh activity (so autoup is not triggered).
         down = NOW - _dt.timedelta(minutes=30)
         cfg = dict(ad.DEFAULT_CONFIG)
@@ -2380,6 +2553,9 @@ class TestSelfHeal:
         monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
         monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
         monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
+        # Hermetic: reconcile probe reports NOT up (no cross-test contamination).
+        monkeypatch.setattr(ad, "_reconcile_up_fn", lambda **kw: False)
+        ad._reconcile_up_streak = 0
         _lifecycle.save_watchdog_block({"blocked": True, "intentional":
                                         "autodown", "reason": "x",
                                         "blocked_at": "2026-01-01T00:00:00+00:00"})
