@@ -431,16 +431,38 @@ stale instruction against a changed cluster:
   crashes the wake itself.
 - **Delivery seam.** `replay.replay_queued(deliver_message=...)` hands each
   queued message to an injectable callable. In tests this is a fake; in
-  production the default (`replay.default_deliver_message`, `replay.py:518`)
-  POSTs the message to the Hermes gateway's **webhook platform**
-  (`http://127.0.0.1:8644/webhooks/<route>` by default) with a `deliver_extra`
-  carrying `chat_id`/`thread_id`/`reply_to_id` so the reply is routed to the
-  original chat/topic. **Runtime requirement:** the gateway's webhook platform
-  must be enabled and a route configured for the queue's delivery URL (see
-  `install/hscc-skills/devops/webhook-subscriptions/SKILL.md`); the URL/secret
-  are overridable via `HSCC_REPLAY_WEBHOOK_URL` / `HSCC_REPLAY_WEBHOOK_SECRET`.
-  If the webhook platform is unavailable, delivery returns False and every
+  production the default (`replay.default_deliver_message`, `replay.py`) is a
+  full orchestrator round-trip through components that exist on this host:
+    1. **Map** the message's chat/topic to an orchestrator profile+session
+       (the `<project>-orch` / session `<project>` convention from
+       `hscc-roles/orchestrators.py`, catch-all `general-orch` / `general`),
+       resolved via the flightdeck registry's per-project `topic` binding.
+    2. **Invoke** that orchestrator exactly the way the HSCC API does
+       (`hscc-api/routes_orchestrator.py`): `hermes -p <profile> chat -Q
+       --continue <session> -q <text>` (argv as a LIST — never shell-
+       interpolated), so the message is actually processed and the reply is
+       the only thing on stdout.
+    3. **Reply** — post the orchestrator's reply back to the message's
+       ORIGINAL chat/topic via `telegram.send_message` (the same Bot API
+       transport `telegram.notify_operations` uses for operator notices,
+       generalised to an explicit `chat_id`/`thread_id`/`reply_to_id`).
+  **Mapping policy (deliberate):** a `platform != "telegram"` message is
+  UNMAPPABLE — the installed reply path is telegram-only — so it stays queued
+  and is reported loudly, never guessed. A telegram message whose thread/topic
+  matches a registry project's `topic` goes to that project's orchestrator; a
+  telegram message with no matching topic (General topic, direct chat, or an
+  unbound topic) goes to the `general` catch-all (which exists precisely for
+  that). No runtime webhook configuration is required — the daemon reads the
+  registry file (`~/.flightdeck/registry.yaml`, overridable via `HSCC_REGISTRY`)
+  and shells `hermes` (`HSCC_HERMES_BIN`) directly.
+  **Failure contract:** `default_deliver_message` returns True only on the FULL
+  round trip (orchestrator produced a non-empty reply AND the reply was posted).
+  If the orchestrator is unavailable, its session is not ready, it returns an
+  empty reply, or the reply cannot be posted, delivery returns False and every
   message is retained + reported loudly — fail-closed, never silently dropped.
+  A pathological orchestrator-ran-but-reply-failed case is logged as CRITICAL
+  (re-running it would re-process the prompt — at-least-once), so the operator
+  can clear the queue deliberately.
 
 ### 4.5 No-op on empty queue
 A wake via CLI/HTTP/kanban with an empty (or absent) queue is a clean no-op —
