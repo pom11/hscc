@@ -35,30 +35,49 @@ def autodown_file(tmp_path, monkeypatch):
 
 
 class _FakeKb:
-    """Fake Hermes kanban library backed by a real in-memory sqlite board.
+    """Fake Hermes kanban library backed by real in-memory sqlite boards.
 
-    Exposes the ``connect_closing()`` interface _has_active_work uses, so the
-    SQL predicate is genuinely exercised. ``conn_closed`` records that the
-    connection was released (no leaks).
+    Exposes the interface (the new) _has_active_work uses: ``list_boards()``
+    plus a board-aware ``connect_closing(board=...)``. ``conn_closed`` records
+    that a connection was released (no leaks); ``opened`` records which boards
+    were actually opened so tests can assert short-circuiting (it does NOT open
+    them all).
+
+    ``__init__`` accepts either a flat list of statuses (→ a single ``default``
+    board, the legacy shape) or a dict ``{slug: [statuses...]}`` for
+    multi-board scenarios.
     """
 
-    def __init__(self, statuses=()):
+    def __init__(self, boards=None):
         self.conn_closed = 0
-        self._conn = sqlite3.connect(":memory:")
-        self._conn.execute(
-            "CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT)"
-        )
-        for sid, status in enumerate(statuses):
-            self._conn.execute(
-                "INSERT INTO tasks (id, status) VALUES (?, ?)",
-                (f"t-{sid}", status),
+        self.opened = []
+        self._conns = {}
+        if boards is None:
+            boards = {"default": []}
+        if isinstance(boards, (list, tuple)):
+            boards = {"default": list(boards)}
+        for slug, statuses in boards.items():
+            conn = sqlite3.connect(":memory:")
+            conn.execute(
+                "CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT)"
             )
-        self._conn.commit()
+            for sid, status in enumerate(statuses):
+                conn.execute(
+                    "INSERT INTO tasks (id, status) VALUES (?, ?)",
+                    (f"{slug}-{sid}", status),
+                )
+            conn.commit()
+            self._conns[slug] = conn
+
+    def list_boards(self):
+        return [{"slug": slug} for slug in self._conns]
 
     @contextmanager
-    def connect_closing(self):
+    def connect_closing(self, board=None):
+        self.opened.append(board)
+        conn = self._conns.get(board) or self._conns.get("default")
         try:
-            yield self._conn
+            yield conn
         finally:
             # Real Hermes connect_closing closes the connection; we just mark it
             # so tests can assert no leak, then reopen for re-use.
@@ -69,7 +88,7 @@ class _UnreachableKb:
     """kanban lib whose connect raises — exercises the fail-safe True path."""
 
     @contextmanager
-    def connect_closing(self):
+    def connect_closing(self, board=None):
         raise RuntimeError("DB unreachable")
 
 
@@ -249,6 +268,77 @@ class TestHasActiveWork:
         kb = _FakeKb([])
         ad._has_active_work(kb)
         assert kb.conn_closed == 1
+
+    # -- per-board scanning (§1a): real work lives in per-board DBs, not just
+    # the legacy flat DB. _has_active_work must consider ALL boards.
+
+    def test_true_when_live_work_on_a_per_board_db(self):
+        """A live card on a NON-default board ⇒ True (this is the core bug)."""
+        kb = _FakeKb({"default": ["done", "archived"],
+                      "hscc": ["running"],
+                      "flosana": ["done"]})
+        assert ad._has_active_work(kb) is True
+        # The flat/default board alone is quiet — the hit comes from 'hscc'.
+        assert ad.kanban_blocking_board() == "hscc"
+
+    def test_true_when_live_work_only_on_flat_db(self):
+        """Live work only on the legacy flat ``default`` DB ⇒ True (legacy
+        path still works — ``list_boards`` resolves default to the flat DB)."""
+        kb = _FakeKb({"default": ["running"], "hscc": ["done"]})
+        assert ad._has_active_work(kb) is True
+        assert ad.kanban_blocking_board() == "default"
+
+    def test_false_when_all_boards_quiet(self):
+        """Every board terminal/parked ⇒ False (genuinely idle)."""
+        kb = _FakeKb({"default": ["done"], "hscc": ["archived", "blocked"],
+                      "flosana": ["done"]})
+        assert ad._has_active_work(kb) is False
+        assert ad.kanban_blocking_board() is None
+
+    def test_true_when_one_board_unreadable(self):
+        """One unreadable board ⇒ True (fail-safe) + surfaced for status."""
+        class _BrokenKb(_FakeKb):
+            @contextmanager
+            def connect_closing(self, board=None):
+                if board == "broken":
+                    raise RuntimeError("DB corrupt")
+                with super().connect_closing(board=board) as conn:
+                    yield conn
+
+        broken = _BrokenKb({"default": ["done"], "hscc": ["done"],
+                            "broken": []})
+        assert ad._has_active_work(broken) is True
+        # The unreadable board is named as the blocker (status also carries
+        # the "board 'broken' unreadable" reason via kanban_check_state).
+        assert ad.kanban_blocking_board() == "broken"
+
+    def test_many_boards_short_circuit_on_first_hit(self):
+        """Many boards ⇒ stops probing at the first live board (does NOT open
+        them all)."""
+        boards = {f"b{i}": (["done"] if i < 2 else ["done"]) for i in range(10)}
+        # Plant live work on the SECOND board so at least the first two open.
+        boards["b1"] = ["running"]
+        kb = _FakeKb(boards)
+        assert ad._has_active_work(kb) is True
+        # It opened b0 (quiet) then b1 (hit) and stopped — never reached b2.
+        assert kb.opened == ["b0", "b1"]
+
+    def test_unreadable_board_surfaced(self):
+        """An unreadable board is surfaced via kanban_check_state (same as the
+        unreachable-kanban case) and fails safe to True."""
+        class _BadKb(_FakeKb):
+            @contextmanager
+            def connect_closing(self, board=None):
+                if board == "hscc":
+                    raise RuntimeError("boom")
+                with super().connect_closing(board=board) as conn:
+                    yield conn
+
+        bad = _BadKb({"default": ["done"], "hscc": ["done"]})
+        assert ad._has_active_work(bad) is True
+        state = ad.kanban_check_state()
+        assert state is not None and state["ok"] is False
+        assert "board 'hscc' unreadable" in state["reason"]
 
 
 # ---------------------------------------------------------------------------
@@ -1384,6 +1474,9 @@ class TestAutoup:
         # wake bookkeeping kept so the operator sees the trigger.
         assert cfg["wake_source"] == "cycle"
         assert cfg["wake_at"] is not None
+        # FAILED wake ⇒ the fleet is NOT confirmed up, so down_since is STILL
+        # retained (set iff down/waking — the honesty fix).
+        assert cfg["down_since"] is not None
         # Block cleared (intentional removed) so the watchdog resumes + heals.
         with open(block_file) as f:
             blk = json.load(f)
@@ -1419,6 +1512,8 @@ class TestAutoup:
         assert cfg["state"] == "up"
         assert "start-failed" not in cfg  # result is return-value only
         assert "wake FAILED" in cfg["reason"]
+        # FAILED wake ⇒ fleet NOT confirmed up ⇒ down_since retained (honest).
+        assert cfg["down_since"] is not None
         # Intentional cleared so the watchdog resumes + can heal.
         with open(block_file) as f:
             blk = json.load(f)
@@ -1455,12 +1550,13 @@ class TestAutoup:
     # -- success ⇒ state up + wake bookkeeping cleared -----------------------
     def test_success_sets_state_up_clears_wake(self, tmp_path, monkeypatch,
                                               autodown_file):
-        """A clean wake: state=up, wake_source/wake_at cleared, block cleared."""
+        """A clean wake: state=up, wake_source/wake_at/down_since cleared."""
         serving, runner, block_file = self._setup(tmp_path, monkeypatch,
                                                   autodown_file)
         cfg = ad.load_config()
         cfg["wake_source"] = "telegram"   # will be cleared on success
         cfg["wake_at"] = "2026-08-23T09:00:00+00:00"
+        cfg["down_since"] = "2026-08-23T07:59:00+00:00"  # stale; cleared on success
         ad.save_config(cfg)
         res = ad.autoup(
             serving_path=serving, run_cmd_fn=runner,
@@ -1472,6 +1568,7 @@ class TestAutoup:
         assert cfg["state"] == "up"
         assert cfg["wake_source"] is None
         assert cfg["wake_at"] is None
+        assert cfg["down_since"] is None   # the honesty fix — no stale down
         assert cfg["reason"] == ""
 
     # -- start timeout / slow-launch readiness (the wake-fails fix) ----------
@@ -1605,6 +1702,8 @@ class TestAutoup:
         assert len(up_runner.calls) == 3      # one start per unit
         # End state: up + block cleared.
         assert ad.load_config()["state"] == "up"
+        end_cfg = ad.load_config()
+        assert end_cfg["down_since"] is None  # cleared after successful wake
         with open(block_file) as f:
             blk = json.load(f)
         assert blk.get("blocked") is False
@@ -2519,6 +2618,8 @@ class TestLockAndGates:
         cfg = ad.load_config()
         assert cfg["state"] == "error"
         assert "empty wake plan" in cfg["reason"]
+        # FAILED wake ⇒ fleet NOT confirmed up ⇒ down_since retained (honest).
+        assert cfg["down_since"] is not None
 
     # -- F7 residual: empty wake plan ⇒ LOUD notify -------------------------
     def test_empty_wake_plan_notifies_loudly(self, tmp_path, monkeypatch,
