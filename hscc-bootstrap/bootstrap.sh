@@ -265,6 +265,19 @@ if $SKIP_DAEMON; then warn "skipped"; else
     DAEMON_SETUP="$PLUGINS/hscc_daemon/systemd-setup.sh"
   fi
   bash "$DAEMON_SETUP" >/dev/null 2>&1 && ok "daemon installed + started" || warn "daemon setup reported issues (run $DAEMON_SETUP manually)"
+
+  # Restart the daemon so freshly-installed code is ALWAYS loaded. The setup
+  # script above leaves an ALREADY-RUNNING daemon alone, so without this the new
+  # plugin code never loads (observed live: an 8-day-old process running while
+  # the fresh autodown loop sat unloaded — cost real debugging time twice).
+  # Non-fatal: a failed restart warns but never aborts the install. Safety: the
+  # new daemon re-runs autodown.resume_from_restart on startup, so a restart can
+  # never strand a down/waking fleet, and we never touch autodown/watchdog state.
+  if RESTART_OUT=$("$BOOT_DIR/restart_daemon.sh" 2>&1); then
+    ok "$RESTART_OUT"
+  else
+    warn "$RESTART_OUT"
+  fi
 fi
 
 # ── Summary ────────────────────────────────────────────────────────────────
