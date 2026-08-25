@@ -172,6 +172,24 @@ fi
 hdr "Install: ~/.hscc state + serving.json"
 mkdir -p "$HSCC_DIR"
 [ -f "$HSCC_DIR/autonomy" ] || { echo off > "$HSCC_DIR/autonomy"; ok "autonomy flag seeded (off)"; }
+hdr "Install: autodown.json (operator state — preserve, never clobber)"
+# ~/.hscc/autodown.json is OPERATOR state, not installable payload: it decides
+# whether the daemon may tear down the whole fleet. Bootstrap must never flip
+# existing `enabled`/`idle_minutes`, and must seed a fresh install DISABLED
+# (opt-in per C5). preserve_autodown.py handles the preserve-vs-seed logic; we
+# only surface a clear ok line for each case. Non-fatal: warn, not die.
+if AD_JSON=$("$PYBIN" "$BOOT_DIR/preserve_autodown.py" 2>/dev/null); then
+  AD_ACTION=$("$PYBIN" -c "import sys,json;print(json.loads(sys.argv[2])['action'])" _ "$AD_JSON" 2>/dev/null || echo unknown)
+  if [ "$AD_ACTION" = "seeded" ]; then
+    ok "autodown: seeded disabled (opt-in)"
+  else
+    AD_EN=$("$PYBIN" -c "import sys,json;print(json.loads(sys.argv[2])['enabled'])" _ "$AD_JSON" 2>/dev/null || echo '?')
+    AD_MIN=$("$PYBIN" -c "import sys,json;print(json.loads(sys.argv[2])['idle_minutes'])" _ "$AD_JSON" 2>/dev/null || echo '?')
+    ok "autodown: existing config preserved (enabled=$AD_EN, idle_minutes=$AD_MIN)"
+  fi
+else
+  warn "autodown install failed — ~/.hscc/autodown.json left untouched"
+fi
 SERVING="$HSCC_DIR/serving.json"
 if [ -f "$SERVING" ] && ! $FORCE; then
   warn "serving.json exists — keeping it (use --force to regenerate)"
