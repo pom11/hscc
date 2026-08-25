@@ -23,7 +23,17 @@ class TestRunCmd:
         fake_subprocess.set_result(stdout="", stderr="not found", returncode=1)
         result = run_cmd(["false"])
         assert result["ok"] is False
-        assert result["output"] == ""
+        # stderr is folded into output so failure diagnostics are never empty
+        # (sparkrun writes its errors to stderr — see run_cmd docstring).
+        assert "not found" in result["output"]
+
+    def test_failure_folds_stdout_and_stderr(self, fake_subprocess):
+        from hscc_daemon.util import run_cmd
+        fake_subprocess.set_result(stdout="partial", stderr="boom", returncode=1)
+        result = run_cmd(["false"])
+        assert result["ok"] is False
+        assert "partial" in result["output"]
+        assert "boom" in result["output"]
 
     def test_timeout(self, fake_subprocess):
         from hscc_daemon.util import run_cmd

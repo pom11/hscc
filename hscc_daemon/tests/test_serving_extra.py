@@ -326,5 +326,65 @@ class TestServingWarn:
         assert "test warning" in output
 
 
+class TestFleetPlanPaths:
+    """fleet_up_plan() and fleet_down_cmd() argv must be fully path-expanded.
+
+    Regression for the wake-plan bug: serving.json stores ``recipe`` values
+    with a literal ``~``, and the plan is passed as an argv LIST to subprocess
+    (no shell), so an unexpanded tilde reaches sparkrun as a nonexistent path.
+    Every recipe put into the plan must be os.path.expanduser'd. Also asserts
+    fleet_down_cmd is scoped to the cluster (``--cluster <name>``), never a bare
+    unscoped ``sparkrun stop --all``.
+    """
+
+    def _serving(self, monkeypatch):
+        from hscc_daemon import serving
+        monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
+        return {
+            "port": 8000,
+            "units": [
+                {"id": "orch", "role": "orchestrator",
+                 "nodes": ["10.0.0.244", "10.0.0.246"], "port": 8000,
+                 "recipe": "~/.sparkrun-local/recipes/orch.yaml"},
+                {"id": "wk1", "role": "worker", "keepalive": False,
+                 "nodes": ["10.0.0.247"], "port": 8000,
+                 "recipe": "~/.sparkrun-local/recipes/wk.yaml"},
+                {"id": "wk-keep", "role": "worker", "keepalive": True,
+                 "nodes": ["10.0.0.248"], "port": 8000,
+                 "recipe": "~/.sparkrun-local/recipes/wk.yaml"},
+            ],
+        }
+
+    def test_fleet_up_plan_no_tilde_anywhere(self, monkeypatch):
+        """Every argv element of every up command is fully expanded (~ gone)."""
+        from hscc_daemon import serving
+        sd = self._serving(monkeypatch)
+        plan = serving.fleet_up_plan(sd)
+        assert len(plan) == 3  # orchestrator + w1 + keepalive worker
+        for entry in plan:
+            for arg in entry["cmd"]:
+                assert not arg.startswith("~"), \
+                    f"unexpanded tilde in up argv: {entry['cmd']!r}"
+            # the recipe position itself must be expanded
+            recipe = entry["cmd"][2]
+            assert not recipe.startswith("~"), recipe
+            assert recipe.startswith("/"), recipe
+
+    def test_fleet_down_cmd_scoped_to_cluster(self, monkeypatch):
+        """"sparkrun stop --all" is scoped with --cluster (never bare)."""
+        from hscc_daemon import serving
+        cmd = serving.fleet_down_cmd()
+        assert cmd[0] == "sparkrun" and cmd[1] == "stop"
+        assert "--all" in cmd
+        assert "--cluster" in cmd
+        # scoped to the cluster read from the resolved config (module global),
+        # not hardcoded in this test.
+        i = cmd.index("--cluster")
+        assert cmd[i + 1] == serving.HSCC_CLUSTER
+        # no path argv (nothing to expand) and nothing starts with ~
+        for arg in cmd:
+            assert not arg.startswith("~")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

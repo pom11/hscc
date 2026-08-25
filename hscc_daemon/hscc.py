@@ -290,6 +290,8 @@ Cluster & templates
   cluster jobs         All sparkrun jobs currently running
   cluster info         Detailed resolved cluster configuration
   cluster stop <id>    Stop a running workload by container id
+  cluster down [--dry-run]   Stop ALL sparkrun workloads fleet-wide
+  cluster up   [--dry-run]   Start every unit in serving.json (orch + keepalive)
   template list        List available cluster templates (declared fleet layouts)
   template status      Which template is currently applied
   template preview <name>    Dry-run: what applying <name> would change
@@ -340,7 +342,7 @@ COMMAND_HELP = {
     "watch": "Live-tail check results. Usage: hscc watch [stream]",
     "triggers": "Show trigger-engine rules and recent firings",
     "notify": "Send a desktop notification. Usage: hscc notify <message>",
-    "cluster": "Cluster management commands.\n  Subcommands: status hosts monitor jobs info stop <id>\n  Usage: hscc cluster <subcommand> [args]",
+    "cluster": "Cluster management commands.\n  Subcommands: status hosts monitor jobs info stop <id> down [--dry-run] up [--dry-run]\n  Usage: hscc cluster <subcommand> [args]",
     "template": "Cluster template commands.\n  Subcommands: list status preview <name> validate <name> [--structural-only] [--json] apply <name> [--confirm]\n  Usage: hscc template <subcommand> [args]",
     "profiles": "Running kanban task counts per profile",
     "project": "Project-portfolio (flightdeck) commands.\n  Delegates to the relocated flightdeck CLI under hscc-project/. Try 'hscc project --help' for the full subcommand surface.\n  Usage: hscc project <subcommand> [args]",
@@ -360,7 +362,8 @@ COMMAND_HELP = {
 }
 
 
-CLUSTER_SUBCOMMANDS = {"status", "hosts", "monitor", "jobs", "info", "stop"}
+CLUSTER_SUBCOMMANDS = {"status", "hosts", "monitor", "jobs", "info", "stop",
+                       "down", "up"}
 TEMPLATE_SUBCOMMANDS = {"list", "status", "preview", "validate", "apply"}
 
 
@@ -429,6 +432,8 @@ def _handle_cluster():
         print("  hscc cluster jobs         All sparkrun jobs currently running")
         print("  hscc cluster info         Detailed resolved cluster configuration")
         print("  hscc cluster stop <id>    Stop a running workload by container id")
+        print("  hscc cluster down [--dry-run]  Stop ALL sparkrun workloads fleet-wide")
+        print("  hscc cluster up   [--dry-run]  Start every unit in serving.json (orch + keepalive)")
         if len(sys.argv) < 3:
             return 0
         else:
@@ -449,6 +454,14 @@ def _handle_cluster():
             print("Usage: hscc cluster stop <id>")
             return 1
         return _emit(eng.cmd_stop(sys.argv[3]))
+
+    if sub == "down":
+        dry_run = "--dry-run" in sys.argv[3:]
+        return _emit(eng.cmd_cluster_down(dry_run=dry_run))
+
+    if sub == "up":
+        dry_run = "--dry-run" in sys.argv[3:]
+        return _emit(eng.cmd_cluster_up(dry_run=dry_run))
 
     fn = {
         "status": eng.cmd_cluster_status,
