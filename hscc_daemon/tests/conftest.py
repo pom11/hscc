@@ -100,6 +100,11 @@ def _isolate_hscc(tmp_path, monkeypatch):
             (autodown, "AGENTS_FILE", p("agents.json")),
             (autodown, "HTTP_ACTIVITY_STATE", p("activity.json")),
             (autodown, "TELEGRAM_OFFSET_FILE", p("state/telegram_probe.offset")),
+            # Hermes cron jobs.json is Hermes' source of truth (feat
+            # t_2b711a94) — redirect so no test ever reads the real host's
+            # scheduled jobs. A missing tmp file yields CRON_UNREADABLE (fail-
+            # closed); CLI tests stub list_active_cron_jobs for their cases.
+            (autodown, "CRON_JOBS_FILE", p("cron/jobs.json")),
             # replay.py (inbound-message queue — never touch the real one;
             # REGISTRY_PATH is redirected so delivery tests never read the real
             # flightdeck registry)

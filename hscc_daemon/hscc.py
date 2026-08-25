@@ -347,7 +347,7 @@ COMMAND_HELP = {
     "profiles": "Running kanban task counts per profile",
     "project": "Project-portfolio (flightdeck) commands.\n  Delegates to the relocated flightdeck CLI under hscc-project/. Try 'hscc project --help' for the full subcommand surface.\n  Usage: hscc project <subcommand> [args]",
     "api": "HSCC HTTP API server lifecycle.\n  Subcommands: start [--tailscale] [--bind <ip>] [--port <n>] stop status\n  Usage: hscc api <subcommand> [args]",
-    "autodown": "Idle autodown/autoup for the GPU serving layer.\n  Subcommands: status enable [--idle-minutes <n>] disable wake cancel\n  Usage: hscc autodown <subcommand> [args]",
+    "autodown": "Idle autodown/autoup for the GPU serving layer.\n  Subcommands: status enable [--idle-minutes <n>] [--force] disable wake cancel\n  Usage: hscc autodown <subcommand> [args]",
     "help": "Show help. Usage: hscc help [command]\n  Use 'hscc help advanced' for internal commands.",
     "verify": "Run a full compatibility/health smoke-test of the cluster.\n  Usage: hscc verify [--json]",
     "stats": "Fleet activity — completions & tool usage over N days (default 7).\n  Usage: hscc stats [days] [--json]",
