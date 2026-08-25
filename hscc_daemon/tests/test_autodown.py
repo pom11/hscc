@@ -14,6 +14,12 @@ import pytest
 
 import hscc_daemon.autodown as ad
 
+# The whole-fleet stop command built by the shared builder, scoped to the
+# configured cluster. Referenced here (not hardcoded) so these assertions stay
+# in sync with serving.fleet_down_cmd().
+from hscc_daemon import serving as _serving
+FLEET_STOP_CMD = _serving.fleet_down_cmd()
+
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -900,7 +906,7 @@ class TestTeardown:
         assert res["result"] == "down"
         # Exactly ONE fleet stop, using the accepted `--all` (no TARGET needed).
         assert len(runner.calls) == 1
-        assert runner.calls[0]["cmd"] == ["sparkrun", "stop", "--all"]
+        assert runner.calls[0]["cmd"] == FLEET_STOP_CMD
         # Plan verifies EVERY unit's head node goes down — including keepalive.
         verify = res["plan"][0]["verify"]
         verify_ids = {v["unit_id"] for v in verify}
@@ -926,11 +932,11 @@ class TestTeardown:
         )
         assert res["result"] == "down"
         # The single fleet stop is exactly the shared builder's command.
-        assert runner.calls == [{"cmd": ["sparkrun", "stop", "--all"],
+        assert runner.calls == [{"cmd": FLEET_STOP_CMD,
                                  "block": runner.calls[0]["block"],
                                  "ok": True}]
         assert res["issued"][0]["kind"] == "fleet"
-        assert res["issued"][0]["cmd"] == ["sparkrun", "stop", "--all"]
+        assert res["issued"][0]["cmd"] == FLEET_STOP_CMD
 
     # -- each stop carries a recipe TARGET sparkrun accepts -------------------
     def test_stop_cmd_is_whole_fleet_all(self, tmp_path, monkeypatch,
@@ -955,7 +961,7 @@ class TestTeardown:
         assert res["result"] == "down"
         # Exactly one stop using the `--all` form sparkrun accepts.
         assert len(runner.calls) == 1
-        assert runner.calls[0]["cmd"] == ["sparkrun", "stop", "--all"]
+        assert runner.calls[0]["cmd"] == FLEET_STOP_CMD
         # Plan is the single fleet entry (unit_id "fleet"), whose verify set
         #   covers every unit (orch + wk1 + keepalive wk-keep) for the
         #   verify-down probes.
@@ -1091,7 +1097,7 @@ class TestTeardown:
         # The single fleet stop already issued — result is "down", not "cancelled".
         assert res["result"] == "down"
         assert len(runner.calls) == 1
-        assert runner.calls[0]["cmd"] == ["sparkrun", "stop", "--all"]
+        assert runner.calls[0]["cmd"] == FLEET_STOP_CMD
         # Block stays latched (autodown proceeded to record down), not rolled back.
         with open(block_file) as f:
             blk = json.load(f)
@@ -1465,7 +1471,7 @@ class TestAutoup:
         )
         assert stop_result["result"] == "down"
         # One whole-fleet stop, using `--all` (the shared builder's command).
-        assert down_runner.calls == [{"cmd": ["sparkrun", "stop", "--all"],
+        assert down_runner.calls == [{"cmd": FLEET_STOP_CMD,
                                       "block": down_runner.calls[0]["block"],
                                       "ok": True}]
         # The teardown plan's verify set covers EVERY unit incl. keepalive.
@@ -2500,7 +2506,7 @@ class TestLockAndGates:
                           keepalive_ok=lambda: True)
         # NOT aborted: the single `--all` stop runs, teardown completes down.
         assert res["result"] == "down"
-        assert runner.calls == [{"cmd": ["sparkrun", "stop", "--all"],
+        assert runner.calls == [{"cmd": FLEET_STOP_CMD,
                                  "block": runner.calls[0]["block"], "ok": True}]
         # Verify set covers BOTH units (orchestrator + the keepalive worker).
         verify_ids = {v["unit_id"] for v in res["plan"][0]["verify"]}
