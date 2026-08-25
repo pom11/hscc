@@ -10,6 +10,8 @@ Commands:
   monitor          Single snapshot of CPU/RAM/GPU metrics
   jobs             List all sparkrun jobs running
   stop <id>        Stop a running workload by container ID
+  down [--dry-run] Stop ALL sparkrun workloads across the fleet
+  up   [--dry-run] Start every unit in serving.json (orch + keepalive)
   info             Detailed cluster configuration
 """
 
@@ -210,6 +212,103 @@ def cmd_stop(container_id):
     return run_cmd([SPARKRUN, "stop", container_id], timeout=30)
 
 
+def _load_daemon_serving():
+    """Import the daemon's ``serving`` module (hscc_daemon/serving.py).
+
+    ``serving`` owns serving.json topology + the fleet down/up builders. It is
+    a sibling plugin (hscc_daemon) of this one; when this plugin is driven as
+    a library by the daemon CLI, ``hscc_daemon`` is already on ``sys.path``.
+    When driven standalone, add the repo root so the sibling package resolves.
+    Returns the module, or None (the callers abort) if it cannot be imported.
+    """
+    try:
+        from hscc_daemon import serving
+        return serving
+    except Exception:
+        # Standalone fallback: add the repo root (parent of hscc_daemon) to path.
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+        try:
+            from hscc_daemon import serving
+            return serving
+        except Exception as e:
+            return None
+
+
+def _run_or_print(cmd, dry_run):
+    """Print the command; execute it unless ``dry_run``. Returns a result dict.
+
+    ``cmd`` is a list of argv tokens. Always prints the exact command line.
+    With ``dry_run`` prints ``--dry-run: not executing`` and returns
+    ``{"dry_run": True, "command": cmd, "issued": []}`` — nothing is run. The
+    real path runs via ``run_cmd`` (which captures BOTH stdout and stderr, so a
+    failure is diagnosable without a manual probe).
+    """
+    print(f"Will run: {' '.join(cmd)}")
+    if dry_run:
+        print("  --dry-run: not executing")
+        return {"dry_run": True, "command": cmd, "issued": []}
+    res = run_cmd(cmd, timeout=120)
+    return {
+        "success": bool(res.get("success", res.get("ok", False))),
+        "returncode": res.get("returncode"),
+        "command": cmd,
+        "output": res.get("output", ""),
+        "error": res.get("error", ""),
+    }
+
+
+def cmd_cluster_down(dry_run=False):
+    """Stop ALL sparkrun workloads across the fleet. ``[--dry-run]``.
+
+    The single source of truth for a full fleet down: issues ONE
+    ``sparkrun stop --all`` built by ``serving.fleet_down_cmd()``, scoped to
+    the configured cluster. Prints the exact command; ``--dry-run`` prints
+    without executing. autodown.teardown() uses this same builder.
+    """
+    serving = _load_daemon_serving()
+    if serving is None:
+        return {"error": "cannot import hscc_daemon.serving (fleet down "
+                         "requires the daemon's serving module)"}
+    cmd = serving.fleet_down_cmd()
+    return _run_or_print(cmd, dry_run)
+
+
+def cmd_cluster_up(dry_run=False):
+    """Start EVERY unit in serving.json (orchestrator AND keepalive workers).
+
+    ``[--dry-run]`` prints the commands without executing. The single source
+    of truth for a full fleet up: builds every unit's start command via
+    ``serving.fleet_up_plan()`` (reusing the existing ``VLLM_START_CMD`` form
+    / ``orchestrator_recipe``) and runs them. autodown.autoup() uses this same
+    builder.
+    """
+    serving = _load_daemon_serving()
+    if serving is None:
+        return {"error": "cannot import hscc_daemon.serving (fleet up "
+                         "requires the daemon's serving module)"}
+    plan = serving.fleet_up_plan()
+    if not plan:
+        return {"error": "no serving units to start (serving.json missing or "
+                         "empty?)", "units": 0}
+    issued = []
+    for entry in plan:
+        issued.append(_run_or_print(entry["cmd"], dry_run))
+    return {
+        "success": not dry_run and all(i.get("success") for i in issued),
+        "dry_run": bool(dry_run),
+        "units": len(plan),
+        "plan": [
+            {"kind": e["kind"], "nodes": e["nodes"], "port": e["port"],
+             "unit_id": e["unit_id"], "cmd": e["cmd"],
+             "keepalive": e["keepalive"]}
+            for e in plan
+        ],
+        "issued": issued,
+    }
+
+
 def cmd_info():
     """Show detailed cluster configuration."""
     cluster_data = read_json_file(CLUSTER_JSON)
@@ -250,6 +349,8 @@ COMMANDS = {
     "monitor": cmd_monitor,
     "jobs": cmd_jobs,
     "stop": cmd_stop,
+    "down": cmd_cluster_down,
+    "up": cmd_cluster_up,
     "info": cmd_info,
     "cluster-template": cmd_cluster_template,
     "profile-status": cmd_profile_status,
@@ -277,6 +378,8 @@ Commands:
   monitor             Single snapshot of CPU/RAM/GPU metrics
   jobs                List all sparkrun jobs running
   stop <id>           Stop a running workload by container ID
+  down [--dry-run]    Stop ALL sparkrun workloads fleet-wide
+  up   [--dry-run]    Start every unit in serving.json (orch + keepalive)
   info                Detailed cluster configuration
   cluster-template    Manage cluster templates (list|preview|apply)
   profile-status      Show running kanban task counts per profile
@@ -299,6 +402,9 @@ Commands:
                 sys.exit(1)
             container_id = sys.argv[2]
             result = fn(container_id)
+        elif cmd in ("down", "up"):
+            dry_run = "--dry-run" in sys.argv[2:]
+            result = fn(dry_run=dry_run)
         elif cmd == "cluster-template":
             # Pass remaining args through to template CLI
             result = fn()

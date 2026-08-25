@@ -388,13 +388,15 @@ def _default_keepalive_ok():
     is a TP peer this run is skipped; every remaining (head) node must answer
     ``/health``.
 
-    Keepalive units are exempt from teardown (C4), but if one is itself
-    unhealthy we abort — do not tear down the orchestrator while a worker is
-    mid-flight relying on it (§6.4). Fail-safe: any inability to load serving,
-    resolve the unit set, resolve tp-peers, or probe a unit's head ⇒ False
-    (abort teardown) AND log why — we never tear down on an unverifiable
-    keepalive signal. With no keepalive units present, there is nothing to
-    protect ⇒ True.
+    Keepalive units are NO LONGER exempt from teardown (C4 reversed) — fleet
+    down takes the whole serving layer incl. keepalive units. The ``keepalive_ok``
+    INTERLOCK is still a separate "don't shut down mid-problem" gate: if a
+    keepalive unit is itself unhealthy we abort, so we do not tear the whole
+    fleet down while a worker is mid-flight relying on it (§6.4). Fail-safe:
+    any inability to load serving, resolve the unit set, resolve tp-peers, or
+    probe a unit's head ⇒ False (abort teardown) AND log why — we never tear
+    down on an unverifiable keepalive signal. With no keepalive units present,
+    there is nothing to protect ⇒ True.
     """
     try:
         from . import serving
@@ -459,8 +461,9 @@ def _is_idle(cfg, kanban_db=None, agents_file=None, now=None,
     # 6.3 Elapsed window (§1c/§6.3).
     if not _window_elapsed(cfg, now):
         return False
-    # 6.4 Keepalive health (§1f) — keepalive units exempt from teardown but a
-    #     sick one aborts (don't tear the orchestrator out from under a worker).
+    # 6.4 Keepalive health INTERLOCK (§1f) — keepalive units are teardown
+    #     targets now (C4 reversed) but a sick one aborts: do not tear the whole
+    #     fleet down mid-problem while a worker relies on it.
     kh = keepalive_ok or _default_keepalive_ok
     try:
         if not kh():
@@ -671,77 +674,44 @@ def _release_lock():
         pass
 
 
-def _worker_stop_cmd(recipe, nodes):
-    """`sparkrun stop <recipe> --hosts <nodes>` for one non-keepalive unit (§3.3).
-
-    Mirrors the established HSCC unit-stop form ``sparkrun stop <recipe>
-    --hosts <node>`` used by ``health.check_workers`` (health.py:1112) and
-    ``hscc-cluster/ops.py`` (ops.py:151). ``<recipe>`` is the TARGET sparkrun
-    requires — the unit's OWN recipe/container identifier, scoped so we never
-    issue a catch-all ``--all`` that could touch keepalive nodes (C4). The
-    ``--hosts`` list carries the EXACT per-unit node set from serving.json.
-    """
-    return ["sparkrun", "stop", recipe, "--hosts", ",".join(nodes)]
-
-
 def _build_teardown_plan(serving):
-    """Ordered stop commands for the NON-keepalive serving units (§3).
+    """Full-fleet teardown plan — the ENTIRE serving layer goes down (§3).
 
-    Returns a list of dicts, one entry per unit to stop::
+    **Fleet down powers EVERYTHING down** — orchestrator AND keepalive AND
+    non-keepalive workers. This REVERSES the earlier C4 keepalive exemption
+    (operator decision): powering the whole serving layer down is the point of
+    the feature. The raw stop string is built by the shared
+    ``serving.fleet_down_cmd()`` (``sparkrun stop --all``) — the single source
+    of truth autodown shares with the ``hscc cluster down`` CLI wrapper — so
+    autodown no longer constructs its own per-unit sparkrun stop strings.
 
-        {"kind": "worker"|"orchestrator", "nodes": [...], "port": int,
-         "unit_id": str, "recipe": str, "cmd": [str, ...]}
+    Returns a single-entry list (the one fleet-down stop), whose entry carries
+    the full verify set so teardown can confirm EVERY unit's head node went
+    down::
 
-    Order is critical: non-keepalive worker units FIRST (sorted by unit id for
-    determinism), the orchestrator unit LAST (§3.3) so nothing is mid-request
-    into a stopped orchestrator. Keepalive units (C4 — ``serving.keepalive_units``,
-    serving.py:172) are NEVER in the set — filtered out explicitly.
+        [{"kind": "fleet", "cmd": ["sparkrun","stop","--all"],
+          "verify": [{"nodes": [...], "port": 8000, "unit_id": "orch"}, ...]}]
 
-    ``recipe`` is the unit's OWN sparkrun recipe, resolved exactly as
-    ``_unit_start_cmd`` (autodown.py:1075) resolves it for the matching start
-    (orchestrator ⇒ ``serving.orchestrator_recipe``, worker ⇒ ``u.recipe``,
-    each falling back to the global ``VLLM_RECIPE``), so the stop targets the
-    same container that teardown's mirror wake will start. It becomes the
-    TARGET of the ``sparkrun stop <recipe> --hosts ...`` command.
-
-    ``serving`` is the parsed serving.json dict (None/absent ⇒ empty plan,
-    fail-safe: stop nothing). ``port`` is kept per entry for the verify-down
-    probe in step 4 of teardown().
+    ``serving`` is the parsed serving.json dict (None/absent ⇒ [], fail-safe:
+    stop nothing).
     """
     if not isinstance(serving, dict):
         return []
-    from .serving import serving_port, orchestrator_recipe, VLLM_RECIPE
-    workers = []
-    orch = []
-    for u in (serving.get("units", []) or []):
-        if not isinstance(u, dict):
-            continue
-        nodes = [n for n in (u.get("nodes") or []) if n]
-        if not nodes:
-            continue  # no nodes ⇒ nothing to stop
-        role = u.get("role")
-        port = u.get("port") or serving_port(serving)
-        unit_id = u.get("id") or ",".join(nodes)
-        if role == "orchestrator":
-            # The orchestrator unit is never keepalive — stop it LAST. Its
-            # recipe is the orchestrator's authoritative recipe (matching
-            # _unit_start_cmd's resolution) so the stop targets the same
-            # container the wake will start.
-            recipe = orchestrator_recipe(serving) or VLLM_RECIPE
-            orch.append({"kind": "orchestrator", "nodes": nodes, "port": port,
-                         "unit_id": unit_id, "recipe": recipe,
-                         "cmd": _worker_stop_cmd(recipe, nodes)})
-        elif role == "worker" and not u.get("keepalive"):
-            # NON-keepalive worker ⇒ teardown target. Keepalive workers are
-            # exempt (C4) and never appear here. Recipe is the unit's own,
-            # matching the start command's resolution.
-            recipe = u.get("recipe") or VLLM_RECIPE
-            workers.append({"kind": "worker", "nodes": nodes, "port": port,
-                            "unit_id": unit_id, "recipe": recipe,
-                            "cmd": _worker_stop_cmd(recipe, nodes)})
-        # keepalive worker / unknown role ⇒ never in the teardown set.
-    workers.sort(key=lambda e: e["unit_id"])
-    return workers + orch
+    from .serving import fleet_up_plan, fleet_down_cmd
+    verify = fleet_up_plan(serving)   # every unit, in fleet-up order
+    if not verify:
+        return []
+    return [{
+        "kind": "fleet",
+        "nodes": sorted({n for e in verify for n in e["nodes"]}),
+        "port": None,
+        "unit_id": "fleet",
+        "cmd": fleet_down_cmd(),
+        "verify": [
+            {"nodes": e["nodes"], "port": e["port"], "unit_id": e["unit_id"]}
+            for e in verify
+        ],
+    }]
 
 
 def _probe_down(node, port, http_check_fn):
@@ -828,10 +798,11 @@ def teardown(serving_path=None, run_cmd_fn=None, kanban_db=None,
          ``blocked:true``, reason §3.2, ``blocked_at: now``, and the NEW field
          ``intentional: "autodown"``. Block first, THEN stop — stopping first
          lets the watchdog resurrect units mid-teardown (has actually happened).
-      3. Stop non-keepalive units — workers first, orchestrator LAST (§3.3),
-         using the exact per-unit node list from serving.json. Keepalive units
-         (C4, serving.py:172) are NEVER in the set. No catch-all sparkrun stop.
-      4. Verify down: confirm the stopped ports no longer respond (§3.4).
+      3. Stop the ENTIRE fleet — ONE `sparkrun stop --all` (built by the shared
+         serving.fleet_down_cmd(), the wrapper's source of truth). Powers ALL
+         serving units down — orchestrator AND keepalive AND non-keepalive
+         workers (reverses the earlier C4 keepalive exemption).
+      4. Verify down: confirm every unit's head port no longer responds (§3.4).
       5. Record state: ``autodown.json`` ⇒ ``state:"down"``, ``down_since``,
          ``reason``. (``intentional:"autodown"`` lives in the WATCHDOG BLOCK
          file only — one source of truth per fact.)
@@ -907,7 +878,7 @@ def _teardown_locked(serving_path=None, run_cmd_fn=None, kanban_db=None,
         _notify(msg, "HSCC Autodown Aborted", priority="high")
         return {"result": "aborted", "issued": [], "plan": []}
 
-    # Build the teardown set (non-keepalive units only; keepalive excluded).
+    # Build the teardown plan (the ENTIRE fleet — all units go down).
     plan = _build_teardown_plan(serving)
 
     # -- 1a. EMPTY plan ⇒ abort before writing the block (§8) -------------
@@ -924,26 +895,15 @@ def _teardown_locked(serving_path=None, run_cmd_fn=None, kanban_db=None,
         _notify(msg, "HSCC Autodown Aborted", priority="high")
         return {"result": "no-targets", "issued": [], "plan": []}
 
-    # -- 1b. Assert the C4 keepalive invariant (§8) ------------------------
-    # _worker_stop_cmd issues a NODE-level `sparkrun stop --hosts <nodes>`
-    # (not a recipe-scoped stop), so the C4 keepalive-exemption holds ONLY
-    # while no keepalive node appears in what we are about to stop. On today's
-    # topology the keepalive nodes are disjoint from the teardown set; a future
-    # co-located config would have teardown kill a keepalive unit. Assert the
-    # invariant in code and abort loudly if it would be violated — do NOT
-    # silently rely on topology (audit F6).
-    teardown_nodes = set()
-    for e in plan:
-        teardown_nodes.update(e.get("nodes") or [])
-    keepalive_node_set = {u["node"] for u in serving_mod.keepalive_units(serving)}
-    overlap = teardown_nodes & keepalive_node_set
-    if overlap:
-        msg = ("Autodown teardown ABORTED: keepalive node(s) "
-               f"{sorted(overlap)} in the teardown set — refusing to stop a "
-               "keepalive unit (C4 invariant violated)")
-        log(msg, "ERROR")
-        _notify(msg, "HSCC Autodown Aborted", priority="high")
-        return {"result": "aborted", "issued": [], "plan": []}
+    # -- 1b. (removed) C4 keepalive-overlap abort guard ---------------------
+    # Previously this aborted when a keepalive node appeared in the teardown
+    # set. With the fleet-down decision (PART 2) keepalive units are NO LONGER
+    # exempt — ``sparkrun stop --all`` takes the ENTIRE serving layer down,
+    # including keepalive units. The old guard would abort on EVERY teardown
+    # (the fleet stop always touches keepalive nodes), so it is removed. The
+    # ``keepalive_ok`` INTERLOCK (a sick fleet aborts teardown) is kept — see
+    # _default_keepalive_ok — that is a "don't shut down mid-problem" signal,
+    # not an exemption.
 
     # -- 2. Write the watchdog block BEFORE stopping anything (§3.2, C2) ----
     # Snapshot the current block so a failure/cancel can roll it back and hand
@@ -958,10 +918,16 @@ def _teardown_locked(serving_path=None, run_cmd_fn=None, kanban_db=None,
     lifecycle.save_watchdog_block(block)
     log("Autodown: watchdog block written (intentional teardown)")
 
-    # -- 3. Stop non-keepalive units — workers first, orchestrator LAST -----
+    # -- 3. Stop the ENTIRE fleet — ONE `sparkrun stop --all` ---------------
+    # The plan is a single fleet-down stop covering ALL units (orchestrator +
+    # keepalive + non-keepalive workers). The command was built by the shared
+    # ``serving.fleet_down_cmd()`` — the wrapper's source of truth — so
+    # autodown no longer builds raw per-unit sparkrun stop strings. Cancel is
+    # still honored: re-check ``cancel_requested`` before issuing the stop, and
+    # if set, roll back + record + return cancelled.
     issued = []
-    for entry in plan:
-        # Re-check cancel_requested BEFORE each stop (§6 manual abort).
+    for entry in plan:   # exactly one entry (the fleet stop)
+        # Re-check cancel_requested BEFORE the stop (§6 manual abort).
         if load_config().get("cancel_requested"):
             _rollback_block(original_block)
             _record_failure("teardown cancelled by operator")
@@ -970,7 +936,7 @@ def _teardown_locked(serving_path=None, run_cmd_fn=None, kanban_db=None,
                     "back so the watchdog resumes supervision",
                     "HSCC Autodown Cancelled", priority="normal")
             return {"result": "cancelled", "issued": issued, "plan": plan}
-        res = run_cmd(entry["cmd"], timeout=30)
+        res = run_cmd(entry["cmd"], timeout=180)
         issued.append({"kind": entry["kind"], "nodes": entry["nodes"],
                        "port": entry["port"], "cmd": entry["cmd"],
                        "ok": bool(res.get("ok"))})
@@ -979,21 +945,25 @@ def _teardown_locked(serving_path=None, run_cmd_fn=None, kanban_db=None,
                                         plan)
         log(f"Autodown: stopped {entry['kind']} unit {entry['unit_id']}")
 
-    # -- 4. Verify down (§3.4) — confirm stopped ports no longer respond. ---
-    # Best-effort confirmation: the issued ``sparkrun stop`` is authoritative;
-    # a still-responding probe is a warning, not a reason to refuse to record
-    # the intentional down (the block gates the watchdog either way).
+    # -- 4. Verify down (§3.4) — confirm every unit's head no longer responds.
+    # Best-effort confirmation: the issued ``sparkrun stop --all`` is
+    # authoritative; a still-responding probe is a warning, not a reason to
+    # refuse to record the intentional down (the block gates the watchdog
+    # either way). Probes each unit's HEAD node (nodes[0]) — multi-node/TP
+    # spans serve through their head only, reusing the fleet-up plan's shape.
     all_down = True
-    for entry in plan:
-        if not _probe_down(entry["nodes"][0], entry["port"], http_check):
+    verify = plan[0]["verify"] if plan else []
+    for v in verify:
+        if not _probe_down(v["nodes"][0], v["port"], http_check):
             all_down = False
-            log(f"Autodown verify-down: WARN {entry['nodes'][0]}:"
-                f"{entry['port']} still responding after stop", "WARN")
+            log(f"Autodown verify-down: WARN {v['nodes'][0]}:"
+                f"{v['port']} still responding after stop", "WARN")
     if all_down:
-        log("Autodown: all non-keepalive units verified down")
+        log("Autodown: all serving units verified down")
     else:
         log("Autodown: verify-down found some ports still responding (warned)",
             "WARN")
+
 
     # -- 5. Record state: down (§3.5) ---------------------------------------
     cfg = load_config()
@@ -1008,9 +978,27 @@ def _teardown_locked(serving_path=None, run_cmd_fn=None, kanban_db=None,
 
     # -- 6. Notify the operator (desktop + ops Telegram) --------------------
     _notify("HSCC serving layer brought DOWN by idle autodown "
-            "(non-keepalive units stopped; keepalive units left up)",
+            "(entire fleet — orchestrator AND keepalive workers stopped)",
             "HSCC Autodown — Serving Down", priority="high")
     return {"result": "down", "issued": issued, "plan": plan}
+
+
+def _cmd_error_text(res, cap=500):
+    """Combine a command's stdout + stderr for the reason/log (PART 3).
+
+    ``res`` is a run_cmd result dict. Stdout and stderr are both captured so a
+    failure is diagnosable without a manual probe — the recorded reason was
+    previously empty because only ``output`` (stdout) was read and the failing
+    ``sparkrun`` command emitted its diagnostic on stderr. Returns a single
+    trimmed string (capped at ``cap`` chars) with the non-empty parts joined by
+    a newline; empty if both are missing.
+    """
+    parts = []
+    for k in ("output", "stderr"):
+        v = res.get(k)
+        if v:
+            parts.append(str(v))
+    return "\n".join(parts)[:cap]
 
 
 def _handle_stop_failure(entry, res, original_block, issued, plan):
@@ -1022,11 +1010,12 @@ def _handle_stop_failure(entry, res, original_block, issued, plan):
     reality — not fully down), and notify.
     """
     _rollback_block(original_block)
-    out = (res.get("output") or "")[:200]
+    out = _cmd_error_text(res)
     _record_failure(
         f"teardown failed stopping {entry['kind']} unit {entry['unit_id']}: {out}")
     log(f"Autodown teardown FAILED at {entry['kind']} unit "
-        f"{entry['unit_id']}; block rolled back — watchdog resuming", "ERROR")
+        f"{entry['unit_id']} ({out}); block rolled back — watchdog resuming",
+        "ERROR")
     _notify(f"HSCC autodown: teardown FAILED stopping {entry['kind']} unit "
             f"{entry['unit_id']} — block rolled back so the watchdog can heal "
             f"the remaining units",
@@ -1088,76 +1077,36 @@ def _wake_ready_grace_minutes():
     return getattr(lifecycle, "VLLM_LOAD_GRACE_MINUTES", 20)
 
 
-def _unit_start_cmd(u, serving):
-    """`sparkrun run <recipe> --cluster hscc --hosts <nodes> --port <port>
-    --no-follow --ensure` for one serving unit (§4.3).
-
-    Mirrors the real orchestrator start form ``serving.VLLM_START_CMD``
-    (serving.py:151-153). The recipe is the unit's OWN recipe
-    (``serving.orchestrator_recipe`` for the orchestrator, ``u.recipe`` for a
-    worker), falling back to the orchestrator recipe global so a unit missing a
-    recipe can still be started. ``--hosts`` carries the EXACT per-unit node
-    list from serving.json so the set that comes UP matches what went DOWN.
-    """
-    from .serving import orchestrator_recipe, serving_port
-    from .serving import VLLM_RECIPE, HSCC_CLUSTER
-    if u.get("role") == "orchestrator":
-        recipe = orchestrator_recipe(serving) or VLLM_RECIPE
-    else:
-        recipe = u.get("recipe") or VLLM_RECIPE
-    nodes = [n for n in (u.get("nodes") or []) if n]
-    port = u.get("port") or serving_port(serving)
-    return ["sparkrun", "run", recipe, "--cluster", HSCC_CLUSTER,
-            "--hosts", ",".join(nodes), "--port", str(port),
-            "--no-follow", "--ensure"]
-
-
 def _build_wake_plan(serving):
-    """Ordered start commands for the NON-keepalive serving units (§4).
+    """Ordered start commands for EVERY serving.json unit (orchestrator FIRST,
+    then workers sorted by id) — the full fleet-up set (§4).
 
-    The EXACT mirror of ``_build_teardown_plan`` (autodown.py:427) but in WAKE
-    order: orchestrator unit FIRST, then non-keepalive workers (§4.3 — reverse
-    of teardown; there is no in-flight request when waking from zero). It picks
-    out the SAME unit set teardown stopped, so what comes UP equals exactly what
-    went DOWN. Keepalive units (C4) are NEVER in the set.
+    **Fleet-up restores the WHOLE serving layer**, including keepalive units.
+    It delegates to the shared ``serving.fleet_up_plan()`` builder — the same
+    single source of truth the ``hscc cluster up`` CLI wrapper uses — so
+    autodown no longer constructs its own raw per-unit sparkrun start strings
+    and does not invent a new start mechanism. Orchestrator FIRST (there is no
+    in-flight request when waking from zero), then workers. This is the exact
+    set ``_build_teardown_plan``'s verify set derives from, so what comes UP
+    equals what went DOWN.
 
-    Each entry: ``{"kind", "nodes", "port", "unit_id", "cmd"}`` (same shape as
-    the teardown plan so the round-trip teardown→autoup is symmetric).
+    Each entry: ``{"kind", "nodes", "port", "unit_id", "cmd"}`` (similar shape
+    to the old wake plan, with ``keepalive`` retained on the entry).
     """
     if not isinstance(serving, dict):
         return []
-    from .serving import serving_port
-    orch = []
-    workers = []
-    for u in (serving.get("units", []) or []):
-        if not isinstance(u, dict):
-            continue
-        nodes = [n for n in (u.get("nodes") or []) if n]
-        if not nodes:
-            continue  # no nodes ⇒ nothing to start
-        role = u.get("role")
-        unit_id = u.get("id") or ",".join(nodes)
-        port = u.get("port") or serving_port(serving)
-        if role == "orchestrator":
-            orch.append({"kind": "orchestrator", "nodes": nodes,
-                         "port": port, "unit_id": unit_id,
-                         "cmd": _unit_start_cmd(u, serving)})
-        elif role == "worker" and not u.get("keepalive"):
-            workers.append({"kind": "worker", "nodes": nodes,
-                            "port": port, "unit_id": unit_id,
-                            "cmd": _unit_start_cmd(u, serving)})
-        # keepalive worker / unknown role ⇒ never in the wake set.
-    workers.sort(key=lambda e: e["unit_id"])
-    return orch + workers
+    from .serving import fleet_up_plan
+    return fleet_up_plan(serving)
 
 
 def _all_units_ready(plan, http_check_fn):
     """True iff EVERY unit in ``plan`` answers healthy on its port (§4.4).
 
     A unit is ready when ``GET http://<nodes[0]>:<port>/health`` returns ok.
-    Keepalive units are not in ``plan`` and are not probed here (they were never
-    stopped, so they are not being woken). An unreachable/probe-error unit is
-    NOT ready.
+    ``plan`` is the FULL fleet-up set (orchestrator + keepalive + non-keepalive
+    workers); each unit's HEAD node (nodes[0]) is probed — multi-node/TP spans
+    serve through their head only, so a TP peer is never probed standalone.
+    An unreachable/probe-error unit is NOT ready.
     """
     for entry in plan:
         try:
@@ -1320,11 +1269,13 @@ def autoup(serving_path=None, run_cmd_fn=None, http_check_fn=None,
           do NOT claim ``up`` when zero units were started/confirmed (§8,
           audit F7). Record the failure loudly and leave the block latched.
       2. Record ``wake_source`` + ``wake_at``.
-      3. Start the serving layer: the units teardown() stopped, orchestrator
-         FIRST (§4.3) — the exact reverse of teardown order. The wake plan is
-         built from the same unit table ``_build_teardown_plan`` derives from,
-         so the set that comes UP equals exactly the set that went DOWN.
-         Keepalive units were never stopped, so they are never started here.
+      3. Start the serving layer back up — EVERY unit in serving.json:
+         orchestrator FIRST (§4.3), then workers. The wake plan comes from the
+         shared ``serving.fleet_up_plan()`` — the same source of truth
+         ``hscc cluster up`` uses — so the full set that went DOWN (orchestrator
+         AND keepalive AND non-keepalive workers) comes back UP. Keepalive
+         units are NO LONGER exempt on the way up: fleet-up restores the whole
+         layer.
       4. Wait for readiness — poll each unit's port until healthy or timeout
          (§4.4, ``VLLM_LOAD_GRACE_MINUTES`` window; injectable probe + clock).
       5. Clear the watchdog block ONLY after serving is confirmed up (§4.5):
@@ -1409,7 +1360,7 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     cfg["state"] = "waking"
     save_config(cfg)
 
-    # Build the wake plan (non-keepalive units only; keepalive excluded).
+    # Build the wake plan — the FULL fleet (all units incl. keepalive).
     plan = _build_wake_plan(serving)
 
     # -- 1a. EMPTY plan ⇒ failure, not success (§8 / audit F7 / residual) --
@@ -1498,14 +1449,14 @@ def _handle_start_failure(entry, res, notify=True):
     a reason an operator can act on. ``wake_source``/``wake_at`` are kept so the
     operator can see the trigger.
     """
-    out = (res.get("output") or "")[:200]
+    out = _cmd_error_text(res)
     msg = (f"autodown: wake FAILED starting {entry['kind']} unit "
            f"{entry['unit_id']}: {out}")
     # Clear intentional so the watchdog resumes supervision + can heal.
     _clear_intentional_block(reason="autodown: wake failed — watchdog resuming")
     _record_wake_failure(msg)
     log("Autodown autoup FAILED at " + f"{entry['kind']} unit "
-        f"{entry['unit_id']}; state=up, intentional cleared", "ERROR")
+        f"{entry['unit_id']} ({out}); state=up, intentional cleared", "ERROR")
     if notify:
         _notify(f"HSCC autodown: wake FAILED starting {entry['kind']} unit "
                 f"{entry['unit_id']} — serving layer NOT up, watchdog resuming",

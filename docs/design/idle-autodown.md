@@ -53,10 +53,15 @@ autoup MUST clear it. Distinguished from a crash-while-down in §7.
 Idle requires zero running/ready/review work AND an elapsed inactivity window.
 Activity timestamp sources are defined precisely in §2.
 
-### C4 — respect existing keepalive
+### C4 — whole-fleet down, keepalive NOT exempt (operator decision)
 `serving.keepalive_nodes()` / `serving.keepalive_units()` (`serving.py:162,172`)
-designate worker units NOT to be torn down. This design **exempts keepalive
-units from teardown** (§3). Decision and rationale in §3.
+designate worker units the health-check thread keeps alive. **Autodown now
+takes the ENTIRE serving layer down — including keepalive units** (operator
+decision, REVERSES the original C4 exemption). Powering everything down is the
+point of the feature. Fleet down/up use the shared `serving.fleet_down_cmd()` /
+`serving.fleet_up_plan()` builders, exposed to the operator as `hscc cluster
+down` / `hscc cluster up`; autoup restores every unit (orchestrator AND
+keepalive workers). See §3.
 
 ### C5 — opt-in, off by default
 Defaults to disabled. An operator must explicitly `hscc autodown enable`. The
@@ -159,12 +164,11 @@ measured from an actual activity timestamp, not from boot. This prevents a
 just-enabled or just-booted, touched-once-then-silent cluster from tearing down
 while an operator is mid-setup.
 
-### 1f. Keepalive-nodes are inherently "active"
-Because keepalive worker units are exempt from teardown (§3), they do not
-advance the idle timer themselves, but they also never make the cluster "idle":
-their presence is orthogonal to autodown (autodown only ever considers tearing
-down the *non-keepalive* serving units). The idle predicate in §1a–1d applies
-to work/activity, not to whether keepalive servers exist.
+### 1f. Keepalive-nodes and the idle signal
+Keepalive worker units are no longer exempt from teardown (C4 reversed), so
+under autodown the whole serving layer either serves or is down. A keepalive
+unit does not itself advance the idle timer, but the idle predicate in §1a–1d
+applies to work/activity, not to whether keepalive servers exist.
 
 ---
 
@@ -210,17 +214,20 @@ down after a recent event.
 
 ## 3. Teardown sequence
 
-Goal: free every GPU that the non-keepalive serving units occupy, in a defined,
-reversible order, marking the teardown intentional so the watchdog doesn't
-fight it (C2).
+Goal: free every GPU in the serving layer, in a defined, reversible order,
+marking the teardown intentional so the watchdog doesn't fight it (C2). **All
+serving units — orchestrator AND keepalive AND non-keepalive workers — are
+torn down** (C4 reversed).
 
 What is **preserved** (never torn down, never stopped):
 - the daemon itself (CPU, on the Mac gateway)
 - the Hermes gateway supervisor job `ai.hermes.gateway` (CPU, reads Telegram)
 - the Telegram MCP daemon (CPU, `~/.hermes-tg/mcp_server.py`)
 - the HSCC HTTP API server (CPU, `hscc-api`)
-- **keepalive worker units** (C4 exemption — see below)
 - NAS, state files, kanban DB, profile configs — all on disk
+
+Only the remote GPU serving layer is stopped. On wake, `hscc cluster up` /
+`autodown.autoup()` restores EVERY unit (orchestrator AND keepalive workers).
 
 Order of operations (all inside one `autodown.teardown()` that runs in the
 autodown thread; each step is logged via `daemon_ops.log`, `daemon_ops.py:146`):
@@ -233,22 +240,18 @@ autodown thread; each step is logged via `daemon_ops.log`, `daemon_ops.py:146`):
    `save_watchdog_block()`. From this instant the watchdog backs off
    (`lifecycle.py:215-234`) and `check_workers` must be taught to skip
    keepalive-relaunch while this block is set (§5).
-3. **Stop non-keepalive serving units in dependency order**, orchestrator last
-   (workers first so nothing is mid-request into a stopped orchestrator):
-   - stop each **non-keepalive worker unit** via its own
-     `sparkrun stop --hosts <unit nodes> <unit port>` (per-unit recipe/port
-     from `serving.keepalive_units()`/unit table — reuse the unit iteration,
-     filtered to `keepalive != true`).
-   - stop the **orchestrator unit** via `serving.VLLM_STOP_CMD`
-     (`sparkrun stop --hosts <primary>`, `serving.py:150`).
-   Each stop uses `sparkrun stop` on the exact node list from `serving.json`;
-   do NOT issue a single catch-all `sparkrun stop` that could touch keepalive
-   nodes. Concretely: stop worker unit nodes, then orchestrator nodes.
-4. **Verify down**: after stops, confirm the units' ports no longer respond
-   (reuse `health.http_check` / `serving.VLLM_HEALTH_URL`-style probe per port).
+3. **Stop the ENTIRE fleet** — ONE `sparkrun stop --all` (built by the shared
+   `serving.fleet_down_cmd()`, `serving.py` — the same source of truth the
+   `hscc cluster down` CLI wrapper uses). This powers ALL serving units down:
+   orchestrator AND keepalive AND non-keepalive workers. Autodown no longer
+   issues per-unit `sparkrun stop --hosts <nodes>` (the form that failed with
+   no TARGET). Cancel is still honored via `cancel_requested` before the stop.
+4. **Verify down**: after the stop, confirm every unit's HEAD port no longer
+   responds (reuse `health.http_check`, `autodown._probe_down`). TP peers
+   serve through their head only, so only each unit's `nodes[0]` is probed.
    Record final serving state in `~/.hscc/autodown.json` (`state: "down"`).
 5. **Write `~/.hscc/autodown.json` state** with `state: "down"`,
-   `down_since`, `reason`, `intentional: true`. This file is the single source
+   `down_since`, `reason`. This file is the single source
    of truth for "we are intentionally down" that autoup, status, and the
    watchdog all read.
 6. **Notify the operator** (desktop + Telegram ops topic):
@@ -261,21 +264,22 @@ half-torn cluster with the block latched. §8 failure modes covers it: roll the
 block back (clear intentional flag, leave `blocked` as the watchdog would) and
 report, so the watchdog resumes and can heal the remaining units back up.
 
-### C4 decision: keepalive units are EXEMPT from teardown
-Keepalive worker units (`serving.keepalive_units()`, `serving.py:172`) are
-**not** torn down by autodown, no exception. Rationale: the keepalive flag is
-an explicit operator declaration "this model must stay up" (used by
-`check_workers`, `health.py:791`, to relaunch it no matter what). Autodown's
-whole point is to *free the GPU*; a keepalive unit is a standing commitment
-that beats an idle timer. The design therefore:
-- never lists keepalive units in the teardown set,
-- keepalive presence does NOT gate whether the non-keepalive layer may go
-  down (§1f): it is the operator's choice that keepalive workers stay up, and
-  a cluster whose only live serving is keepalive workers is still "idle" for
-  the orchestrator unit.
-- documents that `hscc autodown` only ever tears down non-keepalive units; an
-  operator who wants a keepalive unit down must clear its `keepalive` flag in
-  `serving.json` (or use the normal `sparkrun stop` directly).
+### C4 decision: keepalive units are NO LONGER exempt (operator decision)
+Originally autodown exempted keepalive worker units (`serving.keepalive_units()`,
+`serving.py:172`) — the keepalive flag was treated as a standing "this model
+must stay up" commitment that beats an idle timer. **That is REVERSED (operator
+decision).** Autodown now powers the WHOLE serving layer down, including
+keepalive units — freeing that GPU memory and power is the entire point of the
+feature. The design:
+
+- issues a single fleet stop (`serving.fleet_down_cmd()`, `sparkrun stop
+  --all`) that stops EVERY unit — orchestrator, keepalive, AND non-keepalive
+  workers;
+- on wake (`serving.fleet_up_plan()` / `hscc cluster up`) restores EVERY unit,
+  orchestrator AND keepalive workers;
+- keeps the `keepalive_ok` **interlock** (§6.4): if a keepalive unit is sick
+  we abort teardown — a "don't shut down mid-problem" guard, NOT an
+  exemption. Healthy or not, keeping it still goes down.
 
 ---
 
@@ -291,12 +295,12 @@ model** (see §1d). When `autodown.cycle()` observes an activity event while
    (idempotent; if already waking, no-op).
 2. **Record the event that woke us** in `autodown.json` (`wake_source`,
    `wake_at`) so the operator can see the trigger after the fact.
-3. **Start the serving layer back up**, orchestrator units first in reverse
-   of the teardown order (orchestrator before workers is fine here; there is
-   no in-flight request because we are waking from zero):
-   - start the **orchestrator unit** via `serving.VLLM_START_CMD` /
-     `serving.orchestrator_recipe()` (`sparkrun run <recipe> --ensure`).
-   - start any **keepalive/NON-keepalive worker units** that are expected up.
+3. **Start the serving layer back up — EVERY unit** (orchestrator first, then
+   workers) via the shared `serving.fleet_up_plan()` (the exact reverse of the
+   fleet down; there is no in-flight request because we are waking from zero).
+   Orchestrator built from `serving.VLLM_START_CMD` / `serving.orchestrator_recipe()`
+   (`sparkrun run <recipe> --ensure`); workers from their own recipe. Keepalive
+   AND non-keepalive workers all come back up.
 4. **Wait for readiness** — poll `serving.VLLM_HEALTH_URL` (and each unit's
    port) with `health.http_check` until healthy or a timeout (reuse the load
    grace pattern, `lifecycle.py:125`, `VLLM_LOAD_GRACE_MINUTES` default 20).
@@ -376,27 +380,18 @@ else absent).
   the desired state: the cluster can stay down indefinitely without the
   watchdog fighting it.
 - **Crash-while-intentionally-down:** something the daemon does NOT control
-  died — e.g. the keepalive worker unit (which autodown did NOT tear down)
-  crashes, or a *different* non-keepalive unit crashes after teardown, or the
-  NAS drops. How we tell them apart:
-  - The watchdog's job while `intentional == "autodown"` is NOT "do nothing".
-    It should **still health-check the units that autodown did NOT tear down**
-    (keepalive units) and re-heal THOSE, while leaving the intentionally-down
-    non-keepalive units alone. This is a behavioral fork inside
-    `pipeline_watchdog` / `check_workers` keyed on `intentional`.
-  - Distinguisher: a unit that autodown **explicitly stopped** and recorded as
-    down (`state == "down"` in autodown.json) is NOT a crash — it's expected.
-    A unit autodown did NOT stop (keepalive unit, or a unit whose intended
-    targets list does not include it) that is down IS a crash and must be
-    healed.
-  - Concretely: `check_workers` (`health.py:791`) iterates keepalive units —
-    those are never in the teardown set, so it heals them as normal, but ONLY
-    if the block's `intentional` doesn't cover the whole fleet. Because
-    keepalive units are exempt, `check_workers` needs NO change for the
-    intentional flag — keepalive re-healing is always correct. The only change
-    is that `pipeline_watchdog` must skip the **orchestrator** auto-restart
-    (`lifecycle.py:319`) while `intentional == "autodown"`, since the
-    orchestrator unit is the one we deliberately stopped.
+  died after the (whole-fleet) teardown finished, or the NAS drops. How we tell
+  a deliberate down from a crash: with the whole-fleet-down decision (C4
+  reversed), the entire serving layer is down BY DESIGN while
+  `intentional == "autodown"` — every unit (orchestrator, keepalive,
+  non-keepalive) was deliberately stopped, so the watchdog must NOT resurrect
+  any of them. `pipeline_watchdog` skips the orchestrator auto-restart
+  (`lifecycle.py:319`) while the intentional block is latched; `check_workers`
+  relaunches crashed keepalive units, so its relaunch must also respect the
+  intentional block or it would fight the teardown (the block gates both).
+  Distinguisher: a unit recorded `state == "down"` in autodown.json is NOT a
+  crash — it's expected. A unit that is up/down contrary to autodown's recorded
+  state IS a crash and must be healed.
   - A decision table lives in `autodown.py` (`classify(idle_state_block,
     autodown_state)`): given the watchdog block + autodown state, classify each
     unit as `expected_down`, `should_be_up` (heal), or `healthy`. Autodown
@@ -426,9 +421,10 @@ predicate §1. It is a conjunction; any false ⇒ abort. Sources:
 2. **Agent liveness** — read `~/.hscc/agents.json`, all enabled agents `idle`
    (no working/failed).
 3. **Elapsed window** — `now - last_activity_iso >= idle_minutes`.
-4. **Keepalive units ready** — not a teardown target, but if a keepalive unit
-   is itself unhealthy, abort (do not tear down the orchestrator while a worker
-   is mid-flight relying on it). Cautious and simple.
+4. **Keepalive units ready** (`keepalive_ok` INTERLOCK) — keepalive units ARE
+   teardown targets now (C4 reversed), but if a keepalive unit is itself
+   unhealthy we abort, so we do not tear the whole fleet down mid-problem while
+   a worker is mid-flight relying on it. Cautious and simple.
 
 The double-evaluation (timer + pre-stop) closes the race where a card is
 created between the cycle's idle decision and the first `sparkrun stop`. If the
@@ -522,7 +518,7 @@ human, never a silent half-state.
 | **Power/thermal edge** (GPU thermal trip, node reboot, cluster loss while down) | daemon's DGX/gateway health checks | These are failures of machinery, not of autodown. The layer is down by intent; when a wake comes, autoup tries to bring it up; if the node is genuinely gone, autoup's readiness timeout fires → "wake fails" row. SAFE = same as wake-fails: loud, supervised, not silently half-up. |
 | **Config corrupt** (`autodown.json` unparseable) | read returns parse error | Fail-closed to DISABLED + report (C5). Never act on corrupt config. SAFE = no automation; operator fixes file or re-enables. |
 | **Double teardown** (two daemon instances, or operator + autodown both) | `state` guard + `intentional` check | Teardown is gated on `state != "down"` and a lockfile (atomic `O_EXCL` on `~/.hscc/autodown.lock`) so only one teardown runs. Second requester blocks/returns. SAFE = exactly one teardown at a time. |
-| **Keepalive/teardown node overlap** (C4 invariant violated) | `_teardown_locked` step 1b (autodown.py) compares the teardown plan's node set against `serving.keepalive_units()` | `_worker_stop_cmd` issues a NODE-level `sparkrun stop --hosts <nodes>` (serving.py:150), so the C4 keepalive-exemption holds ONLY while keepalive nodes are disjoint from the orchestrator/non-keepalive-worker nodes. Teardown ASSERTS this invariant in code before issuing any stop: if any keepalive node is in the teardown set, ABORT loudly with NO stop issued. SAFE = never kill a keepalive unit, even if a future config co-locates one. |
+| **Keepalive/teardown overlap** (C4 reversed) | ~~`_teardown_locked` step 1b abort guard~~ **REMOVED** | Fleet down (`serving.fleet_down_cmd()`, `sparkrun stop --all`) intentionally stops keepalive units too (operator decision, C4 reversed). The old guard aborted whenever a keepalive node was in the teardown set — with the whole-fleet `--all` stop that would abort EVERY teardown, so it is gone. The `keepalive_ok` INTERLOCK (sick keepalive unit ⇒ abort teardown) is kept as the "don't shut down mid-problem" signal. SAFE = nothing is exempt, so the layer cleanly and wholly goes down (and fully back up on wake). |
 
 **Overall SAFE state for the system:** idle→down is only ever allowed while
 the interlock holds AND sets an intentional block; any deviation routes to
@@ -617,9 +613,10 @@ independent-ish (can land after 5, or parallel). Phase 7 depends only on 1+4+5
 dispatch: 1,2,3,4,5 then 6 and 7 (parallelizable), then 8.
 
 ## Things intentionally NOT in scope
-- Auto-tearing down keepalive units (C4 — exempt unless operator clears the flag).
+- ~~Auto-tearing down keepalive units~~ now IN scope (C4 reversed, operator
+  decision) — autodown powers the whole serving layer down incl. keepalive.
 - Tearing down the CPU-side daemon/gateway/API/Telegram processes (C1 — they
   must stay up to wake).
 - Any model/agent-in-the-loop wake decision (C1 — daemon-only).
 - Autoscale worker count changes (separate feature; `autoscale.py` exists but
-  is engine-only today) — autodown is all-or-nothing for non-keepalive units.
+  is engine-only today) — autodown is all-or-nothing for the serving layer.
