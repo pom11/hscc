@@ -1109,6 +1109,51 @@ def _handle_stalled_wake(serving_path=None, http_check_fn=None):
     return True
 
 
+def _reconcile_stale_intentional_block():
+    """Clear a STALE intentional block (state not down/waking but block latched).
+
+    The MIRROR of ``_reconcile_if_actually_up`` (§8). That path fires when
+    ``state == "down"`` but the serving layer is actually up; THIS path fires
+    when autodown's OWN state says it is NOT in an intentional window (neither
+    ``down`` nor ``waking`` — i.e. ``up``/``error``/missing) yet the watchdog
+    block is still latched with ``intentional == "autodown"``. Such a marker is
+    STALE: autodown is not claiming the layer is intentionally down, so the
+    block must not keep suppressing the watchdog.
+
+    This reconciliation is driven by the CONTRADICTION (block intentional ×
+    state not down/waking), NOT by one specific state — so it covers the
+    reproduced mirror wedge (an interrupted wake leaves ``state: up`` with the
+    block latched) AND the ``error`` residual, instead of only the ``down``
+    direction the two other reconcile paths handle. A LEGITIMATE in-flight
+    teardown (state=down) or wake (state=waking) is never touched here because
+    this helper does not run in those states (callers gate on state not in
+    down/waking), and the waking window is separately gated on holder liveness.
+
+    Returns True iff it cleared the block.
+    """
+    from . import lifecycle
+    block = lifecycle.load_watchdog_block()
+    if block.get("intentional") != "autodown":
+        # Not an intentional block — leave it alone. A real breaker latch
+        # (blocked but no autodown marker) must NEVER be cleared by reconcile.
+        return False
+    _clear_intentional_block(
+        reason="autodown: stale intentional block — state is neither 'down' "
+               "nor 'waking' — reconciled to reality")
+    # LOUD — a latched block suppressing the watchdog while autodown says the
+    # layer is NOT intentionally down is exactly the silent half-state §8
+    # forbids (it is NOT supervised), so it must be unmissable.
+    log("Autodown RECONCILED: watchdog block was latched intentional=autodown "
+        "but autodown state is not down/waking — cleared the stale block, "
+        "normal supervision restored", "ERROR")
+    _notify("HSCC autodown RECONCILED: the watchdog block was left latched with "
+            "an intentional autodown marker, but autodown state is neither "
+            "'down' nor 'waking'. Cleared the stale block so the watchdog "
+            "supervises the running cluster again.",
+            "HSCC Autodown — Reconciled to reality", priority="high")
+    return True
+
+
 def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
           probes=None):
     """Idle autodown decision function (Phase 3, §1/§6; Phase 6 probes §1d).
@@ -1136,12 +1181,17 @@ def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
        we went down, bring the serving layer back up via autoup() (Phase 5,
        called lazily).
     4a. ``state == error`` ⇒ a wake failed to determine any units; autoup has
-       cleared the intentional block and released the layer to the watchdog.
-       Do nothing (no re-latch, no teardown, no wake seam) — the watchdog
-       owns supervision until serving.json is repaired.
-    5. ``state == up`` ⇒ evaluate the full idle conjunction (§1/§6). Any single
-       false, or any unverifiable signal, ⇒ NOT idle ⇒ return without teardown
-       (fail-safe direction is mandatory).
+      cleared the intentional block and released the layer to the watchdog.
+      Do nothing (no re-latch, no teardown, no wake seam) — the watchdog
+      owns supervision until serving.json is repaired. But defensively
+      reconcile the contradiction (clear a stale ``intentional`` block if one
+      somehow survives) so supervision can never stay suppressed.
+    5. ``state == up`` ⇒ FIRST reconcile the contradiction (§8 mirror): if the
+      watchdog block is still latched ``intentional == \"autodown\"``, the
+      marker is stale (state is not down/waking) — clear it so the watchdog
+      supervises the running cluster again. Then evaluate the full idle
+      conjunction (§1/§6). Any single false, or any unverifiable signal, ⇒
+      NOT idle ⇒ return without teardown (fail-safe direction is mandatory).
     6. All clear ⇒ teardown the serving layer (Phase 4, called lazily).
     """
     cfg = load_config()
@@ -1224,8 +1274,25 @@ def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
         # tear down (there is nothing to tear down and the layer may be down),
         # and must NOT run the wake seam (there are no units to start until
         # serving.json is fixed). The watchdog owns supervision; do nothing.
+        # BUT reconcile the contradiction path: if the block somehow survives
+        # latched with intentional=autodown, clear it so supervision resumes
+        # (a stale intentional block must never suppress the watchdog).
+        try:
+            _reconcile_stale_intentional_block()
+        except Exception as e:
+            log(f"Autodown stale-block reconcile error: {e}", "ERROR")
         return
-    # state == "up": evaluate the full idle predicate (§1/§6).
+    # state == "up": reconcile the contradiction path FIRST — if the watchdog
+    # block is still latched with intentional=autodown while state is up (an
+    # interrupted wake left it behind), the marker is stale and must be
+    # cleared so the watchdog supervises the running cluster again. No
+    # debounce needed: the block latch with state=up is a plain contradiction,
+    # not a transient (a live wake holds the lock and rides in state=waking,
+    # never up). Then evaluate the full idle predicate (§1/§6).
+    try:
+        _reconcile_stale_intentional_block()
+    except Exception as e:
+        log(f"Autodown stale-block reconcile error: {e}", "ERROR")
     if not _is_idle(cfg, kanban_db=kanban_db, agents_file=agents_file,
                     now=now, keepalive_ok=keepalive_ok):
         # Not idle — no teardown.
@@ -2708,11 +2775,12 @@ def resume_from_restart():
       stale ``\"waking\"`` (it would trip ``autoup``'s already-waking guard) and
       RE-RUN autoup — idempotent (``--ensure`` on already-running units is a
       no-op) — to finish the wake. SAFE = finish the wake.
-    - ``state == \"up\"`` (or unknown) ⇒ do nothing.
-    - ``state == \"error\"`` ⇒ a wake failed to determine units; autoup already
-      cleared the intentional block and released the layer to the watchdog.
-      Do nothing on restart either (do NOT re-latch) — the watchdog owns
-      supervision until serving.json is repaired.
+    - ``state == \"up\"`` / ``error`` / unknown ⇒ reconcile the contradiction
+      path: if the watchdog block is still latched with
+      ``intentional == \"autodown\"``, it is stale (autodown is not claiming
+      the layer is down/waking) — clear it so supervision resumes. ``error``
+      already had its block cleared by autoup's failure handling, so this is
+      normally a no-op there (do NOT re-latch — the watchdog owns supervision).
 
     Fully defensive: if anything here raises, callers that need to guarantee
     the daemon boots use ``resume_from_restart_defensive()`` — a broken
@@ -2737,9 +2805,19 @@ def resume_from_restart():
         save_config(cfg)
         autoup()
         log("Autodown startup: state=waking → autoup re-run to finish the wake")
-    # state == "up" / "error" / unknown: nothing to recover. For "error",
-    # the intentional block was already cleared by autoup's failure handling;
-    # re-asserting it here would re-suppress the watchdog with nothing running.
+    else:
+        # state == "up" / "error" / unknown: reconcile the contradiction path.
+        # The reproduced mirror wedge is exactly this: an interrupted wake left
+        # ``state: up`` with the watchdog block still latched intentional.
+        # A restart must NOT leave the watchdog suppressed by that stale marker
+        # — clear it so supervision resumes. For "error" the intentional block
+        # was already cleared by autoup's failure handling, so this is normally
+        # a no-op; if it somehow survived latched, clear it too (never re-assert,
+        # never autoup — the watchdog owns supervision).
+        try:
+            _reconcile_stale_intentional_block()
+        except Exception as e:
+            log(f"Autodown startup stale-block reconcile error: {e}", "ERROR")
 
 
 def resume_from_restart_defensive():

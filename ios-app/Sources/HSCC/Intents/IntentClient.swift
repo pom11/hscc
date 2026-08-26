@@ -24,7 +24,7 @@ enum IntentClient {
     static func make() -> HSCCClient? {
         let defaults = UserDefaults.standard
         let host = defaults.string(forKey: hostKey) ?? ""
-        let portString = defaults.string(forKey: portKey) ?? "8787"
+        let portString = defaults.string(forKey: portKey) ?? "8788"
         guard !host.trimmingCharacters(in: .whitespaces).isEmpty,
               let token = KeychainStore.readToken(), !token.isEmpty,
               let port = Int(portString) else {

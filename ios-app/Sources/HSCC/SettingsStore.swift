@@ -31,8 +31,8 @@ final class SettingsStore: ObservableObject {
         // Host starts EMPTY — the owner enters their tailnet host/IP at runtime
         // (never a hardcoded default / no tailnet IP committed).
         self.host = defaults.string(forKey: Self.hostKey) ?? ""
-        // Port defaults to the HSCC API default (8787) but stays editable.
-        self.port = defaults.string(forKey: Self.portKey) ?? "8787"
+        // Port defaults to the HSCC API default (8788) but stays editable.
+        self.port = defaults.string(forKey: Self.portKey) ?? "8788"
         self.hasToken = (KeychainStore.readToken() != nil)
     }
 

@@ -98,9 +98,20 @@ def fakes(monkeypatch):
         "_kanban": _fake_module(
             list_cards=lambda board=None, include_archived=False: [_card()],
             find_card=lambda cid: _card(cid=cid) if cid == "t_abc123" else None,
+            project_for_card=lambda card, projects: _project(),
         ),
         "_registry": _fake_module(
             load_registry=lambda path=None: [_project()],
+            get_project=lambda name, path=None: _project(name=name),
+            ProjectNotFoundError=type("ProjectNotFoundError", (Exception,), {}),
+        ),
+        "_git_state": _fake_module(
+            is_repo=lambda repo: True,
+            current_branch=lambda repo: "main",
+            is_dirty=lambda repo: False,
+            uncommitted_files=lambda repo: [],
+            last_commit_age_seconds=lambda repo: 120,
+            head_sha=lambda repo: "abc123",
         ),
         "_standup_cmd": _fake_module(
             gather_data=lambda registry_path: _standup_data(),
@@ -418,3 +429,90 @@ def test_speak_pure_helpers():
     assert "1 card" in s and "2 are running" in s and "1 failing" in s
     assert routes_project._speak_review_queue({"count": 0}) == "Nothing awaiting review."
     assert "3 cards await review" in routes_project._speak_review_queue({"count": 3})
+
+# --------------------------------------------------------------------------- #
+# /v1/projects (registry list) + /v1/projects/{name} detail + scoped standup
+# --------------------------------------------------------------------------- #
+
+def test_projects_list_200(running, token, fakes):
+    status, payload = _request(running, token, path="/v1/projects")
+    assert status == 200
+    assert payload["count"] == 1
+    row = payload["projects"][0]
+    assert row["name"] == "hscc"
+    assert row["repo"] == "/tmp/repo"
+    assert row["board"] == "default"
+    assert row["topic"] == "unknown"
+    assert "1 project registered." in payload["speak"]
+
+
+def test_projects_list_auth_401(running):
+    status, payload = _request(running, None, path="/v1/projects")
+    assert status == 401
+    assert payload["error"]["code"] == "unauthorized"
+
+
+def test_project_detail_200(running, token, fakes):
+    status, payload = _request(running, token, path="/v1/projects/hscc")
+    assert status == 200
+    assert payload["name"] == "hscc"
+    assert payload["board"] == "default"
+    # board_counts: the fake list_cards returns one running card by default.
+    assert payload["board_counts"].get("running") == 1
+    assert payload["board_counts"].get("total") == 1
+    assert payload["git"]["is_repo"] is True
+    assert payload["git"]["branch"] == "main"
+    assert payload["git"]["last_activity_seconds_ago"] == 120
+    assert payload["speak"]
+
+
+def test_project_detail_unknown_404(running, token, fakes, monkeypatch):
+    def raise_notfound(name, path=None):
+        raise fakes["_registry"].ProjectNotFoundError
+    monkeypatch.setattr(fakes["_registry"], "get_project", raise_notfound)
+    status, payload = _request(running, token, path="/v1/projects/ghost")
+    assert status == 404
+    assert payload["error"]["code"] == "not_found"
+
+
+def test_project_detail_auth_401(running):
+    status, payload = _request(running, None, path="/v1/projects/hscc")
+    assert status == 401
+
+
+def test_project_standup_200(running, token, fakes):
+    status, payload = _request(running, token, path="/v1/projects/hscc/standup")
+    assert status == 200
+    assert status == 200
+    assert isinstance(payload.get("speak"), str) and payload["speak"]
+    assert isinstance(payload.get("running"), list)
+
+
+def test_project_standup_unknown_404(running, token, fakes, monkeypatch):
+    def raise_notfound(name, path=None):
+        raise fakes["_registry"].ProjectNotFoundError
+    monkeypatch.setattr(fakes["_registry"], "get_project", raise_notfound)
+    status, payload = _request(running, token, path="/v1/projects/ghost/standup")
+    assert status == 404
+    assert payload["error"]["code"] == "not_found"
+
+
+def test_project_standup_auth_401(running):
+    status, payload = _request(running, None, path="/v1/projects/hscc/standup")
+    assert status == 401
+
+
+# --------------------------------------------------------------------------- #
+# speak helpers for the projects surface
+# --------------------------------------------------------------------------- #
+
+def test_projects_speak_pure_helpers():
+    assert routes_project._speak_projects_list({"projects": [], "count": 0}) == "0 projects registered."
+    assert routes_project._speak_projects_list({"projects": [1, 2], "count": 2}) == "2 projects registered."
+    d = routes_project._speak_project_detail({
+        "name": "hscc", "board": "hscc",
+        "board_counts": {"running": 2, "ready": 1, "done": 5},
+    })
+    assert "2 running" in d and "3 open cards" in d
+    s = routes_project._speak_project_standup({"needs_you": [], "running": [], "failing": []})
+    assert s == "Nothing needs attention."

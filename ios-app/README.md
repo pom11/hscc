@@ -185,7 +185,7 @@ will not match your setup — substitute your own tailnet IP:
   may work instead.)
 
 **In the app:** open the **Settings** screen and enter **host** (the Mac's
-`100.x` tailnet IP), **port** (`8787` by default — matches the HSCC API), and
+`100.x` tailnet IP), **port** (`8788` by default on this deployment), and
 **token** (see below). Tap **Test connection** — it calls `GET /v1/ping`
 against those settings and reports success or a clear error.
 
@@ -202,7 +202,7 @@ hscc api status              # confirm it's running and see the bound host:port
 hscc api stop
 ```
 
-- The **default port is `8787`** (set it in the app to match).
+- The **default port is `8788`** on this deployment (set it in the app to match).
 - By default the API binds **loopback (`127.0.0.1`)** only. The
   `--tailscale` flag opts in to binding the tailnet IP, which is what makes it
   reachable from your phone. `0.0.0.0` / binding every interface is **refused
