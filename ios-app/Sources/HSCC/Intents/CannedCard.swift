@@ -87,7 +87,7 @@ struct DispatchCannedCardIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         guard let client = IntentClient.make() else {
-            return .result(dialog: IntentDialog(IntentSettingsMessage.notConfigured))
+            return .result(dialog: IntentDialog(stringLiteral: IntentSettingsMessage.notConfigured))
         }
         // EXPLICIT confirmation before any mutation. Every other mutating
         // surface in the app is fronted by MutationButton's confirmationDialog;
@@ -108,7 +108,7 @@ struct DispatchCannedCardIntent: AppIntent {
             // actually returned) — never a fabricated success.
             let spoken = result.message
                 ?? "Dispatched card \(result.id ?? "") onto \(card.boardName)."
-            return .result(dialog: IntentDialog(spoken))
+            return .result(dialog: IntentDialog(stringLiteral: spoken))
         } catch {
             // Non-2xx makes the client throw — say it failed, never claim success.
             let message = (error as? HSCCError)?.localizedDescription

@@ -21,16 +21,16 @@ struct ReviewQueueIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         guard let client = IntentClient.make() else {
-            return .result(dialog: IntentDialog(IntentSettingsMessage.notConfigured))
+            return .result(dialog: IntentDialog(stringLiteral: IntentSettingsMessage.notConfigured))
         }
         do {
             let queue = try await client.reviewQueue()
             // Speak the server-derived count sentence verbatim.
-            return .result(dialog: IntentDialog(queue.speak))
+            return .result(dialog: IntentDialog(stringLiteral: queue.speak))
         } catch {
             let message = (error as? HSCCError)?.localizedDescription
                 ?? "Couldn't get the review queue."
-            return .result(dialog: IntentDialog(message))
+            return .result(dialog: IntentDialog(stringLiteral: message))
         }
     }
 }
