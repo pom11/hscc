@@ -55,7 +55,7 @@ struct OrchestratorChatView: View {
                     .padding(.horizontal)
                     .padding(.vertical, 8)
                 }
-                .onChange(of: transcript.count) { _ in
+                .onChange(of: transcript.count) {
                     // Scroll to the last row (index is a stable identity since the
                     // transcript is append-only within a session).
                     if !transcript.isEmpty {
