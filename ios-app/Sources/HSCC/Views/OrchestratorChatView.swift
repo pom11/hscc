@@ -1,60 +1,103 @@
 import SwiftUI
 
-/// C5 — the orchestrator chat view.
+/// C5 — the per-project orchestrator chat view.
 ///
 /// Sends a prompt to a project's orchestrator via `POST /v1/orchestrator/chat`
-/// and shows a prompt→reply transcript for the current app session.
+/// and shows a persistent prompt→reply transcript for that project.
+///
+/// This is the operator's PRIMARY surface — talking to a project's
+/// orchestrator from the phone. It is designed around the MEASURED reality of
+/// the live cluster:
+///   * a real answer takes **16.8s floor / 30-90s typical**, so the wait is
+///     designed for, not pretended away;
+///   * **sessions persist per project** on the server — each project is a
+///     continuing conversation, not one-shots. Nothing here resets it.
+///   * the client sets a **300s** timeout for the call (HSCCClient, `timeout:`
+///     param). It is never lowered — the 60s URLSession default would abort a
+///     reply the server was still successfully working on.
+///
+/// Smoothness requirements (from the project-detail card) and how each is met:
+///   1. **Optimistic send** — the user's message appears instantly via
+///      `ChatStore.beginSend` before any network call.
+///   2. **Honest waiting state** — an in-flight footer ticks elapsed SECONDS
+///      (TimelineView, one frame/sec) and names which project/profile is
+///      answering, so \"still working\" reads differently from \"hung\".
+///   3. **Never lose input** — the prompt is appended to the persisted
+///      transcript before sending and only cleared on success; a failure keeps
+///      it and says what happened. The un-sent draft is also persisted.
+///   4. **Transcript persists** per project across navigation and app relaunch
+///      (`ChatStore`, UserDefaults keyed per project).
+///   5. **Fleet-down case** — `/v1/autodown/status` is checked on appear and
+///      before send; if the fleet is down/waking a clear banner says so rather
+///      than silently hanging.
+///   6. **One turn at a time** — send is disabled while a reply is in flight
+///      (the session is sequential).
 ///
 /// SENDING IS A MUTATION: the orchestrator can decompose a prompt and dispatch
 /// real work onto its board. So sending follows the SAME explicit confirm
-/// pattern as every other mutating surface in the app (`MutationButton` /
+/// pattern as every other mutating surface (`MutationButton` /
 /// `.confirmationDialog`): a tap on Send only ARMS the confirmation naming
 /// exactly what will happen, and the request fires only after the user
 /// confirms. There is no send-on-return and no other path that bypasses the
 /// confirm step — this is the single place a chat request can fire.
 ///
-/// Honest results: a non-2xx makes the client throw, which we append to the
-/// transcript as a FAILURE with the API's message — never as a reply. A
-/// "session not ready" 503 reads clearly (the orchestrator's named session must
-/// exist first). A 504 timeout is surfaced as a timeout, not a silent empty
-/// reply. Long orchestrator replies are expected, so an in-flight indicator
-/// shows while we wait and the Send control is disabled (no double-tap
-/// double-send).
+/// Honest results: a non-2xx makes the client throw, appended to the
+/// transcript as a FAILURE with the API's message — never as a reply.
 struct OrchestratorChatView: View {
-    @EnvironmentObject private var settings: SettingsStore
-
     /// When set, the chat is fixed to THIS project's orchestrator and the
     /// project picker is hidden (used from a project's detail screen). When
     /// nil (the standalone Chat surface), the picker shows and defaults to
     /// `general`.
     var project: String? = nil
 
-    /// The projects offered in the picker when no fixed `project` is given.
-    /// `general` is the guaranteed catch-all orchestrator. The app CAN fetch a
-    /// live list from /v1/projects, but the standalone picker keeps `general`
-    /// (the catch-all) first, with the live registry appended when configured.
-    static let knownProjects = ["general"]
-
-    @State private var prompt = ""
-    @State private var selectedProject: String = OrchestratorChatView.knownProjects[0]
-    @State private var transcript: [ChatEntry] = []
-    @State private var showConfirm = false
-    @State private var isSending = false
-
     /// The effective project the chat targets: the fixed one, or the picker's.
-    private var chatProject: String { project ?? selectedProject }
+    private var chatProject: String { project ?? "general" }
+
+    var body: some View {
+        // `.id(chatProject)` makes SwiftUI recreate the inner state whenever
+        // the target project changes, so each project gets its own persisted
+        // transcript AND its own store. For the fixed per-project case this is
+        // constant and never fires.
+        ChatBody(project: chatProject)
+            .id(chatProject)
+            .navigationTitle("Orchestrator")
+            .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// The per-project chat surface. Owns a `ChatStore` bound to `project` and
+/// renders the persistent transcript, the honest waiting state, and the
+/// confirm-gated composer.
+private struct ChatBody: View {
+    @EnvironmentObject private var settings: SettingsStore
+    let project: String
+
+    @StateObject private var store: ChatStore
+
+    /// Which project/profile is answering (profile filled from the last reply).
+    @State private var answeringProfile: String? = nil
+    /// Fleet readiness: nil (unknown), or a state string from /v1/autodown/status.
+    @State private var fleetState: String? = nil
+    @State private var showConfirm = false
+
+    init(project: String) {
+        self.project = project
+        _store = StateObject(wrappedValue: ChatStore(project: project))
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            // The prompt→reply transcript of the current app session.
+            fleetBanner
+
+            // The persistent prompt→reply transcript.
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 12) {
-                        if transcript.isEmpty {
+                        if store.transcript.isEmpty {
                             emptyState
                         } else {
-                            ForEach(transcript.indices, id: \.self) { index in
-                                ChatBubble(entry: transcript[index])
+                            ForEach(store.transcript.indices, id: \.self) { index in
+                                ChatBubble(entry: store.transcript[index])
                                     .id(index)   // stable — transcript is append-only
                             }
                         }
@@ -62,24 +105,18 @@ struct OrchestratorChatView: View {
                     .padding(.horizontal)
                     .padding(.vertical, 8)
                 }
-                .onChange(of: transcript.count) {
-                    // Scroll to the last row (index is a stable identity since the
-                    // transcript is append-only within a session).
-                    if !transcript.isEmpty {
+                .onChange(of: store.transcript.count) {
+                    if !store.transcript.isEmpty {
                         withAnimation {
-                            proxy.scrollTo(transcript.count - 1, anchor: .bottom)
+                            proxy.scrollTo(store.transcript.count - 1, anchor: .bottom)
                         }
                     }
                 }
             }
 
-            if let note = inFlightFooter {
-                Text(note)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal)
-                    .padding(.bottom, 4)
-            }
+            inFlightFooter
+                .padding(.horizontal)
+                .padding(.bottom, 4)
 
             Divider()
 
@@ -87,20 +124,25 @@ struct OrchestratorChatView: View {
                 .padding(.horizontal)
                 .padding(.vertical, 8)
         }
-        .navigationTitle("Orchestrator")
-        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            // Restore the saved draft + probe fleet readiness on first appear
+            // so the operator sees the transcript, their draft, and a plain
+            // fleet note rather than a silent hang (requirement 5).
+            store.restoreDraft()
+            await refreshFleetState()
+        }
     }
 
-    // MARK: - Empty / in-flight states
+    // MARK: - Empty / fleet states
 
     private var emptyState: some View {
         VStack(spacing: 8) {
             Image(systemName: "bubble.left.and.bubble.right")
                 .font(.largeTitle)
                 .foregroundColor(.secondary)
-            Text("Ask the Orchestrator")
+            Text("Ask the \(project) orchestrator")
                 .font(.headline)
-            Text("Send a prompt to an orchestrator. It may decompose your request and dispatch real work onto its board.")
+            Text("Send a prompt to the \(project) orchestrator. It may decompose your request and dispatch real work onto the \(project) board. This conversation continues across sessions — the orchestrator remembers context.")
                 .font(.footnote)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -109,38 +151,83 @@ struct OrchestratorChatView: View {
         .padding(.horizontal, 24)
     }
 
-    private var inFlightFooter: String? {
-        isSending ? "Waiting — an orchestrator can take a while." : nil
+    /// A plain readiness banner when the fleet is down or waking — requirement
+    /// 5: tell the operator plainly rather than silently hanging.
+    @ViewBuilder
+    private var fleetBanner: some View {
+        if let fleetState {
+            let (text, color) = fleetBannerContent(fleetState)
+            HStack(spacing: 8) {
+                Image(systemName: "zzz")
+                Text(text)
+                    .font(.footnote)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .background(color.opacity(0.12))
+        }
     }
 
-    // MARK: - Composer (prompt + project picker + confirm-gated send)
+    private func fleetBannerContent(_ state: String) -> (String, Color) {
+        switch state {
+        case "down":
+            return ("The fleet is down — a reply may take a while, or fail. Consider waking it first.", Theme.Semantic.bad)
+        case "waking":
+            return ("The fleet is waking — this will take a few minutes. Your message is queued once it's up.", Theme.Semantic.warn)
+        default:
+            return ("", Theme.Semantic.neutral)   // not shown (state is up/idle)
+        }
+    }
+
+    // MARK: - In-flight footer (honest waiting state)
+
+    /// A live footer that ticks elapsed seconds while a reply is in flight.
+    /// `TimelineView(.periodic)` re-renders once per second, so the elapsed
+    /// count advances visibly — \"still working\" reads differently from a
+    /// frozen spinner (requirement 2).
+    @ViewBuilder
+    private var inFlightFooter: some View {
+        if let inFlight = store.inFlight {
+            TimelineView(.periodic(from: inFlight.startedAt, by: 1)) { context in
+                let elapsed = Int(context.date.timeIntervalSince(inFlight.startedAt))
+                Label {
+                    Text(footerText(elapsed: elapsed, profile: answeringProfile ?? inFlight.profile))
+                } icon: {
+                    Image(systemName: "circle.dotted")
+                }
+            }
+        }
+    }
+
+    private func footerText(elapsed: Int, profile: String?) -> String {
+        // Say which project/profile is answering so the operator can tell this
+        // is real work, not a hang. Two pieces of machine truth on screen.
+        let who: String
+        if let profile {
+            who = "\(project) / \(profile)"
+        } else {
+            who = project
+        }
+        return "\(elapsed)s — \(who) is answering. An orchestrator can take 30-90 s."
+    }
+
+    // MARK: - Composer (draft + confirm-gated send)
 
     private var composer: some View {
         VStack(spacing: 8) {
-            // Project picker — hidden when the chat is fixed to a project.
-            if project == nil {
-                Picker("Project", selection: $selectedProject) {
-                    ForEach(Self.knownProjects, id: \.self) { item in
-                        Text(item == Self.knownProjects.first ? "\(item) (default)" : item)
-                            .tag(item)
-                    }
-                }
-                .pickerStyle(.menu)
-                .disabled(isSending)
-            }
-
             HStack(alignment: .bottom, spacing: 8) {
-                TextField("Ask the orchestrator…", text: $prompt, axis: .vertical)
+                TextField("Ask the \(project) orchestrator…", text: $store.draft, axis: .vertical)
                     .lineLimit(1...4)
                     .textFieldStyle(.roundedBorder)
-                    .disabled(isSending)
+                    .disabled(store.isSending)
 
                 // STEP 1 — a tap only arms the confirmation. No request is sent,
                 // so a double-tap on Send can never double-send.
                 Button {
                     showConfirm = true
                 } label: {
-                    if isSending {
+                    if store.isSending {
                         ProgressView()
                             .frame(width: 24, height: 24)
                     } else {
@@ -164,46 +251,69 @@ struct OrchestratorChatView: View {
     }
 
     private var canSend: Bool {
-        !isSending && !trimmed(prompt).isEmpty
+        !store.isSending && !trimmed(store.draft).isEmpty
     }
 
     private var confirmTitle: String {
-        "Send to the \(chatProject) orchestrator?"
+        "Send to the \(project) orchestrator?"
     }
 
     private var confirmMessage: String {
-        "It may decompose your prompt and dispatch real work onto the \(chatProject) project's board."
+        "It may decompose your prompt and dispatch real work onto the \(project) project's board."
+    }
+
+    // MARK: - Fleet readiness probe
+
+    /// Check /v1/autodown/status so the operator is told plainly when the fleet
+    /// is down or waking (requirement 5) instead of silently waiting on a reply
+    /// that won't come. Informational only — never a gate.
+    private func refreshFleetState() async {
+        guard settings.isConfigured,
+              let token = settings.token,
+              let port = Int(settings.port) else { return }
+        let client = HSCCClient(host: settings.host, port: port, token: token)
+        do {
+            let status = try await client.autodownStatus()
+            fleetState = status.state
+        } catch {
+            // Can't reach the cluster at all — the banner stays hidden and the
+            // send will surface a transport error, which is honest.
+            fleetState = nil
+        }
     }
 
     // MARK: - Send (confirm-gated)
 
     @MainActor
     private func send() async {
-        let text = trimmed(prompt)
-        // The transcript shows what was asked even if the send fails, so the
-        // user can see the prompt that produced the failure. `.loading` is set
-        // first so isSending disables the Send control (no double-fire).
-        isSending = true
-        defer { isSending = false }
-        transcript.append(.prompt(text))
+        let text = trimmed(store.draft)
+        // The transcript + in-flight state are owned by the store. beginSend
+        // optimistically appends the prompt and starts the wait BEFORE the
+        // network call, so the message is never lost even if it fails. Only the
+        // live draft is cleared — the prompt now lives in the transcript.
+        store.beginSend(prompt: text)
+        store.draft = ""
+
+        // Re-probe the fleet right before sending so the operator gets the most
+        // current down/waking warning.
+        await refreshFleetState()
 
         do {
             let client = try clientOrThrow()
-            let result = try await client.orchestratorChat(project: chatProject,
-                                                           prompt: text)
-            transcript.append(.reply(result.reply))
-            prompt = ""   // only clear on a real success
+            let result = try await client.orchestratorChat(project: project, prompt: text)
+            store.finishSend(reply: result.reply, profile: result.profile)
+            answeringProfile = result.profile   // remember who answered, for next wait
         } catch {
             // A non-2xx (400/409/502/503/504) makes the client throw. Render the
-            // failure honestly — never as a reply. Map the transient states to
-            // clear wording so each real condition reads distinctly.
-            transcript.append(.failure(message(for: error)))
+            // failure honestly — never as a reply. The sent prompt stays in the
+            // transcript (never lost).
+            store.failSend(message: message(for: error))
         }
     }
 
     /// Build a clear, human-facing failure string from the thrown error.
-    /// Distinguishes the "session not ready" and "timeout" states from a generic
-    /// failure so each real condition reads clearly.
+    /// Distinguishes the \"session not ready\" and \"timeout\" states from a
+    /// generic failure so each real condition reads clearly.
     private func message(for error: Error) -> String {
         if let hscc = error as? HSCCError {
             switch hscc {
@@ -213,18 +323,18 @@ struct OrchestratorChatView: View {
                     // A real state: the orchestrator's NAMED session must exist
                     // (created by provisioning / the first Telegram topic) before
                     // the orchestrator can be chatted with.
-                    return "\(message) The \(chatProject) orchestrator's session isn't ready yet — create it first, then re-send."
+                    return "\(message) The \(project) orchestrator's session isn't ready yet — create it first, then re-send."
                 case "orchestrator_timeout":
-                    return "The \(chatProject) orchestrator did not reply within 180 s (timeout). Try again or check the orchestrator."
+                    return "The \(project) orchestrator did not reply within 180 s (timeout). Try again or check the orchestrator."
                 default:
                     // 400 unknown_project / bad_request, 409, 502 orchestrator_error, etc.
                     if status == 502 {
-                        return "The orchestrator call failed: \(message)"
+                        return "The \(project) orchestrator call failed: \(message)"
                     }
                     return message
                 }
             case .transport:
-                return "Can't reach the cluster — is Tailscale connected?"
+                return "Can't reach the cluster — is Tailscale connected? Your prompt is saved below; re-send when connected."
             case .invalidURL:
                 return "The host or port is invalid. Set them in Settings."
             case .decoding(let detail):
@@ -256,7 +366,10 @@ struct OrchestratorChatView: View {
 /// failed send. A failure is stored as its own case so it renders as a failure
 /// (red), never as a reply. Rows are given stable identity by their index in
 /// the append-only transcript, so this doesn't conform to Identifiable.
-enum ChatEntry {
+///
+/// `Codable` so a per-project transcript can be persisted (`ChatStore`) across
+/// navigation and app relaunch (requirement 4).
+enum ChatEntry: Codable, Equatable {
     case prompt(String)
     case reply(String)
     case failure(String)
@@ -267,6 +380,37 @@ enum ChatEntry {
         case .reply(let t): return t
         case .failure(let t): return t
         }
+    }
+
+    // MARK: Codable — encode the case + payload as a tagged payload so a
+    // future case can be added without breaking old persisted transcripts.
+
+    private enum Kind: String, Codable {
+        case prompt, reply, failure
+    }
+
+    private struct Payload: Codable {
+        let kind: Kind
+        let text: String
+    }
+
+    init(from decoder: Decoder) throws {
+        let payload = try Payload(from: decoder)
+        switch payload.kind {
+        case .prompt: self = .prompt(payload.text)
+        case .reply: self = .reply(payload.text)
+        case .failure: self = .failure(payload.text)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        let kind: Kind
+        switch self {
+        case .prompt: kind = .prompt
+        case .reply: kind = .reply
+        case .failure: kind = .failure
+        }
+        try Payload(kind: kind, text: text).encode(to: encoder)
     }
 }
 

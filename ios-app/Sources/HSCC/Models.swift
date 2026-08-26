@@ -630,6 +630,17 @@ struct ProjectDetailResponse: Decodable, Speakable {
     let board_counts: [String: Int]?
     let git: ProjectGit?
     let speak: String
+
+    /// Rendered topic: an int id as-is, the string "unknown" when a project has
+    /// none. Mirrors `Project.displayTopic`.
+    var displayTopic: String? {
+        guard let topic else { return nil }
+        switch topic {
+        case .int(let n): return "\(n)"
+        case .string(let s): return s
+        default: return nil
+        }
+    }
 }
 
 // MARK: - Ops / health (verify, daemon, triggers, escalate, profiles)
@@ -808,6 +819,52 @@ struct TemplateApplied: Decodable {
 struct TemplateStatusResponse: Decodable, Speakable {
     let applied: TemplateApplied?
     let note: String?
+    let speak: String
+}
+
+/// GET /v1/template/preview/{name} — one file change the apply would make.
+///
+/// Verified live shape: `{ file, action, summary, diff_summary?, details? }`.
+/// `action` is a short verb ("write" / "update" / "create" / "provision");
+/// `summary` is the one-line human description; `details` optional bullet list.
+struct TemplateChange: Decodable, Identifiable {
+    let file: String?
+    let action: String?
+    let summary: String?
+    let diff_summary: String?
+    let details: [String]?
+
+    var id: String { [file ?? "", summary ?? ""].joined(separator: "-") }
+}
+
+/// GET /v1/template/preview/{name} — one workload the apply would route.
+///
+/// Verified live shape: `{ consumer, target, base_url, model, keys }`. A
+/// `consumer` (delegation, compaction, …) routes to a `target` unit with a
+/// `model`; `keys` are the config paths it would set.
+struct TemplateRouting: Decodable, Identifiable {
+    let consumer: String?
+    let target: String?
+    let base_url: String?
+    let model: String?
+    let keys: [String]?
+
+    var id: String { [consumer ?? "", target ?? "", model ?? ""].joined(separator: "-") }
+}
+
+/// GET /v1/template/preview/{name} — dry-run of applying a template.
+///
+/// Verified live shapes: a FULL preview `{ template, description, changes[],
+/// routing[], routing_untouched[], speak }`, OR a minimal `{ speak }` when the
+/// template has no preview available yet. Every field is optional so a partial
+/// body never blanks the screen — the view falls back to `speak` and notes
+/// which details are missing.
+struct TemplatePreviewResponse: Decodable, Speakable {
+    let template: String?
+    let description: String?
+    let changes: [TemplateChange]?
+    let routing: [TemplateRouting]?
+    let routing_untouched: [TemplateRouting]?
     let speak: String
 }
 

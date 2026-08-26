@@ -1,15 +1,17 @@
 import SwiftUI
 
-/// Fleet control (C6) — cluster up/down + template list/status/apply.
+/// Fleet control (C6) — cluster up/down + currently-applied template status.
 ///
 /// The operating surface for the serving fleet:
 ///   * Status / template — GET /v1/template/status (currently applied).
 ///   * Cluster Up — POST /v1/cluster/up (confirm-gated; starts every unit).
 ///   * Cluster Down — POST /v1/cluster/down (confirm-gated, destructive; the
 ///     confirmation NAMES what happens: it stops ALL workloads fleet-wide).
-///   * Templates — GET /v1/template/list with a per-template confirm-gated
-///     Apply (POST /v1/template/apply — also destructive: it re-deploys the
-///     fleet).
+///
+/// The template LIBRARY (browse grouped templates, preview against the
+/// topology, confirm-gated apply with post-apply reload polling) lives in its
+/// own `TemplatesView` — this screen is cluster up/down + the applied-status
+/// read only.
 ///
 /// Every mutation goes through `MutationButton` (confirm dialog + `confirm:
 /// true` + honest failure). Nothing here fires from a single tap.
@@ -17,9 +19,6 @@ struct FleetControlView: View {
     let client: HSCCClient?
 
     @State private var status = LoadState<TemplateStatusResponse>.idle
-    @State private var list = LoadState<TemplateListResponse>.idle
-    @State private var selectedTemplate = ""
-    @State private var forceRecreate = false
 
     var body: some View {
         NavigationStack {
@@ -28,7 +27,6 @@ struct FleetControlView: View {
                     VStack(alignment: .leading, spacing: 16) {
                         appliedSection
                         clusterActionsSection(client: client)
-                        templateSection(client: client)
                     }
                     .padding()
                 } else {
@@ -36,10 +34,10 @@ struct FleetControlView: View {
                 }
             }
             .navigationTitle("Fleet Control")
-            .refreshable { if client != nil { await loadAll() } }
+            .refreshable { if client != nil { await loadStatus() } }
             .task {
                 if client != nil, status.value == nil, !status.isLoading {
-                    await loadAll()
+                    await loadStatus()
                 }
             }
         }
@@ -66,31 +64,11 @@ struct FleetControlView: View {
 
     // MARK: - Load
 
-    private func loadAll() async {
+    private func loadStatus() async {
         guard let client else { return }
-        async let s: Void = loadStatus(client)
-        async let l: Void = loadList(client)
-        _ = await (s, l)
-    }
-
-    private func loadStatus(_ client: HSCCClient) async {
         status = .loading
         do { status = .loaded(try await client.templateStatus()) }
         catch { status = .failed(errorMessage(for: error)) }
-    }
-
-    private func loadList(_ client: HSCCClient) async {
-        list = .loading
-        do {
-            let response = try await client.templateList()
-            list = .loaded(response)
-            // Keep the picker in sync with the available templates.
-            if response.templates.first(where: { $0.name == selectedTemplate }) == nil {
-                selectedTemplate = response.templates.first?.name ?? ""
-            }
-        } catch {
-            list = .failed(errorMessage(for: error))
-        }
     }
 
     private func errorMessage(for error: Error) -> String {
@@ -161,7 +139,7 @@ struct FleetControlView: View {
                     prompt: "Bring the fleet up? This starts every serving unit in the cluster (orchestrator + workers).",
                     run: {
                         let result = try await client.clusterUp()
-                        await loadStatus(client)
+                        await loadStatus()
                         return result.message ?? "Fleet up issued."
                     }
                 )
@@ -175,72 +153,10 @@ struct FleetControlView: View {
                     prompt: "Stop ALL workloads fleet-wide? This shuts down every serving unit across the entire cluster and interrupts any in-flight work.",
                     run: {
                         let result = try await client.clusterDown()
-                        await loadStatus(client)
+                        await loadStatus()
                         return result.message ?? "Fleet down issued."
                     }
                 )
-            }
-        }
-    }
-
-    // MARK: - Template list + apply (confirm-gated, destructive)
-
-    @ViewBuilder
-    private func templateSection(client: HSCCClient) -> some View {
-        sectionCard(title: "Apply Template", systemImage: "rectangle.stack.badge.plus") {
-            switch list {
-            case .loading:
-                ProgressView()
-            case .failed(let message):
-                errorLabel(message)
-            case .loaded(let state):
-                VStack(alignment: .leading, spacing: 10) {
-                    if state.templates.isEmpty {
-                        emptyLabel("No templates available.")
-                    } else {
-                        Picker("Template", selection: $selectedTemplate) {
-                            ForEach(state.templates) { t in
-                                Text(t.name).tag(t.name)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        if let t = state.templates.first(where: { $0.name == selectedTemplate }) {
-                            if let desc = t.description, !desc.isEmpty {
-                                Text(desc)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            if let fams = t.families, !fams.isEmpty {
-                                Text("Families: \(fams.joined(separator: ", "))")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-
-                        Toggle("Force recreate", isOn: $forceRecreate)
-                            .font(.subheadline)
-
-                        // Apply — confirm-gated, names the template and that it
-                        // re-deploys the fleet.
-                        MutationButton(
-                            title: "Apply Template",
-                            systemImage: "play.rectangle.on.rectangle",
-                            prompt: "Apply template \"\(selectedTemplate)\" and (re)deploy the fleet? This tears down and recreates serving units per the template.",
-                            run: {
-                                let name = selectedTemplate
-                                let result = try await client.applyTemplate(
-                                    name: name,
-                                    forceRecreate: forceRecreate
-                                )
-                                await loadStatus(client)
-                                return result.message ?? "Applied template \(name)."
-                            }
-                        )
-                        .disabled(selectedTemplate.isEmpty)
-                    }
-                }
-            default:
-                EmptyView()
             }
         }
     }
