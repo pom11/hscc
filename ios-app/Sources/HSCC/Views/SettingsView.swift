@@ -39,7 +39,7 @@ struct SettingsView: View {
                     }
 
                     LabeledContent {
-                        TextField("8787", text: $portField)
+                        TextField("8788", text: $portField)
                             .keyboardType(.numberPad)
                             .multilineTextAlignment(.trailing)
                     } label: {

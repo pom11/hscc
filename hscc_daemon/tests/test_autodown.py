@@ -2272,6 +2272,177 @@ class TestStalledWakeRecovery:
 
 
 # ---------------------------------------------------------------------------
+# §8 mirror reconcile — STALE intentional block (state not down/waking)
+# ---------------------------------------------------------------------------
+# The reproduced mirror wedge: an interrupted wake (daemon restarted mid-autoup,
+# or a teardown/wake cycle that never unwound) left ``state: up`` (or error)
+# while the watchdog block is still latched with ``intentional: "autodown"``.
+# Nothing cleared it — the existing two reconcile paths only fire on ``down``
+# and on a stalled ``waking``. Reconciliation must be driven by the
+# CONTRADICTION (block intentional × state not down/waking), not by one state;
+# a LEGITIMATE in-flight teardown/wake (state down/waking, live holder) must
+# be left untouched. Tests drive state + block directly via tmp files — never a
+# real cluster, never a real telegram/sparkrun.
+
+class TestReconcileStaleIntentionalBlock:
+    """cycle() / resume_from_restart() clear a STALE intentional block."""
+
+    def _cfg(self, autodown_file, state="up"):
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["enabled"] = True
+        cfg["state"] = state
+        cfg["idle_minutes"] = 10
+        cfg["down_since"] = None
+        cfg["last_activity_iso"] = (NOW - _dt.timedelta(hours=2)).isoformat()
+        ad.save_config(cfg)
+        return cfg
+
+    def _latch_block(self, tmp_path, monkeypatch, intentional="autodown"):
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
+        monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
+        block = {"blocked": True, "reason": ad.WATCHDOG_TEARDOWN_REASON,
+                 "blocked_at": NOW.isoformat(), "failures": []}
+        if intentional is not None:
+            block["intentional"] = intentional
+        _lifecycle.save_watchdog_block(block)
+        return block_file
+
+    def _read_block(self, block_file):
+        return json.loads(Path(block_file).read_text())
+
+    # -- the mirror case: state=up + block intentional ⇒ cleared, logged -----
+    def test_up_with_latched_intentional_block_cleared_and_logged(
+            self, autodown_file, tmp_path, monkeypatch):
+        """state=up + watchdog block latched intentional=autodown (the
+        reproduced interrupted-wake wedge) ⇒ clear the stale block, restore
+        supervision, log loudly at ERROR. cycle() must reconcile even when the
+        layer is NOT idle (no teardown fires — the stale block is the bug)."""
+        block_file = self._latch_block(tmp_path, monkeypatch)
+        self._cfg(autodown_file, state="up")
+        logs = []
+        monkeypatch.setattr(ad, "log",
+                            lambda msg, level="INFO": logs.append((msg, level)))
+        # Not idle AND teardown is a no-op — we only want the reconcile side
+        # effects, not a teardown.
+        monkeypatch.setattr(ad, "_is_idle", lambda *a, **k: False)
+        monkeypatch.setattr(ad, "_invoke_teardown", lambda: None, raising=False)
+
+        ad.cycle(probes=[])
+
+        blk = self._read_block(block_file)
+        assert blk.get("blocked") is False          # watchdog supervises again
+        assert blk.get("intentional") is None       # staleness cleared
+        assert "stale" in blk.get("reason", "").lower()
+        assert any("RECONCILED" in m and l == "ERROR" for m, l in logs)
+
+    # -- state=up + block NOT intentional (real breaker) ⇒ never cleared ------
+    def test_non_intentional_block_never_cleared_by_reconcile(
+            self, autodown_file, tmp_path, monkeypatch):
+        """NEGATIVE CONTROL: a real breaker latch (blocked: true, NO autodown
+        intentional marker) must NEVER be cleared by reconcile — that is the
+        watchdog's latched fault and clearing it would re-open a downed unit."""
+        block_file = self._latch_block(tmp_path, monkeypatch,
+                                       intentional=None)
+        self._cfg(autodown_file, state="up")
+        monkeypatch.setattr(ad, "_is_idle", lambda *a, **k: False)
+        monkeypatch.setattr(ad, "_invoke_teardown", lambda: None, raising=False)
+
+        ad.cycle(probes=[])
+
+        blk = self._read_block(block_file)
+        assert blk.get("blocked") is True           # untouched
+        assert blk.get("intentional") is None
+
+    # -- state=waking + LIVE holder ⇒ NEVER cleared (legit in-flight) ---------
+    def test_waking_with_live_holder_keeps_block(self, autodown_file, tmp_path,
+                                                 monkeypatch):
+        """state=waking + LIVE lock holder ⇒ a LEGITIMATE in-flight wake; the
+        block must be KEPT (the new contradiction reconcile must NOT touch it —
+        state IS in an intentional window)."""
+        block_file = self._latch_block(tmp_path, monkeypatch)
+        cfg = self._cfg(autodown_file, state="waking")
+        cfg["down_since"] = (NOW - _dt.timedelta(minutes=5)).isoformat()
+        ad.save_config(cfg)
+        monkeypatch.setattr(ad, "_lock_holder_alive", lambda: True)
+
+        for _ in range(ad.WAKE_STALL_DEBOUNCE * 2):
+            ad.cycle(probes=[])
+
+        blk = self._read_block(block_file)
+        assert blk.get("blocked") is True           # still latched
+        assert blk.get("intentional") == "autodown" # not cleared
+        assert ad.load_config()["state"] == "waking"
+
+    # -- state=down (legit teardown) ⇒ block KEPT -----------------------------
+    def test_down_legitimate_teardown_keeps_block(self, autodown_file,
+                                                  tmp_path, monkeypatch):
+        """state=down is a LEGITIMATE intentional teardown — the block must be
+        KEPT. The contradiction reconcile does NOT run for state=down (that
+        window is the existing _reconcile_if_actually_up path, which only clears
+        when the layer probes ACTUALLY up). Here the layer is genuinely down
+        (probe False) ⇒ block stays."""
+        block_file = self._latch_block(tmp_path, monkeypatch)
+        cfg = self._cfg(autodown_file, state="down")
+        cfg["down_since"] = (NOW - _dt.timedelta(minutes=5)).isoformat()
+        ad.save_config(cfg)
+        # Layer NOT actually up — a real drain is in progress.
+        monkeypatch.setattr(ad, "_reconcile_up_fn", lambda **kw: False)
+        ad._reconcile_up_streak = 0
+
+        for _ in range(ad.RECONCILE_UP_DEBOUNCE * 2):
+            ad.cycle(probes=[])
+
+        blk = self._read_block(block_file)
+        assert blk.get("blocked") is True
+        assert blk.get("intentional") == "autodown"
+        assert ad.load_config()["state"] == "down"
+
+    # -- existing direction still works: state=down, layer up ⇒ reconciles ----
+    def test_down_layer_actually_up_still_reconciles(self, autodown_file,
+                                                     tmp_path, monkeypatch):
+        """The EXISTING reconcile direction must keep working: state=down but
+        the layer probes ACTUALLY up across the debounce ⇒ reconcile to up
+        (clear block, set state=up). The new code must not regress it."""
+        block_file = self._latch_block(tmp_path, monkeypatch)
+        self._cfg(autodown_file, state="down")
+        cfg = ad.load_config()
+        cfg["down_since"] = (NOW - _dt.timedelta(minutes=5)).isoformat()
+        ad.save_config(cfg)
+        monkeypatch.setattr(ad, "_reconcile_up_fn", lambda **kw: True)
+        ad._reconcile_up_streak = 0
+
+        for _ in range(ad.RECONCILE_UP_DEBOUNCE):
+            ad.cycle(probes=[])
+
+        assert ad.load_config()["state"] == "up"
+        blk = self._read_block(block_file)
+        assert blk.get("blocked") is False
+        assert blk.get("intentional") is None
+
+    # -- resume_from_restart: state=up + block intentional ⇒ cleared ----------
+    def test_resume_from_restart_up_with_latched_block_cleared(
+            self, autodown_file, tmp_path, monkeypatch):
+        """resume_from_restart with state=up + block latched intentional (the
+        interrupted-wake-on-restart trigger) ⇒ the stale block is cleared so a
+        restart cannot leave the watchdog suppressed."""
+        block_file = self._latch_block(tmp_path, monkeypatch)
+        self._cfg(autodown_file, state="up")
+        up_calls = []
+        monkeypatch.setattr(ad, "autoup",
+                            lambda: up_calls.append("autoup"), raising=False)
+
+        ad.resume_from_restart()
+
+        assert up_calls == []            # no wake (nothing to wake)
+        blk = self._read_block(block_file)
+        assert blk.get("blocked") is False
+        assert blk.get("intentional") is None
+        assert ad.load_config()["state"] == "up"   # unchanged
+
+
+# ---------------------------------------------------------------------------
 # Phase 6 — activity-source probes (§1d) + _wait_ready silent-spin fix
 # ---------------------------------------------------------------------------
 
