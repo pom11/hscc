@@ -18,6 +18,7 @@ import json
 import os
 import re
 import sys
+from typing import Optional
 
 from .daemon_ops import log
 from .state import now_iso
@@ -202,6 +203,33 @@ def list_active_cron_jobs(jobs_file=None):
     return active
 
 
+def _enum_board_names(kanban_db):
+    """The ordered list of board names to scan — the SINGLE enumeration.
+
+    Shared by BOTH ``_has_active_work`` (the idle predicate / C3 interlock) and
+    ``list_stale_tasks`` so the boards "that block autodown" are EXACTLY the
+    boards "that stale lists". A divergence between the two would be its own
+    bug (§ board hygiene is load-bearing for autodown), so there is one code
+    path for enumeration, not two.
+
+    Returns ``(boards, multi)``:
+    - ``boards`` is a list of slug strings (the legacy flat DB as ``None``).
+      A lib that does NOT expose ``list_boards`` (minimal injected lib /
+      back-compat) resolves to ``[None]`` — the single default board.
+    - ``multi`` is True when the lib enumerates boards (so callers must pass
+      ``board=`` to ``connect_closing``), False for the single-board legacy
+      shape (``connect_closing()`` with no board).
+
+    Raises on enumeration failure; the caller decides how to fail (autodown
+    fails safe to active, stale reports it).
+    """
+    multi = hasattr(kanban_db, "list_boards")
+    if not multi:
+        return [None], False
+    boards = [str(e["slug"]) for e in kanban_db.list_boards()] or [None]
+    return boards, True
+
+
 def _has_active_work(kanban_db=None):
     """True if ANY live/imminent kanban task exists across ALL boards.
 
@@ -237,21 +265,14 @@ def _has_active_work(kanban_db=None):
         _note_blocking(_UNREADABLE_BOARD)
         return True
 
-    # Does this lib enumerate boards? The real hermes_cli.kanban_db does. A
-    # minimal injected lib (older tests/callers) exposes only connect_closing()
-    # — treat it as the single default board so we stay compatible.
-    multi = hasattr(kanban_db, "list_boards")
-    if multi:
-        try:
-            boards = [str(e["slug"]) for e in kanban_db.list_boards()] or [None]
-        except Exception as e:
-            # Could not even enumerate boards — fail safe + surface it.
-            _note_blocking(_UNREADABLE_BOARD)
-            _note_kanban_unavailable(
-                f"could not enumerate kanban boards: {e}")
-            return True
-    else:
-        boards = [None]
+    try:
+        boards, multi = _enum_board_names(kanban_db)
+    except Exception as e:
+        # Could not even enumerate boards — fail safe + surface it.
+        _note_blocking(_UNREADABLE_BOARD)
+        _note_kanban_unavailable(
+            f"could not enumerate kanban boards: {e}")
+        return True
 
     for board in boards:
         if _board_has_active_work(kanban_db, board, multi):
@@ -301,6 +322,177 @@ def _probe_active(conn):
         "   OR status NOT IN ('done', 'archived', 'blocked') "
         "LIMIT 1"
     ).fetchone()
+
+
+def _all_non_terminal(conn):
+    """All non-terminal tasks in ONE board connection, oldest first.
+
+    Matches the exact active-set predicate ``_probe_active`` uses (§: the set
+    "that blocks autodown" is exactly the set "that stale lists"), so a task
+    the C3 interlock treats as work is precisely a task ``stale`` surfaces.
+    ``created_at`` is the epoch integer the real schema stores (kanban_db.py
+    tasks table); NULL/missing values are handled by the caller's age
+    computation.
+    """
+    return conn.execute(
+        "SELECT id, title, assignee, status, created_at FROM tasks "
+        "WHERE status IS NULL "
+        "   OR status NOT IN ('done', 'archived', 'blocked') "
+        "ORDER BY created_at"
+    ).fetchall()
+
+
+# Default ``--older-than`` for ``hscc kanban stale``: a card untouched for a
+# week is genuinely forgotten, not active work (documented in kanban_cli).
+DEFAULT_STALE_DAYS = 7
+
+
+def list_stale_tasks(kanban_db=None, now=None, board=None,
+                     older_than: Optional[int] = DEFAULT_STALE_DAYS):
+    """Return every non-terminal task across ALL boards, oldest first.
+
+    The data behind ``hscc kanban stale``. It REUSES the exact board
+    enumeration ``_has_active_work`` does — ``_load_kanban_db_or_default`` +
+    ``_enum_board_names`` — rather than writing a second one, so the boards
+    "that block autodown" are identical to the boards "that stale lists". This
+    is the whole point: stale exists to surface the cards the C3 interlock is
+    being blocked by.
+
+    Returns ``{boards: [slug...], tasks: [{board, id, status, assignee,
+    age_days, title}...], errors: [str...]}``. ``age_days`` is whole days
+    since ``created_at`` (0 for NULL/missing timestamps). ``tasks`` is sorted
+    oldest-first (largest ``age_days`` first, ties by board then id).
+    Unreadable boards never crash the listing: they are appended to
+    ``errors`` ("reported, does not crash") and the scan continues.
+
+    ``board`` optionally restricts to a single board slug (used by
+    ``hscc autodown status`` to name the blocking board's specific tasks);
+    ``None`` scans all. ``older_than`` filters to tasks at least that many
+    days old (inclusive floor); pass ``None``/0 to disable the filter and
+    list every non-terminal task. ``now`` + ``kanban_db`` are injectable for
+    tests (defaults to the real lib and current UTC).
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if kanban_db is None:
+        kanban_db = _load_kanban_db_or_default()
+    result = {"boards": [], "tasks": [], "errors": []}
+    if kanban_db is None:
+        # Cannot even reach the kanban lib — report it, nothing listed.
+        reason = _KANBAN_LOAD.get("reason") or "kanban lib unreachable"
+        result["errors"].append(reason)
+        return result
+    try:
+        boards, multi = _enum_board_names(kanban_db)
+    except Exception as e:
+        result["errors"].append(f"could not enumerate kanban boards: {e}")
+        return result
+    for b in boards:
+        label = b if b else "default"
+        if board is not None and label != board:
+            continue
+        result["boards"].append(label)
+        try:
+            if multi:
+                with kanban_db.connect_closing(board=b) as conn:
+                    rows = _all_non_terminal(conn)
+            else:
+                with kanban_db.connect_closing() as conn:
+                    rows = _all_non_terminal(conn)
+        except Exception as e:
+            result["errors"].append(f"board {label!r} unreadable: {e}")
+            continue
+        for r in rows:
+            created_at = r["created_at"]
+            age_days = _age_days(created_at, now)
+            if older_than is not None and 0 < older_than and age_days < older_than:
+                continue
+            result["tasks"].append({
+                "board": label,
+                "id": r["id"],
+                "status": r["status"],
+                "assignee": r["assignee"],
+                "age_days": age_days,
+                "title": r["title"],
+            })
+    result["tasks"].sort(
+        key=lambda t: (t["board"], t["id"]))
+    result["tasks"].sort(key=lambda t: t["age_days"], reverse=True)
+    return result
+
+
+def _age_days(created_at, now):
+    """Whole days between ``created_at`` (epoch int) and ``now`` (aware dt)."""
+    if not created_at:
+        return 0
+    try:
+        created = datetime.datetime.fromtimestamp(
+            created_at, datetime.timezone.utc)
+        return max(0, int((now - created).total_seconds() // 86400))
+    except (ValueError, TypeError, OSError, OverflowError):
+        return 0
+
+
+def archive_stale_task(task_id, kanban_db=None):
+    """Archive exactly ONE task by id, across all boards.
+
+    Reuses the SAME board enumeration as ``_has_active_work`` /
+    ``list_stale_tasks`` (``_load_kanban_db_or_default`` +
+    ``_enum_board_names``) — never a second seam. Never bulk-archives: this
+    takes a single ``task_id`` and archives at most one task. Closing a task
+    is a judgement call, so it is never done automatically or in bulk; the
+    operator names the id explicitly.
+
+    Returns ``(label, True)`` on success (``label`` = board the task lives
+    on), or ``(None, False)`` if the task was not found on any readable board.
+    An unreadable board during the search is a "cannot say" for that board —
+    it is skipped and we keep scanning, so a genuinely-not-found id returns
+    ``(None, False)`` and the CLI reports the clear unknown-id error. Reuses
+    ``_load_kanban_db_or_default`` + ``_enum_board_names``.
+    """
+    if kanban_db is None:
+        kanban_db = _load_kanban_db_or_default()
+    if kanban_db is None:
+        raise RuntimeError(_KANBAN_LOAD.get("reason") or "kanban lib unreachable")
+    try:
+        boards, multi = _enum_board_names(kanban_db)
+    except Exception as e:
+        raise RuntimeError(f"could not enumerate kanban boards: {e}")
+    for b in boards:
+        label = b if b else "default"
+        try:
+            if multi:
+                with kanban_db.connect_closing(board=b) as conn:
+                    found = _archive_one(conn, task_id)
+            else:
+                with kanban_db.connect_closing() as conn:
+                    found = _archive_one(conn, task_id)
+        except Exception:
+            # Unreadable board — cannot say the id is (not) here; keep scanning
+            # the other boards so a not-found result is only returned after
+            # every READABLE board has been checked.
+            continue
+        if found:
+            return label, True
+    return None, False
+
+
+def _archive_one(conn, task_id):
+    """``UPDATE tasks SET status='archived' WHERE id=?``; True if it hit one row.
+
+    Commits explicitly so the archive persists regardless of the connection's
+    isolation mode — the real hermes_cli.kanban_db `_sqlite_connect` uses
+    autocommit (isolation_level=None), but an injected/test connection may not;
+    an uncommitted UPDATE would be rolled back when connect_closing closes the
+    connection. A commit on an autocommit connection is a harmless no-op, so
+    calling it unconditionally is safe everywhere.
+    """
+    cur = conn.execute(
+        "UPDATE tasks SET status='archived' WHERE id=? AND status!='archived'",
+        (task_id,),
+    )
+    committed = cur.rowcount == 1
+    conn.commit()
+    return committed
 
 
 # Nominal location of the Hermes agent source tree, which holds

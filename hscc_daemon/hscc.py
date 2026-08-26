@@ -301,7 +301,7 @@ Cluster & templates
   project <cmd>        Project-portfolio (flightdeck) commands: standup verify doctor ...
   api <cmd>            HSCC HTTP API server: start stop status (external apps)
   autodown <cmd>       Idle autodown/autoup: status enable disable wake cancel
-  kanban <cmd>         Board hygiene: blocked (show/recover blocked cards), stale
+  kanban <cmd>         Board hygiene: blocked (show/recover), stale (list/archive)
 
 Utility
   notify <message>     Send a desktop notification
@@ -763,8 +763,9 @@ def main():
         rc = cmd_autodown(args[1:])
         sys.exit(rc)
 
-    # 'kanban' group — SHOW why a card is blocked and recover it (blocked);
-    # when card t_e751e652's `stale` subcommand lands it is delegated too.
+    # 'kanban' group — board hygiene. kanban_blocked owns the single dispatcher
+    # and delegates `stale` to kanban_cli, so both subcommands work regardless
+    # of which card's module landed first.
     if cmd == "kanban":
         from hscc_daemon.kanban_blocked import cmd_kanban
         rc = cmd_kanban(args[1:])
