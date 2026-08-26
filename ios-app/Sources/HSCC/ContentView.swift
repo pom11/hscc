@@ -44,7 +44,7 @@ struct ContentView: View {
             // Probe once at launch so the banner reflects reality immediately.
             refreshConnection()
         }
-        .onChange(of: settings.isConfigured) { _ in
+        .onChange(of: settings.isConfigured) {
             refreshConnection()
         }
     }
