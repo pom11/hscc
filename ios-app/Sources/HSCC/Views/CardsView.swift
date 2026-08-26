@@ -43,7 +43,7 @@ struct CardsView: View {
                 }
             }
             .sheet(isPresented: $showDispatch) {
-                DispatchCardView(settings: settings)
+                DispatchCardView()
             }
             .task { await load() }
         }
@@ -171,7 +171,7 @@ struct CardDetailView: View {
                 ProgressView("Loading…")
             }
         }
-        .navigationTitle(card?.displayTitle ?? "Card")
+        .navigationTitle(card?.title ?? "Card")
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
     }
