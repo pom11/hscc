@@ -255,11 +255,36 @@ def check_proxy(url=None, timeout=None):
     """Check that the local proxy responds with a non-empty model list.
 
     GETs the URL; OK if HTTP 200 and body has a non-empty 'data' list.
+
+    NON-failing during an intentional autodown: when the whole serving layer
+    is torn down by operator config (``classify() == expected_down``), the
+    LiteLLM proxy is part of the teardown set and truthfully lists no models
+    — that is the expected state, not a fault. So, mirroring
+    ``check_daemon_streams`` (verify.py:198-252), the result is then a
+    NON-failing "intentionally down" report that still says so, rather than
+    a RED "no models" that would train operators to ignore it during a
+    normal power-save.
+
+    Genuine proxy failures are NOT blanket-suppressed: the gate key is the
+    SINGLE intentional decision table ``autodown.classify() ==
+    expected_down`` (verify.py:126). With no intentional block — or while
+    the layer should be up (waking/up) — the proxy check behaves exactly as
+    before and a broken/unreachable/proxy-with-no-models still fails. We
+    cannot distinguish "no models because the fleet is intentionally down"
+    from "proxy is genuinely broken" inside that window (they are
+    indistinguishable at the HTTP layer, and the proxy is SUPPOSED to be
+    down), so the safe reading while intentionally down is to not report a
+    fault; any real proxy problem surfaces as soon as the wake completes.
     """
     if url is None:
         url = "http://localhost:4000/v1/models"
     if timeout is None:
         timeout = 4
+
+    if _intentional_autodown_in_effect():
+        return {"name": "proxy", "ok": True,
+                "detail": "intentionally down by autodown: serving layer "
+                          "is down, no models expected"}
 
     try:
         req = urllib.request.Request(url, method="GET")
