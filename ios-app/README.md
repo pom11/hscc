@@ -66,11 +66,13 @@ distributed, and is deliberately NOT App Store–ready.**
     from a project's Board section. The per-project board list itself lives in
     `ProjectsView.swift` (`ProjectBoardView`).
   - `Views/OrchestratorChatView.swift` — the **C5** chat surface: send a prompt
-    to a project's orchestrator (`POST /v1/orchestrator/chat`, confirm-gated
-    like every other mutation), with a prompt→reply transcript and honest
-    failure rendering. Reachable from a project's detail Chat section
-    (fixed to that project) — the standalone project-picker form is what the
-    old Chat tab used.
+    to a project's orchestrator via the job-based flow
+    (`POST /v1/orchestrator/chat` returns 202 with a `job_id` immediately, then
+    `GET /v1/orchestrator/chat/{id}` is polled for the reply), confirm-gated
+    like every other mutation, with a prompt→reply transcript, honest failure
+    rendering, and an elapsed-time in-flight footer. Reachable from a project's
+    detail Chat section (fixed to that project) — the standalone project-picker
+    form is what the old Chat tab used.
   - `Intents/` — the **B5** Siri App Intents surface (in-car, hands-free):
     `ClusterStatusIntent` + `ReviewQueueIntent` (speak each endpoint's `speak`
     one-liner), `CannedCard` (an `AppEnum` of pre-defined cards) +

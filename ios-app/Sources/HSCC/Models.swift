@@ -358,22 +358,67 @@ struct QAQueueResponse: Decodable, Speakable {
     let speak: String
 }
 
-// MARK: - Orchestrator chat (C5)
+// MARK: - Orchestrator chat (C5, job-based)
 
-/// POST /v1/orchestrator/chat — the orchestrator's reply.
+/// POST /v1/orchestrator/chat — the immediate 202 response that STARTS a job.
 ///
-/// Matches the ACTUAL 200 response shape in
-/// `hscc-api/routes_orchestrator.py`:
-///   { "reply": "<text>", "profile": "<P>-orch", "session": "<P>", "speak": "..." }
-/// `reply` is the full orchestrator reply the transcript shows; `speak` is the
-/// short server-derived one-liner (B5 may read it aloud). A non-2xx makes the
-/// client throw, so this is only ever decoded from a 2xx success — a failed or
-/// timed-out chat is never rendered as a reply.
-struct OrchestratorChatResponse: Decodable, Speakable {
-    let reply: String
+/// Matching `hscc-api/routes_orchestrator.py`: the POST validates + resolves
+/// the project synchronously, spawns a background thread that actually invokes
+/// the orchestrator, and returns **202 Accepted** with a `job_id` — NOT the
+/// reply. This kills the 90 s dead wait on the phone: the call returns in
+/// milliseconds, and the answer is collected by polling
+/// `GET /v1/orchestrator/chat/{id}` (see `OrchestratorChatJobStatus`).
+///
+/// A non-2xx (409/400/502/503/504) still makes the client throw — it never
+/// yields a job object. The orchestrator is messaged asynchronously after this
+/// returns, so a killed/backgrounded app can still pick the answer up later by
+/// job_id.
+struct OrchestratorChatJobResponse: Decodable, Speakable {
+    let jobID: String
+    let project: String?
+    let status: String
+    let elapsed: Double
     let profile: String?
     let session: String?
     let speak: String
+
+    enum CodingKeys: String, CodingKey {
+        case jobID = "job_id"
+        case project, status, elapsed, profile, session, speak
+    }
+}
+
+/// GET /v1/orchestrator/chat/{id} — a polled job's current state.
+///
+/// `status` is `queued` / `running` / `done`, or a terminal failure state
+/// (`timeout` / `unavailable` / `error`). `reply` + `speak` are present only
+/// when `status == "done"`; `error` is present only on a terminal failure and
+/// carries the unified `{ code, message, speak }` shape. `elapsed` is the
+/// honest server-side wall-clock from submission.
+struct OrchestratorChatJobStatus: Decodable {
+    let jobID: String
+    let project: String?
+    let status: String
+    let elapsed: Double
+    let reply: String?
+    let profile: String?
+    let session: String?
+    let speak: String?
+    let error: ChatJobError?
+
+    enum CodingKeys: String, CodingKey {
+        case jobID = "job_id"
+        case project, status, elapsed, reply, profile, session, speak, error
+    }
+
+    var isTerminal: Bool { status == "done" || status == "timeout" || status == "unavailable" || status == "error" }
+}
+
+/// The unified `{ code, message, speak }` error carried on a failed chat job.
+struct ChatJobError: Decodable {
+    let code: String
+    let message: String
+    let speak: String?
 }
 
 // MARK: - Generic / untyped bucket

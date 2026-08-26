@@ -409,7 +409,7 @@ struct HSCCClient {
                               as: StopClusterResponse.self)
     }
 
-    /// POST /v1/orchestrator/chat — send a prompt to a project's orchestrator.
+    /// POST /v1/orchestrator/chat — START an async orchestrator chat job.
     ///
     /// Body: `{ project: "<name>"|null, prompt: "...", confirm: true }`.
     /// This is a MUTATION: the orchestrator can decompose the prompt and
@@ -420,31 +420,48 @@ struct HSCCClient {
     /// `project` may be `nil` (or `"general"`) → the catch-all `general`
     /// orchestrator (`general-orch` / `general` session / `default` board).
     /// Unknown project → 400; missing/empty prompt → 400; missing confirm →
-    /// 409. On success returns the orchestrator's `reply` (the transcript text).
+    /// 409.
+    ///
+    /// Returns **immediately** (202 Accepted) with a `job_id` — NOT the reply.
+    /// The actual invocation runs in a background thread on the server; collect
+    /// it with `orchestratorChatPoll(jobID:)`, which reports queued/running/
+    /// done + honest `elapsed` and the reply once finished. Because the POST
+    /// returns in milliseconds (no 90 s dead wait), and the server keeps the
+    /// job alive independently of this connection, a dropped/backgrounded
+    /// connection no longer loses an answer the server is still computing.
     ///
     /// Honest failures — a non-2xx ALWAYS throws and is surfaced as a failure,
     /// never as a reply:
     ///   * 409 — confirm missing/refused (shouldn't happen here; we always send it)
     ///   * 400 bad_request / unknown_project — bad prompt or unknown project
-    ///   * 502 orchestrator_error — the hermes invocation failed (empty reply / bad exit)
-    ///   * 503 orchestrator_unavailable — the named session hasn't been created yet
-    ///   * 504 orchestrator_timeout — no reply within 180 s (a real, distinct state)
-    /// Callers distinguish timeout (504) from a normal failure so a timeout is
-    /// surfaced as a timeout, not a silent empty reply.
-    func orchestratorChat(project: String? = nil,
-                          prompt: String) async throws -> OrchestratorChatResponse {
+    /// The timeout/502/503/504 conditions now surface through the JOB's terminal
+    /// error state (poll), not as an HTTP error on the POST.
+    func orchestratorChatStart(project: String? = nil,
+                               prompt: String) async throws -> OrchestratorChatJobResponse {
         var payload: [String: Any] = ["prompt": prompt, "confirm": true]
         if let project, !project.isEmpty {
             payload["project"] = project
         }
         // `project` absent ⇒ the general orchestrator. Always confirms.
-        // 300s, not the 60s default: a real orchestrator answer takes 30-90s
-        // (measured floor 16.8s). The server keeps working regardless, so a
-        // client-side abort would lose an answer that actually arrived.
+        // 30s, not the old 300s: the POST now returns in milliseconds (it only
+        // validates + spawns a thread), so a 30s cap is plenty — anything
+        // longer means the server itself misbehaved, and the job is still
+        // running regardless so nothing is lost.
         return try await post("/v1/orchestrator/chat",
                               body: payload,
-                              as: OrchestratorChatResponse.self,
-                              timeout: 300)
+                              as: OrchestratorChatJobResponse.self,
+                              timeout: 30)
+    }
+
+    /// GET /v1/orchestrator/chat/{id} — poll an async chat job.
+    ///
+    /// Read-only (the orchestrator was already messaged by the POST), so no
+    /// `confirm` is required — only bearer auth. Returns the job's current
+    /// state: `queued`/`running`, `done` (with `reply`), or a terminal failure
+    /// state (`timeout`/`unavailable`/`error`) carrying a unified `error`.
+    /// Unknown job id → 404 throws.
+    func orchestratorChatPoll(jobID: String) async throws -> OrchestratorChatJobStatus {
+        try await get("/v1/orchestrator/chat/\(jobID)", as: OrchestratorChatJobStatus.self)
     }
 
     // MARK: - C6 mutations (confirm-gated)

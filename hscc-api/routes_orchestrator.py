@@ -1,4 +1,4 @@
-"""HSCC HTTP API — Phase C2: ``POST /v1/orchestrator/chat``.
+"""HSCC HTTP API — Phase C2: orchestrator chat (job-based).
 
 The conversational endpoint: talk to a project's orchestrator DIRECTLY,
 bypassing Telegram. Unlike the deterministic structured ops (A2-A4), this is
@@ -25,13 +25,36 @@ exchange into it — the Telegram-topic analog. The localhost:4000 proxy is
 litellm, a stateless OpenAI-compatible inference relay with no Hermes session
 store / profile / memory; it cannot bind a named session, so it cannot satisfy
 the session-continuity requirement.
-"""
 
+Why job-based (Phase 1 — do NOT fake streaming):
+``hermes chat -Q`` emits the reply ONCE, complete, when the underlying
+``run_conversation`` returns (see cli.py:17858-17896 — quiet mode sets
+``stream_delta_callback = None`` and ``print(response)`` once). There is NO
+supported incremental/output-streaming interface on the ``hermes chat`` CLI
+(no ``--stream`` / SSE / ndjson flag; the CLI's streaming is interactive
+display chrome, gated on ``display.streaming`` which is off, and routes
+through ANSI ``_cprint`` box drawing — not a machine-readable token stream).
+So token streaming is NOT available, and faking it would mislead the operator.
+
+The honest fix is a JOB API (option b):
+  * ``POST /v1/orchestrator/chat`` VALIDATES + RESOLVES the project, spawns a
+    background thread that actually invokes hermes, and returns IMMEDIATELY
+    (202) with a ``job_id`` + ``status`` — no more dead-wait on the phone.
+  * ``GET /v1/orchestrator/chat/{id}`` polls the job: ``queued`` / ``running``
+    / ``done`` (with the reply) / a terminal error state, plus honest
+    ``elapsed`` seconds.
+This ALSO fixes a real failure mode: a dropped connection no longer loses a
+90 s answer the server already computed — the background thread finishes and
+the phone (or a backgrounded app) can pick it up by job_id later.
+"""
 from __future__ import annotations
 
+import itertools
 import re
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 from api_server import ApiError, ROUTES
@@ -126,11 +149,30 @@ def _backing_invoke(profile, session, prompt, timeout=_DEFAULT_TIMEOUT):
         )
 
     reply = (proc.stdout or "").strip()
+    # ``-Q`` still lets a couple of harmless one-line notices through to stdout
+    # BEFORE the reply (observed empirically, t_bc242def Phase 1) — e.g. the
+    # cwd-restore line ``↪ restored workspace dir: <path>``. Strip those so the
+    # answer we parse is never polluted by a notice.
+    reply = "\n".join(
+        ln for ln in reply.splitlines() if not _is_notice_line(ln)
+    ).strip()
     if not reply:
         raise _OrchestratorInvocationError(
             f"orchestrator {profile!r} returned an empty reply"
         )
     return reply, profile, session
+
+
+def _is_notice_line(line: str) -> bool:
+    """True when a stdout line is a channel notice, not part of the reply.
+
+    ``hermes chat -Q`` can print a couple of harmless one-liners to stdout
+    BEFORE the reply (observed, t_bc242def Phase 1). The one seen is the
+    cwd-restore notice ``↪ restored workspace dir: <path>``. Matched
+    defensively (substring) so future-notice drift still lands on the
+    conservative side: unknown lines pass through untouched.
+    """
+    return "restored workspace dir:" in line.strip()
 
 
 # --------------------------------------------------------------------------- #
@@ -154,88 +196,131 @@ class _OrchestratorInvocationError(_OrchestratorError):
 
 
 # --------------------------------------------------------------------------- #
-# Handler
+# Job store (in-memory, thread-safe). Lives as long as the server process, so
+# a dropped POST connection does NOT lose a reply the background thread later
+# completes — the phone can pick it up by job_id via GET.
 # --------------------------------------------------------------------------- #
 
-def handle_orchestrator_chat(server, ctx, query, body):
-    """POST /v1/orchestrator/chat — send a prompt to a project's orchestrator.
+_jobs_lock = threading.Lock()
+_jobs = {}                       # job_id -> _ChatJob
+_job_ids = itertools.count(1)
 
-    Body: ``{"project": "<name>"|null, "prompt": "...", "confirm": true}``.
-      * ``project`` absent/null -> the ``general`` orchestrator;
-      * unknown project -> 400;
-      * ``prompt`` required -> 400 if missing/empty;
-      * ``confirm: true`` REQUIRED -> 409 otherwise.
 
-    Response: the orchestrator's reply text (``reply``), the ``profile`` and
-    ``session`` used, and a short ``speak`` summary (the iOS client may speak
-    it). Transport or timeout failures surface as clean 5xx — the route never
-    crashes the server and never leaks a traceback or token.
+class _ChatJob:
+    """One asynchronous orchestrator chat invocation.
+
+    Status transitions: ``queued`` -> ``running`` -> ``done``, or to a
+    terminal error state (``timeout`` / ``unavailable`` / ``error``). ``reply``
+    and the identity fields are set only on ``done``; ``error`` carries a clean
+    code+message on the failure states. ``elapsed`` is honest wall-clock from
+    submission.
     """
-    data = _parse_body(body)
-    _require_confirm(data)
-    prompt = data.get("prompt")
-    if prompt is None or not str(prompt).strip():
-        raise ApiError(
-            400, "bad_request", "missing required field 'prompt'",
-            "Prompt is required.",
-        )
 
-    project = data.get("project")
-    registry_path = _registry_path(ctx)
-
-    # Resolve project -> orchestrator identity (general when absent/null).
-    try:
-        resolved = _backing_resolve(project, registry_path)
-    except UnknownProjectError as exc:
-        raise ApiError(
-            400, "unknown_project", str(exc),
-            f"Unknown project {project!r}.",
-        )
-    except OrchestratorError as exc:
-        # e.g. a registry project with no board — cannot route an orchestrator.
-        raise ApiError(
-            400, "bad_request", str(exc),
-            f"Project {project!r} cannot resolve to an orchestrator.",
-        )
-
-    profile = resolved["profile"]
-    session = resolved["session"]
-
-    # Send the prompt. A pathological orchestrator could take a while; the
-    # backing call enforces the timeout and maps it to a clean error.
-    try:
-        reply, profile, session = _backing_invoke(
-            profile, session, str(prompt).strip(), timeout=_DEFAULT_TIMEOUT,
-        )
-    except _OrchestratorTimeout as exc:
-        raise ApiError(504, "orchestrator_timeout", str(exc),
-                       "The orchestrator did not reply in time.")
-    except _OrchestratorUnavailable as exc:
-        raise ApiError(503, "orchestrator_unavailable", str(exc),
-                       "The orchestrator is not available right now.")
-    except _OrchestratorInvocationError as exc:
-        raise ApiError(502, "orchestrator_error", str(exc),
-                       "The orchestrator call failed.")
-
-    # Keep the human-facing summary short (the iOS client may speak it).
-    return 200, {
-        "reply": reply,
-        "profile": profile,
-        "session": session,
-        "speak": f"{profile} says: {_shorten(reply)}",
+    # terminal error status -> (public error code, speak-safe headline)
+    _ERROR_MAP = {
+        "timeout": ("orchestrator_timeout",
+                    "The orchestrator did not reply in time."),
+        "unavailable": ("orchestrator_unavailable",
+                        "The orchestrator is not available right now."),
+        "error": ("orchestrator_error",
+                  "The orchestrator call failed."),
     }
 
+    def __init__(self, job_id, project, profile, session, prompt):
+        self.job_id = job_id
+        self.project = project
+        self.profile = profile
+        self.session = session
+        self.prompt = prompt
+        self.submitted_at = time.time()
+        self.finished_at: float | None = None
+        self.lock = threading.Lock()
+        self.status = "queued"
+        # done-state payload
+        self.reply: str | None = None
+        self.speak: str | None = None
+        # error-state payload
+        self.error: dict | None = None
 
-def _shorten(text: str, limit: int = 120) -> str:
-    """Trim a long reply for the one-line ``speak`` summary."""
-    text = " ".join(text.split())
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1].rstrip() + "…"
+
+def _new_job(project, profile, session, prompt) -> _ChatJob:
+    """Create (and store) a queued job under the store lock."""
+    with _jobs_lock:
+        job_id = f"chat-{next(_job_ids)}"
+        job = _ChatJob(job_id, project, profile, session, prompt)
+        _jobs[job_id] = job
+    return job
+
+
+def _job_dict(job: _ChatJob) -> dict:
+    """Snapshot a job as a JSON-serialisable dict (safe to hand the client)."""
+    with job.lock:
+        base = {
+            "job_id": job.job_id,
+            "project": job.project,
+            "status": job.status,
+        }
+        if job.status == "done":
+            finished = job.finished_at if job.finished_at is not None else time.time()
+            base["elapsed"] = round(finished - job.submitted_at, 3)
+            base["reply"] = job.reply
+            base["profile"] = job.profile
+            base["session"] = job.session
+            base["speak"] = job.speak
+        else:
+            base["elapsed"] = round(time.time() - job.submitted_at, 3)
+            if job.error is not None:
+                base["error"] = job.error
+        return base
+
+
+def _run_job(job: _ChatJob):
+    """Background worker: invoke the orchestrator and record the outcome.
+
+    Runs in a daemon thread spawned by ``handle_orchestrator_chat``. Any
+    transport failure maps to a terminal job error state with a clean
+    code+message — never a raw exception, never a leaked detail.
+    """
+    with job.lock:
+        job.status = "running"
+    try:
+        reply, profile, session = _backing_invoke(
+            job.profile, job.session, job.prompt, timeout=_DEFAULT_TIMEOUT,
+        )
+    except _OrchestratorTimeout as exc:
+        _finish_job_error(job, "timeout", str(exc))
+        return
+    except _OrchestratorUnavailable as exc:
+        _finish_job_error(job, "unavailable", str(exc))
+        return
+    except _OrchestratorInvocationError as exc:
+        _finish_job_error(job, "error", str(exc))
+        return
+    except Exception:  # never surface raw internals to the client
+        _finish_job_error(job, "error",
+                          "an unexpected orchestrator failure occurred — "
+                          "check ~/.hscc/api.log for details")
+        return
+
+    with job.lock:
+        job.status = "done"
+        job.reply = reply
+        job.speak = f"{profile} says: {_shorten(reply)}"
+        job.finished_at = time.time()
+
+
+def _finish_job_error(job: _ChatJob, status: str, message: str):
+    """Land a job in a terminal error state with a clean, client-safe shape."""
+    code, headline = _ChatJob._ERROR_MAP[status]
+    with job.lock:
+        job.status = status
+        job.error = {"code": code, "message": message,
+                     "speak": headline}
+        job.finished_at = time.time()
 
 
 # --------------------------------------------------------------------------- #
-# Body helpers (mirror routes_actions)
+# Shared POST validation (confirm + prompt), used by handle_orchestrator_chat
 # --------------------------------------------------------------------------- #
 
 def _parse_body(body: bytes) -> dict:
@@ -264,9 +349,118 @@ def _require_confirm(data: dict) -> None:
     )
 
 
+def _validate_prompt(data: dict) -> str:
+    """Pull + validate the required ``prompt``; 400 when missing/blank."""
+    prompt = data.get("prompt")
+    if prompt is None or not str(prompt).strip():
+        raise ApiError(
+            400, "bad_request", "missing required field 'prompt'",
+            "Prompt is required.",
+        )
+    return str(prompt).strip()
+
+
+# --------------------------------------------------------------------------- #
+# Handlers
+# --------------------------------------------------------------------------- #
+
+def handle_orchestrator_chat(server, ctx, query, body):
+    """POST /v1/orchestrator/chat — start an async orchestrator chat JOB.
+
+    Body: ``{"project": "<name>"|null, "prompt": "...", "confirm": true}``.
+      * ``project`` absent/null -> the ``general`` orchestrator;
+      * unknown project -> 400;
+      * ``prompt`` required -> 400 if missing/empty;
+      * ``confirm: true`` REQUIRED -> 409 otherwise.
+
+    The request VALIDATES + RESOLVES synchronously (so a bad project/prompt
+    returns a clean 4xx immediately), then spawns a background thread that
+    actually invokes the orchestrator, and returns **202 Accepted** with a
+    ``job_id`` — NOT the reply. The phone polls
+    ``GET /v1/orchestrator/chat/{id}`` for ``queued``/``running``/``done`` +
+    honest ``elapsed`` and the reply when finished. This kills the 90 s dead
+    wait: the POST returns in milliseconds, and a dropped connection no longer
+    loses an answer the server is still computing.
+    """
+    data = _parse_body(body)
+    _require_confirm(data)
+    prompt = _validate_prompt(data)
+    project = data.get("project")
+    registry_path = _registry_path(ctx)
+
+    # Resolve project -> orchestrator identity (general when absent/null).
+    try:
+        resolved = _backing_resolve(project, registry_path)
+    except UnknownProjectError as exc:
+        raise ApiError(
+            400, "unknown_project", str(exc),
+            f"Unknown project {project!r}.",
+        )
+    except OrchestratorError as exc:
+        # e.g. a registry project with no board — cannot route an orchestrator.
+        raise ApiError(
+            400, "bad_request", str(exc),
+            f"Project {project!r} cannot resolve to an orchestrator.",
+        )
+
+    profile = resolved["profile"]
+    session = resolved["session"]
+
+    # Create the job and run the real invocation on a daemon background thread
+    # (the server is ThreadingHTTPServer with daemon_threads, so this thread
+    # lives as long as the process — the reply is NOT lost when the POST
+    # connection closes).
+    job = _new_job(project, profile, session, prompt)
+    worker = threading.Thread(target=_run_job, args=(job,), daemon=True)
+    worker.start()
+
+    return 202, {
+        "job_id": job.job_id,
+        "project": project,
+        "status": "queued",
+        "elapsed": 0.0,
+        "profile": profile,
+        "session": session,
+        "speak": f"Chat request accepted (job {job.job_id}).",
+    }
+
+
+def handle_orchestrator_chat_job(server, ctx, query, body):
+    """GET /v1/orchestrator/chat/{id} — poll an async chat job.
+
+    Read-only (the orchestrator was already messaged by the POST), so no
+    ``confirm`` is required — only bearer auth (enforced by the dispatcher).
+
+    Response:
+      * ``queued``/``running`` -> ``{job_id, project, status, elapsed}``;
+      * ``done`` -> plus ``reply``, ``profile``, ``session``, ``speak``;
+      * terminal error state (``timeout``/``unavailable``/``error``) -> plus an
+        ``error`` object ``{code, message, speak}`` mirroring the API's error
+        shape so the client can surface each real condition distinctly.
+    Unknown job id -> 404.
+    """
+    job_id = query.get("id")
+    with _jobs_lock:
+        job = _jobs.get(job_id)  # type: ignore[arg-type]
+    if job is None:
+        raise ApiError(404, "not_found", f"unknown chat job {job_id!r}",
+                       "That chat job does not exist (it may have expired).")
+    return 200, _job_dict(job)
+
+
+def _shorten(text: str, limit: int = 120) -> str:
+    """Trim a long reply for the one-line ``speak`` summary."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
 # --------------------------------------------------------------------------- #
 # Route registration (import side-effect; loaded by api_server.py)
 # --------------------------------------------------------------------------- #
 
 ROUTES.append(("POST", re.compile(r"^/v1/orchestrator/chat$"),
                handle_orchestrator_chat))
+ROUTES.append(("GET", re.compile(r"^/v1/orchestrator/chat/(?P<id>[^/]+)$"),
+               handle_orchestrator_chat_job))
