@@ -99,7 +99,7 @@ This is the **host** you enter in the app. Any of these work:
 Open the app's **Settings** screen and fill in:
 
 - **Host** — the Mac's tailnet IP (e.g. `100.64.0.1`) or hostname.
-- **Port** — `8787` by default (HSCC API default).
+- **Port** — `8788` by default on this deployment.
 - **Token** — see §3.
 
 Tap **Test connection** — the app calls `GET /v1/ping` against those settings
