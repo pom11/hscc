@@ -38,10 +38,14 @@ Usage: hscc autodown <subcommand> [args]
   hscc autodown status [--json]              Show enabled? state? idle_minutes? last activity? down_since?
   hscc autodown enable [--idle-minutes <n>]  Arm idle autodown (default 10). Resets the idle timer
                                                so arming never immediately tears down. Non-acting: if
-                                               serving is down it does NOT start it.
-  hscc autodown enable --force               Arm even when active Hermes cron jobs exist (autodown may
-                                               power the cluster down when they are due). Overridden jobs
-                                               are recorded and shown in 'status'.
+                                               serving is down it does NOT start it. Aborts non-zero if an
+                                               ACTIVE model-requiring Hermes cron job exists (one that
+                                               runs an agent and needs the GPU serving layer). CPU-only
+                                               watchdogs (no_agent:true, model:null) do NOT block — they
+                                               are noted.
+  hscc autodown enable --force               Arm even when active model-requiring Hermes cron jobs
+                                               exist (autodown may power the cluster down when they are
+                                               due). Overridden jobs are recorded and shown in 'status'.
   hscc autodown disable                      Disarm autodown and clear the intentional watchdog block so
                                                ordinary supervision resumes. Does NOT restart serving — if
                                                you want it up, run 'hscc autodown wake' or bring it up another way.
@@ -134,6 +138,19 @@ def _cmd_status(rest, json_mode):
     # guessing why autodown never fires.
     kc = autodown.kanban_check_state()
 
+    # Informational: active Hermes cron jobs, classified (feat t_c94f8b8c).
+    # status is read-only — we only READ jobs.json (Hermes' source of truth),
+    # never write it. cpu_only watchdogs are noted so the operator still knows
+    # they exist, even though they never block arming; model-requiring ones are
+    # surfaced because they are the only reason enable would (or, force-armed,
+    # did) abort.
+    active_crons = autodown.list_active_cron_jobs()
+    if isinstance(active_crons, list):
+        cpu_only_crons = [j for j in active_crons if j.get("cpu_only")]
+        model_crons = [j for j in active_crons if not j.get("cpu_only")]
+    else:
+        cpu_only_crons, model_crons = [], []
+
     status = {
         "enabled": bool(cfg.get("enabled")),
         "state": cfg.get("state"),
@@ -152,6 +169,12 @@ def _cmd_status(rest, json_mode):
         # autodown is armed despite scheduled jobs (§7, feat t_2b711a94).
         "force_armed": bool(cfg.get("force_armed")),
         "force_armed_overrides": cfg.get("force_armed_overrides") or [],
+        # Active cron jobs, classified (feat t_c94f8b8c): cpu_only watchdogs
+        # never block arming; model-requiring jobs are the abort-able ones.
+        "active_cron_cpu_only": [j.get("name") or j.get("id")
+                                 for j in cpu_only_crons],
+        "active_cron_model": [j.get("name") or j.get("id")
+                              for j in model_crons],
     }
     if json_mode:
         print(json.dumps(status))
@@ -170,6 +193,17 @@ def _cmd_status(rest, json_mode):
         print("  force-armed:     YES (armed despite active Hermes cron jobs)")
         for job in status["force_armed_overrides"]:
             print(f"    overridden job: {job}")
+    # Informational note for any active CPU-only watchdog(s) — they do not
+    # block arming (and autodown never wakes for them), but the operator
+    # should still know they exist (feat t_c94f8b8c).
+    if status["active_cron_cpu_only"]:
+        names = ", ".join(status["active_cron_cpu_only"])
+        print(f"  active cron (cpu-only): {names} — CPU-side watchdog(s), "
+              "not GPU-dependent, do not block arming.")
+    if status["active_cron_model"]:
+        names = ", ".join(status["active_cron_model"])
+        print(f"  active cron (model):    {names} — model-requiring, "
+              "the reason enable aborts/force-arms.")
     print(f"  state:           {status['state']}")
     if status["blocked_by"]:
         print(f"  blocked by:      {status['blocked_by']}")
@@ -199,18 +233,30 @@ def _cmd_enable(rest, json_mode):
     an immediate teardown. NON-ACTING: if the serving layer is currently down it
     does NOT start it — a separate ``wake`` (or an inbound event) brings it up.
 
-    **Cron-guard (feat t_2b711a94 §7):** before arming, enumerate ACTIVE Hermes
-    scheduled jobs via ``autodown.list_active_cron_jobs`` (Hermes' on-disk
-    source of truth, ``~/.hermes/cron/jobs.json``). If any are active, ``enable``
-    ABORTS — prints the jobs (name, schedule, next run), explains that autodown
-    may power the cluster down when they are due, and exits non-zero. A config
-    we cannot read (unreadable/absent jobs.json) is treated as "cannot
-    determine" and ALSO aborts — autodown never arms on an unverifiable signal.
+    **Cron-guard (feat t_c94f8b8c, refined from t_2b711a94 §7):** before
+    arming, enumerate ACTIVE Hermes scheduled jobs via
+    ``autodown.list_active_cron_jobs`` (Hermes' on-disk source of truth,
+    ``~/.hermes/cron/jobs.json``). The guard only aborts for jobs that ACTUALLY
+    need the serving layer:
 
-    ``--force`` overrides the guard: it arms anyway, prints the jobs that were
-    overridden, and records ``force_armed: true`` + the overridden job names in
-    autodown.json so ``hscc autodown status`` can always show why autodown is
-    armed despite scheduled jobs.
+    - a **model-requiring** active job (one with a ``model``, or ``no_agent``
+      false/absent — i.e. it runs an agent) ⇒ ABORT: prints the job (name,
+      schedule, next run), explains that autodown may power the cluster down
+      when it is due, and exits non-zero.
+    - a **CPU-only** active job (``no_agent: true`` AND ``model: null`` — a
+      script watchdog that never touches the GPU) ⇒ does NOT abort. It is
+      mentioned as an informational note so the operator still knows it exists.
+    - a job whose nature we **cannot determine** (missing/ambiguous fields) is
+      treated as model-requiring and ABORTS — never arm on an unverifiable
+      signal.
+    - an unreadable/absent jobs.json is also "cannot determine" and aborts.
+
+    Only ACTIVE jobs count; paused/disabled jobs never conflict.
+
+    ``--force`` overrides the guard: it arms anyway, prints the model-requiring
+    jobs that were overridden, and records ``force_armed: true`` + the
+    overridden job names in autodown.json so ``hscc autodown status`` can
+    always show why autodown is armed despite scheduled model-requiring jobs.
     """
     idle_minutes, err = _parse_idle_minutes(rest)
     if err:
@@ -223,39 +269,53 @@ def _cmd_enable(rest, json_mode):
     # Cron-guard: read Hermes' scheduled jobs. Fail-closed — an unreadable/
     # absent jobs.json is "cannot determine" and blocks arming unless forced.
     active_jobs = autodown.list_active_cron_jobs()
+    unreadable = active_jobs is autodown.CRON_UNREADABLE
+
+    # Split ACTIVE jobs by whether they need the serving layer (feat
+    # t_c94f8b8c). cpu_only (no_agent:true AND model:null) watchdogs never
+    # touch the GPU and do NOT block arming — they are informational notes.
+    # Every other active job (a real model, no_agent false/absent, or fields
+    # we cannot read) is model-requiring and DOES block — fail-safe.
+    model_jobs = ([j for j in active_jobs if not j.get("cpu_only")]
+                  if isinstance(active_jobs, list) else [])
+    cpu_only_jobs = ([j for j in active_jobs if j.get("cpu_only")]
+                     if isinstance(active_jobs, list) else [])
 
     if not force:
-        if active_jobs is autodown.CRON_UNREADABLE:
+        if unreadable:
             return _error(
                 "cannot determine Hermes cron jobs — "
                 f"{autodown.CRON_JOBS_FILE} is unreadable or absent. Autodown "
                 "does NOT arm on an unverifiable signal. Fix the cron config "
                 "(or pass --force to override).", json_mode)
-        if active_jobs:
-            # Abort: do NOT enable. Print the conflicting jobs + why, exit
-            # non-zero (§7).
+        if model_jobs:
+            # Abort: do NOT enable. Print the MODEL-REQUIRING jobs + why, exit
+            # non-zero (§7). CPU-only jobs are never the blocker — only jobs
+            # that need the serving layer conflict with powering it down.
             names = ", ".join(
-                (j.get("name") or j.get("id")) for j in active_jobs)
+                (j.get("name") or j.get("id")) for j in model_jobs)
             if json_mode:
                 print(json.dumps({
                     "error": (
-                        "aborting: active Hermes cron jobs present — autodown "
-                        "may power the cluster down when they are due"),
-                    "active_cron_jobs": active_jobs, "exit": 1,
+                        "aborting: active model-requiring Hermes cron jobs "
+                        "present — autodown may power the cluster down when "
+                        "they are due"),
+                    "active_cron_jobs": model_jobs, "exit": 1,
                 }))
             else:
-                print("autodown: NOT armed — aborting: active Hermes cron jobs "
-                      "exist and autodown may power the cluster down when they "
-                      "are due.", file=sys.stderr)
-                for j in active_jobs:
+                print("autodown: NOT armed — aborting: active "
+                      "model-requiring Hermes cron jobs exist and autodown "
+                      "may power the cluster down when they are due.",
+                      file=sys.stderr)
+                for j in model_jobs:
                     print(f"  scheduled job:   {j.get('name') or j.get('id')}",
                           file=sys.stderr)
                     print(f"    schedule:      {j.get('schedule_display') or '?'}",
                           file=sys.stderr)
                     print(f"    next run:      {j.get('next_run_at') or '?'}",
                           file=sys.stderr)
-                print(f"  ({len(active_jobs)} active job(s): {names})",
-                      file=sys.stderr)
+                print(f"  ({len(model_jobs)} active model-requiring job(s): "
+                      f"{names})", file=sys.stderr)
                 print("  Fix: pause/disable the conflicting job(s), or "
                       "re-run with --force to arm anyway.", file=sys.stderr)
             return 1
@@ -266,16 +326,17 @@ def _cmd_enable(rest, json_mode):
     cfg = autodown.load_config()
     cfg["enabled"] = True
     cfg["idle_minutes"] = idle_minutes
-    if force and active_jobs not in (None, autodown.CRON_UNREADABLE) \
-            and active_jobs:
-        # Force-armed: record that we overrode active cron jobs so status can
-        # always explain why autodown is armed despite them (§7).
+    if force and model_jobs:
+        # Force-armed: record that we overrode the MODEL-REQUIRING cron jobs
+        # so status can always explain why autodown is armed despite them (§7).
+        # CPU-only jobs never appear here — they do not conflict, so there is
+        # nothing to override.
         cfg["force_armed"] = True
         cfg["force_armed_overrides"] = [
-            j.get("name") or j.get("id") for j in active_jobs]
+            j.get("name") or j.get("id") for j in model_jobs]
     else:
-        # Normal arm (no active cron conflict), or force with nothing to
-        # override, or force with an undeterminable config — clear any prior
+        # Normal arm (no model-requiring cron conflict), or force with nothing
+        # to override, or force with an undeterminable config — clear any prior
         # force markers so a later clean arm is not mislabeled.
         cfg["force_armed"] = False
         cfg["force_armed_overrides"] = []
@@ -290,15 +351,22 @@ def _cmd_enable(rest, json_mode):
             "force_armed_overrides": cfg["force_armed_overrides"],
         }))
     else:
-        if force and active_jobs not in (None, autodown.CRON_UNREADABLE) \
-                and active_jobs:
-            # Report which jobs were overridden (§7).
+        if force and model_jobs:
+            # Report which MODEL-REQUIRING jobs were overridden (§7).
             print(f"autodown: ENABLED (idle_minutes={idle_minutes}, FORCED)")
-            for j in active_jobs:
+            for j in model_jobs:
                 print(f"  overrode schedule: {j.get('name') or j.get('id')}"
                       f" (schedule {j.get('schedule_display') or '?'})")
         else:
             print(f"autodown: ENABLED (idle_minutes={idle_minutes})")
+        # Informational: active CPU-only watchdogs exist but did not block —
+        # the operator should still know they are scheduled (feat t_c94f8b8c).
+        if cpu_only_jobs:
+            names = ", ".join(
+                (j.get("name") or j.get("id")) for j in cpu_only_jobs)
+            print(f"  Note: {len(cpu_only_jobs)} active CPU-only cron "
+                  f"watchdog(s) present ({names}) — not GPU-dependent, "
+                  "so they do not block arming.")
         print("  Idle timer reset — will not tear down for at least "
               f"{idle_minutes} minutes.")
         if cfg["state"] == "down":

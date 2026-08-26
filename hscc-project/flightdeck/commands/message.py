@@ -171,6 +171,104 @@ def _read_body(args: argparse.Namespace) -> tuple[str | None, str | None]:
         return None, f"could not read body file {body_file!r}: {exc}"
 
 
+# --------------------------------------------------------------------------- #
+# dispatch — cluster-readiness guard (idle autodown coordination)
+# --------------------------------------------------------------------------- #
+# ``hscc project message dispatch`` creates work that the fleet dispatcher then
+# spawns agents to execute. If the serving layer is intentionally DOWN (idle
+# autodown) or mid-wake when the card is created, the dispatcher may spawn a
+# worker into a still-loading cluster and the work is destroyed (observed live:
+# workers exit rc=0 without calling kanban_complete — a protocol violation with
+# no model to talk to). Since dispatch cannot be held at the Hermes gateway,
+# HSCC prevents the window at its OWN dispatch entry point: wake the cluster and
+# WAIT for readiness before creating the card. See docs/design/idle-autodown.md
+# §6-dispatch-guard.
+
+def _load_autodown():
+    """Lazily import ``hscc_daemon.autodown``; None when unavailable.
+
+    ``hscc project message dispatch`` runs inside the ``hscc`` (hscc_daemon)
+    process, where ``hscc_daemon`` is a peer plugin on sys.path (both deploy to
+    ``~/.hermes/plugins``; install.py:120-124). There ``import hscc_daemon``
+    always succeeds, so the guard is live on the real dispatch path. The import
+    is deferred + guarded so the standalone flightdeck suite (and standalone
+    ``flightdeck message dispatch``) — where hscc_daemon is NOT on sys.path —
+    still import and run unchanged. Tests monkeypatch this to inject a fake.
+    """
+    try:
+        from hscc_daemon import autodown as _ad
+        return _ad
+    except ImportError:
+        return None
+
+
+def _ensure_cluster_ready(ad, args, out=print):
+    """Wait for the serving layer before dispatch; None = proceed, else error.
+
+    Decision table (docs/design/idle-autodown.md §6-dispatch-guard):
+      * ``hscc_daemon.autodown`` unavailable    -> None (cannot check: proceed
+        as today; the guard only runs where HSCC is fully installed).
+      * autodown DISABLED                       -> None (never interfere).
+      * ``--no-wait``                           -> None (operator accepts risk).
+      * state ``up``                            -> None (cluster already up).
+      * state ``down`` / ``waking`` / ``error`` -> trigger ``autoup()`` and
+        WAIT for readiness (bounded by the load-grace window), then None.
+        ``error`` is folded into the wake set: the layer is not up, so
+        dispatching into it would destroy work — the exact bug this guards.
+      * unknown state                           -> error (refuse to dispatch
+        into an unverifiable cluster rather than guess).
+      * wake fails                              -> error string; the caller
+        exits non-zero and creates NO card, so the work is not lost to a
+        protocol violation (it was never created).
+
+    ``ad`` is the injectable autodown module (real ``hscc_daemon.autodown``
+    from ``_load_autodown``, or a test fake exposing ``load_config`` +
+    ``autoup``); ``None`` means HSCC's daemon is not installed, so we cannot
+    check — proceed unchanged. ``out`` is the progress printer (default
+    ``print``), so tests capture the why-waiting lines. Progress is printed so
+    the operator never sees a silent multi-minute pause.
+    """
+    if ad is None:
+        return None                       # hscc_daemon unavailable: no guard
+    cfg = ad.load_config()
+    if not cfg.get("enabled"):
+        return None                       # autodown disabled: never interfere
+    state = cfg.get("state")
+    if getattr(args, "no_wait", False):
+        return None                       # --no-wait: operator accepts the risk
+    if state == "up":
+        return None                       # cluster already serving: proceed
+    if state not in ("down", "waking", "error"):
+        # Fail-safe: an unknown/unexpected state means we cannot verify the
+        # cluster is serving, so refuse to dispatch into it rather than guess.
+        return (
+            f"autodown state {state!r} is unexpected; refusing to dispatch "
+            "into an unverifiable cluster. Run `hscc autodown status` to "
+            "inspect, then retry (or pass --no-wait to force dispatch)."
+        )
+    out(f"autodown: cluster state={state}; waking the serving layer before "
+        f"dispatch (load-grace window "
+        f"{ad._wake_ready_grace_minutes()}m, please wait)...")
+    result = ad.autoup()
+    res = result.get("result", "?")
+    if res == "up":
+        out("autodown: serving layer is UP — proceeding with dispatch.")
+        return None
+    # Wake failed (start-failed / not-ready / no-units / busy / ...). The human
+    # reason autoup() persisted lives in the CONFIG (via _record_wake_failure),
+    # not in the result dict — so read it back AFTER the call; fall back to
+    # result.failed_at (unit id) then the raw result code so the operator
+    # always gets something actionable.
+    reason = (ad.load_config().get("reason")
+              or result.get("reason") or result.get("failed_at") or res)
+    return (
+        f"autodown: wake did NOT complete ({res}) — {reason}. "
+        "Refusing to dispatch into a not-ready cluster: the card was NOT "
+        "created, so nothing is lost. Retry once the cluster is up, or pass "
+        "--no-wait to dispatch into an unverified cluster."
+    )
+
+
 def cmd_dispatch(args: argparse.Namespace, projects: list[registry.Project]) -> int:
     if not args.task:
         print(
@@ -261,6 +359,19 @@ def cmd_dispatch(args: argparse.Namespace, projects: list[registry.Project]) -> 
             print(f"  dependents: {dependents_notice}")
         print("dry-run: pass --apply to create the card and send the announcement.", file=sys.stderr)
         return 0
+
+    # 0. Cluster-readiness guard (§6-dispatch-guard, docs/design/idle-autodown.md).
+    # Before creating the card, ensure the serving layer is actually up so the
+    # dispatcher never spawns a worker into a down/waking cluster and destroys
+    # the work. state=up / autodown-disabled / --no-wait all proceed unchanged;
+    # down/waking/error wakes the cluster and waits (bounded by the load-grace
+    # window); a failed wake DOES NOT create the card — it exits non-zero so the
+    # work is not lost to a protocol violation (it was never created). Only the
+    # --apply path touches the cluster; a dry-run never wakes anything.
+    guard_err = _ensure_cluster_ready(_load_autodown(), args)
+    if guard_err:
+        print(f"error: {guard_err}", file=sys.stderr)
+        return 1
 
     # 1. Create the card on the resolved board. A failure here means nothing
     #    was dispatched. When --body-file was NOT given, the body defaults to
@@ -387,6 +498,15 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="actually create the card and send the announcement (dry-run by "
         "default; nothing is created or posted without this)",
+    )
+    sp.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="create the card immediately WITHOUT waking an autodown-down/"
+        "waking cluster and waiting for it (enterprise acceptance of the "
+        "risk that a dispatched card is destroyed if the fleet is not yet "
+        "serving). Default: when autodown is enabled and the cluster is "
+        "down/waking, dispatch first wakes it and waits for readiness.",
     )
     sp.set_defaults(func=cmd_dispatch)
 
