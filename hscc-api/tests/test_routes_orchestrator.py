@@ -1,4 +1,4 @@
-"""Unit tests for hscc-api Phase C2 — POST /v1/orchestrator/chat.
+"""Unit tests for hscc-api Phase C2 — job-based orchestrator chat.
 
 The suite is hermetic: the orchestrator invocation is fully stubbed via
 monkeypatch on the ``_backing_resolve`` / ``_backing_invoke`` seams, so NO test
@@ -8,30 +8,39 @@ Both the project→orchestrator resolution and the hermes transport are faked.
 Handlers are driven over real loopback HTTP (port 0) like the A1-A4 suites, so
 auth and the route dispatcher are exercised end-to-end.
 
-Coverage required by the card:
-  * missing ``confirm`` -> 409 AND the backing call was NOT made;
-  * missing ``prompt`` -> 400;
-  * unknown project -> 400;
-  * absent project => resolves to the ``general`` orchestrator;
-  * success path returns the reply + profile/session used;
-  * backing failure -> clean 5xx, no traceback leak;
-  * auth still enforced (401).
-"""
+The chat POST is now JOB-BASED (Phase 2 of t_bc242def): it validates/resolves
+synchronously, spawns a background thread that invokes the orchestrator, and
+returns 202 with a job_id. The reply is read via ``GET /v1/orchestrator/chat/
+{id}`` which reports queued/running/done + honest elapsed.
 
+Coverage required by the card:
+  * missing ``confirm`` -> 409 AND no job created / no backing called;
+  * missing/empty ``prompt`` -> 400;
+  * unknown project -> 400;
+  * absent/null project => resolves to the ``general`` orchestrator;
+  * success: POST -> 202 with job_id; GET -> running then done with the reply
+    + profile/session used + honest elapsed;
+  * backing failure -> job lands in a terminal error state, not a leak;
+  * GET unknown job id -> 404;
+  * auth still enforced (401) on both POST and GET.
+"""
 import json
+import threading
+import time
 import types
 
 import pytest
 
 import api_server
 import routes_orchestrator
+from routes_orchestrator import _ChatJob, _run_job
 
 
 # --------------------------------------------------------------------------- #
 # Fixtures: a running server + hermetic fakes for resolve/invoke
 # --------------------------------------------------------------------------- #
 
-@ pytest.fixture
+@pytest.fixture
 def fakes(monkeypatch):
     """Install hermetic fakes; returns a dict of the call-records + seams.
 
@@ -49,20 +58,32 @@ def fakes(monkeypatch):
         # The real transport reports back the profile/session it used, so the
         # fake echoes the profile/session it was invoked with.
         "invoke_result": None,
+        # Optional: block the fake invoke until this event is set (lets a test
+        # observe the job in a running state). Default None = instant reply.
+        "invoke_gate": None,
     }
     backing = {
         "resolve": lambda project, registry_path: (
             state["resolve_calls"].append((project, registry_path))
             or state["resolved"]
         ),
-        "invoke": lambda profile, session, prompt, timeout=180.0: (
-            state["invoke_calls"].append((profile, session, prompt, timeout))
-            or (state["invoke_result"]
-                or ("I dispatched a card for you.", profile, session))
-        ),
+        "invoke": _make_invoke(state),
     }
     _install(monkeypatch, backing)
     return state
+
+
+def _make_invoke(state):
+    def invoke(profile, session, prompt, timeout=180.0):
+        state["invoke_calls"].append((profile, session, prompt, timeout))
+        gate = state["invoke_gate"]
+        if gate is not None:
+            gate.wait(timeout=5)          # hold the job in `running`
+        if state["invoke_result"] is not None:
+            reply, *_ = state["invoke_result"]
+            return state["invoke_result"]
+        return ("I dispatched a card for you.", profile, session)
+    return invoke
 
 
 def _install(monkeypatch, backing: dict):
@@ -76,8 +97,6 @@ def running(tmp_path, fakes):
     srv = types.SimpleNamespace()
     srv.server = api_server.create_server(hscc_dir=str(tmp_path), addr=("127.0.0.1", 0))
     srv.host, srv.port = srv.server.server_address[:2]
-    import threading
-
     thread = threading.Thread(target=srv.server.serve_forever, daemon=True)
     thread.start()
     yield srv
@@ -85,24 +104,32 @@ def running(tmp_path, fakes):
     srv.server.server_close()
 
 
+@pytest.fixture(autouse=True)
+def _clear_jobs():
+    """Start each test with an empty job store.
+
+    ``_jobs`` is a module-global (the server is long-lived in production, so the
+    store intentionally persists across connections there). Here we clear it
+    before every test so assertions like ``not routes_orchestrator._jobs`` and
+    per-test job ids are deterministic regardless of run order.
+    """
+    with routes_orchestrator._jobs_lock:
+        routes_orchestrator._jobs.clear()
+
+
 @pytest.fixture
 def token(running):
     return api_server.load_token(running.server.ctx.hscc_dir)
 
 
-def _post(running, token, path="/v1/orchestrator/chat", body=None, method="POST"):
+def _request(running, token, method, path, body=None, timeout=5):
     import http.client
 
-    conn = http.client.HTTPConnection(running.host, running.port, timeout=5)
-    headers = {}
+    conn = http.client.HTTPConnection(running.host, running.port, timeout=timeout)
+    headers = {"Content-Type": "application/json"}
     if token is not None:
         headers["Authorization"] = "Bearer " + token
-    if body is not None:
-        headers["Content-Type"] = "application/json"
-        raw = json.dumps(body).encode("utf-8")
-    else:
-        headers["Content-Type"] = "application/json"
-        raw = b""
+    raw = json.dumps(body).encode("utf-8") if body is not None else b""
     conn.request(method, path, body=raw, headers=headers)
     resp = conn.getresponse()
     data = resp.read()
@@ -112,6 +139,26 @@ def _post(running, token, path="/v1/orchestrator/chat", body=None, method="POST"
     except ValueError:
         payload = {"raw": data}
     return resp.status, payload
+
+
+def _post(running, token, path="/v1/orchestrator/chat", body=None):
+    return _request(running, token, "POST", path, body=body)
+
+
+def _get(running, token, path):
+    return _request(running, token, "GET", path)
+
+
+def _poll_done(running, token, job_id, timeout=5.0):
+    """GET the job until it reaches a terminal state; return (status, payload)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        status, payload = _get(running, token, f"/v1/orchestrator/chat/{job_id}")
+        assert status == 200
+        if payload.get("status") in ("done", "timeout", "unavailable", "error"):
+            return payload
+        time.sleep(0.01)
+    raise AssertionError(f"job {job_id} did not finish within {timeout}s")
 
 
 # --------------------------------------------------------------------------- #
@@ -126,6 +173,7 @@ def test_chat_missing_confirm_409_no_backing(running, token, fakes):
     assert payload["error"]["code"] == "confirm_required"
     assert fakes["resolve_calls"] == []   # resolver NOT consulted
     assert fakes["invoke_calls"] == []    # orchestrator NOT messaged
+    assert not routes_orchestrator._jobs   # no job created
 
 
 def test_chat_confirm_false_is_409(running, token, fakes):
@@ -135,6 +183,7 @@ def test_chat_confirm_false_is_409(running, token, fakes):
     assert status == 409
     assert payload["error"]["code"] == "confirm_required"
     assert fakes["invoke_calls"] == []
+    assert not routes_orchestrator._jobs
 
 
 # --------------------------------------------------------------------------- #
@@ -149,6 +198,7 @@ def test_chat_missing_prompt_400(running, token, fakes):
     assert payload["error"]["code"] == "bad_request"
     assert "prompt" in payload["error"]["message"]
     assert fakes["invoke_calls"] == []
+    assert not routes_orchestrator._jobs
 
 
 def test_chat_empty_prompt_400(running, token, fakes):
@@ -158,6 +208,7 @@ def test_chat_empty_prompt_400(running, token, fakes):
     assert status == 400
     assert payload["error"]["code"] == "bad_request"
     assert fakes["invoke_calls"] == []
+    assert not routes_orchestrator._jobs
 
 
 # --------------------------------------------------------------------------- #
@@ -179,6 +230,7 @@ def test_chat_unknown_project_400(running, token, fakes, monkeypatch):
     assert payload["error"]["code"] == "unknown_project"
     assert "bogus" in payload["error"]["message"]
     assert fakes["invoke_calls"] == []  # never got that far
+    assert not routes_orchestrator._jobs
 
 
 def test_chat_project_without_board_400(running, token, fakes, monkeypatch):
@@ -195,16 +247,23 @@ def test_chat_project_without_board_400(running, token, fakes, monkeypatch):
     assert status == 400
     assert payload["error"]["code"] == "bad_request"
     assert "board" in payload["error"]["message"]
+    assert not routes_orchestrator._jobs
 
+
+# --------------------------------------------------------------------------- #
+# POST returns a job; GET reports running -> done with honest elapsed
+# --------------------------------------------------------------------------- #
 
 def test_chat_absent_project_resolves_general(running, token, fakes):
-    """No project in the body -> resolve with None -> the 'general' orchestrator."""
+    """No project in the body -> resolve with None -> the general orchestrator."""
     fakes["resolved"] = {"project": "general", "profile": "general-orch",
                          "session": "general", "board": "default", "repo": None}
     status, payload = _post(running, token, body={
         "prompt": "hi", "confirm": True,
     })
-    assert status == 200
+    assert status == 202
+    assert payload["status"] == "queued"
+    assert payload["job_id"]
     # resolver was consulted with None (project absent -> general)
     assert fakes["resolve_calls"][0][0] is None
     assert payload["profile"] == "general-orch"
@@ -218,10 +277,9 @@ def test_chat_null_project_resolves_general(running, token, fakes):
     status, payload = _post(running, token, body={
         "project": None, "prompt": "hi", "confirm": True,
     })
-    assert status == 200
-    assert fakes["resolve_calls"][0][0] is None
+    assert status == 202
     assert payload["profile"] == "general-orch"
-    assert payload["session"] == "general"
+    assert fakes["resolve_calls"][0][0] is None
 
 
 def test_chat_resolves_named_project(running, token, fakes):
@@ -232,27 +290,32 @@ def test_chat_resolves_named_project(running, token, fakes):
     status, payload = _post(running, token, body={
         "project": project, "prompt": "go build X", "confirm": True,
     })
-    assert status == 200
+    assert status == 202
+    faked = _poll_done(running, token, payload["job_id"])
     assert fakes["invoke_calls"][0][0] == profile
     assert fakes["invoke_calls"][0][1] == session
-    assert payload["profile"] == profile
-    assert payload["session"] == session
+    assert payload["job_id"] and faked["job_id"] == payload["job_id"]
+    assert faked["status"] == "done"
 
 
-# --------------------------------------------------------------------------- #
-# Success path
-# --------------------------------------------------------------------------- #
-
-def test_chat_success_returns_reply_and_identity(running, token, fakes):
+def test_chat_success_full_job_cycle(running, token, fakes):
+    """POST -> 202; GET shows an honest lifecycle and the reply when done."""
     status, payload = _post(running, token, body={
         "project": "hscc", "prompt": "go build X", "confirm": True,
     })
-    assert status == 200
-    assert payload["reply"] == "I dispatched a card for you."
-    assert payload["profile"] == "hscc-orch"
-    assert payload["session"] == "hscc"
-    assert payload["speak"]
-    # The orchestrator was messaged with the right args.
+    assert status == 202
+    job_id = payload["job_id"]
+    assert payload["status"] in ("queued", "running")
+    assert payload["elapsed"] == 0.0
+
+    faked = _poll_done(running, token, job_id)
+    assert faked["status"] == "done"
+    assert faked["reply"] == "I dispatched a card for you."
+    assert faked["profile"] == "hscc-orch"
+    assert faked["session"] == "hscc"
+    assert faked["speak"]
+    assert faked["elapsed"] >= 0.0
+    # The orchestrator was messaged with the right args exactly once.
     assert fakes["invoke_calls"] == [
         ("hscc-orch", "hscc", "go build X", routes_orchestrator._DEFAULT_TIMEOUT)
     ]
@@ -264,16 +327,44 @@ def test_chat_shortens_long_reply_in_speak(running, token, fakes):
     status, payload = _post(running, token, body={
         "project": "hscc", "prompt": "hi", "confirm": True,
     })
-    assert status == 200
-    assert payload["reply"] == long_reply          # full reply preserved
-    assert len(payload["speak"]) < len(long_reply)  # speak is the short summary
+    assert status == 202
+    faked = _poll_done(running, token, payload["job_id"])
+    assert faked["reply"] == long_reply
+    assert len(faked["speak"]) < len(long_reply)
+
+
+def test_get_job_reports_running_while_invoke_blocks(running, token, fakes):
+    """Hold the fake invoke on a gate so we can observe a `running` job."""
+    gate = threading.Event()
+    fakes["invoke_gate"] = gate
+    status, payload = _post(running, token, body={
+        "project": "hscc", "prompt": "hi", "confirm": True,
+    })
+    assert status == 202
+    job_id = payload["job_id"]
+    # Give the worker a moment to flip queued -> running.
+    running_payload = {}
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        _, running_payload = _get(running, token, f"/v1/orchestrator/chat/{job_id}")
+        if running_payload["status"] == "running":
+            break
+        time.sleep(0.005)
+    assert running_payload["status"] == "running"
+    assert "reply" not in running_payload
+    assert running_payload["elapsed"] >= 0.0
+    # Release the gate -> job reaches done.
+    gate.set()
+    faked = _poll_done(running, token, job_id)
+    assert faked["status"] == "done"
+    assert faked["reply"] == "I dispatched a card for you."
 
 
 # --------------------------------------------------------------------------- #
-# Backing failures -> clean 5xx (no traceback leak, no server crash)
+# Backing failures -> job lands in a terminal error state (no leak)
 # --------------------------------------------------------------------------- #
 
-def test_chat_backing_timeout_504(running, token, fakes, monkeypatch):
+def test_chat_backing_timeout_job_error(running, token, fakes, monkeypatch):
     def timed_out(profile, session, prompt, timeout=180.0):
         fakes["invoke_calls"].append((profile, session, prompt, timeout))
         raise routes_orchestrator._OrchestratorTimeout("did not reply in 180s")
@@ -281,13 +372,14 @@ def test_chat_backing_timeout_504(running, token, fakes, monkeypatch):
     status, payload = _post(running, token, body={
         "project": "hscc", "prompt": "hi", "confirm": True,
     })
-    assert status == 504
-    assert payload["error"]["code"] == "orchestrator_timeout"
-    # No traceback is leaked into the response body.
-    assert "Traceback" not in str(payload)
+    assert status == 202
+    faked = _poll_done(running, token, payload["job_id"])
+    assert faked["status"] == "timeout"
+    assert faked["error"]["code"] == "orchestrator_timeout"
+    assert "Traceback" not in str(faked)
 
 
-def test_chat_backing_unavailable_503(running, token, fakes, monkeypatch):
+def test_chat_backing_unavailable_job_error(running, token, fakes, monkeypatch):
     def unavail(profile, session, prompt, timeout=180.0):
         fakes["invoke_calls"].append((profile, session, prompt, timeout))
         raise routes_orchestrator._OrchestratorUnavailable(
@@ -297,12 +389,14 @@ def test_chat_backing_unavailable_503(running, token, fakes, monkeypatch):
     status, payload = _post(running, token, body={
         "project": "hscc", "prompt": "hi", "confirm": True,
     })
-    assert status == 503
-    assert payload["error"]["code"] == "orchestrator_unavailable"
-    assert "Traceback" not in str(payload)
+    assert status == 202
+    faked = _poll_done(running, token, payload["job_id"])
+    assert faked["status"] == "unavailable"
+    assert faked["error"]["code"] == "orchestrator_unavailable"
+    assert "Traceback" not in str(faked)
 
 
-def test_chat_backing_invocation_error_502(running, token, fakes, monkeypatch):
+def test_chat_backing_invocation_error_job_error(running, token, fakes, monkeypatch):
     def failed(profile, session, prompt, timeout=180.0):
         fakes["invoke_calls"].append((profile, session, prompt, timeout))
         raise routes_orchestrator._OrchestratorInvocationError("empty reply")
@@ -310,13 +404,15 @@ def test_chat_backing_invocation_error_502(running, token, fakes, monkeypatch):
     status, payload = _post(running, token, body={
         "project": "hscc", "prompt": "hi", "confirm": True,
     })
-    assert status == 502
-    assert payload["error"]["code"] == "orchestrator_error"
-    assert "Traceback" not in str(payload)
+    assert status == 202
+    faked = _poll_done(running, token, payload["job_id"])
+    assert faked["status"] == "error"
+    assert faked["error"]["code"] == "orchestrator_error"
+    assert "Traceback" not in str(faked)
 
 
-def test_chat_unexpected_backing_exception_500(running, token, fakes, monkeypatch):
-    """A truly unexpected exception must become a clean 500, not a crash/leak."""
+def test_chat_unexpected_backing_exception_job_error(running, token, fakes, monkeypatch):
+    """A truly unexpected exception must become a clean job error, not a leak."""
     def boom(profile, session, prompt, timeout=180.0):
         fakes["invoke_calls"].append((profile, session, prompt, timeout))
         raise RuntimeError("secret-token-in-detail")
@@ -324,24 +420,82 @@ def test_chat_unexpected_backing_exception_500(running, token, fakes, monkeypatc
     status, payload = _post(running, token, body={
         "project": "hscc", "prompt": "hi", "confirm": True,
     })
-    assert status == 500
-    assert payload["error"]["code"] == "internal_error"
-    # The internal message must NOT echo the exception detail (no secret leak).
-    assert "secret-token-in-detail" not in str(payload)
+    assert status == 202
+    faked = _poll_done(running, token, payload["job_id"])
+    assert faked["status"] == "error"
+    assert faked["error"]["code"] == "orchestrator_error"
+    # The internal detail must NOT echo the exception (no secret leak).
+    assert "secret-token-in-detail" not in str(faked)
 
 
 # --------------------------------------------------------------------------- #
-# Auth
+# GET /v1/orchestrator/chat/{id} — 404 for unknown, auth on GET
 # --------------------------------------------------------------------------- #
 
-def test_chat_auth_401(running, fakes):
-    status, payload = _post(running, token=None, body={
+def test_get_unknown_job_404(running, token):
+    status, payload = _get(running, token, "/v1/orchestrator/chat/nope-123")
+    assert status == 404
+    assert payload["error"]["code"] == "not_found"
+
+
+def test_get_job_auth_401(running, fakes):
+    status, _ = _get(running, token=None, path="/v1/orchestrator/chat/chat-1")
+    assert status == 401
+
+
+def test_post_auth_401(running, fakes):
+    status, _ = _post(running, token=None, body={
         "project": "hscc", "prompt": "hi", "confirm": True,
     })
     assert status == 401
-    assert payload["error"]["code"] == "unauthorized"
     assert fakes["invoke_calls"] == []
     assert fakes["resolve_calls"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Direct _run_job unit tests (deterministic, no HTTP)
+# --------------------------------------------------------------------------- #
+
+def test_run_job_done_sets_reply_and_speak(monkeypatch):
+    job = _ChatJob("chat-99", "hscc", "hscc-orch", "hscc", "hi")
+    monkeypatch.setattr(
+        routes_orchestrator, "_backing_invoke",
+        lambda p, s, q, timeout=180.0: ("the answer", p, s),
+    )
+    _run_job(job)
+    d = routes_orchestrator._job_dict(job)
+    assert d["status"] == "done"
+    assert d["reply"] == "the answer"
+    assert d["speak"].startswith("hscc-orch says:")
+    assert d["elapsed"] >= 0.0
+
+
+def test_run_job_done_then_get_is_idempotent(running, token, fakes):
+    """A completed job stays done and stable across repeated GETs."""
+    status, payload = _post(running, token, body={
+        "project": "hscc", "prompt": "hi", "confirm": True,
+    })
+    assert status == 202
+    job_id = payload["job_id"]
+    first = _poll_done(running, token, job_id)
+    second = _poll_done(running, token, job_id)
+    assert first["status"] == "done" and second["status"] == "done"
+    assert first["reply"] == second["reply"]
+    # elapsed is frozen at completion, so both reads report the same value.
+    assert first["elapsed"] == second["elapsed"]
+
+
+def test_get_on_a_given_job_is_readonly(running, token, fakes):
+    """GET never invokes the orchestrator — it only reports a prior job."""
+    status, payload = _post(running, token, body={
+        "project": "hscc", "prompt": "hi", "confirm": True,
+    })
+    assert status == 202
+    _poll_done(running, token, payload["job_id"])
+    _get(running, token, f"/v1/orchestrator/chat/{payload['job_id']}")
+    # The worker invoked exactly once (the POST's background thread); GETs
+    # added nothing.
+    assert len(fakes["invoke_calls"]) == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -401,6 +555,23 @@ def test_backing_invoke_session_not_found_raises_unavailable(monkeypatch):
     monkeypatch.setattr(_sp, "run", notfound)
     with pytest.raises(routes_orchestrator._OrchestratorUnavailable):
         routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
+
+
+def test_backing_invoke_strips_channel_notice_lines(monkeypatch):
+    """`-Q` can emit a cwd-restore notice on stdout BEFORE the reply; the parsed
+    reply must not be polluted by it (observed real transport, t_bc242def)."""
+    import subprocess as _sp
+
+    def with_notice(*a, **k):
+        _p = types.SimpleNamespace(returncode=0)
+        _p.stderr = ""
+        _p.stdout = ("↪ restored workspace dir: /Users/desac\n\n"
+                     "the actual reply here\n")
+        return _p
+    monkeypatch.setattr(_sp, "run", with_notice)
+    reply, _, _ = routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
+    assert "restored workspace" not in reply
+    assert reply == "the actual reply here"
 
 
 def test_backing_invoke_empty_reply_raises(monkeypatch):

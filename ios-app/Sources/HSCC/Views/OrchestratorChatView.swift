@@ -130,6 +130,10 @@ private struct ChatBody: View {
             // fleet note rather than a silent hang (requirement 5).
             store.restoreDraft()
             await refreshFleetState()
+            // Resume polling for an in-flight job persisted from a previous
+            // session (t_bc242def): a backgrounded/relaunched app picks the
+            // finished answer up instead of losing it.
+            await resumeInFlightJob()
         }
     }
 
@@ -282,7 +286,7 @@ private struct ChatBody: View {
         }
     }
 
-    // MARK: - Send (confirm-gated)
+    // MARK: - Send (confirm-gated) + async job poll
 
     @MainActor
     private func send() async {
@@ -300,14 +304,84 @@ private struct ChatBody: View {
 
         do {
             let client = try clientOrThrow()
-            let result = try await client.orchestratorChat(project: project, prompt: text)
-            store.finishSend(reply: result.reply, profile: result.profile)
-            answeringProfile = result.profile   // remember who answered, for next wait
+            // POST /v1/orchestrator/chat returns 202 with a job_id immediately
+            // (the orchestrator is messaged in a background thread on the
+            // server) — no dead wait. Attach the id so a relaunched app can
+            // resume the poll, then poll for the reply.
+            let started = try await client.orchestratorChatStart(project: project, prompt: text)
+            store.startPolling(jobID: started.jobID)
+            await poll(jobID: started.jobID, client: client)
         } catch {
-            // A non-2xx (400/409/502/503/504) makes the client throw. Render the
-            // failure honestly — never as a reply. The sent prompt stays in the
-            // transcript (never lost).
+            // A non-2xx POST (400 unknown_project / bad_request, 409; a 5xx
+            // transport failure would also land here before any job exists)
+            // throws. Render the failure honestly — never as a reply. The sent
+            // prompt stays in the transcript (never lost).
             store.failSend(message: message(for: error))
+        }
+    }
+
+    /// Poll GET /v1/orchestrator/chat/{id} until it reaches a terminal state,
+    /// then fold the outcome into the store. `store.inFlight` drives the honest
+    /// elapsed ticker, so "still working" reads differently from "hung". Runs as
+    /// an async Task kept alive by the view.
+    @MainActor
+    private func poll(jobID: String, client: HSCCClient) async {
+        while true {
+            do {
+                let status = try await client.orchestratorChatPoll(jobID: jobID)
+                if status.isTerminal {
+                    if status.status == "done", let reply = status.reply {
+                        store.finishSend(reply: reply, profile: status.profile)
+                        answeringProfile = status.profile   // remember who answered, for next wait
+                    } else {
+                        store.failSend(
+                            message: status.error.map { jobError(for: $0) }
+                                ?? "The orchestrator call failed."
+                        )
+                    }
+                    return
+                }
+            } catch {
+                // A transient poll failure (e.g. the phone was briefly offline)
+                // must NOT kill the job — the server keeps working and the
+                // persisted job_id survives for a retry/resume. Fall through and
+                // keep polling.
+            }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)  // poll every 2s
+        }
+    }
+
+    /// Resume polling for an in-flight job persisted from a previous session, so
+    /// a backgrounded/relaunched app picks the (possibly already-computed) reply
+    /// up instead of losing it (t_bc242def). Called on appear.
+    @MainActor
+    private func resumeInFlightJob() async {
+        guard store.inFlight == nil,
+              let savedJobID = store.resumedJobID,
+              !savedJobID.isEmpty else { return }
+        do {
+            let client = try clientOrThrow()
+            await poll(jobID: savedJobID, client: client)
+        } catch {
+            // Client construction failed (settings changed); the job remains
+            // persisted and the view re-attempts on the next appear.
+        }
+    }
+
+    /// Map a failed job's unified `ChatJobError` to a clear human string.
+    private func jobError(for error: ChatJobError) -> String {
+        switch error.code {
+        case "orchestrator_unavailable":
+            // A real state: the orchestrator's NAMED session must exist
+            // (created by provisioning / the first Telegram topic) before it can
+            // be chatted with.
+            return "\(error.message) The \(project) orchestrator's session isn't ready yet — create it first, then re-send."
+        case "orchestrator_timeout":
+            return "The \(project) orchestrator did not reply within 180 s (timeout). Try again or check the orchestrator."
+        case "orchestrator_error":
+            return "The \(project) orchestrator call failed: \(error.message)"
+        default:
+            return error.message
         }
     }
 
