@@ -18,6 +18,7 @@ import json
 import os
 import re
 import sys
+from typing import Optional
 
 from .daemon_ops import log
 from .state import now_iso
@@ -55,6 +56,14 @@ DEFAULT_CONFIG = {
     "wake_trigger_text": None,
     "cancel_requested": False,
     "reason": "",
+    # Set when autodown was armed with --force despite active Hermes cron jobs
+    # (feat t_2b711a94 §7). ``force_armed`` is True only when the operator
+    # explicitly overrode the cron-abort guard; ``force_armed_overrides`` holds
+    # the names of the jobs that existed at the moment of arming. Surfaced by
+    # ``hscc autodown status`` so the operator can always see WHY it is armed
+    # despite scheduled jobs.
+    "force_armed": False,
+    "force_armed_overrides": [],
 }
 
 # Statuses that are terminal/parked — the only ones that do NOT count as live
@@ -131,6 +140,96 @@ def record_activity(source):
     return cfg
 
 
+# ---------------------------------------------------------------------------
+# Hermes cron job source of truth (feat t_2b711a94 §7)
+# ---------------------------------------------------------------------------
+# Hermes scheduled jobs fire on a clock and (some) are written expecting a
+# healthy GPU serving layer. Arming autodown while such a job is active is the
+# conflict this feature makes explicit, so ``hscc autodown enable`` reads
+# Hermes' OWN source of truth for scheduled jobs and aborts when any are
+# active (unless force-armed).
+#
+# We read the ON-DISK store ``~/.hermes/cron/jobs.json`` rather than shelling
+# out to ``hermes cron list``. Investigated on this host (2026-08-26): the
+# ``hermes`` binary resolves a profile whose cron view returns "No scheduled
+# jobs" even though jobs.json clearly holds 2 active jobs (hscc-dep-watcher,
+# hscc-escalate-watcher) plus 9 paused ones. The CLI is therefore NOT a
+# reliable interface here — jobs.json _is_ the source of truth the cron engine
+# actually schedules from. Fail-closed: an unreadable OR absent jobs.json
+# yields ``CRON_UNREADABLE`` so the caller aborts on "cannot determine" —
+# never arm on a signal we cannot verify.
+CRON_JOBS_FILE = os.path.expanduser("~/.hermes/cron/jobs.json")
+
+# Sentinel returned by ``list_active_cron_jobs`` when the cron config is
+# unreadable or absent ⇒ "cannot determine". The CLI must NOT arm on it.
+CRON_UNREADABLE = "<unreadable>"
+
+
+def list_active_cron_jobs(jobs_file=None):
+    """Return ACTIVE Hermes cron jobs, or ``CRON_UNREADABLE`` if undeterminable.
+
+    Reads ``~/.hermes/cron/jobs.json`` — Hermes' on-disk source of truth for
+    scheduled jobs — and returns a list of dicts for the jobs that are ACTIVE,
+    each ``{id, name, schedule_display, next_run_at}``. Only active/enabled
+    jobs count: a paused/disabled job cannot fire and poses no scheduling
+    conflict. ``jobs_file`` is injectable so tests never touch the real store.
+
+    Fail-closed: an unreadable OR absent OR malformed jobs.json (non-dict, or
+    ``jobs`` not a list) yields ``CRON_UNREADABLE`` — never an empty list — so
+    the caller can abort on "cannot determine" instead of arming on a signal
+    it could not verify.
+    """
+    p = os.path.expanduser(jobs_file or CRON_JOBS_FILE)
+    try:
+        with open(p) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return CRON_UNREADABLE
+    jobs = data.get("jobs") if isinstance(data, dict) else None
+    if not isinstance(jobs, list):
+        return CRON_UNREADABLE
+    active = []
+    for j in jobs:
+        if not isinstance(j, dict) or not j.get("enabled"):
+            continue  # disabled/paused jobs neither fire nor conflict
+        sch = j.get("schedule") if isinstance(j.get("schedule"), dict) else {}
+        active.append({
+            "id": j.get("id"),
+            "name": j.get("name") or j.get("id"),
+            "schedule_display": j.get("schedule_display")
+                or sch.get("display") or sch.get("expr"),
+            "next_run_at": j.get("next_run_at"),
+        })
+    return active
+
+
+def _enum_board_names(kanban_db):
+    """The ordered list of board names to scan — the SINGLE enumeration.
+
+    Shared by BOTH ``_has_active_work`` (the idle predicate / C3 interlock) and
+    ``list_stale_tasks`` so the boards "that block autodown" are EXACTLY the
+    boards "that stale lists". A divergence between the two would be its own
+    bug (§ board hygiene is load-bearing for autodown), so there is one code
+    path for enumeration, not two.
+
+    Returns ``(boards, multi)``:
+    - ``boards`` is a list of slug strings (the legacy flat DB as ``None``).
+      A lib that does NOT expose ``list_boards`` (minimal injected lib /
+      back-compat) resolves to ``[None]`` — the single default board.
+    - ``multi`` is True when the lib enumerates boards (so callers must pass
+      ``board=`` to ``connect_closing``), False for the single-board legacy
+      shape (``connect_closing()`` with no board).
+
+    Raises on enumeration failure; the caller decides how to fail (autodown
+    fails safe to active, stale reports it).
+    """
+    multi = hasattr(kanban_db, "list_boards")
+    if not multi:
+        return [None], False
+    boards = [str(e["slug"]) for e in kanban_db.list_boards()] or [None]
+    return boards, True
+
+
 def _has_active_work(kanban_db=None):
     """True if ANY live/imminent kanban task exists across ALL boards.
 
@@ -166,21 +265,14 @@ def _has_active_work(kanban_db=None):
         _note_blocking(_UNREADABLE_BOARD)
         return True
 
-    # Does this lib enumerate boards? The real hermes_cli.kanban_db does. A
-    # minimal injected lib (older tests/callers) exposes only connect_closing()
-    # — treat it as the single default board so we stay compatible.
-    multi = hasattr(kanban_db, "list_boards")
-    if multi:
-        try:
-            boards = [str(e["slug"]) for e in kanban_db.list_boards()] or [None]
-        except Exception as e:
-            # Could not even enumerate boards — fail safe + surface it.
-            _note_blocking(_UNREADABLE_BOARD)
-            _note_kanban_unavailable(
-                f"could not enumerate kanban boards: {e}")
-            return True
-    else:
-        boards = [None]
+    try:
+        boards, multi = _enum_board_names(kanban_db)
+    except Exception as e:
+        # Could not even enumerate boards — fail safe + surface it.
+        _note_blocking(_UNREADABLE_BOARD)
+        _note_kanban_unavailable(
+            f"could not enumerate kanban boards: {e}")
+        return True
 
     for board in boards:
         if _board_has_active_work(kanban_db, board, multi):
@@ -230,6 +322,177 @@ def _probe_active(conn):
         "   OR status NOT IN ('done', 'archived', 'blocked') "
         "LIMIT 1"
     ).fetchone()
+
+
+def _all_non_terminal(conn):
+    """All non-terminal tasks in ONE board connection, oldest first.
+
+    Matches the exact active-set predicate ``_probe_active`` uses (§: the set
+    "that blocks autodown" is exactly the set "that stale lists"), so a task
+    the C3 interlock treats as work is precisely a task ``stale`` surfaces.
+    ``created_at`` is the epoch integer the real schema stores (kanban_db.py
+    tasks table); NULL/missing values are handled by the caller's age
+    computation.
+    """
+    return conn.execute(
+        "SELECT id, title, assignee, status, created_at FROM tasks "
+        "WHERE status IS NULL "
+        "   OR status NOT IN ('done', 'archived', 'blocked') "
+        "ORDER BY created_at"
+    ).fetchall()
+
+
+# Default ``--older-than`` for ``hscc kanban stale``: a card untouched for a
+# week is genuinely forgotten, not active work (documented in kanban_cli).
+DEFAULT_STALE_DAYS = 7
+
+
+def list_stale_tasks(kanban_db=None, now=None, board=None,
+                     older_than: Optional[int] = DEFAULT_STALE_DAYS):
+    """Return every non-terminal task across ALL boards, oldest first.
+
+    The data behind ``hscc kanban stale``. It REUSES the exact board
+    enumeration ``_has_active_work`` does — ``_load_kanban_db_or_default`` +
+    ``_enum_board_names`` — rather than writing a second one, so the boards
+    "that block autodown" are identical to the boards "that stale lists". This
+    is the whole point: stale exists to surface the cards the C3 interlock is
+    being blocked by.
+
+    Returns ``{boards: [slug...], tasks: [{board, id, status, assignee,
+    age_days, title}...], errors: [str...]}``. ``age_days`` is whole days
+    since ``created_at`` (0 for NULL/missing timestamps). ``tasks`` is sorted
+    oldest-first (largest ``age_days`` first, ties by board then id).
+    Unreadable boards never crash the listing: they are appended to
+    ``errors`` ("reported, does not crash") and the scan continues.
+
+    ``board`` optionally restricts to a single board slug (used by
+    ``hscc autodown status`` to name the blocking board's specific tasks);
+    ``None`` scans all. ``older_than`` filters to tasks at least that many
+    days old (inclusive floor); pass ``None``/0 to disable the filter and
+    list every non-terminal task. ``now`` + ``kanban_db`` are injectable for
+    tests (defaults to the real lib and current UTC).
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if kanban_db is None:
+        kanban_db = _load_kanban_db_or_default()
+    result = {"boards": [], "tasks": [], "errors": []}
+    if kanban_db is None:
+        # Cannot even reach the kanban lib — report it, nothing listed.
+        reason = _KANBAN_LOAD.get("reason") or "kanban lib unreachable"
+        result["errors"].append(reason)
+        return result
+    try:
+        boards, multi = _enum_board_names(kanban_db)
+    except Exception as e:
+        result["errors"].append(f"could not enumerate kanban boards: {e}")
+        return result
+    for b in boards:
+        label = b if b else "default"
+        if board is not None and label != board:
+            continue
+        result["boards"].append(label)
+        try:
+            if multi:
+                with kanban_db.connect_closing(board=b) as conn:
+                    rows = _all_non_terminal(conn)
+            else:
+                with kanban_db.connect_closing() as conn:
+                    rows = _all_non_terminal(conn)
+        except Exception as e:
+            result["errors"].append(f"board {label!r} unreadable: {e}")
+            continue
+        for r in rows:
+            created_at = r["created_at"]
+            age_days = _age_days(created_at, now)
+            if older_than is not None and 0 < older_than and age_days < older_than:
+                continue
+            result["tasks"].append({
+                "board": label,
+                "id": r["id"],
+                "status": r["status"],
+                "assignee": r["assignee"],
+                "age_days": age_days,
+                "title": r["title"],
+            })
+    result["tasks"].sort(
+        key=lambda t: (t["board"], t["id"]))
+    result["tasks"].sort(key=lambda t: t["age_days"], reverse=True)
+    return result
+
+
+def _age_days(created_at, now):
+    """Whole days between ``created_at`` (epoch int) and ``now`` (aware dt)."""
+    if not created_at:
+        return 0
+    try:
+        created = datetime.datetime.fromtimestamp(
+            created_at, datetime.timezone.utc)
+        return max(0, int((now - created).total_seconds() // 86400))
+    except (ValueError, TypeError, OSError, OverflowError):
+        return 0
+
+
+def archive_stale_task(task_id, kanban_db=None):
+    """Archive exactly ONE task by id, across all boards.
+
+    Reuses the SAME board enumeration as ``_has_active_work`` /
+    ``list_stale_tasks`` (``_load_kanban_db_or_default`` +
+    ``_enum_board_names``) — never a second seam. Never bulk-archives: this
+    takes a single ``task_id`` and archives at most one task. Closing a task
+    is a judgement call, so it is never done automatically or in bulk; the
+    operator names the id explicitly.
+
+    Returns ``(label, True)`` on success (``label`` = board the task lives
+    on), or ``(None, False)`` if the task was not found on any readable board.
+    An unreadable board during the search is a "cannot say" for that board —
+    it is skipped and we keep scanning, so a genuinely-not-found id returns
+    ``(None, False)`` and the CLI reports the clear unknown-id error. Reuses
+    ``_load_kanban_db_or_default`` + ``_enum_board_names``.
+    """
+    if kanban_db is None:
+        kanban_db = _load_kanban_db_or_default()
+    if kanban_db is None:
+        raise RuntimeError(_KANBAN_LOAD.get("reason") or "kanban lib unreachable")
+    try:
+        boards, multi = _enum_board_names(kanban_db)
+    except Exception as e:
+        raise RuntimeError(f"could not enumerate kanban boards: {e}")
+    for b in boards:
+        label = b if b else "default"
+        try:
+            if multi:
+                with kanban_db.connect_closing(board=b) as conn:
+                    found = _archive_one(conn, task_id)
+            else:
+                with kanban_db.connect_closing() as conn:
+                    found = _archive_one(conn, task_id)
+        except Exception:
+            # Unreadable board — cannot say the id is (not) here; keep scanning
+            # the other boards so a not-found result is only returned after
+            # every READABLE board has been checked.
+            continue
+        if found:
+            return label, True
+    return None, False
+
+
+def _archive_one(conn, task_id):
+    """``UPDATE tasks SET status='archived' WHERE id=?``; True if it hit one row.
+
+    Commits explicitly so the archive persists regardless of the connection's
+    isolation mode — the real hermes_cli.kanban_db `_sqlite_connect` uses
+    autocommit (isolation_level=None), but an injected/test connection may not;
+    an uncommitted UPDATE would be rolled back when connect_closing closes the
+    connection. A commit on an autocommit connection is a harmless no-op, so
+    calling it unconditionally is safe everywhere.
+    """
+    cur = conn.execute(
+        "UPDATE tasks SET status='archived' WHERE id=? AND status!='archived'",
+        (task_id,),
+    )
+    committed = cur.rowcount == 1
+    conn.commit()
+    return committed
 
 
 # Nominal location of the Hermes agent source tree, which holds
@@ -628,6 +891,25 @@ _reconcile_up_streak = 0
 # real cluster — the fleet's up/down is dynamic and must not leak into tests.
 _reconcile_up_fn = None
 
+# Consecutive ``state == waking`` cycles during which there is NO live lock
+# holder before a stalled wake is acted upon (§8 Fix, extended to waking). A
+# real wake holds the autodown O_EXCL lock for its whole duration, so a live
+# holder means it is making progress. But when the wake process is KILLED the
+# lock leaks with a dead holder PID and ``state`` stays ``waking`` forever —
+# nothing is progressing. We debounce the no-live-holder signal before acting
+# so a just-transitioning wake is never misread as stalled. 2 × ~30s cadence ≈
+# 60s: short enough that a genuinely stalled wake (the reproduced wedge) is
+# recovered within about a minute, not the 20+ min grace window. Configurable
+# via env, matching RECONCILE_UP_DEBOUNCE's knob convention.
+WAKE_STALL_DEBOUNCE = int(
+    os.environ.get("HSCC_AUTODOWN_WAKE_STALL_DEBOUNCE", "2"))
+
+# In-memory consecutive-no-live-holder counter for the stalled-wake debounce
+# (reset on daemon start). Incremented while state==waking AND no live lock
+# holder; reset to 0 whenever a live holder appears (a wake is genuinely in
+# flight ⇒ keep waiting).
+_wake_stall_streak = 0
+
 
 def _serving_actually_up(serving_path=None, http_check_fn=None):
     """True iff the serving layer is ACTUALLY up (§8 "actually up" definition).
@@ -710,6 +992,64 @@ def _reconcile_if_actually_up(serving_path=None, http_check_fn=None):
     return True
 
 
+def _handle_stalled_wake(serving_path=None, http_check_fn=None):
+    """Act on a STALLED wake (state=waking, no live lock holder, debounced).
+
+    Called from ``cycle()`` once ``WAKE_STALL_DEBOUNCE`` consecutive waking
+    cycles have seen NO live lock holder — the wake process died (the
+    reproduced wedge: killed mid-wake, ``state: waking`` + dead holder PID +
+    block latched forever). Decide by reality, never leave a latched ``waking``
+    suppressing the watchdog:
+
+      * units ACTUALLY HEALTHY ⇒ reconcile: clear the intentional block, set
+        ``state: up``, log + notify LOUDLY — the existing reconcile path
+        (``_reconcile_if_actually_up``) extended to ``waking``. The fleet is up
+        and autodown was lying; the watchdog must supervise what is running.
+      * NOT healthy ⇒ resume the wake via ``autoup()`` — idempotent
+        (``--ensure`` on already-running units is a no-op), so re-running is
+        safe and finishes the interrupted wake.
+
+    Returns True after acting (reconciled or resumed); False if the probe
+    itself raised (logged, do not act on an unverifiable signal).
+
+    ``_reconcile_up_fn`` (or the real ``_serving_actually_up``) judges
+    "actually up" the same way the ``down`` reconcile does — orchestator head
+    node healthy, debounced there. Here the waking-stall debounce already
+    supplies the bounded period, so no second streak is required.
+    """
+    probe = _reconcile_up_fn or _serving_actually_up
+    try:
+        up = probe(serving_path=serving_path, http_check_fn=http_check_fn)
+    except Exception as e:
+        log(f"Autodown stalled-wake probe error: {e}", "ERROR")
+        return False
+    if up:
+        # Units are actually healthy — the reconcile path, extended to waking.
+        _clear_intentional_block(
+            reason="autodown: stalled wake — layer is actually up, reconciled "
+                   "to reality")
+        cfg = load_config()
+        cfg["state"] = "up"
+        cfg["down_since"] = None
+        cfg["reason"] = ("autodown: reconciled to reality — stalled wake "
+                         "(wake process died) but layer is UP despite "
+                         "state:waking")
+        save_config(cfg)
+        # LOUD — the fleet is up while autodown said waking with the watchdog
+        # suppressed: exactly the silent half-state §8 forbids.
+        log("Autodown RECONCILED: stalled wake (state was waking, holder dead) "
+            "but serving layer is actually up — cleared intentional block, "
+            "state=up", "ERROR")
+        _notify("HSCC autodown RECONCILED: a wake stalled (the wake process "
+                "died) but the serving layer is actually UP — cleared the "
+                "intentional block and set state=up.",
+                "HSCC Autodown — Reconciled to reality", priority="high")
+        return True
+    # Units NOT healthy — resume the interrupted wake (idempotent).
+    _invoke_autoup()
+    return True
+
+
 def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
           probes=None):
     """Idle autodown decision function (Phase 3, §1/§6; Phase 6 probes §1d).
@@ -768,8 +1108,29 @@ def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
     cfg = load_config()
     state = cfg.get("state")
     if state == "waking":
-        # A wake is already in flight (autoup set state=waking). Do NOT start
-        # a second parallel wake — return and let the in-flight one finish.
+        global _wake_stall_streak
+        # Distinguish a LEGITIMATE in-flight wake from a STALLED one by holder
+        # LIVENESS, not wall-clock alone (§8 Fix, extended to waking). autoup
+        # holds the autodown O_EXCL lock for the WHOLE duration of a real wake,
+        # so a live lock holder means the wake is genuinely making progress —
+        # never start a second parallel wake and never reconcile. But when the
+        # wake process DIES (the reproduced wedge: killed mid-wake leaves
+        # state=waking, a dead holder PID, and the intentional block latched
+        # forever while the fleet is actually up), nothing is progressing and
+        # cycle() must act after a bounded debounce: reconcile to up if the
+        # units are actually healthy, else resume the wake (autoup is
+        # idempotent). Never leave a latched waking suppressing the watchdog.
+        if _lock_holder_alive():
+            # Authentic in-flight wake — reset the stall counter and let it run.
+            _wake_stall_streak = 0
+            return
+        # No live lock holder ⇒ the wake may be stalled. Debounce so a
+        # just-transitioning wake is never misread as stalled, then act.
+        _wake_stall_streak += 1
+        if _wake_stall_streak < WAKE_STALL_DEBOUNCE:
+            return
+        _wake_stall_streak = 0
+        _handle_stalled_wake()
         return
     if state == "down":
         # §8 self-heal: while down, re-assert the intentional watchdog block
@@ -841,14 +1202,79 @@ def _lock_stale_seconds():
     return int(grace) * 60 + 300   # 20m model-load window + 5m margin
 
 
+def _lock_holder_alive(lock_path=None):
+    """Is the lock's RECORDED holder PID a live process? True/False/None.
+
+    Returns:
+      * True  — a live holder PID was parsed and the process exists.
+      * False — a holder PID was parsed and the process is PROVABLY dead
+                (``ProcessLookupError`` => POSIX ``kill(pid, 0)`` says no such
+                process). A dead holder can never block the daemon.
+      * None  — indeterminate: lock absent / unreadable / no parseable
+                ``pid=`` (a holder on ANOTHER host, or a legacy/foreign lock).
+                The caller must fall back to another rule (the age rule).
+
+    ``os.kill(pid, 0)`` is a pure liveness probe (POSIX signal 0) — it sends
+    no signal, it only checks existence/permission. ``PermissionError`` means
+    the process exists but is owned by another user — treat as alive (do NOT
+    break a lock merely because we may not own its holder).
+    """
+    path = lock_path or AUTODOWN_LOCK
+    try:
+        with open(path) as f:
+            content = f.read()
+    except OSError:
+        return None   # absent/unreadable ⇒ cannot adjudicate liveness
+    m = re.search(r"\bpid=(\d+)", content)
+    if not m:
+        return None   # unparseable/missing pid ⇒ age-rule fallback
+    pid = int(m.group(1))
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False  # provably dead
+    except PermissionError:
+        return True   # exists, owned by another user — treat as alive
+    except OSError:
+        return None   # indeterminate (unsupported platform) ⇒ age-rule fallback
+    return True
+
+
+def _lock_is_stale(now):
+    """True iff the EXISTING autodown lock is abandoned (broken before retry).
+
+    Evidence priority (holder liveness FIRST, then the age fallback):
+      1. Holder PID PROVABLY DEAD ⇒ stale IMMEDIATELY, regardless of age — a
+         dead holder must never block the daemon (the reproduced defect: a
+         killed wake left ``state: waking`` + a dead holder PID for 20+ min).
+      2. Holder PID ALIVE ⇒ NOT stale — an in-flight teardown/autoup is making
+         progress; respect it (a live holder must never be interrupted).
+      3. Indeterminate (no lock, unreadable, unparseable pid — e.g. a holder
+         on ANOTHER host) ⇒ fall back to the age rule (``_lock_stale_seconds``).
+    """
+    alive = _lock_holder_alive()
+    if alive is True:
+        return False
+    if alive is False:
+        return True
+    # alive is None — cannot adjudicate by liveness ⇒ age rule.
+    try:
+        age = now - os.path.getmtime(AUTODOWN_LOCK)
+    except OSError:
+        age = None
+    return age is not None and age > _lock_stale_seconds()
+
+
 def _acquire_lock(now=None):
     """Atomically acquire the autodown O_EXCL lockfile (§8).
 
     Returns True on success (the lock is now held by this process), or False
-    if another teardown/autoup holds it (busy). A stale lock — older than
-    ``_lock_stale_seconds()``, i.e. abandoned by a dead/blocked holder — is
-    broken (unlinked) and acquire is retried once before giving up, so the
-    daemon can never deadlock forever.
+    if another teardown/autoup holds it (busy). A stale lock — one whose
+    RECORDED HOLDER PID IS PROVABLY DEAD, or (fallback) older than
+    ``_lock_stale_seconds()`` for an indeterminate holder — is broken
+    (unlinked) and acquire is retried once before giving up, so the daemon can
+    never deadlock forever. A LIVE holder is NEVER broken, no matter its age:
+    liveness, not wall-clock, is what distinguishes \"in-flight\" from \"stalled\".
     """
     import time
     now = now if now is not None else time.time()
@@ -861,25 +1287,20 @@ def _acquire_lock(now=None):
     try:
         fd = os.open(AUTODOWN_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     except FileExistsError:
-        # Already held — is it stale (abandoned)?
-        try:
-            age = now - os.path.getmtime(AUTODOWN_LOCK)
-        except OSError:
-            age = None
-        if age is not None and age > _lock_stale_seconds():
-            # Presumed abandoned by a dead/blocked holder — break it and retry
-            # once. If the retry still races another acquirer, report busy.
-            try:
-                os.unlink(AUTODOWN_LOCK)
-            except OSError:
-                return False
-            try:
-                fd = os.open(AUTODOWN_LOCK,
-                             os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            except FileExistsError:
-                return False
-        else:
+        # Already held — is it stale (abandoned by a dead/indeterminate holder)?
+        if not _lock_is_stale(now):
             return False  # live lock held by a concurrent teardown/autoup
+        # Stale — break it and retry once. If the retry still races another
+        # acquirer, report busy.
+        try:
+            os.unlink(AUTODOWN_LOCK)
+        except OSError:
+            return False
+        try:
+            fd = os.open(AUTODOWN_LOCK,
+                         os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            return False
     # Record the holder's pid + acquire time for diagnostics / staleness.
     try:
         os.write(fd, f"pid={os.getpid()} acquired={now}".encode())

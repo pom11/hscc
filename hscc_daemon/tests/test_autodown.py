@@ -180,6 +180,60 @@ class TestConfig:
 
 
 # ---------------------------------------------------------------------------
+# list_active_cron_jobs — Hermes cron source of truth (feat t_2b711a94 §7)
+# ---------------------------------------------------------------------------
+
+class TestListActiveCronJobs:
+    """list_active_cron_jobs reads Hermes' jobs.json and returns ACTIVE jobs,
+    or CRON_UNREADABLE on an unreadable/absent/malformed store — fail-closed,
+    so the CLI can abort on 'cannot determine' instead of arming on an
+    unverifiable signal."""
+
+    def _write(self, tmp_path, jobs):
+        p = tmp_path / "jobs.json"
+        p.write_text(json.dumps({"jobs": jobs}))
+        return str(p)
+
+    def test_active_jobs_only(self, tmp_path):
+        p = self._write(tmp_path, [
+            {"id": "a", "name": "active-one", "enabled": True,
+             "schedule_display": "0 8 * * *", "next_run_at": "2026-08-26T08:00:00+03:00"},
+            {"id": "b", "name": "paused-two", "enabled": False,
+             "schedule_display": "0 9 * * *", "next_run_at": "..."},
+            {"id": "c", "name": "also-active", "enabled": True,
+             "schedule": {"kind": "cron", "expr": "*/15 * * * *",
+                          "display": "*/15 * * * *"},
+             "next_run_at": "2026-08-26T00:45:00+03:00"},
+        ])
+        active = ad.list_active_cron_jobs(p)
+        assert active == [
+            {"id": "a", "name": "active-one", "schedule_display": "0 8 * * *",
+             "next_run_at": "2026-08-26T08:00:00+03:00"},
+            {"id": "c", "name": "also-active", "schedule_display": "*/15 * * * *",
+             "next_run_at": "2026-08-26T00:45:00+03:00"},
+        ]
+
+    def test_absent_file_is_unreadable(self, tmp_path):
+        res = ad.list_active_cron_jobs(str(tmp_path / "nope.json"))
+        assert res is ad.CRON_UNREADABLE
+
+    def test_corrupt_json_is_unreadable(self, tmp_path):
+        p = tmp_path / "jobs.json"
+        p.write_text("{ not json")
+        assert ad.list_active_cron_jobs(str(p)) is ad.CRON_UNREADABLE
+
+    def test_top_level_not_dict_is_unreadable(self, tmp_path):
+        p = tmp_path / "jobs.json"
+        p.write_text("[1,2,3]")
+        assert ad.list_active_cron_jobs(str(p)) is ad.CRON_UNREADABLE
+
+    def test_jobs_not_list_is_unreadable(self, tmp_path):
+        p = tmp_path / "jobs.json"
+        p.write_text(json.dumps({"jobs": {"a": 1}}))
+        assert ad.list_active_cron_jobs(str(p)) is ad.CRON_UNREADABLE
+
+
+# ---------------------------------------------------------------------------
 # record_activity
 # ---------------------------------------------------------------------------
 
@@ -1774,10 +1828,17 @@ class TestCycleWakeSeam:
         assert calls == []
 
     def test_waking_does_not_trigger(self, autodown_file, monkeypatch):
-        """state=waking ⇒ autoup NOT called (a wake is already in flight)."""
+        """state=waking with a LIVE lock holder (a wake genuinely in flight)
+        ⇒ autoup NOT called — a real wake must never be doubled or interrupted.
+        (With the §8 stalled-wake fix, holder liveness distinguishes in-flight
+        from stalled: a LIVE holder is always left alone across the debounce.)"""
         calls = []
         monkeypatch.setattr(ad, "autoup", lambda: calls.append("autoup"),
                             raising=False)
+        # A LIVE holder = an authentic in-flight wake. Reset the stall counter
+        # so this test is hermetic regardless of prior tests' debounce state.
+        ad._wake_stall_streak = 0
+        monkeypatch.setattr(ad, "_lock_holder_alive", lambda: True)
         down = NOW - _dt.timedelta(minutes=30)
         self._cfg(autodown_file, down.isoformat(), monkeypatch)
         ad.load_config  # noqa
@@ -1975,6 +2036,133 @@ class TestReconcileToReality:
         for _ in range(ad.RECONCILE_UP_DEBOUNCE):
             ad.cycle(probes=[])
         assert any("RECONCILED" in m and l == "ERROR" for m, l in logs)
+
+
+# ---------------------------------------------------------------------------
+# §8 Fix 2 (extended to waking) — stalled-wake recovery
+# ---------------------------------------------------------------------------
+# The reproduced defect: a wake process KILLED mid-wake leaves state=waking, a
+# dead holder PID in the leaked lock, and the intentional block latched forever
+# while the fleet is actually up. No live lock holder ⇒ nothing is progressing.
+# After a bounded debounce, cycle() must act — reconcile to up if the units are
+# actually healthy, else resume the wake (autoup is idempotent). A LIVE holder
+# is the "in-flight" signal and must be left alone. Tests drive liveness via
+# monkeypatched _lock_holder_alive and reality via _reconcile_up_fn — never a
+# real cluster read and never a real telegram/sparkrun.
+
+class TestStalledWakeRecovery:
+    """cycle() recovers a STALLED wake (state=waking, no live lock holder)."""
+
+    def _cfg(self, autodown_file):
+        cfg = dict(ad.DEFAULT_CONFIG)
+        cfg["enabled"] = True
+        cfg["state"] = "waking"
+        cfg["idle_minutes"] = 10
+        cfg["down_since"] = (NOW - _dt.timedelta(minutes=30)).isoformat()
+        ad.save_config(cfg)
+        return cfg
+
+    def _setup(self, autodown_file, tmp_path, monkeypatch):
+        block_file = str(tmp_path / "watchdog-block.json")
+        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
+        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
+        monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
+        self._cfg(autodown_file)
+        _lifecycle.save_watchdog_block(
+            {"blocked": True, "intentional": "autodown",
+             "reason": ad.WATCHDOG_TEARDOWN_REASON,
+             "blocked_at": NOW.isoformat(), "failures": []})
+        # Reset both debounce counters so each test starts clean.
+        ad._wake_stall_streak = 0
+        ad._reconcile_up_streak = 0
+        return block_file
+
+    def _run_stalled_cycles(self):
+        """Run WAKE_STALL_DEBOUNCE waking cycles with no live holder so the
+        stall debounce trips and _handle_stalled_wake fires."""
+        for _ in range(ad.WAKE_STALL_DEBOUNCE):
+            ad.cycle(probes=[])
+
+    # -- state=waking + DEAD holder + units HEALTHY ⇒ reconcile to up --------
+    def test_stalled_wake_units_healthy_reconciles_to_up(
+            self, autodown_file, tmp_path, monkeypatch):
+        """state=waking, dead lock holder, units ACTUALLY healthy ⇒ reconcile:
+        clear the intentional block, set state=up, clear down_since."""
+        block_file = self._setup(autodown_file, tmp_path, monkeypatch)
+        monkeypatch.setattr(ad, "_lock_holder_alive", lambda: False)
+        monkeypatch.setattr(ad, "_reconcile_up_fn", lambda **kw: True)
+        ap_calls = []
+        monkeypatch.setattr(ad, "autoup",
+                            lambda: ap_calls.append("autoup"), raising=False)
+
+        self._run_stalled_cycles()
+
+        assert ap_calls == []                 # healthy ⇒ reconcile, NOT autoup
+        cfg = ad.load_config()
+        assert cfg["state"] == "up"
+        assert cfg["down_since"] is None
+        blk = json.loads(Path(block_file).read_text())
+        assert blk.get("blocked") is False    # block cleared — watchdog resumes
+        assert blk.get("intentional") is None
+        assert "stalled wake" in blk.get("reason", "")
+
+    # -- state=waking + DEAD holder + units DOWN ⇒ wake resumed --------------
+    def test_stalled_wake_units_down_resumes_autoup(
+            self, autodown_file, tmp_path, monkeypatch):
+        """state=waking, dead lock holder, units NOT healthy ⇒ resume the wake
+        (idempotent autoup), do NOT reconcile to a false up."""
+        self._setup(autodown_file, tmp_path, monkeypatch)
+        monkeypatch.setattr(ad, "_lock_holder_alive", lambda: False)
+        monkeypatch.setattr(ad, "_reconcile_up_fn", lambda **kw: False)
+        ap_calls = []
+        monkeypatch.setattr(ad, "autoup",
+                            lambda: ap_calls.append("autoup"), raising=False)
+
+        self._run_stalled_cycles()
+
+        assert ap_calls == ["autoup"]         # interrupted wake resumed
+        # State stays waking — the resumed wake owns the transition to up.
+        assert ad.load_config()["state"] == "waking"
+
+    # -- state=waking + LIVE holder ⇒ left alone (no double wake) ------------
+    def test_stalled_wake_live_holder_left_alone(
+            self, autodown_file, tmp_path, monkeypatch):
+        """state=waking with a LIVE lock holder (an authentic in-flight wake)
+        ⇒ cycle() leaves it alone across the debounce: no reconcile, no autoup
+        — a legitimate wake must never be interrupted or doubled."""
+        block_file = self._setup(autodown_file, tmp_path, monkeypatch)
+        monkeypatch.setattr(ad, "_lock_holder_alive", lambda: True)
+        monkeypatch.setattr(ad, "_reconcile_up_fn", lambda **kw: True)
+        ap_calls = []
+        monkeypatch.setattr(ad, "autoup",
+                            lambda: ap_calls.append("autoup"), raising=False)
+
+        for _ in range(ad.WAKE_STALL_DEBOUNCE * 2):
+            ad.cycle(probes=[])
+
+        assert ap_calls == []                 # never doubled
+        assert ad.load_config()["state"] == "waking"   # never reconciled
+        blk = json.loads(Path(block_file).read_text())
+        assert blk.get("intentional") == "autodown"    # block never cleared
+        assert ad._wake_stall_streak == 0      # live holder resets the counter
+
+    # -- debounce: a single no-holder waking cycle does NOT act immediately --
+    def test_single_no_holder_cycle_does_not_act(
+            self, autodown_file, tmp_path, monkeypatch):
+        """One waking cycle with no live holder does NOT act yet — the debounce
+        must be sustained (a just-transitioning wake is never misread)."""
+        block_file = self._setup(autodown_file, tmp_path, monkeypatch)
+        monkeypatch.setattr(ad, "_lock_holder_alive", lambda: False)
+        monkeypatch.setattr(ad, "_reconcile_up_fn", lambda **kw: True)
+        ap_calls = []
+        monkeypatch.setattr(ad, "autoup",
+                            lambda: ap_calls.append("autoup"), raising=False)
+
+        ad.cycle(probes=[])   # one cycle only
+        assert ap_calls == []
+        assert ad.load_config()["state"] == "waking"
+        blk = json.loads(Path(block_file).read_text())
+        assert blk.get("intentional") == "autodown"    # not yet cleared
 
 
 # ---------------------------------------------------------------------------
@@ -2930,6 +3118,75 @@ class TestLockAndGates:
             assert ad._acquire_lock(now=NOW.timestamp()) is False   # busy
         finally:
             ad._release_lock()
+
+    # -- F3 (Fix): lock broken IMMEDIATELY when holder PID is PROVABLY DEAD --
+    # The reproduced defect: a killed wake left a lock with pid=73271 DEAD but
+    # a YOUNG age, so the old time-only rule held the daemon blocked for the
+    # full ~20min grace window for no reason. Liveness must win over wall-clock.
+    def test_dead_holder_broken_immediately_even_if_fresh(
+            self, tmp_path, monkeypatch):
+        """A lock whose holder PID is provably dead is broken IMMEDIATELY —
+        regardless of age (the old time-only rule would have waited the full
+        grace window). A dead holder must never block the daemon."""
+        import os as _os
+        lock = str(tmp_path / "hscc" / "autodown.lock")
+        monkeypatch.setattr(ad, "AUTODOWN_LOCK", lock)
+        _os.makedirs(_os.path.dirname(lock), exist_ok=True)
+        with open(lock, "w") as f:
+            f.write("pid=999999 acquired=0")     # provably dead holder
+        now = NOW.timestamp()
+        # FRESH mtime — the old time-only rule would have respected it.
+        _os.utime(lock, (now - 1, now - 1))
+        assert ad._lock_holder_alive() is False
+        assert ad._acquire_lock(now=now) is True   # broken immediately
+        # The dead lock was unlinked and re-acquired by this process.
+        with open(lock) as f:
+            content = f.read()
+        assert f"pid={_os.getpid()}" in content
+        ad._release_lock()
+
+    def test_live_holder_respected_even_if_old(
+            self, tmp_path, monkeypatch):
+        """A lock held by a LIVE process is NEVER broken, even past the
+        staleness threshold — liveness (not wall-clock) is what distinguishes
+        'in flight' from 'stalled'. The old time-only rule would have wrongly
+        broken a slow-but-alive wake past ~20min."""
+        import os as _os
+        lock = str(tmp_path / "hscc" / "autodown.lock")
+        monkeypatch.setattr(ad, "AUTODOWN_LOCK", lock)
+        _os.makedirs(_os.path.dirname(lock), exist_ok=True)
+        with open(lock, "w") as f:
+            f.write(f"pid={_os.getpid()} acquired=0")  # LIVE holder (this test)
+        now = NOW.timestamp()
+        # OLD mtime — past the staleness threshold.
+        _os.utime(lock, (now - 100000, now - 100000))
+        assert ad._lock_holder_alive() is True
+        assert ad._acquire_lock(now=now) is False    # busy — live holder held
+        # The live holder's lock was NOT unlinked.
+        assert _os.path.exists(lock)
+
+    # -- F3 (Fix): unparseable/missing pid falls back to the age rule --------
+    def test_unparseable_lock_falls_back_to_age_rule(
+            self, tmp_path, monkeypatch):
+        """A lock with an unparseable/missing pid (e.g. a holder on ANOTHER
+        host, or a legacy lock) cannot be adjudicated by liveness ⇒ the age
+        rule still applies: fresh ⇒ busy, over-age ⇒ broken."""
+        import os as _os
+        lock = str(tmp_path / "hscc" / "autodown.lock")
+        monkeypatch.setattr(ad, "AUTODOWN_LOCK", lock)
+        _os.makedirs(_os.path.dirname(lock), exist_ok=True)
+        now = NOW.timestamp()
+        # No pid field at all — indeterminate holder.
+        with open(lock, "w") as f:
+            f.write("acquired=0")
+        # FRESH ⇒ age rule says NOT stale ⇒ busy.
+        _os.utime(lock, (now - 1, now - 1))
+        assert ad._lock_holder_alive() is None
+        assert ad._acquire_lock(now=now) is False    # busy (fresh, no pid)
+        # Over-age ⇒ age rule says stale ⇒ broken + re-acquired.
+        _os.utime(lock, (now - 100000, now - 100000))
+        assert ad._acquire_lock(now=now) is True     # stale by age ⇒ broken
+        ad._release_lock()
 
     # -- F4: serving.json missing ⇒ teardown aborts, no block, not down ------
     def test_serving_missing_teardown_aborts_no_block_not_down(
