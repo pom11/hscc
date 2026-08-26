@@ -54,6 +54,7 @@ targets:
       - path: Sources/HSCC/Views/CardsView.swift
       - path: Sources/HSCC/Views/MutationSupport.swift
       - path: Sources/HSCC/Views/OrchestratorChatView.swift
+      - path: Sources/HSCC/Views/ChatStore.swift
       - path: Sources/HSCC/Views/AutodownView.swift
       - path: Sources/HSCC/Views/ProjectsView.swift
       - path: Sources/HSCC/Views/OpsView.swift
