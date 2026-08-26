@@ -386,5 +386,183 @@ class TestFleetPlanPaths:
             assert not arg.startswith("~")
 
 
+class TestFleetUpServedModelName:
+    """fleet_up_plan() must restore the role alias via --served-model-name.
+
+    Regression for the autodown-wake bug (t_cbce664b): vLLM only serves a
+    logical alias if it is STARTED with ``--served-model-name``. autoup() (and
+    ``hscc cluster up``) build from ``fleet_up_plan()``, so the wake command
+    for every unit MUST carry ``--served-model-name <concrete> <alias>`` with
+    the alias derived from the unit's ROLE identity (orchestrator-model /
+    worker-model) and the concrete id from the unit's model field.
+    """
+
+    def _serving(self):
+        return {
+            "port": 8000,
+            "units": [
+                {"id": "orch", "role": "orchestrator",
+                 "nodes": ["10.0.0.244", "10.0.0.246"], "port": 8000,
+                 "recipe": "/abs/recipes/orch.yaml",
+                 "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "tp": 2},
+                {"id": "wk1", "role": "worker", "keepalive": False,
+                 "nodes": ["10.0.0.247"], "port": 8000,
+                 "recipe": "/abs/recipes/wk.yaml",
+                 "model": "deepseek-ai/DeepSeek-V4-Flash-0731"},
+            ],
+        }
+
+    def test_each_cmd_contains_served_model_name_with_alias(self, monkeypatch):
+        """Every wake command CONTAINS --served-model-name with the role alias.
+
+        Built from a fixture serving.json (no serve_cmd field at all) — proves
+        the alias is CARRIED THROUGH from the unit, not copied from serve_cmd.
+        """
+        from hscc_daemon import serving
+        monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
+        plan = serving.fleet_up_plan(self._serving())
+        assert len(plan) == 2
+        by_id = {e["unit_id"]: e for e in plan}
+        # Orchestrator advertises orchestrator-model.
+        orch = by_id["orch"]["cmd"]
+        i = orch.index("--served-model-name")
+        assert orch[i + 1] == "deepseek-ai/DeepSeek-V4-Flash-0731 orchestrator-model"
+        # Worker advertises worker-model (with its --tp).
+        wk = by_id["wk1"]["cmd"]
+        j = wk.index("--served-model-name")
+        assert wk[j + 1] == "deepseek-ai/DeepSeek-V4-Flash-0731 worker-model"
+
+    def test_role_identity_not_kind_string(self, monkeypatch):
+        """The alias follows ROLE (serving.json role), not the planner's kind."""
+        from hscc_daemon import serving
+        monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
+        # A unit whose role is literally 'worker' but is the orchestrator's
+        # tp-peer must STILL advertise worker-model (role identity wins).
+        sd = {
+            "port": 8000,
+            "units": [
+                {"id": "orch", "role": "orchestrator",
+                 "nodes": ["10.0.0.244"], "port": 8000,
+                 "recipe": "/abs/recipes/orch.yaml",
+                 "model": "deepseek-ai/DeepSeek-V4-Flash-0731"},
+                {"id": "wk1", "role": "worker",
+                 "nodes": ["10.0.0.247"], "port": 8000,
+                 "recipe": "/abs/recipes/wk.yaml",
+                 "model": "deepseek-ai/DeepSeek-V4-Flash-0731"},
+            ],
+        }
+        plan = serving.fleet_up_plan(sd)
+        by_id = {e["unit_id"]: e for e in plan}
+        wk = by_id["wk1"]["cmd"]
+        j = wk.index("--served-model-name")
+        assert wk[j + 1] == "deepseek-ai/DeepSeek-V4-Flash-0731 worker-model"
+
+    def test_concrete_falls_back_to_recipe_stem(self, monkeypatch):
+        """A unit without a model field uses the recipe filename stem."""
+        from hscc_daemon import serving
+        monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
+        sd = {
+            "port": 8000,
+            "units": [
+                {"id": "wk1", "role": "worker",
+                 "nodes": ["10.0.0.247"], "port": 8000,
+                 "recipe": "~/recipes/my-model-a3b.yaml"},
+            ],
+        }
+        plan = serving.fleet_up_plan(sd)
+        cmd = plan[0]["cmd"]
+        j = cmd.index("--served-model-name")
+        assert cmd[j + 1] == "my-model-a3b worker-model"
+
+    def test_no_model_no_recipe_yields_no_concrete(self):
+        """A unit with neither model nor recipe has no concrete id ⇒ the flag
+        is omitted (no --served-model-name), so a wake still starts the unit
+        rather than refusing it."""
+        from hscc_daemon import serving
+        assert serving._concrete_model(
+            {"id": "wk1", "role": "worker", "nodes": ["10.0.0.247"],
+             "port": 8000}) is None
+        assert serving._served_model_name(
+            {"id": "wk1", "role": "worker", "nodes": ["10.0.0.247"]}) is None
+
+
+class TestServeCmdMismatchRefused:
+    """A serve_cmd disagreeing with the unit's recipe/nodes/port is REFUSED.
+
+    The wake command is always built from the unit's authoritative fields, so a
+    corrupt ``serve_cmd`` (e.g. rewritten to wrong hosts by an errant apply) can
+    never be RUN. The refusal is proven two ways: (1) ``_serve_cmd_mismatch``
+    reports the disagreement; (2) ``fleet_up_plan`` still issues the CORRECT
+    derived command (right hosts/recipe/port + the alias) and loudly warns —
+    never the serve_cmd's wrong targets.
+    """
+
+    def _unit(self, **over):
+        u = {"id": "wk1", "role": "worker", "nodes": ["10.0.0.247"],
+             "port": 8000, "recipe": "/abs/recipes/wk.yaml",
+             "model": "deepseek-ai/DeepSeek-V4-Flash-0731"}
+        u.update(over)
+        return u
+
+    def _good_serve_cmd(self):
+        return ["sparkrun", "run", "/abs/recipes/wk.yaml", "--cluster", "hscc",
+                "--hosts", "10.0.0.247", "--port", "8000", "--no-follow",
+                "--ensure", "--served-model-name",
+                "deepseek-ai/DeepSeek-V4-Flash-0731 worker-model"]
+
+    def test_agreeing_serve_cmd_no_mismatch(self):
+        from hscc_daemon import serving
+        u = self._unit(serve_cmd=self._good_serve_cmd())
+        assert serving._serve_cmd_mismatch(u, self._good_serve_cmd()) == ""
+
+    def test_wrong_recipe_is_refused(self):
+        from hscc_daemon import serving
+        bad = self._good_serve_cmd()
+        bad[2] = "/Users/desac/recipes/orch.yaml"   # wrong recipe
+        u = self._unit(serve_cmd=bad)
+        assert serving._serve_cmd_mismatch(u, bad) != ""
+
+    def test_wrong_hosts_is_refused(self, monkeypatch):
+        from hscc_daemon import serving
+        # A serve_cmd targeting 10.0.0.1,10.0.0.2 while the unit hosts .247.
+        sd = {
+            "port": 8000,
+            "units": [dict(self._unit(), serve_cmd=[
+                "sparkrun", "run", "/abs/recipes/wk.yaml", "--cluster", "hscc",
+                "--hosts", "10.0.0.1,10.0.0.2", "--port", "8000", "--no-follow",
+                "--ensure", "--served-model-name",
+                "deepseek-ai/DeepSeek-V4-Flash-0731 worker-model"])],
+        }
+        monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
+        plan = serving.fleet_up_plan(sd)
+        assert len(plan) == 1
+        cmd = plan[0]["cmd"]
+        # The ISSUED command uses the unit's real host (.247), NOT the serve_cmd's
+        # imagined 10.0.0.1/10.0.0.2 — the bogus serve_cmd was REFUSED.
+        assert "--hosts" in cmd
+        assert cmd[cmd.index("--hosts") + 1] == "10.0.0.247"
+        # ...and still carries the correct alias.
+        j = cmd.index("--served-model-name")
+        assert cmd[j + 1] == "deepseek-ai/DeepSeek-V4-Flash-0731 worker-model"
+
+    def test_wrong_port_is_refused(self, monkeypatch, capsys):
+        from hscc_daemon import serving
+        sd = {
+            "port": 8000,
+            "units": [dict(self._unit(), serve_cmd=[
+                "sparkrun", "run", "/abs/recipes/wk.yaml", "--cluster", "hscc",
+                "--hosts", "10.0.0.247", "--port", "9000", "--no-follow",
+                "--ensure", "--served-model-name",
+                "deepseek-ai/DeepSeek-V4-Flash-0731 worker-model"])],
+        }
+        monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
+        plan = serving.fleet_up_plan(sd)
+        cmd = plan[0]["cmd"]
+        # Real unit port (8000), not the serve_cmd's 9000.
+        assert cmd[cmd.index("--port") + 1] == "8000"
+        # And the refusal is surfaced loudly via _serving_warn.
+        assert "serve_cmd" in capsys.readouterr().err
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
