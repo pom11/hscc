@@ -276,6 +276,30 @@ class TestStatus:
         assert data["state"] == "down"
         assert data["down_since"] == "2026-08-25T07:59:01+00:00"
 
+    def test_status_notes_cpu_only_cron_and_model_cron(
+            self, capsys, autodown_file, block_file, monkeypatch):
+        """status reads active crons and notes CPU-only watchdogs (they never
+        block arming) AND model-requiring jobs (the abort/force reason)."""
+        monkeypatch.setattr(ad, "list_active_cron_jobs", lambda *a, **k: [
+            _CPU_ONLY_JOBS[0], _MODEL_JOBS[0]])
+        rc = cmd_autodown(["status"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "active cron (cpu-only): hscc-dep-watcher" in out
+        assert "do not block arming" in out
+        assert "active cron (model):    gpu-daily-report" in out
+
+    def test_status_json_notes_cron_classification(
+            self, capsys, autodown_file, block_file, monkeypatch):
+        monkeypatch.setattr(ad, "list_active_cron_jobs", lambda *a, **k: [
+            _CPU_ONLY_JOBS[0], _CPU_ONLY_JOBS[1], _MODEL_JOBS[0]])
+        rc = cmd_autodown(["status", "--json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert sorted(data["active_cron_cpu_only"]) == [
+            "hscc-dep-watcher", "hscc-escalate-watcher"]
+        assert data["active_cron_model"] == ["gpu-daily-report"]
+
 
 # ---------------------------------------------------------------------------
 # enable — resets the idle timer, non-acting
@@ -330,19 +354,30 @@ class TestEnable:
 
 
 # ---------------------------------------------------------------------------
-# enable — Hermes cron-job guard (feat t_2b711a94 §7)
+# enable — Hermes cron-job guard (feat t_2b711a94 §7, refined t_c94f8b8c)
 # ---------------------------------------------------------------------------
 # Active scheduled jobs and an idle-down cluster conflict: autodown may power
 # the GPU serving layer down exactly when a job is due. So `enable` reads
 # Hermes' source of truth (~/.hermes/cron/jobs.json) and ABORTS when active
-# jobs exist, unless `--force` is given. Unreadable/absent cron config ⇒
-# "cannot determine" ⇒ abort (never arm on an unverifiable signal).
+# MODEL-REQUIRING jobs exist (unless --force). CPU-only watchdogs
+# (no_agent:true, model:null) do NOT block — they are informational notes.
+# Unreadable/absent cron config ⇒ "cannot determine" ⇒ abort (fail-safe).
 
-_ACTIVE_JOBS = [
+# The real host's two active jobs — both CPU-only script watchdogs.
+_CPU_ONLY_JOBS = [
     {"id": "j1", "name": "hscc-dep-watcher", "schedule_display": "0 8 * * *",
-     "next_run_at": "2026-08-26T08:00:00+03:00"},
+     "next_run_at": "2026-08-26T08:00:00+03:00",
+     "no_agent": True, "model": None, "cpu_only": True},
     {"id": "j2", "name": "hscc-escalate-watcher",
-     "schedule_display": "*/15 * * * *", "next_run_at": "2026-08-26T00:45:00+03:00"},
+     "schedule_display": "*/15 * * * *", "next_run_at": "2026-08-26T00:45:00+03:00",
+     "no_agent": True, "model": None, "cpu_only": True},
+]
+
+# A model-requiring job (runs an agent / needs the GPU serving layer).
+_MODEL_JOBS = [
+    {"id": "m1", "name": "gpu-daily-report", "schedule_display": "0 9 * * *",
+     "next_run_at": "2026-08-26T09:00:00+03:00",
+     "no_agent": False, "model": "gpt-4o", "cpu_only": False},
 ]
 
 
@@ -357,32 +392,56 @@ class TestEnableCronGuard:
     def _stub_active(self, monkeypatch, jobs):
         monkeypatch.setattr(ad, "list_active_cron_jobs", lambda *a, **k: jobs)
 
-    def test_aborts_nonzero_and_lists_jobs(self, capsys, autodown_file,
-                                           block_file, monkeypatch):
-        """Active jobs present ⇒ `enable` aborts non-zero and lists them."""
-        self._stub_active(monkeypatch, _ACTIVE_JOBS)
+    def test_aborts_nonzero_and_lists_model_jobs(self, capsys, autodown_file,
+                                                 block_file, monkeypatch):
+        """A model-requiring active job ⇒ `enable` aborts non-zero and lists
+        it (the blocker). CPU-only jobs, if present too, are NOT named."""
+        self._stub_active(monkeypatch, _MODEL_JOBS + _CPU_ONLY_JOBS)
         rc = cmd_autodown(["enable", "--idle-minutes", "5"])
         assert rc == 1
         captured = capsys.readouterr()
         combined = captured.out + captured.err
         assert "NOT armed" in combined
-        assert "hscc-dep-watcher" in combined
-        assert "hscc-escalate-watcher" in combined
-        assert "0 8 * * *" in combined
-        assert "*/15 * * * *" in combined
-        assert "2026-08-26T08:00:00+03:00" in combined
+        assert "model-requiring" in combined
+        assert "gpu-daily-report" in combined
+        assert "0 9 * * *" in combined
+        assert "2026-08-26T09:00:00+03:00" in combined
+        # CPU-only job is NOT named as a blocker.
+        assert "hscc-dep-watcher" not in combined
         # Must NOT have armed: no config file created.
         assert not autodown_file.exists()
 
-    def test_abort_json(self, capsys, autodown_file, block_file, monkeypatch):
-        self._stub_active(monkeypatch, _ACTIVE_JOBS)
+    def test_abort_json_names_only_model_jobs(self, capsys, autodown_file,
+                                              block_file, monkeypatch):
+        self._stub_active(monkeypatch, _MODEL_JOBS + _CPU_ONLY_JOBS)
         rc = cmd_autodown(["enable", "--json"])
         assert rc == 1
         data = json.loads(capsys.readouterr().out)
         assert data["exit"] == 1
         assert "aborting" in data["error"]
-        assert len(data["active_cron_jobs"]) == 2
+        names = [j["name"] for j in data["active_cron_jobs"]]
+        assert names == ["gpu-daily-report"]   # only the model-requiring one
         assert not autodown_file.exists()
+
+    def test_cpu_only_active_jobs_arm_and_are_noted(self, capsys,
+                                                    autodown_file, block_file,
+                                                    monkeypatch):
+        """CPU-only active jobs (no_agent:true, model:null) ⇒ enable ARMS and
+        notes them informationally — no abort, no --force needed."""
+        self._stub_active(monkeypatch, _CPU_ONLY_JOBS)
+        rc = cmd_autodown(["enable", "--idle-minutes", "5"])
+        assert rc == 0
+        cfg = _read_config(autodown_file)
+        assert cfg["enabled"] is True
+        # Clean arm over CPU-only jobs — NOT force-armed, nothing overridden.
+        assert cfg["force_armed"] is False
+        assert cfg["force_armed_overrides"] == []
+        out = capsys.readouterr().out
+        assert "ENABLED" in out
+        # CPU-only watchdog is noted informationally.
+        assert "hscc-dep-watcher" in out
+        assert "hscc-escalate-watcher" in out
+        assert "CPU-only" in out
 
     def test_no_active_jobs_arms(self, capsys, autodown_file, block_file,
                                   monkeypatch):
@@ -405,6 +464,23 @@ class TestEnableCronGuard:
         assert "cannot determine" in err
         assert not autodown_file.exists()
 
+    def test_ambiguous_missing_fields_abort_failsafe(self, capsys,
+                                                     autodown_file, block_file,
+                                                     monkeypatch):
+        """A job whose nature cannot be determined (missing no_agent/model)
+        is treated as model-requiring and ABORTS — never arm on an unverifiable
+        signal."""
+        self._stub_active(monkeypatch, [
+            {"id": "u1", "name": "mystery-job",
+             "schedule_display": "0 10 * * *", "next_run_at": "..."}])
+        rc = cmd_autodown(["enable"])
+        assert rc == 1
+        captured = capsys.readouterr()
+        combined = captured.out + captured.err
+        assert "NOT armed" in combined
+        assert "mystery-job" in combined
+        assert not autodown_file.exists()
+
     def test_inactive_jobs_do_not_block(self, capsys, autodown_file,
                                         block_file, monkeypatch):
         """Disabled/paused jobs do not block arming — the REAL reader filters
@@ -422,48 +498,55 @@ class TestEnableCronGuard:
         assert cfg["enabled"] is True
         assert cfg["force_armed"] is False
 
-    def test_force_arms_and_records_overrides(self, capsys, autodown_file,
-                                              block_file, monkeypatch):
-        """--force arms anyway, prints the overridden jobs, records them."""
-        self._stub_active(monkeypatch, _ACTIVE_JOBS)
+    def test_force_arms_and_records_only_model_overrides(
+            self, capsys, autodown_file, block_file, monkeypatch):
+        """--force over a model-requiring job arms, prints the override, and
+        records force_armed + ONLY the model-requiring job(s). CPU-only jobs
+        are NOT recorded as overrides (they never conflicted) but are noted."""
+        self._stub_active(monkeypatch, _MODEL_JOBS + _CPU_ONLY_JOBS)
         rc = cmd_autodown(["enable", "--idle-minutes", "5", "--force"])
         assert rc == 0
         cfg = _read_config(autodown_file)
         assert cfg["enabled"] is True
         assert cfg["force_armed"] is True
-        assert set(cfg["force_armed_overrides"]) == {
-            "hscc-dep-watcher", "hscc-escalate-watcher"}
+        assert cfg["force_armed_overrides"] == ["gpu-daily-report"]
         captured = capsys.readouterr()
         assert "FORCED" in captured.out
-        assert "hscc-dep-watcher" in captured.out
+        assert "gpu-daily-report" in captured.out
+        # CPU-only watchdogs not in the override record, but noted.
+        assert "hscc-dep-watcher" not in cfg["force_armed_overrides"]
+        assert "CPU-only" in captured.out
 
-    def test_force_records_only_actually_active_jobs(
+    def test_force_records_only_actually_active_model_jobs(
             self, capsys, autodown_file, block_file, monkeypatch):
-        """--force records only the ACTIVE jobs it overrode. Uses the REAL
-        reader against a real jobs.json so the active/inactive split happens
-        in production code, not a stub."""
+        """--force records only the ACTIVE MODEL-REQUIRING jobs it overrode.
+        Uses the REAL reader against a real jobs.json so the active/inactive
+        AND cpu-only/model splits all happen in production code, not a stub."""
         autodown_file.parent.mkdir(parents=True, exist_ok=True)
         jobs_file = autodown_file.parent / "cron" / "jobs.json"
         jobs_file.parent.mkdir(parents=True, exist_ok=True)
         jobs_file.write_text(json.dumps({"jobs": [
             {"id": "j1", "name": "hscc-dep-watcher", "enabled": True,
+             "no_agent": True, "model": None,
              "schedule_display": "0 8 * * *",
              "next_run_at": "2026-08-26T08:00:00+03:00"},
             {"id": "p", "name": "paused-one", "enabled": False,
              "schedule_display": "0 8 * * *", "next_run_at": "..."},
-            {"id": "j2", "name": "hscc-escalate-watcher", "enabled": True,
-             "schedule_display": "*/15 * * * *",
-             "next_run_at": "2026-08-26T00:45:00+03:00"},
+            {"id": "m", "name": "gpu-daily-report", "enabled": True,
+             "no_agent": False, "model": "gpt-4o",
+             "schedule_display": "0 9 * * *",
+             "next_run_at": "2026-08-26T09:00:00+03:00"},
         ]}))
         self._use_real_reader(monkeypatch)
         rc = cmd_autodown(["enable", "--force"])
         assert rc == 0
         cfg = _read_config(autodown_file)
         assert cfg["force_armed"] is True
-        assert set(cfg["force_armed_overrides"]) == {
-            "hscc-dep-watcher", "hscc-escalate-watcher"}
+        assert cfg["force_armed_overrides"] == ["gpu-daily-report"]
         captured = capsys.readouterr()
         assert "paused-one" not in captured.out
+        assert "hscc-dep-watcher" not in cfg["force_armed_overrides"]
+        assert "gpu-daily-report" in captured.out
 
     def test_force_arms_when_config_unreadable(self, capsys, autodown_file,
                                                block_file, monkeypatch):
@@ -476,16 +559,6 @@ class TestEnableCronGuard:
         assert cfg["enabled"] is True
         assert cfg["force_armed"] is False
         assert cfg["force_armed_overrides"] == []
-
-    def test_force_json(self, capsys, autodown_file, block_file, monkeypatch):
-        self._stub_active(monkeypatch, _ACTIVE_JOBS)
-        rc = cmd_autodown(["enable", "--force", "--json"])
-        assert rc == 0
-        data = json.loads(capsys.readouterr().out)
-        assert data["enabled"] is True
-        assert data["force_armed"] is True
-        assert data["force_armed_overrides"] == [
-            "hscc-dep-watcher", "hscc-escalate-watcher"]
 
     def test_status_surfaces_force_armed(self, capsys, autodown_file,
                                          block_file):
