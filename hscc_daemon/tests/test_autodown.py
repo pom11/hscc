@@ -653,16 +653,24 @@ class TestClassify:
         state = {"state": "down"}
         assert ad.classify(block, state) == "expected_down"
 
-    def test_should_be_up_when_waking(self):
-        """blocked + intentional autodown + state waking ⇒ should_be_up."""
+    def test_waking(self):
+        """blocked + intentional autodown + state waking ⇒ waking (distinct
+        from expected_down and should_be_up — a normal transition)."""
         block = {"blocked": True, "intentional": "autodown"}
         state = {"state": "waking"}
-        assert ad.classify(block, state) == "should_be_up"
+        assert ad.classify(block, state) == "waking"
 
     def test_should_be_up_when_block_latched_state_up(self):
         """block latched but state not confirmed down ⇒ should_be_up."""
         block = {"blocked": True, "intentional": "autodown"}
         state = {"state": "up"}
+        assert ad.classify(block, state) == "should_be_up"
+
+    def test_should_be_up_when_state_error(self):
+        """block latched but wake failed (error) ⇒ should_be_up — NOT a window;
+        the layer should be up, so verify must not excuse a fault."""
+        block = {"blocked": True, "intentional": "autodown"}
+        state = {"state": "error"}
         assert ad.classify(block, state) == "should_be_up"
 
     def test_healthy_no_block(self):
@@ -682,6 +690,32 @@ class TestClassify:
         """None/missing inputs ⇒ healthy (never invented down)."""
         assert ad.classify(None, None) == "healthy"
         assert ad.classify({}, {}) == "healthy"
+
+
+class TestIntentionalWindow:
+    """intentional_window — the breadth-of-window predicate built on classify():
+    True only for the non-fault transition states (expected_down, waking)."""
+
+    def test_window_covers_expected_down_and_waking(self):
+        assert ad.intentional_window("expected_down") is True
+        assert ad.intentional_window("waking") is True
+
+    def test_window_excludes_should_be_up_and_healthy(self):
+        assert ad.intentional_window("should_be_up") is False
+        assert ad.intentional_window("healthy") is False
+        assert ad.intentional_window(None) is False
+
+    def test_window_matches_classify_for_each_state(self):
+        block = {"blocked": True, "intentional": "autodown"}
+        for state, verdict in (("down", "expected_down"),
+                               ("waking", "waking"),
+                               ("up", "should_be_up"),
+                               ("error", "should_be_up")):
+            got = ad.classify(block, {"state": state})
+            assert got == verdict, (state, got)
+            # A stream is excused precisely when classify says it's in the
+            # intentional window.
+            assert ad.intentional_window(got) is (got in ("expected_down", "waking"))
 
 
 # ---------------------------------------------------------------------------
