@@ -1,53 +1,45 @@
 import SwiftUI
 
-/// Root view: shows connection state, links to Settings, and hosts placeholder
-/// tabs that the B2 (cluster) / B3 (kanban) / B4 (actions) cards will fill in.
+/// Root view: three tabs, project-centric IA.
 ///
-/// Phase B1 ships only skeleton + settings — the feature tabs below are
-/// placeholders that will be replaced by real views in later cards.
+/// The new information architecture is project-first:
+///   1. **Projects** (primary) — the dozen projects from /v1/projects. Tapping
+///      a project opens a detail screen with segmented sections
+///      (Overview · Chat · Board · Settings). Content repeats across tabs have
+///      been folded away: kanban/board content lives under the project it
+///      belongs to; fleet-level content lives in one Cluster tab.
+///   2. **Cluster** — everything fleet-level in ONE place: the node topology
+///      strip, /v1/verify, nodes, fleet stats/throughput/streams, autodown
+///      control, and templates. No fleet-related content lives outside this tab.
+///   3. **Settings** — app connection only (host, port, token, test
+///      connection). The old duplicate nested Settings entry point is gone.
+///
+/// The design system (Theme.swift) supplies the palette via dynamic semantic
+/// colors that adapt to light/dark automatically.
 struct ContentView: View {
     @EnvironmentObject private var settings: SettingsStore
-    @State private var selectedTab: Tab = .cluster
+    @State private var selectedTab: Tab = .projects
     @State private var pingState: PingState = .idle
 
     enum Tab: Hashable {
-        case cluster, kanban, autodown, control, chat, settings
+        case projects, cluster, settings
     }
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            // B2 — cluster + fleet views.
+            // Primary tab — the dozen projects the operator actually cares about.
+            ProjectsView(client: makeClient())
+                .safeAreaInset(edge: .top) { connectionBanner }
+                .tabItem { Label("Projects", systemImage: "folder") }
+                .tag(Tab.projects)
+
+            // Fleet hub — the node topology strip + every fleet-level surface.
             ClusterView(client: makeClient())
                 .safeAreaInset(edge: .top) { connectionBanner }
                 .tabItem { Label("Cluster", systemImage: "bolt") }
                 .tag(Tab.cluster)
 
-            // B3 — kanban views (standup, cards, review, qa — all read-only).
-            KanbanView()
-                .safeAreaInset(edge: .top) { connectionBanner }
-                .tabItem { Label("Kanban", systemImage: "list.bullet") }
-                .tag(Tab.kanban)
-
-            // C6 — autodown control (the operator's most-used surface).
-            AutodownView(client: makeClient())
-                .safeAreaInset(edge: .top) { connectionBanner }
-                .tabItem { Label("Autodown", systemImage: "timer") }
-                .tag(Tab.autodown)
-
-            // C6 — the Control hub: Ops, Board Hygiene, Fleet Control, Projects.
-            ControlView(client: makeClient())
-                .safeAreaInset(edge: .top) { connectionBanner }
-                .tabItem { Label("Control", systemImage: "slider.horizontal.3") }
-                .tag(Tab.control)
-
-            // C5 — orchestrator chat (confirm-gated mutation).
-            NavigationStack {
-                OrchestratorChatView()
-            }
-            .tabItem { Label("Chat", systemImage: "bubble.left.and.bubble.right") }
-            .tag(Tab.chat)
-
-            // Settings — implemented in B1.
+            // App connection ONLY. The nested duplicate entry point is removed.
             SettingsView()
                 .tabItem { Label("Settings", systemImage: "gearshape") }
                 .tag(Tab.settings)
@@ -61,8 +53,9 @@ struct ContentView: View {
         }
     }
 
-    /// A compact banner summarizing connection state. Links to Settings so the
-    /// user can fix host/port/token in one tap.
+    /// A compact banner summarizing connection state (informational only — the
+    /// old Settings NavigationLink here was the duplicate entry point and has
+    /// been removed; Settings is its own tab now).
     private var connectionBanner: some View {
         HStack(spacing: 8) {
             Image(systemName: bannerIcon)
@@ -70,12 +63,6 @@ struct ContentView: View {
             Text(bannerText)
                 .font(.footnote)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            NavigationLink {
-                SettingsView()
-            } label: {
-                Label("Settings", systemImage: "gearshape")
-                    .font(.footnote)
-            }
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
@@ -109,9 +96,9 @@ struct ContentView: View {
 
     private var bannerColor: Color {
         switch pingState {
-        case .success: return .green
-        case .failure: return .red
-        case .checking, .idle: return .secondary
+        case .success: return Theme.Semantic.ok
+        case .failure: return Theme.Semantic.bad
+        case .checking, .idle: return Theme.Semantic.neutral
         }
     }
 
@@ -156,49 +143,4 @@ enum PingState {
     case checking
     case success
     case failure(String)
-}
-
-/// C6 — the Control hub tab: hosts the Ops / Hygiene / Fleet / Projects
-/// surfaces behind a segmented picker (mirroring KanbanView's host pattern).
-///
-/// Every pane is its own NavigationStack view with its own load state, so
-/// switching panes never cross-contaminates. All mutations inside these panes
-/// go through MutationButton (confirm-gated, `confirm: true`).
-struct ControlView: View {
-    let client: HSCCClient?
-
-    enum Pane: String, CaseIterable, Identifiable {
-        case ops, hygiene, fleet, projects
-        var id: String { rawValue }
-        var label: String {
-            switch self {
-            case .ops: return "Ops"
-            case .hygiene: return "Hygiene"
-            case .fleet: return "Fleet"
-            case .projects: return "Projects"
-            }
-        }
-    }
-
-    @State private var selected: Pane = .ops
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Picker("Pane", selection: $selected) {
-                ForEach(Pane.allCases) { pane in
-                    Text(pane.label).tag(pane)
-                }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal)
-            .padding(.vertical, 8)
-
-            switch selected {
-            case .ops: OpsView(client: client)
-            case .hygiene: BoardHygieneView(client: client)
-            case .fleet: FleetControlView(client: client)
-            case .projects: ProjectsView(client: client)
-            }
-        }
-    }
 }
