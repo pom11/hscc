@@ -1508,6 +1508,37 @@ class TestAutoup:
             assert "--ensure" in cmd
             assert "--no-follow" in cmd
 
+    # -- wake commands carry --served-model-name (alias survive a wake) -----
+    def test_wake_cmd_carries_served_model_name_alias(
+            self, tmp_path, monkeypatch, autodown_file):
+        """Every wake start command CONTAINS --served-model-name with the role
+        alias — the regression for t_cbce664b: autodown must bring the fleet
+        back the SAME way the sanctioned template path does, so worker-model /
+        orchestrator-model survive a wake."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        ad.autoup(
+            serving_path=serving, run_cmd_fn=runner,
+            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+            sleep_fn=_noop_sleep, notify=False,
+        )
+        # Every issued start command must carry --served-model-name.
+        for call in runner.calls:
+            cmd = call["cmd"]
+            assert "--served-model-name" in cmd, cmd
+            i = cmd.index("--served-model-name")
+            # The alias derived from the unit's ROLE: orchestrator-model on the
+            # orchestrator's start, worker-model on every worker start.
+            host = cmd[cmd.index("--hosts") + 1]
+            if "10.0.0.244" in host:      # orchestrator head node
+                assert cmd[i + 1].endswith(" orchestrator-model"), cmd[i + 1]
+            else:
+                assert cmd[i + 1].endswith(" worker-model"), cmd[i + 1]
+        # Orchestrator start explicitly advertises orchestrator-model.
+        orch_hosts = runner.calls[0]["cmd"]
+        oi = orch_hosts.index("--served-model-name")
+        assert "orchestrator-model" in orch_hosts[oi + 1]
+
     # -- orchestrator started FIRST (reverse of teardown) -------------------
     def test_orchestrator_started_first(
             self, tmp_path, monkeypatch, autodown_file):

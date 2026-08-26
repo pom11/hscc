@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **autodown wake restores model aliases.** `autoup()` builds each start
+  command via `serving.fleet_up_plan()`, which now appends
+  `--served-model-name <concrete> <alias>` (alias by role identity —
+  `orchestrator-model` / `worker-model` — concrete from the unit's `model`
+  field, recipe-stem fallback) and `--tp`, the same way the sanctioned
+  template path renders them. Previously the wake omitted the flag, so after
+  every autodown cycle vLLM served only the raw model name and the 38 role
+  profiles pinning `worker-model` / `orchestrator-model` lost their model.
+  The names are carried through from the unit, never trusted from the
+  recorded `serve_cmd`; a `serve_cmd` that disagrees with the unit's
+  `recipe`/`nodes`/`port` is refused (loudly flagged, never run) so a corrupt
+  record can never start a model on the wrong hosts.
+
 ## [1.8.4] — 2026-08-20 — Pre-release audit: three silent-success / caps bugs fixed
 
 A full correctness + business-logic audit of the core plugins and the
