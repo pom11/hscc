@@ -25,8 +25,10 @@ distributed, and is deliberately NOT App Store–ready.**
 
 - `Sources/HSCC/` — Swift sources (SwiftUI, iOS 26+).
   - `HSCCApp.swift` — app entry point.
-  - `ContentView.swift` — root view: connection banner + tabs (Cluster,
-    Kanban, Settings). B2 implemented the Cluster tab; B3 filled in Kanban.
+  - `ContentView.swift` — root view: connection banner + **three-tab,
+    project-centric IA** (Projects is primary, Cluster is the fleet hub,
+    Settings is app connection only). The old six-tab layout and the duplicate
+    nested Settings entry point are gone.
   - `HSCCClient.swift` — `async/await` URLSession API client; Bearer auth on
     every request; builds URLs from a configurable host + port over plain
     HTTP; decodes the unified error shape; exposes the `speak` field on reads
@@ -39,24 +41,36 @@ distributed, and is deliberately NOT App Store–ready.**
     token in the Keychain).
   - `Views/SettingsView.swift` — enter/persist host, port, token + **Test
     connection** (calls `GET /v1/ping`).
-  - `Views/ClusterView.swift` — Cluster tab (B2): overall health at a glance
-    (hosts up / workloads running / idle), running workload list, registered
-    hosts, cluster config, pull-to-refresh, and a link to the Fleet view.
-    Replaces the old cluster placeholder.
+  - `Views/ClusterView.swift` — **Cluster tab / fleet hub**: the signature
+    node-topology strip (the two TP pairs) pinned at the top, then nested
+    screens folding in everything fleet-level — Health & Ops, Fleet, Fleet
+    Control (up/down + templates), Autodown, and Board Hygiene. Nothing
+    fleet-related lives outside this tab.
+  - `Views/Theme.swift` — the design-system tokens: the six-palette colors as
+    dynamic semantic roles (`Theme.Semantic.surface / ok / warn / bad / ...`
+    that adapt to light/dark) and the `Font.hsccMono(...)` rule for
+    machine-produced values.
+  - `Views/NodeTopologyView.swift` — the signature element: a compact row of
+    the four serving nodes as their two tensor-parallel pairs, each dot
+    coloured by live state. Encodes that only each pair's head serves HTTP.
+  - `Views/ProjectsView.swift` — the **primary tab**: the twelve projects from
+    `/v1/projects`, each opening a detail screen with segmented sections
+    Overview · Chat · Board · Settings (project board + project chat work now;
+    project settings is a shell a follow-up card fills).
   - `Views/FleetView.swift` — Fleet view (B2): health (5-check verify),
     throughput, stats, daemon streams, autoscale — each with its own
     loading / error / empty state.
   - `Views/LoadState.swift` — a small generic async-load container shared by
-    the cluster/fleet/kanban views.
-  - `Views/KanbanView.swift` — Kanban tab (B3): project board read views.
-  - `Views/StandupView.swift`, `Views/CardsView.swift`,
-    `Views/ReviewQueueView.swift`, `Views/QAQueueView.swift` — the individual
-    kanban read panels (standup, cards, review queue, QA queue), each with
-    loading / error / empty states.
-  - `Views/OrchestratorChatView.swift` — the **C5** Chat tab: send a prompt to
-    a project's orchestrator (`POST /v1/orchestrator/chat`, project picker
-    defaulting to `general`), confirm-gated like every other mutation, with a
-    prompt→reply transcript and honest failure rendering.
+    the cluster/fleet/project views.
+  - `Views/CardsView.swift` — `CardDetailView` (GET /v1/cards/{id}), reached
+    from a project's Board section. The per-project board list itself lives in
+    `ProjectsView.swift` (`ProjectBoardView`).
+  - `Views/OrchestratorChatView.swift` — the **C5** chat surface: send a prompt
+    to a project's orchestrator (`POST /v1/orchestrator/chat`, confirm-gated
+    like every other mutation), with a prompt→reply transcript and honest
+    failure rendering. Reachable from a project's detail Chat section
+    (fixed to that project) — the standalone project-picker form is what the
+    old Chat tab used.
   - `Intents/` — the **B5** Siri App Intents surface (in-car, hands-free):
     `ClusterStatusIntent` + `ReviewQueueIntent` (speak each endpoint's `speak`
     one-liner), `CannedCard` (an `AppEnum` of pre-defined cards) +

@@ -3,7 +3,7 @@ import SwiftUI
 /// Board hygiene (C6) — blocked cards (with confirm-gated recover) and stale
 /// cards, across every board.
 ///
-/// Two panes behind a segmented picker, mirroring KanbanView's host pattern:
+/// Two panes behind a segmented picker (a Cluster-hub nested screen):
 ///   * Blocked — GET /v1/kanban/blocked, listing why each card is blocked
 ///     with a confirm-gated "Recover" one-card-at-a-time action.
 ///   * Stale   — GET /v1/kanban/stale, listing non-terminal cards (older_than=0
