@@ -930,3 +930,50 @@ dispatch: 1,2,3,4,5 then 6 and 7 (parallelizable), then 8.
 - Any model/agent-in-the-loop wake decision (C1 — daemon-only).
 - Autoscale worker count changes (separate feature; `autoscale.py` exists but
   is engine-only today) — autodown is all-or-nothing for the serving layer.
+
+---
+
+## Verify behaviour across the intentional-autodown lifecycle (up / down / waking)
+
+`hscc verify` (hscc_daemon/verify.py) must honestly report three distinguishable
+readings — "off on purpose" (down), "coming back" (waking), and "actually
+broken" (real fault). The SINGLE mechanism is `autodown.classify()` (autodown.py:643)
+extended with a `waking` verdict, plus the breadth-of-window predicate
+`autodown.intentional_window()` (autodown.py:704) which is True for both
+`expected_down` and `waking`. The verify reader (`verify._intentional_window_verdict`)
+and the stream-tagging writers (`health._intentional_window`) both consult the
+SAME predicate on the SAME `classify()` table — no parallel representation.
+
+A stream is excused by `check_daemon_streams` ONLY when (a) the window verdict is
+`expected_down` or `waking` AND (b) the stream itself carries
+`intentional == "autodown"`. Either missing ⇒ genuine failure. So a real fault
+in an untagged stream still fails even during the window; and a wake that
+fails leaves `waking` (→ `error`, `should_be_up`) so verify stops excusing it.
+
+### Verify check matrix (run_all)
+| check | up | down | waking |
+|-------|----|------|--------|
+| plugins | independent — pass | pass | pass |
+| multiplex | independent — pass | pass | pass |
+| config_wiring | independent — pass | pass | pass |
+| daemon_streams | pass iff every stream ok/current | PASS (excuses tagged serving streams) | PASS (excuses tagged serving streams) |
+| proxy | pass iff models present | PASS (excused, "intentionally down") | PASS (excused, "waking from autodown") |
+
+### Stream writer matrix (`state/*.json`)
+| stream | writer | up | down | waking |
+|--------|--------|----|------|--------|
+| watchdog | lifecycle.PipelineWatchdog (:249/:274/:302) | ok=True healthy | ok=False + `intentional:"autodown"` (block latched) | ok=False + `intentional:"autodown"` (block stays latched mid-wake) |
+| dgx | health.check_dgx (:274) | ok from SSH+vLLM | ok=False + marker | ok=False + marker |
+| gateway | health.check_gateway (:397) | ok from job+vLLM+mux | ok=False + marker | ok=False + marker |
+| proxy | health.check_proxy (:483) | ok from port probe | ok=False + marker | ok=False + marker |
+| workers | health.check_workers (:1210) | ok based on unit supervision | ok=True + marker (defer, no relaunch) | ok=True + marker (defer, no relaunch) |
+| heartbeat | health.check_heartbeat (:654) | always ok=True | ok=True | ok=True |
+| local | health.check_local (:573) | ok from infra, not serving | same (infra, not serving) | same |
+| nas | health.check_nas (:751) | ok from mount, not serving | same | same |
+| idle | health.check_idle (:919) | ok from idle counts, not serving | same | same |
+
+Only the five serving streams (watchdog, dgx, gateway, proxy, workers) legitimately
+go unhealthy during a transition and are excused in the window. The infra
+streams (heartbeat/local/nas/idle) are independent of the serving layer and are
+NOT excused — a genuine infra fault during a wake still fails, as intended
+(negative control).
