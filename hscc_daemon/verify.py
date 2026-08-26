@@ -175,7 +175,22 @@ def _intentional_window_label(verdict):
     return "intentionally down by autodown"
 
 
-def check_daemon_streams(state_dir=None, max_age_s=None):
+def _live_stream_intervals():
+    """Return the live daemon's per-stream check cadence (stream -> seconds).
+
+    Reads ``daemon_ops.PERIODIC_INTERVALS`` — the single source of truth the
+    daemon actually runs on. Purely defensive: if the import ever fails, return
+    an empty map so staleness falls back to the flat ``max_age_s`` window
+    (identical to the pre-fix behaviour, no worse). Never raises.
+    """
+    try:
+        from .daemon_ops import PERIODIC_INTERVALS
+        return dict(PERIODIC_INTERVALS)
+    except Exception:
+        return {}
+
+
+def check_daemon_streams(state_dir=None, max_age_s=None, stream_intervals=None):
     """Check all daemon state files are healthy and recent.
 
     OK if every *.json has ok==True and last_check within max_age_s of now,
@@ -196,6 +211,16 @@ def check_daemon_streams(state_dir=None, max_age_s=None):
     Genuine failures are NOT blanket-suppressed: any ``ok is False`` stream
     WITHOUT the intentional marker (or outside a confirmed intentional window)
     still fails — the intended negative control.
+
+    Staleness is per-stream, keyed off the stream's OWN cadence
+    (``daemon_ops.PERIODIC_INTERVALS`` — the live loop's source of truth), not
+    one flat window. A stream that only checks every 900s (nas) must not be
+    flagged stale by a 600s flat window — that was the "cries wolf on a healthy
+    cluster" bug (verify.py:206 max_age_s=600 < daemon_ops.py nas:900). Each
+    stream's limit is ``max(max_age_s, 2*interval + JITTER)``, so slow streams
+    get room for real jitter while fast streams stay tight and any genuinely
+    dead stream is still caught within ~2 missed ticks. ``stream_intervals``
+    is injectable for tests; defaulting to the live cadence.
     """
     if state_dir is None:
         state_dir = os.path.expanduser("~/.hscc/state")
@@ -204,6 +229,21 @@ def check_daemon_streams(state_dir=None, max_age_s=None):
 
     if max_age_s is None:
         max_age_s = 600
+    if stream_intervals is None:
+        stream_intervals = _live_stream_intervals()
+
+    # How long each stream may stay silent before it is "stale": at least the
+    # caller's flat window, but never less than ~2 full check cycles — so a
+    # healthy slow stream (nas: 900s) is never flagged stale between ticks,
+    # while a genuinely dead one (more than ~2 missed ticks) still is.
+    _JITTER_S = 90
+    _EXTRA_CYCLES = 2
+
+    def _limit_for(stream):
+        interval = stream_intervals.get(stream)
+        if not interval:
+            return max_age_s
+        return max(max_age_s, _EXTRA_CYCLES * interval + _JITTER_S)
 
     try:
         if not os.path.isdir(state_dir):
@@ -254,7 +294,7 @@ def check_daemon_streams(state_dir=None, max_age_s=None):
                 ts = datetime.fromisoformat(ts_str)
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=timezone.utc)
-                if now - ts > timedelta(seconds=max_age_s):
+                if now - ts > timedelta(seconds=_limit_for(fn[:-5])):
                     issues.append(f"{fn}: stale ({ts_str})")
             except (ValueError, TypeError):
                 issues.append(f"{fn}: unparseable timestamp ({ts_str})")

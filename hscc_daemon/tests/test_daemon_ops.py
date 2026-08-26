@@ -209,8 +209,101 @@ class TestAutodownStartupRecovery:
         autodown.resume_from_restart_defensive()  # must not raise
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+class TestSupervisedPeriodic:
+    """_run_supervised_periodic — a periodic check thread that dies must be
+    detected and restarted, never left dark (the "NAS check silently stops"
+    bug class). Module-level so it is directly testable without booting the
+    full monolithic run_daemon_loop."""
+
+    @staticmethod
+    def _start_supervisor(monkeypatch, check_fn, interval=0.005):
+        from hscc_daemon import daemon_ops
+        monkeypatch.setattr(daemon_ops, "log", lambda *a, **kw: None)
+        stop = threading.Event()
+        t = threading.Thread(
+            target=daemon_ops._run_supervised_periodic,
+            args=(stop, check_fn, interval, "nas"),
+            daemon=True,
+        )
+        t.start()
+        return stop, t
+
+    def test_dead_thread_is_restarted_and_runs_again(self, monkeypatch):
+        """A check that DIES (raises a BaseException, which the old
+        `except Exception` silently let out) is detected by the supervisor and
+        restarted: the check runs a second time instead of the stream going
+        dark forever."""
+        calls = {"n": 0}
+
+        def flaky_check():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # Simulate the abnormal death the old loop missed: only
+                # `except BaseException` catches this; the old `except
+                # Exception` let it kill the thread with no one watching.
+                raise SystemExit("simulated thread death")
+
+        stop, t = self._start_supervisor(monkeypatch, flaky_check)
+        # Wait until the supervisor has respawned the thread at least once.
+        deadline = time.time() + 5
+        while calls["n"] < 2 and time.time() < deadline:
+            time.sleep(0.005)
+        stop.set()
+        t.join(timeout=3)
+        assert calls["n"] >= 2, (
+            f"check was NOT restarted after dying; ran {calls['n']}x")
+
+    def test_supervisor_exits_on_stop_even_if_check_raises_every_time(
+            self, monkeypatch):
+        """A check that dies on EVERY call must not spin the supervisor into an
+        unbounded tight loop: once stop_event is set the supervisor unwinds.
+        The respawn loop is gated on stop_event, so setting it terminates the
+        supervisor cleanly."""
+        calls = {"n": 0}
+
+        def always_dying_check():
+            calls["n"] += 1
+            raise RuntimeError("ordinary exception — kept alive, not a death")
+
+        stop, t = self._start_supervisor(monkeypatch, always_dying_check,
+                                         interval=0.002)
+        # Let it run a few cycles (ordinary exceptions never kill the thread),
+        # then stop.
+        deadline = time.time() + 3
+        while calls["n"] < 3 and time.time() < deadline:
+            time.sleep(0.005)
+        stop.set()
+        t.join(timeout=3)
+        assert not t.is_alive()  # supervisor exited cleanly on stop
+
+    def test_ordinary_exception_does_not_kill_thread(self, monkeypatch):
+        """A check raising a NORMAL Exception (the common case) must NOT be
+        treated as a death: `_run_periodic` catches it, logs, and keeps the
+        SAME thread alive — no restart churn."""
+        from hscc_daemon import daemon_ops
+        monkeypatch.setattr(daemon_ops, "log", lambda *a, **kw: None)
+        calls = {"n": 0}
+
+        def flaky_check():
+            calls["n"] += 1
+            raise ValueError("transient blip")
+
+        stop = threading.Event()
+        # Run _run_periodic DIRECTLY (not via the supervisor) — this is what a
+        # living check thread runs. An ordinary exception must not make it
+        # return, so the check keeps running on the same thread.
+        t = threading.Thread(
+            target=daemon_ops._run_periodic,
+            args=(stop, flaky_check, 0.002, "nas"),
+            daemon=True,
+        )
+        t.start()
+        deadline = time.time() + 3
+        while calls["n"] < 3 and time.time() < deadline:
+            time.sleep(0.005)
+        assert calls["n"] >= 3, f"thread died on an ordinary exception ({calls['n']})"
+        stop.set()
+        t.join(timeout=2)
 
 
 class TestGetPid:
