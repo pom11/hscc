@@ -630,6 +630,17 @@ struct ProjectDetailResponse: Decodable, Speakable {
     let board_counts: [String: Int]?
     let git: ProjectGit?
     let speak: String
+
+    /// Rendered topic: an int id as-is, the string "unknown" when a project has
+    /// none. Mirrors `Project.displayTopic`.
+    var displayTopic: String? {
+        guard let topic else { return nil }
+        switch topic {
+        case .int(let n): return "\(n)"
+        case .string(let s): return s
+        default: return nil
+        }
+    }
 }
 
 // MARK: - Ops / health (verify, daemon, triggers, escalate, profiles)

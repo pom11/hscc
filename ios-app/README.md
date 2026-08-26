@@ -55,22 +55,34 @@ distributed, and is deliberately NOT App Store–ready.**
     coloured by live state. Encodes that only each pair's head serves HTTP.
   - `Views/ProjectsView.swift` — the **primary tab**: the twelve projects from
     `/v1/projects`, each opening a detail screen with segmented sections
-    Overview · Chat · Board · Settings (project board + project chat work now;
-    project settings is a shell a follow-up card fills).
+    Overview · Chat · Board · Settings. **Overview** shows repo/board/topic +
+    live board counts + git state (recent activity). **Board** shows the
+    project's cards plus its blocked/stale cards (`/v1/kanban/blocked` +
+    `/v1/kanban/stale`, filtered to the project's board) under a "Needs
+    attention" heading. **Settings** presents the project's repo path, board,
+    topic, and orchestrator profile/session read-only (they live on the
+    cluster, not in the app — no fake editable controls).
   - `Views/FleetView.swift` — Fleet view (B2): health (5-check verify),
     throughput, stats, daemon streams, autoscale — each with its own
     loading / error / empty state.
   - `Views/LoadState.swift` — a small generic async-load container shared by
     the cluster/fleet/project views.
+  - `Views/ChatStore.swift` — per-project orchestrator chat persistence: an
+    `ObservableObject` that holds a project's transcript + in-flight state,
+    persisting the transcript and the un-sent draft in `UserDefaults` keyed per
+    project so a conversation survives navigation and app relaunch.
   - `Views/CardsView.swift` — `CardDetailView` (GET /v1/cards/{id}), reached
     from a project's Board section. The per-project board list itself lives in
     `ProjectsView.swift` (`ProjectBoardView`).
-  - `Views/OrchestratorChatView.swift` — the **C5** chat surface: send a prompt
-    to a project's orchestrator (`POST /v1/orchestrator/chat`, confirm-gated
-    like every other mutation), with a prompt→reply transcript and honest
-    failure rendering. Reachable from a project's detail Chat section
-    (fixed to that project) — the standalone project-picker form is what the
-    old Chat tab used.
+  - `Views/OrchestratorChatView.swift` — the **C5** per-project chat surface:
+    send a prompt to a project's orchestrator (`POST /v1/orchestrator/chat`,
+    confirm-gated like every other mutation), with a persistent prompt→reply
+    transcript. Designed for the 30-90s real latency: optimistic send, an
+    elapsed-seconds ticking in-flight footer naming which project/profile is
+    answering, never-lost input (the prompt stays in the persisted transcript
+    on a failure), a fleet-down banner (checks `/v1/autodown/status`), and
+    one-turn-at-a-time send locking. Reachable from a project's detail Chat
+    section (fixed to that project).
   - `Intents/` — the **B5** Siri App Intents surface (in-car, hands-free):
     `ClusterStatusIntent` + `ReviewQueueIntent` (speak each endpoint's `speak`
     one-liner), `CannedCard` (an `AppEnum` of pre-defined cards) +
