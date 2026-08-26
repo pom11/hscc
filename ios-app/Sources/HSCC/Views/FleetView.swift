@@ -292,7 +292,7 @@ struct FleetView: View {
         .padding()
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(.secondarySystemBackground))
+                .fill(Theme.Semantic.surfaceRaised)
         )
     }
 
@@ -303,13 +303,13 @@ struct FleetView: View {
                 .foregroundColor(color)
             Text(label)
                 .font(.caption)
-                .foregroundColor(.secondary)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 8)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(.tertiarySystemBackground))
+                .fill(Theme.Semantic.surfaceElevated)
         )
     }
 
@@ -327,13 +327,13 @@ struct FleetView: View {
     private func errorLabel(_ message: String) -> some View {
         Label(message, systemImage: "exclamationmark.triangle.fill")
             .font(.subheadline)
-            .foregroundColor(.red)
+            .foregroundColor(Theme.Semantic.bad)
     }
 
     private func emptyLabel(_ text: String) -> some View {
         Label(text, systemImage: "tray")
             .font(.subheadline)
-            .foregroundColor(.secondary)
+            .foregroundColor(Theme.Semantic.onSurfaceMuted)
     }
 
     // MARK: - Formatting
