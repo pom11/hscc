@@ -384,11 +384,12 @@ def fleet_up_plan(serving=None):
             cmd.extend(["--tp", str(int(tp))])
         # Surface (loudly, but do NOT run) a serve_cmd that disagrees with the
         # authoritative recipe/nodes/port — refusing to act on a corrupt record
-        # rather than starting a model on the wrong hosts.
+        # rather than starting a model on the wrong hosts. The unit's OWN
+        # derived command is still issued (correct recipe/hosts/alias).
         mism = _serve_cmd_mismatch(e, cmd)
         if mism:
-            _serving_warn(f"fleet_up_plan: unit {e['unit_id']!r} ignored — "
-                          f"{mism}")
+            _serving_warn(f"fleet_up_plan: unit {e['unit_id']!r} serve_cmd "
+                          f"refused ({mism}); using derived command")
         cmds.append({"kind": e["kind"], "nodes": e["nodes"], "port": e["port"],
                      "unit_id": e["unit_id"], "cmd": cmd,
                      "keepalive": e["keepalive"]})
