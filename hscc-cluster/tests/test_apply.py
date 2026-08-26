@@ -850,6 +850,8 @@ class TestStopFailuresRecorded:
                             lambda r: rc.RecipeCost(r, per_gpu_total_gb=30, fits=True))
         monkeypatch.setattr(ti, "Path_isfile", lambda r: True)
         monkeypatch.setattr(ct.Path, "is_file", lambda self: True)
+        # Isolate serving.json (do_launch=True stamps serve_cmd into SERVING_JSON).
+        monkeypatch.setattr(ct, "SERVING_JSON", tmp_path / "serving.json")
 
         plan = ti.resolve(
             ti.ClusterTemplate.from_dict({
@@ -879,6 +881,8 @@ class TestStopFailuresRecorded:
                             lambda r: rc.RecipeCost(r, per_gpu_total_gb=30, fits=True))
         monkeypatch.setattr(ti, "Path_isfile", lambda r: True)
         monkeypatch.setattr(ct.Path, "is_file", lambda self: True)
+        # Isolate serving.json (do_launch=True stamps serve_cmd into SERVING_JSON).
+        monkeypatch.setattr(ct, "SERVING_JSON", tmp_path / "serving.json")
 
         plan = ti.resolve(
             ti.ClusterTemplate.from_dict({
@@ -927,8 +931,13 @@ class TestProvisionMultiNodeSpan:
     """Fix 6: _provision_models launches tp>1 units across their full node span
     with comma-joined --hosts and --tp flags. tp=1 units remain unchanged."""
 
-    def _build_plan(self, monkeypatch, orch_nodes, orch_tp, unit_nodes, unit_tp, unit_port=8000):
+    def _build_plan(self, monkeypatch, tmp_path, orch_nodes, orch_tp, unit_nodes, unit_tp, unit_port=8000):
         """Build a ResolvedPlan with the given node spans and tp values."""
+        # Isolate the serving.json write: this class calls _provision_models
+        # directly (do_launch=True), which stamps serve_cmd into SERVING_JSON.
+        # Without the redirect these tests would write fixture data into the
+        # operator's LIVE ~/.hscc/serving.json (the t_501fb7f1 leak locus).
+        monkeypatch.setattr(cluster_template, "SERVING_JSON", tmp_path / "serving.json")
         orch = ti.ResolvedUnit("orchestrator", None, "o.yaml", "OrchModel",
                                orch_nodes, 9000, orch_tp, 1)
         unit = ti.ResolvedUnit("worker", "coding", "m.yaml", "WorkerModel",
@@ -936,7 +945,7 @@ class TestProvisionMultiNodeSpan:
         fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[unit])
         return ti.ResolvedPlan(template="t", orchestrator=orch, families=[fam])
 
-    def test_tp1_unit_no_tp_flag(self, monkeypatch):
+    def test_tp1_unit_no_tp_flag(self, monkeypatch, tmp_path):
         """A tp=1 unit produces ONE sparkrun call with single host, NO --tp flag."""
         import subprocess
         from unittest.mock import MagicMock
@@ -947,7 +956,7 @@ class TestProvisionMultiNodeSpan:
             return MagicMock(returncode=0, stderr="", stdout="")
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        plan = self._build_plan(monkeypatch, ["10.0.0.1"], 1, ["10.0.0.2"], 1)
+        plan = self._build_plan(monkeypatch, tmp_path, ["10.0.0.1"], 1, ["10.0.0.2"], 1)
         result = cluster_template._provision_models(plan, do_launch=True)
 
         # 2 calls: 1 orchestrator + 1 worker (status not counted if no IP in output)
@@ -960,7 +969,7 @@ class TestProvisionMultiNodeSpan:
         assert worker_call[hosts_idx + 1] == "10.0.0.2"
         assert "--tp" not in worker_call
 
-    def test_tp2_unit_one_call_comma_hosts_and_tp(self, monkeypatch):
+    def test_tp2_unit_one_call_comma_hosts_and_tp(self, monkeypatch, tmp_path):
         """A tp=2 unit spanning 2 nodes produces ONE sparkrun call with
         comma-joined --hosts and --tp 2."""
         import subprocess
@@ -972,7 +981,7 @@ class TestProvisionMultiNodeSpan:
             return MagicMock(returncode=0, stderr="", stdout="")
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        plan = self._build_plan(monkeypatch, ["10.0.0.1"], 1,
+        plan = self._build_plan(monkeypatch, tmp_path, ["10.0.0.1"], 1,
                                 ["10.0.0.2", "10.0.0.3"], 2)
         result = cluster_template._provision_models(plan, do_launch=True)
 
@@ -985,7 +994,7 @@ class TestProvisionMultiNodeSpan:
         tp_idx = worker_call.index("--tp")
         assert worker_call[tp_idx + 1] == "2"
 
-    def test_spanning_nodes_not_stopped(self, monkeypatch):
+    def test_spanning_nodes_not_stopped(self, monkeypatch, tmp_path):
         """Nodes that are part of a spanning unit are not stopped."""
         import subprocess
         from unittest.mock import MagicMock
@@ -1000,7 +1009,7 @@ class TestProvisionMultiNodeSpan:
         monkeypatch.setattr(subprocess, "run", mock_run)
 
         # tp=2 worker spans 10.0.0.2 and 10.0.0.3
-        plan = self._build_plan(monkeypatch, ["10.0.0.1"], 1,
+        plan = self._build_plan(monkeypatch, tmp_path, ["10.0.0.1"], 1,
                                 ["10.0.0.2", "10.0.0.3"], 2)
         result = cluster_template._provision_models(plan, do_launch=True)
 
@@ -1010,9 +1019,9 @@ class TestProvisionMultiNodeSpan:
             assert "10.0.0.2" not in sc
             assert "10.0.0.3" not in sc
 
-    def test_dry_run_reports_span(self, monkeypatch):
+    def test_dry_run_reports_span(self, monkeypatch, tmp_path):
         """Dry-run provisioned list uses comma-joined node span."""
-        plan = self._build_plan(monkeypatch, ["10.0.0.1"], 1,
+        plan = self._build_plan(monkeypatch, tmp_path, ["10.0.0.1"], 1,
                                 ["10.0.0.2", "10.0.0.3"], 2)
         result = cluster_template._provision_models(plan, do_launch=False)
 
@@ -1020,7 +1029,7 @@ class TestProvisionMultiNodeSpan:
         assert "10.0.0.2,10.0.0.3:8000:m.yaml" in prov
         assert "10.0.0.1:9000:o.yaml" in prov
 
-    def test_orchestrator_tp2_span(self, monkeypatch):
+    def test_orchestrator_tp2_span(self, monkeypatch, tmp_path):
         """Orchestrator with tp=2 also gets comma-joined hosts and --tp."""
         import subprocess
         from unittest.mock import MagicMock
@@ -1031,7 +1040,7 @@ class TestProvisionMultiNodeSpan:
             return MagicMock(returncode=0, stderr="", stdout="")
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        plan = self._build_plan(monkeypatch, ["10.0.0.1", "10.0.0.2"], 2,
+        plan = self._build_plan(monkeypatch, tmp_path, ["10.0.0.1", "10.0.0.2"], 2,
                                 ["10.0.0.3"], 1)
         result = cluster_template._provision_models(plan, do_launch=True)
 
@@ -2064,7 +2073,7 @@ class TestProvisionReusedNode:
     container must be stopped BEFORE the launch. A node already correctly
     serving the wanted model must be left running (--ensure idempotency)."""
 
-    def _invoke(self, monkeypatch, status_out, *, orch_nodes=("10.0.0.1",),
+    def _invoke(self, monkeypatch, tmp_path, status_out, *, orch_nodes=("10.0.0.1",),
                 unit_nodes=("10.0.0.2",)):
         """Run _provision_models with a plan of one orchestrator + one worker,
         recording every subprocess call. status_out is the `sparkrun status`
@@ -2080,6 +2089,9 @@ class TestProvisionReusedNode:
             return MagicMock(returncode=0, stderr="", stdout="")
 
         monkeypatch.setattr(subprocess, "run", mock_run)
+        # Isolate serving.json: this class calls _provision_models directly,
+        # which stamps serve_cmd into SERVING_JSON (t_501fb7f1 leak locus).
+        monkeypatch.setattr(cluster_template, "SERVING_JSON", tmp_path / "serving.json")
         orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
                                "orch", list(orch_nodes), 8000, 1, 1)
         unit = ti.ResolvedUnit("worker", "coding", "~/recipes/deepseek.yaml",
@@ -2098,12 +2110,12 @@ class TestProvisionReusedNode:
         return [c for c in calls
                 if c[0] == "sparkrun" and c[1] == "run" and recipe_substr in str(c)]
 
-    def test_reused_node_different_model_stopped_before_launch(self, monkeypatch):
+    def test_reused_node_different_model_stopped_before_launch(self, monkeypatch, tmp_path):
         # A container serving qwen27b is running on the worker node the plan
         # wants deepseek on → the stale qwen container must be stopped first.
         status = ("Job: qwen27b\n"
                   "10.0.0.2\n")
-        calls = self._invoke(monkeypatch, status, unit_nodes=("10.0.0.2",))
+        calls = self._invoke(monkeypatch, tmp_path, status, unit_nodes=("10.0.0.2",))
         stops = self._stops(calls)
         assert len(stops) == 1
         assert "10.0.0.2" in stops[0]
@@ -2111,31 +2123,31 @@ class TestProvisionReusedNode:
         assert len(deepseek_run) == 1
         assert calls.index(stops[0]) < calls.index(deepseek_run[0])
 
-    def test_node_serving_wanted_model_kept_running(self, monkeypatch):
+    def test_node_serving_wanted_model_kept_running(self, monkeypatch, tmp_path):
         # A container already serving the WANTED model (deepseek) is on the node
         # → no stop, no relaunch (the --ensure run is the only run, and there is
         # no stop for the node).
         status = ("Job: ~/recipes/deepseek.yaml\n"
                   "10.0.0.2\n")
-        calls = self._invoke(monkeypatch, status, unit_nodes=("10.0.0.2",))
+        calls = self._invoke(monkeypatch, tmp_path, status, unit_nodes=("10.0.0.2",))
         stops = self._stops(calls)
         assert stops == []  # idempotent — nothing stopped
         assert len(self._run_for(calls, "deepseek.yaml")) == 1
 
-    def test_fresh_node_no_spurious_stop(self, monkeypatch):
+    def test_fresh_node_no_spurious_stop(self, monkeypatch, tmp_path):
         # Nothing running on the worker node → it is just launched, no stop.
         status = "Idle hosts (...): 0\n"
-        calls = self._invoke(monkeypatch, status, unit_nodes=("10.0.0.2",))
+        calls = self._invoke(monkeypatch, tmp_path, status, unit_nodes=("10.0.0.2",))
         stops = self._stops(calls)
         assert stops == []
         assert len(self._run_for(calls, "deepseek.yaml")) == 1
 
-    def test_stop_nodes_not_in_plan_still_holds(self, monkeypatch):
+    def test_stop_nodes_not_in_plan_still_holds(self, monkeypatch, tmp_path):
         # A node running a container but NOT part of the plan is still stopped
         # by the existing not-in-plan logic.
         status = ("Job: qwen27b\n"
                   "10.0.0.1 10.0.0.2 10.0.0.3\n")
-        calls = self._invoke(monkeypatch, status,
+        calls = self._invoke(monkeypatch, tmp_path, status,
                              orch_nodes=("10.0.0.1",), unit_nodes=("10.0.0.2",))
         # 10.0.0.3 is not in the plan → gets stopped via `_running_nodes_via_sparkrun`
         stop_nodes = {n for stop in self._stops(calls) for n in stop if n.count(".") == 3}
@@ -2151,7 +2163,7 @@ class TestProvisionTimeout:
     def test_default_timeout_is_900(self):
         assert cluster_template.PROVISION_TIMEOUT_S == 900
 
-    def test_provision_uses_module_timeout(self, monkeypatch):
+    def test_provision_uses_module_timeout(self, monkeypatch, tmp_path):
         """_provision_models passes PROVISION_TIMEOUT_S as subprocess timeout."""
         import subprocess
         from unittest.mock import MagicMock
@@ -2161,6 +2173,9 @@ class TestProvisionTimeout:
             call_kws.append(kw)
             return MagicMock(returncode=0, stderr="", stdout="")
         monkeypatch.setattr(subprocess, "run", mock_run)
+        # Isolate serving.json: _provision_models stamps serve_cmd into
+        # SERVING_JSON (t_501fb7f1 leak locus).
+        monkeypatch.setattr(cluster_template, "SERVING_JSON", tmp_path / "serving.json")
 
         orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
                                "test-model", ["10.0.0.1"], 8000, 1, 1)
@@ -2212,7 +2227,7 @@ class TestServedModelNameAliases:
 
     # ── helpers matching sparkrun's real execution boundary ────────────────
 
-    def _invoke(self, monkeypatch, *, orch_recipe="~/recipes/orch.yaml",
+    def _invoke(self, monkeypatch, tmp_path, *, orch_recipe="~/recipes/orch.yaml",
                 worker_recipe="~/recipes/deepseek.yaml", orch_model="orch",
                 worker_model="deepseek"):
         """Run _provision_models with a plan of one orchestrator + one worker,
@@ -2225,6 +2240,9 @@ class TestServedModelNameAliases:
             calls.append(argv)
             return MagicMock(returncode=0, stderr="", stdout="")
         monkeypatch.setattr(subprocess, "run", mock_run)
+        # Isolate serving.json: _provision_models stamps serve_cmd into
+        # SERVING_JSON (t_501fb7f1 leak locus).
+        monkeypatch.setattr(cluster_template, "SERVING_JSON", tmp_path / "serving.json")
         orch = ti.ResolvedUnit("orchestrator", None, orch_recipe,
                                orch_model, ["10.0.0.1"], 8000, 1, 1)
         unit = ti.ResolvedUnit("worker", "coding", worker_recipe,
@@ -2270,26 +2288,26 @@ class TestServedModelNameAliases:
 
     # ── tests ──────────────────────────────────────────────────────────────
 
-    def test_orchestrator_emits_concrete_and_alias(self, monkeypatch):
-        calls = self._invoke(monkeypatch)
+    def test_orchestrator_emits_concrete_and_alias(self, monkeypatch, tmp_path):
+        calls = self._invoke(monkeypatch, tmp_path)
         orch_run = self._runs(calls, "orch.yaml")
         assert len(orch_run) == 1
         # HSCC hands sparkrun ONE flag with ONE space-separated value token.
         assert orch_run[0].count("--served-model-name") == 1
         assert self._value_token(orch_run[0]) == "orch orchestrator-model"
 
-    def test_worker_emits_concrete_and_alias(self, monkeypatch):
-        calls = self._invoke(monkeypatch)
+    def test_worker_emits_concrete_and_alias(self, monkeypatch, tmp_path):
+        calls = self._invoke(monkeypatch, tmp_path)
         worker_run = self._runs(calls, "deepseek.yaml")
         assert len(worker_run) == 1
         assert self._value_token(worker_run[0]) == "deepseek worker-model"
 
-    def test_final_argv_two_separate_names_orchestrator(self, monkeypatch):
+    def test_final_argv_two_separate_names_orchestrator(self, monkeypatch, tmp_path):
         """THE core guard: the FINAL command vLLM executes must carry the
         concrete id and alias as TWO SEPARATE argv tokens, never one collapsed
         token `"concrete alias"` (nor one comma-joined name). Fails if a
         regression makes the value land as a single argv element."""
-        calls = self._invoke(monkeypatch)
+        calls = self._invoke(monkeypatch, tmp_path)
         orch_run = self._runs(calls, "orch.yaml")[0]
         served_value = self._value_token(orch_run)
         assert served_value == "orch orchestrator-model"
@@ -2300,8 +2318,8 @@ class TestServedModelNameAliases:
             f"got {names!r} from final command {final_tokens!r}"
         )
 
-    def test_final_argv_two_separate_names_worker(self, monkeypatch):
-        calls = self._invoke(monkeypatch)
+    def test_final_argv_two_separate_names_worker(self, monkeypatch, tmp_path):
+        calls = self._invoke(monkeypatch, tmp_path)
         worker_run = self._runs(calls, "deepseek.yaml")[0]
         served_value = self._value_token(worker_run)
         names = self._flag_names(self._final_tokens(
@@ -2331,7 +2349,7 @@ class TestServedModelNameAliases:
         final argv must carry it plus the alias as two tokens."""
         recipe = tmp_path / "quad.yaml"
         recipe.write_text("model: deepseek-ai/DeepSeek-V4-Flash-0731\n")
-        calls = self._invoke(monkeypatch, worker_recipe=str(recipe))
+        calls = self._invoke(monkeypatch, tmp_path, worker_recipe=str(recipe))
         worker_run = self._runs(calls, "quad.yaml")
         assert len(worker_run) == 1
         served_value = self._value_token(worker_run[0])
@@ -2354,6 +2372,9 @@ class TestServedModelNameAliases:
             return MagicMock(returncode=0, stderr="", stdout="")
         monkeypatch.setattr(subprocess, "run", mock_run)
 
+        # Isolate serving.json (do_launch=True stamps serve_cmd into SERVING_JSON).
+        monkeypatch.setattr(cluster_template, "SERVING_JSON", tmp_path / "serving.json")
+
         # A worker unit with a misleading role "orchestrator".
         unit = ti.ResolvedUnit("orchestrator", "coding", "~/recipes/deepseek.yaml",
                                "deepseek", ["10.0.0.2"], 8001, 1, 1)
@@ -2368,7 +2389,7 @@ class TestServedModelNameAliases:
         assert self._value_token(orch_run) == "orch orchestrator-model"
         assert self._value_token(worker_run) == "deepseek worker-model"
 
-    def test_flag_placed_before_tp(self, monkeypatch):
+    def test_flag_placed_before_tp(self, monkeypatch, tmp_path):
         """--served-model-name coexists with --tp without disturbing it."""
         import subprocess
         from unittest.mock import MagicMock
@@ -2378,6 +2399,9 @@ class TestServedModelNameAliases:
             calls.append(argv)
             return MagicMock(returncode=0, stderr="", stdout="")
         monkeypatch.setattr(subprocess, "run", mock_run)
+
+        # Isolate serving.json (do_launch=True stamps serve_cmd into SERVING_JSON).
+        monkeypatch.setattr(cluster_template, "SERVING_JSON", tmp_path / "serving.json")
 
         orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
                                "orch", ["10.0.0.1", "10.0.0.2"], 9000, 2, 1)
@@ -2389,7 +2413,7 @@ class TestServedModelNameAliases:
         assert orch_run.index("--served-model-name") < orch_run.index("--tp")
         assert self._value_token(orch_run) == "orch orchestrator-model"
 
-    def test_dry_run_not_affected(self, monkeypatch):
+    def test_dry_run_not_affected(self, monkeypatch, tmp_path):
         """do_launch=False never builds sparkrun run argv — no served-model-name
         launches attempted, dry-run note/provisioned output unchanged."""
         import subprocess
