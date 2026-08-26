@@ -9,7 +9,8 @@ import SwiftUI
 ///   * the **node topology strip** — the two TP pairs, the signature element
 ///   * **Health**        — OpsView (verify, daemon, triggers, escalations, profiles)
 ///   * **Fleet**         — FleetView (health, stats, throughput, streams, autoscale)
-///   * **Fleet Control** — FleetControlView (cluster up/down + templates)
+///   * **Fleet Control** — FleetControlView (cluster up/down)
+///   * **Templates**     — TemplatesView (browse, preview, confirm-gated apply)
 ///   * **Autodown**      — AutodownView (the operator's most-used surface)
 ///   * **Board Hygiene** — BoardHygieneView (blocked/stale ACROSS all boards)
 ///
@@ -192,8 +193,12 @@ struct ClusterView: View {
                 FleetView(client: client)
             }
             hubRow("Fleet Control", systemImage: "power",
-                   subtitle: "bring fleet up / down, apply templates") {
+                   subtitle: "bring fleet up / down") {
                 FleetControlView(client: client)
+            }
+            hubRow("Templates", systemImage: "square.grid.2x2",
+                   subtitle: "browse layouts, preview, apply a fleet template") {
+                TemplatesView(client: client)
             }
             hubRow("Autodown", systemImage: "timer",
                    subtitle: "the idle power-down you can arm or wake") {
