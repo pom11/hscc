@@ -172,7 +172,7 @@ struct AutodownView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .fill(Color(.tertiarySystemBackground)))
+            .fill(Theme.Semantic.surfaceElevated))
     }
 
     private func stateColor(_ state: String?) -> Color {
@@ -347,13 +347,13 @@ struct AutodownView: View {
         .padding()
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(.secondarySystemBackground))
+                .fill(Theme.Semantic.surfaceRaised)
         )
     }
 
     private func errorLabel(_ message: String) -> some View {
         Label(message, systemImage: "exclamationmark.triangle.fill")
             .font(.subheadline)
-            .foregroundColor(.red)
+            .foregroundColor(Theme.Semantic.bad)
     }
 }

@@ -261,20 +261,20 @@ struct FleetControlView: View {
         .padding()
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(.secondarySystemBackground))
+                .fill(Theme.Semantic.surfaceRaised)
         )
     }
 
     private func errorLabel(_ message: String) -> some View {
         Label(message, systemImage: "exclamationmark.triangle.fill")
             .font(.subheadline)
-            .foregroundColor(.red)
+            .foregroundColor(Theme.Semantic.bad)
     }
 
     private func emptyLabel(_ text: String) -> some View {
         Label(text, systemImage: "tray")
             .font(.subheadline)
-            .foregroundColor(.secondary)
+            .foregroundColor(Theme.Semantic.onSurfaceMuted)
     }
 
     private func displayJSON(_ value: JSONValue) -> String {
