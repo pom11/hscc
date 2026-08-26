@@ -43,3 +43,4 @@ docs/superpowers/
 
 # git worktrees used by the kanban dispatcher
 .worktrees/
+ios-app/HSCC.xcodeproj/
