@@ -12,17 +12,17 @@ import Foundation
 // Every READ response carries a first-class, top-level `speak` string. The
 // client exposes it via `Speakable` so B5 (Siri App Intents) can read the
 // server-derived one-liner instead of re-deriving prose on device.
+//
+// NOTE: The `Speakable` protocol and the shared endpoint models that the
+// widget / Live Activity extensions also need (`AutodownStatusResponse`,
+// `ClusterStatusResponse`, `ClusterWorkload`, `TopologyPair`, `TopologyNode`)
+// live in Sources/Shared/ so all targets compile ONE definition instead of
+// duplicating. This file owns app-only + extension-specific surface models.
 // ---------------------------------------------------------------------------
-
-/// Protocol for any read response that carries the API's first-class `speak`
-/// field (design §B). B5 consumes this to speak summaries aloud.
-protocol Speakable {
-    var speak: String { get }
-}
 
 // MARK: - Shared error shape (design §C)
 
-/// The unified error object inside `{ "error": { ... } }`.
+/// The unified error object inside `{ \"error\": { ... } }`.
 struct APIErrorBody: Decodable {
     let code: String
     let message: String
@@ -45,26 +45,6 @@ struct PingResponse: Decodable, Speakable {
 
 // MARK: - Cluster
 
-/// GET /v1/cluster/status — one workload entry.
-struct ClusterWorkload: Decodable, Identifiable {
-    let name: String
-    let tp: String?
-    let pp: String?
-    let container_id: String?
-
-    var id: String { name }
-}
-
-/// GET /v1/cluster/status.
-struct ClusterStatusResponse: Decodable, Speakable {
-    let workloads: [ClusterWorkload]
-    let idle_hosts: [String]
-    let total_hosts: Int
-    let speak: String
-}
-
-/// GET /v1/cluster/hosts.
-///
 /// `saved_clusters` and `live_status` are raw `run_cmd`-shaped dicts from the
 /// cluster engine (keys like `success`/`returncode`/`output` with MIXED value
 /// types — bool, int, string), so they are decoded as untyped `[String:
@@ -358,22 +338,67 @@ struct QAQueueResponse: Decodable, Speakable {
     let speak: String
 }
 
-// MARK: - Orchestrator chat (C5)
+// MARK: - Orchestrator chat (C5, job-based)
 
-/// POST /v1/orchestrator/chat — the orchestrator's reply.
+/// POST /v1/orchestrator/chat — the immediate 202 response that STARTS a job.
 ///
-/// Matches the ACTUAL 200 response shape in
-/// `hscc-api/routes_orchestrator.py`:
-///   { "reply": "<text>", "profile": "<P>-orch", "session": "<P>", "speak": "..." }
-/// `reply` is the full orchestrator reply the transcript shows; `speak` is the
-/// short server-derived one-liner (B5 may read it aloud). A non-2xx makes the
-/// client throw, so this is only ever decoded from a 2xx success — a failed or
-/// timed-out chat is never rendered as a reply.
-struct OrchestratorChatResponse: Decodable, Speakable {
-    let reply: String
+/// Matching `hscc-api/routes_orchestrator.py`: the POST validates + resolves
+/// the project synchronously, spawns a background thread that actually invokes
+/// the orchestrator, and returns **202 Accepted** with a `job_id` — NOT the
+/// reply. This kills the 90 s dead wait on the phone: the call returns in
+/// milliseconds, and the answer is collected by polling
+/// `GET /v1/orchestrator/chat/{id}` (see `OrchestratorChatJobStatus`).
+///
+/// A non-2xx (409/400/502/503/504) still makes the client throw — it never
+/// yields a job object. The orchestrator is messaged asynchronously after this
+/// returns, so a killed/backgrounded app can still pick the answer up later by
+/// job_id.
+struct OrchestratorChatJobResponse: Decodable, Speakable {
+    let jobID: String
+    let project: String?
+    let status: String
+    let elapsed: Double
     let profile: String?
     let session: String?
     let speak: String
+
+    enum CodingKeys: String, CodingKey {
+        case jobID = "job_id"
+        case project, status, elapsed, profile, session, speak
+    }
+}
+
+/// GET /v1/orchestrator/chat/{id} — a polled job's current state.
+///
+/// `status` is `queued` / `running` / `done`, or a terminal failure state
+/// (`timeout` / `unavailable` / `error`). `reply` + `speak` are present only
+/// when `status == "done"`; `error` is present only on a terminal failure and
+/// carries the unified `{ code, message, speak }` shape. `elapsed` is the
+/// honest server-side wall-clock from submission.
+struct OrchestratorChatJobStatus: Decodable {
+    let jobID: String
+    let project: String?
+    let status: String
+    let elapsed: Double
+    let reply: String?
+    let profile: String?
+    let session: String?
+    let speak: String?
+    let error: ChatJobError?
+
+    enum CodingKeys: String, CodingKey {
+        case jobID = "job_id"
+        case project, status, elapsed, reply, profile, session, speak, error
+    }
+
+    var isTerminal: Bool { status == "done" || status == "timeout" || status == "unavailable" || status == "error" }
+}
+
+/// The unified `{ code, message, speak }` error carried on a failed chat job.
+struct ChatJobError: Decodable {
+    let code: String
+    let message: String
+    let speak: String?
 }
 
 // MARK: - Generic / untyped bucket
@@ -506,38 +531,8 @@ struct StopClusterResponse: Decodable {
 // single absent key can never blank the whole screen.
 // ---------------------------------------------------------------------------
 
-// MARK: - Autodown
-
-/// GET /v1/autodown/status — the autodown report.
-///
-/// Verified live shape:
-///   { enabled, state, idle_minutes, last_activity_iso, down_since,
-///     wake_source, reason, watchdog_blocked, watchdog_intentional,
-///     kanban_ok, kanban_reason, blocked_by, force_armed,
-///     force_armed_overrides, active_cron_cpu_only, active_cron_model, speak }
-/// Every field is optional except `speak` (which the API always synthesizes).
-struct AutodownStatusResponse: Decodable, Speakable {
-    let enabled: Bool?
-    let state: String?
-    let idle_minutes: Int?
-    let last_activity_iso: String?
-    let down_since: String?
-    let wake_source: String?
-    let reason: String?
-    let watchdog_blocked: Bool?
-    /// The watchdog block's `intentional` marker — a STRING ("autodown") when a
-    /// teardown is in effect, absent otherwise. Not a Bool: the server passes
-    /// `block.get("intentional")` through verbatim (routes_autodown.py:216).
-    let watchdog_intentional: String?
-    let kanban_ok: Bool?
-    let kanban_reason: String?
-    let blocked_by: String?
-    let force_armed: Bool?
-    let force_armed_overrides: [String]?
-    let active_cron_cpu_only: [String]?
-    let active_cron_model: [String]?
-    let speak: String
-}
+// MARK: - Autodown (attachment models; the shared `/v1/autodown/status`
+// `AutodownStatusResponse` lives in Sources/Shared/SharedModels.swift)
 
 /// POST /v1/autodown/enable (routes_autodown.py handle_autodown_enable).
 struct AutodownEnableResponse: Decodable {
