@@ -83,6 +83,11 @@ distributed, and is deliberately NOT App Store–ready.**
     on a failure), a fleet-down banner (checks `/v1/autodown/status`), and
     one-turn-at-a-time send locking. Reachable from a project's detail Chat
     section (fixed to that project).
+  - `LiveActivityManager.swift` — the app side of the fleet-wake **Live
+    Activity**: starts it when a wake begins (autodown state → `waking`), polls
+    `/v1/autodown/status` + `/v1/cluster/status` for per-node readiness, and
+    ENDS it with an explicit success/failure message. Honest progress only —
+    elapsed time + per-unit readiness, never a fabricated percentage bar.
   - `Intents/` — the **B5** Siri App Intents surface (in-car, hands-free):
     `ClusterStatusIntent` + `ReviewQueueIntent` (speak each endpoint's `speak`
     one-liner), `CannedCard` (an `AppEnum` of pre-defined cards) +
@@ -90,7 +95,19 @@ distributed, and is deliberately NOT App Store–ready.**
     confirm-gated client, never free-form dictation), `AppShortcuts`
     (the `AppShortcutsProvider` with natural phrases), and `IntentClient`
     (builds the client from the same stored settings the app uses).
-- `project.yml` — XcodeGen spec (all sources listed explicitly).
+- `project.yml` — XcodeGen spec (all sources listed explicitly). Alongside the
+  app it defines **two embedded extension targets**, both sharing the App Group
+  `group.com.hscc.ios` (so they see the same host/port/token and last-known
+  state):
+  - `HSCCWidgets` (**Home Screen widget**) — `systemSmall` (state + compact
+    topology glyph) and `systemMedium` (topology pairs + model count +
+    idle-minutes remaining). Refreshes every 5 min (state is minutes-scale).
+    `Unreachable` is a first-class state — "Can't reach the cluster" with the
+    last-known state and its age, never a blank or stale-looking-live widget.
+  - `HSCCLiveActivity` (**fleet-wake Live Activity**) — the `ActivityConfiguration`
+    for the wake `WakingActivityAttributes`. Dynamic Island compact = elapsed +
+    a state dot, expanded = the topology pairs coming online; Lock Screen shows
+    elapsed + units up. Ends explicitly on success or failure.
 
 No third-party dependencies. Sideload-friendly.
 

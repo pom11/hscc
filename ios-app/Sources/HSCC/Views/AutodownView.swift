@@ -24,6 +24,10 @@ struct AutodownView: View {
     @State private var waking = false
     /// The "waking" hold message shown during the wake poll (from the API).
     @State private var wakeMessage: String?
+    /// Presents the fleet-wake Live Activity (Dynamic Island / Lock Screen).
+    /// Started from `beginWaking`; ends with success/failure. Independent of
+    /// the in-app poll, so the operator can leave the app and still see the wake.
+    @State private var liveActivity = LiveActivityManager()
 
     /// Idle-minute presets offered to the operator when enabling.
     private let idleOptions = [10, 20, 30, 60, 90, 120]
@@ -317,11 +321,17 @@ struct AutodownView: View {
         await loadStatus()
     }
 
-    /// Enter the waking state and start polling until the state leaves
-    /// "waking" (wake can take ~9 minutes).
+    /// Enter the waking state and start tracking the wake — BOTH the in-app
+    /// poll AND the Live Activity (the operator can close the app and still see
+    /// the wake on the Dynamic Island / Lock Screen).
     private func beginWaking(_ result: AutodownWakeResponse) {
         waking = true
         wakeMessage = result.message
+        // Start the Live Activity + its own polling; it ends when the state
+        // settles (up = success, down = failure, both with an explicit message).
+        if let client {
+            liveActivity.beginWake(client: client)
+        }
         // Poll from a background task so the UI stays responsive.
         Task {
             while waking {

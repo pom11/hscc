@@ -12,17 +12,17 @@ import Foundation
 // Every READ response carries a first-class, top-level `speak` string. The
 // client exposes it via `Speakable` so B5 (Siri App Intents) can read the
 // server-derived one-liner instead of re-deriving prose on device.
+//
+// NOTE: The `Speakable` protocol and the shared endpoint models that the
+// widget / Live Activity extensions also need (`AutodownStatusResponse`,
+// `ClusterStatusResponse`, `ClusterWorkload`, `TopologyPair`, `TopologyNode`)
+// live in Sources/Shared/ so all targets compile ONE definition instead of
+// duplicating. This file owns app-only + extension-specific surface models.
 // ---------------------------------------------------------------------------
-
-/// Protocol for any read response that carries the API's first-class `speak`
-/// field (design §B). B5 consumes this to speak summaries aloud.
-protocol Speakable {
-    var speak: String { get }
-}
 
 // MARK: - Shared error shape (design §C)
 
-/// The unified error object inside `{ "error": { ... } }`.
+/// The unified error object inside `{ \"error\": { ... } }`.
 struct APIErrorBody: Decodable {
     let code: String
     let message: String
@@ -45,26 +45,6 @@ struct PingResponse: Decodable, Speakable {
 
 // MARK: - Cluster
 
-/// GET /v1/cluster/status — one workload entry.
-struct ClusterWorkload: Decodable, Identifiable {
-    let name: String
-    let tp: String?
-    let pp: String?
-    let container_id: String?
-
-    var id: String { name }
-}
-
-/// GET /v1/cluster/status.
-struct ClusterStatusResponse: Decodable, Speakable {
-    let workloads: [ClusterWorkload]
-    let idle_hosts: [String]
-    let total_hosts: Int
-    let speak: String
-}
-
-/// GET /v1/cluster/hosts.
-///
 /// `saved_clusters` and `live_status` are raw `run_cmd`-shaped dicts from the
 /// cluster engine (keys like `success`/`returncode`/`output` with MIXED value
 /// types — bool, int, string), so they are decoded as untyped `[String:
@@ -506,38 +486,8 @@ struct StopClusterResponse: Decodable {
 // single absent key can never blank the whole screen.
 // ---------------------------------------------------------------------------
 
-// MARK: - Autodown
-
-/// GET /v1/autodown/status — the autodown report.
-///
-/// Verified live shape:
-///   { enabled, state, idle_minutes, last_activity_iso, down_since,
-///     wake_source, reason, watchdog_blocked, watchdog_intentional,
-///     kanban_ok, kanban_reason, blocked_by, force_armed,
-///     force_armed_overrides, active_cron_cpu_only, active_cron_model, speak }
-/// Every field is optional except `speak` (which the API always synthesizes).
-struct AutodownStatusResponse: Decodable, Speakable {
-    let enabled: Bool?
-    let state: String?
-    let idle_minutes: Int?
-    let last_activity_iso: String?
-    let down_since: String?
-    let wake_source: String?
-    let reason: String?
-    let watchdog_blocked: Bool?
-    /// The watchdog block's `intentional` marker — a STRING ("autodown") when a
-    /// teardown is in effect, absent otherwise. Not a Bool: the server passes
-    /// `block.get("intentional")` through verbatim (routes_autodown.py:216).
-    let watchdog_intentional: String?
-    let kanban_ok: Bool?
-    let kanban_reason: String?
-    let blocked_by: String?
-    let force_armed: Bool?
-    let force_armed_overrides: [String]?
-    let active_cron_cpu_only: [String]?
-    let active_cron_model: [String]?
-    let speak: String
-}
+// MARK: - Autodown (attachment models; the shared `/v1/autodown/status`
+// `AutodownStatusResponse` lives in Sources/Shared/SharedModels.swift)
 
 /// POST /v1/autodown/enable (routes_autodown.py handle_autodown_enable).
 struct AutodownEnableResponse: Decodable {
