@@ -23,19 +23,26 @@ import SwiftUI
 struct OrchestratorChatView: View {
     @EnvironmentObject private var settings: SettingsStore
 
-    /// The projects offered in the picker. The app has no `/v1/projects` list
-    /// endpoint (checked the real API routes on feat/hscc-api), so it cannot
-    /// fetch a live project list. `general` is the guaranteed catch-all
-    /// orchestrator (`general-orch` / `general` session / `default` board) and
-    /// is the default. If the API ever exposes a project-list endpoint, switch
-    /// this to a fetch instead of a static list.
+    /// When set, the chat is fixed to THIS project's orchestrator and the
+    /// project picker is hidden (used from a project's detail screen). When
+    /// nil (the standalone Chat surface), the picker shows and defaults to
+    /// `general`.
+    var project: String? = nil
+
+    /// The projects offered in the picker when no fixed `project` is given.
+    /// `general` is the guaranteed catch-all orchestrator. The app CAN fetch a
+    /// live list from /v1/projects, but the standalone picker keeps `general`
+    /// (the catch-all) first, with the live registry appended when configured.
     static let knownProjects = ["general"]
 
     @State private var prompt = ""
-    @State private var selectedProject = Self.knownProjects[0]
+    @State private var selectedProject: String = OrchestratorChatView.knownProjects[0]
     @State private var transcript: [ChatEntry] = []
     @State private var showConfirm = false
     @State private var isSending = false
+
+    /// The effective project the chat targets: the fixed one, or the picker's.
+    private var chatProject: String { project ?? selectedProject }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -110,15 +117,17 @@ struct OrchestratorChatView: View {
 
     private var composer: some View {
         VStack(spacing: 8) {
-            // Project picker — defaults to `general`.
-            Picker("Project", selection: $selectedProject) {
-                ForEach(Self.knownProjects, id: \.self) { project in
-                    Text(project == Self.knownProjects.first ? "\(project) (default)" : project)
-                        .tag(project)
+            // Project picker — hidden when the chat is fixed to a project.
+            if project == nil {
+                Picker("Project", selection: $selectedProject) {
+                    ForEach(Self.knownProjects, id: \.self) { item in
+                        Text(item == Self.knownProjects.first ? "\(item) (default)" : item)
+                            .tag(item)
+                    }
                 }
+                .pickerStyle(.menu)
+                .disabled(isSending)
             }
-            .pickerStyle(.menu)
-            .disabled(isSending)
 
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Ask the orchestrator…", text: $prompt, axis: .vertical)
@@ -159,11 +168,11 @@ struct OrchestratorChatView: View {
     }
 
     private var confirmTitle: String {
-        "Send to the \(selectedProject) orchestrator?"
+        "Send to the \(chatProject) orchestrator?"
     }
 
     private var confirmMessage: String {
-        "It may decompose your prompt and dispatch real work onto the \(selectedProject) project's board."
+        "It may decompose your prompt and dispatch real work onto the \(chatProject) project's board."
     }
 
     // MARK: - Send (confirm-gated)
@@ -180,7 +189,7 @@ struct OrchestratorChatView: View {
 
         do {
             let client = try clientOrThrow()
-            let result = try await client.orchestratorChat(project: selectedProject,
+            let result = try await client.orchestratorChat(project: chatProject,
                                                            prompt: text)
             transcript.append(.reply(result.reply))
             prompt = ""   // only clear on a real success
@@ -204,9 +213,9 @@ struct OrchestratorChatView: View {
                     // A real state: the orchestrator's NAMED session must exist
                     // (created by provisioning / the first Telegram topic) before
                     // the orchestrator can be chatted with.
-                    return "\(message) The \(selectedProject) orchestrator's session isn't ready yet — create it first, then re-send."
+                    return "\(message) The \(chatProject) orchestrator's session isn't ready yet — create it first, then re-send."
                 case "orchestrator_timeout":
-                    return "The \(selectedProject) orchestrator did not reply within 180 s (timeout). Try again or check the orchestrator."
+                    return "The \(chatProject) orchestrator did not reply within 180 s (timeout). Try again or check the orchestrator."
                 default:
                     // 400 unknown_project / bad_request, 409, 502 orchestrator_error, etc.
                     if status == 502 {

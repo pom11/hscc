@@ -46,16 +46,12 @@ targets:
       - path: Sources/HSCC/KeychainStore.swift
       - path: Sources/HSCC/SettingsStore.swift
       - path: Sources/HSCC/Views/SettingsView.swift
-      - path: Sources/HSCC/Views/PlaceholderViews.swift
+      - path: Sources/HSCC/Views/Theme.swift
+      - path: Sources/HSCC/Views/NodeTopologyView.swift
       - path: Sources/HSCC/Views/LoadState.swift
       - path: Sources/HSCC/Views/ClusterView.swift
       - path: Sources/HSCC/Views/FleetView.swift
-      - path: Sources/HSCC/Views/KanbanView.swift
-      - path: Sources/HSCC/Views/StandupView.swift
       - path: Sources/HSCC/Views/CardsView.swift
-      - path: Sources/HSCC/Views/DispatchCardView.swift
-      - path: Sources/HSCC/Views/ReviewQueueView.swift
-      - path: Sources/HSCC/Views/QAQueueView.swift
       - path: Sources/HSCC/Views/MutationSupport.swift
       - path: Sources/HSCC/Views/OrchestratorChatView.swift
       - path: Sources/HSCC/Views/AutodownView.swift
