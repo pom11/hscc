@@ -166,7 +166,7 @@ struct ProjectDetailView: View {
             case .overview: ProjectOverviewView(client: client, name: project.name)
             case .chat:     OrchestratorChatView(project: project.name)
             case .board:    ProjectBoardView(client: client, board: project.board)
-            case .settings: ProjectSettingsView(name: project.name)
+            case .settings: ProjectSettingsView(client: client, name: project.name)
             }
         }
         .navigationTitle(project.name)
@@ -212,6 +212,9 @@ struct ProjectOverviewView: View {
             }
 
             Section("Project") {
+                if let topic = state.displayTopic, !topic.isEmpty {
+                    LabeledContent("Topic") { Text(topic).font(.hsccMono(15)) }
+                }
                 if let board = state.board, !board.isEmpty {
                     LabeledContent("Board") { Text(board).font(.hsccMono(15)) }
                 }
@@ -281,13 +284,17 @@ struct ProjectOverviewView: View {
 /// Board section — THIS project's kanban board (read-only).
 ///
 /// Fetches GET /v1/cards and filters to the project's board, so the operator
-/// sees exactly the cards for this project in one place. A follow-up card
-/// builds deeper project depth on top of this.
+/// sees exactly this project's cards in one place. Also brings in the board's
+/// blocked (/v1/kanban/blocked) and stale (/v1/kanban/stale) reads, filtered
+/// to this project, under a "Needs attention" heading — the states the operator
+/// actively cares about.
 struct ProjectBoardView: View {
     let client: HSCCClient
     let board: String?
 
     @State private var cards = LoadState<CardsResponse>.idle
+    @State private var blocked = LoadState<KanbanBlockedResponse>.idle
+    @State private var stale = LoadState<KanbanStaleResponse>.idle
 
     var body: some View {
         Group {
@@ -319,8 +326,12 @@ struct ProjectBoardView: View {
             guard let board else { return card.board == nil || card.board?.isEmpty == true }
             return card.board == board
         }
+        // Blocked / stale scoped to THIS project's board.
+        let projectBlocked = blocked.value?.tasks?.filter { $0.board == board } ?? []
+        let projectStale = stale.value?.tasks?.filter { $0.board == board } ?? []
+
         List {
-            if filtered.isEmpty {
+            if filtered.isEmpty && projectBlocked.isEmpty && projectStale.isEmpty {
                 Section {
                     ContentUnavailableView {
                         Label("No cards on \(board ?? "this") board", systemImage: "square.grid.2x2")
@@ -329,16 +340,82 @@ struct ProjectBoardView: View {
                     }
                 }
             } else {
-                ForEach(filtered) { card in
-                    NavigationLink {
-                        CardDetailView(cardID: card.id)
-                    } label: {
-                        cardRow(card)
+                // Active cards first — the primary surface.
+                Section("Open cards") {
+                    if filtered.isEmpty {
+                        Text("No open cards on this board.")
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    } else {
+                        ForEach(filtered) { card in
+                            NavigationLink {
+                                CardDetailView(cardID: card.id)
+                            } label: {
+                                cardRow(card)
+                            }
+                        }
+                    }
+                }
+
+                // Blocked — things stalled that the operator cares about.
+                if !projectBlocked.isEmpty {
+                    Section("Blocked — \(projectBlocked.count)") {
+                        ForEach(projectBlocked, id: \.id) { card in
+                            buttonRow(icon: "hand.raised.fill",
+                                      color: Theme.Semantic.warn,
+                                      title: card.displayTitle,
+                                      subtitle: subtitle(blockCard: card))
+                        }
+                    }
+                }
+
+                // Stale — non-terminal cards sitting too long.
+                if !projectStale.isEmpty {
+                    Section("Stale — \(projectStale.count)") {
+                        ForEach(projectStale, id: \.id) { card in
+                            buttonRow(icon: "clock.fill",
+                                      color: Theme.Semantic.warn,
+                                      title: card.displayTitle,
+                                      subtitle: subtitle(staleCard: card))
+                        }
                     }
                 }
             }
         }
         .refreshable { await load() }
+    }
+
+    private func subtitle(blockCard card: BlockedCard) -> String {
+        var parts: [String] = []
+        if let why = card.why, !why.isEmpty { parts.append(why) }
+        if card.comments?.isEmpty == false { parts.append("\(card.comments?.count ?? 0) comments") }
+        parts.append(ageString(card.age_days, noun: "blocked"))
+        return parts.joined(separator: " · ")
+    }
+
+    private func subtitle(staleCard card: StaleCard) -> String {
+        ageString(card.age_days, noun: "stale")
+    }
+
+    private func ageString(_ days: Int?, noun: String) -> String {
+        guard let days else { return "age unknown" }
+        return days == 0 ? "\(noun) today" : "\(days)d \(noun)"
+    }
+
+    @ViewBuilder
+    private func buttonRow(icon: String, color: Color, title: String, subtitle: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: icon)
+                .foregroundColor(color)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .foregroundColor(Theme.Semantic.onSurface)
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -372,31 +449,137 @@ struct ProjectBoardView: View {
 
     private func load() async {
         cards = .loading
+        // Load the three reads concurrently so the board fills in fast; each
+        // writes to its own LoadState so one failing read never blanks the rest.
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await self.loadCards() }
+            group.addTask { await self.loadBlockedIfPresent() }
+            group.addTask { await self.loadStaleIfPresent() }
+        }
+    }
+
+    private func loadCards() async {
         do {
             cards = .loaded(try await client.cards())
         } catch {
             cards = .failed((error as? HSCCError)?.localizedDescription ?? "Something went wrong.")
         }
     }
+
+    /// Load blocked/stale best-effort: if their reads fail we still show the
+    /// active cards (the board section must not blank because a hygiene read
+    /// hiccuped).
+    private func loadBlockedIfPresent() async {
+        do {
+            blocked = .loaded(try await client.kanbanBlocked())
+        } catch {
+            blocked = .failed((error as? HSCCError)?.localizedDescription ?? "Something went wrong.")
+        }
+    }
+
+    private func loadStaleIfPresent() async {
+        do {
+            stale = .loaded(try await client.kanbanStale(olderThan: 0))
+        } catch {
+            stale = .failed((error as? HSCCError)?.localizedDescription ?? "Something went wrong.")
+        }
+    }
 }
 
-/// Settings section shell — project-level settings.
+/// Settings section — what the operator can actually see/change for a project.
 ///
-/// The navigation shell is established here; a follow-up card fills in the
-/// actual project-level configuration. Keep a clean seam so depth can land
-/// without restructuring this screen.
+/// The project registry is basically read-only for the operator: repo path,
+/// board name, session topic, and the orchestrator profile/session live on the
+/// server (provisioned / driven by the project hub), not in the app. There is
+/// nothing here the operator can edit from the phone, so everything is
+/// presented read-only — honest about what's configurable vs. what is not. No
+/// fake editable controls.
+///
+/// Shows repo path, board name, topic, and the orchestrator's project session.
 struct ProjectSettingsView: View {
+    let client: HSCCClient
     let name: String
 
+    @State private var detail = LoadState<ProjectDetailResponse>.idle
+
     var body: some View {
+        Group {
+            switch detail {
+            case .loading, .idle:
+                ProgressView("Loading…")
+            case .failed(let message):
+                ContentUnavailableView {
+                    Label("Couldn't load project settings", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(message)
+                } actions: {
+                    Button("Try again") { Task { await load() } }
+                }
+            case .loaded(let state):
+                content(state)
+            }
+        }
+        .task {
+            if detail.value == nil, !detail.isLoading { await load() }
+        }
+    }
+
+    @ViewBuilder
+    private func content(_ state: ProjectDetailResponse) -> some View {
         List {
             Section {
-                Label("Project settings", systemImage: "gearshape.2")
-                    .font(.headline)
-                Text("Configuration for \(name) lives here — project-scoped orchestration, notification, and board options. Depth lands in a follow-up card; the shell is ready.")
-                    .font(.subheadline)
+                Text("These project settings live on the cluster, driven by the project hub. They are read-only from this app.")
+                    .font(.footnote)
                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
             }
+
+            Section("Repository") {
+                row("Path", value: state.repo)
+                if let git = state.git, git.is_repo == true, let branch = git.branch, !branch.isEmpty {
+                    row("Branch", value: branch)
+                }
+            }
+
+            Section("Board") {
+                row("Name", value: state.board)
+                if let counts = state.board_counts, counts["total"] != nil {
+                    row("Open cards", value: "\(counts["total"] ?? 0)")
+                }
+            }
+
+            Section("Orchestrator") {
+                // The orchestrator's per-project profile + session follow the
+                // project naming convention: `<project>-orch` / session `<project>`.
+                row("Profile", value: "\(name)-orch")
+                row("Session", value: name)
+                if let topic = state.displayTopic, !topic.isEmpty {
+                    row("Topic", value: topic)
+                }
+            }
+
+            Section {
+                Text("The orchestrator session persists context across messages — this conversation is continuous, not one-off. To restart it, recreate the session on the cluster.")
+                    .font(.footnote)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ label: String, value: String?) -> some View {
+        if let value, !value.isEmpty {
+            LabeledContent(label) {
+                Text(value).font(.hsccMono(15)).textSelection(.enabled)
+            }
+        }
+    }
+
+    private func load() async {
+        detail = .loading
+        do {
+            detail = .loaded(try await client.projectDetail(name))
+        } catch {
+            detail = .failed((error as? HSCCError)?.localizedDescription ?? "Something went wrong.")
         }
     }
 }
