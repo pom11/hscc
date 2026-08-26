@@ -301,6 +301,7 @@ Cluster & templates
   project <cmd>        Project-portfolio (flightdeck) commands: standup verify doctor ...
   api <cmd>            HSCC HTTP API server: start stop status (external apps)
   autodown <cmd>       Idle autodown/autoup: status enable disable wake cancel
+  kanban <cmd>         Board hygiene for autodown: stale (list/archive stale cards)
 
 Utility
   notify <message>     Send a desktop notification
@@ -759,6 +760,12 @@ def main():
     if cmd == "autodown":
         from hscc_daemon.autodown_cli import cmd_autodown
         rc = cmd_autodown(args[1:])
+        sys.exit(rc)
+
+    # 'kanban' group (board hygiene — find/clean stale cards that block autodown)
+    if cmd == "kanban":
+        from hscc_daemon.kanban_cli import cmd_kanban
+        rc = cmd_kanban(args[1:])
         sys.exit(rc)
 
     # Per-command --help (daemon commands)

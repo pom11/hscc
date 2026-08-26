@@ -109,7 +109,22 @@ def _cmd_status(rest, json_mode):
     if autodown._has_active_work():
         blocking_board = autodown.kanban_blocking_board()
         if blocking_board and blocking_board != autodown._UNREADABLE_BOARD:
-            blocking = f"kanban work on board '{blocking_board}'"
+            # Name the SPECIFIC blocking task(s), not just the board, so the
+            # operator can act without running a second command. Reuses the
+            # same board enumeration the predicate just did (list_stale_tasks
+            # → _enum_board_names) so status names exactly the work that blocks.
+            tasks = autodown.list_stale_tasks(
+                board=blocking_board, older_than=None)["tasks"]
+            if tasks:
+                names = ", ".join(
+                    f"{t['id']} ({t['title']})" for t in tasks[:3])
+                if len(tasks) > 3:
+                    names += f", … and {len(tasks) - 3} more"
+                blocking = f"kanban work on board '{blocking_board}': {names}"
+            else:
+                # Predicate said active but no task could be enumerated (e.g.
+                # the interlock is held by an unreadable board). Name the board.
+                blocking = f"kanban work on board '{blocking_board}'"
         else:
             blocking = "kanban work (board unknown)"
 
