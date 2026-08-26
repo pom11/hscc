@@ -652,14 +652,20 @@ def classify(idle_state_block, autodown_state):
         The layer is intentionally down by autodown: the watchdog block is set
         with ``intentional == "autodown"`` and autodown state is ``"down"``.
         The watchdog must NOT resurrect it.
+    ``waking``
+        The block is latched with ``intentional == "autodown"`` and autodown
+        state is ``"waking"`` — a normal, expected transition: the wake is
+        bringing the serving layer up, so the streams are legitimately not
+        healthy yet (models still loading). NOT a fault, but distinct from
+        ``expected_down``: the layer is coming back, not off by design.
     ``should_be_up``
         The block is latched with ``intentional == "autodown"`` but the layer
-        is not confirmed down (state is ``waking``/``up``/``error``/missing) — an
-        in-progress or failed transition. The layer should be up: finish the
-        wake (or resume supervision). Never leave it parked.
+        is neither confirmed down nor waking (state is ``up``/``error``/missing)
+        — an in-progress or failed transition. The layer should be up: finish
+        the wake (or resume supervision). Never leave it parked.
     ``healthy``
         No intentional autodown block — the watchdog supervises normally. A
-        wake-failure ``state: \"error\"`` lands here once its block is cleared:
+        wake-failure ``state: "error"`` lands here once its block is cleared:
         the watchdog supervises and can heal whatever is actually there.
 
     Later phases extend this per-unit (which specific units are in the
@@ -675,10 +681,33 @@ def classify(idle_state_block, autodown_state):
 
     if blocked and intentional == "autodown" and ad_state == "down":
         return "expected_down"
+    if blocked and intentional == "autodown" and ad_state == "waking":
+        # Normal, expected transition — wake in progress, streams not healthy
+        # yet. Distinct from should_be_up so verify can say "coming up" rather
+        # than falsely flag the layer while it is genuinely still loading.
+        return "waking"
     if blocked and intentional == "autodown":
-        # Block latched but layer not confirmed down (waking/up/missing).
+        # Block latched but layer not confirmed down nor waking (up/error/missing).
         return "should_be_up"
     return "healthy"
+
+
+def intentional_window(verdict):
+    """True when an intentional-autodown window is active.
+
+    The single breadth-of-window predicate built on ``classify()``: True for
+    both ``expected_down`` (serving layer off by design) and ``waking`` (coming
+    up, not yet healthy) — in both the layer is not expected to be healthy, so
+    an unhealthy/unserving report is a legitimate non-fault. False for
+    ``should_be_up`` and ``healthy`` — there the layer should be healthy, so an
+    unhealthy report is a real fault.
+
+    Every caller that must know "is this unhealthy because of a deliberate
+    autodown transition" (the verify reader and the stream writers in
+    ``health.py``) consults this SAME predicate on the SAME ``classify()`` table
+    rather than re-deriving the rule, so writer and reader always agree.
+    """
+    return verdict in ("expected_down", "waking")
 
 
 # ---------------------------------------------------------------------------
