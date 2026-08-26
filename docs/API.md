@@ -253,19 +253,67 @@ and persists the exchange into it (the Telegram-topic analog). The
 `localhost:4000` proxy is litellm — a stateless OpenAI-compatible inference
 relay with no Hermes session store, so it is NOT used here.
 
-**Response `200`:**
+**It is a JOB API (not streaming).** `hermes chat -Q` emits the reply ONLY
+once, complete, when the underlying run finishes — there is no supported
+incremental/streaming interface (no `--stream`/SSE/ndjson; quiet mode explicitly
+nulls the stream callback, `cli.py:17863`). So the POST does **not** block for
+the (30-90 s, sometimes much longer) reply. Instead:
+
+* **`POST /v1/orchestrator/chat`** validates + confirm-gates + resolves the
+  project synchronously, spawns a background thread that invokes hermes, and
+  returns **`202 Accepted` immediately** with a `job_id` — the request/response
+  path returns in milliseconds, not minutes.
+* **`GET /v1/orchestrator/chat/{id}`** polls the job: `queued` / `running` /
+  `done` (with the `reply`) or a terminal failure state, plus an honest
+  `elapsed` seconds counter. The phone shows real progress; a backgrounded app
+  can pick the finished answer up later by `job_id` (a job that outlives the
+  connection that submitted it is no longer lost).
+
+**`POST` response `202`:**
 
 ```json
 {
-  "reply": "<the orchestrator's reply text>",
+  "job_id": "chat-1",
+  "project": "hscc",
+  "status": "queued",
+  "elapsed": 0.0,
   "profile": "hscc-orch",
   "session": "hscc",
+  "speak": "Chat request accepted (job chat-1)."
+}
+```
+
+**`GET /v1/orchestrator/chat/{id}` — running:**
+
+```json
+{ "job_id": "chat-abc…", "status": "running", "elapsed": 47.3, "profile": "hscc-orch", "session": "hscc" }
+```
+
+**`GET` — done:**
+
+```json
+{
+  "job_id": "chat-abc…",
+  "status": "done",
+  "elapsed": 87.2,
+  "profile": "hscc-orch",
+  "session": "hscc",
+  "reply": "<the orchestrator's reply text>",
   "speak": "hscc-orch says: <short summary>"
 }
 ```
 
-The `server` never crashes and never leaks a traceback or token on a bad
-orchestrator call:
+**`GET` — terminal failure** (`failed`), carrying the same error `code` a
+blocking call would have returned as an HTTP status:
+
+```json
+{ "job_id": "chat-abc…", "status": "timeout", "elapsed": 180.1, "error": { "code": "orchestrator_timeout", "message": "…", "speak": "…" } }
+```
+
+The terminal `error.code` is one of `orchestrator_error` / `orchestrator_unavailable`
+/ `orchestrator_timeout`; the `POST` itself only returns 400/409 (validation) or
+202 (accepted). The `server` never crashes and never leaks a traceback or token
+on a bad orchestrator call:
 
 | Status | `code` | When |
 |---|---|---|
