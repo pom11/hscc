@@ -13,6 +13,10 @@ import SwiftUI
 ///
 /// This is the ONE place the design spends visual boldness — every other
 /// surface stays quiet. No gradients, no numbered eyebrows, no idle animation.
+///
+/// The `TopologyPair` / `TopologyNode` models live in
+/// `Sources/Shared/SharedModels.swift` (shared with the widget + Live Activity
+/// so every surface draws the SAME cluster).
 struct NodeTopologyView: View {
     /// The two serving pairs, each carrying its two nodes + a role label.
     let pairs: [TopologyPair]
@@ -66,7 +70,7 @@ struct NodeTopologyView: View {
                 .font(.hsccMono(12, weight: .semibold))
                 .foregroundColor(Theme.Semantic.onSurface)
         }
-        .accessibilityLabel("\\(node.label), \\(node.state.rawValue)")
+        .accessibilityLabel("\(node.label), \(node.state.rawValue)")
     }
 
     /// The bond between the pair's two nodes.
@@ -78,48 +82,7 @@ struct NodeTopologyView: View {
 
     private var accessibilitySummary: String {
         pairs.map { pair in
-            "\\(pair.role): \\(pair.nodes[0].label) paired with \\(pair.nodes[1].label)"
+            "\(pair.role): \(pair.nodes[0].label) paired with \(pair.nodes[1].label)"
         }.joined(separator: ", ")
-    }
-}
-
-/// One serving pair in the topology strip — two nodes + a role label.
-struct TopologyPair: Identifiable {
-    /// A stable identity for the pair (the joining node labels).
-    var id: String { "\(nodes[0].label)-\(nodes[1].label)" }
-    let nodes: [TopologyNode]       // exactly 2
-    let role: String                // e.g. "orchestrator" / "worker"
-}
-
-/// One node in the topology strip: its displayed label (the short ip tail) and
-/// its live state.
-struct TopologyNode: Identifiable {
-    let label: String               // e.g. ".244"
-    let state: NodeState
-
-    var id: String { label }
-
-    /// The live serving state of a node, driving its dot colour.
-    enum NodeState: String {
-        /// Serving / healthy.
-        case up
-        /// Busy / waking / in transition.
-        case busy
-        /// Warning / degraded.
-        case warn
-        /// Down / faulted.
-        case down
-        /// No live signal yet.
-        case unknown
-
-        var color: Color {
-            switch self {
-            case .up: return Theme.Semantic.ok
-            case .busy: return Theme.Semantic.warn
-            case .warn: return Theme.Semantic.warn
-            case .down: return Theme.Semantic.bad
-            case .unknown: return Theme.Semantic.neutral
-            }
-        }
     }
 }
