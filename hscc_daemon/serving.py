@@ -217,6 +217,84 @@ def fleet_down_cmd():
     return ["sparkrun", "stop", "--all", "--cluster", HSCC_CLUSTER]
 
 
+def _validate_unit_serve_cmd(unit):
+    """Validates a unit's recorded ``serve_cmd`` against its OWN ``nodes`` /
+    ``port`` / ``recipe`` fields. Returns a list of human-readable violations;
+    empty means the serve_cmd agrees with the unit (or is absent).
+
+    A ``serve_cmd`` is the start command stamped into serving.json at provision
+    time (see cluster_template._render_serve_cmd). It is data from the past —
+    transcribed from the unit's fields — so it must never be TRUSTED to override
+    the unit's own fields. If it disagrees (hosts outside the node list, a port
+    that isn't the unit's, a recipe that isn't the unit's), it is bogus fixture
+    data and MUST NOT be executed: an autoup/start path that trusts a stale
+    serve_cmd could launch a model on hosts that are not this cluster
+    (t_501fb7f1 — a leaked test serve_cmd naming 10.0.0.1/9000 landed in live
+    ~/.hscc/serving.json).
+
+    Normalization: the serve_cmd stores the recipe path-expanded and nodes
+    comma-joined and port as a string, while the unit keeps recipe possibly
+    tilde'd, nodes as a list, port as an int. We compare node SETS (order
+    doesn't matter), ports as ints, and recipes after expanduser on both sides.
+    """
+    if not isinstance(unit, dict):
+        return []
+    serve_cmd = unit.get("serve_cmd")
+    if not serve_cmd:
+        return []
+    if not isinstance(serve_cmd, list):
+        return [f"unit {unit.get('id')}: serve_cmd is not a list ({serve_cmd!r})"]
+
+    nodes = [n for n in (unit.get("nodes") or []) if n]
+    port = unit.get("port")
+    recipe = unit.get("recipe")
+
+    cmd_nodes = None
+    cmd_port = None
+    cmd_recipe = None
+    i = 0
+    argv = list(serve_cmd)
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--hosts" and i + 1 < len(argv):
+            cmd_nodes = [n for n in str(argv[i + 1]).split(",") if n]
+            i += 2
+        elif tok == "--port" and i + 1 < len(argv):
+            try:
+                cmd_port = int(argv[i + 1])
+            except (TypeError, ValueError):
+                cmd_port = None
+            i += 2
+        elif tok.startswith("-"):
+            i += 2 if (i + 1 < len(argv) and not str(argv[i + 1]).startswith("-")) else 1
+        else:
+            # first non-flag token after "sparkrun run" is the recipe
+            if cmd_recipe is None and tok not in ("sparkrun", "run"):
+                cmd_recipe = tok
+            i += 1
+
+    problems = []
+    unit_id = unit.get("id") or ",".join(nodes) or "?"
+
+    def _norm(path):
+        return os.path.normpath(os.path.expanduser(path)) if path else path
+
+    if nodes and cmd_nodes is not None and set(cmd_nodes) != set(nodes):
+        problems.append(
+            f"unit {unit_id}: serve_cmd --hosts {sorted(cmd_nodes)} disagrees "
+            f"with unit nodes {sorted(nodes)} — REFUSING: a start command "
+            f"targeting hosts outside the unit's node list must never be executed")
+    if port is not None and cmd_port is not None and cmd_port != int(port):
+        problems.append(
+            f"unit {unit_id}: serve_cmd --port {cmd_port} disagrees with unit "
+            f"port {port}")
+    if recipe and cmd_recipe is not None and _norm(cmd_recipe) != _norm(recipe):
+        problems.append(
+            f"unit {unit_id}: serve_cmd recipe {cmd_recipe!r} disagrees with unit "
+            f"recipe {recipe!r}")
+    return problems
+
+
 def fleet_up_plan(serving=None):
     """Ordered start plan for EVERY serving.json unit (orchestrator FIRST, then
     workers sorted by id) — the full fleet-up set.
@@ -239,10 +317,30 @@ def fleet_up_plan(serving=None):
     "keepalive"}`` (``keepalive`` True for a keepalive worker). Empty/missing
     ``serving`` ⇒ ``[]`` (nothing to start). Used by BOTH ``hscc cluster up``
     and ``autodown.autoup()``.
+
+    SAFETY (t_501fb7f1): before planning, every unit's recorded ``serve_cmd``
+    is validated against that unit's OWN ``nodes``/``port``/``recipe``. A
+    ``serve_cmd`` that disagrees (e.g. hosts outside the node list) is leaked
+    fixture data, and any start derived from it could launch a model on hosts
+    that are not this cluster. When any unit carries a disagreeing ``serve_cmd``
+    we REFUSE: log loudly and return ``[]`` (start nothing), so no consumer —
+    now or a future autoup that trusts serve_cmd — ever executes a bogus
+    command.
     """
     if serving is None:
         serving = load_serving()
     if not isinstance(serving, dict):
+        return []
+    # REFUSE to plan a start when any unit's recorded serve_cmd disagrees
+    # with its own recipe/nodes/port (leaked fixture data must never drive a
+    # launch on hosts outside the unit's node list — t_501fb7f1).
+    violations = []
+    for u in (serving.get("units", []) or []):
+        if isinstance(u, dict):
+            violations.extend(_validate_unit_serve_cmd(u))
+    if violations:
+        for v in violations:
+            _serving_warn(f"serve_cmd validation REFUSED start: {v}")
         return []
     orch = []
     workers = []
