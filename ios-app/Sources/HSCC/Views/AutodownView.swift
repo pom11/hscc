@@ -134,8 +134,11 @@ struct AutodownView: View {
                     statusRow("Enabled", value: state.enabled == true ? "Yes" : "No",
                               color: state.enabled == true ? .green : .secondary)
                     if state.watchdog_blocked == true {
-                        statusRow("Watchdog block", value: state.watchdog_intentional == true ? "intentional" : "active",
-                                  color: .red)
+                        // `intentional` is a STRING ("autodown") during a teardown,
+                        // not a Bool — an intentional block is expected, not a fault.
+                        statusRow("Watchdog block",
+                                  value: state.watchdog_intentional == nil ? "active" : "intentional (\(state.watchdog_intentional!))",
+                                  color: state.watchdog_intentional == nil ? .red : .secondary)
                     }
                     if let blockedBy = state.blocked_by, !blockedBy.isEmpty {
                         blockedByRow(blockedBy)
