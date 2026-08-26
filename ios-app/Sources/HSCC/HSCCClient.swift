@@ -333,6 +333,19 @@ struct HSCCClient {
         try await get("/v1/template/status", as: TemplateStatusResponse.self)
     }
 
+    /// GET /v1/template/preview/{name} — dry-run of what applying a template
+    /// would change (READ-ONLY; never mutates).
+    ///
+    /// A template with no preview yet returns a minimal `{ speak }` body; one
+    /// with a preview returns the full changes + routing. Unknown template →
+    /// 404. This is the browse/preview step BEFORE any confirmed apply.
+    func templatePreview(name: String) async throws -> TemplatePreviewResponse {
+        // Inline the encoding expression (matches `cardDetail`/`reviewDetail`
+        // so a slash or space can't break the route).
+        let encoded = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
+        return try await get("/v1/template/preview/\(encoded)", as: TemplatePreviewResponse.self)
+    }
+
     // MARK: - Mutating endpoints (B4, ALL confirm-gated)
 
     /// POST /v1/cards — dispatch a card (create a kanban card).
