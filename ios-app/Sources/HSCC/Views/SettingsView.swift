@@ -27,7 +27,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Cluster connection") {
+                Section {
                     LabeledContent {
                         TextField("e.g. dgx-tailscale (hostname or IP)", text: $hostField)
                             .textInputAutocapitalization(.never)

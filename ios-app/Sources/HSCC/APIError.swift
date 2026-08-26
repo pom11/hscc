@@ -40,4 +40,25 @@ enum HSCCError: Error, Equatable {
             return "The host or port is invalid."
         }
     }
+
+    /// Equatable is written by hand because `.transport` carries an
+    /// `Error?`, and `Error` is not `Equatable` — so the compiler cannot
+    /// synthesise conformance. Two transport failures are treated as equal
+    /// when their underlying descriptions match (nil == nil), which is what
+    /// callers actually care about: "same kind of unreachable", not object
+    /// identity.
+    static func == (lhs: HSCCError, rhs: HSCCError) -> Bool {
+        switch (lhs, rhs) {
+        case let (.api(lc, lm, ls), .api(rc, rm, rs)):
+            return lc == rc && lm == rm && ls == rs
+        case let (.decoding(l), .decoding(r)):
+            return l == r
+        case let (.transport(l), .transport(r)):
+            return String(describing: l) == String(describing: r)
+        case (.invalidURL, .invalidURL):
+            return true
+        default:
+            return false
+        }
+    }
 }
