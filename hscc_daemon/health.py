@@ -263,7 +263,15 @@ def check_dgx():
     results["vllm_healthy"] = health.get("ok", False)
     
     ok = results["ssh_reachable"] and results["vllm_healthy"]
-    write_state("dgx", {"ok": ok, "details": results})
+    state_entry = {"ok": ok, "details": results}
+    if not ok and _intentional_autodown_down():
+        # The whole serving layer is deliberately down by autodown — the model
+        # being stopped IS why vLLM is unreachable. Tag the stream so verify
+        # treats it as an expected intentional down, not a fault. Any real fault
+        # (no intentional block) is left to fail normally below.
+        state_entry["intentional"] = "autodown"
+        state_entry["message"] = "intentional autodown — serving layer down by design"
+    write_state("dgx", state_entry)
     log(f"DGX check complete: ok={ok}")
     return ok
 
@@ -381,6 +389,11 @@ def check_gateway():
         "ok": ok, "gateway_job": job_ok, "vllm_healthy": vllm_ok,
         "multiplex_ok": mux["ok"], "multiplex_message": mux["message"],
     }
+    if not ok and _intentional_autodown_down():
+        # Serving layer down by design — vLLM being stopped is why the gateway
+        # backend probe fails. Tag so verify treats it as expected, not a fault.
+        state_data["intentional"] = "autodown"
+        state_data["message"] = "intentional autodown — serving layer down by design"
     write_state("gateway", state_data)
     log(f"Gateway check: ok={ok} (job={job_ok} vllm={vllm_ok} mux={mux['ok']}) "
         f"{mux['message']}")
@@ -456,9 +469,18 @@ def check_proxy():
     r = run_cmd(["sparkrun", "proxy", "start", "--cluster", serving.HSCC_CLUSTER,
                  "--hosts", ",".join(nodes), "--port", str(PROXY_PORT)], timeout=90)
     ok = r.get("ok", False)
-    write_state("proxy", {"ok": ok, "port": PROXY_PORT, "relaunched": True,
-                          "last_check": now_iso(),
-                          "message": "relaunched" if ok else "relaunch failed"})
+    proxy_data = {"ok": ok, "port": PROXY_PORT, "relaunched": True,
+                  "last_check": now_iso(),
+                  "message": "relaunched" if ok else "relaunch failed"}
+    if ok is False and _intentional_autodown_down():
+        # Fleet deliberately down — the worker proxy is not required while the
+        # serving layer is stopped. Tag so verify treats it as expected, not a
+        # real fault. The proxy relaunch attempt above is intentionally left
+        # unchanged: the proxy is a CPU-only management unit (not a serving
+        # unit), so starting it is not a serving resurrection.
+        proxy_data["intentional"] = "autodown"
+        proxy_data["message"] = "intentional autodown — worker proxy not required while fleet down"
+    write_state("proxy", proxy_data)
     return ok
 
 
