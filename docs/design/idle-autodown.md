@@ -690,6 +690,88 @@ wake-on-cron; that decision is deferred until such a job exists.
 
 ---
 
+## 7.2 Dispatch guard — wait for cluster readiness before dispatching work
+### (feat t_5d1118de — follow-up to the accepted finding)
+
+**Finding (`t_ab177036`, do not re-investigate):** there is no supported seam
+to HOLD a Hermes kanban dispatch. `pre_kanban_dispatch` was removed in 0.17
+(`docs/hermes-017-new-features.md:20`); `kanban_task_claimed` fires AFTER
+`claim_task` commits ready→running and is observer-only (return values
+discarded, `kanban_db.py:164-186`); `pre_gateway_dispatch` gates inbound
+MessageEvents only, not kanban dispatch; HSCC's fork patches do not touch the
+dispatch gate. **HSCC does NOT patch Hermes.** So dispatch cannot be held.
+
+**The consequence (live incident):** work dispatched while the fleet is
+down/waking is destroyed. autodown tore down at 21:19, three cards were
+created, the dispatcher spawned workers into a still-loading cluster, and 2 of
+3 ended `blocked` with `worker exited cleanly (rc=0) without calling
+kanban_complete` — a protocol violation caused purely by having no model to
+talk to.
+
+**The fix:** since dispatch cannot be held, prevent the window at the source
+HSCC controls — its OWN dispatch entry point, `hscc project message dispatch`
+(wired through `hscc_daemon/hscc.py:_handle_project:663` → `flightdeck.cli.main`
+→ `flightdeck/commands/message.py:cmd_dispatch`). Before creating the card,
+`cmd_dispatch` calls a cluster-readiness guard:
+
+```
+flightdeck message dispatch <project> <task> [--apply] [--no-wait]
+```
+
+Decision table (`flightdeck/commands/message.py:_ensure_cluster_ready`):
+
+| autodown state | default (no flag) | `--no-wait` |
+|---|---|---|
+| disabled | proceed immediately (never interfere) | proceed |
+| `up` | proceed immediately (cluster already serving) | proceed |
+| `down` / `waking` / `error` | wake (`autodown.autoup()`) + **wait for readiness**, then create card | create immediately (operator accepts the risk) |
+| unknown | refuse (exit non-zero; cluster unverifiable) | proceed |
+| **wake fails** | **NO card created**, exit non-zero, clear error | n/a |
+
+Mechanics:
+- The guard reads `~/.hscc/autodown.json` via `autodown.load_config()` (the
+  single source of truth), and triggers the wake via `autodown.autoup()` — the
+  SAME function the daemon's wake path and `hscc autodown wake` use. Reusing
+  the library (not re-implementing, not shelling out) matches the house rule
+  that the wake logic lives in exactly one place.
+- `autoup()` starts the whole fleet and polls each unit's port until healthy
+  or the load-grace deadline (`VLLM_LOAD_GRACE_MINUTES`, default 20 min) — this
+  IS the "wait for readiness" the card wants, bounded by the same window.
+- Progress is printed to stdout so the operator sees WHY dispatch is pausing —
+  a silent multi-minute pause is explicitly not acceptable. Lines: "waking the
+  serving layer before dispatch (load-grace window Nm, please wait)..." then
+  "serving layer is UP — proceeding with dispatch."
+- Only the `--apply` path touches the cluster. A dry-run previews the plan and
+  never wakes anything — dry-run mutates nothing.
+- The wake limit: `autoup()` returns `up` on readiness; any other result
+  (`start-failed` / `not-ready` / `no-units` / `busy` / `already-waking`) is a
+  failure. The guard reads the failure reason autoup persisted to
+  `autodown.json.reason` (`_record_wake_failure`), reports it, and exits
+  non-zero **without creating the card** — so the work is not lost to a
+  protocol violation (it was never created). The operator fixes and retries, or
+  passes `--no-wait`.
+
+**Limitation (documented honestly):** this guard covers ONLY cards created via
+`hscc project message dispatch` — HSCC's own dispatch entry point. It does NOT
+cover cards created by other paths that bypass it: Hermes-internal
+decomposition (`delegate_task` → `kanban_create`), cron jobs, direct `kanban
+create`, `kanban_submit_review`, or an orchestrator's own fan-out. Those paths
+are not guarded here and can still create a card into a down/waking fleet.
+
+**Recovery when it does happen (`hscc kanban blocked --recover`).** The
+dispatcher's circuit-breaker auto-block sets `block_kind` NULL with no comment,
+and Hermes' `reclaim_task` REFUSES blocked cards outright (early guard,
+`kanban_db.py:4491-4493` returns False — the reason two cards had to be
+recovered by direct DB write the night of the incident). `hscc kanban blocked`
+(owned by `hscc_daemon/kanban_blocked.py`) SHOWS why a card is blocked and
+`--recover` un-sticks it. So if a card is ever dispatched into a not-ready
+fleet and ends up circuit-breaker-blocked with no model to talk to, the
+recovery is: `hscc kanban blocked --recover <id>` (see `hscc_daemon/kanban_blocked.py`
+and the `kanban blocked` design doc). Record this so the next operator is never
+stuck re-writing the DB by hand.
+
+---
+
 ## 8. Failure modes + the SAFE state for each
 
 Principle: when in doubt, **favor UP and supervised over down and unsupervised**.
