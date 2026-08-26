@@ -525,7 +525,10 @@ struct AutodownStatusResponse: Decodable, Speakable {
     let wake_source: String?
     let reason: String?
     let watchdog_blocked: Bool?
-    let watchdog_intentional: Bool?
+    /// The watchdog block's `intentional` marker — a STRING ("autodown") when a
+    /// teardown is in effect, absent otherwise. Not a Bool: the server passes
+    /// `block.get("intentional")` through verbatim (routes_autodown.py:216).
+    let watchdog_intentional: String?
     let kanban_ok: Bool?
     let kanban_reason: String?
     let blocked_by: String?
