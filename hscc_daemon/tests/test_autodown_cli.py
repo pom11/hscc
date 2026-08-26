@@ -184,26 +184,55 @@ class TestStatus:
         """When kanban work blocks teardown, status names the board — the
         operator can tell healthy-and-waiting from stuck-on-an-interlock."""
         from hscc_daemon import autodown
+        import sqlite3
 
         def _fake_active(kanban_db=None):
             autodown._note_blocking("hscc")
             return True
+
+        # Stub the board the predicate named so status does NOT read the
+        # operator's real boards (tests never touch live boards).
+        kb = sqlite3.connect(":memory:")
+        kb.row_factory = sqlite3.Row
+        kb.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, "
+                   "assignee TEXT, status TEXT, created_at INTEGER)")
+        kb.execute("INSERT INTO tasks VALUES "
+                   "('t-1', 'forgotten card', 'w', 'todo', 0), "
+                   "('t-2', 'other', 'w', 'running', 0)")
+        kb.commit()
+
+        class _Kb:
+            def list_boards(self):
+                return [{"slug": "hscc"}]
+            def connect_closing(self, board=None):
+                class _CM:
+                    def __enter__(_self):
+                        return kb
+                    def __exit__(_self, *exc):
+                        return False
+                return _CM()
+
+        def _fake_load():
+            return _Kb()
 
         autodown_file.write_text(json.dumps({
             "enabled": True, "idle_minutes": 10, "state": "up",
             "last_activity_iso": "2026-08-25T09:19:51+00:00",
         }))
         monkeypatch.setattr(autodown, "_has_active_work", _fake_active)
+        monkeypatch.setattr(autodown, "_load_kanban_db_or_default", _fake_load)
         rc = cmd_autodown(["status"])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "blocked by:      kanban work on board 'hscc'" in out
+        assert "kanban work on board 'hscc': t-1 (forgotten card), " \
+               "t-2 (other)" in out
 
         # --json carries the same machine-readable signal.
         rc = cmd_autodown(["status", "--json"])
         assert rc == 0
         data = json.loads(capsys.readouterr().out)
-        assert data["blocked_by"] == "kanban work on board 'hscc'"
+        assert data["blocked_by"] == \
+            "kanban work on board 'hscc': t-1 (forgotten card), t-2 (other)"
 
     def test_status_no_down_since_line_when_null(self, capsys, autodown_file,
                                                  block_file):
