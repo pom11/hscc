@@ -7,10 +7,11 @@ import SwiftUI
 /// NOTE: This is an UNBUILT, UNTESTED skeleton (Phase B1). The first Xcode /
 /// xcodegen build is expected to need small fixes. See ios-app/README.md.
 ///
-/// B5 adds the Siri App Intents surface (in-car, hands-free). The
-/// `.appShortcuts(...)` scene registers `AppShortcuts` so the voice shortcuts
-/// ("cluster status", "review queue", "dispatch a card") become available to
-/// Siri / the Shortcuts app.
+/// B5 adds the Siri App Intents surface (in-car, hands-free). Declaring a type
+/// that conforms to `AppShortcutsProvider` (see Intents/AppShortcuts.swift) is
+/// all that is needed — the system discovers it at build time. There is NO
+/// scene modifier to attach it with; an earlier `.appShortcuts(...)` call here
+/// did not compile.
 @main
 struct HSCCApp: App {
     @StateObject private var settings = SettingsStore()
@@ -20,7 +21,5 @@ struct HSCCApp: App {
             ContentView()
                 .environmentObject(settings)
         }
-        // B5 — expose the voice shortcuts to Siri for the in-car path.
-        .appShortcuts(AppShortcuts())
     }
 }
