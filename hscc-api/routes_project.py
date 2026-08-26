@@ -43,6 +43,7 @@ if _PROJECT_DIR is not None and str(_PROJECT_DIR) not in sys.path:
 from flightdeck.core import kanban as _kanban            # noqa: E402
 from flightdeck.core import registry as _registry        # noqa: E402
 from flightdeck.core import review as _review_core       # noqa: E402
+from flightdeck.core import git_state as _git_state      # noqa: E402
 from flightdeck.commands import review as _review_cmd    # noqa: E402
 from flightdeck.commands import qa as _qa_cmd            # noqa: E402
 from flightdeck.commands import standup as _standup_cmd  # noqa: E402
@@ -292,6 +293,192 @@ def handle_qa_queue(server, ctx, query, body):
 
 
 # --------------------------------------------------------------------------- #
+# Projects — registry list / detail / scoped standup
+# --------------------------------------------------------------------------- #
+
+def _speak_projects_list(data: dict) -> str:
+    """§B: "{n} project(s) registered."."""
+    n = data.get("count", len(data.get("projects") or []))
+    return f"{n} project{'s' if n != 1 else ''} registered."
+
+
+def _speak_project_detail(data: dict) -> str:
+    """§B: "{name}: {running} running, {open} open on board {board}."."""
+    name = data.get("name") or "project"
+    board = data.get("board_counts") or {}
+    running = 0
+    open_total = 0
+    for status, cnt in board.items():
+        if status == "running":
+            running = cnt
+        if status not in ("done", "archived", "blocked"):
+            open_total += cnt
+    return (f"{name}: {running} running, {open_total} open cards"
+            f" on board {data.get('board') or 'unknown'}.")
+
+
+def _speak_project_standup(data: dict) -> str:
+    """§B: mirror the unscoped standup headline for the scoped digest."""
+    n_review = len(data.get("needs_you") or [])
+    n_running = len(data.get("running") or [])
+    n_failing = len(data.get("failing") or [])
+    clauses = []
+    if n_review:
+        clauses.append(f"{n_review} card{'s' if n_review != 1 else ''} need review")
+    if n_running:
+        clauses.append(f"{n_running} are running")
+    if n_failing:
+        clauses.append(f"{n_failing} failing")
+    if not clauses:
+        return "Nothing needs attention."
+    return ", ".join(clauses) + "."
+
+
+def _project_detail(projects, proj):
+    """Compute per-project detail: board counts, git state, last activity.
+
+    All reads are wrapped defensively — a missing repo or an unreadable board
+    degrades to honest None/[] rather than crashing the endpoint. Git facts
+    come from ``git_state`` (real subprocess on the live path, stubbed in
+    tests); board counts come from ``kanban.list_cards``.
+    """
+    board = getattr(proj, "board", None)
+    board_counts = {}
+    if board:
+        try:
+            cards = _kanban.list_cards(board=board)
+            for c in cards:
+                st = str(c.get("status") or "unknown")
+                board_counts[st] = board_counts.get(st, 0) + 1
+            board_counts["total"] = len(cards)
+        except Exception:
+            board_counts = {"total": 0}
+
+    repo = getattr(proj, "repo", None)
+    git = {"is_repo": False}
+    if repo:
+        try:
+            git["is_repo"] = bool(_git_state.is_repo(repo))
+            if git["is_repo"]:
+                git["branch"] = _git_state.current_branch(repo)
+                git["dirty"] = bool(_git_state.is_dirty(repo))
+                git["uncommitted"] = _git_state.uncommitted_files(repo)
+                last_age = _git_state.last_commit_age_seconds(repo)
+                git["last_activity_seconds_ago"] = last_age
+                git["head"] = _git_state.head_sha(repo)
+        except Exception:
+            git = {"is_repo": bool(git.get("is_repo"))}
+
+    return {"board_counts": board_counts, "git": git}
+
+
+def handle_projects(server, ctx, query, body):
+    """GET /v1/projects — the registry list (name, repo, board, topic)."""
+    registry_path = _registry_path(ctx)
+    try:
+        projects = _registry.load_registry(registry_path)
+    except Exception:
+        return 200, {"speak": "Project list unavailable."}
+    rows = [
+        {
+            "name": getattr(p, "name", None),
+            "repo": getattr(p, "repo", None),
+            "board": getattr(p, "board", None) or "unknown",
+            "topic": getattr(p, "topic", None) if getattr(p, "topic", None) is not None else "unknown",
+        }
+        for p in projects
+    ]
+    payload = {"projects": rows, "count": len(rows)}
+    payload["speak"] = _speak_projects_list(payload)
+    return 200, payload
+
+
+def handle_project_detail(server, ctx, query, body):
+    """GET /v1/projects/{name} — per-project detail (board counts, git state, activity)."""
+    name = query.get("name")
+    if name is None or not str(name).strip():
+        raise ApiError(400, "bad_request", "missing project name")
+    registry_path = _registry_path(ctx)
+    try:
+        projects = _registry.load_registry(registry_path)
+        proj = _registry.get_project(name, path=registry_path)
+    except _registry.ProjectNotFoundError:
+        raise ApiError(
+            404, "not_found", f"no project named {name!r}",
+            f"Project {name} was not found.",
+        )
+    except Exception:
+        return 200, {"speak": "Project detail unavailable."}
+    detail = _project_detail(projects, proj)
+    payload = {
+        "name": getattr(proj, "name", None) or name,
+        "repo": getattr(proj, "repo", None),
+        "board": getattr(proj, "board", None) or "unknown",
+        "topic": getattr(proj, "topic", None) if getattr(proj, "topic", None) is not None else "unknown",
+        "board_counts": detail["board_counts"],
+        "git": detail["git"],
+    }
+    payload["speak"] = _speak_project_detail(payload)
+    return 200, payload
+
+
+def handle_project_standup(server, ctx, query, body):
+    """GET /v1/projects/{name}/standup — project-scoped standup digest.
+
+    ``standup.gather_data`` walks every registered project in one pass (it
+    does not itself support per-project scoping), so this endpoint runs the
+    full digest and FILTERS the card rows down to this project's cards, using
+    the same ``kanban.project_for_card`` attribution the digest itself uses.
+    Cards that cannot be attributed to this project are dropped; the ``running``
+    UNATTRIBUTED bucket is omitted for the scoped view.
+    """
+    name = query.get("name")
+    if name is None or not str(name).strip():
+        raise ApiError(400, "bad_request", "missing project name")
+    registry_path = _registry_path(ctx)
+    try:
+        projects = _registry.load_registry(registry_path)
+        _registry.get_project(name, path=registry_path)
+    except _registry.ProjectNotFoundError:
+        raise ApiError(
+            404, "not_found", f"no project named {name!r}",
+            f"Project {name} was not found.",
+        )
+    except Exception:
+        return 200, {"speak": "Standup unavailable."}
+    try:
+        data = _standup_cmd.gather_data(registry_path)
+    except Exception:
+        return 200, {"speak": "Standup unavailable."}
+    if not isinstance(data, dict):
+        return 200, {"speak": "Standup unavailable."}
+
+    def _belongs(card):
+        try:
+            proj = _kanban.project_for_card(card, projects)
+            return proj is not None and getattr(proj, "name", None) == name
+        except Exception:
+            return False
+
+    payload = {}
+    for section in ("needs_you", "running", "stale", "failing", "drift",
+                    "unreadable"):
+        rows = data.get(section) or []
+        if section == "running":
+            payload[section] = [r for r in rows if _belongs(r)]
+        else:
+            # Non-card-only sections (drift/unreadable) are per-project rows
+            # keyed by project name; keep the row whose key matches.
+            payload[section] = [r for r in rows
+                                if (r.get("project") if isinstance(r, dict)
+                                    else None) == name
+                                or _belongs(r)]
+    payload["coverage"] = data.get("coverage")
+    payload["speak"] = _speak_project_standup(payload)
+    return 200, payload
+
+
+# --------------------------------------------------------------------------- #
 # Route registration
 # --------------------------------------------------------------------------- #
 
@@ -301,3 +488,6 @@ ROUTES.append(("GET", re.compile(r"^/v1/cards/(?P<card_id>[^/]+)$"), handle_card
 ROUTES.append(("GET", re.compile(r"^/v1/review/queue$"), handle_review_queue))
 ROUTES.append(("GET", re.compile(r"^/v1/review/(?P<card_id>[^/]+)$"), handle_review_detail))
 ROUTES.append(("GET", re.compile(r"^/v1/qa/queue$"), handle_qa_queue))
+ROUTES.append(("GET", re.compile(r"^/v1/projects$"), handle_projects))
+ROUTES.append(("GET", re.compile(r"^/v1/projects/(?P<name>[^/]+)$"), handle_project_detail))
+ROUTES.append(("GET", re.compile(r"^/v1/projects/(?P<name>[^/]+)/standup$"), handle_project_standup))

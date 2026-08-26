@@ -632,3 +632,11 @@ import routes_actions  # noqa: E402,F401  (registers /v1 mutating POST routes)
 # hscc-roles/orchestrators.py is loaded via sys.path inside the module.
 import routes_orchestrator  # noqa: E402,F401  (registers /v1/orchestrator/chat)
 
+# t_69979dd1: expose the full HSCC surface. Each module registers its routes
+# at import (module-level ROUTES.append). Imported last so ROUTES/ApiError
+# exist first, matching the A3/A4/C2 pattern above.
+import routes_autodown  # noqa: E402,F401  (registers /v1/autodown/*)
+import routes_ops  # noqa: E402,F401  (registers /v1/{verify,daemon/status,triggers,escalate,profiles,cluster/up,cluster/down})
+import routes_kanban  # noqa: E402,F401  (registers /v1/kanban/{blocked,blocked/{id}/recover,stale})
+import routes_template  # noqa: E402,F401  (registers /v1/template/{list,status,preview/{name}})
+
