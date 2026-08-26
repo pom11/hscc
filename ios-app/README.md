@@ -23,7 +23,7 @@ distributed, and is deliberately NOT App Store–ready.**
 
 ## What's here (Phase B5)
 
-- `Sources/HSCC/` — Swift sources (SwiftUI, iOS 17+).
+- `Sources/HSCC/` — Swift sources (SwiftUI, iOS 26+).
   - `HSCCApp.swift` — app entry point.
   - `ContentView.swift` — root view: connection banner + tabs (Cluster,
     Kanban, Settings). B2 implemented the Cluster tab; B3 filled in Kanban.
