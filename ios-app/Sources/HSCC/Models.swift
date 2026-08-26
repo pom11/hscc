@@ -495,3 +495,339 @@ struct StopClusterResponse: Decodable {
     let container_id: String?
     let success: Bool?
 }
+
+// ---------------------------------------------------------------------------
+// C6 — autodown / projects / ops / board hygiene / fleet control models.
+//
+// These match the ACTUAL response shapes verified against the live API
+// (100.64.0.1:8788) and the source in hscc-api/routes_autodown.py,
+// routes_ops.py, routes_kanban.py, routes_project.py, routes_template.py, and
+// hscc-cluster/hscc.py. Every server-optional field is Optional in Swift so a
+// single absent key can never blank the whole screen.
+// ---------------------------------------------------------------------------
+
+// MARK: - Autodown
+
+/// GET /v1/autodown/status — the autodown report.
+///
+/// Verified live shape:
+///   { enabled, state, idle_minutes, last_activity_iso, down_since,
+///     wake_source, reason, watchdog_blocked, watchdog_intentional,
+///     kanban_ok, kanban_reason, blocked_by, force_armed,
+///     force_armed_overrides, active_cron_cpu_only, active_cron_model, speak }
+/// Every field is optional except `speak` (which the API always synthesizes).
+struct AutodownStatusResponse: Decodable, Speakable {
+    let enabled: Bool?
+    let state: String?
+    let idle_minutes: Int?
+    let last_activity_iso: String?
+    let down_since: String?
+    let wake_source: String?
+    let reason: String?
+    let watchdog_blocked: Bool?
+    /// The watchdog block's `intentional` marker — a STRING ("autodown") when a
+    /// teardown is in effect, absent otherwise. Not a Bool: the server passes
+    /// `block.get("intentional")` through verbatim (routes_autodown.py:216).
+    let watchdog_intentional: String?
+    let kanban_ok: Bool?
+    let kanban_reason: String?
+    let blocked_by: String?
+    let force_armed: Bool?
+    let force_armed_overrides: [String]?
+    let active_cron_cpu_only: [String]?
+    let active_cron_model: [String]?
+    let speak: String
+}
+
+/// POST /v1/autodown/enable (routes_autodown.py handle_autodown_enable).
+struct AutodownEnableResponse: Decodable {
+    let enabled: Bool?
+    let idle_minutes: Int?
+    let state: String?
+    let last_activity_iso: String?
+    let force_armed: Bool?
+    let force_armed_overrides: [String]?
+    let message: String?
+}
+
+/// POST /v1/autodown/disable (routes_autodown.py handle_autodown_disable).
+struct AutodownDisableResponse: Decodable {
+    let enabled: Bool?
+    let state: String?
+    let message: String?
+}
+
+/// POST /v1/autodown/wake (routes_autodown.py handle_autodown_wake).
+///
+/// The API returns promptly with `state: waking` and runs autoup() on a
+/// background thread (it can block ~9 minutes). The client surfaces this as a
+/// "waking" state and the view polls /v1/autodown/status rather than blocking.
+struct AutodownWakeResponse: Decodable {
+    let result: String?
+    let state: String?
+    let wake_source: String?
+    let message: String?
+    let speak: String?
+}
+
+/// POST /v1/autodown/cancel (routes_autodown.py handle_autodown_cancel).
+struct AutodownCancelResponse: Decodable {
+    let cancel_requested: Bool?
+    let message: String?
+}
+
+// MARK: - Projects
+
+/// GET /v1/projects — one registry row.
+///
+/// Verified live shape: `{ name, repo, board, topic }`. `topic` is an integer
+/// topic id on most rows but the literal string "unknown" when a project has
+/// none (routes_project.handle_projects), so it is modeled as `JSONValue?`
+/// and rendered via `displayTopic` — a typed `Int?` would blow up the whole
+/// list decode on the first topicless row.
+struct Project: Decodable, Identifiable {
+    let name: String
+    let repo: String?
+    let board: String?
+    let topic: JSONValue?
+
+    var id: String { name }
+    var displayTopic: String {
+        switch topic {
+        case .int(let n): return "\(n)"
+        case .string(let s): return s
+        default: return "—"
+        }
+    }
+}
+
+/// GET /v1/projects — the list envelope.
+struct ProjectsResponse: Decodable, Speakable {
+    let projects: [Project]
+    let count: Int?
+    let speak: String
+}
+
+/// GET /v1/projects/{name} — git state bucket.
+struct ProjectGit: Decodable {
+    let is_repo: Bool?
+    let branch: String?
+    let dirty: Bool?
+    let uncommitted: [String]?
+    let last_activity_seconds_ago: Int?
+    let head: String?
+}
+
+/// GET /v1/projects/{name} — per-project detail.
+///
+/// `board_counts` maps status -> count (plus a `total` entry). `topic` mirrors
+/// the list row (Int id or "unknown"). All fields optional except `speak`.
+struct ProjectDetailResponse: Decodable, Speakable {
+    let name: String?
+    let repo: String?
+    let board: String?
+    let topic: JSONValue?
+    let board_counts: [String: Int]?
+    let git: ProjectGit?
+    let speak: String
+}
+
+// MARK: - Ops / health (verify, daemon, triggers, escalate, profiles)
+
+/// GET /v1/verify — reuses `HealthResponse` (identical shape: ok + checks of
+/// {name, ok, detail} + speak). See `HealthResponse` above.
+typealias VerifyResponse = HealthResponse
+
+/// GET /v1/daemon/status — daemon PID + every health stream.
+///
+/// Stream entries carry per-stream extra keys beyond the common {ok,
+/// timestamp, stream, message}; those are ignored on decode by `StreamStatus`.
+struct DaemonStatusResponse: Decodable, Speakable {
+    let daemon_running: Bool?
+    let pid: Int?
+    let state: String?
+    let streams: [String: StreamStatus]?
+    let speak: String
+}
+
+/// GET /v1/triggers — one trigger rule.
+struct TriggerRule: Decodable, Identifiable {
+    let id: String
+    let trigger_type: String?
+    let condition: TriggerCondition?
+    let trigger_params: TriggerParams?
+}
+
+/// The `condition` bucket of a /v1/triggers rule.
+struct TriggerCondition: Decodable {
+    let metric: String?
+    let op: String?
+    let value: JSONValue?
+}
+
+/// The `trigger_params` bucket of a /v1/triggers rule.
+struct TriggerParams: Decodable {
+    let title: String?
+    let body: String?
+}
+
+/// GET /v1/triggers — rules + last run + recent events.
+///
+/// `last_run` is a stream-status-shaped dict (timestamp/stream/ok/message plus
+/// rules_evaluated/events_checked/actions_fired) — decoded via `StreamStatus`,
+/// extra keys ignored. `recent_events` is a list of serialized JSON strings.
+struct TriggersResponse: Decodable, Speakable {
+    let rules: [TriggerRule]?
+    let last_run: StreamStatus?
+    let recent_events: [String]?
+    let speak: String
+}
+
+/// GET /v1/escalate — pending escalations.
+///
+/// Verified live shape: `{ escalations: [], count: 0, speak }`. Escalation
+/// entries vary; they're kept as untyped `JSONValue` so a populated list can
+/// never break the decode.
+struct EscalationsResponse: Decodable, Speakable {
+    let escalations: [JSONValue]?
+    let count: Int?
+    let speak: String
+}
+
+/// GET /v1/profiles — running kanban task counts per profile.
+///
+/// Verified live shape: `{ counts: {}, total_running: 0, profiles: [], speak }`.
+/// `counts` maps profile -> running count; `profiles` entries are kept untyped.
+struct ProfilesResponse: Decodable, Speakable {
+    let counts: [String: Int]?
+    let total_running: Int?
+    let profiles: [JSONValue]?
+    let speak: String
+}
+
+// MARK: - Board hygiene (blocked / recover / stale)
+
+/// GET /v1/kanban/blocked — one blocked card.
+///
+/// Verified live shape: `{ board, id, status, assignee, age_days, block_kind,
+/// why, title, comments }` (routes_kanban.py + kanban_blocked module).
+struct BlockedCard: Decodable, Identifiable {
+    let board: String?
+    let id: String
+    let status: String?
+    let assignee: String?
+    let age_days: Int?
+    let block_kind: String?
+    let why: String?
+    let title: String?
+    let comments: [String]?
+
+    var displayTitle: String { title ?? id }
+}
+
+/// GET /v1/kanban/blocked — the envelope.
+struct KanbanBlockedResponse: Decodable, Speakable {
+    let boards: Int?
+    let tasks: [BlockedCard]?
+    let errors: [String]?
+    let count: Int?
+    let speak: String
+}
+
+/// POST /v1/kanban/blocked/{id}/recover (routes_kanban.py handle_kanban_recover).
+struct RecoverCardResponse: Decodable {
+    let id: String?
+    let board: String?
+    let reason: String?
+    let message: String?
+    let speak: String?
+}
+
+/// GET /v1/kanban/stale — one stale card.
+///
+/// Shape from autodown.list_stale_tasks (autodown.py:439): `{ board, id,
+/// status, assignee, age_days, title }`. Same envelope as blocked.
+struct StaleCard: Decodable, Identifiable {
+    let board: String?
+    let id: String
+    let status: String?
+    let assignee: String?
+    let age_days: Int?
+    let title: String?
+
+    var displayTitle: String { title ?? id }
+}
+
+/// GET /v1/kanban/stale — the envelope (shares the blocked envelope shape).
+struct KanbanStaleResponse: Decodable, Speakable {
+    let boards: Int?
+    let tasks: [StaleCard]?
+    let errors: [String]?
+    let older_than: Int?
+    let count: Int?
+    let speak: String
+}
+
+// MARK: - Fleet control (cluster up/down + templates)
+
+/// GET /v1/template/list — one template row.
+///
+/// Verified live shape: `{ name, version, description, families, group }`.
+struct ClusterTemplate: Decodable, Identifiable {
+    let name: String
+    let version: Int?
+    let description: String?
+    let families: [String]?
+    let group: String?
+
+    var id: String { name }
+}
+
+/// GET /v1/template/list — the envelope.
+struct TemplateListResponse: Decodable, Speakable {
+    let templates: [ClusterTemplate]
+    let count: Int?
+    let speak: String
+}
+
+/// GET /v1/template/status — the currently-applied template.
+///
+/// Verified live shape: `{ applied: { template, applied_at,
+/// orchestrator_node, families, units }, note, speak }`. `units` may be an
+/// int or a `{total, per_family}` dict depending on whether the applied apply
+/// recorded units — so `applied.units` is `JSONValue?` to be safe.
+struct TemplateApplied: Decodable {
+    let template: String?
+    let applied_at: String?
+    let orchestrator_node: String?
+    let families: [String]?
+    let units: JSONValue?
+}
+
+/// GET /v1/template/status.
+struct TemplateStatusResponse: Decodable, Speakable {
+    let applied: TemplateApplied?
+    let note: String?
+    let speak: String
+}
+
+/// POST /v1/cluster/up — fleet-up result (routes_ops.py + hscc.py:301).
+///
+/// `plan` is an array of `{kind, nodes, port, unit_id, cmd, keepalive}` dicts
+/// and `issued` an array of per-command run results — both kept untyped so a
+/// shape drift never blanks the confirmation "what will happen" labeling.
+struct ClusterUpResponse: Decodable {
+    let success: Bool?
+    let dry_run: Bool?
+    let units: Int?
+    let plan: [JSONValue]?
+    let issued: [JSONValue]?
+    let message: String?
+    let speak: String?
+}
+
+/// POST /v1/cluster/down — fleet-down result (routes_ops.py + hscc.py:285).
+struct ClusterDownResponse: Decodable {
+    let message: String?
+    let speak: String?
+}
