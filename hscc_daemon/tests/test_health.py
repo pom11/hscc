@@ -1406,6 +1406,40 @@ class TestCheckNas:
         for key in ("disk_total", "disk_used", "disk_avail", "disk_pct"):
             assert key not in details
 
+    def test_hung_existence_probe_does_not_freeze_thread(self, tmp_hfcc_dir,
+                                                         monkeypatch):
+        """REGRESSION: the existence gate at the TOP of check_nas must also be
+        timeout-bounded. Before the fix, os.path.exists(NAS_MOUNT) /
+        os.path.isdir(NAS_MOUNT) ran directly on the daemon's periodic thread,
+        so a wedged NFS handle froze the NAS check forever (the "NAS check
+        silently stops running" root cause). A hanging _probe_exists must time
+        out, report ok False, and return promptly — never hang the thread."""
+        import time as _time
+
+        def hanging_exists(path):           # blocks forever (bounded daemon thread)
+            while True:
+                _time.sleep(1)
+
+        from hscc_daemon import health
+        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
+        monkeypatch.setattr(health, "_probe_exists", hanging_exists)
+        monkeypatch.setattr(health, "NAS_MOUNT",
+                            str(tmp_hfcc_dir / "nas"))
+        monkeypatch.setattr(health, "NAS_PROBE_TIMEOUT", 0.05)
+        state_calls = []
+        monkeypatch.setattr(
+            health, "write_state",
+            lambda name, data: state_calls.append((name, data)))
+
+        start = _time.monotonic()
+        assert health.check_nas() is False
+        elapsed = _time.monotonic() - start
+        assert elapsed < 3.0, \
+            f"check_nas hung {elapsed:.2f}s on a blocking existence probe"
+        _, data = state_calls[-1]
+        assert data["ok"] is False
+        assert "timed out" in data["details"]["message"]
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
