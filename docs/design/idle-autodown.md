@@ -602,28 +602,45 @@ serving layer is currently down does NOT auto-restart it — it only arms the
 automation; a separate `wake` (or an inbound event) brings it up. This keeps
 `enable` non-acting.
 
-**Cron-job guard (feat t_2b711a94 §7).** A scheduled Hermes job and an
-idle-down cluster are in direct conflict: autodown may power the GPU serving
-layer down exactly when a job is due. So before arming, `enable` enumerates
-ACTIVE Hermes jobs and ABORTS (non-zero, printing each job's name, schedule,
-and next run) if any exist, explaining that autodown may power the cluster
-down when they are due. It reads Hermes' OWN on-disk source of truth,
-`~/.hermes/cron/jobs.json` (`autodown.list_active_cron_jobs`,
-`hscc_daemon/autodown.py`) — NOT the `hermes cron list` CLI, which on this host
-resolves a profile that reports "No scheduled jobs" even though jobs.json
-holds 2 active jobs (so the CLI is not a reliable interface; jobs.json is what
-the scheduler actually fires from). Only jobs with `enabled: true` count; a
-paused/disabled job cannot fire and poses no conflict. **Fail-closed:** an
-unreadable OR absent jobs.json is treated as "cannot determine" and `enable`
-also aborts with that reason — autodown never arms on a signal it cannot
-verify.
+**Cron-job guard (feat t_2b711a94 §7, refined t_c94f8b8c).** A scheduled
+Hermes job and an idle-down cluster are in direct conflict only when the job
+needs the GPU serving layer: autodown may power that layer down exactly when
+the job is due. So before arming, `enable` enumerates ACTIVE Hermes jobs and
+classifies each one by whether it needs the serving layer
+(`autodown.list_active_cron_jobs` + `autodown.cron_job_is_cpu_only`,
+`hscc_daemon/autodown.py`):
 
-`--force` overrides the guard (feat t_2b711a94 §7): `enable --force` arms
-anyway, prints each override, and records `force_armed: true` +
-`force_armed_overrides` (the overridden job names) in `autodown.json`.
-`hscc autodown status` then surfaces `force-armed: YES` and the overridden
-jobs, so the operator can always see WHY autodown is armed despite scheduled
-jobs. A later clean `enable` (when no active jobs remain) clears the markers.
+- **Model-requiring** active job (has a `model`, or `no_agent` is false/absent —
+  i.e. it runs an agent) ⇒ `enable` **ABORTS** non-zero, printing the job's
+  name, schedule, and next run and explaining that autodown may power the
+  cluster down when it is due.
+- **CPU-only** active job (`no_agent: true` AND `model: null` — a script
+  watchdog that never touches the GPU) ⇒ does **NOT** abort. It succeeds
+  identically whether or not the fleet is down, so it poses no conflict; it is
+  mentioned as an informational note in the `enable` output and in `status` so
+  the operator still knows it exists.
+- A job whose nature **cannot be determined** (missing/ambiguous fields) is
+  treated as model-requiring and aborts — never arm on an unverifiable signal.
+
+It reads Hermes' OWN on-disk source of truth, `~/.hermes/cron/jobs.json`
+(`autodown.list_active_cron_jobs`, `hscc_daemon/autodown.py`) — NOT the
+`hermes cron list` CLI, which on this host resolves a profile that reports
+"No scheduled jobs" even though jobs.json holds 2 active jobs (so the CLI is
+not a reliable interface; jobs.json is what the scheduler actually fires
+from). Only jobs with `enabled: true` count; a paused/disabled job cannot fire
+and poses no conflict. **Fail-closed:** an unreadable OR absent jobs.json is
+treated as "cannot determine" and `enable` also aborts with that reason —
+autodown never arms on a signal it cannot verify.
+
+`--force` overrides the guard (feat t_2b711a94 §7 / t_c94f8b8c): `enable
+--force` arms anyway, prints each *model-requiring* job it overrode, and
+records `force_armed: true` + `force_armed_overrides` (the overridden
+model-requiring job names) in `autodown.json`. CPU-only jobs never appear in
+the overrides record — they do not conflict, so there is nothing to override;
+they are still noted informationally. `hscc autodown status` then surfaces
+`force-armed: YES` and the overridden jobs, so the operator can always see WHY
+autodown is armed despite scheduled model-requiring jobs. A later clean
+`enable` (when no model-requiring jobs remain) clears the markers.
 
 `disable` semantics (C2/C5): set `enabled: false`, set `state` to the current
 reality, and **clear the `intentional` marker + `blocked` flag in the watchdog
@@ -680,13 +697,115 @@ offending scheduled jobs, or explicitly `--force`-arms knowing the cluster may
 be down when they fire. Part 3's "wake + queue the job" was the riskiest, least
 valuable piece — a reliable-but-harmful wake is covered by documenting the
 limitation rather than half-building it (the card's own guidance: an unreliable
-"we'll wake for crons" promise is worse than a documented limitation). If a
-GPU-model cron job (`no_agent: false`, a real `model`) is ever added, wake-on-
-cron would become meaningful — revisit then, keyed on `model` presence, not
-on every firing. **Ordering risk documented:** a GPU-model job that fires at
-08:00 but only runs at 08:09 after the model load — the ~9-min gap — would need
-the operator to decide whether a late run is acceptable before relying on
+"we'll wake for crons" promise is worse than a documented limitation).
+
+**The "future trigger keyed on model presence" is now implemented.** The earlier
+TODO proposed revisiting wake-on-cron "keyed on `model` presence" if a
+GPU-model job were ever added. That classification is exactly what this card
+(t_c94f8b8c) implements — not for wake-on-cron, but for the abort guard:
+`autodown.cron_job_is_cpu_only` classifies every active job as CPU-only
+(`no_agent: true` AND `model: null`) or model-requiring (everything else), and
+the guard aborts only for the model-requiring ones. So a GPU-model job is no
+longer a hypothetical to key on later; it is detected at the arming gate today.
+
+**What happens when a model-requiring cron fires while the fleet is down.**
+In practice this **should not arise** from a cleanly-armed autodown: `enable`
+aborts at arming time the moment a model-requiring job is active (unless the
+operator explicitly `--force`-arms). The only path to a model-requiring job
+running against a down fleet is an intentional `--force` arm — the operator has
+explicitly accepted that the cluster may be down when it fires. Autodown does
+not wake for it (there is no wake-on-cron path) and does not queue-and-replay
+it (CPU-side jobs already completed; a model job lost to a down fleet is not
+re-run — per the §1d.2 Telegram / §4 philosophy, re-executing an instruction
+or job minutes later without confirmation is not safe). If such a job matters,
+do not `--force`-arm over it.
+
+**Ordering risk documented:** a GPU-model job that fires at 08:00 but only runs
+at 08:09 after the model load — the ~9-min gap — would need the operator to
+decide whether a late run is acceptable before relying on
 wake-on-cron; that decision is deferred until such a job exists.
+
+---
+
+## 7.2 Dispatch guard — wait for cluster readiness before dispatching work
+### (feat t_5d1118de — follow-up to the accepted finding)
+
+**Finding (`t_ab177036`, do not re-investigate):** there is no supported seam
+to HOLD a Hermes kanban dispatch. `pre_kanban_dispatch` was removed in 0.17
+(`docs/hermes-017-new-features.md:20`); `kanban_task_claimed` fires AFTER
+`claim_task` commits ready→running and is observer-only (return values
+discarded, `kanban_db.py:164-186`); `pre_gateway_dispatch` gates inbound
+MessageEvents only, not kanban dispatch; HSCC's fork patches do not touch the
+dispatch gate. **HSCC does NOT patch Hermes.** So dispatch cannot be held.
+
+**The consequence (live incident):** work dispatched while the fleet is
+down/waking is destroyed. autodown tore down at 21:19, three cards were
+created, the dispatcher spawned workers into a still-loading cluster, and 2 of
+3 ended `blocked` with `worker exited cleanly (rc=0) without calling
+kanban_complete` — a protocol violation caused purely by having no model to
+talk to.
+
+**The fix:** since dispatch cannot be held, prevent the window at the source
+HSCC controls — its OWN dispatch entry point, `hscc project message dispatch`
+(wired through `hscc_daemon/hscc.py:_handle_project:663` → `flightdeck.cli.main`
+→ `flightdeck/commands/message.py:cmd_dispatch`). Before creating the card,
+`cmd_dispatch` calls a cluster-readiness guard:
+
+```
+flightdeck message dispatch <project> <task> [--apply] [--no-wait]
+```
+
+Decision table (`flightdeck/commands/message.py:_ensure_cluster_ready`):
+
+| autodown state | default (no flag) | `--no-wait` |
+|---|---|---|
+| disabled | proceed immediately (never interfere) | proceed |
+| `up` | proceed immediately (cluster already serving) | proceed |
+| `down` / `waking` / `error` | wake (`autodown.autoup()`) + **wait for readiness**, then create card | create immediately (operator accepts the risk) |
+| unknown | refuse (exit non-zero; cluster unverifiable) | proceed |
+| **wake fails** | **NO card created**, exit non-zero, clear error | n/a |
+
+Mechanics:
+- The guard reads `~/.hscc/autodown.json` via `autodown.load_config()` (the
+  single source of truth), and triggers the wake via `autodown.autoup()` — the
+  SAME function the daemon's wake path and `hscc autodown wake` use. Reusing
+  the library (not re-implementing, not shelling out) matches the house rule
+  that the wake logic lives in exactly one place.
+- `autoup()` starts the whole fleet and polls each unit's port until healthy
+  or the load-grace deadline (`VLLM_LOAD_GRACE_MINUTES`, default 20 min) — this
+  IS the "wait for readiness" the card wants, bounded by the same window.
+- Progress is printed to stdout so the operator sees WHY dispatch is pausing —
+  a silent multi-minute pause is explicitly not acceptable. Lines: "waking the
+  serving layer before dispatch (load-grace window Nm, please wait)..." then
+  "serving layer is UP — proceeding with dispatch."
+- Only the `--apply` path touches the cluster. A dry-run previews the plan and
+  never wakes anything — dry-run mutates nothing.
+- The wake limit: `autoup()` returns `up` on readiness; any other result
+  (`start-failed` / `not-ready` / `no-units` / `busy` / `already-waking`) is a
+  failure. The guard reads the failure reason autoup persisted to
+  `autodown.json.reason` (`_record_wake_failure`), reports it, and exits
+  non-zero **without creating the card** — so the work is not lost to a
+  protocol violation (it was never created). The operator fixes and retries, or
+  passes `--no-wait`.
+
+**Limitation (documented honestly):** this guard covers ONLY cards created via
+`hscc project message dispatch` — HSCC's own dispatch entry point. It does NOT
+cover cards created by other paths that bypass it: Hermes-internal
+decomposition (`delegate_task` → `kanban_create`), cron jobs, direct `kanban
+create`, `kanban_submit_review`, or an orchestrator's own fan-out. Those paths
+are not guarded here and can still create a card into a down/waking fleet.
+
+**Recovery when it does happen (`hscc kanban blocked --recover`).** The
+dispatcher's circuit-breaker auto-block sets `block_kind` NULL with no comment,
+and Hermes' `reclaim_task` REFUSES blocked cards outright (early guard,
+`kanban_db.py:4491-4493` returns False — the reason two cards had to be
+recovered by direct DB write the night of the incident). `hscc kanban blocked`
+(owned by `hscc_daemon/kanban_blocked.py`) SHOWS why a card is blocked and
+`--recover` un-sticks it. So if a card is ever dispatched into a not-ready
+fleet and ends up circuit-breaker-blocked with no model to talk to, the
+recovery is: `hscc kanban blocked --recover <id>` (see `hscc_daemon/kanban_blocked.py`
+and the `kanban blocked` design doc). Record this so the next operator is never
+stuck re-writing the DB by hand.
 
 ---
 
