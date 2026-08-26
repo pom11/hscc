@@ -23,17 +23,17 @@ struct ClusterStatusIntent: AppIntent {
     func perform() async throws -> some IntentResult & ProvidesDialog {
         guard let client = IntentClient.make() else {
             // Not configured: fail with a clear spoken message, not a crash.
-            return .result(dialog: IntentDialog(IntentSettingsMessage.notConfigured))
+            return .result(dialog: IntentDialog(stringLiteral: IntentSettingsMessage.notConfigured))
         }
         do {
             let status = try await client.clusterStatus()
             // Speak the server-derived one-liner verbatim.
-            return .result(dialog: IntentDialog(status.speak))
+            return .result(dialog: IntentDialog(stringLiteral: status.speak))
         } catch {
             // Honest failure speech — never a fabricated number.
             let message = (error as? HSCCError)?.localizedDescription
                 ?? "Couldn't get the cluster status."
-            return .result(dialog: IntentDialog(message))
+            return .result(dialog: IntentDialog(stringLiteral: message))
         }
     }
 }
