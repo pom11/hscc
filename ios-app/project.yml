@@ -58,6 +58,11 @@ targets:
       - path: Sources/HSCC/Views/QAQueueView.swift
       - path: Sources/HSCC/Views/MutationSupport.swift
       - path: Sources/HSCC/Views/OrchestratorChatView.swift
+      - path: Sources/HSCC/Views/AutodownView.swift
+      - path: Sources/HSCC/Views/ProjectsView.swift
+      - path: Sources/HSCC/Views/OpsView.swift
+      - path: Sources/HSCC/Views/BoardHygieneView.swift
+      - path: Sources/HSCC/Views/FleetControlView.swift
       - path: Sources/HSCC/Intents/IntentClient.swift
       - path: Sources/HSCC/Intents/ClusterStatusIntent.swift
       - path: Sources/HSCC/Intents/ReviewQueueIntent.swift

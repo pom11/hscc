@@ -11,7 +11,7 @@ struct ContentView: View {
     @State private var pingState: PingState = .idle
 
     enum Tab: Hashable {
-        case cluster, kanban, chat, settings
+        case cluster, kanban, autodown, control, chat, settings
     }
 
     var body: some View {
@@ -27,6 +27,18 @@ struct ContentView: View {
                 .safeAreaInset(edge: .top) { connectionBanner }
                 .tabItem { Label("Kanban", systemImage: "list.bullet") }
                 .tag(Tab.kanban)
+
+            // C6 — autodown control (the operator's most-used surface).
+            AutodownView(client: makeClient())
+                .safeAreaInset(edge: .top) { connectionBanner }
+                .tabItem { Label("Autodown", systemImage: "timer") }
+                .tag(Tab.autodown)
+
+            // C6 — the Control hub: Ops, Board Hygiene, Fleet Control, Projects.
+            ControlView(client: makeClient())
+                .safeAreaInset(edge: .top) { connectionBanner }
+                .tabItem { Label("Control", systemImage: "slider.horizontal.3") }
+                .tag(Tab.control)
 
             // C5 — orchestrator chat (confirm-gated mutation).
             NavigationStack {
@@ -144,4 +156,49 @@ enum PingState {
     case checking
     case success
     case failure(String)
+}
+
+/// C6 — the Control hub tab: hosts the Ops / Hygiene / Fleet / Projects
+/// surfaces behind a segmented picker (mirroring KanbanView's host pattern).
+///
+/// Every pane is its own NavigationStack view with its own load state, so
+/// switching panes never cross-contaminates. All mutations inside these panes
+/// go through MutationButton (confirm-gated, `confirm: true`).
+struct ControlView: View {
+    let client: HSCCClient?
+
+    enum Pane: String, CaseIterable, Identifiable {
+        case ops, hygiene, fleet, projects
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .ops: return "Ops"
+            case .hygiene: return "Hygiene"
+            case .fleet: return "Fleet"
+            case .projects: return "Projects"
+            }
+        }
+    }
+
+    @State private var selected: Pane = .ops
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("Pane", selection: $selected) {
+                ForEach(Pane.allCases) { pane in
+                    Text(pane.label).tag(pane)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+
+            switch selected {
+            case .ops: OpsView(client: client)
+            case .hygiene: BoardHygieneView(client: client)
+            case .fleet: FleetControlView(client: client)
+            case .projects: ProjectsView(client: client)
+            }
+        }
+    }
 }
