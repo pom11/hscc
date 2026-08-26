@@ -235,12 +235,32 @@ def pipeline_watchdog(check_dgx_fn=None, check_gateway_fn=None,
                 elapsed_ok = True  # unparseable timestamp — don't latch forever
         if not elapsed_ok:
             log("Watchdog: backing off (blocked), will retry after cooldown")
-            write_state("watchdog", {
-                "ok": False, "blocked": True, "reason": block.get("reason", ""),
-                "auto_restart_count": block.get("auto_restart_count", 0),
-                "last_check": now_iso(),
-                "message": f"Backing off: {block.get('reason', '')}",
-            })
+            # Intentional-autodown gate on the STATE WRITE (§5 C2): a backoff
+            # caused by an INTENTIONAL autodown must NOT write the watchdog
+            # stream unhealthy-and-untagged, or `hscc verify` reads a RED fleet
+            # during a deliberate power-save. Carry the same `intentional ==
+            # "autodown"` marker the reader (verify.check_daemon_streams)
+            # requires to excuse a down stream — writer and reader agree. A
+            # backoff for any OTHER reason (a real circuit-breaker latch) still
+            # writes plain ok:False and still fails verify — never suppressing
+            # genuine faults. `intentional` was derived from the block at the
+            # top of this fork (line 219).
+            if intentional:
+                write_state("watchdog", {
+                    "ok": False, "blocked": True, "reason": block.get("reason", ""),
+                    "intentional": "autodown",
+                    "auto_restart_count": block.get("auto_restart_count", 0),
+                    "last_check": now_iso(),
+                    "message": f"Backing off (intentional autodown): "
+                               f"{block.get('reason', '')}",
+                })
+            else:
+                write_state("watchdog", {
+                    "ok": False, "blocked": True, "reason": block.get("reason", ""),
+                    "auto_restart_count": block.get("auto_restart_count", 0),
+                    "last_check": now_iso(),
+                    "message": f"Backing off: {block.get('reason', '')}",
+                })
             return False
         # Backoff elapsed — clear the breaker and resume checking this cycle.
         if intentional:
