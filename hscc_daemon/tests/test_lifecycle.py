@@ -476,6 +476,87 @@ class TestPipelineWatchdog:
         assert blk.get("blocked") is True
         assert blk.get("intentional") == "autodown"
 
+    def test_backoff_intentional_roundtrip_verify_passes(self, tmp_hfcc_dir, monkeypatch):
+        """WRITER+READER round-trip (the live red bug): pipeline_watchdog's
+        backoff path with an INTENTIONAL block writes a real watchdog state
+        file carrying the intentional marker, and check_daemon_streams —
+        reading that SAME file — PASSES on it. Writer and reader are exercised
+        together against a real state file, not just the reader."""
+        import json as _json
+        from hscc_daemon import lifecycle
+        monkeypatch.setattr(lifecycle, "log", lambda *a, **kw: None)
+        from hscc_daemon import state as state_mod
+        from hscc_daemon import autodown as _ad
+        from hscc_daemon.verify import check_daemon_streams
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(parents=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        block_path = str(tmp_hfcc_dir / "block.json")
+        monkeypatch.setattr(lifecycle, "WATCHDOG_BLOCK_FILE", block_path)
+        # Intentional block latched, blocked_at RECENT ⇒ not elapsed ⇒ the
+        # backoff branch — the exact path that was writing raw red.
+        self._blocked(lifecycle, block_path, blocked=True,
+                      intentional="autodown",
+                      blocked_at=self._recent_ts(minutes_ago=1))
+        # autodown confirmed down ⇒ classify()==expected_down (the reader's
+        # excuse gate).
+        ad_file = str(tmp_hfcc_dir / "autodown.json")
+        monkeypatch.setattr(_ad, "AUTODOWN_FILE", ad_file)
+        _ad.save_config({**_ad.DEFAULT_CONFIG, "enabled": True, "state": "down"})
+
+        lifecycle.pipeline_watchdog(
+            check_dgx_fn=lambda: False,
+            check_gateway_fn=lambda: False,
+            restart_vllm_fn=lambda: {"ok": True},
+            send_macos_notification_fn=lambda *a, **kw: None,
+        )
+        # The WRITER persisted a real state file carrying the marker...
+        entry = _json.loads((state_dir / "watchdog.json").read_text())
+        assert entry["ok"] is False
+        assert entry.get("intentional") == "autodown"
+        assert "intentional autodown" in entry.get("message", "")
+        # ...and the READER (check_daemon_streams) PASSES on it — verify green.
+        result = check_daemon_streams(state_dir=str(state_dir))
+        assert result["ok"] is True
+        assert "intentionally down by autodown" in result["detail"]
+
+    def test_backoff_nonintentional_roundtrip_verify_fails(
+            self, tmp_hfcc_dir, monkeypatch):
+        """NEGATIVE CONTROL (WRITER+READER): backoff with a NON-intentional
+        block (a real circuit-breaker latch) writes a raw ok:False watchdog
+        stream WITHOUT the intentional marker, and check_daemon_streams FAILS
+        on it. Genuine faults are never blanket-suppressed."""
+        import json as _json
+        from hscc_daemon import lifecycle
+        monkeypatch.setattr(lifecycle, "log", lambda *a, **kw: None)
+        from hscc_daemon import state as state_mod
+        from hscc_daemon.verify import check_daemon_streams
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(parents=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        block_path = str(tmp_hfcc_dir / "block.json")
+        monkeypatch.setattr(lifecycle, "WATCHDOG_BLOCK_FILE", block_path)
+        # BLOCKED with NO `intentional` key, recent blocked_at ⇒ backoff branch.
+        lifecycle.save_watchdog_block({
+            "blocked": True, "reason": "3 consecutive failures in 10min",
+            "blocked_at": self._recent_ts(minutes_ago=1),
+            "failures": [], "auto_restart_count": 0,
+        })
+
+        lifecycle.pipeline_watchdog(
+            check_dgx_fn=lambda: False,
+            check_gateway_fn=lambda: False,
+            restart_vllm_fn=lambda: {"ok": True},
+            send_macos_notification_fn=lambda *a, **kw: None,
+        )
+        entry = _json.loads((state_dir / "watchdog.json").read_text())
+        assert entry["ok"] is False
+        assert entry.get("intentional") != "autodown"
+        # Reader FAILS on it — the real fault stays visible (no suppression).
+        result = check_daemon_streams(state_dir=str(state_dir))
+        assert result["ok"] is False
+        assert "watchdog.json: ok=False" in result["detail"]
+
     def test_no_intentional_restart_still_runs(self, tmp_hfcc_dir, monkeypatch):
         """NEGATIVE CONTROL: a block WITHOUT intentional + dgx failing ⇒
         restart IS called (ordinary healing must not regress)."""
