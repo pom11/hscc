@@ -94,6 +94,10 @@ struct DispatchCannedCardIntent: AppIntent {
         // this is the voice equivalent. Do NOT rely on Siri implicitly
         // confirming an AppIntent — it does not reliably do so, which would
         // let a stray invocation dispatch a real card with no user assent.
+        // Deprecated in favour of requestConfirmation(conditions:actionName:dialog:),
+        // which is iOS 18+. This target deploys to iOS 17, so this is the only
+        // form available here. The deprecation warning is expected and load-bearing:
+        // removing the call would drop the confirmation gate entirely.
         try await requestConfirmation(
             result: .result(dialog: IntentDialog("Dispatch \(card.title) onto \(card.boardName)?"))
         )
