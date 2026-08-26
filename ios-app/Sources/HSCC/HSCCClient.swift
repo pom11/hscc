@@ -53,8 +53,13 @@ struct HSCCClient {
 
     // MARK: - Request construction
 
-    private func request(for path: String) throws -> URLRequest {
+    /// Build a request. `timeout` overrides URLSession's 60s default — the
+    /// orchestrator chat shells out to `hermes chat` and a real answer takes
+    /// 30-90s (measured floor: 16.8s for a two-word reply), so the default
+    /// would abort a request the server is still successfully working on.
+    private func request(for path: String, timeout: TimeInterval? = nil) throws -> URLRequest {
         var req = URLRequest(url: try url(for: path))
+        if let timeout { req.timeoutInterval = timeout }
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         return req
@@ -110,8 +115,9 @@ struct HSCCClient {
     ///   non-2xx NEVER yields a decoded success value.
     func post<T: Decodable>(_ path: String,
                             body: [String: Any],
-                            as type: T.Type = T.self) async throws -> T {
-        var req = try request(for: path)
+                            as type: T.Type = T.self,
+                            timeout: TimeInterval? = nil) async throws -> T {
+        var req = try request(for: path, timeout: timeout)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         do {
@@ -419,9 +425,13 @@ struct HSCCClient {
             payload["project"] = project
         }
         // `project` absent ⇒ the general orchestrator. Always confirms.
+        // 300s, not the 60s default: a real orchestrator answer takes 30-90s
+        // (measured floor 16.8s). The server keeps working regardless, so a
+        // client-side abort would lose an answer that actually arrived.
         return try await post("/v1/orchestrator/chat",
                               body: payload,
-                              as: OrchestratorChatResponse.self)
+                              as: OrchestratorChatResponse.self,
+                              timeout: 300)
     }
 
     // MARK: - C6 mutations (confirm-gated)
