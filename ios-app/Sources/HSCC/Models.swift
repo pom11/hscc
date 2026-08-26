@@ -64,10 +64,18 @@ struct ClusterStatusResponse: Decodable, Speakable {
 }
 
 /// GET /v1/cluster/hosts.
+///
+/// `saved_clusters` and `live_status` are raw `run_cmd`-shaped dicts from the
+/// cluster engine (keys like `success`/`returncode`/`output` with MIXED value
+/// types — bool, int, string), so they are decoded as untyped `[String:
+/// JSONValue]`. They are not rendered in the current UI, but declaring them as
+/// `[String: String]` (as this was) makes the WHOLE response throw on decode
+/// and blanks the Hosts section for no visible reason. (Verified against the
+/// live /v1/cluster/hosts response.)
 struct ClusterHostsResponse: Decodable, Speakable {
     let hosts: [String]
-    let saved_clusters: [String: String]?
-    let live_status: [String: String]?
+    let saved_clusters: [String: JSONValue]?
+    let live_status: [String: JSONValue]?
     let speak: String
 }
 
@@ -320,13 +328,18 @@ struct QARow: Decodable, Identifiable {
 }
 
 /// GET /v1/qa/queue — one manual-QA store entry.
+///
+/// `added_at` is the store's ISO-8601 STRING (e.g. "2026-08-15T23:52:51") as
+/// written by `qa_manual` on the server — NOT a Unix epoch. It is decoded as a
+/// String and surfaced verbatim; the client never parses it to a Date for the
+/// current UI. (Verified against the live /v1/qa/queue response.)
 struct ManualQARow: Decodable, Identifiable {
     /// The API `id` field (may be absent for some entries).
     let rawID: String?
     let project: String?
     let description: String?
     let card_id: String?
-    let added_at: Double?
+    let added_at: String?
     let checked: Bool?
 
     enum CodingKeys: String, CodingKey {
