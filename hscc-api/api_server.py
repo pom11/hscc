@@ -62,7 +62,7 @@ log = logging.getLogger("hscc-api")
 # Auth: token load/create, fail-closed (design §Hard constraints #3, §C)
 # ---------------------------------------------------------------------------
 
-def load_token(hscc_dir: str | os.PathLike) -> str:
+def load_token(hscc_dir: str | os.PathLike | None = None) -> str:
     """Return the auth token, generating it on first run.
 
     Fail-closed: if the token file EXISTS but is unreadable, empty, or a
@@ -71,6 +71,7 @@ def load_token(hscc_dir: str | os.PathLike) -> str:
 
     Returns only the raw token string; callers must take care never to log it.
     """
+    hscc_dir = hscc_dir or DEFAULT_HSCC_DIR
     token_path = Path(hscc_dir) / TOKEN_FILE
     if token_path.exists():
         try:
