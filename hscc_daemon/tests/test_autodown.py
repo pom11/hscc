@@ -197,10 +197,12 @@ class TestListActiveCronJobs:
     def test_active_jobs_only(self, tmp_path):
         p = self._write(tmp_path, [
             {"id": "a", "name": "active-one", "enabled": True,
+             "no_agent": True, "model": None,
              "schedule_display": "0 8 * * *", "next_run_at": "2026-08-26T08:00:00+03:00"},
             {"id": "b", "name": "paused-two", "enabled": False,
              "schedule_display": "0 9 * * *", "next_run_at": "..."},
             {"id": "c", "name": "also-active", "enabled": True,
+             "no_agent": False, "model": "gpt-4o",
              "schedule": {"kind": "cron", "expr": "*/15 * * * *",
                           "display": "*/15 * * * *"},
              "next_run_at": "2026-08-26T00:45:00+03:00"},
@@ -208,9 +210,11 @@ class TestListActiveCronJobs:
         active = ad.list_active_cron_jobs(p)
         assert active == [
             {"id": "a", "name": "active-one", "schedule_display": "0 8 * * *",
-             "next_run_at": "2026-08-26T08:00:00+03:00"},
+             "next_run_at": "2026-08-26T08:00:00+03:00",
+             "no_agent": True, "model": None, "cpu_only": True},
             {"id": "c", "name": "also-active", "schedule_display": "*/15 * * * *",
-             "next_run_at": "2026-08-26T00:45:00+03:00"},
+             "next_run_at": "2026-08-26T00:45:00+03:00",
+             "no_agent": False, "model": "gpt-4o", "cpu_only": False},
         ]
 
     def test_absent_file_is_unreadable(self, tmp_path):
@@ -231,6 +235,43 @@ class TestListActiveCronJobs:
         p = tmp_path / "jobs.json"
         p.write_text(json.dumps({"jobs": {"a": 1}}))
         assert ad.list_active_cron_jobs(str(p)) is ad.CRON_UNREADABLE
+
+
+# ---------------------------------------------------------------------------
+# cron_job_is_cpu_only — the model-vs-CPU classification (feat t_c94f8b8c)
+# ---------------------------------------------------------------------------
+
+class TestCronJobIsCpuOnly:
+    """CPU-only is positively asserted ONLY for no_agent:true AND model:null.
+    Everything else (a real model, no_agent false/absent, or unreadable
+    fields) is model-requiring — fail-safe, so the CLI aborts on it rather
+    than arming on a signal it cannot verify."""
+
+    def test_no_agent_true_model_null_is_cpu_only(self):
+        assert ad.cron_job_is_cpu_only(
+            {"no_agent": True, "model": None}) is True
+
+    def test_model_present_is_model_requiring(self):
+        # A job with a real model needs the GPU — never CPU-only.
+        assert ad.cron_job_is_cpu_only(
+            {"no_agent": True, "model": "gpt-4o"}) is False
+        assert ad.cron_job_is_cpu_only(
+            {"no_agent": False, "model": "gpt-4o"}) is False
+
+    def test_no_agent_false_is_model_requiring(self):
+        # no_agent:false ⇒ runs an agent ⇒ needs the serving layer.
+        assert ad.cron_job_is_cpu_only(
+            {"no_agent": False, "model": None}) is False
+
+    def test_ambiguous_missing_fields_is_model_requiring(self):
+        # Cannot determine the job's nature ⇒ not CPU-only (fail-safe).
+        assert ad.cron_job_is_cpu_only({}) is False
+        assert ad.cron_job_is_cpu_only({"no_agent": True}) is False   # model absent
+        assert ad.cron_job_is_cpu_only({"model": None}) is False      # no_agent absent
+
+    def test_none_is_model_requiring(self):
+        # A null job is not a CPU-side watchdog — never treat as safe.
+        assert ad.cron_job_is_cpu_only(None) is False
 
 
 # ---------------------------------------------------------------------------

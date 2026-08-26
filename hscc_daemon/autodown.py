@@ -165,14 +165,41 @@ CRON_JOBS_FILE = os.path.expanduser("~/.hermes/cron/jobs.json")
 CRON_UNREADABLE = "<unreadable>"
 
 
+def cron_job_is_cpu_only(job):
+    """True iff a job is DEMONSTRABLY CPU-only — needs no GPU model.
+
+    CPU-only is positively asserted ONLY when BOTH ``no_agent`` is true AND
+    ``model`` is *explicitly* null (``no_agent: true`` with ``model: null``
+    present — feat t_c94f8b8c). A `no_agent` script watchdog with no model
+    never touches the GPU serving layer, so autodown powering the fleet down
+    cannot break it — it must NOT block arming.
+
+    Anything else — a real ``model``, ``no_agent`` false or absent, or a
+    ``model`` key that is missing/absent (not positively null) — is NOT
+    CPU-only ⇒ model-requiring (fail-safe). The CLI aborts on a model-
+    requiring job rather than arming on a signal it cannot verify, so an
+    ambiguous job is treated as needing the serving layer.
+    """
+    return (bool(job) and job.get("no_agent") is True
+            and "model" in job and job["model"] is None)
+
+
 def list_active_cron_jobs(jobs_file=None):
     """Return ACTIVE Hermes cron jobs, or ``CRON_UNREADABLE`` if undeterminable.
 
     Reads ``~/.hermes/cron/jobs.json`` — Hermes' on-disk source of truth for
     scheduled jobs — and returns a list of dicts for the jobs that are ACTIVE,
-    each ``{id, name, schedule_display, next_run_at}``. Only active/enabled
-    jobs count: a paused/disabled job cannot fire and poses no scheduling
-    conflict. ``jobs_file`` is injectable so tests never touch the real store.
+    each ``{id, name, schedule_display, next_run_at, no_agent, model,
+    cpu_only}``. Only active/enabled jobs count: a paused/disabled job cannot
+    fire and poses no scheduling conflict. ``jobs_file`` is injectable so
+    tests never touch the real store.
+
+    ``cpu_only`` is the computed classification (``cron_job_is_cpu_only``):
+    True only for demonstrably CPU-side watchdogs (``no_agent: true`` AND
+    ``model: null``). The CLI uses it to separate jobs that ACTUALLY need the
+    serving layer (abort-able blockers) from CPU-only ones that are merely
+    informational. ``no_agent`` and ``model`` are carried through so the
+    caller can see the raw fields behind the classification.
 
     Fail-closed: an unreadable OR absent OR malformed jobs.json (non-dict, or
     ``jobs`` not a list) yields ``CRON_UNREADABLE`` — never an empty list — so
@@ -199,6 +226,9 @@ def list_active_cron_jobs(jobs_file=None):
             "schedule_display": j.get("schedule_display")
                 or sch.get("display") or sch.get("expr"),
             "next_run_at": j.get("next_run_at"),
+            "no_agent": j.get("no_agent"),
+            "model": j.get("model"),
+            "cpu_only": cron_job_is_cpu_only(j),
         })
     return active
 
