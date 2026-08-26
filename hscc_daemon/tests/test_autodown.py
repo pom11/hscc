@@ -653,16 +653,24 @@ class TestClassify:
         state = {"state": "down"}
         assert ad.classify(block, state) == "expected_down"
 
-    def test_should_be_up_when_waking(self):
-        """blocked + intentional autodown + state waking ⇒ should_be_up."""
+    def test_waking(self):
+        """blocked + intentional autodown + state waking ⇒ waking (distinct
+        from expected_down and should_be_up — a normal transition)."""
         block = {"blocked": True, "intentional": "autodown"}
         state = {"state": "waking"}
-        assert ad.classify(block, state) == "should_be_up"
+        assert ad.classify(block, state) == "waking"
 
     def test_should_be_up_when_block_latched_state_up(self):
         """block latched but state not confirmed down ⇒ should_be_up."""
         block = {"blocked": True, "intentional": "autodown"}
         state = {"state": "up"}
+        assert ad.classify(block, state) == "should_be_up"
+
+    def test_should_be_up_when_state_error(self):
+        """block latched but wake failed (error) ⇒ should_be_up — NOT a window;
+        the layer should be up, so verify must not excuse a fault."""
+        block = {"blocked": True, "intentional": "autodown"}
+        state = {"state": "error"}
         assert ad.classify(block, state) == "should_be_up"
 
     def test_healthy_no_block(self):
@@ -682,6 +690,32 @@ class TestClassify:
         """None/missing inputs ⇒ healthy (never invented down)."""
         assert ad.classify(None, None) == "healthy"
         assert ad.classify({}, {}) == "healthy"
+
+
+class TestIntentionalWindow:
+    """intentional_window — the breadth-of-window predicate built on classify():
+    True only for the non-fault transition states (expected_down, waking)."""
+
+    def test_window_covers_expected_down_and_waking(self):
+        assert ad.intentional_window("expected_down") is True
+        assert ad.intentional_window("waking") is True
+
+    def test_window_excludes_should_be_up_and_healthy(self):
+        assert ad.intentional_window("should_be_up") is False
+        assert ad.intentional_window("healthy") is False
+        assert ad.intentional_window(None) is False
+
+    def test_window_matches_classify_for_each_state(self):
+        block = {"blocked": True, "intentional": "autodown"}
+        for state, verdict in (("down", "expected_down"),
+                               ("waking", "waking"),
+                               ("up", "should_be_up"),
+                               ("error", "should_be_up")):
+            got = ad.classify(block, {"state": state})
+            assert got == verdict, (state, got)
+            # A stream is excused precisely when classify says it's in the
+            # intentional window.
+            assert ad.intentional_window(got) is (got in ("expected_down", "waking"))
 
 
 # ---------------------------------------------------------------------------
@@ -1473,6 +1507,37 @@ class TestAutoup:
             assert cmd[1] == "run"
             assert "--ensure" in cmd
             assert "--no-follow" in cmd
+
+    # -- wake commands carry --served-model-name (alias survive a wake) -----
+    def test_wake_cmd_carries_served_model_name_alias(
+            self, tmp_path, monkeypatch, autodown_file):
+        """Every wake start command CONTAINS --served-model-name with the role
+        alias — the regression for t_cbce664b: autodown must bring the fleet
+        back the SAME way the sanctioned template path does, so worker-model /
+        orchestrator-model survive a wake."""
+        serving, runner, block_file = self._setup(tmp_path, monkeypatch,
+                                                  autodown_file)
+        ad.autoup(
+            serving_path=serving, run_cmd_fn=runner,
+            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
+            sleep_fn=_noop_sleep, notify=False,
+        )
+        # Every issued start command must carry --served-model-name.
+        for call in runner.calls:
+            cmd = call["cmd"]
+            assert "--served-model-name" in cmd, cmd
+            i = cmd.index("--served-model-name")
+            # The alias derived from the unit's ROLE: orchestrator-model on the
+            # orchestrator's start, worker-model on every worker start.
+            host = cmd[cmd.index("--hosts") + 1]
+            if "10.0.0.244" in host:      # orchestrator head node
+                assert cmd[i + 1].endswith(" orchestrator-model"), cmd[i + 1]
+            else:
+                assert cmd[i + 1].endswith(" worker-model"), cmd[i + 1]
+        # Orchestrator start explicitly advertises orchestrator-model.
+        orch_hosts = runner.calls[0]["cmd"]
+        oi = orch_hosts.index("--served-model-name")
+        assert "orchestrator-model" in orch_hosts[oi + 1]
 
     # -- orchestrator started FIRST (reverse of teardown) -------------------
     def test_orchestrator_started_first(

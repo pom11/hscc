@@ -217,6 +217,95 @@ def fleet_down_cmd():
     return ["sparkrun", "stop", "--all", "--cluster", HSCC_CLUSTER]
 
 
+def _role_alias(role):
+    """The stable logical alias a unit advertises, decided by ROLE identity.
+
+    Mirrors ``cluster_template._unit_alias`` (hscc-cluster/cluster_template.py):
+    the orchestrator advertises ``orchestrator-model``; every worker advertises
+    ``worker-model``. Decided by role, never by index/name matching — a worker
+    whose role string is literally 'orchestrator' still gets ``worker-model``.
+    """
+    return "orchestrator-model" if role == "orchestrator" else "worker-model"
+
+
+def _concrete_model(u):
+    """The concrete served model id for a unit.
+
+    Prefers the unit's ``model`` field (authoritative in serving.json); falls
+    back to the recipe's filename stem (basename without extension), matching
+    the template intent's filename-stem heuristic when ``model`` is absent.
+    Returns None only when neither yields a usable id.
+    """
+    m = (u.get("model") or "").strip()
+    if m:
+        return m
+    recipe = (u.get("recipe") or "").strip()
+    if recipe:
+        return os.path.splitext(os.path.basename(recipe))[0]
+    return None
+
+
+def _served_model_name(u):
+    """The ``--served-model-name`` value (``<concrete> <alias>``) for a unit.
+
+    vLLM's multi-name ``--served-model-name`` (nargs='+', space-separated)
+    registers BOTH the concrete id and the role alias against the endpoint, so
+    a consumer that pins ``worker-model`` / ``orchestrator-model`` keeps
+    working across a wake. The names are CARRIED THROUGH from the unit/template
+    (this function), NOT trusted from ``serve_cmd`` — so a bogus ``serve_cmd``
+    can never cause a wrong alias. Returns None when no concrete id can be
+    determined (adds no flag, preserving current behaviour).
+    """
+    concrete = _concrete_model(u)
+    if not concrete:
+        return None
+    return f"{concrete} {_role_alias(u.get('role'))}"
+
+
+def _flag_after(cmd, flag, default=None):
+    """The argv token following ``flag`` in ``cmd``, or ``default``.
+
+    CLI flags are ``(flag, value)`` argv pairs. Missing/empty ⇒ ``default``.
+    """
+    for i, tok in enumerate(cmd):
+        if tok == flag and i + 1 < len(cmd):
+            return cmd[i + 1]
+    return default
+
+
+def _serve_cmd_mismatch(u, cmd):
+    """'' if unit's serve_cmd agrees with its authoritative fields, else a reason.
+
+    ``serve_cmd`` in serving.json is a RECORDED artifact (the template apply
+    writes it for drift comparison) and is NEVER an execution source on the
+    wake path — ``fleet_up_plan`` always builds each start command from the
+    unit's real ``recipe``/``nodes``/``port``. But a ``serve_cmd`` that
+    disagrees with those fields is a red flag (a rehosted unit, a changed
+    alias, a stale record) that must be surfaced loudly rather than silently
+    diverging. Compare the fields that materially decide WHERE/WHAT is started:
+    the recipe path, the ``--hosts`` node set, and ``--port``. Returns the first
+    mismatch found, or '' when they agree (or the unit has no serve_cmd).
+    """
+    sc = (u.get("serve_cmd") or [])
+    if not isinstance(sc, list) or not sc:
+        return ""
+    recipe = os.path.expanduser(u.get("recipe") or "") or None
+    if recipe and os.path.expanduser(_flag_after(sc, "run", "")) != recipe:
+        return (f"serve_cmd recipe {_flag_after(sc, 'run', '')!r} != unit "
+                f"recipe {recipe!r}")
+    nodes = sorted(n for n in (u.get("nodes") or []) if n)
+    if nodes:
+        hosts = _flag_after(sc, "--hosts", "")
+        if sorted(h.strip() for h in hosts.split(",") if h.strip()) != nodes:
+            return (f"serve_cmd --hosts {hosts!r} != unit nodes {nodes!r}")
+    port = str(u.get("port") or _flag_after(sc, "--port", "") or "")
+    if port:
+        sc_port = _flag_after(sc, "--port", "")
+        if sc_port and sc_port != port:
+            return f"serve_cmd --port {sc_port!r} != unit port {port!r}"
+    return ""
+
+
 def fleet_up_plan(serving=None):
     """Ordered start plan for EVERY serving.json unit (orchestrator FIRST, then
     workers sorted by id) — the full fleet-up set.
@@ -257,16 +346,22 @@ def fleet_up_plan(serving=None):
         port = u.get("port") or serving_port(serving)
         if role == "orchestrator":
             recipe = orchestrator_recipe(serving) or VLLM_RECIPE
-            orch.append({"kind": "orchestrator", "nodes": nodes, "port": port,
-                         "unit_id": unit_id, "recipe": recipe,
-                         "keepalive": False})
+            orch.append({"kind": "orchestrator", "role": role,
+                         "nodes": nodes, "port": port, "unit_id": unit_id,
+                         "recipe": recipe, "keepalive": False,
+                         "model": u.get("model"), "serve_cmd": u.get("serve_cmd"),
+                         "tp": u.get("tp")})
         elif role == "worker":
             # BOTH keepalive and non-keepalive workers come up on fleet-up.
             recipe = u.get("recipe") or VLLM_RECIPE
             recipe = os.path.expanduser(recipe) if recipe else None
-            workers.append({"kind": "worker", "nodes": nodes, "port": port,
-                            "unit_id": unit_id, "recipe": recipe,
-                            "keepalive": bool(u.get("keepalive"))})
+            workers.append({"kind": "worker", "role": role,
+                            "nodes": nodes, "port": port, "unit_id": unit_id,
+                            "recipe": recipe,
+                            "keepalive": bool(u.get("keepalive")),
+                            "model": u.get("model"),
+                            "serve_cmd": u.get("serve_cmd"),
+                            "tp": u.get("tp")})
     workers.sort(key=lambda e: e["unit_id"])
     plan = orch + workers
     cmds = []
@@ -274,6 +369,27 @@ def fleet_up_plan(serving=None):
         cmd = ["sparkrun", "run", e["recipe"], "--cluster", HSCC_CLUSTER,
                "--hosts", ",".join(e["nodes"]), "--port", str(e["port"]),
                "--no-follow", "--ensure"]
+        # --served-model-name <concrete> <role-alias>: carry the served model
+        # names through from the unit into the start command, the SAME way the
+        # sanctioned template path renders them (cluster_template._render_serve_cmd).
+        # This is what makes vLLM (re)started by a wake serve the alias, so the
+        # 38 role profiles that pin worker-model / orchestrator-model keep
+        # working after an autodown cycle. The names come from the unit's own
+        # fields (role → alias, model/recipe → concrete), NEVER from serve_cmd.
+        smn = _served_model_name(e)
+        if smn:
+            cmd.extend(["--served-model-name", smn])
+        tp = e.get("tp")
+        if tp is not None and int(tp) > 1:
+            cmd.extend(["--tp", str(int(tp))])
+        # Surface (loudly, but do NOT run) a serve_cmd that disagrees with the
+        # authoritative recipe/nodes/port — refusing to act on a corrupt record
+        # rather than starting a model on the wrong hosts. The unit's OWN
+        # derived command is still issued (correct recipe/hosts/alias).
+        mism = _serve_cmd_mismatch(e, cmd)
+        if mism:
+            _serving_warn(f"fleet_up_plan: unit {e['unit_id']!r} serve_cmd "
+                          f"refused ({mism}); using derived command")
         cmds.append({"kind": e["kind"], "nodes": e["nodes"], "port": e["port"],
                      "unit_id": e["unit_id"], "cmd": cmd,
                      "keepalive": e["keepalive"]})
