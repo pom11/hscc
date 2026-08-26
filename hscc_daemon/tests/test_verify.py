@@ -606,3 +606,147 @@ class TestRunAll:
         assert result["ok"] is False
         multiplex_check = [c for c in result["checks"] if c["name"] == "multiplex"][0]
         assert multiplex_check["ok"] is None
+
+
+class TestRunAllFullVerifyIntentionalAutodown:
+    """FULL `hscc verify` check-set round trip against a simulated
+    intentional-down fleet. This is the end-to-end prove-it test the previous
+    two attempts lacked: it runs the ENTIRE run_all() check list (not one
+    side of a reader/writer pair) against real state files in a tmp dir with
+    the intentional block set, and asserts the OVERALL result is PASS. The
+    negative control reuses the IDENTICAL state with the intentional block
+    removed and asserts overall FAIL.
+
+    run_all() forwards keyed overrides to each check's matching parameter, so
+    the whole synthetic fleet surface is built through overrides (plugins
+    dir, config, gateway state, profiles, daemon state dir, proxy url) while
+    the intentional block is armed via the REAL watchdog-block.json /
+    autodown.json in the tmp dir — no live ~/.hscc or ~/.hermes is touched.
+    """
+
+    def _arm_intentional(self, tmp_hfcc_dir, monkeypatch):
+        """Latched intentional watchdog block + autodown config at down,
+        exactly as TestCheckDaemonStreamsIntentional does."""
+        from hscc_daemon import lifecycle as _lc
+        from hscc_daemon import autodown as _ad
+        block_file = str(tmp_hfcc_dir / "watchdog-block.json")
+        monkeypatch.setattr(_lc, "WATCHDOG_BLOCK_FILE", block_file)
+        _lc.save_watchdog_block({
+            "blocked": True, "intentional": "autodown",
+            "reason": "autodown: intentional idle teardown"})
+        ad_file = str(tmp_hfcc_dir / "autodown.json")
+        monkeypatch.setattr(_ad, "AUTODOWN_FILE", ad_file)
+        _ad.save_config({**_ad.DEFAULT_CONFIG, "enabled": True,
+                         "state": "down", "down_since": "2026-01-01T00:00:00+00:00"})
+
+    def _build_fleet(self, tmp_path):
+        """Plant the whole synthetic fleet surface; return run_all overrides.
+
+        The state dir holds the serving streams truthfully down WITH the
+        intentional marker (the exact healthy power-save state); the proxy is
+        patched to report no models (it is part of the torn-down serving
+        layer); config/gateway/plugins are a healthy, fully-wired install.
+        """
+        import yaml
+
+        from hscc_daemon.state import now_iso
+
+        # plugins — fully wired.
+        plugins_dir = tmp_path / "plugins" / "hscc-commands"
+        plugins_dir.mkdir(parents=True)
+        (plugins_dir / "__init__.py").write_text(
+            'register("workers-up")\nregister("cluster-restart")\n'
+            'register("template")\n')
+
+        # config — full HSCC wiring.
+        config = tmp_path / "config.yaml"
+        config.write_text(yaml.dump({
+            "multiplex_profiles": True,
+            "kanban": {"max_in_progress": 3},
+            "toolsets": ["hscc-cluster"],
+        }))
+
+        # gateway state serving every profile dir, and the profile dirs.
+        gw_state = tmp_path / "gateway_state.json"
+        profiles = tmp_path / "profiles"
+        (profiles / "backend-engineer").mkdir(parents=True)
+        (profiles / "writer").mkdir(parents=True)
+        json.dump({"served_profiles": ["backend-engineer", "writer"]},
+                  open(gw_state, "w"))
+
+        # daemon state — every serving stream truthfully down WITH the
+        # intentional marker, fresh timestamps (healthy power-save).
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        for name in ("watchdog", "dgx", "gateway", "proxy", "workers"):
+            data = {"ok": False, "timestamp": now_iso(), "last_check": now_iso(),
+                    "stream": name, "intentional": "autodown",
+                    "message": f"intentional autodown ({name})"}
+            (state_dir / f"{name}.json").write_text(json.dumps(data))
+
+        return {
+            "plugins_dir": str(tmp_path / "plugins"),
+            "config": str(config),
+            "gateway_state": str(gw_state),
+            "profiles_dir": str(tmp_path / "profiles"),
+            "state_dir": str(state_dir),
+            "url": "http://localhost:4000/v1/models",
+        }
+
+    def _proxy_no_models(self):
+        """Patch the proxy to list NO models (fleet torn down)."""
+        import urllib.request
+        from unittest.mock import patch, MagicMock
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = json.dumps({"data": []}).encode()
+        mock_resp.__enter__ = lambda self: self
+        mock_resp.__exit__ = lambda self, *a: None
+        return patch("hscc_daemon.verify.urllib.request.urlopen",
+                     return_value=mock_resp)
+
+    def test_full_verify_round_trip_passes_intentional(self, tmp_path,
+                                                       tmp_hfcc_dir,
+                                                       monkeypatch):
+        """Intentional-down fleet + intentional block ⇒ OVERALL PASS."""
+        from hscc_daemon.verify import run_all
+        self._arm_intentional(tmp_hfcc_dir, monkeypatch)
+        overrides = self._build_fleet(tmp_path)
+
+        with self._proxy_no_models():
+            result = run_all(**overrides)
+
+        assert result["ok"] is True, (
+            "full verify must PASS during an intentional autodown; got: "
+            + repr(result["checks"]))
+        by_name = {c["name"]: c for c in result["checks"]}
+        # The excused proxy explicitly says WHY it is not failing.
+        assert "intentionally down by autodown" in by_name["proxy"]["detail"]
+        assert by_name["proxy"]["ok"] is True
+        # daemon_streams keeps its intent-labelling (not regressed).
+        assert "intentionally down by autodown" in \
+            by_name["daemon_streams"]["detail"]
+
+    def test_full_verify_round_trip_fails_without_intentional_block(
+            self, tmp_path, tmp_hfcc_dir, monkeypatch):
+        """Negative control: SAME fleet state (streams tagged intentional,
+        proxy with no models) but NO intentional block ⇒ OVERALL FAIL.
+
+        The only difference from the passing test is that the watchdog block
+        / autodown config are not armed, so classify() is 'healthy' — the
+        intentional markers and the empty proxy are then genuine failures.
+        """
+        from hscc_daemon.verify import run_all
+        # NOTE: intentionally do NOT call _arm_intentional.
+        overrides = self._build_fleet(tmp_path)
+
+        with self._proxy_no_models():
+            result = run_all(**overrides)
+
+        assert result["ok"] is False, (
+            "full verify must FAIL with no intentional block; got: "
+            + repr(result["checks"]))
+        by_name = {c["name"]: c for c in result["checks"]}
+        assert by_name["proxy"]["ok"] is False
+        assert "no models" in by_name["proxy"]["detail"]
+        assert by_name["daemon_streams"]["ok"] is False
