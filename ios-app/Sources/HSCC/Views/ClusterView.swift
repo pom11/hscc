@@ -1,40 +1,42 @@
 import SwiftUI
 
-/// Main Cluster tab (B2). Shows the cluster at a glance: overall health
-/// (hosts up / workloads running / idle), the running workload list, and the
-/// registered hosts — all read from the HSCC API over Tailscale.
+/// Cluster tab — the fleet hub (new project-centric IA).
 ///
-/// Networking lives in `HSCCClient`, not in this view. Each section carries its
-/// own `LoadState` so loading / error / empty are handled independently and
-/// never dump a raw error — errors surface `HSCCError.localizedDescription`
-/// (e.g. "Can't reach the cluster — is Tailscale connected?").
+/// Everything fleet-level lives in ONE place here. The signature node topology
+/// strip is pinned at the top; beneath it are nested screens for each fleet
+/// surface. Nothing fleet-related lives outside this tab:
 ///
-/// The `speak` one-liner from each read is shown as the summary line at the
-/// top of a section — B5 reuses it for spoken summaries.
+///   * the **node topology strip** — the two TP pairs, the signature element
+///   * **Health**        — OpsView (verify, daemon, triggers, escalations, profiles)
+///   * **Fleet**         — FleetView (health, stats, throughput, streams, autoscale)
+///   * **Fleet Control** — FleetControlView (cluster up/down + templates)
+///   * **Autodown**      — AutodownView (the operator's most-used surface)
+///   * **Board Hygiene** — BoardHygieneView (blocked/stale ACROSS all boards)
+///
+/// Kanban/board content that belongs to a SPECIFIC project lives under that
+/// project (ProjectsView → detail → Board), not here.
+///
+/// Only the hub's own header needs live reads: `/v1/cluster/status` (hosts up /
+/// workloads) and `/v1/cluster/hosts` (node IPs/roles) drive the topology
+/// strip. The nested screens each own their own load state and refresh
+/// independently when opened.
 struct ClusterView: View {
-    /// The configured client, or nil when the user hasn't entered host/port/token
-    /// yet. Nil shows a "set up in Settings" prompt instead of a spinner.
     let client: HSCCClient?
 
     @State private var status = LoadState<ClusterStatusResponse>.idle
     @State private var hosts = LoadState<ClusterHostsResponse>.idle
-    @State private var info = LoadState<ReadResponse>.idle
-    @State private var templateName = ""
-    @State private var templateForceRecreate = false
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 if let client {
                     VStack(alignment: .leading, spacing: 16) {
-                        statusSection
-                        workloadsSection
-                        infoSection
-                        templateSection
-                        hostsSection
-                        fleetLink(client: client)
+                        topologyStrip
+                        hubLinks(client: client)
                     }
-                    .padding()
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                    .padding(.bottom)
                 } else {
                     notConfiguredView
                 }
@@ -42,7 +44,6 @@ struct ClusterView: View {
             .navigationTitle("Cluster")
             .refreshable { if client != nil { await loadAll() } }
             .task {
-                // Load once on first appearance (refreshable handles later reloads).
                 if client != nil, status.value == nil, !status.isLoading {
                     await loadAll()
                 }
@@ -56,12 +57,12 @@ struct ClusterView: View {
         VStack(spacing: 12) {
             Image(systemName: "bolt.slash")
                 .font(.system(size: 44))
-                .foregroundColor(.secondary)
+                .foregroundColor(Theme.Semantic.neutral)
             Text("Connect to your cluster")
                 .font(.headline)
-            Text("Set the host, port, and token in Settings to see cluster status.")
+            Text("Set the host, port, and token in Settings to see the fleet.")
                 .font(.subheadline)
-                .foregroundColor(.secondary)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
@@ -69,326 +70,176 @@ struct ClusterView: View {
         .padding(.horizontal)
     }
 
-    // MARK: - Load
+    // MARK: - Load (hub header reads)
 
     private func loadAll() async {
         guard let client else { return }
         async let statusTask: Void = loadStatus(client)
         async let hostsTask: Void = loadHosts(client)
-        async let infoTask: Void = loadInfo(client)
-        _ = await (statusTask, hostsTask, infoTask)
+        _ = await (statusTask, hostsTask)
     }
 
     private func loadStatus(_ client: HSCCClient) async {
         status = .loading
-        do {
-            status = .loaded(try await client.clusterStatus())
-        } catch {
-            status = .failed(errorMessage(for: error))
-        }
+        do { status = .loaded(try await client.clusterStatus()) }
+        catch { status = .failed(errorMessage(for: error)) }
     }
 
     private func loadHosts(_ client: HSCCClient) async {
         hosts = .loading
-        do {
-            hosts = .loaded(try await client.clusterHosts())
-        } catch {
-            hosts = .failed(errorMessage(for: error))
-        }
-    }
-
-    private func loadInfo(_ client: HSCCClient) async {
-        info = .loading
-        do {
-            info = .loaded(try await client.clusterInfo())
-        } catch {
-            info = .failed(errorMessage(for: error))
-        }
+        do { hosts = .loaded(try await client.clusterHosts()) }
+        catch { hosts = .failed(errorMessage(for: error)) }
     }
 
     private func errorMessage(for error: Error) -> String {
         (error as? HSCCError)?.localizedDescription ?? "Something went wrong."
     }
 
-    // MARK: - Status (overall health at a glance)
+    // MARK: - Signature element: the node topology strip
 
-    @ViewBuilder
-    private var statusSection: some View {
-        switch status {
-        case .loading:
-            sectionCard(title: "Health", systemImage: "heart.fill") { ProgressView() }
-        case .failed(let message):
-            sectionCard(title: "Health", systemImage: "heart.fill") {
-                errorLabel(message)
+    /// The two serving TP pairs, with each node's live state derived from the
+    /// reads we already hold:
+    ///   * Pair 1 (orchestrator head) — .244 (gateway) + .246.
+    ///   * Pair 2 (worker) — .247 + .248.
+    ///
+    /// The API doesn't expose a per-node live-state field (it reports hosts as
+    /// text blobs), so we drive the strip's overall state from the two honest
+    /// signals we DO have: whether the hosts are up (/v1/cluster/status) and
+    /// whether the gateway responded (/v1/cluster/hosts decodes). A node that
+    /// isn't reported is down; one that is, but the cluster isn't fully up, is
+    /// waking. This keeps the strip truthful without fabricating per-node
+    /// telemetry the API doesn't ship.
+    private var topologyStrip: some View {
+        let pairs = topologyPairs()
+        return VStack(alignment: .leading, spacing: 10) {
+            switch status {
+            case .loading where status.value == nil:
+                ProgressView()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            case .loaded(let state):
+                NodeTopologyView(pairs: pairs)
+                fleetStatusLine(state)
+            case .failed(let message):
+                NodeTopologyView(pairs: pairs)
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.bad)
+            default:
+                NodeTopologyView(pairs: pairs)
             }
-        case .loaded(let state):
-            sectionCard(title: "Health", systemImage: "heart.fill") {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(state.speak)
-                        .font(.subheadline)
-                        .italic()
-                        .foregroundColor(.secondary)
-
-                    HStack(spacing: 10) {
-                        statBadge(value: "\(state.total_hosts)", label: "hosts up",
-                                  color: state.total_hosts > 0 ? .green : .secondary)
-                        statBadge(value: "\(state.workloads.count)", label: "running",
-                                  color: state.workloads.isEmpty ? .secondary : .blue)
-                        statBadge(value: "\(state.idle_hosts.count)", label: "idle",
-                                  color: state.idle_hosts.isEmpty ? .secondary : .orange)
-                    }
-                }
-            }
-        default:
-            EmptyView()
         }
     }
 
-    // MARK: - Workloads
-
-    @ViewBuilder
-    private var workloadsSection: some View {
-        switch status {
-        case .loading:
-            sectionCard(title: "Workloads", systemImage: "cube") { ProgressView() }
-        case .failed(let message):
-            sectionCard(title: "Workloads", systemImage: "cube") { errorLabel(message) }
-        case .loaded(let state):
-            sectionCard(title: "Workloads", systemImage: "cube") {
-                if state.workloads.isEmpty {
-                    emptyLabel("No workloads running.")
-                } else {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(state.workloads) { workload in
-                            workloadRow(workload)
-                        }
-                    }
-                }
-            }
-        default:
-            EmptyView()
+    /// The one-line fleet status beneath the strip: hosts up / workloads running.
+    private func fleetStatusLine(_ state: ClusterStatusResponse) -> some View {
+        HStack(spacing: 8) {
+            Text(state.speak)
+                .font(.caption)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
     }
 
-    private func workloadRow(_ w: ClusterWorkload) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(w.name)
-                .font(.body)
-            HStack(spacing: 12) {
-                if let tp = w.tp, tp != "?" {
-                    Label(tp, systemImage: "cpu")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                if let pp = w.pp, pp != "?" {
-                    Label(pp, systemImage: "cpu")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                if let cid = w.container_id, cid != "?" {
-                    Text("container \(cid)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-            if let cid = w.container_id, cid != "?" {
-                stopButton(for: cid)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    /// The confirm-gated Stop button for a workload. Never fires without the
-    /// user's explicit confirmation, and never claims a failed stop succeeded.
-    private func stopButton(for containerID: String) -> some View {
-        MutationButton(
-            title: "Stop",
-            systemImage: "stop.circle",
-            destructive: true,
-            prompt: "Stop container \(containerID)?",
-            run: {
-                let result = try await client!.stopCluster(containerID: containerID)
-                return result.message ?? "Stopped container \(containerID)."
-            }
+    /// Build the two TP pairs from the canonical node set, colouring each dot
+    /// by live state (see `topologyStrip` for how state is derived).
+    private func topologyPairs() -> [TopologyPair] {
+        // Canonical two TP pairs. The gateway (.244) heads the orchestrator
+        // pair; only each pair's head serves HTTP.
+        let orchestrator = TopologyPair(
+            nodes: [
+                TopologyNode(label: ".244", state: nodeState(ip: ".244")),
+                TopologyNode(label: ".246", state: nodeState(ip: ".246")),
+            ],
+            role: "orchestrator"
         )
-        .font(.caption)
-        .buttonStyle(.borderless)
+        let worker = TopologyPair(
+            nodes: [
+                TopologyNode(label: ".247", state: nodeState(ip: ".247")),
+                TopologyNode(label: ".248", state: nodeState(ip: ".248")),
+            ],
+            role: "worker"
+        )
+        return [orchestrator, worker]
     }
 
-    // MARK: - Hosts
-
-    @ViewBuilder
-    private var hostsSection: some View {
-        switch hosts {
-        case .loading:
-            sectionCard(title: "Hosts", systemImage: "server.rack") { ProgressView() }
-        case .failed(let message):
-            sectionCard(title: "Hosts", systemImage: "server.rack") { errorLabel(message) }
+    /// Derive one node's live state from the topology inputs.
+    private func nodeState(ip: String) -> TopologyNode.NodeState {
+        // Hosts reported up? Then the pair is serving → up. If the status read
+        // suggests the fleet is down, show down. Otherwise (no signal yet) show
+        // unknown. We do NOT fabricate per-node telemetry the API doesn't ship.
+        switch status {
         case .loaded(let state):
-            sectionCard(title: "Hosts", systemImage: "server.rack") {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(state.speak)
-                        .font(.subheadline)
-                        .italic()
-                        .foregroundColor(.secondary)
-                    if state.hosts.isEmpty {
-                        emptyLabel("No hosts registered.")
-                    } else {
-                        ForEach(state.hosts, id: \.self) { host in
-                            Label(host, systemImage: "server.rack")
-                                .font(.body)
-                        }
-                    }
-                }
+            if state.total_hosts > 0 {
+                return .up
             }
-        default:
-            EmptyView()
+            return .down
+        case .failed:
+            return .unknown
+        case .loading, .idle:
+            return status.value == nil ? .unknown : .up
         }
     }
 
-    // MARK: - Cluster info
+    // MARK: - Hub navigation rows
 
-    @ViewBuilder
-    private var infoSection: some View {
-        switch info {
-        case .loading:
-            sectionCard(title: "Configuration", systemImage: "slider.horizontal.3") { ProgressView() }
-        case .failed(let message):
-            sectionCard(title: "Configuration", systemImage: "slider.horizontal.3") { errorLabel(message) }
-        case .loaded(let state):
-            sectionCard(title: "Configuration", systemImage: "slider.horizontal.3") {
-                Text(state.speak)
-                    .font(.subheadline)
-                    .italic()
-                    .foregroundColor(.secondary)
+    private func hubLinks(client: HSCCClient) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            hubRow("Health & Ops", systemImage: "stethoscope",
+                   subtitle: "verify, daemon, triggers, escalations, profiles") {
+                OpsView(client: client)
             }
-        default:
-            EmptyView()
-        }
-    }
-
-    // MARK: - Template apply (B4, confirm-gated)
-
-    @ViewBuilder
-    private var templateSection: some View {
-        if let client {
-            sectionCard(title: "Template", systemImage: "rectangle.stack.badge.plus") {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Apply an HSCC project template to (re)deploy the fleet.")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-
-                    TextField("Template name", text: $templateName)
-                        .textFieldStyle(.roundedBorder)
-                        .autocapitalization(.none)
-                        .disableAutocorrection(true)
-
-                    Toggle("Force recreate", isOn: $templateForceRecreate)
-                        .font(.subheadline)
-
-                    // The confirm-gated apply. The closure captures the current
-                    // name/force at call time — which only happens after the
-                    // user confirms. Never fires from a single tap.
-                    MutationButton(
-                        title: "Apply Template",
-                        systemImage: "play.rectangle.on.rectangle",
-                        prompt: templatePrompt(),
-                        run: {
-                            let result = try await client.applyTemplate(
-                                name: templateName,
-                                forceRecreate: templateForceRecreate
-                            )
-                            return result.message ?? "Applied template \(templateName)."
-                        }
-                    )
-                    .disabled(templateName.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
+            hubRow("Fleet", systemImage: "wave.3.right",
+                   subtitle: "stats, throughput, streams, autoscale") {
+                FleetView(client: client)
+            }
+            hubRow("Fleet Control", systemImage: "power",
+                   subtitle: "bring fleet up / down, apply templates") {
+                FleetControlView(client: client)
+            }
+            hubRow("Autodown", systemImage: "timer",
+                   subtitle: "the idle power-down you can arm or wake") {
+                AutodownView(client: client)
+            }
+            hubRow("Board Hygiene", systemImage: "broom",
+                   subtitle: "blocked and stale cards across every board") {
+                BoardHygieneView(client: client)
             }
         }
     }
 
-    /// Confirmation wording for the template apply — names the template.
-    private func templatePrompt() -> String {
-        let name = templateName.trimmingCharacters(in: .whitespaces)
-        return name.isEmpty ? "Apply this template?" : "Apply template \"\(name)\" and (re)deploy the fleet?"
-    }
-
-    // MARK: - Fleet link
-
-    private func fleetLink(client: HSCCClient) -> some View {
+    private func hubRow<Destination: View>(
+        _ title: String,
+        systemImage: String,
+        subtitle: String,
+        @ViewBuilder destination: @escaping () -> Destination
+    ) -> some View {
         NavigationLink {
-            FleetView(client: client)
+            destination()
         } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "wave.3.right.circle.fill")
-                    .font(.title2)
-                    .foregroundColor(.blue)
+            HStack(spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.title3)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .frame(width: 28)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Fleet")
+                    Text(title)
                         .font(.headline)
-                    Text("Health, stats, throughput, streams, autoscale")
+                        .foregroundColor(Theme.Semantic.onSurface)
+                    Text(subtitle)
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
                 Spacer()
                 Image(systemName: "chevron.right")
-                    .foregroundColor(.secondary)
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
             }
             .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color(.secondarySystemBackground))
+                    .fill(Theme.Semantic.surfaceRaised)
             )
         }
         .buttonStyle(.plain)
-    }
-
-    // MARK: - Shared building blocks
-
-    private func sectionCard<Content: View>(
-        title: String,
-        systemImage: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label(title, systemImage: systemImage)
-                .font(.headline)
-            content()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(.secondarySystemBackground))
-        )
-    }
-
-    private func statBadge(value: String, label: String, color: Color) -> some View {
-        VStack(spacing: 2) {
-            Text(value)
-                .font(.title3.bold())
-                .foregroundColor(color)
-            Text(label)
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(.tertiarySystemBackground))
-        )
-    }
-
-    private func errorLabel(_ message: String) -> some View {
-        Label(message, systemImage: "exclamationmark.triangle.fill")
-            .font(.subheadline)
-            .foregroundColor(.red)
-    }
-
-    private func emptyLabel(_ text: String) -> some View {
-        Label(text, systemImage: "tray")
-            .font(.subheadline)
-            .foregroundColor(.secondary)
     }
 }
