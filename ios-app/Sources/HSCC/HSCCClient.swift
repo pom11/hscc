@@ -264,6 +264,69 @@ struct HSCCClient {
         try await get(path, as: ReadResponse.self)
     }
 
+    // MARK: - C6 reads (autodown / projects / ops / board hygiene / fleet control)
+
+    /// GET /v1/autodown/status — the autodown report (operator's most-used surface).
+    func autodownStatus() async throws -> AutodownStatusResponse {
+        try await get("/v1/autodown/status", as: AutodownStatusResponse.self)
+    }
+
+    /// GET /v1/projects — the registry list.
+    func projects() async throws -> ProjectsResponse {
+        try await get("/v1/projects", as: ProjectsResponse.self)
+    }
+
+    /// GET /v1/projects/{name} — per-project detail.
+    func projectDetail(_ name: String) async throws -> ProjectDetailResponse {
+        try await get("/v1/projects/\(name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name)",
+                      as: ProjectDetailResponse.self)
+    }
+
+    /// GET /v1/verify — same shape as /v1/health ({ok, checks, speak}).
+    func verify() async throws -> VerifyResponse {
+        try await get("/v1/verify", as: VerifyResponse.self)
+    }
+
+    /// GET /v1/daemon/status — daemon + every health stream.
+    func daemonStatus() async throws -> DaemonStatusResponse {
+        try await get("/v1/daemon/status", as: DaemonStatusResponse.self)
+    }
+
+    /// GET /v1/triggers — trigger rules + last run + recent events.
+    func triggers() async throws -> TriggersResponse {
+        try await get("/v1/triggers", as: TriggersResponse.self)
+    }
+
+    /// GET /v1/escalate — pending escalations (read-only).
+    func escalations() async throws -> EscalationsResponse {
+        try await get("/v1/escalate", as: EscalationsResponse.self)
+    }
+
+    /// GET /v1/profiles — running task counts per profile.
+    func profiles() async throws -> ProfilesResponse {
+        try await get("/v1/profiles", as: ProfilesResponse.self)
+    }
+
+    /// GET /v1/kanban/blocked — blocked cards across all boards.
+    func kanbanBlocked() async throws -> KanbanBlockedResponse {
+        try await get("/v1/kanban/blocked", as: KanbanBlockedResponse.self)
+    }
+
+    /// GET /v1/kanban/stale?older_than=N — non-terminal cards (0 = all).
+    func kanbanStale(olderThan: Int = 0) async throws -> KanbanStaleResponse {
+        try await get("/v1/kanban/stale?older_than=\(olderThan)", as: KanbanStaleResponse.self)
+    }
+
+    /// GET /v1/template/list — available cluster templates.
+    func templateList() async throws -> TemplateListResponse {
+        try await get("/v1/template/list", as: TemplateListResponse.self)
+    }
+
+    /// GET /v1/template/status — the currently-applied template.
+    func templateStatus() async throws -> TemplateStatusResponse {
+        try await get("/v1/template/status", as: TemplateStatusResponse.self)
+    }
+
     // MARK: - Mutating endpoints (B4, ALL confirm-gated)
 
     /// POST /v1/cards — dispatch a card (create a kanban card).
@@ -359,5 +422,65 @@ struct HSCCClient {
         return try await post("/v1/orchestrator/chat",
                               body: payload,
                               as: OrchestratorChatResponse.self)
+    }
+
+    // MARK: - C6 mutations (confirm-gated)
+
+    /// POST /v1/autodown/enable — arm idle autodown.
+    ///
+    /// Body: `{ idle_minutes, force?, confirm: true }`. Non-2xx (409 for a
+    /// cron conflict unless force, 400 for a bad idle_minutes) always throws.
+    func autodownEnable(idleMinutes: Int, force: Bool = false) async throws -> AutodownEnableResponse {
+        var payload: [String: Any] = ["idle_minutes": idleMinutes, "confirm": true]
+        if force { payload["force"] = true }
+        return try await post("/v1/autodown/enable", body: payload, as: AutodownEnableResponse.self)
+    }
+
+    /// POST /v1/autodown/disable — disarm + release the intentional block.
+    /// Body: `{ confirm: true }`. Always confirms.
+    func autodownDisable() async throws -> AutodownDisableResponse {
+        try await post("/v1/autodown/disable", body: ["confirm": true], as: AutodownDisableResponse.self)
+    }
+
+    /// POST /v1/autodown/wake — force autoup (running in the background).
+    ///
+    /// Body: `{ confirm: true }`. Returns promptly with `state: waking`; autoup
+    /// can take ~9 minutes. The view polls /v1/autodown/status rather than
+    /// blocking. Always confirms.
+    func autodownWake() async throws -> AutodownWakeResponse {
+        try await post("/v1/autodown/wake", body: ["confirm": true], as: AutodownWakeResponse.self)
+    }
+
+    /// POST /v1/autodown/cancel — abort an in-progress teardown.
+    /// Body: `{ confirm: true }`. Always confirms.
+    func autodownCancel() async throws -> AutodownCancelResponse {
+        try await post("/v1/autodown/cancel", body: ["confirm": true], as: AutodownCancelResponse.self)
+    }
+
+    /// POST /v1/kanban/blocked/{id}/recover — recover ONE blocked card.
+    ///
+    /// Body: `{ reason?, confirm: true }`. Non-2xx (404 for a card that isn't
+    /// blocked, 502 for a failed recover) always throws. Always confirms.
+    func recoverBlockedCard(_ cardID: String, reason: String? = nil) async throws -> RecoverCardResponse {
+        let encoded = cardID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? cardID
+        var payload: [String: Any] = ["confirm": true]
+        if let reason, !reason.isEmpty { payload["reason"] = reason }
+        return try await post("/v1/kanban/blocked/\(encoded)/recover",
+                              body: payload,
+                              as: RecoverCardResponse.self)
+    }
+
+    /// POST /v1/cluster/up — bring the whole serving fleet up.
+    ///
+    /// Body: `{ dry_run?, confirm: true }`. A 502 on a failed up always throws.
+    func clusterUp() async throws -> ClusterUpResponse {
+        try await post("/v1/cluster/up", body: ["confirm": true], as: ClusterUpResponse.self)
+    }
+
+    /// POST /v1/cluster/down — stop ALL workloads fleet-wide.
+    ///
+    /// Body: `{ confirm: true }`. A 502 on a failed down always throws.
+    func clusterDown() async throws -> ClusterDownResponse {
+        try await post("/v1/cluster/down", body: ["confirm": true], as: ClusterDownResponse.self)
     }
 }
