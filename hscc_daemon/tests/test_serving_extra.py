@@ -386,5 +386,84 @@ class TestFleetPlanPaths:
             assert not arg.startswith("~")
 
 
+class TestServeCmdGuard:
+    """t_501fb7f1: a unit's recorded serve_cmd must agree with its OWN
+    recipe/nodes/port, and fleet_up_plan must REFUSE (return [], log loudly)
+    when any unit carries a disagreeing serve_cmd — leaked fixture data must
+    never drive a start on hosts outside the unit's node list.
+    """
+
+    def _unit(self, **over):
+        base = {
+            "id": "orch", "role": "orchestrator",
+            "nodes": ["10.0.0.244", "10.0.0.246"], "port": 8000,
+            "recipe": "~/.sparkrun-local/recipes/local-fixed/orch.yaml",
+            "serve_cmd": [
+                "sparkrun", "run",
+                "/Users/desac/.sparkrun-local/recipes/local-fixed/orch.yaml",
+                "--cluster", "hscc", "--hosts", "10.0.0.244,10.0.0.246",
+                "--port", "8000", "--no-follow", "--ensure",
+                "--served-model-name", "M orch orchestrator-model", "--tp", "2"],
+        }
+        base.update(over)
+        return base
+
+    def test_agreeing_serve_cmd_is_clean(self):
+        from hscc_daemon import serving
+        assert serving._validate_unit_serve_cmd(self._unit()) == []
+
+    def test_absent_serve_cmd_is_clean(self):
+        from hscc_daemon import serving
+        u = self._unit()
+        u.pop("serve_cmd")
+        assert serving._validate_unit_serve_cmd(u) == []
+
+    def test_hosts_outside_node_list_is_violation(self):
+        from hscc_daemon import serving
+        u = self._unit()
+        # drifted hosts (10.0.0.1) vs unit nodes (10.0.0.*)
+        u["serve_cmd"][6] = "10.0.0.1,10.0.0.2"
+        probs = serving._validate_unit_serve_cmd(u)
+        assert any("--hosts" in p and "REFUSING" in p for p in probs)
+
+    def test_wrong_port_is_violation(self):
+        from hscc_daemon import serving
+        u = self._unit()
+        idx = u["serve_cmd"].index("--port")
+        u["serve_cmd"][idx + 1] = "9000"
+        probs = serving._validate_unit_serve_cmd(u)
+        assert any("--port 9000 disagrees" in p for p in probs)
+
+    def test_wrong_recipe_is_violation(self):
+        from hscc_daemon import serving
+        u = self._unit()
+        u["serve_cmd"][2] = "/Users/desac/recipes/orch.yaml"
+        probs = serving._validate_unit_serve_cmd(u)
+        assert any("recipe" in p for p in probs)
+
+    def test_fleet_up_plan_refuses_on_disagreeing_serve_cmd(self, monkeypatch):
+        """A unit whose serve_cmd targets hosts outside its node list makes
+        fleet_up_plan return [] (start nothing) and log loudly."""
+        from hscc_daemon import serving
+        monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
+        bogus = {"port": 8000, "units": [self._unit()]}
+        # drift the recorded serve_cmd to the leaked fixture hosts/port
+        bogus["units"][0]["serve_cmd"][6] = "10.0.0.1,10.0.0.2"
+        idx = bogus["units"][0]["serve_cmd"].index("--port")
+        bogus["units"][0]["serve_cmd"][idx + 1] = "9000"
+        warnings = []
+        monkeypatch.setattr(serving, "_serving_warn", lambda m: warnings.append(m))
+        assert serving.fleet_up_plan(bogus) == []
+        assert any("REFUSED start" in w for w in warnings)
+
+    def test_fleet_up_plan_ok_when_serve_cmds_agree(self, monkeypatch):
+        from hscc_daemon import serving
+        monkeypatch.delenv("HSCC_KEEPALIVE_NODES", raising=False)
+        good = {"port": 8000, "units": [self._unit()]}
+        plan = serving.fleet_up_plan(good)
+        assert len(plan) == 1
+        assert plan[0]["cmd"][6] == "10.0.0.244,10.0.0.246"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
