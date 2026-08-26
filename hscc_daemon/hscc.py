@@ -301,6 +301,7 @@ Cluster & templates
   project <cmd>        Project-portfolio (flightdeck) commands: standup verify doctor ...
   api <cmd>            HSCC HTTP API server: start stop status (external apps)
   autodown <cmd>       Idle autodown/autoup: status enable disable wake cancel
+  kanban <cmd>         Board hygiene: blocked (show/recover blocked cards), stale
 
 Utility
   notify <message>     Send a desktop notification
@@ -348,6 +349,7 @@ COMMAND_HELP = {
     "project": "Project-portfolio (flightdeck) commands.\n  Delegates to the relocated flightdeck CLI under hscc-project/. Try 'hscc project --help' for the full subcommand surface.\n  Usage: hscc project <subcommand> [args]",
     "api": "HSCC HTTP API server lifecycle.\n  Subcommands: start [--tailscale] [--bind <ip>] [--port <n>] stop status\n  Usage: hscc api <subcommand> [args]",
     "autodown": "Idle autodown/autoup for the GPU serving layer.\n  Subcommands: status enable [--idle-minutes <n>] [--force] disable wake cancel\n  Usage: hscc autodown <subcommand> [args]",
+    "kanban": "Board hygiene for autodown.\n  blocked [--json]: list BLOCKED cards with why; blocked --recover <id> [--reason <t>]: recover one blocked card to ready\n  stale [--older-than <days>] [--json]: list non-terminal cards; stale --archive <id>: archive one (t_e751e652)\n  Usage: hscc kanban <subcommand> [args]",
     "help": "Show help. Usage: hscc help [command]\n  Use 'hscc help advanced' for internal commands.",
     "verify": "Run a full compatibility/health smoke-test of the cluster.\n  Usage: hscc verify [--json]",
     "stats": "Fleet activity — completions & tool usage over N days (default 7).\n  Usage: hscc stats [days] [--json]",
@@ -761,6 +763,13 @@ def main():
         rc = cmd_autodown(args[1:])
         sys.exit(rc)
 
+    # 'kanban' group — SHOW why a card is blocked and recover it (blocked);
+    # when card t_e751e652's `stale` subcommand lands it is delegated too.
+    if cmd == "kanban":
+        from hscc_daemon.kanban_blocked import cmd_kanban
+        rc = cmd_kanban(args[1:])
+        sys.exit(rc)
+
     # Per-command --help (daemon commands)
     if cmd in DAEMON_COMMANDS and len(args) > 1 and args[1] == "--help":
         help_text = COMMAND_HELP.get(cmd, f"Run 'hscc help {cmd}' for details.")
@@ -845,7 +854,7 @@ def main():
         cmd_ed_uninstall()
     else:
         print(f"Unknown command: {cmd}")
-        print(f"Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, project, api, verify, stats, throughput, autoscale, escalate, start-daemon")
+        print(f"Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, project, api, kanban, verify, stats, throughput, autoscale, escalate, start-daemon")
         sys.exit(1)
 
 
