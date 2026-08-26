@@ -123,32 +123,56 @@ def check_multiplex(gateway_state=None, config=None, profiles_dir=None):
     return {"name": "multiplex", "ok": True, "detail": f"all {len(served)} profiles served"}
 
 
-def _intentional_autodown_in_effect():
-    """True when an intentional autodown is confirmed down (expected_down).
+def _intentional_window_verdict():
+    """Return the intentional-autodown window verdict, or None.
 
     Reuses ``autodown.classify()`` — the SINGLE decision table the watchdog
     (lifecycle.py:219), trigger engine (trigger.py:162) and check_workers
-    resurrection guard (health.py:1002) all consult — rather than re-deriving
-    the rule here. ``expected_down`` is returned only when the watchdog block is
-    latched with ``intentional == "autodown"`` AND autodown state is confirmed
-    ``"down"``.
+    resurrection guard (health.py:1024) all consult — rather than re-deriving
+    the rule here. Returns one of:
 
-    This is the gate for excusing ``hscc verify`` streams that are down because
-    of an intentional, operator-configured teardown. It is NOT sufficient on
-    its own: a stream is excused only when it ALSO carries its own
+    ``"expected_down"``
+        The watchdog block is latched with ``intentional == "autodown"`` AND
+        autodown state is confirmed ``"down"`` — the serving layer is OFF BY
+        DESIGN (an operator-configured teardown).
+    ``"waking"``
+        The block is latched with ``intentional == "autodown"`` AND autodown
+        state is ``"waking"`` — a NORMAL, expected transition: the wake is
+        bringing the serving layer up, so the streams are legitimately not
+        healthy yet. NOT a fault; the layer is coming back, not off.
+
+    Returns None in every other case (no intentional block, state up/error/
+    missing, or classify() raising) ⇒ verify treats ``ok is False`` exactly as
+    before (a failure). This is the gate for excusing ``hscc verify`` streams
+    that are unhealthy because of an intentional autodown transition. It is NOT
+    sufficient on its own: a stream is excused only when it ALSO carries its own
     ``intentional == "autodown"`` marker (see check_daemon_streams), so a real
     fault in an untagged stream still fails even during the window.
 
     Fail-safe: any inability to read the block/config (or classify raising)
-    ⇒ False ⇒ verify treats ``ok is False`` exactly as before (a failure).
+    ⇒ None ⇒ verify treats ``ok is False`` exactly as before (a failure).
     """
     try:
         from . import autodown
         from .lifecycle import load_watchdog_block
-        return autodown.classify(
-            load_watchdog_block(), autodown.load_config()) == "expected_down"
+        verdict = autodown.classify(
+            load_watchdog_block(), autodown.load_config())
+        if verdict in ("expected_down", "waking"):
+            return verdict
+        return None
     except Exception:
-        return False
+        return None
+
+
+def _intentional_window_label(verdict):
+    """Human wording for an intentional-autodown window verdict, so an operator
+    can tell "off on purpose" (down) from "coming back" (waking) from a real
+    fault. ``expected_down`` ⇒ "intentionally down by autodown"; ``waking`` ⇒
+    "waking from autodown (serving layer starting)". A ``None`` verdict (no
+    window) is not labelled — callers only invoke it inside the window."""
+    if verdict == "waking":
+        return "waking from autodown (serving layer starting)"
+    return "intentionally down by autodown"
 
 
 def check_daemon_streams(state_dir=None, max_age_s=None):
@@ -195,7 +219,9 @@ def check_daemon_streams(state_dir=None, max_age_s=None):
     now = datetime.now(timezone.utc)
     issues = []
     expected = []
-    intentional_down = _intentional_autodown_in_effect()
+    window_verdict = _intentional_window_verdict()
+    window_label = (_intentional_window_label(window_verdict)
+                    if window_verdict else None)
 
     for fn in sorted(json_files):
         filepath = os.path.join(state_dir, fn)
@@ -208,12 +234,13 @@ def check_daemon_streams(state_dir=None, max_age_s=None):
 
         ok = data.get("ok")
         if ok is False:
-            # A stream is excused ONLY when an intentional autodown is confirmed
-            # in effect AND the stream itself says it is down because of the
-            # intentional teardown. Either condition missing ⇒ genuine failure.
-            if (intentional_down and data.get("intentional") == "autodown"):
+            # A stream is excused ONLY when an intentional autodown window is
+            # in effect (down by design or waking) AND the stream itself says
+            # it is unhealthy because of the intentional transition. Either
+            # condition missing ⇒ genuine failure.
+            if (window_verdict and data.get("intentional") == "autodown"):
                 reason = data.get("message") or data.get("reason") or "autodown"
-                expected.append(f"{fn}: intentionally down ({reason})")
+                expected.append(f"{fn}: {window_label} ({reason})")
                 # fall through to the recency check below — stale is still stale
             else:
                 issues.append(f"{fn}: ok=False")
@@ -233,7 +260,7 @@ def check_daemon_streams(state_dir=None, max_age_s=None):
                 issues.append(f"{fn}: unparseable timestamp ({ts_str})")
 
     expected_note = (
-        f"intentionally down by autodown: {'; '.join(expected)}"
+        f"{window_label}: {'; '.join(expected)}"
         if expected else ""
     )
     if issues:
@@ -257,34 +284,38 @@ def check_proxy(url=None, timeout=None):
     GETs the URL; OK if HTTP 200 and body has a non-empty 'data' list.
 
     NON-failing during an intentional autodown: when the whole serving layer
-    is torn down by operator config (``classify() == expected_down``), the
-    LiteLLM proxy is part of the teardown set and truthfully lists no models
-    — that is the expected state, not a fault. So, mirroring
-    ``check_daemon_streams`` (verify.py:198-252), the result is then a
-    NON-failing "intentionally down" report that still says so, rather than
-    a RED "no models" that would train operators to ignore it during a
-    normal power-save.
+    is in an intentional window — either torn down by operator config
+    (``classify() == expected_down``) or waking (``classify() == "waking"``,
+    models still loading) — the LiteLLM proxy is part of the (down / coming
+    up) serving layer and truthfully lists no models yet; that is the expected
+    state, not a fault. So, mirroring ``check_daemon_streams``
+    (verify.py:198-252), the result is then a NON-failing report that names
+    the window, rather than a RED "no models" that would train operators to
+    ignore it during a normal power-save or wake.
 
     Genuine proxy failures are NOT blanket-suppressed: the gate key is the
-    SINGLE intentional decision table ``autodown.classify() ==
-    expected_down`` (verify.py:126). With no intentional block — or while
-    the layer should be up (waking/up) — the proxy check behaves exactly as
-    before and a broken/unreachable/proxy-with-no-models still fails. We
-    cannot distinguish "no models because the fleet is intentionally down"
-    from "proxy is genuinely broken" inside that window (they are
-    indistinguishable at the HTTP layer, and the proxy is SUPPOSED to be
-    down), so the safe reading while intentionally down is to not report a
-    fault; any real proxy problem surfaces as soon as the wake completes.
+    SINGLE intentional decision table ``autodown.classify()`` restricted to the
+    intentional window (``expected_down``/``waking``, verify.py:126). With no
+    intentional block — or while the layer should be up (``should_be_up``) —
+    the proxy check behaves exactly as before and a
+    broken/unreachable/proxy-with-no-models still fails. We cannot distinguish
+    "no models because the fleet is intentionally down/waking" from "proxy is
+    genuinely broken" inside that window (they are indistinguishable at the
+    HTTP layer, and the proxy is SUPPOSED to be down), so the safe reading
+    while in the intentional window is to not report a fault; any real proxy
+    problem surfaces as soon as the wake completes.
     """
     if url is None:
         url = "http://localhost:4000/v1/models"
     if timeout is None:
         timeout = 4
 
-    if _intentional_autodown_in_effect():
+    window_verdict = _intentional_window_verdict()
+    if window_verdict:
+        window_label = _intentional_window_label(window_verdict)
         return {"name": "proxy", "ok": True,
-                "detail": "intentionally down by autodown: serving layer "
-                          "is down, no models expected"}
+                "detail": f"{window_label}: serving layer not serving "
+                          f"models, none expected"}
 
     try:
         req = urllib.request.Request(url, method="GET")
