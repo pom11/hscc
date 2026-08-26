@@ -264,11 +264,12 @@ def check_dgx():
     
     ok = results["ssh_reachable"] and results["vllm_healthy"]
     state_entry = {"ok": ok, "details": results}
-    if not ok and _intentional_autodown_down():
-        # The whole serving layer is deliberately down by autodown — the model
-        # being stopped IS why vLLM is unreachable. Tag the stream so verify
-        # treats it as an expected intentional down, not a fault. Any real fault
-        # (no intentional block) is left to fail normally below.
+    if not ok and _intentional_window():
+        # The serving layer is in an intentional-autodown window — either
+        # down by design (model stopped IS why vLLM is unreachable) or waking
+        # (model still loading, vLLM not answering yet). Both are expected
+        # non-faults. Tag the stream so verify treats them as such, and names
+        # the window. Any real fault (no intentional block) fails normally.
         state_entry["intentional"] = "autodown"
         state_entry["message"] = "intentional autodown — serving layer down by design"
     write_state("dgx", state_entry)
@@ -389,9 +390,10 @@ def check_gateway():
         "ok": ok, "gateway_job": job_ok, "vllm_healthy": vllm_ok,
         "multiplex_ok": mux["ok"], "multiplex_message": mux["message"],
     }
-    if not ok and _intentional_autodown_down():
-        # Serving layer down by design — vLLM being stopped is why the gateway
-        # backend probe fails. Tag so verify treats it as expected, not a fault.
+    if not ok and _intentional_window():
+        # Serving layer in an intentional-autodown window (down by design or
+        # waking) — vLLM being stopped/loading is why the gateway backend probe
+        # fails. Tag so verify treats it as expected, not a fault.
         state_data["intentional"] = "autodown"
         state_data["message"] = "intentional autodown — serving layer down by design"
     write_state("gateway", state_data)
@@ -472,12 +474,13 @@ def check_proxy():
     proxy_data = {"ok": ok, "port": PROXY_PORT, "relaunched": True,
                   "last_check": now_iso(),
                   "message": "relaunched" if ok else "relaunch failed"}
-    if ok is False and _intentional_autodown_down():
-        # Fleet deliberately down — the worker proxy is not required while the
-        # serving layer is stopped. Tag so verify treats it as expected, not a
-        # real fault. The proxy relaunch attempt above is intentionally left
-        # unchanged: the proxy is a CPU-only management unit (not a serving
-        # unit), so starting it is not a serving resurrection.
+    if ok is False and _intentional_window():
+        # Fleet in an intentional-autodown window (down by design or waking) —
+        # the worker proxy is not serving models while the layer is stopped or
+        # still coming up. Tag so verify treats it as expected, not a real fault.
+        # The proxy relaunch attempt above is intentionally left unchanged: the
+        # proxy is a CPU-only management unit (not a serving unit), so starting
+        # it is not a serving resurrection.
         proxy_data["intentional"] = "autodown"
         proxy_data["message"] = "intentional autodown — worker proxy not required while fleet down"
     write_state("proxy", proxy_data)
@@ -1053,6 +1056,32 @@ def _intentional_autodown_down():
         return False
 
 
+def _intentional_window():
+    """True during the intentional-autodown WINDOW (down OR waking).
+
+    The breadth-of-window companion to ``_intentional_autodown_down`` for the
+    stream-TAGGING writers (check_dgx:274, check_gateway:397, check_proxy:483):
+    during a WAKE the serving layer is coming up and the streams are
+    legitimately not healthy yet (models still loading), so they must carry the
+    ``intentional == "autodown"`` marker for ``hscc verify`` to report "coming
+    up" instead of false-failing a normal transition. Reuses the SAME single
+    decision table ``autodown.classify()`` via ``autodown.intentional_window``
+    — no parallel representation.
+
+    Deliberately NOT used by the ``check_workers`` resurrection guard, which
+    stays keyed on the NARROWER ``_intentional_autodown_down()`` (expected_down
+    only) so a genuinely wedged unit is still healed during a wake.
+    """
+    try:
+        from . import autodown
+        from .lifecycle import load_watchdog_block
+        verdict = autodown.classify(
+            load_watchdog_block(), autodown.load_config())
+        return autodown.intentional_window(verdict)
+    except Exception:
+        return False
+
+
 def check_workers():
     """Keep-alive worker check (UNIT-keyed, G1): health-check each serving.json
     keep-alive worker UNIT on its own port and relaunch a crashed one with its
@@ -1086,18 +1115,28 @@ def check_workers():
                                 "last_check": now_iso()})
         return True
 
-    # §8 intentional-autodown gate (Fix 1): if the whole fleet is deliberately
-    # down by autodown (confirmed), do NOT resurrect the keep-alive units it
-    # stopped. Any other state (no block / should_be_up) falls through to
-    # ordinary supervision below.
-    if _intentional_autodown_down():
-        log("Workers check: intentional autodown in effect — fleet (incl. "
-            "keepalive units) deliberately down, NOT relaunching")
+    # §8 intentional-autodown gate (Fix 1, extended to the wake): if the whole
+    # fleet is in an intentional-autodown window (confirmed down by design, or
+    # waking — the wake is bringing the units up), do NOT independently
+    # relaunch the keep-alive units. Relaunching mid-wake would fight the wake
+    # process and the units are legitimately not up yet, so the workers stream
+    # is written "coming up with the wake" (ok=True + intentional marker) for
+    # verify to excuse. Any other state (no block / should_be_up / healthy)
+    # falls through to ordinary supervision; a wake that fails and leaves the
+    # waking window (→ error) resumes healing there.
+    if _intentional_window():
+        _window_label = (
+            "intentional autodown — fleet down by design"
+            if _intentional_autodown_down()
+            else "waking from autodown — fleet coming up, not relaunching")
+        log(f"Workers check: intentional autodown window in effect — fleet "
+            f"(incl. keepalive units) not up, NOT relaunching")
         write_state("workers", {
             "ok": True, "total": len(units), "online": 0, "relaunched": [],
             "down": [], "last_check": now_iso(),
-            "message": f"intentional autodown — {len(units)} keepalive unit(s) "
-                       "deliberately down, not relaunching",
+            "intentional": "autodown",
+            "message": f"{_window_label} — {len(units)} keepalive unit(s) "
+                       f"not up",
         })
         return True
 

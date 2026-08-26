@@ -624,9 +624,11 @@ class TestRunAllFullVerifyIntentionalAutodown:
     autodown.json in the tmp dir — no live ~/.hscc or ~/.hermes is touched.
     """
 
-    def _arm_intentional(self, tmp_hfcc_dir, monkeypatch):
-        """Latched intentional watchdog block + autodown config at down,
-        exactly as TestCheckDaemonStreamsIntentional does."""
+    def _arm_intentional(self, tmp_hfcc_dir, monkeypatch, state="down"):
+        """Latched intentional watchdog block + autodown config at ``state``
+        (default "down"), exactly as TestCheckDaemonStreamsIntentional does.
+        Pass ``state="waking"`` to simulate the wake window (block latched,
+        models still loading)."""
         from hscc_daemon import lifecycle as _lc
         from hscc_daemon import autodown as _ad
         block_file = str(tmp_hfcc_dir / "watchdog-block.json")
@@ -637,7 +639,7 @@ class TestRunAllFullVerifyIntentionalAutodown:
         ad_file = str(tmp_hfcc_dir / "autodown.json")
         monkeypatch.setattr(_ad, "AUTODOWN_FILE", ad_file)
         _ad.save_config({**_ad.DEFAULT_CONFIG, "enabled": True,
-                         "state": "down", "down_since": "2026-01-01T00:00:00+00:00"})
+                         "state": state, "down_since": "2026-01-01T00:00:00+00:00"})
 
     def _build_fleet(self, tmp_path):
         """Plant the whole synthetic fleet surface; return run_all overrides.
@@ -750,3 +752,92 @@ class TestRunAllFullVerifyIntentionalAutodown:
         assert by_name["proxy"]["ok"] is False
         assert "no models" in by_name["proxy"]["detail"]
         assert by_name["daemon_streams"]["ok"] is False
+
+    def test_full_verify_round_trip_passes_waking(self, tmp_path,
+                                                  tmp_hfcc_dir, monkeypatch):
+        """Wake window (+ intentional block) ⇒ OVERALL PASS.
+
+        The serving layer is coming up (models still loading), so every
+        serving stream legitimately reports unhealthy WITH the intentional
+        marker and the proxy lists no models — the exact healthy in-wake
+        state. The gate must now excuse this window, and the wording must say
+        "waking" (coming back), not "intentionally down" (off on purpose).
+        """
+        from hscc_daemon.verify import run_all
+        self._arm_intentional(tmp_hfcc_dir, monkeypatch, state="waking")
+        overrides = self._build_fleet(tmp_path)
+
+        with self._proxy_no_models():
+            result = run_all(**overrides)
+
+        assert result["ok"] is True, (
+            "full verify must PASS during the waking window; got: "
+            + repr(result["checks"]))
+        by_name = {c["name"]: c for c in result["checks"]}
+        # The proxy explicitly says it is waking, not off by design.
+        assert "waking from autodown" in by_name["proxy"]["detail"]
+        assert by_name["proxy"]["ok"] is True
+        # daemon_streams names the waking window and excused the streams.
+        assert "waking from autodown" in \
+            by_name["daemon_streams"]["detail"]
+        assert by_name["daemon_streams"]["ok"] is True
+
+    def test_full_verify_waking_without_intentional_block_fails(
+            self, tmp_path, tmp_hfcc_dir, monkeypatch):
+        """Negative control: same in-wake fleet state but NO intentional block
+        ⇒ OVERALL FAIL. With autodown state waking but no latched block the
+        intentional markers and empty proxy are genuine failures (the layer
+        should be up — nothing excuses it)."""
+        from hscc_daemon.verify import run_all
+        # Enable autodown at waking WITHOUT a block: NOT armed via
+        # _arm_intentional, so classify() stays 'healthy' and nothing is
+        # excused — even though the streams carry the intentional marker.
+        from hscc_daemon import autodown as _ad
+        ad_file = str(tmp_hfcc_dir / "autodown.json")
+        monkeypatch.setattr(_ad, "AUTODOWN_FILE", ad_file)
+        _ad.save_config({**_ad.DEFAULT_CONFIG, "enabled": True,
+                         "state": "waking",
+                         "down_since": "2026-01-01T00:00:00+00:00"})
+        overrides = self._build_fleet(tmp_path)
+
+        with self._proxy_no_models():
+            result = run_all(**overrides)
+
+        assert result["ok"] is False, (
+            "full verify must FAIL waking with no intentional block; got: "
+            + repr(result["checks"]))
+        by_name = {c["name"]: c for c in result["checks"]}
+        assert by_name["proxy"]["ok"] is False
+        assert by_name["daemon_streams"]["ok"] is False
+
+    def test_full_verify_real_fault_during_waking_fails(
+            self, tmp_path, tmp_hfcc_dir, monkeypatch):
+        """Negative control: waking with the intentional block armed, PLUS an
+        UNRELATED real fault (a non-serving stream untagged, e.g. heartbeat)
+        ⇒ OVERALL FAIL.
+
+        The serving streams are excused (they are down because of the wake),
+        but the unrelated stream is NOT carrying the intentional marker and is
+        NOT excused — a genuine fault during a wake must still surface.
+        """
+        from hscc_daemon.verify import run_all
+        from hscc_daemon.state import now_iso
+        self._arm_intentional(tmp_hfcc_dir, monkeypatch, state="waking")
+        overrides = self._build_fleet(tmp_path)
+
+        # Inject an unrelated real fault: a non-serving stream, ok=False, NO
+        # intentional marker (heartbeat is not part of the serving layer).
+        state_dir = tmp_path / "state"
+        (state_dir / "heartbeat.json").write_text(json.dumps({
+            "ok": False, "timestamp": now_iso(), "last_check": now_iso(),
+            "stream": "heartbeat"}))
+
+        with self._proxy_no_models():
+            result = run_all(**overrides)
+
+        assert result["ok"] is False, (
+            "a real fault during waking must still FAIL; got: "
+            + repr(result["checks"]))
+        by_name = {c["name"]: c for c in result["checks"]}
+        assert by_name["daemon_streams"]["ok"] is False
+        assert "heartbeat" in by_name["daemon_streams"]["detail"]
