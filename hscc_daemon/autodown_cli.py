@@ -39,6 +39,9 @@ Usage: hscc autodown <subcommand> [args]
   hscc autodown enable [--idle-minutes <n>]  Arm idle autodown (default 10). Resets the idle timer
                                                so arming never immediately tears down. Non-acting: if
                                                serving is down it does NOT start it.
+  hscc autodown enable --force               Arm even when active Hermes cron jobs exist (autodown may
+                                               power the cluster down when they are due). Overridden jobs
+                                               are recorded and shown in 'status'.
   hscc autodown disable                      Disarm autodown and clear the intentional watchdog block so
                                                ordinary supervision resumes. Does NOT restart serving — if
                                                you want it up, run 'hscc autodown wake' or bring it up another way.
@@ -82,6 +85,11 @@ def _error(msg, json_mode):
     return 1
 
 
+def _has_force(argv):
+    """True when ``--force`` is present in the (subcommand) argv."""
+    return "--force" in argv
+
+
 def _cmd_status(rest, json_mode):
     """``hscc autodown status`` — read-only report (§7).
 
@@ -101,7 +109,22 @@ def _cmd_status(rest, json_mode):
     if autodown._has_active_work():
         blocking_board = autodown.kanban_blocking_board()
         if blocking_board and blocking_board != autodown._UNREADABLE_BOARD:
-            blocking = f"kanban work on board '{blocking_board}'"
+            # Name the SPECIFIC blocking task(s), not just the board, so the
+            # operator can act without running a second command. Reuses the
+            # same board enumeration the predicate just did (list_stale_tasks
+            # → _enum_board_names) so status names exactly the work that blocks.
+            tasks = autodown.list_stale_tasks(
+                board=blocking_board, older_than=None)["tasks"]
+            if tasks:
+                names = ", ".join(
+                    f"{t['id']} ({t['title']})" for t in tasks[:3])
+                if len(tasks) > 3:
+                    names += f", … and {len(tasks) - 3} more"
+                blocking = f"kanban work on board '{blocking_board}': {names}"
+            else:
+                # Predicate said active but no task could be enumerated (e.g.
+                # the interlock is held by an unreadable board). Name the board.
+                blocking = f"kanban work on board '{blocking_board}'"
         else:
             blocking = "kanban work (board unknown)"
 
@@ -124,6 +147,11 @@ def _cmd_status(rest, json_mode):
         "kanban_ok": kc["ok"] if kc else None,
         "kanban_reason": kc["reason"] if kc else "",
         "blocked_by": blocking,
+        # Force-armed without --force: set when the operator armed despite
+        # active Hermes cron jobs. Surfaced so the operator can always see WHY
+        # autodown is armed despite scheduled jobs (§7, feat t_2b711a94).
+        "force_armed": bool(cfg.get("force_armed")),
+        "force_armed_overrides": cfg.get("force_armed_overrides") or [],
     }
     if json_mode:
         print(json.dumps(status))
@@ -138,6 +166,10 @@ def _cmd_status(rest, json_mode):
         print(line)
     else:
         print(f"autodown: ENABLED (idle_minutes={status['idle_minutes']})")
+    if status["force_armed"]:
+        print("  force-armed:     YES (armed despite active Hermes cron jobs)")
+        for job in status["force_armed_overrides"]:
+            print(f"    overridden job: {job}")
     print(f"  state:           {status['state']}")
     if status["blocked_by"]:
         print(f"  blocked by:      {status['blocked_by']}")
@@ -160,12 +192,25 @@ def _cmd_status(rest, json_mode):
 
 
 def _cmd_enable(rest, json_mode):
-    """``hscc autodown enable [--idle-minutes N]`` — arm it (§7).
+    """``hscc autodown enable [--idle-minutes N] [--force]`` — arm it (§7).
 
     Persists ``enabled: true`` (+ ``idle_minutes``) to autodown.json AND resets
     ``last_activity_iso = now`` (§1e first-window guard) so arming can never cause
     an immediate teardown. NON-ACTING: if the serving layer is currently down it
     does NOT start it — a separate ``wake`` (or an inbound event) brings it up.
+
+    **Cron-guard (feat t_2b711a94 §7):** before arming, enumerate ACTIVE Hermes
+    scheduled jobs via ``autodown.list_active_cron_jobs`` (Hermes' on-disk
+    source of truth, ``~/.hermes/cron/jobs.json``). If any are active, ``enable``
+    ABORTS — prints the jobs (name, schedule, next run), explains that autodown
+    may power the cluster down when they are due, and exits non-zero. A config
+    we cannot read (unreadable/absent jobs.json) is treated as "cannot
+    determine" and ALSO aborts — autodown never arms on an unverifiable signal.
+
+    ``--force`` overrides the guard: it arms anyway, prints the jobs that were
+    overridden, and records ``force_armed: true`` + the overridden job names in
+    autodown.json so ``hscc autodown status`` can always show why autodown is
+    armed despite scheduled jobs.
     """
     idle_minutes, err = _parse_idle_minutes(rest)
     if err:
@@ -173,12 +218,67 @@ def _cmd_enable(rest, json_mode):
     if idle_minutes is None:
         idle_minutes = DEFAULT_IDLE_MINUTES
 
+    force = _has_force(rest)
+
+    # Cron-guard: read Hermes' scheduled jobs. Fail-closed — an unreadable/
+    # absent jobs.json is "cannot determine" and blocks arming unless forced.
+    active_jobs = autodown.list_active_cron_jobs()
+
+    if not force:
+        if active_jobs is autodown.CRON_UNREADABLE:
+            return _error(
+                "cannot determine Hermes cron jobs — "
+                f"{autodown.CRON_JOBS_FILE} is unreadable or absent. Autodown "
+                "does NOT arm on an unverifiable signal. Fix the cron config "
+                "(or pass --force to override).", json_mode)
+        if active_jobs:
+            # Abort: do NOT enable. Print the conflicting jobs + why, exit
+            # non-zero (§7).
+            names = ", ".join(
+                (j.get("name") or j.get("id")) for j in active_jobs)
+            if json_mode:
+                print(json.dumps({
+                    "error": (
+                        "aborting: active Hermes cron jobs present — autodown "
+                        "may power the cluster down when they are due"),
+                    "active_cron_jobs": active_jobs, "exit": 1,
+                }))
+            else:
+                print("autodown: NOT armed — aborting: active Hermes cron jobs "
+                      "exist and autodown may power the cluster down when they "
+                      "are due.", file=sys.stderr)
+                for j in active_jobs:
+                    print(f"  scheduled job:   {j.get('name') or j.get('id')}",
+                          file=sys.stderr)
+                    print(f"    schedule:      {j.get('schedule_display') or '?'}",
+                          file=sys.stderr)
+                    print(f"    next run:      {j.get('next_run_at') or '?'}",
+                          file=sys.stderr)
+                print(f"  ({len(active_jobs)} active job(s): {names})",
+                      file=sys.stderr)
+                print("  Fix: pause/disable the conflicting job(s), or "
+                      "re-run with --force to arm anyway.", file=sys.stderr)
+            return 1
+
     # record_activity stamps last_activity_iso=now (creates the file if absent,
     # still disabled) — §1d.4 CLI source + §1e first-window guard.
     autodown.record_activity("cli")
     cfg = autodown.load_config()
     cfg["enabled"] = True
     cfg["idle_minutes"] = idle_minutes
+    if force and active_jobs not in (None, autodown.CRON_UNREADABLE) \
+            and active_jobs:
+        # Force-armed: record that we overrode active cron jobs so status can
+        # always explain why autodown is armed despite them (§7).
+        cfg["force_armed"] = True
+        cfg["force_armed_overrides"] = [
+            j.get("name") or j.get("id") for j in active_jobs]
+    else:
+        # Normal arm (no active cron conflict), or force with nothing to
+        # override, or force with an undeterminable config — clear any prior
+        # force markers so a later clean arm is not mislabeled.
+        cfg["force_armed"] = False
+        cfg["force_armed_overrides"] = []
     autodown.save_config(cfg)
 
     if json_mode:
@@ -186,9 +286,19 @@ def _cmd_enable(rest, json_mode):
             "enabled": True,
             "idle_minutes": idle_minutes,
             "last_activity_iso": cfg["last_activity_iso"],
+            "force_armed": cfg["force_armed"],
+            "force_armed_overrides": cfg["force_armed_overrides"],
         }))
     else:
-        print(f"autodown: ENABLED (idle_minutes={idle_minutes})")
+        if force and active_jobs not in (None, autodown.CRON_UNREADABLE) \
+                and active_jobs:
+            # Report which jobs were overridden (§7).
+            print(f"autodown: ENABLED (idle_minutes={idle_minutes}, FORCED)")
+            for j in active_jobs:
+                print(f"  overrode schedule: {j.get('name') or j.get('id')}"
+                      f" (schedule {j.get('schedule_display') or '?'})")
+        else:
+            print(f"autodown: ENABLED (idle_minutes={idle_minutes})")
         print("  Idle timer reset — will not tear down for at least "
               f"{idle_minutes} minutes.")
         if cfg["state"] == "down":

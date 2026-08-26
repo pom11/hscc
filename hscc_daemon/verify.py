@@ -123,10 +123,55 @@ def check_multiplex(gateway_state=None, config=None, profiles_dir=None):
     return {"name": "multiplex", "ok": True, "detail": f"all {len(served)} profiles served"}
 
 
+def _intentional_autodown_in_effect():
+    """True when an intentional autodown is confirmed down (expected_down).
+
+    Reuses ``autodown.classify()`` — the SINGLE decision table the watchdog
+    (lifecycle.py:219), trigger engine (trigger.py:162) and check_workers
+    resurrection guard (health.py:1002) all consult — rather than re-deriving
+    the rule here. ``expected_down`` is returned only when the watchdog block is
+    latched with ``intentional == "autodown"`` AND autodown state is confirmed
+    ``"down"``.
+
+    This is the gate for excusing ``hscc verify`` streams that are down because
+    of an intentional, operator-configured teardown. It is NOT sufficient on
+    its own: a stream is excused only when it ALSO carries its own
+    ``intentional == "autodown"`` marker (see check_daemon_streams), so a real
+    fault in an untagged stream still fails even during the window.
+
+    Fail-safe: any inability to read the block/config (or classify raising)
+    ⇒ False ⇒ verify treats ``ok is False`` exactly as before (a failure).
+    """
+    try:
+        from . import autodown
+        from .lifecycle import load_watchdog_block
+        return autodown.classify(
+            load_watchdog_block(), autodown.load_config()) == "expected_down"
+    except Exception:
+        return False
+
+
 def check_daemon_streams(state_dir=None, max_age_s=None):
     """Check all daemon state files are healthy and recent.
 
-    OK if every *.json has ok==True and last_check within max_age_s of now.
+    OK if every *.json has ok==True and last_check within max_age_s of now,
+    EXCEPT streams that are deliberately down by an intentional autodown.
+
+    An intentional, operator-configured teardown is not a fault: while the
+    whole serving layer is down by design, the serving streams (watchdog, dgx,
+    gateway, proxy, workers) truthfully report ``ok: False`` because the models
+    really are stopped. A health command that reads RED during normal operation
+    would train the operator to ignore it — and a scheduled check would page
+    for nothing. So a stream whose data carries its own ``intentional ==
+    "autodown"`` marker, AND an intentional autodown is confirmed in effect
+    (``classify() == expected_down``), is treated as a NON-failing "expected"
+    state that still tells the truth: the detail names the intentional autodown
+    so ``hscc verify``'s human output says the cluster is intentionally down
+    rather than silently claiming everything is normal.
+
+    Genuine failures are NOT blanket-suppressed: any ``ok is False`` stream
+    WITHOUT the intentional marker (or outside a confirmed intentional window)
+    still fails — the intended negative control.
     """
     if state_dir is None:
         state_dir = os.path.expanduser("~/.hscc/state")
@@ -149,6 +194,8 @@ def check_daemon_streams(state_dir=None, max_age_s=None):
 
     now = datetime.now(timezone.utc)
     issues = []
+    expected = []
+    intentional_down = _intentional_autodown_in_effect()
 
     for fn in sorted(json_files):
         filepath = os.path.join(state_dir, fn)
@@ -159,10 +206,21 @@ def check_daemon_streams(state_dir=None, max_age_s=None):
             issues.append(f"{fn}: unreadable")
             continue
 
-        if not data.get("ok"):
-            issues.append(f"{fn}: ok=False")
+        ok = data.get("ok")
+        if ok is False:
+            # A stream is excused ONLY when an intentional autodown is confirmed
+            # in effect AND the stream itself says it is down because of the
+            # intentional teardown. Either condition missing ⇒ genuine failure.
+            if (intentional_down and data.get("intentional") == "autodown"):
+                reason = data.get("message") or data.get("reason") or "autodown"
+                expected.append(f"{fn}: intentionally down ({reason})")
+                # fall through to the recency check below — stale is still stale
+            else:
+                issues.append(f"{fn}: ok=False")
 
-        # Check recency via last_check or timestamp
+        # Check recency via last_check or timestamp (applies to ALL streams,
+        # intentional or not — an intentionally-down stream still must publish
+        # fresh state every tick; silence there is a real fault).
         ts_str = data.get("last_check") or data.get("timestamp")
         if ts_str:
             try:
@@ -174,8 +232,21 @@ def check_daemon_streams(state_dir=None, max_age_s=None):
             except (ValueError, TypeError):
                 issues.append(f"{fn}: unparseable timestamp ({ts_str})")
 
+    expected_note = (
+        f"intentionally down by autodown: {'; '.join(expected)}"
+        if expected else ""
+    )
     if issues:
-        return {"name": "daemon_streams", "ok": False, "detail": "; ".join(issues)}
+        detail = "; ".join(issues)
+        if expected_note:
+            detail = f"{expected_note}; REAL FAILURES: {detail}"
+        return {"name": "daemon_streams", "ok": False, "detail": detail}
+
+    if expected_note:
+        return {
+            "name": "daemon_streams", "ok": True,
+            "detail": f"ok={len(json_files) - len(expected)} healthy, {expected_note}",
+        }
 
     return {"name": "daemon_streams", "ok": True, "detail": f"all {len(json_files)} streams healthy"}
 

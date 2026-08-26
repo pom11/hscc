@@ -12,7 +12,6 @@ cluster state (operator constraint).
 import json
 
 from hscc_daemon import replay
-from hscc_daemon import telegram
 
 # The autouse conftest isolation fixture stubs replay.default_deliver_message to
 # a hermetic no-op so NO test can ever reach the live stack by accident. These
@@ -228,7 +227,7 @@ class TestDefaultDeliver:
             posted.append((chat_id, text, kw))
             return True
 
-        monkeypatch.setattr(telegram, "send_message", fake_send)
+        monkeypatch.setattr(replay, "send_message", fake_send)
         # The message's own topic is NOT a registry topic, but it's a telegram
         # message so it is mappable (general catch-all here). chat_id is the
         # original chat; the reply must go back there.
@@ -273,7 +272,7 @@ class TestDefaultDeliver:
             posted.append((chat_id, text, kw))
             return True
 
-        monkeypatch.setattr(telegram, "send_message", fake_send)
+        monkeypatch.setattr(replay, "send_message", fake_send)
         msg = _msg(chat_id="-100999", thread_id="2257", reply_to_id=5)
         assert replay.default_deliver_message(msg) is True
         assert sent["argv"][2] == "ecofire-app-orch"
@@ -316,7 +315,7 @@ class TestDefaultDeliver:
             posted.append(a)
             return True
 
-        monkeypatch.setattr(telegram, "send_message", fake_send)
+        monkeypatch.setattr(replay, "send_message", fake_send)
         assert replay.default_deliver_message(_msg(thread_id="2046")) is False
         assert posted == []  # no reply posted on orchestrator failure
 
@@ -339,7 +338,7 @@ class TestDefaultDeliver:
             return _P()
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        monkeypatch.setattr(telegram, "send_message", lambda *a, **k: False)
+        monkeypatch.setattr(replay, "send_message", lambda *a, **k: False)
         assert replay.default_deliver_message(_msg(thread_id="2046")) is False
         assert len(sent) == 1  # orchestrator DID run — but reply failed
 
@@ -389,7 +388,7 @@ class TestReplayWithProductionSeam:
             posted.append(text)
             return True
 
-        monkeypatch.setattr(telegram, "send_message", fake_send)
+        monkeypatch.setattr(replay, "send_message", fake_send)
         res = replay.replay_queued(deliver_message=replay.default_deliver_message,
                                    path=q)
         assert res["delivered"] == 2

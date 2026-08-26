@@ -20,10 +20,25 @@ from hscc_daemon import lifecycle
 from hscc_daemon.autodown_cli import (cmd_autodown, _parse_idle_minutes,
                                       DEFAULT_IDLE_MINUTES)
 
+# The REAL cron reader, captured at import (before the autouse _no_active_crons
+# fixture replaces ad.list_active_cron_jobs with a []-returning stub per test).
+# Tests that want the production active/inactive filtering restore this.
+_REAL_LIST_ACTIVE_CRON_JOBS = ad.list_active_cron_jobs
+
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _no_active_crons(monkeypatch):
+    """Default: NO active Hermes cron jobs, so existing enable/status tests arm
+    normally. The cron-guard itself is tested explicitly (those tests overwrite
+    this via their own monkeypatch of ``ad.list_active_cron_jobs``, which — LIFO
+    teardown — wins during the test). Also keeps every test off the real
+    ``~/.hermes/cron/jobs.json``.
+    """
+    monkeypatch.setattr(ad, "list_active_cron_jobs", lambda *a, **k: [])
 
 @pytest.fixture
 def autodown_file(tmp_path, monkeypatch):
@@ -169,26 +184,55 @@ class TestStatus:
         """When kanban work blocks teardown, status names the board — the
         operator can tell healthy-and-waiting from stuck-on-an-interlock."""
         from hscc_daemon import autodown
+        import sqlite3
 
         def _fake_active(kanban_db=None):
             autodown._note_blocking("hscc")
             return True
+
+        # Stub the board the predicate named so status does NOT read the
+        # operator's real boards (tests never touch live boards).
+        kb = sqlite3.connect(":memory:")
+        kb.row_factory = sqlite3.Row
+        kb.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, "
+                   "assignee TEXT, status TEXT, created_at INTEGER)")
+        kb.execute("INSERT INTO tasks VALUES "
+                   "('t-1', 'forgotten card', 'w', 'todo', 0), "
+                   "('t-2', 'other', 'w', 'running', 0)")
+        kb.commit()
+
+        class _Kb:
+            def list_boards(self):
+                return [{"slug": "hscc"}]
+            def connect_closing(self, board=None):
+                class _CM:
+                    def __enter__(_self):
+                        return kb
+                    def __exit__(_self, *exc):
+                        return False
+                return _CM()
+
+        def _fake_load():
+            return _Kb()
 
         autodown_file.write_text(json.dumps({
             "enabled": True, "idle_minutes": 10, "state": "up",
             "last_activity_iso": "2026-08-25T09:19:51+00:00",
         }))
         monkeypatch.setattr(autodown, "_has_active_work", _fake_active)
+        monkeypatch.setattr(autodown, "_load_kanban_db_or_default", _fake_load)
         rc = cmd_autodown(["status"])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "blocked by:      kanban work on board 'hscc'" in out
+        assert "kanban work on board 'hscc': t-1 (forgotten card), " \
+               "t-2 (other)" in out
 
         # --json carries the same machine-readable signal.
         rc = cmd_autodown(["status", "--json"])
         assert rc == 0
         data = json.loads(capsys.readouterr().out)
-        assert data["blocked_by"] == "kanban work on board 'hscc'"
+        assert data["blocked_by"] == \
+            "kanban work on board 'hscc': t-1 (forgotten card), t-2 (other)"
 
     def test_status_no_down_since_line_when_null(self, capsys, autodown_file,
                                                  block_file):
@@ -283,6 +327,195 @@ class TestEnable:
         assert data["enabled"] is True
         assert data["idle_minutes"] == 9
         assert data["last_activity_iso"]
+
+
+# ---------------------------------------------------------------------------
+# enable — Hermes cron-job guard (feat t_2b711a94 §7)
+# ---------------------------------------------------------------------------
+# Active scheduled jobs and an idle-down cluster conflict: autodown may power
+# the GPU serving layer down exactly when a job is due. So `enable` reads
+# Hermes' source of truth (~/.hermes/cron/jobs.json) and ABORTS when active
+# jobs exist, unless `--force` is given. Unreadable/absent cron config ⇒
+# "cannot determine" ⇒ abort (never arm on an unverifiable signal).
+
+_ACTIVE_JOBS = [
+    {"id": "j1", "name": "hscc-dep-watcher", "schedule_display": "0 8 * * *",
+     "next_run_at": "2026-08-26T08:00:00+03:00"},
+    {"id": "j2", "name": "hscc-escalate-watcher",
+     "schedule_display": "*/15 * * * *", "next_run_at": "2026-08-26T00:45:00+03:00"},
+]
+
+
+class TestEnableCronGuard:
+    def _use_real_reader(self, monkeypatch):
+        """Restore the REAL ``list_active_cron_jobs`` (the autouse stub returns
+        []), so the production filtering runs end-to-end against the
+        conftest-redirected CRON_JOBS_FILE."""
+        monkeypatch.setattr(ad, "list_active_cron_jobs",
+                            _REAL_LIST_ACTIVE_CRON_JOBS)
+
+    def _stub_active(self, monkeypatch, jobs):
+        monkeypatch.setattr(ad, "list_active_cron_jobs", lambda *a, **k: jobs)
+
+    def test_aborts_nonzero_and_lists_jobs(self, capsys, autodown_file,
+                                           block_file, monkeypatch):
+        """Active jobs present ⇒ `enable` aborts non-zero and lists them."""
+        self._stub_active(monkeypatch, _ACTIVE_JOBS)
+        rc = cmd_autodown(["enable", "--idle-minutes", "5"])
+        assert rc == 1
+        captured = capsys.readouterr()
+        combined = captured.out + captured.err
+        assert "NOT armed" in combined
+        assert "hscc-dep-watcher" in combined
+        assert "hscc-escalate-watcher" in combined
+        assert "0 8 * * *" in combined
+        assert "*/15 * * * *" in combined
+        assert "2026-08-26T08:00:00+03:00" in combined
+        # Must NOT have armed: no config file created.
+        assert not autodown_file.exists()
+
+    def test_abort_json(self, capsys, autodown_file, block_file, monkeypatch):
+        self._stub_active(monkeypatch, _ACTIVE_JOBS)
+        rc = cmd_autodown(["enable", "--json"])
+        assert rc == 1
+        data = json.loads(capsys.readouterr().out)
+        assert data["exit"] == 1
+        assert "aborting" in data["error"]
+        assert len(data["active_cron_jobs"]) == 2
+        assert not autodown_file.exists()
+
+    def test_no_active_jobs_arms(self, capsys, autodown_file, block_file,
+                                  monkeypatch):
+        """No active jobs ⇒ enable works as before (returns 0, arms)."""
+        self._stub_active(monkeypatch, [])
+        rc = cmd_autodown(["enable", "--idle-minutes", "5"])
+        assert rc == 0
+        cfg = _read_config(autodown_file)
+        assert cfg["enabled"] is True
+        assert cfg["force_armed"] is False
+        assert cfg["force_armed_overrides"] == []
+
+    def test_unreadable_cron_config_aborts(self, capsys, autodown_file,
+                                           block_file, monkeypatch):
+        """Unreadable/absent cron config ⇒ abort with 'cannot determine'."""
+        self._stub_active(monkeypatch, ad.CRON_UNREADABLE)
+        rc = cmd_autodown(["enable"])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "cannot determine" in err
+        assert not autodown_file.exists()
+
+    def test_inactive_jobs_do_not_block(self, capsys, autodown_file,
+                                        block_file, monkeypatch):
+        """Disabled/paused jobs do not block arming — the REAL reader filters
+        them out of the active set, so the CLI arms normally."""
+        autodown_file.parent.mkdir(parents=True, exist_ok=True)
+        jobs_file = autodown_file.parent / "cron" / "jobs.json"
+        jobs_file.parent.mkdir(parents=True, exist_ok=True)
+        jobs_file.write_text(json.dumps({"jobs": [
+            {"id": "x", "name": "paused-job", "enabled": False,
+             "schedule_display": "0 8 * * *", "next_run_at": "..."}]}))
+        self._use_real_reader(monkeypatch)
+        rc = cmd_autodown(["enable", "--idle-minutes", "5"])
+        assert rc == 0
+        cfg = _read_config(autodown_file)
+        assert cfg["enabled"] is True
+        assert cfg["force_armed"] is False
+
+    def test_force_arms_and_records_overrides(self, capsys, autodown_file,
+                                              block_file, monkeypatch):
+        """--force arms anyway, prints the overridden jobs, records them."""
+        self._stub_active(monkeypatch, _ACTIVE_JOBS)
+        rc = cmd_autodown(["enable", "--idle-minutes", "5", "--force"])
+        assert rc == 0
+        cfg = _read_config(autodown_file)
+        assert cfg["enabled"] is True
+        assert cfg["force_armed"] is True
+        assert set(cfg["force_armed_overrides"]) == {
+            "hscc-dep-watcher", "hscc-escalate-watcher"}
+        captured = capsys.readouterr()
+        assert "FORCED" in captured.out
+        assert "hscc-dep-watcher" in captured.out
+
+    def test_force_records_only_actually_active_jobs(
+            self, capsys, autodown_file, block_file, monkeypatch):
+        """--force records only the ACTIVE jobs it overrode. Uses the REAL
+        reader against a real jobs.json so the active/inactive split happens
+        in production code, not a stub."""
+        autodown_file.parent.mkdir(parents=True, exist_ok=True)
+        jobs_file = autodown_file.parent / "cron" / "jobs.json"
+        jobs_file.parent.mkdir(parents=True, exist_ok=True)
+        jobs_file.write_text(json.dumps({"jobs": [
+            {"id": "j1", "name": "hscc-dep-watcher", "enabled": True,
+             "schedule_display": "0 8 * * *",
+             "next_run_at": "2026-08-26T08:00:00+03:00"},
+            {"id": "p", "name": "paused-one", "enabled": False,
+             "schedule_display": "0 8 * * *", "next_run_at": "..."},
+            {"id": "j2", "name": "hscc-escalate-watcher", "enabled": True,
+             "schedule_display": "*/15 * * * *",
+             "next_run_at": "2026-08-26T00:45:00+03:00"},
+        ]}))
+        self._use_real_reader(monkeypatch)
+        rc = cmd_autodown(["enable", "--force"])
+        assert rc == 0
+        cfg = _read_config(autodown_file)
+        assert cfg["force_armed"] is True
+        assert set(cfg["force_armed_overrides"]) == {
+            "hscc-dep-watcher", "hscc-escalate-watcher"}
+        captured = capsys.readouterr()
+        assert "paused-one" not in captured.out
+
+    def test_force_arms_when_config_unreadable(self, capsys, autodown_file,
+                                               block_file, monkeypatch):
+        """--force overrides even a 'cannot determine' config (arms, but does
+        NOT record overrides since nothing determinate was overridden)."""
+        self._stub_active(monkeypatch, ad.CRON_UNREADABLE)
+        rc = cmd_autodown(["enable", "--force"])
+        assert rc == 0
+        cfg = _read_config(autodown_file)
+        assert cfg["enabled"] is True
+        assert cfg["force_armed"] is False
+        assert cfg["force_armed_overrides"] == []
+
+    def test_force_json(self, capsys, autodown_file, block_file, monkeypatch):
+        self._stub_active(monkeypatch, _ACTIVE_JOBS)
+        rc = cmd_autodown(["enable", "--force", "--json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["enabled"] is True
+        assert data["force_armed"] is True
+        assert data["force_armed_overrides"] == [
+            "hscc-dep-watcher", "hscc-escalate-watcher"]
+
+    def test_status_surfaces_force_armed(self, capsys, autodown_file,
+                                         block_file):
+        """status shows force_armed + overridden jobs so the operator can see
+        why autodown is armed despite scheduled jobs."""
+        autodown_file.write_text(json.dumps({
+            "enabled": True, "idle_minutes": 5, "state": "up",
+            "last_activity_iso": "2026-08-26T00:00:00+00:00",
+            "force_armed": True,
+            "force_armed_overrides": ["hscc-dep-watcher"],
+        }))
+        rc = cmd_autodown(["status"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "force-armed:     YES" in out
+        assert "hscc-dep-watcher" in out
+
+    def test_status_json_surfaces_force_armed(self, capsys, autodown_file,
+                                              block_file):
+        autodown_file.write_text(json.dumps({
+            "enabled": True, "idle_minutes": 5, "state": "up",
+            "last_activity_iso": "2026-08-26T00:00:00+00:00",
+            "force_armed": True,
+            "force_armed_overrides": ["hscc-dep-watcher"],
+        }))
+        rc = cmd_autodown(["status", "--json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["force_armed"] is True
+        assert data["force_armed_overrides"] == ["hscc-dep-watcher"]
 
 
 # ---------------------------------------------------------------------------
