@@ -9,19 +9,28 @@ import Security
 /// group, tagged with a purpose constant so the item is easy to delete.
 enum KeychainStore {
     /// Purpose string identifying this app's token item in the Keychain.
-    private static let service = "com.hscc.ios"
-    private static let account = "api-token"
-    private static let accessGroup = ""
+    private static let service = AppGroup.keychainService
+    private static let account = AppGroup.keychainAccount
+    /// The shared App-Group access group so the widget/Live Activity extensions
+    /// can read the SAME token item (`$(AppIdentifierPrefix)` = team prefix
+    /// resolved at build time from the entitlements file).
+    private static let accessGroup = KeychainConstants.keychainAccessGroup
 
     /// Read the stored token, or nil when none is saved.
     static func readToken() -> String? {
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
+        // Apply the shared access group when it is non-empty (always is via
+        // KeychainConstants), so app + extensions read the same item.
+        let ag = accessGroup.trimmingCharacters(in: .whitespaces)
+        if !ag.isEmpty {
+            query[kSecAttrAccessGroup as String] = ag
+        }
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess, let data = item as? Data else {
@@ -36,12 +45,16 @@ enum KeychainStore {
     static func saveToken(_ token: String?) {
         if let token, !token.isEmpty {
             let data = Data(token.utf8)
-            let query: [String: Any] = [
+            var query: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: service,
                 kSecAttrAccount as String: account,
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             ]
+            let ag = accessGroup.trimmingCharacters(in: .whitespaces)
+            if !ag.isEmpty {
+                query[kSecAttrAccessGroup as String] = ag
+            }
             let attributes: [String: Any] = [
                 kSecValueData as String: data,
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
@@ -60,11 +73,15 @@ enum KeychainStore {
 
     /// Delete any stored token.
     static func deleteToken() {
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
+        let ag = accessGroup.trimmingCharacters(in: .whitespaces)
+        if !ag.isEmpty {
+            query[kSecAttrAccessGroup as String] = ag
+        }
         SecItemDelete(query as CFDictionary)
     }
 }

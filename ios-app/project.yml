@@ -1,4 +1,4 @@
-# XcodeGen project spec for the HSCC iOS app.
+# XcodeGen project spec for the HSCC iOS app + its extensions.
 #
 # Generate the Xcode project reproducibly with:
 #   brew install xcodegen
@@ -6,11 +6,16 @@
 #
 # See README.md for both build paths (xcodegen, or manual Xcode project).
 #
-# This spec drives a single iOS app target: SwiftUI lifecycle, iOS 26+
-# deployment target, no third-party dependencies (self-contained + sideload
-# friendly). Sources are listed explicitly (not via a folder glob) so a source
-# added without updating this file is easy to spot in review. Info.plist keys
-# are generated from the `info` block below; a physical `Info.plist` is not
+# This spec drives the main app plus TWO app-extension targets:
+#   * HSCCWidgets     — Home Screen cluster widget (systemSmall + systemMedium).
+#   * HSCCLiveActivity— the fleet-wake Live Activity (ActivityKit).
+# All three targets share the App Group `group.com.hscc.ios` so the widget and
+# Live Activity see the operator's connection settings and the cluster state.
+#
+# Sources are listed explicitly (not via a folder glob) so a source added
+# without updating this file is easy to spot in review. The shared sources
+# under Sources/Shared are compiled into EVERY target. Info.plist keys are
+# generated from the `info` block below; a physical `Info.plist` is not
 # required (XcodeGen emits one at build time).
 
 name: HSCC
@@ -27,6 +32,10 @@ settings:
     SWIFT_VERSION: "5.9"
     TARGETED_DEVICE_FAMILY: "1"          # iPhone only (sideload onto owner's device)
     SWIFT_EMIT_LOC_STRINGS: YES
+
+# Shared source files compiled into the app AND both extensions, so every
+# surface reads the same settings / topology / cluster state. Each target's
+# `sources` list includes the shared files it needs under Sources/Shared.
 
 targets:
   HSCC:
@@ -45,6 +54,7 @@ targets:
       - path: Sources/HSCC/APIError.swift
       - path: Sources/HSCC/KeychainStore.swift
       - path: Sources/HSCC/SettingsStore.swift
+      - path: Sources/HSCC/LiveActivityManager.swift
       - path: Sources/HSCC/Views/SettingsView.swift
       - path: Sources/HSCC/Views/Theme.swift
       - path: Sources/HSCC/Views/NodeTopologyView.swift
@@ -65,6 +75,22 @@ targets:
       - path: Sources/HSCC/Intents/ReviewQueueIntent.swift
       - path: Sources/HSCC/Intents/CannedCard.swift
       - path: Sources/HSCC/Intents/AppShortcuts.swift
+      # Shared cross-target sources (compiled into all three bundles).
+      - path: Sources/Shared/SharedModels.swift
+      - path: Sources/Shared/ExtensionClient.swift
+      - path: Sources/Shared/WakingActivity.swift
+    entitlements:
+      path: Sources/HSCC.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.hscc.ios
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)group.com.hscc.ios
+    dependencies:
+      - target: HSCCWidgets
+        embed: true
+      - target: HSCCLiveActivity
+        embed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios
@@ -75,6 +101,7 @@ targets:
         INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads: YES
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: Sources/HSCC.entitlements
     info:
       path: Sources/Info.plist
       properties:
@@ -84,3 +111,82 @@ targets:
           # HTTP is fine — Tailscale provides the encrypted transport (design
           # §D rules TLS out of scope). Do NOT add pinning/cert handling.
           NSAllowsArbitraryLoads: true
+
+  # Home Screen cluster widget — small (state + compact topology glyph) and
+  # medium (topology pairs + model count + idle-minutes remaining).
+  HSCCWidgets:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Sources/HSCCWidgets/HSCCWidgetsBundle.swift
+      - path: Sources/HSCCWidgets/ClusterWidget.swift
+      - path: Sources/HSCCWidgets/ClusterWidgetViews.swift
+      # Shared source files compiled into every target.
+      - path: Sources/Shared/SharedModels.swift
+      - path: Sources/Shared/ExtensionClient.swift
+      # Theme tokens shared with the app (design-system palette, no raw hex).
+      - path: Sources/HSCC/Views/Theme.swift
+    entitlements:
+      path: Sources/HSCCWidgets.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.hscc.ios
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)group.com.hscc.ios
+    info:
+      path: Sources/HSCCWidgets/Info.plist
+      properties:
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios.widgets
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: Sources/HSCCWidgets.entitlements
+        SKIP_INSTALL: YES
+        # Widgets must include their own app-group entitlement; extension
+        # products must not copy the main app's framework (there is none).
+    dependencies:
+      - sdk: WidgetKit.framework
+
+  # Fleet-wake Live Activity (ActivityKit) — the app starts it via
+  # `LiveActivityManager`; this extension renders the ActivityConfiguration.
+  HSCCLiveActivity:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Sources/HSCCLiveActivity/HSCCLiveActivity.swift
+      # Shared source files compiled into every target.
+      - path: Sources/Shared/SharedModels.swift
+      - path: Sources/Shared/WakingActivity.swift
+      # Theme tokens shared with the app (design-system, no raw hex here).
+      - path: Sources/HSCC/Views/Theme.swift
+    entitlements:
+      path: Sources/HSCCLiveActivity.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.hscc.ios
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)group.com.hscc.ios
+    info:
+      path: Sources/HSCCLiveActivity/Info.plist
+      properties:
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios.liveactivity
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: Sources/HSCCLiveActivity.entitlements
+        SKIP_INSTALL: YES
+    dependencies:
+      - sdk: WidgetKit.framework
+      - sdk: ActivityKit.framework
