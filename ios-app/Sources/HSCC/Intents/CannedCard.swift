@@ -87,7 +87,7 @@ struct DispatchCannedCardIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         guard let client = IntentClient.make() else {
-            return .result(dialog: IntentSettingsMessage.notConfigured)
+            return .result(dialog: IntentDialog(IntentSettingsMessage.notConfigured))
         }
         // EXPLICIT confirmation before any mutation. Every other mutating
         // surface in the app is fronted by MutationButton's confirmationDialog;
@@ -95,7 +95,7 @@ struct DispatchCannedCardIntent: AppIntent {
         // confirming an AppIntent — it does not reliably do so, which would
         // let a stray invocation dispatch a real card with no user assent.
         try await requestConfirmation(
-            result: .result(dialog: "Dispatch \(card.title) onto \(card.boardName)?")
+            result: .result(dialog: IntentDialog("Dispatch \(card.title) onto \(card.boardName)?"))
         )
         do {
             // ALWAYS confirm: true — B4's client sends it on every mutation.
@@ -108,12 +108,12 @@ struct DispatchCannedCardIntent: AppIntent {
             // actually returned) — never a fabricated success.
             let spoken = result.message
                 ?? "Dispatched card \(result.id ?? "") onto \(card.boardName)."
-            return .result(dialog: spoken)
+            return .result(dialog: IntentDialog(spoken))
         } catch {
             // Non-2xx makes the client throw — say it failed, never claim success.
             let message = (error as? HSCCError)?.localizedDescription
                 ?? "The card could not be dispatched."
-            return .result(dialog: "Dispatch failed. \(message)")
+            return .result(dialog: IntentDialog("Dispatch failed. \(message)"))
         }
     }
 }
