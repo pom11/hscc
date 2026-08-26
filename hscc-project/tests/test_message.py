@@ -817,3 +817,152 @@ def test_single_token_disambiguation(tmp_path, capsys, monkeypatch):
     assert fake2.calls == []  # nothing was sent
 
 
+# --------------------------------------------------------------------------- #
+# dispatch — cluster-readiness guard (idle autodown, §6-dispatch-guard)
+# --------------------------------------------------------------------------- #
+# The guard wakes an autodown-down/waking cluster and waits for readiness
+# BEFORE creating the card, so the dispatcher never spawns a worker into a
+# still-loading fleet (the live incident that destroyed 2 of 3 dispatched
+# cards). Fakes only: a fake autodown module is injected via monkeypatching
+# msg_cmd._load_autodown; no real teardown/wake, no Telegram, no live board.
+
+class FakeAD:
+    """Stands in for hscc_daemon.autodown inside the dispatch guard.
+
+    ``cfg`` is the config ``load_config`` returns; ``autoup_result`` is the
+    dict ``autoup`` returns (counted via ``autoup_calls``). ``grace`` feeds
+    ``_wake_ready_grace_minutes``.
+    """
+
+    def __init__(self, cfg, autoup_result=None, grace=20):
+        self.cfg = dict(cfg)
+        self.autoup_result = dict(autoup_result) if autoup_result else {}
+        self.grace = grace
+        self.autoup_calls = 0
+
+    def load_config(self):
+        return dict(self.cfg)
+
+    def _wake_ready_grace_minutes(self):
+        return self.grace
+
+    def autoup(self):
+        self.autoup_calls += 1
+        return dict(self.autoup_result)
+
+
+def _stub_ad(ad, monkeypatch):
+    monkeypatch.setattr(msg_cmd, "_load_autodown", lambda: ad)
+
+
+def _dispatch_done(monkeypatch, tmp_path, capsys, ad, **over):
+    """Run a full --apply dispatch with the fake AD wired; return combined out."""
+    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
+    kb = FakeKB(new_id="card-77")
+    _stub_kb(kb, monkeypatch)
+    _stub_ad(ad, monkeypatch)
+    fake = FakeTG(topics={140: "hscc"})
+    base = dict(client=fake, project="hscc", task="build the widget",
+                assignee=None, message="do the widget", apply=True)
+    base.update(over)
+    rc = msg_cmd.cmd_dispatch(_ns(**base), projects)
+    captured = capsys.readouterr()
+    return rc, captured.out + captured.err, kb, ad
+
+
+def test_dispatch_state_up_proceeds_no_wait(monkeypatch, tmp_path, capsys):
+    """state=up -> dispatch proceeds, autoup NOT triggered (no cluster pause)."""
+    ad = FakeAD({"enabled": True, "state": "up"})
+    rc, combined, kb, ad = _dispatch_done(monkeypatch, tmp_path, capsys, ad)
+    assert rc == 0
+    assert ad.autoup_calls == 0          # never woke an already-up cluster
+    assert kb.created[0]["title"] == "build the widget"  # card created
+
+def test_dispatch_state_down_wakes_waits_then_creates(monkeypatch, tmp_path, capsys):
+    """state=down -> wake triggered; on readiness the card IS created."""
+    ad = FakeAD({"enabled": True, "state": "down"}, autoup_result={"result": "up"})
+    rc, combined, kb, ad = _dispatch_done(monkeypatch, tmp_path, capsys, ad)
+    assert rc == 0
+    assert ad.autoup_calls == 1          # wake was triggered
+    assert "waking the serving layer before dispatch" in combined
+    assert "serving layer is UP" in combined
+    assert kb.created[0]["title"] == "build the widget"  # created after readiness
+
+def test_dispatch_state_waking_waits_then_creates(monkeypatch, tmp_path, capsys):
+    """state=waking -> waits for readiness, then the card IS created."""
+    ad = FakeAD({"enabled": True, "state": "waking"}, autoup_result={"result": "up"})
+    rc, combined, kb, ad = _dispatch_done(monkeypatch, tmp_path, capsys, ad)
+    assert rc == 0
+    assert ad.autoup_calls == 1
+    assert "state=waking" in combined
+    assert kb.created[0]["title"] == "build the widget"
+
+def test_dispatch_no_wait_creates_immediately(monkeypatch, tmp_path, capsys):
+    """--no-wait -> card created immediately even while down, no wake issued."""
+    ad = FakeAD({"enabled": True, "state": "down"}, autoup_result={"result": "up"})
+    rc, combined, kb, ad = _dispatch_done(
+        monkeypatch, tmp_path, capsys, ad, no_wait=True)
+    assert rc == 0
+    assert ad.autoup_calls == 0          # --no-wait: operator accepted the risk
+    assert "waking the serving layer" not in combined
+    assert kb.created[0]["title"] == "build the widget"  # still created
+
+def test_dispatch_autodown_disabled_never_waits(monkeypatch, tmp_path, capsys):
+    """autodown disabled -> dispatch proceeds with NO wake, never interferes."""
+    ad = FakeAD({"enabled": False, "state": "down"}, autoup_result={"result": "up"})
+    rc, combined, kb, ad = _dispatch_done(monkeypatch, tmp_path, capsys, ad)
+    assert rc == 0
+    assert ad.autoup_calls == 0
+    assert "waking the serving layer" not in combined
+    assert kb.created[0]["title"] == "build the widget"
+
+def test_dispatch_wake_failure_no_card_created(monkeypatch, tmp_path, capsys):
+    """wake failure -> NO card created, non-zero exit, clear error on stderr."""
+    ad = FakeAD({"enabled": True, "state": "down", "reason": "boom"},
+                autoup_result={"result": "start-failed", "failed_at": "orch"})
+    rc, combined, kb, ad = _dispatch_done(monkeypatch, tmp_path, capsys, ad)
+    assert rc == 1
+    assert ad.autoup_calls == 1
+    assert "wake did NOT complete (start-failed)" in combined
+    assert "boom" in combined            # the recorded failure reason surfaced
+    assert kb.created == []              # NO card created
+    assert "created on board" not in combined  # no false success
+
+def test_dispatch_wake_timeout_no_card_created(monkeypatch, tmp_path, capsys):
+    """readiness timeout -> NO card created, non-zero exit, clear error."""
+    ad = FakeAD({"enabled": True, "state": "waking", "reason": "not ready in time"},
+                autoup_result={"result": "not-ready"})
+    rc, combined, kb, ad = _dispatch_done(monkeypatch, tmp_path, capsys, ad)
+    assert rc == 1
+    assert ad.autoup_calls == 1
+    assert "wake did NOT complete (not-ready)" in combined
+    assert kb.created == []              # NO card created
+    assert "created on board" not in combined
+
+def test_dispatch_dry_run_never_wakes(monkeypatch, tmp_path, capsys):
+    """A dry-run (no --apply) NEVER wakes the cluster — dry-run mutates nothing."""
+    ad = FakeAD({"enabled": True, "state": "down"}, autoup_result={"result": "up"})
+    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
+    kb = FakeKB(new_id="card-77")
+    _stub_kb(kb, monkeypatch)
+    _stub_ad(ad, monkeypatch)
+    rc = msg_cmd.cmd_dispatch(
+        _ns(client=FakeTG(topics={140: "hscc"}), project="hscc",
+            task="build the widget", assignee=None, message="do the widget",
+            apply=False),
+        projects,
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "dry-run" in captured.out
+    assert ad.autoup_calls == 0          # dry-run never touches the cluster
+    assert kb.created == []
+
+def test_ensure_cluster_ready_unknown_state_refuses(monkeypatch, tmp_path):
+    """An unexpected state refuses to dispatch into an unverifiable cluster."""
+    ad = FakeAD({"enabled": True, "state": "bogus"})
+    err = msg_cmd._ensure_cluster_ready(ad, _ns(no_wait=False))
+    assert err is not None
+    assert "unexpected" in err
+    assert "--no-wait" in err
+    assert ad.autoup_calls == 0
