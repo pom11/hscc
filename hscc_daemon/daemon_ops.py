@@ -13,6 +13,21 @@ PID_FILE = os.path.expanduser("~/.hscc/daemon.pid")
 LOG_FILE = os.path.expanduser("~/.hscc/daemon.log")
 STATE_DIR = os.path.expanduser("~/.hscc/state")
 
+# The live daemon's check cadence, in seconds, per health stream. This is the
+# SINGLE source of truth for how often `run_daemon_loop` re-runs each check
+# (daemon_ops.py) AND for how long `hscc verify` tolerates a stream being silent
+# before calling it stale (verify.py). Keeping them in lockstep is what stops a
+# healthy-but-slow stream (NAS at 900s) from being flagged stale by a verify
+# window shorter than its own cadence — the "cries wolf on a healthy cluster"
+# bug this constant exists to prevent. NOTE: event_driven.py has its own
+# PERIODIC_STREAMS with different values (e.g. nas: 30) — that module is NOT
+# wired into the live daemon path (cli.py ed-* commands are placeholders), so
+# it is inert; this dict is what actually runs.
+PERIODIC_INTERVALS = {
+    "dgx": 60, "gateway": 60, "local": 60, "heartbeat": 300,
+    "nas": 900, "idle": 300, "workers": 60, "proxy": 60,
+}
+
 
 def get_pid(pid_file=None):
     """Read PID from file, return None if not running.
@@ -164,6 +179,67 @@ def log(msg, level="INFO", log_file=None, pid_file=None):
         print(line)
 
 
+def _run_periodic(stop_event, check_fn, interval, stream_name):
+    """Run one check on a loop until the daemon stops (supervised below).
+
+    Catches BaseException (not just Exception) so a KeyboardInterrupt /
+    SystemExit raised *inside a child thread* — or any other abnormal
+    termination — does NOT silently kill the loop: it is logged LOUDLY and the
+    function RETURNS so the caller (``_run_supervised_periodic``) can see the
+    thread died and restart it. The old ``except Exception`` let a
+    BaseException propagate out of the thread with no one watching, which is
+    precisely how a check "stopped silently". A check that BLOCKS (e.g. a
+    wedged NFS handle in check_nas) never returns here — that class is handled
+    by bounding every blocking probe inside the check functions themselves
+    (health._run_bounded / the bounded existence checks).
+    """
+    while not stop_event.is_set():
+        try:
+            check_fn()
+        except Exception as e:
+            # Ordinary exception (the common transient blip) — log and keep
+            # the SAME thread alive; this is not a death.
+            log(f"Check {stream_name} error: {e}", "ERROR")
+        except BaseException as e:  # noqa: B036 — SystemExit/KeyboardInterrupt
+            # A genuine abnormal exit. Only BaseException subclasses that are
+            # NOT Exception reach here (ordinary Exceptions were handled above),
+            # so this is a real thread death: log it LOUDLY and return so the
+            # supervisor can restart the thread.
+            log(f"Check {stream_name} thread died: {type(e).__name__}: {e}",
+                "ERROR")
+            return
+        stop_event.wait(interval)
+
+
+def _run_supervised_periodic(stop_event, check_fn, interval, stream_name):
+    """Keep a check thread alive: respawn it if it ever dies.
+
+    A periodic health check must NOT be able to stop silently — a dead stream
+    makes ``hscc verify`` cry wolf. If the check thread exits for any reason
+    (BaseException, swallowed fatal, unexpected return) while the daemon should
+    still be running, log it loudly and start a replacement thread. The
+    ``stop_event`` is the only thing that ends this loop: once set, it unwinds
+    and no further respawns happen. Module-level (not nested in
+    ``run_daemon_loop``) so the respawn-on-death behaviour is directly
+    testable; ``run_daemon_loop`` runs one of these per check stream in its own
+    daemon thread.
+    """
+    while not stop_event.is_set():
+        t = threading.Thread(
+            target=_run_periodic,
+            args=(stop_event, check_fn, interval, stream_name),
+            daemon=True,
+        )
+        t.start()
+        t.join()
+        if stop_event.is_set():
+            return
+        # Fell out without the daemon stopping ⇒ the thread died. Log loudly
+        # and immediately replace it (never leave the stream dark).
+        log(f"Check {stream_name} thread died unexpectedly — "
+            f"restarting (interval={interval}s)", "ERROR")
+
+
 def run_daemon_loop():
     """Main daemon event loop (polling mode fallback)."""
     from .health import check_dgx, check_gateway, check_local, check_heartbeat, check_nas, check_idle_monitor, check_workers, check_proxy
@@ -202,10 +278,7 @@ def run_daemon_loop():
     signal.signal(signal.SIGTERM, stop_handler)
     signal.signal(signal.SIGINT, stop_handler)
 
-    STREAMS = {
-        "dgx": 60, "gateway": 60, "local": 60, "heartbeat": 300,
-        "nas": 900, "idle": 300, "workers": 60, "proxy": 60,
-    }
+    STREAMS = PERIODIC_INTERVALS
 
     # The check_* fns are imported as locals above (not module globals), so map
     # them explicitly — globals().get("check_<name>") would return None and no
@@ -216,14 +289,6 @@ def run_daemon_loop():
         "idle": check_idle_monitor, "workers": check_workers,
         "proxy": check_proxy,
     }
-
-    def run_periodic(check_fn, interval, stream_name):
-        while not stop_event.is_set():
-            try:
-                check_fn()
-            except Exception as e:
-                log(f"Check {stream_name} error: {e}", "ERROR")
-            stop_event.wait(interval)
 
     def run_watchdog_loop():
         while not stop_event.is_set():
@@ -252,8 +317,8 @@ def run_daemon_loop():
         check_fn = CHECKS.get(stream_name)
         if check_fn:
             t = threading.Thread(
-                target=run_periodic,
-                args=(check_fn, interval, stream_name),
+                target=_run_supervised_periodic,
+                args=(stop_event, check_fn, interval, stream_name),
                 daemon=True,
             )
             t.start()
