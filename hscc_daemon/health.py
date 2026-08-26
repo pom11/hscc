@@ -674,10 +674,23 @@ def check_nas():
 
     # The path must at least exist on disk. (Existence alone is NOT enough —
     # a bare directory satisfies it — but if it does not exist at all, we're
-    # done immediately.)
-    exists = os.path.exists(NAS_MOUNT)
+    # done immediately.) These stat()-backed calls run INSIDE _run_bounded: on
+    # a wedged (stale-handle) NFS mount even os.path.exists can block
+    # indefinitely, and left unbounded they would freeze the daemon's periodic
+    # NAS thread — the root cause of "NAS check silently stops running". All
+    # three of _probe_mount's stat/df calls are already bounded; the existence
+    # gate at the top of this check was the one fs-probe left unguarded.
+    done, existence = _run_bounded(_probe_exists, NAS_PROBE_TIMEOUT, NAS_MOUNT)
+    if not done:
+        results["message"] = (
+            f"NAS existence probe timed out after {NAS_PROBE_TIMEOUT:g}s — "
+            "stale/wedged mount?"
+        )
+        _write_nas(False, results)
+        return False
+    exists, is_dir = existence
     results["mount_exists"] = exists
-    results["is_dir"] = os.path.isdir(NAS_MOUNT)
+    results["is_dir"] = is_dir
     if not exists:
         results["message"] = f"{NAS_MOUNT} missing (NAS not mounted)"
         _write_nas(False, results)
@@ -859,6 +872,21 @@ def _run_bounded(fn, timeout, *args):
     if box["exc"] is not None:
         raise box["exc"]
     return True, box["value"]
+
+
+def _probe_exists(path):
+    """Return (exists, is_dir) for `path`, tolerating a wedged NFS handle.
+
+    On a stale-handle NFS mount even os.path.exists / os.path.isdir can block
+    indefinitely, so the caller runs this inside ``_run_bounded`` like every
+    other fs probe. Exception-safe: any OSError reports ``exists=False``.
+    """
+    try:
+        exists = os.path.exists(path)
+        is_dir = os.path.isdir(path) if exists else False
+        return exists, is_dir
+    except OSError:
+        return False, False
 
 
 def _probe_mount(path):

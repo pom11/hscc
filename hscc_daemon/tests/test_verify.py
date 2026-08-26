@@ -198,6 +198,58 @@ class TestCheckDaemonStreams:
         assert result["ok"] is False
         assert "stale" in result["detail"]
 
+    def test_nas_stream_healthy_cadence_not_stale(self, tmp_path):
+        """The NAS stream only refreshes every 900s on the live daemon
+        (daemon_ops.PERIODIC_INTERVALS). A NAS state 700s old must NOT be
+        flagged stale — under the old flat 600s window it was, which is the
+        "cries wolf on a healthy cluster" bug (verify.py:206 max_age_s=600 <
+        nas:900). The per-stream limit widens to ~2*900+90=1890s, so a healthy
+        NAS is never caught between ticks."""
+        from hscc_daemon.verify import check_daemon_streams
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        # 700s old — well within the 900s cadence's per-stream window.
+        old = (datetime.now(timezone.utc) - timedelta(seconds=700)).isoformat()
+        data = {"ok": True, "timestamp": old, "last_check": old, "stream": "nas"}
+        (state_dir / "nas.json").write_text(json.dumps(data))
+
+        result = check_daemon_streams(state_dir=str(state_dir))
+        assert result["ok"] is True, result["detail"]
+
+    def test_nas_stream_truly_dead_still_stale(self, tmp_path):
+        """A genuinely dead NAS — silent longer than ~2 full cycles (>1890s for
+        the 900s cadence) — MUST still be flagged stale. Widening the window
+        must not let a real failure slide."""
+        from hscc_daemon.verify import check_daemon_streams
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        # 2000s old — beyond even the widened 1890s NAS limit.
+        old = (datetime.now(timezone.utc) - timedelta(seconds=2000)).isoformat()
+        data = {"ok": True, "timestamp": old, "last_check": old, "stream": "nas"}
+        (state_dir / "nas.json").write_text(json.dumps(data))
+
+        result = check_daemon_streams(state_dir=str(state_dir))
+        assert result["ok"] is False
+        assert "nas.json: stale" in result["detail"]
+
+    def test_fast_stream_tolerated_within_flat_window(self, tmp_path):
+        """A fast stream (dgx, 60s) is NOT widened by the per-stream logic:
+        its limit stays the 600s flat window, so a genuinely-dead dgx (700s
+        old) still fails — fast streams stay tight."""
+        from hscc_daemon.verify import check_daemon_streams
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        old = (datetime.now(timezone.utc) - timedelta(seconds=700)).isoformat()
+        data = {"ok": True, "timestamp": old, "last_check": old, "stream": "dgx"}
+        (state_dir / "dgx.json").write_text(json.dumps(data))
+
+        result = check_daemon_streams(state_dir=str(state_dir))
+        assert result["ok"] is False
+        assert "dgx.json: stale" in result["detail"]
+
     def test_skip_missing_dir(self, tmp_path):
         from hscc_daemon.verify import check_daemon_streams
         result = check_daemon_streams(state_dir=str(tmp_path / "no_such_dir"))

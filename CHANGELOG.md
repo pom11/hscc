@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **daemon: NAS health check no longer goes silent, and `hscc verify` stops
+  crying wolf on a healthy cluster.** Two coupled root causes, both fixed.
+  (1) **Schedule/tolerance mismatch:** the live daemon's NAS stream refreshes
+  every 900s (`daemon_ops.PERIODIC_INTERVALS`, hoisted from the old local
+  `STREAMS` dict) but `verify.check_daemon_streams` used a flat
+  `max_age_s=600` window, so a healthy NAS was flagged stale roughly a third
+  of the time. Staleness is now per-stream: each stream's limit is
+  `max(max_age_s, 2*interval+90)` keyed off the stream's own cadence, so a
+  healthy slow NAS is never caught between ticks while a genuinely dead one
+  (~2 missed ticks) still fails. (2) **Unbounded blocking:** `check_nas`'s
+  existence gate (`os.path.exists`/`os.path.isdir`, health.py) ran directly on
+  the daemon's periodic thread with no timeout, so a wedged NFS handle froze
+  it forever. That gate is now bounded via `_run_bounded(_probe_exists, ...)`
+  like every other fs probe. Also hardened the daemon loop so no check thread
+  can die silently: a check that exits abnormally (BaseException) is detected
+  and the thread restarted by a supervisor (`_run_supervised_periodic`), with
+  the failure logged loudly.
 - **autodown wake restores model aliases.** `autoup()` builds each start
   command via `serving.fleet_up_plan()`, which now appends
   `--served-model-name <concrete> <alias>` (alias by role identity —
