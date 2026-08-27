@@ -344,38 +344,46 @@ def _busy_notice(profile: str, count: int) -> str:
 # means). Measured from the live strong-tier endpoint: ``orchestrator-model``
 # resolves to 262144 tokens (same value the hermes-agent compressor resolves;
 # the hscc-roles generator's COMPACT_THRESHOLD comment cites "~210K of 262K").
-# This is the anchor the bloat high-water mark is computed from — the signal
-# is anchored to the REAL model ceiling, not an arbitrary message count.
+# Reported on ``session_health`` for operator transparency; it is NOT a rotation
+# trigger (see below — rotation fires only on positive compaction-failure
+# evidence, never on raw size).
 _ORCH_CONTEXT_WINDOW = 262144
 
-# Proactive-rotation factor: rotate once the session's CUMULATIVE ``input_tokens``
-# exceeds this many multiples of the context window. ``input_tokens`` in the
-# sessions table is cumulative (monotonically grows: ``input_tokens = input_tokens
-# + ?`` on every turn), so it roughly equals ``(number of successful compaction
-# cycles) x active_window``. The card's measured wall: the wedged ``hscc``
-# session died at 14.2M tokens = ~54x the 262144 window (and its
-# compression_* failure fields were all 0, so the failure signals ALONE would
-# not have caught it — the proactive cumulative high-water mark must). We
-# rotate at 30x the window (7.86M for 262144): comfortably above every observed
-# healthy session (max ~5.9M / 23x for a heavy day) yet with ~1.8x margin below
-# the observed failure wall, so rotation happens well BEFORE the wedge while a
-# session is still broadly healthy. Configurable via ``session_guard.bloat_factor``.
-_DEFAULT_BLOAT_FACTOR = 30.0
+# The proactive context-health mechanism (operator decision, t_a8e9b7ff): make
+# Hermes' NATIVE compaction fire EARLY so there is always ~2x headroom for the
+# compression call itself. Hermes triggers compaction at the lower of the
+# ratio-based threshold and this ABSOLUTE token cap
+# (agent/agent_init.py:1946-1953 reads ``compression.threshold_tokens``, then
+# ``context_compressor._apply_threshold_tokens_cap`` clamps it DOWNWARD only —
+# ``min(cap, context_length)``, and never fires LATER than this cap). Without
+# the cap, the ratio path floors at 0.75 x 262144 = 196608 — the exact
+# active-token value the wedged ``hscc`` run died at, where the compression
+# call (196K + summarizer overhead) had no headroom and retried with growing
+# inputs (196609 -> 196804) until the 600s timeout. Setting the cap to 100000
+# makes compaction fire at ~100K active — comfortably inside the window with
+# headroom to spare — so continuity is PRESERVED (same session id, same history
+# via the summary) instead of wedging. ``_ensure_compaction_threshold`` writes
+# this key onto every resolved ``<project>-orch`` profile, idempotently. This
+# value is a module constant (not a literal scattered around) per the operator
+# decision.
+SESSION_COMPACTION_THRESHOLD_TOKENS = 100000
 
 
 def _session_guard_config(ctx) -> tuple:
     """Resolve the session-guard parameters for this server's config.
 
-    Returns ``(enabled, context_window, bloat_factor)``. Precedence mirrors the
+    Returns ``(enabled, context_window)``. Precedence mirrors the
     ``chat_timeout`` / ``registry`` pattern: ``session_guard`` dict on the
     resolved config object, then ``session_guard`` in ``~/.hscc/api.json``, then
-    the module defaults. Malformed values are a hard config error (matching the
-    API's hard-error-on-malformed-config stance), never a silent guess.
+    the module defaults. ``context_window`` is REPORTED on ``session_health``
+    (operator transparency) but does not drive rotation — rotation is decided
+    solely on positive compaction-failure evidence. Malformed values are a hard
+    config error (matching the API's hard-error-on-malformed-config stance),
+    never a silent guess.
     """
     # defaults
     enabled = True
     context_window = _ORCH_CONTEXT_WINDOW
-    bloat_factor = _DEFAULT_BLOAT_FACTOR
 
     raw = None
     from_config = getattr(ctx, "config", None)
@@ -407,20 +415,7 @@ def _session_guard_config(ctx) -> tuple:
                 raise RuntimeError(
                     "invalid session_guard.context_window — must be > 0"
                 )
-        if raw.get("bloat_factor") is not None:
-            try:
-                bloat_factor = float(raw["bloat_factor"])
-            except (TypeError, ValueError):
-                raise RuntimeError(
-                    f"invalid session_guard.bloat_factor {raw['bloat_factor']!r} — "
-                    "expected a positive number"
-                )
-            if bloat_factor <= 0:
-                raise RuntimeError(
-                    "invalid session_guard.bloat_factor — must be a positive "
-                    "number of context windows"
-                )
-    return enabled, context_window, bloat_factor
+    return enabled, context_window
 
 
 def _open_profile_session_db(profile: str, read_only: bool = False):
@@ -456,32 +451,119 @@ def _open_profile_session_db(profile: str, read_only: bool = False):
         return None
 
 
-def _session_bloat_verdict(session_row, context_window: int,
-                           bloat_factor: float) -> tuple:
-    """Decide whether a session row is bloated, from the real signals.
+def _ensure_compaction_threshold(profile: str) -> dict:
+    """ENSURE the profile's ``compression.threshold_tokens`` makes native
+    compaction fire EARLY (the PRIMARY context-health mechanism, t_a8e9b7ff).
 
-    Returns ``(bloated, reason)``. Two independent triggers (OR):
+    The operator's decision: compaction is the goal, rotation only the last
+    resort. Compaction's trigger is moved EARLIER declaratively — by writing
+    ``compression.threshold_tokens = 100000`` (see
+    :data:`SESSION_COMPACTION_THRESHOLD_TOKENS`) onto the resolved ``<project>-orch``
+    profile's ``config.yaml`` — so Hermes' next chat turn compacts at ~100K
+    active in the 262K window (headroom for the compression call itself)
+    instead of at the 196608 ratio floor where it wedges. Continuity is fully
+    preserved: same session id, same history via the summary — no rotation.
 
-      1. HARD rotate — the session's context compression is actively failing.
-         The sessions table records ``compression_failure_error`` (a string),
-         ``compression_fallback_streak`` and ``compression_ineffective_count``
-         (ints) when Hermes' compressor throws, falls back repeatedly, or runs
-         but fails to shrink the context. Any one of these set means the session
-         already crossed the point where compaction can recover it — continuing
-         it is exactly the 600s wedge the card measured. Rotate immediately.
-      2. PROACTIVE rotate — the session has accumulated enough cumulative
-         ``input_tokens`` (>= ``bloat_factor`` x ``context_window``) that it has
-         been through many successful compaction rounds and the NEXT one is
-         statistically the one most likely to finally fail. The card's proof:
-         the wedged session carried 14.2M cumulative tokens yet had ALL ZERO
-         compression-failure fields, so the failure signals alone could not
-         have caught it — only a cumulative high-water mark could. We rotate
-         while it still works, well before the wall.
+    Idempotent + non-destructive: if the profile already has
+    ``compression.threshold_tokens`` set to a value <= the constant (an
+    operator-set or previously-ensured value), we do NOT clobber it — a lower
+    cap is strictly better, and our own uniform 100000 is a harmless no-op on
+    any window (``_apply_threshold_tokens_cap`` takes ``min(cap,
+    context_length)``, so it can only LOWER the trigger, never raise it).
 
-    A session row is never "bloated" merely because it is LARGE-and-healthy —
-    the triggers require either active compression failure or an enormous
-    cumulative history relative to the model's real context window. The return
-    ``reason`` feeds the rotation payload / project-detail surfacing.
+    We write the profile's OWN ``config.yaml`` directly (via an atomic YAML
+    read-modify-write through the same ``utils.atomic_yaml_write`` the CLI's
+    ``config set`` uses), keyed on the profile's resolved home — we never touch
+    the global ``HERMES_HOME`` env in this multithreaded server, so concurrent
+    chats to different projects can't race each other's config. The write goes
+    through the same file ``hermes -p <profile> config set ...`` writes, which
+    ``agent_init`` (``load_config`` -> ``_compression_cfg.get(\"threshold_tokens\")``)
+    reads on the next ``hermes -p <profile> chat`` invocation.
+
+    Returns a dict describing what was done (``profile``, ``threshold_tokens``,
+    ``previous``, ``set``), or ``None`` when the profile is unresolvable /
+    already correctly configured / the guard couldn't run (FAIL-SAFE: any
+    error leaves the profile untouched and the chat proceeds as before).
+    """
+    import yaml
+    try:
+        from hermes_cli import profiles as profiles_mod
+        from utils import atomic_yaml_write
+    except Exception:
+        return None
+
+    try:
+        canon = profiles_mod.normalize_profile_name(profile)
+        profiles_mod.validate_profile_name(canon)
+        if not profiles_mod.profile_exists(canon):
+            return None
+        cfg_path = profiles_mod.get_profile_dir(canon) / "config.yaml"
+    except Exception:
+        return None
+
+    try:
+        cur = {}
+        if cfg_path.exists():
+            with open(cfg_path, encoding="utf-8") as f:
+                cur = yaml.safe_load(f) or {}
+        if not isinstance(cur, dict):
+            cur = {}
+        comp = cur.get("compression")
+        prev = None
+        if isinstance(comp, dict):
+            prev = comp.get("threshold_tokens")
+        # No-op when an operator value already <= the constant is present: a
+        # lower cap is strictly better (compaction can only fire earlier) and
+        # we must never clobber it.
+        if isinstance(prev, (int, float)) and not isinstance(prev, bool) \
+                and prev <= SESSION_COMPACTION_THRESHOLD_TOKENS:
+            return None
+        if not isinstance(comp, dict):
+            comp = {}
+        comp["threshold_tokens"] = SESSION_COMPACTION_THRESHOLD_TOKENS
+        cur["compression"] = comp
+        atomic_yaml_write(cfg_path, cur, sort_keys=False)
+        return {
+            "profile": profile,
+            "threshold_tokens": SESSION_COMPACTION_THRESHOLD_TOKENS,
+            "previous": prev,
+            "set": True,
+        }
+    except Exception as exc:  # noqa: BLE001 — fail-safe: never break a chat
+        logging.getLogger("hscc-api").error(
+            "could not ensure compression.threshold_tokens on %s (chat "
+            "proceeds on existing config): %r", profile, exc,
+        )
+        return None
+
+
+def _session_bloat_verdict(session_row) -> tuple:
+    """Decide whether a session must be ROTATED (last resort) — from POSITIVE
+    compaction-failure evidence only.
+
+    Returns ``(bloated, reason)``. Since the operator made native compaction
+    the PRIMARY mechanism (see :data:`SESSION_COMPACTION_THRESHOLD_TOKENS` and
+    :func:`_ensure_compaction_threshold`), rotation is demoted to a TRUE last
+    resort that fires ONLY when we have positive evidence the session's
+    compaction has already failed:
+
+      * ``compression_failure_error`` set (the compressor threw — e.g. \"model
+        context length exceeded\");
+      * ``compression_fallback_streak >= 1`` (the compressor fell back to a
+        less-effective path);
+      * ``compression_ineffective_count >= 1`` (compaction ran but did not
+        actually shrink the context).
+
+    Any one of these means the session already crossed the point where another
+    compaction round can recover it — continuing it is exactly the 600s wedge
+    the card measured. Rotate.
+
+    A session is NEVER rotated merely for being LARGE — ``input_tokens`` is a
+    CUMULATIVE counter (``input_tokens = input_tokens + ?`` per turn in the CLI
+    path, never reset by compaction), so raw size says nothing about current
+    health, and with the 100K cap in place a large-but-healthy session is
+    normal and must not be rotated (operator decision, t_a8e9b7ff). The ``reason``
+    feeds the rotation payload / project-detail surfacing.
     """
     def _int(row, key):
         try:
@@ -494,15 +576,6 @@ def _session_bloat_verdict(session_row, context_window: int,
     ineffective_count = _int(session_row, "compression_ineffective_count")
     if failure_error or fallback_streak >= 1 or ineffective_count >= 1:
         return True, "context compression is failing"
-
-    input_tokens = _int(session_row, "input_tokens")
-    ceiling = context_window * bloat_factor
-    if input_tokens >= ceiling:
-        ratio = input_tokens / float(context_window) if context_window else 0.0
-        return True, (
-            f"session has accumulated {input_tokens:,} input tokens "
-            f"(~{ratio:.0f}x the {context_window:,}-token context window)"
-        )
     return False, ""
 
 
@@ -554,23 +627,46 @@ def _rotate_session(db, profile: str, session: str) -> dict:
 
 
 def _guard_session_bloat(ctx, profile: str, session: str):
-    """Check the named chat session for bloat and rotate it if needed.
+    """The session context-health guard, run at chat POST time.
 
-    Runs at chat POST time, BEFORE the job continues ``<session>``. Reads the
-    REAL signals on the session row and, when bloated, retires + recreates it
-    so the chat never wedges on a context it can no longer compact.
+    Two layers, per the operator decision (t_a8e9b7ff):
 
-    Returns a dict describing the rotation (or ``None`` when the session is
-    healthy / the guard couldn't run). FAIL-SAFE: any error reading or writing
-    the profile's state.db results in NO rotation (the chat proceeds on the
-    existing session exactly as before this guard existed) — a guard that can't
-    verify must not invent health, but it must also never break a working chat
-    or corrupt a profile.
+      1. ENSURE (primary, non-destructive): call
+         :func:`_ensure_compaction_threshold` so the profile's native
+         compaction triggers EARLY at ``compression.threshold_tokens = 100000``.
+         This is the actual fix — it prevents the wedge by compacting long
+         before the context runs out of headroom, preserving session continuity
+         (no rotation, same session id, history via the summary). Idempotent;
+         never clobbers an operator value already <= the constant.
+
+      2. ROTATE (last resort, only on positive failure evidence): read the
+         real compaction-failure signals on the session row and, when the
+         verdict says compaction has ALREADY failed (``compression_failure_error``
+         / ``compression_fallback_streak`` / ``compression_ineffective_count``),
+         retire + recreate the session so the chat never wedges. NEVER rotates
+         on raw size alone.
+
+    Returns a dict describing a rotation (when one happened), or ``None`` when
+    the session is healthy / the guard couldn't run. FAIL-SAFE: any error here
+    results in NO rotation and the chat proceeds on the existing session
+    exactly as before this guard existed — a guard that can't verify must not
+    invent health, but it must also never break a working chat or corrupt a
+    profile.
     """
-    enabled, context_window, bloat_factor = _session_guard_config(ctx)
+    enabled, _context_window = _session_guard_config(ctx)
     if not enabled:
         return None
 
+    # Layer 1 — ensure native compaction fires early (the real fix). Best-effort
+    # and non-destructive: failure leaves the chat on the existing config.
+    try:
+        _ensure_compaction_threshold(profile)
+    except Exception:  # noqa: BLE001 — fail-safe, never break the chat
+        logging.getLogger("hscc-api").exception(
+            "compaction-threshold ensure raised for %s (continuing)", profile)
+
+    # Layer 2 — last-resort rotation, ONLY on positive compaction-failure
+    # evidence (never on size alone).
     db = _open_profile_session_db(profile)
     if db is None:
         # Cannot inspect the profile's sessions — do not guess, do not rotate.
@@ -582,8 +678,7 @@ def _guard_session_bloat(ctx, profile: str, session: str):
             session_row = None
         if not session_row:
             return None   # no titled session to guard (chat will 503 honestly)
-        bloated, reason = _session_bloat_verdict(
-            session_row, context_window, bloat_factor)
+        bloated, reason = _session_bloat_verdict(session_row)
         if not bloated:
             return None
         return _do_rotation(db, profile, session, reason)
@@ -620,17 +715,26 @@ def _session_health(ctx, profile: str, session: str):
     """Read-only session-health report (NO rotation) — for operator visibility.
 
     Surfaces the same real signals ``_guard_session_bloat`` inspects, plus the
-    bloat verdict, WITHOUT mutating anything, so the operator can see a
+    rotation verdict, WITHOUT mutating anything, so the operator can see a
     project's chat session health before it breaks (the card's surfacing
     requirement). Returns ``None`` when the profile/session is unresolvable or
     the guard is disabled — an honest "cannot report" that implies nothing.
 
+    ``compaction_at_risk`` is the "alert" the operator asked for (t_a8e9b7ff):
+    it is True exactly when there is POSITIVE evidence compaction is not firing
+    (``compression_failure_error`` / fallback streak / ineffective count). It is
+    intentionally NOT tied to raw ``input_tokens`` — that column is a CUMULATIVE
+    counter (never reset by compaction), so "large" does not mean "compaction
+    failed"; a large-but-healthy session is normal and must NOT be flagged.
+    ``threshold_tokens`` reports the ensured compaction cap so the operator can
+    see the proactive mechanism's configured value.
+
     Payload keys: ``profile``, ``session`` (title), ``messages``,
     ``input_tokens``, ``compression_failure_error``, ``compression_fallback_streak``,
-    ``compression_ineffective_count``, ``context_window``, ``bloat_factor``,
-    ``bloated``, ``reason``.
+    ``compression_ineffective_count``, ``context_window``, ``threshold_tokens``,
+    ``compaction_at_risk``, ``bloated``, ``reason``.
     """
-    enabled, context_window, bloat_factor = _session_guard_config(ctx)
+    enabled, context_window = _session_guard_config(ctx)
     if not enabled:
         return None
     db = _open_profile_session_db(profile, read_only=True)
@@ -643,8 +747,7 @@ def _session_health(ctx, profile: str, session: str):
             session_row = None
         if not session_row:
             return None
-        bloated, reason = _session_bloat_verdict(
-            session_row, context_window, bloat_factor)
+        bloated, reason = _session_bloat_verdict(session_row)
         return {
             "profile": profile,
             "session": session,
@@ -657,7 +760,8 @@ def _session_health(ctx, profile: str, session: str):
             "compression_ineffective_count":
                 int(session_row.get("compression_ineffective_count") or 0),
             "context_window": context_window,
-            "bloat_factor": bloat_factor,
+            "threshold_tokens": SESSION_COMPACTION_THRESHOLD_TOKENS,
+            "compaction_at_risk": bloated,
             "bloated": bloated,
             "reason": reason,
         }
@@ -1026,17 +1130,20 @@ def handle_orchestrator_chat(server, ctx, query, body):
     profile = resolved["profile"]
     session = resolved["session"]
 
-    # Session-bloat guard (t_a8e9b7ff Bug 1): before the job continues the
-    # named ``<session>``, check the session row for real bloat signals and, if
-    # bloated, ROTATE it (retire the old row to ``<session>-retired-<ts>`` —
-    # non-destructive — and create a fresh ``<session>``) so this chat never
-    # wedges on a context compaction can no longer recover. Rotation completes
-    # HERE, synchronously, BEFORE the background job runs ``hermes chat
-    # --continue <session>``, satisfying the card's ordering requirement
-    # (``--continue`` does not create a session; the fresh one must already
-    # exist). The resolved ``session`` name is unchanged — the fresh row now
-    # owns the ``<project>`` title — so per-project continuity (``<project>-orch``
-    # profile / ``<project>`` session / ``<project>`` board) is fully preserved.
+    # Session context-health guard (t_a8e9b7ff Bug 1): before the job continues
+    # the named ``<session>``, (1) ENSURE the profile's native compaction fires
+    # early (``compression.threshold_tokens = 100000`` — the PRIMARY mechanism,
+    # proactive, non-destructive) and (2) as a last resort, when the session row
+    # shows POSITIVE compaction-failure evidence, ROTATE it (retire the old row
+    # to ``<session>-retired-<ts>`` — non-destructive — and create a fresh
+    # ``<session>``) so this chat never wedges on a context compaction can no
+    # longer recover. Rotation (if any) completes HERE, synchronously, BEFORE
+    # the background job runs ``hermes chat --continue <session>``, satisfying
+    # the card's ordering requirement (``--continue`` does not create a session;
+    # the fresh one must already exist). The resolved ``session`` name is
+    # unchanged — the fresh row now owns the ``<project>`` title — so
+    # per-project continuity (``<project>-orch`` profile / ``<project>``
+    # session / ``<project>`` board) is fully preserved.
     rotation = _guard_session_bloat(ctx, profile, session)
 
     # Bug 1 honest-reporting (t_5ed5dfa8): detect when the resolved orchestrator
