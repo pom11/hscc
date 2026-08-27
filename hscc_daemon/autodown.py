@@ -17,7 +17,9 @@ import datetime
 import json
 import os
 import re
+import subprocess
 import sys
+import time
 from typing import Optional
 
 from .daemon_ops import log
@@ -867,19 +869,270 @@ def _default_keepalive_ok():
     return True
 
 
+# ---------------------------------------------------------------------------
+# PR/CI idle interlock (§1a extension) — never tear down while PRs or CI run
+# ---------------------------------------------------------------------------
+# The kanban idle predicate only sees task states; it is BLIND to a live
+# review/merge cycle or a running CI build. Powering the fleet down mid-PR
+# (destroying/half-applying that work) or mid-CI (killing the build) is exactly
+# the kind of destructive surprise autodown must avoid. So open PRs and active
+# CI runs on the tracked repos count as ACTIVE work, exactly like a running
+# kanban card — they preset idle (§1d activity source) AND hard-block teardown
+# (§1a/§6 interlock).
+#
+# Fail-safe direction is identical to the kanban interlock: an unreachable /
+# unevaluable PR/CI source ⇒ ACTIVE ⇒ never tear down on an unverifiable
+# signal. The interlock returns True (active) on any screen failure or unknown
+# state; it returns False (idle w.r.t. PR/CI) ONLY when every tracked repo is
+# POSITIVELY clear of both open PRs and running CI.
+
+# Sentinel returned by the PR/CI screen when the source cannot be reached.
+_PRCI_UNREACHABLE = "<prci-unreachable>"
+
+# The default set of "tracked repos" the real PR/CI screen probes. These are
+# the repos whose open PRs / running CI represent live fleet work (the hscc
+# project's primary codebases). Overridable via env (matching the project's
+# knob convention) so an operator can scope or empty the set; empty ⇒ nothing
+# is probed ⇒ the screen reports clear. Repo identifiers are "<owner>/<name>"
+# so `gh` queries them without resolving remotes.
+DEFAULT_PRCI_REPOS = tuple(
+    r for r in os.environ.get(
+        "HSCC_AUTODOWN_PRCI_REPOS",
+        "pom11/hscc,pom11/ecofire,pom11/flightdeck,pom11/efsdriver",
+    ).split(",") if r.strip()
+)
+
+# Module-level TTL cache for the REAL gh screen so the 30s cycle never hammers
+# the GitHub API on every tick. Cacheable only off the real subprocess path —
+# an injected checker (always used in tests) bypasses it entirely, so tests
+# never observe caching. Default 90s ≈ 3 daemon ticks.
+PRCI_CACHE_TTL = float(os.environ.get("HSCC_AUTODOWN_PRCI_TTL", "90"))
+_prci_cache = {"at": 0.0, "key": None, "result": None}
+
+
+def _screen_prci(repos=None, run=None, _now=None):
+    """Screen the tracked repos for open PRs or running CI via ``gh``.
+
+    Returns ``_PRCI_UNREACHABLE`` when the source cannot be reached
+    (fail-safe: never act on an unverifiable signal), otherwise a dict
+    ``{open_prs, active_runs, repos}`` counting open PRs and in-progress /
+    queued CI runs across the repo set.
+
+    For each repo we run ``gh pr list --state open`` (count) and probe both
+    ``gh run list --status in_progress`` and ``--status queued`` (count; ``gh
+    run list`` takes a single status at a time). ``--limit`` keeps PRs cheap;
+    ``run list`` needs a generous limit so an active run at the tail is not
+    missed. Anything that prevents a confident answer — missing/raising
+    ``gh``, a nonzero exit, unreadable output, a timeout — is a screen failure
+    ⇒ ``_PRCI_UNREACHABLE``, because we must never report "clear" on a signal
+    we could not verify. One repo failing poisons the whole screen (never tear
+    down on a partially-verifiable fleet).
+
+    ``run`` is an injectable ``subprocess.run``-like runner (tests never touch
+    the real network); ``_now`` an injectable clock for the TTL cache. With no
+    ``repos`` it probes ``DEFAULT_PRCI_REPOS``.
+    """
+    if run is None:
+        run = subprocess.run
+    repos = list(repos) if repos else list(DEFAULT_PRCI_REPOS)
+    if not repos:
+        # Nothing tracked ⇒ positively nothing to screen ⇒ clear.
+        return {"open_prs": 0, "active_runs": 0, "repos": []}
+    key = tuple(repos)
+    now = _now() if _now else time.monotonic()
+    if (_prci_cache["key"] == key
+            and now - _prci_cache["at"] < PRCI_CACHE_TTL):
+        return _prci_cache["result"]  # fresh cache hit off the real path
+    result = _screen_prci_uncached(repos, run)
+    _prci_cache["at"] = now
+    _prci_cache["key"] = key
+    _prci_cache["result"] = result
+    return result
+
+
+def _screen_prci_uncached(repos, run):
+    """The real per-repo ``gh`` probes, uncached. See ``_screen_prci``."""
+    total = {"open_prs": 0, "active_runs": 0, "repos": []}
+    for repo in repos:
+        try:
+            open_prs = _gh_count(run, repo, "pr list", "--state open")
+            # ``gh run list`` accepts ONE status value at a time (−s takes a
+            # single value, NOT a comma list), so probe the two "active"
+            # statuses separately and sum.
+            in_progress = _gh_count(
+                run, repo, "run list", "--status in_progress")
+            queued = _gh_count(run, repo, "run list", "--status queued")
+            active_runs = in_progress + queued
+        except Exception:
+            return _PRCI_UNREACHABLE  # any repo unreachable ⇒ fail-safe
+        total["open_prs"] += open_prs
+        total["active_runs"] += active_runs
+    total["repos"] = list(repos)
+    return total
+
+
+def _gh_count(run, repo, verb, arg):
+    """Run one ``gh <verb> --repo <repo> <arg>`` count probe, or raise.
+
+    Raises on ANY screen failure (nonzero exit, timeout, missing gh, unparsed
+    output) so the caller's single ``except`` fails safe. ``--limit 1`` for
+    ``pr list`` keeps it cheap; ``run list`` uses ``--limit 50`` so an active
+    run buried past the default window is still caught. The raw JSON is parsed
+    and its ``length`` returned as the count.
+    """
+    limit = 50 if "run list" in verb else 1  # pr list needs only 1; run list 50
+    # ``verb`` (e.g. ``"pr list"``) and ``arg`` (e.g. ``"--state open"``) each
+    # arrive as single strings containing spaces — split both into separate
+    # argv tokens, since ``subprocess`` passes a list element verbatim (a
+    # literal ``"pr list"`` would be an unknown command). ``--json``/``-q``
+    # count the list length off the raw JSON.
+    proc = run(
+        ["gh"] + verb.split() + ["--repo", repo] + arg.split()
+        + ["--limit", str(limit),
+           "--json", "number" if "run list" not in verb else "databaseId",
+           "-q", "length"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"gh {verb} {repo} rc={proc.returncode}: "
+                           f"{proc.stderr.strip()}")
+    try:
+        return int(proc.stdout.strip())
+    except (TypeError, ValueError):
+        raise RuntimeError(f"gh {verb} {repo} unparsed output: "
+                           f"{proc.stdout.strip()!r}")
+
+
+def _prci_screen_active(result):
+    """Normalize a PR/CI screen result to a bool: has ANY open PR / active run.
+
+    Accepts either the ``_PRCI_UNREACHABLE`` sentinel or a dict from
+    ``_screen_prci``. Never raises. ``_PRCI_UNREACHABLE`` ⇒ True (fail-safe).
+    Any positive count ⇒ True. A recognized dict with both counts zero ⇒ False.
+    Any other / ambiguous shape ⇒ True (fail-safe: never call an unclear
+    screen "clear").
+    """
+    if result is _PRCI_UNREACHABLE:
+        return True  # unverifiable signal ⇒ treat as active
+    if isinstance(result, dict):
+        open_prs = result.get("open_prs")
+        active_runs = result.get("active_runs")
+        if isinstance(open_prs, int) and isinstance(active_runs, int):
+            return open_prs > 0 or active_runs > 0
+    return True  # ambiguous / unreadable shape ⇒ fail-safe active
+
+
+def _has_active_pr_ci(prci_checker=None):
+    """True if a tracked repo has an open PR or running CI (§1a interlock).
+
+    True ⇒ ACTIVE ⇒ NOT idle ⇒ never tear down. False only when the PR/CI
+    screen is POSITIVELY clear. Fail-safe: an unreachable / raising checker,
+    the ``_PRCI_UNREACHABLE`` sentinel, or any ambiguous screen ⇒ True.
+
+    ``prci_checker`` is an injectable zero-arg callable returning
+    ``_PRCI_UNREACHABLE`` or a screen dict (from ``_screen_prci``). Tests pass
+    a fake so they never hit a real repo/remote/network; when omitted the real
+    ``gh`` screen (with its TTL cache) is used.
+    """
+    if prci_checker is None:
+        prci_checker = _screen_prci
+    try:
+        result = prci_checker()
+    except Exception as e:
+        # A raising checker ⇒ cannot verify ⇒ fail safe active + surface it.
+        _note_prci_unavailable(f"PR/CI checker raised: {e}")
+        return True
+    if _prci_screen_active(result):
+        # Note WHY (PR vs CI vs unreachable) for ``hscc autodown status``.
+        if result is _PRCI_UNREACHABLE:
+            _note_prci_unavailable("PR/CI source unreachable — treating as "
+                                   "active (fail-safe)")
+        _note_prci_active()
+        return True
+    _note_prci_blocking(None)
+    return False
+
+
+# In-memory bookkeeping so ``hscc autodown status`` can name WHY PR/CI keeps
+# the interlock active (mirrors the kanban interlock's ``_KANBAN_WORK`` /
+# ``_KANBAN_LOAD`` pattern). ``blocking`` is None when clear, otherwise
+# "PR/CI"; ``ok``+``reason`` describe the last PR/CI source resolution for the
+# unverifiable/unevaluable case.
+_PRCI_LOAD = {"blocking": None, "ok": None, "reason": "", "warned": False}
+
+
+def _note_prci_active():
+    _PRCI_LOAD["blocking"] = "PR/CI"
+    _PRCI_LOAD["ok"] = True
+    _PRCI_LOAD["reason"] = ""
+    _PRCI_LOAD["warned"] = False
+
+
+def _note_prci_blocking(blocking):
+    _PRCI_LOAD["blocking"] = blocking
+
+
+def _note_prci_unavailable(reason):
+    """Record that the PR/CI interlock is unevaluable and log it ONCE.
+
+    Updates the module-level ``_PRCI_LOAD`` so ``hscc autodown status`` can
+    show the truth, and emits a single WARN log line (not one per daemon tick)
+    via ``daemon_ops.log``. Does not raise — the caller still fails safe (the
+    interlock stays active).
+    """
+    _PRCI_LOAD["ok"] = False
+    _PRCI_LOAD["reason"] = reason
+    if not _PRCI_LOAD["warned"]:
+        _PRCI_LOAD["warned"] = True
+        try:
+            log(f"Autodown PR/CI interlock unevaluable: {reason}", "WARN")
+        except Exception:
+            pass  # logging must never break the fail-safe
+
+
+def prci_blocking_signal():
+    """Return what (if anything) the PR/CI interlock blocks on.
+
+    Read by ``hscc autodown status``: ``None`` when PR/CI is clear, ``"PR/CI"``
+    when an open PR / active run is keeping the interlock active, and the
+    ``_PRCI_UNREACHABLE`` sentinel when we could not evaluate the source. Only
+    populated in the process that ran ``_has_active_pr_ci``.
+    """
+    return _PRCI_LOAD["blocking"]
+
+
+def prci_check_state():
+    """Report the PR/CI source resolution for ``hscc autodown status``.
+
+    Returns None when the daemon has not yet evaluated it, otherwise a dict
+    ``{ok: bool, reason: str, blocking: str|None}`` describing the last
+    resolution: ``ok`` True with ``blocking`` "PR/CI" when an open PR / active
+    run is holding the interlock; ``ok`` False with a ``reason`` when the
+    source is unreachable (fail-safe active); ``ok`` True with ``blocking``
+    None when PR/CI is positively clear.
+    """
+    return {"ok": _PRCI_LOAD["ok"], "reason": _PRCI_LOAD["reason"],
+            "blocking": _PRCI_LOAD["blocking"]}
+
+
 def _is_idle(cfg, kanban_db=None, agents_file=None, now=None,
-             keepalive_ok=None):
+             keepalive_ok=None, prci_checker=None):
     """Evaluate the FULL idle conjunction (§1/§6) — all must hold.
 
     ``True`` only when every interlock positively clears. Any single false, or
     any signal we could not verify, ⇒ ``False`` (not idle, no teardown).
     Small helpers are injectable (Phase 1 ``_has_active_work(kanban_db=...)``,
-    ``agents_file`` for §1b, ``now`` for the clock, ``keepalive_ok`` for §6.4)
-    so cycle() is unit-testable without the daemon or the real ~/.hscc /
-    ~/.hermes.
+    ``agents_file`` for §1b, ``now`` for the clock, ``keepalive_ok`` for §6.4,
+    ``prci_checker`` for the §1a PR/CI interlock) so cycle() is unit-testable
+    without the daemon or the real ~/.hscc / ~/.hermes.
     """
     # 6.1 Kanban work (§1a) — _has_active_work True ⇒ active ⇒ not idle.
     if _has_active_work(kanban_db):
+        return False
+    # 6.1b PR/CI work (§1a extension) — open PR / running CI ⇒ active, and an
+    #     unreachable PR/CI source fails safe to active (never tear down on an
+    #     unverifiable signal — identical direction to the kanban interlock).
+    if _has_active_pr_ci(prci_checker):
         return False
     # 6.2 Agent liveness (§1b) — every enabled agent must be idle.
     if not _agents_idle(agents_file):
@@ -1155,7 +1408,7 @@ def _reconcile_stale_intentional_block():
 
 
 def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
-          probes=None):
+          probes=None, prci_checker=None):
     """Idle autodown decision function (Phase 3, §1/§6; Phase 6 probes §1d).
 
     Called each daemon tick by ``daemon_ops.run_autodown_loop``
@@ -1172,8 +1425,9 @@ def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
        point (§1d). A raising/broken probe is caught + logged and never breaks
        the cycle.
        ``probes`` (an injectable sequence of zero-arg callables returning True
-       if they stamped) defaults to the three real sources: HTTP API request,
-       new kanban card / task activity, inbound Telegram. Pass ``probes=[]`` to
+       if they stamped) defaults to the four real sources: HTTP API request,
+       new kanban card / task activity, inbound Telegram, PR/CI activity.
+       Pass ``probes=[]`` to
        run the pure idle evaluation without any source polling.
     3. ``state`` in (``down``, ``waking``) ⇒ wake is Phase 5. Return without
        touching the serving layer.
@@ -1294,7 +1548,8 @@ def cycle(kanban_db=None, agents_file=None, now=None, keepalive_ok=None,
     except Exception as e:
         log(f"Autodown stale-block reconcile error: {e}", "ERROR")
     if not _is_idle(cfg, kanban_db=kanban_db, agents_file=agents_file,
-                    now=now, keepalive_ok=keepalive_ok):
+                    now=now, keepalive_ok=keepalive_ok,
+                    prci_checker=prci_checker):
         # Not idle — no teardown.
         return
     # All interlocks clear ⇒ teardown (Phase 4, called lazily).
@@ -1610,7 +1865,7 @@ def _rollback_block(original_block):
 
 def teardown(serving_path=None, run_cmd_fn=None, kanban_db=None,
              agents_file=None, now=None, keepalive_ok=None,
-             http_check_fn=None, lock_now=None):
+             http_check_fn=None, lock_now=None, prci_checker=None):
     """Execute the idle teardown sequence (§3/§5), under the autodown lock.
 
     Entry point wraps the real sequence in the autodown O_EXCL lockfile so
@@ -1672,14 +1927,15 @@ def teardown(serving_path=None, run_cmd_fn=None, kanban_db=None,
                                 run_cmd_fn=run_cmd_fn, kanban_db=kanban_db,
                                 agents_file=agents_file, now=now,
                                 keepalive_ok=keepalive_ok,
-                                http_check_fn=http_check_fn)
+                                http_check_fn=http_check_fn,
+                                prci_checker=prci_checker)
     finally:
         _release_lock()
 
 
 def _teardown_locked(serving_path=None, run_cmd_fn=None, kanban_db=None,
                      agents_file=None, now=None, keepalive_ok=None,
-                     http_check_fn=None):
+                     http_check_fn=None, prci_checker=None):
     """The teardown sequence itself, run while holding the autodown lock.
 
     Split out of ``teardown()`` so the O_EXCL lock acquisition + release live
@@ -1712,9 +1968,10 @@ def _teardown_locked(serving_path=None, run_cmd_fn=None, kanban_db=None,
     # -- 1. Re-verify idle (§6 last-line guard) ---------------------------
     # Re-run the FULL idle conjunction. If anything changed since the timer
     # decided (a card arrived, an agent went busy, the window reset, a
-    # keepalive unit went sick), ABORT — no stops issued at all.
+    # keepalive unit went sick, a PR/CI went live), ABORT — no stops issued.
     if not _is_idle(cfg, kanban_db=kanban_db, agents_file=agents_file,
-                    now=now, keepalive_ok=keepalive_ok):
+                    now=now, keepalive_ok=keepalive_ok,
+                    prci_checker=prci_checker):
         msg = "Autodown teardown ABORTED: idle predicate no longer holds " \
               "(work/activity arrived)".strip()
         log(msg, "ERROR")
@@ -2503,6 +2760,40 @@ def probe_kanban_activity(kanban_db=None):
     return False
 
 
+def probe_prci_activity(prci_checker=None):
+    """Stamp ``record_activity(\"prci\")`` when a tracked repo has an open
+    PR or running CI (§1d.4: \"PR/CI activity\"). Returns True if it stamped.
+
+    Mirrors ``probe_kanban_activity``: open PRs / active CI runs are live fleet
+    work, so their presence rolls the idle window (keeps the cluster awake
+    through a review/merge or build cycle) and, while DOWN, fires the wake seam
+    (a fresh ``last_activity_iso`` beats ``down_since`` and triggers autoup).
+
+    ACTIVITY polarity is opposite the teardown fail-safe — same rule as
+    ``probe_kanban_activity``: we stamp ONLY on POSITIVELY confirmed activity.
+    An unreachable / raising checker returns False (no stamp); fabricating
+    perpetual activity from an unverifiable source is worse than not stamping,
+    and the teardown interlock ``_has_active_pr_ci`` independently fails safe
+    to active on that same unreachable signal (§1a). ``prci_checker`` is the
+    same injectable zero-arg checker as ``_has_active_pr_ci`` (tests pass a
+    fake so they never hit a real repo/network).
+    """
+    if prci_checker is None:
+        prci_checker = _screen_prci
+    try:
+        result = prci_checker()
+    except Exception:
+        # Unverifiable source ⇒ cannot positively confirm activity ⇒ no stamp.
+        return False
+    if result is _PRCI_UNREACHABLE:
+        return False   # cannot verify ⇒ do not fabricate activity
+    if isinstance(result, dict) and (
+            result.get("open_prs") or result.get("active_runs")):
+        record_activity("prci")
+        return True
+    return False
+
+
 def _load_telegram_offset(offset_file=None):
     """Read the last-scanned byte offset of the gateway log, or None."""
     path = offset_file or TELEGRAM_OFFSET_FILE
@@ -2702,6 +2993,7 @@ def _default_probes(kanban_db=None):
         lambda: probe_http_activity(),
         lambda: probe_kanban_activity(kanban_db),
         lambda: probe_telegram_activity(),
+        lambda: probe_prci_activity(),
     ]
 
 

@@ -132,11 +132,29 @@ def _cmd_status(rest, json_mode):
         else:
             blocking = "kanban work (board unknown)"
 
+    # PR/CI interlock — actively evaluate it here (read-only) and surface it.
+    # Open PRs / active CI runs keep the interlock active the same way kanban
+    # work does. ``_has_active_pr_ci`` populates ``prci_check_state()`` /
+    # ``prci_blocking_signal()``, so those are read AFTER the predicate.
+    prci_active = autodown._has_active_pr_ci()
+    prci = autodown.prci_blocking_signal()
+    if prci_active:
+        if prci == autodown._PRCI_UNREACHABLE:
+            prci_blocking = "PR/CI source unreachable — treating as active "
+            "(fail-safe)"
+        else:
+            prci_blocking = "open PR / active CI run on a tracked repo"
+        # Prepend PR/CI blocking if kanban is not already blocking, else list
+        # both — never hide one interlock behind the other.
+        blocking = f"{prci_blocking}, and {blocking}" if blocking \
+            else prci_blocking
+
     # Kanban interlock resolution — read AFTER the predicate above, which
     # resolves the lib, so ok/reason reflect the live evaluation and let an
     # operator see when the interlock is unevaluable (and why) instead of
     # guessing why autodown never fires.
     kc = autodown.kanban_check_state()
+    pci = autodown.prci_check_state()
 
     # Informational: active Hermes cron jobs, classified (feat t_c94f8b8c).
     # status is read-only — we only READ jobs.json (Hermes' source of truth),
@@ -175,6 +193,12 @@ def _cmd_status(rest, json_mode):
                                  for j in cpu_only_crons],
         "active_cron_model": [j.get("name") or j.get("id")
                               for j in model_crons],
+        # PR/CI interlock resolution (figures above): ``prci_active`` True means
+        # an open PR / active run (or an unreachable source, fail-safe) is
+        # keeping the interlock active; ``prci`` names the signal.
+        "prci_active": bool(prci_active),
+        "prci_ok": (pci or {}).get("ok"),
+        "prci_reason": (pci or {}).get("reason") or "",
     }
     if json_mode:
         print(json.dumps(status))
@@ -222,6 +246,13 @@ def _cmd_status(rest, json_mode):
         print(f"  kanban interlock: UNEVALUABLE — {kc['reason']}")
     elif kc is not None and kc["ok"]:
         print("  kanban interlock: ok (board readable)")
+    if status["prci_active"]:
+        if prci == autodown._PRCI_UNREACHABLE:
+            print("  PR/CI interlock:  UNEVALUABLE — source unreachable")
+        else:
+            print("  PR/CI interlock:  ACTIVE (open PR / active CI run)")
+    elif status["prci_ok"] is not None:
+        print("  PR/CI interlock:  ok (no open PR / no active CI run)")
     return 0
 
 
