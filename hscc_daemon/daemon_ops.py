@@ -245,6 +245,7 @@ def run_daemon_loop():
     from .health import check_dgx, check_gateway, check_local, check_heartbeat, check_nas, check_idle_monitor, check_workers, check_proxy, check_engine_wedge
     from .trigger import trigger_engine
     from .lifecycle import pipeline_watchdog, restart_vllm, load_watchdog_block
+    from . import recover
     from .state import now_iso, write_state
 
     ensure_state_dir()
@@ -312,6 +313,23 @@ def run_daemon_loop():
                 log(f"Trigger engine error: {e}", "ERROR")
             stop_event.wait(15)
 
+    def run_engine_wedge_recover_loop():
+        """Guarded auto-recovery for a wedged serving unit (E stream).
+
+        Runs at the same cadence as the ``engine_wedge`` probe. Each tick
+        calls ``recover.recover_engine_wedge()``, which consumes the probe's
+        latest verdict and — only after N consecutive wedge detections and every
+        other guard passes — restarts JUST the wedged unit via the hscc
+        wrappers. A raising tick must never kill the thread: swallow it loudly
+        and continue.
+        """
+        while not stop_event.is_set():
+            try:
+                recover.recover_engine_wedge()
+            except Exception as e:
+                log(f"Engine-wedge recovery error: {e}", "ERROR")
+            stop_event.wait(recover.RECOVER_CHECK_INTERVAL)
+
     threads = []
     for stream_name, interval in STREAMS.items():
         check_fn = CHECKS.get(stream_name)
@@ -329,6 +347,12 @@ def run_daemon_loop():
     ad.start()
     threads.append(ad)
     log("Started autodown thread (interval=30s)")
+
+    er = threading.Thread(target=run_engine_wedge_recover_loop, daemon=True)
+    er.start()
+    threads.append(er)
+    log("Started engine-wedge recovery thread "
+        "(interval=%ss)" % recover.RECOVER_CHECK_INTERVAL)
 
     wd = threading.Thread(target=run_watchdog_loop, daemon=True)
     wd.start()
