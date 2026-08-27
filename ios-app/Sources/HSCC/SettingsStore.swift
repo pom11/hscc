@@ -16,13 +16,13 @@ import Combine
 final class SettingsStore: ObservableObject {
     /// Published copy of the host the user is editing / has saved.
     @Published var host: String {
-        didSet { suite.set(host, forKey: Self.hostKey) }
+        didSet { Self.suite.set(host, forKey: Self.hostKey) }
     }
 
     /// Published copy of the port as a string (kept in the text field as text;
     /// converted to an Int when building the URL).
     @Published var port: String {
-        didSet { suite.set(port, forKey: Self.portKey) }
+        didSet { Self.suite.set(port, forKey: Self.portKey) }
     }
 
     /// The current token, backed by the Keychain. Exposed for the Settings UI
@@ -33,12 +33,18 @@ final class SettingsStore: ObservableObject {
     private static let portKey = AppGroup.portKey
 
     /// The shared suite the extensions read from too.
-    private var suite: UserDefaults {
+    ///
+    /// STATIC on purpose: `init()` reads it to seed the stored properties, and a
+    /// computed *instance* property would touch `self` before `host`, `port` and
+    /// `hasToken` are initialized — which Swift rejects ("'self' used in property
+    /// access 'suite' before all stored properties are initialized"). It depends
+    /// on no instance state, so static is also the honest signature.
+    private static var suite: UserDefaults {
         UserDefaults(suiteName: AppGroup.suiteName) ?? .standard
     }
 
     init() {
-        let defaults = suite
+        let defaults = Self.suite
         // Host starts EMPTY — the owner enters their tailnet host/IP at runtime
         // (never a hardcoded default / no tailnet IP committed).
         self.host = defaults.string(forKey: Self.hostKey) ?? ""
