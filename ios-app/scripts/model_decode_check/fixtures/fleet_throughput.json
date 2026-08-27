@@ -1,0 +1,19 @@
+{
+ "by_node": {
+  "http://10.0.0.3:8000/metrics": {
+   "prompt_tokens": 6,
+   "generation_tokens": 5,
+   "running": 0,
+   "waiting": 0
+  }
+ },
+ "fleet": {
+  "prompt_tokens": 6,
+  "generation_tokens": 5,
+  "running": 0,
+  "waiting": 0,
+  "nodes_ok": 1,
+  "nodes_total": 2
+ },
+ "speak": "1 of 2 nodes healthy."
+}

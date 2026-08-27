@@ -1,0 +1,17 @@
+{
+ "id": "t_049d6986",
+ "title": "QA-3: surface pending manual items in `qa` list output",
+ "body": "(body omitted by sanitizer)",
+ "status": "blocked",
+ "assignee": "backend-engineer",
+ "board": "default",
+ "branch": "wt/t_049d6986",
+ "priority": 0,
+ "created_at": 1786820476,
+ "started_at": 1786989311,
+ "completed_at": null,
+ "last_heartbeat_at": 1786989373,
+ "workspace_kind": "worktree",
+ "workspace_path": "/home/devuser/dev/flightdeck/.worktrees/t_049d6986",
+ "speak": "Card t_049d6986: QA-3: surface pending manual items in `qa` list output. Status blocked."
+}

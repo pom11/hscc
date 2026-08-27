@@ -1,0 +1,78 @@
+{
+ "projects": [
+  {
+   "name": "hscc",
+   "repo": "/home/devuser/dev/hscc",
+   "board": "hscc",
+   "topic": 2046
+  },
+  {
+   "name": "ecofire-bc",
+   "repo": "/home/devuser/dev/EcoFire_customizations_bc",
+   "board": "ecofire-bc",
+   "topic": 3899
+  },
+  {
+   "name": "ecofire-app",
+   "repo": "/home/devuser/dev/ecofire",
+   "board": "ecofire-app",
+   "topic": 2257
+  },
+  {
+   "name": "sphoin",
+   "repo": "/home/devuser/dev/sphoin_engine",
+   "board": "sphoin",
+   "topic": 2
+  },
+  {
+   "name": "soconn",
+   "repo": "/home/devuser/dev/soconn",
+   "board": "soconn",
+   "topic": 7074
+  },
+  {
+   "name": "flosana",
+   "repo": "/home/devuser/dev/flosana",
+   "board": "flosana",
+   "topic": 7253
+  },
+  {
+   "name": "powerbi",
+   "repo": "/home/devuser/dev/ecofire-powerbi",
+   "board": "powerbi",
+   "topic": 6366
+  },
+  {
+   "name": "efsdriver",
+   "repo": "/home/devuser/dev/efsdriver",
+   "board": "efsdriver",
+   "topic": 6369
+  },
+  {
+   "name": "grid",
+   "repo": "/home/devuser/dev/Grid",
+   "board": "grid",
+   "topic": 9031
+  },
+  {
+   "name": "radio",
+   "repo": "/home/devuser/dev/Radio",
+   "board": "radio",
+   "topic": 9032
+  },
+  {
+   "name": "pickolo",
+   "repo": "/home/devuser/dev/pickolo",
+   "board": "pickolo",
+   "topic": 9033
+  },
+  {
+   "name": "pom",
+   "repo": "/home/devuser/dev/pom",
+   "board": "pom",
+   "topic": 9034
+  }
+ ],
+ "count": 12,
+ "speak": "12 projects registered."
+}

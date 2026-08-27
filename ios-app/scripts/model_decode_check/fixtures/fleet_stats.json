@@ -1,0 +1,64 @@
+{
+ "since_days": 7,
+ "completions": {
+  "total": 14,
+  "by_profile": {
+   "default": 1
+  },
+  "by_day": {
+   "2026-08-20": 4,
+   "2026-08-21": 4,
+   "2026-08-24": 4,
+   "2026-08-25": 2
+  }
+ },
+ "activity": {
+  "tool_calls_by_profile": {
+   "test": 285,
+   "unknown": 377
+  },
+  "top_tools": [
+   [
+    "test_tool",
+    285
+   ],
+   [
+    "terminal",
+    220
+   ],
+   [
+    "skill_manage",
+    50
+   ],
+   [
+    "skill_view",
+    43
+   ],
+   [
+    "memory",
+    17
+   ],
+   [
+    "kanban_show",
+    15
+   ],
+   [
+    "skills_list",
+    10
+   ],
+   [
+    "kanban_create",
+    10
+   ],
+   [
+    "kanban_heartbeat",
+    2
+   ],
+   [
+    "read_file",
+    2
+   ]
+  ]
+ },
+ "speak": "About 14 work items across the last 7 days."
+}

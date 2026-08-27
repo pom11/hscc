@@ -1,0 +1,19 @@
+{
+ "name": "hscc",
+ "repo": "/home/devuser/dev/hscc",
+ "board": "hscc",
+ "topic": 2046,
+ "board_counts": {
+  "running": 2,
+  "total": 2
+ },
+ "git": {
+  "is_repo": true,
+  "branch": "dev",
+  "dirty": false,
+  "uncommitted": [],
+  "last_activity_seconds_ago": 995,
+  "head": "12c97b0a43f4eedc9d81d21382abf09780058535"
+ },
+ "speak": "hscc: 2 running, 4 open cards on board hscc."
+}

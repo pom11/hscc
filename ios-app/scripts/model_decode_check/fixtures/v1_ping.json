@@ -1,0 +1,6 @@
+{
+ "ok": true,
+ "service": "hscc-api",
+ "version": "0.1.0",
+ "speak": "HSCC API is up."
+}
