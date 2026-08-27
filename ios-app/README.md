@@ -272,10 +272,34 @@ The app is **unbuilt and unverified**; use whichever path works on your Mac.
 ```sh
 brew install xcodegen
 cd ios-app
-xcodegen generate        # produces HSCC.xcodeproj from project.yml
+scripts/generate.sh      # produces HSCC.xcodeproj from project.yml, with signing
 open HSCC.xcodeproj
-# Select your signing team under Signing & Capabilities, then Run on your device.
+# Run on your device.
 ```
+
+**Use `scripts/generate.sh`, not bare `xcodegen generate`.** There are THREE
+targets — the app plus two app extensions (`HSCCWidgets`, `HSCCLiveActivity`) —
+and each needs its own `DEVELOPMENT_TEAM`. Setting the team on the app alone
+still fails with:
+
+```
+Signing for "HSCCWidgets" requires a development team.
+Signing for "HSCCLiveActivity" requires a development team.
+```
+
+Picking a team in Xcode's Signing & Capabilities editor fixes it only until the
+next regenerate — `HSCC.xcodeproj` is a generated artifact and is overwritten.
+The script sets the team at project level (all three targets inherit it), then
+verifies with `xcodebuild -showBuildSettings` that it actually landed on each one.
+
+It auto-detects the team from your signing certificate. Override or supply it
+explicitly when auto-detection finds nothing:
+
+```sh
+HSCC_DEVELOPMENT_TEAM=YOURTEAMID scripts/generate.sh
+```
+
+A free personal Apple ID team works for sideloading onto your own device.
 
 - `project.yml` lists every source file under `Sources`. If you add a new Swift
   file, add it to the `Sources` list in `project.yml` too (or use a folder glob;
