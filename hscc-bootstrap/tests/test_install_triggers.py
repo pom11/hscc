@@ -11,7 +11,8 @@ if _PLUGIN_DIR not in sys.path:
 import install_triggers as IT
 
 
-DEFAULT_RULES = ["orch-dgx-down", "vllm-down", "watchdog-blocked"]
+DEFAULT_RULES = ["orch-dgx-down", "vllm-down", "watchdog-blocked",
+                 "engine-wedge-detected"]
 
 # Path to the default rules file (shipped alongside install_triggers.py)
 _DEFAULTS_PATH = os.path.join(_PLUGIN_DIR, "triggers.default.json")
@@ -27,12 +28,12 @@ def _load_defaults():
 
 
 def test_fresh_install_adds_all_rules(tmp_path):
-    """When no triggers.json exists, all 3 default rules are installed."""
+    """When no triggers.json exists, all default rules are installed."""
     target = str(tmp_path / "triggers.json")
     result = IT.install_triggers(triggers_path=target, defaults_path=_DEFAULTS_PATH)
 
     assert set(result["added"]) == set(DEFAULT_RULES)
-    assert result["total"] == 3
+    assert result["total"] == len(DEFAULT_RULES)
 
     with open(target) as f:
         data = json.load(f)
@@ -51,7 +52,7 @@ def test_second_run_adds_nothing(tmp_path):
     result = IT.install_triggers(triggers_path=target, defaults_path=_DEFAULTS_PATH)
 
     assert result["added"] == []
-    assert result["total"] == 3
+    assert result["total"] == len(DEFAULT_RULES)
 
 
 # ── Operator rule preservation ────────────────────────────────────────
@@ -91,8 +92,9 @@ def test_operator_rules_preserved(tmp_path):
 
     # Only missing defaults added; orch-dgx-down was already present (operator-edited)
     assert "orch-dgx-down" not in result["added"]
-    assert set(result["added"]) <= {"vllm-down", "watchdog-blocked"}
-    assert result["total"] == 4
+    assert set(result["added"]) <= {"vllm-down", "watchdog-blocked",
+                                    "engine-wedge-detected"}
+    assert result["total"] == 2 + len(set(result["added"]))
 
     with open(target) as f:
         data = json.load(f)
@@ -177,7 +179,7 @@ def test_corrupt_existing_file_treated_as_empty(tmp_path):
     result = IT.install_triggers(triggers_path=target, defaults_path=_DEFAULTS_PATH)
 
     assert set(result["added"]) == set(DEFAULT_RULES)
-    assert result["total"] == 3
+    assert result["total"] == len(DEFAULT_RULES)
 
 
 # ── Backup on re-install ──────────────────────────────────────────────
@@ -239,7 +241,7 @@ def test_write_failure_returns_ok_false(tmp_path, monkeypatch):
     assert result["ok"] is False
     assert "error" in result
     assert "No space left on device" in result["error"]
-    assert result["total"] == 3  # total still reflects merged count
+    assert result["total"] == len(DEFAULT_RULES)  # total still reflects merged count
     assert set(result["added"]) == set(DEFAULT_RULES)  # added still computed
 
     # Target file was never written

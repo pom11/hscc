@@ -38,6 +38,19 @@
         "title": "HSCC: pipeline watchdog blocked",
         "body": "The pipeline watchdog tripped its circuit breaker \u2014 dispatch is halted."
       }
+    },
+    {
+      "id": "engine-wedge-detected",
+      "trigger_type": "notify",
+      "condition": {
+        "metric": "event_type",
+        "op": "==",
+        "value": "state.engine_wedge.degraded"
+      },
+      "trigger_params": {
+        "title": "HSCC: inference engine wedged",
+        "body": "A serving unit answered HTTP 200 but streamed no generated tokens \u2014 the engine is wedged (answering but not generating), not merely down."
+      }
     }
   ]
 }
