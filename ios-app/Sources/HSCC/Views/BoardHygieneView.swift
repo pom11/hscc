@@ -90,33 +90,47 @@ struct BoardHygieneView: View {
                 } actions: {
                     Button("Try again") { Task { await loadBlocked(client) } }
                 }
+            case .stale(let response, let ageMessage):
+                blockedList(response, client: client, staleMessage: ageMessage)
             case .loaded(let response):
-                List {
-                    Section {
-                        Label(response.speak, systemImage: "text.bubble")
-                            .font(.subheadline)
-                    }
-                    let tasks = response.tasks ?? []
-                    if tasks.isEmpty {
-                        Section {
-                            Text("No blocked cards on any board.")
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    ForEach(tasks) { card in
-                        blockedRow(card, client: client)
-                    }
-                    if let errors = response.errors, !errors.isEmpty {
-                        Section("Errors") {
-                            ForEach(errors, id: \.self) { error in
-                                Text(error).font(.caption).foregroundColor(.red)
-                            }
-                        }
-                    }
-                }
-                .refreshable { await loadBlocked(client) }
+                blockedList(response, client: client, staleMessage: nil)
             }
         }
+    }
+
+    @ViewBuilder
+    private func blockedList(_ response: KanbanBlockedResponse, client: HSCCClient, staleMessage: String?) -> some View {
+        List {
+            if let staleMessage {
+                Section {
+                    StaleBanner(age: staleMessage, reason: "Can't reach the cluster right now.") {
+                        Task { await loadBlocked(client) }
+                    }
+                }
+            }
+            Section {
+                Label(response.speak, systemImage: "text.bubble")
+                    .font(.subheadline)
+            }
+            let tasks = response.tasks ?? []
+            if tasks.isEmpty {
+                Section {
+                    Text("No blocked cards on any board.")
+                        .foregroundColor(.secondary)
+                }
+            }
+            ForEach(tasks) { card in
+                blockedRow(card, client: client)
+            }
+            if let errors = response.errors, !errors.isEmpty {
+                Section("Errors") {
+                    ForEach(errors, id: \.self) { error in
+                        Text(error).font(.caption).foregroundColor(.red)
+                    }
+                }
+            }
+        }
+        .refreshable { await loadBlocked(client) }
     }
 
     @ViewBuilder
@@ -179,62 +193,80 @@ struct BoardHygieneView: View {
                 } actions: {
                     Button("Try again") { Task { await loadStale(client) } }
                 }
+            case .stale(let response, let ageMessage):
+                staleList(response, client: client, staleMessage: ageMessage)
             case .loaded(let response):
-                List {
-                    Section {
-                        Label(response.speak, systemImage: "text.bubble")
-                            .font(.subheadline)
-                    }
-                    let tasks = response.tasks ?? []
-                    if tasks.isEmpty {
-                        Section {
-                            Text("No stale cards.")
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    ForEach(tasks) { card in
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(card.displayTitle)
-                                .font(.body)
-                            HStack(spacing: 6) {
-                                if let board = card.board, !board.isEmpty {
-                                    Text(board).font(.caption).foregroundColor(.secondary)
-                                }
-                                if let status = card.status, !status.isEmpty {
-                                    Text(status).font(.caption).foregroundColor(.secondary)
-                                }
-                                if let assignee = card.assignee, !assignee.isEmpty {
-                                    Text(assignee).font(.caption).foregroundColor(.secondary)
-                                }
-                                if let age = card.age_days {
-                                    Text("\(age)d old").font(.caption).foregroundColor(.secondary)
-                                }
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    if let errors = response.errors, !errors.isEmpty {
-                        Section("Errors") {
-                            ForEach(errors, id: \.self) { error in
-                                Text(error).font(.caption).foregroundColor(.red)
-                            }
-                        }
-                    }
-                }
-                .refreshable { await loadStale(client) }
+                staleList(response, client: client, staleMessage: nil)
             }
         }
     }
 
+    @ViewBuilder
+    private func staleList(_ response: KanbanStaleResponse, client: HSCCClient, staleMessage: String?) -> some View {
+        List {
+            if let staleMessage {
+                Section {
+                    StaleBanner(age: staleMessage, reason: "Can't reach the cluster right now.") {
+                        Task { await loadStale(client) }
+                    }
+                }
+            }
+            Section {
+                Label(response.speak, systemImage: "text.bubble")
+                    .font(.subheadline)
+            }
+            let tasks = response.tasks ?? []
+            if tasks.isEmpty {
+                Section {
+                    Text("No stale cards.")
+                        .foregroundColor(.secondary)
+                }
+            }
+            ForEach(tasks) { card in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(card.displayTitle)
+                        .font(.body)
+                    HStack(spacing: 6) {
+                        if let board = card.board, !board.isEmpty {
+                            Text(board).font(.caption).foregroundColor(.secondary)
+                        }
+                        if let status = card.status, !status.isEmpty {
+                            Text(status).font(.caption).foregroundColor(.secondary)
+                        }
+                        if let assignee = card.assignee, !assignee.isEmpty {
+                            Text(assignee).font(.caption).foregroundColor(.secondary)
+                        }
+                        if let age = card.age_days {
+                            Text("\(age)d old").font(.caption).foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let errors = response.errors, !errors.isEmpty {
+                Section("Errors") {
+                    ForEach(errors, id: \.self) { error in
+                        Text(error).font(.caption).foregroundColor(.red)
+                    }
+                }
+            }
+        }
+        .refreshable { await loadStale(client) }
+    }
+
     private func loadBlocked(_ client: HSCCClient) async {
-        blocked = .loading
-        do { blocked = .loaded(try await client.kanbanBlocked()) }
-        catch { blocked = .failed((error as? HSCCError)?.localizedDescription ?? "Something went wrong.") }
+        blocked = await Offline.load(blocked,
+                                     cacheKey: "/v1/kanban/blocked",
+                                     client: client) {
+            try await client.kanbanBlocked()
+        }
     }
 
     private func loadStale(_ client: HSCCClient) async {
-        stale = .loading
-        do { stale = .loaded(try await client.kanbanStale(olderThan: 0)) }
-        catch { stale = .failed((error as? HSCCError)?.localizedDescription ?? "Something went wrong.") }
+        stale = await Offline.load(stale,
+                                   cacheKey: "/v1/kanban/stale",
+                                   client: client) {
+            try await client.kanbanStale(olderThan: 0)
+        }
     }
 }

@@ -13,6 +13,8 @@ struct ProjectsView: View {
     let client: HSCCClient?
 
     @State private var projects = LoadState<ProjectsResponse>.idle
+    /// Whether the cross-project search sheet is presented.
+    @State private var showSearch = false
 
     var body: some View {
         NavigationStack {
@@ -24,7 +26,20 @@ struct ProjectsView: View {
                 }
             }
             .navigationTitle("Projects")
+            .task {
+                // First load: fetch once the view appears (idle → loading).
+                if client != nil, projects.value == nil, !projects.isLoading {
+                    await load()
+                }
+            }
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        showSearch = true
+                    } label: {
+                        Image(systemName: "magnifyingglass")
+                    }
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
                         Task { await load() }
@@ -34,13 +49,16 @@ struct ProjectsView: View {
                     .disabled(projects.isLoading)
                 }
             }
+            .sheet(isPresented: $showSearch) {
+                SearchView(client: client)
+            }
         }
     }
 
     @ViewBuilder
     private func content(_ client: HSCCClient) -> some View {
         switch projects {
-        case .loading:
+        case .loading, .idle:
             ProgressView("Loading…")
         case .failed(let message):
             ContentUnavailableView {
@@ -50,6 +68,8 @@ struct ProjectsView: View {
             } actions: {
                 Button("Try again") { Task { await load() } }
             }
+        case .stale(let response, _):
+            staleContent(response, client: client)
         case .loaded(let response):
             List {
                 Section {
@@ -71,11 +91,37 @@ struct ProjectsView: View {
                 }
             }
             .refreshable { await load() }
-        case .idle:
-            ProgressView("Loading…")
-                .task { await load() }
         }
     }
+
+    /// Live-free version of the list, headed by a stale banner instead of the
+    /// live `speak` line — same rows, clearly marked as last-known.
+    @ViewBuilder
+    private func staleContent(_ response: ProjectsResponse, client: HSCCClient) -> some View {
+        List {
+            Section {
+                StaleBanner(age: staleMessage ?? "", reason: "Can't reach the cluster right now.") {
+                    Task { await load() }
+                }
+            }
+            if response.projects.isEmpty {
+                Section {
+                    Text("No projects registered.")
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+            }
+            ForEach(response.projects) { project in
+                NavigationLink {
+                    ProjectDetailView(client: client, project: project)
+                } label: {
+                    projectRow(project)
+                }
+            }
+        }
+        .refreshable { await load() }
+    }
+
+    private var staleMessage: String? { projects.staleMessage }
 
     @ViewBuilder
     private func projectRow(_ project: Project) -> some View {
@@ -113,11 +159,10 @@ struct ProjectsView: View {
 
     private func load() async {
         guard let client else { return }
-        projects = .loading
-        do {
-            projects = .loaded(try await client.projects())
-        } catch {
-            projects = .failed((error as? HSCCError)?.localizedDescription ?? "Something went wrong.")
+        projects = await Offline.load(projects,
+                                      cacheKey: EndpointPath.projects,
+                                      client: client) {
+            try await client.projects()
         }
     }
 }
@@ -194,8 +239,10 @@ struct ProjectOverviewView: View {
                 } actions: {
                     Button("Try again") { Task { await load() } }
                 }
+            case .stale(let state, let ageMessage):
+                content(state, staleMessage: ageMessage)
             case .loaded(let state):
-                content(state)
+                content(state, staleMessage: nil)
             }
         }
         .task {
@@ -204,8 +251,15 @@ struct ProjectOverviewView: View {
     }
 
     @ViewBuilder
-    private func content(_ state: ProjectDetailResponse) -> some View {
+    private func content(_ state: ProjectDetailResponse, staleMessage: String?) -> some View {
         List {
+            if let staleMessage {
+                Section {
+                    StaleBanner(age: staleMessage, reason: "Can't reach the cluster right now.") {
+                        Task { await load() }
+                    }
+                }
+            }
             Section {
                 Label(state.speak, systemImage: "text.bubble")
                     .font(.subheadline)
@@ -272,11 +326,10 @@ struct ProjectOverviewView: View {
     }
 
     private func load() async {
-        detail = .loading
-        do {
-            detail = .loaded(try await client.projectDetail(name))
-        } catch {
-            detail = .failed((error as? HSCCError)?.localizedDescription ?? "Something went wrong.")
+        detail = await Offline.load(detail,
+                                    cacheKey: "/v1/projects/\(name)",
+                                    client: client) {
+            try await client.projectDetail(name)
         }
     }
 }
@@ -309,8 +362,10 @@ struct ProjectBoardView: View {
                 } actions: {
                     Button("Try again") { Task { await load() } }
                 }
+            case .stale(let response, let ageMessage):
+                content(response, staleMessage: ageMessage)
             case .loaded(let response):
-                content(response)
+                content(response, staleMessage: nil)
             }
         }
         .task {
@@ -319,7 +374,7 @@ struct ProjectBoardView: View {
     }
 
     @ViewBuilder
-    private func content(_ response: CardsResponse) -> some View {
+    private func content(_ response: CardsResponse, staleMessage: String?) -> some View {
         // Filter to this project's board. Every card carries a `board`; cards
         // with no board match are excluded (the board section is project-scoped).
         let filtered = response.cards.filter { card in
@@ -331,6 +386,13 @@ struct ProjectBoardView: View {
         let projectStale = stale.value?.tasks?.filter { $0.board == board } ?? []
 
         List {
+            if let staleMessage {
+                Section {
+                    StaleBanner(age: staleMessage, reason: "Can't reach the cluster right now.") {
+                        Task { await load() }
+                    }
+                }
+            }
             if filtered.isEmpty && projectBlocked.isEmpty && projectStale.isEmpty {
                 Section {
                     ContentUnavailableView {
@@ -459,10 +521,10 @@ struct ProjectBoardView: View {
     }
 
     private func loadCards() async {
-        do {
-            cards = .loaded(try await client.cards())
-        } catch {
-            cards = .failed((error as? HSCCError)?.localizedDescription ?? "Something went wrong.")
+        cards = await Offline.load(cards,
+                                   cacheKey: EndpointPath.cards,
+                                   client: client) {
+            try await client.cards()
         }
     }
 
@@ -515,8 +577,10 @@ struct ProjectSettingsView: View {
                 } actions: {
                     Button("Try again") { Task { await load() } }
                 }
+            case .stale(let state, let ageMessage):
+                content(state, staleMessage: ageMessage)
             case .loaded(let state):
-                content(state)
+                content(state, staleMessage: nil)
             }
         }
         .task {
@@ -525,8 +589,15 @@ struct ProjectSettingsView: View {
     }
 
     @ViewBuilder
-    private func content(_ state: ProjectDetailResponse) -> some View {
+    private func content(_ state: ProjectDetailResponse, staleMessage: String?) -> some View {
         List {
+            if let staleMessage {
+                Section {
+                    StaleBanner(age: staleMessage, reason: "Can't reach the cluster right now.") {
+                        Task { await load() }
+                    }
+                }
+            }
             Section {
                 Text("These project settings live on the cluster, driven by the project hub. They are read-only from this app.")
                     .font(.footnote)
@@ -575,11 +646,10 @@ struct ProjectSettingsView: View {
     }
 
     private func load() async {
-        detail = .loading
-        do {
-            detail = .loaded(try await client.projectDetail(name))
-        } catch {
-            detail = .failed((error as? HSCCError)?.localizedDescription ?? "Something went wrong.")
+        detail = await Offline.load(detail,
+                                    cacheKey: "/v1/projects/\(name)",
+                                    client: client) {
+            try await client.projectDetail(name)
         }
     }
 }

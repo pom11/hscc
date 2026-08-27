@@ -81,9 +81,11 @@ struct ClusterView: View {
     }
 
     private func loadStatus(_ client: HSCCClient) async {
-        status = .loading
-        do { status = .loaded(try await client.clusterStatus()) }
-        catch { status = .failed(errorMessage(for: error)) }
+        status = await Offline.load(status,
+                                    cacheKey: EndpointPath.clusterStatus,
+                                    client: client) {
+            try await client.clusterStatus()
+        }
     }
 
     private func loadHosts(_ client: HSCCClient) async {
@@ -117,6 +119,12 @@ struct ClusterView: View {
             case .loading where status.value == nil:
                 ProgressView()
                     .frame(maxWidth: .infinity, alignment: .leading)
+            case .stale(let state, let ageMessage):
+                NodeTopologyView(pairs: pairs)
+                StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
+                    Task { await loadAll() }
+                }
+                fleetStatusLine(state)
             case .loaded(let state):
                 NodeTopologyView(pairs: pairs)
                 fleetStatusLine(state)
@@ -168,7 +176,7 @@ struct ClusterView: View {
         // suggests the fleet is down, show down. Otherwise (no signal yet) show
         // unknown. We do NOT fabricate per-node telemetry the API doesn't ship.
         switch status {
-        case .loaded(let state):
+        case .loaded(let state), .stale(let state, _):
             if state.total_hosts > 0 {
                 return .up
             }
