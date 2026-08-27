@@ -272,6 +272,22 @@ _jobs_lock = threading.Lock()
 _jobs = {}                       # job_id -> _ChatJob
 _job_ids = itertools.count(1)
 
+# How long a TERMINAL job (done / timeout / unavailable / error) is retained
+# after it finished before it becomes eligible for eviction. The whole value of
+# the job API is that a job outlives its submitting connection and can be
+# picked up LATER by job_id (a dropped/backgrounded phone), so eviction must
+# NOT be aggressive enough to 404 a result an operator was promised. 60 min
+# past ``finished_at`` is a generous grace: a real operator polling an in-flight
+# chat reads it far sooner, and a result left unread for an hour is fair to reap.
+_JOB_RETENTION_SECONDS = 3600.0
+
+# Hard bound on the store: no matter how few terminal jobs have aged out of the
+# retention window, never let the dict grow past this many entries. Belt to the
+# retention-window's suspenders — keeps a pathological burst from ballooning
+# memory even between _new_job opportunism. When over it we drop the oldest
+# terminal jobs first (a live queued/running job is never evicted).
+_JOBS_MAX = 10000
+
 
 class _ChatJob:
     """One asynchronous orchestrator chat invocation.
@@ -312,9 +328,51 @@ class _ChatJob:
         self.error: dict | None = None
 
 
+def _reap_jobs():
+    """Evict terminal jobs that have outlived their retention, under the lock.
+
+    Safe policy (never over-aggressive — a legit late poll must not 404):
+      1. Drop every terminal job (finished_at set) whose ``finished_at`` is
+         older than :data:`_JOB_RETENTION_SECONDS` past now.
+      2. As a hard bound, if the store is still over :data:`_JOBS_MAX`, drop
+         the oldest terminal jobs until it is back under — never a live job
+         (queued/running has no finished_at).
+
+    The job_id :data:`_job_ids` counter is deliberately NOT touched: it is
+    monotonic forever, so a reaped id is never re-issued to a later client that
+    might already have seen it. Must be called with ``_jobs_lock`` held.
+    """
+    now = time.time()
+    stale = [
+        jid for jid, job in _jobs.items()
+        if job.finished_at is not None
+        and now - job.finished_at >= _JOB_RETENTION_SECONDS
+    ]
+    for jid in stale:
+        del _jobs[jid]
+
+    # Hard bound: if the store is still huge (pathological burst that flooded
+    # in faster than retention ages it), trim the OLDEST terminal jobs first.
+    over = len(_jobs) - _JOBS_MAX
+    if over > 0:
+        terminal_sorted = sorted(
+            (job for job in _jobs.values() if job.finished_at is not None),
+            key=lambda j: j.finished_at,
+        )
+        for job in terminal_sorted[:over]:
+            del _jobs[job.job_id]
+
+
 def _new_job(project, profile, session, prompt, timeout=_DEFAULT_TIMEOUT) -> _ChatJob:
-    """Create (and store) a queued job under the store lock."""
+    """Create (and store) a queued job under the store lock.
+
+    Also runs the opportunistic :func:`_reap_jobs` so every submission pays
+    down any terminal jobs that have aged past retention — this is what bounds
+    the otherwise-unbounded ``_jobs`` dict (the t_2bb97a26 slow leak: nothing
+    ever removed terminal jobs).
+    """
     with _jobs_lock:
+        _reap_jobs()
         job_id = f"chat-{next(_job_ids)}"
         job = _ChatJob(job_id, project, profile, session, prompt, timeout=timeout)
         _jobs[job_id] = job
