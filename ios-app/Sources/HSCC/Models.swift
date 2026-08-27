@@ -45,15 +45,18 @@ struct PingResponse: Decodable, Speakable {
 
 // MARK: - Cluster
 
-/// `saved_clusters` and `live_status` are raw `run_cmd`-shaped dicts from the
-/// cluster engine (keys like `success`/`returncode`/`output` with MIXED value
-/// types — bool, int, string), so they are decoded as untyped `[String:
-/// JSONValue]`. They are not rendered in the current UI, but declaring them as
-/// `[String: String]` (as this was) makes the WHOLE response throw on decode
-/// and blanks the Hosts section for no visible reason. (Verified against the
-/// live /v1/cluster/hosts response.)
+/// `hosts` is an array of node dicts `{ id, name, ip, role, ssh_user }` (every
+/// field may be null — e.g. the NAS host has no id/name/ssh_user), so it is
+/// decoded as untyped `[JSONValue]`. `saved_clusters` and `live_status` are
+/// raw `run_cmd`-shaped dicts from the cluster engine (keys like
+/// `success`/`returncode`/`output` with MIXED value types — bool, int, string),
+/// also decoded as untyped `[String: JSONValue]`. None are rendered in the
+/// current UI (the topology strip derives from `/v1/cluster/status`), but a
+/// wrongly-typed field here makes the WHOLE response throw on decode and blanks
+/// the Hosts load state for no visible reason. (Verified against the live
+/// /v1/cluster/hosts response 2026-08-27.)
 struct ClusterHostsResponse: Decodable, Speakable {
-    let hosts: [String]
+    let hosts: [JSONValue]
     let saved_clusters: [String: JSONValue]?
     let live_status: [String: JSONValue]?
     let speak: String
@@ -764,9 +767,11 @@ struct StaleCard: Decodable, Identifiable {
     var displayTitle: String { title ?? id }
 }
 
-/// GET /v1/kanban/stale — the envelope (shares the blocked envelope shape).
+/// GET /v1/kanban/stale — the envelope (shares the blocked envelope shape,
+/// EXCEPT `boards` is an array of board name STRINGS here, while /v1/kanban/blocked
+/// reports a board COUNT int — verified live 2026-08-27).
 struct KanbanStaleResponse: Decodable, Speakable {
-    let boards: Int?
+    let boards: [String]?
     let tasks: [StaleCard]?
     let errors: [String]?
     let older_than: Int?
