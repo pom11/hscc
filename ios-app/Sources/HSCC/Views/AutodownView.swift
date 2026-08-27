@@ -84,24 +84,21 @@ struct AutodownView: View {
         if status.value == nil {
             status = .loading
         }
-        do {
-            let fresh = try await client.autodownStatus()
-            status = .loaded(fresh)
-            // Mirror the server's idle_minutes into the picker when the saved
-            // config changes underneath us.
-            if let m = fresh.idle_minutes, m > 0, idleMinutes != m {
-                idleMinutes = m
-            }
-            // End the wake poll once the state leaves "waking".
-            if waking, (fresh.state ?? "") != "waking" {
-                waking = false
-                wakeMessage = nil
-            }
-        } catch {
-            if status.value == nil {
-                status = .failed(errorMessage(for: error))
-            }
-            // If we held a value, keep it on screen but surface the refresh error.
+        status = await Offline.load(status,
+                                    cacheKey: EndpointPath.autodownStatus,
+                                    client: client) {
+            try await client.autodownStatus()
+        }
+        // Mirror the server's idle_minutes into the picker when the saved
+        // config changes underneath us.
+        if let fresh = status.value,
+           let m = fresh.idle_minutes, m > 0, idleMinutes != m {
+            idleMinutes = m
+        }
+        // End the wake poll once the state leaves "waking".
+        if waking, (status.value?.state ?? "") != "waking" {
+            waking = false
+            wakeMessage = nil
         }
     }
 
@@ -118,45 +115,59 @@ struct AutodownView: View {
             sectionCard(title: "Status", systemImage: "timer") { ProgressView() }
         case .failed(let message):
             sectionCard(title: "Status", systemImage: "timer") { errorLabel(message) }
-        case .loaded(let state):
+        case .stale(let state, let ageMessage):
             sectionCard(title: "Status", systemImage: "timer") {
                 VStack(alignment: .leading, spacing: 12) {
-                    if waking, let wakeMessage {
-                        wakingBanner(wakeMessage)
+                    StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
+                        Task { await loadStatus() }
                     }
-
-                    // Summary line (design §B).
-                    Text(state.speak)
-                        .font(.subheadline)
-                        .italic()
-                        .foregroundColor(.secondary)
-
-                    // Key status fields.
-                    statusRow("State", value: state.state ?? "unknown",
-                              color: stateColor(state.state))
-                    statusRow("Idle limit", value: idleMinutesLabel(state.idle_minutes))
-                    statusRow("Enabled", value: state.enabled == true ? "Yes" : "No",
-                              color: state.enabled == true ? .green : .secondary)
-                    if state.watchdog_blocked == true {
-                        // `intentional` is a STRING ("autodown") during a teardown,
-                        // not a Bool — an intentional block is expected, not a fault.
-                        statusRow("Watchdog block",
-                                  value: state.watchdog_intentional == nil ? "active" : "intentional (\(state.watchdog_intentional!))",
-                                  color: state.watchdog_intentional == nil ? .red : .secondary)
-                    }
-                    if let blockedBy = state.blocked_by, !blockedBy.isEmpty {
-                        blockedByRow(blockedBy)
-                    }
-                    if state.force_armed == true {
-                        Label("Force-armed (cron guard overridden)",
-                              systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundColor(.orange)
-                    }
+                    statusBody(state)
                 }
+            }
+        case .loaded(let state):
+            sectionCard(title: "Status", systemImage: "timer") {
+                statusBody(state)
             }
         default:
             EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private func statusBody(_ state: AutodownStatusResponse) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if waking, let wakeMessage {
+                wakingBanner(wakeMessage)
+            }
+
+            // Summary line (design §B).
+            Text(state.speak)
+                .font(.subheadline)
+                .italic()
+                .foregroundColor(.secondary)
+
+            // Key status fields.
+            statusRow("State", value: stateLabel(state.state),
+                      color: stateColor(state.state))
+            statusRow("Idle limit", value: idleMinutesLabel(state.idle_minutes))
+            statusRow("Enabled", value: state.enabled == true ? "Yes" : "No",
+                      color: state.enabled == true ? .green : .secondary)
+            if state.watchdog_blocked == true {
+                // `intentional` is a STRING ("autodown") during a teardown,
+                // not a Bool — an intentional block is expected, not a fault.
+                statusRow("Watchdog block",
+                          value: state.watchdog_intentional == nil ? "active" : "intentional (\(state.watchdog_intentional!))",
+                          color: state.watchdog_intentional == nil ? .red : .secondary)
+            }
+            if let blockedBy = state.blocked_by, !blockedBy.isEmpty {
+                blockedByRow(blockedBy)
+            }
+            if state.force_armed == true {
+                Label("Force-armed (cron guard overridden)",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+            }
         }
     }
 
@@ -179,12 +190,19 @@ struct AutodownView: View {
             .fill(Theme.Semantic.surfaceElevated))
     }
 
+    /// A `down` state is NORMAL when autodown is armed and idle — the fleet is
+    /// intentionally down, not faulting. Say so plainly instead of implying a
+    /// fault (the offline feature's core honesty rule).
+    private func stateLabel(_ state: String?) -> String {
+        state == "down" ? "down (intentional)" : (state ?? "unknown")
+    }
+
     private func stateColor(_ state: String?) -> Color {
         switch state {
-        case "up": return .green
-        case "down": return .red
-        case "waking": return .orange
-        default: return .secondary
+        case "up": return Theme.Semantic.ok
+        case "down": return Theme.Semantic.neutral
+        case "waking": return Theme.Semantic.warn
+        default: return Theme.Semantic.onSurfaceMuted
         }
     }
 
