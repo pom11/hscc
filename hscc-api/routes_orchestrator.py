@@ -56,6 +56,23 @@ only fires when the ``hermes chat`` process is genuinely hung, not merely slow.
 Every terminal job (``done`` or a failure state) reports ``elapsed`` FROZEN at
 its termination instant (``finished_at - submitted_at``), so status, message
 and elapsed always agree (the original 180s-vs-2972.7s contradiction).
+
+Busy-reporting (t_5ed5dfa8 Bug 1): when kanban workers are running on the SAME
+orchestrator profile, the chat can wedge in the Hermes agent layer (shared
+named session + ``journal_mode=delete`` state.db contention → compaction storm,
+silent 600s timeout). We don't hide that behind a higher timeout; at submit the
+handler counts ``profile``'s running board tasks (``_backing_busy_tasks``) and,
+when non-zero, returns an honest ``notice`` ("<profile> is busy with N kanban
+tasks...") on the POST AND on every GET poll (see ``_job_dict``). The verified
+job-status state machine (queued/running/done/error) is unchanged — the notice
+is purely additive context so a queued message the operator understands beats a
+timeout they cannot explain.
+
+Preamble stripping (t_5ed5dfa8 Bug 2): ``hermes chat -Q`` emits a few one-line
+startup notices to stdout before the reply (the cwd-restore notice, the tirith
+security warning, and defensively the resume banner). ``_backing_invoke`` strips
+them so ``reply`` carries only the model's answer — anchored on the exact known
+shapes so a legitimate reply that merely looks like a warning is never stripped.
 """
 from __future__ import annotations
 
@@ -230,16 +247,110 @@ def _backing_invoke(profile, session, prompt, timeout=_DEFAULT_TIMEOUT):
     return reply, profile, session
 
 
-def _is_notice_line(line: str) -> bool:
-    """True when a stdout line is a channel notice, not part of the reply.
+def _backing_busy_tasks(profile: str) -> int:
+    """Count running kanban tasks assigned to ``profile`` across ALL boards.
 
-    ``hermes chat -Q`` can print a couple of harmless one-liners to stdout
-    BEFORE the reply (observed, t_bc242def Phase 1). The one seen is the
-    cwd-restore notice ``↪ restored workspace dir: <path>``. Matched
-    defensively (substring) so future-notice drift still lands on the
-    conservative side: unknown lines pass through untouched.
+    This is the contention signal for Bug 1 (t_5ed5dfa8). Every HSCC chat runs
+    ``hermes -p <profile> chat -Q --continue <session>`` against the profile's
+    named session — the SAME session and profile through which the project's
+    kanban workers are also running. When ``profile`` has ``n`` running batch
+    tasks, the interactive chat competes for the same agent layer / the same
+    per-profile ``state.db`` (which is pinned to ``journal_mode=delete`` by the
+    WAL-reset-vulnerability guard — see the warning in agent.log), so it can
+    wedge in the agent layer (a shared-session context-compaction storm on a
+    busy profile → the silent 600s timeout the card measured). This count is
+    how the API reports that contention honestly instead of timing out silently.
+
+    Reuses Hermes' OWN ``list_boards()`` enumeration — the same seam
+    flightdeck/core/kanban.py::list_boards and hscc_daemon.autodown use — and
+    scans each board's ``tasks`` for ``status='running'`` rows whose assignee
+    is ``profile``. Fail-SAFE: any board we cannot enumerate/read is counted as
+    BUSY (+1) rather than silently skipped — behaving as idle on an
+    unresolvable signal is a step back toward the silent timeout.
     """
-    return "restored workspace dir:" in line.strip()
+    try:
+        from hermes_cli import kanban_db
+        import sqlite3
+        boards = kanban_db.list_boards()
+    except Exception:
+        # Cannot verify the profile is idle — fail safe toward busy (>=1).
+        return 1
+    count = 0
+    for board in boards:
+        db_path = board.get("db_path")
+        if not db_path:
+            count += 1   # no DB path to inspect — fail safe
+            continue
+        try:
+            conn = sqlite3.connect(str(db_path), timeout=1.0)
+        except Exception:
+            count += 1   # fail safe: cannot verify idle
+            continue
+        try:
+            rows = conn.execute(
+                "SELECT 1 FROM tasks "
+                "WHERE status='running' AND assignee=? LIMIT 1",
+                (profile,),
+            ).fetchone()
+            if rows is not None:
+                count += 1
+        except Exception:
+            count += 1   # fail safe: unreadable board => not provably idle
+        finally:
+            conn.close()
+    return count
+
+
+def _busy_notice(profile: str, count: int) -> str:
+    """An honest, operator-facing notice that the orchestrator is busy.
+
+    Bug 1 fix (t_5ed5dfa8): name the contention instead of a silent 600s
+    timeout. The insight the card proved — a queued message the operator
+    understands beats a timeout they cannot explain. ``count`` is the number of
+    running kanban tasks on ``profile`` (>=1); if it is 1 (only this chat's own
+    profile has no other work) the notice reads naturally singular.
+    """
+    n = int(count)
+    task_word = "task" if n == 1 else "tasks"
+    return (
+        f"{profile} is busy right now (with {n} kanban {task_word} running). "
+        f"Your question is queued behind that work and may take a while; "
+        f"poll this job for the answer."
+    )
+
+
+def _is_notice_line(line: str) -> bool:
+    """True when a stdout line is a Hermes preamble notice, not part of the reply.
+
+    ``hermes chat -Q`` can print a handful of harmless one-liners to stdout
+    BEFORE the reply (observed). Known shapes:
+      * the cwd-restore notice  ``↪ restored workspace dir: <path>``
+        (t_bc242def Phase 1);
+      * the security preamble   ``⚠ tirith security scanner enabled but not
+        available — command scanning will use pattern matching only``
+        (cli.py:7018-7021 — emitted via ``_cprint`` => stdout when no
+        interactive prompt_toolkit app is running, t_5ed5dfa8 Bug 2);
+      * the resume banner       ``↻ Resumed session <id> "<title>" (N user
+        messages, M total messages)`` (cli_agent_setup_mixin.py:312-315 —
+        ordinarily stderr, kept here defensively in case a config change
+        lands it on stdout).
+
+    Matched defensively (substring) against the KNOWN preamble shapes only, so
+    future drift still lands on the conservative side. Crucially, no legitimate
+    reply line that merely "looks like a warning" is ever stripped — only these
+    exact Hermes startup lines are removed, never a model answer that happens
+    to mention a scanner or a session.
+    """
+    s = line.strip()
+    if "restored workspace dir:" in s:
+        return True
+    if "tirith security scanner enabled but not available" in s:
+        return True
+    # The resume banner is distinctive (a ↻ prefix plus the bracketed
+    # user/total message counts) — no model reply naturally matches it.
+    if s.startswith("↻ Resumed session ") and " total messages" in s:
+        return True
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -310,13 +421,14 @@ class _ChatJob:
     }
 
     def __init__(self, job_id, project, profile, session, prompt,
-                 timeout=_DEFAULT_TIMEOUT):
+                 timeout=_DEFAULT_TIMEOUT, notice=None):
         self.job_id = job_id
         self.project = project
         self.profile = profile
         self.session = session
         self.prompt = prompt
         self.timeout = timeout
+        self.notice = notice   # optional honest busy-notice (Bug 1, t_5ed5dfa8)
         self.submitted_at = time.time()
         self.finished_at: float | None = None
         self.lock = threading.Lock()
@@ -363,18 +475,22 @@ def _reap_jobs():
             del _jobs[job.job_id]
 
 
-def _new_job(project, profile, session, prompt, timeout=_DEFAULT_TIMEOUT) -> _ChatJob:
+def _new_job(project, profile, session, prompt, timeout=_DEFAULT_TIMEOUT,
+             notice=None) -> _ChatJob:
     """Create (and store) a queued job under the store lock.
 
     Also runs the opportunistic :func:`_reap_jobs` so every submission pays
     down any terminal jobs that have aged past retention — this is what bounds
     the otherwise-unbounded ``_jobs`` dict (the t_2bb97a26 slow leak: nothing
-    ever removed terminal jobs).
+    ever removed terminal jobs). ``notice`` (optional) is an honest busy-notice
+    carried on the job (Bug 1, t_5ed5dfa8) so a later poll still explains why
+    the orchestrator was slow.
     """
     with _jobs_lock:
         _reap_jobs()
         job_id = f"chat-{next(_job_ids)}"
-        job = _ChatJob(job_id, project, profile, session, prompt, timeout=timeout)
+        job = _ChatJob(job_id, project, profile, session, prompt, timeout=timeout,
+                       notice=notice)
         _jobs[job_id] = job
     return job
 
@@ -390,6 +506,11 @@ def _job_dict(job: _ChatJob) -> dict:
     was the t_023d4c4c contradiction: status/error said 180s while elapsed said
     2972.7s). Only a live (``queued``/``running``) job shows a growing
     ``time.time() - submitted_at``.
+
+    A ``notice`` set at submission (Bug 1, t_5ed5dfa8 — the orchestrator was
+    busy with running kanban tasks) rides along on EVERY state so the operator
+    sees the honest "queued behind batch work" context even after the job
+    finishes — it never disappears mid-poll.
     """
     with job.lock:
         base = {
@@ -397,6 +518,8 @@ def _job_dict(job: _ChatJob) -> dict:
             "project": job.project,
             "status": job.status,
         }
+        if job.notice is not None:
+            base["notice"] = job.notice
         if job.finished_at is not None:
             # Terminal: elapsed frozen at the termination moment, so status,
             # error message and elapsed tell ONE coherent story.
@@ -546,16 +669,28 @@ def handle_orchestrator_chat(server, ctx, query, body):
     profile = resolved["profile"]
     session = resolved["session"]
 
+    # Bug 1 honest-reporting (t_5ed5dfa8): detect when the resolved orchestrator
+    # profile is busy with running kanban work and say so up front, instead of a
+    # silent 600s timeout. A chat on a busy profile queues behind its batch
+    # workers (shared named session + journal_mode=delete state.db contention →
+    # possible agent-layer compaction wedge) so the operator should understand
+    # WHY it may be slow. The notice is surfaced at submit AND rides on the job
+    # (see _job_dict) so a later poll still explains it. Fail-safe: a busy
+    # profile is reported busy; an unverifiable one is treated as busy.
+    busy_count = _backing_busy_tasks(profile)
+    busy_notice = _busy_notice(profile, busy_count) if busy_count > 0 else None
+
     # Create the job and run the real invocation on a daemon background thread
     # (the server is ThreadingHTTPServer with daemon_threads, so this thread
     # lives as long as the process — the reply is NOT lost when the POST
     # connection closes). The timeout (configurable, default 600s) is captured
     # per-job at submission so every job reports elapsed at ITS termination.
-    job = _new_job(project, profile, session, prompt, timeout=_chat_timeout(ctx))
+    job = _new_job(project, profile, session, prompt, timeout=_chat_timeout(ctx),
+                   notice=busy_notice)
     worker = threading.Thread(target=_run_job, args=(job,), daemon=True)
     worker.start()
 
-    return 202, {
+    payload = {
         "job_id": job.job_id,
         "project": project,
         "status": "queued",
@@ -564,6 +699,9 @@ def handle_orchestrator_chat(server, ctx, query, body):
         "session": session,
         "speak": f"Chat request accepted (job {job.job_id}).",
     }
+    if busy_notice is not None:
+        payload["notice"] = busy_notice
+    return 202, payload
 
 
 def handle_orchestrator_chat_job(server, ctx, query, body):

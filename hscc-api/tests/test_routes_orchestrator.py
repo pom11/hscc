@@ -25,6 +25,7 @@ Coverage required by the card:
   * auth still enforced (401) on both POST and GET.
 """
 import json
+import sys
 import threading
 import time
 import types
@@ -687,6 +688,91 @@ def test_backing_invoke_strips_channel_notice_lines(monkeypatch):
     assert reply == "the actual reply here"
 
 
+def test_backing_invoke_strips_tirith_preamble(monkeypatch):
+    """t_5ed5dfa8 Bug 2: the tirith security preamble must NOT pollute the reply.
+
+    Observed real leak — the reply was ``"⚠ tirith security scanner enabled
+    but not available — command scanning will use pattern matching only\n
+    IDLETEST"``, i.e. the Hermes startup warning reached the chat transcript and
+    would be spoken aloud by Siri intents. `_cprint` -> stdout when no prompt
+    app is active (cli.py:7018-7021). `_backing_invoke` must strip it.
+    """
+    import subprocess as _sp
+
+    def with_tirith(*a, **k):
+        _p = types.SimpleNamespace(returncode=0)
+        _p.stderr = ""
+        _p.stdout = (
+            "⚠ tirith security scanner enabled but not available — command "
+            "scanning will use pattern matching only\nIDLETEST\n"
+        )
+        return _p
+    monkeypatch.setattr(_sp, "run", with_tirith)
+    reply, _, _ = routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
+    assert "tirith" not in reply
+    assert "scanner" not in reply
+    assert reply == "IDLETEST"
+
+
+def test_backing_invoke_strips_resume_banner_defensively(monkeypatch):
+    """t_5ed5dfa8 Bug 2: the resume banner is stripped if it ever lands on stdout.
+
+    Ordinarily `hermes chat -Q` sends the ``↻ Resumed session ...`` banner to
+    stderr (cli_agent_setup_mixin.py:312-315), but we strip it defensively in
+    case a config change routes it to stdout — a distinctive line that no model
+    reply naturally matches.
+    """
+    import subprocess as _sp
+
+    def with_banner(*a, **k):
+        _p = types.SimpleNamespace(returncode=0)
+        _p.stderr = ""
+        _p.stdout = (
+            "↻ Resumed session seed-hscc \"hscc\" (21 user messages, 266 total "
+            "messages)\nthe answer\n"
+        )
+        return _p
+    monkeypatch.setattr(_sp, "run", with_banner)
+    reply, _, _ = routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
+    assert "Resumed session" not in reply
+    assert reply == "the answer"
+
+
+def test_notice_line_does_not_strip_warning_shaped_reply_content():
+    """t_5ed5dfa8 Bug 2 anti-over-strip: a model answer that merely looks like a
+    warning (mentions a scanner/session, or starts with '⚠') must PASS THROUGH.
+
+    We anchor on the exact known Hermes preamble shapes, so legitimate reply
+    content that resembles a warning is never removed. Each of these is a
+    plausible model answer and must survive:
+    """
+    not_notices = [
+        "⚠ The session you asked about was archived.",
+        "the tirith scanner is not available on this host, so commands are safe",
+        "Resumed session handling is documented in the API.md design doc",
+    ]
+    for line in not_notices:
+        assert not routes_orchestrator._is_notice_line(line), repr(line)
+
+
+def test_notice_line_strips_known_preamble_shapes():
+    """Known Hermes startup lines are stripped; near-misses are not."""
+    assert routes_orchestrator._is_notice_line(
+        "↪ restored workspace dir: /Users/desac"
+    )
+    assert routes_orchestrator._is_notice_line(
+        "⚠ tirith security scanner enabled but not available — command "
+        "scanning will use pattern matching only"
+    )
+    assert routes_orchestrator._is_notice_line(
+        "↻ Resumed session seed-hscc \"hscc\" (21 user messages, 266 total messages)"
+    )
+    # A resume-shaped line WITHOUT the message counts is NOT the banner -> keep.
+    assert not routes_orchestrator._is_notice_line(
+        "↻ Resumed session seed-hscc"
+    )
+
+
 def test_backing_invoke_empty_reply_raises(monkeypatch):
     import subprocess as _sp
 
@@ -774,3 +860,118 @@ def test_chat_uses_configured_timeout_in_invoke(tmp_path, fakes):
     finally:
         srv.server.shutdown()
         srv.server.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# t_5ed5dfa8 Bug 1: honest busy-reporting when the orchestrator profile is busy
+# --------------------------------------------------------------------------- #
+
+def test_busy_notice_singular_and_plural():
+    """The busy notice reads grammatically for 1 task and for many."""
+    one = routes_orchestrator._busy_notice("hscc-orch", 1)
+    many = routes_orchestrator._busy_notice("hscc-orch", 3)
+    assert "1 kanban task" in one and "tasks" not in one
+    assert "3 kanban tasks" in many
+    assert "hscc-orch is busy" in one
+    assert "queued behind" in one
+    # Must read correctly in both: "with N task(s) running" avoids a plural-verb.
+    assert "1 kanban task running" in one
+    assert "3 kanban tasks running" in many
+
+
+def test_backing_busy_tasks_counts_only_assigned_running(monkeypatch, tmp_path):
+    """Counts exactly the boards' `running` tasks assigned to the profile.
+
+    Injects a fake ``hermes_cli`` module exposing a ``kanban_db.list_boards()``
+    that points at real temp SQLite files, so the seam's real SQL runs against
+    controlled data — no live ~/.hermes is touched.
+    """
+    import sqlite3
+
+    boards = []
+    for slug, rows in [
+        ("hscc", [("t_a", "hscc-orch", "running")]),
+        ("flosana", [("t_b", "some-other", "running"),
+                     ("t_c", "hscc-orch", "done")]),
+    ]:
+        path = tmp_path / f"{slug}.db"
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE tasks (id TEXT, assignee TEXT, status TEXT)")
+        conn.executemany(
+            "INSERT INTO tasks (id, assignee, status) VALUES (?,?,?)", rows
+        )
+        conn.commit()
+        conn.close()
+        boards.append({"slug": slug, "db_path": str(path)})
+
+    fake_kanban = types.SimpleNamespace(list_boards=lambda: boards)
+    fake_hermes_cli = types.SimpleNamespace(kanban_db=fake_kanban)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+
+    count = routes_orchestrator._backing_busy_tasks("hscc-orch")
+    # hscc has 1 running hscc-orch task; flosana's running task is other-assignee
+    # and its done hscc-orch task is not running -> only 1 counts.
+    assert count == 1
+
+    # A profile with no running tasks anywhere -> 0 (idle).
+    assert routes_orchestrator._backing_busy_tasks("ghost-profile") == 0
+
+
+def test_backing_busy_tasks_failsafe_to_busy(monkeypatch, tmp_path):
+    """Unreadable boards -> fail safe toward busy (>=1), never idle."""
+    fake_kanban = types.SimpleNamespace(
+        list_boards=lambda: [{"db_path": str(tmp_path / "missing.db")}]
+    )
+    fake_hermes_cli = types.SimpleNamespace(kanban_db=fake_kanban)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    count = routes_orchestrator._backing_busy_tasks("hscc-orch")
+    assert count >= 1
+
+
+def test_backing_busy_tasks_import_failure_failsafe(monkeypatch):
+    """If hermes_cli.kanban_db cannot be imported -> fail safe busy (>=1).
+
+    ``_backing_busy_tasks`` imports ``hermes_cli`` lazily inside the function;
+    if that import raises (Hermes not reachable from the API plugin env), it
+    must fail SAFE toward busy so we never claim an orchestrator is idle when we
+    cannot verify.
+    """
+    def boom():
+        raise ImportError("no hermes_cli")
+    fake_mod = types.SimpleNamespace()
+    fake_mod.list_boards = boom
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_mod)
+    count = routes_orchestrator._backing_busy_tasks("hscc-orch")
+    assert count >= 1
+
+
+def test_chat_post_includes_notice_when_profile_busy(running, token, fakes, monkeypatch):
+    """A busy orchestrator profile -> the 202 POST AND every GET carry the honest
+    notice (the card's "queued message the operator understands")."""
+    monkeypatch.setattr(routes_orchestrator, "_backing_busy_tasks",
+                        lambda profile: 2)
+    status, payload = _post(running, token, body={
+        "project": "hscc", "prompt": "go build X", "confirm": True,
+    })
+    assert status == 202
+    assert payload["notice"]
+    assert "hscc-orch" in payload["notice"]
+    assert "2 kanban tasks" in payload["notice"]
+    # And the notice rides on every GET poll too.
+    faked = _poll_done(running, token, payload["job_id"])
+    assert faked["status"] == "done"
+    assert faked["notice"] == payload["notice"]
+
+
+def test_chat_post_omits_notice_when_profile_idle(running, token, fakes, monkeypatch):
+    """An idle orchestrator profile -> no notice (the common fast path)."""
+    monkeypatch.setattr(routes_orchestrator, "_backing_busy_tasks",
+                        lambda profile: 0)
+    status, payload = _post(running, token, body={
+        "project": "hscc", "prompt": "hi", "confirm": True,
+    })
+    assert status == 202
+    assert "notice" not in payload
+    faked = _poll_done(running, token, payload["job_id"])
+    assert "notice" not in faked
+    assert faked["status"] == "done"
