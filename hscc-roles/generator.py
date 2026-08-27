@@ -95,20 +95,87 @@ COMPACT_TIMEOUT = int(os.environ.get("HSCC_COMPACT_TIMEOUT", "90"))
 # Compact less often: at this fraction of context (default 0.8 = ~210K of 262K),
 # so summarization is rare instead of firing at 40%.
 COMPACT_THRESHOLD = float(os.environ.get("HSCC_COMPACT_THRESHOLD", "0.8"))
+# The compaction TOKEN CAP (v1.14.0, t_a8e9b7ff): native compaction fires EARLY
+# at this many active tokens in the window — headroom for the compression call
+# itself — instead of at the 196608 ratio floor where it wedges. This is the
+# SINGLE source of truth, shared with the API-side ensure
+# (hscc-api/routes_orchestrator.py imports it from here); do NOT duplicate the
+# literal elsewhere. A lower operator value is always preserved (compaction
+# can only fire earlier — see _compression_block).
+SESSION_COMPACTION_THRESHOLD_TOKENS = 100000
 
 
-def _worker_compaction():
-    """Route a worker role's context-compaction to the idle orchestrator."""
-    return {
-        "compression": {"threshold": COMPACT_THRESHOLD},
-        "auxiliary": {"compression": {
-            "provider": "custom",
-            "model": COMPACT_MODEL,
-            "base_url": COMPACT_BASE_URL,
-            "api_key": COMPACT_KEY,
-            "timeout": COMPACT_TIMEOUT,
-        }},
-    }
+def _compression_block(existing=None):
+    """Build the ``compression`` block for a generated profile, MERGED over an
+    existing block so operator values survive a regeneration.
+
+    Mirrors the well-behaved intent of
+    ``hscc-bootstrap/enable_plugins.py:_ensure_compaction`` (\"operator choices
+    survive\"), applied to the generator's own compression block:
+
+      * ``threshold`` (ratio) is only raised toward COMPACT_THRESHOLD, never
+        lowered — an operator who set a smaller ratio keeps it.
+      * ``threshold_tokens`` (token cap) is emitted at the shared
+        SESSION_COMPACTION_THRESHOLD_TOKENS unless an existing value already
+        ``<=`` that constant is present — a lower cap is deliberate and must
+        never be raised (same rule as the API-side ``_ensure_compaction``).
+      * every OTHER key in an existing compression block is preserved verbatim
+        (the old generator replaced the whole block and dropped them).
+
+    Returns a fresh dict; ``existing`` is never mutated.
+    """
+    comp = dict(existing) if isinstance(existing, dict) else {}
+    cur_thr = comp.get("threshold")
+    if not isinstance(cur_thr, (int, float)) or cur_thr < COMPACT_THRESHOLD:
+        comp["threshold"] = COMPACT_THRESHOLD
+    cur_tok = comp.get("threshold_tokens")
+    if not (isinstance(cur_tok, (int, float))
+            and not isinstance(cur_tok, bool)
+            and cur_tok <= SESSION_COMPACTION_THRESHOLD_TOKENS):
+        comp["threshold_tokens"] = SESSION_COMPACTION_THRESHOLD_TOKENS
+    return comp
+
+
+def _read_existing_config(pdir):
+    """Read an existing on-disk profile config.yaml, if any.
+
+    Returns ``(compression, auxiliary)`` blocks (or ``None`` for each when
+    absent/unreadable) so the generator can MERGE into them instead of
+    clobbering operator values. Never touches anything but the given profile
+    dir; a missing or unparseable file simply yields ``None`` blocks.
+    """
+    path = os.path.join(pdir, "config.yaml")
+    if not os.path.exists(path):
+        return None, None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except (yaml.YAMLError, OSError, UnicodeDecodeError):
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    comp = data.get("compression") if isinstance(data.get("compression"), dict) else None
+    aux = data.get("auxiliary") if isinstance(data.get("auxiliary"), dict) else None
+    return comp, aux
+
+
+def _worker_compaction(existing_compression=None):
+    """Route a worker role's context-compaction to the idle orchestrator.
+
+    The compression block is merged over any existing block (see
+    ``_compression_block``) so an operator's ``threshold_tokens`` survives a
+    regeneration. The auxiliary block is fresh — a worker's summarization must
+    run on the idle orchestrator, not the busy worker proxy.
+    """
+    out = {"compression": _compression_block(existing_compression)}
+    out["auxiliary"] = {"compression": {
+        "provider": "custom",
+        "model": COMPACT_MODEL,
+        "base_url": COMPACT_BASE_URL,
+        "api_key": COMPACT_KEY,
+        "timeout": COMPACT_TIMEOUT,
+    }}
+    return out
 
 _WORKER_OPS = (
     "## Operational\n\n"
@@ -250,6 +317,12 @@ def generate_profile(spec, base_identity):
         "toolsets": rolelib.role_toolsets(),
         "skills": {"preload": spec["preload_skills"]},
     }
+    # Read the profile's EXISTING on-disk compaction blocks (if any) so a
+    # regeneration MERGES into them instead of clobbering operator values —
+    # in particular, an operator-set ``compression.threshold_tokens`` must
+    # survive (see _compression_block). Fresh profiles yield None and start
+    # from the generated defaults.
+    existing_compression, _existing_aux = _read_existing_config(pdir)
     # Worker roles serve from the load-balanced worker proxy so their work runs
     # on worker GPUs, not the orchestrator. The orchestrator role keeps the root
     # config (its own gateway-node model) and is never repointed; per-project
@@ -266,8 +339,12 @@ def generate_profile(spec, base_identity):
         #
         # Deliberately NOT given worker-proxy compaction routing: an
         # orchestrator is not a kanban worker and must not be repointed at the
-        # worker proxy.
+        # worker proxy. It DOES, however, get the compaction compression block
+        # (threshold + threshold_tokens) so bootstrap no longer nulls the
+        # token cap the API-side ensure set (the 2026-08-27 incident: 11 idle
+        # project orche went null for ~84 min and wedged at the ratio floor).
         config["model"] = _strong_model_block()
+        config["compression"] = _compression_block(existing_compression)
     elif not _is_orchestrator(name):
         model_tier = spec.get("model_tier", "fast")
         model_endpoint = spec.get("model_endpoint")
@@ -292,7 +369,7 @@ def generate_profile(spec, base_identity):
         # orchestrator, so a long task's self-summarization doesn't wedge the
         # worker. This applies regardless of model_tier — even strong-tier roles
         # should not compete with their own model for compaction.
-        for k, v in _worker_compaction().items():
+        for k, v in _worker_compaction(existing_compression).items():
             config[k] = v
     changed |= _write_if_changed(
         os.path.join(pdir, "config.yaml"),
