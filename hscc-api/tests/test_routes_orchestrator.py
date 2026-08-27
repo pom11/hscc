@@ -1340,39 +1340,62 @@ def test_session_guard_config_precedence_and_validation(tmp_path):
 # so we verify the file actually lands and parses back.
 
 class _FakeProfilesModule:
-    """Stand-in for ``hermes_cli.profiles`` (profile dir resolution)."""
-    def __init__(self, root):
+    """Stand-in for ``hermes_cli.profiles`` (profile dir resolution).
+
+    When ``roster`` (a list of profile names, t_c03fd5ae) is empty/None it
+    keeps the original single-root behaviour (``get_profile_dir`` -> ``root``,
+    ``profile_exists`` -> True, ``list_profiles`` -> []) so the existing
+    single-profile ensure + guard tests are unchanged. When ``roster`` is
+    given, it resolves each profile to its OWN subdir under ``root`` and
+    ``list_profiles`` enumerates the roster — exercising the role-profile sweep
+    against isolated fake profile dirs, never the live ``~/.hermes/profiles``.
+    """
+    def __init__(self, root, roster=None):
         self._root = root
+        self._roster = list(roster or [])
     def normalize_profile_name(self, name):
         return name
     def validate_profile_name(self, name):
         return None
     def profile_exists(self, name):
+        if self._roster:
+            return name in self._roster
         return True
     def get_profile_dir(self, name):
+        if self._roster:
+            return self._root / name
         return self._root
+    def list_profiles(self):
+        if not self._roster:
+            return []
+        return [types.SimpleNamespace(name=n, path=self._root / n)
+                for n in self._roster]
 
 
-def _install_fake_hermes_modules(monkeypatch, tmp_path, wrote=None):
+def _install_fake_hermes_modules(monkeypatch, tmp_path, wrote=None, roster=None):
     """Inject fake ``hermes_cli.profiles`` + ``utils`` into ``sys.modules`` so
-    ``_ensure_compaction_threshold`` runs against ``tmp_path``'s ``config.yaml``.
+    ``_ensure_compaction_threshold`` / ``_ensure_role_profiles`` run against
+    ``tmp_path``'s config files.
 
     ``wrote`` (optional list) collects every path ``atomic_yaml_write`` wrote to
     (monkeypatched from the real writer, so tests can assert the write actually
     landed and parse the file back through ``yaml.safe_load`` — i.e. verify via
     the same ``config.yaml`` path ``agent_init`` reads, not just the return
-    dict).``monkeypatch.setitem`` tracks the sys.modules entries so they are
-    restored after each test — the global module registry is never left
-    polluted for later tests.
+    dict). ``roster`` (optional, t_c03fd5ae) seeds the fake profile set for the
+    role-profile sweep. ``monkeypatch.setitem`` tracks the sys.modules entries
+    so they are restored after each test — the global module registry is never
+    left polluted for later tests.
     """
     import sys as _sys
-    fake_profiles = _FakeProfilesModule(tmp_path)
+    fake_profiles = _FakeProfilesModule(tmp_path, roster)
     fake_utils = types.ModuleType("utils")
 
     def _atomic_write(path, data, **kw):
+        import os as _os
         import yaml as _yaml
         if wrote is not None:
             wrote.append(str(path))
+        _os.makedirs(_os.path.dirname(str(path)), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             _yaml.dump(data, f, sort_keys=False, default_flow_style=False)
     fake_utils.atomic_yaml_write = _atomic_write
@@ -1471,6 +1494,120 @@ def test_ensure_compaction_threshold_preserves_other_config(tmp_path, monkeypatc
     assert parsed["chat_timeout"] == 600             # untouched
 
 
+# ---- _ensure_role_profiles (t_c03fd5ae) ---------------------------------- #
+# The role-profile sweep discovers every non-orchestrator profile from the
+# profile root (never hardcoded) and runs each through the existing
+# _ensure_compaction_threshold — so new profiles get the threshold on the next
+# run, idempotence is inherited, lower operator values are preserved, and orch
+# profiles are skipped. All against a fake roster rooted at tmp_path — never
+# the live ~/.hermes/profiles.
+
+def _seed_cfg(root, name, text):
+    """Create ``root/<name>/config.yaml`` (with parents) so a role profile has
+    a home dir before the sweep runs against it."""
+    (root / name).mkdir(parents=True, exist_ok=True)
+    (root / name / "config.yaml").write_text(text, encoding="utf-8")
+
+
+def test_ensure_role_profiles_covers_new_profile(tmp_path, monkeypatch):
+    """THE point: a NEW profile appearing under the profile root gets the
+    threshold on the next ensure run. Roster mixes already-ensured roles, an
+    under-cap operator value, and a brand-new profile with no config."""
+    import yaml as _yaml
+    # coder: already at 100000 (idempotence target)
+    _seed_cfg(tmp_path, "coder", "compression:\n  threshold_tokens: 100000\n")
+    # qa: operator set BELOW the constant — must be preserved
+    _seed_cfg(tmp_path, "qa", "compression:\n  threshold_tokens: 60000\n")
+    # worker: role profile already configured with OTHER keys, no compression
+    _seed_cfg(tmp_path, "worker", "model: worker-role\nchat_timeout: 300\n")
+    # NEW role profile — no config.yaml at all (regressed to the wedge state)
+    roster = ["coder", "qa", "worker", "new-role", "hscc-orch"]
+    wrote = []
+    _install_fake_hermes_modules(monkeypatch, tmp_path, wrote, roster=roster)
+
+    res = routes_orchestrator._ensure_role_profiles()
+    assert res is not None
+    # new-role + worker (no cap yet) got the threshold;
+    # coder/qa unchanged; hscc-orch skipped
+    assert res["set"] == ["new-role", "worker"]
+    assert res["unchanged"] == ["coder", "qa"]
+    assert res["orchestrators"] == ["hscc-orch"]
+    assert res["role_profiles"] == 4
+
+    # The new role profile's config.yaml landed on disk (agent_init's read path).
+    assert str(tmp_path / "new-role" / "config.yaml") in wrote
+    assert _yaml.safe_load(
+        (tmp_path / "new-role" / "config.yaml").read_text()
+    )["compression"]["threshold_tokens"] == 100000
+    # worker's OTHER keys survived its ensure (only compression touched) ...
+    worker_parsed = _yaml.safe_load((tmp_path / "worker" / "config.yaml").read_text())
+    assert worker_parsed["compression"]["threshold_tokens"] == 100000
+    assert worker_parsed["model"] == "worker-role"        # untouched
+    assert worker_parsed["chat_timeout"] == 300           # untouched
+    # qa's lower operator value preserved, coder already-ensured value intact.
+    assert _yaml.safe_load((tmp_path / "qa" / "config.yaml").read_text()
+                           )["compression"]["threshold_tokens"] == 60000
+    assert _yaml.safe_load((tmp_path / "coder" / "config.yaml").read_text()
+                           )["compression"]["threshold_tokens"] == 100000
+    # hscc-orch was SKIPPED by the sweep — its (missing) config untouched.
+    assert not (tmp_path / "hscc-orch" / "config.yaml").exists()
+
+
+def test_ensure_role_profiles_idempotent_noop(tmp_path, monkeypatch):
+    """When every role profile is already at 100000 the sweep is a NO-OP: it
+    writes nothing and reports everything unchanged."""
+    for name in ("coder", "reviewer", "worker"):
+        _seed_cfg(tmp_path, name, "compression:\n  threshold_tokens: 100000\n")
+    roster = ["coder", "reviewer", "worker", "hscc-orch"]
+    wrote = []
+    _install_fake_hermes_modules(monkeypatch, tmp_path, wrote, roster=roster)
+
+    res = routes_orchestrator._ensure_role_profiles()
+    assert res is not None
+    assert res["set"] == []
+    assert res["unchanged"] == ["coder", "reviewer", "worker"]
+    assert res["orchestrators"] == ["hscc-orch"]
+    assert wrote == []                    # nothing written anywhere
+
+
+def test_ensure_role_profiles_preserves_lower_operator_value(tmp_path, monkeypatch):
+    """An operator value BELOW the constant (e.g. 60000) on a role profile is
+    PRESERVED, not raised — never clobber a strictly-better lower cap."""
+    import yaml as _yaml
+    _seed_cfg(tmp_path, "backend-engineer",
+              "compression:\n  threshold_tokens: 60000\n")
+    roster = ["backend-engineer"]
+    wrote = []
+    _install_fake_hermes_modules(monkeypatch, tmp_path, wrote, roster=roster)
+
+    res = routes_orchestrator._ensure_role_profiles()
+    assert res["set"] == []
+    assert res["unchanged"] == ["backend-engineer"]
+    assert wrote == []
+    assert _yaml.safe_load(
+        (tmp_path / "backend-engineer" / "config.yaml").read_text()
+    )["compression"]["threshold_tokens"] == 60000
+
+
+def test_ensure_role_profiles_skips_orchestrators(tmp_path, monkeypatch):
+    """Orch profiles are NOT touched by the role sweep — their behaviour stays
+    byte-identical; they are already covered by the per-project ensure path.
+    A role profile alongside IS still ensured."""
+    import yaml as _yaml
+    _seed_cfg(tmp_path, "hscc-orch", "model: orchestrator-model\n")
+    roster = ["hscc-orch", "general-orch", "worker"]
+    wrote = []
+    _install_fake_hermes_modules(monkeypatch, tmp_path, wrote, roster=roster)
+
+    res = routes_orchestrator._ensure_role_profiles()
+    assert res["orchestrators"] == ["general-orch", "hscc-orch"]
+    assert res["set"] == ["worker"]
+    # hscc-orch was NOT ensured by the sweep — its config has no threshold cap.
+    assert "compression" not in _yaml.safe_load(
+        (tmp_path / "hscc-orch" / "config.yaml").read_text())
+    assert (tmp_path / "general-orch" / "config.yaml").exists() is False
+
+
 def test_guard_session_bloat_ensures_compaction_threshold(tmp_path, monkeypatch):
     """_guard_session_bloat's PRIMARY action is to ENSURE the compaction cap on
     the profile's config.yaml (the real fix), independent of the session DB. We
@@ -1490,6 +1627,37 @@ def test_guard_session_bloat_ensures_compaction_threshold(tmp_path, monkeypatch)
     import yaml as _yaml
     parsed = _yaml.safe_load(cfg_path.read_text())
     assert parsed["compression"]["threshold_tokens"] == 100000
+
+
+def test_guard_session_bloat_also_sweeps_role_profiles(tmp_path, monkeypatch):
+    """Wiring (t_c03fd5ae): _guard_session_bloat sweeps the ROLE profiles too,
+    not just the resolved orch profile — so the role-profile extension actually
+    runs on the guard's trigger, not only when called directly."""
+    import yaml as _yaml
+    wrote = []
+    # hscc-orch is the chat target; coder is a role profile with no cap yet.
+    # general-orch is another orchestrator that the sweep must skip.
+    roster = ["hscc-orch", "general-orch", "coder"]
+    _install_fake_hermes_modules(monkeypatch, tmp_path, wrote, roster=roster)
+    fake, old_id = _seed_session_db(tmp_path, "hscc", messages=4,
+                                    input_tokens=51566)
+    _install_fake_profile_db(monkeypatch, fake)
+    ctx = _ctx(str(tmp_path), {})
+
+    res = routes_orchestrator._guard_session_bloat(ctx, "hscc-orch", "hscc")
+    assert res is None                      # healthy session -> no rotation
+
+    # The orch profile's config.yaml (chat target) got the ensure ...
+    orch_cfg = tmp_path / "hscc-orch" / "config.yaml"
+    assert str(orch_cfg) in wrote
+    # ... AND the role profile coder got it (the extension actually fired on
+    # the guard path).
+    role_cfg = tmp_path / "coder" / "config.yaml"
+    assert str(role_cfg) in wrote
+    assert _yaml.safe_load(
+        role_cfg.read_text())["compression"]["threshold_tokens"] == 100000
+    # general-orch was NOT touched by the role sweep (orch behaviour intact).
+    assert not (tmp_path / "general-orch" / "config.yaml").exists()
 
 
 def test_chat_post_surfaces_session_rotation(running, token, fakes, monkeypatch):
