@@ -90,3 +90,47 @@ extension Font {
         return f
     }
 }
+
+// MARK: - Offline stale banner
+
+/// A small reusable banner a view overlays when rendering stale last-known
+/// data: the age ("showing state from 6m ago") + the real reason the fetch
+/// failed. Tapping refetches. Defined here (with the rest of the system
+/// components) because it is pure UI and lives beside the palette.
+struct StaleBanner: View {
+    /// The staleness age message, e.g. "showing state from 6m ago".
+    let age: String
+    /// The real reason the fetch failed, e.g. "Can't reach the cluster…".
+    let reason: String
+    /// Closure run when the operator taps retry.
+    var retry: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "clock.arrow.circlepath")
+                .foregroundColor(Theme.Semantic.warn)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Offline — \(age.lowercased())")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(Theme.Semantic.warn)
+                if !reason.isEmpty {
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+            }
+            Spacer(minLength: 0)
+            Button(action: retry) {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.borderless)
+            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Theme.Semantic.surfaceElevated)
+        )
+    }
+}
