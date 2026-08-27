@@ -345,3 +345,118 @@ def test_env_override_worker_model_forces_concrete(monkeypatch):
     assert mod.WORKER_MODEL == "Qwen/Qwen3.6-27B-FP8"
     assert mod.STRONG_MODEL == "orchestrator-model"  # untouched remains alias
     _restore_model_defaults(monkeypatch)
+
+
+# -- compression.threshold_tokens regression (t_f2c2dbb5) --
+#
+# Bootstrap regenerating a profile must NOT drop the operator/API-set
+# ``compression.threshold_tokens``. The 2026-08-27 incident: the generator
+# wrote the compression block as a fresh dict and nulled this key on every
+# profile, wedging sessions at the 196608 ratio floor. These tests pin the
+# merge behaviour. They all run against an isolated fake profile root
+# (tmp_path + monkeypatched HERMES_HOME / PROFILES_DIR) — never
+# ~/.hermes/profiles.
+
+
+def _gen_config(tmp_path, monkeypatch, spec):
+    """Generate a profile and return its config.yaml dict (isolated root)."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR",
+                        str(tmp_path / "profiles"))
+    generator.generate_profile(spec, base_identity="BASE")
+    with open(os.path.join(str(tmp_path / "profiles" / spec["name"]),
+                           "config.yaml")) as f:
+        return yaml.safe_load(f)
+
+
+def test_new_profile_has_threshold_tokens(tmp_path, monkeypatch):
+    """A brand-new worker profile is generated WITH threshold_tokens set."""
+    cfg = _gen_config(tmp_path, monkeypatch, {
+        "name": "coder", "identity": "You build.\n",
+        "preload_skills": [], "model_tier": "fast"})
+    comp = cfg["compression"]
+    assert comp["threshold"] == generator.COMPACT_THRESHOLD
+    assert comp["threshold_tokens"] == \
+        generator.SESSION_COMPACTION_THRESHOLD_TOKENS == 100000
+
+
+def test_regen_keeps_threshold_tokens_100000(tmp_path, monkeypatch):
+    """THE regression: regenerating a profile that already has
+    threshold_tokens: 100000 leaves it at 100000 (a test that only asserted on
+    ``threshold`` would have passed on 2026-08-27)."""
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    cfg = _gen_config(tmp_path, monkeypatch, spec)
+    assert cfg["compression"]["threshold_tokens"] == \
+        generator.SESSION_COMPACTION_THRESHOLD_TOKENS == 100000
+    # Regenerate — must NOT null the token cap.
+    cfg2 = _gen_config(tmp_path, monkeypatch, spec)
+    assert cfg2["compression"]["threshold_tokens"] == 100000
+    assert cfg2["compression"]["threshold_tokens"] == \
+        generator.SESSION_COMPACTION_THRESHOLD_TOKENS
+
+
+def test_regen_preserves_lower_operator_threshold_tokens(tmp_path, monkeypatch):
+    """A LOWER operator value (<= the constant) survives a regeneration — raising
+    it would clobber a deliberate, stricter cap."""
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    pdir = os.path.join(str(tmp_path / "profiles" / "coder"))
+    # Simulate an operator lowering the token cap to 50000.
+    with open(os.path.join(pdir, "config.yaml")) as f:
+        cur = yaml.safe_load(f)
+    cur["compression"]["threshold_tokens"] = 50000
+    with open(os.path.join(pdir, "config.yaml"), "w") as f:
+        yaml.safe_dump(cur, f, sort_keys=False)
+    # Regenerate; the lower operator value must be preserved.
+    cfg2 = _gen_config(tmp_path, monkeypatch, spec)
+    assert cfg2["compression"]["threshold_tokens"] == 50000
+
+
+def test_regen_preserves_other_compression_keys(tmp_path, monkeypatch):
+    """OTHER keys in an existing compression block are not dropped by the merge."""
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    pdir = os.path.join(str(tmp_path / "profiles" / "coder"))
+    with open(os.path.join(pdir, "config.yaml")) as f:
+        cur = yaml.safe_load(f)
+    cur["compression"]["operator_key"] = "keep-me"
+    with open(os.path.join(pdir, "config.yaml"), "w") as f:
+        yaml.safe_dump(cur, f, sort_keys=False)
+    cfg2 = _gen_config(tmp_path, monkeypatch, spec)
+    assert cfg2["compression"]["operator_key"] == "keep-me"
+    assert cfg2["compression"]["threshold_tokens"] == 100000
+
+
+def test_project_orch_gets_threshold_tokens(tmp_path, monkeypatch):
+    """A <project>-orch profile is emitted WITH threshold_tokens too — these
+    are the 11 idle profiles bootstrap nulled on 2026-08-27 (they previously
+    got NO compression block at all)."""
+    spec = {"name": "ecofire-app-orch", "identity": "You orch.\n",
+            "preload_skills": [], "model_tier": "strong"}
+    cfg = _gen_config(tmp_path, monkeypatch, spec)
+    assert cfg["model"]["base_url"]  # still has its strong model block
+    comp = cfg["compression"]
+    assert comp["threshold_tokens"] == \
+        generator.SESSION_COMPACTION_THRESHOLD_TOKENS == 100000
+    # Regeneration keeps it (not nulled).
+    cfg2 = _gen_config(tmp_path, monkeypatch, spec)
+    assert cfg2["compression"]["threshold_tokens"] == 100000
+
+
+def test_project_orch_preserves_operator_threshold_tokens(tmp_path, monkeypatch):
+    """A project-orch profile's LOWER operator threshold_tokens survives a
+    regeneration (same merge rule as worker roles)."""
+    spec = {"name": "ecofire-app-orch", "identity": "You orch.\n",
+            "preload_skills": [], "model_tier": "strong"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    pdir = os.path.join(str(tmp_path / "profiles" / "ecofire-app-orch"))
+    with open(os.path.join(pdir, "config.yaml")) as f:
+        cur = yaml.safe_load(f)
+    cur["compression"]["threshold_tokens"] = 40000
+    with open(os.path.join(pdir, "config.yaml"), "w") as f:
+        yaml.safe_dump(cur, f, sort_keys=False)
+    cfg2 = _gen_config(tmp_path, monkeypatch, spec)
+    assert cfg2["compression"]["threshold_tokens"] == 40000
