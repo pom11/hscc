@@ -1,0 +1,50 @@
+{
+ "hosts": [
+  {
+   "id": "node-1",
+   "name": "Node #1",
+   "ip": "10.0.0.2",
+   "role": "worker",
+   "ssh_user": "node"
+  },
+  {
+   "id": "node-2",
+   "name": "Node #2",
+   "ip": "10.0.0.3",
+   "role": "worker",
+   "ssh_user": "node"
+  },
+  {
+   "id": "node-3",
+   "name": "Node #3",
+   "ip": "10.0.0.4",
+   "role": "worker",
+   "ssh_user": "node"
+  },
+  {
+   "id": "gateway-1",
+   "name": "Gateway",
+   "ip": "10.0.0.1",
+   "role": "gateway",
+   "ssh_user": "node"
+  },
+  {
+   "id": null,
+   "name": null,
+   "ip": "10.0.0.5",
+   "role": "nas",
+   "ssh_user": null
+  }
+ ],
+ "saved_clusters": {
+  "success": true,
+  "returncode": 0,
+  "output": "Name                 Hosts                                    Description                   \n---------------------------------------------------------------------------------------------\n* hscc                 10.0.0.1, 10.0.0.2                                         \n                       10.0.0.3, 10.0.0.4          \n\n* = default cluster"
+ },
+ "live_status": {
+  "success": true,
+  "returncode": 0,
+  "output": "Job: /home/devuser/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml  (tp=2, pp=1)  [9a0467d69586ef5f_4e690f2e56f8]  (2 container(s))\n  node_0     10.0.0.1                           Up 12 hours               scitrera/dgx-spark-vllm-jasl-ds4:20260609-hscc\n  node_1     10.0.0.2                           Up 12 hours               scitrera/dgx-spark-vllm-jasl-ds4:20260609-hscc\n  logs: sparkrun logs 9a0467d69586ef5f_4e690f2e56f8\n  stop: sparkrun stop 9a0467d69586ef5f_4e690f2e56f8\n\nJob: /home/devuser/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml  (tp=2, pp=1)  [eaa6ce556fd1e21d_f4de31453fdf]  (2 container(s))\n  node_0     10.0.0.3                           Up 12 hours               scitrera/dgx-spark-vllm-jasl-ds4:20260609-hscc\n  node_1     10.0.0.4                           Up 12 hours               scitrera/dgx-spark-vllm-jasl-ds4:20260609-hscc\n  logs: sparkrun logs eaa6ce556fd1e21d_f4de31453fdf\n  stop: sparkrun stop eaa6ce556fd1e21d_f4de31453fdf\n\nJob: /home/devuser/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml  (tp=2, pp=1)  [81fb38c99696b8c8_086606fbaf71]  (1 container(s))\n  solo       10.0.0.3                           Up 13 hours               scitrera/dgx-spark-vllm-jasl-ds4:20260609-hscc\n  logs: sparkrun logs 81fb38c99696b8c8_086606fbaf71\n  stop: sparkrun stop 81fb38c99696b8c8_086606fbaf71\n\nTotal: 5 container(s) across 4 host(s)"
+ },
+ "speak": "5 hosts registered."
+}

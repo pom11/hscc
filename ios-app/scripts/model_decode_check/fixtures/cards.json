@@ -1,0 +1,54 @@
+{
+ "cards": [
+  {
+   "id": "t_049d6986",
+   "title": "QA-3: surface pending manual items in `qa` list output",
+   "body": "(body omitted by sanitizer)",
+   "status": "blocked",
+   "assignee": "backend-engineer",
+   "board": "default",
+   "branch": "wt/t_049d6986",
+   "priority": 0,
+   "created_at": 1786820476,
+   "started_at": 1786989311,
+   "completed_at": null,
+   "last_heartbeat_at": 1786989373,
+   "workspace_kind": "worktree",
+   "workspace_path": "/home/devuser/dev/flightdeck/.worktrees/t_049d6986"
+  },
+  {
+   "id": "t_704ac55b",
+   "title": "iOS B4: mutating actions behind explicit confirm UI",
+   "body": "(body omitted by sanitizer)",
+   "status": "blocked",
+   "assignee": "ios-engineer",
+   "board": "ios-app",
+   "branch": "wt/t_704ac55b",
+   "priority": 0,
+   "created_at": 1787250568,
+   "started_at": null,
+   "completed_at": null,
+   "last_heartbeat_at": 1787250631,
+   "workspace_kind": "scratch",
+   "workspace_path": "/home/devuser/.hermes/kanban/boards/hscc/workspaces/t_704ac55b"
+  },
+  {
+   "id": "t_41727d6a",
+   "title": "docs(ios): end-to-end app-vs-API review + README for the real surface",
+   "body": "(body omitted by sanitizer)",
+   "status": "running",
+   "assignee": "hscc-orch",
+   "board": "hscc",
+   "branch": "wt/t_41727d6a",
+   "priority": 0,
+   "created_at": 1787244745,
+   "started_at": 1787244900,
+   "completed_at": null,
+   "last_heartbeat_at": 1787250400,
+   "workspace_kind": "worktree",
+   "workspace_path": "/home/devuser/dev/hscc/.worktrees/t_41727d6a"
+  }
+ ],
+ "count": 3,
+ "speak": "3 open cards."
+}

@@ -1,0 +1,76 @@
+{
+ "rules": [
+  {
+   "id": "orch-dgx-down",
+   "trigger_type": "notify",
+   "condition": {
+    "metric": "failed_dgx",
+    "op": "==",
+    "value": true
+   },
+   "trigger_params": {
+    "title": "HSCC: orchestrator/DGX unhealthy",
+    "body": "The orchestrator node / DGX check is failing — inference may be down."
+   }
+  },
+  {
+   "id": "vllm-down",
+   "trigger_type": "notify",
+   "condition": {
+    "metric": "vllm_down",
+    "op": "==",
+    "value": true
+   },
+   "trigger_params": {
+    "title": "HSCC: vLLM backend down",
+    "body": "The orchestrator vLLM endpoint is not serving."
+   }
+  },
+  {
+   "id": "watchdog-blocked",
+   "trigger_type": "notify",
+   "condition": {
+    "metric": "watchdog_blocked",
+    "op": "==",
+    "value": true
+   },
+   "trigger_params": {
+    "title": "HSCC: pipeline watchdog blocked",
+    "body": "The pipeline watchdog tripped its circuit breaker — dispatch is halted."
+   }
+  }
+ ],
+ "last_run": {
+  "timestamp": "2026-08-27T04:13:30.136977+00:00",
+  "stream": "triggers",
+  "ok": true,
+  "rules_evaluated": 3,
+  "events_checked": 50,
+  "actions_fired": 0,
+  "last_check": "2026-08-27T04:13:30.136930+00:00",
+  "message": "Evaluated 3 rules, fired 0 actions"
+ },
+ "recent_events": [
+  "{\"id\": \"hscc-agent-coordinator.task.dispatched.1780591246.935407\", \"event_type\": \"task.dispatched\", \"timestamp\": \"2026-06-04T16:40:46.935415+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"task_id\": \"28D4653C-4FB7-4215-BE72-57CC386216DD\", \"project_id\": \"602539B0-F889-405E-88A9-68F108300EC6\", \"kanban_id\": \"t_78276103\", \"board\": \"hscc-602539b0\", \"worktree\": \"/home/devuser/.hscc/worktrees/602539B0-F889-405E-88A9-68F108300EC6/worker-247-28D4653C-4FB7-4215-BE72-57CC386216DD\", \"profile\": \"worker-247\", \"worker_host\": \"10.0.0.3\"}}",
+  "{\"id\": \"hscc-agent-coordinator.task.released.1780591257.128507\", \"event_type\": \"task.released\", \"timestamp\": \"2026-06-04T16:40:57.128511+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"task_id\": \"28D4653C-4FB7-4215-BE72-57CC386216DD\", \"kanban_id\": \"t_78276103\", \"board\": \"hscc-602539b0\"}}",
+  "{\"id\": \"hscc-agent-coordinator.worktree.created.1780592590.370853\", \"event_type\": \"worktree.created\", \"timestamp\": \"2026-06-04T17:03:10.370865+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"project_id\": \"602539B0-F889-405E-88A9-68F108300EC6\", \"task_id\": \"1ACF71E5-56D7-461D-B210-C3A80221833D\", \"agent_id\": \"worker-247\", \"branch\": \"task/1ACF71E5-56D7-461D-B210-C3A80221833D-Task-0-Project-Setup-(re-dispatch)\", \"path\": \"/home/devuser/.hscc/worktrees/602539B0-F889-405E-88A9-68F108300EC6/worker-247-1ACF71E5-56D7-461D-B210-C3A80221833D\"}}",
+  "{\"id\": \"hscc-agent-coordinator.worktree.created.1780593523.209054\", \"event_type\": \"worktree.created\", \"timestamp\": \"2026-06-04T17:18:43.209067+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"project_id\": \"602539B0-F889-405E-88A9-68F108300EC6\", \"task_id\": \"205F5CBE-2659-4D98-884B-E2F1E323773A\", \"agent_id\": \"worker-248\", \"branch\": \"task/205F5CBE-2659-4D98-884B-E2F1E323773A-Task-2-CNN-Feature-Extractor\", \"path\": \"/home/devuser/.hscc/worktrees/602539B0-F889-405E-88A9-68F108300EC6/worker-248-205F5CBE-2659-4D98-884B-E2F1E323773A\"}}",
+  "{\"id\": \"hscc-agent-coordinator.task.dispatched.1780593555.207041\", \"event_type\": \"task.dispatched\", \"timestamp\": \"2026-06-04T17:19:15.207050+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"task_id\": \"205F5CBE-2659-4D98-884B-E2F1E323773A\", \"project_id\": \"602539B0-F889-405E-88A9-68F108300EC6\", \"kanban_id\": \"t_9f7c237a\", \"board\": \"hscc-602539b0\", \"worktree\": \"/home/devuser/.hscc/worktrees/602539B0-F889-405E-88A9-68F108300EC6/worker-248-205F5CBE-2659-4D98-884B-E2F1E323773A\", \"profile\": \"worker-248\", \"worker_host\": \"10.0.0.4\"}}",
+  "{\"id\": \"hscc-agent-coordinator.worktree.created.1780594694.50671\", \"event_type\": \"worktree.created\", \"timestamp\": \"2026-06-04T17:38:14.506721+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"project_id\": \"602539B0-F889-405E-88A9-68F108300EC6\", \"task_id\": \"205F5CBE-2659-4D98-884B-E2F1E323773A\", \"agent_id\": \"worker-246\", \"branch\": \"task/205F5CBE-2659-4D98-884B-E2F1E323773A-Task-2-CNN-Feature-Extractor\", \"path\": \"/home/devuser/.hscc/worktrees/602539B0-F889-405E-88A9-68F108300EC6/worker-246-205F5CBE-2659-4D98-884B-E2F1E323773A\"}}",
+  "{\"id\": \"hscc-agent-coordinator.task.dispatched.1780594695.307673\", \"event_type\": \"task.dispatched\", \"timestamp\": \"2026-06-04T17:38:15.307682+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"task_id\": \"205F5CBE-2659-4D98-884B-E2F1E323773A\", \"project_id\": \"602539B0-F889-405E-88A9-68F108300EC6\", \"kanban_id\": \"t_9f7c237a\", \"board\": \"hscc-602539b0\", \"worktree\": \"/home/devuser/.hscc/worktrees/602539B0-F889-405E-88A9-68F108300EC6/worker-246-205F5CBE-2659-4D98-884B-E2F1E323773A\", \"profile\": \"default\", \"worker_host\": null}}",
+  "{\"id\": \"hscc-agent-coordinator.task.released.1780594705.660397\", \"event_type\": \"task.released\", \"timestamp\": \"2026-06-04T17:38:25.660400+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"task_id\": \"205F5CBE-2659-4D98-884B-E2F1E323773A\", \"kanban_id\": \"t_9f7c237a\", \"board\": \"hscc-602539b0\"}}",
+  "{\"id\": \"hscc-agent-coordinator.task.released.1780594915.072591\", \"event_type\": \"task.released\", \"timestamp\": \"2026-06-04T17:41:55.072593+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"task_id\": \"205F5CBE-2659-4D98-884B-E2F1E323773A\", \"kanban_id\": \"t_9f7c237a\", \"board\": \"hscc-602539b0\"}}",
+  "{\"id\": \"hscc-agent-coordinator.worktree.removed.1780596081.072178\", \"event_type\": \"worktree.removed\", \"timestamp\": \"2026-06-04T18:01:21.072185+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"project_id\": \"602539B0-F889-405E-88A9-68F108300EC6\", \"task_id\": \"205F5CBE-2659-4D98-884B-E2F1E323773A\", \"path\": \"/home/devuser/.hscc/worktrees/602539B0-F889-405E-88A9-68F108300EC6/worker-246-205F5CBE-2659-4D98-884B-E2F1E323773A\"}}",
+  "{\"id\": \"hscc-agent-coordinator.worktree.created.1780596130.503697\", \"event_type\": \"worktree.created\", \"timestamp\": \"2026-06-04T18:02:10.503706+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"project_id\": \"602539B0-F889-405E-88A9-68F108300EC6\", \"task_id\": \"205F5CBE-2659-4D98-884B-E2F1E323773A\", \"agent_id\": \"worker-246\", \"branch\": \"task/205F5CBE-2659-4D98-884B-E2F1E323773A-Task-2-CNN-Feature-Extractor\", \"path\": \"/home/devuser/.hscc/worktrees/602539B0-F889-405E-88A9-68F108300EC6/worker-246-205F5CBE-2659-4D98-884B-E2F1E323773A\"}}",
+  "{\"id\": \"hscc-agent-coordinator.task.dispatched.1780596131.348219\", \"event_type\": \"task.dispatched\", \"timestamp\": \"2026-06-04T18:02:11.348226+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"task_id\": \"205F5CBE-2659-4D98-884B-E2F1E323773A\", \"project_id\": \"602539B0-F889-405E-88A9-68F108300EC6\", \"kanban_id\": \"t_9f7c237a\", \"board\": \"hscc-602539b0\", \"worktree\": \"/home/devuser/.hscc/worktrees/602539B0-F889-405E-88A9-68F108300EC6/worker-246-205F5CBE-2659-4D98-884B-E2F1E323773A\", \"profile\": \"default\", \"worker_host\": null}}",
+  "{\"id\": \"hscc-agent-coordinator.task.released.1780596145.702168\", \"event_type\": \"task.released\", \"timestamp\": \"2026-06-04T18:02:25.702171+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"task_id\": \"205F5CBE-2659-4D98-884B-E2F1E323773A\", \"kanban_id\": \"t_9f7c237a\", \"board\": \"hscc-602539b0\"}}",
+  "{\"id\": \"hscc-agent-coordinator.task.dispatched.1780596356.690982\", \"event_type\": \"task.dispatched\", \"timestamp\": \"2026-06-04T18:05:56.690994+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"task_id\": \"205F5CBE-2659-4D98-884B-E2F1E323773A\", \"project_id\": \"602539B0-F889-405E-88A9-68F108300EC6\", \"kanban_id\": \"t_9f7c237a\", \"board\": \"hscc-602539b0\", \"worktree\": \"/home/devuser/.hscc/worktrees/602539B0-F889-405E-88A9-68F108300EC6/worker-246-205F5CBE-2659-4D98-884B-E2F1E323773A\", \"profile\": \"default\", \"worker_host\": null}}",
+  "{\"id\": \"hscc-agent-coordinator.task.released.1780596465.475718\", \"event_type\": \"task.released\", \"timestamp\": \"2026-06-04T18:07:45.475721+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"task_id\": \"205F5CBE-2659-4D98-884B-E2F1E323773A\", \"kanban_id\": \"t_9f7c237a\", \"board\": \"hscc-602539b0\"}}",
+  "{\"id\": \"hscc-agent-coordinator.task.cancelled.1780596535.685513\", \"event_type\": \"task.cancelled\", \"timestamp\": \"2026-06-04T18:08:55.685519+00:00\", \"severity\": \"warning\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"task_id\": \"205F5CBE-2659-4D98-884B-E2F1E323773A\", \"kanban_id\": \"t_9f7c237a\", \"board\": \"hscc-602539b0\"}}",
+  "{\"id\": \"hscc-agent-coordinator.task.dispatched.1780596572.902946\", \"event_type\": \"task.dispatched\", \"timestamp\": \"2026-06-04T18:09:32.902959+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"task_id\": \"205F5CBE-2659-4D98-884B-E2F1E323773A\", \"project_id\": \"602539B0-F889-405E-88A9-68F108300EC6\", \"kanban_id\": \"t_df30e130\", \"board\": \"hscc-602539b0\", \"worktree\": \"/home/devuser/.hscc/worktrees/602539B0-F889-405E-88A9-68F108300EC6/worker-246-205F5CBE-2659-4D98-884B-E2F1E323773A\", \"profile\": \"default\", \"worker_host\": null}}",
+  "{\"id\": \"hscc-agent-coordinator.task.released.1780596589.895554\", \"event_type\": \"task.released\", \"timestamp\": \"2026-06-04T18:09:49.895556+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"task_id\": \"205F5CBE-2659-4D98-884B-E2F1E323773A\", \"kanban_id\": \"t_df30e130\", \"board\": \"hscc-602539b0\"}}",
+  "{\"id\": \"hscc-agent-coordinator.worktree.merged.1780596845.437572\", \"event_type\": \"worktree.merged\", \"timestamp\": \"2026-06-04T18:14:05.437577+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"project_id\": \"602539B0-F889-405E-88A9-68F108300EC6\", \"task_id\": \"205F5CBE-2659-4D98-884B-E2F1E323773A\", \"branch\": \"task/205F5CBE-2659-4D98-884B-E2F1E323773A-Task-2-CNN-Feature-Extractor\"}}",
+  "{\"id\": \"hscc-agent-coordinator.worktree.removed.1780596872.792202\", \"event_type\": \"worktree.removed\", \"timestamp\": \"2026-06-04T18:14:32.792209+00:00\", \"severity\": \"info\", \"source\": \"hscc-agent-coordinator\", \"payload\": {\"project_id\": \"602539B0-F889-405E-88A9-68F108300EC6\", \"task_id\": \"205F5CBE-2659-4D98-884B-E2F1E323773A\", \"path\": \"/home/devuser/.hscc/worktrees/602539B0-F889-405E-88A9-68F108300EC6/worker-246-205F5CBE-2659-4D98-884B-E2F1E323773A\"}}"
+ ],
+ "speak": "3 trigger rules configured."
+}

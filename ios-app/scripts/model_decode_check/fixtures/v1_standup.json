@@ -1,0 +1,172 @@
+{
+ "needs_you": [],
+ "failing": [],
+ "stale": [],
+ "running": [
+  {
+   "id": "t_41727d6a",
+   "board": "hscc",
+   "title": "docs(ios): end-to-end app-vs-API review + README for the real surface",
+   "status": "running",
+   "branch": "wt/t_41727d6a",
+   "assignee": "hscc-orch",
+   "verify": null,
+   "kind": "working"
+  },
+  {
+   "id": "t_a8e9b7ff",
+   "board": "hscc",
+   "title": "fix(api): auto-rotate bloated chat sessions + stop the lying busy notice",
+   "status": "running",
+   "branch": "wt/t_a8e9b7ff",
+   "assignee": "hscc-orch",
+   "verify": null,
+   "kind": "working"
+  },
+  {
+   "id": "t_049d6986",
+   "board": null,
+   "title": "QA-3: surface pending manual items in `qa` list output",
+   "status": "blocked",
+   "branch": "wt/t_049d6986",
+   "assignee": "backend-engineer",
+   "verify": null,
+   "kind": "working",
+   "unattributed": true
+  },
+  {
+   "id": "t_704ac55b",
+   "board": null,
+   "title": "iOS B4: mutating actions behind explicit confirm UI (dispatch/merge/template-apply/stop)",
+   "status": "blocked",
+   "branch": "wt/t_704ac55b",
+   "assignee": "ios-engineer",
+   "verify": null,
+   "kind": "working",
+   "unattributed": true
+  }
+ ],
+ "drift": [
+  {
+   "project": "ecofire-app",
+   "board": "ecofire-app",
+   "repo_version": null,
+   "installed": null,
+   "state": "UNKNOWN"
+  },
+  {
+   "project": "ecofire-bc",
+   "board": "ecofire-bc",
+   "repo_version": null,
+   "installed": null,
+   "state": "UNKNOWN"
+  },
+  {
+   "project": "efsdriver",
+   "board": "efsdriver",
+   "repo_version": null,
+   "installed": null,
+   "state": "UNKNOWN"
+  },
+  {
+   "project": "flosana",
+   "board": "flosana",
+   "repo_version": null,
+   "installed": null,
+   "state": "UNKNOWN"
+  },
+  {
+   "project": "grid",
+   "board": "grid",
+   "repo_version": null,
+   "installed": null,
+   "state": "UNKNOWN"
+  },
+  {
+   "project": "hscc",
+   "board": "hscc",
+   "repo_version": null,
+   "installed": null,
+   "state": "UNKNOWN"
+  },
+  {
+   "project": "pickolo",
+   "board": "pickolo",
+   "repo_version": null,
+   "installed": null,
+   "state": "UNKNOWN"
+  },
+  {
+   "project": "pom",
+   "board": "pom",
+   "repo_version": null,
+   "installed": null,
+   "state": "UNKNOWN"
+  },
+  {
+   "project": "powerbi",
+   "board": "powerbi",
+   "repo_version": null,
+   "installed": null,
+   "state": "UNKNOWN"
+  },
+  {
+   "project": "radio",
+   "board": "radio",
+   "repo_version": null,
+   "installed": null,
+   "state": "UNKNOWN"
+  },
+  {
+   "project": "soconn",
+   "board": "soconn",
+   "repo_version": null,
+   "installed": null,
+   "state": "UNKNOWN"
+  },
+  {
+   "project": "sphoin",
+   "board": "sphoin",
+   "repo_version": null,
+   "installed": null,
+   "state": "UNKNOWN"
+  }
+ ],
+ "unreadable": [],
+ "main_tree": [],
+ "coverage": {
+  "projects": 12,
+  "boards": 3,
+  "cards": 4,
+  "attributed": 2,
+  "unreadable": 0,
+  "unreadable_projects": [],
+  "no_source": [],
+  "cap": 6,
+  "ceiling": 3,
+  "in_flight": 2,
+  "in_flight_boards": [
+   "hscc"
+  ],
+  "watermark": 1787244745,
+  "watermark_boards": [
+   "default",
+   "hscc",
+   "ios-app"
+  ],
+  "dependents": [
+   {
+    "project": "ecofire-bc",
+    "notice": "2 dependent project(s): ecofire-app, efsdriver — consider verifying they still work"
+   }
+  ],
+  "unread_boards": [
+   "default",
+   "ios-app"
+  ],
+  "unread_cards": 2,
+  "update": null,
+  "main_tree": 0
+ },
+ "speak": "4 are running."
+}

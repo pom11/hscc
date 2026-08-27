@@ -1,0 +1,19 @@
+{
+ "enabled": true,
+ "state": "up",
+ "idle_minutes": 60,
+ "last_activity_iso": "2026-08-27T04:15:04.925277+00:00",
+ "down_since": null,
+ "wake_source": "http",
+ "reason": "",
+ "watchdog_blocked": false,
+ "watchdog_intentional": null,
+ "kanban_ok": null,
+ "kanban_reason": null,
+ "blocked_by": null,
+ "force_armed": false,
+ "force_armed_overrides": [],
+ "active_cron_cpu_only": [],
+ "active_cron_model": [],
+ "speak": "Autodown armed, idle limit 60 minutes, status up. http."
+}

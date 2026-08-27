@@ -1,0 +1,132 @@
+{
+ "count": 14,
+ "templates": [
+  {
+   "name": "1node-orchestrator-only",
+   "version": 2,
+   "description": "1 node: A3B-NVFP4 orchestrator only (no worker family). cluster_size=1.",
+   "families": [],
+   "group": "1node"
+  },
+  {
+   "name": "2node-coding",
+   "version": 2,
+   "description": "2 nodes: orchestrator + 1 coding worker (27B-FP8). cluster_size=2.",
+   "families": [
+    "coding"
+   ],
+   "group": "2node"
+  },
+  {
+   "name": "3node-coding",
+   "version": 2,
+   "description": "3 nodes: orchestrator + 2 coding workers (27B-FP8). cluster_size=3.",
+   "families": [
+    "coding"
+   ],
+   "group": "3node"
+  },
+  {
+   "name": "4node-coding-plus-fast",
+   "version": 2,
+   "description": "4 nodes: orchestrator + coding family (2× 27B-FP8) + fast family (1× A3B-FP8). cluster_size=4.",
+   "families": [
+    "coding",
+    "fast"
+   ],
+   "group": "4node"
+  },
+  {
+   "name": "4node-coding",
+   "version": 2,
+   "description": "4 nodes: orchestrator + 3 coding workers (27B-FP8). The live setup. cluster_size=4.",
+   "families": [
+    "coding"
+   ],
+   "group": "4node"
+  },
+  {
+   "name": "4node-colocated-dual",
+   "version": 2,
+   "description": "4 nodes: orchestrator + 3 workers EACH co-locating 2× A3B-FP8 (ports 8000/8001). cluster_size=4.",
+   "families": [
+    "dual"
+   ],
+   "group": "4node"
+  },
+  {
+   "name": "4node-deepseek-v4-orchestrator",
+   "version": 2,
+   "description": "4 nodes: DeepSeek-V4-Flash 304B NVFP4 orchestrator (tp=2, 2 nodes) + coding family (2x 27B-FP8). cluster_size=4.",
+   "families": [
+    "coding"
+   ],
+   "group": "4node"
+  },
+  {
+   "name": "4node-dsv4-plus-coding",
+   "version": 2,
+   "description": "4 nodes: DeepSeek-V4-Flash-0731 FP8 orchestrator (tp=2) + coding family (2x Qwen3.6-27B-FP8). cluster_size=4.",
+   "families": [
+    "coding"
+   ],
+   "group": "4node"
+  },
+  {
+   "name": "4node-dual-dsv4",
+   "version": 3,
+   "description": "4 nodes: 2x DeepSeek-V4-Flash-0731 FP8 (each tp=2) — orchestrator DSV4 + reasoning family DSV4. cluster_size=4.",
+   "families": [
+    "reasoning"
+   ],
+   "group": "4node"
+  },
+  {
+   "name": "8node-coding-plus-fast",
+   "version": 2,
+   "description": "8 nodes: orchestrator + coding (4× 27B-FP8) + fast (3× A3B-FP8). cluster_size=8.",
+   "families": [
+    "coding",
+    "fast"
+   ],
+   "group": "8node"
+  },
+  {
+   "name": "8node-coding",
+   "version": 2,
+   "description": "8 nodes: orchestrator + 7 coding workers (27B-FP8). cluster_size=8.",
+   "families": [
+    "coding"
+   ],
+   "group": "8node"
+  },
+  {
+   "name": "colocated-two-models",
+   "version": 2,
+   "description": "One family, two co-located models per worker on distinct ports behind one proxy.",
+   "families": [
+    "dual"
+   ],
+   "group": ""
+  },
+  {
+   "name": "hscc-live",
+   "version": 2,
+   "description": "Live cluster: A3B-NVFP4 orchestrator + one coding family (27B-FP8) across all workers, behind the proxy.",
+   "families": [
+    "coding"
+   ],
+   "group": ""
+  },
+  {
+   "name": "single-family",
+   "version": 2,
+   "description": "Orchestrator + one coding family across all workers, load-balanced behind a proxy.",
+   "families": [
+    "coding"
+   ],
+   "group": ""
+  }
+ ],
+ "speak": "14 templates available."
+}

@@ -1,0 +1,41 @@
+{
+ "boards": [
+  "default",
+  "ecofire-app",
+  "ecofire-bc",
+  "efsdriver",
+  "flightdeck",
+  "flosana",
+  "grid",
+  "hscc",
+  "ios-app",
+  "pickolo",
+  "pom",
+  "powerbi",
+  "radio",
+  "soconn",
+  "sphoin"
+ ],
+ "tasks": [
+  {
+   "board": "hscc",
+   "id": "t_41727d6a",
+   "status": "running",
+   "assignee": "hscc-orch",
+   "age_days": 0,
+   "title": "docs(ios): end-to-end app-vs-API review + README for the real surface"
+  },
+  {
+   "board": "hscc",
+   "id": "t_a8e9b7ff",
+   "status": "running",
+   "assignee": "hscc-orch",
+   "age_days": 0,
+   "title": "fix(api): auto-rotate bloated chat sessions + stop the lying busy notice"
+  }
+ ],
+ "errors": [],
+ "older_than": 0,
+ "count": 2,
+ "speak": "2 stale cards."
+}

@@ -1,0 +1,185 @@
+{
+ "daemon_running": true,
+ "pid": 84510,
+ "state": "running",
+ "streams": {
+  "watchdog": {
+   "timestamp": "2026-08-27T04:14:47.683889+00:00",
+   "stream": "watchdog",
+   "ok": true,
+   "blocked": false,
+   "dgx": true,
+   "gateway": true,
+   "last_check": "2026-08-27T04:14:47.683876+00:00",
+   "message": "Pipeline healthy",
+   "auto_restart_count": 0
+  },
+  "heartbeat": {
+   "timestamp": "2026-08-27T04:13:51.448931+00:00",
+   "stream": "heartbeat",
+   "fleet": {
+    "total": 7,
+    "idle": 7,
+    "working": 0,
+    "failed": 0,
+    "enabled": 7,
+    "disabled": 0
+   },
+   "system": {
+    "os": "macOS",
+    "ProductName": "macOS",
+    "ProductVersion": "26.6.1",
+    "BuildVersion": "25G76",
+    "disk_total": "460Gi",
+    "disk_used": "12Gi",
+    "disk_avail": "166Gi",
+    "disk_pct": "7%",
+    "loadavg": "vm.loadavg: { 1.86 1.73 1.63 }",
+    "uptime": "7:13  up 14 days, 20:57, 2 users, load averages: 1.86 1.73 1.63"
+   },
+   "ok": true
+  },
+  "triggers": {
+   "timestamp": "2026-08-27T04:15:00.296290+00:00",
+   "stream": "triggers",
+   "ok": true,
+   "rules_evaluated": 3,
+   "events_checked": 50,
+   "actions_fired": 0,
+   "last_check": "2026-08-27T04:15:00.296176+00:00",
+   "message": "Evaluated 3 rules, fired 0 actions"
+  },
+  "proxy": {
+   "timestamp": "2026-08-27T04:14:52.657844+00:00",
+   "stream": "proxy",
+   "ok": true,
+   "port": 4000,
+   "last_check": "2026-08-27T04:14:52.657781+00:00",
+   "message": "proxy healthy"
+  },
+  "idle": {
+   "timestamp": "2026-08-27T04:13:48.792260+00:00",
+   "stream": "idle",
+   "ok": true,
+   "idle_count": 7,
+   "stale_count": 0,
+   "last_check": "2026-08-27T04:13:48.792167+00:00",
+   "message": "7 idle agents"
+  },
+  "gateway": {
+   "timestamp": "2026-08-27T04:15:04.906140+00:00",
+   "stream": "gateway",
+   "ok": true,
+   "gateway_job": true,
+   "vllm_healthy": true,
+   "multiplex_ok": true,
+   "multiplex_message": "all 40 multiplex profile(s) served"
+  },
+  "dgx": {
+   "timestamp": "2026-08-27T04:14:52.131366+00:00",
+   "stream": "dgx",
+   "ok": true,
+   "details": {
+    "ssh_reachable": true,
+    "ssh_error": "reachable",
+    "gpu_count": 1,
+    "gpus": [
+     {
+      "index": "0",
+      "name": "NVIDIA GB10",
+      "memory_total_mb": "[N/A]",
+      "memory_used_mb": "[N/A]",
+      "temperature": "74",
+      "power_watts": "37.95 W"
+     }
+    ],
+    "workloads": [
+     {
+      "name": "/home/devuser/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
+      "container": "9a0467d69586ef5f_4e690f2e56f8"
+     },
+     {
+      "name": "/home/devuser/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
+      "container": "eaa6ce556fd1e21d_f4de31453fdf"
+     },
+     {
+      "name": "/home/devuser/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
+      "container": "81fb38c99696b8c8_086606fbaf71"
+     }
+    ],
+    "workload_count": 3,
+    "vllm_health": {
+     "ok": true,
+     "status": 200
+    },
+    "vllm_healthy": true
+   }
+  },
+  "workers": {
+   "timestamp": "2026-08-27T04:14:52.670390+00:00",
+   "stream": "workers",
+   "ok": true,
+   "total": 2,
+   "online": 2,
+   "relaunched": [],
+   "down": [],
+   "last_check": "2026-08-27T04:14:52.670339+00:00",
+   "message": "2/2 online"
+  },
+  "nas": {
+   "timestamp": "2026-08-27T04:08:48.920584+00:00",
+   "stream": "nas",
+   "ok": true,
+   "details": {
+    "local_mount": "/Volumes/NAS",
+    "mount_exists": true,
+    "is_dir": true,
+    "in_mount_table": true,
+    "mount_fstype": "nfs",
+    "mount_source": "10.0.0.5:/models",
+    "mount_is_distinct_device": true,
+    "disk_total": "8664G",
+    "disk_used": "1440G",
+    "disk_avail": "7223G",
+    "disk_pct": "16.6%",
+    "has_huggingface": true,
+    "has_hub": true,
+    "has_memori": true,
+    "huggingface_cached_items": 0,
+    "message": "/Volumes/NAS is an NFS mount"
+   }
+  },
+  "local": {
+   "timestamp": "2026-08-27T04:15:01.970508+00:00",
+   "stream": "local",
+   "ok": true,
+   "services": {
+    "docker": {
+     "running": false
+    },
+    "ollama": {
+     "running": false
+    },
+    "postgresql": {
+     "running": true
+    },
+    "hscc_daemon": {
+     "running": false
+    }
+   },
+   "tools": {
+    "node": {
+     "version": "v26.7.0"
+    },
+    "npm": {
+     "version": "11.19.0"
+    },
+    "sparkrun": {
+     "version": "sparkrun, version 0.3.1"
+    }
+   },
+   "message": "informational: docker, ollama, hscc_daemon not available"
+  }
+ },
+ "speak": "Daemon is running with 10 health streams."
+}

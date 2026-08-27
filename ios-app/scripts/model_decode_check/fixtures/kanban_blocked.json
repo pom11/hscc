@@ -1,0 +1,30 @@
+{
+ "boards": 15,
+ "tasks": [
+  {
+   "board": "default",
+   "id": "t_049d6986",
+   "status": "blocked",
+   "assignee": "backend-engineer",
+   "age_days": 11,
+   "block_kind": "needs_input",
+   "why": "kind=needs_input",
+   "title": "QA-3: surface pending manual items in `qa` list output",
+   "comments": []
+  },
+  {
+   "board": "ios-app",
+   "id": "t_704ac55b",
+   "status": "blocked",
+   "assignee": "ios-engineer",
+   "age_days": 6,
+   "block_kind": "needs_input",
+   "why": "kind=needs_input",
+   "title": "iOS B4: mutating actions behind explicit confirm UI (dispatch/merge/template-apply/stop)",
+   "comments": []
+  }
+ ],
+ "errors": [],
+ "count": 2,
+ "speak": "2 cards blocked across 15 boards."
+}

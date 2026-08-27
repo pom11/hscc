@@ -1,0 +1,31 @@
+{
+ "ok": true,
+ "checks": [
+  {
+   "name": "plugins",
+   "ok": true,
+   "detail": "all core commands found"
+  },
+  {
+   "name": "multiplex",
+   "ok": true,
+   "detail": "all 40 profiles served"
+  },
+  {
+   "name": "daemon_streams",
+   "ok": true,
+   "detail": "all 10 streams healthy"
+  },
+  {
+   "name": "proxy",
+   "ok": true,
+   "detail": "3 models available"
+  },
+  {
+   "name": "config_wiring",
+   "ok": true,
+   "detail": "all wiring checks passed"
+  }
+ ],
+ "speak": "All checks passed."
+}

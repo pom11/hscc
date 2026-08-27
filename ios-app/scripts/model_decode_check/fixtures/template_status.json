@@ -1,0 +1,13 @@
+{
+ "applied": {
+  "template": "4node-dual-dsv4",
+  "applied_at": "2026-08-26T09:07:18",
+  "orchestrator_node": "10.0.0.1",
+  "families": [
+   "reasoning"
+  ],
+  "units": 2
+ },
+ "note": "",
+ "speak": "Template {'template': '4node-dual-dsv4', 'applied_at': '2026-08-26T09:07:18', 'orchestrator_node': '10.0.0.1', 'families': ['reasoning'], 'units': 2} is applied."
+}
