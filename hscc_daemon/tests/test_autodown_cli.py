@@ -40,6 +40,22 @@ def _no_active_crons(monkeypatch):
     """
     monkeypatch.setattr(ad, "list_active_cron_jobs", lambda *a, **k: [])
 
+
+@pytest.fixture(autouse=True)
+def _no_active_prci(monkeypatch):
+    """Default: PR/CI interlock CLEAR, so existing status tests are hermetic.
+
+    ``_cmd_status`` evaluates ``_has_active_pr_ci()`` (the real ``gh`` screen)
+    to surface the PR/CI interlock. Stubbing it clear keeps every status test
+    off the real GitHub/network and deterministic; PR/CI surfacing itself is
+    tested explicitly (those tests overwrite this via their own monkeypatch,
+    which — LIFO teardown — wins during the test).
+    """
+    monkeypatch.setattr(ad, "_has_active_pr_ci", lambda *a, **k: False)
+    monkeypatch.setattr(ad, "prci_blocking_signal", lambda: None)
+    monkeypatch.setattr(ad, "prci_check_state", lambda: {
+        "ok": True, "reason": "", "blocking": None})
+
 @pytest.fixture
 def autodown_file(tmp_path, monkeypatch):
     """Point autodown.AUTODOWN_FILE at a tmp path and return the path."""
@@ -233,6 +249,61 @@ class TestStatus:
         data = json.loads(capsys.readouterr().out)
         assert data["blocked_by"] == \
             "kanban work on board 'hscc': t-1 (forgotten card), t-2 (other)"
+
+    def test_status_surfaces_prci_interlock(self, capsys, autodown_file,
+                                            block_file, monkeypatch):
+        """When an open PR / active CI run blocks teardown, status names it —
+        both the human line and --json — and preprends it to any kanban
+        blocker instead of hiding one interlock behind the other."""
+        from hscc_daemon import autodown
+
+        # Override the autouse hermetic stub (LIFO wins) so the PR/CI
+        # interlock is ACTIVE — like an open PR on a tracked repo.
+        monkeypatch.setattr(autodown, "_has_active_pr_ci",
+                            lambda *a, **k: True)
+        monkeypatch.setattr(autodown, "prci_blocking_signal",
+                            lambda: "PR/CI")
+        monkeypatch.setattr(autodown, "prci_check_state", lambda: {
+            "ok": True, "reason": "", "blocking": "PR/CI"})
+
+        autodown_file.write_text(json.dumps({
+            "enabled": True, "idle_minutes": 10, "state": "up",
+            "last_activity_iso": "2026-08-25T09:19:51+00:00",
+        }))
+        rc = cmd_autodown(["status"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "PR/CI interlock:  ACTIVE" in out
+
+        rc = cmd_autodown(["status", "--json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["prci_active"] is True
+        assert "open PR / active CI run" in data["blocked_by"]
+
+    def test_status_prci_unreachable_surfaced(self, capsys, autodown_file,
+                                              block_file, monkeypatch):
+        """An unreachable PR/CI source is surfaced as fail-safe active, so an
+        operator sees WHY autodown holds rather than a bare state: up."""
+        from hscc_daemon import autodown
+        monkeypatch.setattr(autodown, "_has_active_pr_ci",
+                            lambda *a, **k: True)
+        monkeypatch.setattr(autodown, "prci_blocking_signal",
+                            lambda: autodown._PRCI_UNREACHABLE)
+        monkeypatch.setattr(autodown, "prci_check_state", lambda: {
+            "ok": False, "reason": "PR/CI source unreachable", "blocking":
+            autodown._PRCI_UNREACHABLE})
+
+        autodown_file.write_text(json.dumps({
+            "enabled": True, "idle_minutes": 10, "state": "up",
+            "last_activity_iso": "2026-08-25T09:19:51+00:00",
+        }))
+        rc = cmd_autodown(["status", "--json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["prci_active"] is True
+        assert "unreachable" in data["blocked_by"]
+        assert data["prci_ok"] is False
 
     def test_status_no_down_since_line_when_null(self, capsys, autodown_file,
                                                  block_file):
