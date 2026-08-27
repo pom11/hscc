@@ -132,9 +132,12 @@ fleet-level folded into one Cluster tab.
 - `scripts/` — verification helpers:
   - `shared_model_check.swift` — decodes the shared widget/Live Activity model
     shapes against live API JSON (runs as a macOS CLI).
-  - `model_decode_check.swift` — decodes every app model in `Models.swift`
-    field-for-field against real live API JSON. Both are wired to the capture
-    convention in the review notes.
+  - `model_decode_check.sh` — compiles the **real** `Models.swift` +
+    `SharedModels.swift` + `APIError.swift` into a macOS CLI and decodes the
+    committed live fixtures (under `scripts/model_decode_check/fixtures/`)
+    against them, so it can never drift into a false green like a mirrored
+    validator could. Replaces the old field-for-field mirror
+    (`model_decode_check.swift`, removed).
 
 **Offline last-known state** is a first-class feature: every successful read is
 cached, and when the cluster (or Tailscale) is unreachable, views show the
@@ -147,10 +150,11 @@ No third-party dependencies. Sideload-friendly. **Default port is `8788`**
 
 ## End-to-end review: view → endpoint → model (verified against the live API)
 
-Verified 2026-08-27 against the live API at `100.64.0.1:8788` (READS only).
+Verified 2026-08-27 against the live API (READS only).
 Every row was confirmed with a real `curl`-equivalent GET, and every app model
 was **actually decoded** against the captured live JSON (see
-`scripts/model_decode_check.swift` + `scripts/shared_model_check.swift`).
+`scripts/model_decode_check.sh` — compiles the real model sources, decodes 26
+committed fixtures 26/26 — plus `scripts/shared_model_check.swift`).
 
 | View | Endpoint | Model | Verdict |
 | --- | --- | --- | --- |

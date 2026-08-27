@@ -1,9 +1,9 @@
 import Foundation
 
 // ===========================================================================
-// model_decode_check.swift — DECODE the committed live fixtures against the
-// REAL model sources (this is the harness; see main.swift for the driver and
-// ThemeStub.swift for the one non-model shim).
+// model_decode_check/main.swift — DECODE the committed live fixtures against the
+// REAL model sources (the harness; see ThemeStub.swift for the one non-model
+// shim, and model_decode_check.sh for the build+run wrapper).
 //
 // Compiled and run by scripts/model_decode_check.sh, which first compiles the
 // actual model files from the repo:
