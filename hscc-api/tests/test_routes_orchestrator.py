@@ -74,7 +74,7 @@ def fakes(monkeypatch):
 
 
 def _make_invoke(state):
-    def invoke(profile, session, prompt, timeout=180.0):
+    def invoke(profile, session, prompt, timeout=routes_orchestrator._DEFAULT_TIMEOUT):
         state["invoke_calls"].append((profile, session, prompt, timeout))
         gate = state["invoke_gate"]
         if gate is not None:
@@ -365,7 +365,7 @@ def test_get_job_reports_running_while_invoke_blocks(running, token, fakes):
 # --------------------------------------------------------------------------- #
 
 def test_chat_backing_timeout_job_error(running, token, fakes, monkeypatch):
-    def timed_out(profile, session, prompt, timeout=180.0):
+    def timed_out(profile, session, prompt, timeout=routes_orchestrator._DEFAULT_TIMEOUT):
         fakes["invoke_calls"].append((profile, session, prompt, timeout))
         raise routes_orchestrator._OrchestratorTimeout("did not reply in 180s")
     _install(monkeypatch, {"invoke": timed_out})
@@ -379,8 +379,50 @@ def test_chat_backing_timeout_job_error(running, token, fakes, monkeypatch):
     assert "Traceback" not in str(faked)
 
 
+def test_timeout_job_elapsed_frozen_at_termination(running, token, fakes, monkeypatch):
+    """t_023d4c4c Bug 2: a terminal job's elapsed is frozen at termination.
+
+    Regression for the contradiction where status/error said 'did not reply
+    within 180s' while elapsed reported ~50 min. The failure was that _job_dict
+    computed elapsed for error states as live ``time.time() - submitted_at``
+    (i.e. at POLL time), so a late GET after a timeout reported the minutes
+    spent polling, not the seconds the job actually ran. Now any terminal state
+    freezes elapsed at ``finished_at - submitted_at``. We prove it by marking a
+    job timed-out, then reading it again long after (simulating a late poll):
+    elapsed must still equal finished_at - submitted_at, and must match the
+    timeout the message describes — NOT the wall time between submission and
+    the late read.
+    """
+    def timed_out(profile, session, prompt, timeout=routes_orchestrator._DEFAULT_TIMEOUT):
+        fakes["invoke_calls"].append((profile, session, prompt, timeout))
+        raise routes_orchestrator._OrchestratorTimeout("did not reply in 180s")
+    _install(monkeypatch, {"invoke": timed_out})
+    status, payload = _post(running, token, body={
+        "project": "hscc", "prompt": "hi", "confirm": True,
+    })
+    assert status == 202
+    job_id = payload["job_id"]
+    faked = _poll_done(running, token, job_id)
+    assert faked["status"] == "timeout"
+    terminated_elapsed = faked["elapsed"]
+
+    with routes_orchestrator._jobs_lock:
+        job = routes_orchestrator._jobs[job_id]
+        frozen = job.finished_at - job.submitted_at
+
+    # Simulate an operator polling LATE — well after the job terminated. The
+    # frozen value must NOT have grown into the polling window.
+    time.sleep(0.05)
+    late = _get(running, token, f"/v1/orchestrator/chat/{job_id}")[1]
+    assert late["status"] == "timeout"
+    assert late["elapsed"] == terminated_elapsed == round(frozen, 3)
+    # And it agrees with the message — the timeout the message names (~180s in
+    # the fake), not ~50 min of post-termination polling.
+    assert late["elapsed"] < 5.0
+
+
 def test_chat_backing_unavailable_job_error(running, token, fakes, monkeypatch):
-    def unavail(profile, session, prompt, timeout=180.0):
+    def unavail(profile, session, prompt, timeout=routes_orchestrator._DEFAULT_TIMEOUT):
         fakes["invoke_calls"].append((profile, session, prompt, timeout))
         raise routes_orchestrator._OrchestratorUnavailable(
             "orchestrator session 'hscc' not ready"
@@ -397,7 +439,7 @@ def test_chat_backing_unavailable_job_error(running, token, fakes, monkeypatch):
 
 
 def test_chat_backing_invocation_error_job_error(running, token, fakes, monkeypatch):
-    def failed(profile, session, prompt, timeout=180.0):
+    def failed(profile, session, prompt, timeout=routes_orchestrator._DEFAULT_TIMEOUT):
         fakes["invoke_calls"].append((profile, session, prompt, timeout))
         raise routes_orchestrator._OrchestratorInvocationError("empty reply")
     _install(monkeypatch, {"invoke": failed})
@@ -413,7 +455,7 @@ def test_chat_backing_invocation_error_job_error(running, token, fakes, monkeypa
 
 def test_chat_unexpected_backing_exception_job_error(running, token, fakes, monkeypatch):
     """A truly unexpected exception must become a clean job error, not a leak."""
-    def boom(profile, session, prompt, timeout=180.0):
+    def boom(profile, session, prompt, timeout=routes_orchestrator._DEFAULT_TIMEOUT):
         fakes["invoke_calls"].append((profile, session, prompt, timeout))
         raise RuntimeError("secret-token-in-detail")
     _install(monkeypatch, {"invoke": boom})
@@ -460,7 +502,7 @@ def test_run_job_done_sets_reply_and_speak(monkeypatch):
     job = _ChatJob("chat-99", "hscc", "hscc-orch", "hscc", "hi")
     monkeypatch.setattr(
         routes_orchestrator, "_backing_invoke",
-        lambda p, s, q, timeout=180.0: ("the answer", p, s),
+        lambda p, s, q, timeout=routes_orchestrator._DEFAULT_TIMEOUT: ("the answer", p, s),
     )
     _run_job(job)
     d = routes_orchestrator._job_dict(job)
@@ -529,7 +571,7 @@ def test_backing_invoke_passes_argv_as_list(monkeypatch):
     assert "--continue" in argv
     # The dangerous prompt is a SINGLE argv element, never interpolated.
     assert "uname; rm -rf /" in argv
-    assert "timeout" in captured["kw"] and captured["kw"]["timeout"] == 180.0
+    assert "timeout" in captured["kw"] and captured["kw"]["timeout"] == routes_orchestrator._DEFAULT_TIMEOUT
     # --continue carries the named session so the thread persists.
     assert "hscc" in argv
 
@@ -595,3 +637,69 @@ def test_backing_invoke_missing_hermes_raises_unavailable(monkeypatch):
     monkeypatch.setattr(_sp, "run", missing)
     with pytest.raises(routes_orchestrator._OrchestratorUnavailable):
         routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
+
+
+# --------------------------------------------------------------------------- #
+# t_023d4c4c Bug 1: configurable timeout via chat_timeout in ~/.hscc/api.json
+# --------------------------------------------------------------------------- #
+
+def _ctx_with_config(hscc_dir, config_dict):
+    """A minimal ctx stub matching the fields _chat_timeout reads."""
+    return types.SimpleNamespace(config=config_dict, hscc_dir=hscc_dir)
+
+
+def test_chat_timeout_default_when_unconfigured(tmp_path):
+    """No api.json, no config dict -> the module default (600s)."""
+    ctx = _ctx_with_config(str(tmp_path), {})
+    assert routes_orchestrator._chat_timeout(ctx) == \
+        routes_orchestrator._DEFAULT_TIMEOUT == 600.0
+
+
+def test_chat_timeout_reads_api_json(tmp_path):
+    """A chat_timeout key in ~/.hscc/api.json overrides the default."""
+    (tmp_path / "api.json").write_text(json.dumps({"chat_timeout": 900}))
+    ctx = _ctx_with_config(str(tmp_path), {})
+    assert routes_orchestrator._chat_timeout(ctx) == 900.0
+
+
+def test_chat_timeout_config_dict_highest_precedence(tmp_path):
+    """An explicit config-dict value beats the api.json file."""
+    (tmp_path / "api.json").write_text(json.dumps({"chat_timeout": 900}))
+    ctx = _ctx_with_config(str(tmp_path), {"chat_timeout": 40})
+    assert routes_orchestrator._chat_timeout(ctx) == 40.0
+
+
+def test_chat_timeout_rejects_bad_values(tmp_path):
+    """A malformed chat_timeout is a hard config error, not a silent guess."""
+    ctx = _ctx_with_config(str(tmp_path), {"chat_timeout": "soon"})
+    with pytest.raises(RuntimeError):
+        routes_orchestrator._chat_timeout(ctx)
+    ctx2 = _ctx_with_config(str(tmp_path), {"chat_timeout": 0})
+    with pytest.raises(RuntimeError):
+        routes_orchestrator._chat_timeout(ctx2)
+    ctx3 = _ctx_with_config(str(tmp_path), {"chat_timeout": -5})
+    with pytest.raises(RuntimeError):
+        routes_orchestrator._chat_timeout(ctx3)
+
+
+def test_chat_uses_configured_timeout_in_invoke(tmp_path, fakes):
+    """A configured chat_timeout flows all the way into the backing invoke."""
+    (tmp_path / "api.json").write_text(json.dumps({"chat_timeout": 42.0}))
+    srv = types.SimpleNamespace()
+    srv.server = api_server.create_server(hscc_dir=str(tmp_path), addr=("127.0.0.1", 0))
+    srv.host, srv.port = srv.server.server_address[:2]
+    thread = threading.Thread(target=srv.server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        tok = api_server.load_token(tmp_path)
+        status, payload = _post(srv, tok, body={
+            "project": "hscc", "prompt": "hi", "confirm": True,
+        })
+        assert status == 202
+        _poll_done(srv, tok, payload["job_id"])
+        # The recorded invoke was called with the CONFIGURED timeout (42s),
+        # not the 600s default.
+        assert fakes["invoke_calls"][0][3] == 42.0
+    finally:
+        srv.server.shutdown()
+        srv.server.server_close()
