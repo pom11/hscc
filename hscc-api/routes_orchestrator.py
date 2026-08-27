@@ -63,10 +63,25 @@ named session + ``journal_mode=delete`` state.db contention → compaction storm
 silent 600s timeout). We don't hide that behind a higher timeout; at submit the
 handler counts ``profile``'s running board tasks (``_backing_busy_tasks``) and,
 when non-zero, returns an honest ``notice`` ("<profile> is busy with N kanban
-tasks...") on the POST AND on every GET poll (see ``_job_dict``). The verified
-job-status state machine (queued/running/done/error) is unchanged — the notice
-is purely additive context so a queued message the operator understands beats a
-timeout they cannot explain.
+tasks...") on the POST AND on GET polls of a LIVE job. The notice is DROPPED
+once the job reaches a terminal state (t_a8e9b7ff): a finished job must never
+carry "busy right now ... poll this job" — the outcome is described by
+status/reply/error. The verified job-status state machine
+(queued/running/done/error) is unchanged.
+
+Session-bloat guard (t_a8e9b7ff Bug 1): each project's chat uses ONE long-lived
+named session that grows forever until compaction stops being able to recover
+and the chat wedges (the 14.2M-token / 278-message ``hscc`` session timed out
+at 600s while a fresh session answered in 1.777s). ``_guard_session_bloat``
+runs at chat POST time — before the job continues the named session — reads the
+real signals on the session row (``input_tokens``, ``compression_failure_error``,
+``compression_fallback_streak``, ``compression_ineffective_count``) and, when
+the session is bloated, ROTATES it: retitles the old session to
+``<project>-retired-<ts>`` (non-destructive, kept on disk) and creates a fresh
+session titled ``<project>`` (via Hermes' own SessionDB, so ``--continue
+<project>`` resolves to the fresh row). Per-project continuity is preserved —
+profile ``<project>-orch``, session ``<project>``, board ``<project>`` are all
+untouched as identities; only the session's accumulated context is reset.
 
 Preamble stripping (t_5ed5dfa8 Bug 2): ``hermes chat -Q`` emits a few one-line
 startup notices to stdout before the reply (the cwd-restore notice, the tirith
@@ -77,6 +92,7 @@ shapes so a legitimate reply that merely looks like a warning is never stripped.
 from __future__ import annotations
 
 import itertools
+import logging
 import re
 import subprocess
 import sys
@@ -319,6 +335,440 @@ def _busy_notice(profile: str, count: int) -> str:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Session-bloat guard (t_a8e9b7ff Bug 1): rotate a chat session approaching the
+# context ceiling BEFORE it wedges, preserving per-project continuity.
+# --------------------------------------------------------------------------- #
+
+# The orchestrator model's context window (the "context ceiling" the card
+# means). Measured from the live strong-tier endpoint: ``orchestrator-model``
+# resolves to 262144 tokens (same value the hermes-agent compressor resolves;
+# the hscc-roles generator's COMPACT_THRESHOLD comment cites "~210K of 262K").
+# Reported on ``session_health`` for operator transparency; it is NOT a rotation
+# trigger (see below — rotation fires only on positive compaction-failure
+# evidence, never on raw size).
+_ORCH_CONTEXT_WINDOW = 262144
+
+# The proactive context-health mechanism (operator decision, t_a8e9b7ff): make
+# Hermes' NATIVE compaction fire EARLY so there is always ~2x headroom for the
+# compression call itself. Hermes triggers compaction at the lower of the
+# ratio-based threshold and this ABSOLUTE token cap
+# (agent/agent_init.py:1946-1953 reads ``compression.threshold_tokens``, then
+# ``context_compressor._apply_threshold_tokens_cap`` clamps it DOWNWARD only —
+# ``min(cap, context_length)``, and never fires LATER than this cap). Without
+# the cap, the ratio path floors at 0.75 x 262144 = 196608 — the exact
+# active-token value the wedged ``hscc`` run died at, where the compression
+# call (196K + summarizer overhead) had no headroom and retried with growing
+# inputs (196609 -> 196804) until the 600s timeout. Setting the cap to 100000
+# makes compaction fire at ~100K active — comfortably inside the window with
+# headroom to spare — so continuity is PRESERVED (same session id, same history
+# via the summary) instead of wedging. ``_ensure_compaction_threshold`` writes
+# this key onto every resolved ``<project>-orch`` profile, idempotently. This
+# value is a module constant (not a literal scattered around) per the operator
+# decision.
+SESSION_COMPACTION_THRESHOLD_TOKENS = 100000
+
+
+def _session_guard_config(ctx) -> tuple:
+    """Resolve the session-guard parameters for this server's config.
+
+    Returns ``(enabled, context_window)``. Precedence mirrors the
+    ``chat_timeout`` / ``registry`` pattern: ``session_guard`` dict on the
+    resolved config object, then ``session_guard`` in ``~/.hscc/api.json``, then
+    the module defaults. ``context_window`` is REPORTED on ``session_health``
+    (operator transparency) but does not drive rotation — rotation is decided
+    solely on positive compaction-failure evidence. Malformed values are a hard
+    config error (matching the API's hard-error-on-malformed-config stance),
+    never a silent guess.
+    """
+    # defaults
+    enabled = True
+    context_window = _ORCH_CONTEXT_WINDOW
+
+    raw = None
+    from_config = getattr(ctx, "config", None)
+    if from_config and isinstance(from_config.get("session_guard"), dict):
+        raw = from_config["session_guard"]
+    else:
+        hscc_dir = getattr(ctx, "hscc_dir", None) or "~/.hscc"
+        cfg_path = Path(hscc_dir).expanduser() / "api.json"
+        if cfg_path.exists():
+            try:
+                import json
+                data = json.loads(cfg_path.read_text())
+                if isinstance(data, dict) and isinstance(data.get("session_guard"), dict):
+                    raw = data["session_guard"]
+            except (OSError, ValueError):
+                raw = None
+    if isinstance(raw, dict):
+        if raw.get("enabled") is not None:
+            enabled = bool(raw["enabled"])
+        if raw.get("context_window") is not None:
+            try:
+                context_window = int(raw["context_window"])
+            except (TypeError, ValueError):
+                raise RuntimeError(
+                    f"invalid session_guard.context_window {raw['context_window']!r} — "
+                    "expected an integer number of tokens"
+                )
+            if context_window <= 0:
+                raise RuntimeError(
+                    "invalid session_guard.context_window — must be > 0"
+                )
+    return enabled, context_window
+
+
+def _open_profile_session_db(profile: str, read_only: bool = False):
+    """Open the orchestrator profile's ``state.db`` via Hermes' own SessionDB.
+
+    Returns a ``SessionDB`` bound to ``<profile>``'s state.db (the same DB the
+    ``hermes -p <profile> chat --continue`` invocation reads and writes), or
+    ``None`` when the profile is unresolvable / has no state.db (fail-safe: the
+    caller then skips the guard rather than guessing). We resolve the profile
+    directory through ``hermes_cli.profiles`` exactly like the session-search
+    tool does, so reads always target the RIGHT profile — never the API process's
+    own default profile.
+
+    ``read_only=True`` opens the DB in read-only mode (no write lock) — the
+    safe choice for surfacing health (``_session_health``), so a busy profile's
+    state.db is never contended for a mere status read. The rotation path
+    (``_guard_session_bloat``) passes ``read_only=False`` (the default) because
+    it must retitle + create.
+    """
+    try:
+        from hermes_cli import profiles as profiles_mod
+        from hermes_state import SessionDB
+        from pathlib import Path as _Path
+        canon = profiles_mod.normalize_profile_name(profile)
+        profiles_mod.validate_profile_name(canon)
+        if not profiles_mod.profile_exists(canon):
+            return None
+        db_path = _Path(profiles_mod.get_profile_dir(canon)) / "state.db"
+        if not db_path.exists():
+            return None
+        return SessionDB(db_path=db_path, read_only=read_only)
+    except Exception:
+        return None
+
+
+def _ensure_compaction_threshold(profile: str) -> dict:
+    """ENSURE the profile's ``compression.threshold_tokens`` makes native
+    compaction fire EARLY (the PRIMARY context-health mechanism, t_a8e9b7ff).
+
+    The operator's decision: compaction is the goal, rotation only the last
+    resort. Compaction's trigger is moved EARLIER declaratively — by writing
+    ``compression.threshold_tokens = 100000`` (see
+    :data:`SESSION_COMPACTION_THRESHOLD_TOKENS`) onto the resolved ``<project>-orch``
+    profile's ``config.yaml`` — so Hermes' next chat turn compacts at ~100K
+    active in the 262K window (headroom for the compression call itself)
+    instead of at the 196608 ratio floor where it wedges. Continuity is fully
+    preserved: same session id, same history via the summary — no rotation.
+
+    Idempotent + non-destructive: if the profile already has
+    ``compression.threshold_tokens`` set to a value <= the constant (an
+    operator-set or previously-ensured value), we do NOT clobber it — a lower
+    cap is strictly better, and our own uniform 100000 is a harmless no-op on
+    any window (``_apply_threshold_tokens_cap`` takes ``min(cap,
+    context_length)``, so it can only LOWER the trigger, never raise it).
+
+    We write the profile's OWN ``config.yaml`` directly (via an atomic YAML
+    read-modify-write through the same ``utils.atomic_yaml_write`` the CLI's
+    ``config set`` uses), keyed on the profile's resolved home — we never touch
+    the global ``HERMES_HOME`` env in this multithreaded server, so concurrent
+    chats to different projects can't race each other's config. The write goes
+    through the same file ``hermes -p <profile> config set ...`` writes, which
+    ``agent_init`` (``load_config`` -> ``_compression_cfg.get(\"threshold_tokens\")``)
+    reads on the next ``hermes -p <profile> chat`` invocation.
+
+    Returns a dict describing what was done (``profile``, ``threshold_tokens``,
+    ``previous``, ``set``), or ``None`` when the profile is unresolvable /
+    already correctly configured / the guard couldn't run (FAIL-SAFE: any
+    error leaves the profile untouched and the chat proceeds as before).
+    """
+    import yaml
+    try:
+        from hermes_cli import profiles as profiles_mod
+        from utils import atomic_yaml_write
+    except Exception:
+        return None
+
+    try:
+        canon = profiles_mod.normalize_profile_name(profile)
+        profiles_mod.validate_profile_name(canon)
+        if not profiles_mod.profile_exists(canon):
+            return None
+        cfg_path = profiles_mod.get_profile_dir(canon) / "config.yaml"
+    except Exception:
+        return None
+
+    try:
+        cur = {}
+        if cfg_path.exists():
+            with open(cfg_path, encoding="utf-8") as f:
+                cur = yaml.safe_load(f) or {}
+        if not isinstance(cur, dict):
+            cur = {}
+        comp = cur.get("compression")
+        prev = None
+        if isinstance(comp, dict):
+            prev = comp.get("threshold_tokens")
+        # No-op when an operator value already <= the constant is present: a
+        # lower cap is strictly better (compaction can only fire earlier) and
+        # we must never clobber it.
+        if isinstance(prev, (int, float)) and not isinstance(prev, bool) \
+                and prev <= SESSION_COMPACTION_THRESHOLD_TOKENS:
+            return None
+        if not isinstance(comp, dict):
+            comp = {}
+        comp["threshold_tokens"] = SESSION_COMPACTION_THRESHOLD_TOKENS
+        cur["compression"] = comp
+        atomic_yaml_write(cfg_path, cur, sort_keys=False)
+        return {
+            "profile": profile,
+            "threshold_tokens": SESSION_COMPACTION_THRESHOLD_TOKENS,
+            "previous": prev,
+            "set": True,
+        }
+    except Exception as exc:  # noqa: BLE001 — fail-safe: never break a chat
+        logging.getLogger("hscc-api").error(
+            "could not ensure compression.threshold_tokens on %s (chat "
+            "proceeds on existing config): %r", profile, exc,
+        )
+        return None
+
+
+def _session_bloat_verdict(session_row) -> tuple:
+    """Decide whether a session must be ROTATED (last resort) — from POSITIVE
+    compaction-failure evidence only.
+
+    Returns ``(bloated, reason)``. Since the operator made native compaction
+    the PRIMARY mechanism (see :data:`SESSION_COMPACTION_THRESHOLD_TOKENS` and
+    :func:`_ensure_compaction_threshold`), rotation is demoted to a TRUE last
+    resort that fires ONLY when we have positive evidence the session's
+    compaction has already failed:
+
+      * ``compression_failure_error`` set (the compressor threw — e.g. \"model
+        context length exceeded\");
+      * ``compression_fallback_streak >= 1`` (the compressor fell back to a
+        less-effective path);
+      * ``compression_ineffective_count >= 1`` (compaction ran but did not
+        actually shrink the context).
+
+    Any one of these means the session already crossed the point where another
+    compaction round can recover it — continuing it is exactly the 600s wedge
+    the card measured. Rotate.
+
+    A session is NEVER rotated merely for being LARGE — ``input_tokens`` is a
+    CUMULATIVE counter (``input_tokens = input_tokens + ?`` per turn in the CLI
+    path, never reset by compaction), so raw size says nothing about current
+    health, and with the 100K cap in place a large-but-healthy session is
+    normal and must not be rotated (operator decision, t_a8e9b7ff). The ``reason``
+    feeds the rotation payload / project-detail surfacing.
+    """
+    def _int(row, key):
+        try:
+            return int(row.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    failure_error = (session_row.get("compression_failure_error") or "").strip()
+    fallback_streak = _int(session_row, "compression_fallback_streak")
+    ineffective_count = _int(session_row, "compression_ineffective_count")
+    if failure_error or fallback_streak >= 1 or ineffective_count >= 1:
+        return True, "context compression is failing"
+    return False, ""
+
+
+def _rotate_session(db, profile: str, session: str) -> dict:
+    """Retire the bloated session and create a fresh one titled ``session``.
+
+    Non-destructive and reversible, exactly mirroring the operator's manual
+    recovery: (1) retitle the existing ``<session>`` row to
+    ``<session>-retired-<timestamp>`` (kept on disk, all messages intact);
+    (2) create a fresh session via Hermes' own ``SessionDB.create_session`` and
+    title it ``<session>``, so ``--continue <session>`` — the transport the
+    chat job uses — resolves to the clean row. The CREATE MUST happen before
+    the job's ``--continue`` (the card's ordering note: ``--continue`` does not
+    create a session and the API returns ``orchestrator_unavailable`` if none
+    matches) — the caller guarantees this because rotation completes before the
+    job spawns its background invoke.
+
+    ``profile`` / ``session`` are the orchestrator identity (``<project>-orch`` /
+    ``<project>``). Returns a dict describing the rotation (old title, new
+    session id, reason) for surfacing to the operator. Raises on failure so the
+    caller can fail-safely skip; every error here leaves the ORIGINAL session
+    in place (the retitle is the only mutation and it happens first, so a crash
+    after retitle-but-before-create leaves NO session titled ``<project>`` — an
+    ``orchestrator_unavailable`` the operator can recover from exactly as the
+    card's manual flow does).
+    """
+    import time as _time
+    import uuid as _uuid
+
+    old_id = db.resolve_session_by_title(session)
+    retired_title = f"{session}-retired-{_time.strftime('%Y%m%d-%H%M%S')}"
+    if old_id and db.get_session_title(old_id) == session:
+        db.set_session_title(old_id, retired_title)
+
+    new_id = f"{_time.strftime('%Y%m%d')}_rot_{_uuid.uuid4().hex[:6]}"
+    db.create_session(
+        new_id,
+        source="cli",
+        model="orchestrator-model",
+        profile_name=profile,
+    )
+    db.set_session_title(new_id, session)
+    return {
+        "retired_session": old_id,
+        "retired_title": retired_title if old_id else None,
+        "session": new_id,          # now the live session titled ``session``
+        "created_at": new_id,
+    }
+
+
+def _guard_session_bloat(ctx, profile: str, session: str):
+    """The session context-health guard, run at chat POST time.
+
+    Two layers, per the operator decision (t_a8e9b7ff):
+
+      1. ENSURE (primary, non-destructive): call
+         :func:`_ensure_compaction_threshold` so the profile's native
+         compaction triggers EARLY at ``compression.threshold_tokens = 100000``.
+         This is the actual fix — it prevents the wedge by compacting long
+         before the context runs out of headroom, preserving session continuity
+         (no rotation, same session id, history via the summary). Idempotent;
+         never clobbers an operator value already <= the constant.
+
+      2. ROTATE (last resort, only on positive failure evidence): read the
+         real compaction-failure signals on the session row and, when the
+         verdict says compaction has ALREADY failed (``compression_failure_error``
+         / ``compression_fallback_streak`` / ``compression_ineffective_count``),
+         retire + recreate the session so the chat never wedges. NEVER rotates
+         on raw size alone.
+
+    Returns a dict describing a rotation (when one happened), or ``None`` when
+    the session is healthy / the guard couldn't run. FAIL-SAFE: any error here
+    results in NO rotation and the chat proceeds on the existing session
+    exactly as before this guard existed — a guard that can't verify must not
+    invent health, but it must also never break a working chat or corrupt a
+    profile.
+    """
+    enabled, _context_window = _session_guard_config(ctx)
+    if not enabled:
+        return None
+
+    # Layer 1 — ensure native compaction fires early (the real fix). Best-effort
+    # and non-destructive: failure leaves the chat on the existing config.
+    try:
+        _ensure_compaction_threshold(profile)
+    except Exception:  # noqa: BLE001 — fail-safe, never break the chat
+        logging.getLogger("hscc-api").exception(
+            "compaction-threshold ensure raised for %s (continuing)", profile)
+
+    # Layer 2 — last-resort rotation, ONLY on positive compaction-failure
+    # evidence (never on size alone).
+    db = _open_profile_session_db(profile)
+    if db is None:
+        # Cannot inspect the profile's sessions — do not guess, do not rotate.
+        return None
+    try:
+        try:
+            session_row = db.get_session_by_title(session)
+        except Exception:
+            session_row = None
+        if not session_row:
+            return None   # no titled session to guard (chat will 503 honestly)
+        bloated, reason = _session_bloat_verdict(session_row)
+        if not bloated:
+            return None
+        return _do_rotation(db, profile, session, reason)
+    finally:
+        db.close()
+
+
+def _do_rotation(db, profile: str, session: str, reason: str):
+    """Retire + recreate a bloated session, FAIL-SAFE to no-rotation on error.
+
+    Wraps the actual mutation so ANY failure (e.g. ``database is locked`` while
+    a kanban worker is mid-turn on the profile, or an unexpected SessionDB
+    error) fails SAFE: log it, return ``None``, and leave the chat to proceed on
+    the existing session exactly as before this guard existed — never corrupt a
+    profile, never wedge the POST on a retry. ``reason`` is the bloat verdict
+    (see :func:`_session_bloat_verdict`) carried on the returned rotation dict.
+    """
+    try:
+        rotation = _rotate_session(db, profile, session)
+    except Exception as exc:  # noqa: BLE001 — must never break the chat
+        logging.getLogger("hscc-api").error(
+            "session-bloat rotation failed for %s/%s (guard disabled for this "
+            "run; chat proceeds on existing session): %r",
+            profile, session, exc,
+        )
+        return None
+    rotation["reason"] = reason
+    rotation["profile"] = profile
+    rotation["title"] = session
+    return rotation
+
+
+def _session_health(ctx, profile: str, session: str):
+    """Read-only session-health report (NO rotation) — for operator visibility.
+
+    Surfaces the same real signals ``_guard_session_bloat`` inspects, plus the
+    rotation verdict, WITHOUT mutating anything, so the operator can see a
+    project's chat session health before it breaks (the card's surfacing
+    requirement). Returns ``None`` when the profile/session is unresolvable or
+    the guard is disabled — an honest "cannot report" that implies nothing.
+
+    ``compaction_at_risk`` is the "alert" the operator asked for (t_a8e9b7ff):
+    it is True exactly when there is POSITIVE evidence compaction is not firing
+    (``compression_failure_error`` / fallback streak / ineffective count). It is
+    intentionally NOT tied to raw ``input_tokens`` — that column is a CUMULATIVE
+    counter (never reset by compaction), so "large" does not mean "compaction
+    failed"; a large-but-healthy session is normal and must NOT be flagged.
+    ``threshold_tokens`` reports the ensured compaction cap so the operator can
+    see the proactive mechanism's configured value.
+
+    Payload keys: ``profile``, ``session`` (title), ``messages``,
+    ``input_tokens``, ``compression_failure_error``, ``compression_fallback_streak``,
+    ``compression_ineffective_count``, ``context_window``, ``threshold_tokens``,
+    ``compaction_at_risk``, ``bloated``, ``reason``.
+    """
+    enabled, context_window = _session_guard_config(ctx)
+    if not enabled:
+        return None
+    db = _open_profile_session_db(profile, read_only=True)
+    if db is None:
+        return None
+    try:
+        try:
+            session_row = db.get_session_by_title(session)
+        except Exception:
+            session_row = None
+        if not session_row:
+            return None
+        bloated, reason = _session_bloat_verdict(session_row)
+        return {
+            "profile": profile,
+            "session": session,
+            "messages": int(session_row.get("message_count") or 0),
+            "input_tokens": int(session_row.get("input_tokens") or 0),
+            "compression_failure_error":
+                (session_row.get("compression_failure_error") or "").strip() or None,
+            "compression_fallback_streak":
+                int(session_row.get("compression_fallback_streak") or 0),
+            "compression_ineffective_count":
+                int(session_row.get("compression_ineffective_count") or 0),
+            "context_window": context_window,
+            "threshold_tokens": SESSION_COMPACTION_THRESHOLD_TOKENS,
+            "compaction_at_risk": bloated,
+            "bloated": bloated,
+            "reason": reason,
+        }
+    finally:
+        db.close()
+
+
 def _is_notice_line(line: str) -> bool:
     """True when a stdout line is a Hermes preamble notice, not part of the reply.
 
@@ -508,9 +958,16 @@ def _job_dict(job: _ChatJob) -> dict:
     ``time.time() - submitted_at``.
 
     A ``notice`` set at submission (Bug 1, t_5ed5dfa8 — the orchestrator was
-    busy with running kanban tasks) rides along on EVERY state so the operator
-    sees the honest "queued behind batch work" context even after the job
-    finishes — it never disappears mid-poll.
+    busy with running kanban tasks) is emitted ONLY while the job is still
+    LIVE (``queued``/``running``). It is DROPPED the instant the job reaches a
+    terminal state (``done`` / ``timeout`` / ``unavailable`` / ``error``): the
+    card (t_a8e9b7ff) proved the old "rides on every state forever" behavior
+    LIED — a job that finished in 1.777s still carried "busy right now ... may
+    take a while; poll this job for the answer." A notice that cries wolf is
+    worse than none, so on a terminal job the outcome is fully described by
+    ``status`` / ``reply`` / ``error`` and the stale busy/poll text is
+    suppressed. The notice never tells you to poll a job that is already
+    finished.
     """
     with job.lock:
         base = {
@@ -518,7 +975,11 @@ def _job_dict(job: _ChatJob) -> dict:
             "project": job.project,
             "status": job.status,
         }
-        if job.notice is not None:
+        # Busy notice only on a LIVE (non-terminal) job. A terminal job's
+        # outcome is already fully described by status/reply/error; surfacing
+        # "busy ... poll this job" there is the lying notice t_a8e9b7ff bans
+        # (a job that already finished must never tell the operator to poll).
+        if job.notice is not None and job.finished_at is None:
             base["notice"] = job.notice
         if job.finished_at is not None:
             # Terminal: elapsed frozen at the termination moment, so status,
@@ -669,13 +1130,30 @@ def handle_orchestrator_chat(server, ctx, query, body):
     profile = resolved["profile"]
     session = resolved["session"]
 
+    # Session context-health guard (t_a8e9b7ff Bug 1): before the job continues
+    # the named ``<session>``, (1) ENSURE the profile's native compaction fires
+    # early (``compression.threshold_tokens = 100000`` — the PRIMARY mechanism,
+    # proactive, non-destructive) and (2) as a last resort, when the session row
+    # shows POSITIVE compaction-failure evidence, ROTATE it (retire the old row
+    # to ``<session>-retired-<ts>`` — non-destructive — and create a fresh
+    # ``<session>``) so this chat never wedges on a context compaction can no
+    # longer recover. Rotation (if any) completes HERE, synchronously, BEFORE
+    # the background job runs ``hermes chat --continue <session>``, satisfying
+    # the card's ordering requirement (``--continue`` does not create a session;
+    # the fresh one must already exist). The resolved ``session`` name is
+    # unchanged — the fresh row now owns the ``<project>`` title — so
+    # per-project continuity (``<project>-orch`` profile / ``<project>``
+    # session / ``<project>`` board) is fully preserved.
+    rotation = _guard_session_bloat(ctx, profile, session)
+
     # Bug 1 honest-reporting (t_5ed5dfa8): detect when the resolved orchestrator
     # profile is busy with running kanban work and say so up front, instead of a
     # silent 600s timeout. A chat on a busy profile queues behind its batch
     # workers (shared named session + journal_mode=delete state.db contention →
     # possible agent-layer compaction wedge) so the operator should understand
-    # WHY it may be slow. The notice is surfaced at submit AND rides on the job
-    # (see _job_dict) so a later poll still explains it. Fail-safe: a busy
+    # WHY it may be slow. The notice is surfaced at submit and on live polls
+    # (see _job_dict); once the job is TERMINAL it is dropped (t_a8e9b7ff) —
+    # a finished job never carries stale "busy / poll" text. Fail-safe: a busy
     # profile is reported busy; an unverifiable one is treated as busy.
     busy_count = _backing_busy_tasks(profile)
     busy_notice = _busy_notice(profile, busy_count) if busy_count > 0 else None
@@ -701,6 +1179,17 @@ def handle_orchestrator_chat(server, ctx, query, body):
     }
     if busy_notice is not None:
         payload["notice"] = busy_notice
+    if rotation is not None:
+        # Surface the rotation so the operator sees the session was retired +
+        # recreated (the chat continues on the fresh session, same name).
+        payload["session_rotation"] = {
+            "profile": rotation["profile"],
+            "title": rotation["title"],
+            "retired_session": rotation["retired_session"],
+            "retired_title": rotation["retired_title"],
+            "session": rotation["session"],
+            "reason": rotation["reason"],
+        }
     return 202, payload
 
 

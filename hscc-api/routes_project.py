@@ -418,6 +418,22 @@ def handle_project_detail(server, ctx, query, body):
         "board_counts": detail["board_counts"],
         "git": detail["git"],
     }
+    # Session-health surfacing (t_a8e9b7ff Bug 1): report the project chat
+    # session's real bloat signals so the operator can see it approaching the
+    # context ceiling BEFORE it wedges. The chat session for ``<name>`` lives on
+    # the ``<name>-orch`` profile as a session titled ``<name>`` (the
+    # orchestrators resolver convention). Lazy import (avoids a module-level
+    # cycle — routes_orchestrator imports ``_registry_path`` from this module);
+    # any failure degrades to omitting the field, never failing the request.
+    try:
+        from routes_orchestrator import _session_health
+        proj_name = getattr(proj, "name", None) or name
+        health = _session_health(
+            ctx, f"{proj_name}-orch", str(proj_name))
+    except Exception:
+        health = None
+    if health is not None:
+        payload["session_health"] = health
     payload["speak"] = _speak_project_detail(payload)
     return 200, payload
 
