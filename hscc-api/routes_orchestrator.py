@@ -537,6 +537,89 @@ def _ensure_compaction_threshold(profile: str) -> dict:
         return None
 
 
+def _ensure_role_profiles() -> dict:
+    """ENSURE ``compression.threshold_tokens`` on every ROLE profile (t_c03fd5ae).
+
+    v1.14.0 shipped :func:`_ensure_compaction_threshold` covering only the
+    resolved ``<project>-orch`` profiles. But kanban workers and subagents run
+    under ROLE profiles (coder, reviewer, worker, ios-engineer, qa,
+    backend-engineer, ...) and wedge at the same 196608 ratio floor. The
+    operator set all 26 role profiles to 100000 BY HAND; nothing in code held
+    them there, so a newly created or reset role profile silently regressed to
+    the wedge. This sweep holds every role profile at
+    :data:`SESSION_COMPACTION_THRESHOLD_TOKENS` declaratively, so NEW profiles
+    are covered on the next run.
+
+    A role profile is ANY profile under the profile root that is not a
+    ``<project>-orch`` orchestrator (name does not end with ``-orch``). We
+    discover the set via ``hermes_cli.profiles.list_profiles()`` — the same
+    enumeration the CLI uses — so the current 26 names are never hardcoded and
+    new profiles are picked up automatically. ``default`` counts as a role
+    profile (it is not an orchestrator and wedges the same way).
+
+    Each profile runs through the SAME :func:`_ensure_compaction_threshold`,
+    so the idempotence rule is identical: a value already <= the constant
+    (operator-set or previously ensured) is never clobbered. FAIL-SAFE: any
+    error here — on the enumeration or on an individual profile — is caught and
+    logged, never propagated; a profile we cannot reach is skipped and the rest
+    still get ensured. The orch profiles are skipped by this sweep because they
+    are already covered by the per-project path; their behaviour is untouched.
+
+    Returns a summary dict: ``role_profiles`` (total considered), ``set``
+    (names the threshold was written to), ``unchanged`` (already ensured /
+    preserved), ``orchestrators`` (skipped orch profiles). Returns ``None`` when
+    the enumeration itself fails (fail-safe — nothing is written blind).
+    """
+    import logging
+    _log = logging.getLogger("hscc-api")
+    try:
+        from hermes_cli import profiles as profiles_mod
+    except Exception:
+        return None
+
+    # Discover every profile, then keep only role profiles (non-orchestrators).
+    # The point of discovery is that NEW profiles are covered — never hardcode
+    # the current roster.
+    try:
+        infos = profiles_mod.list_profiles()
+    except Exception as exc:  # noqa: BLE001 — fail-safe
+        _log.error(
+            "could not enumerate profiles for compaction-threshold ensure: %r",
+            exc)
+        return None
+
+    set_, unchanged, orchestrators = [], [], []
+    for info in infos:
+        name = getattr(info, "name", None)
+        if not isinstance(name, str) or not name:
+            continue
+        if name.endswith("-orch"):
+            # Orchestrator: already covered by the per-project ensure path
+            # (_ensure_compaction_threshold on the resolved <project>-orch).
+            # This sweep deliberately does not touch them — extension, not
+            # rewrite — so their behaviour stays byte-identical.
+            orchestrators.append(name)
+            continue
+        try:
+            res = _ensure_compaction_threshold(name)
+        except Exception as exc:  # noqa: BLE001 — fail-safe per profile
+            _log.error(
+                "compaction-threshold ensure failed for role profile %s: %r",
+                name, exc)
+            continue
+        if res is not None:
+            set_.append(name)
+        else:
+            unchanged.append(name)
+
+    return {
+        "role_profiles": len(set_) + len(unchanged),
+        "set": sorted(set_),
+        "unchanged": sorted(unchanged),
+        "orchestrators": sorted(orchestrators),
+    }
+
+
 def _session_bloat_verdict(session_row) -> tuple:
     """Decide whether a session must be ROTATED (last resort) — from POSITIVE
     compaction-failure evidence only.
@@ -664,6 +747,18 @@ def _guard_session_bloat(ctx, profile: str, session: str):
     except Exception:  # noqa: BLE001 — fail-safe, never break the chat
         logging.getLogger("hscc-api").exception(
             "compaction-threshold ensure raised for %s (continuing)", profile)
+
+    # Extension (t_c03fd5ae): also sweep the ROLE profiles (kanban workers /
+    # subagents wedge identically). Runs on the same trigger as the orch ensure,
+    # idempotently — after the first sweep every profile is already at the
+    # constant, so this degrades to cheap no-op reads. Best-effort and
+    # non-destructive: failure never breaks the chat and never touches the
+    # orch profile path above (which stays byte-identical).
+    try:
+        _ensure_role_profiles()
+    except Exception:  # noqa: BLE001 — fail-safe, never break the chat
+        logging.getLogger("hscc-api").exception(
+            "role-profile compaction-threshold sweep raised (continuing)")
 
     # Layer 2 — last-resort rotation, ONLY on positive compaction-failure
     # evidence (never on size alone).
