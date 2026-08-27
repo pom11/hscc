@@ -75,9 +75,11 @@ struct OpsView: View {
     }
 
     private func loadVerify(_ client: HSCCClient) async {
-        verify = .loading
-        do { verify = .loaded(try await client.verify()) }
-        catch { verify = .failed(errorMessage(for: error)) }
+        verify = await Offline.load(verify,
+                                    cacheKey: EndpointPath.verify,
+                                    client: client) {
+            try await client.verify()
+        }
     }
 
     private func loadDaemon(_ client: HSCCClient) async {
@@ -112,40 +114,54 @@ struct OpsView: View {
 
     @ViewBuilder
     private var verifySection: some View {
-        sectionCard(title: "Verify", systemImage: "checkmark.seal") {
-            switch verify {
-            case .loading:
-                ProgressView()
-            case .failed(let message):
-                errorLabel(message)
-            case .loaded(let state):
-                VStack(alignment: .leading, spacing: 10) {
-                    Label(state.speak, systemImage: state.ok ? "checkmark.seal.fill" : "xmark.seal.fill")
-                        .font(.subheadline)
-                        .foregroundColor(state.ok ? .green : .red)
-                    if state.checks.isEmpty {
-                        emptyLabel("No checks reported.")
-                    } else {
-                        ForEach(state.checks) { check in
-                            HStack(alignment: .top, spacing: 8) {
-                                Image(systemName: check.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                    .foregroundColor(check.ok ? .green : .red)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(check.name)
-                                        .font(.body)
-                                    if let detail = check.detail, !detail.isEmpty {
-                                        Text(detail)
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
+        if let client {
+            sectionCard(title: "Verify", systemImage: "checkmark.seal") {
+                switch verify {
+                case .loading:
+                    ProgressView()
+                case .failed(let message):
+                    errorLabel(message)
+                case .stale(let state, let ageMessage):
+                    VStack(alignment: .leading, spacing: 10) {
+                        StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
+                            Task { await loadVerify(client) }
+                        }
+                        verifyBody(state)
+                    }
+                case .loaded(let state):
+                    verifyBody(state)
+                default:
+                    EmptyView()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func verifyBody(_ state: VerifyResponse) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(state.speak, systemImage: state.ok ? "checkmark.seal.fill" : "xmark.seal.fill")
+                .font(.subheadline)
+                .foregroundColor(state.ok ? Theme.Semantic.ok : Theme.Semantic.bad)
+            if state.checks.isEmpty {
+                emptyLabel("No checks reported.")
+            } else {
+                ForEach(state.checks) { check in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: check.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundColor(check.ok ? Theme.Semantic.ok : Theme.Semantic.bad)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(check.name)
+                                .font(.body)
+                            if let detail = check.detail, !detail.isEmpty {
+                                Text(detail)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-            default:
-                EmptyView()
             }
         }
     }
