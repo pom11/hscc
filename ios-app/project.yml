@@ -85,11 +85,16 @@ targets:
       - path: Sources/HSCC/Views/OpsView.swift
       - path: Sources/HSCC/Views/BoardHygieneView.swift
       - path: Sources/HSCC/Views/FleetControlView.swift
+      - path: Sources/HSCC/Views/TemplatesView.swift
+      - path: Sources/HSCC/Views/TemplateDetailView.swift
+      - path: Sources/HSCC/Views/TemplateTopologyView.swift
+      - path: Sources/HSCC/Views/SearchView.swift
       - path: Sources/HSCC/Intents/IntentClient.swift
       - path: Sources/HSCC/Intents/ClusterStatusIntent.swift
       - path: Sources/HSCC/Intents/ReviewQueueIntent.swift
       - path: Sources/HSCC/Intents/CannedCard.swift
       - path: Sources/HSCC/Intents/AppShortcuts.swift
+      - path: Sources/HSCC/Intents/ProjectIntents.swift
       # Shared cross-target sources (compiled into all three bundles).
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/ExtensionClient.swift

@@ -62,6 +62,10 @@ MSG
   exit 1
 fi
 
+# A source on disk but missing from project.yml is never compiled — the build
+# fails later at the first use site ("Cannot find 'X' in scope"). Catch it here.
+"$(dirname "${BASH_SOURCE[0]}")/check_sources.sh" || exit 1
+
 echo "development team: $team"
 HSCC_DEVELOPMENT_TEAM="$team" xcodegen generate --spec project.yml
 
