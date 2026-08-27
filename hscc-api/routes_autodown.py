@@ -108,10 +108,26 @@ def _backing_status_context():
         model_crons = [j for j in active_crons if not j.get("cpu_only")]
     else:
         cpu_only_crons, model_crons = [], []
+    # PR/CI interlock — same read-only evaluation + folding as the CLI status,
+    # so the API payload carries the PR/CI signal alongside kanban work.
+    prci_active = autodown._has_active_pr_ci()
+    prci = autodown.prci_blocking_signal()
+    if prci_active:
+        if prci == autodown._PRCI_UNREACHABLE:
+            prci_blocking = "PR/CI source unreachable — treating as active "\
+                "(fail-safe)"
+        else:
+            prci_blocking = "open PR / active CI run on a tracked repo"
+        blocking = f"{prci_blocking}, and {blocking}" if blocking \
+            else prci_blocking
+    pci = autodown.prci_check_state()
     return {
         "blocked_by": blocking,
         "kanban_ok": kc["ok"] if kc else None,
         "kanban_reason": kc["reason"] if kc else "",
+        "prci_active": bool(prci_active),
+        "prci_ok": (pci or {}).get("ok"),
+        "prci_reason": (pci or {}).get("reason") or "",
         "active_cron_cpu_only": [j.get("name") or j.get("id")
                                  for j in cpu_only_crons],
         "active_cron_model": [j.get("name") or j.get("id")

@@ -98,6 +98,37 @@ mirroring the status vocabulary in `hscc.py:112`. Because the dispatcher can
 claim `ready` cards at any moment, this predicate is (correctly) conservative:
 any ambiguous state counts as "work".
 
+#### 1a-ext. PR/CI work (open PRs / running CI) — §1a extension
+
+The kanban predicate is blind to a live review/merge cycle or a running CI
+build. Powering the fleet down mid-PR (destroying/half-applying that work) or
+mid-CI (killing the build) is exactly the destructive surprise autodown must
+not cause. So open PRs and active CI runs on the **tracked repos** (the hscc
+project's codebases: `hscc`, `ecofire`, `flightdeck`, `efsdriver`; overridable
+via `HSCC_AUTODOWN_PRCI_REPOS`) count as ACTIVE work, exactly like a running
+kanban card.
+
+Implementation (`autodown.py`):
+- `_has_active_pr_ci(prci_checker=None) -> bool` — the interlock. True ⇒ active
+  ⇒ not idle ⇒ never tear down. False ONLY when every tracked repo is positively
+  clear of both open PRs and active CI runs.
+- `prci_checker` is an **injectable** zero-arg callable returning
+  `_PRCI_UNREACHABLE` or a screen dict `{open_prs, active_runs, repos}`, so
+  tests never touch a real repo/remote/network. When omitted, the real `gh`
+  screen (`_screen_prci`) is used (TTL-cached at `HSCC_AUTODOWN_PRCI_TTL`, so
+  the 30s cycle never hammers the GitHub API). Real probe per repo:
+  `gh pr list --state open` and `gh run list --status in_progress` +
+  `--status queued` (`gh` takes one status at a time), counted via
+  `--json ... -q length`.
+- **Fail-safe** direction is identical to the kanban interlock: an unreachable /
+  raising / ambiguous PR/CI source ⇒ ACTIVE ⇒ never tear down on an unverifiable
+  signal. The interlock returns clear ONLY on a positively-verified zero result.
+- The same PR/CI activity is also a §1d **activity source** (`probe_prci_activity`
+  stamps `record_activity("prci")` on positively-confirmed activity), keeping
+  the window rolled through a review/merge/build and firing the wake seam while
+  down.
+
+
 ### 1b. No agent currently executing
 Beyond kanban, an agent may be mid-turn on a direct (non-kanban) request (e.g.
 a Telegram DM conversation in progress). Source: `~/.hscc/agents.json`
@@ -151,6 +182,12 @@ countdown):
    "no active work" to "new ready card" is activity. Additionally, the kanban
    DB mtime in `~/.hermes/kanban.db` serves as a coarse proxy: any write to the
    DB resets the timer. Both are model-free and CPU-side.
+3b. **PR/CI activity** — open PRs / active CI runs on the tracked repos signify
+   live review/merge or build work (§1a-ext). `probe_prci_activity` stamps
+   `record_activity("prci")` on **positively-confirmed** activity (an
+   unreachable source does NOT stamp — fabricating perpetual activity from an
+   unverifiable signal is worse than not stamping, and the §1a-ext interlock
+   independently fails safe to active on that same unreachable signal).
 4. **Explicit CLI command** — `hscc autodown wake` (and any `enable`, or any
    `hscc` invocation that touches the serving layer) directly sets
    `last_activity_iso` and, if down, triggers autoup. Model-free: the CLI runs
@@ -525,6 +562,10 @@ predicate §1. It is a conjunction; any false ⇒ abort. Sources:
 
 1. **Kanban work** — read `~/.hermes/kanban.db` (`_has_active_work`), zero
    running/ready/review/qa.
+1b. **PR/CI work** — (`_has_active_pr_ci`, §1a-ext): open PRs / active CI runs
+   on the tracked repos count as active; an unreachable/raising source fails
+   safe to active (never tear down on an unverifiable signal — same direction
+   as the kanban interlock).
 2. **Agent liveness** — read `~/.hscc/agents.json`, all enabled agents `idle`
    (no working/failed).
 3. **Elapsed window** — `now - last_activity_iso >= idle_minutes`.
