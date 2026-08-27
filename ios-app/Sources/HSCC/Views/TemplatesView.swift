@@ -82,21 +82,28 @@ struct TemplatesView: View {
     }
 
     private func loadStatus(_ client: HSCCClient) async {
-        status = .loading
-        do { status = .loaded(try await client.templateStatus()) }
-        catch { status = .failed(errorMessage(for: error)) }
+        status = await Offline.load(status,
+                                    cacheKey: EndpointPath.templateStatus,
+                                    client: client) {
+            try await client.templateStatus()
+        }
     }
 
     private func loadList(_ client: HSCCClient) async {
-        list = .loading
-        do { list = .loaded(try await client.templateList()) }
-        catch { list = .failed(errorMessage(for: error)) }
+        list = await Offline.load(list,
+                                  cacheKey: EndpointPath.templateList,
+                                  client: client) {
+            try await client.templateList()
+        }
     }
 
     private func refreshStatus() async {
         guard let client else { return }
-        do { status = .loaded(try await client.templateStatus()) }
-        catch { /* keep the last known status on a refresh failure */ }
+        status = await Offline.load(status,
+                                    cacheKey: EndpointPath.templateStatus,
+                                    client: client) {
+            try await client.templateStatus()
+        }
     }
 
     private func errorMessage(for error: Error) -> String {
@@ -115,28 +122,15 @@ struct TemplatesView: View {
                 ProgressView()
             case .failed(let message):
                 errorLabel(message)
-            case .loaded(let state):
-                if let applied = state.applied,
-                   let name = applied.template, !name.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(name)
-                            .font(.hsccMono(20, weight: .bold))
-                            .foregroundColor(Theme.Semantic.onSurface)
-                        Text(state.speak)
-                            .font(.caption)
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            case .stale(let state, let ageMessage):
+                VStack(alignment: .leading, spacing: 10) {
+                    StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
+                        Task { await refreshStatus() }
                     }
-                } else {
-                    Label("No template applied yet.",
-                          systemImage: "tray")
-                        .font(.subheadline)
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    if !state.speak.isEmpty {
-                        Text(state.speak)
-                            .font(.caption)
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    }
+                    appliedBody(state)
                 }
+            case .loaded(let state):
+                appliedBody(state)
             default:
                 EmptyView()
             }
@@ -147,6 +141,31 @@ struct TemplatesView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Theme.Semantic.surfaceRaised)
         )
+    }
+
+    @ViewBuilder
+    private func appliedBody(_ state: TemplateStatusResponse) -> some View {
+        if let applied = state.applied,
+           let name = applied.template, !name.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(name)
+                    .font(.hsccMono(20, weight: .bold))
+                    .foregroundColor(Theme.Semantic.onSurface)
+                Text(state.speak)
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            }
+        } else {
+            Label("No template applied yet.",
+                  systemImage: "tray")
+                .font(.subheadline)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            if !state.speak.isEmpty {
+                Text(state.speak)
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            }
+        }
     }
 
     // MARK: - The browsable library
@@ -165,6 +184,17 @@ struct TemplatesView: View {
                     Text("Pull to retry, or check that the cluster is reachable.")
                         .font(.caption)
                         .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+            case .stale(let state, let ageMessage):
+                VStack(alignment: .leading, spacing: 12) {
+                    StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
+                        Task { await loadList(client) }
+                    }
+                    if state.templates.isEmpty {
+                        emptyLabel("No templates are available right now.")
+                    } else {
+                        groupedLibrary(state.templates)
+                    }
                 }
             case .loaded(let state):
                 if state.templates.isEmpty {

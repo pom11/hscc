@@ -1,5 +1,95 @@
 import Foundation
 
+/// A tiny, bounded last-known-state cache for read endpoints (offline feature).
+///
+/// Stores the raw JSON `Data` of the last successful read per endpoint path,
+/// plus when it was captured, in `UserDefaults` so it survives app relaunch —
+/// the phone stays useful when the cluster (or Tailscale) is unreachable.
+///
+/// It is a convenience, not a database: capped at `maxEntries` keys with the
+/// oldest evicted by recency, and only ever holds the LAST known value per
+/// endpoint. Views never present this as live; they render it clearly marked
+/// stale with its age (see `LoadState.stale` / `StaleBanner`).
+enum StateCache {
+    private static let storageKey = "hscc.stateCache.v1"
+    private static let maxEntries = 40
+
+    /// One cached read: the raw body + when it was captured.
+    struct Entry: Codable {
+        var data: Data
+        var timestamp: Date
+    }
+
+    /// Turn an endpoint path into the stable storage key (keeps the mapping
+    /// explicit and testable — the same path is used by fetch and cache read).
+    static func key(for path: String) -> String { "read.\\(path)" }
+
+    // MARK: - Persistence
+
+    private static func readAll() -> [String: Entry] {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let dict = try? JSONDecoder().decode([String: Entry].self, from: data) else {
+            return [:]
+        }
+        return dict
+    }
+
+    private static func writeAll(_ dict: [String: Entry]) {
+        guard let data = try? JSONEncoder().encode(dict) else { return }
+        UserDefaults.standard.set(data, forKey: storageKey)
+    }
+
+    // MARK: - Store / read
+
+    /// Persist `data` as the last-known response for `path` (called by the
+    /// client's `get` on every successful read). Bounded: evicts the oldest
+    /// entries beyond `maxEntries`.
+    static func store(_ data: Data, for path: String) {
+        var dict = readAll()
+        dict[key(for: path)] = Entry(data: data, timestamp: Date())
+        if dict.count > maxEntries {
+            let overflow = dict.count - maxEntries
+            let oldest = dict.sorted { $0.value.timestamp < $1.value.timestamp }
+                .prefix(overflow).map(\.key)
+            for k in oldest { dict.removeValue(forKey: k) }
+        }
+        writeAll(dict)
+    }
+
+    /// The age in seconds of the last-known response for `path`, or nil if
+    /// never fetched.
+    static func age(for path: String) -> TimeInterval? {
+        guard let ts = readAll()[key(for: path)]?.timestamp else { return nil }
+        return Date().timeIntervalSince(ts)
+    }
+
+    /// The last-known decoded value for `path`, or nil if never fetched.
+    static func value<T: Decodable>(_ type: T.Type, for path: String) -> T? {
+        guard let entry = readAll()[key(for: path)] else { return nil }
+        return try? JSONDecoder().decode(T.self, from: entry.data)
+    }
+
+    /// Whether a last-known value exists for `path`.
+    static func hasValue(for path: String) -> Bool {
+        readAll()[key(for: path)] != nil
+    }
+}
+
+
+/// Canonical read paths the app caches last-known state under (offline
+/// feature). The client's `get` caches under the exact path string, and views
+/// pass the same constant to `Offline.load` so the read-back lines up. Keeping
+/// them in one place prevents a fetch path and its cache key drifting apart.
+enum EndpointPath {
+    static let projects = "/v1/projects"
+    static let clusterStatus = "/v1/cluster/status"
+    static let verify = "/v1/verify"
+    static let autodownStatus = "/v1/autodown/status"
+    static let cards = "/v1/cards"
+    static let templateList = "/v1/template/list"
+    static let templateStatus = "/v1/template/status"
+}
+
 /// HSCC HTTP API client — async/await URLSession.
 ///
 /// Talks to the HSCC API (Phase A) which lives on the owner's Tailscale tailnet
@@ -90,7 +180,12 @@ struct HSCCClient {
         // 2xx: decode the body into the requested type.
         if (200...299).contains(status) {
             do {
-                return try Self.decoder.decode(T.self, from: data)
+                let decoded = try Self.decoder.decode(T.self, from: data)
+                // Persist as last-known state so an unreachable cluster can
+                // still surface this data, clearly marked stale (offline
+                // feature). Only successful reads are cached — never a failure.
+                StateCache.store(data, for: path)
+                return decoded
             } catch {
                 throw HSCCError.decoding(String(describing: error))
             }
@@ -170,6 +265,26 @@ struct HSCCClient {
         let d = JSONDecoder()
         return d
     }()
+
+    // MARK: - Offline last-known-state cache accessors
+
+    /// The last-known decoded value for a read `path` (e.g. "/v1/projects"),
+    /// or nil if that endpoint was never fetched successfully. Used by
+    /// `Offline.load` to show stale data when the cluster is unreachable.
+    func cachedValue<T: Decodable>(_ type: T.Type, for path: String) -> T? {
+        StateCache.value(type, for: path)
+    }
+
+    /// The age in seconds of the last-known value for `path`, or nil if never
+    /// fetched.
+    func cacheAge(for path: String) -> TimeInterval? {
+        StateCache.age(for: path)
+    }
+
+    /// Whether `path` was ever fetched successfully (has last-known data).
+    func hasCache(for path: String) -> Bool {
+        StateCache.hasValue(for: path)
+    }
 
     // MARK: - Endpoint methods
 
