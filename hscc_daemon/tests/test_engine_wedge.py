@@ -79,6 +79,16 @@ def _probe_slow_first_ok(node, port):
     return _probe_ok(node, port)
 
 
+# Healthy on the FIRST call, then wedged forever after. Simulates a unit whose
+# engine regresses mid-flight: it streamed fine, then wedged.
+def _probe_ok_then_wedged(node, port):
+    state = _probe_ok_then_wedged.__dict__
+    state["calls"] = state.get("calls", 0) + 1
+    if state["calls"] == 1:
+        return _probe_ok(node, port)
+    return _probe_wedged(node, port)
+
+
 class TestEngineWedgeProbe:
     def test_healthy_unit_not_flagged(self, monkeypatch):
         _patch_serving(monkeypatch, [UNIT_ORCH])
@@ -105,6 +115,15 @@ class TestEngineWedgeProbe:
         assert state["ok"] is False
         assert len(state["wedged"]) == 1
         assert state["wedged"][0]["unit"] == "worker-247"
+        # Actionable detail: which unit, why, and how long since it last
+        # streamed successfully. Here the unit was wedged from its FIRST probe
+        # (no prior success), so stalled_for_s is None (unknown) and last_success
+        # is absent — the stream still names the unit, node, port and reason.
+        w = state["wedged"][0]
+        assert w["node"].endswith(".247")
+        assert "no generated tokens" in w["message"]
+        assert w.get("last_success") is None
+        assert w.get("stalled_for_s") is None
 
     def test_single_slow_response_does_not_trip(self, monkeypatch):
         _patch_serving(monkeypatch, [UNIT_ORCH])
@@ -143,6 +162,30 @@ class TestEngineWedgeProbe:
         assert ok is True
         state = _read("engine_wedge")
         assert state["wedged"] == []
+
+    def test_stalled_detail_reports_last_success(self, monkeypatch):
+        """A unit that streamed fine, then wedged, records when it last
+        succeeded and how long it has been stalled — the detail an operator
+        needs to act."""
+        _patch_serving(monkeypatch, [UNIT_WORKER])
+        monkeypatch.setattr(health, "ENGINE_WEDGE_LOAD_GRACE", 0)
+        monkeypatch.setattr(health, "ENGINE_WEDGE_THRESHOLD", 1)
+        _probe_ok_then_wedged.__dict__.pop("calls", None)
+        monkeypatch.setattr(health, "_probe_unit_generation",
+                            _probe_ok_then_wedged)
+
+        # Tick 1: streams fine -> last_success recorded.
+        assert health.check_engine_wedge() is True
+        # Tick 2: wedged -> stream reports the wedge with last-succeful detail.
+        assert health.check_engine_wedge() is False
+        state = _read("engine_wedge")
+        w = state["wedged"][0]
+        assert w["unit"] == "worker-247"
+        assert w["status"] == "wedged"
+        assert w["last_success"] is not None          # had streamed before
+        assert w["stalled_for_s"] is not None         # time since that success
+        assert w["stalled_for_s"] >= 0
+        assert "no generated tokens" in w["message"]
 
     def test_loading_unit_is_not_wedge_candidate(self, monkeypatch):
         _patch_serving(monkeypatch, [UNIT_ORCH])

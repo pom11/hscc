@@ -1532,10 +1532,13 @@ def check_engine_wedge():
         if probe["error"] == "wedged":
             st["consecutive_failures"] += 1
             if st["consecutive_failures"] >= ENGINE_WEDGE_THRESHOLD:
+                stalled_s = (now_wall - st["last_success"]) if st["last_success"] else None
                 wedged.append({"unit": label, "node": node, "port": port,
                                "status": "wedged",
                                "message": "HTTP 200 but no generated tokens "
-                                          "within %ss" % ENGINE_WEDGE_TIMEOUT})
+                                          "within %ss" % ENGINE_WEDGE_TIMEOUT,
+                               "last_success": st["last_success"] or None,
+                               "stalled_for_s": round(stalled_s) if stalled_s else None})
             else:
                 # Debouncing: one (or a few) slow/empty responses is not yet a
                 # declared wedge — report transparently but do not fail.
