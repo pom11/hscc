@@ -263,6 +263,27 @@ def recover_engine_wedge(stream_state=None, resolve_container=None,
         if streak >= RECOVER_CONSECUTIVE_WEDGES:
             candidates.append((key, u, streak))
 
+    # -- Reset persisted gave_up/attempts for units observed HEALTHY ------
+    # A unit the probe now streams fine has healed (whether from a recovery or
+    # on its own): give it a fresh attempt budget + clear any gave_up so a LATER
+    # distinct failure starts from zero. Done here (not just under the lock)
+    # because this must run even when there are no candidates this tick.
+    ok_units = stream.get("ok_units") or []
+    healthy_keys = {_unit_key(u) for u in ok_units}
+    if healthy_keys:
+        state = _load_recover_state(state_file)
+        dirty = False
+        for key in healthy_keys:
+            unit_state = state["units"].get(key)
+            if unit_state and (unit_state.get("gave_up")
+                               or unit_state.get("attempts")):
+                unit_state["gave_up"] = False
+                unit_state["gave_up_at"] = None
+                unit_state["attempts"] = 0
+                dirty = True
+        if dirty:
+            _save_recover_state(state, state_file)
+
     if not candidates:
         return {"result": "none-wedged",
                 "message": "no unit has N consecutive wedge detections yet",
@@ -305,8 +326,6 @@ def _recover_locked(candidates, stream=None, resolve_container=None,
     stream = stream or {}
     now = now if now is not None else time.time()
     state = _load_recover_state(state_file)
-    loading_keys = {_unit_key(u) for u in (stream.get("loading") or [])}
-    healthy_keys = {_unit_key(u) for u in (stream.get("ok_units") or [])}
 
     if resolve_container is None:
         resolve_container = _resolve_container_id
@@ -345,14 +364,6 @@ def _recover_locked(candidates, stream=None, resolve_container=None,
             "gave_up_at": None,
         })
 
-        # A unit we just recovered that is now healthy gets a fresh attempt
-        # budget + cleared cooldown (it healed), so a LATER distinct failure
-        # starts from zero, not from a stale gave-up.
-        if key in healthy_keys:
-            unit_state["attempts"] = 0
-            unit_state["gave_up"] = False
-            unit_state["gave_up_at"] = None
-
         # -- Guard: max consecutive-attempt cap (gave up) -------------------
         if unit_state["gave_up"]:
             log(f"Engine-wedge recovery: unit {key!r} GAVE UP after "
@@ -371,16 +382,6 @@ def _recover_locked(candidates, stream=None, resolve_container=None,
                 f"({since:.0f}s < {RECOVER_COOLDOWN_SECONDS}s) — suppressing")
             actions.append({"unit": key, "action": "skip",
                             "reason": "cooldown",
-                            "attempt": unit_state["attempts"]})
-            continue
-
-        # -- Guard: a loading unit is not a wedged unit ----------------------
-        # The probe's `wedged` list already excludes loading units, so this is
-        # belt-and-braces: refuse to act on a unit the stream ALSO marks as
-        # loading.
-        if key in loading_keys:
-            actions.append({"unit": key, "action": "skip",
-                            "reason": "loading",
                             "attempt": unit_state["attempts"]})
             continue
 
