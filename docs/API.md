@@ -247,7 +247,8 @@ hermes -p <profile> chat -Q --continue <session> -q "<prompt>"
 ```
 
 — with the prompt passed as an argv element (never shell-interpolated), a
-180 s timeout, and quiet mode so the reply is the only thing on stdout.
+configurable timeout (default **600 s**, see `chat_timeout` below), and quiet
+mode so the reply is the only thing on stdout.
 `chat --continue` resolves the session by title from the profile's `state.db`
 and persists the exchange into it (the Telegram-topic analog). The
 `localhost:4000` proxy is litellm — a stateless OpenAI-compatible inference
@@ -268,6 +269,25 @@ the (30-90 s, sometimes much longer) reply. Instead:
   `elapsed` seconds counter. The phone shows real progress; a backgrounded app
   can pick the finished answer up later by `job_id` (a job that outlives the
   connection that submitted it is no longer lost).
+
+**Timeout semantics:** because a job holds no connection open (the POST returns
+in ms, the GET polls), a short "reply latency" budget is meaningless — the
+honest model is *report elapsed and let the operator decide*. The worker still
+runs the `hermes chat` process under a **wedge-backstop** so a genuinely stuck
+(or orphaned) process cannot burn GPU forever, but the default is a generous
+**600 s** (~3.5× the ~165 s measured while three kanban workers were busy; the
+old 180 s sat barely above loaded latency and normal busy-cluster chats timed
+out). It is configurable as `chat_timeout` (seconds) in `~/.hscc/api.json`:
+
+```json
+{ "chat_timeout": 900 }
+```
+
+In every **terminal** state (`done` or a failure) `elapsed` is **frozen at the
+moment the job terminated** (`finished_at − submitted_at`), so the reported
+elapsed always agrees with the status and the error message — a job marked
+`timeout` reports the seconds it actually ran, *never* the minutes the operator
+spent polling it afterward.
 
 **`POST` response `202`:**
 
@@ -320,7 +340,7 @@ on a bad orchestrator call:
 | 400 | `unknown_project` | `project` is neither a registry project nor `general` |
 | 502 | `orchestrator_error` | the hermes invocation failed (empty reply / bad exit) |
 | 503 | `orchestrator_unavailable` | the orchestrator profile/session is not reachable (e.g. the named session hasn't been created yet) |
-| 504 | `orchestrator_timeout` | the orchestrator did not reply within 180 s |
+| 504 | `orchestrator_timeout` | the orchestrator did not reply within the configured timeout (default 600 s) — the reported `elapsed` equals the seconds it actually ran |
 
 ---
 
