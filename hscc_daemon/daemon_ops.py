@@ -25,7 +25,7 @@ STATE_DIR = os.path.expanduser("~/.hscc/state")
 # it is inert; this dict is what actually runs.
 PERIODIC_INTERVALS = {
     "dgx": 60, "gateway": 60, "local": 60, "heartbeat": 300,
-    "nas": 900, "idle": 300, "workers": 60, "proxy": 60,
+    "nas": 900, "idle": 300, "workers": 60, "proxy": 60, "engine_wedge": 60,
 }
 
 
@@ -242,7 +242,7 @@ def _run_supervised_periodic(stop_event, check_fn, interval, stream_name):
 
 def run_daemon_loop():
     """Main daemon event loop (polling mode fallback)."""
-    from .health import check_dgx, check_gateway, check_local, check_heartbeat, check_nas, check_idle_monitor, check_workers, check_proxy
+    from .health import check_dgx, check_gateway, check_local, check_heartbeat, check_nas, check_idle_monitor, check_workers, check_proxy, check_engine_wedge
     from .trigger import trigger_engine
     from .lifecycle import pipeline_watchdog, restart_vllm, load_watchdog_block
     from .state import now_iso, write_state
@@ -287,7 +287,7 @@ def run_daemon_loop():
         "dgx": check_dgx, "gateway": check_gateway, "local": check_local,
         "heartbeat": check_heartbeat, "nas": check_nas,
         "idle": check_idle_monitor, "workers": check_workers,
-        "proxy": check_proxy,
+        "proxy": check_proxy, "engine_wedge": check_engine_wedge,
     }
 
     def run_watchdog_loop():
