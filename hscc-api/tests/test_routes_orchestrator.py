@@ -1131,41 +1131,40 @@ def _install_fake_profile_db(monkeypatch, fake_db):
 
 
 def test_bloat_verdict_hard_signals():
-    """The compression-failure fields (real signals) trigger a hard rotate."""
+    """The compression-failure fields (real signals) trigger a last-resort
+    rotate — the ONLY rotation trigger (t_a8e9b7ff step 3)."""
     row_healthy = {"input_tokens": 1000, "compression_failure_error": None,
                    "compression_fallback_streak": 0,
                    "compression_ineffective_count": 0}
-    assert routes_orchestrator._session_bloat_verdict(
-        row_healthy, 262144, 30.0) == (False, "")
+    assert routes_orchestrator._session_bloat_verdict(row_healthy) == (False, "")
 
     # Each failure signal alone is enough (even small input_tokens).
     for field, value in [
         ("compression_failure_error", "model context length exceeded"),
-        ("compression_fallback_streak", 3),
+        ("compression_fallback_streak", 1),   # >= 1 fires
         ("compression_ineffective_count", 2),
     ]:
         row = dict(row_healthy, **{field: value})
-        bloated, reason = routes_orchestrator._session_bloat_verdict(
-            row, 262144, 30.0)
+        bloated, reason = routes_orchestrator._session_bloat_verdict(row)
         assert bloated is True
         assert "compression" in reason
 
 
-def test_bloat_verdict_proactive_high_water_mark():
-    """Cumulative input_tokens at/over bloat_factor x context_window rotates."""
-    ctx_win = 262144
-    factor = 30.0
-    ceiling = int(ctx_win * factor)  # 7864320
-    below = {"input_tokens": ceiling - 1, "compression_failure_error": None,
-             "compression_fallback_streak": 0, "compression_ineffective_count": 0}
-    assert routes_orchestrator._session_bloat_verdict(
-        below, ctx_win, factor) == (False, "")
-    at = {"input_tokens": ceiling, "compression_failure_error": None,
-          "compression_fallback_streak": 0, "compression_ineffective_count": 0}
-    bloated, reason = routes_orchestrator._session_bloat_verdict(
-        at, ctx_win, factor)
-    assert bloated is True
-    assert "context window" in reason
+def test_bloat_verdict_never_rotates_on_size_alone():
+    """Size-driven rotation is GONE (t_a8e9b7ff step 2/3): a LARGE session is
+    never rotated merely for being large — ``input_tokens`` is a CUMULATIVE
+    counter (never reset by compaction), so cumulative size says nothing about
+    current health, and with the 100K compaction cap in place a large-but-healthy
+    session is normal and must not be rotated."""
+    row = {"input_tokens": int(routes_orchestrator._ORCH_CONTEXT_WINDOW * 54),
+           "compression_failure_error": None,
+           "compression_fallback_streak": 0,
+           "compression_ineffective_count": 0}
+    assert routes_orchestrator._session_bloat_verdict(row) == (False, "")
+
+    # Even absurd cumulative tokens do NOT rotate absent failure evidence.
+    row_absurd = dict(row, input_tokens=50_000_000)
+    assert routes_orchestrator._session_bloat_verdict(row_absurd) == (False, "")
 
 
 def test_busy_notice_dropped_on_terminal_error_job():
@@ -1179,13 +1178,16 @@ def test_busy_notice_dropped_on_terminal_error_job():
     assert d["error"]["code"] == "orchestrator_timeout"
 
 
-def test_guard_session_bloat_rotates_bloated_session(tmp_path, monkeypatch):
-    """Full guard: a bloated session is retired (non-destructive) and a fresh
-    `<project>` session replaces it, so `--continue <project>` resolves clean."""
+def test_guard_session_bloat_rotates_on_failure_evidence(tmp_path, monkeypatch):
+    """Full guard: when compaction has POSITIVELY failed, the session is retired
+    (non-destructive) and a fresh `<project>` session replaces it, so
+    `--continue <project>` resolves clean. Rotation here is the LAST RESORT —
+    it fires on failure evidence, never on size alone."""
     fake, old_id = _seed_session_db(
         tmp_path, "hscc",
         messages=280,
         input_tokens=int(routes_orchestrator._ORCH_CONTEXT_WINDOW * 40),  # ~10.5M
+        comp_streak=1,
     )
     _install_fake_profile_db(monkeypatch, fake)
     ctx = _ctx(str(tmp_path), {})
@@ -1217,6 +1219,23 @@ def test_guard_session_bloat_noop_when_healthy(tmp_path, monkeypatch):
     assert fake.get_session(old_id)["title"] == "hscc"
 
 
+def test_guard_session_bloat_noop_on_large_healthy_session(tmp_path, monkeypatch):
+    """A LARGE session with NO failure evidence is NOT rotated (t_a8e9b7ff
+    step 2/3). With the 100K compaction cap in place, a big-but-healthy session
+    is normal — this is the exact case the old 30x cumulative trigger would
+    have wrongly rotated."""
+    fake, old_id = _seed_session_db(
+        tmp_path, "hscc", messages=278,
+        input_tokens=int(routes_orchestrator._ORCH_CONTEXT_WINDOW * 54),
+    )
+    _install_fake_profile_db(monkeypatch, fake)
+    ctx = _ctx(str(tmp_path), {})
+    rotation = routes_orchestrator._guard_session_bloat(ctx, "hscc-orch", "hscc")
+    assert rotation is None
+    assert fake.resolve_session_by_title("hscc") == old_id
+    assert fake.get_session(old_id)["title"] == "hscc"
+
+
 def test_guard_session_bloat_hard_failure_signal(tmp_path, monkeypatch):
     """A session whose compression is failing rotates even at modest tokens."""
     fake, old_id = _seed_session_db(
@@ -1231,10 +1250,12 @@ def test_guard_session_bloat_hard_failure_signal(tmp_path, monkeypatch):
 
 
 def test_guard_session_bloat_failsafe_disabled(tmp_path, monkeypatch):
-    """session_guard.enabled=False -> the guard never runs (no rotation)."""
+    """session_guard.enabled=False -> the guard never runs (no rotation) EVEN
+    with positive failure evidence present — the fail-safe gate is absolute."""
     fake, old_id = _seed_session_db(
         tmp_path, "hscc", messages=999,
         input_tokens=int(routes_orchestrator._ORCH_CONTEXT_WINDOW * 500),
+        comp_streak=5,
     )
     _install_fake_profile_db(monkeypatch, fake)
     ctx = _ctx(str(tmp_path), {"session_guard": {"enabled": False}})
@@ -1251,7 +1272,31 @@ def test_guard_session_bloat_failsafe_unreadable(monkeypatch):
 
 
 def test_session_health_readonly_reports_signals(tmp_path, monkeypatch):
-    """_session_health surfaces the signals + verdict WITHOUT rotating."""
+    """_session_health surfaces the rotation signals + cap WITHOUT rotating."""
+    fake, old_id = _seed_session_db(
+        tmp_path, "hscc", messages=278,
+        input_tokens=int(routes_orchestrator._ORCH_CONTEXT_WINDOW * 54),
+        comp_fail="model context length exceeded",
+    )
+    _install_fake_profile_db(monkeypatch, fake)
+    ctx = _ctx(str(tmp_path), {})
+    health = routes_orchestrator._session_health(ctx, "hscc-orch", "hscc")
+    assert health is not None
+    assert health["bloated"] is True
+    assert health["compaction_at_risk"] is True     # the compaction alert
+    assert health["messages"] == 278
+    assert health["input_tokens"] > 0
+    assert health["context_window"] == routes_orchestrator._ORCH_CONTEXT_WINDOW
+    assert health["threshold_tokens"] == \
+        routes_orchestrator.SESSION_COMPACTION_THRESHOLD_TOKENS == 100000
+    # Read-only: the session is UNAFFECTED (still titled `<project>`, no retire).
+    assert fake.resolve_session_by_title("hscc") == old_id
+    assert fake.get_session(old_id)["title"] == "hscc"
+
+
+def test_session_health_not_at_risk_for_large_healthy(tmp_path, monkeypatch):
+    """A large-but-healthy session does NOT trip the compaction alert — raw
+    cumulative size is not failure evidence (t_a8e9b7ff)."""
     fake, old_id = _seed_session_db(
         tmp_path, "hscc", messages=278,
         input_tokens=int(routes_orchestrator._ORCH_CONTEXT_WINDOW * 54),
@@ -1260,38 +1305,191 @@ def test_session_health_readonly_reports_signals(tmp_path, monkeypatch):
     ctx = _ctx(str(tmp_path), {})
     health = routes_orchestrator._session_health(ctx, "hscc-orch", "hscc")
     assert health is not None
-    assert health["bloated"] is True
-    assert health["messages"] == 278
-    assert health["input_tokens"] > 0
-    assert health["context_window"] == routes_orchestrator._ORCH_CONTEXT_WINDOW
-    # Read-only: the session is UNAFFECTED (still titled `<project>`, no retire).
-    assert fake.resolve_session_by_title("hscc") == old_id
-    assert fake.get_session(old_id)["title"] == "hscc"
+    assert health["bloated"] is False
+    assert health["compaction_at_risk"] is False
+    assert health["threshold_tokens"] == 100000
 
 
 def test_session_guard_config_precedence_and_validation(tmp_path):
     """session_guard config: defaults, file, inline, and hard-error on garbage."""
     # Defaults when nothing configured.
-    enabled, ctx_win, factor = routes_orchestrator._session_guard_config(
+    enabled, ctx_win = routes_orchestrator._session_guard_config(
         _ctx(str(tmp_path), {}))
     assert enabled is True
     assert ctx_win == routes_orchestrator._ORCH_CONTEXT_WINDOW == 262144
-    assert factor == routes_orchestrator._DEFAULT_BLOAT_FACTOR == 30.0
 
     # Inline config dict wins.
-    cfg = {"session_guard": {"enabled": False, "context_window": 131072,
-                             "bloat_factor": 10}}
-    enabled, ctx_win, factor = routes_orchestrator._session_guard_config(
+    cfg = {"session_guard": {"enabled": False, "context_window": 131072}}
+    enabled, ctx_win = routes_orchestrator._session_guard_config(
         _ctx(str(tmp_path), cfg))
-    assert enabled is False and ctx_win == 131072 and factor == 10.0
+    assert enabled is False and ctx_win == 131072
 
     # Malformed -> hard error.
     with pytest.raises(RuntimeError):
         routes_orchestrator._session_guard_config(
             _ctx(str(tmp_path), {"session_guard": {"context_window": "huge"}}))
-    with pytest.raises(RuntimeError):
-        routes_orchestrator._session_guard_config(
-            _ctx(str(tmp_path), {"session_guard": {"bloat_factor": 0}}))
+
+
+# ---- _ensure_compaction_threshold (t_a8e9b7ff step 2) -------------------- #
+# The ensure mechanism lazily imports ``hermes_cli.profiles`` and
+# ``utils.atomic_yaml_write`` (the same real Hermes modules the CLI's
+# ``config set`` path uses). The hermetic test path (p313) has neither, so we
+# inject FAKE modules into ``sys.modules`` — matching exactly how the rest of
+# this suite fakes the SessionDB — to exercise the ensure logic against a real
+# temp ``config.yaml`` on disk. ``atomic_yaml_write`` doubles as the real writer
+# so we verify the file actually lands and parses back.
+
+class _FakeProfilesModule:
+    """Stand-in for ``hermes_cli.profiles`` (profile dir resolution)."""
+    def __init__(self, root):
+        self._root = root
+    def normalize_profile_name(self, name):
+        return name
+    def validate_profile_name(self, name):
+        return None
+    def profile_exists(self, name):
+        return True
+    def get_profile_dir(self, name):
+        return self._root
+
+
+def _install_fake_hermes_modules(monkeypatch, tmp_path, wrote=None):
+    """Inject fake ``hermes_cli.profiles`` + ``utils`` into ``sys.modules`` so
+    ``_ensure_compaction_threshold`` runs against ``tmp_path``'s ``config.yaml``.
+
+    ``wrote`` (optional list) collects every path ``atomic_yaml_write`` wrote to
+    (monkeypatched from the real writer, so tests can assert the write actually
+    landed and parse the file back through ``yaml.safe_load`` — i.e. verify via
+    the same ``config.yaml`` path ``agent_init`` reads, not just the return
+    dict).``monkeypatch.setitem`` tracks the sys.modules entries so they are
+    restored after each test — the global module registry is never left
+    polluted for later tests.
+    """
+    import sys as _sys
+    fake_profiles = _FakeProfilesModule(tmp_path)
+    fake_utils = types.ModuleType("utils")
+
+    def _atomic_write(path, data, **kw):
+        import yaml as _yaml
+        if wrote is not None:
+            wrote.append(str(path))
+        with open(path, "w", encoding="utf-8") as f:
+            _yaml.dump(data, f, sort_keys=False, default_flow_style=False)
+    fake_utils.atomic_yaml_write = _atomic_write
+
+    # Build a fake ``hermes_cli`` package with a ``profiles`` submodule.
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.profiles = fake_profiles
+    fake_hermes_cli.__path__ = []
+
+    monkeypatch.setitem(_sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(_sys.modules, "hermes_cli.profiles", fake_profiles)
+    monkeypatch.setitem(_sys.modules, "utils", fake_utils)
+    return fake_profiles
+
+
+def test_ensure_compaction_threshold_writes_when_missing(tmp_path, monkeypatch):
+    """Ensure sets compression.threshold_tokens on a profile with NO config
+    yet, and the value LANDS in config.yaml (agent_init's read path)."""
+    wrote = []
+    _install_fake_hermes_modules(monkeypatch, tmp_path, wrote)
+    res = routes_orchestrator._ensure_compaction_threshold("hscc-orch")
+    assert res is not None
+    assert res["set"] is True
+    assert res["threshold_tokens"] == 100000
+    assert res["previous"] is None
+    # The write actually landed on disk (agent_init reads this exact file).
+    cfg_path = tmp_path / "config.yaml"
+    assert str(cfg_path) in wrote
+    import yaml as _yaml
+    parsed = _yaml.safe_load(cfg_path.read_text())
+    assert parsed["compression"]["threshold_tokens"] == 100000
+
+
+def test_ensure_compaction_threshold_idempotent_noop(tmp_path, monkeypatch):
+    """Ensure is a NO-OP when the profile already has threshold_tokens == the
+    constant — it never clobbers an operator value already <= 100000."""
+    import yaml as _yaml
+    (tmp_path / "config.yaml").write_text(
+        "compression:\n  threshold_tokens: 100000\n")
+    wrote = []
+    _install_fake_hermes_modules(monkeypatch, tmp_path, wrote)
+    res = routes_orchestrator._ensure_compaction_threshold("hscc-orch")
+    assert res is None                     # no-op
+    assert wrote == []                     # nothing written
+    # File unchanged (operator value preserved).
+    parsed = _yaml.safe_load((tmp_path / "config.yaml").read_text())
+    assert parsed["compression"]["threshold_tokens"] == 100000
+
+
+def test_ensure_compaction_threshold_preserves_lower_operator_value(
+        tmp_path, monkeypatch):
+    """An operator value BELOW the constant (e.g. 60000) is PRESERVED — a lower
+    cap is strictly better and must never be clobbered."""
+    import yaml as _yaml
+    (tmp_path / "config.yaml").write_text(
+        "compression:\n  threshold_tokens: 60000\n")
+    wrote = []
+    _install_fake_hermes_modules(monkeypatch, tmp_path, wrote)
+    res = routes_orchestrator._ensure_compaction_threshold("hscc-orch")
+    assert res is None
+    assert wrote == []
+    parsed = _yaml.safe_load((tmp_path / "config.yaml").read_text())
+    assert parsed["compression"]["threshold_tokens"] == 60000
+
+
+def test_ensure_compaction_threshold_lowers_over_cap_value(tmp_path, monkeypatch):
+    """An operator value ABOVE the constant (e.g. 250000, past the wedge floor)
+    is LOWERED to the constant — compaction must fire early enough to leave
+    headroom, not at/over the 196608 ratio floor."""
+    import yaml as _yaml
+    (tmp_path / "config.yaml").write_text(
+        "compression:\n  threshold_tokens: 250000\n")
+    wrote = []
+    _install_fake_hermes_modules(monkeypatch, tmp_path, wrote)
+    res = routes_orchestrator._ensure_compaction_threshold("hscc-orch")
+    assert res is not None
+    assert res["set"] is True
+    assert res["previous"] == 250000
+    parsed = _yaml.safe_load((tmp_path / "config.yaml").read_text())
+    assert parsed["compression"]["threshold_tokens"] == 100000
+
+
+def test_ensure_compaction_threshold_preserves_other_config(tmp_path, monkeypatch):
+    """Write sets/replaces ONLY compression.threshold_tokens; all other config
+    keys (e.g. model, memory directives) are preserved untouched."""
+    import yaml as _yaml
+    (tmp_path / "config.yaml").write_text(
+        "model: orchestrator-model\nchat_timeout: 600\n")
+    wrote = []
+    _install_fake_hermes_modules(monkeypatch, tmp_path, wrote)
+    res = routes_orchestrator._ensure_compaction_threshold("hscc-orch")
+    assert res is not None and res["set"] is True
+    parsed = _yaml.safe_load((tmp_path / "config.yaml").read_text())
+    assert parsed["compression"]["threshold_tokens"] == 100000
+    assert parsed["model"] == "orchestrator-model"   # untouched
+    assert parsed["chat_timeout"] == 600             # untouched
+
+
+def test_guard_session_bloat_ensures_compaction_threshold(tmp_path, monkeypatch):
+    """_guard_session_bloat's PRIMARY action is to ENSURE the compaction cap on
+    the profile's config.yaml (the real fix), independent of the session DB. We
+    capture it by requesting the threshold on the resolved profile dir."""
+    import sys as _sys
+    wrote = []
+    fake_profiles = _install_fake_hermes_modules(monkeypatch, tmp_path, wrote)
+    fake, old_id = _seed_session_db(tmp_path, "hscc", messages=4,
+                                    input_tokens=51566)
+    _install_fake_profile_db(monkeypatch, fake)
+    ctx = _ctx(str(tmp_path), {})
+    res = routes_orchestrator._guard_session_bloat(ctx, "hscc-orch", "hscc")
+    assert res is None                      # healthy session -> no rotation
+    # But the ensure layer fired: the cap landed on the profile's config.yaml.
+    cfg_path = tmp_path / "config.yaml"
+    assert str(cfg_path) in wrote
+    import yaml as _yaml
+    parsed = _yaml.safe_load(cfg_path.read_text())
+    assert parsed["compression"]["threshold_tokens"] == 100000
 
 
 def test_chat_post_surfaces_session_rotation(running, token, fakes, monkeypatch):
@@ -1305,7 +1503,7 @@ def test_chat_post_surfaces_session_rotation(running, token, fakes, monkeypatch)
             "retired_session": "seed-hscc",
             "retired_title": "hscc-retired-20260827-070000",
             "session": "20260827_rot_abcd12",
-            "reason": "session has accumulated 7.9M input tokens",
+            "reason": "context compression is failing",
         })
     status, payload = _post(running, token, body={
         "project": "hscc", "prompt": "go build X", "confirm": True,
