@@ -27,6 +27,21 @@ options:
 
 settings:
   base:
+    # Signing team for ALL THREE targets. The app and both extensions each need
+    # one — setting it on the app alone still fails the extensions with
+    # "Signing for <target> requires a development team".
+    #
+    # Set it once in your environment before generating, and it survives every
+    # `xcodegen generate` (a team picked in the Xcode UI does NOT — regenerating
+    # overwrites the project):
+    #
+    #     export HSCC_DEVELOPMENT_TEAM=YOURTEAMID
+    #     xcodegen generate
+    #
+    # Find your ID in Xcode > Settings > Accounts, or:
+    #     security find-identity -v -p codesigning
+    # A free personal team works for sideloading.
+    DEVELOPMENT_TEAM: ${HSCC_DEVELOPMENT_TEAM}
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "5.9"
