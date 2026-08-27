@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **engine-wedge auto-recovery (operator-approved ACTING automation).** The
+  E-stream probe (`check_engine_wedge`) only alerts when a unit answers HTTP
+  200 but never generates tokens. New `hscc_daemon/recover.py` is the acting
+  half: when a serving.json unit has been wedged for N (default 3) CONSECUTIVE
+  checks it restarts JUST that unit by the same hand-driven flow the operator
+  used — `hscc cluster stop <container_id>` for the wedged unit only, then
+  `hscc cluster up` to relaunch (which re-derives the serve command and carries
+  `--served-model-name`, so aliases survive). All side-effects are injectable;
+  a 60s recovery thread runs in the daemon loop. Guards: it never fires before
+  N consecutive detections; a per-unit cooldown (default 30 min) prevents a
+  restart loop; a max consecutive-attempt cap (default 3) stops acting and
+  keeps alerting, recording `gave_up`; it never acts during an intentional
+  autodown block or while a unit is loading; a healthy sibling is never
+  stopped; and it takes autodown's O_EXCL lock so a recovery can never race an
+  autodown teardown/wake. Hermetic test suite (`test_recover.py`) maps 1:1 to
+  the proof requirements with zero real subprocess/HTTP and no live state.
+
 ### Fixed
 - **daemon: NAS health check no longer goes silent, and `hscc verify` stops
   crying wolf on a healthy cluster.** Two coupled root causes, both fixed.

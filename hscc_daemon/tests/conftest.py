@@ -68,7 +68,8 @@ def _isolate_hscc(tmp_path, monkeypatch):
     base = str(tmp_path / "hscc")
 
     from hscc_daemon import (
-        autodown, daemon_ops, desktop, hscc, lifecycle, replay, state, trigger,
+        autodown, daemon_ops, desktop, hscc, lifecycle, recover, replay, state,
+        trigger,
     )
 
     # (a) Runtime expanduser redirect for the whole ~/.hscc directory tree.
@@ -115,6 +116,8 @@ def _isolate_hscc(tmp_path, monkeypatch):
             (lifecycle, "WATCHDOG_BLOCK_FILE", p("watchdog-block.json")),
             # state.py (the write_state/read_state funnel)
             (state, "STATE_DIR", p("state")),
+            # recover.py (cooldown + attempt-cap state)
+            (recover, "RECOVER_STATE_FILE", p("recover.json")),
             # trigger.py
             (trigger, "EVENTS_FILE", p("events.jsonl")),
             (trigger, "TRIGGERS_FILE", p("triggers.json")),
