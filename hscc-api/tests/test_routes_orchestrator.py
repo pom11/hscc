@@ -33,7 +33,7 @@ import pytest
 
 import api_server
 import routes_orchestrator
-from routes_orchestrator import _ChatJob, _run_job
+from routes_orchestrator import _ChatJob, _new_job, _reap_jobs, _run_job
 
 
 # --------------------------------------------------------------------------- #
@@ -510,6 +510,77 @@ def test_run_job_done_sets_reply_and_speak(monkeypatch):
     assert d["reply"] == "the answer"
     assert d["speak"].startswith("hscc-orch says:")
     assert d["elapsed"] >= 0.0
+
+
+# --------------------------------------------------------------------------- #
+# Job-store reaping (t_2bb97a26): terminal jobs must not leak unboundedly.
+# --------------------------------------------------------------------------- #
+
+def test_reap_evicts_terminal_job_past_retention():
+    """A terminal job finished longer ago than the retention window is reaped."""
+    old = _ChatJob("chat-1", "hscc", "hscc-orch", "hscc", "hi")
+    old.finished_at = time.time() - routes_orchestrator._JOB_RETENTION_SECONDS - 1
+    fresh = _ChatJob("chat-2", "hscc", "hscc-orch", "hscc", "hi")
+    fresh.finished_at = time.time()
+    with routes_orchestrator._jobs_lock:
+        routes_orchestrator._jobs.clear()
+        routes_orchestrator._jobs["chat-1"] = old
+        routes_orchestrator._jobs["chat-2"] = fresh
+        _reap_jobs()
+        assert "chat-1" not in routes_orchestrator._jobs   # past window -> gone
+        assert "chat-2" in routes_orchestrator._jobs       # in window -> kept
+
+
+def test_reap_keeps_in_retention_and_live_jobs():
+    """No terminal job inside the window, and no live job, is ever reaped."""
+    oldish = _ChatJob("chat-1", "hscc", "hscc-orch", "hscc", "hi")
+    oldish.finished_at = time.time() - routes_orchestrator._JOB_RETENTION_SECONDS + 1
+    live = _ChatJob("chat-2", "hscc", "hscc-orch", "hscc", "hi")  # queued, no finished_at
+    with routes_orchestrator._jobs_lock:
+        routes_orchestrator._jobs.clear()
+        routes_orchestrator._jobs["chat-1"] = oldish
+        routes_orchestrator._jobs["chat-2"] = live
+        _reap_jobs()
+        assert "chat-1" in routes_orchestrator._jobs   # inside window -> kept
+        assert "chat-2" in routes_orchestrator._jobs   # live -> always kept
+
+
+def test_reap_is_triggered_by_new_job_opportunistically():
+    """``_new_job`` pays down aged terminal jobs as a side effect."""
+    old = _ChatJob("chat-1", "hscc", "hscc-orch", "hscc", "hi")
+    old.finished_at = time.time() - routes_orchestrator._JOB_RETENTION_SECONDS - 1
+    with routes_orchestrator._jobs_lock:
+        routes_orchestrator._jobs.clear()
+        routes_orchestrator._jobs["chat-1"] = old
+    _new_job("hscc", "hscc-orch", "hscc", "hi")
+    with routes_orchestrator._jobs_lock:
+        # The stale job was reaped as a side effect of the new submission; only
+        # the freshly created queued job (and nothing else) remains.
+        ids = set(routes_orchestrator._jobs.keys())
+    assert "chat-1" not in ids
+    assert len(ids) == 1
+
+
+def test_reap_cap_trims_oldest_terminal_never_live(monkeypatch):
+    """Over the hard bound, the OLDEST terminal jobs are trimmed, never live."""
+    monkeypatch.setattr(routes_orchestrator, "_JOBS_MAX", 3)
+    older = _ChatJob("chat-1", "hscc", "hscc-orch", "hscc", "hi")
+    older.finished_at = time.time() - 1000
+    newer = _ChatJob("chat-2", "hscc", "hscc-orch", "hscc", "hi")
+    newer.finished_at = time.time() - 100
+    live = _ChatJob("chat-3", "hscc", "hscc-orch", "hscc", "hi")  # no finished_at
+    with routes_orchestrator._jobs_lock:
+        routes_orchestrator._jobs.clear()
+        routes_orchestrator._jobs["chat-1"] = older
+        routes_orchestrator._jobs["chat-2"] = newer
+        routes_orchestrator._jobs["chat-3"] = live
+        routes_orchestrator._jobs["chat-4"] = \
+            _ChatJob("chat-4", "hscc", "hscc-orch", "hscc", "hi")
+        _reap_jobs()
+        assert "chat-1" not in routes_orchestrator._jobs   # oldest terminal trimmed
+        assert "chat-2" in routes_orchestrator._jobs
+        assert "chat-3" in routes_orchestrator._jobs       # live never trimmed
+        assert "chat-4" in routes_orchestrator._jobs
 
 
 def test_run_job_done_then_get_is_idempotent(running, token, fakes):
