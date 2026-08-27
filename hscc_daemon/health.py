@@ -1285,3 +1285,292 @@ def check_workers():
         + (f", relaunched {relaunched}" if relaunched else "")
         + (f", down {down}" if down else ""))
     return ok
+
+
+# --------------------------------------------------------------------------
+# Engine-wedge probe (E stream) — v1.12.0
+# --------------------------------------------------------------------------
+# A regressed vLLM/engine process can keep listening and answer the HTTP
+# handshake (200) while never emitting generated tokens — a "200 that hangs".
+# Reachability checks (/health, tcp, ps) cannot see this. This probe sends a
+# tiny STREAMING chat-completions request directly to each serving.json unit's
+# primary node and requires REAL generated text within a SHORT timeout.
+#
+# Alerting is hung on the existing trigger-engine path: when a unit is wedged
+# we write this stream with ``ok: False``, which trigger_engine() (trigger.py)
+# turns into a ``state.engine_wedge.degraded`` pseudo-event that operator rules
+# (triggers.json) can fire on — no new notification channel.
+# --------------------------------------------------------------------------
+
+ENGINE_WEDGE_STREAM = "engine_wedge"
+# Short wall-clock bound for the ENTIRE streaming probe (connect + first token
+# + a read of the stream). A healthy engine streams tens of tokens well under
+# this; a wedged engine stalls with zero tokens. Never alert on a single slow
+# response — the consecutive-failure threshold handles that separately.
+ENGINE_WEDGE_TIMEOUT = int(os.environ.get("HSCC_ENGINE_WEDGE_TIMEOUT", "10"))
+# A unit may legitimately be mid-load (weights staging) for minutes; a loading
+# unit is NOT a wedged unit. A unit unseen before (first probe since daemon
+# start) within this many seconds of its first probe is reported "loading" and
+# is not a wedge candidate.
+ENGINE_WEDGE_LOAD_GRACE = int(os.environ.get("HSCC_ENGINE_WEDGE_LOAD_GRACE", "240"))
+# Consecutive probe failures required before a unit is declared wedged.
+# Debounce so a single slow response never fires the alert.
+ENGINE_WEDGE_THRESHOLD = int(os.environ.get("HSCC_ENGINE_WEDGE_THRESHOLD", "2"))
+# Tokens to request per probe ("tens of tokens" — enough to confirm the engine
+# is actually generating, not just returning the HTTP handshake). Deliberately
+# small so a healthy unit returns within the short timeout.
+ENGINE_WEDGE_MAX_TOKENS = int(os.environ.get("HSCC_ENGINE_WEDGE_MAX_TOKENS", "40"))
+
+# In-memory per-unit wedge state, keyed by unit id. Lives only for the lifetime
+# of this daemon process: ``first_seen`` (first tick we probed the unit),
+# ``consecutive_failures`` (wedged-signal streak), ``last_success`` (wall clock
+# of last healthy probe). Persisted nowhere — a daemon restart resets streaks,
+# which is correct: on restart a healthy unit streams text immediately, and a
+# still-loading unit is back inside the load grace via a fresh ``first_seen``.
+_engine_wedge_units = {}
+
+
+def _engine_wedge_unit_key(u):
+    """Stable per-unit key. Prefer the unit's explicit id; fall back to the
+    primary node + port so co-located units on one node stay distinct."""
+    uid = u.get("id")
+    if uid:
+        return uid
+    nodes = u.get("nodes") or []
+    return f"{nodes[0] if nodes else '?'}:{u.get('port') or '?'}"
+
+
+def _read_sse_content_until(resp, stop_event, out_box):
+    """Drain an OpenAI-compatible SSE stream on a helper thread.
+
+    Accumulates ``choices[0].delta.content`` text into ``out_box`` (a plain
+    list) until [DONE], EOF, or ``stop_event`` is set. Runs off the caller's
+    stack so the caller can enforce an OVERALL outer deadline on the streaming
+    probe with a bounded ``join(timeout=...)`` regardless of per-read socket
+    timeouts. Best-effort: any parse/transport error just stops accumulating;
+    the resulting (possibly empty) text is what the caller judges.
+    """
+    buf = b""
+    fp = getattr(resp, "fp", None)
+    try:
+        while not stop_event.is_set():
+            if fp is None:
+                break
+            chunk = fp.read(256)
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                line = line.strip()
+                if not line.startswith(b"data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == b"[DONE]":
+                    return
+                try:
+                    obj = json.loads(payload)
+                    delta = (obj.get("choices") or [{}])[0].get("delta") or {}
+                    content = delta.get("content")
+                    if content:
+                        out_box.append(content)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _probe_unit_generation(node, port, timeout=None, max_tokens=None):
+    """Send a tiny streaming chat-completions request to a unit's direct
+    endpoint and confirm it returns REAL generated text within a short window.
+
+    Returns ``{"ok": bool, "status": int|None, "error": str, "text": str}``.
+
+    Core signal (the wedge signature): the unit returns HTTP 200 but produces
+    NO content deltas within ``timeout`` seconds ⇒ ``ok: False`` with a
+    "wedged" classification. HTTP/transport errors ⇒ ``ok: False`` with a
+    "down" error — unreachable, a distinct condition from "answering but never
+    generating". The caller separates the two in the stream's details.
+    """
+    import urllib.request
+    import urllib.error
+    import threading as _threading
+
+    timeout = timeout or ENGINE_WEDGE_TIMEOUT
+    max_tokens = max_tokens or ENGINE_WEDGE_MAX_TOKENS
+    body = json.dumps({
+        "model": "x",
+        "messages": [{"role": "user",
+                      "content": "Reply with the single word: ok."}],
+        "max_tokens": max_tokens,
+        "stream": True,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"http://{node}:{port}/v1/chat/completions",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = resp.status
+            out_box = []
+            stop = _threading.Event()
+            t = _threading.Thread(
+                target=_read_sse_content_until, args=(resp, stop, out_box),
+                daemon=True)
+            t.start()
+            # Overall wall-clock bound on the whole streaming probe. If the
+            # worker thread is still blocked in a socket read when this
+            # returns, stop_event tells it to abandon and we judge the (empty)
+            # text already gathered.
+            t.join(timeout=timeout)
+            stop.set()
+            text = "".join(out_box)
+        if text.strip():
+            return {"ok": True, "status": status, "text": text.strip(),
+                    "error": ""}
+        return {"ok": False, "status": status, "error": "wedged"}
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "status": e.code, "error": "down"}
+    except Exception as e:
+        return {"ok": False, "status": None, "error": "down"}
+
+
+def check_engine_wedge():
+    """Per-unit inference-wedge probe (E stream): confirm EVERY serving.json
+    unit actually STREAMS real generated text, not merely answers HTTP 200.
+
+    Reachability checks cannot see a wedged engine: a regressed process keeps
+    listening and returns the HTTP handshake while never emitting generated
+    tokens. This probe POSTs a tiny STREAMING chat-completions request directly
+    to each unit's primary node (``nodes[0]:port``) and requires real generated
+    text within a SHORT timeout.
+
+    ONE concern, kept clean: the stream reports per-unit status and the overall
+    ``ok`` reflects only the WEDGE signal (a unit answering 200 with zero
+    tokens). A genuinely-down unit (transport/HTTP error) is recorded in
+    ``details.down`` but does NOT fail this stream — a down unit is the
+    ``workers``/``gateway`` streams' job, and failing here too would double-fire
+    the escalation. One wedged unit never marks a healthy sibling unhealthy.
+
+    Guards:
+      * intentional autodown in effect => SKIP probing entirely; write
+        ``ok: True`` + ``intentional: "autodown"`` so ``hscc verify`` neither
+        flags the stream stale nor fails it during a deliberate teardown.
+      * unit still loading (unseen within the load grace) => report "loading",
+        not a wedge candidate.
+      * never alert on a single slow response => consecutive-failure debounce
+        (``ENGINE_WEDGE_THRESHOLD``).
+
+    Alerting is hung on the existing trigger-engine path: ``ok: False`` makes
+    trigger_engine() emit a ``state.engine_wedge.degraded`` pseudo-event that
+    operator rules can fire on. No new notification channel.
+    """
+    from .state import now_iso, write_state
+
+    log("Running engine-wedge check")
+    serving_data = serving.load_serving()
+    if not isinstance(serving_data, dict):
+        serving_data = {"units": []}
+    units = [u for u in (serving_data.get("units") or []) if isinstance(u, dict)]
+
+    # SKIP entirely during an intentional autodown: the serving layer is down
+    # by design (or waking), so probing would only report a false wedge against
+    # a deliberately stopped layer. Write ok:True + the intentional marker so
+    # verify neither flags the stream stale nor fails it.
+    if _intentional_window():
+        log("Engine-wedge check: intentional autodown in effect — SKIPPING probe")
+        write_state(ENGINE_WEDGE_STREAM, {
+            "ok": True, "skipped": "intentional autodown", "units": [],
+            "wedged": [], "loading": [], "down": [], "ok_units": [],
+            "last_check": now_iso(), "intentional": "autodown",
+            "message": "intentional autodown — probe skipped by design",
+        })
+        return True
+
+    if not units:
+        write_state(ENGINE_WEDGE_STREAM, {
+            "ok": True, "units": 0, "wedged": [], "loading": [], "down": [],
+            "ok_units": [], "last_check": now_iso(),
+            "message": "no serving units configured",
+        })
+        return True
+
+    now_wall = time.time()
+    wedged, loading, down, ok_units = [], [], [], []
+
+    for u in units:
+        nodes = [n for n in (u.get("nodes") or []) if n]
+        if not nodes:
+            continue
+        key = _engine_wedge_unit_key(u)
+        node, port = nodes[0], u.get("port") or serving.serving_port(serving_data)
+        label = u.get("id") or f"{node}:{port}"
+
+        st = _engine_wedge_units.setdefault(key, {
+            "first_seen": now_wall, "consecutive_failures": 0,
+            "last_success": 0.0,
+        })
+
+        # A unit we've only just met may still be loading weights (minutes);
+        # a loading unit is NOT a wedged unit. Skip it for the load grace and
+        # report "loading" so the stream tells the truth without alarming.
+        if now_wall - st["first_seen"] < ENGINE_WEDGE_LOAD_GRACE:
+            loading.append({"unit": label, "node": node, "port": port,
+                            "status": "loading"})
+            continue
+
+        probe = _probe_unit_generation(node, port)
+        if probe["ok"]:
+            st["consecutive_failures"] = 0
+            st["last_success"] = now_wall
+            ok_units.append({"unit": label, "node": node, "port": port,
+                             "status": "ok"})
+            continue
+
+        if probe["error"] == "wedged":
+            st["consecutive_failures"] += 1
+            if st["consecutive_failures"] >= ENGINE_WEDGE_THRESHOLD:
+                stalled_s = (now_wall - st["last_success"]) if st["last_success"] else None
+                wedged.append({"unit": label, "node": node, "port": port,
+                               "status": "wedged",
+                               "message": "HTTP 200 but no generated tokens "
+                                          "within %ss" % ENGINE_WEDGE_TIMEOUT,
+                               "last_success": st["last_success"] or None,
+                               "stalled_for_s": round(stalled_s) if stalled_s else None})
+            else:
+                # Debouncing: one (or a few) slow/empty responses is not yet a
+                # declared wedge — report transparently but do not fail.
+                loading.append({"unit": label, "node": node, "port": port,
+                                "status": "checking",
+                                "consecutive_failures": st["consecutive_failures"]})
+            continue
+
+        # Down (transport/HTTP error) — recorded but NOT a wedge-stream failure
+        # (the unit isn't answering at all; that's the workers/gateway streams'
+        # job). Keep the streak reset so a unit that comes back healthy starts
+        # clean instead of inheriting stale wedge credit.
+        st["consecutive_failures"] = 0
+        down.append({"unit": label, "node": node, "port": port,
+                     "status": "down",
+                     "message": probe.get("error") or "unreachable"})
+
+    ok = not wedged
+    msg_parts = [f"{len(ok_units)}/{len(units)} streaming ok"]
+    if loading:
+        msg_parts.append(f"{len(loading)} loading/checking")
+    if down:
+        msg_parts.append(f"{len(down)} down (not wedge)")
+    if wedged:
+        w = ", ".join(w_["unit"] for w_ in wedged)
+        msg_parts.append(f"WEDGED: {w}")
+        log(f"Engine-wedge check: WEDGED unit(s) detected: {w}", "ERROR")
+
+    write_state(ENGINE_WEDGE_STREAM, {
+        "ok": ok, "units": len(units), "ok_units": ok_units,
+        "wedged": wedged, "loading": loading, "down": down,
+        "last_check": now_iso(), "message": ", ".join(msg_parts),
+    })
+    log(f"Engine-wedge check: {', '.join(msg_parts)}")
+    return ok
