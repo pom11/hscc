@@ -1272,6 +1272,115 @@ def test_watch_telegram_failure_does_not_crash_loop(tmp_path, capsys):
     assert "notify failed" in err
 
 
+def test_watch_manual_section_shows_pending_item(tmp_path):
+    """A watch frame renders the pending manual item, like the one-shot view."""
+    state, _ = _manual_state(tmp_path)
+    _write_manual(state, [_manual_entry()])
+
+    def gather():
+        return qa._collect(
+            [_card()], [_project()], _run=FakeGit(), _run_verify=FakeVerify()
+        )
+
+    def load_manual():
+        return qa._unchecked_manual(state, None)
+
+    sleeps: list[int] = []
+
+    def fake_sleep(interval):
+        sleeps.append(interval)
+
+    it = qa.qa_frames(gather, interval=7, _sleep=fake_sleep,
+                      manual_loader=load_manual)
+    frame1 = next(it)
+
+    body = "\n".join(frame1["lines"])
+    assert frame1["error"] is None
+    assert "NEEDS MANUAL VERIFICATION" in body
+    assert "mqa-1a2b3c4d" in body
+    assert "check printer byte output on real hardware" in body
+
+
+def test_watch_manual_checked_off_disappears_next_tick(tmp_path):
+    """A manual item checked off between ticks disappears on the next tick.
+
+    The store is re-read on every frame: frame1 shows the unchecked item, the
+    entry is marked checked, and frame2 (a fresh read) drops it.
+    """
+    state, _ = _manual_state(tmp_path)
+    _write_manual(state, [_manual_entry()])
+
+    def gather():
+        return qa._collect(
+            [_card()], [_project()], _run=FakeGit(), _run_verify=FakeVerify()
+        )
+
+    def load_manual():
+        return qa._unchecked_manual(state, None)
+
+    sleeps: list[int] = []
+
+    def fake_sleep(interval):
+        sleeps.append(interval)
+        if len(sleeps) >= 3:
+            raise KeyboardInterrupt()
+
+    frames: list[dict] = []
+    it = qa.qa_frames(gather, interval=7, _sleep=fake_sleep,
+                      manual_loader=load_manual)
+    frames.append(next(it))          # tick 1: item unchecked -> shown
+
+    # Simulate the operator checking the item off while watching.
+    entries = qa._load_manual(state)
+    entries[0]["checked"] = True
+    _write_manual(state, entries)
+
+    try:
+        frames.append(next(it))      # tick 2: fresh read -> hidden
+    except KeyboardInterrupt:
+        pass
+
+    assert "mqa-1a2b3c4d" in "\n".join(frames[0]["lines"])
+    assert "mqa-1a2b3c4d" not in "\n".join(frames[1]["lines"])
+
+
+def test_watch_manual_project_filter(tmp_path):
+    """The [project] filter applies in watch mode exactly as in the default view."""
+    state, _ = _manual_state(tmp_path)
+    _write_manual(state, [
+        _manual_entry(id="mqa-aaaa0000", project="alpha", description="alpha item"),
+        _manual_entry(id="mqa-bbbb0000", project="beta", description="beta item"),
+    ])
+
+    def gather():
+        return qa._collect(
+            [_card()], [_project()], _run=FakeGit(), _run_verify=FakeVerify()
+        )
+
+    def load_manual():
+        return qa._unchecked_manual(state, "alpha")
+
+    sleeps: list[int] = []
+
+    def fake_sleep(interval):
+        sleeps.append(interval)
+        if len(sleeps) >= 2:
+            raise KeyboardInterrupt()
+
+    frames: list[dict] = []
+    it = qa.qa_frames(gather, interval=7, _sleep=fake_sleep,
+                      manual_loader=load_manual)
+    while True:
+        try:
+            frames.append(next(it))
+        except KeyboardInterrupt:
+            break
+
+    body = "\n".join(frames[0]["lines"])
+    assert "mqa-aaaa0000" in body     # alpha item kept under the alpha filter
+    assert "mqa-bbbb0000" not in body  # beta item filtered out
+
+
 class _StopAfter:
     """A sleep that raises KeyboardInterrupt after ``n`` calls, ending _watch."""
 
