@@ -35,6 +35,24 @@ def autodown_file(tmp_path, monkeypatch):
     return path
 
 
+@pytest.fixture(autouse=True)
+def _no_prci_network(monkeypatch):
+    """Default: PR/CI interlock CLEAR so cycle/teardown tests are hermetic.
+
+    ``_is_idle`` now evaluates ``_has_active_pr_ci()``; when no injectable
+    checker is passed that falls through to the real ``gh`` screen (which
+    issues live subprocess calls). Stubbing the *screen source* to a clear
+    result keeps every existing cycle / teardown / autoup / lock test off the
+    real GitHub/network and deterministic (the "all clear ⇒ teardown" cases
+    need PR/CI positively clear) while leaving the real ``_has_active_pr_ci``
+    logic intact — tests that pass an injectable checker or override the
+    screen via their own monkeypatch (LIFO teardown wins) still exercise it.
+    """
+    monkeypatch.setattr(ad, "_screen_prci",
+                        lambda *a, **k: {"open_prs": 0, "active_runs": 0,
+                                         "repos": []})
+
+
 class _FakeKb:
     """Fake Hermes kanban library backed by real in-memory sqlite boards.
 
@@ -435,6 +453,132 @@ class TestHasActiveWork:
         state = ad.kanban_check_state()
         assert state is not None and state["ok"] is False
         assert "board 'hscc' unreadable" in state["reason"]
+
+
+class _PrciClear:
+    """Injectable PR/CI checker reporting no open PR / no active CI run."""
+
+    def __call__(self):
+        return {"open_prs": 0, "active_runs": 0, "repos": []}
+
+
+class _PrciOpenPr:
+    """Injectable PR/CI checker reporting ONE open PR."""
+
+    def __call__(self):
+        return {"open_prs": 1, "active_runs": 0, "repos": ["pom11/hscc"]}
+
+
+class _PrciCiRunning:
+    """Injectable PR/CI checker reporting ONE active CI run."""
+
+    def __call__(self):
+        return {"open_prs": 0, "active_runs": 1, "repos": ["pom11/hscc"]}
+
+
+class _PrciUnreachable:
+    """Injectable PR/CI checker reporting the source cannot be reached."""
+
+    def __call__(self):
+        return ad._PRCI_UNREACHABLE
+
+
+class _PrciRaises:
+    """Injectable PR/CI checker that RAISES (simulates a broken source)."""
+
+    def __call__(self):
+        raise RuntimeError("gh network down")
+
+
+class _PrciGarbage:
+    """Injectable PR/CI checker returning an unreadable shape (fail-safe)."""
+
+    def __call__(self):
+        return "definitely-not-a-screen"
+
+
+class TestHasActivePrCi:
+    """``_has_active_pr_ci`` PR/CI idle interlock (§1a extension).
+
+    True ⇒ active ⇒ not idle ⇒ never tear down. False ONLY when the screen is
+    POSITIVELY clear. Every failure/unreachable/ambiguous shape fails safe to
+    True — identical direction to the kanban interlock.
+    """
+
+    def test_open_pr_is_active(self):
+        assert ad._has_active_pr_ci(_PrciOpenPr()) is True
+
+    def test_ci_running_is_active(self):
+        assert ad._has_active_pr_ci(_PrciCiRunning()) is True
+
+    def test_both_clear_is_idle(self):
+        # Both open PRs and active runs at zero ⇒ w.r.t. PR/CI the fleet is
+        # idle (the caller's kanban check still runs separately).
+        assert ad._has_active_pr_ci(_PrciClear()) is False
+
+    def test_unreachable_failsafe_active(self):
+        assert ad._has_active_pr_ci(_PrciUnreachable()) is True
+
+    def test_raising_checker_failsafe_active(self):
+        assert ad._has_active_pr_ci(_PrciRaises()) is True
+
+    def test_garbage_shape_failsafe_active(self):
+        assert ad._has_active_pr_ci(_PrciGarbage()) is True
+
+    def test_reset_state_between_calls(self):
+        # Each call stands alone — a clear then an active must not leak state.
+        assert ad._has_active_pr_ci(_PrciClear()) is False
+        assert ad._has_active_pr_ci(_PrciOpenPr()) is True
+        assert ad._has_active_pr_ci(_PrciClear()) is False
+
+
+class TestPrciScreenActive:
+    """``_prci_screen_active`` normalizes a screen to a bool (fail-safe)."""
+
+    def test_unreachable_is_active(self):
+        assert ad._prci_screen_active(ad._PRCI_UNREACHABLE) is True
+
+    def test_open_pr_active(self):
+        assert ad._prci_screen_active({"open_prs": 2, "active_runs": 0,
+                                       "repos": []}) is True
+
+    def test_ci_running_active(self):
+        assert ad._prci_screen_active({"open_prs": 0, "active_runs": 3,
+                                       "repos": []}) is True
+
+    def test_clear_is_idle(self):
+        assert ad._prci_screen_active({"open_prs": 0, "active_runs": 0,
+                                       "repos": []}) is False
+
+    def test_ambiguous_shape_failsafe_active(self):
+        assert ad._prci_screen_active("nonsense") is True
+        assert ad._prci_screen_active(None) is True
+        assert ad._prci_screen_active({"open_prs": "x", "active_runs": 0}) is True
+
+
+class TestProbePrciActivity:
+    """``probe_prci_activity`` stamps ONLY on positively-confirmed activity."""
+
+    def test_stamps_on_open_pr(self, autodown_file):
+        assert ad.probe_prci_activity(_PrciOpenPr()) is True
+        assert ad.load_config()["wake_source"] == "prci"
+
+    def test_stamps_on_ci_running(self, autodown_file):
+        assert ad.probe_prci_activity(_PrciCiRunning()) is True
+        assert ad.load_config()["wake_source"] == "prci"
+
+    def test_no_stamp_when_clear(self, autodown_file):
+        assert ad.probe_prci_activity(_PrciClear()) is False
+        assert ad.load_config()["wake_source"] is None
+
+    def test_no_stamp_when_unreachable(self, autodown_file):
+        # Unverifiable source ⇒ no stamp (would fabricate perpetual activity).
+        assert ad.probe_prci_activity(_PrciUnreachable()) is False
+        assert ad.load_config()["wake_source"] is None
+
+    def test_no_stamp_when_raising(self, autodown_file):
+        assert ad.probe_prci_activity(_PrciRaises()) is False
+        assert ad.load_config()["wake_source"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -865,6 +1009,96 @@ class TestCycle:
             probes=[],
         )
         assert calls == ["teardown"]
+
+    # --- PR/CI interlock (§1a extension) ----------------------------------
+    def test_open_pr_blocks_teardown(self, autodown_file, tmp_path, monkeypatch):
+        """Open PR on a tracked repo ⇒ active ⇒ no teardown."""
+        calls = []
+        monkeypatch.setattr(ad, "teardown", lambda: calls.append("teardown"),
+                 raising=False)
+        self._ready(autodown_file)
+        agents = self._write_agents(tmp_path, [{"name": "a", "status": "idle"}])
+        ad.cycle(
+            kanban_db=_FakeKb([]),
+            agents_file=agents,
+            now=NOW,
+            keepalive_ok=lambda: True,
+            probes=[],
+            prci_checker=_PrciOpenPr(),  # broken interlock
+        )
+        assert calls == []
+
+    def test_ci_running_blocks_teardown(
+            self, autodown_file, tmp_path, monkeypatch):
+        """Active CI run on a tracked repo ⇒ active ⇒ no teardown."""
+        calls = []
+        monkeypatch.setattr(ad, "teardown", lambda: calls.append("teardown"),
+                 raising=False)
+        self._ready(autodown_file)
+        agents = self._write_agents(tmp_path, [{"name": "a", "status": "idle"}])
+        ad.cycle(
+            kanban_db=_FakeKb([]),
+            agents_file=agents,
+            now=NOW,
+            keepalive_ok=lambda: True,
+            probes=[],
+            prci_checker=_PrciCiRunning(),  # broken interlock
+        )
+        assert calls == []
+
+    def test_prci_clear_falls_through_to_kanban(
+            self, autodown_file, tmp_path, monkeypatch):
+        """Both PR/CI clear ⇒ predicate falls through to the kanban check.
+
+        Proves PR/CI-clear does NOT short-circuit the rest of the conjunction:
+        with PR/CI clear but kanban work active, teardown is still suppressed
+        (the kanban interlock is evaluated next); with PR/CI AND kanban clear,
+        teardown proceeds. Autodown is only idle when EVERY signal is clear.
+        """
+        calls = []
+        monkeypatch.setattr(ad, "teardown", lambda: calls.append("teardown"),
+                 raising=False)
+        self._ready(autodown_file)
+        agents = self._write_agents(tmp_path, [{"name": "a", "status": "idle"}])
+        clear = _PrciClear()
+        # (a) PR/CI clear + kanban ACTIVE ⇒ still blocked by kanban work.
+        ad.cycle(
+            kanban_db=_FakeKb(["running"]),
+            agents_file=agents,
+            now=NOW,
+            keepalive_ok=lambda: True,
+            probes=[],
+            prci_checker=clear,
+        )
+        assert calls == []
+        # (b) PR/CI clear + kanban clear ⇒ fully idle ⇒ teardown.
+        ad.cycle(
+            kanban_db=_FakeKb([]),
+            agents_file=agents,
+            now=NOW,
+            keepalive_ok=lambda: True,
+            probes=[],
+            prci_checker=_PrciClear(),
+        )
+        assert calls == ["teardown"]
+
+    def test_prci_unreachable_blocks_teardown(
+            self, autodown_file, tmp_path, monkeypatch):
+        """Unreachable PR/CI source ⇒ active (fail-safe) ⇒ no teardown."""
+        calls = []
+        monkeypatch.setattr(ad, "teardown", lambda: calls.append("teardown"),
+                 raising=False)
+        self._ready(autodown_file)
+        agents = self._write_agents(tmp_path, [{"name": "a", "status": "idle"}])
+        ad.cycle(
+            kanban_db=_FakeKb([]),
+            agents_file=agents,
+            now=NOW,
+            keepalive_ok=lambda: True,
+            probes=[],
+            prci_checker=_PrciUnreachable(),  # fail-safe active
+        )
+        assert calls == []
 
     # --- warm-up / first-boot guard ---------------------------------------
     def test_null_last_activity_does_not_teardown(

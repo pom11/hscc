@@ -377,7 +377,10 @@ private struct ChatBody: View {
             // be chatted with.
             return "\(error.message) The \(project) orchestrator's session isn't ready yet — create it first, then re-send."
         case "orchestrator_timeout":
-            return "The \(project) orchestrator did not reply within 180 s (timeout). Try again or check the orchestrator."
+            // No hardcoded seconds here: the server's timeout is configurable
+            // (chat_timeout, default 600s) and the job's `elapsed`/`message`
+            // carry the real number — hardcoding "180 s" would contradict them.
+            return "The \(project) orchestrator did not reply in time (timeout). Try again or check the orchestrator."
         case "orchestrator_error":
             return "The \(project) orchestrator call failed: \(error.message)"
         default:
@@ -386,7 +389,7 @@ private struct ChatBody: View {
     }
 
     /// Build a clear, human-facing failure string from the thrown error.
-    /// Distinguishes the \"session not ready\" and \"timeout\" states from a
+    /// Distinguishes the "session not ready" and "timeout" states from a
     /// generic failure so each real condition reads clearly.
     private func message(for error: Error) -> String {
         if let hscc = error as? HSCCError {
@@ -399,7 +402,7 @@ private struct ChatBody: View {
                     // the orchestrator can be chatted with.
                     return "\(message) The \(project) orchestrator's session isn't ready yet — create it first, then re-send."
                 case "orchestrator_timeout":
-                    return "The \(project) orchestrator did not reply within 180 s (timeout). Try again or check the orchestrator."
+                    return "The \(project) orchestrator did not reply in time (timeout). Try again or check the orchestrator."
                 default:
                     // 400 unknown_project / bad_request, 409, 502 orchestrator_error, etc.
                     if status == 502 {
