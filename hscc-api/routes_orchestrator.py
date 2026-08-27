@@ -122,6 +122,13 @@ from orchestrators import (                          # noqa: E402
     resolve_orchestrator,     # project -> {profile, session, board, repo}
 )
 
+# The compaction token cap is the SINGLE source of truth held in the roles
+# generator (hscc-roles/generator.py), which the bootstrap producer uses to
+# mint profiles. The API-side ensure imports it from there so the two sides
+# can never drift apart — a diverged literal is exactly the bug that let
+# bootstrap silently null threshold_tokens on every profile (2026-08-27).
+from generator import SESSION_COMPACTION_THRESHOLD_TOKENS  # noqa: E402
+
 # Registry path is shared with routes_project (config-driven).
 from routes_project import _registry_path             # noqa: E402
 
@@ -363,10 +370,10 @@ _ORCH_CONTEXT_WINDOW = 262144
 # makes compaction fire at ~100K active — comfortably inside the window with
 # headroom to spare — so continuity is PRESERVED (same session id, same history
 # via the summary) instead of wedging. ``_ensure_compaction_threshold`` writes
-# this key onto every resolved ``<project>-orch`` profile, idempotently. This
-# value is a module constant (not a literal scattered around) per the operator
-# decision.
-SESSION_COMPACTION_THRESHOLD_TOKENS = 100000
+# this key onto every resolved ``<project>-orch`` profile, idempotently.
+# SESSION_COMPACTION_THRESHOLD_TOKENS is imported from the roles generator
+# (hscc-roles/generator.py), the single source of truth shared with the
+# bootstrap producer, so the two sides cannot drift (see import above).
 
 
 def _session_guard_config(ctx) -> tuple:
