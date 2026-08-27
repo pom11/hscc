@@ -46,6 +46,16 @@ The honest fix is a JOB API (option b):
 This ALSO fixes a real failure mode: a dropped connection no longer loses a
 90 s answer the server already computed — the background thread finishes and
 the phone (or a backgrounded app) can pick it up by job_id later.
+
+Timeout semantics (t_023d4c4c): because a job holds NO connection open, a short
+"reply latency" timeout is pointless — the honest model is "report elapsed and
+let the operator decide". The worker therefore runs the orchestrator under a
+generous WEDGE-backstop :data:`_DEFAULT_TIMEOUT` (600s default, configurable as
+``chat_timeout`` seconds in ``~/.hscc/api.json`` — see ``_chat_timeout``) that
+only fires when the ``hermes chat`` process is genuinely hung, not merely slow.
+Every terminal job (``done`` or a failure state) reports ``elapsed`` FROZEN at
+its termination instant (``finished_at - submitted_at``), so status, message
+and elapsed always agree (the original 180s-vs-2972.7s contradiction).
 """
 from __future__ import annotations
 
@@ -83,7 +93,64 @@ from orchestrators import (                          # noqa: E402
 from routes_project import _registry_path             # noqa: E402
 
 # Default: how long we wait for the orchestrator to reply before giving up.
-_DEFAULT_TIMEOUT = 180.0   # seconds; an orchestrator can take a while
+#
+# WHY 600s and not 180s (t_023d4c4c): the orchestrator answers a trivial prompt
+# in ~17s when the fleet is IDLE, but >165s while even three kanban workers are
+# running — and "busy" is this cluster's NORMAL state, not the exception. The
+# old 180s sat barely above loaded latency, so normal busy-cluster chats timed
+# out (the reported 2972.7s / 180s contradiction came from poll-side elapsed
+# drift, fixed separately — see _job_dict). A job does NOT hold a connection
+# open (the POST returns in ms and the phone polls by job_id), so a short
+# "reply latency" budget serves no purpose; the honest model is "report elapsed
+# and let the operator decide". This value is therefore a pure WEDGE-backstop:
+# it should only fire when the underlying `hermes chat` process is genuinely
+# hung (deadlocked / wedged), never merely slow. 600s = 10 min, ~3.5x the
+# measured 165s loaded case — room for "busy", yet still bounds a truly stuck
+# process so an orphan can't burn GPU forever. Tune via ``chat_timeout`` (float
+# seconds) in ``~/.hscc/api.json`` — see ``_chat_timeout``.
+_DEFAULT_TIMEOUT = 600.0   # seconds (configurable backstop for a WEDGED process)
+
+
+def _chat_timeout(ctx) -> float:
+    """Resolve the orchestrator-chat timeout for this server's config.
+
+    Precedence (lowest -> highest): :data:`_DEFAULT_TIMEOUT` -> ``chat_timeout``
+    in ``~/.hscc/api.json`` -> ``chat_timeout`` on the resolved config dict.
+    Mirrors the ``registry`` precedence in :func:`routes_project._registry_path`.
+    A non-numeric / non-positive value is a user CONFIG error: raise (matching
+    api_server's hard-error-on-malformed-config stance) rather than silently
+    guess.
+    """
+    raw = None
+    from_config = getattr(ctx, "config", None)
+    if from_config and from_config.get("chat_timeout") is not None:
+        raw = from_config["chat_timeout"]
+    else:
+        hscc_dir = getattr(ctx, "hscc_dir", None) or "~/.hscc"
+        cfg_path = Path(hscc_dir).expanduser() / "api.json"
+        if cfg_path.exists():
+            try:
+                import json
+                data = json.loads(cfg_path.read_text())
+                if isinstance(data, dict) and data.get("chat_timeout") is not None:
+                    raw = data["chat_timeout"]
+            except (OSError, ValueError):
+                pass  # fall through to the default
+        else:
+            raw = None
+    if raw is None:
+        return _DEFAULT_TIMEOUT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            f"invalid 'chat_timeout' {raw!r} in api config — expected seconds"
+        )
+    if value <= 0:
+        raise RuntimeError(
+            f"invalid 'chat_timeout' {value!r} — must be a positive number of seconds"
+        )
+    return value
 
 
 # --------------------------------------------------------------------------- #
@@ -226,12 +293,14 @@ class _ChatJob:
                   "The orchestrator call failed."),
     }
 
-    def __init__(self, job_id, project, profile, session, prompt):
+    def __init__(self, job_id, project, profile, session, prompt,
+                 timeout=_DEFAULT_TIMEOUT):
         self.job_id = job_id
         self.project = project
         self.profile = profile
         self.session = session
         self.prompt = prompt
+        self.timeout = timeout
         self.submitted_at = time.time()
         self.finished_at: float | None = None
         self.lock = threading.Lock()
@@ -243,34 +312,47 @@ class _ChatJob:
         self.error: dict | None = None
 
 
-def _new_job(project, profile, session, prompt) -> _ChatJob:
+def _new_job(project, profile, session, prompt, timeout=_DEFAULT_TIMEOUT) -> _ChatJob:
     """Create (and store) a queued job under the store lock."""
     with _jobs_lock:
         job_id = f"chat-{next(_job_ids)}"
-        job = _ChatJob(job_id, project, profile, session, prompt)
+        job = _ChatJob(job_id, project, profile, session, prompt, timeout=timeout)
         _jobs[job_id] = job
     return job
 
 
 def _job_dict(job: _ChatJob) -> dict:
-    """Snapshot a job as a JSON-serialisable dict (safe to hand the client)."""
+    """Snapshot a job as a JSON-serialisable dict (safe to hand the client).
+
+    ``elapsed`` is honest wall-clock from submission. For ANY terminal state
+    (``done`` or a failure state) it is FROZEN at ``finished_at - submitted_at``
+    — the exact instant the job terminated — so the reported elapsed ALWAYS
+    agrees with the status and error message: a job marked ``timeout`` at 180s
+    reports ~180s, never the minutes you spent polling it afterward (that drift
+    was the t_023d4c4c contradiction: status/error said 180s while elapsed said
+    2972.7s). Only a live (``queued``/``running``) job shows a growing
+    ``time.time() - submitted_at``.
+    """
     with job.lock:
         base = {
             "job_id": job.job_id,
             "project": job.project,
             "status": job.status,
         }
+        if job.finished_at is not None:
+            # Terminal: elapsed frozen at the termination moment, so status,
+            # error message and elapsed tell ONE coherent story.
+            base["elapsed"] = round(job.finished_at - job.submitted_at, 3)
+        else:
+            # Live: elapsed grows as the operator polls.
+            base["elapsed"] = round(time.time() - job.submitted_at, 3)
         if job.status == "done":
-            finished = job.finished_at if job.finished_at is not None else time.time()
-            base["elapsed"] = round(finished - job.submitted_at, 3)
             base["reply"] = job.reply
             base["profile"] = job.profile
             base["session"] = job.session
             base["speak"] = job.speak
-        else:
-            base["elapsed"] = round(time.time() - job.submitted_at, 3)
-            if job.error is not None:
-                base["error"] = job.error
+        if job.error is not None:
+            base["error"] = job.error
         return base
 
 
@@ -285,7 +367,7 @@ def _run_job(job: _ChatJob):
         job.status = "running"
     try:
         reply, profile, session = _backing_invoke(
-            job.profile, job.session, job.prompt, timeout=_DEFAULT_TIMEOUT,
+            job.profile, job.session, job.prompt, timeout=job.timeout,
         )
     except _OrchestratorTimeout as exc:
         _finish_job_error(job, "timeout", str(exc))
@@ -409,8 +491,9 @@ def handle_orchestrator_chat(server, ctx, query, body):
     # Create the job and run the real invocation on a daemon background thread
     # (the server is ThreadingHTTPServer with daemon_threads, so this thread
     # lives as long as the process — the reply is NOT lost when the POST
-    # connection closes).
-    job = _new_job(project, profile, session, prompt)
+    # connection closes). The timeout (configurable, default 600s) is captured
+    # per-job at submission so every job reports elapsed at ITS termination.
+    job = _new_job(project, profile, session, prompt, timeout=_chat_timeout(ctx))
     worker = threading.Thread(target=_run_job, args=(job,), daemon=True)
     worker.start()
 
