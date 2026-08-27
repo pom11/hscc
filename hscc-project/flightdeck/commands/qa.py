@@ -485,6 +485,22 @@ def _save_manual(entries: list[dict], _path=None) -> None:
         yaml.safe_dump(entries, f, sort_keys=False)
 
 
+def _unchecked_manual(path=None, want=None) -> list[dict]:
+    """The manual store, reduced to what the default view shows.
+
+    Re-reads the store on every call (callers refresh each tick), applies the
+    SAME ``[project]`` filter as the queue, drops checked entries, and sorts
+    unchecked oldest-first — identical semantics for the one-shot command and
+    every ``--watch`` frame, so the two cannot drift.
+    """
+    manual = _load_manual(path)
+    if want:
+        manual = [e for e in manual if e.get("project") == want]
+    unchecked = [e for e in manual if not e.get("checked")]
+    unchecked.sort(key=lambda e: e.get("added_at") or "")
+    return unchecked
+
+
 def _new_manual_id(existing: list[dict]) -> str:
     """A fresh ``mqa-<8 hex>`` id that does not collide with existing entries."""
     import secrets
@@ -643,7 +659,8 @@ def _sleep_seconds(seconds: float) -> None:
 
 
 def qa_frames(gather: Callable[[], list[dict]], *, interval: int,
-              _sleep: Callable):
+              _sleep: Callable,
+              manual_loader: Callable[[], list[dict]] | None = None):
     """Yield one qa frame dict per refresh in watch mode.
 
     Each frame is ``{"rows": list, "lines": list[str], "error": str|None}``
@@ -654,6 +671,12 @@ def qa_frames(gather: Callable[[], list[dict]], *, interval: int,
     the caller can run notify against fresh state. ``interval`` is passed to
     ``_sleep`` so the injected sleep is respected.
 
+    ``manual_loader`` (when given) is re-invoked on EVERY tick to produce this
+    frame's manual-QA section, so an item added or checked off while watching
+    appears or disappears on the next render. It must read fresh from the
+    store (use :func:`_unchecked_manual`), never capture once. ``None`` keeps
+    the frame manual-free, byte-identical to a watch without a manual store.
+
     Infinite by design; the shell below stops on ``KeyboardInterrupt``.
     """
     last_rows: list[dict] = []
@@ -662,7 +685,8 @@ def qa_frames(gather: Callable[[], list[dict]], *, interval: int,
         error = None
         try:
             rows = gather()
-            lines = _render(rows)
+            manual = manual_loader() if manual_loader else None
+            lines = _render(rows, manual)
             last_rows, last_lines = rows, lines
         except Exception as exc:
             rows, lines, error = last_rows, last_lines, f"refresh failed: {exc}"
@@ -708,8 +732,16 @@ def _watch(args: argparse.Namespace, projects: list[registry.Project],
     def gather() -> list[dict]:
         return _gather_rows(args, projects)
 
+    def load_manual() -> list[dict]:
+        # Fresh read every tick so an item added/checked while watching shows
+        # or hides on the next render — same filter as the queue.
+        return _unchecked_manual(
+            getattr(args, "state", None), getattr(args, "project", None)
+        )
+
     try:
-        for frame in qa_frames(gather, interval=interval, _sleep=args.sleep):
+        for frame in qa_frames(gather, interval=interval, _sleep=args.sleep,
+                               manual_loader=load_manual):
             if frame["error"] is None:
                 newly, errors = _run_notify(
                     frame["rows"], projects,
@@ -800,14 +832,10 @@ def cmd_qa(args: argparse.Namespace) -> int:
 
     rows = _gather_rows(args, projects)
 
-    # Manual-QA store, filtered by the same [project] filter as the queue.
-    # Checked entries stay in the store but drop out of this default view.
-    # Unchecked entries are shown oldest first, matching the queue's ordering.
-    manual = _load_manual(getattr(args, "state", None))
-    if want:
-        manual = [e for e in manual if e.get("project") == want]
-    unchecked = [e for e in manual if not e.get("checked")]
-    unchecked.sort(key=lambda e: e.get("added_at") or "")
+    # Manual-QA store, reduced by the same [project] filter as the queue:
+    # checked entries drop out, unchecked show oldest-first. Shared with the
+    # --watch loader so both views cannot drift.
+    unchecked = _unchecked_manual(getattr(args, "state", None), want)
 
     if getattr(args, "notify", False):
         newly, errors = _run_notify(
