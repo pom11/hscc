@@ -946,8 +946,10 @@ def test_backing_busy_tasks_import_failure_failsafe(monkeypatch):
 
 
 def test_chat_post_includes_notice_when_profile_busy(running, token, fakes, monkeypatch):
-    """A busy orchestrator profile -> the 202 POST AND every GET carry the honest
-    notice (the card's "queued message the operator understands")."""
+    """A busy orchestrator -> the 202 POST carries the honest notice, and a
+    LIVE (still-running) poll shows it too. The t_a8e9b7ff fix: the notice is
+    DROPPED once the job reaches a terminal state — a finished job must never
+    carry "busy right now ... poll this job" (that was the lying notice)."""
     monkeypatch.setattr(routes_orchestrator, "_backing_busy_tasks",
                         lambda profile: 2)
     status, payload = _post(running, token, body={
@@ -957,10 +959,32 @@ def test_chat_post_includes_notice_when_profile_busy(running, token, fakes, monk
     assert payload["notice"]
     assert "hscc-orch" in payload["notice"]
     assert "2 kanban tasks" in payload["notice"]
-    # And the notice rides on every GET poll too.
-    faked = _poll_done(running, token, payload["job_id"])
+
+    # HOLD the fake invoke on a gate so the job stays LIVE (running) — the
+    # notice must ride on a live poll, because the operator is still waiting.
+    gate = threading.Event()
+    fakes["invoke_gate"] = gate
+    # Re-submit so the gate takes effect on a LIVE job we can observe.
+    status, payload = _post(running, token, body={
+        "project": "hscc", "prompt": "go build X", "confirm": True,
+    })
+    job_id = payload["job_id"]
+    live = {}
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        _, live = _get(running, token, f"/v1/orchestrator/chat/{job_id}")
+        if live["status"] == "running":
+            break
+        time.sleep(0.005)
+    assert live["status"] == "running"
+    assert live["notice"] == payload["notice"]   # live poll keeps the notice
+
+    # Release the gate -> the job goes DONE; the notice MUST be dropped now.
+    gate.set()
+    faked = _poll_done(running, token, job_id)
     assert faked["status"] == "done"
-    assert faked["notice"] == payload["notice"]
+    assert "notice" not in faked          # no stale "busy / poll this job"
+    assert "reply" in faked               # the outcome speaks for itself
 
 
 def test_chat_post_omits_notice_when_profile_idle(running, token, fakes, monkeypatch):
@@ -975,3 +999,323 @@ def test_chat_post_omits_notice_when_profile_idle(running, token, fakes, monkeyp
     faked = _poll_done(running, token, payload["job_id"])
     assert "notice" not in faked
     assert faked["status"] == "done"
+
+
+# --------------------------------------------------------------------------- #
+# t_a8e9b7ff Bug 1: session-bloat guard — detect pre-wedge, rotate preserving
+# continuity, surface health, all non-destructive.
+# --------------------------------------------------------------------------- #
+
+def _ctx(hscc_dir, config=None):
+    return types.SimpleNamespace(config=config or {}, hscc_dir=hscc_dir)
+
+
+class _FakeProfileDB:
+    """Hermetic stand-in for the orchestrator profile's state.db (no hermes).
+
+    Implements exactly the ``SessionDB`` surface ``_guard_session_bloat`` /
+    ``_session_health`` / ``_rotate_session`` use, backed by an in-memory
+    ``sessions`` table carrying the columns the guard reads. This keeps the
+    bloat-guard tests fully self-contained — no dependency on a real
+    ``hermes_state``/``hermes_cli`` install on the test path — while exercising
+    the guard's real decision + rotation code end-to-end.
+    """
+
+    def __init__(self, rows):
+        self.closed = False
+        self.rows = {}           # id -> row dict (mutable)
+        for r in rows:
+            self.rows[r["id"]] = dict(r)
+            self.rows[r["id"]].setdefault("compression_failure_error", None)
+            self.rows[r["id"]].setdefault("compression_fallback_streak", 0)
+            self.rows[r["id"]].setdefault("compression_ineffective_count", 0)
+
+    # --- interface the guard uses (name-for-name with SessionDB) ---------- #
+    def get_session_by_title(self, title):
+        for r in self.rows.values():
+            if r.get("title") == title:
+                return dict(r)
+        return None
+
+    def resolve_session_by_title(self, title):
+        match = None
+        for r in self.rows.values():
+            if r.get("title") == title:
+                if match is None or r.get("started_at", 0) > match.get("started_at", 0):
+                    match = r
+        return match["id"] if match else None
+
+    def get_session(self, sid):
+        r = self.rows.get(sid)
+        return dict(r) if r else None
+
+    def get_session_title(self, sid):
+        r = self.rows.get(sid)
+        return r.get("title") if r else None
+
+    def set_session_title(self, sid, title):
+        if sid not in self.rows:
+            raise ValueError(f"_FakeProfileDB: no session {sid!r}")
+        self.rows[sid]["title"] = title
+        return True
+
+    def create_session(self, sid, source="cli", model=None, profile_name=None):
+        self.rows[sid] = {
+            "id": sid, "source": source, "title": None,
+            "message_count": 0, "input_tokens": 0,
+            "compression_failure_error": None,
+            "compression_fallback_streak": 0,
+            "compression_ineffective_count": 0,
+            "model": model, "profile_name": profile_name,
+            "started_at": 0,
+        }
+        return sid
+
+    def close(self):
+        self.closed = True
+
+
+def _seed_session_db(tmp_path, title, messages=0, input_tokens=0,
+                     comp_fail=None, comp_streak=0, comp_ineff=0, model=None):
+    """Build a temp :class:`_FakeProfileDB` with ONE titled session carrying the
+    given real signals.
+
+    Returns ``(fake_db, sid)``. Installs ``fake_db`` as the stub for
+    ``_open_profile_session_db`` and returns a *factory* that hands out a FRESH
+    ``_FakeProfileDB`` (sharing the same row store) per call when installed via
+    :func:`_install_fake_profile_db`. ``fake_db`` is passed to the test for
+    direct inspection; it shares ``rows`` with fresh copies, so state written by
+    the guard is visible through it.
+    """
+    sid = f"seed_{title}_{messages}_{id(_seed_session_db)}"
+    base = {
+        "id": sid, "source": "cli", "title": title, "profile_name": f"{title}-orch",
+        "message_count": messages, "input_tokens": input_tokens,
+        "compression_failure_error": comp_fail,
+        "compression_fallback_streak": comp_streak,
+        "compression_ineffective_count": comp_ineff,
+        "model": model or "orchestrator-model", "started_at": 0,
+    }
+    fake = _FakeProfileDB([base])
+    return fake, sid
+
+
+def _install_fake_profile_db(monkeypatch, fake_db):
+    """Point ``_open_profile_session_db`` at a FRESH ``_FakeProfileDB`` per call.
+
+    The guard CLOSES the SessionDB it opens (both the no-rotation and rotate
+    paths), so the stub must hand out a NEW connection each call. Each fresh
+    instance shares ``rows`` with the original ``fake_db``, so mutations the
+    guard makes are visible both through the instance the guard used and
+    through ``fake_db`` for later assertions. ``read_only`` is captured but
+    ignored (the fake is a read/write in-memory store) — what matters for the
+    test is which path the guard takes, not the underlying SQLite mode.
+    """
+    store = fake_db.rows
+
+    def _open(profile, read_only=False):
+        # Share the SAME mutable ``rows`` store object across every connection
+        # (mirroring how the real SessionDB instances read/write one underlying
+        # state.db file). A naive ``_FakeProfileDB([dict(r) for r in ...])``
+        # would hand each connection deep-shallow COPIES of the row dicts, so a
+        # ``set_session_title`` / ``create_session`` mutation on one connection
+        # would never be visible through ``fake_db`` — silently breaking the
+        # rotation assertions. Bypassing ``__init__`` and aliasing ``rows``
+        # makes every mutation propagate to the shared store the test inspects.
+        db = _FakeProfileDB.__new__(_FakeProfileDB)
+        db.closed = False
+        db.rows = store
+        return db
+
+    monkeypatch.setattr(routes_orchestrator, "_open_profile_session_db", _open)
+
+
+def test_bloat_verdict_hard_signals():
+    """The compression-failure fields (real signals) trigger a hard rotate."""
+    row_healthy = {"input_tokens": 1000, "compression_failure_error": None,
+                   "compression_fallback_streak": 0,
+                   "compression_ineffective_count": 0}
+    assert routes_orchestrator._session_bloat_verdict(
+        row_healthy, 262144, 30.0) == (False, "")
+
+    # Each failure signal alone is enough (even small input_tokens).
+    for field, value in [
+        ("compression_failure_error", "model context length exceeded"),
+        ("compression_fallback_streak", 3),
+        ("compression_ineffective_count", 2),
+    ]:
+        row = dict(row_healthy, **{field: value})
+        bloated, reason = routes_orchestrator._session_bloat_verdict(
+            row, 262144, 30.0)
+        assert bloated is True
+        assert "compression" in reason
+
+
+def test_bloat_verdict_proactive_high_water_mark():
+    """Cumulative input_tokens at/over bloat_factor x context_window rotates."""
+    ctx_win = 262144
+    factor = 30.0
+    ceiling = int(ctx_win * factor)  # 7864320
+    below = {"input_tokens": ceiling - 1, "compression_failure_error": None,
+             "compression_fallback_streak": 0, "compression_ineffective_count": 0}
+    assert routes_orchestrator._session_bloat_verdict(
+        below, ctx_win, factor) == (False, "")
+    at = {"input_tokens": ceiling, "compression_failure_error": None,
+          "compression_fallback_streak": 0, "compression_ineffective_count": 0}
+    bloated, reason = routes_orchestrator._session_bloat_verdict(
+        at, ctx_win, factor)
+    assert bloated is True
+    assert "context window" in reason
+
+
+def test_busy_notice_dropped_on_terminal_error_job():
+    """Never 'poll' on a terminal ERROR job either — the notice is dropped."""
+    job = _ChatJob("chat-1", "hscc", "hscc-orch", "hscc", "hi",
+                   notice="hscc-orch is busy right now ... poll this job")
+    routes_orchestrator._finish_job_error(job, "timeout", "did not reply")
+    d = routes_orchestrator._job_dict(job)
+    assert d["status"] == "timeout"
+    assert "notice" not in d          # no stale "poll this job" on a terminal
+    assert d["error"]["code"] == "orchestrator_timeout"
+
+
+def test_guard_session_bloat_rotates_bloated_session(tmp_path, monkeypatch):
+    """Full guard: a bloated session is retired (non-destructive) and a fresh
+    `<project>` session replaces it, so `--continue <project>` resolves clean."""
+    fake, old_id = _seed_session_db(
+        tmp_path, "hscc",
+        messages=280,
+        input_tokens=int(routes_orchestrator._ORCH_CONTEXT_WINDOW * 40),  # ~10.5M
+    )
+    _install_fake_profile_db(monkeypatch, fake)
+    ctx = _ctx(str(tmp_path), {})
+    rotation = routes_orchestrator._guard_session_bloat(ctx, "hscc-orch", "hscc")
+    assert rotation is not None
+    assert rotation["retired_session"] == old_id
+    assert rotation["title"] == "hscc"
+    assert rotation["reason"]
+    # Non-destructive: the old session still exists, retitled.
+    old = fake.get_session(old_id)
+    assert old is not None
+    assert old["title"].startswith("hscc-retired-")
+    # Fresh session now owns the `<project>` title and is resolvable.
+    new_id = fake.resolve_session_by_title("hscc")
+    assert new_id != old_id
+    assert fake.get_session(new_id)["message_count"] == 0
+
+
+def test_guard_session_bloat_noop_when_healthy(tmp_path, monkeypatch):
+    """A healthy session is NOT rotated (no false positives)."""
+    fake, old_id = _seed_session_db(tmp_path, "hscc", messages=4,
+                                    input_tokens=51566)
+    _install_fake_profile_db(monkeypatch, fake)
+    ctx = _ctx(str(tmp_path), {})
+    rotation = routes_orchestrator._guard_session_bloat(ctx, "hscc-orch", "hscc")
+    assert rotation is None
+    # Original session untouched, still titled `<project>`.
+    assert fake.resolve_session_by_title("hscc") == old_id
+    assert fake.get_session(old_id)["title"] == "hscc"
+
+
+def test_guard_session_bloat_hard_failure_signal(tmp_path, monkeypatch):
+    """A session whose compression is failing rotates even at modest tokens."""
+    fake, old_id = _seed_session_db(
+        tmp_path, "hscc", messages=120, input_tokens=4_000_000,
+        comp_streak=2)
+    _install_fake_profile_db(monkeypatch, fake)
+    ctx = _ctx(str(tmp_path), {})
+    rotation = routes_orchestrator._guard_session_bloat(ctx, "hscc-orch", "hscc")
+    assert rotation is not None
+    assert rotation["retired_session"] == old_id
+    assert "compression" in rotation["reason"]
+
+
+def test_guard_session_bloat_failsafe_disabled(tmp_path, monkeypatch):
+    """session_guard.enabled=False -> the guard never runs (no rotation)."""
+    fake, old_id = _seed_session_db(
+        tmp_path, "hscc", messages=999,
+        input_tokens=int(routes_orchestrator._ORCH_CONTEXT_WINDOW * 500),
+    )
+    _install_fake_profile_db(monkeypatch, fake)
+    ctx = _ctx(str(tmp_path), {"session_guard": {"enabled": False}})
+    assert routes_orchestrator._guard_session_bloat(ctx, "hscc-orch", "hscc") is None
+    assert fake.resolve_session_by_title("hscc") == old_id
+
+
+def test_guard_session_bloat_failsafe_unreadable(monkeypatch):
+    """Can't open the profile state.db -> fail-safe no-rotation, never a crash."""
+    monkeypatch.setattr(routes_orchestrator, "_open_profile_session_db",
+                        lambda profile, read_only=False: None)
+    ctx = _ctx("/nonexistent", {})
+    assert routes_orchestrator._guard_session_bloat(ctx, "hscc-orch", "hscc") is None
+
+
+def test_session_health_readonly_reports_signals(tmp_path, monkeypatch):
+    """_session_health surfaces the signals + verdict WITHOUT rotating."""
+    fake, old_id = _seed_session_db(
+        tmp_path, "hscc", messages=278,
+        input_tokens=int(routes_orchestrator._ORCH_CONTEXT_WINDOW * 54),
+    )
+    _install_fake_profile_db(monkeypatch, fake)
+    ctx = _ctx(str(tmp_path), {})
+    health = routes_orchestrator._session_health(ctx, "hscc-orch", "hscc")
+    assert health is not None
+    assert health["bloated"] is True
+    assert health["messages"] == 278
+    assert health["input_tokens"] > 0
+    assert health["context_window"] == routes_orchestrator._ORCH_CONTEXT_WINDOW
+    # Read-only: the session is UNAFFECTED (still titled `<project>`, no retire).
+    assert fake.resolve_session_by_title("hscc") == old_id
+    assert fake.get_session(old_id)["title"] == "hscc"
+
+
+def test_session_guard_config_precedence_and_validation(tmp_path):
+    """session_guard config: defaults, file, inline, and hard-error on garbage."""
+    # Defaults when nothing configured.
+    enabled, ctx_win, factor = routes_orchestrator._session_guard_config(
+        _ctx(str(tmp_path), {}))
+    assert enabled is True
+    assert ctx_win == routes_orchestrator._ORCH_CONTEXT_WINDOW == 262144
+    assert factor == routes_orchestrator._DEFAULT_BLOAT_FACTOR == 30.0
+
+    # Inline config dict wins.
+    cfg = {"session_guard": {"enabled": False, "context_window": 131072,
+                             "bloat_factor": 10}}
+    enabled, ctx_win, factor = routes_orchestrator._session_guard_config(
+        _ctx(str(tmp_path), cfg))
+    assert enabled is False and ctx_win == 131072 and factor == 10.0
+
+    # Malformed -> hard error.
+    with pytest.raises(RuntimeError):
+        routes_orchestrator._session_guard_config(
+            _ctx(str(tmp_path), {"session_guard": {"context_window": "huge"}}))
+    with pytest.raises(RuntimeError):
+        routes_orchestrator._session_guard_config(
+            _ctx(str(tmp_path), {"session_guard": {"bloat_factor": 0}}))
+
+
+def test_chat_post_surfaces_session_rotation(running, token, fakes, monkeypatch):
+    """When the guard rotates, the 202 POST carries `session_rotation` so the
+    operator sees the session was retired + recreated (chat continues on the
+    fresh one, same name)."""
+    monkeypatch.setattr(
+        routes_orchestrator, "_guard_session_bloat",
+        lambda ctx, profile, session: {
+            "profile": "hscc-orch", "title": "hscc",
+            "retired_session": "seed-hscc",
+            "retired_title": "hscc-retired-20260827-070000",
+            "session": "20260827_rot_abcd12",
+            "reason": "session has accumulated 7.9M input tokens",
+        })
+    status, payload = _post(running, token, body={
+        "project": "hscc", "prompt": "go build X", "confirm": True,
+    })
+    assert status == 202
+    rot = payload["session_rotation"]
+    assert rot["retired_session"] == "seed-hscc"
+    assert rot["session"] == "20260827_rot_abcd12"
+    assert rot["reason"]
+    # The background job still continues the (same-named) `<project>` session.
+    _poll_done(running, token, payload["job_id"])
+    assert fakes["invoke_calls"][0][1] == "hscc"   # session name unchanged
+

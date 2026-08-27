@@ -63,10 +63,25 @@ named session + ``journal_mode=delete`` state.db contention → compaction storm
 silent 600s timeout). We don't hide that behind a higher timeout; at submit the
 handler counts ``profile``'s running board tasks (``_backing_busy_tasks``) and,
 when non-zero, returns an honest ``notice`` ("<profile> is busy with N kanban
-tasks...") on the POST AND on every GET poll (see ``_job_dict``). The verified
-job-status state machine (queued/running/done/error) is unchanged — the notice
-is purely additive context so a queued message the operator understands beats a
-timeout they cannot explain.
+tasks...") on the POST AND on GET polls of a LIVE job. The notice is DROPPED
+once the job reaches a terminal state (t_a8e9b7ff): a finished job must never
+carry "busy right now ... poll this job" — the outcome is described by
+status/reply/error. The verified job-status state machine
+(queued/running/done/error) is unchanged.
+
+Session-bloat guard (t_a8e9b7ff Bug 1): each project's chat uses ONE long-lived
+named session that grows forever until compaction stops being able to recover
+and the chat wedges (the 14.2M-token / 278-message ``hscc`` session timed out
+at 600s while a fresh session answered in 1.777s). ``_guard_session_bloat``
+runs at chat POST time — before the job continues the named session — reads the
+real signals on the session row (``input_tokens``, ``compression_failure_error``,
+``compression_fallback_streak``, ``compression_ineffective_count``) and, when
+the session is bloated, ROTATES it: retitles the old session to
+``<project>-retired-<ts>`` (non-destructive, kept on disk) and creates a fresh
+session titled ``<project>`` (via Hermes' own SessionDB, so ``--continue
+<project>`` resolves to the fresh row). Per-project continuity is preserved —
+profile ``<project>-orch``, session ``<project>``, board ``<project>`` are all
+untouched as identities; only the session's accumulated context is reset.
 
 Preamble stripping (t_5ed5dfa8 Bug 2): ``hermes chat -Q`` emits a few one-line
 startup notices to stdout before the reply (the cwd-restore notice, the tirith
@@ -77,6 +92,7 @@ shapes so a legitimate reply that merely looks like a warning is never stripped.
 from __future__ import annotations
 
 import itertools
+import logging
 import re
 import subprocess
 import sys
@@ -319,6 +335,336 @@ def _busy_notice(profile: str, count: int) -> str:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Session-bloat guard (t_a8e9b7ff Bug 1): rotate a chat session approaching the
+# context ceiling BEFORE it wedges, preserving per-project continuity.
+# --------------------------------------------------------------------------- #
+
+# The orchestrator model's context window (the "context ceiling" the card
+# means). Measured from the live strong-tier endpoint: ``orchestrator-model``
+# resolves to 262144 tokens (same value the hermes-agent compressor resolves;
+# the hscc-roles generator's COMPACT_THRESHOLD comment cites "~210K of 262K").
+# This is the anchor the bloat high-water mark is computed from — the signal
+# is anchored to the REAL model ceiling, not an arbitrary message count.
+_ORCH_CONTEXT_WINDOW = 262144
+
+# Proactive-rotation factor: rotate once the session's CUMULATIVE ``input_tokens``
+# exceeds this many multiples of the context window. ``input_tokens`` in the
+# sessions table is cumulative (monotonically grows: ``input_tokens = input_tokens
+# + ?`` on every turn), so it roughly equals ``(number of successful compaction
+# cycles) x active_window``. The card's measured wall: the wedged ``hscc``
+# session died at 14.2M tokens = ~54x the 262144 window (and its
+# compression_* failure fields were all 0, so the failure signals ALONE would
+# not have caught it — the proactive cumulative high-water mark must). We
+# rotate at 30x the window (7.86M for 262144): comfortably above every observed
+# healthy session (max ~5.9M / 23x for a heavy day) yet with ~1.8x margin below
+# the observed failure wall, so rotation happens well BEFORE the wedge while a
+# session is still broadly healthy. Configurable via ``session_guard.bloat_factor``.
+_DEFAULT_BLOAT_FACTOR = 30.0
+
+
+def _session_guard_config(ctx) -> tuple:
+    """Resolve the session-guard parameters for this server's config.
+
+    Returns ``(enabled, context_window, bloat_factor)``. Precedence mirrors the
+    ``chat_timeout`` / ``registry`` pattern: ``session_guard`` dict on the
+    resolved config object, then ``session_guard`` in ``~/.hscc/api.json``, then
+    the module defaults. Malformed values are a hard config error (matching the
+    API's hard-error-on-malformed-config stance), never a silent guess.
+    """
+    # defaults
+    enabled = True
+    context_window = _ORCH_CONTEXT_WINDOW
+    bloat_factor = _DEFAULT_BLOAT_FACTOR
+
+    raw = None
+    from_config = getattr(ctx, "config", None)
+    if from_config and isinstance(from_config.get("session_guard"), dict):
+        raw = from_config["session_guard"]
+    else:
+        hscc_dir = getattr(ctx, "hscc_dir", None) or "~/.hscc"
+        cfg_path = Path(hscc_dir).expanduser() / "api.json"
+        if cfg_path.exists():
+            try:
+                import json
+                data = json.loads(cfg_path.read_text())
+                if isinstance(data, dict) and isinstance(data.get("session_guard"), dict):
+                    raw = data["session_guard"]
+            except (OSError, ValueError):
+                raw = None
+    if isinstance(raw, dict):
+        if raw.get("enabled") is not None:
+            enabled = bool(raw["enabled"])
+        if raw.get("context_window") is not None:
+            try:
+                context_window = int(raw["context_window"])
+            except (TypeError, ValueError):
+                raise RuntimeError(
+                    f"invalid session_guard.context_window {raw['context_window']!r} — "
+                    "expected an integer number of tokens"
+                )
+            if context_window <= 0:
+                raise RuntimeError(
+                    "invalid session_guard.context_window — must be > 0"
+                )
+        if raw.get("bloat_factor") is not None:
+            try:
+                bloat_factor = float(raw["bloat_factor"])
+            except (TypeError, ValueError):
+                raise RuntimeError(
+                    f"invalid session_guard.bloat_factor {raw['bloat_factor']!r} — "
+                    "expected a positive number"
+                )
+            if bloat_factor <= 0:
+                raise RuntimeError(
+                    "invalid session_guard.bloat_factor — must be a positive "
+                    "number of context windows"
+                )
+    return enabled, context_window, bloat_factor
+
+
+def _open_profile_session_db(profile: str, read_only: bool = False):
+    """Open the orchestrator profile's ``state.db`` via Hermes' own SessionDB.
+
+    Returns a ``SessionDB`` bound to ``<profile>``'s state.db (the same DB the
+    ``hermes -p <profile> chat --continue`` invocation reads and writes), or
+    ``None`` when the profile is unresolvable / has no state.db (fail-safe: the
+    caller then skips the guard rather than guessing). We resolve the profile
+    directory through ``hermes_cli.profiles`` exactly like the session-search
+    tool does, so reads always target the RIGHT profile — never the API process's
+    own default profile.
+
+    ``read_only=True`` opens the DB in read-only mode (no write lock) — the
+    safe choice for surfacing health (``_session_health``), so a busy profile's
+    state.db is never contended for a mere status read. The rotation path
+    (``_guard_session_bloat``) passes ``read_only=False`` (the default) because
+    it must retitle + create.
+    """
+    try:
+        from hermes_cli import profiles as profiles_mod
+        from hermes_state import SessionDB
+        from pathlib import Path as _Path
+        canon = profiles_mod.normalize_profile_name(profile)
+        profiles_mod.validate_profile_name(canon)
+        if not profiles_mod.profile_exists(canon):
+            return None
+        db_path = _Path(profiles_mod.get_profile_dir(canon)) / "state.db"
+        if not db_path.exists():
+            return None
+        return SessionDB(db_path=db_path, read_only=read_only)
+    except Exception:
+        return None
+
+
+def _session_bloat_verdict(session_row, context_window: int,
+                           bloat_factor: float) -> tuple:
+    """Decide whether a session row is bloated, from the real signals.
+
+    Returns ``(bloated, reason)``. Two independent triggers (OR):
+
+      1. HARD rotate — the session's context compression is actively failing.
+         The sessions table records ``compression_failure_error`` (a string),
+         ``compression_fallback_streak`` and ``compression_ineffective_count``
+         (ints) when Hermes' compressor throws, falls back repeatedly, or runs
+         but fails to shrink the context. Any one of these set means the session
+         already crossed the point where compaction can recover it — continuing
+         it is exactly the 600s wedge the card measured. Rotate immediately.
+      2. PROACTIVE rotate — the session has accumulated enough cumulative
+         ``input_tokens`` (>= ``bloat_factor`` x ``context_window``) that it has
+         been through many successful compaction rounds and the NEXT one is
+         statistically the one most likely to finally fail. The card's proof:
+         the wedged session carried 14.2M cumulative tokens yet had ALL ZERO
+         compression-failure fields, so the failure signals alone could not
+         have caught it — only a cumulative high-water mark could. We rotate
+         while it still works, well before the wall.
+
+    A session row is never "bloated" merely because it is LARGE-and-healthy —
+    the triggers require either active compression failure or an enormous
+    cumulative history relative to the model's real context window. The return
+    ``reason`` feeds the rotation payload / project-detail surfacing.
+    """
+    def _int(row, key):
+        try:
+            return int(row.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    failure_error = (session_row.get("compression_failure_error") or "").strip()
+    fallback_streak = _int(session_row, "compression_fallback_streak")
+    ineffective_count = _int(session_row, "compression_ineffective_count")
+    if failure_error or fallback_streak >= 1 or ineffective_count >= 1:
+        return True, "context compression is failing"
+
+    input_tokens = _int(session_row, "input_tokens")
+    ceiling = context_window * bloat_factor
+    if input_tokens >= ceiling:
+        ratio = input_tokens / float(context_window) if context_window else 0.0
+        return True, (
+            f"session has accumulated {input_tokens:,} input tokens "
+            f"(~{ratio:.0f}x the {context_window:,}-token context window)"
+        )
+    return False, ""
+
+
+def _rotate_session(db, profile: str, session: str) -> dict:
+    """Retire the bloated session and create a fresh one titled ``session``.
+
+    Non-destructive and reversible, exactly mirroring the operator's manual
+    recovery: (1) retitle the existing ``<session>`` row to
+    ``<session>-retired-<timestamp>`` (kept on disk, all messages intact);
+    (2) create a fresh session via Hermes' own ``SessionDB.create_session`` and
+    title it ``<session>``, so ``--continue <session>`` — the transport the
+    chat job uses — resolves to the clean row. The CREATE MUST happen before
+    the job's ``--continue`` (the card's ordering note: ``--continue`` does not
+    create a session and the API returns ``orchestrator_unavailable`` if none
+    matches) — the caller guarantees this because rotation completes before the
+    job spawns its background invoke.
+
+    ``profile`` / ``session`` are the orchestrator identity (``<project>-orch`` /
+    ``<project>``). Returns a dict describing the rotation (old title, new
+    session id, reason) for surfacing to the operator. Raises on failure so the
+    caller can fail-safely skip; every error here leaves the ORIGINAL session
+    in place (the retitle is the only mutation and it happens first, so a crash
+    after retitle-but-before-create leaves NO session titled ``<project>`` — an
+    ``orchestrator_unavailable`` the operator can recover from exactly as the
+    card's manual flow does).
+    """
+    import time as _time
+    import uuid as _uuid
+
+    old_id = db.resolve_session_by_title(session)
+    retired_title = f"{session}-retired-{_time.strftime('%Y%m%d-%H%M%S')}"
+    if old_id and db.get_session_title(old_id) == session:
+        db.set_session_title(old_id, retired_title)
+
+    new_id = f"{_time.strftime('%Y%m%d')}_rot_{_uuid.uuid4().hex[:6]}"
+    db.create_session(
+        new_id,
+        source="cli",
+        model="orchestrator-model",
+        profile_name=profile,
+    )
+    db.set_session_title(new_id, session)
+    return {
+        "retired_session": old_id,
+        "retired_title": retired_title if old_id else None,
+        "session": new_id,          # now the live session titled ``session``
+        "created_at": new_id,
+    }
+
+
+def _guard_session_bloat(ctx, profile: str, session: str):
+    """Check the named chat session for bloat and rotate it if needed.
+
+    Runs at chat POST time, BEFORE the job continues ``<session>``. Reads the
+    REAL signals on the session row and, when bloated, retires + recreates it
+    so the chat never wedges on a context it can no longer compact.
+
+    Returns a dict describing the rotation (or ``None`` when the session is
+    healthy / the guard couldn't run). FAIL-SAFE: any error reading or writing
+    the profile's state.db results in NO rotation (the chat proceeds on the
+    existing session exactly as before this guard existed) — a guard that can't
+    verify must not invent health, but it must also never break a working chat
+    or corrupt a profile.
+    """
+    enabled, context_window, bloat_factor = _session_guard_config(ctx)
+    if not enabled:
+        return None
+
+    db = _open_profile_session_db(profile)
+    if db is None:
+        # Cannot inspect the profile's sessions — do not guess, do not rotate.
+        return None
+    try:
+        try:
+            session_row = db.get_session_by_title(session)
+        except Exception:
+            session_row = None
+        if not session_row:
+            return None   # no titled session to guard (chat will 503 honestly)
+        bloated, reason = _session_bloat_verdict(
+            session_row, context_window, bloat_factor)
+        if not bloated:
+            return None
+        return _do_rotation(db, profile, session, reason)
+    finally:
+        db.close()
+
+
+def _do_rotation(db, profile: str, session: str, reason: str):
+    """Retire + recreate a bloated session, FAIL-SAFE to no-rotation on error.
+
+    Wraps the actual mutation so ANY failure (e.g. ``database is locked`` while
+    a kanban worker is mid-turn on the profile, or an unexpected SessionDB
+    error) fails SAFE: log it, return ``None``, and leave the chat to proceed on
+    the existing session exactly as before this guard existed — never corrupt a
+    profile, never wedge the POST on a retry. ``reason`` is the bloat verdict
+    (see :func:`_session_bloat_verdict`) carried on the returned rotation dict.
+    """
+    try:
+        rotation = _rotate_session(db, profile, session)
+    except Exception as exc:  # noqa: BLE001 — must never break the chat
+        logging.getLogger("hscc-api").error(
+            "session-bloat rotation failed for %s/%s (guard disabled for this "
+            "run; chat proceeds on existing session): %r",
+            profile, session, exc,
+        )
+        return None
+    rotation["reason"] = reason
+    rotation["profile"] = profile
+    rotation["title"] = session
+    return rotation
+
+
+def _session_health(ctx, profile: str, session: str):
+    """Read-only session-health report (NO rotation) — for operator visibility.
+
+    Surfaces the same real signals ``_guard_session_bloat`` inspects, plus the
+    bloat verdict, WITHOUT mutating anything, so the operator can see a
+    project's chat session health before it breaks (the card's surfacing
+    requirement). Returns ``None`` when the profile/session is unresolvable or
+    the guard is disabled — an honest "cannot report" that implies nothing.
+
+    Payload keys: ``profile``, ``session`` (title), ``messages``,
+    ``input_tokens``, ``compression_failure_error``, ``compression_fallback_streak``,
+    ``compression_ineffective_count``, ``context_window``, ``bloat_factor``,
+    ``bloated``, ``reason``.
+    """
+    enabled, context_window, bloat_factor = _session_guard_config(ctx)
+    if not enabled:
+        return None
+    db = _open_profile_session_db(profile, read_only=True)
+    if db is None:
+        return None
+    try:
+        try:
+            session_row = db.get_session_by_title(session)
+        except Exception:
+            session_row = None
+        if not session_row:
+            return None
+        bloated, reason = _session_bloat_verdict(
+            session_row, context_window, bloat_factor)
+        return {
+            "profile": profile,
+            "session": session,
+            "messages": int(session_row.get("message_count") or 0),
+            "input_tokens": int(session_row.get("input_tokens") or 0),
+            "compression_failure_error":
+                (session_row.get("compression_failure_error") or "").strip() or None,
+            "compression_fallback_streak":
+                int(session_row.get("compression_fallback_streak") or 0),
+            "compression_ineffective_count":
+                int(session_row.get("compression_ineffective_count") or 0),
+            "context_window": context_window,
+            "bloat_factor": bloat_factor,
+            "bloated": bloated,
+            "reason": reason,
+        }
+    finally:
+        db.close()
+
+
 def _is_notice_line(line: str) -> bool:
     """True when a stdout line is a Hermes preamble notice, not part of the reply.
 
@@ -508,9 +854,16 @@ def _job_dict(job: _ChatJob) -> dict:
     ``time.time() - submitted_at``.
 
     A ``notice`` set at submission (Bug 1, t_5ed5dfa8 — the orchestrator was
-    busy with running kanban tasks) rides along on EVERY state so the operator
-    sees the honest "queued behind batch work" context even after the job
-    finishes — it never disappears mid-poll.
+    busy with running kanban tasks) is emitted ONLY while the job is still
+    LIVE (``queued``/``running``). It is DROPPED the instant the job reaches a
+    terminal state (``done`` / ``timeout`` / ``unavailable`` / ``error``): the
+    card (t_a8e9b7ff) proved the old "rides on every state forever" behavior
+    LIED — a job that finished in 1.777s still carried "busy right now ... may
+    take a while; poll this job for the answer." A notice that cries wolf is
+    worse than none, so on a terminal job the outcome is fully described by
+    ``status`` / ``reply`` / ``error`` and the stale busy/poll text is
+    suppressed. The notice never tells you to poll a job that is already
+    finished.
     """
     with job.lock:
         base = {
@@ -518,7 +871,11 @@ def _job_dict(job: _ChatJob) -> dict:
             "project": job.project,
             "status": job.status,
         }
-        if job.notice is not None:
+        # Busy notice only on a LIVE (non-terminal) job. A terminal job's
+        # outcome is already fully described by status/reply/error; surfacing
+        # "busy ... poll this job" there is the lying notice t_a8e9b7ff bans
+        # (a job that already finished must never tell the operator to poll).
+        if job.notice is not None and job.finished_at is None:
             base["notice"] = job.notice
         if job.finished_at is not None:
             # Terminal: elapsed frozen at the termination moment, so status,
@@ -669,13 +1026,27 @@ def handle_orchestrator_chat(server, ctx, query, body):
     profile = resolved["profile"]
     session = resolved["session"]
 
+    # Session-bloat guard (t_a8e9b7ff Bug 1): before the job continues the
+    # named ``<session>``, check the session row for real bloat signals and, if
+    # bloated, ROTATE it (retire the old row to ``<session>-retired-<ts>`` —
+    # non-destructive — and create a fresh ``<session>``) so this chat never
+    # wedges on a context compaction can no longer recover. Rotation completes
+    # HERE, synchronously, BEFORE the background job runs ``hermes chat
+    # --continue <session>``, satisfying the card's ordering requirement
+    # (``--continue`` does not create a session; the fresh one must already
+    # exist). The resolved ``session`` name is unchanged — the fresh row now
+    # owns the ``<project>`` title — so per-project continuity (``<project>-orch``
+    # profile / ``<project>`` session / ``<project>`` board) is fully preserved.
+    rotation = _guard_session_bloat(ctx, profile, session)
+
     # Bug 1 honest-reporting (t_5ed5dfa8): detect when the resolved orchestrator
     # profile is busy with running kanban work and say so up front, instead of a
     # silent 600s timeout. A chat on a busy profile queues behind its batch
     # workers (shared named session + journal_mode=delete state.db contention →
     # possible agent-layer compaction wedge) so the operator should understand
-    # WHY it may be slow. The notice is surfaced at submit AND rides on the job
-    # (see _job_dict) so a later poll still explains it. Fail-safe: a busy
+    # WHY it may be slow. The notice is surfaced at submit and on live polls
+    # (see _job_dict); once the job is TERMINAL it is dropped (t_a8e9b7ff) —
+    # a finished job never carries stale "busy / poll" text. Fail-safe: a busy
     # profile is reported busy; an unverifiable one is treated as busy.
     busy_count = _backing_busy_tasks(profile)
     busy_notice = _busy_notice(profile, busy_count) if busy_count > 0 else None
@@ -701,6 +1072,17 @@ def handle_orchestrator_chat(server, ctx, query, body):
     }
     if busy_notice is not None:
         payload["notice"] = busy_notice
+    if rotation is not None:
+        # Surface the rotation so the operator sees the session was retired +
+        # recreated (the chat continues on the fresh session, same name).
+        payload["session_rotation"] = {
+            "profile": rotation["profile"],
+            "title": rotation["title"],
+            "retired_session": rotation["retired_session"],
+            "retired_title": rotation["retired_title"],
+            "session": rotation["session"],
+            "reason": rotation["reason"],
+        }
     return 202, payload
 
 
