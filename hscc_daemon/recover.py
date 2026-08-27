@@ -215,6 +215,8 @@ def recover_engine_wedge(stream_state=None, resolve_container=None,
     Returns ``{"result": ...}`` where result is one of:
       ``skipped`` (intentional autodown / lock busy),
       ``none-wedged`` (no unit crossed the N-consecutive threshold),
+      ``suppressed`` (candidates existed but every one was held back by a
+        guard — cooldown / gave_up / unresolvable container),
       ``recovered`` (one or more units restarted), or
       ``gave-up`` (attempt cap reached — stopped acting).
     """
@@ -301,15 +303,14 @@ def recover_engine_wedge(stream_state=None, resolve_container=None,
             "flight) — skipping this pass")
         return {"result": "skipped", "reason": "lock held", "actions": []}
     try:
-        return _recover_locked(candidates, stream=stream,
-                               resolve_container=resolve_container,
+        return _recover_locked(candidates, resolve_container=resolve_container,
                                status_fn=status_fn, stop_fn=stop_fn,
                                up_fn=up_fn, now=now, state_file=state_file)
     finally:
         lock_release()
 
 
-def _recover_locked(candidates, stream=None, resolve_container=None,
+def _recover_locked(candidates, resolve_container=None,
                     status_fn=None, stop_fn=None, up_fn=None, now=None,
                     state_file=None):
     """The recovery sequence, run while holding the autodown O_EXCL lock.
@@ -323,7 +324,6 @@ def _recover_locked(candidates, stream=None, resolve_container=None,
     never stopped (only each wedged unit's own container is stopped, then one
     fleet ``hscc cluster up`` relaunches the wedged/missing units).
     """
-    stream = stream or {}
     now = now if now is not None else time.time()
     state = _load_recover_state(state_file)
 
