@@ -460,3 +460,62 @@ def test_project_orch_preserves_operator_threshold_tokens(tmp_path, monkeypatch)
         yaml.safe_dump(cur, f, sort_keys=False)
     cfg2 = _gen_config(tmp_path, monkeypatch, spec)
     assert cfg2["compression"]["threshold_tokens"] == 40000
+
+
+# -- cluster-wide `orchestrator` regression (t_1d7c9c34) --
+#
+# The v1.14.2 fix (t_f2c2dbb5) covered worker roles and <project>-orch profiles
+# but MISSED the cluster-wide `orchestrator`. Because `_is_orchestrator(name)`
+# is True but `_is_project_orchestrator(name)` is False, its branch set NO
+# compression block, so a regeneration rewrote config.yaml WITHOUT one — then
+# enable_plugins._ensure_compaction re-created a threshold-only block and
+# threshold_tokens came back NULL (2026-08-28 incident). A test that only
+# asserted on the worker/project-orch or only on `threshold` would have passed
+# through BOTH incidents. These tests pin the orchestrator SPECIFICALLY. They
+# run against an isolated fake profile root (tmp_path + monkeypatched
+# HERMES_HOME / PROFILES_DIR) — never ~/.hermes/profiles.
+
+
+def test_cluster_orchestrator_gets_threshold_tokens(tmp_path, monkeypatch):
+    """The cluster-wide `orchestrator` is generated WITH threshold_tokens —
+    the one profile the t_f2c2dbb5 fix missed."""
+    spec = {"name": "orchestrator", "identity": "You orchestrate.\n",
+            "preload_skills": [], "model_tier": "strong"}
+    cfg = _gen_config(tmp_path, monkeypatch, spec)
+    # Keeps its strong gateway-node model block.
+    assert cfg["model"]["base_url"]
+    comp = cfg["compression"]
+    assert comp["threshold"] == generator.COMPACT_THRESHOLD
+    assert comp["threshold_tokens"] == \
+        generator.SESSION_COMPACTION_THRESHOLD_TOKENS == 100000
+
+
+def test_cluster_orchestrator_regen_keeps_threshold_tokens(tmp_path, monkeypatch):
+    """THE regression for THIS incident: regenerating an `orchestrator` profile
+    that already has threshold_tokens: 100000 must NOT null it. Before the fix
+    the orchestrator branch emitted no compression block, so the value was
+    dropped on every bootstrap."""
+    spec = {"name": "orchestrator", "identity": "You orchestrate.\n",
+            "preload_skills": [], "model_tier": "strong"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    # Regenerate — must NOT null the token cap.
+    cfg2 = _gen_config(tmp_path, monkeypatch, spec)
+    assert cfg2["compression"]["threshold_tokens"] == 100000
+    assert cfg2["compression"]["threshold_tokens"] == \
+        generator.SESSION_COMPACTION_THRESHOLD_TOKENS
+
+
+def test_cluster_orchestrator_preserves_lower_operator_threshold_tokens(tmp_path, monkeypatch):
+    """A LOWER operator threshold_tokens on the cluster-wide orchestrator
+    survives a regeneration — never raise a deliberate stricter cap."""
+    spec = {"name": "orchestrator", "identity": "You orchestrate.\n",
+            "preload_skills": [], "model_tier": "strong"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    pdir = os.path.join(str(tmp_path / "profiles" / "orchestrator"))
+    with open(os.path.join(pdir, "config.yaml")) as f:
+        cur = yaml.safe_load(f)
+    cur["compression"]["threshold_tokens"] = 50000
+    with open(os.path.join(pdir, "config.yaml"), "w") as f:
+        yaml.safe_dump(cur, f, sort_keys=False)
+    cfg2 = _gen_config(tmp_path, monkeypatch, spec)
+    assert cfg2["compression"]["threshold_tokens"] == 50000
