@@ -328,45 +328,70 @@ def _read(stream):
 class _StreamingHandler(http.server.BaseHTTPRequestHandler):
     """Configurable fake vLLM /v1/chat/completions endpoint.
 
-    ``mode`` (class attr): 'healthy' streams real tokens then [DONE];
-    'wedged' returns HTTP 200 with Content-Type text/event-stream but never
-    emits a token (the wedge signature); 'slow' stalls then finally streams.
+    ``mode`` lives PER-SERVER (each fixture creates its own fresh server and
+    handler instance), NOT as a shared class attribute — so a leaked handler
+    thread from one test can never observe another test's mode. Modes:
+      'healthy' streams real tokens then [DONE];
+      'wedged'  returns HTTP 200 with Content-Type text/event-stream but never
+                emits a token (the wedge signature);
+      'slow'    stalls then finally streams.
     """
 
-    mode = "healthy"
-
     def do_POST(self):
+        import socket as _socket
+        import time as _t
+
+        mode = self.server.mode  # per-server, fully isolated across tests
         body = {"id": "x", "object": "chat.completion.chunk", "choices": [
             {"index": 0, "delta": {"content": "ok"}, "finish_reason": None}]}
         chunk = ("data: %s\n\n" % json.dumps(body)).encode()
         done = b"data: [DONE]\n\n"
-        if self.mode == "wedged":
+        if mode == "wedged":
             # 200 but never any data line — answers the handshake, no tokens.
-            # Sleep well past the probe's outer timeout (1s) so the client's
-            # bounded timeout is what fires, then return normally. Deliberately
-            # NOT an infinite loop: a spinning handler thread would keep the
-            # test process alive past teardown.
+            # Never spins forever: wait until the client times out (probe
+            # abandons + closes) or the fixture signals teardown, then return.
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
-            try:
-                import time as _t
-                _t.sleep(30)
-            except Exception:
-                pass
+            self._settle_until_client_gone(_socket)
             return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
         try:
-            if self.mode == "slow":
-                import time as _t
+            if mode == "slow":
                 _t.sleep(3)  # slow-but-eventually-successful: beyond 1s but
                              # within the probe's 10s outer bound
             self.wfile.write(chunk)
             self.wfile.flush()
             self.wfile.write(done)
             self.wfile.flush()
+            # ROOT CAUSE of the flake: if we return here, http.server tears the
+            # connection down with a close that, under the concurrent client
+            # reader thread, can send a RST that races (and loses to) the just-
+            # emitted body bytes. The client reader then raises
+            # ConnectionResetError before consuming "ok", yielding empty text
+            # -> false "wedged" on a healthy/slow unit. Hold the connection
+            # open until the client closes (clean FIN) or the fixture signals
+            # teardown, so our close can never RST in-flight body bytes.
+            self._settle_until_client_gone(_socket)
+        except Exception:
+            pass
+
+    def _settle_until_client_gone(self, _socket):
+        """Keep the (already-served) connection open until the client closes
+        its side OR the fixture signals teardown, then let http.server close
+        it cleanly. Uses a blocking 5s socket timeout — NOT a tight 0.5s retry
+        loop: the blocking recv is what reliably lets the client consume the
+        in-flight body before our close fires."""
+        try:
+            self.connection.settimeout(5)
+            while not self.server.stop_event.is_set():
+                data = self.connection.recv(1024)
+                if not data:
+                    return  # clean FIN from the client
+        except _socket.timeout:
+            pass  # bounded: never hold beyond ~5s with the client gone
         except Exception:
             pass
 
@@ -381,33 +406,43 @@ class TestProbeEndToEnd:
 
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0),
                                                  _StreamingHandler)
-        # Handler threads must not keep the test process alive past teardown
-        # (e.g. the wedged-mode handler sleeping out its stall).
+        # Handler threads must not keep the test process alive past teardown.
         server.daemon_threads = True
+        # Per-server state (fresh per test -> no cross-test leakage). mode is
+        # the fake unit's behaviour; stop_event lets teardown release any
+        # handler still held open (e.g. one blocked waiting for a client that
+        # already abandoned the probe).
+        server.mode = "healthy"
+        server.stop_event = _t.Event()
         t = _t.Thread(target=server.serve_forever, daemon=True)
         t.start()
         try:
-            yield server.server_address[1]  # port
+            yield server
         finally:
+            server.stop_event.set()  # release held-open/leaked handlers
             server.shutdown()
+            server.server_close()
 
     def test_healthy_stream_returns_text(self, live_server):
-        _StreamingHandler.mode = "healthy"
-        r = health._probe_unit_generation("127.0.0.1", live_server, timeout=10)
+        live_server.mode = "healthy"
+        r = health._probe_unit_generation(
+            "127.0.0.1", live_server.server_address[1], timeout=10)
         assert r["ok"] is True
         assert r["text"] == "ok"
         assert r["status"] == 200
 
     def test_wedged_200_no_text_detected(self, live_server):
-        _StreamingHandler.mode = "wedged"
-        r = health._probe_unit_generation("127.0.0.1", live_server, timeout=1)
+        live_server.mode = "wedged"
+        r = health._probe_unit_generation(
+            "127.0.0.1", live_server.server_address[1], timeout=1)
         assert r["ok"] is False
         assert r["status"] == 200
         assert r["error"] == "wedged"
 
     def test_slow_but_eventually_successful_ok(self, live_server):
-        _StreamingHandler.mode = "slow"
-        r = health._probe_unit_generation("127.0.0.1", live_server, timeout=10)
+        live_server.mode = "slow"
+        r = health._probe_unit_generation(
+            "127.0.0.1", live_server.server_address[1], timeout=10)
         assert r["ok"] is True
         assert r["text"] == "ok"
 
