@@ -16,6 +16,10 @@ enum KeychainStore {
     /// resolved at build time from the entitlements file).
     private static let accessGroup = KeychainConstants.keychainAccessGroup
 
+    /// Last non-success OSStatus from a write, for diagnosing a failed save.
+    /// nil once a write succeeds.
+    private(set) static var lastError: OSStatus?
+
     /// Read the stored token, or nil when none is saved.
     static func readToken() -> String? {
         var query: [String: Any] = [
@@ -63,9 +67,14 @@ enum KeychainStore {
             if status == errSecItemNotFound {
                 var addQuery = query
                 addQuery[kSecValueData as String] = data
-                SecItemAdd(addQuery as CFDictionary, nil)
+                let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+                lastError = (addStatus == errSecSuccess) ? nil : addStatus
             }
-            // Ignore the update status: either the item updated or we added it.
+            // Surface a real failure instead of swallowing it. A silent
+            // Keychain write is what made a filled-in form still report
+            // "Set a host, port, and token first".
+            if status == errSecSuccess { lastError = nil }
+            else if status != errSecItemNotFound { lastError = status }
         } else {
             deleteToken()
         }

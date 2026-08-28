@@ -150,9 +150,21 @@ struct APIConfig {
 /// Constants for Keychain access sharing, kept here so both the app's
 /// `KeychainStore` and the extensions' `KeychainShared` agree on the group.
 enum KeychainConstants {
-    /// The access group the token lives in — `$(AppIdentifierPrefix)` is the
-    /// team prefix injected by Xcode at build time from the entitlements file.
-    static let keychainAccessGroup = "$(AppIdentifierPrefix)group.com.hscc.ios"
+    /// EMPTY ON PURPOSE — do not put `$(AppIdentifierPrefix)...` here.
+    ///
+    /// `$(AppIdentifierPrefix)` is a BUILD SETTING placeholder. Xcode expands it
+    /// in .entitlements and Info.plist files, but NEVER inside Swift source: the
+    /// string stays literal at runtime, no such access group exists, and every
+    /// SecItemAdd/SecItemUpdate fails with errSecMissingEntitlement (-34018).
+    /// The token then reads back as nil and the app reports "Set a host, port,
+    /// and token first" even though the fields are filled.
+    ///
+    /// When the access group is empty, `KeychainStore` omits
+    /// `kSecAttrAccessGroup` and iOS uses the FIRST group in the
+    /// `keychain-access-groups` entitlement — which is exactly
+    /// `<team prefix>group.com.hscc.ios`, already shared by the app and both
+    /// extensions. Same sharing, correctly resolved, no hardcoded prefix.
+    static let keychainAccessGroup = ""
 }
 
 // ---------------------------------------------------------------------------
