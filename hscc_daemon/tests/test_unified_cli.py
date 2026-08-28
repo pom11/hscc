@@ -1101,9 +1101,11 @@ class TestApiStatusNeverPrintsToken:
     server module + a stubbed PID file; no real server is bound.
     """
 
-    def _run_status(self, monkeypatch, tmp_path, pid_value, token_value):
+    def _run_status(self, monkeypatch, tmp_path, pid_value, token_value,
+                    argv=None, token_raises=False):
         import hscc_daemon.api_cli as api_cli_mod
 
+        argv = argv or []
         # Stub the api server module so we never load the real one (which would
         # pull in routes_cluster/routes_project). resolve_config returns the
         # resolved loopback bind; pid-file existence comes from a monkeypatched
@@ -1111,6 +1113,11 @@ class TestApiStatusNeverPrintsToken:
         class _FakeApi:
             def resolve_config(self, **kw):
                 return {"host": "127.0.0.1", "port": 8787}
+
+            def load_token(self):
+                if token_raises:
+                    raise RuntimeError("token file is unreadable")
+                return token_value
 
         monkeypatch.setattr(api_cli_mod, "_load_api_server", lambda: _FakeApi())
         pid_file = str(tmp_path / "api.pid")
@@ -1125,7 +1132,7 @@ class TestApiStatusNeverPrintsToken:
         rc = None
         try:
             with redirect_stdout(out), redirect_stderr(err):
-                rc = api_cli_mod._handle_status([])
+                rc = api_cli_mod._handle_status(argv)
         except SystemExit as exc:
             rc = exc.code
         return out.getvalue(), err.getvalue(), rc
@@ -1148,6 +1155,145 @@ class TestApiStatusNeverPrintsToken:
         assert "127.0.0.1:8787" in out
         assert "TOPSECRETABC" not in out
         assert "TOPSECRETABC" not in err
+
+    # --- QR output ------------------------------------------------------
+
+    def test_status_prints_qr_with_real_token(self, monkeypatch, tmp_path):
+        """`status` with a valid token prints the connection QR carrying the
+        real token (byte-for-byte the iOS contract); the token value never
+        appears as literal text in the output — only encoded in the matrix."""
+        out, err, rc = self._run_status(
+            monkeypatch, tmp_path, None, "REALTOKENZZZ"
+        )
+        assert rc == 0
+        assert "Scan to connect" in out
+        assert "grants API access" in out
+        # A QR was rendered (unicode half-blocks / full blocks present).
+        assert "\u2588" in out or "\u2584" in out or "\u2580" in out
+        # The real credential appears ENCODED in the matrix, never as text.
+        assert "REALTOKENZZZ" not in out
+        assert "REALTOKENZZZ" not in err
+
+    def test_qr_payload_matches_ios_contract(self):
+        """The payload is exactly the byte-for-byte contract the iOS scanner
+        depends on: real token, NO space after any colon, no trailing newline,
+        fixed key order (v, host, port, token)."""
+        import hscc_daemon.api_cli as api_cli_mod
+        payload = api_cli_mod._build_qr_payload("100.64.0.3", 8787, "TOK123")
+        # Exact iOS contract — no spaces after the colons, and no trailing
+        # newline. The token value is the real credential, not a mask.
+        assert payload == (
+            '{"v":1,"host":"100.64.0.3","port":8787,"token":"TOK123"}'
+        )
+        assert not payload.endswith("\n")
+        # port must be an integer (not a quoted string), v is 1.
+        assert '"port":8787' in payload and '"v":1' in payload
+
+    def test_loopback_bind_still_prints_with_warning(self, monkeypatch, tmp_path):
+        """A loopback-only bind still prints the QR, plus a warning that a
+        phone cannot reach it. The fake resolve_config returns 127.0.0.1."""
+        out, err, rc = self._run_status(
+            monkeypatch, tmp_path, None, "T"
+        )
+        assert rc == 0
+        assert "Scan to connect" in out
+        assert "phone cannot reach" in out
+
+    def test_status_no_qr_suppresses_qr(self, monkeypatch, tmp_path):
+        out, err, rc = self._run_status(
+            monkeypatch, tmp_path, None, "T", argv=["--no-qr"]
+        )
+        assert rc == 0
+        assert "Scan to connect" not in out
+        assert "\u2588" not in out
+        assert "127.0.0.1:8787" in out
+
+    def test_status_no_token_says_so_cleanly(self, monkeypatch, tmp_path):
+        """If no token can be read, status says so and exits cleanly (rc 0) —
+        it must NOT crash and must NOT emit a useless QR."""
+        out, err, rc = self._run_status(
+            monkeypatch, tmp_path, None, "T", token_raises=True
+        )
+        assert rc == 0
+        assert "could not read auth token" in out
+        assert "Scan to connect" not in out
+        assert "127.0.0.1:8787" in out
+
+
+class TestApiStartQr:
+    """`hscc api start --no-qr` suppresses the QR; with a token it prints it."""
+
+    def _run_start(self, monkeypatch, tmp_path, argv):
+        import hscc_daemon.api_cli as api_cli_mod
+
+        monkeypatch.setattr(api_cli_mod, "_load_api_server",
+                            _make_fake_api())
+        pid_file = str(tmp_path / "api.pid")
+        log_file = str(tmp_path / "api.log")
+        monkeypatch.setattr(api_cli_mod, "API_PID_FILE", pid_file)
+        monkeypatch.setattr(api_cli_mod, "API_LOG_FILE", log_file)
+        daemon_ops = _import_daemon_ops()
+        # Emulate the parent branch of the double-fork so we never create a
+        # real child or bind a real port: fork() and save_pid are stubbed.
+        monkeypatch.setattr(api_cli_mod.os, "fork", lambda: 12345)
+        monkeypatch.setattr(daemon_ops, "save_pid",
+                            lambda pid_file: None)
+
+        out = io.StringIO()
+        rc = None
+        with redirect_stdout(out):
+            rc = api_cli_mod._handle_start(argv)
+        return out.getvalue(), rc
+
+    def test_start_prints_qr_with_real_token(self, monkeypatch, tmp_path):
+        out, rc = self._run_start(monkeypatch, tmp_path, ["--port", "8788"])
+        assert rc == 0
+        assert "Scan to connect" in out
+        # A QR was rendered and it never leaks the token value as text.
+        assert "\u2588" in out or "\u2584" in out or "\u2580" in out
+        assert "SECRETTOKEN" not in out
+
+    def test_start_no_qr_suppresses_qr(self, monkeypatch, tmp_path):
+        out, rc = self._run_start(monkeypatch, tmp_path, ["--no-qr"])
+        assert rc == 0
+        assert "Scan to connect" not in out
+        assert "\u2588" not in out
+
+    def test_no_token_written_to_any_file(self, monkeypatch, tmp_path):
+        """The token never lands in any file this command writes. Run start
+        (which writes api.log / api.pid via daemon_ops), then scan every file
+        in the tmp dir EXCEPT the api-token fixture itself — the QR payload
+        and the log/pid files must be free of the literal credential."""
+        out, rc = self._run_start(monkeypatch, tmp_path, ["--port", "8788"])
+        assert rc == 0
+        infected = []
+        for p in sorted(tmp_path.iterdir()):
+            if p.name == "api-token":
+                continue  # this is OUR input fixture, not output
+            if p.is_file():
+                content = p.read_text(errors="replace")
+                if "SECRETTOKEN" in content:
+                    infected.append(str(p))
+        assert infected == [], f"token leaked into files: {infected}"
+
+
+def _make_fake_api():
+    """A fake api_server module used by the start-with-QR tests."""
+
+    class _FakeApi:
+        def resolve_config(self, **kw):
+            return {"host": "127.0.0.1", "port": 8787}
+
+        def load_token(self):
+            return "SECRETTOKEN"
+
+    return lambda: _FakeApi()
+
+
+def _import_daemon_ops():
+    """Return the module object for hscc_daemon.daemon_ops."""
+    from hscc_daemon import daemon_ops
+    return daemon_ops
 
 
 if __name__ == "__main__":
