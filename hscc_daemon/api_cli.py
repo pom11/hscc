@@ -38,7 +38,9 @@ Usage: hscc api <subcommand> [args]
 
 Bind defaults to loopback (127.0.0.1). '--tailscale' or '--bind <ip>' opt in
 to exposing it on the tailnet / a specific IP. 0.0.0.0 is always refused.
-The auth token lives at ~/.hscc/api-token (never printed).
+The auth token lives at ~/.hscc/api-token and is ENCODED into the QR, so the
+QR must be treated like a password — do not show it on a stream or
+screen-share.
 '--no-qr' suppresses the scannable connection QR shown by start/status."""
 
 
@@ -74,26 +76,39 @@ def _has_flag(argv, name):
     return name in argv
 
 
-def _build_qr_payload(host, port) -> str:
-    """Connection-settings JSON for the QR, single line, no trailing newline.
+def _is_loopback(host) -> bool:
+    """True if ``host`` is a loopback address a phone cannot reach."""
+    if not host:
+        return True
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return True
+    return host.startswith("127.") or host == "[::1]"
 
-    The token is intentionally masked as ``***`` — the QR identifies the
-    endpoint a client should reach, not a bearer credential. (The real token
-    is never placed in the matrix; callers load it separately for actual auth.)
+
+def _build_qr_payload(host, port, token) -> str:
+    """Connection-settings JSON for the QR.
+
+    Single line, NO trailing newline, and key order fixed (v, host, port,
+    token) — the iOS scanner depends on this byte-for-byte. No spaces after
+    the colons. ``token`` is the real live credential read from the token
+    file; the caller prints it ONLY to stdout and never to a log/error.
     """
-    return '{"v":1,"host":"%s","port":%d,"token": "***"}' % (host, port)
+    return '{"v":1,"host":"%s","port":%d,"token":"%s"}' % (host, port, token)
 
 
-def _print_api_qr(host, port, *, force_ascii=False):
+def _print_api_qr(host, port, token, *, force_ascii=False):
     """Print the scannable connection-settings QR with a security warning.
 
     The warning is printed unconditionally (it accompanies the QR itself, not
-    the flag state): whoever scans this QR is handed the host/port of the API
-    endpoint. `--no-qr` suppresses this entire block at the call site.
+    the flag state): whoever scans this QR is handed a live credential. When
+    the bind is loopback-only we additionally warn that a phone cannot reach
+    it. `--no-qr` suppresses this entire block at the call site.
     """
-    payload = _build_qr_payload(host, port)
+    payload = _build_qr_payload(host, port, token)
     matrix = qr_code.make_qr(payload.encode("utf-8"))
     print("  Scan to connect: grants API access to this host.")
+    if _is_loopback(host):
+        print("  Warning: bound to loopback — a phone cannot reach this host.")
     print(qr_code.render_text(matrix, force_ascii=force_ascii))
     print()
 
@@ -202,7 +217,7 @@ def _handle_start(argv):
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     try:
-        api.load_token()
+        token_server = api.load_token()
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -211,9 +226,10 @@ def _handle_start(argv):
 
     # Print the scannable connection QR unless the user suppressed it. We do
     # this only after config+token are known to be valid, so the user gets a
-    # useful, scrape-free QR of the endpoint they are about to start.
+    # useful QR of the endpoint they are about to start. The token in the QR
+    # is the real live credential printed only to stdout, never logged.
     if not no_qr:
-        _print_api_qr(config["host"], config["port"])
+        _print_api_qr(config["host"], config["port"], token_server)
 
     daemon_ops.log(
         "HSCC API starting", log_file=API_LOG_FILE, pid_file=API_PID_FILE,
@@ -315,15 +331,16 @@ def _handle_status(argv):
     if host is not None:
         print(f"Listening:     {host}:{port}")
 
-    # The QR is only useful when there is an endpoint AND a token to present.
-    # If the token is missing/unreadable, say so and exit cleanly (no QR).
+    # The QR is only useful when there is an endpoint AND a valid token. If
+    # the token is missing/unreadable, say so and exit cleanly (no QR). The
+    # token is passed straight into the QR payload (stdout only, never logged).
     if not no_qr and host is not None:
         try:
-            api.load_token()
+            token = api.load_token()
         except RuntimeError as exc:
             print(f"No connection QR: could not read auth token ({exc})")
         else:
-            _print_api_qr(host, port)
+            _print_api_qr(host, port, token)
     return 0
 
 
