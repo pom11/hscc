@@ -201,7 +201,21 @@ struct SettingsView: View {
         guard let token = settings.token,
               let port = Int(settings.port),
               !settings.host.isEmpty else {
-            testResult = "Set a host, port, and token first."
+            // Name what is ACTUALLY missing. Saying "set a host, port and token"
+            // while all three fields are filled sends the operator looking in
+            // the wrong place — that happened when a Keychain write was failing
+            // silently and the token read back as nil.
+            var missing: [String] = []
+            if settings.host.isEmpty { missing.append("host") }
+            if Int(settings.port) == nil { missing.append("port") }
+            if settings.token == nil {
+                if let err = KeychainStore.lastError {
+                    missing.append("token (Keychain write failed, OSStatus \(err))")
+                } else {
+                    missing.append("token")
+                }
+            }
+            testResult = "Missing: \(missing.joined(separator: ", "))."
             testIsSuccess = false
             return
         }
