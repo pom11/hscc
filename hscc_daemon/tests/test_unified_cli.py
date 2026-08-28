@@ -1158,9 +1158,10 @@ class TestApiStatusNeverPrintsToken:
 
     # --- QR output ------------------------------------------------------
 
-    def test_status_prints_scannable_qr_with_masked_token(self, monkeypatch, tmp_path):
-        """`status` with a valid token prints the connection QR; the QR payload
-        carries the endpoint + a MASKED token (`***`), not the real credential."""
+    def test_status_prints_qr_with_real_token(self, monkeypatch, tmp_path):
+        """`status` with a valid token prints the connection QR carrying the
+        real token (byte-for-byte the iOS contract); the token value never
+        appears as literal text in the output — only encoded in the matrix."""
         out, err, rc = self._run_status(
             monkeypatch, tmp_path, None, "REALTOKENZZZ"
         )
@@ -1169,18 +1170,34 @@ class TestApiStatusNeverPrintsToken:
         assert "grants API access" in out
         # A QR was rendered (unicode half-blocks / full blocks present).
         assert "\u2588" in out or "\u2584" in out or "\u2580" in out
-        # The real credential never appears anywhere.
+        # The real credential appears ENCODED in the matrix, never as text.
         assert "REALTOKENZZZ" not in out
         assert "REALTOKENZZZ" not in err
 
-    def test_qr_payload_masks_token(self):
-        """The QR payload is exactly the connection JSON with `token` masked."""
+    def test_qr_payload_matches_ios_contract(self):
+        """The payload is exactly the byte-for-byte contract the iOS scanner
+        depends on: real token, NO space after any colon, no trailing newline,
+        fixed key order (v, host, port, token)."""
         import hscc_daemon.api_cli as api_cli_mod
-        payload = api_cli_mod._build_qr_payload("100.64.0.3", 8787)
+        payload = api_cli_mod._build_qr_payload("100.64.0.3", 8787, "TOK123")
+        # Exact iOS contract — no spaces after the colons, and no trailing
+        # newline. The token value is the real credential, not a mask.
         assert payload == (
-            '{"v":1,"host":"100.64.0.3","port":8787,"token": "***"}'
+            '{"v":1,"host":"100.64.0.3","port":8787,"token":"TOK123"}'
         )
         assert not payload.endswith("\n")
+        # port must be an integer (not a quoted string), v is 1.
+        assert '"port":8787' in payload and '"v":1' in payload
+
+    def test_loopback_bind_still_prints_with_warning(self, monkeypatch, tmp_path):
+        """A loopback-only bind still prints the QR, plus a warning that a
+        phone cannot reach it. The fake resolve_config returns 127.0.0.1."""
+        out, err, rc = self._run_status(
+            monkeypatch, tmp_path, None, "T"
+        )
+        assert rc == 0
+        assert "Scan to connect" in out
+        assert "phone cannot reach" in out
 
     def test_status_no_qr_suppresses_qr(self, monkeypatch, tmp_path):
         out, err, rc = self._run_status(
@@ -1228,11 +1245,11 @@ class TestApiStartQr:
             rc = api_cli_mod._handle_start(argv)
         return out.getvalue(), rc
 
-    def test_start_prints_qr_with_masked_token(self, monkeypatch, tmp_path):
+    def test_start_prints_qr_with_real_token(self, monkeypatch, tmp_path):
         out, rc = self._run_start(monkeypatch, tmp_path, ["--port", "8788"])
         assert rc == 0
         assert "Scan to connect" in out
-        # A QR was rendered and it never leaks the token value.
+        # A QR was rendered and it never leaks the token value as text.
         assert "\u2588" in out or "\u2584" in out or "\u2580" in out
         assert "SECRETTOKEN" not in out
 
@@ -1241,6 +1258,23 @@ class TestApiStartQr:
         assert rc == 0
         assert "Scan to connect" not in out
         assert "\u2588" not in out
+
+    def test_no_token_written_to_any_file(self, monkeypatch, tmp_path):
+        """The token never lands in any file this command writes. Run start
+        (which writes api.log / api.pid via daemon_ops), then scan every file
+        in the tmp dir EXCEPT the api-token fixture itself — the QR payload
+        and the log/pid files must be free of the literal credential."""
+        out, rc = self._run_start(monkeypatch, tmp_path, ["--port", "8788"])
+        assert rc == 0
+        infected = []
+        for p in sorted(tmp_path.iterdir()):
+            if p.name == "api-token":
+                continue  # this is OUR input fixture, not output
+            if p.is_file():
+                content = p.read_text(errors="replace")
+                if "SECRETTOKEN" in content:
+                    infected.append(str(p))
+        assert infected == [], f"token leaked into files: {infected}"
 
 
 def _make_fake_api():

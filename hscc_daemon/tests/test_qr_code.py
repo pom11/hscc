@@ -2,9 +2,12 @@
 
 Proves the encoder is correct three independent ways:
 
-  1. A PINNED matrix regression — the 33x33 matrix for a fixed connection
-     payload was cross-checked against zbar during development and is baked in
-     verbatim here, so any future encoder change that alters the output fails.
+  1. A PINNED matrix regression — the 41x41 matrix that the encoder produces
+     for the fixed connection payload below is baked in verbatim, so any
+     future encoder change that alters the output fails. Its correctness is
+     corroborated independently by the self-contained decoder (section 2),
+     which reconstructs the layout from the spec tables and reads the matrix
+     back to the exact payload.
   2. A SELF-CONTAINED DECODER — the test re-derives the QR layout from the
      spec tables (finder/timing/alignment/format positions) and reads the
      matrix back, asserting the payload is byte-identical for a range of
@@ -24,46 +27,58 @@ from hscc_daemon import qr_code
 # 1) Pinned matrix regression (zbar-verified during development)
 # ---------------------------------------------------------------------------
 
-# Payload: {"v":1,"host":"100.64.0.3","port":8787,"token": "***"}  (57 bytes)
-_PAYLOAD = '{"v":1,"host":"100.64.0.3","port":8787,"token": "***"}'
+# Payload: the exact connection JSON the CLI produces (real 43-char token,
+# no spaces after colons, no trailing newline) — 93 bytes.
+_PAYLOAD = (
+    '{"v":1,"host":"100.64.0.3","port":8787,'
+    '"token":"AAAAAAAAAAAAAAAAAAAAAAAAAAaaaaaaaaaaaaaaaaa"}'
+)
 
-# Encoder picked the smallest fit → version 4 (33x33). Matrix rows listed top
-# to bottom as '1'=dark / '0'=light. Verified decodeable to the exact payload
-# with zbar (pyzbar) during development.
+# Encoder picked the smallest fit → version 6 (41x41). Matrix rows listed top
+# to bottom as '1'=dark / '0'=light. Corroborated by the independent decoder
+# in section 2 (reads back to the exact payload).
 _PINNED = [
-    "111111101011001110101111101111111",
-    "100000100010000001111110101000001",
-    "101110100110110111001110001011101",
-    "101110101001101100100011001011101",
-    "101110101100101001001101001011101",
-    "100000101101100011011100001000001",
-    "111111101010101010101010101111111",
-    "000000001001101111010111100000000",
-    "100010111110100011100100111111001",
-    "110111011001010111001001110000100",
-    "100010101111100111100011011111100",
-    "011000011100101011111111100000001",
-    "010110111010011000111100111011011",
-    "011100010000010010101011010000010",
-    "100111100110100011000011100001100",
-    "111110010111101001010110001011011",
-    "011010101001110101100101001011010",
-    "000011011010011101101111010001110",
-    "010011101011100110100011100011100",
-    "111101010100001100011110001111000",
-    "000101111100000110001100101110001",
-    "110100001100111001101001000000000",
-    "000010110001111100100111101111010",
-    "000100011101001111010100100101001",
-    "110111101011010001101101111111001",
-    "000000001010010100001011100010100",
-    "111111101101110111000110101011110",
-    "100000100110010011100110100011001",
-    "101110101100111000111100111111011",
-    "101110100010110010001001001111100",
-    "101110100010110010000110101110100",
-    "100000100101011001110111110101000",
-    "111111101100100101110101111011001",
+    "11111110010010100111001001100010001111111",
+    "10000010101011010011110110111101101000001",
+    "10111010011100111110100011101000101011101",
+    "10111010011011000111010101111011101011101",
+    "10111010111101000110010111110111101011101",
+    "10000010001010101011101100010101001000001",
+    "11111110101010101010101010101010101111111",
+    "00000000001111011101010011000101000000000",
+    "10101010000111111110111111100101100010010",
+    "00111101110101000110011001000100110001111",
+    "10000110000011001010111010001100101111011",
+    "00011101000010100111010101000110000101000",
+    "00010111110011000000011011001110111100001",
+    "01100100011011010101011111010110111001010",
+    "10011010000000001010001110100010000000011",
+    "01100100011100100111011011111111011100000",
+    "10000010010110000100100110011000101101001",
+    "01111101000100011100100111011101101101011",
+    "00011110000001101010010000100010011001101",
+    "01000100110101001111000101110111010100010",
+    "10100011011100010010100010101100001000110",
+    "00010000011111111111110011100000011001001",
+    "00111110010110110110010001101100101111111",
+    "00010001010001010111010111011110000100000",
+    "01101011001001110110011001111101111010010",
+    "11111101011010100100001000100010010001011",
+    "10111011100000101010111011001010101110011",
+    "00011000011000110110110101111101100100000",
+    "11000110100001111001111001000111111101001",
+    "01101001011100100101110101001110111001010",
+    "10010110111011111011101000101010001100111",
+    "01011001100100011110111101100111000010000",
+    "10010010111111110101110010001000111110001",
+    "00000000101100011000110110011101100011011",
+    "11111110000110010100001001000010101011101",
+    "10000010011000011001011100010110100010011",
+    "10111010110101111000101010001110111110101",
+    "10111010011110110101111011000100010111000",
+    "10111010100000111000100000100110100011111",
+    "10000010011010101100010001101110110110010",
+    "11111110110100101110111101100100100110011",
 ]
 
 
@@ -76,7 +91,7 @@ class TestPinnedMatrix:
     def test_encoder_reproduces_reference_matrix(self):
         got = qr_code.make_qr(_PAYLOAD.encode("utf-8"))
         want = _matrix_from_pinned()
-        assert len(got) == len(want) == 33
+        assert len(got) == len(want) and all(len(r) == len(want) for r in want)
         assert got == want
 
 
@@ -292,9 +307,9 @@ class TestDecodeRoundTrip:
     of payload sizes that land on different versions."""
     CASES = [
         b"hi",                                            # version 1
-        b"a" * 30,                                        # version 2 (26+) → 3
-        _PAYLOAD.encode("utf-8"),                         # version 4 (pinned)
-        b"x" * 90,                                        # version 6
+        b"a" * 30,                                        # version 3
+        _PAYLOAD.encode("utf-8"),                         # version 6 (pinned)
+        b"x" * 90,                                        # version 6 too
         b"x" * 120,                                       # version 7 (smallest fit)
         b"x" * 125,                                       # version 8 (tests version info)
         ("y" * 20).encode() + "z".encode() * 100,
