@@ -7,6 +7,15 @@ def build_serving(cluster, *, orchestrator, recipe, model, port=8000, keepalive=
     """
     hosts = list(cluster.get("hosts") or [])
 
+    # Worker hosts = every listed host except the orchestrator's OWN address.
+    # Remove exactly ONE occurrence of the orchestrator: in the dual-subnet
+    # (CX7) case a genuine worker can share the exact same address string as
+    # the orchestrator on a different physical link, so we must not drop every
+    # copy of it — just the orchestrator's own entry.
+    others = list(hosts)
+    if orchestrator in others:
+        others.remove(orchestrator)
+
     def _ipslug(ip, idx):
         # Full IP with dots->dashes, so two hosts that share a last octet on
         # different subnets (e.g. CX7 dual-subnet) get DISTINCT ids. Falls back
@@ -22,7 +31,7 @@ def build_serving(cluster, *, orchestrator, recipe, model, port=8000, keepalive=
         "nodes": [orchestrator],
     }]
     seen = set()
-    for i, host in enumerate(h for h in hosts if h != orchestrator):
+    for i, host in enumerate(others):
         uid = f"worker-{_ipslug(host, i)}"
         # Guarantee uniqueness even if two hosts somehow slug-collide.
         if uid in seen:
