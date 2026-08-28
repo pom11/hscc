@@ -716,6 +716,56 @@ def _rotate_session(db, profile: str, session: str) -> dict:
     }
 
 
+def _ensure_session_exists(profile: str, session: str) -> dict | None:
+    """Ensure a session titled ``session`` exists on ``profile`` — CREATE on
+    first use (t_fc53b13d), idempotent, never clobbers an existing session.
+
+    A brand-new project has NO chat session yet, so ``hermes chat -Q --continue
+    <session>`` — the transport ``_backing_invoke`` uses — fails with
+    ``orchestrator_unavailable`` (\"create it first, then re-send\") and the
+    project can never be chatted with. This makes the chat path CREATE the
+    project's session on first use: we open the profile's state.db via Hermes'
+    own SessionDB (``_open_profile_session_db``) and, when no session is titled
+    ``<session>``, create one (``create_session`` + ``set_session_title``) — the
+    SAME machinery ``_rotate_session`` uses to hand a bloated chat a fresh row —
+    so the SUBSEQUENT ``--continue <session>`` in the job resolves to it.
+
+    Idempotent: if a session titled ``session`` already exists, we do nothing
+    and return ``None`` (never clobber an existing session / its history).
+    Returns a dict describing the creation (``created_session``, ``profile``,
+    ``title``) for operator surfacing, or ``None`` when the session already
+    existed OR could not be created (fail-safe — an ensure that can't verify
+    must not break the chat; the job then goes on to fail honestly with
+    ``orchestrator_unavailable`` exactly as before this fix).
+    """
+    db = _open_profile_session_db(profile)
+    if db is None:
+        # Cannot open the profile's state.db — do not guess. Return None so the
+        # chat proceeds; the downstream ``--continue`` fails honestly if the
+        # session truly doesn't exist yet.
+        return None
+    import time as _time
+    import uuid as _uuid
+    try:
+        if db.resolve_session_by_title(session):
+            return None   # already exists — never clobber
+        new_id = f"{_time.strftime('%Y%m%d')}_first_{_uuid.uuid4().hex[:6]}"
+        db.create_session(new_id, source="cli", model="orchestrator-model",
+                          profile_name=profile)
+        db.set_session_title(new_id, session)
+        return {
+            "created_session": new_id,
+            "profile": profile,
+            "title": session,
+        }
+    except Exception:
+        # Fail-safe: an ensure that errors must not break the chat or corrupt a
+        # profile. Downstream ``--continue`` will fail honestly if needed.
+        return None
+    finally:
+        db.close()
+
+
 def _guard_session_bloat(ctx, profile: str, session: str):
     """The session context-health guard, run at chat POST time.
 
@@ -1232,6 +1282,18 @@ def handle_orchestrator_chat(server, ctx, query, body):
     profile = resolved["profile"]
     session = resolved["session"]
 
+    # Create the project's chat session on first use (t_fc53b13d): a brand-new
+    # project has NO session yet, so without this the job's
+    # ``hermes chat -Q --continue <session>`` would fail with
+    # ``orchestrator_unavailable`` ("create it first, then re-send") and the
+    # project could never be chatted with. This CREATEs it (idempotently, via
+    # Hermes' own SessionDB — never clobbers an existing session's history)
+    # BEFORE the guard and the background job, so the subsequent
+    # ``--continue <session>`` resolves to the fresh row. Returns a ``created``
+    # dict only when it actually created the session; ``None`` when one already
+    # existed or the ensure couldn't run (fail-safe).
+    created = _ensure_session_exists(profile, session)
+
     # Session context-health guard (t_a8e9b7ff Bug 1): before the job continues
     # the named ``<session>``, (1) ENSURE the profile's native compaction fires
     # early (``compression.threshold_tokens = 100000`` — the PRIMARY mechanism,
@@ -1281,6 +1343,15 @@ def handle_orchestrator_chat(server, ctx, query, body):
     }
     if busy_notice is not None:
         payload["notice"] = busy_notice
+    if created is not None:
+        # Surface the create-on-first-use so the operator sees a brand-new
+        # project's chat session was created and the chat now continues on it
+        # (idempotently; proving the cold-start path works).
+        payload["session_created"] = {
+            "profile": created["profile"],
+            "title": created["title"],
+            "session": created["created_session"],
+        }
     if rotation is not None:
         # Surface the rotation so the operator sees the session was retired +
         # recreated (the chat continues on the fresh session, same name).
