@@ -345,6 +345,19 @@ def generate_profile(spec, base_identity):
         # project orche went null for ~84 min and wedged at the ratio floor).
         config["model"] = _strong_model_block()
         config["compression"] = _compression_block(existing_compression)
+    elif name == "orchestrator":
+        # Cluster-wide `orchestrator`: keeps the gateway-node strong model (root
+        # config) and is never repointed at the worker proxy. It must ALSO get
+        # the compaction compression block (threshold + threshold_tokens) merged
+        # over its existing block — it was the ONE profile the v1.14.2 fix
+        # (t_f2c2dbb5) missed, so a regeneration rewrote config.yaml without a
+        # compression block and then enable_plugins._ensure_compaction re-added
+        # a threshold-only block -> threshold_tokens came back null (2026-08-28
+        # incident) and the session reverted to the 196608 ratio floor. Emitting
+        # it here (through the SAME _compression_block) preserves an operator's
+        # threshold_tokens and never raises a lower value.
+        config["model"] = _strong_model_block()
+        config["compression"] = _compression_block(existing_compression)
     elif not _is_orchestrator(name):
         model_tier = spec.get("model_tier", "fast")
         model_endpoint = spec.get("model_endpoint")
