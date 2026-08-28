@@ -46,9 +46,14 @@ struct AppShortcuts: AppShortcutsProvider {
         )
         AppShortcut(
             intent: AskOrchestratorIntent(),
+            // ONE parameter per phrase — App Intents rejects two
+            // ("Multiple parameters detected in phrase"). The project is the
+            // phrase parameter because it selects WHICH orchestrator answers;
+            // Siri then asks for the question via the prompt parameter's
+            // requestValueDialog, so nothing is lost.
             phrases: [
-                "Ask \(.applicationName) \(\.$project) \(\.$prompt)",
-                "Ask \(.applicationName) \(\.$project) about \(\.$prompt)",
+                "Ask \(.applicationName) \(\.$project)",
+                "Ask \(.applicationName) about \(\.$project)",
             ],
             shortTitle: "Ask an orchestrator",
             systemImageName: "bubble.left.and.bubble.right"

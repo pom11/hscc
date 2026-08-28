@@ -186,7 +186,7 @@ struct AskOrchestratorIntent: AppIntent {
 
     /// The question to ask. Siri fills this from the spoken phrase (the
     /// personal-assistant analog of typing in the app's chat composer).
-    @Parameter(title: "Prompt")
+    @Parameter(title: "Prompt", requestValueDialog: "What should I ask?")
     var prompt: String
 
     /// Fixed poll cadence for the background job poll (2 s, same as the app's
