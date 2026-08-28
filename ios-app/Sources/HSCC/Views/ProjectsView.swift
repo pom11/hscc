@@ -74,7 +74,7 @@ struct ProjectsView: View {
             List {
                 Section {
                     Label(response.speak, systemImage: "text.bubble")
-                        .font(.subheadline)
+                        .font(.hsccMono(15))
                 }
                 if response.projects.isEmpty {
                     Section {
@@ -262,7 +262,7 @@ struct ProjectOverviewView: View {
             }
             Section {
                 Label(state.speak, systemImage: "text.bubble")
-                    .font(.subheadline)
+                    .font(.hsccMono(15))
             }
 
             Section("Project") {
