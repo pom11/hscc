@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from hscc_daemon import daemon_ops
+from hscc_daemon import qr_code
 
 # The API server is a SEPARATE background process from the monitoring daemon,
 # so it gets its own PID + log files (distinct from daemon.pid / daemon.log).
@@ -30,14 +31,15 @@ HSCC API server — HTTP API for external apps (e.g. the iOS client).
 
 Usage: hscc api <subcommand> [args]
 
-  hscc api start [--tailscale] [--bind <ip>] [--port <n>]   Start the API server in the background
-  hscc api stop                                            Stop the running API server
-  hscc api status                                          Show running/stopped + bound host:port
-  hscc api --help                                          This help
+  hscc api start [--tailscale] [--bind <ip>] [--port <n>] [--no-qr]   Start the API server in the background
+  hscc api stop                                                       Stop the running API server
+  hscc api status [--no-qr]                                           Show running/stopped + bound host:port
+  hscc api --help                                                     This help
 
 Bind defaults to loopback (127.0.0.1). '--tailscale' or '--bind <ip>' opt in
 to exposing it on the tailnet / a specific IP. 0.0.0.0 is always refused.
-The auth token lives at ~/.hscc/api-token (never printed)."""
+The auth token lives at ~/.hscc/api-token (never printed).
+'--no-qr' suppresses the scannable connection QR shown by start/status."""
 
 
 def _resolve_api_dir() -> Path:
@@ -67,20 +69,52 @@ def _load_api_server():
     return api_server
 
 
-def _parse_start_flags(argv):
-    """Parse ``start`` flags into (bind_override, port_override).
+def _has_flag(argv, name):
+    """True if ``name`` appears in ``argv`` (a bare boolean flag)."""
+    return name in argv
 
-    Supports ``--tailscale`` (→ bind 'tailscale'), ``--bind <ip>``, and
-    ``--port <n>``, matching the design §C config precedence (flags are the
-    highest precedence). Unknown flags are ignored by the caller.
+
+def _build_qr_payload(host, port) -> str:
+    """Connection-settings JSON for the QR, single line, no trailing newline.
+
+    The token is intentionally masked as ``***`` — the QR identifies the
+    endpoint a client should reach, not a bearer credential. (The real token
+    is never placed in the matrix; callers load it separately for actual auth.)
+    """
+    return '{"v":1,"host":"%s","port":%d,"token": "***"}' % (host, port)
+
+
+def _print_api_qr(host, port, *, force_ascii=False):
+    """Print the scannable connection-settings QR with a security warning.
+
+    The warning is printed unconditionally (it accompanies the QR itself, not
+    the flag state): whoever scans this QR is handed the host/port of the API
+    endpoint. `--no-qr` suppresses this entire block at the call site.
+    """
+    payload = _build_qr_payload(host, port)
+    matrix = qr_code.make_qr(payload.encode("utf-8"))
+    print("  Scan to connect: grants API access to this host.")
+    print(qr_code.render_text(matrix, force_ascii=force_ascii))
+    print()
+
+
+def _parse_start_flags(argv):
+    """Parse ``start`` flags into (bind_override, port_override, no_qr).
+
+    Supports ``--tailscale`` (→ bind 'tailscale'), ``--bind <ip>``, ``--port
+    <n>``, and ``--no-qr`` (suppress the QR), matching the design §C config
+    precedence (flags are the highest precedence). Unknown flags are ignored.
     """
     bind_override = None
     port_override = None
+    no_qr = False
     i = 0
     while i < len(argv):
         arg = argv[i]
         if arg == "--tailscale":
             bind_override = "tailscale"
+        elif arg == "--no-qr":
+            no_qr = True
         elif arg == "--bind":
             if i + 1 < len(argv):
                 bind_override = argv[i + 1]
@@ -93,7 +127,7 @@ def _parse_start_flags(argv):
                     pass
                 i += 1
         i += 1
-    return bind_override, port_override
+    return bind_override, port_override, no_qr
 
 
 def _serve(api, bind_override, port_override):
@@ -149,7 +183,7 @@ def _handle_start(argv):
     (refused bind, empty/unreadable token, plugin missing).
     """
     api = _load_api_server()
-    bind_override, port_override = _parse_start_flags(argv)
+    bind_override, port_override, no_qr = _parse_start_flags(argv)
 
     existing = daemon_ops.get_pid(API_PID_FILE)
     if existing:
@@ -174,6 +208,13 @@ def _handle_start(argv):
         return 1
 
     print(f"Starting HSCC API on {config['host']}:{config['port']}...")
+
+    # Print the scannable connection QR unless the user suppressed it. We do
+    # this only after config+token are known to be valid, so the user gets a
+    # useful, scrape-free QR of the endpoint they are about to start.
+    if not no_qr:
+        _print_api_qr(config["host"], config["port"])
+
     daemon_ops.log(
         "HSCC API starting", log_file=API_LOG_FILE, pid_file=API_PID_FILE,
     )
@@ -243,7 +284,11 @@ def _handle_status(argv):
 
     NEVER prints the auth token. Uses A1's resolve_config only to report the
     configured bind address (loopback default honored); does not bind anything.
+    Prints a scannable connection QR (suppressed by ``--no-qr``) when a token
+    exists — if the token is missing/unreadable, says so and exits cleanly.
     """
+    no_qr = _has_flag(argv, "--no-qr")
+
     api = None
     try:
         api = _load_api_server()
@@ -269,6 +314,16 @@ def _handle_status(argv):
 
     if host is not None:
         print(f"Listening:     {host}:{port}")
+
+    # The QR is only useful when there is an endpoint AND a token to present.
+    # If the token is missing/unreadable, say so and exit cleanly (no QR).
+    if not no_qr and host is not None:
+        try:
+            api.load_token()
+        except RuntimeError as exc:
+            print(f"No connection QR: could not read auth token ({exc})")
+        else:
+            _print_api_qr(host, port)
     return 0
 
 
