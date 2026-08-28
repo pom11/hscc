@@ -132,13 +132,15 @@ def _rs_compute_remainder(data, divisor):
 def _pick_version(data_len: int) -> int:
     """Smallest version (1..10) whose level-M byte-mode capacity fits data_len."""
     for v in range(1, 11):
-        # Byte-mode overhead: 4-bit mode + 8-bit char count; terminator ≤ 4 bits.
+        # Byte-mode overhead: 4-bit mode + char count (8 bits for v1-9, 16 for
+        # v10); terminator ≤ 4 bits. Count width differs for version 10.
+        cc_bits = 8 if v <= 9 else 16
         data_bits = _DATA_CODEWORDS_M[v] * 8
-        if 12 + 8 * data_len <= data_bits:
+        if (4 + cc_bits) + 8 * data_len <= data_bits:
             return v
     raise ValueError(
         f"payload of {data_len} bytes exceeds version-10 level-M capacity "
-        f"({_DATA_CODEWORDS_M[10] - 1} bytes max byte-mode)"
+        f"(max {(_DATA_CODEWORDS_M[10] * 8 - 20) // 8} bytes byte-mode)"
     )
 
 
