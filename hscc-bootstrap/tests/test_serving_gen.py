@@ -38,7 +38,10 @@ def test_keepalive_false_omits_flag():
 def test_same_last_octet_different_subnet_no_id_collision():
     """Two hosts sharing a last octet on different subnets (CX7 dual-subnet)
     must get DISTINCT unit ids (regression: ids were derived from last octet)."""
-    cluster = {"hosts": ["10.0.0.10", "10.0.0.10", "172.16.0.10"]}
+    # Three DISTINCT subnets that all share last octet .10 — the point of the
+    # regression. (An IP scrub once collapsed two of these into the same address,
+    # silently destroying the premise and failing the test.)
+    cluster = {"hosts": ["10.0.0.10", "10.1.0.10", "172.16.0.10"]}
     s = serving_gen.build_serving(
         cluster, orchestrator="10.0.0.10",
         recipe="r", model="m", port=8000, keepalive=True)
