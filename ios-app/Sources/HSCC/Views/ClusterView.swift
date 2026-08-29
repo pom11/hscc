@@ -213,6 +213,10 @@ struct ClusterView: View {
                    subtitle: "list a profile's sessions, compact or retire one") {
                 SessionsView(client: client)
             }
+            hubRow("Memories", systemImage: "brain",
+                   subtitle: "what a profile remembers — correct or delete one") {
+                MemoryView(client: client)
+            }
         }
     }
 
