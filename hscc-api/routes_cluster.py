@@ -121,6 +121,11 @@ def _backing_throughput():
     return throughput.compute_throughput()
 
 
+def _backing_usage():
+    from hscc_daemon import usage
+    return usage.compute_usage()
+
+
 def _backing_streams():
     from hscc_daemon import state
     return state.read_all_states()
@@ -253,11 +258,40 @@ def _speak_stats(data):
 
 
 def _speak_throughput(data):
-    """§B: "{nodes_ok} of {nodes_total} nodes healthy."."""
+    """§B: "{nodes_ok} of {nodes_total} nodes healthy". """
     fleet = data.get("fleet", {})
     ok = fleet.get("nodes_ok", 0)
     total = fleet.get("nodes_total", 0)
     return f"{ok} of {total} nodes healthy."
+
+
+def _speak_usage(data):
+    """§B: budget/activity sentence from the real usage dict.
+
+    Prefers a cost sentence when cost is actually tracked; otherwise reports
+    the real token activity across bots and projects. Never fabricated.
+    """
+    budget = data.get("budget") or {}
+    total = data.get("total") or {}
+    spent = budget.get("spent_usd", 0.0)
+    configured = budget.get("configured", False)
+    n_bots = len(data.get("per_bot", {}))
+    n_projects = len(data.get("per_project", {}))
+    activity = f"{n_bots} bots across {n_projects} projects"
+    if data.get("cost_tracked"):
+        pct = budget.get("pct", 0.0)
+        if budget.get("exceeded"):
+            return f"Budget exceeded: ${spent:.2f} over budget ({pct:.0f}%). {activity}."
+        if configured:
+            return (f"{activity}: ${spent:.2f} spent "
+                    f"({pct:.0f}% of ${budget.get('budget_usd', 0):.2f} budget).")
+        return f"{activity}: ${spent:.2f} tracked spend."
+    # Cost is not tracked — report the real token activity honestly.
+    total_tokens = total.get("total_tokens", 0)
+    if total_tokens:
+        return (f"{activity}: {total_tokens:,} tokens used; cost not tracked "
+                "on this cluster.")
+    return f"{activity}; cost not tracked on this cluster."
 
 
 def _speak_streams(data):
@@ -403,6 +437,16 @@ def handle_fleet_throughput(server, ctx, query, body):
     return 200, {**data, "speak": _speak_throughput(data)}
 
 
+def handle_fleet_usage(server, ctx, query, body):
+    try:
+        data = _backing_usage()
+    except Exception:
+        return 200, {"speak": "fleet usage unavailable"}
+    if not isinstance(data, dict):
+        return 200, {"speak": "fleet usage unavailable"}
+    return 200, {**data, "speak": _speak_usage(data)}
+
+
 def handle_fleet_streams(server, ctx, query, body):
     try:
         data = _backing_streams()
@@ -445,9 +489,10 @@ def load():
         ("GET", r"^/v1/cluster/jobs$", handle_cluster_jobs),
         ("GET", r"^/v1/cluster/info$", handle_cluster_info),
         ("GET", r"^/v1/health$", handle_health),
-        ("GET", r"^/v1/fleet/stats$", handle_fleet_stats),
-        ("GET", r"^/v1/fleet/throughput$", handle_fleet_throughput),
-        ("GET", r"^/v1/fleet/streams$", handle_fleet_streams),
+        ('GET', r'^/v1/fleet/stats$', handle_fleet_stats),
+        ('GET', r'^/v1/fleet/throughput$', handle_fleet_throughput),
+        ('GET', r'^/v1/fleet/usage$', handle_fleet_usage),
+        ('GET', r'^/v1/fleet/streams$', handle_fleet_streams),
         ("GET", r"^/v1/autoscale$", handle_autoscale),
     ]
     for method, pattern, handler in routes:
