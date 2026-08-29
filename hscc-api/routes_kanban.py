@@ -48,6 +48,16 @@ def _backing_list_stale(older_than=None, board=None):
     return autodown.list_stale_tasks(older_than=older_than, board=board)
 
 
+def _backing_list_running():
+    from hscc_daemon import kill_switch
+    return kill_switch.list_running_tasks()
+
+
+def _backing_kill_running(task_id):
+    from hscc_daemon import kill_switch
+    return kill_switch.kill_running_task(task_id)
+
+
 # --------------------------------------------------------------------------- #
 # Body helpers (confirm gate mirrors routes_actions)
 # --------------------------------------------------------------------------- #
@@ -102,6 +112,33 @@ def _speak_stale(data: dict) -> str:
 def _speak_recover(payload: dict) -> str:
     """§B: "Recovered card {id} to ready."."""
     return f"Recovered card {payload.get('id')} to ready."
+
+
+def _speak_running(data: dict) -> str:
+    """§B: "{n} running task(s)." / "no running tasks."."""
+    tasks = data.get("tasks") or []
+    if not tasks:
+        return "No running tasks."
+    n = len(tasks)
+    return f"{n} running task{'s' if n != 1 else ''}."
+
+
+def _speak_kill(payload: dict) -> str:
+    """§B: names what was stopped and reports what actually died."""
+    task = payload.get("task") or {}
+    term = payload.get("termination") or {}
+    tid = task.get("id") or payload.get("id")
+    if payload.get("not_running"):
+        return f"Task {tid} is not currently running."
+    if not task.get("host_local"):
+        return (f"Task {tid} runs on a different host — cannot be stopped "
+                f"from this node.")
+    if term.get("terminated"):
+        if term.get("sigkill"):
+            return (f"Stopped task {tid} (pid {task.get('pid')}) — "
+                    f"escalated to force-kill.")
+        return f"Stopped task {tid} (pid {task.get('pid')})."
+    return f"Could not stop task {tid} (pid {task.get('pid')})."
 
 
 # --------------------------------------------------------------------------- #
@@ -197,6 +234,74 @@ def handle_kanban_stale(server, ctx, query, body):
     return 200, payload
 
 
+def handle_kanban_running(server, ctx, query, body):
+    """GET /v1/kanban/running — running tasks across ALL boards + kill detail.
+
+    Names exactly what a kill would stop: each running task with its board,
+    id, title, assignee, PID, and whether it is host-local (can we even signal
+    it from this node). ``host_local`` False means its worker runs on another
+    node and a kill from here is a no-op — surfaced up front, not learned
+    after the fact.
+    """
+    try:
+        data = _backing_list_running()
+    except Exception:
+        return 200, {"speak": "Running-task list unavailable."}
+    if not isinstance(data, dict):
+        return 200, {"speak": "Running-task list unavailable."}
+    payload = {
+        "boards": data.get("boards", []),
+        "tasks": data.get("tasks", []),
+        "errors": data.get("errors", []),
+        "count": data.get("count", len(data.get("tasks", []))),
+    }
+    payload["speak"] = _speak_running(payload)
+    return 200, payload
+
+
+def handle_kanban_kill(server, ctx, query, body):
+    """POST /v1/kanban/task/{task_id}/kill — stop ONE running task (confirm-gated).
+
+    The kill switch. Confirm-gated exactly like ``recover`` (409
+    ``confirm_required`` without ``confirm: true``, and the backing call is
+    NOT made until confirmed) — a kill is never automatic and never bulk.
+    ``task_id`` is required. Reports WHAT ACTUALLY DIED: the backing
+    ``kill_switch.kill_running_task`` returns the Hermes ``_terminate_reclaimed_worker``
+    result dict verbatim (``prev_pid / host_local / termination_attempted /
+    terminated / sigkill``) plus the task detail, which we surface whole.
+    """
+    data = _parse_body(body)
+    _require_confirm(data, "stop this running task")
+    task_id = query.get("task_id")
+    if task_id is None or not str(task_id).strip():
+        raise ApiError(400, "bad_request", "missing task_id")
+    try:
+        result = _backing_kill_running(task_id)
+    except Exception as exc:
+        raise ApiError(502, "kill_failed", str(exc),
+                       "Task could not be stopped.")
+    if not isinstance(result, dict) or not result.get("found"):
+        # Not found (or the kill lib is unreachable — surfaced as error).
+        err = (result or {}).get("error")
+        raise ApiError(
+            404, "not_found",
+            err or f"task {task_id!r} is not a running task on any board",
+            f"Task {task_id} could not be stopped — it is not running.",
+        )
+    task = result.get("task") or {}
+    term = result.get("termination") or {}
+    payload = {
+        "id": task_id,
+        "task": task,
+        "termination": term,
+        "not_running": False,
+        "message": (f"kill issued for {task_id} (board "
+                    f"'{task.get('board')}')"),
+    }
+    payload["speak"] = _speak_kill(payload)
+    return 200, payload
+
+
 # --------------------------------------------------------------------------- #
 # Route registration (import side-effect; loaded by api_server.py)
 # --------------------------------------------------------------------------- #
@@ -209,3 +314,9 @@ ROUTES.append(
 )
 ROUTES.append(("GET", re.compile(r"^/v1/kanban/stale$"),
                handle_kanban_stale))
+ROUTES.append(("GET", re.compile(r"^/v1/kanban/running$"),
+               handle_kanban_running))
+ROUTES.append(
+    ("POST", re.compile(r"^/v1/kanban/task/(?P<task_id>[^/]+)/kill$"),
+     handle_kanban_kill)
+)
