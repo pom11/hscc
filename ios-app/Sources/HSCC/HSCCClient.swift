@@ -470,6 +470,46 @@ struct HSCCClient {
                               as: SessionMutationResponse.self)
     }
 
+    // MARK: - Memory viewer (list / correct / delete)
+
+    /// GET /v1/memory?profile=<name> — a profile's memory cards.
+    ///
+    /// Read-only (no `confirm`). Returns every card the agent remembers, each
+    /// with its stable graph node id (`memory:<memory|profile>:<index>`) that
+    /// the operator passes back to correct/delete. The profile whose memories
+    /// to inspect is chosen by the operator in the view's field at the top.
+    func memories(profile: String) async throws -> MemoryListResponse {
+        let encoded = profile.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)
+            ?? profile
+        return try await get("/v1/memory?profile=\\(encoded)", as: MemoryListResponse.self)
+    }
+
+    /// POST /v1/memory/{node_id}/delete — delete one memory card.
+    ///
+    /// Body: `{ profile, confirm: true }`. Permanently removes the card from
+    /// the profile's memory file. Requires the confirm UI gate (MutationButton)
+    /// before calling — this is destructive.
+    func deleteMemory(nodeID: String, profile: String) async throws -> MemoryMutationResponse {
+        let encoded = nodeID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? nodeID
+        return try await post("/v1/memory/\\(encoded)/delete",
+                              body: ["profile": profile, "confirm": true],
+                              as: MemoryMutationResponse.self)
+    }
+
+    /// POST /v1/memory/{node_id}/edit — correct one memory card.
+    ///
+    /// Body: `{ profile, content, confirm: true }`. Replaces the card's content
+    /// with the corrected text. Requires the confirm UI gate before calling.
+    func editMemory(nodeID: String, profile: String,
+                    content: String) async throws -> MemoryMutationResponse {
+        let encoded = nodeID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? nodeID
+        return try await post("/v1/memory/\\(encoded)/edit",
+                              body: ["profile": profile,
+                                     "content": content,
+                                     "confirm": true],
+                              as: MemoryMutationResponse.self)
+    }
+
     /// GET /v1/kanban/blocked — blocked cards across all boards.
     func kanbanBlocked() async throws -> KanbanBlockedResponse {
         try await get("/v1/kanban/blocked", as: KanbanBlockedResponse.self)
