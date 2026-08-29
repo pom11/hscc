@@ -496,6 +496,10 @@ No tailnet IP, token, or API key is hardcoded anywhere in this repo.
 
 - [**Sideload · Tailscale · Security**](docs/SIDELOAD-TAILSCALE-SECURITY.md) —
   the same guidance above as a standalone reference you can keep handy.
+- [**Device smoke checklist**](docs/DEVICE-SMOKE-CHECKLIST.md) — five
+  on-device checks (QR pairing, chat, backgrounding, wrong/revoked token) that
+  can't be automated on the build host; run before handing a build to the
+  operator for testing.
 - The API contract and CLI surface live in `docs/API.md` on the
   `feat/hscc-api` branch (and in the installed `hscc` tool itself via
   `hscc api --help`).
