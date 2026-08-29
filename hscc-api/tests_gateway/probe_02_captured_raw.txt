@@ -1,0 +1,156 @@
+[PTY ] <BYTES b"\x1b[0'z\x1b[0'{\x1b[?2029l\x1b[?1016l\x1b[?1015l\x1b[?1006l\x1b[?1005l\x1b[?1003l\x1b[?1002l\x1b[?1001l\x1b[?1000l\x1b[?9l\x1b[?1004l\x1b[?2004l\x1b[?1049l\x1b[<u\x1b[>4m\x1b[0m\x1b[?25h"
+[PTY ] <BYTES b'\x1b[2J\x1b[H\x1b[3J'
+[PTY ] <BYTES b'\x1b[?2004h\x1b[?1004h'
+[PTY ] <BYTES b'\x1b[?25l'
+[PTY ] <BYTES b'\x1b[?2004h'
+[PTY ] <BYTES b'\x1b]0;Hermes\x07'
+[PTY ] <BYTES b'\x1b[?2026h\r\r\n\x1b[1C\x1b[38;2;255;215;0m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[1CHermes\x1b[1CAgen'
+[PTY ] <BYTES b'\x1b[>0q'
+[PTY ] <BYTES b'\x1b]11;?\x07\x1b]10;?\x07\x1b[c'
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "gateway.ready", "payload": {"skin": {"name": "default", "colors": {"banner_border": "#CD7F32", "banner_title": "#FFD700", "banner_accent": "#FFBF00", "banner_dim": "#B8860B", "banner_text": "#FFF8DC", "ui_accent": "#FFBF00", "ui_label": "#DAA520", "ui_ok": "#4caf50", "ui_error": "#ef5350", "ui_warn": "#ffa726", "prompt": "#FFF8DC", "input_r
+[EVENT] {"jsonrpc": "2.0", "id": "r2", "result": {"config": {"model": {"default": "worker-model", "provider": "custom", "base_url": "http://localhost:4000/v1", "api_key": "sk-sparkrun"}}}}
+[EVENT] {"jsonrpc": "2.0", "id": "r1", "result": {"enabled": false}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[3C\x1b[2A\x1b[38;2;184;134;11mforgi\x1b[1Cg session\xe2\x80\xa6 \xe2\x94\x82 \x1b[39m \r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r3", "result": {"started": false, "reason": "disabled"}}
+[EVENT] {"jsonrpc": "2.0", "id": "r4", "result": {"pairs": [["/new", "Start a new session (fresh session ID + history) (usage: /new [name])"], ["/clear", "Clear screen and start a new session"], ["/redraw", "Force a full UI repaint (recovers from terminal drift)"], ["/history", "Show conversation history"], ["/save", "Save the current conversation"], ["/retry", "Retry the last message (resend to agent)"],
+[EVENT] {"jsonrpc": "2.0", "id": "r5", "result": {"provider_configured": true}}
+[EVENT] {"jsonrpc": "2.0", "id": "r6", "result": {"session_id": "eb5e699b", "stored_session_id": "20260830_024722_044f31", "message_count": 0, "messages": [], "info": {"model": "worker-model", "tools": {}, "skills": {}, "cwd": "/Users/desac/.hermes/kanban/boards/hscc/workspaces/t_776e294a", "branch": "", "project": null, "lazy": true, "desktop_contract": 5, "profile_name": "default"}}}
+[PTY ] <BYTES b'\x1b]1;\xe2\x9c\x93\x07\x1b]2;\xe2\x9c\x93 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[EVENT] {"jsonrpc": "2.0", "id": "r7", "result": {"mtime": 1788046975.912334, "mcp_rev": "80330eb04eda"}}
+[EVENT] {"jsonrpc": "2.0", "id": "r8", "result": {"config": {"model": {"default": "worker-model", "provider": "custom", "base_url": "http://localhost:4000/v1", "api_key": "sk-sparkrun"}}}}
+[PTY ] <BYTES b'\x1b]1;\xe2\x9c\x93\x07\x1b]2;\xe2\x9c\x93 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[EVENT] {"jsonrpc": "2.0", "id": "r9", "result": {"sessions": [{"current": true, "id": "eb5e699b", "last_active": 1788047242.307029, "message_count": 0, "model": "worker-model", "preview": "", "session_key": "20260830_024722_044f31", "started_at": 1788047242.307029, "status": "idle", "title": ""}]}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[1C\x1b[4A\x1b[38;2;205;127;50m\xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80'
+[PTY ] <BYTES b'\xe2\x96\x81\x1b[38;2;218;165;32m\xe2\x96\x81\xe2\x96\x81\xe2\x96\x81\xe2\x96\x81\xe2\x96\x81\xe2\x96\x81\xe2\x96\x81\x1b[34C\x1b[38;2;205;127;50m\xe2\x94\x82\x1b[39m\r\r\n\x1b[1C\x1b[38;2;205;127;50m\xe2\x94\x82\x1b[2C\x1b[38;2;220;191;116m\xe2\x96\x81\xe2\x96\x81\xe2\x96\x81\xe2\x96\x81\xe2\x96\x81\x1b'
+[PTY ] <BYTES b'C\x1b[38;2;205;127;50m\xe2\x94\x82\x1b[2C\x1b[38;2;255;191;0m\xe2\x96\xb8\x1b[1C\x1b[1mAvailable\x1b[1CSkills\x1b[22m\x1b[38;2;184;134;11m (0)\x1b[50C\x1b[38;2;205;127;50m\xe2\x94\x82\x1b[39m\r\r\n\x1b[1C\x1b['
+[PTY ] <BYTES b'\x1b]1;\xe2\x9c\x93\x07\x1b]2;\xe2\x9c\x93 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[4C\x1b[16A\x1b[38;2;218;165;32m\xe2\x96\x81\x1b[30C\x1b[38;2;220;191;116m\xe2\x96\x81\r\x1b[9C\x1b[1B\xe2\x96\x81\x1b[2C\xe2\x96\x81\x1b[6C\x1b[38;2;218;165;32m\xe2\x96\x81\r\x1b[14C\x1b[1B\x1b[38;2;220;191;116m\xe2'
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[5C\x1b[16A\x1b[38;2;218;165;32m\xe2\x96\x81\x1b[30C\x1b[38;2;220;191;116m\xe2\x96\x81\r\x1b[10C\x1b[1B\xe2\x96\x81\x1b[2C\xe2\x96\x81\x1b[6C\x1b[38;2;218;165;32m\xe2\x96\x81\r\x1b[15C\x1b[1B\x1b[38;2;220;191;116m'
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[6C\x1b[16A\x1b[38;2;218;165;32m\xe2\x96\x81\x1b[30C\x1b[38;2;220;191;116m\xe2\x96\x81\r\x1b[4C\x1b[1B\x1b[38;2;218;165;32m\xe2\x96\x81\x1b[9C\x1b[38;2;220;191;116m\xe2\x96\x81\r\x1b[16C\x1b[1B\xe2\x96\x81\x1b[5C\x1b'
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[7C\x1b[16A\x1b[38;2;218;165;32m\xe2\x96\x81\x1b[30C\x1b[38;2;220;191;116m\xe2\x96\x81\r\x1b[5C\x1b[1B\x1b[38;2;218;165;32m\xe2\x96\x81\x1b[9C\x1b[38;2;220;191;116m\xe2\x96\x81\r\x1b[17C\x1b[1B\xe2\x96\x81\x1b[5C\x1b'
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[8C\x1b[16A\x1b[38;2;218;165;32m\xe2\x96\x81\x1b[30C\x1b[38;2;220;191;116m\xe2\x96\x81\r\x1b[6C\x1b[1B\x1b[38;2;218;165;32m\xe2\x96\x81\x1b[9C\x1b[38;2;220;191;116m\xe2\x96\x81\r\x1b[4C\x1b[1B\x1b[38;2;21'
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "session.info", "session_id": "eb5e699b", "payload": {"model": "worker-model", "provider": "custom", "reasoning_effort": "", "service_tier": "", "fast": false, "yolo": false, "approval_mode": "smart", "tools": {"browser": ["browser_back", "browser_click", "browser_console", "browser_get_images", "browser_navigate", "browser_press", "browser_
+[PTY ] <BYTES b'\x1b]1;\xe2\x9c\x93\x07\x1b]2;\xe2\x9c\x93 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[PTY ] <BYTES b'\x1b]1;\xe2\x9c\x93\x07\x1b]2;\xe2\x9c\x93 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[4C\x1b[16A\x1b[38;2;218;165;32mbrowser: \x1b[38;2;220;191;116mbrowser_back, browser_click, browser_console, \xe2\x80\xa6+7\r\x1b[4C\x1b[1B\x1b[38;2;218;165;3'
+[PTY ] <BYTES b'\x1b[38;2;205;127;50m\xe2\x94\x82\r\x1b[1C\x1b[1B\xe2\x94\x82\x1b[2C\x1b[38;2;255;167;38m\x1b[1m! 6573 commits behind - run hermes update to update\x1b[21C\x1b[22m\x1b[38;2;205;127;50m\xe2\x94'
+[PTY ] <BYTES b'\x1b]1;\xe2\x9c\x93\x07\x1b]2;\xe2\x9c\x93 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[26C\x1b[2A\x1b[38;2;184;134;11m1\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r10", "result": {"sessions": [{"current": true, "id": "eb5e699b", "last_active": 1788047242.307029, "message_count": 0, "model": "worker-model", "preview": "", "session_key": "20260830_024722_044f31", "started_at": 1788047242.307029, "status": "idle", "title": ""}]}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[26C\x1b[2A\x1b[38;2;184;134;11m2\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r11", "result": {"enabled": false}}
+[EVENT] {"jsonrpc": "2.0", "id": "r12", "result": {"sessions": [{"current": true, "id": "eb5e699b", "last_active": 1788047242.307029, "message_count": 0, "model": "worker-model", "preview": "", "session_key": "20260830_024722_044f31", "started_at": 1788047242.307029, "status": "idle", "title": ""}]}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[26C\x1b[2A\x1b[38;2;184;134;11m3\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[26C\x1b[2A\x1b[38;2;184;134;11m4\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r13", "result": {"sessions": [{"current": true, "id": "eb5e699b", "last_active": 1788047242.307029, "message_count": 0, "model": "worker-model", "preview": "", "session_key": "20260830_024722_044f31", "started_at": 1788047242.307029, "status": "idle", "title": ""}]}}
+[EVENT] {"jsonrpc": "2.0", "id": "r14", "result": {"enabled": false}}
+[PTY ] <BYTES b'\x1b[?25h'
+[PTY ] <BYTES b'\x1b]1;\xe2\x9c\x93\x07\x1b]2;\xe2\x9c\x93 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[3C\x1b[1A\x1b[38;2;255;248;220ms\x1b[39m                        \r\r\n\x1b[4C\x1b[1A\x1b[?2026l'
+[PTY ] <BYTES b'\x1b[38;2;255;248;220ma\x1b[39m'
+[PTY ] <BYTES b'\x1b[?2026h\x1b[5D\x1b[1B\r\x1b[4C\x1b[1A\x1b[38;2;255;248;220ma\x1b[39m\r\r\n\x1b[5C\x1b[1A\x1b[?2026l'
+[PTY ] <BYTES b'\x1b]1;\xe2\x9c\x93\x07\x1b]2;\xe2\x9c\x93 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[PTY ] <BYTES b'\x1b[38;2;255;248;220my\x1b[39m'
+[PTY ] <BYTES b'\x1b[?2026h\x1b[6D\x1b[1B\r\x1b[5C\x1b[1A\x1b[38;2;255;248;220my\x1b[39m\r\r\n\x1b[6C\x1b[1A\x1b[?2026l'
+[PTY ] <BYTES b'\x1b]1;\xe2\x9c\x93\x07\x1b]2;\xe2\x9c\x93 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[PTY ] <BYTES b'\x1b[38;2;255;248;220m \x1b[39m'
+[PTY ] <BYTES b'\x1b[?2026h\x1b[7D\x1b[1B\r\x1b[6C\x1b[1A\x1b[38;2;255;248;220m \x1b[39m\r\r\n\x1b[7C\x1b[1A\x1b[?2026l'
+[PTY ] <BYTES b'\x1b]1;\xe2\x9c\x93\x07\x1b]2;\xe2\x9c\x93 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[PTY ] <BYTES b'\x1b[38;2;255;248;220mh\x1b[39m'
+[PTY ] <BYTES b'\x1b[?2026h\x1b[8D\x1b[1B\r\x1b[7C\x1b[1A\x1b[38;2;255;248;220mh\x1b[39m\r\r\n\x1b[8C\x1b[1A\x1b[?2026l'
+[PTY ] <BYTES b'\x1b]1;\xe2\x9c\x93\x07\x1b]2;\xe2\x9c\x93 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[PTY ] <BYTES b'\x1b[38;2;255;248;220mi\x1b[39m'
+[PTY ] <BYTES b'\x1b[?2026h\x1b[9D\x1b[1B\r\x1b[8C\x1b[1A\x1b[38;2;255;248;220mi\x1b[39m\r\r\n\x1b[9C\x1b[1A\x1b[?2026l'
+[PTY ] <BYTES b'\x1b]1;\xe2\x9c\x93\x07\x1b]2;\xe2\x9c\x93 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[EVENT] {"jsonrpc": "2.0", "id": "r15", "result": {"mtime": 1788046975.912334, "mcp_rev": "80330eb04eda"}}
+[PTY ] <BYTES b'\x1b[?2026h\x1b[9D\x1b[1B\r\x1b[26C\x1b[2A\x1b[38;2;184;134;11m5\x1b[39m\r\r\n\r\n\x1b[9C\x1b[1A\x1b[?2026l'
+[PTY ] <BYTES b'\x1b[?25l'
+[PTY ] <BYTES b'\x1b]1;\xe2\x8f\xb3\x07\x1b]2;\xe2\x8f\xb3 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[PTY ] <BYTES b'\x1b[?2026h\x1b[9D\x1b[1B\r\x1b[3C\x1b[2A\x1b[38;2;184;134;11m\xe3\x83\xbd(>\xe2\x88\x80<\xe2\x98\x86)\xe2\x98\x86 pondering\xe2\x80\xa6\x1b[1C \x1b[1C  \xe2\x94\x82 worker model\r\x1b[3C\x1b[1B\x1b[48;2;184;134;11m\x1b[38;2;255;255'
+[PTY ] <BYTES b'\x1b]1;\xe2\x8f\xb3\x07\x1b]2;\xe2\x8f\xb3 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[28C\x1b[2A\x1b[38;2;184;134;11m\xc2\xb7\x1b[1C0s \xe2\x94\x82 worker model\x1b[1C\x1b[39m    \x1b[38;2;205;127;50m \xe2\x94\x80 \x1b[38;2;218;165;32m\xe2\x80\xa6/hscc/workspaces/t_776'
+[EVENT] {"jsonrpc": "2.0", "id": "r16", "result": {"matched": false}}
+[EVENT] {"jsonrpc": "2.0", "id": "r17", "result": {"enabled": false}}
+[PTY ] <BYTES b'\x1b]1;\xe2\x8f\xb3\x07\x1b]2;\xe2\x8f\xb3 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[1C\x1b[3A\x1b[38;2;218;165;32m\x1b[1m\xe2\x9d\xaf \x1b[22msay hi\r\x1b[1C\x1b[1B\x1b[39m                                              \x1b[5C                      '
+[EVENT] {"jsonrpc": "2.0", "id": "r18", "result": {"status": "streaming"}}
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "message.start", "session_id": "eb5e699b"}}
+[PTY ] <BYTES b'\x1b]1;\xe2\x8f\xb3\x07\x1b]2;\xe2\x8f\xb3 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[PTY ] <BYTES b'\x1b]1;\xe2\x8f\xb3\x07\x1b]2;\xe2\x8f\xb3 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "thinking.delta", "session_id": "eb5e699b", "payload": {"text": "(｡•́︿•̀｡) synthesizing..."}}}
+[PTY ] <BYTES b'\x1b]1;\xe2\x8f\xb3\x07\x1b]2;\xe2\x8f\xb3 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "sessions.changed", "session_id": "", "payload": {}}}
+[EVENT] {"jsonrpc": "2.0", "id": "r19", "result": {"sessions": [{"current": true, "id": "eb5e699b", "last_active": 1788047247.8426611, "message_count": 0, "model": "worker-model", "preview": "say hi", "session_key": "20260830_024722_044f31", "started_at": 1788047242.307029, "status": "working", "title": ""}]}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[30C\x1b[2A\x1b[38;2;184;134;11m1\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[30C\x1b[2A\x1b[38;2;184;134;11m2\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r20", "result": {"sessions": [{"current": true, "id": "eb5e699b", "last_active": 1788047247.8426611, "message_count": 0, "model": "worker-model", "preview": "say hi", "session_key": "20260830_024722_044f31", "started_at": 1788047242.307029, "status": "working", "title": ""}]}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[3C\x1b[2A\x1b[38;2;184;134;11m\xd9\xa9(\xe0\xb9\x91\xe2\x9d\x9b\xe1\xb4\x97\xe2\x9d\x9b\xe0\xb9\x91\x1b[1C\xdb\xb6\x1b[1Cc\x1b[2Ct\x1b[1Cmplating\xe2\x80\xa6\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r21", "result": {"enabled": false}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[30C\x1b[2A\x1b[38;2;184;134;11m3\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r22", "result": {"sessions": [{"current": true, "id": "eb5e699b", "last_active": 1788047247.8426611, "message_count": 0, "model": "worker-model", "preview": "say hi", "session_key": "20260830_024722_044f31", "started_at": 1788047242.307029, "status": "working", "title": ""}]}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[30C\x1b[2A\x1b[38;2;184;134;11m4\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r23", "result": {"mtime": 1788046975.912334, "mcp_rev": "80330eb04eda"}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[3C\x1b[2A\x1b[38;2;184;134;11m(\xe2\x8a\x99_\xe2\x8a\x99) musing\xe2\x80\xa6        \xc2\xb7 4s \xe2\x94\x82 worker model\x1b[39m    \r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r24", "result": {"enabled": false}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[26C\x1b[2A\x1b[38;2;184;134;11m5\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r25", "result": {"sessions": [{"current": true, "id": "eb5e699b", "last_active": 1788047247.8426611, "message_count": 0, "model": "worker-model", "preview": "say hi", "session_key": "20260830_024722_044f31", "started_at": 1788047242.307029, "status": "working", "title": ""}]}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[26C\x1b[2A\x1b[38;2;184;134;11m6\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r26", "result": {"sessions": [{"current": true, "id": "eb5e699b", "last_active": 1788047247.8426611, "message_count": 0, "model": "worker-model", "preview": "say hi", "session_key": "20260830_024722_044f31", "started_at": 1788047242.307029, "status": "working", "title": ""}]}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[26C\x1b[2A\x1b[38;2;184;134;11m7\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[4C\x1b[2A\x1b[38;2;184;134;11m\xc2\xac\x1b[1C\xc2\xac\x1b[2Ccog\x1b[1Ctating\xe2\x80\xa6\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r27", "result": {"enabled": false}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[26C\x1b[2A\x1b[38;2;184;134;11m8\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r28", "result": {"sessions": [{"current": true, "id": "eb5e699b", "last_active": 1788047247.8426611, "message_count": 0, "model": "worker-model", "preview": "say hi", "session_key": "20260830_024722_044f31", "started_at": 1788047242.307029, "status": "working", "title": ""}]}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[26C\x1b[2A\x1b[38;2;184;134;11m9\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r29", "result": {"mtime": 1788046975.912334, "mcp_rev": "80330eb04eda"}}
+[EVENT] {"jsonrpc": "2.0", "id": "r30", "result": {"sessions": [{"current": true, "id": "eb5e699b", "last_active": 1788047247.8426611, "message_count": 0, "model": "worker-model", "preview": "say hi", "session_key": "20260830_024722_044f31", "started_at": 1788047242.307029, "status": "working", "title": ""}]}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[4C\x1b[2A\x1b[38;2;184;134;11m \xcd\xa1\xc2\xb0 \xcd\x9c\xca\x96 \xcd\xa1\xc2\xb0) ruminating\xe2\x80\xa6\x1b[1C \x1b[1C \xc2\xb7\x1b[1C9s \xe2\x94\x82 wo\x1b[1Cker model\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r31", "result": {"enabled": false}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[29C\x1b[2A\x1b[38;2;184;134;11m10s \xe2\x94\x82 worker model\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[30C\x1b[2A\x1b[38;2;184;134;11m1\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r32", "result": {"sessions": [{"current": true, "id": "eb5e699b", "last_active": 1788047247.8426611, "message_count": 0, "model": "worker-model", "preview": "say hi", "session_key": "20260830_024722_044f31", "started_at": 1788047242.307029, "status": "working", "title": ""}]}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[30C\x1b[2A\x1b[38;2;184;134;11m2\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[3C\x1b[2A\x1b[38;2;184;134;11m\xe0\xb2\xa0_\xe0\xb2\xa0 deliberating\xe2\x80\xa6  \xc2\xb7\x1b[1C12s \xe2\x94\x82 worker model\x1b[39m     \r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r33", "result": {"enabled": false}}
+[EVENT] {"jsonrpc": "2.0", "id": "r34", "result": {"sessions": [{"current": true, "id": "eb5e699b", "last_active": 1788047247.8426611, "message_count": 0, "model": "worker-model", "preview": "say hi", "session_key": "20260830_024722_044f31", "started_at": 1788047242.307029, "status": "working", "title": ""}]}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[25C\x1b[2A\x1b[38;2;184;134;11m3\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[25C\x1b[2A\x1b[38;2;184;134;11m4\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r35", "result": {"sessions": [{"current": true, "id": "eb5e699b", "last_active": 1788047247.8426611, "message_count": 0, "model": "worker-model", "preview": "say hi", "session_key": "20260830_024722_044f31", "started_at": 1788047242.307029, "status": "working", "title": ""}]}}
+[EVENT] {"jsonrpc": "2.0", "id": "r36", "result": {"mtime": 1788046975.912334, "mcp_rev": "80330eb04eda"}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[3C\x1b[2A\x1b[38;2;184;134;11m(\xef\xbd\xa1\xe2\x80\xa2\xcc\x81\xef\xb8\xbf\xe2\x80\xa2\xcc\x80\xef\xbd\xa1) mull\x1b[6C \x1b[1C   \xc2\xb7 14s \xe2\x94\x82 worker model\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r37", "result": {"enabled": false}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[30C\x1b[2A\x1b[38;2;184;134;11m5\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r38", "result": {"sessions": [{"current": true, "id": "eb5e699b", "last_active": 1788047247.8426611, "message_count": 0, "model": "worker-model", "preview": "say hi", "session_key": "20260830_024722_044f31", "started_at": 1788047242.307029, "status": "working", "title": ""}]}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[30C\x1b[2A\x1b[38;2;184;134;11m6\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[30C\x1b[2A\x1b[38;2;184;134;11m7\x1b[39m\r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r39", "result": {"sessions": [{"current": true, "id": "eb5e699b", "last_active": 1788047247.8426611, "message_count": 0, "model": "worker-model", "preview": "say hi", "session_key": "20260830_024722_044f31", "started_at": 1788047242.307029, "status": "working", "title": ""}]}}
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "thinking.delta", "session_id": "eb5e699b", "payload": {"text": ""}}}
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "message.delta", "session_id": "eb5e699b", "payload": {"text": "Hi"}}}
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "message.delta", "session_id": "eb5e699b", "payload": {"text": "!"}}}
+[PTY ] <BYTES b'\x1b]1;\xe2\x8f\xb3\x07\x1b]2;\xe2\x8f\xb3 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[1C\x1b[4A\x1b[38;2;205;127;50m\xe2\x94\x8a \x1b[1C\x1b[38;2;255;248;220mHi!\r\x1b[1C\x1b[2B\x1b[39m                                              \x1b[5C           '
+[PTY ] <BYTES b'\x1b]1;\xe2\x8f\xb3\x07\x1b]2;\xe2\x8f\xb3 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "message.delta", "session_id": "eb5e699b", "payload": {"text": " 👋"}}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[7C\x1b[5A\x1b[38;2;255;248;220m \xf0\x9f\x91\x8b\x1b[39m\r\r\n\r\n\r\n\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "message.delta", "session_id": "eb5e699b", "payload": {"text": " How"}}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[10C\x1b[5A\x1b[38;2;255;248;220m How\x1b[39m\r\r\n\r\n\r\n\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "message.delta", "session_id": "eb5e699b", "payload": {"text": " can"}}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[14C\x1b[5A\x1b[38;2;255;248;220m can\x1b[39m\r\r\n\r\n\r\n\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "message.delta", "session_id": "eb5e699b", "payload": {"text": " I"}}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[4C\x1b[2A\x1b[38;2;184;134;11m\xe2\x97\x94_\xe2\x97\x94) reflect\x1b[8C\xc2\xb7\x1b[1C17s \xe2\x94\x82 worke\x1b[1C model\x1b[39m   \r\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "id": "r40", "result": {"enabled": false}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[18C\x1b[5A\x1b[38;2;255;248;220m I\x1b[39m\r\r\n\r\n\r\n\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "message.delta", "session_id": "eb5e699b", "payload": {"text": " help"}}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[20C\x1b[5A\x1b[38;2;255;248;220m help\x1b[39m\r\r\n\r\n\r\n\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "message.delta", "session_id": "eb5e699b", "payload": {"text": " you"}}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[25C\x1b[5A\x1b[38;2;255;248;220m you\x1b[39m\r\r\n\r\n\r\n\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "message.delta", "session_id": "eb5e699b", "payload": {"text": " today"}}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[29C\x1b[5A\x1b[38;2;255;248;220m today\x1b[39m\r\r\n\r\n\r\n\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "message.delta", "session_id": "eb5e699b", "payload": {"text": "?"}}}
+[PTY ] <BYTES b'\x1b[?2026h\r\x1b[35C\x1b[5A\x1b[38;2;255;248;220m?\x1b[39m\r\r\n\r\n\r\n\r\n\r\n\x1b[?2026l'
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "thinking.delta", "session_id": "eb5e699b", "payload": {"text": ""}}}
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "reasoning.available", "session_id": "eb5e699b", "payload": {"text": "Hi! 👋 How can I help you today?"}}}
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "status.update", "session_id": "eb5e699b", "payload": {"kind": "lifecycle", "text": "⚠️ Kanban worker tried to exit without kanban_complete/kanban_block — nudging to finish"}}}
+[PTY ] <BYTES b'\x1b]1;\xe2\x8f\xb3\x07\x1b]2;\xe2\x8f\xb3 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
+[EVENT] {"jsonrpc": "2.0", "method": "event", "params": {"type": "thinking.delta", "session_id": "eb5e699b", "payload": {"text": "ಠ_ಠ formulating..."}}}
+[PTY ] <BYTES b'\x1b]1;\xe2\x8f\xb3\x07\x1b]2;\xe2\x8f\xb3 worker-model \xc2\xb7 \xe2\x80\xa6c/workspaces/t_776e294a\x07'
