@@ -84,6 +84,31 @@ c.check(TemplatePreviewResponse.self, "template_preview_hscc-live.json", "Templa
 c.check(ClusterStatusResponse.self, "v1_cluster_status.json", "ClusterStatusResponse (Shared)")
 c.check(AutodownStatusResponse.self, "autodown_status.json", "AutodownStatusResponse (Shared)")
 
+// ---- Approvals classification (t_9a5cfc3b) — the SAME `isPendingApproval`
+// logic the on-screen inbox, the badge poller, and the Siri intent use, asserted
+// against the REAL committed kanban_blocked.json fixture. Both cards in that
+// capture are `block_kind == needs_input`, so both are pending approvals. This
+// guards the classification from drifting on decode types we don't redeclare. ----
+do {
+    let blocked = try JSONDecoder().decode(
+        KanbanBlockedResponse.self,
+        from: try Data(contentsOf: URL(fileURLWithPath: fixtureDir + "/kanban_blocked.json")))
+    let cards = blocked.tasks ?? []
+    let pending = cards.filter(\.isPendingApproval)
+    if cards.count == 2 && pending.count == 2 {
+        c.passed += 1
+        print("OK   kanban_blocked.json  →  approvals classification: 2/2 pending")
+    } else {
+        c.failures.append(("kanban_blocked.json",
+                           "isPendingApproval classification",
+                           "expected 2/2 pending, got \(cards.count) cards / \(pending.count) pending"))
+        print("FAIL kanban_blocked.json → isPendingApproval classification (\(pending.count)/\(cards.count))")
+    }
+} catch {
+    c.failures.append(("kanban_blocked.json", "approvals classification", "\(error)"))
+    print("FAIL kanban_blocked.json → approvals classification: \(error)")
+}
+
 // ---- Summary + exit code. A single failure is a non-zero exit — a guard that
 // exits 0 here has proven, right now, that every committed fixture decodes
 // against the real models. ----
