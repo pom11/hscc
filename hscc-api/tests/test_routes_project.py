@@ -149,6 +149,8 @@ def fakes(monkeypatch):
             uncommitted_files=lambda repo: [],
             last_commit_age_seconds=lambda repo: 120,
             head_sha=lambda repo: "abc123",
+            ahead_of_upstream=lambda repo, branch: 3,
+            behind_of_upstream=lambda repo, branch: 1,
         ),
         "_standup_cmd": _fake_module(
             gather_data=lambda registry_path: _standup_data(),
@@ -534,6 +536,8 @@ def test_project_detail_200(running, token, fakes):
     assert payload["git"]["is_repo"] is True
     assert payload["git"]["branch"] == "main"
     assert payload["git"]["last_activity_seconds_ago"] == 120
+    assert payload["git"]["ahead"] == 3
+    assert payload["git"]["behind"] == 1
     assert payload["speak"]
 
 
