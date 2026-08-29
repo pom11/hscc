@@ -1,0 +1,47 @@
+{
+  "entries": [
+    {
+      "kind": "tool_call",
+      "profile": "ios-engineer",
+      "board": "hscc",
+      "card_id": "t_308fce41",
+      "card_title": "live agent activity feed",
+      "pid": 24868,
+      "host_local": true,
+      "started_at": "2026-08-29T10:00:00+00:00",
+      "at": "2026-08-29T10:03:21.482659+00:00",
+      "tool": "kanban_show",
+      "session_id": "s_9f2c1a44"
+    },
+    {
+      "kind": "tool_call",
+      "profile": "researcher-a",
+      "board": "hscc",
+      "card_id": "t_77f3b810",
+      "card_title": "index the homelab docs",
+      "pid": 5112,
+      "host_local": true,
+      "started_at": "2026-08-29T09:58:00+00:00",
+      "at": "2026-08-29T09:59:44.110882+00:00",
+      "tool": "terminal",
+      "session_id": "s_77f3b810"
+    },
+    {
+      "kind": "running",
+      "profile": "ios-engineer",
+      "board": "hscc",
+      "card_id": "t_308fce41",
+      "card_title": "live agent activity feed",
+      "pid": 24868,
+      "host_local": true,
+      "started_at": "2026-08-29T10:00:00+00:00",
+      "at": "2026-08-29T10:00:00+00:00",
+      "tool": null,
+      "session_id": null
+    }
+  ],
+  "count": 3,
+  "running_count": 2,
+  "profiles": ["ios-engineer", "researcher-a"],
+  "speak": "3 activity events across 2 running tasks."
+}
