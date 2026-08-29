@@ -42,16 +42,20 @@ fresh capture and diff the key structure.
 
 ## Coverage
 
-26 fixtures cover every decodable response model in Models.swift +
-SharedModels.swift that has a live capture on this host (verified 26/26 OK).
+27 fixtures cover every decodable response model in Models.swift +
+SharedModels.swift that has a live capture on this host (verified 27/27 OK).
 Missing from the set (no captured fixture exists):
 - mutation POST responses (`DispatchCardResponse`, `MergeCardResponse`,
   `TemplateApplyResponse`, `StopClusterResponse`, `AutodownEnable/Disable/
-  Wake/Cancel`, `RecoverCardResponse`, `ClusterUpResponse`,
-  `ClusterDownResponse`) — not read endpoints, no captures taken
+  Wake/Cancel`, `RecoverCardResponse`, `ClusterUpResponse`, `ClusterDownResponse`,
+  `SessionMutationResponse`) — not read endpoints, no captures taken
 - `ReviewDetailResponse` (`GET /v1/review/{id}`) — no capture taken
 - `OrchestratorChatJobResponse` / `OrchestratorChatJobStatus` / `ChatJobError`
 - `ReadResponse` — self-contained generic bucket, needs no fixture
+
+`v1_sessions.json` is the sessions-manager list (`GET /v1/sessions?profile=...`),
+captured against routes_sessions.py: one healthy session and one bloated one
+(positive compaction-failure evidence), value-sanitized, shape-faithful.
 
 ## Running the check
 

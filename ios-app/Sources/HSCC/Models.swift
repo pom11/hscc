@@ -903,3 +903,80 @@ struct ClusterDownResponse: Decodable {
     let message: String?
     let speak: String?
 }
+
+// MARK: - Sessions manager (list / retire / compact a profile's sessions)
+
+/// One session row from GET /v1/sessions?profile=<name> (routes_sessions.py).
+///
+/// Verified shape (tests/ + routes_sessions._row_to_session): every field is
+/// present on a well-formed row. Token totals mirror the `sessions` columns
+/// SessionDB maintains; ``total_tokens`` is the sum across all streams.
+/// ``bloated`` is decided on POSITIVE compaction-failure evidence (never on
+/// size alone — ``input_tokens`` is cumulative), and ``compaction_headroom``
+/// = ``context_window`` − ``threshold_tokens``, the guaranteed room the early
+/// compaction cap leaves for the compress call.
+struct SessionItem: Decodable, Identifiable {
+    let id: String
+    let title: String?
+    let source: String?
+    let model: String?
+    let message_count: Int?
+    let tool_call_count: Int?
+    let input_tokens: Int?
+    let output_tokens: Int?
+    let cache_read_tokens: Int?
+    let cache_write_tokens: Int?
+    let reasoning_tokens: Int?
+    let total_tokens: Int?
+    let started_at: String?
+    let ended_at: String?
+    let archived: Bool?
+    let pinned: Bool?
+    let compression_failure_error: String?
+    let compression_fallback_streak: Int?
+    let compression_ineffective_count: Int?
+    let context_window: Int?
+    let threshold_tokens: Int?
+    let compaction_headroom: Int?
+    let bloated: Bool?
+    let reason: String?
+
+    var displayTitle: String { title ?? id }
+    var isBloated: Bool { bloated ?? false }
+
+    /// Human token count for the list row (e.g. "12.5k").
+    var tokenSummary: String {
+        formatCount(total_tokens ?? input_tokens ?? 0)
+    }
+
+    private func formatCount(_ n: Int) -> String {
+        if n >= 1000 { return String(format: "%.1fk", Double(n) / 1000) }
+        return "\(n)"
+    }
+}
+
+/// GET /v1/sessions?profile=<name> — the envelope.
+///
+/// Verified shape: `{ profile, sessions: [], count, bloated_count, speak }`.
+/// ``sessions`` is kept optional so a partial body never blanks the screen.
+struct SessionsListResponse: Decodable, Speakable {
+    let profile: String?
+    let sessions: [SessionItem]?
+    let count: Int?
+    let bloated_count: Int?
+    let speak: String
+}
+
+/// POST /v1/sessions/{id}/retire and /v1/sessions/{id}/compact — shared result.
+///
+/// Retire: `{ session_id, previous_title?, retired_title?, message, speak }`.
+/// Compact: `{ session_id, title?, message, speak }`. All optional so either
+/// shape decodes cleanly.
+struct SessionMutationResponse: Decodable, Speakable {
+    let session_id: String?
+    let previous_title: String?
+    let retired_title: String?
+    let title: String?
+    let message: String?
+    let speak: String
+}

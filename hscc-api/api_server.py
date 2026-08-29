@@ -657,4 +657,5 @@ import routes_ops  # noqa: E402,F401  (registers /v1/{verify,daemon/status,trigg
 import routes_kanban  # noqa: E402,F401  (registers /v1/kanban/{blocked,blocked/{id}/recover,stale})
 import routes_template  # noqa: E402,F401  (registers /v1/template/{list,status,preview/{name}})
 import routes_profile  # noqa: E402,F401  (registers /v1/profile/{list,install,export,export/{file}})
+import routes_sessions  # noqa: E402,F401  (registers /v1/sessions list + retire/compact)
 
