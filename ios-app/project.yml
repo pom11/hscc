@@ -66,6 +66,7 @@ targets:
       - path: Sources/HSCC/ContentView.swift
       - path: Sources/HSCC/HSCCClient.swift
       - path: Sources/HSCC/SessionStreamCursor.swift
+      - path: Sources/HSCC/SessionEvent.swift
       - path: Sources/HSCC/Models.swift
       - path: Sources/HSCC/APIError.swift
       - path: Sources/HSCC/KeychainStore.swift
@@ -83,6 +84,7 @@ targets:
       - path: Sources/HSCC/Views/MutationSupport.swift
       - path: Sources/HSCC/Views/OrchestratorChatView.swift
       - path: Sources/HSCC/Views/ChatStore.swift
+      - path: Sources/HSCC/Views/SessionHistoryView.swift
       - path: Sources/HSCC/Views/AutodownView.swift
       - path: Sources/HSCC/Views/ProjectsView.swift
       - path: Sources/HSCC/Views/ProjectUnreadCenter.swift

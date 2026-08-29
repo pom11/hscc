@@ -1,0 +1,79 @@
+{
+  "project": "hscc",
+  "events": [
+    {
+      "seq": 41,
+      "type": "hello",
+      "ts": "2026-08-29T09:00:01Z",
+      "payload": { "next_seq": 42 }
+    },
+    {
+      "seq": 42,
+      "type": "message",
+      "ts": "2026-08-29T09:01:00Z",
+      "payload": { "role": "user", "delta": "What is the cluster status? Summarize.", "done": true }
+    },
+    {
+      "seq": 43,
+      "type": "tool_call",
+      "ts": "2026-08-29T09:01:03Z",
+      "payload": {
+        "call_id": "call_0001",
+        "name": "cluster_status",
+        "status": "start",
+        "args": { "project": "hscc" }
+      }
+    },
+    {
+      "seq": 44,
+      "type": "tool_call",
+      "ts": "2026-08-29T09:01:06Z",
+      "payload": {
+        "call_id": "call_0001",
+        "name": "cluster_status",
+        "status": "finish",
+        "result": { "healthy": true, "nodes": 4 }
+      }
+    },
+    {
+      "seq": 45,
+      "type": "message",
+      "ts": "2026-08-29T09:01:09Z",
+      "payload": { "role": "assistant", "delta": "The cluster is healthy: 4/4 nodes up, all services serving.", "done": true }
+    },
+    {
+      "seq": 46,
+      "type": "card",
+      "ts": "2026-08-29T09:05:00Z",
+      "payload": { "board": "hscc", "id": "t_2776ea3c", "title": "iOS: session history paging", "status": "running" }
+    },
+    {
+      "seq": 47,
+      "type": "agent",
+      "ts": "2026-08-29T09:05:02Z",
+      "payload": { "role": "ios-engineer", "action": "spawned", "task": "implement history pager" }
+    },
+    {
+      "seq": 48,
+      "type": "system",
+      "ts": "2026-08-29T09:06:00Z",
+      "payload": { "kind": "cron", "details": { "job": "daily-briefing" } }
+    },
+    {
+      "seq": 49,
+      "type": "error",
+      "ts": "2026-08-29T09:07:00Z",
+      "payload": { "code": "E_BACKEND", "message": "Daemon parse failed on one node" }
+    },
+    {
+      "seq": 50,
+      "type": "message",
+      "ts": "2026-08-29T09:08:00Z",
+      "payload": { "role": "assistant", "delta": "Recording that to the incident log.", "done": true }
+    }
+  ],
+  "next_before": 40,
+  "oldest_seq": 1,
+  "next_seq": 51,
+  "speak": "10 events, seq 41–50; 40 events older available (seq 1–40)."
+}

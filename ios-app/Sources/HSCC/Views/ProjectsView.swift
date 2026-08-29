@@ -214,6 +214,18 @@ struct ProjectDetailView: View {
         }
         .navigationTitle(project.name)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                // Session history — the project's chat log as a window onto
+                // the session. Loads context that predates this install and
+                // pages further back on scroll-up (t_2776ea3c).
+                NavigationLink {
+                    SessionHistoryView(client: client, project: project.name)
+                } label: {
+                    Label("Session History", systemImage: "clock.arrow.circlepath")
+                }
+            }
+        }
     }
 }
 
