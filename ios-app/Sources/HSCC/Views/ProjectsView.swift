@@ -885,6 +885,11 @@ struct ProjectSettingsView: View {
                 if let topic = state.displayTopic, !topic.isEmpty {
                     row("Topic", value: topic)
                 }
+                NavigationLink {
+                    ProfileEditorView(client: client, profile: "\(name)-orch")
+                } label: {
+                    Label("Edit Bot Profile…", systemImage: "slider.horizontal.3")
+                }
             }
 
             Section {
