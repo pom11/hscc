@@ -222,7 +222,8 @@ def fakes(monkeypatch):
             "board": "default",
         }
 
-    def _invoke(profile, session, prompt, timeout=None):
+    def _invoke(profile, session, prompt, timeout=None,
+                image_data=None, image_mime=None):
         return ("hello from the contract-test orchestrator", profile, session)
 
     monkeypatch.setattr(routes_orchestrator, "_backing_resolve", _resolve)
