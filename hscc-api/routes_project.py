@@ -372,6 +372,14 @@ def _project_detail(projects, proj):
                 last_age = _git_state.last_commit_age_seconds(repo)
                 git["last_activity_seconds_ago"] = last_age
                 git["head"] = _git_state.head_sha(repo)
+                branch = git["branch"]
+                if branch:
+                    # Push/pull sync signals vs the branch's tracking upstream.
+                    # The project-overview card wants ahead/behind so the
+                    # operator sees how far local is from the remote. Both are
+                    # defensive (0 when no upstream / non-repo — safe readings).
+                    git["ahead"] = _git_state.ahead_of_upstream(repo, branch)
+                    git["behind"] = _git_state.behind_of_upstream(repo, branch)
         except Exception:
             git = {"is_repo": bool(git.get("is_repo"))}
 
