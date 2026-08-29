@@ -86,6 +86,34 @@ def _backing_escalate():
     )
 
 
+def _backing_triggers_run():
+    """Force the trigger engine to re-evaluate all rules now, firing any
+    pending actions, then return the fresh read state.
+
+    Mirrors ``hscc check triggers`` — an operator-initiated trigger-engine
+    run that does NOT wait for the daemon's periodic cycle. Effectively a
+    mutation: enabled rules may fire notify / emit_event / auto_restart /
+    block_pipeline actions, so it is confirm-gated.
+    """
+    from hscc_daemon import trigger
+    trigger.trigger_engine()
+    rules = trigger.load_triggers()
+    from hscc_daemon import state
+    last_run = state.read_state("triggers")
+    recent = trigger.read_events_tail(limit=20)
+    return {
+        "rules": rules,
+        "last_run": last_run,
+        "recent_events": recent,
+    }
+
+
+def _backing_escalate_run():
+    """Actually perform pending failure escalations (reassign + notify)."""
+    from hscc_daemon import escalate_watcher
+    return escalate_watcher.scan_and_escalate()
+
+
 def _backing_profiles():
     eng = _load_cluster_engine()
     if eng is None:
@@ -257,6 +285,51 @@ def handle_escalate(server, ctx, query, body):
                  "speak": _speak_escalate(data)}
 
 
+def handle_triggers_run(server, ctx, query, body):
+    """POST /v1/triggers/run — force re-evaluate all trigger rules now.
+
+    Confirm-gated: enabled rules may fire notify / emit_event / auto_restart
+    / block_pipeline actions immediately. Returns the fresh read state so the
+    operator sees the result in the same response.
+    """
+    data = _parse_body(body)
+    _require_confirm(data, "run the trigger engine now")
+    try:
+        result = _backing_triggers_run()
+    except Exception as exc:
+        raise ApiError(502, "triggers_run_failed",
+                       f"trigger run failed: {exc}", "Trigger run failed.")
+    if not isinstance(result, dict):
+        raise ApiError(502, "triggers_run_failed",
+                       "trigger run produced no result", "Trigger run failed.")
+    payload = dict(result)
+    payload["message"] = "trigger engine run"
+    payload["speak"] = _speak_triggers(result)
+    return 200, payload
+
+
+def handle_escalate_run(server, ctx, query, body):
+    """POST /v1/escalate — perform pending failure escalations for real.
+
+    Confirm-gated: actually reassigns repeatedly-failing tasks to the strong
+    tier and notifies a human for those needing one (the escalation watcher's
+    real action path, not the dry-run the GET uses). Returns the actions taken.
+    """
+    data = _parse_body(body)
+    _require_confirm(data, "run pending escalations")
+    try:
+        actions = _backing_escalate_run()
+    except Exception as exc:
+        raise ApiError(502, "escalate_failed",
+                       f"escalation run failed: {exc}", "Escalation run failed.")
+    if not isinstance(actions, list):
+        raise ApiError(502, "escalate_failed",
+                       "escalation run produced no actions", "Escalation run failed.")
+    return 200, {"escalations": actions, "count": len(actions),
+                 "performed": True,
+                 "speak": _speak_escalate(actions)}
+
+
 def handle_profiles(server, ctx, query, body):
     """GET /v1/profiles — running kanban task counts per profile."""
     try:
@@ -321,7 +394,9 @@ def handle_cluster_down(server, ctx, query, body):
 ROUTES.append(("GET", re.compile(r"^/v1/verify$"), handle_verify))
 ROUTES.append(("GET", re.compile(r"^/v1/daemon/status$"), handle_daemon_status))
 ROUTES.append(("GET", re.compile(r"^/v1/triggers$"), handle_triggers))
+ROUTES.append(("POST", re.compile(r"^/v1/triggers/run$"), handle_triggers_run))
 ROUTES.append(("GET", re.compile(r"^/v1/escalate$"), handle_escalate))
+ROUTES.append(("POST", re.compile(r"^/v1/escalate$"), handle_escalate_run))
 ROUTES.append(("GET", re.compile(r"^/v1/profiles$"), handle_profiles))
 ROUTES.append(("POST", re.compile(r"^/v1/cluster/up$"), handle_cluster_up))
 ROUTES.append(("POST", re.compile(r"^/v1/cluster/down$"), handle_cluster_down))
