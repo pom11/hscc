@@ -183,9 +183,18 @@ struct SettingsView: View {
     // MARK: - Actions
 
     private func save() {
-        settings.host = hostField.trimmingCharacters(in: .whitespaces)
-        settings.port = portField.trimmingCharacters(in: .whitespaces)
-        settings.saveToken(tokenField.isEmpty ? nil : tokenField)
+        // `host`/`port` are computed views onto the ACTIVE SavedCluster since
+        // the multi-cluster model landed — they are read-only. Writing the
+        // fields means updating that cluster (or creating the first one).
+        let host = hostField.trimmingCharacters(in: .whitespaces)
+        let port = Int(portField.trimmingCharacters(in: .whitespaces)) ?? 0
+        var cluster = settings.activeCluster
+            ?? SavedCluster(id: UUID(), name: host.isEmpty ? "Cluster" : host,
+                            host: host, port: port,
+                            lastConnected: nil, lastTestSuccess: nil)
+        cluster.host = host
+        cluster.port = port
+        settings.saveCluster(cluster, token: tokenField.isEmpty ? nil : tokenField)
         // The root view re-probes on isConfigured change.
     }
 
