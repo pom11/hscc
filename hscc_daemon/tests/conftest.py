@@ -90,7 +90,7 @@ def _isolate_hscc(tmp_path, monkeypatch):
     def _module_attrs():
         from hscc_daemon import (
             autodown, daemon_ops, desktop, hscc, lifecycle, replay, state,
-            trigger,
+            trigger, usage,
         )
         def p(sub):
             return os.path.join(base, sub)
@@ -116,6 +116,8 @@ def _isolate_hscc(tmp_path, monkeypatch):
             (lifecycle, "WATCHDOG_BLOCK_FILE", p("watchdog-block.json")),
             # state.py (the write_state/read_state funnel)
             (state, "STATE_DIR", p("state")),
+            # usage.py (budget config — never read the operator's real one)
+            (usage, "BUDGET_FILE", p("budget.json")),
             # recover.py (cooldown + attempt-cap state)
             (recover, "RECOVER_STATE_FILE", p("recover.json")),
             # trigger.py
