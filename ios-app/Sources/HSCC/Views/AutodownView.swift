@@ -99,11 +99,11 @@ struct AutodownView: View {
     private var statusSection: some View {
         switch status {
         case .loading:
-            sectionCard(title: "Status", systemImage: "timer") { ProgressView() }
+            HSSectionCard(title: "Status", systemImage: "timer") { ProgressView() }
         case .failed(let message):
-            sectionCard(title: "Status", systemImage: "timer") { errorLabel(message) }
+            HSSectionCard(title: "Status", systemImage: "timer") { errorLabel(message) }
         case .stale(let state, let ageMessage):
-            sectionCard(title: "Status", systemImage: "timer") {
+            HSSectionCard(title: "Status", systemImage: "timer") {
                 VStack(alignment: .leading, spacing: 12) {
                     StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
                         Task { await loadStatus() }
@@ -112,7 +112,7 @@ struct AutodownView: View {
                 }
             }
         case .loaded(let state):
-            sectionCard(title: "Status", systemImage: "timer") {
+            HSSectionCard(title: "Status", systemImage: "timer") {
                 statusBody(state)
             }
         default:
@@ -221,7 +221,7 @@ struct AutodownView: View {
     @ViewBuilder
     private func controlSection(client: HSCCClient) -> some View {
         let enabled = value?.enabled == true
-        sectionCard(title: "Controls", systemImage: "slider.horizontal.3") {
+        HSSectionCard(title: "Controls", systemImage: "slider.horizontal.3") {
             VStack(alignment: .leading, spacing: 14) {
                 if enabled {
                     // Disable — confirm-gated. Names what will happen.
@@ -298,7 +298,7 @@ struct AutodownView: View {
             let cpuOnly = state.active_cron_cpu_only ?? []
             let model = state.active_cron_model ?? []
             if !cpuOnly.isEmpty || !model.isEmpty {
-                sectionCard(title: "Active cron jobs", systemImage: "calendar") {
+                HSSectionCard(title: "Active cron jobs", systemImage: "calendar") {
                     VStack(alignment: .leading, spacing: 8) {
                         if !model.isEmpty {
                             Label("Model-requiring jobs block autodown: \(model.joined(separator: ", "))",
@@ -348,27 +348,6 @@ struct AutodownView: View {
 
     // MARK: - Shared building blocks
 
-    private func sectionCard<Content: View>(
-        title: String,
-        systemImage: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label(title, systemImage: systemImage)
-                .font(.headline)
-            content()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Theme.Semantic.surfaceRaised)
-        )
-    }
 
-    private func errorLabel(_ message: String) -> some View {
-        Label(message, systemImage: "exclamationmark.triangle.fill")
-            .font(.subheadline)
-            .foregroundColor(Theme.Semantic.bad)
-    }
+    private func errorLabel(_ message: String) -> some View { HSErrorLabel(message: message) }
 }

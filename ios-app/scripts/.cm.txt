@@ -1,0 +1,10 @@
+design: extract shared HSSectionCard + HSErrorLabel (one card/error style)
+
+The titled raised section card was copy-pasted byte-for-byte into four views
+(Ops, Fleet, FleetControl, Autodown) — one real definition now lives in
+Theme.swift as HSSectionCard, and those views' call sites + private funcs are
+repurposed. Also dedups the red inline error label (HSErrorLabel) across all
+six views that each carried an identical private errorLabel.
+
+Both new components use the scale (Theme.Spacing.sm, Theme.Corner.card) instead
+of the old raw `spacing: 10` / `cornerRadius: 12`. Builds clean.
