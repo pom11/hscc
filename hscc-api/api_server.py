@@ -576,6 +576,23 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
     # -- response helpers ---------------------------------------------------
 
     def _send_json(self, status: int, payload: dict):
+        # Binary escape hatch: a handler can serve raw bytes (not JSON) by
+        # returning {"__raw_bytes__": <bytes>, "__raw_content_type__": str}.
+        # Used by GET /v1/profile/export/{file} to download an exported
+        # archive. Kept out of the JSON envelope entirely so the bytes are
+        # delivered verbatim (no base64 inflation).
+        raw = payload.pop("__raw_bytes__", None) if isinstance(payload, dict) else None
+        if raw is not None:
+            content_type = payload.pop("__raw_content_type__", "application/octet-stream")
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            try:
+                self.wfile.write(raw)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
         data = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -639,4 +656,5 @@ import routes_autodown  # noqa: E402,F401  (registers /v1/autodown/*)
 import routes_ops  # noqa: E402,F401  (registers /v1/{verify,daemon/status,triggers,escalate,profiles,cluster/up,cluster/down})
 import routes_kanban  # noqa: E402,F401  (registers /v1/kanban/{blocked,blocked/{id}/recover,stale})
 import routes_template  # noqa: E402,F401  (registers /v1/template/{list,status,preview/{name}})
+import routes_profile  # noqa: E402,F401  (registers /v1/profile/{list,install,export,export/{file}})
 
