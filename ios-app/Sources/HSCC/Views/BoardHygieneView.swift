@@ -121,17 +121,8 @@ struct BoardHygieneView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(card.displayTitle)
                 .font(.body)
-            HStack(spacing: 6) {
-                if let board = card.board, !board.isEmpty {
-                    Text(board).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                }
-                if let assignee = card.assignee, !assignee.isEmpty {
-                    Text(assignee).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                }
-                if let age = card.age_days {
-                    Text("\(age)d").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                }
-            }
+            HSMetaLine([card.board, card.assignee,
+                        card.age_days.map { "\($0)d" }])
             if let kind = card.block_kind, !kind.isEmpty {
                 Label(kind, systemImage: "hand.raised.fill")
                     .font(.caption)
@@ -205,20 +196,8 @@ struct BoardHygieneView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(card.displayTitle)
                         .font(.body)
-                    HStack(spacing: 6) {
-                        if let board = card.board, !board.isEmpty {
-                            Text(board).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                        }
-                        if let status = card.status, !status.isEmpty {
-                            Text(status).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                        }
-                        if let assignee = card.assignee, !assignee.isEmpty {
-                            Text(assignee).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                        }
-                        if let age = card.age_days {
-                            Text("\(age)d old").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                        }
-                    }
+                    HSMetaLine([card.board, card.status, card.assignee,
+                                card.age_days.map { "\($0)d old" }])
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
