@@ -445,6 +445,45 @@ struct HSCCClient {
         try await get("/v1/profiles", as: ProfilesResponse.self)
     }
 
+    // MARK: - Profile editor (per-project profile read / edit)
+
+    /// GET /v1/profile/editor/{profile} — read a profile's editable fields.
+    ///
+    /// The per-project editor targets the orchestrator's `<project>-orch`
+    /// profile (the project's bot). Read-only (no `confirm`). The profile
+    /// name is URL-encoded so a slash can't break the path.
+    func profileEditor(profile: String) async throws -> ProfileEditorResponse {
+        let encoded = profile.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+            ?? profile
+        return try await get("/v1/profile/editor/\(encoded)", as: ProfileEditorResponse.self)
+    }
+
+    /// POST /v1/profile/editor/{profile} — edit a profile's editable fields.
+    ///
+    /// Body: `{ model?, provider?, toolsets?, preload_skills?, description?,
+    /// compression?, confirm: true }`. Only supplied fields are written; the
+    /// rest of each YAML file is preserved verbatim. Confirm-gated — the
+    /// editor passes `confirm: true` only after the operator hits save.
+    func updateProfile(_ profile: String,
+                       model: String? = nil,
+                       provider: String? = nil,
+                       toolsets: [String]? = nil,
+                       preloadSkills: [String]? = nil,
+                       description: String? = nil,
+                       compression: [String: Any]? = nil) async throws -> ProfileEditorResponse {
+        let encoded = profile.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+            ?? profile
+        var body: [String: Any] = ["confirm": true]
+        if let model { body["model"] = model }
+        if let provider { body["provider"] = provider }
+        if let toolsets { body["toolsets"] = toolsets }
+        if let preloadSkills { body["preload_skills"] = preloadSkills }
+        if let description { body["description"] = description }
+        if let compression { body["compression"] = compression }
+        return try await post("/v1/profile/editor/\(encoded)", body: body,
+                              as: ProfileEditorResponse.self)
+    }
+
     // MARK: - Sessions manager (list / retire / compact)
 
     /// GET /v1/sessions?profile=<name> — a profile's sessions with message
