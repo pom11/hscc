@@ -743,6 +743,33 @@ struct ProfilesResponse: Decodable, Speakable {
     let speak: String
 }
 
+// MARK: - Profile editor (per-project profile read / edit)
+
+/// GET/POST /v1/profile/editor/{profile} — a profile's editable surface.
+///
+/// The per-project editor targets the orchestrator's `<project>-orch` profile
+/// (the project's bot). Shape: `{ profile, model, provider, toolsets,
+/// preload_skills, description, compression {threshold, threshold_tokens},
+/// toolsets_all, skills_all, speak }` plus `updated` on a successful POST.
+struct ProfileCompression: Decodable, Equatable {
+    let threshold: Double?
+    let threshold_tokens: Int?
+}
+
+struct ProfileEditorResponse: Decodable, Speakable {
+    let profile: String?
+    let model: String?
+    let provider: String?
+    let toolsets: [String]?
+    let preload_skills: [String]?
+    let description: String?
+    let compression: ProfileCompression?
+    let toolsets_all: [String]?
+    let skills_all: [String]?
+    let updated: [String]?
+    let speak: String
+}
+
 // MARK: - Board hygiene (blocked / recover / stale)
 
 /// GET /v1/kanban/blocked — one blocked card.
