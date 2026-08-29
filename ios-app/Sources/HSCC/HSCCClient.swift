@@ -425,6 +425,21 @@ struct HSCCClient {
         try await get("/v1/escalate", as: EscalationsResponse.self)
     }
 
+    /// POST /v1/triggers/run — force re-evaluate all trigger rules now.
+    /// Body: `{ confirm: true }`. Returns the fresh read state after the run.
+    func triggersRun() async throws -> TriggersResponse {
+        try await post("/v1/triggers/run", body: ["confirm": true],
+                       as: TriggersResponse.self)
+    }
+
+    /// POST /v1/escalate — actually perform pending failure escalations
+    /// (reassign + notify), not the read-only dry-run.
+    /// Body: `{ confirm: true }`. Returns the actions taken.
+    func escalateRun() async throws -> EscalationsResponse {
+        try await post("/v1/escalate", body: ["confirm": true],
+                       as: EscalationsResponse.self)
+    }
+
     /// GET /v1/profiles — running task counts per profile.
     func profiles() async throws -> ProfilesResponse {
         try await get("/v1/profiles", as: ProfilesResponse.self)

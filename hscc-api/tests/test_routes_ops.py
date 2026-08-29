@@ -31,6 +31,8 @@ def fakes(monkeypatch):
     state = {
         "up_calls": [],
         "down_calls": [],
+        "triggers_run_calls": [],
+        "escalate_run_calls": [],
     }
     b = {
         "verify": lambda: {
@@ -51,10 +53,25 @@ def fakes(monkeypatch):
             "last_run": {"actions_fired": 1},
             "recent_events": [],
         },
+        "triggers_run": lambda: (
+            state["triggers_run_calls"].append(True)
+            or {
+                "rules": [{"id": "r1", "trigger_type": "notify", "enabled": True}],
+                "last_run": {"actions_fired": 2, "timestamp": "t"},
+                "recent_events": [{"event": "run"}],
+            }
+        ),
         "escalate": lambda: [
             {"task": "t_abc", "action": "escalate", "to": "architect",
              "category": "test-failure"},
         ],
+        "escalate_run": lambda: (
+            state["escalate_run_calls"].append(True)
+            or [
+                {"task": "t_abc", "action": "reassign", "to": "architect",
+                 "category": "test-failure", "notified": True},
+            ]
+        ),
         "profiles": lambda: {
             "counts": {"researcher-a": 2, "architect": 1},
             "total_running": 3,
@@ -305,6 +322,81 @@ def test_cluster_down_auth_401(running, fakes):
 
 
 # --------------------------------------------------------------------------- #
+# POST /v1/triggers/run (confirm-gated)
+# --------------------------------------------------------------------------- #
+
+def test_triggers_run_missing_confirm_409_no_backing(running, token, fakes):
+    status, payload = _req(running, token, "/v1/triggers/run", body={},
+                           method="POST")
+    assert status == 409
+    assert payload["error"]["code"] == "confirm_required"
+    assert fakes["triggers_run_calls"] == []
+
+
+def test_triggers_run_confirm_true_backs(running, token, fakes):
+    status, payload = _req(running, token, "/v1/triggers/run",
+                           body={"confirm": True}, method="POST")
+    assert status == 200
+    assert payload["last_run"]["actions_fired"] == 2
+    assert payload["recent_events"] == [{"event": "run"}]
+    assert payload["speak"]
+    assert fakes["triggers_run_calls"] == [True]
+
+
+def test_triggers_run_failure_non2xx(running, token, fakes, monkeypatch):
+    _install(monkeypatch, {"triggers_run": lambda: None})
+    status, payload = _req(running, token, "/v1/triggers/run",
+                           body={"confirm": True}, method="POST")
+    assert status == 502
+    assert payload["error"]["code"] == "triggers_run_failed"
+
+
+def test_triggers_run_auth_401(running, fakes):
+    status, payload = _req(running, None, "/v1/triggers/run",
+                           body={"confirm": True}, method="POST")
+    assert status == 401
+    assert fakes["triggers_run_calls"] == []
+
+
+# --------------------------------------------------------------------------- #
+# POST /v1/escalate (confirm-gated)
+# --------------------------------------------------------------------------- #
+
+def test_escalate_run_missing_confirm_409_no_backing(running, token, fakes):
+    status, payload = _req(running, token, "/v1/escalate", body={},
+                           method="POST")
+    assert status == 409
+    assert payload["error"]["code"] == "confirm_required"
+    assert fakes["escalate_run_calls"] == []
+
+
+def test_escalate_run_confirm_true_backs(running, token, fakes):
+    status, payload = _req(running, token, "/v1/escalate",
+                           body={"confirm": True}, method="POST")
+    assert status == 200
+    assert payload["count"] == 1
+    assert payload["performed"] is True
+    assert payload["escalations"][0]["action"] == "reassign"
+    assert payload["speak"]
+    assert fakes["escalate_run_calls"] == [True]
+
+
+def test_escalate_run_failure_non2xx(running, token, fakes, monkeypatch):
+    _install(monkeypatch, {"escalate_run": lambda: "boom"})
+    status, payload = _req(running, token, "/v1/escalate",
+                           body={"confirm": True}, method="POST")
+    assert status == 502
+    assert payload["error"]["code"] == "escalate_failed"
+
+
+def test_escalate_run_auth_401(running, fakes):
+    status, payload = _req(running, None, "/v1/escalate",
+                           body={"confirm": True}, method="POST")
+    assert status == 401
+    assert fakes["escalate_run_calls"] == []
+
+
+# --------------------------------------------------------------------------- #
 # cluster up/down are POST-only
 # --------------------------------------------------------------------------- #
 
@@ -315,3 +407,17 @@ def test_cluster_up_down_not_reachable_via_get(running, token, fakes):
         assert payload["error"]["code"] == "method_not_allowed"
     assert fakes["up_calls"] == []
     assert fakes["down_calls"] == []
+
+
+# --------------------------------------------------------------------------- #
+# triggers/run + escalate are POST-only for the mutating path
+# --------------------------------------------------------------------------- #
+
+def test_triggers_run_escalate_run_not_reachable_via_get(running, token, fakes):
+    # GET /v1/triggers and GET /v1/escalate are the read endpoints; the
+    # mutating POST paths must reject GET (a GET must never trigger work).
+    status, payload = _req(running, token, "/v1/triggers/run", method="GET")
+    assert status == 405
+    assert payload["error"]["code"] == "method_not_allowed"
+    assert fakes["triggers_run_calls"] == []
+

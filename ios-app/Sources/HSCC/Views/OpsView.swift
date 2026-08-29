@@ -6,8 +6,10 @@ import SwiftUI
 /// health stream, trigger rules + last run, pending escalations, and profile
 /// task counts. Each read is its own section with its own `LoadState`, so one
 /// degraded endpoint never blanks the rest. Errors surface the real message.
-/// READ-ONLY: no mutations here (fleet up/down + template apply live in
-/// FleetControlView; autodown controls live in AutodownView).
+/// Fleet-wide mutations live in FleetControlView and autodown controls in
+/// AutodownView; this view hosts the operator's trigger/escalation actions —
+/// "run triggers now" and "perform escalations" — both confirm-gated via
+/// `MutationButton`. A tap never fires a request by itself.
 struct OpsView: View {
     let client: HSCCClient?
 
@@ -20,12 +22,12 @@ struct OpsView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                if client != nil {
+                if let client {
                     VStack(alignment: .leading, spacing: 16) {
                         verifySection
                         daemonSection
-                        triggersSection
-                        escalateSection
+                        triggersSection(client: client)
+                        escalateSection(client: client)
                         profilesSection
                     }
                     .padding()
@@ -202,7 +204,7 @@ struct OpsView: View {
     // MARK: - Triggers
 
     @ViewBuilder
-    private var triggersSection: some View {
+    private func triggersSection(client: HSCCClient) -> some View {
         HSSectionCard(title: "Triggers", systemImage: "bolt") {
             switch triggers {
             case .loading:
@@ -248,6 +250,22 @@ struct OpsView: View {
                             .padding(.vertical, 2)
                         }
                     }
+                    // Operator action: force a trigger-engine run now instead
+                    // of waiting for the daemon's periodic cycle. Confirm-gated
+                    // because enabled rules may fire notify / auto_restart /
+                    // block_pipeline actions immediately.
+                    Divider()
+                    MutationButton(
+                        title: "Run Triggers Now",
+                        systemImage: "bolt.circle",
+                        destructive: false,
+                        prompt: "Re-evaluate all trigger rules now? Enabled rules may fire actions (notify, auto-restart, block pipeline) immediately instead of waiting for the daemon's next cycle.",
+                        run: {
+                            let result = try await client.triggersRun()
+                            triggers = .loaded(result)
+                            return result.speak.isEmpty ? "Trigger engine run." : result.speak
+                        }
+                    )
                 }
             default:
                 EmptyView()
@@ -258,7 +276,7 @@ struct OpsView: View {
     // MARK: - Escalations
 
     @ViewBuilder
-    private var escalateSection: some View {
+    private func escalateSection(client: HSCCClient) -> some View {
         HSSectionCard(title: "Escalations", systemImage: "arrow.up.right.circle") {
             switch escalations {
             case .loading:
@@ -278,6 +296,22 @@ struct OpsView: View {
                                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
                         }
                     }
+                    // Operator action: actually perform the pending failure
+                    // escalations (reassign to the strong tier + notify a
+                    // human), rather than the read-only dry-run the GET shows.
+                    // Confirm-gated — this mutates tasks and notifies humans.
+                    Divider()
+                    MutationButton(
+                        title: "Perform Escalations",
+                        systemImage: "arrow.up.right.circle.fill",
+                        destructive: true,
+                        prompt: "Run pending escalations for real now? This reassigns repeatedly-failing tasks to the strong tier and notifies a human for each one — it is not a dry run.",
+                        run: {
+                            let result = try await client.escalateRun()
+                            escalations = .loaded(result)
+                            return result.speak.isEmpty ? "Escalations run." : result.speak
+                        }
+                    )
                 }
             default:
                 EmptyView()
