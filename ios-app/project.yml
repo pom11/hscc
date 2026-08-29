@@ -95,6 +95,7 @@ targets:
       - path: Sources/HSCC/Views/TemplateTopologyView.swift
       - path: Sources/HSCC/Views/SearchView.swift
       - path: Sources/HSCC/Views/SessionsView.swift
+      - path: Sources/HSCC/Views/ActivityFeedView.swift
       - path: Sources/HSCC/Views/MemoryView.swift
       - path: Sources/HSCC/Intents/IntentClient.swift
       - path: Sources/HSCC/Intents/ClusterStatusIntent.swift

@@ -217,6 +217,10 @@ struct ClusterView: View {
                    subtitle: "what a profile remembers — correct or delete one") {
                 MemoryView(client: client)
             }
+            hubRow("Activity", systemImage: "waveform.path.ecg",
+                   subtitle: "live feed — who is running, which tool, on which card") {
+                ActivityFeedView(client: client)
+            }
         }
     }
 
