@@ -345,6 +345,29 @@ def ahead_of_upstream(repo, branch, _run: Optional[Callable] = None) -> int:
     return commits_ahead(repo, branch, base=upstream, _run=_run)
 
 
+def behind_of_upstream(repo, branch, _run: Optional[Callable] = None) -> int:
+    """Commits on ``branch``'s upstream that are not yet on ``branch``.
+
+    The sync signal: how many commits the remote tracking branch has that the
+    local branch is missing (i.e. how far local is BEHIND the remote). 0 means
+    up to date (or no upstream / non-repo — the safe no-data reading is
+    \"nothing to pull\"). Computed as ``git rev-list --count <branch>..<upstream>``
+    (the mirror of ``commits_ahead``, which counts the other direction).
+    """
+    upstream = upstream_of(repo, branch, _run)
+    if not upstream:
+        return 0
+    cp = _dispatch(
+        ["git", "rev-list", "--count", "{}..{}".format(branch, upstream)], repo, _run
+    )
+    if cp.returncode != 0:
+        return 0
+    try:
+        return int(cp.stdout.strip())
+    except ValueError:
+        return 0
+
+
 def fetch(repo, _run: Optional[Callable] = None):
     """Run ``git fetch --prune origin``; return ``(ok: bool, detail: str)``.
 
