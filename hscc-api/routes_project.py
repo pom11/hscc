@@ -44,9 +44,15 @@ from flightdeck.core import kanban as _kanban            # noqa: E402
 from flightdeck.core import registry as _registry        # noqa: E402
 from flightdeck.core import review as _review_core       # noqa: E402
 from flightdeck.core import git_state as _git_state      # noqa: E402
+from flightdeck.core import release as _release_core     # noqa: E402
+from flightdeck.core import roadmap as _roadmap_core     # noqa: E402
 from flightdeck.commands import review as _review_cmd    # noqa: E402
 from flightdeck.commands import qa as _qa_cmd            # noqa: E402
 from flightdeck.commands import standup as _standup_cmd  # noqa: E402
+from flightdeck.commands import roadmap as _roadmap_cmd  # noqa: E402
+from flightdeck.commands import metrics as _metrics_cmd  # noqa: E402
+from flightdeck.commands import hygiene as _hygiene_cmd  # noqa: E402
+from flightdeck.commands import why as _why_cmd          # noqa: E402
 
 from api_server import ApiError, ROUTES                  # noqa: E402
 
@@ -495,6 +501,428 @@ def handle_project_standup(server, ctx, query, body):
 
 
 # --------------------------------------------------------------------------- #
+# Why — one card's full story (kanban + git), the antidote to confident invention
+# --------------------------------------------------------------------------- #
+
+def _speak_why(data: dict) -> str:
+    """§B: lead with the verdict, the one line that says what's going on."""
+    verdict = data.get("verdict")
+    title = data.get("title")
+    if not verdict:
+        return f"No stance available for {title or 'this card'}."
+    return f"{title or 'This card'}: {verdict}"
+
+
+def handle_why(server, ctx, query, body):
+    """GET /v1/why/{card_id} — the card's full story (kanban + git facts).
+
+    Read-only assembly of ``flightdeck why``: identity, timing, branch,
+    workspace, commits and the one-line ``verdict`` on what would move the
+    card. The verdict is the "antidote to an agent that confidently invents
+    things" — every claim traces to a checked git fact or card event, never a
+    guess.
+    """
+    card_id = query.get("card_id")
+    if card_id is None or not str(card_id).strip():
+        raise ApiError(400, "bad_request", "missing card id")
+    registry_path = _registry_path(ctx)
+    try:
+        projects = _registry.load_registry(registry_path)
+    except Exception:
+        return 200, {"speak": "Card story unavailable."}
+    try:
+        story = _why_cmd.gather(str(card_id), projects)
+    except _why_cmd.UnknownCardError:
+        raise ApiError(
+            404, "not_found", f"no card with id {card_id!r}",
+            f"Card {card_id} was not found.",
+        )
+    except Exception:
+        return 200, {"speak": "Card story unavailable."}
+    payload = _why_cmd.render_json(story)
+    payload["speak"] = _speak_why(payload)
+    return 200, payload
+
+
+# --------------------------------------------------------------------------- #
+# Portfolio surfaces — project-scoped read endpoints (roadmap / incidents /
+# release / metrics / hygiene)
+# --------------------------------------------------------------------------- #
+
+def _resolve_project(name, registry_path):
+    """Resolve a single project by registry name, or raise the 404 ApiError."""
+    try:
+        projects = _registry.load_registry(registry_path)
+        proj = _registry.get_project(name, path=registry_path)
+        return projects, proj
+    except _registry.ProjectNotFoundError:
+        raise ApiError(
+            404, "not_found", f"no project named {name!r}",
+            f"Project {name} was not found.",
+        )
+
+
+def _speak_roadmap(data: dict) -> str:
+    """§B: project roadmap — milestones present/done summary."""
+    name = data.get("name") or "project"
+    if not data.get("present"):
+        return f"{name} has no roadmap."
+    sections = data.get("milestones") or {}
+    built = []
+    for sec, ms in sections.items():
+        if ms.get("total"):
+            built.append(f"{sec} {ms.get('done', 0)}/{ms.get('total', 0)}")
+    return f"{name} roadmap: " + (", ".join(built) if built else "no items yet.")
+
+
+def handle_project_roadmap(server, ctx, query, body):
+    """GET /v1/projects/{name}/roadmap — the project's ROADMAP.md milestones.
+
+    Surfaces the show view (Now/Next/Later checklist items with done/total) via
+    ``roadmap.parse_roadmap``. Read-only; a missing ROADMAP.md reports
+    ``present:false`` rather than an error.
+    """
+    name = query.get("name")
+    if name is None or not str(name).strip():
+        raise ApiError(400, "bad_request", "missing project name")
+    registry_path = _registry_path(ctx)
+    try:
+        _projects, proj = _resolve_project(name, registry_path)
+    except ApiError:
+        raise
+    except Exception:
+        return 200, {"speak": "Roadmap unavailable."}
+    try:
+        path = _roadmap_cmd._definite_path(proj)
+        r = _roadmap_core.parse_roadmap(path)
+    except Exception:
+        return 200, {"name": name, "present": False,
+                     "speak": "Roadmap unavailable."}
+    milestones = {}
+    if r.present:
+        for section in _roadmap_cmd._SECTION_HEADING.values():
+            m = r.milestone(section)
+            milestones[section] = {
+                "items": [
+                    {"text": it.text, "checked": it.checked}
+                    for it in (m.items if m else [])
+                ],
+                "done": m.done_count if m else 0,
+                "total": m.total if m else 0,
+            }
+    payload = {
+        "name": name,
+        "present": r.present,
+        "path": path,
+        "milestones": milestones,
+    }
+    payload["speak"] = _speak_roadmap(payload)
+    return 200, payload
+
+
+def _parse_incidents(text: str) -> list:
+    """Parse ``docs/INCIDENTS.md`` text into newest-first entry dicts.
+
+    Each entry is the ``## YYYY-MM-DD — heading`` block with the five ``**k:**``
+    fields. Entries are returned in file order (newest first, the file's own
+    convention). A block missing a field renders that field as ``""``; the file
+    header (text before the first ``## ``) is dropped.
+    """
+    entries = []
+    current = None
+    field_re = re.compile(r"^\*\*([^*]+):\*\*\s*(.*)$")
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if current is not None:
+                entries.append(current)
+            rest = line[3:].strip()
+            parts = rest.split("—", 1)
+            date = parts[0].strip()
+            heading = parts[1].strip() if len(parts) > 1 else ""
+            current = {
+                "date": date, "heading": heading, "project": "",
+                "symptom": "", "cause": "", "fix": "", "lesson": "",
+            }
+            continue
+        if current is None:
+            continue  # header block
+        m = field_re.match(line)
+        if m:
+            current[m.group(1).strip().lower()] = m.group(2).strip()
+    if current is not None:
+        entries.append(current)
+    return entries
+
+
+def _speak_incidents(data: dict) -> str:
+    """§B: project incidents — count of recorded lessons."""
+    name = data.get("name") or "project"
+    if not data.get("present"):
+        return f"{name} has no incident log."
+    n = len(data.get("incidents") or [])
+    return f"{name}: {n} recorded incident{'s' if n != 1 else ''}."
+
+
+def handle_project_incidents(server, ctx, query, body):
+    """GET /v1/projects/{name}/incidents — the project's docs/INCIDENTS.md log.
+
+    Read-only parse of the newest-first lesson log into structured entries
+    (date, heading, symptom, cause, fix, lesson). A missing/unreadable log
+    reports ``present:false`` rather than an error.
+    """
+    name = query.get("name")
+    if name is None or not str(name).strip():
+        raise ApiError(400, "bad_request", "missing project name")
+    registry_path = _registry_path(ctx)
+    try:
+        _projects, proj = _resolve_project(name, registry_path)
+    except ApiError:
+        raise
+    except Exception:
+        return 200, {"speak": "Incidents unavailable."}
+    path = os.path.join(
+        getattr(proj, "repo", "") or "",
+        os.path.join("docs", "INCIDENTS.md"),
+    )
+    present = False
+    entries = []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+        entries = _parse_incidents(text)
+        present = True
+    except (OSError, IOError, UnicodeDecodeError):
+        present = False
+    payload = {"name": name, "present": present, "path": path,
+               "incidents": entries}
+    payload["speak"] = _speak_incidents(payload)
+    return 200, payload
+
+
+_RELEASE_PLAN_STEPS = [
+    "bump VERSION",
+    "commit the version bump",
+    "tag the release (annotated)",
+    "push the branch and tag",
+    "create the GitHub release",
+    "install the release",
+    "verify the installed version is live",
+]
+
+
+def _speak_release(data: dict) -> str:
+    """§B: release readiness — ready, or first blocker."""
+    name = data.get("name") or "project"
+    problems = data.get("problems") or []
+    if data.get("ready"):
+        return (f"{name} is release-ready for {data.get('version') or '?'}: "
+                f"{len(data.get('plan') or [])} dry-run steps would run.")
+    if problems:
+        return f"{name} is NOT release-ready for {data.get('version') or '?'}: {problems[0]['code']}."
+    return f"{name} release readiness unavailable."
+
+
+def handle_project_release(server, ctx, query, body):
+    """GET /v1/projects/{name}/release?version=X — dry-run release readiness.
+
+    Read-only: runs ``release.preconditions`` and reports every blocker plus
+    the ordered plan a real release would execute. Never applies, never mutates.
+    ``version`` is required (the target being checked); a missing version is a
+    400.
+    """
+    name = query.get("name")
+    version = query.get("version")
+    if name is None or not str(name).strip():
+        raise ApiError(400, "bad_request", "missing project name")
+    if version is None or not str(version).strip():
+        raise ApiError(400, "bad_request", "missing version")
+    registry_path = _registry_path(ctx)
+    try:
+        _projects, proj = _resolve_project(name, registry_path)
+    except ApiError:
+        raise
+    except Exception:
+        return 200, {"speak": "Release readiness unavailable."}
+    try:
+        problems = _release_core.preconditions(proj, str(version))
+    except Exception:
+        return 200, {"name": name, "ready": False, "problems": [],
+                     "speak": "Release readiness unavailable."}
+    payload = {
+        "name": name,
+        "version": str(version),
+        "ready": not problems,
+        "problems": [{"code": p.code, "message": p.message} for p in problems],
+        "plan": _RELEASE_PLAN_STEPS,
+    }
+    payload["speak"] = _speak_release(payload)
+    return 200, payload
+
+
+def _speak_metrics(data: dict) -> str:
+    """§B: metrics headline — reviewed/merged in the window."""
+    name = data.get("name") or "project"
+    if data.get("metrics") is None:
+        return f"{name} metrics unavailable."
+    m = data["metrics"]
+    return (f"{name}: {m.get('merged_count', 0)} merged, "
+            f"{m.get('reviewed', 0)} reviewed in the window.")
+
+
+def handle_project_metrics(server, ctx, query, body):
+    """GET /v1/projects/{name}/metrics — project-scoped quality metrics.
+
+    Read-only via ``metrics.gather(project=<name>)``: first-time-pass,
+    stalled rate, review latency, throughput and rework over the default 24h
+    window. An unknown project is a 404; degraded reads report honest None
+    figures rather than fabricated values.
+    """
+    name = query.get("name")
+    if name is None or not str(name).strip():
+        raise ApiError(400, "bad_request", "missing project name")
+    registry_path = _registry_path(ctx)
+    try:
+        projects, _proj = _resolve_project(name, registry_path)
+    except ApiError:
+        raise
+    except Exception:
+        return 200, {"speak": "Metrics unavailable."}
+    try:
+        now_ts = float(__import__("time").time())
+        since_ts = now_ts - _metrics_cmd.DEFAULT_SINCE_SECONDS
+        metrics_dict = _metrics_cmd.gather(
+            projects, since_ts=since_ts, now=now_ts, project=name,
+        )
+    except Exception:
+        return 200, {"name": name, "metrics": None,
+                     "speak": "Metrics unavailable."}
+    payload = {
+        "name": name,
+        "window_days": metrics_dict["window"]["days"],
+        "metrics": _metrics_cmd.render_json(metrics_dict),
+    }
+    payload["speak"] = _speak_metrics(payload)
+    payload["metrics"]["window"] = {
+        "since": metrics_dict["window"]["since"],
+        "now": metrics_dict["window"]["now"],
+        "days": metrics_dict["window"]["days"],
+    }
+    return 200, payload
+
+
+def _speak_hygiene(data: dict) -> str:
+    """§B: per-project hygiene — clean, or the issue count."""
+    name = data.get("name") or "project"
+    n = data.get("issue_count", 0)
+    if n == 0:
+        return f"{name} hygiene: clean."
+    return f"{name} hygiene: {n} issue{'s' if n != 1 else ''}."
+
+
+def handle_project_hygiene(server, ctx, query, body):
+    """GET /v1/projects/{name}/hygiene — board-decay findings for this project.
+
+    Read-only. Hygiene is detected board-wide (duplicate cards, triage traps,
+    stale worktrees), then filtered to this project by attributing each card to
+    a project via ``kanban.project_for_card`` and each stale worktree to the
+    repo it lives under. A fully clean project reports ``issue_count: 0``.
+    """
+    name = query.get("name")
+    if name is None or not str(name).strip():
+        raise ApiError(400, "bad_request", "missing project name")
+    registry_path = _registry_path(ctx)
+    try:
+        projects, _proj = _resolve_project(name, registry_path)
+    except ApiError:
+        raise
+    except Exception:
+        return 200, {"speak": "Hygiene unavailable."}
+    try:
+        all_cards = _kanban.list_cards(board=None, include_archived=True)
+        worktrees = _hygiene_cmd._collect_worktrees(projects)
+        active = [c for c in all_cards
+                  if str(c.get("status") or "") != "archived"]
+        closed_ids = {
+            c["id"] for c in all_cards
+            if str(c.get("status") or "") in _hygiene_cmd.hygiene.CLOSED_STATUSES
+        }
+        worktree_ids = {w["card_id"] for w in worktrees}
+        need_facts = (
+            {c["id"] for c in active
+             if str(c.get("status") or "") == _hygiene_cmd.hygiene.TRIAGE_STATUS}
+            | worktree_ids
+        )
+        git_facts = _hygiene_cmd._git_facts_for_cards(
+            all_cards, projects, card_ids=need_facts,
+        )
+        plan = _hygiene_cmd.hygiene.build_plan(
+            active, git_facts, worktrees, closed_ids,
+            threshold=_hygiene_cmd.hygiene.DEFAULT_SIMILARITY,
+        )
+    except Exception:
+        return 200, {"name": name, "issue_count": 0,
+                     "speak": "Hygiene unavailable."}
+
+    def _card_project(card_id, board=None):
+        for c in all_cards:
+            if c.get("id") == card_id:
+                try:
+                    p = _kanban.project_for_card(c, projects)
+                    if p is not _kanban.UNATTRIBUTED:
+                        return getattr(p, "name", None)
+                except Exception:
+                    return None
+                return None
+        return None
+
+    def _worktree_project(wt):
+        try:
+            for p in projects:
+                repo = getattr(p, "repo", None)
+                if repo and wt.get("worktree", "").startswith(
+                        repo + os.sep):
+                    return getattr(p, "name", None)
+            return None
+        except Exception:
+            return None
+
+    def _in_project(proj_name):
+        return proj_name is not None and proj_name == name
+
+    duplicates = [
+        {"board": d.get("board"), "title": d.get("title"),
+         "keep": d.get("keep", {}).get("id"),
+         "archive": [c["id"] for c in (d.get("archive") or [])]}
+        for d in plan["duplicates"]
+        if _in_project(_card_project(d.get("keep", {}).get("id")))
+    ]
+    triage = [
+        {"board": r["card"]["board"], "card_id": r["card"]["id"],
+         "title": r["card"]["title"], "branch": r["branch"],
+         "branch_has_work": r["branch_has_work"],
+         "commits_ahead": r["commits_ahead"]}
+        for r in plan["triage"]
+        if _in_project(_card_project(r["card"]["id"]))
+    ]
+    stale_worktrees = [
+        {"card_id": s["card_id"], "board": s["board"],
+         "worktree": s["worktree"]}
+        for s in plan["stale_worktrees"]
+        if _in_project(_worktree_project(s))
+    ]
+    payload = {
+        "name": name,
+        "present": True,
+        "duplicates": duplicates,
+        "triage": triage,
+        "stale_worktrees": stale_worktrees,
+        "issue_count": len(duplicates) + len(triage) + len(stale_worktrees),
+    }
+    payload["speak"] = _speak_hygiene(payload)
+    return 200, payload
+
+
+# --------------------------------------------------------------------------- #
 # Route registration
 # --------------------------------------------------------------------------- #
 
@@ -507,3 +935,9 @@ ROUTES.append(("GET", re.compile(r"^/v1/qa/queue$"), handle_qa_queue))
 ROUTES.append(("GET", re.compile(r"^/v1/projects$"), handle_projects))
 ROUTES.append(("GET", re.compile(r"^/v1/projects/(?P<name>[^/]+)$"), handle_project_detail))
 ROUTES.append(("GET", re.compile(r"^/v1/projects/(?P<name>[^/]+)/standup$"), handle_project_standup))
+ROUTES.append(("GET", re.compile(r"^/v1/why/(?P<card_id>[^/]+)$"), handle_why))
+ROUTES.append(("GET", re.compile(r"^/v1/projects/(?P<name>[^/]+)/roadmap$"), handle_project_roadmap))
+ROUTES.append(("GET", re.compile(r"^/v1/projects/(?P<name>[^/]+)/incidents$"), handle_project_incidents))
+ROUTES.append(("GET", re.compile(r"^/v1/projects/(?P<name>[^/]+)/release$"), handle_project_release))
+ROUTES.append(("GET", re.compile(r"^/v1/projects/(?P<name>[^/]+)/metrics$"), handle_project_metrics))
+ROUTES.append(("GET", re.compile(r"^/v1/projects/(?P<name>[^/]+)/hygiene$"), handle_project_hygiene))

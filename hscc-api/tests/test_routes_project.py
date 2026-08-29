@@ -83,6 +83,42 @@ def _project(name="hscc", repo="/tmp/repo", board="default"):
     return types.SimpleNamespace(name=name, repo=repo, board=board)
 
 
+def _why_story(card_id="t_abc123"):
+    return {
+        "id": card_id, "title": "Do a thing", "status": "running",
+        "assignee": "node", "board": "default", "project": "hscc",
+        "milestone": None, "created_at": 1000, "started_at": 1200,
+        "last_heartbeat_at": 1300, "status_duration_s": 300,
+        "branch": "wt/t_abc123", "branch_exists": True,
+        "commits": ["Add the thing"], "landed": False, "uncommitted": [],
+        "workspace_path": "/tmp/repo", "is_worktree": False,
+        "verdict": "in progress — keep going", "boards_searched": ["default"],
+    }
+
+
+def _roadmap_result(present=True):
+    def _milestone(name):
+        return _fake_module(
+            items=[_fake_module(text="Do it", checked=True),
+                   _fake_module(text="Later thing", checked=False)],
+            done_count=1, total=2, name=name, id=name.lower(),
+        )
+
+    return _fake_module(present=present, milestone=_milestone)
+
+
+def _metrics_dict():
+    return {
+        "window": {"since": 1000.0, "now": 1000.0 + 86400, "days": 1.0},
+        "reviewed": 3, "merged_count": 2,
+        "first_time_pass": {"n": 3, "count": 2, "rate": 0.67},
+        "started": 4, "stalled": {"n": 3, "count": 1, "rate": 0.33},
+        "review_latency": {"n": 3, "median": 60.0, "p90": 120.0},
+        "throughput": {"n": 2, "per_day": 2.0},
+        "rework": {"n": 3, "count": 1, "share": 0.33},
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Fixtures: a running server + full set of fakes
 # --------------------------------------------------------------------------- #
@@ -99,6 +135,7 @@ def fakes(monkeypatch):
             list_cards=lambda board=None, include_archived=False: [_card()],
             find_card=lambda cid: _card(cid=cid) if cid == "t_abc123" else None,
             project_for_card=lambda card, projects: _project(),
+            UNATTRIBUTED=object(),
         ),
         "_registry": _fake_module(
             load_registry=lambda path=None: [_project()],
@@ -169,6 +206,40 @@ def fakes(monkeypatch):
                                "added_at": "2026-08-20T00:00:00", "checked": False,
                                "checked_at": None}],
             },
+        ),
+        "_why_cmd": _fake_module(
+            gather=lambda card_id, projects: _why_story(card_id),
+            render_json=lambda story: story,
+            UnknownCardError=type("UnknownCardError", (Exception,), {}),
+        ),
+        "_roadmap_cmd": _fake_module(
+            _definite_path=lambda proj: "/tmp/repo/ROADMAP.md",
+            _SECTION_HEADING={"now": "Now", "next": "Next", "later": "Later"},
+        ),
+        "_roadmap_core": _fake_module(
+            parse_roadmap=lambda path: _roadmap_result(),
+        ),
+        "_release_core": _fake_module(
+            preconditions=lambda project, version: [],
+        ),
+        "_metrics_cmd": _fake_module(
+            DEFAULT_SINCE_SECONDS=86400,
+            gather=lambda projects, since_ts=None, now=None, project=None:
+                _metrics_dict(),
+            render_json=lambda d: d,
+        ),
+        "_hygiene_cmd": _fake_module(
+            _collect_worktrees=lambda projects: [],
+            hygiene=_fake_module(
+                CLOSED_STATUSES={"done", "archived", "cancelled"},
+                TRIAGE_STATUS="triage",
+                DEFAULT_SIMILARITY=0.88,
+                build_plan=lambda active, git_facts, worktrees, closed_ids,
+                                threshold=0.88: {
+                    "duplicates": [], "triage": [], "stale_worktrees": [],
+                },
+            ),
+            _git_facts_for_cards=lambda all_cards, projects, card_ids=None: {},
         ),
     }
     for name, fake in fd.items():
@@ -516,3 +587,300 @@ def test_projects_speak_pure_helpers():
     assert "2 running" in d and "3 open cards" in d
     s = routes_project._speak_project_standup({"needs_you": [], "running": [], "failing": []})
     assert s == "Nothing needs attention."
+
+
+# --------------------------------------------------------------------------- #
+# Portfolio: why / roadmap / incidents / release / metrics / hygiene
+# --------------------------------------------------------------------------- #
+
+def test_why_200_shape(running, token, fakes):
+    status, payload = _request(running, token, path="/v1/why/t_abc123")
+    assert status == 200
+    assert payload["id"] == "t_abc123"
+    assert payload["title"] == "Do a thing"
+    assert payload["verdict"]
+    assert isinstance(payload["speak"], str) and payload["speak"]
+    assert "in progress" in payload["speak"]
+
+
+def test_why_404_unknown_card(running, token, fakes, monkeypatch):
+    def raise_unknown(card_id, projects):
+        raise fakes["_why_cmd"].UnknownCardError("no card")
+    monkeypatch.setattr(fakes["_why_cmd"], "gather", raise_unknown)
+    status, payload = _request(running, token, path="/v1/why/ghost")
+    assert status == 404
+    assert payload["error"]["code"] == "not_found"
+
+
+def test_why_route_requires_card_id(running, token, fakes):
+    # A bare /v1/why/ (empty card id) matches no route -> 404 not_found.
+    status, payload = _request(running, token, path="/v1/why/")
+    assert status == 404
+    assert payload["error"]["code"] == "not_found"
+
+
+def test_why_degrades_on_backing_error(running, token, fakes, monkeypatch):
+    def boom(card_id, projects):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(fakes["_why_cmd"], "gather", boom)
+    status, payload = _request(running, token, path="/v1/why/t_abc123")
+    assert status == 200
+    assert "unavailable" in payload["speak"]
+
+
+def test_why_auth_401(running):
+    status, payload = _request(running, None, path="/v1/why/t_abc123")
+    assert status == 401
+
+
+def test_roadmap_200_shape(running, token, fakes):
+    status, payload = _request(running, token, path="/v1/projects/hscc/roadmap")
+    assert status == 200
+    assert payload["present"] is True
+    assert payload["name"] == "hscc"
+    ms = payload["milestones"]
+    assert "Now" in ms and "Next" in ms and "Later" in ms
+    assert ms["Now"]["done"] == 1 and ms["Now"]["total"] == 2
+    assert ms["Now"]["items"][0]["checked"] is True
+    assert isinstance(payload["speak"], str) and payload["speak"]
+
+
+def test_roadmap_missing_roadmap_present_false(running, token, fakes, monkeypatch):
+    monkeypatch.setattr(fakes["_roadmap_core"], "parse_roadmap",
+                        lambda path: _roadmap_result(present=False))
+    status, payload = _request(running, token, path="/v1/projects/hscc/roadmap")
+    assert status == 200
+    assert payload["present"] is False
+    assert "no roadmap" in payload["speak"]
+
+
+def test_roadmap_unknown_project_404(running, token, fakes, monkeypatch):
+    def raise_notfound(name, path=None):
+        raise fakes["_registry"].ProjectNotFoundError
+    monkeypatch.setattr(fakes["_registry"], "get_project", raise_notfound)
+    status, payload = _request(running, token, path="/v1/projects/ghost/roadmap")
+    assert status == 404
+    assert payload["error"]["code"] == "not_found"
+
+
+def test_incidents_200_shape(running, token, fakes, tmp_path, monkeypatch):
+    repo = str(tmp_path / "repo")
+    import os
+    os.makedirs(os.path.join(repo, "docs"), exist_ok=True)
+    with open(os.path.join(repo, "docs", "INCIDENTS.md"), "w") as fh:
+        fh.write(
+            "# Incidents\n\n"
+            "## 2026-08-20 — topic not mapped\n"
+            "**Project:** hscc\n"
+            "**Symptom:** out of memory\n"
+            "**Cause:** unbounded cache\n"
+            "**Fix:** ran topics bind\n"
+            "**Lesson:** always bind topics\n"
+        )
+    proj = types.SimpleNamespace(name="hscc", repo=repo, board="d")
+    monkeypatch.setattr(fakes["_registry"], "load_registry",
+                        lambda path=None: [proj])
+    monkeypatch.setattr(fakes["_registry"], "get_project",
+                        lambda name, path=None: proj)
+    status, payload = _request(running, token, path="/v1/projects/hscc/incidents")
+    assert status == 200
+    assert payload["present"] is True
+    entries = payload["incidents"]
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["date"] == "2026-08-20"
+    assert e["heading"] == "topic not mapped"
+    assert e["project"] == "hscc"
+    assert e["cause"] == "unbounded cache"
+    assert e["lesson"] == "always bind topics"
+    assert isinstance(payload["speak"], str) and payload["speak"]
+
+
+def test_incidents_parse_pure():
+    text = (
+        "# Incidents\n\n"
+        "## 2026-08-20 — thing broke\n"
+        "**Project:** hscc\n"
+        "**Symptom:** crash\n"
+        "**Cause:** x\n"
+        "**Fix:** y\n"
+        "**Lesson:** z\n"
+    )
+    entries = routes_project._parse_incidents(text)
+    assert len(entries) == 1
+    assert entries[0]["date"] == "2026-08-20"
+    assert entries[0]["heading"] == "thing broke"
+    assert entries[0]["lesson"] == "z"
+
+
+def test_incidents_missing_log_present_false(running, token, fakes, tmp_path):
+    import os
+    proj = types.SimpleNamespace(name="hscc", repo=str(tmp_path / "norepo"),
+                                 board="d")
+    # default fakes load_registry returns [_project()] with repo /tmp/repo (no file) -> present False
+    status, payload = _request(running, token, path="/v1/projects/hscc/incidents")
+    assert status == 200
+    assert payload["present"] is False
+    assert payload["incidents"] == []
+    assert "no incident" in payload["speak"] or "0" in payload["speak"]
+
+
+def test_release_ready_200(running, token, fakes):
+    status, payload = _request(running, token,
+                               path="/v1/projects/hscc/release?version=1.5.0")
+    assert status == 200
+    assert payload["ready"] is True
+    assert payload["version"] == "1.5.0"
+    assert len(payload["plan"]) == 7
+    assert isinstance(payload["speak"], str) and payload["speak"]
+    assert "release-ready" in payload["speak"]
+
+
+def test_release_blocked_200(running, token, fakes, monkeypatch):
+    monkeypatch.setattr(
+        fakes["_release_core"], "preconditions",
+        lambda project, version: [
+            types.SimpleNamespace(code="dirty", message="tree is dirty"),
+            types.SimpleNamespace(code="wrong-branch", message="on feature"),
+        ],
+    )
+    status, payload = _request(running, token,
+                               path="/v1/projects/hscc/release?version=1.5.0")
+    assert status == 200
+    assert payload["ready"] is False
+    assert [p["code"] for p in payload["problems"]] == ["dirty", "wrong-branch"]
+    assert isinstance(payload["speak"], str) and "NOT release-ready" in payload["speak"]
+
+
+def test_release_missing_version_400(running, token, fakes):
+    status, payload = _request(running, token, path="/v1/projects/hscc/release")
+    assert status == 400
+    assert payload["error"]["code"] == "bad_request"
+
+
+def test_release_unknown_project_404(running, token, fakes, monkeypatch):
+    def raise_notfound(name, path=None):
+        raise fakes["_registry"].ProjectNotFoundError
+    monkeypatch.setattr(fakes["_registry"], "get_project", raise_notfound)
+    status, payload = _request(running, token,
+                               path="/v1/projects/ghost/release?version=1.0")
+    assert status == 404
+    assert payload["error"]["code"] == "not_found"
+
+
+def test_metrics_200_shape(running, token, fakes):
+    status, payload = _request(running, token, path="/v1/projects/hscc/metrics")
+    assert status == 200
+    assert payload["name"] == "hscc"
+    m = payload["metrics"]
+    assert m["merged_count"] == 2
+    assert m["reviewed"] == 3
+    assert m["first_time_pass"]["rate"] == 0.67
+    assert m["window"]["days"] == 1.0
+    assert isinstance(payload["speak"], str) and "2 merged" in payload["speak"]
+
+
+def test_metrics_degrades_on_backing_error(running, token, fakes, monkeypatch):
+    def boom(projects, since_ts=None, now=None, project=None):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(fakes["_metrics_cmd"], "gather", boom)
+    status, payload = _request(running, token, path="/v1/projects/hscc/metrics")
+    assert status == 200
+    assert payload["metrics"] is None
+    assert "unavailable" in payload["speak"]
+
+
+def test_metrics_unknown_project_404(running, token, fakes, monkeypatch):
+    def raise_notfound(name, path=None):
+        raise fakes["_registry"].ProjectNotFoundError
+    monkeypatch.setattr(fakes["_registry"], "get_project", raise_notfound)
+    status, payload = _request(running, token, path="/v1/projects/ghost/metrics")
+    assert status == 404
+    assert payload["error"]["code"] == "not_found"
+
+
+def test_hygiene_clean_200(running, token, fakes):
+    status, payload = _request(running, token, path="/v1/projects/hscc/hygiene")
+    assert status == 200
+    assert payload["name"] == "hscc"
+    assert payload["duplicates"] == [] and payload["triage"] == []
+    assert payload["stale_worktrees"] == []
+    assert payload["issue_count"] == 0
+    assert "clean" in payload["speak"]
+
+
+def test_hygiene_with_issues_filters_to_project(running, token, fakes,
+                                                monkeypatch):
+    # Duplicate: keep card belongs to hscc -> included; a keep card that is
+    # unattributed (project_for_card returns None) -> dropped.
+    dups = [
+        {"keep": {"id": "t_keep1"}, "board": "default", "title": "Dup thing",
+         "archive": [{"id": "t_dup2"}]},
+        {"keep": {"id": "t_loner"}, "board": "x", "title": "Other",
+         "archive": []},
+    ]
+    triage = [
+        {"card": {"id": "t_tr1", "board": "default", "title": "Trap"},
+         "branch": "wt/t_tr1", "branch_has_work": True, "commits_ahead": 2},
+    ]
+    stale = [
+        {"card_id": "t_st1", "board": "default",
+         "worktree": "/tmp/repo/.worktrees/t_st1"},
+        {"card_id": "t_st2", "board": "x",
+         "worktree": "/tmp/other/.worktrees/t_st2"},
+    ]
+    monkeypatch.setattr(
+        fakes["_hygiene_cmd"].hygiene, "build_plan",
+        lambda active, git_facts, worktrees, closed_ids, threshold=0.88: {
+            "duplicates": dups, "triage": triage, "stale_worktrees": stale,
+        },
+    )
+    # project_for_card returns hscc for the cards we care about, but None for
+    # the "loner" so its duplicate is filtered out.
+    def pfc(card, projects):
+        if card.get("id") in ("t_keep1", "t_tr1"):
+            return _project()
+        return None  # unattributed
+    monkeypatch.setattr(fakes["_kanban"], "project_for_card", pfc)
+    # list_cards must surface the cards the handler attributes back to a project.
+    def lc(board=None, include_archived=False):
+        return [
+            {"id": "t_keep1", "board": "default", "status": "running"},
+            {"id": "t_tr1", "board": "default", "status": "triage"},
+            {"id": "t_st1", "board": "default", "status": "done"},
+            {"id": "t_st2", "board": "x", "status": "done"},
+            {"id": "t_loner", "board": "x", "status": "running"},
+        ]
+    monkeypatch.setattr(fakes["_kanban"], "list_cards", lc)
+    monkeypatch.setattr(fakes["_hygiene_cmd"], "_collect_worktrees",
+                        lambda projects: stale)
+    status, payload = _request(running, token, path="/v1/projects/hscc/hygiene")
+    assert status == 200
+    assert len(payload["duplicates"]) == 1
+    assert payload["duplicates"][0]["keep"] == "t_keep1"
+    assert len(payload["triage"]) == 1
+    assert payload["triage"][0]["card_id"] == "t_tr1"
+    # stale worktree under /tmp/repo (hscc) included; under /tmp/other excluded
+    assert len(payload["stale_worktrees"]) == 1
+    assert payload["stale_worktrees"][0]["card_id"] == "t_st1"
+    assert payload["issue_count"] == 3
+    assert isinstance(payload["speak"], str) and "3" in payload["speak"]
+
+
+def test_hygiene_degrades_on_backing_error(running, token, fakes, monkeypatch):
+    def boom(board=None, include_archived=True):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(fakes["_kanban"], "list_cards", boom)
+    status, payload = _request(running, token, path="/v1/projects/hscc/hygiene")
+    assert status == 200
+    assert payload["issue_count"] == 0
+    assert "unavailable" in payload["speak"]
+
+
+def test_portfolio_auth_401(running):
+    for path in ("/v1/projects/hscc/roadmap", "/v1/projects/hscc/incidents",
+                 "/v1/projects/hscc/release?version=1.0",
+                 "/v1/projects/hscc/metrics", "/v1/projects/hscc/hygiene"):
+        status, payload = _request(running, None, path=path)
+        assert status == 401
+
