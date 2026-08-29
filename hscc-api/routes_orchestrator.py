@@ -91,11 +91,14 @@ shapes so a legitimate reply that merely looks like a warning is never stripped.
 """
 from __future__ import annotations
 
+import base64
 import itertools
 import logging
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -207,7 +210,8 @@ def _backing_resolve(project, registry_path):
     return resolve_orchestrator(project, path=registry_path)
 
 
-def _backing_invoke(profile, session, prompt, timeout=_DEFAULT_TIMEOUT):
+def _backing_invoke(profile, session, prompt, timeout=_DEFAULT_TIMEOUT,
+                    image_data=None, image_mime=None):
     """Send a prompt to an orchestrator and return its reply.
 
     The transport: shell Hermes headlessly as the orchestrator profile, in the
@@ -223,6 +227,12 @@ def _backing_invoke(profile, session, prompt, timeout=_DEFAULT_TIMEOUT):
     analog). Quiet mode (``-Q``) keeps status/banner lines on stderr so stdout
     is machine-readable.
 
+    When ``image_data`` (raw bytes) + ``image_mime`` are supplied (t_a779c06f),
+    the bytes are written to a temp file and passed as ``--image <path>`` so the
+    orchestrator can SEE the attached screenshot/photo. The temp file is always
+    removed afterwards (try/finally) — even on failure — so a background job
+    never leaks a copy of the image on disk.
+
     Returns ``(reply_text, profile, session)``. Raises:
       * ``_OrchestratorTimeout`` when the reply exceeds ``timeout``;
       * ``_OrchestratorUnavailable`` when the profile/session cannot be
@@ -232,7 +242,19 @@ def _backing_invoke(profile, session, prompt, timeout=_DEFAULT_TIMEOUT):
     """
     argv = ["hermes", "-p", profile, "chat", "-Q", "--continue", session,
             "-q", prompt]
+    tmp_path = None
     try:
+        if image_data is not None:
+            # Write the decoded attachment to a temp file so `--image` has a
+            # real path for hermes to read. Keep the suffix aligned with the
+            # MIME so the model / downstream decode sees a correct extension.
+            tmp_path = tempfile.mkstemp(
+                prefix="hscc-chat-", suffix=_image_suffix(image_mime)
+            )[1]
+            with open(tmp_path, "wb") as f:
+                f.write(image_data)
+            argv += ["--image", tmp_path]
+
         proc = subprocess.run(
             argv, capture_output=True, text=True, timeout=timeout,
         )
@@ -244,6 +266,12 @@ def _backing_invoke(profile, session, prompt, timeout=_DEFAULT_TIMEOUT):
         raise _OrchestratorUnavailable(
             f"cannot invoke `hermes`: {exc!r}"
         )
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass   # best-effort cleanup; never mask the real outcome
 
     err = (proc.stderr or "").strip()
     # A clean "no such session yet" failure — the orchestrator's named session
@@ -1023,7 +1051,8 @@ class _ChatJob:
     }
 
     def __init__(self, job_id, project, profile, session, prompt,
-                 timeout=_DEFAULT_TIMEOUT, notice=None):
+                 timeout=_DEFAULT_TIMEOUT, notice=None,
+                 image_data=None, image_mime=None):
         self.job_id = job_id
         self.project = project
         self.profile = profile
@@ -1031,6 +1060,11 @@ class _ChatJob:
         self.prompt = prompt
         self.timeout = timeout
         self.notice = notice   # optional honest busy-notice (Bug 1, t_5ed5dfa8)
+        # Optional decoded image attachment (t_a779c06f). Neither is set for a
+        # plain chat; when present, _run_job forwards both to _backing_invoke so
+        # it can pass `--image <file>` to `hermes chat`.
+        self.image_data = image_data
+        self.image_mime = image_mime
         self.submitted_at = time.time()
         self.finished_at: float | None = None
         self.lock = threading.Lock()
@@ -1078,7 +1112,7 @@ def _reap_jobs():
 
 
 def _new_job(project, profile, session, prompt, timeout=_DEFAULT_TIMEOUT,
-             notice=None) -> _ChatJob:
+             notice=None, image_data=None, image_mime=None) -> _ChatJob:
     """Create (and store) a queued job under the store lock.
 
     Also runs the opportunistic :func:`_reap_jobs` so every submission pays
@@ -1087,12 +1121,17 @@ def _new_job(project, profile, session, prompt, timeout=_DEFAULT_TIMEOUT,
     ever removed terminal jobs). ``notice`` (optional) is an honest busy-notice
     carried on the job (Bug 1, t_5ed5dfa8) so a later poll still explains why
     the orchestrator was slow.
+
+    ``image_data`` (raw bytes) + ``image_mime`` are the optional decoded image
+    attachment carried on the job (t_a779c06f) and forwarded to the transport
+    when the job runs. Both are ``None`` for the common plain-text chat path.
     """
     with _jobs_lock:
         _reap_jobs()
         job_id = f"chat-{next(_job_ids)}"
         job = _ChatJob(job_id, project, profile, session, prompt, timeout=timeout,
-                       notice=notice)
+                       notice=notice, image_data=image_data,
+                       image_mime=image_mime)
         _jobs[job_id] = job
     return job
 
@@ -1162,6 +1201,7 @@ def _run_job(job: _ChatJob):
     try:
         reply, profile, session = _backing_invoke(
             job.profile, job.session, job.prompt, timeout=job.timeout,
+            image_data=job.image_data, image_mime=job.image_mime,
         )
     except _OrchestratorTimeout as exc:
         _finish_job_error(job, "timeout", str(exc))
@@ -1237,6 +1277,77 @@ def _validate_prompt(data: dict) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Image attachment (t_a779c06f) — optional base64-in-JSON support
+# --------------------------------------------------------------------------- #
+
+# Decoded-size cap for an attached image. The operator may attach a
+# screenshot/photo to a chat message; we bound it so a misbehaving client can't
+# push an unbounded blob (and so the file hermes reads into context stays sane).
+_MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20 MiB decoded cap
+
+
+def _validate_image(data: dict):
+    """Pull + validate the optional image attachment from a chat POST body.
+
+    The client may attach an image to a chat message as ``image_data`` (base64)
+    + ``image_mime``. Both must come together. Returns
+    ``(raw_bytes, normalized_mime)`` on success, or ``None`` when no image was
+    supplied. Raises ``ApiError(400, bad_request)`` on a malformed,
+    non-image-typed, or oversized attachment.
+    """
+    if "image_data" not in data and "image_mime" not in data:
+        return None            # no attachment — the common (plain chat) path
+    if "image_data" not in data or "image_mime" not in data:
+        raise ApiError(400, "bad_request",
+                       "'image_data' and 'image_mime' must be supplied together",
+                       "Image attachment is incomplete.")
+    b64 = data.get("image_data")
+    mime = data.get("image_mime")
+    if not isinstance(b64, str) or not isinstance(mime, str):
+        raise ApiError(400, "bad_request",
+                       "'image_data' must be a base64 string and 'image_mime' "
+                       "a string",
+                       "Image attachment is malformed.")
+    try:
+        raw = base64.b64decode(b64, validate=True)
+    except Exception:
+        raise ApiError(400, "bad_request", "'image_data' is not valid base64",
+                       "Image attachment could not be decoded.")
+    if not raw:
+        raise ApiError(400, "bad_request", "the image is empty",
+                       "Image attachment is empty.")
+    if len(raw) > _MAX_IMAGE_BYTES:
+        raise ApiError(400, "bad_request",
+                       f"image exceeds the {_MAX_IMAGE_BYTES // (1024 * 1024)} "
+                       "MiB decoded limit",
+                       "Image attachment is too large.")
+    mime = mime.lower()
+    if not mime.startswith("image/"):
+        raise ApiError(400, "bad_request",
+                       "'image_mime' must be an image/* type",
+                       "Image attachment has an unsupported type.")
+    return raw, mime
+
+
+_IMAGE_SUFFIXES = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/heic": ".heic",
+    "image/heif": ".heif",
+}
+
+
+def _image_suffix(mime: str | None) -> str:
+    """Map an image MIME to a temp-file suffix. Defaults to ``.png`` so an
+    unusual image/* type (or a missing MIME) still gets a sensible, decodable
+    extension."""
+    return _IMAGE_SUFFIXES.get((mime or "").lower(), ".png")
+
+
+# --------------------------------------------------------------------------- #
 # Handlers
 # --------------------------------------------------------------------------- #
 
@@ -1261,6 +1372,7 @@ def handle_orchestrator_chat(server, ctx, query, body):
     data = _parse_body(body)
     _require_confirm(data)
     prompt = _validate_prompt(data)
+    image = _validate_image(data)   # None, or (raw_bytes, normalized_mime)
     project = data.get("project")
     registry_path = _registry_path(ctx)
 
@@ -1328,7 +1440,9 @@ def handle_orchestrator_chat(server, ctx, query, body):
     # connection closes). The timeout (configurable, default 600s) is captured
     # per-job at submission so every job reports elapsed at ITS termination.
     job = _new_job(project, profile, session, prompt, timeout=_chat_timeout(ctx),
-                   notice=busy_notice)
+                   notice=busy_notice,
+                   image_data=(image[0] if image else None),
+                   image_mime=(image[1] if image else None))
     worker = threading.Thread(target=_run_job, args=(job,), daemon=True)
     worker.start()
 
