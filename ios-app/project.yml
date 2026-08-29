@@ -85,6 +85,7 @@ targets:
       - path: Sources/HSCC/Views/ChatStore.swift
       - path: Sources/HSCC/Views/AutodownView.swift
       - path: Sources/HSCC/Views/ProjectsView.swift
+      - path: Sources/HSCC/Views/ProjectUnreadCenter.swift
       - path: Sources/HSCC/Views/OpsView.swift
       - path: Sources/HSCC/Views/BoardHygieneView.swift
       - path: Sources/HSCC/Views/ApprovalsView.swift
