@@ -434,7 +434,9 @@ struct HSCCClient {
 
     /// GET /v1/fleet/stats?days=N — fleet completions & tool activity (B2).
     func fleetStats(days: Int = 7) async throws -> FleetStatsResponse {
-        try await get("/v1/fleet/stats?days=\(days)", as: FleetStatsResponse.self)
+        try await get(path: "/v1/fleet/stats",
+                      queryItems: [URLQueryItem(name: "days", value: String(days))],
+                      as: FleetStatsResponse.self)
     }
 
     /// GET /v1/fleet/throughput — vLLM token throughput + per-node queue depth (B2).
@@ -644,7 +646,9 @@ struct HSCCClient {
 
     /// GET /v1/kanban/stale?older_than=N — non-terminal cards (0 = all).
     func kanbanStale(olderThan: Int = 0) async throws -> KanbanStaleResponse {
-        try await get("/v1/kanban/stale?older_than=\(olderThan)", as: KanbanStaleResponse.self)
+        try await get(path: "/v1/kanban/stale",
+                      queryItems: [URLQueryItem(name: "older_than", value: String(olderThan))],
+                      as: KanbanStaleResponse.self)
     }
 
     // MARK: - Live agent activity feed
@@ -657,7 +661,12 @@ struct HSCCClient {
     /// ``profile``, ``card_id`` and ``session_id`` an operator uses to
     /// tap-to-trace.
     func activityFeed(limit: Int = 50) async throws -> ActivityFeedResponse {
-        try await get("/v1/activity/feed?limit=\(limit)", as: ActivityFeedResponse.self)
+        // A literal `?` in the path is percent-encoded to %3F by
+        // `components.path = path`, so the server never sees the query and
+        // `limit` was silently ignored. Pass it as a real query item.
+        try await get(path: "/v1/activity/feed",
+                      queryItems: [URLQueryItem(name: "limit", value: String(limit))],
+                      as: ActivityFeedResponse.self)
     }
 
     /// GET /v1/projects/{name}/session/events — page the project's chat log.
