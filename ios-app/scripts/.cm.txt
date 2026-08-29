@@ -1,5 +1,0 @@
-design: extract shared HSEmptyLabel (one empty style)
-
-The muted "tray" empty label was copy-pasted into four views (Ops, Fleet,
-FleetControl, Templates). One shared HSEmptyLabel now lives in Theme.swift;
-those views' private emptyLabel funcs delegate to it. Builds clean.
