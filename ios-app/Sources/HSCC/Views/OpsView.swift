@@ -102,7 +102,7 @@ struct OpsView: View {
     @ViewBuilder
     private var verifySection: some View {
         if let client {
-            sectionCard(title: "Verify", systemImage: "checkmark.seal") {
+            HSSectionCard(title: "Verify", systemImage: "checkmark.seal") {
                 switch verify {
                 case .loading:
                     ProgressView()
@@ -157,7 +157,7 @@ struct OpsView: View {
 
     @ViewBuilder
     private var daemonSection: some View {
-        sectionCard(title: "Daemon", systemImage: "server.rack") {
+        HSSectionCard(title: "Daemon", systemImage: "server.rack") {
             switch daemon {
             case .loading:
                 ProgressView()
@@ -203,7 +203,7 @@ struct OpsView: View {
 
     @ViewBuilder
     private var triggersSection: some View {
-        sectionCard(title: "Triggers", systemImage: "bolt") {
+        HSSectionCard(title: "Triggers", systemImage: "bolt") {
             switch triggers {
             case .loading:
                 ProgressView()
@@ -259,7 +259,7 @@ struct OpsView: View {
 
     @ViewBuilder
     private var escalateSection: some View {
-        sectionCard(title: "Escalations", systemImage: "arrow.up.right.circle") {
+        HSSectionCard(title: "Escalations", systemImage: "arrow.up.right.circle") {
             switch escalations {
             case .loading:
                 ProgressView()
@@ -289,7 +289,7 @@ struct OpsView: View {
 
     @ViewBuilder
     private var profilesSection: some View {
-        sectionCard(title: "Profiles", systemImage: "person.3") {
+        HSSectionCard(title: "Profiles", systemImage: "person.3") {
             switch profiles {
             case .loading:
                 ProgressView()
@@ -325,30 +325,8 @@ struct OpsView: View {
 
     // MARK: - Shared building blocks
 
-    private func sectionCard<Content: View>(
-        title: String,
-        systemImage: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label(title, systemImage: systemImage)
-                .font(.headline)
-            content()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Theme.Semantic.surfaceRaised)
-        )
-    }
 
-    private func errorLabel(_ message: String) -> some View {
-        Label(message, systemImage: "exclamationmark.triangle.fill")
-            .font(.subheadline)
-            .foregroundColor(Theme.Semantic.bad)
-    }
-
+    private func errorLabel(_ message: String) -> some View { HSErrorLabel(message: message) }
     private func emptyLabel(_ text: String) -> some View {
         Label(text, systemImage: "tray")
             .font(.subheadline)

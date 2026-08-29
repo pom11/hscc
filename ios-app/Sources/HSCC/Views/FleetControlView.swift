@@ -66,7 +66,7 @@ struct FleetControlView: View {
 
     @ViewBuilder
     private var appliedSection: some View {
-        sectionCard(title: "Applied Template", systemImage: "rectangle.stack.badge.checkmark") {
+        HSSectionCard(title: "Applied Template", systemImage: "rectangle.stack.badge.checkmark") {
             switch status {
             case .loading:
                 ProgressView()
@@ -113,7 +113,7 @@ struct FleetControlView: View {
 
     @ViewBuilder
     private func clusterActionsSection(client: HSCCClient) -> some View {
-        sectionCard(title: "Cluster", systemImage: "power") {
+        HSSectionCard(title: "Cluster", systemImage: "power") {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Bring the serving fleet up, or stop ALL workloads fleet-wide.")
                     .font(.subheadline)
@@ -150,30 +150,8 @@ struct FleetControlView: View {
 
     // MARK: - Shared building blocks
 
-    private func sectionCard<Content: View>(
-        title: String,
-        systemImage: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label(title, systemImage: systemImage)
-                .font(.headline)
-            content()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Theme.Semantic.surfaceRaised)
-        )
-    }
 
-    private func errorLabel(_ message: String) -> some View {
-        Label(message, systemImage: "exclamationmark.triangle.fill")
-            .font(.subheadline)
-            .foregroundColor(Theme.Semantic.bad)
-    }
-
+    private func errorLabel(_ message: String) -> some View { HSErrorLabel(message: message) }
     private func emptyLabel(_ text: String) -> some View {
         Label(text, systemImage: "tray")
             .font(.subheadline)

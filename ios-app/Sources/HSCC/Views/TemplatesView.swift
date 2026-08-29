@@ -311,12 +311,7 @@ struct TemplatesView: View {
 
     // MARK: - Building blocks
 
-    private func errorLabel(_ message: String) -> some View {
-        Label(message, systemImage: "exclamationmark.triangle.fill")
-            .font(.subheadline)
-            .foregroundColor(Theme.Semantic.bad)
-    }
-
+    private func errorLabel(_ message: String) -> some View { HSErrorLabel(message: message) }
     private func emptyLabel(_ text: String) -> some View {
         Label(text, systemImage: "tray")
             .font(.subheadline)

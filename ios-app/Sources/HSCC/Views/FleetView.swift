@@ -85,7 +85,7 @@ struct FleetView: View {
 
     @ViewBuilder
     private var healthSection: some View {
-        sectionCard(title: "Health", systemImage: "stethoscope") {
+        HSSectionCard(title: "Health", systemImage: "stethoscope") {
             switch health {
             case .loading:
                 ProgressView()
@@ -127,7 +127,7 @@ struct FleetView: View {
 
     @ViewBuilder
     private var throughputSection: some View {
-        sectionCard(title: "Throughput", systemImage: "speedometer") {
+        HSSectionCard(title: "Throughput", systemImage: "speedometer") {
             switch throughput {
             case .loading:
                 ProgressView()
@@ -170,7 +170,7 @@ struct FleetView: View {
 
     @ViewBuilder
     private var statsSection: some View {
-        sectionCard(title: "Stats", systemImage: "chart.bar") {
+        HSSectionCard(title: "Stats", systemImage: "chart.bar") {
             switch stats {
             case .loading:
                 ProgressView()
@@ -209,7 +209,7 @@ struct FleetView: View {
 
     @ViewBuilder
     private var streamsSection: some View {
-        sectionCard(title: "Streams", systemImage: "point.3.connected.trianglepath.dotted") {
+        HSSectionCard(title: "Streams", systemImage: "point.3.connected.trianglepath.dotted") {
             switch streams {
             case .loading:
                 ProgressView()
@@ -252,7 +252,7 @@ struct FleetView: View {
 
     @ViewBuilder
     private var autoscaleSection: some View {
-        sectionCard(title: "Autoscale", systemImage: "arrow.up.arrow.down.circle") {
+        HSSectionCard(title: "Autoscale", systemImage: "arrow.up.arrow.down.circle") {
             switch autoscale {
             case .loading:
                 ProgressView()
@@ -278,23 +278,6 @@ struct FleetView: View {
 
     // MARK: - Shared building blocks
 
-    private func sectionCard<Content: View>(
-        title: String,
-        systemImage: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label(title, systemImage: systemImage)
-                .font(.headline)
-            content()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Theme.Semantic.surfaceRaised)
-        )
-    }
 
     private func statBadge(value: String, label: String, color: Color) -> some View {
         VStack(spacing: 2) {
@@ -324,12 +307,7 @@ struct FleetView: View {
         }
     }
 
-    private func errorLabel(_ message: String) -> some View {
-        Label(message, systemImage: "exclamationmark.triangle.fill")
-            .font(.subheadline)
-            .foregroundColor(Theme.Semantic.bad)
-    }
-
+    private func errorLabel(_ message: String) -> some View { HSErrorLabel(message: message) }
     private func emptyLabel(_ text: String) -> some View {
         Label(text, systemImage: "tray")
             .font(.subheadline)

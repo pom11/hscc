@@ -320,10 +320,49 @@ struct HSConnectGate: View {
     }
 }
 
+/// Shared title + content section card (the "one card style"). Use everywhere a
+/// titled, rounded, raised panel wraps a switch/section of content — replacing
+/// the near-identical private `sectionCard` funcs that used to be copy-pasted
+/// into every view.
+struct HSSectionCard<Content: View>: View {
+    let title: String
+    let systemImage: String
+    @ViewBuilder let content: Content
+
+    init(title: String, systemImage: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.systemImage = systemImage
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
+            Label(title, systemImage: systemImage)
+                .font(.headline)
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
+                .fill(Theme.Semantic.surfaceRaised)
+        )
+    }
+}
+
+/// The shared red inline error label under a section card.
+struct HSErrorLabel: View {
+    let message: String
+
+    var body: some View {
+        Label(message, systemImage: "exclamationmark.triangle.fill")
+            .font(.subheadline)
+            .foregroundColor(Theme.Semantic.bad)
+    }
+}
+
 /// The shared secondary-metadata line under a row title (board · assignee ·
-/// age…). Use it instead of stacking three separate `.caption` Texts with their
-/// own `.foregroundColor(.secondary)`, each gated by `if let`.
-/// Nils are dropped, so separators only appear between present parts.
+/// age…). Nils are dropped, so separators only appear between present parts.
 struct HSMetaLine: View {
     let parts: [String]
 
