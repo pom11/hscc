@@ -654,6 +654,7 @@ import routes_orchestrator  # noqa: E402,F401  (registers /v1/orchestrator/chat)
 # exist first, matching the A3/A4/C2 pattern above.
 import routes_autodown  # noqa: E402,F401  (registers /v1/autodown/*)
 import routes_ops  # noqa: E402,F401  (registers /v1/{verify,daemon/status,triggers,escalate,profiles,cluster/up,cluster/down})
+import routes_bootstrap  # noqa: E402,F401  (registers /v1/projects/new/{plan,})
 import routes_kanban  # noqa: E402,F401  (registers /v1/kanban/{blocked,blocked/{id}/recover,stale})
 import routes_template  # noqa: E402,F401  (registers /v1/template/{list,status,preview/{name}})
 import routes_profile  # noqa: E402,F401  (registers /v1/profile/{list,install,export,export/{file}})
