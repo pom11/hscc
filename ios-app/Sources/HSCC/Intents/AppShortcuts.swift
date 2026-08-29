@@ -29,11 +29,21 @@ struct AppShortcuts: AppShortcutsProvider {
         AppShortcut(
             intent: ReviewQueueIntent(),
             phrases: [
-                "Get \(.applicationName) review queue",
-                "\(.applicationName) review queue",
+                "Get \\(.applicationName) review queue",
+                "\\(.applicationName) review queue",
             ],
             shortTitle: "Review queue",
             systemImageName: "list.bullet"
+        )
+        AppShortcut(
+            intent: ApprovalsIntent(),
+            phrases: [
+                "Get \\(.applicationName) approvals",
+                "\\(.applicationName) pending approvals",
+                "Are there pending \\(.applicationName) approvals",
+            ],
+            shortTitle: "Pending approvals",
+            systemImageName: "checkmark.seal"
         )
         AppShortcut(
             intent: DispatchCannedCardIntent(),

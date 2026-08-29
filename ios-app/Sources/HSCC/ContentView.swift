@@ -20,6 +20,7 @@ struct ContentView: View {
     @EnvironmentObject private var settings: SettingsStore
     @State private var selectedTab: Tab = .projects
     @State private var pingState: PingState = .idle
+    @StateObject private var approvals = ApprovalPoller()
 
     enum Tab: Hashable {
         case projects, cluster, settings
@@ -34,9 +35,13 @@ struct ContentView: View {
                 .tag(Tab.projects)
 
             // Fleet hub — the node topology strip + every fleet-level surface.
-            ClusterView(client: makeClient())
+            // The tab badge shows the pending-approval count at a glance
+            // (approvals inbox, t_9a5cfc3b) — the operator's "is something
+            // needing me right now?" signal.
+            ClusterView(client: makeClient(), approvalCount: approvals.pendingCount)
                 .safeAreaInset(edge: .top) { connectionBanner }
                 .tabItem { Label("Cluster", systemImage: "bolt") }
+                .badge(approvals.pendingCount)
                 .tag(Tab.cluster)
 
             // App connection ONLY. The nested duplicate entry point is removed.
@@ -47,9 +52,11 @@ struct ContentView: View {
         .onAppear {
             // Probe once at launch so the banner reflects reality immediately.
             refreshConnection()
+            approvals.setClient(makeClient())
         }
         .onChange(of: settings.isConfigured) {
             refreshConnection()
+            approvals.setClient(makeClient())
         }
     }
 
