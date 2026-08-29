@@ -12,6 +12,8 @@ import SwiftUI
 struct ProjectsView: View {
     let client: HSCCClient?
 
+    @EnvironmentObject private var unread: ProjectUnreadCenter
+
     @State private var projects = LoadState<ProjectsResponse>.idle
     /// Whether the cross-project search sheet is presented.
     @State private var showSearch = false
@@ -122,11 +124,30 @@ struct ProjectsView: View {
     @ViewBuilder
     private func projectRow(_ project: Project) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(project.name)
-                .font(.body.weight(.medium))
-                .foregroundColor(Theme.Semantic.onSurface)
+            HStack(spacing: 6) {
+                Text(project.name)
+                    .font(.body.weight(.medium))
+                    .foregroundColor(Theme.Semantic.onSurface)
+                unreadBadge(project.name)
+            }
             HSMetaLine([project.board,
                         project.displayTopic.isEmpty ? nil : "topic \(project.displayTopic)"])
+        }
+    }
+
+    /// The unread badge for a project row — the app's notification mechanism
+    /// (t_267da363). Shown only when there are unread replies waiting; hidden
+    /// (empty view) at zero so the list stays clean.
+    @ViewBuilder
+    private func unreadBadge(_ project: String) -> some View {
+        let count = unread.count(for: project)
+        if count > 0 {
+            Text("\(count)")
+                .font(.caption2.weight(.bold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Theme.Semantic.warn, in: Capsule())
         }
     }
 

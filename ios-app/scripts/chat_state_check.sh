@@ -53,6 +53,7 @@ fi
 
 real_sources=(
   Sources/HSCC/Views/ChatStore.swift
+  Sources/HSCC/Views/ProjectUnreadCenter.swift
   "$TMP/ChatEntry.swift"
 )
 harness=(

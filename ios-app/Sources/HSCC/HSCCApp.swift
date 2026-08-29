@@ -15,11 +15,13 @@ import SwiftUI
 @main
 struct HSCCApp: App {
     @StateObject private var settings = SettingsStore()
+    @StateObject private var unread = ProjectUnreadCenter()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(settings)
+                .environmentObject(unread)
         }
     }
 }

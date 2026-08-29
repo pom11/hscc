@@ -35,6 +35,12 @@ final class ChatStore: ObservableObject {
     /// The project this store is bound to ("general" for the standalone form).
     let project: String
 
+    /// The app-scoped unread-badge center. When a reply lands in this project's
+    /// session (`finishSend`), the store reports the session event so the
+    /// project-list row can badge it as unread (t_267da363). Weak so the store
+    /// never owns its lifetime — the center lives at app scope.
+    weak var unread: ProjectUnreadCenter?
+
     /// The full transcript, ordered oldest→newest.
     @Published private(set) var transcript: [ChatEntry] = []
 
@@ -62,8 +68,9 @@ final class ChatStore: ObservableObject {
     /// — the session is sequential, one turn at a time (requirement 6).
     var isSending: Bool { inFlight != nil }
 
-    init(project: String) {
+    init(project: String, unread: ProjectUnreadCenter? = nil) {
         self.project = project
+        self.unread = unread
         self.transcript = Self.load(project: project)
     }
 
@@ -92,6 +99,10 @@ final class ChatStore: ObservableObject {
         inFlight = nil
         clearJob()
         persist()
+        // Drive the project's unread badge from this session event — a finished
+        // reply that isn't currently on screen is the "reply waits in the app"
+        // signal (t_267da363). The center itself decides read-vs-unread.
+        unread?.noteReply(project: project)
     }
 
     /// Record a terminal failure of a job that WAS created and end the

@@ -70,6 +70,7 @@ struct OrchestratorChatView: View {
 /// confirm-gated composer.
 private struct ChatBody: View {
     @EnvironmentObject private var settings: SettingsStore
+    @EnvironmentObject private var unread: ProjectUnreadCenter
     let project: String
 
     /// Sustained poll failures (at a 2s interval) after which the cluster is
@@ -140,6 +141,22 @@ private struct ChatBody: View {
             composer
                 .padding(.horizontal)
                 .padding(.vertical, 8)
+        }
+        .onAppear {
+            // Wire the unread-badge center (the environmentObject isn't
+            // available at `init`, so attach it here — before any reply is
+            // folded by the .task below). Declaring this project as reading and
+            // clearing its badge runs BEFORE a resumed-job reply is counted, so
+            // a reply that's already on screen is never badged as unread
+            // (t_267da363).
+            store.unread = unread
+            unread.setReading(project)
+            unread.markRead(project: project)
+        }
+        .onDisappear {
+            // Leaving the chat: stop declaring we're reading it, so a reply
+            // that arrives after navigation away is badged as unread.
+            unread.setReading(nil)
         }
         .task {
             // Restore the saved draft + probe fleet readiness on first appear
