@@ -429,6 +429,47 @@ struct HSCCClient {
         try await get("/v1/profiles", as: ProfilesResponse.self)
     }
 
+    // MARK: - Sessions manager (list / retire / compact)
+
+    /// GET /v1/sessions?profile=<name> — a profile's sessions with message
+    /// count, token totals, compaction signals + headroom, and a bloat verdict.
+    ///
+    /// Read-only (no `confirm`). Each row's `bloated`/`reason` come from the
+    /// SAME verdict the orchestrator bloat-guard uses. Requires the profile
+    /// whose state.db to inspect; the profile name is URL-encoded so a slash
+    /// or space can't break the query string.
+    func sessions(profile: String) async throws -> SessionsListResponse {
+        let encoded = profile.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)
+            ?? profile
+        return try await get("/v1/sessions?profile=\\(encoded)", as: SessionsListResponse.self)
+    }
+
+    /// POST /v1/sessions/{id}/retire — non-destructive retirement.
+    ///
+    /// Body: `{ profile, confirm: true }`. Retitles the session to
+    /// `<title>-retired-<ts>` so it drops out of the live list while its full
+    /// history stays on disk. Requires explicit profile + the confirm UI gate
+    /// (MutationButton) before calling.
+    func retireSession(id: String, profile: String) async throws -> SessionMutationResponse {
+        let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        return try await post("/v1/sessions/\\(encoded)/retire",
+                              body: ["profile": profile, "confirm": true],
+                              as: SessionMutationResponse.self)
+    }
+
+    /// POST /v1/sessions/{id}/compact — re-arm native compaction.
+    ///
+    /// Body: `{ profile, confirm: true }`. KEEPS the session (continuity
+    /// preserved): clears the compaction-failure latch so Hermes' own
+    /// compressor retakes the floor on its next turn and shrinks it for real.
+    /// Requires explicit profile + the confirm UI gate before calling.
+    func compactSession(id: String, profile: String) async throws -> SessionMutationResponse {
+        let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        return try await post("/v1/sessions/\\(encoded)/compact",
+                              body: ["profile": profile, "confirm": true],
+                              as: SessionMutationResponse.self)
+    }
+
     /// GET /v1/kanban/blocked — blocked cards across all boards.
     func kanbanBlocked() async throws -> KanbanBlockedResponse {
         try await get("/v1/kanban/blocked", as: KanbanBlockedResponse.self)

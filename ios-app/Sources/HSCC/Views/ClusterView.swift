@@ -209,6 +209,10 @@ struct ClusterView: View {
                    subtitle: "blocked and stale cards across every board") {
                 BoardHygieneView(client: client)
             }
+            hubRow("Sessions", systemImage: "text.bubble",
+                   subtitle: "list a profile's sessions, compact or retire one") {
+                SessionsView(client: client)
+            }
         }
     }
 

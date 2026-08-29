@@ -83,6 +83,7 @@ c.check(TemplateStatusResponse.self, "template_status.json", "TemplateStatusResp
 c.check(TemplatePreviewResponse.self, "template_preview_hscc-live.json", "TemplatePreviewResponse")
 c.check(ClusterStatusResponse.self, "v1_cluster_status.json", "ClusterStatusResponse (Shared)")
 c.check(AutodownStatusResponse.self, "autodown_status.json", "AutodownStatusResponse (Shared)")
+c.check(SessionsListResponse.self, "v1_sessions.json", "SessionsListResponse")
 
 // ---- Approvals classification (t_9a5cfc3b) — the SAME `isPendingApproval`
 // logic the on-screen inbox, the badge poller, and the Siri intent use, asserted
