@@ -662,3 +662,8 @@ import routes_sessions  # noqa: E402,F401  (registers /v1/sessions list + retire
 import routes_memory  # noqa: E402,F401  (registers /v1/memory list + delete/edit)
 import routes_activity  # noqa: E402,F401  (registers /v1/activity/feed — live agent activity feed)
 
+# t_47f51a71: session-event wire contract — history read endpoint over the
+# per-project chat event store (the bridge's live WS half appends to the same
+# store). Module-level ROUTES.append registers it at import.
+import routes_session  # noqa: E402,F401  (registers /v1/projects/{name}/session/events)
+
