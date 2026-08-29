@@ -89,6 +89,7 @@ enum EndpointPath {
     static let templateList = "/v1/template/list"
     static let templateStatus = "/v1/template/status"
     static let kanbanBlocked = "/v1/kanban/blocked"
+    static let activityFeed = "/v1/activity/feed"
 }
 
 /// HSCC HTTP API client — async/await URLSession.
@@ -518,6 +519,19 @@ struct HSCCClient {
     /// GET /v1/kanban/stale?older_than=N — non-terminal cards (0 = all).
     func kanbanStale(olderThan: Int = 0) async throws -> KanbanStaleResponse {
         try await get("/v1/kanban/stale?older_than=\(olderThan)", as: KanbanStaleResponse.self)
+    }
+
+    // MARK: - Live agent activity feed
+
+    /// GET /v1/activity/feed — the live agent activity feed (flight recorder).
+    ///
+    /// Read-only (no `confirm`): who is running, which tool they just called,
+    /// on which card — newest first. ``limit`` (default 50, capped at 200 by
+    /// the server) bounds the returned entries. Each entry carries the
+    /// ``profile``, ``card_id`` and ``session_id`` an operator uses to
+    /// tap-to-trace.
+    func activityFeed(limit: Int = 50) async throws -> ActivityFeedResponse {
+        try await get("/v1/activity/feed?limit=\(limit)", as: ActivityFeedResponse.self)
     }
 
     /// GET /v1/template/list — available cluster templates.
