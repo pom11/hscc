@@ -27,6 +27,8 @@ class FakeGit:
         merged=None,
         branch_exists=True,
         commits_ahead=3,
+        commits_behind=0,
+        has_upstream=True,
         porcelain=(),
         branch="feature/x",
         detached=False,
@@ -37,6 +39,8 @@ class FakeGit:
         self.merged = merged
         self.branch_exists = branch_exists
         self.commits_ahead = commits_ahead
+        self.commits_behind = commits_behind
+        self.has_upstream = has_upstream
         self.porcelain = list(porcelain)
         self.branch = branch
         self.detached = detached
@@ -57,8 +61,14 @@ class FakeGit:
             return self._proc(cmd, 0 if self.merged else 1)
 
         if sub == "rev-list":
-            # git rev-list --count <base>..<branch>
+            # git rev-list --count <base>..<branch>  (direction decides)
             assert cmd[2] == "--count"
+            arg = cmd[3]
+            # Both directions come through the same command; pick which knob to
+            # answer with by checking which side is the local branch.
+            left, right = arg.split("..")
+            if left == self.branch or left == "@{u}":
+                return self._proc(cmd, 0, str(self.commits_behind))
             return self._proc(cmd, 0, str(self.commits_ahead))
 
         if sub == "status":
@@ -82,6 +92,12 @@ class FakeGit:
                     cmd, 0 if self.branch_exists else 1,
                     self.branch if self.branch_exists else "")
             if "--abbrev-ref" in cmd:
+                if any("@{upstream}" in c for c in cmd):
+                    # git rev-parse --abbrev-ref <branch>@{upstream}
+                    # (upstream resolution): None when no tracking branch set.
+                    if not self.has_upstream:
+                        return self._proc(cmd, 128, "", "fatal: no upstream")
+                    return self._proc(cmd, 0, "origin/" + self.branch)
                 out = "HEAD" if self.detached else self.branch
                 return self._proc(cmd, 0, out)
             # plain: git rev-parse HEAD
@@ -170,6 +186,46 @@ def test_commits_ahead_zero_is_stall_signal():
 
 def test_commits_ahead_zero_for_non_repo():
     assert git_state.commits_ahead("/no/repo", "feature/x", _run=non_repo) == 0
+
+
+# --------------------------------------------------------------------------- #
+# ahead_of_upstream / behind_of_upstream — the push/pull sync signals
+# --------------------------------------------------------------------------- #
+
+def test_ahead_of_upstream_counts_local_only_commits():
+    assert git_state.ahead_of_upstream("/repo", "feature/x",
+                                       _run=FakeGit(commits_ahead=4)) == 4
+
+
+def test_ahead_of_upstream_zero_when_nothing_to_push():
+    assert git_state.ahead_of_upstream("/repo", "feature/x",
+                                       _run=FakeGit(commits_ahead=0)) == 0
+
+
+def test_ahead_of_upstream_zero_when_no_upstream():
+    assert git_state.ahead_of_upstream("/repo", "feature/x",
+                                       _run=FakeGit(has_upstream=False,
+                                                    commits_ahead=9)) == 0
+
+
+def test_behind_of_upstream_counts_remote_only_commits():
+    assert git_state.behind_of_upstream("/repo", "feature/x",
+                                        _run=FakeGit(commits_behind=2)) == 2
+
+
+def test_behind_of_upstream_zero_when_up_to_date():
+    assert git_state.behind_of_upstream("/repo", "feature/x",
+                                        _run=FakeGit(commits_behind=0)) == 0
+
+
+def test_behind_of_upstream_zero_when_no_upstream():
+    assert git_state.behind_of_upstream("/repo", "feature/x",
+                                        _run=FakeGit(has_upstream=False,
+                                                     commits_behind=7)) == 0
+
+
+def test_behind_of_upstream_zero_for_non_repo():
+    assert git_state.behind_of_upstream("/no/repo", "feature/x", _run=non_repo) == 0
 
 
 # --------------------------------------------------------------------------- #
