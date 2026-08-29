@@ -807,8 +807,98 @@ def test_backing_invoke_session_not_found_raises_unavailable(monkeypatch):
         _p.stdout = ""
         return _p
     monkeypatch.setattr(_sp, "run", notfound)
+    with pytest.raises(routes_orchestrator._OrchestratorUnavailable) as ei:
+        routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
+    assert "not ready" in str(ei.value)
+
+
+def test_backing_invoke_session_not_found_returncode_0_still_unavailable(monkeypatch):
+    """Even with a 0 exit, an explicit 'Session not found' is a missing session.
+
+    Preserves the original combinator: a literal missing-session signal is
+    reported as unavailable regardless of the exit code.
+    """
+    import subprocess as _sp
+
+    def notfound0(*a, **k):
+        _p = types.SimpleNamespace(returncode=0)
+        _p.stderr = "Session not found: hscc"
+        _p.stdout = ""
+        return _p
+    monkeypatch.setattr(_sp, "run", notfound0)
     with pytest.raises(routes_orchestrator._OrchestratorUnavailable):
         routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
+
+
+def test_backing_invoke_model_unreachable_names_itself(monkeypatch):
+    """A nonzero exit that is NOT a missing session must name the real failure.
+
+    The card's incident: the operator's message failed with "session 'hscc'
+    not ready" WHILE that session existed — the real cause (e.g. the model
+    endpoint unreachable) was discarded behind the blanket returncode check.
+    Now any nonzero exit without an explicit 'Session not found' stderr
+    becomes a distinct invocation error carrying the ACTUAL stderr tail, so
+    the operator sees the true cause and is never sent chasing a ghost.
+    """
+    import subprocess as _sp
+
+    def unreachable(*a, **k):
+        _p = types.SimpleNamespace(returncode=1)
+        _p.stderr = (
+            "openai.APIConnectionError: Failed to connect to the model "
+            "endpoint at api.openai.com:443\nConnection refused"
+        )
+        _p.stdout = ""
+        return _p
+    monkeypatch.setattr(_sp, "run", unreachable)
+    with pytest.raises(routes_orchestrator._OrchestratorInvocationError) as ei:
+        routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
+    msg = str(ei.value)
+    # The REAL failure names itself — not a fabricated "not ready".
+    assert "not ready" not in msg
+    assert "APIConnectionError" in msg
+    assert "Connection refused" in msg
+    # And it is NOT misreported as an unavailable SESSION.
+    assert not isinstance(ei.value, routes_orchestrator._OrchestratorUnavailable)
+
+
+def test_backing_invoke_nonzero_exit_carries_bounded_stderr_tail(monkeypatch):
+    """A crash's real stderr tail is surfaced, bounded, never discarded."""
+    import subprocess as _sp
+
+    def crashed(*a, **k):
+        big_err = "\n".join(f"line {i} of an internal stack" for i in range(200))
+        _p = types.SimpleNamespace(returncode=2)
+        _p.stderr = big_err
+        _p.stdout = ""
+        return _p
+    monkeypatch.setattr(_sp, "run", crashed)
+    with pytest.raises(routes_orchestrator._OrchestratorInvocationError) as ei:
+        routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
+    msg = str(ei.value)
+    assert f"exit 2" in msg
+    assert "stderr tail:" in msg
+    # Bounded: the tail is capped, not the whole 200-line stack.
+    assert len(msg) < 2000
+    # The real tail (latest lines) is present, not the head.
+    assert "line 199 of an internal stack" in msg
+
+
+def test_backing_invoke_nonzero_exit_no_stderr(monkeypatch):
+    """A nonzero exit with empty stderr still names itself, not 'not ready'."""
+    import subprocess as _sp
+
+    def silent(*a, **k):
+        _p = types.SimpleNamespace(returncode=1)
+        _p.stderr = ""
+        _p.stdout = ""
+        return _p
+    monkeypatch.setattr(_sp, "run", silent)
+    with pytest.raises(routes_orchestrator._OrchestratorInvocationError) as ei:
+        routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
+    msg = str(ei.value)
+    assert "not ready" not in msg
+    assert "no stderr captured" in msg
 
 
 def test_backing_invoke_strips_channel_notice_lines(monkeypatch):

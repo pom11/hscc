@@ -210,6 +210,25 @@ def _backing_resolve(project, registry_path):
     return resolve_orchestrator(project, path=registry_path)
 
 
+def _stderr_tail(err: str, max_chars: int = 300) -> str:
+    """A bounded, human-readable tail of the failing process's REAL stderr.
+
+    We never paste unbounded stderr (a stack trace can be huge and may carry
+    an internal path we don't want to hand the client raw), but dropping it
+    entirely is exactly the disaster this card fixes (every real failure
+    reported as a fabricated "session not ready"). Take the last few
+    non-empty lines, collapse to a single quoted line, cap the length. Falls
+    back to a plain description when there is nothing to show.
+    """
+    if not err:
+        return "stderr tail: (no stderr captured)"
+    lines = [ln.strip() for ln in err.splitlines() if ln.strip()]
+    tail = " | ".join(lines[-3:])
+    if len(tail) > max_chars:
+        tail = tail[-max_chars:] + "…"
+    return f'stderr tail: "{tail}"'
+
+
 def _backing_invoke(profile, session, prompt, timeout=_DEFAULT_TIMEOUT,
                     image_data=None, image_mime=None):
     """Send a prompt to an orchestrator and return its reply.
@@ -277,10 +296,27 @@ def _backing_invoke(profile, session, prompt, timeout=_DEFAULT_TIMEOUT,
     # A clean "no such session yet" failure — the orchestrator's named session
     # must exist before it can be continued (created by provisioning / first
     # Telegram topic). Surface it honestly rather than synthesising a reply.
-    if proc.returncode != 0 or "Session not found" in err:
+    # This is the ONLY stderr signal that means "session not ready": a missing
+    # session is reported verbatim and is checkable. It is checked FIRST so
+    # that no OTHER nonzero exit can be misreported as a missing session.
+    if "Session not found" in err:
         raise _OrchestratorUnavailable(
             f"orchestrator session {session!r} not ready "
-            f"(create it first, then re-send)".strip()
+            f"(create it first, then re-send)"
+        )
+
+    if proc.returncode != 0:
+        # A nonzero exit that is NOT a missing-session signal. This is where
+        # every real failure lands — model unreachable, an internal hermes
+        # error, a crash. It must NAME ITSELF with the actual stderr tail so
+        # the operator (and reviewer) see what truly happened, instead of the
+        # fabricated "session 'hscc' not ready" that sent both chasing a
+        # non-existent bug while the session existed. Selecting a session is
+        # impossible here (the process already failed), so this is an
+        # invocation error, not an unavailable session.
+        raise _OrchestratorInvocationError(
+            f"orchestrator {profile!r} invocation failed (exit "
+            f"{proc.returncode}): {_stderr_tail(err)}"
         )
 
     reply = (proc.stdout or "").strip()
