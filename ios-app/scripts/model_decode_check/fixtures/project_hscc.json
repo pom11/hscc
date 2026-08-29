@@ -5,7 +5,10 @@
  "topic": 2046,
  "board_counts": {
   "running": 2,
-  "total": 2
+  "blocked": 1,
+  "ready": 0,
+  "done": 14,
+  "total": 17
  },
  "git": {
   "is_repo": true,
@@ -13,7 +16,23 @@
   "dirty": false,
   "uncommitted": [],
   "last_activity_seconds_ago": 995,
-  "head": "12c97b0a43f4eedc9d81d21382abf09780058535"
+  "head": "12c97b0a43f4eedc9d81d21382abf09780058535",
+  "ahead": 0,
+  "behind": 2
+ },
+ "session_health": {
+  "profile": "hscc-orch",
+  "session": "hscc",
+  "messages": 312,
+  "input_tokens": 2140530,
+  "compression_failure_error": null,
+  "compression_fallback_streak": 0,
+  "compression_ineffective_count": 0,
+  "context_window": 128000,
+  "threshold_tokens": 110000,
+  "compaction_at_risk": false,
+  "bloated": false,
+  "reason": null
  },
  "speak": "hscc: 2 running, 4 open cards on board hscc."
 }
