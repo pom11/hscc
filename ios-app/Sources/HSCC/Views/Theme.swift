@@ -361,6 +361,17 @@ struct HSErrorLabel: View {
     }
 }
 
+/// The shared muted inline empty label ("nothing here").
+struct HSEmptyLabel: View {
+    let message: String
+
+    var body: some View {
+        Label(message, systemImage: "tray")
+            .font(.subheadline)
+            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+    }
+}
+
 /// The shared secondary-metadata line under a row title (board · assignee ·
 /// age…). Nils are dropped, so separators only appear between present parts.
 struct HSMetaLine: View {
