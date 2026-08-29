@@ -16,12 +16,8 @@ struct CardDetailView: View {
     var body: some View {
         Group {
             if let loadError {
-                ContentUnavailableView {
-                    Label("Couldn't load card", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(loadError.localizedDescription)
-                } actions: {
-                    Button("Try again") { Task { await load() } }
+                HSError("Couldn't load card", message: loadError.localizedDescription) {
+                    Task { await load() }
                 }
             } else if let card {
                 List {
@@ -36,7 +32,7 @@ struct CardDetailView: View {
                     }
                 }
             } else {
-                ProgressView("Loading…")
+                HSLoading("Loading…")
             }
         }
         .navigationTitle(card?.title ?? "Card")

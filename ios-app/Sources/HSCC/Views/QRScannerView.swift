@@ -38,7 +38,7 @@ struct QRScannerView: View {
                 case .notDetermined:
                     // Brief placeholder while we ask; the request is fired in
                     // onAppear and updates `authorization` on completion.
-                    ProgressView("Requesting camera access…")
+                    HSLoading("Requesting camera access…")
                 @unknown default:
                     permissionDeniedView
                 }
