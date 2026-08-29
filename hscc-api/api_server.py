@@ -428,6 +428,18 @@ def handle_ping(server, ctx, query, body):
 
 ROUTES.append(("GET", re.compile(r"^/v1/ping$"), handle_ping))
 
+# WebSocket route table (the live session stream). Each entry is
+# (compiled path regex, ws_handler). ws_handler(server, ctx, query, handler)
+# performs the RFC 6455 handshake against `handler` (the ApiHandler, which
+# carries the request headers) then runs the WS session on handler.connection.
+# Registered at import like ROUTES; see routes_ws.py.
+WS_ROUTES = []
+
+
+def register_ws_route(pattern, handler):
+    """Append a WebSocket route to WS_ROUTES (module-level registration)."""
+    WS_ROUTES.append((re.compile(pattern), handler))
+
 
 # ---------------------------------------------------------------------------
 # HTTP handler
@@ -460,6 +472,11 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
     """Request handler: auth gate -> route dispatch -> envelope/error wrap."""
 
     server_version = "hscc-api"
+    # HTTP/1.1 so keep-alive works and, vitally, so the WebSocket client
+    # (websockets / iOS) accepts the response status line — the websockets
+    # handshake parser rejects an "HTTP/1.0" reply, which BaseHTTPRequestHandler
+    # emits by default. Our WS upgrade response already writes "HTTP/1.1 101".
+    protocol_version = "HTTP/1.1"
     # Silence the default "logged to stderr" request line; we manage our own log.
     def log_message(self, format, *args):
         log.debug("(%s) %s", self.address_string(), format % args)
@@ -492,6 +509,12 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
             # not count — a port scanner can't keep the cluster awake.
             _stamp_http_activity()
             path, query = self._parse_path()
+            # WebSocket upgrade (GET with Upgrade: websocket) — hand the raw
+            # connection to the WS route, which owns the rest of the session.
+            # No JSON body/response follows, so return after it completes.
+            if method == "GET" and self._is_ws_upgrade():
+                if self._dispatch_ws(path, query):
+                    return
             body = self._read_body()
             status, payload = self._dispatch(method, path, query, body)
         except ApiError as exc:
@@ -502,6 +525,32 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(500, error_internal().to_dict())
             return
         self._send_json(status, payload)
+
+    def _is_ws_upgrade(self) -> bool:
+        """True when this GET requests an RFC 6455 WebSocket upgrade."""
+        upgrade = (self.headers.get("Upgrade", "") or "").lower()
+        connection = (self.headers.get("Connection", "") or "").lower()
+        has_key = bool(self.headers.get("Sec-WebSocket-Key"))
+        return upgrade == "websocket" and "upgrade" in connection and has_key
+
+    def _dispatch_ws(self, path, query):
+        """Run a matching WS route on this connection; False if path is unhandled.
+
+        The full WS lifecycle runs inside the matched handler. On return the
+        connection is closed (never keep-alive-reused after a protocol switch).
+        """
+        for pattern, handler in WS_ROUTES:
+            m = pattern.match(path)
+            if m:
+                merged = dict(query)
+                merged.update(
+                    {k: v for k, v in m.groupdict().items() if v is not None}
+                )
+                handler(self.server, self.ctx, merged, self)
+                return True
+        # A WebSocket upgrade for a path we don't serve → reject before any
+        # upgrade handshake, so the client sees a clean HTTP error.
+        raise error_not_found("unknown websocket route")
 
     def _authorize(self):
         """Reject the request unless a valid Bearer token is supplied."""
@@ -668,4 +717,9 @@ import routes_activity  # noqa: E402,F401  (registers /v1/activity/feed — live
 # per-project chat event store (the bridge's live WS half appends to the same
 # store). Module-level ROUTES.append registers it at import.
 import routes_session  # noqa: E402,F401  (registers /v1/projects/{name}/session/events)
+
+# t_47f51a71: the live WebSocket relay — upgrade to a WS stream over the same
+# seq space as the history endpoint. Module-level register_ws_route() runs at
+# import, after WS_ROUTES is defined above.
+import routes_ws  # noqa: E402,F401  (registers /v1/projects/{name}/session/ws)
 
