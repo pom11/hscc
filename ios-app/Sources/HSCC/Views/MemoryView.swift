@@ -44,9 +44,9 @@ struct MemoryView: View {
             }
         }
         .navigationTitle("Memories")
-        .refreshable { if client != nil { await load(client) } }
+        .refreshable { if let client { await load(client) } }
         .task {
-            if client != nil, list.value == nil, !list.isLoading {
+            if let client, list.value == nil, !list.isLoading {
                 await load(client)
             }
         }

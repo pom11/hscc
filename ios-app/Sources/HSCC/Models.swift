@@ -981,6 +981,58 @@ struct SessionMutationResponse: Decodable, Speakable {
     let speak: String
 }
 
+// MARK: - Live agent activity feed (flight recorder)
+
+/// One row of the live agent activity feed (GET /v1/activity/feed).
+///
+/// Two kinds, both in one timeline:
+///   * ``kind == "running"`` — a worker is on a card (emitted per running
+///     card even if that profile has no tool call in the window, so "who is
+///     running what" is always visible);
+///   * ``kind == "tool_call"`` — a specific tool the profile just called,
+///     tied to its card.
+/// ``tool`` is the tool name (dotted namespaces reduced to the head, e.g.
+/// ``build_server.run`` → ``build_server``). The ``at`` field is a UTC ISO
+/// timestamp used for the newest-first sort. ``profile`` +
+/// ``card_id`` + ``session_id`` give the operator everything needed to
+/// TAP-TO-TRACE back to the source session or card.
+struct ActivityEntry: Decodable, Identifiable {
+    let kind: String?
+    let profile: String?
+    let board: String?
+    let card_id: String?
+    let card_title: String?
+    let pid: Int?
+    let host_local: Bool?
+    let started_at: String?
+    let at: String?
+    let tool: String?
+    let session_id: String?
+
+    /// Identifiable — the feed has no server-supplied id, so synthesize a
+    /// reasonably stable one from the fields that define a row.
+    var id: String {
+        "\(profile ?? "")|\(kind ?? "")|\(at ?? "")|\(tool ?? "")|\(session_id ?? "")"
+    }
+
+    var isRunning: Bool { kind == "running" }
+
+    /// The kind label for the list row's leading glyph / badge.
+    var kindLabel: String { isRunning ? "Running" : "Tool" }
+}
+
+/// GET /v1/activity/feed — the envelope.
+///
+/// Verified shape: `{ entries: [], count, running_count, profiles, speak }`.
+/// ``entries`` is kept optional so a partial body never blanks the screen.
+struct ActivityFeedResponse: Decodable, Speakable {
+    let entries: [ActivityEntry]?
+    let count: Int?
+    let running_count: Int?
+    let profiles: [String]?
+    let speak: String
+}
+
 /// One memory card from GET /v1/memory (the memory viewer, t_e8ffd787).
 ///
 /// Mirrors the API card shape: ``node_id`` is the stable graph id
