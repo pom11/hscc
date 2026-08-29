@@ -56,20 +56,7 @@ struct TemplatesView: View {
     // MARK: - Not configured
 
     private var notConfiguredView: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "square.grid.2x2")
-                .font(.system(size: 44))
-                .foregroundColor(Theme.Semantic.neutral)
-            Text("Connect to your cluster")
-                .font(.headline)
-            Text("Set the host, port, and token in Settings to browse templates.")
-                .font(.subheadline)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 60)
-        .padding(.horizontal)
+        HSConnectGate(systemImage: "square.grid.2x2", verb: "to browse templates")
     }
 
     // MARK: - Load

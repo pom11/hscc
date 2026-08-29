@@ -46,20 +46,7 @@ struct OpsView: View {
     // MARK: - Not configured
 
     private var notConfiguredView: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "stethoscope")
-                .font(.system(size: 44))
-                .foregroundColor(.secondary)
-            Text("Connect to your cluster")
-                .font(.headline)
-            Text("Set the host, port, and token in Settings to see health.")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 60)
-        .padding(.horizontal)
+        HSConnectGate(systemImage: "stethoscope", verb: "to see health")
     }
 
     // MARK: - Load
@@ -156,7 +143,7 @@ struct OpsView: View {
                             if let detail = check.detail, !detail.isEmpty {
                                 Text(detail)
                                     .font(.caption)
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
                             }
                         }
                     }
@@ -180,7 +167,7 @@ struct OpsView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Label(state.speak, systemImage: state.daemon_running == true ? "checkmark.seal.fill" : "xmark.seal.fill")
                         .font(.subheadline)
-                        .foregroundColor(state.daemon_running == true ? .green : .red)
+                        .foregroundColor(state.daemon_running == true ? Theme.Semantic.ok : Theme.Semantic.bad)
                     if let pid = state.pid {
                         LabeledContent("PID") { Text("\(pid)") }
                     }
@@ -190,14 +177,14 @@ struct OpsView: View {
                         ForEach(sorted, id: \.key) { name, stream in
                             HStack(alignment: .top, spacing: 8) {
                                 Image(systemName: stream.ok == true ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                    .foregroundColor(stream.ok == true ? .green : .red)
+                                    .foregroundColor(stream.ok == true ? Theme.Semantic.ok : Theme.Semantic.bad)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(name)
                                         .font(.body)
                                     if let msg = stream.message, !msg.isEmpty {
                                         Text(msg)
                                             .font(.caption)
-                                            .foregroundColor(.secondary)
+                                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
                                     }
                                 }
                                 Spacer(minLength: 0)
@@ -227,11 +214,11 @@ struct OpsView: View {
                     Text(state.speak)
                         .font(.subheadline)
                         .italic()
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     if let lastRun = state.last_run, let msg = lastRun.message, !msg.isEmpty {
                         Text("Last run: \(msg)")
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     }
                     let rules = state.rules ?? []
                     if rules.isEmpty {
@@ -244,14 +231,14 @@ struct OpsView: View {
                                 if let title = rule.trigger_params?.title, !title.isEmpty {
                                     Text(title)
                                         .font(.caption)
-                                        .foregroundColor(.secondary)
+                                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                                 }
                                 if let metric = rule.condition?.metric, !metric.isEmpty {
                                     HStack(spacing: 6) {
                                         Text("when \(metric)")
-                                        if let op = rule.condition?.op { Text(op).foregroundColor(.secondary) }
+                                        if let op = rule.condition?.op { Text(op).foregroundColor(Theme.Semantic.onSurfaceMuted) }
                                         if let value = rule.condition?.value {
-                                            Text(displayJSON(value)).foregroundColor(.secondary)
+                                            Text(displayJSON(value)).foregroundColor(Theme.Semantic.onSurfaceMuted)
                                         }
                                     }
                                     .font(.caption)
@@ -283,12 +270,12 @@ struct OpsView: View {
                     Text(state.speak)
                         .font(.subheadline)
                         .italic()
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     if let es = state.escalations, !es.isEmpty {
                         ForEach(es.indices, id: \.self) { i in
                             Text(displayJSON(es[i]))
                                 .font(.caption)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
                         }
                     }
                 }
@@ -313,7 +300,7 @@ struct OpsView: View {
                     Text(state.speak)
                         .font(.subheadline)
                         .italic()
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     let counts = state.counts ?? [:]
                     if counts.isEmpty {
                         emptyLabel("No profiles running tasks.")
@@ -325,7 +312,7 @@ struct OpsView: View {
                                 Spacer()
                                 Text("\(n)")
                                     .font(.body.monospacedDigit())
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
                             }
                         }
                     }

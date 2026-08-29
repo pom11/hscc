@@ -72,7 +72,7 @@ struct SettingsView: View {
                                 showingToken.toggle()
                             } label: {
                                 Image(systemName: showingToken ? "eye.slash" : "eye")
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
                             }
                             .buttonStyle(.borderless)
                         }
@@ -116,7 +116,7 @@ struct SettingsView: View {
                         } icon: {
                             Image(systemName: testIsSuccess == true ? "checkmark.circle.fill" : "xmark.circle.fill")
                         }
-                        .foregroundColor(testIsSuccess == true ? .green : .red)
+                        .foregroundColor(testIsSuccess == true ? Theme.Semantic.ok : Theme.Semantic.bad)
                     }
                 }
 

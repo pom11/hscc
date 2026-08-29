@@ -59,20 +59,7 @@ struct AutodownView: View {
     // MARK: - Not configured
 
     private var notConfiguredView: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "timer")
-                .font(.system(size: 44))
-                .foregroundColor(.secondary)
-            Text("Connect to your cluster")
-                .font(.headline)
-            Text("Set the host, port, and token in Settings to control autodown.")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 60)
-        .padding(.horizontal)
+        HSConnectGate(systemImage: "timer", verb: "to control autodown")
     }
 
     // MARK: - Load
@@ -144,20 +131,20 @@ struct AutodownView: View {
             Text(state.speak)
                 .font(.subheadline)
                 .italic()
-                .foregroundColor(.secondary)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
 
             // Key status fields.
             statusRow("State", value: stateLabel(state.state),
                       color: stateColor(state.state))
             statusRow("Idle limit", value: idleMinutesLabel(state.idle_minutes))
             statusRow("Enabled", value: state.enabled == true ? "Yes" : "No",
-                      color: state.enabled == true ? .green : .secondary)
+                      color: state.enabled == true ? Theme.Semantic.ok : Theme.Semantic.onSurfaceMuted)
             if state.watchdog_blocked == true {
                 // `intentional` is a STRING ("autodown") during a teardown,
                 // not a Bool — an intentional block is expected, not a fault.
                 statusRow("Watchdog block",
                           value: state.watchdog_intentional == nil ? "active" : "intentional (\(state.watchdog_intentional!))",
-                          color: state.watchdog_intentional == nil ? .red : .secondary)
+                          color: state.watchdog_intentional == nil ? Theme.Semantic.bad : Theme.Semantic.onSurfaceMuted)
             }
             if let blockedBy = state.blocked_by, !blockedBy.isEmpty {
                 blockedByRow(blockedBy)
@@ -166,7 +153,7 @@ struct AutodownView: View {
                 Label("Force-armed (cron guard overridden)",
                       systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
-                    .foregroundColor(.orange)
+                    .foregroundColor(Theme.Semantic.warn)
             }
         }
     }
@@ -181,7 +168,7 @@ struct AutodownView: View {
                     .font(.subheadline.weight(.semibold))
                 Text(message)
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -211,11 +198,11 @@ struct AutodownView: View {
         return "\(minutes) min"
     }
 
-    private func statusRow(_ label: String, value: String, color: Color = .secondary) -> some View {
+    private func statusRow(_ label: String, value: String, color: Color = Theme.Semantic.onSurfaceMuted) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(label)
                 .font(.body)
-                .foregroundColor(.secondary)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
             Spacer()
             Text(value)
                 .font(.body.weight(.medium))
@@ -226,7 +213,7 @@ struct AutodownView: View {
     private func blockedByRow(_ text: String) -> some View {
         Label(text, systemImage: "hand.raised.fill")
             .font(.caption)
-            .foregroundColor(.orange)
+            .foregroundColor(Theme.Semantic.warn)
     }
 
     // MARK: - Controls (all confirm-gated)
@@ -317,13 +304,13 @@ struct AutodownView: View {
                             Label("Model-requiring jobs block autodown: \(model.joined(separator: ", "))",
                                   systemImage: "exclamationmark.triangle.fill")
                                 .font(.caption)
-                                .foregroundColor(.orange)
+                                .foregroundColor(Theme.Semantic.warn)
                         }
                         if !cpuOnly.isEmpty {
                             Label("CPU-only jobs run through idle: \(cpuOnly.joined(separator: ", "))",
                                   systemImage: "cpu")
                                 .font(.caption)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
                         }
                     }
                 }
