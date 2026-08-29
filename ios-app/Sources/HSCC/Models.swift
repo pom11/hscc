@@ -980,3 +980,49 @@ struct SessionMutationResponse: Decodable, Speakable {
     let message: String?
     let speak: String
 }
+
+/// One memory card from GET /v1/memory (the memory viewer, t_e8ffd787).
+///
+/// Mirrors the API card shape: ``node_id`` is the stable graph id
+/// (``memory:<memory|profile>:<index>``) the operator passes back to
+/// correct/delete; ``body`` is the FULL entry text (not truncated — the viewer
+/// shows everything the agent remembers).
+struct MemoryItem: Decodable, Identifiable {
+    let id: String
+    let node_id: String?
+    let source: String?
+    let kind: String?
+    let timestamp: Int?
+    let title: String?
+    let body: String?
+
+    var nodeID: String { node_id ?? id }
+    var sourceLabel: String { source == "profile" ? "Profile" : "Notes" }
+}
+
+/// GET /v1/memory?profile=<name> — the envelope.
+///
+/// Verified shape: `{ profile, memories: [], count, memory_count,
+/// profile_count, speak }`. ``memories`` is kept optional so a partial body
+/// never blanks the screen.
+struct MemoryListResponse: Decodable, Speakable {
+    let profile: String?
+    let memories: [MemoryItem]?
+    let count: Int?
+    let memory_count: Int?
+    let profile_count: Int?
+    let speak: String
+}
+
+/// POST /v1/memory/{node_id}/delete and /v1/memory/{node_id}/edit — shared result.
+///
+/// Delete: `{ node_id, kind, title?, message, speak }`.
+/// Edit: `{ node_id, kind, previous_title?, message, speak }`.
+struct MemoryMutationResponse: Decodable, Speakable {
+    let node_id: String?
+    let kind: String?
+    let title: String?
+    let previous_title: String?
+    let message: String?
+    let speak: String
+}
