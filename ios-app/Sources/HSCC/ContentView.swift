@@ -41,7 +41,7 @@ struct ContentView: View {
             ClusterView(client: makeClient(), approvalCount: approvals.pendingCount)
                 .safeAreaInset(edge: .top) { connectionBanner }
                 .tabItem { Label("Cluster", systemImage: "bolt") }
-                .badge(approvals.pendingCount)
+                .badge(approvals.pendingCount.flatMap { $0 > 0 ? String($0) : nil })
                 .tag(Tab.cluster)
 
             // App connection ONLY. The nested duplicate entry point is removed.
