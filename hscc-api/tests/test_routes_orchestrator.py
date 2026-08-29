@@ -25,7 +25,9 @@ Coverage required by the card:
   * auth still enforced (401) on both POST and GET.
 """
 import json
+import os
 import sys
+import tempfile
 import threading
 import time
 import types
@@ -75,8 +77,11 @@ def fakes(monkeypatch):
 
 
 def _make_invoke(state):
-    def invoke(profile, session, prompt, timeout=routes_orchestrator._DEFAULT_TIMEOUT):
+    def invoke(profile, session, prompt, timeout=routes_orchestrator._DEFAULT_TIMEOUT,
+               **kwargs):   # image_data/image_mime forwarded by _run_job
         state["invoke_calls"].append((profile, session, prompt, timeout))
+        state.setdefault("invoke_images", []).append(
+            (kwargs.get("image_data"), kwargs.get("image_mime")))
         gate = state["invoke_gate"]
         if gate is not None:
             gate.wait(timeout=5)          # hold the job in `running`
@@ -210,6 +215,135 @@ def test_chat_empty_prompt_400(running, token, fakes):
     assert payload["error"]["code"] == "bad_request"
     assert fakes["invoke_calls"] == []
     assert not routes_orchestrator._jobs
+
+
+# --------------------------------------------------------------------------- #
+# Image attachment (t_a779c06f) — validation
+# --------------------------------------------------------------------------- #
+
+def test_chat_image_data_without_mime_400(running, token, fakes):
+    status, payload = _post(running, token, body={
+        "project": "hscc", "prompt": "hi", "confirm": True,
+        "image_data": "aGVsbG8=",
+    })
+    assert status == 400
+    assert payload["error"]["code"] == "bad_request"
+    assert "together" in payload["error"]["message"]
+    assert fakes["invoke_calls"] == []
+    assert not routes_orchestrator._jobs
+
+
+def test_chat_image_mime_without_data_400(running, token, fakes):
+    status, payload = _post(running, token, body={
+        "project": "hscc", "prompt": "hi", "confirm": True,
+        "image_mime": "image/png",
+    })
+    assert status == 400
+    assert payload["error"]["code"] == "bad_request"
+    assert "together" in payload["error"]["message"]
+    assert fakes["invoke_calls"] == []
+
+
+def test_chat_image_bad_base64_400(running, token, fakes):
+    status, payload = _post(running, token, body={
+        "project": "hscc", "prompt": "hi", "confirm": True,
+        "image_data": "not@@base64!!", "image_mime": "image/png",
+    })
+    assert status == 400
+    assert payload["error"]["code"] == "bad_request"
+    assert "not valid base64" in payload["error"]["message"]
+    assert fakes["invoke_calls"] == []
+
+
+def test_chat_image_non_image_mime_400(running, token, fakes):
+    status, payload = _post(running, token, body={
+        "project": "hscc", "prompt": "hi", "confirm": True,
+        "image_data": "aGVsbG8=", "image_mime": "text/plain",
+    })
+    assert status == 400
+    assert payload["error"]["code"] == "bad_request"
+    assert "image/*" in payload["error"]["message"]
+    assert fakes["invoke_calls"] == []
+
+
+def test_chat_image_empty_400(running, token, fakes):
+    status, payload = _post(running, token, body={
+        "project": "hscc", "prompt": "hi", "confirm": True,
+        "image_data": "", "image_mime": "image/png",
+    })
+    assert status == 400
+    assert payload["error"]["code"] == "bad_request"
+    assert "empty" in payload["error"]["message"]
+
+
+def test_chat_image_oversized_400(monkeypatch):
+    """Just over the decoded cap is rejected BEFORE any job is created. Tested
+    at the validation seam (not over HTTP) because shipping a ~27 MB base64 body
+    over loopback breaks the synchronous test client (BrokenPipe when the
+    server rejects mid-body) — the HTTP path is already covered by the other 400
+    cases."""
+    monkeypatch.setattr(routes_orchestrator, "_MAX_IMAGE_BYTES", 1024)
+    big = b"x" * 1025
+    import base64 as _b64
+    with pytest.raises(routes_orchestrator.ApiError) as ei:
+        routes_orchestrator._validate_image({
+            "image_data": _b64.b64encode(big).decode(),
+            "image_mime": "image/png",
+        })
+    assert ei.value.status == 400
+    assert "exceeds" in ei.value.message
+    assert "MiB" in ei.value.message
+
+
+def test_chat_image_success_runs_job_with_image(running, token, fakes):
+    """A valid image attachment is forwarded to the backing invoke, which the
+    transport then turns into ``--image <file>``. The 202 + job flow stays the
+    same as a plain chat."""
+    import base64 as _b64
+    png_data = b"\x89PNG\r\n\x1a\n" + b"fakepixels" * 10
+    status, payload = _post(running, token, body={
+        "project": "hscc", "prompt": "what went wrong on the dashboard",
+        "confirm": True,
+        "image_data": _b64.b64encode(png_data).decode(),
+        "image_mime": "image/png",
+    })
+    assert status == 202
+    job_id = payload["job_id"]
+    done = _poll_done(running, token, job_id)
+    assert done["status"] == "done"
+    assert done["reply"] == "I dispatched a card for you."
+    # The fake invoke saw our exact image bytes + mime.
+    assert fakes["invoke_images"] == [(png_data, "image/png")]
+    assert fakes["invoke_calls"] == [
+        ("hscc-orch", "hscc", "what went wrong on the dashboard",
+         routes_orchestrator._DEFAULT_TIMEOUT)
+    ]
+
+
+def test_chat_image_success_normalizes_mime(running, token, fakes):
+    """MIME case is normalized to lowercase before it reaches the invoke."""
+    import base64 as _b64
+    status, payload = _post(running, token, body={
+        "project": "hscc", "prompt": "hi", "confirm": True,
+        "image_data": _b64.b64encode(b"jpegdata").decode(),
+        "image_mime": "image/JPEG",
+    })
+    assert status == 202
+    done = _poll_done(running, token, payload["job_id"])
+    assert done["status"] == "done"
+    assert fakes["invoke_images"] == [(b"jpegdata", "image/jpeg")]
+
+
+def test_chat_plain_has_no_image(running, token, fakes):
+    """A plain (no image) chat must NOT be mistaken for one carrying an image —
+    regression guard so existing clients are unaffected."""
+    status, payload = _post(running, token, body={
+        "project": "hscc", "prompt": "hello", "confirm": True,
+    })
+    assert status == 202
+    done = _poll_done(running, token, payload["job_id"])
+    assert done["status"] == "done"
+    assert fakes["invoke_images"] == [(None, None)]
 
 
 # --------------------------------------------------------------------------- #
@@ -366,7 +500,8 @@ def test_get_job_reports_running_while_invoke_blocks(running, token, fakes):
 # --------------------------------------------------------------------------- #
 
 def test_chat_backing_timeout_job_error(running, token, fakes, monkeypatch):
-    def timed_out(profile, session, prompt, timeout=routes_orchestrator._DEFAULT_TIMEOUT):
+    def timed_out(profile, session, prompt, timeout=routes_orchestrator._DEFAULT_TIMEOUT,
+                  **kwargs):
         fakes["invoke_calls"].append((profile, session, prompt, timeout))
         raise routes_orchestrator._OrchestratorTimeout("did not reply in 180s")
     _install(monkeypatch, {"invoke": timed_out})
@@ -394,7 +529,8 @@ def test_timeout_job_elapsed_frozen_at_termination(running, token, fakes, monkey
     timeout the message describes — NOT the wall time between submission and
     the late read.
     """
-    def timed_out(profile, session, prompt, timeout=routes_orchestrator._DEFAULT_TIMEOUT):
+    def timed_out(profile, session, prompt, timeout=routes_orchestrator._DEFAULT_TIMEOUT,
+                  **kwargs):
         fakes["invoke_calls"].append((profile, session, prompt, timeout))
         raise routes_orchestrator._OrchestratorTimeout("did not reply in 180s")
     _install(monkeypatch, {"invoke": timed_out})
@@ -423,7 +559,8 @@ def test_timeout_job_elapsed_frozen_at_termination(running, token, fakes, monkey
 
 
 def test_chat_backing_unavailable_job_error(running, token, fakes, monkeypatch):
-    def unavail(profile, session, prompt, timeout=routes_orchestrator._DEFAULT_TIMEOUT):
+    def unavail(profile, session, prompt, timeout=routes_orchestrator._DEFAULT_TIMEOUT,
+                **kwargs):
         fakes["invoke_calls"].append((profile, session, prompt, timeout))
         raise routes_orchestrator._OrchestratorUnavailable(
             "orchestrator session 'hscc' not ready"
@@ -440,7 +577,8 @@ def test_chat_backing_unavailable_job_error(running, token, fakes, monkeypatch):
 
 
 def test_chat_backing_invocation_error_job_error(running, token, fakes, monkeypatch):
-    def failed(profile, session, prompt, timeout=routes_orchestrator._DEFAULT_TIMEOUT):
+    def failed(profile, session, prompt, timeout=routes_orchestrator._DEFAULT_TIMEOUT,
+               **kwargs):
         fakes["invoke_calls"].append((profile, session, prompt, timeout))
         raise routes_orchestrator._OrchestratorInvocationError("empty reply")
     _install(monkeypatch, {"invoke": failed})
@@ -456,7 +594,8 @@ def test_chat_backing_invocation_error_job_error(running, token, fakes, monkeypa
 
 def test_chat_unexpected_backing_exception_job_error(running, token, fakes, monkeypatch):
     """A truly unexpected exception must become a clean job error, not a leak."""
-    def boom(profile, session, prompt, timeout=routes_orchestrator._DEFAULT_TIMEOUT):
+    def boom(profile, session, prompt, timeout=routes_orchestrator._DEFAULT_TIMEOUT,
+             **kwargs):
         fakes["invoke_calls"].append((profile, session, prompt, timeout))
         raise RuntimeError("secret-token-in-detail")
     _install(monkeypatch, {"invoke": boom})
@@ -503,7 +642,8 @@ def test_run_job_done_sets_reply_and_speak(monkeypatch):
     job = _ChatJob("chat-99", "hscc", "hscc-orch", "hscc", "hi")
     monkeypatch.setattr(
         routes_orchestrator, "_backing_invoke",
-        lambda p, s, q, timeout=routes_orchestrator._DEFAULT_TIMEOUT: ("the answer", p, s),
+        lambda p, s, q, timeout=routes_orchestrator._DEFAULT_TIMEOUT,
+               **kwargs: ("the answer", p, s),
     )
     _run_job(job)
     d = routes_orchestrator._job_dict(job)
