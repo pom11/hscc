@@ -41,6 +41,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
+from queue import Empty, Queue
 from typing import Any, Optional
 
 # --- Event type constants (the ``type`` field on every envelope) ----------- #
@@ -293,11 +294,67 @@ class SessionEventStore:
         self._events: list[Event] = []   # seq-ascending, contiguous from oldest_seq
         self._first_seq = 1              # seq of self._events[0]
         self._lock = threading.Lock()
+        self._listeners: set = set()     # callables(Event) notified on append
+
+    # -- live-stream subscription ---------------------------------------- #
+
+    def subscribe(self, listener) -> None:
+        """Register ``listener(Event)`` to be called on every future append.
+
+        Listeners drive the live WebSocket fan-out: the bridge relay and any
+        connected app WS both subscribe here so a single append (from hermes
+        serve) reaches every live client exactly once, in seq order. The
+        listener must be reentrant / not block on the store lock (callbacks run
+        WITHOUT the lock held); a ``queue.put`` is the idiomatic use.
+        """
+        with self._lock:
+            self._listeners.add(listener)
+
+    def unsubscribe(self, listener) -> None:
+        """Remove a listener registered with :meth:`subscribe` (idempotent)."""
+        with self._lock:
+            self._listeners.discard(listener)
+
+    def snapshot_and_subscribe(self, after: int) -> tuple:
+        """Atomically subscribe and return ``(boundary, replay_events)``.
+
+        This is the gap-free reconnect primitive. It must be called by a WS
+        connection AFTER it decides on its resume cursor ``after`` (the seq it
+        has already rendered). It:
+
+        1. subscribes a fresh listener queue first, then
+        2. captures ``boundary == store.next_seq``, then
+        3. snapshots the stored events with ``after < seq < boundary``.
+
+        Because the listener is registered BEFORE ``boundary`` is read, no
+        event appended between the two is dropped: an event that lands there is
+        both in the stored snapshot (seq <= boundary) and will arrive on the
+        listener queue — the connection dedupes by skipping queue events with
+        ``seq <= boundary``. Events appended after ``boundary`` appear ONLY on
+        the queue and are streamed live. Net effect: every event with
+        ``seq > after`` is delivered exactly once, in order — no gap, no dupe.
+
+        Returns ``(boundary, replay_events, queue)``. ``replay_events`` is
+        seq-ascending with ``after < seq < boundary``; callers drain ``queue``
+        via ``get_nowait``/``get(timeout=...)``.
+        """
+        sub_queue: Queue = Queue()
+        self.subscribe(sub_queue.put)
+        with self._lock:
+            boundary = self._first_seq + len(self._events)
+            replay = [e for e in self._events if after < e.seq < boundary]
+        return boundary, replay, sub_queue
+
 
     # -- writes ----------------------------------------------------------- #
 
     def append(self, type_: str, payload: Any, ts: Optional[str] = None) -> int:
-        """Append one event; returns its seq. Thread-safe."""
+        """Append one event; returns its seq. Thread-safe.
+
+        Fan-outs to subscribed live listeners AFTER releasing the store lock,
+        so a slow/reentrant listener never stalls other appends. Each listener
+        receives the fully-stamped :class:`Event` (seq + ts already assigned).
+        """
         with self._lock:
             seq = self._first_seq + len(self._events)
             ev = make_event(type_, payload, seq, ts=ts)
@@ -307,7 +364,15 @@ class SessionEventStore:
                 over = len(self._events) - self._capacity
                 del self._events[:over]
                 self._first_seq += over
-            return seq
+            listeners = list(self._listeners)
+
+        for listener in listeners:
+            try:
+                listener(ev)
+            except Exception:
+                # A misbehaving listener must not kill the append path.
+                pass
+        return seq
 
     @property
     def next_seq(self) -> int:

@@ -234,6 +234,96 @@ def test_limit_clamped_and_zero(clean_store):
 
 
 # --------------------------------------------------------------------------- #
+# Live-stream subscription + gap-free resume (the WS bridge backend)
+# --------------------------------------------------------------------------- #
+
+def test_append_fans_out_to_subscribers(clean_store):
+    s = get_store("alpha")
+    got = []
+    s.subscribe(lambda ev: got.append(ev.seq))
+    s.append("message", MessagePayload(role="assistant", delta="a"))
+    s.append("message", MessagePayload(role="assistant", delta="b"))
+    assert got == [1, 2]
+
+
+def test_unsubscribe_stops_fanout(clean_store):
+    s = get_store("alpha")
+    got = []
+    listener = _store_listener(got)
+    s.subscribe(listener)
+    s.append("message", MessagePayload(role="assistant", delta="a"))
+    assert got == [1]
+    s.unsubscribe(listener)
+    s.append("message", MessagePayload(role="assistant", delta="b"))
+    assert got == [1]  # no further fan-out after unsubscribe
+
+
+def test_unsubscribe_is_idempotent(clean_store):
+    s = get_store("alpha")
+    got = []
+    listener = _store_listener(got)
+    s.subscribe(listener)
+    s.unsubscribe(listener)
+    s.unsubscribe(listener)  # must not raise
+    s.append("message", MessagePayload(role="assistant", delta="a"))
+    assert got == []
+
+
+def _store_listener(got):
+    def _l(ev):
+        got.append(ev.seq)
+    return _l
+
+
+def test_listener_receives_fully_stamped_event(clean_store):
+    s = get_store("alpha")
+    seen = {}
+    s.subscribe(lambda ev: seen.update(seq=ev.seq, type=ev.type,
+                                       ts=ev.ts, payload=ev.payload))
+    s.append("message", MessagePayload(role="assistant", delta="hi"))
+    assert seen["seq"] == 1
+    assert seen["type"] == "message"
+    assert seen["ts"].endswith("Z")
+    assert seen["payload"].to_json() == {"role": "assistant", "delta": "hi",
+                                         "done": False}
+
+
+def test_fanout_does_not_block_append_on_slow_listener(clean_store):
+    """A throwing listener is swallowed; the append still returns the seq."""
+    s = get_store("alpha")
+    s.subscribe(lambda ev: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert s.append("message", MessagePayload(role="assistant", delta="a")) == 1
+
+
+def test_snapshot_and_subscribe_replay_with_resume_cursor(clean_store):
+    s = get_store("alpha")
+    for i in range(1, 6):
+        s.append("message", MessagePayload(role="assistant", delta=f"d{i}"))
+    # Client has rendered up to seq 2; resume from 3.
+    boundary, replay, q = s.snapshot_and_subscribe(after=2)
+    assert boundary == 6
+    assert [e.seq for e in replay] == [3, 4, 5]
+    # Live events after the boundary land on the queue only.
+    s.append("message", MessagePayload(role="assistant", delta="d6"))
+    s.append("message", MessagePayload(role="assistant", delta="d7"))
+    live = [q.get_nowait().seq for _ in range(2)]
+    assert live == [6, 7]
+    s.unsubscribe(q.put)
+
+
+def test_snapshot_keeps_next_seq_monotonic_across_resume(clean_store):
+    """Repeated subscribes never perturb the shared seq space."""
+    s = get_store("alpha")
+    s.append("message", MessagePayload(role="assistant", delta="d1"))
+    store = s
+    first = store.snapshot_and_subscribe(after=0)
+    second = store.snapshot_and_subscribe(after=first[0] - 1)
+    assert second[0] == first[0] == 2
+    store.unsubscribe(first[2].put)
+    store.unsubscribe(second[2].put)
+
+
+# --------------------------------------------------------------------------- #
 # History endpoint over HTTP
 # --------------------------------------------------------------------------- #
 
