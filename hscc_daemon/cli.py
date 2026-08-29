@@ -142,7 +142,7 @@ def cmd_status():
     print(f"  {'Stream':<12s} {'Status':<8s} {'Last Check':<22s} {'OK'}")
     print(f"  {'─'*12} {'─'*8} {'─'*22} {'─'*8}")
 
-    for stream_name in ["dgx", "gateway", "local", "heartbeat", "nas", "watchdog", "triggers", "engine_wedge"]:
+    for stream_name in ["dgx", "gateway", "local", "heartbeat", "nas", "watchdog", "triggers", "engine_wedge", "dispatcher"]:
         state = states.get(stream_name)
         if not state:
             print(f"  {stream_name:<12s} {'—':<8s} {'never':<22s} —")
@@ -178,6 +178,7 @@ def cmd_status():
 def cmd_check(stream=None):
     """Run a single check cycle."""
     from .health import check_dgx, check_gateway, check_local, check_heartbeat, check_nas, check_idle_monitor, check_workers, check_engine_wedge
+    from .dispatcher_wedge import check_dispatcher_wedge
     from .lifecycle import pipeline_watchdog
     from .trigger import trigger_engine
     from .state import read_state
@@ -188,6 +189,7 @@ def cmd_check(stream=None):
         "watchdog": pipeline_watchdog, "triggers": trigger_engine,
         "idle": check_idle_monitor, "workers": check_workers,
         "engine_wedge": check_engine_wedge,
+        "dispatcher": check_dispatcher_wedge,
     }
 
     if stream and stream == "all":
