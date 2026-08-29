@@ -69,6 +69,56 @@ struct AutodownStatusResponse: Decodable, Speakable {
     let speak: String
 }
 
+/// A saved cluster the operator can connect to: a named host/port/token set.
+///
+/// The app holds a LIST of these (SettingsStore) so an operator can keep
+/// several clusters around — a test cluster, a colleague's cluster, their own
+/// production one — and switch between them without destroying settings.
+///
+/// The bearer token is NOT stored here (never in UserDefaults/source): it lives
+/// in the Keychain, one item per cluster, keyed by `id` (see KeychainStore).
+/// This struct only carries the non-secret connection facts + connection
+/// history used by the settings UI and the cluster picker.
+struct SavedCluster: Identifiable, Codable, Equatable {
+    var id: UUID
+    /// Human-friendly name the operator picks ("Production", "Test DGX", …).
+    var name: String
+    /// Hostname or IP (tailnet name, e.g. `dgx-tailscale`). Never a default.
+    var host: String
+    /// The HSCC API port (8778 usually; default 8788).
+    var port: Int
+    /// When the cluster last answered a ping successfully. nil = never.
+    var lastConnected: Date?
+    /// Result of the last connection test. nil = never tested; true/false =
+    /// the ping outcome (drives the health dot). A successful *use* of the
+    /// cluster also sets this to true.
+    var lastTestSuccess: Bool?
+
+    init(id: UUID = UUID(), name: String, host: String, port: Int,
+         lastConnected: Date? = nil, lastTestSuccess: Bool? = nil) {
+        self.id = id
+        self.name = name
+        self.host = host
+        self.port = port
+        self.lastConnected = lastConnected
+        self.lastTestSuccess = lastTestSuccess
+    }
+
+    /// The connection health derived from `lastTestSuccess` — the color shown
+    /// as the health dot in the cluster list and picker.
+    var health: ClusterHealth {
+        guard let s = lastTestSuccess else { return .unknown }
+        return s ? .ok : .failed
+    }
+}
+
+/// The health of a saved cluster — drives the colored dot in the list/picker.
+enum ClusterHealth {
+    case unknown   /// never tested (gray)
+    case ok        /// last test / use succeeded (green)
+    case failed    /// last test failed (red)
+}
+
 /// The App Group that the app and all extensions share for preferences +
 /// Keychain access, so the widget and Live Activity see the operator's
 /// connection settings and last-known cluster state.
@@ -77,10 +127,17 @@ enum AppGroup {
     static let suiteName = "group.com.hscc.ios"
     /// Keychain item identity (service/account) shared by app + extensions.
     static let keychainService = "com.hscc.ios"
+    /// The legacy "current" token account. This holds the ACTIVE cluster's
+    /// token so the extensions/intents (which read this single item) always see
+    /// the cluster the operator is connected to. Per-cluster tokens live under
+    /// the derived account `api-token.<uuid>` (see KeychainStore).
     static let keychainAccount = "api-token"
     // Preference keys stored in the shared suite.
     static let hostKey = "hscc.host"
     static let portKey = "hscc.port"
+    // Multi-cluster list + which cluster is currently active.
+    static let clustersKey = "hscc.clusters"
+    static let activeClusterIDKey = "hscc.activeClusterID"
     // Last-known cluster snapshot keys (see SnapshotStore below).
     static let snapStateKey = "hscc.snap.state"
     static let snapModelCountKey = "hscc.snap.model_count"
