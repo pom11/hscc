@@ -46,20 +46,7 @@ struct FleetControlView: View {
     // MARK: - Not configured
 
     private var notConfiguredView: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "power")
-                .font(.system(size: 44))
-                .foregroundColor(.secondary)
-            Text("Connect to your cluster")
-                .font(.headline)
-            Text("Set the host, port, and token in Settings to control the fleet.")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 60)
-        .padding(.horizontal)
+        HSConnectGate(systemImage: "power", verb: "to control the fleet")
     }
 
     // MARK: - Load
@@ -90,7 +77,7 @@ struct FleetControlView: View {
                     Text(state.speak)
                         .font(.subheadline)
                         .italic()
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     if let applied = state.applied {
                         if let name = applied.template, !name.isEmpty {
                             LabeledContent("Template") { Text(name) }
@@ -113,7 +100,7 @@ struct FleetControlView: View {
                     if let note = state.note, !note.isEmpty {
                         Label(note, systemImage: "info.circle")
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     }
                 }
             default:
@@ -130,7 +117,7 @@ struct FleetControlView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Bring the serving fleet up, or stop ALL workloads fleet-wide.")
                     .font(.subheadline)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
 
                 // Cluster Up — starts every serving unit. Confirm names it.
                 MutationButton(

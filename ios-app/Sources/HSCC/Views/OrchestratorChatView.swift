@@ -143,12 +143,12 @@ private struct ChatBody: View {
         VStack(spacing: 8) {
             Image(systemName: "bubble.left.and.bubble.right")
                 .font(.largeTitle)
-                .foregroundColor(.secondary)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
             Text("Ask the \(project) orchestrator")
                 .font(.headline)
             Text("Send a prompt to the \(project) orchestrator. It may decompose your request and dispatch real work onto the \(project) board. This conversation continues across sessions — the orchestrator remembers context.")
                 .font(.footnote)
-                .foregroundColor(.secondary)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 .multilineTextAlignment(.center)
         }
         .padding(.top, 48)
@@ -510,8 +510,8 @@ private struct ChatBubble: View {
                 Spacer(minLength: 48)
             case .failure:
                 bubble
-                    .background(Color.red.opacity(0.12))
-                    .foregroundColor(.red)
+                    .background(Theme.Semantic.bad.opacity(0.12))
+                    .foregroundColor(Theme.Semantic.bad)
                 Spacer(minLength: 48)
             }
         }

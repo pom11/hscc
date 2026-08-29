@@ -56,20 +56,7 @@ struct BoardHygieneView: View {
     }
 
     private var notConfiguredView: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "broom")
-                .font(.system(size: 44))
-                .foregroundColor(.secondary)
-            Text("Connect to your cluster")
-                .font(.headline)
-            Text("Set the host, port, and token in Settings to manage boards.")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 60)
-        .padding(.horizontal)
+        HSConnectGate(systemImage: "broom", verb: "to manage boards")
     }
 
     // MARK: - Blocked pane
@@ -116,7 +103,7 @@ struct BoardHygieneView: View {
             if tasks.isEmpty {
                 Section {
                     Text("No blocked cards on any board.")
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
             }
             ForEach(tasks) { card in
@@ -125,7 +112,7 @@ struct BoardHygieneView: View {
             if let errors = response.errors, !errors.isEmpty {
                 Section("Errors") {
                     ForEach(errors, id: \.self) { error in
-                        Text(error).font(.caption).foregroundColor(.red)
+                        Text(error).font(.caption).foregroundColor(Theme.Semantic.bad)
                     }
                 }
             }
@@ -140,22 +127,22 @@ struct BoardHygieneView: View {
                 .font(.body)
             HStack(spacing: 6) {
                 if let board = card.board, !board.isEmpty {
-                    Text(board).font(.caption).foregroundColor(.secondary)
+                    Text(board).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
                 if let assignee = card.assignee, !assignee.isEmpty {
-                    Text(assignee).font(.caption).foregroundColor(.secondary)
+                    Text(assignee).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
                 if let age = card.age_days {
-                    Text("\(age)d").font(.caption).foregroundColor(.secondary)
+                    Text("\(age)d").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
             }
             if let kind = card.block_kind, !kind.isEmpty {
                 Label(kind, systemImage: "hand.raised.fill")
                     .font(.caption)
-                    .foregroundColor(.orange)
+                    .foregroundColor(Theme.Semantic.warn)
             }
             if let why = card.why, !why.isEmpty {
-                Text(why).font(.caption).foregroundColor(.secondary)
+                Text(why).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
             }
             // Recover — confirm-gated, one card at a time. Names the card so
             // the operator knows exactly what will be re-run.
@@ -219,7 +206,7 @@ struct BoardHygieneView: View {
             if tasks.isEmpty {
                 Section {
                     Text("No stale cards.")
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
             }
             ForEach(tasks) { card in
@@ -228,16 +215,16 @@ struct BoardHygieneView: View {
                         .font(.body)
                     HStack(spacing: 6) {
                         if let board = card.board, !board.isEmpty {
-                            Text(board).font(.caption).foregroundColor(.secondary)
+                            Text(board).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
                         }
                         if let status = card.status, !status.isEmpty {
-                            Text(status).font(.caption).foregroundColor(.secondary)
+                            Text(status).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
                         }
                         if let assignee = card.assignee, !assignee.isEmpty {
-                            Text(assignee).font(.caption).foregroundColor(.secondary)
+                            Text(assignee).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
                         }
                         if let age = card.age_days {
-                            Text("\(age)d old").font(.caption).foregroundColor(.secondary)
+                            Text("\(age)d old").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
                         }
                     }
                 }
@@ -246,7 +233,7 @@ struct BoardHygieneView: View {
             if let errors = response.errors, !errors.isEmpty {
                 Section("Errors") {
                     ForEach(errors, id: \.self) { error in
-                        Text(error).font(.caption).foregroundColor(.red)
+                        Text(error).font(.caption).foregroundColor(Theme.Semantic.bad)
                     }
                 }
             }
