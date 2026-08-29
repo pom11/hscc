@@ -327,11 +327,7 @@ struct OpsView: View {
 
 
     private func errorLabel(_ message: String) -> some View { HSErrorLabel(message: message) }
-    private func emptyLabel(_ text: String) -> some View {
-        Label(text, systemImage: "tray")
-            .font(.subheadline)
-            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-    }
+    private func emptyLabel(_ text: String) -> some View { HSEmptyLabel(message: text) }
 
     private func displayJSON(_ value: JSONValue) -> String {
         switch value {
