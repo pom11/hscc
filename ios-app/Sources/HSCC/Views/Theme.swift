@@ -322,11 +322,12 @@ struct HSConnectGate: View {
 
 /// The shared secondary-metadata line under a row title (board · assignee ·
 /// age…). Use it instead of stacking three separate `.caption` Texts with their
-/// own `.foregroundColor(.secondary)`.
+/// own `.foregroundColor(.secondary)`, each gated by `if let`.
+/// Nils are dropped, so separators only appear between present parts.
 struct HSMetaLine: View {
     let parts: [String]
 
-    init(_ parts: [String]) { self.parts = parts }
+    init(_ parts: [String?]) { self.parts = parts.compactMap { $0 } }
     init(_ parts: String...) { self.parts = parts }
     init<S: Sequence>(_ parts: S) where S.Element == String { self.parts = Array(parts) }
 

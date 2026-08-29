@@ -125,14 +125,8 @@ struct ProjectsView: View {
             Text(project.name)
                 .font(.body.weight(.medium))
                 .foregroundColor(Theme.Semantic.onSurface)
-            HStack(spacing: 6) {
-                if let board = project.board, !board.isEmpty {
-                    Text(board).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                }
-                if !project.displayTopic.isEmpty {
-                    Text("topic \(project.displayTopic)").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                }
-            }
+            HSMetaLine([project.board,
+                        project.displayTopic.isEmpty ? nil : "topic \(project.displayTopic)"])
         }
     }
 
@@ -462,12 +456,7 @@ struct ProjectBoardView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(card.displayTitle)
                     .foregroundColor(Theme.Semantic.onSurface)
-                HStack(spacing: 6) {
-                    if let assignee = card.assignee, !assignee.isEmpty {
-                        Text(assignee).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    }
-                    Text(card.id).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                }
+                HSMetaLine([card.assignee, card.id])
             }
         }
     }

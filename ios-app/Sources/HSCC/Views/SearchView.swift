@@ -210,14 +210,7 @@ struct SearchView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(card.displayTitle)
                     .foregroundColor(Theme.Semantic.onSurface)
-                HStack(spacing: 6) {
-                    if let board = card.board, !board.isEmpty {
-                        Text(board).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    }
-                    if let status = card.status, !status.isEmpty {
-                        Text(status).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    }
-                }
+                HSMetaLine([card.board, card.status])
             }
         }
     }
