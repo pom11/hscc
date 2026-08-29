@@ -66,16 +66,12 @@ struct BoardHygieneView: View {
         Group {
             switch blocked {
             case .idle:
-                ProgressView("Loading…").task { await loadBlocked(client) }
+                HSLoading("Loading…").task { await loadBlocked(client) }
             case .loading:
-                ProgressView("Loading…")
+                HSLoading("Loading…")
             case .failed(let message):
-                ContentUnavailableView {
-                    Label("Couldn't load blocked cards", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(message)
-                } actions: {
-                    Button("Try again") { Task { await loadBlocked(client) } }
+                HSError("Couldn't load blocked cards", message: message) {
+                    Task { await loadBlocked(client) }
                 }
             case .stale(let response, let ageMessage):
                 blockedList(response, client: client, staleMessage: ageMessage)
@@ -169,16 +165,12 @@ struct BoardHygieneView: View {
         Group {
             switch stale {
             case .idle:
-                ProgressView("Loading…").task { await loadStale(client) }
+                HSLoading("Loading…").task { await loadStale(client) }
             case .loading:
-                ProgressView("Loading…")
+                HSLoading("Loading…")
             case .failed(let message):
-                ContentUnavailableView {
-                    Label("Couldn't load stale cards", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(message)
-                } actions: {
-                    Button("Try again") { Task { await loadStale(client) } }
+                HSError("Couldn't load stale cards", message: message) {
+                    Task { await loadStale(client) }
                 }
             case .stale(let response, let ageMessage):
                 staleList(response, client: client, staleMessage: ageMessage)

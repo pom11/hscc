@@ -63,12 +63,8 @@ struct SearchView: View {
 
         switch (projects, cards) {
         case (.failed(let m), _), (_, .failed(let m)):
-            ContentUnavailableView {
-                Label("Couldn't search", systemImage: "exclamationmark.triangle")
-            } description: {
-                Text(m)
-            } actions: {
-                Button("Try again") { Task { await load() } }
+            HSError("Couldn't search", message: m) {
+                Task { await load() }
             }
         default:
             if trimmed.isEmpty {
@@ -138,11 +134,9 @@ struct SearchView: View {
             if let stale = staleBanner() {
                 Section { stale }
             }
-            ContentUnavailableView {
-                Label("No results for “\(query)”", systemImage: "magnifyingglass")
-            } description: {
-                Text("Search project names, repos, boards, or card titles, ids, and statuses.")
-            }
+            HSEmpty("No results for “\(query)”",
+                     message: "Search project names, repos, boards, or card titles, ids, and statuses.",
+                     systemImage: "magnifyingglass")
         }
     }
 
