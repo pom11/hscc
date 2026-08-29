@@ -143,6 +143,33 @@ struct HSCCClient {
         return url
     }
 
+    /// Build a URL with explicit query items (never embedded in `path`).
+    ///
+    /// The plain `url(for:)` used by the core `get` sets `components.path` to
+    /// the whole string; if that string contains a literal `?` it is
+    /// percent-encoded into `%3F` and silently becomes part of the path. Query
+    /// parameters that matter — like a paging `before` cursor — must go
+    /// through `URLQueryItem`, which percent-encodes name/value and keeps the
+    /// path clean.
+    private func url(for path: String, queryItems: [URLQueryItem]) throws -> URL {
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = host
+        components.port = port
+        components.path = path
+        components.queryItems = queryItems
+        guard let url = components.url else {
+            throw HSCCError.invalidURL
+        }
+        return url
+    }
+
+    /// Percent-encode a single path segment (project names etc.) so it is safe
+    /// to interpolate into a URL path.
+    func pathComponent(_ value: String) -> String {
+        value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
+    }
+
     // MARK: - Request construction
 
     /// Build a request. `timeout` overrides URLSession's 60s default — the
@@ -150,7 +177,13 @@ struct HSCCClient {
     /// 30-90s (measured floor: 16.8s for a two-word reply), so the default
     /// would abort a request the server is still successfully working on.
     private func request(for path: String, timeout: TimeInterval? = nil) throws -> URLRequest {
-        var req = URLRequest(url: try url(for: path))
+        try request(for: try url(for: path), timeout: timeout)
+    }
+
+    /// Build a request from an already-constructed `URL` (used by the
+    /// query-string GET variant).
+    private func request(for url: URL, timeout: TimeInterval? = nil) throws -> URLRequest {
+        var req = URLRequest(url: url)
         if let timeout { req.timeoutInterval = timeout }
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -194,6 +227,45 @@ struct HSCCClient {
         }
 
         // Non-2xx: attempt to decode the unified error shape.
+        throw Self.error(from: data, status: status)
+    }
+
+    /// Perform a GET with explicit query items and decode into `T`.
+    ///
+    /// Same semantics as `get(_:as:)` but builds the URL via `URLQueryItem`s
+    /// (see `url(for:queryItems:)`). The response is cached under the plain
+    /// `path` ONLY when `queryItems` is empty — i.e. the newest-page (tail)
+    /// read — so the offline last-known cache always holds the freshest page
+    /// and a paging read never clobbers it.
+    func get<T: Decodable>(path: String,
+                           queryItems: [URLQueryItem],
+                           as type: T.Type = T.self) async throws -> T {
+        let req = try request(for: try url(for: path, queryItems: queryItems))
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: req)
+        } catch {
+            throw HSCCError.transport(underlying: error)
+        }
+
+        guard let http = response as? HTTPURLResponse else {
+            throw HSCCError.decoding("non-HTTP response")
+        }
+
+        let status = http.statusCode
+        if (200...299).contains(status) {
+            do {
+                let decoded = try Self.decoder.decode(T.self, from: data)
+                if queryItems.isEmpty {
+                    StateCache.store(data, for: path)
+                }
+                return decoded
+            } catch {
+                throw HSCCError.decoding(String(describing: error))
+            }
+        }
+
         throw Self.error(from: data, status: status)
     }
 
@@ -586,6 +658,29 @@ struct HSCCClient {
     /// tap-to-trace.
     func activityFeed(limit: Int = 50) async throws -> ActivityFeedResponse {
         try await get("/v1/activity/feed?limit=\(limit)", as: ActivityFeedResponse.self)
+    }
+
+    /// GET /v1/projects/{name}/session/events — page the project's chat log.
+    ///
+    /// On open (no `before`) this fetches the NEWEST page (the tail) so the
+    /// operator sees context that predates this install — the thing that makes
+    /// a project's chat a SESSION, not a log the app happens to own. Pass
+    /// `before` = the returned `next_before` to page further BACK (strictly
+    /// older seq). `limit` defaults to the server's 200 and is capped at 1000.
+    ///
+    /// Query parameters are built with `URLQueryItem` (not embedded in the
+    /// path) so `before`/`limit` survive percent-decoding exactly — unlike a
+    /// literal `?` in the path string, which URLComponents would encode as
+    /// `%3F` and turn into a wrong path.
+    func sessionEvents(project: String,
+                       before: Int? = nil,
+                       limit: Int = 200) async throws -> SessionHistoryResponse {
+        var query: [URLQueryItem] = []
+        if let before { query.append(URLQueryItem(name: "before", value: String(before))) }
+        query.append(URLQueryItem(name: "limit", value: String(limit)))
+        return try await get(path: "/v1/projects/\(pathComponent(project))/session/events",
+                             queryItems: query,
+                             as: SessionHistoryResponse.self)
     }
 
     /// GET /v1/template/list — available cluster templates.

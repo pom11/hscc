@@ -86,6 +86,51 @@ c.check(AutodownStatusResponse.self, "autodown_status.json", "AutodownStatusResp
 c.check(SessionsListResponse.self, "v1_sessions.json", "SessionsListResponse")
 c.check(ActivityFeedResponse.self, "v1_activity_feed.json", "ActivityFeedResponse")
 
+// ---- Session history paging (t_2776ea3c) ----
+// Decode the session-event history page against the REAL wire model and assert
+// the pager's contract: every event type decodes to its right case, seq is
+// ascending oldest→newest, and the `next_before` paging cursor is surfaced.
+c.check(SessionHistoryResponse.self, "v1_session_events.json", "SessionHistoryResponse")
+do {
+    let page = try JSONDecoder().decode(SessionHistoryResponse.self,
+                                         from: try Data(contentsOf: URL(fileURLWithPath: fixtureDir + "/v1_session_events.json")))
+    var ok = page.project == "hscc"
+    ok = ok && page.next_before == 40
+    ok = ok && page.oldest_seq == 1 && page.next_seq == 51
+    ok = ok && !page.speak.isEmpty
+    ok = ok && page.events.count == 10
+    // seq strictly ascending oldest→newest (the pager relies on this order).
+    for i in 1..<page.events.count where page.events[i].seq <= page.events[i-1].seq {
+        ok = false
+    }
+    // every event type decodes to the expected case.
+    let types: [ParsedPayload] = page.events.map(\.payload)
+    guard types.count == 10 else { throw NSError(domain: "decodecheck", code: 1, userInfo: [NSLocalizedDescriptionKey: "expected 10 payloads"]) }
+    if case .hello = types[0] {} else { ok = false }
+    if case .message = types[1] {} else { ok = false }
+    if case .toolCall = types[2] {} else { ok = false }
+    if case .toolCall = types[3] {} else { ok = false }
+    if case .message = types[4] {} else { ok = false }
+    if case .card = types[5] {} else { ok = false }
+    if case .agent = types[6] {} else { ok = false }
+    if case .system = types[7] {} else { ok = false }
+    if case .error = types[8] {} else { ok = false }
+    if case .message = types[9] {} else { ok = false }
+    // tool_call finish carried its optional duration_s as absent — decode lenient.
+    if case .toolCall(let tc) = types[3], tc.duration_s != nil { ok = false }
+
+    if ok {
+        c.passed += 1
+        print("OK   v1_session_events.json  →  history paging contract (10 events, seq 41–50, next_before 40, all 7 types)")
+    } else {
+        c.failures.append(("v1_session_events.json", "history paging contract", "assertion failed"))
+        print("FAIL v1_session_events.json → history paging contract")
+    }
+} catch {
+    c.failures.append(("v1_session_events.json", "history paging contract", "\(error)"))
+    print("FAIL v1_session_events.json → history paging contract: \(error)")
+}
+
 // ---- Approvals classification (t_9a5cfc3b) — the SAME `isPendingApproval`
 // logic the on-screen inbox, the badge poller, and the Siri intent use, asserted
 // against the REAL committed kanban_blocked.json fixture. Both cards in that
