@@ -26,6 +26,7 @@ STATE_DIR = os.path.expanduser("~/.hscc/state")
 PERIODIC_INTERVALS = {
     "dgx": 60, "gateway": 60, "local": 60, "heartbeat": 300,
     "nas": 900, "idle": 300, "workers": 60, "proxy": 60, "engine_wedge": 60,
+    "dispatcher": 60,
 }
 
 
@@ -243,6 +244,8 @@ def _run_supervised_periodic(stop_event, check_fn, interval, stream_name):
 def run_daemon_loop():
     """Main daemon event loop (polling mode fallback)."""
     from .health import check_dgx, check_gateway, check_local, check_heartbeat, check_nas, check_idle_monitor, check_workers, check_proxy, check_engine_wedge
+    from .dispatcher_wedge import check_dispatcher_wedge
+    from .dispatcher_wedge import DISPATCHER_RECOVER_CHECK_INTERVAL as _DWE_INTERVAL
     from .trigger import trigger_engine
     from .lifecycle import pipeline_watchdog, restart_vllm, load_watchdog_block
     from . import recover
@@ -289,6 +292,7 @@ def run_daemon_loop():
         "heartbeat": check_heartbeat, "nas": check_nas,
         "idle": check_idle_monitor, "workers": check_workers,
         "proxy": check_proxy, "engine_wedge": check_engine_wedge,
+        "dispatcher": check_dispatcher_wedge,
     }
 
     def run_watchdog_loop():
@@ -330,6 +334,25 @@ def run_daemon_loop():
                 log(f"Engine-wedge recovery error: {e}", "ERROR")
             stop_event.wait(recover.RECOVER_CHECK_INTERVAL)
 
+    def run_dispatcher_wedge_recover_loop():
+        """Guarded self-heal for a wedged kanban dispatcher.
+
+        Runs at the same cadence as the ``dispatcher`` probe. Each tick calls
+        ``dispatcher_wedge.recover_dispatcher_wedge()``, which consumes the
+        probe's latest verdict and — only after a genuine stall is declared and
+        confirmed for M consecutive detections, then every cooldown/attempt-cap
+        guard passes — restarts the gateway. The restart action is injectable
+        and defaults to the real ``launchctl kickstart``. A raising tick must
+        never kill the thread: swallow it loudly and continue.
+        """
+        from . import dispatcher_wedge as _dwe
+        while not stop_event.is_set():
+            try:
+                _dwe.recover_dispatcher_wedge()
+            except Exception as e:
+                log(f"Dispatcher-wedge recovery error: {e}", "ERROR")
+            stop_event.wait(_dwe.DISPATCHER_RECOVER_CHECK_INTERVAL)
+
     threads = []
     for stream_name, interval in STREAMS.items():
         check_fn = CHECKS.get(stream_name)
@@ -353,6 +376,12 @@ def run_daemon_loop():
     threads.append(er)
     log("Started engine-wedge recovery thread "
         "(interval=%ss)" % recover.RECOVER_CHECK_INTERVAL)
+
+    dwr = threading.Thread(target=run_dispatcher_wedge_recover_loop, daemon=True)
+    dwr.start()
+    threads.append(dwr)
+    log("Started dispatcher-wedge recovery thread "
+        "(interval=%ss)" % _DWE_INTERVAL)
 
     wd = threading.Thread(target=run_watchdog_loop, daemon=True)
     wd.start()
