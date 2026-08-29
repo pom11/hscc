@@ -732,8 +732,23 @@ struct BlockedCard: Decodable, Identifiable {
     let comments: [String]?
 
     var displayTitle: String { title ?? id }
-}
 
+    /// Whether this blocked card is a PENDING APPROVAL — i.e. genuinely waiting
+    /// on a human decision (approvals inbox, t_9a5cfc3b).
+    ///
+    /// The `kanban_block` tool's kinds:
+    ///   * `needs_input`, `capability` (and missing/unclassified) → a human must
+    ///     decide → APPROVAL.
+    ///   * `dependency`, `transient` → auto-resume; no human in the loop → NOT.
+    var isPendingApproval: Bool {
+        switch block_kind {
+        case "dependency", "transient":
+            return false
+        default:
+            return true
+        }
+    }
+}
 /// GET /v1/kanban/blocked — the envelope.
 struct KanbanBlockedResponse: Decodable, Speakable {
     let boards: Int?

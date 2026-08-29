@@ -87,6 +87,8 @@ targets:
       - path: Sources/HSCC/Views/ProjectsView.swift
       - path: Sources/HSCC/Views/OpsView.swift
       - path: Sources/HSCC/Views/BoardHygieneView.swift
+      - path: Sources/HSCC/Views/ApprovalsView.swift
+      - path: Sources/HSCC/Views/ApprovalBadge.swift
       - path: Sources/HSCC/Views/FleetControlView.swift
       - path: Sources/HSCC/Views/TemplatesView.swift
       - path: Sources/HSCC/Views/TemplateDetailView.swift
@@ -95,6 +97,7 @@ targets:
       - path: Sources/HSCC/Intents/IntentClient.swift
       - path: Sources/HSCC/Intents/ClusterStatusIntent.swift
       - path: Sources/HSCC/Intents/ReviewQueueIntent.swift
+      - path: Sources/HSCC/Intents/ApprovalsIntent.swift
       - path: Sources/HSCC/Intents/CannedCard.swift
       - path: Sources/HSCC/Intents/AppShortcuts.swift
       - path: Sources/HSCC/Intents/ProjectIntents.swift

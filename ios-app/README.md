@@ -69,8 +69,9 @@ fleet-level folded into one Cluster tab.
       then nested screens folding in everything fleet-level — Health & Ops
       (`Views/OpsView.swift`: verify / daemon / triggers / escalations /
       profiles), Fleet (`Views/FleetView.swift`: health, stats, throughput,
-      streams, autoscale), Fleet Control (up/down), Templates, Autodown, and
-      Board Hygiene. Nothing fleet-related lives outside this tab.
+      streams, autoscale), Fleet Control (up/down), Templates, Autodown,
+      **Approvals**, and Board Hygiene. Nothing fleet-related lives outside
+      this tab.
     - `Views/AutodownView.swift` — the operator's most-used surface: the live
       `/v1/autodown/status` report + confirm-gated enable / disable / wake /
       cancel. Wake enters a polling "waking" state and starts the **Live
@@ -82,6 +83,15 @@ fleet-level folded into one Cluster tab.
       polling of `/v1/template/status` + `/v1/verify`.
     - `Views/BoardHygieneView.swift` — blocked (with confirm-gated recover)
       and stale cards across every board.
+    - `Views/ApprovalsView.swift` — the **approvals inbox**: blocked cards
+      genuinely waiting on a human decision, presented as a decision surface
+      ("worker wants to force-push X — allow?"). Uses `/v1/kanban/blocked`
+      classified by `BlockedCard.isPendingApproval` (human-decision kinds
+      `needs_input`/`capability`/unclassified; `dependency`/`transient`
+      auto-resume and are excluded). **Allow** recovers the card so the worker
+      proceeds; leaving it blocked is the decline. `Views/ApprovalBadge.swift`
+      backs the Cluster tab `.badge(...)` pending count (polls the same read,
+      same classification) so pending work is visible at a glance.
     - `Views/SearchView.swift` — **cross-project search** over last-known
       projects + cards, so it works even when the cluster is unreachable.
     - `Views/OrchestratorChatView.swift` — the confirm-gated chat surface (job
@@ -109,6 +119,9 @@ fleet-level folded into one Cluster tab.
       the per-project `speak` summary verbatim).
     - `ClusterStatusIntent` + `ReviewQueueIntent` — speak each endpoint's
       `speak` one-liner.
+    - `ApprovalsIntent` — voices the pending approval count (read-only,
+      classified by `BlockedCard.isPendingApproval`, no confirm needed):
+      "3 pending approvals await your decision." / "No pending approvals."
     - `CannedCard` + `DispatchCannedCardIntent` — voice-dispatch a KNOWN card
       via the confirm-gated client (never free-form dictation).
     - `AppShortcuts` — the `AppShortcutsProvider` with natural phrases.

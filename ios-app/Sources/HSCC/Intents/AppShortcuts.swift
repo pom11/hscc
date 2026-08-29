@@ -7,6 +7,7 @@ import AppIntents
 /// Every shortcut here maps to one of the AppIntents above:
 ///   * "cluster status"  → `ClusterStatusIntent`
 ///   * "review queue"    → `ReviewQueueIntent`
+///   * "pending approvals" → `ApprovalsIntent` (read-only count)
 ///   * "dispatch a card" → `DispatchCannedCardIntent` (picks a known card)
 ///   * "ask <project> <question>" → `AskOrchestratorIntent` (job-based, speaks
 ///     the reply after a normal wait)
@@ -14,7 +15,8 @@ import AppIntents
 ///
 /// The dispatch + ask-orchestrator shortcuts carry explicit confirmation
 /// before they run — a voice tap can never silently start real work. The
-/// read-only ones (cluster status, review queue, project status) need none.
+/// read-only ones (cluster status, review queue, approvals, project status)
+/// need none.
 struct AppShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
@@ -34,6 +36,16 @@ struct AppShortcuts: AppShortcutsProvider {
             ],
             shortTitle: "Review queue",
             systemImageName: "list.bullet"
+        )
+        AppShortcut(
+            intent: ApprovalsIntent(),
+            phrases: [
+                "Get \(.applicationName) approvals",
+                "\(.applicationName) pending approvals",
+                "Are there pending \(.applicationName) approvals",
+            ],
+            shortTitle: "Pending approvals",
+            systemImageName: "checkmark.seal"
         )
         AppShortcut(
             intent: DispatchCannedCardIntent(),

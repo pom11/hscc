@@ -12,6 +12,7 @@ import SwiftUI
 ///   * **Fleet Control** — FleetControlView (cluster up/down)
 ///   * **Templates**     — TemplatesView (browse, preview, confirm-gated apply)
 ///   * **Autodown**      — AutodownView (the operator's most-used surface)
+///   * **Approvals**     — ApprovalsView (the destructive-action decision inbox)
 ///   * **Board Hygiene** — BoardHygieneView (blocked/stale ACROSS all boards)
 ///
 /// Kanban/board content that belongs to a SPECIFIC project lives under that
@@ -23,6 +24,10 @@ import SwiftUI
 /// independently when opened.
 struct ClusterView: View {
     let client: HSCCClient?
+    /// The pending-approval count from the tab badge poller (nil = not yet
+    /// known). Shown on the Approvals hub row so the inbox is reachable and
+    /// its count is visible at a glance.
+    var approvalCount: Int? = nil
 
     @State private var status = LoadState<ClusterStatusResponse>.idle
     @State private var hosts = LoadState<ClusterHostsResponse>.idle
@@ -179,6 +184,7 @@ struct ClusterView: View {
 
     private func hubLinks(client: HSCCClient) -> some View {
         VStack(alignment: .leading, spacing: 12) {
+            approvalsRow(client)
             hubRow("Health & Ops", systemImage: "stethoscope",
                    subtitle: "verify, daemon, triggers, escalations, profiles") {
                 OpsView(client: client)
@@ -204,6 +210,60 @@ struct ClusterView: View {
                 BoardHygieneView(client: client)
             }
         }
+    }
+
+    private func approvalsRow(_ client: HSCCClient) -> some View {
+        NavigationLink {
+            ApprovalsView(client: client)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "checkmark.seal")
+                    .font(.title3)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Approvals")
+                        .font(.headline)
+                        .foregroundColor(Theme.Semantic.onSurface)
+                    Text(approvalCountLabel)
+                        .font(.caption)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(approvalTint)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// The subtitle for the Approvals hub row — either the pending count when
+    /// known, or a neutral "still loading" cue when the badge poller hasn't
+    /// produced a number yet.
+    private var approvalCountLabel: String {
+        if let approvalCount, approvalCount > 0 {
+            return "\(approvalCount) pending — allow or leave blocked"
+        }
+        if approvalCount == 0 {
+            return "no pending approvals"
+        }
+        return "this is where you allow or leave blocked a worker's request"
+    }
+
+    /// A distinct tint so the approvals inbox reads as the attention surface it
+    /// is — amber when there's something to decide, neutral otherwise.
+    private var approvalTint: Color {
+        guard let approvalCount, approvalCount > 0 else {
+            return Theme.Semantic.surfaceRaised
+        }
+        return Theme.Semantic.warn.opacity(0.14)
     }
 
     private func hubRow<Destination: View>(

@@ -88,6 +88,7 @@ enum EndpointPath {
     static let cards = "/v1/cards"
     static let templateList = "/v1/template/list"
     static let templateStatus = "/v1/template/status"
+    static let kanbanBlocked = "/v1/kanban/blocked"
 }
 
 /// HSCC HTTP API client — async/await URLSession.
