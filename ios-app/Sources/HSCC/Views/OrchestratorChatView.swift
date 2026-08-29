@@ -72,6 +72,16 @@ private struct ChatBody: View {
     @EnvironmentObject private var settings: SettingsStore
     let project: String
 
+    /// Sustained poll failures (at a 2s interval) after which the cluster is
+    /// judged unreachable and the honest terminal state replaces the spinner
+    /// (~30s of no contact). A SINGLE failure never kills a job — the persisted
+    /// job_id keeps it resumable. (t_c0953d4c)
+    private static let maxPollFailures = 15
+    /// Seconds an in-flight reply must pass before the operator gets a "Stop
+    /// waiting" control, so an accidental tap can't end a real wait too early.
+    /// (t_c0953d4c)
+    private static let stopWaitingGraceSec = 20
+
     @StateObject private var store: ChatStore
 
     /// Which project/profile is answering (profile filled from the last reply).
@@ -79,6 +89,12 @@ private struct ChatBody: View {
     /// Fleet readiness: nil (unknown), or a state string from /v1/autodown/status.
     @State private var fleetState: String? = nil
     @State private var showConfirm = false
+    /// The text of an UNSENT message awaiting a retry decision (t_c0953d4c).
+    /// Non-nil only while a Retry confirmation is pending; reset after send/retry.
+    @State private var retryCandidate: String? = nil
+    /// Handle to the running poll task, so "Stop waiting" can cancel it and the
+    /// honest impossible-to-collect states can end the spinner (t_c0953d4c).
+    @State private var pollTask: Task<Void, Never>? = nil
 
     init(project: String) {
         self.project = project
@@ -97,7 +113,8 @@ private struct ChatBody: View {
                             emptyState
                         } else {
                             ForEach(store.transcript.indices, id: \.self) { index in
-                                ChatBubble(entry: store.transcript[index])
+                                let entry = store.transcript[index]
+                                ChatBubble(entry: entry, retry: retry(for: entry))
                                     .id(index)   // stable — transcript is append-only
                             }
                         }
@@ -195,10 +212,28 @@ private struct ChatBody: View {
         if let inFlight = store.inFlight {
             TimelineView(.periodic(from: inFlight.startedAt, by: 1)) { context in
                 let elapsed = Int(context.date.timeIntervalSince(inFlight.startedAt))
-                Label {
-                    Text(footerText(elapsed: elapsed, profile: answeringProfile ?? inFlight.profile))
-                } icon: {
-                    Image(systemName: "circle.dotted")
+                HStack(spacing: 8) {
+                    Label {
+                        Text(footerText(elapsed: elapsed, profile: answeringProfile ?? inFlight.profile))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } icon: {
+                        // jobID == nil → still POSTing (no job yet); otherwise a
+                        // job exists and we're polling. Both must reach an honest
+                        // terminal state eventually — never a permanent spinner.
+                        Image(systemName: inFlight.jobID != nil ? "circle.dotted" : "arrow.up.circle")
+                    }
+                    // Honest stop: once a job exists (so nothing in-flight is
+                    // lost server-side) and the wait has passed a short grace so
+                    // this isn't an accidental tap, let the operator end the
+                    // spinner themselves. The terminal state explains what
+                    // happened and that a late answer can still be resumed.
+                    if inFlight.jobID != nil && elapsed >= Self.stopWaitingGraceSec {
+                        Button("Stop waiting") {
+                            stopWaiting()
+                        }
+                        .font(.caption)
+                        .buttonStyle(.borderless)
+                    }
                 }
             }
         }
@@ -227,8 +262,10 @@ private struct ChatBody: View {
                     .disabled(store.isSending)
 
                 // STEP 1 — a tap only arms the confirmation. No request is sent,
-                // so a double-tap on Send can never double-send.
+                // so a double-tap on Send can never double-send. A fresh typed
+                // message is never a retry, so clear any pending retry target.
                 Button {
+                    retryCandidate = nil
                     showConfirm = true
                 } label: {
                     if store.isSending {
@@ -246,7 +283,11 @@ private struct ChatBody: View {
         .confirmationDialog(confirmTitle, isPresented: $showConfirm, titleVisibility: .visible) {
             // STEP 2 — the deliberate second step naming exactly what will happen.
             Button("Send") {
-                Task { await send() }
+                if let text = retryCandidate {
+                    Task { await retrySend(text) }
+                } else {
+                    Task { await submitSend() }
+                }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -259,11 +300,17 @@ private struct ChatBody: View {
     }
 
     private var confirmTitle: String {
-        "Send to the \(project) orchestrator?"
+        if retryCandidate != nil {
+            return "Retry this UNSENT message?"
+        }
+        return "Send to the \(project) orchestrator?"
     }
 
     private var confirmMessage: String {
-        "It may decompose your prompt and dispatch real work onto the \(project) project's board."
+        if retryCandidate != nil {
+            return "Re-sends the failed prompt to the \(project) orchestrator. It may decompose your prompt and dispatch real work onto the \(project) project's board."
+        }
+        return "It may decompose your prompt and dispatch real work onto the \(project) project's board."
     }
 
     // MARK: - Fleet readiness probe
@@ -286,18 +333,34 @@ private struct ChatBody: View {
         }
     }
 
-    // MARK: - Send (confirm-gated) + async job poll
+    // MARK: - Send / retry (confirm-gated) + async job poll
 
+    /// Compose a NEW message from the composer draft and send it (t_c0953d4c).
     @MainActor
-    private func send() async {
+    private func submitSend() async {
         let text = trimmed(store.draft)
-        // The transcript + in-flight state are owned by the store. beginSend
-        // optimistically appends the prompt and starts the wait BEFORE the
-        // network call, so the message is never lost even if it fails. Only the
-        // live draft is cleared — the prompt now lives in the transcript.
+        retryCandidate = nil
         store.beginSend(prompt: text)
-        store.draft = ""
+        store.draft = ""   // the prompt now lives in the transcript; never lost
+        await deliver(text: text)
+    }
 
+    /// Re-send an UNSENT message (t_c0953d4c). Same confirm-gated path as a
+    /// fresh send — the command is a mutation and never bypasses the gate. The
+    /// historical UNSENT entry stays as the record of the failed attempt.
+    @MainActor
+    private func retrySend(_ text: String) async {
+        retryCandidate = nil
+        store.retry(prompt: text)   // appends a fresh `.prompt`, starts in-flight
+        await deliver(text: text)
+    }
+
+    /// The shared delivery path for a fresh send and a retry: optimistically
+    /// begin (already done by the caller), POST to create the job, then poll.
+    /// If delivery fails (the POST never created a job), the message is kept as
+    /// UNSENT — never silently discarded.
+    @MainActor
+    private func deliver(text: String) async {
         // Re-probe the fleet right before sending so the operator gets the most
         // current down/waking warning.
         await refreshFleetState()
@@ -310,25 +373,35 @@ private struct ChatBody: View {
             // resume the poll, then poll for the reply.
             let started = try await client.orchestratorChatStart(project: project, prompt: text)
             store.startPolling(jobID: started.jobID)
-            await poll(jobID: started.jobID, client: client)
+            pollTask = Task { await poll(jobID: started.jobID, client: client) }
         } catch {
-            // A non-2xx POST (400 unknown_project / bad_request, 409; a 5xx
-            // transport failure would also land here before any job exists)
-            // throws. Render the failure honestly — never as a reply. The sent
-            // prompt stays in the transcript (never lost).
-            store.failSend(message: message(for: error))
+            // Delivery failed: the POST never created a job (transport error, or
+            // a 4xx/5xx before any background work started). Nothing will arrive.
+            // Keep the message visible as UNSENT with a Retry — never silently
+            // discarded, never rendered as a bogus reply — and surface why
+            // delivery failed so the operator knows what to fix before Retry.
+            store.markUnsent(reason: message(for: error))
         }
     }
 
     /// Poll GET /v1/orchestrator/chat/{id} until it reaches a terminal state,
     /// then fold the outcome into the store. `store.inFlight` drives the honest
-    /// elapsed ticker, so "still working" reads differently from "hung". Runs as
-    /// an async Task kept alive by the view.
+    /// elapsed ticker, so "still working" reads differently from "hung".
+    ///
+    /// Honest terminal states (t_c0953d4c) — this loop NEVER spins forever:
+    ///   * a job reaching a terminal error folds `.failure` and returns;
+    ///   * a sustained run of unreachable polls (the phone cannot reach the
+    ///     cluster) ends with `store.reachabilityLost()`, an honest "couldn't
+    ///     collect the answer" note rather than an endless ticker;
+    ///   * the operator choosing "Stop waiting" cancels this task, which ends
+    ///     the spinner with `store.abandonWaiting()`.
     @MainActor
     private func poll(jobID: String, client: HSCCClient) async {
-        while true {
+        var consecutiveFailures = 0
+        while !Task.isCancelled {
             do {
                 let status = try await client.orchestratorChatPoll(jobID: jobID)
+                consecutiveFailures = 0
                 if status.isTerminal {
                     if status.status == "done", let reply = status.reply {
                         store.finishSend(reply: reply, profile: status.profile)
@@ -342,12 +415,45 @@ private struct ChatBody: View {
                     return
                 }
             } catch {
-                // A transient poll failure (e.g. the phone was briefly offline)
-                // must NOT kill the job — the server keeps working and the
-                // persisted job_id survives for a retry/resume. Fall through and
-                // keep polling.
+                // A failed poll attempt (e.g. the phone was briefly offline).
+                // Count it and keep going — a SINGLE failure must not kill the
+                // job (the server keeps working and the persisted job_id
+                // survives). Only a sustained run of failures terminates: after
+                // `maxPollFailures` the cluster is judged unreachable, and the
+                // honest terminal state replaces the endless spinner.
+                consecutiveFailures += 1
+                if consecutiveFailures >= Self.maxPollFailures {
+                    store.reachabilityLost()
+                    return
+                }
             }
             try? await Task.sleep(nanoseconds: 2_000_000_000)  // poll every 2s
+        }
+    }
+
+    /// The operator tapped "Stop waiting" in the in-flight footer: cancel the
+    /// poll and end the spinner with an honest terminal state (t_c0953d4c).
+    @MainActor
+    private func stopWaiting() {
+        store.abandonWaiting()   // guarded — clears inFlight + appends honest note
+        pollTask?.cancel()
+        pollTask = nil
+    }
+
+    /// The Retry action for an UNSENT entry: shows the confirm-gated retry
+    /// dialog targeting the exact failed text. Only `.unsent` entries get one
+    /// (there is nothing to retry otherwise). Each failed message stays
+    /// individually retriable — the failed prompt is never silently dropped.
+    /// The command (re-send) is a mutation and stays behind the confirm gate.
+    private func retry(for entry: ChatEntry) -> (() -> Void)? {
+        switch entry {
+        case .unsent:
+            return { [store] in
+                retryCandidate = entry.text
+                showConfirm = true
+            }
+        default:
+            return nil
         }
     }
 
@@ -447,28 +553,48 @@ private struct ChatBody: View {
 /// `Codable` so a per-project transcript can be persisted (`ChatStore`) across
 /// navigation and app relaunch (requirement 4).
 enum ChatEntry: Codable, Equatable {
+    /// A prompt the operator sent and the orchestrator received (delivered).
     case prompt(String)
+    /// A completed orchestrator reply.
     case reply(String)
+    /// A terminal failure — red, never rendered as a reply. Used for a job that
+    /// reached a terminal error on the server, and for the honest terminal
+    /// states this chat reaches when a reply cannot be collected (t_c0953d4c).
     case failure(String)
+    /// An UNSENT message: the send failed to DELIVER (the POST never created a
+    /// job). It stays visible, marked UNSENT, with a Retry — never silently
+    /// discarded (t_c0953d4c). Holds the failed prompt text and an optional
+    /// human reason for why delivery failed (transport, bad request, etc.).
+    case unsent(prompt: String, reason: String?)
 
     var text: String {
         switch self {
         case .prompt(let t): return t
         case .reply(let t): return t
         case .failure(let t): return t
+        case .unsent(let prompt, _): return prompt
         }
+    }
+
+    /// The delivery-failure reason, for the `.unsent` case (nil for all others).
+    var unsentReason: String? {
+        if case .unsent(_, let reason) = self { return reason }
+        return nil
     }
 
     // MARK: Codable — encode the case + payload as a tagged payload so a
     // future case can be added without breaking old persisted transcripts.
 
     private enum Kind: String, Codable {
-        case prompt, reply, failure
+        case prompt, reply, failure, unsent
     }
 
     private struct Payload: Codable {
         let kind: Kind
         let text: String
+        /// Present only for `.unsent` — the reason delivery failed. Optional so
+        /// older (pre-unsent) persisted records and reason-less unsents decode.
+        var reason: String? = nil
     }
 
     init(from decoder: Decoder) throws {
@@ -477,27 +603,44 @@ enum ChatEntry: Codable, Equatable {
         case .prompt: self = .prompt(payload.text)
         case .reply: self = .reply(payload.text)
         case .failure: self = .failure(payload.text)
+        case .unsent: self = .unsent(prompt: payload.text, reason: payload.reason)
         }
     }
 
     func encode(to encoder: Encoder) throws {
         let kind: Kind
+        var reason: String? = nil
         switch self {
-        case .prompt: kind = .prompt
-        case .reply: kind = .reply
-        case .failure: kind = .failure
+        case .prompt(let t):
+            kind = .prompt
+            _ = t
+        case .reply(let t):
+            kind = .reply
+            _ = t
+        case .failure(let t):
+            kind = .failure
+            _ = t
+        case .unsent(let prompt, let r):
+            kind = .unsent
+            _ = prompt
+            reason = r
         }
-        try Payload(kind: kind, text: text).encode(to: encoder)
+        try Payload(kind: kind, text: text, reason: reason).encode(to: encoder)
     }
 }
 
 /// Bubble rendering for a transcript entry: prompts on the right (accent),
-/// orchestrator replies on the left (system gray), failures in red.
+/// orchestrator replies on the left (system gray), failures in red, and UNSENT
+/// messages in a muted bad-tint with a Retry button (t_c0953d4c).
 private struct ChatBubble: View {
     let entry: ChatEntry
+    /// Called when the operator taps Retry on an UNSENT message. The view
+    /// passes this only for `.unsent` entries, and re-confirms before sending
+    /// (no path around the confirm gate). When nil, no Retry is shown.
+    var retry: (() -> Void)? = nil
 
     var body: some View {
-        HStack {
+        HStack(alignment: .bottom) {
             switch entry {
             case .prompt:
                 Spacer(minLength: 48)
@@ -513,8 +656,37 @@ private struct ChatBubble: View {
                     .background(Theme.Semantic.bad.opacity(0.12))
                     .foregroundColor(Theme.Semantic.bad)
                 Spacer(minLength: 48)
+            case .unsent:
+                // Left-ish like the other own-messages, but with a bad-tinted
+                // background, an explicit UNSENT label, the failed text, the
+                // delivery-failure reason (if any), and a Retry button. It is
+                // ALWAYS visible — the failed message is never silently deleted.
+                if let retry {
+                    bubble
+                        .background(Color.red.opacity(0.12))
+                        .overlay(alignment: .bottomTrailing) { retryButton }
+                } else {
+                    bubble
+                        .background(Color.red.opacity(0.12))
+                }
+                Spacer(minLength: 48)
             }
         }
+    }
+
+    private var retryButton: some View {
+        Button {
+            retry?()
+        } label: {
+            Label("Retry", systemImage: "arrow.clockwise")
+                .font(.caption2.weight(.semibold))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.red)
+                .foregroundColor(.white)
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.borderless)
     }
 
     private var bubble: some View {
@@ -526,6 +698,14 @@ private struct ChatBubble: View {
             Text(entry.text)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            // For an UNSENT message, surface why delivery failed (e.g. "can't
+            // reach the cluster") so the operator knows what to fix before Retry.
+            if let reason = entry.unsentReason {
+                Text(reason)
+                    .font(.caption2)
+                    .opacity(0.85)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(10)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -536,6 +716,7 @@ private struct ChatBubble: View {
         case .prompt: return "YOU"
         case .reply: return "ORCHESTRATOR"
         case .failure: return "FAILED"
+        case .unsent: return "UNSENT"
         }
     }
 }
