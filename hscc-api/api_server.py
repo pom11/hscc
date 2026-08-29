@@ -659,6 +659,7 @@ import routes_kanban  # noqa: E402,F401  (registers /v1/kanban/{blocked,blocked/
 import routes_template  # noqa: E402,F401  (registers /v1/template/{list,status,preview/{name}})
 import routes_profile  # noqa: E402,F401  (registers /v1/profile/{list,install,export,export/{file}})
 import routes_profiles  # noqa: E402,F401  (registers /v1/profiles/* lifecycle + config)
+import routes_profile_editor  # noqa: E402,F401  (registers /v1/profile/editor/{profile} read + update)
 import routes_sessions  # noqa: E402,F401  (registers /v1/sessions list + retire/compact)
 import routes_memory  # noqa: E402,F401  (registers /v1/memory list + delete/edit)
 import routes_activity  # noqa: E402,F401  (registers /v1/activity/feed — live agent activity feed)
