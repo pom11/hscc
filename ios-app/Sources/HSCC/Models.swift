@@ -614,6 +614,34 @@ struct ProjectGit: Decodable {
     let uncommitted: [String]?
     let last_activity_seconds_ago: Int?
     let head: String?
+    /// Commits on the local branch not on its tracking upstream (to push).
+    let ahead: Int?
+    /// Commits on the upstream not on the local branch (to pull).
+    let behind: Int?
+}
+
+/// GET /v1/projects/{name} — the chat session's health bucket (routes_project
+/// surfaces routes_orchestrator._session_health for the `<name>-orch` profile /
+/// `<name>` session). Mirrors the backend keys so the operator sees the bloat
+/// signals approaching the context ceiling before it wedges.
+///
+/// `compaction_at_risk` is the alert: positive evidence compaction is not
+/// firing (a compression_failure_error / fallback streak / ineffective count),
+/// NOT raw input_tokens — that column is a cumulative counter never reset by
+/// compaction. `threshold_tokens` is the ensured compaction cap.
+struct ProjectSessionHealth: Decodable {
+    let profile: String?
+    let session: String?
+    let messages: Int?
+    let input_tokens: Int?
+    let compression_failure_error: String?
+    let compression_fallback_streak: Int?
+    let compression_ineffective_count: Int?
+    let context_window: Int?
+    let threshold_tokens: Int?
+    let compaction_at_risk: Bool?
+    let bloated: Bool?
+    let reason: String?
 }
 
 /// GET /v1/projects/{name} — per-project detail.
@@ -627,6 +655,7 @@ struct ProjectDetailResponse: Decodable, Speakable {
     let topic: JSONValue?
     let board_counts: [String: Int]?
     let git: ProjectGit?
+    let session_health: ProjectSessionHealth?
     let speak: String
 
     /// Rendered topic: an int id as-is, the string "unknown" when a project has

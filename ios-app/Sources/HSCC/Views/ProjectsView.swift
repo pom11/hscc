@@ -206,7 +206,7 @@ struct ProjectDetailView: View {
             .padding(.vertical, 8)
 
             switch selected {
-            case .overview: ProjectOverviewView(client: client, name: project.name)
+            case .overview: ProjectOverviewView(client: client, name: project.name, onOpenChat: { selected = .chat })
             case .chat:     OrchestratorChatView(project: project.name)
             case .board:    ProjectBoardView(client: client, board: project.board)
             case .settings: ProjectSettingsView(client: client, name: project.name)
@@ -217,10 +217,25 @@ struct ProjectDetailView: View {
     }
 }
 
-/// Overview section — board counts + git state (GET /v1/projects/{name}).
+/// Overview section — answers \"what is the state of this project?\" in ~3s.
+///
+/// Layered so the operator's eye lands on risk first:
+///   1. A BLOCKED hero (big, warm) when anything is blocked — the thing that
+///      actually needs eyes. Running/ready counts sit quietly beside it.
+///   2. Git state — branch + ahead/behind + dirty (how sync'd local is).
+///   3. Session health — the orchestrator's compaction headroom so a bloating
+///      context is visible before it wedges.
+///   4. A tappable last-reply preview that jumps to the Chat section.
+///
+/// Data: GET /v1/projects/{name} (+ the app's own persisted ChatStore for the
+/// last-reply preview). Unreadable in ~3 seconds on purpose: no dense tables,
+/// risk-first ordering.
 struct ProjectOverviewView: View {
     let client: HSCCClient
     let name: String
+    /// Navigate to the Chat section (wired by ProjectDetailView to flip its
+    /// segmented picker). The last-reply preview calls this on tap.
+    var onOpenChat: () -> Void = {}
 
     @State private var detail = LoadState<ProjectDetailResponse>.idle
 
@@ -259,56 +274,321 @@ struct ProjectOverviewView: View {
                     .font(.hsccMono(15))
             }
 
-            Section("Project") {
-                if let topic = state.displayTopic, !topic.isEmpty {
-                    LabeledContent("Topic") { Text(topic).font(.hsccMono(15)) }
-                }
-                if let board = state.board, !board.isEmpty {
-                    LabeledContent("Board") { Text(board).font(.hsccMono(15)) }
-                }
-                if let repo = state.repo, !repo.isEmpty {
-                    LabeledContent("Repo") { Text(repo).lineLimit(1).truncationMode(.middle).font(.hsccMono(15)) }
-                }
-                if let counts = state.board_counts {
-                    let sorted = counts
-                        .filter { $0.key != "total" }
-                        .sorted { $0.value > $1.value }
-                    if !sorted.isEmpty {
-                        let openTotal = counts["total"] ?? sorted.map(\.value).reduce(0, +)
-                        LabeledContent("Open cards") { Text("\(openTotal)").font(.hsccMono(15)) }
-                        ForEach(sorted, id: \.key) { status, count in
-                            LabeledContent(status.capitalized) { Text("\(count)").font(.hsccMono(15)) }
-                        }
+            // Compact ident — board + repo so the operator knows exactly which
+            // project/board/checkout this overview is for.
+            if state.board != nil || state.repo != nil {
+                Section("Project") {
+                    if let board = state.board, !board.isEmpty {
+                        LabeledContent("Board") { Text(board).font(.hsccMono(15)) }
+                    }
+                    if let repo = state.repo, !repo.isEmpty {
+                        LabeledContent("Repo") { Text(repo).lineLimit(1).truncationMode(.middle).font(.hsccMono(15)) }
                     }
                 }
             }
 
+            countsSection(state.board_counts)
+
             if let git = state.git, git.is_repo == true {
-                Section("Git") {
-                    if let branch = git.branch, !branch.isEmpty {
-                        LabeledContent("Branch") { Text(branch).font(.hsccMono(15)) }
-                    }
-                    LabeledContent("Dirty") { Text(git.dirty == true ? "Yes" : "No") }
-                    if let age = git.last_activity_seconds_ago {
-                        LabeledContent("Last commit") { Text(timeAgo(age)) }
-                    }
-                    if let head = git.head, !head.isEmpty {
-                        LabeledContent("Head") { Text(head.prefix(8)).font(.hsccMono(15)) }
-                    }
-                    if let uncommitted = git.uncommitted, !uncommitted.isEmpty {
-                        LabeledContent("Uncommitted") {
-                            Text("\(uncommitted.count) file\(uncommitted.count == 1 ? "" : "s")").font(.hsccMono(15))
-                        }
-                    }
-                }
+                gitSection(git)
             } else {
                 Section("Git") {
                     Text("Not a git repo.")
                         .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
             }
+
+            if let health = state.session_health {
+                sessionHealthSection(health)
+            }
+
+            if let last = lastReply(state) {
+                lastReplySection(last)
+            }
         }
         .refreshable { await load() }
+    }
+
+    // MARK: - Counts (blocked first & loud, running/ready beside it)
+
+    @ViewBuilder
+    private func countsSection(_ counts: [String: Int]?) -> some View {
+        let blocked = counts?["blocked"] ?? 0
+        let running = counts?["running"] ?? 0
+        let ready = counts?["ready"] ?? 0
+        let total = counts?["total"] ?? (blocked + running + ready)
+
+        Section("Board") {
+            if blocked > 0 {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "hand.raised.fill")
+                            .foregroundColor(Theme.Semantic.warn)
+                        Text("\(blocked) blocked")
+                            .font(.title2.weight(.bold))
+                            .foregroundColor(Theme.Semantic.warn)
+                    }
+                    Text("Needs eyes — tap the Board section to triage.")
+                        .font(.caption)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+                .padding(.vertical, 6)
+            } else {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(Theme.Semantic.ok)
+                    Text("Nothing blocked")
+                        .font(.title3.weight(.semibold))
+                        .foregroundColor(Theme.Semantic.ok)
+                }
+                .padding(.vertical, 6)
+            }
+
+            HStack(spacing: 16) {
+                statPill("Running", value: running, color: Theme.Semantic.warn)
+                statPill("Ready", value: ready, color: Theme.Semantic.ok)
+                Spacer()
+                Text("of \(total) open")
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    @ViewBuilder
+    private func statPill(_ label: String, value: Int, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("\(value)")
+                .font(.title2.weight(.bold))
+                .foregroundColor(color)
+            Text(label)
+                .font(.caption)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        }
+    }
+
+    // MARK: - Git state (branch + ahead/behind + dirty)
+
+    @ViewBuilder
+    private func gitSection(_ git: ProjectGit) -> some View {
+        Section("Git") {
+            if let branch = git.branch, !branch.isEmpty {
+                LabeledContent("Branch") { Text(branch).font(.hsccMono(15)) }
+            }
+            // Sync: ahead = to push, behind = to pull. Dirty adds local edits.
+            let behind = git.behind ?? 0
+            let ahead = git.ahead ?? 0
+            if behind > 0 || ahead > 0 {
+                LabeledContent("vs upstream") {
+                    Text(syncText(ahead: ahead, behind: behind)).font(.hsccMono(15))
+                        .foregroundColor(behind > 0 ? Theme.Semantic.warn : Theme.Semantic.onSurface)
+                }
+            }
+            LabeledContent("Dirty") {
+                HStack(spacing: 6) {
+                    if git.dirty == true {
+                        Circle().fill(Theme.Semantic.warn).frame(width: 8, height: 8)
+                    }
+                    Text(git.dirty == true ? "Yes" : "No")
+                }
+            }
+            if let age = git.last_activity_seconds_ago {
+                LabeledContent("Last commit") { Text(timeAgo(age)) }
+            }
+            if let head = git.head, !head.isEmpty {
+                LabeledContent("Head") { Text(head.prefix(8)).font(.hsccMono(15)) }
+            }
+            if let uncommitted = git.uncommitted, !uncommitted.isEmpty {
+                LabeledContent("Uncommitted") {
+                    Text("\(uncommitted.count) file\(uncommitted.count == 1 ? "" : "s")").font(.hsccMono(15))
+                }
+            }
+        }
+    }
+
+    private func syncText(ahead: Int, behind: Int) -> String {
+        var parts: [String] = []
+        if ahead > 0 { parts.append("\(ahead) ahead") }
+        if behind > 0 { parts.append("\(behind) behind") }
+        return parts.isEmpty ? "synced" : parts.joined(separator: " · ")
+    }
+
+    // MARK: - Session health + compaction headroom
+
+    @ViewBuilder
+    private func sessionHealthSection(_ h: ProjectSessionHealth) -> some View {
+        let atRisk = h.compaction_at_risk == true
+        Section {
+            if atRisk {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(Theme.Semantic.bad)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Compaction at risk")
+                            .font(.headline)
+                            .foregroundColor(Theme.Semantic.bad)
+                        if let reason = h.reason, !reason.isEmpty {
+                            Text(reason)
+                                .font(.caption)
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            } else {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .foregroundColor(Theme.Semantic.ok)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Compaction healthy")
+                            .font(.headline)
+                            .foregroundColor(Theme.Semantic.ok)
+                        if let reason = h.reason, !reason.isEmpty {
+                            Text(reason)
+                                .font(.caption)
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+
+            if let headroom = compactionHeadroom(h) {
+                headroomBar(h, headroom: headroom)
+            }
+            if let profile = h.profile, !profile.isEmpty {
+                LabeledContent("Session") { Text(profile).font(.hsccMono(15)) }
+            }
+            if let messages = h.messages {
+                LabeledContent("Messages") { Text("\(messages)").font(.hsccMono(15)) }
+            }
+            if let tokens = h.input_tokens {
+                LabeledContent("Input tokens") { Text("\(tokens)").font(.hsccMono(15)) }
+            }
+        } header: {
+            Text("Session health")
+        } footer: {
+            Text(healthFootnote(h))
+        }
+    }
+
+    /// Fraction (0...1) of context still free before the compaction threshold,
+    /// derived from threshold_tokens vs the cumulative input_tokens gauge.
+    /// nil when the numbers aren't present / sane.
+    private func compactionHeadroom(_ h: ProjectSessionHealth) -> Double? {
+        guard let tokens = h.input_tokens, tokens > 0,
+              let threshold = h.threshold_tokens, threshold > 0 else { return nil }
+        // input_tokens is cumulative and never reset, so it can exceed the
+        // threshold on its own; clamp the headroom at 0 (no room) rather than
+        // going negative or pretending there's spare capacity.
+        return max(0.0, min(1.0, 1.0 - Double(tokens) / Double(threshold)))
+    }
+
+    @ViewBuilder
+    private func headroomBar(_ h: ProjectSessionHealth, headroom: Double) -> some View {
+        let pct = Int((headroom * 100).rounded())
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("\(pct)% context headroom")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(headroomColor(headroom))
+                Spacer()
+                if let threshold = h.threshold_tokens {
+                    Text("cap \(threshold)")
+                        .font(.caption2)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Theme.Semantic.surfaceElevated)
+                    Capsule()
+                        .fill(headroomColor(headroom))
+                        .frame(width: geo.size.width * headroom)
+                }
+            }
+            .frame(height: 6)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func headroomColor(_ headroom: Double) -> Color {
+        // Red at the edge, amber approaching it, green healthy.
+        switch headroom {
+        case ..<0.15: return Theme.Semantic.bad
+        case ..<0.35: return Theme.Semantic.warn
+        default: return Theme.Semantic.ok
+        }
+    }
+
+    private func healthFootnote(_ h: ProjectSessionHealth) -> String {
+        if h.compaction_at_risk == true { return "Compaction is not clearing context — watch this session." }
+        // When not at risk but there's an explicit stall signal, surface it.
+        if let streak = h.compression_fallback_streak, streak > 0 {
+            return "\(streak) fallback compaction\(streak == 1 ? "" : "s") in a row."
+        }
+        if let ineffective = h.compression_ineffective_count, ineffective > 0 {
+            return "\(ineffective) compaction\(ineffective == 1 ? "" : "s") did not reduce context."
+        }
+        if let err = h.compression_failure_error, !err.isEmpty {
+            return "Last compaction failed: \(err)"
+        }
+        return "Session context is healthy."
+    }
+
+    // MARK: - Last reply preview (tappable → Chat)
+
+    /// The most recent orchestrator reply from the app's own persisted
+    /// transcript, if there is one. Read from ChatStore (the SAME store the
+    /// Chat section uses) so the preview always matches what Chat shows without
+    /// a second network round-trip.
+    private func lastReply(_ state: ProjectDetailResponse) -> String? {
+        let store = ChatStore(project: name)
+        guard let entry = store.transcript.last(where: { if case .reply = $0 { return true }; return false }) else {
+            return nil
+        }
+        return entry.text
+    }
+
+    @ViewBuilder
+    private func lastReplySection(_ text: String) -> some View {
+        Section {
+            Button(action: onOpenChat) {
+                HStack(alignment: .top, spacing: 10) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.accentColor.opacity(0.15))
+                            .frame(width: 30, height: 30)
+                        Image(systemName: "bubble.left.and.bubble.right.fill")
+                            .font(.system(size: 14))
+                            .foregroundColor(Color.accentColor)
+                    }
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack {
+                            Text("Last reply")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundColor(Theme.Semantic.onSurface)
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        }
+                        Text(text)
+                            .font(.subheadline)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .lineLimit(3)
+                            .multilineTextAlignment(.leading)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        } header: {
+            Text("Chat")
+        } footer: {
+            Text("Tap to open the chat for this project.")
+        }
     }
 
     private func timeAgo(_ seconds: Int) -> String {
