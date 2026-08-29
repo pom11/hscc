@@ -30,7 +30,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import struct
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
 
 # The RFC 6455 GUID appended to the key before SHA-1 for the accept value.
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -171,7 +171,8 @@ class FrameDecoder:
         return opcode, unmasked, fin
 
 
-def iter_data_messages(decoder: FrameDecoder, data: bytes
+def iter_data_messages(decoder: FrameDecoder, data: bytes,
+                       on_close: Optional[Callable[[bytes], None]] = None
                        ) -> Iterator[tuple[int, bytes]]:
     """Yield complete (opcode, payload) DATA messages from a byte stream.
 
@@ -179,10 +180,10 @@ def iter_data_messages(decoder: FrameDecoder, data: bytes
     control frames (ping/pong/close) WITHOUT yielding them as data messages.
     Control frames may be interleaved anywhere (RFC 6455 §5.4).
 
-    ``close`` frames are surfaced to the caller via the ``on_close``/return —
-    but this helper keeps it simple: it silently drops ping/pong and yields
-    only finished data messages. Use :class:`FrameDecoder` directly if you
-    need to observe close/ping frames.
+    When ``on_close`` is given, it is called with the close frame's payload
+    the moment a close frame completes — so a server can detect the peer's
+    close and reply in kind. Ping/pong are silently dropped and only finished
+    data messages are yielded.
     """
     curr_opcode: Optional[int] = None
     curr: bytearray = bytearray()
@@ -191,6 +192,8 @@ def iter_data_messages(decoder: FrameDecoder, data: bytes
         if opcode in (OP_PING, OP_PONG):
             continue
         if opcode == OP_CLOSE:
+            if on_close is not None:
+                on_close(payload)
             continue
         if opcode in (OP_TEXT, OP_BINARY):
             if curr_opcode is not None:
