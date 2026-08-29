@@ -56,20 +56,7 @@ struct BoardHygieneView: View {
     }
 
     private var notConfiguredView: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "broom")
-                .font(.system(size: 44))
-                .foregroundColor(.secondary)
-            Text("Connect to your cluster")
-                .font(.headline)
-            Text("Set the host, port, and token in Settings to manage boards.")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 60)
-        .padding(.horizontal)
+        HSConnectGate(systemImage: "broom", verb: "to manage boards")
     }
 
     // MARK: - Blocked pane
@@ -79,16 +66,12 @@ struct BoardHygieneView: View {
         Group {
             switch blocked {
             case .idle:
-                ProgressView("Loading…").task { await loadBlocked(client) }
+                HSLoading("Loading…").task { await loadBlocked(client) }
             case .loading:
-                ProgressView("Loading…")
+                HSLoading("Loading…")
             case .failed(let message):
-                ContentUnavailableView {
-                    Label("Couldn't load blocked cards", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(message)
-                } actions: {
-                    Button("Try again") { Task { await loadBlocked(client) } }
+                HSError("Couldn't load blocked cards", message: message) {
+                    Task { await loadBlocked(client) }
                 }
             case .stale(let response, let ageMessage):
                 blockedList(response, client: client, staleMessage: ageMessage)
@@ -116,7 +99,7 @@ struct BoardHygieneView: View {
             if tasks.isEmpty {
                 Section {
                     Text("No blocked cards on any board.")
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
             }
             ForEach(tasks) { card in
@@ -125,7 +108,7 @@ struct BoardHygieneView: View {
             if let errors = response.errors, !errors.isEmpty {
                 Section("Errors") {
                     ForEach(errors, id: \.self) { error in
-                        Text(error).font(.caption).foregroundColor(.red)
+                        Text(error).font(.caption).foregroundColor(Theme.Semantic.bad)
                     }
                 }
             }
@@ -138,24 +121,15 @@ struct BoardHygieneView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(card.displayTitle)
                 .font(.body)
-            HStack(spacing: 6) {
-                if let board = card.board, !board.isEmpty {
-                    Text(board).font(.caption).foregroundColor(.secondary)
-                }
-                if let assignee = card.assignee, !assignee.isEmpty {
-                    Text(assignee).font(.caption).foregroundColor(.secondary)
-                }
-                if let age = card.age_days {
-                    Text("\(age)d").font(.caption).foregroundColor(.secondary)
-                }
-            }
+            HSMetaLine([card.board, card.assignee,
+                        card.age_days.map { "\($0)d" }])
             if let kind = card.block_kind, !kind.isEmpty {
                 Label(kind, systemImage: "hand.raised.fill")
                     .font(.caption)
-                    .foregroundColor(.orange)
+                    .foregroundColor(Theme.Semantic.warn)
             }
             if let why = card.why, !why.isEmpty {
-                Text(why).font(.caption).foregroundColor(.secondary)
+                Text(why).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
             }
             // Recover — confirm-gated, one card at a time. Names the card so
             // the operator knows exactly what will be re-run.
@@ -182,16 +156,12 @@ struct BoardHygieneView: View {
         Group {
             switch stale {
             case .idle:
-                ProgressView("Loading…").task { await loadStale(client) }
+                HSLoading("Loading…").task { await loadStale(client) }
             case .loading:
-                ProgressView("Loading…")
+                HSLoading("Loading…")
             case .failed(let message):
-                ContentUnavailableView {
-                    Label("Couldn't load stale cards", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(message)
-                } actions: {
-                    Button("Try again") { Task { await loadStale(client) } }
+                HSError("Couldn't load stale cards", message: message) {
+                    Task { await loadStale(client) }
                 }
             case .stale(let response, let ageMessage):
                 staleList(response, client: client, staleMessage: ageMessage)
@@ -219,34 +189,22 @@ struct BoardHygieneView: View {
             if tasks.isEmpty {
                 Section {
                     Text("No stale cards.")
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
             }
             ForEach(tasks) { card in
                 VStack(alignment: .leading, spacing: 3) {
                     Text(card.displayTitle)
                         .font(.body)
-                    HStack(spacing: 6) {
-                        if let board = card.board, !board.isEmpty {
-                            Text(board).font(.caption).foregroundColor(.secondary)
-                        }
-                        if let status = card.status, !status.isEmpty {
-                            Text(status).font(.caption).foregroundColor(.secondary)
-                        }
-                        if let assignee = card.assignee, !assignee.isEmpty {
-                            Text(assignee).font(.caption).foregroundColor(.secondary)
-                        }
-                        if let age = card.age_days {
-                            Text("\(age)d old").font(.caption).foregroundColor(.secondary)
-                        }
-                    }
+                    HSMetaLine([card.board, card.status, card.assignee,
+                                card.age_days.map { "\($0)d old" }])
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             if let errors = response.errors, !errors.isEmpty {
                 Section("Errors") {
                     ForEach(errors, id: \.self) { error in
-                        Text(error).font(.caption).foregroundColor(.red)
+                        Text(error).font(.caption).foregroundColor(Theme.Semantic.bad)
                     }
                 }
             }

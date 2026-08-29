@@ -85,7 +85,7 @@ struct FleetView: View {
 
     @ViewBuilder
     private var healthSection: some View {
-        sectionCard(title: "Health", systemImage: "stethoscope") {
+        HSSectionCard(title: "Health", systemImage: "stethoscope") {
             switch health {
             case .loading:
                 ProgressView()
@@ -95,21 +95,21 @@ struct FleetView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Label(state.speak, systemImage: state.ok ? "checkmark.seal.fill" : "xmark.seal.fill")
                         .font(.subheadline)
-                        .foregroundColor(state.ok ? .green : .red)
+                        .foregroundColor(state.ok ? Theme.Semantic.ok : Theme.Semantic.bad)
                     if state.checks.isEmpty {
                         emptyLabel("No health checks reported.")
                     } else {
                         ForEach(state.checks) { check in
                             HStack(alignment: .top, spacing: 8) {
                                 Image(systemName: check.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                    .foregroundColor(check.ok ? .green : .red)
+                                    .foregroundColor(check.ok ? Theme.Semantic.ok : Theme.Semantic.bad)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(check.name)
                                         .font(.body)
                                     if let detail = check.detail, !detail.isEmpty {
                                         Text(detail)
                                             .font(.caption)
-                                            .foregroundColor(.secondary)
+                                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
                                     }
                                 }
                             }
@@ -127,7 +127,7 @@ struct FleetView: View {
 
     @ViewBuilder
     private var throughputSection: some View {
-        sectionCard(title: "Throughput", systemImage: "speedometer") {
+        HSSectionCard(title: "Throughput", systemImage: "speedometer") {
             switch throughput {
             case .loading:
                 ProgressView()
@@ -138,23 +138,23 @@ struct FleetView: View {
                     Text(state.speak)
                         .font(.subheadline)
                         .italic()
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
 
                     if let fleet = state.fleet {
                         HStack(spacing: 10) {
                             statBadge(value: "\(fleet.nodes_ok ?? 0)/\(fleet.nodes_total ?? 0)",
                                       label: "nodes ok",
-                                      color: (fleet.nodes_ok ?? 0) >= (fleet.nodes_total ?? 1) ? .green : .orange)
+                                      color: (fleet.nodes_ok ?? 0) >= (fleet.nodes_total ?? 1) ? Theme.Semantic.ok : Theme.Semantic.warn)
                             statBadge(value: fmt(fleet.prompt_tokens), label: "prompt",
-                                      color: .secondary)
+                                      color: Theme.Semantic.onSurfaceMuted)
                             statBadge(value: fmt(fleet.generation_tokens), label: "generation",
-                                      color: .secondary)
+                                      color: Theme.Semantic.onSurfaceMuted)
                         }
                         HStack(spacing: 10) {
                             statBadge(value: fmt(fleet.running), label: "running",
-                                      color: .blue)
+                                      color: Theme.Semantic.onSurface)
                             statBadge(value: fmt(fleet.waiting), label: "waiting",
-                                      color: .orange)
+                                      color: Theme.Semantic.warn)
                         }
                     } else {
                         emptyLabel("No throughput data.")
@@ -170,7 +170,7 @@ struct FleetView: View {
 
     @ViewBuilder
     private var statsSection: some View {
-        sectionCard(title: "Stats", systemImage: "chart.bar") {
+        HSSectionCard(title: "Stats", systemImage: "chart.bar") {
             switch stats {
             case .loading:
                 ProgressView()
@@ -181,15 +181,15 @@ struct FleetView: View {
                     Text(state.speak)
                         .font(.subheadline)
                         .italic()
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
 
                     if let completions = state.completions {
                         statBadge(value: "\(completions.total)", label: "work items",
-                                  color: .blue)
+                                  color: Theme.Semantic.onSurface)
 
                         if let byProfile = completions.by_profile, !byProfile.isEmpty {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("By profile").font(.caption).foregroundColor(.secondary)
+                                Text("By profile").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
                                 ForEach(byProfile.sorted { $0.value > $1.value }, id: \.key) { key, value in
                                     row(key, value: "\(value)")
                                 }
@@ -209,7 +209,7 @@ struct FleetView: View {
 
     @ViewBuilder
     private var streamsSection: some View {
-        sectionCard(title: "Streams", systemImage: "point.3.connected.trianglepath.dotted") {
+        HSSectionCard(title: "Streams", systemImage: "point.3.connected.trianglepath.dotted") {
             switch streams {
             case .loading:
                 ProgressView()
@@ -220,7 +220,7 @@ struct FleetView: View {
                     Text(state.speak)
                         .font(.subheadline)
                         .italic()
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     if state.streams.isEmpty {
                         emptyLabel("No daemon streams reported.")
                     } else {
@@ -228,14 +228,14 @@ struct FleetView: View {
                         ForEach(sorted, id: \.key) { name, stream in
                             HStack(spacing: 8) {
                                 Image(systemName: stream.ok == true ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                    .foregroundColor(stream.ok == true ? .green : .red)
+                                    .foregroundColor(stream.ok == true ? Theme.Semantic.ok : Theme.Semantic.bad)
                                 Text(name)
                                     .font(.body)
                                 Spacer()
                                 if let ts = stream.timestamp {
                                     Text(shortTimestamp(ts))
                                         .font(.caption2)
-                                        .foregroundColor(.secondary)
+                                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                                 }
                             }
                             .frame(maxWidth: .infinity)
@@ -252,7 +252,7 @@ struct FleetView: View {
 
     @ViewBuilder
     private var autoscaleSection: some View {
-        sectionCard(title: "Autoscale", systemImage: "arrow.up.arrow.down.circle") {
+        HSSectionCard(title: "Autoscale", systemImage: "arrow.up.arrow.down.circle") {
             switch autoscale {
             case .loading:
                 ProgressView()
@@ -263,11 +263,11 @@ struct FleetView: View {
                     Text(state.speak)
                         .font(.subheadline)
                         .italic()
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     if let reason = state.reason, !reason.isEmpty {
                         Text(reason)
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     }
                 }
             default:
@@ -278,23 +278,6 @@ struct FleetView: View {
 
     // MARK: - Shared building blocks
 
-    private func sectionCard<Content: View>(
-        title: String,
-        systemImage: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label(title, systemImage: systemImage)
-                .font(.headline)
-            content()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Theme.Semantic.surfaceRaised)
-        )
-    }
 
     private func statBadge(value: String, label: String, color: Color) -> some View {
         VStack(spacing: 2) {
@@ -320,21 +303,12 @@ struct FleetView: View {
             Spacer()
             Text(value)
                 .font(.body.monospacedDigit())
-                .foregroundColor(.secondary)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
     }
 
-    private func errorLabel(_ message: String) -> some View {
-        Label(message, systemImage: "exclamationmark.triangle.fill")
-            .font(.subheadline)
-            .foregroundColor(Theme.Semantic.bad)
-    }
-
-    private func emptyLabel(_ text: String) -> some View {
-        Label(text, systemImage: "tray")
-            .font(.subheadline)
-            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-    }
+    private func errorLabel(_ message: String) -> some View { HSErrorLabel(message: message) }
+    private func emptyLabel(_ text: String) -> some View { HSEmptyLabel(message: text) }
 
     // MARK: - Formatting
 

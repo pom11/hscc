@@ -21,6 +21,12 @@ import Foundation
 /// instead of losing it (the server keeps working even after the connection that
 /// submitted the job goes away).
 ///
+/// Honest terminal states (t_c0953d4c): a send that fails to DELIVER becomes an
+/// UNSENT entry (never silently discarded, retry available), and an in-flight
+/// reply is ALWAYS brought to a clear terminal state — never a spinner that
+/// ticks forever. Every terminal transition here is idempotent (guarded on
+/// `inFlight != nil`), so a raced or doubled call cannot double-append.
+///
 /// Everything is `@MainActor` so state mutations funnel onto the main thread,
 /// matching the rest of the SwiftUI app.
 @MainActor
@@ -61,7 +67,7 @@ final class ChatStore: ObservableObject {
         self.transcript = Self.load(project: project)
     }
 
-    // MARK: - Mutations
+    // MARK: - Mutations (send lifecycle)
 
     /// Optimistically append the user's prompt and start the in-flight state.
     /// Called BEFORE the network request so the message is never lost, even if
@@ -88,11 +94,68 @@ final class ChatStore: ObservableObject {
         persist()
     }
 
-    /// Record a failure and end the in-flight state, keeping the sent prompt in
-    /// the transcript so the user can see what produced the failure and re-send
-    /// the same prompt if they want (requirement 3: never lose input).
+    /// Record a terminal failure of a job that WAS created and end the
+    /// in-flight state, keeping the sent prompt in the transcript so the user
+    /// can see what produced the failure and re-send the same prompt if they
+    /// want (requirement 3: never lose input).
     func failSend(message: String) {
         transcript.append(.failure(message))
+        inFlight = nil
+        clearJob()
+        persist()
+    }
+
+    /// A message failed to be DELIVERED — the POST never created a job (a
+    /// transport error, or a 4xx/5xx before any background work started). Never
+    /// silently discard: the optimistic prompt becomes an UNSENT entry that
+    /// stays visible with a Retry so the operator can re-send the same text
+    /// (requirement 3 + this card). Idempotent: only converts the trailing
+    /// `.prompt`. `reason` explains why delivery failed, shown under the message.
+    func markUnsent(reason: String?) {
+        if case .prompt(let text)? = transcript.last {
+            transcript[transcript.count - 1] = .unsent(prompt: text, reason: reason)
+        }
+        inFlight = nil
+        clearJob()
+        persist()
+    }
+
+    /// Re-send an UNSENT prompt as a fresh turn (t_c0953d4c). The historical
+    /// UNSENT entry stays as the record of the failed attempt — it is never
+    /// silently erased; a new `.prompt` is appended and the in-flight state
+    /// starts, exactly like a fresh send. The caller is responsible for
+    /// confirm-gating this, the same as any send.
+    func retry(prompt: String) {
+        beginSend(prompt: prompt)
+    }
+
+    /// The in-flight poll could not reach the cluster for a sustained stretch,
+    /// so it terminated (t_c0953d4c). Ends the spinner with an honest terminal
+    /// note: nothing arrived, the job may still be running server-side, resume
+    /// or retry are available. The persisted job SURVIVES so a later resume can
+    /// collect a late answer.
+    func reachabilityLost() {
+        guard inFlight != nil else { return }
+        transcript.append(.failure(
+            "Couldn't reach the cluster to collect the orchestrator's answer, so waiting stopped. "
+            + "The job may still be running server-side — re-open this chat to resume and collect a late answer, or Retry."
+        ))
+        inFlight = nil
+        persist()
+        // NB: the persisted job_id is NOT cleared here — a later resume
+        // (`resumedJobID`) can still collect a late answer once reachable again.
+    }
+
+    /// The operator chose to stop waiting (t_c0953d4c). Honest terminal state:
+    /// nothing further will be collected in this view. The persisted job is
+    /// cleared, so no stale resume loop; the note tells the operator they can
+    /// simply send again.
+    func abandonWaiting() {
+        guard inFlight != nil else { return }
+        transcript.append(.failure(
+            "Stopped waiting — no answer arrived yet. The job may still be finishing server-side; "
+            + "you can send the prompt again to retry."
+        ))
         inFlight = nil
         clearJob()
         persist()

@@ -46,20 +46,7 @@ struct FleetControlView: View {
     // MARK: - Not configured
 
     private var notConfiguredView: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "power")
-                .font(.system(size: 44))
-                .foregroundColor(.secondary)
-            Text("Connect to your cluster")
-                .font(.headline)
-            Text("Set the host, port, and token in Settings to control the fleet.")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 60)
-        .padding(.horizontal)
+        HSConnectGate(systemImage: "power", verb: "to control the fleet")
     }
 
     // MARK: - Load
@@ -79,7 +66,7 @@ struct FleetControlView: View {
 
     @ViewBuilder
     private var appliedSection: some View {
-        sectionCard(title: "Applied Template", systemImage: "rectangle.stack.badge.checkmark") {
+        HSSectionCard(title: "Applied Template", systemImage: "rectangle.stack.badge.checkmark") {
             switch status {
             case .loading:
                 ProgressView()
@@ -90,7 +77,7 @@ struct FleetControlView: View {
                     Text(state.speak)
                         .font(.subheadline)
                         .italic()
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     if let applied = state.applied {
                         if let name = applied.template, !name.isEmpty {
                             LabeledContent("Template") { Text(name) }
@@ -113,7 +100,7 @@ struct FleetControlView: View {
                     if let note = state.note, !note.isEmpty {
                         Label(note, systemImage: "info.circle")
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     }
                 }
             default:
@@ -126,11 +113,11 @@ struct FleetControlView: View {
 
     @ViewBuilder
     private func clusterActionsSection(client: HSCCClient) -> some View {
-        sectionCard(title: "Cluster", systemImage: "power") {
+        HSSectionCard(title: "Cluster", systemImage: "power") {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Bring the serving fleet up, or stop ALL workloads fleet-wide.")
                     .font(.subheadline)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
 
                 // Cluster Up — starts every serving unit. Confirm names it.
                 MutationButton(
@@ -163,35 +150,9 @@ struct FleetControlView: View {
 
     // MARK: - Shared building blocks
 
-    private func sectionCard<Content: View>(
-        title: String,
-        systemImage: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label(title, systemImage: systemImage)
-                .font(.headline)
-            content()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Theme.Semantic.surfaceRaised)
-        )
-    }
 
-    private func errorLabel(_ message: String) -> some View {
-        Label(message, systemImage: "exclamationmark.triangle.fill")
-            .font(.subheadline)
-            .foregroundColor(Theme.Semantic.bad)
-    }
-
-    private func emptyLabel(_ text: String) -> some View {
-        Label(text, systemImage: "tray")
-            .font(.subheadline)
-            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-    }
+    private func errorLabel(_ message: String) -> some View { HSErrorLabel(message: message) }
+    private func emptyLabel(_ text: String) -> some View { HSEmptyLabel(message: text) }
 
     private func displayJSON(_ value: JSONValue) -> String {
         switch value {

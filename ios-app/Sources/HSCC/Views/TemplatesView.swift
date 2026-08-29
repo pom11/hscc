@@ -56,20 +56,7 @@ struct TemplatesView: View {
     // MARK: - Not configured
 
     private var notConfiguredView: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "square.grid.2x2")
-                .font(.system(size: 44))
-                .foregroundColor(Theme.Semantic.neutral)
-            Text("Connect to your cluster")
-                .font(.headline)
-            Text("Set the host, port, and token in Settings to browse templates.")
-                .font(.subheadline)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 60)
-        .padding(.horizontal)
+        HSConnectGate(systemImage: "square.grid.2x2", verb: "to browse templates")
     }
 
     // MARK: - Load
@@ -324,17 +311,8 @@ struct TemplatesView: View {
 
     // MARK: - Building blocks
 
-    private func errorLabel(_ message: String) -> some View {
-        Label(message, systemImage: "exclamationmark.triangle.fill")
-            .font(.subheadline)
-            .foregroundColor(Theme.Semantic.bad)
-    }
-
-    private func emptyLabel(_ text: String) -> some View {
-        Label(text, systemImage: "tray")
-            .font(.subheadline)
-            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-    }
+    private func errorLabel(_ message: String) -> some View { HSErrorLabel(message: message) }
+    private func emptyLabel(_ text: String) -> some View { HSEmptyLabel(message: text) }
 }
 
 /// The unmistakable marker on the currently-applied template row.
