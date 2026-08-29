@@ -52,20 +52,7 @@ struct SearchView: View {
     }
 
     private var notConfiguredView: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 44))
-                .foregroundColor(Theme.Semantic.neutral)
-            Text("Connect to your cluster")
-                .font(.headline)
-            Text("Set the host, port, and token in Settings to search across projects and boards.")
-                .font(.subheadline)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 60)
-        .padding(.horizontal)
+        HSConnectGate(systemImage: "magnifyingglass", verb: "to search across projects and boards")
     }
 
     // MARK: - Results
@@ -76,12 +63,8 @@ struct SearchView: View {
 
         switch (projects, cards) {
         case (.failed(let m), _), (_, .failed(let m)):
-            ContentUnavailableView {
-                Label("Couldn't search", systemImage: "exclamationmark.triangle")
-            } description: {
-                Text(m)
-            } actions: {
-                Button("Try again") { Task { await load() } }
+            HSError("Couldn't search", message: m) {
+                Task { await load() }
             }
         default:
             if trimmed.isEmpty {
@@ -151,11 +134,9 @@ struct SearchView: View {
             if let stale = staleBanner() {
                 Section { stale }
             }
-            ContentUnavailableView {
-                Label("No results for “\(query)”", systemImage: "magnifyingglass")
-            } description: {
-                Text("Search project names, repos, boards, or card titles, ids, and statuses.")
-            }
+            HSEmpty("No results for “\(query)”",
+                     message: "Search project names, repos, boards, or card titles, ids, and statuses.",
+                     systemImage: "magnifyingglass")
         }
     }
 
@@ -229,14 +210,7 @@ struct SearchView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(card.displayTitle)
                     .foregroundColor(Theme.Semantic.onSurface)
-                HStack(spacing: 6) {
-                    if let board = card.board, !board.isEmpty {
-                        Text(board).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    }
-                    if let status = card.status, !status.isEmpty {
-                        Text(status).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    }
-                }
+                HSMetaLine([card.board, card.status])
             }
         }
     }

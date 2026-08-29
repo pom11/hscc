@@ -59,14 +59,10 @@ struct ProjectsView: View {
     private func content(_ client: HSCCClient) -> some View {
         switch projects {
         case .loading, .idle:
-            ProgressView("Loading…")
+            HSLoading("Loading…")
         case .failed(let message):
-            ContentUnavailableView {
-                Label("Couldn't load projects", systemImage: "exclamationmark.triangle")
-            } description: {
-                Text(message)
-            } actions: {
-                Button("Try again") { Task { await load() } }
+            HSError("Couldn't load projects", message: message) {
+                Task { await load() }
             }
         case .stale(let response, _):
             staleContent(response, client: client)
@@ -129,32 +125,13 @@ struct ProjectsView: View {
             Text(project.name)
                 .font(.body.weight(.medium))
                 .foregroundColor(Theme.Semantic.onSurface)
-            HStack(spacing: 6) {
-                if let board = project.board, !board.isEmpty {
-                    Text(board).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                }
-                if !project.displayTopic.isEmpty {
-                    Text("topic \(project.displayTopic)").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                }
-            }
+            HSMetaLine([project.board,
+                        project.displayTopic.isEmpty ? nil : "topic \(project.displayTopic)"])
         }
     }
 
     private var notConfiguredView: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "folder")
-                .font(.system(size: 44))
-                .foregroundColor(Theme.Semantic.neutral)
-            Text("Connect to your cluster")
-                .font(.headline)
-            Text("Set the host, port, and token in Settings to see your projects.")
-                .font(.subheadline)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 60)
-        .padding(.horizontal)
+        HSConnectGate(systemImage: "folder", verb: "to see your projects")
     }
 
     private func load() async {
@@ -230,14 +207,10 @@ struct ProjectOverviewView: View {
         Group {
             switch detail {
             case .loading, .idle:
-                ProgressView("Loading…")
+                HSLoading("Loading…")
             case .failed(let message):
-                ContentUnavailableView {
-                    Label("Couldn't load project", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(message)
-                } actions: {
-                    Button("Try again") { Task { await load() } }
+                HSError("Couldn't load project", message: message) {
+                    Task { await load() }
                 }
             case .stale(let state, let ageMessage):
                 content(state, staleMessage: ageMessage)
@@ -353,14 +326,10 @@ struct ProjectBoardView: View {
         Group {
             switch cards {
             case .loading, .idle:
-                ProgressView("Loading…")
+                HSLoading("Loading…")
             case .failed(let message):
-                ContentUnavailableView {
-                    Label("Couldn't load the board", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(message)
-                } actions: {
-                    Button("Try again") { Task { await load() } }
+                HSError("Couldn't load the board", message: message) {
+                    Task { await load() }
                 }
             case .stale(let response, let ageMessage):
                 content(response, staleMessage: ageMessage)
@@ -395,11 +364,9 @@ struct ProjectBoardView: View {
             }
             if filtered.isEmpty && projectBlocked.isEmpty && projectStale.isEmpty {
                 Section {
-                    ContentUnavailableView {
-                        Label("No cards on \(board ?? "this") board", systemImage: "square.grid.2x2")
-                    } description: {
-                        Text("Nothing is open here yet. This section fills in as the project's board develops.")
-                    }
+                    HSEmpty("No cards on \(board ?? "this") board",
+                             message: "Nothing is open here yet. This section fills in as the project's board develops.",
+                             systemImage: "square.grid.2x2")
                 }
             } else {
                 // Active cards first — the primary surface.
@@ -489,12 +456,7 @@ struct ProjectBoardView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(card.displayTitle)
                     .foregroundColor(Theme.Semantic.onSurface)
-                HStack(spacing: 6) {
-                    if let assignee = card.assignee, !assignee.isEmpty {
-                        Text(assignee).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    }
-                    Text(card.id).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                }
+                HSMetaLine([card.assignee, card.id])
             }
         }
     }
@@ -568,14 +530,10 @@ struct ProjectSettingsView: View {
         Group {
             switch detail {
             case .loading, .idle:
-                ProgressView("Loading…")
+                HSLoading("Loading…")
             case .failed(let message):
-                ContentUnavailableView {
-                    Label("Couldn't load project settings", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(message)
-                } actions: {
-                    Button("Try again") { Task { await load() } }
+                HSError("Couldn't load project settings", message: message) {
+                    Task { await load() }
                 }
             case .stale(let state, let ageMessage):
                 content(state, staleMessage: ageMessage)

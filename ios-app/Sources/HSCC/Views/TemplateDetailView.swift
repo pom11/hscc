@@ -411,11 +411,7 @@ struct TemplateDetailView: View {
 
     // MARK: - Building blocks
 
-    private func errorLabel(_ message: String) -> some View {
-        Label(message, systemImage: "exclamationmark.triangle.fill")
-            .font(.subheadline)
-            .foregroundColor(Theme.Semantic.bad)
-    }
+    private func errorLabel(_ message: String) -> some View { HSErrorLabel(message: message) }
 }
 
 /// The confirm-gated apply sheet. This is where the operator reads the REAL
