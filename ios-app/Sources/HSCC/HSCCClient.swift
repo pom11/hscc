@@ -22,7 +22,7 @@ enum StateCache {
 
     /// Turn an endpoint path into the stable storage key (keeps the mapping
     /// explicit and testable — the same path is used by fetch and cache read).
-    static func key(for path: String) -> String { "read.\\(path)" }
+    static func key(for path: String) -> String { "read.\(path)" }
 
     // MARK: - Persistence
 
@@ -568,9 +568,12 @@ struct HSCCClient {
     /// whose state.db to inspect; the profile name is URL-encoded so a slash
     /// or space can't break the query string.
     func sessions(profile: String) async throws -> SessionsListResponse {
-        let encoded = profile.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)
-            ?? profile
-        return try await get("/v1/sessions?profile=\\(encoded)", as: SessionsListResponse.self)
+        // `?` in a path string is percent-encoded to %3F by `components.path`,
+        // and "\\(" is an ESCAPED backslash — not interpolation — so this used to
+        // send the literal text \(encoded) and no profile filter at all.
+        return try await get(path: "/v1/sessions",
+                             queryItems: [URLQueryItem(name: "profile", value: profile)],
+                             as: SessionsListResponse.self)
     }
 
     /// POST /v1/sessions/{id}/retire — non-destructive retirement.
@@ -581,7 +584,7 @@ struct HSCCClient {
     /// (MutationButton) before calling.
     func retireSession(id: String, profile: String) async throws -> SessionMutationResponse {
         let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
-        return try await post("/v1/sessions/\\(encoded)/retire",
+        return try await post("/v1/sessions/\(encoded)/retire",
                               body: ["profile": profile, "confirm": true],
                               as: SessionMutationResponse.self)
     }
@@ -594,7 +597,7 @@ struct HSCCClient {
     /// Requires explicit profile + the confirm UI gate before calling.
     func compactSession(id: String, profile: String) async throws -> SessionMutationResponse {
         let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
-        return try await post("/v1/sessions/\\(encoded)/compact",
+        return try await post("/v1/sessions/\(encoded)/compact",
                               body: ["profile": profile, "confirm": true],
                               as: SessionMutationResponse.self)
     }
@@ -608,9 +611,11 @@ struct HSCCClient {
     /// the operator passes back to correct/delete. The profile whose memories
     /// to inspect is chosen by the operator in the view's field at the top.
     func memories(profile: String) async throws -> MemoryListResponse {
-        let encoded = profile.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)
-            ?? profile
-        return try await get("/v1/memory?profile=\\(encoded)", as: MemoryListResponse.self)
+        // Same defect as sessions(profile:): escaped backslash, not interpolation,
+        // plus a literal `?` the path setter percent-encodes.
+        return try await get(path: "/v1/memory",
+                             queryItems: [URLQueryItem(name: "profile", value: profile)],
+                             as: MemoryListResponse.self)
     }
 
     /// POST /v1/memory/{node_id}/delete — delete one memory card.
@@ -620,7 +625,7 @@ struct HSCCClient {
     /// before calling — this is destructive.
     func deleteMemory(nodeID: String, profile: String) async throws -> MemoryMutationResponse {
         let encoded = nodeID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? nodeID
-        return try await post("/v1/memory/\\(encoded)/delete",
+        return try await post("/v1/memory/\(encoded)/delete",
                               body: ["profile": profile, "confirm": true],
                               as: MemoryMutationResponse.self)
     }
@@ -632,7 +637,7 @@ struct HSCCClient {
     func editMemory(nodeID: String, profile: String,
                     content: String) async throws -> MemoryMutationResponse {
         let encoded = nodeID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? nodeID
-        return try await post("/v1/memory/\\(encoded)/edit",
+        return try await post("/v1/memory/\(encoded)/edit",
                               body: ["profile": profile,
                                      "content": content,
                                      "confirm": true],

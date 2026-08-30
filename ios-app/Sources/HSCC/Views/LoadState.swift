@@ -77,12 +77,12 @@ enum Offline {
     /// cache; this floors at 0 and rounds.
     static func agePhrase(_ seconds: TimeInterval) -> String {
         let s = max(0, Int(seconds.rounded()))
-        if s < 60 { return "\\(s)s" }
+        if s < 60 { return "\(s)s" }
         let m = s / 60
-        if m < 60 { return "\\(m)m" }
+        if m < 60 { return "\(m)m" }
         let h = m / 60
-        if h < 24 { return "\\(h)h" }
-        return "\\(h / 24)d"
+        if h < 24 { return "\(h)h" }
+        return "\(h / 24)d"
     }
 
     /// A reusable offline-aware fetch-and-cache helper (offline last-known
