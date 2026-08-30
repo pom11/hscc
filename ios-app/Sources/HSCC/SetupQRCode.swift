@@ -59,7 +59,7 @@ struct SetupQRCode: Decodable, Equatable {
         // host/port/token set that can't work. Reject as a whole.
         guard !code.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               (1...65535).contains(code.port),
-              !code.token.isEmpty else {
+              !code.token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw SetupQRCodeError.invalidPayload("host, port, and token must all be non-empty, and port must be a valid TCP port (1–65535)")
         }
         return code
