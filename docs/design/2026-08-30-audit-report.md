@@ -18,7 +18,7 @@ run on a device or simulator. What is proven is exactly:
 - all four targets **compile and link** (HSCC 56 files, HSCCWidgets 6,
   HSCCLiveActivity 4, HSCCLiveActivitySession 4 — 0 errors)
 - all 61 Swift sources are **registered** in `project.yml`
-- 31/31 response fixtures **decode against the real Codable models**
+- 48/48 response fixtures **decode against the real Codable models**
 - eight logic harnesses pass (`first_run`, `chat_state`, `streaming`,
   `session_activity`, `reconnect`, `model_decode`, `check_sources`, `check_theme`)
 
@@ -224,7 +224,13 @@ Stated plainly, because they affect how much you should trust the rest.
    recording as evidence the compile gate is doing real work rather than
    rubber-stamping.
 
-5. **My first grep for the literal-`?` bug was wrong**, so I reported "three
+5. **I claimed the permissions fix worked without checking it against the
+   running system.** Twice over: the code was not deployed at all, and then the
+   deployed placement covered only one of the two daemon start paths. Both were
+   only caught by watching a live daemon rewrite the files. "Merging is not
+   deploying" — and deploying is not running, either.
+
+6. **My first grep for the literal-`?` bug was wrong**, so I reported "three
    occurrences" when the real count was five, inside a wider class of twelve.
    A pattern that finds *some* instances reads exactly like one that finds all
    of them.
@@ -234,14 +240,28 @@ Stated plainly, because they affect how much you should trust the rest.
 You asked not to be handed decisions on Monday morning, so both open items are
 resolved rather than deferred.
 
-**Operator state file permissions — fixed.** `~/.hscc/*.json` were created
-`0644` by the default umask while holding cluster topology and node addresses.
-The `0700` directory made real exposure nil, but the files should not depend on
-the directory for their privacy. There are a dozen atomic-write sites across the
-daemon, so rather than patch each one I set `os.umask(0o077)` once at the daemon
-entry point (`hscc_daemon/cli.py`, `cmd_start_daemon`) — every file and directory
-it creates from now on is owner-only — and chmod'ed the 23 existing files to
-`0600`. Shipped in `c337ede`.
+**Operator state file permissions — fixed, but only after I got it wrong twice.**
+`~/.hscc/*.json` were created `0644` by the inherited umask while holding cluster
+topology and node addresses. The `0700` directory made real exposure nil, but the
+files should not depend on the directory for their privacy.
+
+The fix itself is one line — set a private umask instead of patching a dozen
+atomic-write sites. Getting it to actually take effect took two corrections:
+
+1. I put `os.umask(0o077)` in `cmd_start_daemon` and committed it. That code was
+   never deployed — the daemon runs the **installed** payload under
+   `~/.hermes/plugins`, not the repo.
+2. After deploying, it still did not work: `cmd_start_daemon` is only the
+   service-supervised path, and `hscc start` reaches the loop another way. The
+   running daemon kept writing `0644`.
+
+Both were caught the same way — by chmod'ing the files, waiting, and watching a
+live daemon rewrite them. The umask now sits at `run_daemon_loop`
+(`hscc_daemon/daemon_ops.py:253`), the single point both start paths pass
+through, and it is **proven live**: after a chmod at 19:42:05, `autodown.json`
+was rewritten at 19:43:51 and stayed `0600`, with no file reverting. Shipped in
+`c337ede` + `ddd04a4`; the 23 existing files are `0600` and the directory stays
+`0700`.
 
 **History rewrite for `a7c3303` — decided against, deliberately.** The leaked
 value is a CGNAT tailnet address, not a credential: it is meaningful only to
@@ -311,7 +331,7 @@ real time.
 
 ## Coverage and what is still open
 
-Fourteen audit cards were dispatched; twelve completed, were verified by
+Seventeen audit cards were dispatched in total; sixteen completed, were verified by
 execution and are shipped. One — API↔Swift contract re-verification — **wedged
 eight times with zero commits**. That is a card-scoping failure, not
 infrastructure: it bundled route coverage, payload shapes, query-parameter
@@ -322,8 +342,13 @@ would have wedged again, so I closed it, did its highest-value part by hand
 - decode-fixture coverage for every `Decodable` the Swift client uses
 - confirm-gating parity between client and server, in both directions
 
-Those two, plus the dead-code audit, were still running when this was written.
-Anything they land will be appended here.
+All three landed and are shipped. Decode-fixture coverage was the last: **18
+previously-uncovered response types** now have fixtures derived from the serving
+handler in each case, taking `model_decode_check` from 31 to **48 checks**. I
+spot-checked one against its source — `stop_cluster.json` matches
+`handle_cluster_stop` (`routes_actions.py:302-317`) exactly, including the
+`success` field that arrives via the `**result` spread — to confirm the shapes
+were derived from the server rather than shaped to fit the model.
 
 **Verified by hand in place of the wedged card:** `test_contract_swift_routes.py`
 passes 7/7 on current dev; 52 route literals enumerated from `HSCCClient.swift`;
@@ -332,7 +357,7 @@ class is eliminated and has a regression scan.
 
 ## Final state
 
-`origin/main` = `dev`, working tree clean. Python suite **665 tests ALL GREEN**
+`origin/main` = `dev`, working tree clean. Python suite **666 tests ALL GREEN**
 across all seven packages. All four iOS targets compile clean; nine harnesses
 green (`check_sources`, `build_check`, `model_decode_check`, `chat_state_check`,
 `streaming_check`, `session_activity_check`, `first_run_check`, `reconnect_check`,
