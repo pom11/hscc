@@ -194,7 +194,11 @@ struct SettingsView: View {
                             lastConnected: nil, lastTestSuccess: nil)
         cluster.host = host
         cluster.port = port
-        settings.saveCluster(cluster, token: tokenField.isEmpty ? nil : tokenField)
+        // Trim the token too: a trailing space/newline pasted from terminal
+        // output would otherwise be stored verbatim, making the app "configured"
+        // but every request 401 — a silent dead end with no in-app explanation.
+        let token = tokenField.trimmingCharacters(in: .whitespaces)
+        settings.saveCluster(cluster, token: token.isEmpty ? nil : token)
         // The root view re-probes on isConfigured change.
     }
 
