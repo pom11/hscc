@@ -32,6 +32,11 @@ struct SessionHistoryView: View {
     @State private var phase: Phase = .idle
     /// Prevent concurrent paging requests (scroll triggers can fire back to back).
     @State private var pagingLock = false
+    /// Non-nil when the most recent OLDER-page fetch failed. The current
+    /// history stays on screen (never blanked); this drives an inline banner
+    /// so the operator knows the page didn't load instead of silently stopping
+    /// at a wall of older events that never arrive.
+    @State private var pagingError: String?
 
     private static let pageLimit = 100
 
@@ -47,10 +52,17 @@ struct SessionHistoryView: View {
                     Task { await loadTail() }
                 }
             case .ready, .loadingOlder:
-                if events.isEmpty {
-                    emptyState
-                } else {
-                    history
+                VStack(spacing: 0) {
+                    if let pagingError {
+                        // An inline, dismissible note: the fetch for an older
+                        // page failed, but the already-loaded history is intact.
+                        pagingErrorBanner(pagingError)
+                    }
+                    if events.isEmpty {
+                        emptyState
+                    } else {
+                        history
+                    }
                 }
             }
         }
@@ -114,6 +126,41 @@ struct SessionHistoryView: View {
                 systemImage: "text.bubble")
     }
 
+    /// Inline banner showing a failed OLDER-page fetch with a retry, so the
+    /// operator isn't left silently unable to page further back. The history
+    /// already on screen is untouched.
+    private func pagingErrorBanner(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 14))
+                .foregroundColor(Theme.Semantic.warn)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Couldn't load older events")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(Theme.Semantic.onSurface)
+                Text(message)
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    pagingError = nil
+                    Task { await loadOlder() }
+                } label: {
+                    Label("Retry", systemImage: "arrow.clockwise")
+                        .font(.subheadline)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(Theme.Spacing.md.rawValue)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous)
+                .fill(Theme.Semantic.warn.opacity(0.12))
+        )
+        .padding(.horizontal, Theme.Spacing.md.rawValue)
+        .padding(.top, Theme.Spacing.sm.rawValue)
+    }
+
     // MARK: - Paging
 
     private func isLoading(_ p: Phase) -> Bool {
@@ -132,6 +179,7 @@ struct SessionHistoryView: View {
             nextBefore = page.next_before
             highWaterSeq = page.next_seq
             oldestSeq = page.oldest_seq
+            pagingError = nil
             phase = .ready
         } catch {
             let msg = (error as? HSCCError)?.localizedDescription ?? "Something went wrong."
@@ -158,11 +206,15 @@ struct SessionHistoryView: View {
             nextBefore = page.next_before
             highWaterSeq = page.next_seq
             oldestSeq = page.oldest_seq
+            pagingError = nil
             phase = .ready
         } catch {
-            // Keep current history on screen; surface the paging failure inline.
+            // Keep current history on screen, but surface the paging failure
+            // inline so the operator knows the older page didn't load and can
+            // retry — never a silent stop at the edge of loaded history.
+            pagingError = (error as? HSCCError)?.localizedDescription
+                ?? "Something went wrong."
             phase = .ready
-            // TODO: inline retry affordance for the failed older-page fetch.
         }
     }
 }
