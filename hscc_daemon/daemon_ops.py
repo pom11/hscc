@@ -243,6 +243,14 @@ def _run_supervised_periodic(stop_event, check_fn, interval, stream_name):
 
 def run_daemon_loop():
     """Main daemon event loop (polling mode fallback)."""
+    # Operator state under ~/.hscc is private — it carries cluster topology,
+    # node addresses and serving config. The files were being created 0644 by
+    # the inherited umask. Set it HERE rather than in a cmd_* entry point:
+    # `hscc start` and the service-supervised `start-daemon` are two different
+    # paths, and putting it in only one left the running daemon still writing
+    # 0644 (observed: autodown.json and watchdog-block.json reverted within 90s
+    # of a chmod). run_daemon_loop is the single point both paths reach.
+    os.umask(0o077)
     from .health import check_dgx, check_gateway, check_local, check_heartbeat, check_nas, check_idle_monitor, check_workers, check_proxy, check_engine_wedge
     from .dispatcher_wedge import check_dispatcher_wedge
     from .dispatcher_wedge import DISPATCHER_RECOVER_CHECK_INTERVAL as _DWE_INTERVAL

@@ -306,13 +306,6 @@ def cmd_start_daemon():
     from . import log
     from .state import ensure_state_dir
 
-    # Operator state under ~/.hscc is private: it carries cluster topology,
-    # node addresses and serving config. The directory is 0700, but the files
-    # themselves were being created 0644 by the default umask, so anything that
-    # later widened the directory would expose them. Set the umask ONCE here
-    # rather than patching a dozen atomic-write sites individually — every file
-    # and directory the daemon creates from now on is owner-only.
-    os.umask(0o077)
     log("start-daemon invoked (service-supervised mode)")
     write_stopped()
     ensure_state_dir()
