@@ -141,6 +141,18 @@ def test_cluster_monitor_unavailable(running, token, stub_cluster):
     status, payload = _request(running, token, "/v1/cluster/monitor")
     assert status == 200
     assert payload["speak"] == "fleet monitor unavailable"
+    # The raw backing error dict must NOT be forwarded into a 200 body.
+    assert "error" not in payload
+    assert "no monitor output" not in str(payload)
+
+
+def test_cluster_monitor_run_cmd_error_dict_degrades(running, token, stub_cluster):
+    """A plain {"error": "..."} (not the run_cmd shape) also must not leak."""
+    stub_cluster(monitor={"error": "cluster engine command failed"})
+    status, payload = _request(running, token, "/v1/cluster/monitor")
+    assert status == 200
+    assert "error" not in payload
+    assert payload["speak"] == "fleet monitor unavailable"
 
 
 def test_cluster_jobs_shape(running, token, stub_cluster):
@@ -152,9 +164,21 @@ def test_cluster_jobs_shape(running, token, stub_cluster):
 
 
 def test_cluster_jobs_unavailable(running, token, stub_cluster):
-    stub_cluster(jobs=None)
+    stub_cluster(jobs={"error": "cluster engine command failed"})
     status, payload = _request(running, token, "/v1/cluster/jobs")
     assert status == 200
+    assert payload["speak"] == "job list unavailable"
+    # The raw backing error dict must NOT be forwarded into a 200 body.
+    assert "error" not in payload
+    assert "cluster engine command failed" not in str(payload)
+
+
+def test_cluster_jobs_run_cmd_error_dict_degrades(running, token, stub_cluster):
+    """A run_cmd-shaped error (success False, no json) also must not leak."""
+    stub_cluster(jobs={"success": False, "error": "no job output"})
+    status, payload = _request(running, token, "/v1/cluster/jobs")
+    assert status == 200
+    assert "error" not in payload
     assert payload["speak"] == "job list unavailable"
 
 

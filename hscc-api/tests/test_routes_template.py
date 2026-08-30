@@ -99,6 +99,15 @@ def test_template_list_auth_401(running):
     assert status == 401
 
 
+def test_template_list_backing_error_dict_degrades(running, token, monkeypatch):
+    """Backing error dict -> clean 200 with only 'speak', never a raw 'error' key."""
+    _install(monkeypatch, {"template_list": lambda: {"error": "hscc-cluster plugin not found"}})
+    status, payload = _req(running, token, "/v1/template/list")
+    assert status == 200
+    assert payload == {"speak": "Template list unavailable."}
+    assert "error" not in payload
+
+
 # --------------------------------------------------------------------------- #
 # GET /v1/template/status
 # --------------------------------------------------------------------------- #
@@ -113,6 +122,15 @@ def test_template_status_200(running, token):
 def test_template_status_auth_401(running):
     status, payload = _req(running, None, "/v1/template/status")
     assert status == 401
+
+
+def test_template_status_backing_error_dict_degrades(running, token, monkeypatch):
+    """Backing error dict -> clean 200 with only 'speak', never a raw 'error' key."""
+    _install(monkeypatch, {"template_status": lambda: {"error": "hscc-cluster plugin not found"}})
+    status, payload = _req(running, token, "/v1/template/status")
+    assert status == 200
+    assert payload == {"speak": "Template status unavailable."}
+    assert "error" not in payload
 
 
 # --------------------------------------------------------------------------- #
