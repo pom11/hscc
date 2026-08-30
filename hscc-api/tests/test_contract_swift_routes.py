@@ -22,7 +22,9 @@ seams are monkeypatched (same style as the rest of the suite). Never touches
 live operator state.
 """
 
+import ast
 import http.client
+import inspect
 import json
 import re
 
@@ -152,6 +154,91 @@ def test_every_mutating_post_carries_confirm():
 
 
 # --------------------------------------------------------------------------- #
+# Bidirectional cross-check: the server must ACTUALLY gate each client POST
+# --------------------------------------------------------------------------- #
+#
+# The client-side test above proves the app always SENDS `confirm: true`. That
+# is only half the contract. The other, worse half: a mutating endpoint the
+# client calls whose server handler never checks `confirm` is an UNGATED
+# mutation — the app's confirm UI is theatre and any caller (not just this app)
+# can mutate without confirmation. So for every POST route the Swift client
+# derives, resolve the server handler via `api_server.ROUTES` and prove it
+# really calls a confirm-gating helper (`_require_confirm(...)` or the
+# `_action_fields(...)` preamble that wraps `_require_confirm`).
+#
+# A regression in EITHER direction fails the suite:
+#   * client drops confirm while the server still requires it -> existing
+#     `test_every_mutating_post_carries_confirm` fails;
+#   * server stops checking confirm on a route the client POSTs -> the new
+#     test below fails.
+
+# Confirm-gating helpers, by name. `_action_fields` always calls
+# `_require_confirm` first (routes_actions.py:181) before validating fields, so
+# an actions handler that delegates to it IS confirm-gated.
+_CONFIRM_HELPER_CALL = re.compile(r"\b_(?:require_confirm|action_fields)\s*\(")
+
+
+def _strip_handler_docstring(src):
+    """Remove the handler's module docstring statement so a confirm helper ONLY
+    mentioned in prose (never actually called) can't pass the gate."""
+    try:
+        tree = ast.parse(src)
+        fn = tree.body[0] if tree.body else None
+        if (isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and fn.body and isinstance(fn.body[0], ast.Expr)
+                and isinstance(fn.body[0].value, ast.Constant)
+                and isinstance(fn.body[0].value.value, str)):
+            lines = src.split("\n")
+            del lines[fn.body[0].lineno - 1: fn.body[0].end_lineno]
+            return "\n".join(lines)
+    except (SyntaxError, IndexError):
+        pass
+    return src
+
+
+def _server_handler_for(method, path):
+    """Resolve a client route to its registered server handler, or None."""
+    concrete = _path_only(_instantiate(path))
+    for (rm, rp, handler) in api_server.ROUTES:
+        if rm == method and rp.match(concrete):
+            return handler, rp.pattern
+    return None, None
+
+
+def test_every_client_post_server_handler_is_confirm_gated():
+    """The reverse half of the confirm contract. For each POST route the Swift
+    client calls, the server handler must actually call a confirm-gating helper
+    (`_require_confirm(...)` or `_action_fields(...)`, which wraps it). If a
+    server handler stops checking confirm on a route the app POSTs to, the
+    mutation becomes ungated — worse than a 409 — and this must fail the suite.
+    Checks the CALL SITE, not prose, by stripping the handler docstring first."""
+    ungated = []
+    not_registered = []
+    for method, path in SWIFT_ROUTES:
+        if method != "POST":
+            continue
+        handler, pattern = _server_handler_for(method, path)
+        if handler is None:
+            not_registered.append(path)
+            continue
+        src = _strip_handler_docstring(inspect.getsource(handler))
+        if _CONFIRM_HELPER_CALL.search(src) is None:
+            ungated.append((path, handler.__name__, pattern))
+    assert not not_registered, (
+        "Client POST route(s) have no registered server route:\\n"
+        + "\\n".join(f"  POST {p}" for p in not_registered)
+    )
+    assert not ungated, (
+        "Client POST route(s) map to a server handler that does NOT call a "
+        "confirm-gating helper (_require_confirm / _action_fields) — an "
+        "UNGATED mutation. The app sends `confirm: true` but the server never "
+        "checks it:\\n"
+        + "\\n".join(f"  POST {p} -> {h}  (registered {rp})"
+                     for p, h, rp in ungated)
+    )
+
+
+
 # Real-HTTP exercise of the chat seam (the exact failure class from last night)
 # --------------------------------------------------------------------------- #
 
