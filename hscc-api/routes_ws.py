@@ -114,8 +114,9 @@ def _handle_client_send(sock: socket.socket, project: str, payload: dict) -> Non
     role="user" event. The store fan-out then broadcasts it back to every live
     subscriber (including the sender), so the operator sees their own line in
     the transcript with the same seq semantics as everything else. Increment 3
-    replaces this with the real relay into ``hermes serve``; the ack/echo shape
-    is unchanged.
+    additionally relays the message OUT to ``hermes serve`` via the
+    :data:`relay_user_message` hook installed by :class:`GatewayDriver`; the
+    ack/echo shape is unchanged.
     """
     text = payload.get("text")
     if text is None or not isinstance(text, str) or not text.strip():
@@ -126,6 +127,20 @@ def _handle_client_send(sock: socket.socket, project: str, payload: dict) -> Non
         return
     get_store(project).append(
         TYPE_MESSAGE, MessagePayload(role="user", delta=text.strip(), done=True))
+    # Increment 3: forward to the attached hermes serve gateway (if any). The
+    # hook defaults to a no-op when no GatewayDriver is running, so the WS
+    # endpoint stays decoupled and hermetically testable (test_ws_route).
+    relay_user_message(project, text.strip())
+
+
+def _default_relay(project: str, text: str) -> bool:
+    """Default (no-op) relay — no outbound gateway attached."""
+    return False
+
+
+# Installable by GatewayDriver.start() so the WS endpoint need not import the
+# driver. Kept decoupled: the endpoint talks only to the store + this hook.
+relay_user_message = _default_relay
 
 
 def _process_inbound(sock: socket.socket, project: str, opcode, payload):
