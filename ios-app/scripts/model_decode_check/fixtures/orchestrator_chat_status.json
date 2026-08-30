@@ -1,0 +1,10 @@
+{
+  "job_id": "job_9a1c2d3e",
+  "project": null,
+  "status": "done",
+  "elapsed": 41.302,
+  "reply": "Bringing the serving layer up… done. The fleet is up with 6 units.",
+  "profile": "general-orch",
+  "session": "general",
+  "speak": "Chat request accepted (job job_9a1c2d3e)."
+}

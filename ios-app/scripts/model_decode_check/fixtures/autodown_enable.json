@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "idle_minutes": 10,
+  "state": "up",
+  "last_activity_iso": "2026-08-30T14:58:03+00:00",
+  "force_armed": false,
+  "force_armed_overrides": [],
+  "message": "autodown enabled (idle_minutes=10)"
+}

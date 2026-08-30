@@ -1,0 +1,7 @@
+{
+  "result": "waking",
+  "state": "waking",
+  "wake_source": "api",
+  "message": "wake initiated in the background — this can take up to ~9 minutes. Poll GET /v1/autodown/status for the outcome.",
+  "speak": "Wake initiated, bringing the serving layer up. Current state: waking."
+}

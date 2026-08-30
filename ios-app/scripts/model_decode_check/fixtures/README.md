@@ -42,16 +42,33 @@ fresh capture and diff the key structure.
 
 ## Coverage
 
-27 fixtures cover every decodable response model in Models.swift +
-SharedModels.swift that has a live capture on this host (verified 27/27 OK).
-Missing from the set (no captured fixture exists):
-- mutation POST responses (`DispatchCardResponse`, `MergeCardResponse`,
-  `TemplateApplyResponse`, `StopClusterResponse`, `AutodownEnable/Disable/
-  Wake/Cancel`, `RecoverCardResponse`, `ClusterUpResponse`, `ClusterDownResponse`,
-  `SessionMutationResponse`) — not read endpoints, no captures taken
-- `ReviewDetailResponse` (`GET /v1/review/{id}`) — no capture taken
-- `OrchestratorChatJobResponse` / `OrchestratorChatJobStatus` / `ChatJobError`
-- `ReadResponse` — self-contained generic bucket, needs no fixture
+45 fixtures cover every decodable response model in Models.swift +
+SharedModels.swift that has a decode check wired into `main.swift`
+(verified 45/45 `c.check` rows + 1 approvals classification = 46 green).
+
+The 17 mutation/detail fixtures added 2026-08-30 (`dispatch_card`, `merge_card`,
+`template_apply`, `stop_cluster`, `recover_card`, `session_retire`,
+`memory_list`, `memory_delete`, `autodown_enable/disable/wake/cancel`,
+`cluster_up`, `cluster_down`, `orchestrator_chat`,
+`orchestrator_chat_status`, `review_detail`) were not captured from the live
+host — their shapes were derived from the actual hscc-api handlers so each
+fixture mirrors what the real endpoint returns on a 2xx success. See the
+handler at the cited source for each:
+- `dispatch_card.json` — routes_actions.py `handle_create_card`
+- `merge_card.json` — routes_actions.py `handle_merge_card` (clean close branch)
+- `template_apply.json` — routes_actions.py `handle_template_apply` + cluster_template.py `apply_template`
+- `stop_cluster.json` — routes_actions.py `handle_cluster_stop`
+- `recover_card.json` — routes_kanban.py `handle_kanban_recover`
+- `session_retire.json` — routes_sessions.py `handle_sessions_retire`
+- `memory_list.json` — routes_memory.py `handle_memory_list`
+- `memory_delete.json` — routes_memory.py `handle_memory_delete`
+- `autodown_enable/disable/wake/cancel.json` — routes_autodown.py handlers
+- `cluster_up.json` / `cluster_down.json` — routes_ops.py + hscc-cluster/hscc.py `cmd_cluster_up`/`cmd_cluster_down`
+- `orchestrator_chat.json` — routes_orchestrator.py `handle_orchestrator_chat`
+- `orchestrator_chat_status.json` — routes_orchestrator.py `handle_orchestrator_chat_job`
+
+Only `ReadResponse` remains without a fixture — it is a self-contained generic
+bucket (`{ speak, payload? }`) by design and needs no fixture.
 
 `v1_sessions.json` is the sessions-manager list (`GET /v1/sessions?profile=...`),
 captured against routes_sessions.py: one healthy session and one bloated one

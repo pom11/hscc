@@ -1,0 +1,7 @@
+{
+  "id": "t_9f3e2ab1",
+  "board": "hscc",
+  "reason": "operator resolved the dependency",
+  "message": "recovered t_9f3e2ab1 (board 'hscc') to ready",
+  "speak": "Recovered card t_9f3e2ab1 on board 'hscc' — it is back to ready."
+}

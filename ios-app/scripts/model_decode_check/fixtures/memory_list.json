@@ -1,0 +1,27 @@
+{
+  "profile": "backend-engineer",
+  "memories": [
+    {
+      "id": "1",
+      "node_id": "memory:memory:backend-engineer:0",
+      "source": "memory",
+      "kind": "memory",
+      "timestamp": 1785530200,
+      "title": "HSCC tests run via plain python",
+      "body": "HSCC tests run via plain `python`, not scripts/run_tests.sh."
+    },
+    {
+      "id": "2",
+      "node_id": "memory:profile:backend-engineer:0",
+      "source": "profile",
+      "kind": "profile",
+      "timestamp": 1785014400,
+      "title": "User prefers concise responses",
+      "body": "User prefers concise responses."
+    }
+  ],
+  "count": 2,
+  "memory_count": 1,
+  "profile_count": 1,
+  "speak": "2 memories for backend-engineer (1 notes, 1 profile)."
+}
