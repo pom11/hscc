@@ -25,9 +25,11 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
-<key>NSSupportsLiveActivities</key>
+	<key>NSCameraUsageDescription</key>
+	<string>HSCC uses the camera only to scan the setup QR code from `hscc api status`, so you do not have to type a tailnet address and a 43-character token by hand.</string>
+	<key>NSSupportsLiveActivities</key>
 	<true/>
-		<key>UILaunchScreen</key>
+	<key>UILaunchScreen</key>
 	<dict/>
 </dict>
 </plist>
