@@ -157,6 +157,13 @@ private struct ChatBody: View {
             // Leaving the chat: stop declaring we're reading it, so a reply
             // that arrives after navigation away is badged as unread.
             unread.setReading(nil)
+            // Stop any in-flight reply poll. The unstructured `pollTask`
+            // created in `deliver` is NOT tied to the .task modifier, so it
+            // would otherwise keep polling every 2s — writing @Published
+            // mutations into a ChatStore whose view is gone. Cancel it like
+            // TemplateDetailView does (t_97e31dbf concurrency audit).
+            pollTask?.cancel()
+            pollTask = nil
         }
         .task {
             // Restore the saved draft + probe fleet readiness on first appear
