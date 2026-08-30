@@ -264,6 +264,32 @@ fixtures, which I confirmed were fabricated rather than real before allowing the
 If you decide you want the rewrite anyway, it is a five-minute operation whose
 only real cost is re-cloning the second machine.
 
+### Dead code and dangling references — reported, nothing deleted
+
+The audit found real dead weight and **deleted none of it**, which was the
+instruction: a wrong deletion costs far more than dead code. Full detail in
+`docs/audits/dead-code-audit-t_58f21007.md`. Verified independently:
+
+- `hscc_daemon/event_driven.py` — **1503 lines, never imported anywhere**
+  (confirmed by grep across all non-test Python). It carries its own
+  install/uninstall CLI, so it is operator-facing and was reported rather than
+  removed.
+- Five Swift types are referenced exactly once each — at their own declaration:
+  `HSStatusDot`, `HSStatusRow`, `HSStatusChip` (Theme.swift), `QRPairing`
+  (SetupQRCode.swift), `TopologySnapshot` (SharedModels.swift).
+- No registered-but-unreachable route, no config key read nowhere, no
+  preview-only code in the app target, and zero hard-proven dangling references
+  in docs or comments.
+
+**Decision on the five Swift types: keep them.** Each carries documented intent —
+the `HSStatus*` trio says "use these instead of re-inventing", and `QRPairing`
+describes itself as the shared post-scan step with working `test()`/`classify()`
+logic. That reads as scaffolding waiting to be wired, not abandoned code. I
+checked that `QRPairing` being unused does not break anything: the first-run path
+works through `applyScanned → save → testConnection`, proven by
+`first_run_check.sh`. Five unused types cost nothing; deleting planned work costs
+real time.
+
 ## Coverage and what is still open
 
 Fourteen audit cards were dispatched; twelve completed, were verified by
