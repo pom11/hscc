@@ -365,7 +365,7 @@ def handle_cluster_monitor(server, ctx, query, body):
         data = _backing_cluster_monitor()
     except Exception:
         return 200, {"speak": "fleet monitor unavailable"}
-    if data is None:
+    if data is None or _is_error_dict(data):
         return 200, {"speak": "fleet monitor unavailable"}
     return 200, {**data, "speak": _speak_cluster_monitor(data)}
 
@@ -375,7 +375,7 @@ def handle_cluster_jobs(server, ctx, query, body):
         data = _backing_cluster_jobs()
     except Exception:
         return 200, {"speak": "job list unavailable"}
-    if data is None:
+    if data is None or _is_error_dict(data):
         return 200, {"speak": "job list unavailable"}
     return 200, {**data, "speak": _speak_cluster_jobs(data)}
 
