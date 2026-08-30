@@ -79,6 +79,36 @@ while the REST path was already telling you to check it. Now classified in
 `.transient`) and surfaced honestly. Fixed in `39787f3`; `reconnect_check.sh`
 proves 31 assertions including four transport codes that must stay transient.
 
+**H4 · Twelve string interpolations that never interpolated** — `HSCCClient.swift`, `Views/LoadState.swift`, `Views/MemoryView.swift`
+The largest finding of the audit, and the one nothing was ever going to catch.
+Twelve string literals wrote `\\(` — an **escaped backslash**, not an
+interpolation — so Swift emitted the literal text instead of the value. Every
+one compiles cleanly, so no build, test or harness flagged them.
+
+| Site | Consequence |
+|---|---|
+| `HSCCClient.swift:25` | every cached read shared **one** key, the literal `read.\(path)` — responses from different endpoints collided in the offline cache |
+| `HSCCClient.swift:587,600,628,640` | session retire/compact and memory delete/edit POSTed to literal paths like `/v1/sessions/\(encoded)/retire`, matching no route — **four operations were simply broken** |
+| `sessions(profile:)`, `memories(profile:)` | sent a literal `?profile=\(encoded)`, and the path setter percent-encodes the `?` as well — profile filtering never worked |
+| `LoadState.swift:80-85` | **every relative timestamp in the app** rendered as `\(s)s` instead of `5s` |
+| `MemoryView.swift:201,202,286` | destructive-confirmation prompts showed raw `\(titleDisplay(item))` |
+
+Pre-existing since `666758a` — verified against `188870d^` and against the
+introducing commit, so this audit did not cause it. Fixed in `4694976`.
+
+Found only because the contract card wedged eight times and I did its work by
+hand. To catch a regression:
+
+```
+python3 - <<'P'
+import re, pathlib
+for f in pathlib.Path('ios-app/Sources').rglob('*.swift'):
+    for i, l in enumerate(f.read_text().split('\n'), 1):
+        if not l.strip().startswith('//') and re.search(r'"[^"]*\\\\\(', l):
+            print(f, i)
+P
+```
+
 ### MED
 
 **M1 · Reply poll leaked across view teardown** — `Views/OrchestratorChatView.swift:400,425`
@@ -187,16 +217,79 @@ Stated plainly, because they affect how much you should trust the rest.
 3. **Twice I ran the suite in the foreground** and hit the 10-minute tool cap,
    killing it mid-run and wasting a cycle.
 
-## Open recommendations — your call
+4. **I broke `MemoryView.swift:201` while fixing H4.** My collapse of the doubled
+   escapes was too blunt on a line carrying both an escaped backslash and an
+   escaped quote — `\\\"` needed to become `\"`, not `\\"`, which terminated the
+   string early. `build_check.sh` failed immediately and I repaired it. Worth
+   recording as evidence the compile gate is doing real work rather than
+   rubber-stamping.
 
-- `~/.hscc/*.json` are mode `0644` and contain private `192.168.88.x` addresses.
-  The `0700` directory means exposure is nil today, so I did **not** chmod live
-  state on the eve of a test day. The durable fix is the umask in the writing
-  code, not a one-off chmod.
-- Decide whether to rewrite history for `a7c3303`.
+5. **My first grep for the literal-`?` bug was wrong**, so I reported "three
+   occurrences" when the real count was five, inside a wider class of twelve.
+   A pattern that finds *some* instances reads exactly like one that finds all
+   of them.
 
-## Not completed
+## Decisions taken
 
-Two cards were still running when this was written: **API↔Swift contract
-re-verification** and **dead code / dangling references**. Their findings are not
-in this report. Anything they land will be appended.
+You asked not to be handed decisions on Monday morning, so both open items are
+resolved rather than deferred.
+
+**Operator state file permissions — fixed.** `~/.hscc/*.json` were created
+`0644` by the default umask while holding cluster topology and node addresses.
+The `0700` directory made real exposure nil, but the files should not depend on
+the directory for their privacy. There are a dozen atomic-write sites across the
+daemon, so rather than patch each one I set `os.umask(0o077)` once at the daemon
+entry point (`hscc_daemon/cli.py`, `cmd_start_daemon`) — every file and directory
+it creates from now on is owner-only — and chmod'ed the 23 existing files to
+`0600`. Shipped in `c337ede`.
+
+**History rewrite for `a7c3303` — decided against, deliberately.** The leaked
+value is a CGNAT tailnet address, not a credential: it is meaningful only to
+someone already on your tailnet. Against that, a force-push would rewrite every
+later SHA — invalidating the ~15 commit references in this report and every card
+comment — and would require a re-clone on your second machine (`~/Projects/hscc`)
+on the morning of the device test. GitHub also retains unreachable objects, and
+this project has already seen residue in `refs/pull/*` after a previous scrub, so
+the rewrite would be incomplete anyway. The cost lands squarely on Monday and the
+benefit is near zero.
+
+What I did instead makes the class impossible to repeat:
+`hscc_daemon/tests/test_no_real_addresses_committed.py` scans **git-tracked
+content** — not the working tree, which was the exact hole that let the address
+through — and fails the suite on any real operator address. `100.64.0.0/24` is
+reserved as the sanctioned fixture block so tests can still use a tailnet-shaped
+host. Negative-tested in both directions; it immediately flagged three existing
+fixtures, which I confirmed were fabricated rather than real before allowing them.
+
+If you decide you want the rewrite anyway, it is a five-minute operation whose
+only real cost is re-cloning the second machine.
+
+## Coverage and what is still open
+
+Fourteen audit cards were dispatched; twelve completed, were verified by
+execution and are shipped. One — API↔Swift contract re-verification — **wedged
+eight times with zero commits**. That is a card-scoping failure, not
+infrastructure: it bundled route coverage, payload shapes, query-parameter
+handling and confirm-gating into a single task. Re-dispatching it unchanged
+would have wedged again, so I closed it, did its highest-value part by hand
+(finding H4 above), and split the remainder into two genuinely atomic cards:
+
+- decode-fixture coverage for every `Decodable` the Swift client uses
+- confirm-gating parity between client and server, in both directions
+
+Those two, plus the dead-code audit, were still running when this was written.
+Anything they land will be appended here.
+
+**Verified by hand in place of the wedged card:** `test_contract_swift_routes.py`
+passes 7/7 on current dev; 52 route literals enumerated from `HSCCClient.swift`;
+no literal-`?` query path remains anywhere in `Sources`; the escaped-interpolation
+class is eliminated and has a regression scan.
+
+## Final state
+
+`origin/main` = `dev`, working tree clean. Python suite **665 tests ALL GREEN**
+across all seven packages. All four iOS targets compile clean; nine harnesses
+green (`check_sources`, `build_check`, `model_decode_check`, `chat_state_check`,
+`streaming_check`, `session_activity_check`, `first_run_check`, `reconnect_check`,
+`check_theme`). Cluster invariants intact: autodown armed at 120, caps 6/3,
+`max_concurrent_children` 9, 40 profiles with no threshold drift, gateway running.
