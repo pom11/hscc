@@ -687,11 +687,11 @@ private struct ChatBubble: View {
                 // ALWAYS visible — the failed message is never silently deleted.
                 if let retry {
                     bubble
-                        .background(Color.red.opacity(0.12))
+                        .background(Theme.Semantic.bad.opacity(0.12))
                         .overlay(alignment: .bottomTrailing) { retryButton }
                 } else {
                     bubble
-                        .background(Color.red.opacity(0.12))
+                        .background(Theme.Semantic.bad.opacity(0.12))
                 }
                 Spacer(minLength: 48)
             }
