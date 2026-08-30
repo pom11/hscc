@@ -198,8 +198,8 @@ struct MemoryView: View {
                     title: "Delete",
                     systemImage: "trash",
                     destructive: true,
-                    prompt: "Delete the memory \\\"\\(titleDisplay(item))\\\"? "
-                        + "This removes it permanently from \\(item.sourceLabel)."
+                    prompt: "Delete the memory \"\(titleDisplay(item))\"? "
+                        + "This removes it permanently from \(item.sourceLabel)."
                 ) {
                     let r = try await client.deleteMemory(nodeID: item.nodeID,
                                                           profile: trimmedProfile)
@@ -283,7 +283,7 @@ struct MemoryEditSheet: View {
                     MutationButton(
                         title: "Save",
                         systemImage: "checkmark",
-                        prompt: "Rewrite this memory in \\(profile) with the corrected text?"
+                        prompt: "Rewrite this memory in \(profile) with the corrected text?"
                     ) {
                         let r = try await client.editMemory(nodeID: item.nodeID,
                                                             profile: profile,
