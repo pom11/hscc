@@ -80,6 +80,20 @@ def test_suite_never_writes_live_hscc(tmp_path):
     # activity.json is EVENT-DRIVEN and lives OUTSIDE state/ (at ~/.hscc root):
     _plant(ws, "activity.json", '{"ts": "planted"}\n')
     _plant(ws, "state/telegram_probe.offset", "0\n")
+    # serving.json + profile config.yaml — added (t_2985e00b) because
+    # serving.update_orchestrator_followers() rewrites orchestrator-tracking
+    # profile config.yaml files. The sandbox must plant those so a regression
+    # that stops patching serving.PROFILES_DIR trips the manifest diff.
+    _plant(ws, "serving.json",
+           '{"port": 8000, "units": [{"id": "o", "role": "orchestrator", '
+           '"nodes": ["192.0.2.10"], "recipe": "r", "model": "m"}]}\n')
+    # Realistic managed profiles: one tracking the orchestrator endpoint
+    # (rewriteable by update_orchestrator_followers) and one worker pinned to
+    # its own node (never matched, must stay untouched).
+    _plant(ws, "profiles/default/config.yaml",
+           "model:\n  provider: custom\n  base_url: http://192.0.2.10:8000/v1\n")
+    _plant(ws, "profiles/worker-246/config.yaml",
+           "model:\n  provider: custom\n  base_url: http://192.0.2.11:8000/v1\n")
 
     before = _manifest(os.path.join(ws, ".hscc"))
 
@@ -91,6 +105,10 @@ def test_suite_never_writes_live_hscc(tmp_path):
         "test_daemon_ops.py", "test_lifecycle.py", "test_trigger.py",
         "test_health.py", "test_autodown.py", "test_autodown_cli.py",
         "test_state.py", "test_desktop.py",
+        # t_2985e00b: serving tests exercise update_orchestrator_followers(),
+        # which rewrites profile config.yaml — must run in the sandbox so the
+        # planted serving.json/profiles are asserted unchanged.
+        "test_serving.py", "test_serving_extra.py",
     ]
     paths = [os.path.join(tests_dir, t) for t in targets]
 
