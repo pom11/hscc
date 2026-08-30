@@ -264,6 +264,25 @@ fixtures, which I confirmed were fabricated rather than real before allowing the
 If you decide you want the rewrite anyway, it is a five-minute operation whose
 only real cost is re-cloning the second machine.
 
+### Confirm-gating parity — clean, in both directions
+
+Every mutating call the app can make is confirmation-gated, and so is every
+server handler that receives one. Detail in
+`docs/audits/confirm-gate-audit-t_c77f243f.md`.
+
+- **19 mutating client methods**, all sending `"confirm": true`. The single
+  shared `post(_:body:as:timeout:)` helper is the only path that issues a
+  mutating POST, so there is no route around it.
+- **19 matching server handlers**, all gating on it. I spot-checked the most
+  destructive one myself rather than trusting the table:
+  `handle_cluster_down` (`routes_ops.py:371`) calls
+  `_require_confirm(data, "stop the entire fleet")` before it touches anything.
+
+The direction that would actually be dangerous — a server mutation that accepts
+a request *without* checking confirm — came back empty. The contract test now
+asserts the mapping, so a future client POST that forgets `confirm`, or a
+handler that stops requiring it, fails the suite.
+
 ### Dead code and dangling references — reported, nothing deleted
 
 The audit found real dead weight and **deleted none of it**, which was the
