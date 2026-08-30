@@ -207,7 +207,7 @@ struct ProjectDetailView: View {
 
             switch selected {
             case .overview: ProjectOverviewView(client: client, name: project.name, onOpenChat: { selected = .chat })
-            case .chat:     OrchestratorChatView(project: project.name)
+            case .chat:     StreamingChatView(project: project.name)
             case .board:    ProjectBoardView(client: client, board: project.board)
             case .settings: ProjectSettingsView(client: client, name: project.name)
             }
