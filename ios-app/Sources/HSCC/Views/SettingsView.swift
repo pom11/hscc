@@ -123,6 +123,12 @@ struct SettingsView: View {
                 Section {
                     Button("Save", action: save)
                         .disabled(!hasEdits)
+                    if let tokenSaveFailure = settings.tokenSaveFailure {
+                        Label(tokenSaveFailure, systemImage: "exclamationmark.triangle.fill")
+                            .font(.footnote)
+                            .foregroundColor(Theme.Semantic.bad)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             .navigationTitle("Settings")

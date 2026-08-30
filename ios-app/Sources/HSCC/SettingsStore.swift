@@ -26,6 +26,11 @@ final class SettingsStore: ObservableObject {
     @Published private(set) var clusters: [SavedCluster]
     /// Which cluster is currently active (the one the app connects to).
     @Published private(set) var activeClusterID: UUID?
+    /// Non-nil when the most recent `saveCluster` could not write its token to
+    /// the Keychain (e.g. the device blocked the write). Surfaced in Settings
+    /// so a saved host/port is never mistaken for a saved CONNECTION — the
+    /// token is what makes it usable. Cleared on the next successful write.
+    @Published private(set) var tokenSaveFailure: String?
 
     /// The shared suite the extensions read from too.
     ///
@@ -135,6 +140,15 @@ final class SettingsStore: ObservableObject {
     ///   - token: the token to store for this cluster. nil/empty deletes it.
     func saveCluster(_ cluster: SavedCluster, token: String?) {
         KeychainStore.saveToken(token, forCluster: cluster.id)
+        // The Keychain write reports a failure through `lastError` (it cannot
+        // throw). Surface it here so the operator is told when a saved host/port
+        // did NOT come with a usable token — otherwise the UI would look saved
+        // while the app reads back as "not configured".
+        if let token, !token.isEmpty, let status = KeychainStore.lastError {
+            tokenSaveFailure = "The token could not be saved (Keychain OSStatus \(status)). Host and port were saved, but the token was not — the connection will not work."
+        } else {
+            tokenSaveFailure = nil
+        }
         if let idx = clusters.firstIndex(where: { $0.id == cluster.id }) {
             clusters[idx] = cluster
         } else {
