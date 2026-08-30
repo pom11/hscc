@@ -22,26 +22,17 @@ THEME="$SRC/HSCC/Views/Theme.swift"
 
 RAW='\.(red|white|black|green|blue|orange|yellow|purple|gray|pink|mint|teal|indigo|brown)\b|0x[0-9A-Fa-f]{6}|UIColor\(red:|Color\(red:|\.init\(red:|UIColor\(white:'
 
-# ALLOWLIST — raw named colours INTENTIONALLY kept because each is readable in
-# BOTH light and dark appearances (fixed-hue background, see audit t_87914280):
-#   OrchestratorChatView.swift:666  white text on the accent-coloured bubble
-#   OrchestratorChatView.swift:702  fault-red Retry button (has "Retry" label)
-#   OrchestratorChatView.swift:703  white text on that Retry button
-#   ProjectsView.swift:149          white text on the amber unread badge chip
-ALLOW='OrchestratorChatView.swift:666
-OrchestratorChatView.swift:702
-OrchestratorChatView.swift:703
-ProjectsView.swift:149'
-
-HITS=$(grep -rnE "$RAW" --include='*.swift' "$SRC" | grep -vF "${THEME}:")
+# ALLOWLIST — a raw named colour is intentional ONLY when the line carries an
+# inline `// theme-allow:` marker explaining why. Markers travel WITH the code:
+# an earlier line-number allowlist (666/702/703/149) silently went stale the
+# moment anything above those lines shifted, turning the guard into a false
+# failure. Anchor on content, never on position.
+HITS=$(grep -rnE "$RAW" --include='*.swift' "$SRC" | grep -vF "${THEME}:" | grep -v 'theme-allow:')
 VIOL=""
 while IFS= read -r line; do
   [ -z "$line" ] && continue
-  key=$(printf '%s' "$line" | sed -E 's#^.*/##; s/:.*//')   # "<File>.swift:<line>"
-  key="$key:$(printf '%s' "$line" | sed -E 's#^[^:]*:([0-9]+):.*#\1#')"
-  if ! printf '%s\n' "$ALLOW" | grep -qxF "$key"; then
-    VIOL="${VIOL}${line}\n"
-  fi
+  VIOL="${VIOL}${line}
+"
 done <<< "$HITS"
 
 if [ -z "$VIOL" ]; then
