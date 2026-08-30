@@ -28,6 +28,10 @@ struct StreamingChatView: View {
     @EnvironmentObject private var settings: SettingsStore
     @StateObject private var store: StreamingChatStore
     @State private var showConfirm = false
+    /// Drives the session Live Activity (lock screen / Dynamic Island mirror
+    /// of this project's live session). A plain `let` — it holds no published
+    /// state, it just reflects changes when the stream updates.
+    private let sessionActivity = SessionActivityDriver()
 
     init(project: String) {
         self.project = project
@@ -92,7 +96,23 @@ struct StreamingChatView: View {
         .onDisappear {
             store.persistDraft()
             store.stop()
+            // Leaving the live chat ends the lock-screen mirror.
+            sessionActivity.end()
         }
+        // Reflect stream changes onto the lock screen Live Activity: whenever
+        // the connection phase changes or more rows/streaming text land, push
+        // the derived summary so the Dynamic Island stays current.
+        .onChange(of: store.phase) { _, phase in
+            reflectSessionActivity(phase: phase)
+        }
+        .onChange(of: liveTick) { _, _ in
+            reflectSessionActivity(phase: store.phase)
+        }
+    }
+
+    /// Push the current rows + phase to the session Live Activity driver.
+    private func reflectSessionActivity(phase: ConnectionPhase) {
+        sessionActivity.reflect(project: project, rows: store.rows, phase: phase)
     }
 
     private func startStream() {
