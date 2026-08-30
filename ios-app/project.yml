@@ -143,14 +143,12 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        # Allow plain-HTTP loads over the Tailscale tailnet (App Transport
-        # Security). Tailscale is the encrypted transport, so HTTP is intended.
-        INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads: YES
-        # The camera is used ONLY to scan the setup QR code from `hscc api
-        # status` so the operator can fill host/port/token instead of typing a
-        # tailnet address and a 43-char token. Without this plist key iOS kills
-        # the app the instant the scanner opens.
-        INFOPLIST_KEY_NSCameraUsageDescription: HSCC uses the camera only to scan the setup QR code from hscc api status so it can fill in the connection settings.
+        # NOTE: do NOT redeclare NSCameraUsageDescription / NSAppTransportSecurity
+        # as INFOPLIST_KEY_* here. This target has an explicit INFOPLIST_FILE;
+        # XcodeGen regenerates it from the `info.properties` block below, so
+        # those keys are declared THERE (single source of truth). Duplicating
+        # them as INFOPLIST_KEY_* here risks drift — a future edit to one but
+        # not the other silently splits the declaration.
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_ENTITLEMENTS: Sources/HSCC.entitlements
@@ -200,6 +198,9 @@ targets:
     info:
       path: Sources/HSCCWidgets/Info.plist
       properties:
+        # A display name so the widget gallery / Home Screen shows a friendly
+        # label instead of the raw target identifier "HSCCWidgets".
+        CFBundleDisplayName: HSCC Widgets
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
         NSAppTransportSecurity:
@@ -239,6 +240,9 @@ targets:
     info:
       path: Sources/HSCCLiveActivity/Info.plist
       properties:
+        # A display name so the Live Activity / Lock Screen surfaces a friendly
+        # label instead of the raw target identifier "HSCCLiveActivity".
+        CFBundleDisplayName: HSCC Live Activity
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
         NSAppTransportSecurity:
@@ -284,6 +288,9 @@ targets:
     info:
       path: Sources/HSCCLiveActivitySession/Info.plist
       properties:
+        # A display name so the session Live Activity / Lock Screen surfaces a
+        # friendly label instead of the raw target identifier "HSCCLiveActivitySession".
+        CFBundleDisplayName: HSCC Session
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
         NSAppTransportSecurity:
