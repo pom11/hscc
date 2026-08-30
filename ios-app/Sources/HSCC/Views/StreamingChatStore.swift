@@ -278,6 +278,11 @@ final class StreamingChatStore: ObservableObject {
             // frame of every connection. That IS the "we're live" signal; the
             // replay tail (if any) and live events fold over the next frames.
             phase = .connected
+            // A confirmed-live connection resets the backoff. Without this the
+            // counter only ever grows, so after the first drop EVERY later
+            // reconnect waits the 15s ceiling — even a brief blip costs 15s for
+            // the rest of the session (t_ec570637 Q4).
+            reconnectAttempt = 0
             return
         }
         guard let event = try? JSONDecoder().decode(SessionEvent.self, from: Data(text.utf8)) else {
