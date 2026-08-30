@@ -18,7 +18,7 @@ token; the API binds the tailnet address only, never 0.0.0.0.
   frame: `_route()` calls `_authorize()` at line 505, and the RFC 6455
   handshake (`routes_ws.py:_handshake`, line 230) is only reached inside the
   WS handler, which `_dispatch_ws()` reaches only AFTER auth passes.
-- **Bind address** is the tailnet IP (`100.115.243.3`), proven from code
+- **Bind address** is the tailnet IP (`100.64.0.1`), proven from code
   (`_REFUSED_BINDS` at api_server.py:197 blocks 0.0.0.0/::/empty) and from
   live config (`~/.hscc/api.json` → `"bind": "tailscale"`).
 - **New table-driven test** `tests/test_auth_all_routes.py` iterates the live
@@ -127,13 +127,13 @@ Enforced in `resolve_bind()` (api_server.py:280) and `resolve_config()`
 **Live config** (`~/.hscc/api.json`):
 ```
 config bind value: 'tailscale'
-resolved host: 100.115.243.3
-resolved config: {'host': '100.115.243.3', 'port': 8788}
+resolved host: 100.64.0.1
+resolved config: {'host': '100.64.0.1', 'port': 8788}
 is 0.0.0.0? False
 ```
 
 **Proof:** `~/.hscc/api.json` requests `"bind": "tailscale"`, which resolves to
-the host's tailnet address `100.115.243.3` (port 8788). This is a private
+the host's tailnet address `100.64.0.1` (port 8788). This is a private
 100.x Tailscale CGNAT address — the API is NOT reachable on 0.0.0.0 and not
 exposed on any wildcard interface.
 
