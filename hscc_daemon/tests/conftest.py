@@ -89,8 +89,8 @@ def _isolate_hscc(tmp_path, monkeypatch):
     # (b) Module-level constants already computed at import — overwrite each.
     def _module_attrs():
         from hscc_daemon import (
-            autodown, daemon_ops, desktop, hscc, lifecycle, replay, state,
-            trigger, usage,
+            autodown, daemon_ops, desktop, hscc, lifecycle, replay, serving,
+            state, trigger, usage,
         )
         def p(sub):
             return os.path.join(base, sub)
@@ -134,6 +134,17 @@ def _isolate_hscc(tmp_path, monkeypatch):
             # hscc.py CLI module
             (hscc, "BRIDGE_FILE", p("bridge.json")),
             (hscc, "ORCH_ENDPOINT_STATE", p("orch-endpoint")),
+            (hscc, "PROFILES_DIR", p("profiles")),
+            # serving.py — the autouse fixture previously did NOT cover these,
+            # and serving.update_orchestrator_followers() REWRITES config.yaml
+            # files under ~/.hermes/profiles (a real latent leak seam). Redirect
+            # every $HOME-rooted constant so a test calling any serving/health
+            # path function can never reach the operator's live files. (Tests
+            # that patch these themselves win via LIFO teardown.)
+            (serving, "SERVING_JSON", p("serving.json")),
+            (serving, "CLUSTER_JSON", p("cluster.json")),
+            (serving, "PROFILES_DIR", p("profiles")),
+            (serving, "ORCH_ENDPOINT_STATE", p("orch-endpoint")),
         ]
 
     for mod, attr, val in _module_attrs():
