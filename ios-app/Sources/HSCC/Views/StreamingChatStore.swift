@@ -24,10 +24,10 @@ import Combine
 //      paths abut cleanly: history folds up to lastSeq, then the WS resumes
 //      from lastSeq+1.
 //
-// Persistence (per project, in UserDefaults under "streaming.chat.<project>"):
-//   * `lastSeq` — so a relaunched app reconnects at the right seq instead of
-//     replaying old events as new (the cursor guarantee survives relaunch);
-//   * `draft` — the composer draft survives navigation.
+// Persistence: only the composer `draft` survives navigation/relaunch (under
+// "streaming.chat.<project>.draft"). The TRANSCRIPT is rebuilt fresh from the
+// newest history page on every `start` (it is a window, not an append-only
+// log), so there is no persisted cursor to go stale.
 //
 // Concurrency: URLSessionWebSocketTask's receive callback fires off-main. It
 // bridges every frame onto the MainActor (via `Task { @MainActor in … }`) so
@@ -103,21 +103,31 @@ final class StreamingChatStore: ObservableObject {
     init(project: String, urlSession: URLSession = .shared) {
         self.project = project
         self.urlSession = urlSession
-        // Restore persisted draft + cursor so a relaunch resumes gap-free.
+        // Restore the persisted draft. The session cursor is NOT restored
+        // here — `start` rebuilds a fresh window (and cursor) from the newest
+        // history page every appearance, so a persisted seq would be
+        // immediately overwritten.
         draft = UserDefaults.standard.string(forKey: Self.keyPrefix + project + ".draft") ?? ""
-        let savedSeq = UserDefaults.standard.object(forKey: Self.keyPrefix + project + ".seq") as? UInt64 ?? 0
-        cursor = SessionStreamCursor(lastSequence: savedSeq)
     }
 
     // MARK: - Lifecycle (called from the view's .task)
 
-    /// Start the chat window: seed from history, then open the live socket.
-    /// Safe to call once; the view calls it on first appear.
+    /// Start the chat window: rebuild a fresh transcript, seed it from the
+    /// newest history page, then open the live socket. Safe to call once per
+    /// appearance — re-appearing after `stop()` rebuilds the window from
+    /// history rather than double-folding the old rows (no duplicates across
+    /// navigate-away-and-back).
     func start(settings: StreamSettings) async {
         guard !isActive else { return }
         isActive = true
         self.settings = settings
         reconnectAttempt = 0
+        // Fresh window every start: re-seeding from history is the source of
+        // truth, so rebuilding avoids ever double-folding a row.
+        transcript = StreamingTranscript()
+        rows = []
+        cursor = SessionStreamCursor(lastSequence: 0)
+        expandedToolIDs = []
         await seedFromHistory()
         openSocket()
     }
@@ -282,7 +292,6 @@ final class StreamingChatStore: ObservableObject {
         case .accept:
             transcript.fold(event)
             rows = transcript.rows
-            saveSeq()
             // The resume tail (if any) is consumed; from here on jumps are
             // real gaps and must be detected as such.
             isResume = false
@@ -381,10 +390,6 @@ final class StreamingChatStore: ObservableObject {
     private func makeClient(_ s: StreamSettings) -> HSCCClient? {
         guard s.isConfigured else { return nil }
         return HSCCClient(host: s.host, port: s.port, token: s.token)
-    }
-
-    private func saveSeq() {
-        UserDefaults.standard.set(cursor.lastSequence, forKey: Self.keyPrefix + project + ".seq")
     }
 
     private func historyFailureMessage(_ error: HSCCError) -> String {
