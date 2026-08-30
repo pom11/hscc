@@ -62,4 +62,20 @@ def main(out_path):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        sys.exit(
+            "usage: hscc_hermeticity_snapshot.py <manifest.json>\n"
+            "\n"
+            "Writes a snapshot of ~/.hscc/*.json and ~/.hermes/profiles/*/config.yaml.\n"
+            "Take one before a suite run and one after, then diff them:\n"
+            "\n"
+            "  python3 scripts/hscc_hermeticity_snapshot.py /tmp/before.json\n"
+            "  HSCC_TEST_PY=... bash scripts/run_tests.sh\n"
+            "  python3 scripts/hscc_hermeticity_snapshot.py /tmp/after.json\n"
+            "  diff <(python3 -m json.tool /tmp/before.json) "
+            "<(python3 -m json.tool /tmp/after.json)\n"
+            "\n"
+            "A daemon write touches only last_activity_iso / rolling failures[];\n"
+            "anything else changing is a TEST leaking into operator state."
+        )
     main(sys.argv[1])
