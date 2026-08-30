@@ -41,6 +41,7 @@ struct ProjectsView: View {
                     } label: {
                         Image(systemName: "magnifyingglass")
                     }
+                    .accessibilityLabel("Search projects")
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
@@ -49,6 +50,7 @@ struct ProjectsView: View {
                         Image(systemName: "arrow.clockwise")
                     }
                     .disabled(projects.isLoading)
+                    .accessibilityLabel("Refresh projects")
                 }
             }
             .sheet(isPresented: $showSearch) {
@@ -769,7 +771,7 @@ struct ProjectBoardView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(card.displayTitle)
                     .foregroundColor(Theme.Semantic.onSurface)
-                HSMetaLine([card.assignee, card.id])
+                HSMetaLine([card.displayStatus, card.assignee, card.id])
             }
         }
     }
