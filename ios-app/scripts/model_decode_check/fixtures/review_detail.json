@@ -1,0 +1,19 @@
+{
+  "id": "t_8b1c42f0",
+  "title": "Add fixture for review detail decode",
+  "board": "hscc",
+  "project": "hscc",
+  "repo": "https://github.com/pom11/hscc",
+  "branch": "wt/t_8b1c42f0",
+  "base": "dev",
+  "subject": "add review-detail decode fixture",
+  "files_changed": 3,
+  "insertions": 41,
+  "deletions": 2,
+  "conflicts": 0,
+  "landed": false,
+  "verify_present": true,
+  "verify": "python scripts/model_decode_check.sh",
+  "dependents": [],
+  "speak": "Card t_8b1c42f0 is not yet merged. 3 files changed, 41 insertions, 2 deletions, no conflicts. Verification present. No dependents."
+}

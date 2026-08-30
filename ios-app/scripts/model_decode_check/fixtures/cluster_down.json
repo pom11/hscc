@@ -1,0 +1,9 @@
+{
+  "success": true,
+  "returncode": 0,
+  "command": ["sparkrun", "stop", "--all"],
+  "output": "stopped 6 workloads",
+  "error": "",
+  "message": "cluster down issued",
+  "speak": "The entire fleet has been stopped."
+}

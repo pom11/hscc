@@ -130,6 +130,26 @@ do {
     c.failures.append(("v1_session_events.json", "history paging contract", "\(error)"))
     print("FAIL v1_session_events.json → history paging contract: \(error)")
 }
+// ---- Mutation POST responses (previously uncovered; each shape derived from
+// the actual hscc-api handler so the fixture mirrors what the real endpoint
+// returns on a 2xx clean success). ----
+c.check(ReviewDetailResponse.self, "review_detail.json", "ReviewDetailResponse")
+c.check(DispatchCardResponse.self, "dispatch_card.json", "DispatchCardResponse")
+c.check(MergeCardResponse.self, "merge_card.json", "MergeCardResponse")
+c.check(TemplateApplyResponse.self, "template_apply.json", "TemplateApplyResponse")
+c.check(StopClusterResponse.self, "stop_cluster.json", "StopClusterResponse")
+c.check(RecoverCardResponse.self, "recover_card.json", "RecoverCardResponse")
+c.check(SessionMutationResponse.self, "session_retire.json", "SessionMutationResponse (retire)")
+c.check(MemoryListResponse.self, "memory_list.json", "MemoryListResponse")
+c.check(MemoryMutationResponse.self, "memory_delete.json", "MemoryMutationResponse (delete)")
+c.check(AutodownEnableResponse.self, "autodown_enable.json", "AutodownEnableResponse")
+c.check(AutodownDisableResponse.self, "autodown_disable.json", "AutodownDisableResponse")
+c.check(AutodownWakeResponse.self, "autodown_wake.json", "AutodownWakeResponse")
+c.check(AutodownCancelResponse.self, "autodown_cancel.json", "AutodownCancelResponse")
+c.check(ClusterUpResponse.self, "cluster_up.json", "ClusterUpResponse")
+c.check(ClusterDownResponse.self, "cluster_down.json", "ClusterDownResponse")
+c.check(OrchestratorChatJobResponse.self, "orchestrator_chat.json", "OrchestratorChatJobResponse")
+c.check(OrchestratorChatJobStatus.self, "orchestrator_chat_status.json", "OrchestratorChatJobStatus")
 
 // ---- Approvals classification (t_9a5cfc3b) — the SAME `isPendingApproval`
 // logic the on-screen inbox, the badge poller, and the Siri intent use, asserted

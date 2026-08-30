@@ -1,0 +1,7 @@
+{
+  "node_id": "memory:memory:backend-engineer:0",
+  "kind": "memory",
+  "title": "HSCC tests run via plain python",
+  "message": "deleted memory from MEMORY.md",
+  "speak": "Deleted the memory \"HSCC tests run via plain python\"."
+}

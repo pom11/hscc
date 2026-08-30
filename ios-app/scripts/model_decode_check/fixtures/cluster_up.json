@@ -1,0 +1,24 @@
+{
+  "success": true,
+  "dry_run": false,
+  "units": 1,
+  "plan": [
+    {
+      "kind": "orchestrator",
+      "nodes": ["10.0.0.1"],
+      "port": 8788,
+      "cmd": ["sparkrun", "run", "hscc-orch"],
+      "keepalive": true
+    }
+  ],
+  "issued": [
+    {
+      "success": true,
+      "returncode": 0,
+      "command": ["sparkrun", "run", "hscc-orch"],
+      "output": "unit hscc-orch started",
+      "error": ""
+    }
+  ],
+  "message": "cluster up issued"
+}

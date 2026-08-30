@@ -1,0 +1,4 @@
+{
+  "cancel_requested": true,
+  "message": "cancel requested — an in-progress teardown will abort between stops."
+}

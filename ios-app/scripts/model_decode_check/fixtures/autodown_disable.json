@@ -1,0 +1,5 @@
+{
+  "enabled": false,
+  "state": "up",
+  "message": "autodown disabled; intentional watchdog block cleared. Serving layer not restarted (use wake to bring it up)."
+}
