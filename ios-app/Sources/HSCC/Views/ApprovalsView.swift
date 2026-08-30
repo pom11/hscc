@@ -114,7 +114,7 @@ struct ApprovalsView: View {
             if let errors = response.errors, !errors.isEmpty {
                 Section("Errors") {
                     ForEach(errors, id: \.self) { error in
-                        Text(error).font(.caption).foregroundColor(.red)
+                        Text(error).font(.caption).foregroundColor(Theme.Semantic.bad)
                     }
                 }
             }
