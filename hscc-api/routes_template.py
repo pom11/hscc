@@ -112,7 +112,7 @@ def handle_template_list(server, ctx, query, body):
         data = _backing_template_list()
     except Exception:
         return 200, {"speak": "Template list unavailable."}
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or data.get("error"):
         return 200, {"speak": "Template list unavailable."}
     return 200, {**data, "speak": _speak_template_list(data)}
 
@@ -123,7 +123,7 @@ def handle_template_status(server, ctx, query, body):
         data = _backing_template_status()
     except Exception:
         return 200, {"speak": "Template status unavailable."}
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or data.get("error"):
         return 200, {"speak": "Template status unavailable."}
     return 200, {**data, "speak": _speak_template_status(data)}
 
