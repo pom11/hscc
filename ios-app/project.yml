@@ -159,6 +159,17 @@ targets:
       properties:
         CFBundleDisplayName: HSCC
         UILaunchScreen: {}
+        # Declared HERE, not as INFOPLIST_KEY_* build settings: this target has
+        # an explicit INFOPLIST_FILE, and XcodeGen REGENERATES that file from
+        # this block. A key hand-added to Sources/Info.plist survives only until
+        # the next generate.sh run, then vanishes silently.
+        # ActivityKit refuses to start any Live Activity without this key —
+        # Activity.request throws and areActivitiesEnabled reports false.
+        NSSupportsLiveActivities: true
+        # The camera is used ONLY to scan the setup QR code from `hscc api
+        # status`. Without this key iOS kills the app the instant the scanner
+        # opens — which is the first thing an operator does.
+        NSCameraUsageDescription: HSCC uses the camera only to scan the setup QR code from `hscc api status`, so you do not have to type a tailnet address and a 43-character token by hand.
         NSAppTransportSecurity:
           # HTTP is fine — Tailscale provides the encrypted transport (design
           # §D rules TLS out of scope). Do NOT add pinning/cert handling.
