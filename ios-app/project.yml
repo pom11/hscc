@@ -6,11 +6,17 @@
 #
 # See README.md for both build paths (xcodegen, or manual Xcode project).
 #
-# This spec drives the main app plus TWO app-extension targets:
-#   * HSCCWidgets     — Home Screen cluster widget (systemSmall + systemMedium).
-#   * HSCCLiveActivity— the fleet-wake Live Activity (ActivityKit).
-# All three targets share the App Group `group.com.hscc.ios` so the widget and
-# Live Activity see the operator's connection settings and the cluster state.
+# This spec drives the main app plus THREE app-extension targets:
+#   * HSCCWidgets            — Home Screen cluster widget (systemSmall + systemMedium).
+#   * HSCCLiveActivity       — the fleet-wake Live Activity (ActivityKit).
+#   * HSCCLiveActivitySession— the session Live Activity (ActivityKit): a live
+#                              mirror of a project's streaming session.
+# All four targets share the App Group `group.com.hscc.ios` so the widget and
+# Live Activities see the operator's connection settings and the cluster state.
+#
+# Note on Live Activity targets: a widget extension body can only contain ONE
+# ActivityConfiguration, so each Live Activity attribute type gets its own
+# extension target (HSCCLiveActivity = wake, HSCCLiveActivitySession = session).
 #
 # Sources are listed explicitly (not via a folder glob) so a source added
 # without updating this file is easy to spot in review. The shared sources
@@ -27,8 +33,8 @@ options:
 
 settings:
   base:
-    # Signing team for ALL THREE targets. The app and both extensions each need
-    # one — setting it on the app alone still fails the extensions with
+    # Signing team for ALL FOUR targets. The app and all three extensions each
+    # need one — setting it on the app alone still fails the extensions with
     # "Signing for <target> requires a development team".
     #
     # Set it once in your environment before generating, and it survives every
@@ -68,6 +74,8 @@ targets:
       - path: Sources/HSCC/SessionStreamCursor.swift
       - path: Sources/HSCC/SessionEvent.swift
       - path: Sources/HSCC/StreamingTranscript.swift
+      - path: Sources/HSCC/SessionActivitySummary.swift
+      - path: Sources/HSCC/SessionActivityDriver.swift
       - path: Sources/HSCC/Models.swift
       - path: Sources/HSCC/APIError.swift
       - path: Sources/HSCC/KeychainStore.swift
@@ -115,6 +123,7 @@ targets:
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/ExtensionClient.swift
       - path: Sources/Shared/WakingActivity.swift
+      - path: Sources/Shared/SessionActivity.swift
     entitlements:
       path: Sources/HSCC.entitlements
       properties:
@@ -126,6 +135,8 @@ targets:
       - target: HSCCWidgets
         embed: true
       - target: HSCCLiveActivity
+        embed: true
+      - target: HSCCLiveActivitySession
         embed: true
     settings:
       base:
@@ -227,6 +238,51 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_ENTITLEMENTS: Sources/HSCCLiveActivity.entitlements
+        SKIP_INSTALL: YES
+    dependencies:
+      - sdk: WidgetKit.framework
+      - sdk: ActivityKit.framework
+
+  # Session Live Activity (ActivityKit) — the LIVE mirror of a project's
+  # streaming session on the Lock Screen / Dynamic Island. The app drives it
+  # via `SessionActivityDriver` (fed by StreamingTranscript/StreamingChatStore
+  # folding the session event stream); this extension renders the
+  # ActivityConfiguration for `SessionActivityAttributes`.
+  #
+  # SEPARATE target from HSCCLiveActivity: a widget extension body can only
+  # contain ONE ActivityConfiguration, so each Live Activity attribute type
+  # gets its own extension target.
+  HSCCLiveActivitySession:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Sources/HSCCLiveActivitySession/HSCCLiveActivitySession.swift
+      # Shared source files compiled into every target.
+      - path: Sources/Shared/SharedModels.swift
+      - path: Sources/Shared/SessionActivity.swift
+      # Theme tokens shared with the app (design-system, no raw hex here).
+      - path: Sources/HSCC/Views/Theme.swift
+    entitlements:
+      path: Sources/HSCCLiveActivitySession.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.hscc.ios
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)group.com.hscc.ios
+    info:
+      path: Sources/HSCCLiveActivitySession/Info.plist
+      properties:
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios.liveactivity.session
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: Sources/HSCCLiveActivitySession.entitlements
         SKIP_INSTALL: YES
     dependencies:
       - sdk: WidgetKit.framework
