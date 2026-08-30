@@ -9,11 +9,19 @@ import Foundation
 // connection mid-stream, reconnect, and the transcript has no gap and no
 // repeat. Never leave the user wondering whether their message was sent."
 //
+// Audit t_ec570637 extended this with Scenario G: the store must classify a
+// rejected WS upgrade (rotated/rejected token) as `.rejected` so it surfaces a
+// failure and STOPS retrying, rather than reconnecting forever against a server
+// that will never accept — while a pure network drop stays `.transient` and
+// keeps retrying. That distinction (StreamConnectionError.swift) is compiled
+// from real source and asserted here with the exact URLSession error codes.
+//
 // This harness is the headless proof. There is NO iOS runtime on this host, so
-// the reconnect algorithm is exercised as a plain macOS CLI (the cursor is pure
-// Foundation). The scenarios below replay a stream that is cut mid-way and
-// resumed with the cursor's resumeRequest, then assert the assembled transcript
-// is exactly the producer's events once each — no gap, no repeat.
+// the reconnect algorithm is exercised as a plain macOS CLI (the cursor and the
+// error classifier are pure Foundation). The scenarios below replay a stream
+// that is cut mid-way and resumed with the cursor's resumeRequest, then assert
+// the assembled transcript is exactly the producer's events once each — no gap,
+// no repeat — plus the token-vs-network classification.
 // ===========================================================================
 
 /// A tiny test harness with a shared pass/fail tally.
@@ -210,4 +218,65 @@ do {
     h.expect(transcript.count == 6, "transcript still 6 entries, no duplicates")
 }
 
-h.finish("6 scenarios, mid-stream drop + reconnect")
+// =========================== Scenario G ====================================
+// WS error classification (audit t_ec570637): the store must tell a server
+// REJECTION (rotated/rejected token → HTTP 401 before the handshake) apart
+// from a transient network drop, so a bad token surfaces to the operator and
+// stops hammering the server instead of reconnecting forever. This exercises
+// the REAL classifyStreamError from StreamConnectionError.swift, using the
+// exact error identities URLSessionWebSocketTask produces (proven by a live
+// URLSession experiment on this host: upgrade rejected with 401 → -1011;
+// connection refused → -1004; timeout → -1001).
+h.section("G — connection error classification: token-rejection is not a network drop")
+do {
+    // The store's decision, mirroring socketClosed(_:):
+    //   .rejected  → surface `.failed`, STOP retrying (permanent local cause)
+    //   .transient → reconnect(resumed: true), keep trying
+    func storeDecision(_ error: Error) -> String {
+        switch classifyStreamError(error) {
+        case .rejected:  return "failed(no-retry)"   // tell the operator, stop
+        case .transient: return "reconnect"          // retry with backoff
+        }
+    }
+
+    // A rejected token: the server ANSWERED the WS upgrade with a non-101
+    // (NSURLErrorBadServerResponse = -1011). The server is up but refuses —
+    // a retry can never succeed.
+    let rejected401 = NSError(domain: NSURLErrorDomain,
+                              code: NSURLErrorBadServerResponse,
+                              userInfo: [NSLocalizedDescriptionKey: "There was a bad response from the server."])
+    h.expect(classifyStreamError(rejected401) == .rejected,
+             "HTTP-401 upgrade rejection (-1011) classified .rejected, not transient")
+    h.expect(storeDecision(rejected401) == "failed(no-retry)",
+             "store surfaces .failed and stops retrying on token rejection")
+    h.expect(classifyStreamError(rejected401) != .transient,
+             ".rejected and .transient are distinct kinds")
+
+    // A transient network drop: connection refused (-1004), timeout (-1001),
+    // cannot-find-host (-1003), and a plain NSURLError. All must stay
+    // .transient so the store keeps retrying — reconnecting is legitimate.
+    let refused = NSError(domain: NSURLErrorDomain,
+                          code: NSURLErrorCannotConnectToHost,
+                          userInfo: [NSLocalizedDescriptionKey: "Could not connect to the server."])
+    h.expect(classifyStreamError(refused) == .transient,
+             "connection refused (-1004) stays .transient — retry")
+    h.expect(storeDecision(refused) == "reconnect",
+             "store reconnects (resume, no gap) on a network drop")
+
+    let timeout = NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut, userInfo: nil)
+    h.expect(classifyStreamError(timeout) == .transient, "timeout (-1001) stays .transient")
+
+    let dns = NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotFindHost, userInfo: nil)
+    h.expect(classifyStreamError(dns) == .transient, "cannot-find-host (-1003) stays .transient")
+
+    let other = NSError(domain: "com.example", code: 42, userInfo: nil)
+    h.expect(classifyStreamError(other) == .transient, "non-NSURLError stays .transient")
+
+    // A mid-stream drop (server abruptly closes after a successful handshake)
+    // surfaces as network-connection-lost / bad-server-response-free NSURLError
+    // — transient, so the store retries and resumes the cursor.
+    let drop = NSError(domain: NSURLErrorDomain, code: NSURLErrorNetworkConnectionLost, userInfo: nil)
+    h.expect(classifyStreamError(drop) == .transient, "mid-stream drop (-1005) stays .transient")
+}
+
+h.finish("7 scenarios, mid-stream drop + reconnect + error classification")

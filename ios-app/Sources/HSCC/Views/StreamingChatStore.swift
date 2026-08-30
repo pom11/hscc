@@ -319,12 +319,26 @@ final class StreamingChatStore: ObservableObject {
         return true
     }
 
-    /// The socket closed (or failed to receive). If the view is still alive,
-    /// retry with bounded backoff and resume the cursor — no gap, no repeat.
+    /// The socket closed (or failed to receive). Classify WHY: if the server
+    /// responded but rejected the upgrade (rotated/rejected token → HTTP 401
+    /// before the handshake), surfacing it and stopping is the honest move — a
+    /// retry can never succeed and would only hammer the server while the
+    /// operator watches stale data labelled "reconnecting". A pure transport
+    /// drop (network down, socket torn down) is transient — retry with backoff
+    /// and resume the cursor, no gap, no repeat.
     @MainActor
     private func socketClosed(_ error: Error) {
         wsTask = nil
         guard isActive else { return }
+        if classifyStreamError(error) == .rejected {
+            // The server is up but refused the stream — almost always the
+            // token rotated or is wrong. The REST path already tells the
+            // operator "check your token" for a 401; the socket path must not
+            // silently loop instead (see StreamConnectionError.swift for the
+            // evidence behind the classification).
+            phase = .failed("The cluster rejected this stream — your token may have rotated. Check it in Settings.")
+            return
+        }
         reconnect(resumed: true)
     }
 
