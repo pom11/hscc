@@ -670,7 +670,7 @@ private struct ChatBubble: View {
                 Spacer(minLength: 48)
                 bubble
                     .background(Color.accentColor)
-                    .foregroundColor(.white)
+                    .foregroundColor(.white)  // theme-allow: white on fixed accent, readable in both appearances
             case .reply:
                 bubble
                     .background(Color(.secondarySystemBackground))
@@ -706,8 +706,8 @@ private struct ChatBubble: View {
                 .font(.caption2.weight(.semibold))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(Color.red)
-                .foregroundColor(.white)
+                .background(Color.red)  // theme-allow: fault-red Retry, fixed hue
+                .foregroundColor(.white)  // theme-allow: white on that fixed red
                 .clipShape(Capsule())
         }
         .buttonStyle(.borderless)
