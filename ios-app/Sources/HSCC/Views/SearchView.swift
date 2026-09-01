@@ -69,6 +69,13 @@ struct SearchView: View {
         default:
             if trimmed.isEmpty {
                 emptyQueryView
+            } else if !hasLoaded {
+                // The search sources are still resolving — don't claim
+                // "No results" before we actually know. On a slow cluster they
+                // land out-of-order; a premature no-results is the same "no
+                // data" lie this screen exists to avoid (the two Offline.load
+                // calls in `load()` run concurrently and set state in flight).
+                searchingView
             } else {
                 let (ps, cs) = matched(trimmed)
                 if ps.isEmpty && cs.isEmpty {
@@ -77,6 +84,29 @@ struct SearchView: View {
                     resultsList(projects: ps, cards: cs)
                 }
             }
+        }
+    }
+
+    /// True once both sources hold a value (live or cached), so `matched()`
+    /// can be trusted to mean "really no results" rather than "still loading".
+    private var hasLoaded: Bool {
+        projects.value != nil && cards.value != nil
+    }
+
+    /// Shown while an in-flight query is still loading its two sources.
+    @ViewBuilder
+    private var searchingView: some View {
+        List {
+            if let stale = staleBanner() {
+                Section { stale }
+            }
+            HStack(spacing: 10) {
+                ProgressView()
+                Text("Searching…")
+                    .font(.subheadline)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
