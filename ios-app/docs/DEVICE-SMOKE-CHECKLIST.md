@@ -90,6 +90,120 @@ recovers once the new token is applied.
 
 ---
 
+## 6. Timestamps show real numbers  (≈30 s) — **NEW, most likely to be visibly wrong**
+
+Until 2026-08-30 every relative time in the app rendered as the literal text
+`\(s)s` instead of `5s`, because the string interpolation was escaped. If the
+fix did not land you will see it instantly, everywhere.
+
+- [ ] Open **Fleet**, **Cluster**, **Activity feed**, **Approvals**, **Autodown**
+      and **Board hygiene**.
+- [ ] Every "time ago" label reads like `5s` / `12m` / `3h` / `2d`.
+- [ ] **FAIL** if you see a literal `\(s)s` or `\(m)m` anywhere.
+
+---
+
+## 7. Session and memory actions actually work  (≈2 min) — **NEW**
+
+These four operations used to POST to a literal, unmatched URL and always fail.
+
+- [ ] **Sessions** tab → pick a session → **Retire**. Confirm. It succeeds and
+      the row updates.
+- [ ] Pick another session → **Compact**. Confirm. It succeeds.
+- [ ] **Memory** tab → **Delete** a memory. Read the confirmation text before
+      confirming: it must name the memory, e.g. *Delete the memory "foo"?* —
+      **FAIL** if the prompt contains a raw `\(titleDisplay(item))`.
+- [ ] **Edit** a memory, change the text, save. It persists.
+
+---
+
+## 8. Sessions and Memory are filtered to the right profile  (≈1 min) — **NEW**
+
+The profile filter was silently dropped from the request, so these lists showed
+everything rather than the project's own.
+
+- [ ] Open a project → **Sessions**. The list shows only that project's
+      orchestrator sessions, not every profile on the cluster.
+- [ ] Same for **Memory**.
+- [ ] **FAIL** if you see entries that clearly belong to another project.
+
+---
+
+## 9. Offline cache shows the right screen's data  (≈2 min) — **NEW**
+
+Every cached read shared a single cache key, so screens could show each other's
+data when offline.
+
+- [ ] While connected, visit **Fleet**, **Cluster** and **Activity feed** so each
+      caches.
+- [ ] Turn on **Airplane mode**.
+- [ ] Visit those three screens again. Each shows **its own** last-known data,
+      clearly marked stale.
+- [ ] **FAIL** if one screen shows another screen's content.
+
+---
+
+## 10. Live Activity appears  (≈2 min) — **NEW, never runtime-tested**
+
+`NSSupportsLiveActivities` was missing from the app's Info.plist entirely, so
+ActivityKit refused to start *any* Live Activity. This has never run on a device.
+
+- [ ] Trigger a fleet wake (or a long chat that starts a session activity).
+- [ ] A Live Activity appears on the **Lock Screen**, and in the **Dynamic
+      Island** if your phone has one.
+- [ ] It updates as state changes, and ends cleanly.
+- [ ] **FAIL** if nothing ever appears — that means the plist key still is not
+      reaching the built app.
+
+---
+
+## 11. Home Screen widget  (≈2 min) — **NEW, never runtime-tested**
+
+- [ ] Long-press the Home Screen → **+** → find **HSCC** → add the small widget,
+      then the medium one.
+- [ ] Both render cluster state rather than a placeholder or "unable to load".
+- [ ] They refresh (give it a few minutes, or toggle the fleet).
+
+---
+
+## 12. Streaming chat rejects a rotated token honestly  (≈2 min) — **NEW**
+
+Previously a rejected token made the stream reconnect forever with no
+explanation.
+
+- [ ] Open a project **Chat** and get a live stream going.
+- [ ] On the Mac, rotate the token so the current one is invalid.
+- [ ] Send another message / let the socket drop.
+- [ ] The app must show **"The cluster rejected this stream — your token may have
+      rotated. Check it in Settings."** and STOP retrying.
+- [ ] **FAIL** if it sits on "Reconnecting…" indefinitely.
+- [ ] Restore the token and confirm the stream recovers.
+
+---
+
+## 13. Leave a chat mid-reply  (≈1 min) — **NEW**
+
+An uncancelled poll used to keep running after the view was gone.
+
+- [ ] Send a message, and **navigate away** before the reply arrives.
+- [ ] Come back a minute later. The reply is there **once** — not duplicated.
+- [ ] The phone does not get warm / battery does not visibly drain while the
+      app sits on another screen.
+
+---
+
+## 14. Brief network drop recovers quickly  (≈1 min) — **NEW**
+
+The reconnect backoff never reset, so after one drop every later reconnect
+waited the full 15 s ceiling.
+
+- [ ] With a live stream, toggle Airplane mode on and off quickly.
+- [ ] It reconnects and resumes with no missing and no repeated messages.
+- [ ] Do it a second and third time — recovery should stay **fast**, not get
+      progressively slower.
+
+---
+
 ## Interpretation
 
 | Observed | What it means |
