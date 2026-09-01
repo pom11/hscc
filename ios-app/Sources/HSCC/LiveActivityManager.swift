@@ -177,11 +177,21 @@ final class LiveActivityManager {
     }
 
     /// Drop any leftover activity without a message (cleanup between wakes).
+    ///
+    /// Runs the `end` on a background Task. It must NOT blindly nil `self.current`
+    /// afterwards: `beginWake` calls this and then immediately assigns the NEW
+    /// activity to `self.current`. Because this Task only runs after `beginWake`
+    /// yields, an unguarded `self.current = nil` here would clobber the reference
+    /// to the freshly-started activity, leaving it on the lock screen forever —
+    /// never updated, never ended (an orphan). Only clear the reference if it is
+    /// still the same activity we ended.
     private func endCurrentSilently() {
-        guard let current else { return }
+        guard let activity = current else { return }
         Task {
-            await current.end(nil, dismissalPolicy: .immediate)
-            self.current = nil
+            await activity.end(nil, dismissalPolicy: .immediate)
+            if self.current === activity {
+                self.current = nil
+            }
         }
     }
 }
