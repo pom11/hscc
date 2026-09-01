@@ -326,9 +326,17 @@ struct TopologySnapshot {
 enum SnapshotStore {
     private static var suite: UserDefaults? { UserDefaults(suiteName: AppGroup.suiteName) }
 
-    /// Serialize the nodes to a storable form (label|state per node, pipes).
+    /// Serialize the nodes to a storable form (label:state per node, `;`-joined).
+    ///
+    /// IMPORTANT (fix t_15a88458): the node separator MUST differ from the
+    /// label-state separator, or decode cannot recover the pairing. The prior
+    /// code used `|` for BOTH, so `encode` produced `.244|up|.246|up|...` and
+    /// `decode` split every `|` then re-split a token with no `|` inside —
+    /// always recovering 0 nodes. Node labels are `.NNN` and states are words;
+    /// neither contains `;` or `:`, so those are unambiguous:
+    ///   label : state  (one node)   `;`  joins nodes.
     private static func encodeNodes(_ pairs: [TopologyPair]) -> String {
-        pairs.flatMap { $0.nodes }.map { "\($0.label)|\($0.state.rawValue)" }.joined(separator: "|")
+        pairs.flatMap { $0.nodes }.map { "\($0.label):\($0.state.rawValue)" }.joined(separator: ";")
     }
 
     /// Save the current successful snapshot.
@@ -366,8 +374,8 @@ enum SnapshotStore {
 
     private static func decodeNodes(_ raw: String?) -> [TopologyNode] {
         guard let raw, !raw.isEmpty else { return [] }
-        return raw.split(separator: "|").map { seg -> TopologyNode? in
-            let parts = seg.split(separator: "|", maxSplits: 1)
+        return raw.split(separator: ";").map { seg -> TopologyNode? in
+            let parts = seg.split(separator: ":", maxSplits: 1)
             guard parts.count == 2, let label = parts.first, let stateRaw = parts.last,
                   let state = TopologyNode.NodeState(rawValue: String(stateRaw)) else { return nil }
             return TopologyNode(label: String(label), state: state)
