@@ -10,6 +10,7 @@ config.yaml skills.preload list is what drives preloading. HSCC-specific
 config.yaml (model block, compaction, toolsets) is still written manually
 because the native API has no concept of cluster topology.
 """
+import json
 import os
 import yaml
 
@@ -37,12 +38,43 @@ WORKER_PROXY_BASE_URL = os.environ.get(
 WORKER_MODEL = os.environ.get("HSCC_WORKER_MODEL", "worker-model")
 WORKER_PROXY_KEY = os.environ.get("HSCC_WORKER_PROXY_KEY", "sk-sparkrun")
 
+
+def _live_orchestrator_endpoint():
+    """The orchestrator base_url read from the LIVE serving config.
+
+    serving.json is the single source of truth for where the orchestrator is
+    actually served; deriving from it means this file carries no host literal
+    that can drift. That matters concretely: when the repo was scrubbed of real
+    addresses for publication, the scrub also rewrote the hardcoded defaults
+    below, so every `hscc-roles generate` afterwards stamped an unreachable
+    placeholder into all 15 orchestrator profiles and project chat hung in
+    SYN_SENT until it timed out.
+
+    Mirrors serving.orchestrator_head(): the head is nodes[0] of the first
+    orchestrator unit. Read directly rather than importing hscc_daemon so this
+    plugin stays standalone.
+    """
+    try:
+        with open(os.path.expanduser("~/.hscc/serving.json")) as fh:
+            data = json.load(fh)
+        units = data if isinstance(data, list) else data.get("units", [])
+        for unit in units:
+            if unit.get("role") == "orchestrator":
+                nodes = unit.get("nodes") or []
+                if nodes:
+                    return "http://%s:%s/v1" % (nodes[0], unit.get("port", 8000))
+    except Exception:
+        pass
+    return None
+
+
 # Strong-tier roles (model_tier: strong) route to the orchestrator GPU directly.
 # Only architect + orchestrator use strong by default — .244 already runs
 # orchestration + worker-compaction, so saturating it would hurt the whole fleet.
 # Reviewers, coders, and QA stay on the fast worker proxy (:4000).
-STRONG_URL = os.environ.get(
-    "HSCC_STRONG_URL", "http://10.0.0.244:8000/v1")
+STRONG_URL = (os.environ.get("HSCC_STRONG_URL")
+              or _live_orchestrator_endpoint()
+              or "http://127.0.0.1:8000/v1")
 # Default to the stable logical alias "orchestrator-model", resolved at the
 # serving layer: the endpoint advertises that alias via --served-model-name, so
 # the alias IS served as long as the serving layer's alias→id mapping is
@@ -78,8 +110,9 @@ def _strong_model_block():
 # worker WEDGES (the big summary prompt generates forever). Route compaction to
 # the idle orchestrator (A3B, fast MoE) instead, with a hard timeout so a stuck
 # summarize fails fast rather than hanging. Env-overridable.
-COMPACT_BASE_URL = os.environ.get(
-    "HSCC_COMPACT_URL", "http://10.0.0.244:8000/v1")
+COMPACT_BASE_URL = (os.environ.get("HSCC_COMPACT_URL")
+                    or _live_orchestrator_endpoint()
+                    or "http://127.0.0.1:8000/v1")
 # The compaction model ID defaults to STRONG_MODEL, which is the stable logical
 # alias "orchestrator-model", resolved at the serving layer — one orchestrator
 # knob for both strong-tier and compaction. The endpoint advertises the alias
