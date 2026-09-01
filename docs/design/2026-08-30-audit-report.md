@@ -224,11 +224,12 @@ Stated plainly, because they affect how much you should trust the rest.
    recording as evidence the compile gate is doing real work rather than
    rubber-stamping.
 
-5. **I claimed the permissions fix worked without checking it against the
-   running system.** Twice over: the code was not deployed at all, and then the
-   deployed placement covered only one of the two daemon start paths. Both were
-   only caught by watching a live daemon rewrite the files. "Merging is not
-   deploying" — and deploying is not running, either.
+5. **I claimed the permissions fix worked, four times, before it did.** Not
+   deployed; then deployed to one of two daemon start paths; then missing two
+   further writer processes (a cron and the CLI); then the cron's copy was not
+   even refreshed by bootstrap. Every failure was invisible to the test suite and
+   visible in ten seconds of `ls -l` on a running system. If a fix concerns
+   runtime behaviour, verify it against the runtime, not the repo.
 
 6. **My first grep for the literal-`?` bug was wrong**, so I reported "three
    occurrences" when the real count was five, inside a wider class of twelve.
@@ -240,28 +241,38 @@ Stated plainly, because they affect how much you should trust the rest.
 You asked not to be handed decisions on Monday morning, so both open items are
 resolved rather than deferred.
 
-**Operator state file permissions — fixed, but only after I got it wrong twice.**
+**Operator state file permissions — fixed, after four wrong attempts.**
 `~/.hscc/*.json` were created `0644` by the inherited umask while holding cluster
 topology and node addresses. The `0700` directory made real exposure nil, but the
 files should not depend on the directory for their privacy.
 
-The fix itself is one line — set a private umask instead of patching a dozen
-atomic-write sites. Getting it to actually take effect took two corrections:
+The fix is one line — set a private umask rather than patch a dozen atomic-write
+sites. Making it actually take effect took four corrections, each found the same
+way: chmod the files, wait, and watch a running system rewrite them.
 
-1. I put `os.umask(0o077)` in `cmd_start_daemon` and committed it. That code was
-   never deployed — the daemon runs the **installed** payload under
-   `~/.hermes/plugins`, not the repo.
-2. After deploying, it still did not work: `cmd_start_daemon` is only the
-   service-supervised path, and `hscc start` reaches the loop another way. The
-   running daemon kept writing `0644`.
+1. Put `os.umask(0o077)` in `cmd_start_daemon` and committed it — **never
+   deployed**. The daemon runs the installed payload under `~/.hermes/plugins`,
+   not the repo.
+2. Deployed it; still broken. `cmd_start_daemon` is only the service-supervised
+   path, and `hscc start` reaches the loop another way. Moved to
+   `run_daemon_loop` (`hscc_daemon/daemon_ops.py:253`), the point both pass through.
+3. `escalated.json` **still** came back `0644`: the `hscc-escalate-watcher` cron
+   runs `scripts/escalate_watcher_run.py` as its own process, which never enters
+   that loop. And every `hscc …` command is a third writer process. Umask now set
+   at all three entry points.
+4. The repo fix to the watcher still did not reach production, because
+   `install_scripts.py` deployed only `hscc_*.sh` — the cron executes the copy in
+   `~/.hermes/scripts`, which bootstrap never refreshed. Extended to cover
+   `*_run.py` too, and to install them `0700` rather than `0755`.
 
-Both were caught the same way — by chmod'ing the files, waiting, and watching a
-live daemon rewrite them. The umask now sits at `run_daemon_loop`
-(`hscc_daemon/daemon_ops.py:253`), the single point both start paths pass
-through, and it is **proven live**: after a chmod at 19:42:05, `autodown.json`
-was rewritten at 19:43:51 and stayed `0600`, with no file reverting. Shipped in
-`c337ede` + `ddd04a4`; the 23 existing files are `0600` and the directory stays
-`0700`.
+**Proven live on all three paths**, after a chmod at 09:50: `autodown.json` and
+`watchdog-block.json` rewritten by the daemon at 09:54 — still `0600`;
+`escalated.json` rewritten by the cron at 10:00:20 — still `0600`. Nothing
+reverted. Shipped in `c337ede`, `ddd04a4`, `7dbdbf1`, `fc070f5`.
+
+The general lesson, which cost the most time of anything in this audit: merging
+is not deploying, deploying is not running, and a process you forgot about is
+still a writer.
 
 **History rewrite for `a7c3303` — decided against, deliberately.** The leaked
 value is a CGNAT tailnet address, not a credential: it is meaningful only to
