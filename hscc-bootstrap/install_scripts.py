@@ -39,8 +39,16 @@ def install_scripts(repo_root, scripts_dir, *, backup=True, ts=None):
     stamp = ts or datetime.now().strftime("%Y%m%d-%H%M%S")
     scripts_dir.mkdir(parents=True, exist_ok=True)
 
+    # `hscc_*.sh` are the watchdog shells. The cron-invoked *_run.py watchers
+    # belong here too: `hscc-escalate-watcher` executes
+    # ~/.hermes/scripts/escalate_watcher_run.py every 15 minutes, and until this
+    # was added bootstrap never deployed it — a repo fix to that file silently
+    # never reached the running system. Both name shapes are ours; user scripts
+    # in the runtime dir are still left alone.
+    sources = sorted(repo_scripts.glob("hscc_*.sh")) + sorted(repo_scripts.glob("*_run.py"))
+
     installed, backed_up = [], []
-    for src in sorted(repo_scripts.glob("hscc_*.sh")):
+    for src in sources:
         dst = scripts_dir / src.name
         if dst.exists():
             if backup:
@@ -48,7 +56,7 @@ def install_scripts(repo_root, scripts_dir, *, backup=True, ts=None):
                 shutil.copy2(dst, bak)
                 backed_up.append(bak.name)
         shutil.copy2(src, dst)
-        os.chmod(dst, 0o755)
+        os.chmod(dst, 0o755 if src.suffix == ".sh" else 0o700)
         installed.append(src.name)
 
     return {
