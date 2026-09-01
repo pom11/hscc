@@ -38,6 +38,7 @@ PY
 }
 
 rc=0
+warnings=0
 for t in HSCC HSCCWidgets HSCCLiveActivity HSCCLiveActivitySession; do
   # macOS ships bash 3.2, which has no `mapfile`.
   files=()
@@ -52,12 +53,25 @@ for t in HSCC HSCCWidgets HSCCLiveActivity HSCCLiveActivitySession; do
         -module-name "$t" -emit-module -emit-module-path "$TMP/$t.swiftmodule" \
         -wmo -c -o "$TMP/$t.o" "${files[@]}" 2>&1)
   n=$(printf '%s\n' "$out" | grep -c "error:")
-  echo "$t: ${#files[@]} files, $n error(s)"
+  # Warnings were previously DISCARDED here, so three of them reached the
+  # operator's Xcode build while this script reported "0 errors" and exited 0.
+  # A gate that hides half the compiler's output is worse than no gate.
+  w=$(printf '%s\n' "$out" | grep -c "warning:")
+  echo "$t: ${#files[@]} files, $n error(s), $w warning(s)"
   if [ "$n" != "0" ]; then
     printf '%s\n' "$out" | grep "error:" | head -12
     rc=1
   fi
+  if [ "$w" != "0" ]; then
+    printf '%s\n' "$out" | grep "warning:" | head -20
+    warnings=$((warnings + w))
+  fi
 done
 
-[ "$rc" = "0" ] && echo "full compile clean (compile only — never built or run on a device)"
+if [ "$warnings" != "0" ]; then
+  echo "FAIL: $warnings compiler warning(s) — fix them or the operator sees them in Xcode"
+  rc=1
+fi
+
+[ "$rc" = "0" ] && echo "full compile clean, 0 warnings (compile only — never built or run on a device)"
 exit $rc

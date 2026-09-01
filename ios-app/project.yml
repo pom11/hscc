@@ -169,6 +169,16 @@ targets:
         # status`. Without this key iOS kills the app the instant the scanner
         # opens — which is the first thing an operator does.
         NSCameraUsageDescription: HSCC uses the camera only to scan the setup QR code from `hscc api status`, so you do not have to type a tailnet address and a 43-character token by hand.
+        # Declared explicitly: with no orientation keys Xcode warns "All
+        # interface orientations must be supported unless the app requires
+        # full screen". This is an iPhone-only console
+        # (TARGETED_DEVICE_FAMILY 1); portrait is the primary layout and both
+        # landscapes are useful for reading chat transcripts and log lines.
+        # Upside-down is omitted, as Apple's own iPhone templates do.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
         NSAppTransportSecurity:
           # HTTP is fine — Tailscale provides the encrypted transport (design
           # §D rules TLS out of scope). Do NOT add pinning/cert handling.

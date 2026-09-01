@@ -472,7 +472,7 @@ private struct ChatBody: View {
     private func retry(for entry: ChatEntry) -> (() -> Void)? {
         switch entry {
         case .unsent:
-            return { [store] in
+            return {
                 retryCandidate = entry.text
                 showConfirm = true
             }
@@ -685,7 +685,7 @@ private struct ChatBubble: View {
                 // background, an explicit UNSENT label, the failed text, the
                 // delivery-failure reason (if any), and a Retry button. It is
                 // ALWAYS visible — the failed message is never silently deleted.
-                if let retry {
+                if retry != nil {
                     bubble
                         .background(Theme.Semantic.bad.opacity(0.12))
                         .overlay(alignment: .bottomTrailing) { retryButton }
