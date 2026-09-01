@@ -984,8 +984,11 @@ struct SessionItem: Decodable, Identifiable {
     let cache_write_tokens: Int?
     let reasoning_tokens: Int?
     let total_tokens: Int?
-    let started_at: String?
-    let ended_at: String?
+    // The wire sends these as epoch REALs (float seconds), not ISO strings —
+    // SessionDB stores them as `started_at REAL` / `ended_at REAL`. The app is
+    // honest about the shape even though no surface formats them yet.
+    let started_at: Double?
+    let ended_at: Double?
     let archived: Bool?
     let pinned: Bool?
     let compression_failure_error: String?
