@@ -142,6 +142,13 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios
+        # Per-TARGET, not just project-level: XcodeGen emits the SDK default
+        # ("1,2") into each target's build settings, which silently overrode the
+        # project-level value and made every target iPad-capable. That is what
+        # triggers "All interface orientations must be supported unless the app
+        # requires full screen" — an iPad multitasking rule. This is an
+        # iPhone-only sideload, so declare it where it actually applies.
+        TARGETED_DEVICE_FAMILY: "1"
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         # NOTE: do NOT redeclare NSCameraUsageDescription / NSAppTransportSecurity
@@ -219,6 +226,13 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios.widgets
+        # Per-TARGET, not just project-level: XcodeGen emits the SDK default
+        # ("1,2") into each target's build settings, which silently overrode the
+        # project-level value and made every target iPad-capable. That is what
+        # triggers "All interface orientations must be supported unless the app
+        # requires full screen" — an iPad multitasking rule. This is an
+        # iPhone-only sideload, so declare it where it actually applies.
+        TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_ENTITLEMENTS: Sources/HSCCWidgets.entitlements
@@ -261,6 +275,13 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios.liveactivity
+        # Per-TARGET, not just project-level: XcodeGen emits the SDK default
+        # ("1,2") into each target's build settings, which silently overrode the
+        # project-level value and made every target iPad-capable. That is what
+        # triggers "All interface orientations must be supported unless the app
+        # requires full screen" — an iPad multitasking rule. This is an
+        # iPhone-only sideload, so declare it where it actually applies.
+        TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_ENTITLEMENTS: Sources/HSCCLiveActivity.entitlements
@@ -309,6 +330,13 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios.liveactivity.session
+        # Per-TARGET, not just project-level: XcodeGen emits the SDK default
+        # ("1,2") into each target's build settings, which silently overrode the
+        # project-level value and made every target iPad-capable. That is what
+        # triggers "All interface orientations must be supported unless the app
+        # requires full screen" — an iPad multitasking rule. This is an
+        # iPhone-only sideload, so declare it where it actually applies.
+        TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_ENTITLEMENTS: Sources/HSCCLiveActivitySession.entitlements
