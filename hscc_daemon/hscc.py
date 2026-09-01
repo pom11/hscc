@@ -717,6 +717,12 @@ DAEMON_COMMANDS = {
 
 
 def main():
+    # Every `hscc ...` invocation is its OWN process — it does not pass through
+    # run_daemon_loop, so it does not inherit the daemon's private umask. Several
+    # subcommands write ~/.hscc state directly (autodown enable/disable, serving
+    # updates), which would recreate those files 0644. Third and last writer
+    # path: daemon loop, escalate-watcher cron, and here.
+    os.umask(0o077)
     args = sys.argv[1:]
 
     # No args or explicit help flags -> full help
