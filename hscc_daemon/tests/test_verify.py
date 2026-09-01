@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
+import yaml
 
 
 class TestCheckPlugins:
@@ -531,6 +532,123 @@ class TestCheckConfigWiring:
         assert "skipped" in result["detail"]
 
 
+class TestCheckProfileEndpoints:
+    """Hermetic profile_endpoints guard — all expectations derived from the
+    fixture serving.json/profiles, never from live ~/.hscc or ~/.hermes.
+
+    A profile base_url must resolve to an origin the fleet actually serves:
+    the orchestrator endpoint (nodes[0] of the first orchestrator unit + its
+    port, from serving.json), the worker proxy (LiteLLM, default
+    localhost:4000), or an allow-listed loopback host (any port).
+    """
+
+    ORCH = "10.99.99.99"
+    ORCH_PORT = 8123
+    ORCH_EP = f"http://{ORCH}:{ORCH_PORT}/v1"
+
+    def _serving(self, tmp_path):
+        """Fixture serving.json: one orchestrator unit on a synthetic head."""
+        serving = tmp_path / "serving.json"
+        serving.write_text(json.dumps({
+            "units": [{"role": "orchestrator", "nodes": [self.ORCH],
+                       "recipe": "r", "model": "m", "port": self.ORCH_PORT}],
+        }))
+        return serving
+
+    def _write_profile(self, profiles_dir, name, cfg):
+        pdir = profiles_dir / name
+        pdir.mkdir(parents=True, exist_ok=True)
+        (pdir / "config.yaml").write_text(yaml.safe_dump(cfg))
+
+    def _check(self, tmp_path, profiles_cfg, **kw):
+        from hscc_daemon.verify import check_profile_endpoints
+        serving = self._serving(tmp_path)
+        profiles_dir = tmp_path / "profiles"
+        profiles_dir.mkdir()
+        for name, cfg in profiles_cfg.items():
+            self._write_profile(profiles_dir, name, cfg)
+        return check_profile_endpoints(
+            serving_path=str(serving),
+            profiles_dir=str(profiles_dir),
+            **kw,
+        )
+
+    def test_all_good(self, tmp_path):
+        """orchestrator, worker proxy, and loopback base_urls all pass."""
+        result = self._check(tmp_path, {
+            "orch": {"model": {"base_url": self.ORCH_EP}},
+            "worker": {"model": {"base_url": "http://localhost:4000/v1"}},
+            "tooling": {"model": {"base_url": "http://127.0.0.1:9999"}},
+        })
+        assert result["ok"] is True
+        assert "profiles served" in result["detail"]
+
+    def test_bad_orchestrator_profile(self, tmp_path):
+        """A profile aimed at a host the fleet does not serve is a finding."""
+        result = self._check(tmp_path, {
+            "orch": {"model": {"base_url": self.ORCH_EP}},
+            "stale": {"model": {"base_url": "http://10.99.99.98:8000/v1"}},
+        })
+        assert result["ok"] is False
+        assert "stale" in result["detail"]
+        assert "model.base_url" in result["detail"]
+        assert "10.99.99.98" in result["detail"]
+
+    def test_bad_auxiliary_block(self, tmp_path):
+        """A wrong endpoint nested in an auxiliary block is caught (not just
+        the top-level model base_url) and reports its dotted key path."""
+        result = self._check(tmp_path, {
+            "orch": {"model": {"base_url": self.ORCH_EP},
+                     "auxiliary": {"compression": {
+                         "base_url": "http://192.0.2.5:9000/v1"}}},
+        })
+        assert result["ok"] is False
+        assert "auxiliary.compression.base_url" in result["detail"]
+        assert "192.0.2.5" in result["detail"]
+
+    def test_compact_and_strong_blocks_scanned(self, tmp_path):
+        """base_urls under compact/strong payload blocks are checked too."""
+        result = self._check(tmp_path, {
+            "orch": {"model": {"base_url": self.ORCH_EP}},
+            "bad": {"compact": {"base_url": "http://198.51.100.7:7777"},
+                    "strong": {"base_url": "http://203.0.113.9:8888"}},
+        })
+        assert result["ok"] is False
+        assert "compact.base_url" in result["detail"]
+        assert "strong.base_url" in result["detail"]
+
+    def test_loopback_any_port_allowed(self, tmp_path):
+        """Allow-listed loopback hosts pass regardless of port."""
+        result = self._check(tmp_path, {
+            "orch": {"model": {"base_url": self.ORCH_EP}},
+            "extra_loop": {"model": {"base_url": "http://localhost:54321/v1"},
+                           "cache": {"base_url": "http://127.0.0.1:1"}},
+        })
+        assert result["ok"] is True
+
+    def test_missing_serving_is_unverified_not_fail(self, tmp_path):
+        """Missing serving.json -> ok None (can't derive the endpoint)."""
+        from hscc_daemon.verify import check_profile_endpoints
+        profiles_dir = tmp_path / "profiles"
+        profiles_dir.mkdir()
+        self._write_profile(profiles_dir, "orch",
+                            {"model": {"base_url": self.ORCH_EP}})
+        result = check_profile_endpoints(
+            serving_path=str(tmp_path / "nope.json"),
+            profiles_dir=str(profiles_dir))
+        assert result["ok"] is None
+        assert "unverified" in result["detail"]
+
+    def test_profiles_dir_missing_is_skipped(self, tmp_path):
+        """No profiles dir -> skipped (ok True), not a failure."""
+        from hscc_daemon.verify import check_profile_endpoints
+        result = check_profile_endpoints(
+            serving_path=str(self._serving(tmp_path)),
+            profiles_dir=str(tmp_path / "missing"))
+        assert result["ok"] is True
+        assert "skipped" in result["detail"]
+
+
 class TestRunAll:
     """run_all — aggregates all checks and reports overall ok."""
 
@@ -570,6 +688,12 @@ class TestRunAll:
         mock_resp.__enter__ = lambda self: self
         mock_resp.__exit__ = lambda self, *a: None
 
+        serving = tmp_path / "serving.json"
+        serving.write_text(json.dumps({
+            "units": [{"role": "orchestrator", "nodes": ["10.0.0.1"],
+                       "recipe": "r", "model": "m", "port": 8000}],
+        }))
+
         with patch("hscc_daemon.verify.urllib.request.urlopen", return_value=mock_resp):
             result = run_all(
                 plugins_dir=str(tmp_path / "plugins"),
@@ -578,10 +702,11 @@ class TestRunAll:
                 profiles_dir=str(tmp_path / "profiles"),
                 state_dir=str(state_dir),
                 url="http://localhost:4000/v1/models",
+                serving_path=str(serving),
             )
 
         assert result["ok"] is True
-        assert len(result["checks"]) == 5
+        assert len(result["checks"]) == 6
         assert all(c["ok"] for c in result["checks"])
 
     def test_run_all_fail_aggregation(self, tmp_path):
@@ -593,18 +718,29 @@ class TestRunAll:
         mock_resp.__enter__ = lambda self: self
         mock_resp.__exit__ = lambda self, *a: None
 
+        serving = tmp_path / "serving.json"
+        serving.write_text(json.dumps({
+            "units": [{"role": "orchestrator", "nodes": ["10.0.0.1"],
+                       "recipe": "r", "model": "m", "port": 8000}],
+        }))
+        empty_profiles = tmp_path / "profiles"
+        empty_profiles.mkdir()
+
         with patch("hscc_daemon.verify.urllib.request.urlopen", return_value=mock_resp):
             result = run_all(
                 plugins_dir=str(tmp_path / "missing"),
                 config=str(tmp_path / "missing.yaml"),
                 state_dir=str(tmp_path / "missing_state"),
+                profiles_dir=str(empty_profiles),
+                serving_path=str(serving),
             )
 
-        assert len(result["checks"]) == 5
+        assert len(result["checks"]) == 6
         # At least the proxy check passes here — overall ok depends on individual checks
         names = [c["name"] for c in result["checks"]]
         assert "plugins" in names
         assert "proxy" in names
+        assert "profile_endpoints" in names
         assert "ok" in result
 
     def test_run_all_overrides_selective(self, tmp_path):
@@ -614,8 +750,18 @@ class TestRunAll:
         plugins_dir.mkdir(parents=True)
         (plugins_dir / "__init__.py").write_text('register("workers-up")\nregister("cluster-restart")\nregister("template")\n')
 
-        result = run_all(plugins_dir=str(tmp_path / "plugins"))
-        assert len(result["checks"]) == 5
+        serving = tmp_path / "serving.json"
+        serving.write_text(json.dumps({
+            "units": [{"role": "orchestrator", "nodes": ["10.0.0.1"],
+                       "recipe": "r", "model": "m", "port": 8000}],
+        }))
+        empty_profiles = tmp_path / "profiles"
+        empty_profiles.mkdir()
+
+        result = run_all(plugins_dir=str(tmp_path / "plugins"),
+                         profiles_dir=str(empty_profiles),
+                         serving_path=str(serving))
+        assert len(result["checks"]) == 6
 
     def test_run_all_ok_none_is_not_pass(self, tmp_path):
         """When multiplex is enabled but gateway state is missing (ok=None),
@@ -645,6 +791,12 @@ class TestRunAll:
         mock_resp.__enter__ = lambda self: self
         mock_resp.__exit__ = lambda self, *a: None
 
+        serving = tmp_path / "serving.json"
+        serving.write_text(json.dumps({
+            "units": [{"role": "orchestrator", "nodes": ["10.0.0.1"],
+                       "recipe": "r", "model": "m", "port": 8000}],
+        }))
+
         with patch("hscc_daemon.verify.urllib.request.urlopen", return_value=mock_resp):
             result = run_all(
                 plugins_dir=str(tmp_path / "plugins"),
@@ -653,6 +805,7 @@ class TestRunAll:
                 profiles_dir=str(tmp_path / "profiles"),
                 state_dir=str(state_dir),
                 url="http://localhost:4000/v1/models",
+                serving_path=str(serving),
             )
 
         assert result["ok"] is False
@@ -738,13 +891,24 @@ class TestRunAllFullVerifyIntentionalAutodown:
                     "message": f"intentional autodown ({name})"}
             (state_dir / f"{name}.json").write_text(json.dumps(data))
 
+        # serving.json fixture (hermetic — no live ~/.hscc is read) with an
+        # orchestrator unit so the profile_endpoints check can derive a
+        # served endpoint; the profiles below carry no base_urls, so the
+        # check is vacuously-pass/ok=True.
+        serving = tmp_path / "serving.json"
+        serving.write_text(json.dumps({
+            "units": [{"role": "orchestrator", "nodes": ["10.0.0.1"],
+                       "recipe": "r", "model": "m", "port": 8000}],
+        }))
+
         return {
             "plugins_dir": str(tmp_path / "plugins"),
             "config": str(config),
             "gateway_state": str(gw_state),
-            "profiles_dir": str(tmp_path / "profiles"),
+            "profiles_dir": str(profiles),
             "state_dir": str(state_dir),
             "url": "http://localhost:4000/v1/models",
+            "serving_path": str(serving),
         }
 
     def _proxy_no_models(self):
