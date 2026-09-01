@@ -1,3 +1,31 @@
 {
- "speak": "Template preview unavailable."
+  "template": "1node-orchestrator-only",
+  "description": "1 node: A3B-NVFP4 orchestrator only (no worker family). cluster_size=1.",
+  "changes": [
+    {
+      "file": "serving.json",
+      "action": "write",
+      "summary": "1 units (1 orchestrator + 0 families)",
+      "diff_summary": "2 units → 1 units"
+    },
+    {
+      "file": "models.json",
+      "action": "write",
+      "summary": "1 models registered"
+    },
+    {
+      "file": "config.yaml",
+      "action": "update",
+      "summary": "Update provider/model settings",
+      "details": [
+        "  orchestrator: 192.168.88.244:8000 (model: orchestrator-model)"
+      ]
+    },
+    {
+      "file": "models (provision)",
+      "action": "provision",
+      "summary": "1 orchestrator + 0 worker nodes"
+    }
+  ],
+  "speak": "Preview: 4 changes."
 }
