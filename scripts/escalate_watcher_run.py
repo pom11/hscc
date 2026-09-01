@@ -113,4 +113,9 @@ def main():
 
 
 if __name__ == "__main__":
+    # This runs as its own process from the `hscc-escalate-watcher` cron, so it
+    # never passes through run_daemon_loop and does not inherit the daemon's
+    # private umask. Without this it recreates ~/.hscc/escalated.json 0644 —
+    # which is exactly what happened after the daemon-side fix looked complete.
+    os.umask(0o077)
     sys.exit(main())
