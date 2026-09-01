@@ -46,6 +46,18 @@ _REPO_ROOT = str(__file__.rsplit("/", 3)[0])
 # `read("/v1/...")` (GET). The literal string may contain Swift interpolation
 # and `\.` escapes, which we normalize below.
 _CALL_RE = re.compile(r'\b(get|post|read)\(\s*"((?:[^"\\]|\\.)*)"', re.S)
+# The LABELED form the query-string GETs use: `get(path: "/v1/...", queryItems:)`.
+# The direct `_CALL_RE` above requires a literal immediately after `get(` —
+# it does NOT match `get(path: "<lit>", ...)` because `path:` sits between the
+# paren and the literal. That silent gap dropped EVERY query-param route
+# (fleet/stats, sessions, memory, kanban/stale, activity/feed, project
+# session/events) from the derived route set — which is precisely how the
+# `?profile=\(encoded)` escaped-backslash defect on /v1/sessions and /v1/memory
+# sailed past `test_every_swift_route_is_registered`: those routes were never
+# in SWIFT_ROUTES to be checked. Match the labeled form too so the register
+# gate (and the parameter gate below) actually covers them.
+_LABELED_CALL_RE = re.compile(
+    r'\b(get|post|read)\(\s*path:\s*"((?:[^"\\]|\\.)*)"', re.S)
 # Swift `\( ... )` interpolation -> `{param}` placeholder.
 _INTERP_RE = re.compile(r'\\\(.*?\)')
 
@@ -63,17 +75,23 @@ def _normalize_swift_path(lit):
 def _swift_routes():
     """Parse HSCCClient.swift and return the ordered unique list of
     ``(method, normalized_path)`` the client calls. Deriving here — not
-    hand-maintaining a table — is what makes the gate cannot-drift."""
+    hand-maintaining a table — is what makes the gate cannot-drift.
+
+    Iterates BOTH the direct-literal form (`get("/v1/x")`) and the labeled
+    query-string form (`get(path: "/v1/x", queryItems:...)`), so no client
+    call is silently dropped from the derived set.
+    """
     src = open(f"{_REPO_ROOT}/{CLIENT_PATH}").read()
     seen = set()
     routes = []
-    for m in _CALL_RE.finditer(src):
-        method = m.group(1).upper()
-        method = "GET" if method == "READ" else method
-        path = _normalize_swift_path(m.group(2))
-        if (method, path) not in seen:
-            seen.add((method, path))
-            routes.append((method, path))
+    for regex in (_CALL_RE, _LABELED_CALL_RE):
+        for m in regex.finditer(src):
+            method = m.group(1).upper()
+            method = "GET" if method == "READ" else method
+            path = _normalize_swift_path(m.group(2))
+            if (method, path) not in seen:
+                seen.add((method, path))
+                routes.append((method, path))
     return routes
 
 
@@ -237,6 +255,95 @@ def test_every_client_post_server_handler_is_confirm_gated():
                      for p, h, rp in ungated)
     )
 
+
+
+# Real-HTTP exercise of the chat seam (the exact failure class from last night)
+# --------------------------------------------------------------------------- #
+#
+# Bidirectional query-parameter contract: every route the client calls must
+# send, as a real URLQueryItem, every query parameter its server handler
+# REQUIRES (i.e. one whose absence raises a 400 "missing required ... query
+# param"). This is the exact defect class on this card: /v1/sessions and
+# /v1/memory both require `profile` and return 400 without it, yet the client
+# used to send the literal `?profile=\(encoded)` — an escaped backslash that
+# URLComponents percent-encoded into the path, so the server never saw the
+# query and the filter silently never applied. That call COMPILED and all
+# tests passed because these two routes were not even in SWIFT_ROUTES.
+#
+# The matrix below is the audit deliverable: every row cites the server
+# handler (file:line) that REQUIRES the param and the client method (file:line)
+# that must transmit it. Each required param is asserted to be sent as a real
+# `URLQueryItem` in the client's function for that route. A regression in
+# either direction — the server starts requiring a query param the client
+# doesn't send, or the client stops routing a required param through
+# URLQueryItem (falling back to a path/`?`-literal that never reaches the
+# handler) — fails the suite.
+#
+# (GET routes only: POST routes carry their params in the JSON body, covered
+# by the confirm + register gates above.)
+#
+#   client route                      required query param   server handler (requires it)
+#   --------------------------------  ---------------------  --------------------------------------------
+#   GET /v1/sessions                  profile                routes_sessions.py:200-202 (400 without it)
+#   GET /v1/memory                    profile                routes_memory.py:252-255   (400 without it)
+#
+# Query params the server treats as OPTIONAL (days, older_than, limit, before)
+# are not listed here — the client transmitting them is a real behavior (the
+# responses differ), but their absence is not a 400. They are still exercised
+# by the derived-route register gate above.
+REQUIRED_QUERY_PARAMS = {
+    ("GET", "/v1/sessions"): ["profile"],
+    ("GET", "/v1/memory"): ["profile"],
+}
+
+
+def _client_query_params_for(method, path):
+    """Parse the enclosing Swift function of a call site and return the set of
+    query param NAMES the client transmits via `URLQueryItem(name: "...")`.
+
+    Checks only the function body that owns the call so we don't mistake an
+    unrelated route's params for this one. Returns an empty set when the route
+    uses the direct-literal form (no query params).
+    """
+    src = open(f"{_REPO_ROOT}/{CLIENT_PATH}").read()
+    # Find the call site in EITHER form (direct literal or labeled `path:`).
+    for regex in (_CALL_RE, _LABELED_CALL_RE):
+        for m in regex.finditer(src):
+            if (_normalize_swift_path(m.group(2)) == path
+                    and m.group(1).upper().replace("READ", "GET") == method):
+                fn_start = src.rfind("\n    func ", 0, m.start()) + 1
+                fn_end = src.find("\n    func ", m.end())
+                if fn_end == -1:
+                    fn_end = len(src)
+                body = src[fn_start:fn_end]
+                return set(re.findall(
+                    r'URLQueryItem\(name:\s*"([^"]+)"', body))
+    return set()
+
+
+def test_every_required_query_param_is_sent():
+    """The parameter matrix gate. For every route whose server handler REQUIRES
+    a query param (400 without it), the client must transmit that param as a
+    real `URLQueryItem` in the route's own function — never as a path-embedded
+    `?x=` literal (which URLComponents percent-encodes to %3F and hides from
+    the handler) and never omitted (which would make the call always 400)."""
+    failures = []
+    for (method, path), required in REQUIRED_QUERY_PARAMS.items():
+        sent = _client_query_params_for(method, path)
+        for param in required:
+            if param not in sent:
+                failures.append((path, param, sent))
+    assert not failures, (
+        "Client fails to transmit a server-REQUIRED query param as a real "
+        "URLQueryItem — the route would always 400 (or, if embedded in the "
+        "path via `?x=`, silently no-op like the escaped-backslash profile "
+        "bug):\n"
+        + "\n".join(
+            f"  {p} requires query param '{param}' but the client sends "
+            f"queryItems={sorted(sent)}"
+            for p, param, sent in failures
+        )
+    )
 
 
 # Real-HTTP exercise of the chat seam (the exact failure class from last night)
