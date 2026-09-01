@@ -346,6 +346,100 @@ def test_every_required_query_param_is_sent():
     )
 
 
+# Required BODY fields (the same defect class, one layer down).
+# This card's brief is "every call sends the parameters its handler requires"
+# and names BOTH halves — "query params, body fields". The matrix above covers
+# query params (400 on a GET without them). POSTs carry their params in the
+# JSON body, and several handlers 400 on a missing/non-empty body field
+# (routes_actions._action_fields) — a client that omits one makes that call
+# all-ways fail, exactly the class of silent-regex-drop the labeled-query bug
+# hid. So mirror the query gate for the body fields the handlers REQUIRES.
+#
+#   client route                     required body fields   server handler (requires it)
+#   -------------------------------  ---------------------  --------------------------------------------------
+#   POST /v1/cards                   board, title           routes_actions.py:199  (_action_fields "board","title")
+#   POST /v1/template/apply          name                   routes_actions.py:281  (_action_fields "name")
+#   POST /v1/cluster/stop            container_id           routes_actions.py:303  (_action_fields "container_id")
+#   POST /v1/sessions/{id}/retire    profile                routes_sessions.py:252-254 (400 without it)
+#   POST /v1/sessions/{id}/compact   profile                routes_sessions.py:291-293 (400 without it)
+#   POST /v1/memory/{node}/delete    profile                routes_memory.py:280-282  (400 without it)
+#   POST /v1/memory/{node}/edit      profile, content       routes_memory.py:307-314  (400 w/o profile / content)
+#   POST /v1/orchestrator/chat       prompt                 routes_orchestrator.py:1304-1310 (400 without it)
+#
+# (Path params like card_id / node_id / session_id are embedded in the URL the
+# client itself builds, so they are inherently transmitted — no gate needed.
+# Handlers that require NO body field beyond confirm — merge, autodown
+# enable/disable/wake/cancel, kanban recover, cluster up/down, triggers run,
+# escalate — are excluded: their only body requirement is confirm, already
+# covered by test_every_mutating_post_carries_confirm + the server-side
+# confirm-gate test. Profile-editor PUT is excluded: it requires "at least one
+# of many optional fields", not a fixed name.)
+REQUIRED_BODY_PARAMS = {
+    ("POST", "/v1/cards"): ["board", "title"],
+    ("POST", "/v1/template/apply"): ["name"],
+    ("POST", "/v1/cluster/stop"): ["container_id"],
+    ("POST", "/v1/sessions/{param}/retire"): ["profile"],
+    ("POST", "/v1/sessions/{param}/compact"): ["profile"],
+    ("POST", "/v1/memory/{param}/delete"): ["profile"],
+    ("POST", "/v1/memory/{param}/edit"): ["profile", "content"],
+    ("POST", "/v1/orchestrator/chat"): ["prompt"],
+}
+
+
+def _client_body_params_for(method, path):
+    """Parse the enclosing Swift function of a POST call site and return the
+    set of BODY key names the client puts in its JSON payload.
+
+    Catches both payload shapes the client uses:
+      * inline dictionary literal: `["board": board, "title": title, ...]`
+      * subscript assignment after building a payload dict: `payload["assignee"] = ...`
+    A required body field whose name appears in NEITHER form is a call that
+    always 400s — this is the body-field analog of the escaped-backslash
+    query defect (a field the client never actually transmits).
+    """
+    src = open(f"{_REPO_ROOT}/{CLIENT_PATH}").read()
+    for regex in (_CALL_RE, _LABELED_CALL_RE):
+        for m in regex.finditer(src):
+            if (_normalize_swift_path(m.group(2)) == path
+                    and m.group(1).upper().replace("READ", "GET") == method):
+                fn_start = src.rfind("\n    func ", 0, m.start()) + 1
+                fn_end = src.find("\n    func ", m.end())
+                if fn_end == -1:
+                    fn_end = len(src)
+                body = src[fn_start:fn_end]
+                subscripts = set(re.findall(
+                    r'payload\s*\[\s*"([^"]+)"\s*\]', body))
+                inline = set(re.findall(
+                    r'"([A-Za-z0-9_]+)"\s*:', body))
+                return subscripts | inline
+    return set()
+
+
+def test_every_required_body_field_is_sent():
+    """Mirror of the query-param gate for body fields. For every POST route
+    whose handler REQUIRES a body field (400 without it), the client must
+    actually put that field's name in its JSON payload. A regression in either
+    direction — the server starts requiring a body field the client never
+    sends (silent 400, the board/title/container_id/prompt class), or the
+    client stops sending one — fails the suite."""
+    failures = []
+    for (method, path), required in REQUIRED_BODY_PARAMS.items():
+        sent = _client_body_params_for(method, path)
+        for field in required:
+            if field not in sent:
+                failures.append((path, field, sent))
+    assert not failures, (
+        "Client fails to transmit a server-REQUIRED body field in its POST "
+        "payload — that call always 400s (or omits a semantic the handler "
+        "needs):\n"
+        + "\n".join(
+            f"  {p} requires body field '{field}' but the client payload keys "
+            f"are {sorted(sent)}"
+            for p, field, sent in failures
+        )
+    )
+
+
 # Real-HTTP exercise of the chat seam (the exact failure class from last night)
 # --------------------------------------------------------------------------- #
 
