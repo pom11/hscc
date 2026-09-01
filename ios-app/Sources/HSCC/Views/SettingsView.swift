@@ -239,23 +239,17 @@ struct SettingsView: View {
             return
         }
 
-        let client = HSCCClient(host: settings.host, port: port, token: token)
-        do {
-            let pong = try await client.ping()
-            if pong.ok {
-                if let service = pong.service, let version = pong.version {
-                    testResult = "Connected to \(service) v\(version)."
-                } else {
-                    testResult = "Connected — HSCC API is up."
-                }
-                testIsSuccess = true
-            } else {
-                testResult = "Reached the API, but it reported not-ok."
-                testIsSuccess = false
-            }
-        } catch {
-            testResult = (error as? HSCCError)?.localizedDescription
-                ?? "Connection failed."
+        // Connect through the shared pairing step so a failed scan is told WHY
+        // (unreachable host vs rejected token vs wrong app version) instead of a
+        // generic transport message. `QRPairingOutcome` is the same surface the
+        // onboarding flow uses, so both paths report identically.
+        let outcome = await QRPairing.test(host: settings.host, port: port, token: token)
+        if case .success = outcome {
+            testResult = outcome.message   // "Connected to <service> v<version>."
+            testIsSuccess = true
+        } else {
+            // Headline + actionable explanation for every non-paired outcome.
+            testResult = "\(outcome.title): \(outcome.message)"
             testIsSuccess = false
         }
     }

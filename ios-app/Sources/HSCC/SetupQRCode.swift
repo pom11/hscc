@@ -174,7 +174,7 @@ enum QRPairing {
     /// Map a thrown `HSCCError` to the pairing outcome with an actionable
     /// reason. Pure and isolated so it is easy to reason about — everything a
     /// scan can fail with lands in exactly one bucket.
-    static func classify(_ error: Error) -> QRPairingOutcome {
+    nonisolated static func classify(_ error: Error) -> QRPairingOutcome {
         guard let hscc = error as? HSCCError else {
             return .other(error.localizedDescription)
         }
