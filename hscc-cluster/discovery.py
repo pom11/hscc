@@ -224,6 +224,12 @@ def _write_cache(topo: ClusterTopology) -> None:
         tmp = CLUSTER_JSON + ".tmp"
         with open(tmp, "w") as fh:
             json.dump(to_cluster_json(topo), fh, indent=2)
+        # cluster.json holds node addresses. This plugin is loaded into Hermes
+        # agent processes whose umask we do not control, so a process-level
+        # umask (as the daemon, CLI and cron watcher each set) cannot reach
+        # here — set the mode explicitly on the temp file before the atomic
+        # rename so the published file is never world-readable, even briefly.
+        os.chmod(tmp, 0o600)
         os.replace(tmp, CLUSTER_JSON)
     except OSError:
         pass  # cache write is best-effort; never fail discovery on it
