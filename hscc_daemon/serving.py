@@ -101,11 +101,25 @@ def serving_port(serving):
 
 
 def orchestrator_endpoint(serving):
-    """The single orchestrator base_url (http://head:port/v1), or None."""
+    """The single orchestrator base_url (http://head:port/v1), or None.
+
+    Port prefers the first orchestrator UNIT's own ``port`` (a unit may serve
+    on a non-default port even when the top-level serving port differs — this
+    is the contract fleet_up_plan already honours), falling back to the
+    top-level serving port, then the VLLM_PORT default.
+    """
     head = orchestrator_head(serving)
     if not head:
         return None
-    return f"http://{head}:{serving_port(serving)}/v1"
+    units = _orchestrator_units(serving)
+    unit_port = None
+    if units and units[0].get("port"):
+        try:
+            unit_port = int(units[0].get("port"))
+        except (TypeError, ValueError):
+            unit_port = None
+    port = unit_port or serving_port(serving)
+    return f"http://{head}:{port}/v1"
 
 
 def compute_base_url_change(current, old_endpoint, new_endpoint):

@@ -183,6 +183,19 @@ class TestOrchestratorEndpoint:
         }
         assert orchestrator_endpoint(serving_data) == "http://10.0.0.1:9000/v1"
 
+    def test_unit_port_wins_over_top_level(self):
+        """A per-unit port overrides the top-level serving port — a unit can
+        serve on a non-default port even when the global port differs."""
+        from hscc_daemon.serving import orchestrator_endpoint
+        serving_data = {
+            "port": 9000,
+            "units": [
+                {"role": "orchestrator", "nodes": ["10.0.0.1"], "recipe": "r",
+                 "model": "m", "port": 8123},
+            ]
+        }
+        assert orchestrator_endpoint(serving_data) == "http://10.0.0.1:8123/v1"
+
     def test_no_orchestrator(self):
         from hscc_daemon.serving import orchestrator_endpoint
         assert orchestrator_endpoint(None) is None
