@@ -124,9 +124,7 @@ struct BoardHygieneView: View {
             HSMetaLine([card.board, card.assignee,
                         card.age_days.map { "\($0)d" }])
             if let kind = card.block_kind, !kind.isEmpty {
-                Label(kind, systemImage: "hand.raised.fill")
-                    .font(.caption)
-                    .foregroundColor(Theme.Semantic.warn)
+                HSStatusChip(kind, systemImage: "hand.raised.fill", color: Theme.Semantic.warn)
             }
             if let why = card.why, !why.isEmpty {
                 Text(why).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
