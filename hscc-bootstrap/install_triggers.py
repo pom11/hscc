@@ -101,6 +101,7 @@ def install_triggers(
         with open(tmp, "w") as f:
             json.dump({"rules": merged}, f, indent=2, ensure_ascii=False)
             f.write("\n")
+        os.chmod(tmp, 0o600)  # operator state, not world-readable (see audit 2026-08-30)
         os.replace(tmp, triggers_path)
         result["ok"] = True
     except OSError as e:

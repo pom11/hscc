@@ -270,6 +270,22 @@ way: chmod the files, wait, and watch a running system rewrite them.
 `escalated.json` rewritten by the cron at 10:00:20 — still `0600`. Nothing
 reverted. Shipped in `c337ede`, `ddd04a4`, `7dbdbf1`, `fc070f5`.
 
+Two more writer families turned up after that: the **hscc-cluster plugin**
+(`cluster.json`), which Hermes loads into agent processes whose umask we do not
+control, and **bootstrap itself** (`triggers.json`). Both now set `0600`
+explicitly on the temp file before the atomic rename, so the published file is
+never world-readable even briefly.
+
+**Where I deliberately stopped.** A sweep of every `~/.hscc` write site found
+**23** of them; most rely on the process umask rather than an explicit mode. I
+fixed the three process entry points and the two sites actually observed
+producing `0644`, and left the remaining ~18 alone. The reasoning: the directory
+is `0700`, so no other user can read any of these files whatever their mode —
+the exposure is already zero and file modes here are defence-in-depth only.
+Patching eighteen more atomic-write sites would be churn with real regression
+risk and no security gain. If you ever loosen `~/.hscc` to `0755`, that
+calculation changes and those sites need revisiting.
+
 The general lesson, which cost the most time of anything in this audit: merging
 is not deploying, deploying is not running, and a process you forgot about is
 still a writer.
