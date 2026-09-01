@@ -1,3 +1,4 @@
+import json
 import os
 import yaml
 import pytest
@@ -109,8 +110,34 @@ def test_model_tier_strong_uses_orch_endpoint(tmp_path, monkeypatch):
     generator.generate_profile(spec, base_identity="BASE")
     with open(os.path.join(str(tmp_path / "profiles" / "architect"), "config.yaml")) as f:
         cfg = yaml.safe_load(f)
-    assert cfg["model"]["base_url"] == "http://10.0.0.244:8000/v1"
+    # Assert the CONTRACT, not an address: strong tier routes to the
+    # orchestrator endpoint and never to the worker proxy. Hardcoding a host
+    # here is what hid the real bug — a repo-wide address scrub rewrote the
+    # generator's default AND this expectation together, so the suite stayed
+    # green while every generated orchestrator profile pointed at a dead host.
+    assert cfg["model"]["base_url"] == generator.STRONG_URL
+    assert cfg["model"]["base_url"] != generator.WORKER_PROXY_BASE_URL
     assert cfg["model"]["default"] == "orchestrator-model"
+
+
+def test_live_orchestrator_endpoint_read_from_serving(tmp_path, monkeypatch):
+    """The endpoint is derived from serving.json, mirroring orchestrator_head:
+    the head is nodes[0] of the first orchestrator unit."""
+    serving = tmp_path / "serving.json"
+    serving.write_text(json.dumps([
+        {"role": "worker", "nodes": ["10.9.9.1", "10.9.9.2"], "port": 8000},
+        {"role": "orchestrator", "nodes": ["10.9.9.7", "10.9.9.8"], "port": 8123},
+    ]))
+    monkeypatch.setattr(os.path, "expanduser",
+                        lambda p: str(serving) if p.endswith("serving.json") else p)
+    assert generator._live_orchestrator_endpoint() == "http://10.9.9.7:8123/v1"
+
+
+def test_live_orchestrator_endpoint_absent_is_none(tmp_path, monkeypatch):
+    """No serving.json -> None, so the caller falls back rather than crashing."""
+    monkeypatch.setattr(os.path, "expanduser",
+                        lambda p: str(tmp_path / "nope.json") if p.endswith("serving.json") else p)
+    assert generator._live_orchestrator_endpoint() is None
 
 
 def test_model_tier_override_via_env(tmp_path, monkeypatch):
