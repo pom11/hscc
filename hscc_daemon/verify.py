@@ -604,6 +604,7 @@ def run_all(**overrides):
         check_daemon_streams,
         check_proxy,
         check_config_wiring,
+        check_profile_endpoints,
     ]
 
     results = []
