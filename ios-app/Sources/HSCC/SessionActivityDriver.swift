@@ -43,9 +43,12 @@ final class SessionActivityDriver {
     /// A nil summary (nothing live, nothing folded) ends a lingering activity.
     func reflect(project: String, rows: [ChatRow], phase: ConnectionPhase) {
         // A project change ends any prior activity so we never keep stale
-        // content for a different project on screen.
+        // content for a different project on screen, and resets the folded
+        // event count — a new project is a new activity window, so a live
+        // activity for it must not inherit the previous project's counts.
         if self.project != nil && self.project != project {
             end()
+            activityCount = 0
             self.project = nil
         }
         self.project = project
