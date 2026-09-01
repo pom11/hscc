@@ -129,7 +129,7 @@ fleet-level folded into one Cluster tab.
 - `Sources/Shared/` — cross-target glue compiled into all three bundles:
   `Speakable`, the shared endpoint models the widget / Live Activity also need
   (`AutodownStatusResponse`, `ClusterStatusResponse` / `ClusterWorkload`,
-  `TopologyPair` / `TopologyNode` / `TopologySnapshot`), the App Group
+  `TopologyPair` / `TopologyNode`), the App Group
   `group.com.hscc.ios`, shared Keychain access, `APIConfig`, and the
   last-known `SnapshotStore`.
 - `Sources/HSCCWidgets/` — the **Home Screen widget** (`systemSmall` + medium):
