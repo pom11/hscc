@@ -10,11 +10,17 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 try:
     import yaml
 except ImportError:
     yaml = None
+
+try:
+    from . import serving as _serving
+except Exception:  # pragma: no cover - import-time safety
+    _serving = None
 
 
 def check_plugins(plugins_dir=None):
@@ -424,6 +430,166 @@ def check_config_wiring(config=None):
         return {"name": "config_wiring", "ok": False, "detail": f"missing: {', '.join(missing)}"}
 
     return {"name": "config_wiring", "ok": True, "detail": "all wiring checks passed"}
+
+
+def _iter_keys(node, key="base_url", _path=""):
+    """Yield ``(key_path, value)`` for every value stored under ``key``.
+
+    Walks nested dicts and lists so a base_url is found whether it lives under
+    ``model``, an ``auxiliary`` subsection (e.g. ``auxiliary.compression``),
+    a ``compact``/``strong`` block, a fallback chain, or any other placement.
+    ``key_path`` is a dotted path (e.g. ``model.base_url``) so a finding can
+    name exactly which key in a profile is wrong.
+    """
+    if isinstance(node, dict):
+        for k, v in node.items():
+            kp = ("%s.%s" % (_path, k)) if _path else str(k)
+            if k == key:
+                yield kp, v
+            else:
+                yield from _iter_keys(v, key, kp)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _iter_keys(item, key, _path)
+
+
+def _origin(url):
+    """``(scheme, host, port)`` for a url, or None if unparseable.
+
+    Path is ignored, so a profile's trailing ``/v1`` never matters — the
+    origin (scheme+host+port) is what must match a served endpoint. Port is
+    defaulted to the scheme's well-known port when absent.
+    """
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.hostname:
+            return None
+        port = parsed.port
+        if port is None:
+            port = 443 if parsed.scheme.lower() == "https" else 80
+        return (parsed.scheme.lower(), parsed.hostname.lower(), port)
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _collect_profile_urls(profiles_dir):
+    """Map ``{profile_name: [base_url, ...]}`` from every config.yaml.
+
+    Returns None when the profiles dir is missing/unreadable (caller reports
+    skipped). Profiles without a config.yaml or with no base_urls contribute
+    nothing. Unreadable YAML is skipped rather than flagged — the point of the
+    check is to catch a WRONG endpoint, not to police config syntax.
+    """
+    if yaml is None:
+        return {}
+    if not os.path.isdir(profiles_dir):
+        return None
+    try:
+        entries = list(os.scandir(profiles_dir))
+    except OSError:
+        return None
+    out = {}
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        cfg = os.path.join(entry.path, "config.yaml")
+        if not os.path.isfile(cfg):
+            continue
+        try:
+            data = yaml.safe_load(open(cfg))
+        except Exception:
+            continue
+        items = [(kp, u.strip()) for kp, u in _iter_keys(data, "base_url")
+                 if isinstance(u, str) and u.strip()]
+        if items:
+            out[entry.name] = items
+    return out
+
+
+def check_profile_endpoints(serving_path=None, profiles_dir=None,
+                            proxy_base=None, loopback_hosts=None):
+    """Check every profile base_url points at an endpoint the fleet actually serves.
+
+    A profile's ``base_url`` must resolve to an origin (scheme+host+port) the
+    cluster actually serves:
+      * the **orchestrator endpoint**, derived from ``~/.hscc/serving.json``
+        (nodes[0] of the first orchestrator unit + the serving port →
+        ``http://<head>:<port>[/v1]``);
+      * the **worker proxy** (the LiteLLM proxy, default
+        ``http://localhost:4000``);
+      * an explicitly allow-listed **loopback** host for local tooling
+        (defaults ``localhost``, ``127.0.0.1``, ``::1`` — any port).
+
+    Any other base_url is a red flag — most commonly a stale pointer to a host
+    the cluster no longer serves (e.g. every orchestrator profile left pointing
+    at a dead ``10.0.0.x`` placeholder after the orchestrator moved). This is
+    the guard that would have caught that whole-class regression before it
+    silently broke every orchestrator-routed profile.
+
+    Each finding reports the profile name, the dotted key path, and the value
+    (e.g. ``orch-01: model.base_url http://10.99.99.99:8000/v1 not in serving
+    endpoints``). Comparison is by origin, so trailing ``/v1`` or any other
+    path on a profile's base_url is ignored. Never raises. ``ok`` is None
+    (unverified, not pass/fail) when the orchestrator endpoint cannot be
+    derived because serving.json is missing/unparseable or has no orchestrator
+    unit.
+    """
+    if _serving is None:
+        return {"name": "profile_endpoints", "ok": None,
+                "detail": "unverified: serving module unavailable"}
+
+    if serving_path is None:
+        serving_path = _serving.SERVING_JSON
+    else:
+        serving_path = os.path.expanduser(serving_path)
+
+    if profiles_dir is None:
+        profiles_dir = _serving.PROFILES_DIR
+    else:
+        profiles_dir = os.path.expanduser(profiles_dir)
+
+    proxy_base = proxy_base or "http://localhost:4000"
+    loopback_hosts = loopback_hosts or {"localhost", "127.0.0.1", "::1"}
+
+    serving_data = _serving.load_serving(serving_path)
+    if serving_data is None:
+        return {"name": "profile_endpoints", "ok": None,
+                "detail": "unverified: serving.json missing/unparseable — "
+                          "cannot derive orchestrator endpoint"}
+
+    orch_ep = _serving.orchestrator_endpoint(serving_data)
+    if not orch_ep:
+        return {"name": "profile_endpoints", "ok": None,
+                "detail": "unverified: no orchestrator unit in serving.json"}
+
+    allowed = {_origin(orch_ep), _origin(proxy_base)}
+
+    by_profile = _collect_profile_urls(profiles_dir)
+    if by_profile is None:
+        return {"name": "profile_endpoints", "ok": True,
+                "detail": "skipped: profiles dir not found"}
+
+    issues = []
+    checked = 0
+    for prof, items in sorted(by_profile.items()):
+        for key_path, url in items:
+            checked += 1
+            origin = _origin(url)
+            if origin is None:
+                issues.append(f"{prof}: {key_path} unparseable base_url {url!r}")
+            elif origin in allowed or origin[1] in loopback_hosts:
+                continue
+            else:
+                issues.append(
+                    f"{prof}: {key_path} {url} not in serving endpoints")
+
+    if issues:
+        return {"name": "profile_endpoints", "ok": False,
+                "detail": f"{len(issues)} offending url(s): " + "; ".join(issues)}
+
+    return {"name": "profile_endpoints", "ok": True,
+            "detail": f"all {checked} base_urls across {len(by_profile)} "
+                      f"profiles served by cluster endpoints"}
 
 
 def run_all(**overrides):
