@@ -306,15 +306,6 @@ struct TopologyNode: Identifiable {
     }
 }
 
-/// The canonical two TP pairs as a pure value — shared by the app's topology
-/// strip, the widget, and the Live Activity so every surface draws the SAME
-/// cluster.
-struct TopologySnapshot {
-    var pairs: [TopologyPair]
-    var modelCount: Int?
-    var idleMinutes: Int?
-}
-
 // ---------------------------------------------------------------------------
 // Last-known snapshot persistence (App Group UserDefaults)
 // ---------------------------------------------------------------------------
