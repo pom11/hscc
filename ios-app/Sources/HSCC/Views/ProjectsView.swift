@@ -747,27 +747,13 @@ struct ProjectBoardView: View {
 
     @ViewBuilder
     private func buttonRow(icon: String, color: Color, title: String, subtitle: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Image(systemName: icon)
-                .foregroundColor(color)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .foregroundColor(Theme.Semantic.onSurface)
-                if !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                }
-            }
-        }
+        HSStatusRow(title, caption: subtitle, icon: icon, iconColor: color)
     }
 
     @ViewBuilder
     private func cardRow(_ card: Card) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Circle()
-                .fill(statusColor(card.displayStatus))
-                .frame(width: 10, height: 10)
+            HSStatusDot(statusColor(card.displayStatus))
             VStack(alignment: .leading, spacing: 3) {
                 Text(card.displayTitle)
                     .foregroundColor(Theme.Semantic.onSurface)
