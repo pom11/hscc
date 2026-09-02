@@ -43,14 +43,17 @@ import re
 import select
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
 from queue import Empty
 
 from api_server import ApiError, register_ws_route  # noqa: E402
 from session_event import (  # noqa: E402
+    TYPE_ERROR,
     TYPE_HELLO,
     TYPE_MESSAGE,
+    ErrorPayload,
     HelloPayload,
     MessagePayload,
     get_store,
@@ -134,8 +137,41 @@ def _handle_client_send(sock: socket.socket, project: str, payload: dict) -> Non
 
 
 def _default_relay(project: str, text: str) -> bool:
-    """Default (no-op) relay — no outbound gateway attached."""
-    return False
+    """Relay the operator's message to the orchestrator over the REST path.
+
+    This USED TO BE A NO-OP, and that silently broke chat for the operator: the
+    app's Chat tab sends over this socket, the message was appended to the store
+    (so it echoed back) and then dropped on the floor. The orchestrator never saw
+    it, the cluster looked idle, and no reply ever arrived. It compiled, and every
+    test passed, because the tests asserted the hook was *called* — not that
+    anything happened.
+
+    A user action must never be accepted and discarded. With no GatewayDriver
+    attached we fall back to the path that demonstrably works: the same backing
+    invoke `/v1/orchestrator/chat` uses. Runs on a background thread so the
+    socket keeps serving, and folds the reply into the SAME store, so every
+    subscriber sees it with correct seq ordering.
+
+    Returns True if the relay was started.
+    """
+    def _work():
+        try:
+            import routes_orchestrator as _ro
+            resolved = _ro._backing_resolve(project, _ro._registry_path(None))
+            reply, _profile, _session = _ro._backing_invoke(
+                resolved["profile"], resolved["session"], text)
+            payload = MessagePayload(role="assistant", delta=reply, done=True)
+            get_store(project).append(TYPE_MESSAGE, payload)
+        except Exception as exc:  # noqa: BLE001 - surface, never swallow
+            # Tell the operator in the transcript rather than failing silently:
+            # a dropped message with no explanation is exactly the bug this
+            # function exists to fix.
+            get_store(project).append(TYPE_ERROR, ErrorPayload(
+                code="relay_failed",
+                message="Could not reach the orchestrator: %s" % exc))
+
+    threading.Thread(target=_work, name="ws-relay-%s" % project, daemon=True).start()
+    return True
 
 
 # Installable by GatewayDriver.start() so the WS endpoint need not import the
