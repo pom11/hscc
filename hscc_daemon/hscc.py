@@ -351,7 +351,7 @@ COMMAND_HELP = {
     "autodown": "Idle autodown/autoup for the GPU serving layer.\n  Subcommands: status enable [--idle-minutes <n>] [--force] disable wake cancel\n  Usage: hscc autodown <subcommand> [args]",
     "kanban": "Board hygiene for autodown.\n  blocked [--json]: list BLOCKED cards with why; blocked --recover <id> [--reason <t>]: recover one blocked card to ready\n  stale [--older-than <days>] [--json]: list non-terminal cards; stale --archive <id>: archive one (t_e751e652)\n  Usage: hscc kanban <subcommand> [args]",
     "help": "Show help. Usage: hscc help [command]\n  Use 'hscc help advanced' for internal commands.",
-    "verify": "Run a full compatibility/health smoke-test of the cluster.\n  Usage: hscc verify [--json]",
+    "verify": "Run a full compatibility/health smoke-test of the cluster.\n  Usage: hscc verify [--json] [--chat]\n  --chat  also run a deep end-to-end chat round trip against the live\n          orchestrator (real POST, poll, assert reply, assert model tokens\n          moved). Opt-in: it fires a real prompt and can take ~600s.",
     "stats": "Fleet activity — completions & tool usage over N days (default 7).\n  Usage: hscc stats [days] [--json]",
     "throughput": "Aggregate vLLM throughput + queue depth across the fleet.\n  Usage: hscc throughput [--json]",
     "autoscale": "Show autoscale decision from current queue depth (read-only, never scales).\n  Usage: hscc autoscale [--json]",
@@ -524,11 +524,27 @@ def _handle_template():
 
 
 def _handle_verify():
-    """Run verify.run_all() and print a per-check table (or JSON with --json)."""
+    """Run verify.run_all() and print a per-check table (or JSON with --json).
+
+    With `--chat` an additional deep check is run: a full chat round trip
+    against the live API (POST /v1/orchestrator/chat -> poll -> assert a real
+    reply -> assert the orchestrator's vllm:generation_tokens_total moved).
+    That proves the model actually saw a user message, not just that the API
+    accepts one. It is OPT-IN because it fires a real prompt at the live
+    orchestrator and can take up to the chat timeout (~600 s) to complete —
+    too expensive and too invasive for the default fast smoke test.
+    """
     from hscc_daemon import verify as verify_mod
 
     json_mode = "--json" in sys.argv[1:]
+    chat_mode = "--chat" in sys.argv[1:]
     result = verify_mod.run_all()
+
+    chat_check = None
+    if chat_mode:
+        chat_check = verify_mod.run_chat_roundtrip()
+        result["checks"] = result.get("checks", []) + [chat_check]
+        result["ok"] = result.get("ok", True) and bool(chat_check["ok"])
 
     if json_mode:
         print(json.dumps(result))
