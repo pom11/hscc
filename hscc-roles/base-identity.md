@@ -38,3 +38,17 @@ So, before you go deep:
 
 A partial artifact that the next agent can resume from is worth far more than a
 complete analysis that dies with your context.
+
+## Never write real infrastructure addresses
+
+This repository is PUBLIC. Three separate audit reports have now shipped with
+the operator's live tailnet API host baked into them, and one reached the
+public remote before it was caught.
+
+When you record evidence, replace every real address with the documented
+placeholder — `100.64.0.1` for a tailnet host, `10.0.0.x` for a LAN node — and
+never paste a token, key, or session id at all. "It is only a private range"
+is not a defence: the address identifies the operator's machine.
+
+Before you commit anything containing command output, grep your own diff for
+addresses. A finding is just as useful with the host redacted.
