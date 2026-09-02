@@ -241,6 +241,69 @@ do {
           "got '\(tr?.result?.renderInline() ?? "nil")'")
 }
 
+// ---- 12. Optimistic operator echo: instant row, no duplicate on echo ----
+// The Chat tab used to look dead after pressing enter: nothing rendered until
+// the server round trip landed. send() now appends the row locally FIRST, so
+// the echo must ADOPT that row instead of drawing a second identical bubble.
+do {
+    var t = StreamingTranscript()
+    t.addLocalUserMessage("restart the orchestrator")
+    check("optimistic row appears before any server event", t.rows.count == 1,
+          "got \(t.rows.count) rows")
+    check("optimistic row is the operator's own text",
+          messageText(t.rows[0]) == "restart the orchestrator" && messageRole(t.rows[0]) == "user")
+    check("optimistic row is not marked streaming", messageStreaming(t.rows[0]) == false)
+
+    // The server echoes the same message back with a real seq.
+    let echo = try decode("""
+    [{"seq":1,"type":"message","ts":"t","payload":{"role":"user","delta":"restart the orchestrator","done":true}}]
+    """)
+    let idBefore = t.rows[0].id
+    for e in echo { t.fold(e) }
+    check("echo does NOT duplicate the optimistic row", t.rows.count == 1,
+          "got \(t.rows.count) rows: \(t.rows.map { messageText($0) ?? "?" })")
+    check("adopted row re-anchors its id to the real seq", t.rows[0].id != idBefore)
+
+    // The assistant reply still streams in as its own bubble afterwards.
+    let reply = try decode("""
+    [{"seq":2,"type":"message","ts":"t","payload":{"role":"assistant","delta":"on it","done":true}}]
+    """)
+    for e in reply { t.fold(e) }
+    check("assistant reply appends after the adopted row", t.rows.count == 2
+          && messageRole(t.rows[1]) == "assistant" && messageText(t.rows[1]) == "on it")
+}
+
+// ---- 13. The same text sent twice keeps BOTH rows ----
+// Adoption matches on text, so a naive implementation would collapse a
+// repeated message into one row and lose the operator's second send.
+do {
+    var t = StreamingTranscript()
+    t.addLocalUserMessage("status")
+    t.addLocalUserMessage("status")
+    check("two identical sends show two rows", t.rows.count == 2)
+    let echoes = try decode("""
+    [
+      {"seq":1,"type":"message","ts":"t","payload":{"role":"user","delta":"status","done":true}},
+      {"seq":2,"type":"message","ts":"t","payload":{"role":"user","delta":"status","done":true}}
+    ]
+    """)
+    for e in echoes { t.fold(e) }
+    check("both echoes adopt, still two rows", t.rows.count == 2,
+          "got \(t.rows.count)")
+}
+
+// ---- 14. An echo with no optimistic row still renders ----
+// History replay and a second device's messages arrive with no pending row.
+do {
+    var t = StreamingTranscript()
+    let ev = try decode("""
+    [{"seq":1,"type":"message","ts":"t","payload":{"role":"user","delta":"from another device","done":true}}]
+    """)
+    for e in ev { t.fold(e) }
+    check("unmatched user echo still renders a row", t.rows.count == 1
+          && messageText(t.rows[0]) == "from another device")
+}
+
 print("")
 if failures == 0 {
     print("streaming_check: ALL PASSED")

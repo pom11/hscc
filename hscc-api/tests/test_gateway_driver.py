@@ -282,7 +282,14 @@ def test_client_answers_ping_with_pong(socket_pair):
 # --------------------------------------------------------------------------- #
 
 def test_driver_installs_and_removes_relay_hook(monkeypatch):
-    """start() wires routes_ws.relay_user_message; stop() restores the no-op."""
+    """start() wires routes_ws.relay_user_message; stop() restores the default.
+
+    Asserts hook IDENTITY, not a return value. This used to call the default
+    hook and assert it returned False — which pinned a no-op as correct and is
+    exactly why a total chat outage shipped green. The default now really
+    relays (see test_ws_relay_not_noop.py), so calling it here would spawn a
+    live orchestrator round trip from a unit test.
+    """
     cfg = GatewayConfig(host="127.0.0.1", port=1, token="t", project="hscc")
     drv = GatewayDriver(cfg)
 
@@ -294,7 +301,7 @@ def test_driver_installs_and_removes_relay_hook(monkeypatch):
     monkeypatch.setattr(drv, "_run_events_loop", lambda: None)
     monkeypatch.setattr(drv, "_run_pty_loop", lambda: None)
 
-    assert routes_ws.relay_user_message("hscc", "x") is False  # no-op before
+    assert routes_ws.relay_user_message is routes_ws._default_relay  # default before
     drv.start()
     try:
         assert routes_ws.relay_user_message is drv._relay_hook
@@ -303,7 +310,7 @@ def test_driver_installs_and_removes_relay_hook(monkeypatch):
         # we assert the hook identity rather than a live call.)
     finally:
         drv.stop()
-    assert routes_ws.relay_user_message("hscc", "x") is False  # restored
+    assert routes_ws.relay_user_message is routes_ws._default_relay  # restored
 
 
 def test_send_user_message_types_into_pty(send_pty):
