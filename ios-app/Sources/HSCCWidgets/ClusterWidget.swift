@@ -66,18 +66,12 @@ struct ClusterTimelineProvider: TimelineProvider {
     private func fetchEntry() async -> ClusterEntry {
         let config = APIConfig.load()
         guard config != nil else {
-            // Not configured — but still surface any last-known snapshot the
-            // app recorded so a reconnect shows real history, not a blank.
-            if let last = SnapshotStore.load() {
-                let age = last.timestamp.map { Int(Date().timeIntervalSince($0) / 60) } ?? 0
-                return ClusterEntry(date: .now,
-                                    state: .unreachable,
-                                    pairs: pairs(fromNodes: last.nodes),
-                                    modelCount: last.modelCount,
-                                    idleMinutesRemaining: last.idleMinutes,
-                                    lastKnownAgeMinutes: age,
-                                    configured: false)
-            }
+            // Not configured → the widget's ONE job is to invite setup. Always
+            // return the unconfigured state; never fabricate `.unreachable`.
+            // (fix t_5c554c5b) A stale last-known snapshot does NOT make this a
+            // "can't reach" problem — the operator hasn't given us a target to
+            // reach. If they configure and the cluster is down/unreachable, the
+            // unreachable path below will surface the snapshot with its age.
             return .unconfigured
         }
 
