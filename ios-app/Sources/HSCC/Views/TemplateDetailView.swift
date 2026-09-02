@@ -83,6 +83,11 @@ struct TemplateDetailView: View {
                     await loadPreview()
                 }
             }
+            .refreshable {
+                // The error state says "Pull to retry" — make that gesture real.
+                // Only the read-only preview is re-fetched, never a re-apply.
+                await loadPreview()
+            }
             .onDisappear { pollTask?.cancel() }
         }
         .sheet(isPresented: $showApplyConfirm) {
