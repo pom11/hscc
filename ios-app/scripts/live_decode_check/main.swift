@@ -141,6 +141,22 @@ c.decode(ReadResponse.self,             "v1_cluster_jobs.json",        "ReadResp
 c.decode(ReadResponse.self,             "v1_cluster_info.json",        "ReadResponse (info)")
 c.decode(CardsResponse.self,            "v1_cards.json",               "CardsResponse")
 c.decode(CardDetailResponse.self,       "v1_cards_detail.json",        "CardDetailResponse")
+// Regression guard (t_cb300f9c): the card DETAIL view must show the full card
+// content, not just id/title/status/speak. Assert the fields the view now
+// renders (body/assignee/board) actually arrive from the live detail endpoint.
+do {
+    let detail = try JSONDecoder().decode(CardDetailResponse.self,
+        from: Data(contentsOf: URL(fileURLWithPath: captureDir + "/v1_cards_detail.json")))
+    if let body = detail.body, !body.isEmpty, detail.assignee != nil, detail.board != nil {
+        print("OK   v1_cards_detail.json → CardDetailResponse carries body/assignee/board (view renders all three)")
+    } else {
+        c.decodeFailures.append(("v1_cards_detail.json", "CardDetailResponse", "body/assignee/board missing"))
+        print("FAIL v1_cards_detail.json → CardDetailResponse missing body/assignee/board")
+    }
+} catch {
+    c.decodeFailures.append(("v1_cards_detail.json", "CardDetailResponse", "\\(error)"))
+    print("FAIL v1_cards_detail.json → CardDetailResponse: \\(error)")
+}
 c.decode(StandupResponse.self,          "v1_standup.json",             "StandupResponse")
 c.decode(ReviewQueueResponse.self,      "v1_review_queue.json",        "ReviewQueueResponse")
 c.decode(QAQueueResponse.self,          "v1_qa_queue.json",            "QAQueueResponse")
