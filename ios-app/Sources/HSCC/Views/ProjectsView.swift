@@ -489,14 +489,24 @@ struct ProjectOverviewView: View {
 
     /// Fraction (0...1) of context still free before the compaction threshold,
     /// derived from threshold_tokens vs the cumulative input_tokens gauge.
-    /// nil when the numbers aren't present / sane.
+    /// nil when the numbers aren't present / sane, or when the gauge is
+    /// meaningless.
+    ///
+    /// `input_tokens` is a CUMULATIVE counter that compaction never resets, so
+    /// once it has crossed `threshold_tokens` it no longer measures "context
+    /// used now" — it is just a lifetime total and can sit far above the cap
+    /// (e.g. 11.9M vs a 100K threshold) without the session being at risk. In
+    /// that regime (tokens >= threshold) there is no live-free-context number to
+    /// show; forcing a 0.0 clamp here painted a permanent red "0% headroom" bar
+    /// under the green "Compaction healthy" verdict, a false alarm. So return
+    /// nil (hide the bar) once cumulative tokens reach the threshold and let the
+    /// server's own real signals (compaction_at_risk / bloated) carry the risk.
     private func compactionHeadroom(_ h: ProjectSessionHealth) -> Double? {
         guard let tokens = h.input_tokens, tokens > 0,
               let threshold = h.threshold_tokens, threshold > 0 else { return nil }
-        // input_tokens is cumulative and never reset, so it can exceed the
-        // threshold on its own; clamp the headroom at 0 (no room) rather than
-        // going negative or pretending there's spare capacity.
-        return max(0.0, min(1.0, 1.0 - Double(tokens) / Double(threshold)))
+        // Lifetime total already past the cap ⇒ not a live headroom measure.
+        guard tokens < threshold else { return nil }
+        return min(1.0, 1.0 - Double(tokens) / Double(threshold))
     }
 
     @ViewBuilder
