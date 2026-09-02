@@ -44,3 +44,7 @@ docs/superpowers/
 # git worktrees used by the kanban dispatcher
 .worktrees/
 ios-app/HSCC.xcodeproj/
+
+# Stray worker worktrees created inside the repo root (t_3e152ac7 did this).
+# They are registered git worktrees, not project content — never commit them.
+wt/
