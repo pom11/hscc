@@ -428,6 +428,7 @@ struct StaleBanner: View {
             }
             .buttonStyle(.borderless)
             .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            .accessibilityLabel("Retry loading")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(Theme.Spacing.md.rawValue)
