@@ -138,9 +138,11 @@ struct TemplatesView: View {
                 Text(name)
                     .font(.hsccMono(20, weight: .bold))
                     .foregroundColor(Theme.Semantic.onSurface)
-                Text(state.speak)
-                    .font(.caption)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                if !appliedSummary(applied).isEmpty {
+                    Text(appliedSummary(applied))
+                        .font(.caption)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
             }
         } else {
             Label("No template applied yet.",
@@ -153,6 +155,41 @@ struct TemplatesView: View {
                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
             }
         }
+    }
+
+    /// A clean caption for the applied card, built from the structured
+    /// `applied` fields instead of the server's raw `speak`. The live server's
+    /// `speak` for a status is a Python dict repr (contains the orchestrator
+    /// node's internal address and debug quoting) — not prose. Rendering the
+    /// structured fields gives the operator the applied time, families, and
+    /// unit count in one readable line. Falls back to empty (caller hides it)
+    /// if there is nothing structured to say.
+    private func appliedSummary(_ applied: TemplateApplied) -> String {
+        var parts: [String] = []
+        if let at = applied.applied_at, !at.isEmpty {
+            parts.append("applied \(relativeApplied(at))")
+        }
+        if let families = applied.families, !families.isEmpty {
+            parts.append("families: \(families.joined(separator: ", "))")
+        }
+        if case .int(let n)? = applied.units {
+            parts.append("\(n) unit\(n == 1 ? "" : "s")")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// "3d ago"-style label for the ISO applied timestamp. Falls back to the
+    /// raw timestamp if it can't be parsed. Same helper as ActivityFeedView.
+    private func relativeApplied(_ iso: String) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var date = formatter.date(from: iso)
+        if date == nil {
+            formatter.formatOptions = [.withInternetDateTime]
+            date = formatter.date(from: iso)
+        }
+        guard let date else { return iso }
+        return Offline.agePhrase(Date().timeIntervalSince(date))
     }
 
     // MARK: - The browsable library
