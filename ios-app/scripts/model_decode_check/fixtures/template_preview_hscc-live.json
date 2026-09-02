@@ -18,7 +18,7 @@
       "action": "update",
       "summary": "Update provider/model settings",
       "details": [
-        "  orchestrator: 192.168.88.244:8000 (model: orchestrator-model)"
+        "  orchestrator: 10.0.0.244:8000 (model: orchestrator-model)"
       ]
     },
     {
