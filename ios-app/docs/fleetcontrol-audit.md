@@ -37,7 +37,7 @@ Target file (relative to this repo): `ios-app/Sources/HSCC/Views/FleetControlVie
   `applied.families`, `applied.units`, `state.note`. All present in the live body.
   - `units` arrives as an INT here. `TemplateApplied.units` is `JSONValue?`
     (Models.swift:886) because it can be an int OR a `{total, per_family}` dict —
-    the view's `displayJSON` (FleetControlView.swift:157-166) renders int fine.
+    the view's `displayJSON` (FleetControlView.swift:175-184) renders int fine.
 
 - **Route sweep** (`scripts/api_route_sweep.py`): `/v1/template/status` → 200 parseable JSON.
   `/v1/cluster/up` and `/v1/cluster/down` are POST-only; GET returns 405, which the
@@ -49,16 +49,16 @@ Target file (relative to this repo): `ios-app/Sources/HSCC/Views/FleetControlVie
 
 ## 2. RENDER
 
-With the live data above, the operator sees (appliedSection, lines 67-109):
-- `state.speak` — line 77-80 (italic muted subheadline). NOTE: server `speak` is a raw
+With the live data above, the operator sees (appliedSection, lines 72-93):
+- `state.speak` — statusBody line 99 (italic muted subheadline). NOTE: server `speak` is a raw
   Python repr string (`Template {'template': '4node-dual-dsv4' ...} is applied.`) —
   technical but informative. Not truncated.
-- `Template` = "4node-dual-dsv4" — line 83
-- `Applied at` = "2026-08-30T04:01:00" — line 86 (raw ISO timestamp, no timezone/localization — ISO has no TZ suffix, so it reads as a naive timestamp; minor)
-- `Orchestrator` = "10.0.0.x" — line 89 (**real LAN IP shown to operator**; correct on-device, but an identifiability note for public screenshots)
-- `Families` = "reasoning" — line 92
-- `Units` = "2" — line 95 via `displayJSON(.int(2))`
-- `note` = "" — empty so the info-circle Label at line 100-104 is skipped (good; non-empty notes do render).
+- `Template` = "4node-dual-dsv4" — statusBody line 104
+- `Applied at` = "2026-08-30T04:01:00" — statusBody line 107 (raw ISO timestamp, no timezone/localization — ISO has no TZ suffix, so it reads as a naive timestamp; minor)
+- `Orchestrator` = "10.0.0.x" — statusBody line 110 (**real LAN IP shown to operator**; correct on-device, but an identifiability note for public screenshots)
+- `Families` = "reasoning" — statusBody line 113
+- `Units` = "2" — statusBody line 116 via `displayJSON(.int(2))`
+- `note` = "" — empty so the info-circle Label in statusBody (lines 124-128) is skipped (good; non-empty notes do render).
 
 **No dropped fields, no wrong units, no truncation hiding meaning.** Client renders the
 server's own counts directly (units=2 from the server), no client-side counting that
@@ -66,45 +66,46 @@ could disagree. RENDER is faithful.
 
 ---
 
-## 3. STATES  ← one real gap
+## 3. STATES  ← one real gap (now FIXED)
 
-How each state renders in `appliedSection` (lines 67-109):
+How each state renders in `appliedSection` (lines 72-93), CURRENT POST-FIX:
 
-- **Loading** — `.loading` → `ProgressView()` spinner (line 71-72).
-- **Loaded (non-empty)** — detailed rows (line 75-96).
+- **Loading** — `.loading` → `ProgressView()` spinner (line 76-77).
+- **Loaded (non-empty)** — `statusBody(state)` detailed rows (line 87-88 → statusBody 95-128).
 - **Empty** (`applied == nil`, e.g. no template applied yet) — `emptyLabel("No template applied.")`
-  (line 97-99): muted `tray` icon + muted text.
-- **Failed** — `errorLabel(message)` (line 73-74): red `exclamationmark.triangle.fill`
+  (statusBody line 119-120): muted `tray` icon + muted text.
+- **Failed** — `errorLabel(message)` (line 78-79): red `exclamationmark.triangle.fill`
   + red message (HSErrorLabel, Theme.swift:354-362).
   → **Empty and Failed ARE visually distinct** (muted tray vs red warning). ✔
-- **Idle** — NOT handled → `default: EmptyView()` (blank card). Transient only: `.task`
-  fires immediately and sets `.loading`, so on-screen flicker is minimal. Minor.
-- **Stale/offline — NOT HANDLED (BUG).** `status` never becomes `.stale` because
-  `loadStatus()` (lines 54-59) uses a plain `.loading → .loaded/.failed` and does NOT
-  use `Offline.load`. And even if it did, `appliedSection`'s switch has NO `.stale`
-  case, so a stale state would fall to `default: EmptyView()` — a BLANK card.
+- **Idle** — NOT handled → `default: EmptyView()` (blank card, line 89-90). Transient
+  only: `.task` fires immediately and sets state, so on-screen flicker is minimal. Minor.
+- **Stale/offline — was the gap, NOW FIXED.** As found in the PRE-FIX code:
+  `loadStatus()` used a plain `.loading → .loaded/.failed`
+  (FleetControlView.swift:54-59 pre-fix) and did NOT use `Offline.load`; the
+  `appliedSection` switch had NO `.stale` case, so stale fell to `default: EmptyView()`.
 
-  Compare the sibling `TemplatesView` (same data source, `GET /v1/template/status`):
+  The sibling `TemplatesView` (same data source, `GET /v1/template/status`) handled it:
   - `loadStatus` uses `await Offline.load(...)` (TemplatesView.swift:71-77).
   - `appliedCard` switch HAS a `.stale` case rendering `StaleBanner(age:reason:)`
     + last-known data (TemplatesView.swift:112-123).
 
-  **Consequence:** when the cluster is unreachable but the app holds last-known
-  (cached) template-status data, `TemplatesView` shows it under a "Can't reach the
-  cluster... showing state from X ago" banner — `FleetControlView` shows a BLANK
-  Applied Template card (and a hard red error at worst), even though it has the
-  same data available. Inconsistent offline behavior across the two surfaces that
-  render the exact same endpoint.
+  **Consequence (pre-fix):** when the cluster is unreachable but the app holds
+  last-known (cached) template-status data, `TemplatesView` showed it under a
+  "Can't reach the cluster... showing state from X ago" banner — `FleetControlView`
+  showed a BLANK Applied Template card (or a hard red error at worst), even though
+  it had the same data available. Inconsistent offline behavior across the two
+  surfaces rendering the exact same endpoint.
 
-  This is the operator-facing "stale/offline" gap. FIXED in this audit (see §FIX).
-
-- **`.stale` never rendered** — see above.
+  **Fix applied (see §FIX):** `loadStatus()` now uses `Offline.load(...)` and the
+  switch renders `.stale` with `StaleBanner` + `statusBody(state)` — the operator
+  now sees last-known data under a "Can't reach the cluster... showing state from
+  X ago" banner, matching TemplatesView.
 
 ---
 
 ## 4. CONTROLS
 
-- **Bring Fleet Up** (`MutationButton`, lines 123-132):
+- **Bring Fleet Up** (`MutationButton`, lines 141-150):
   - Tap → confirmationDialog (MutationSupport.swift:63). Prompt names consequence
     ("starts every serving unit").
   - Confirm → `client.clusterUp()` → POST /v1/cluster/up with `confirm:true`
@@ -114,13 +115,13 @@ How each state renders in `appliedSection` (lines 67-109):
     then success alert (line 76-78). ✔ visible feedback.
   - Non-2xx throws → failure alert (line 79-82). ✔ honest failure, never a false success.
 
-- **Stop All Workloads** (`MutationButton`, lines 136-146):
+- **Stop All Workloads** (`MutationButton`, lines 154-164):
   - `destructive: true` → confirm button rendered red with role `.destructive`
     (MutationSupport.swift:65).
   - Confirm → `client.clusterDown()` → POST /v1/cluster/down with `confirm:true`
     (HSCCClient.swift:897-899). Route exists (405 on GET = POST-only). ✔
   - Prompt NAMES the destructive consequence: "shuts down every serving unit across
-    the entire cluster and interrupts any in-flight work" (line 140). ✔ strong.
+    the entire cluster and interrupts any in-flight work" (MutationButton prompt, line 158). ✔ strong.
   - Feedback mirrors up: spinner + alert. ✔
 
   **All controls are confirm-gated, route to live POST endpoints, and give visible
@@ -150,7 +151,7 @@ How each state renders in `appliedSection` (lines 67-109):
 - `ScrollView` → `VStack(alignment: .leading, spacing: 16)` with `.padding()` (lines 25-31).
 - Long `speak`/families text wraps; `LabeledContent` rows stack label over value —
   fine on small screens.
-- `displayJSON` for `.object`/`.array` returns `<complex>` (line 164) — if `units`
+- `displayJSON` for `.object`/`.array` returns `<complex>` (FleetControlView.swift:182) — if `units`
   arrives as a dict (`{total, per_family}`), the operator sees the literal string
   `<complex>` instead of the unit count. **This is a real render gap for the dict
   shape.** The view *handles* the dict type but does NOT render it — it shows
@@ -208,7 +209,20 @@ File: `ios-app/Sources/HSCC/Views/FleetControlView.swift`
 ## PROOF
 - Live GET output for /v1/template/status (see §1) — fetched read-only, real values.
 - `scripts/api_route_sweep.py` → "All swept routes answered with parseable JSON"
-  (/v1/template/status included).
+  (/v1/template/status included, 200 parseable).
 - POST-only check: `curl -w %{http_code} .../v1/cluster/up` → 405,
   `.../v1/cluster/down` → 405 (route exists, not fired).
-- Build check: `ios-app/scripts/build_check.sh` → see final status in kanban summary.
+- `ios-app/scripts/build_check.sh` → **full compile clean, 0 errors, 0 warnings**
+  (HSCC 57 files, HSCCWidgets 6, HSCCLiveActivity 4, HSCCLiveActivitySession 4).
+- `ios-app/scripts/check_sources.sh` → "sources in sync: 62 Swift files, all listed
+  in project.yml" (FleetControlView.swift is registered → compiled).
+- `ios-app/scripts/check_theme.sh` → "CLEAN — no raw colour outside Theme.swift".
+
+## EXECUTED vs REASONED (explicit)
+- **Executed (proven by tool output):** live GET of /v1/template/status (real values);
+  route sweep pass; 405-on-GET for cluster up/down (routes exist); build_check 0
+  warnings; check_sources; check_theme.
+- **Reasoned (no iOS runtime here, cannot execute on device):** the actual on-device
+  rendering of the stale banner, Dynamic Type behaviour, VoiceOver labels — these
+  follow from the SwiftUI code + the shared components and their use in TemplatesView,
+  but are not runtime-verified on a device. This is inherent to a headless audit.
