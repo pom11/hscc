@@ -58,6 +58,36 @@ settings:
 # surface reads the same settings / topology / cluster state. Each target's
 # `sources` list includes the shared files it needs under Sources/Shared.
 
+# Schemes — declared explicitly so the RUNNABLE one is unambiguous.
+# Without this, Xcode auto-creates a scheme per target on open, including one
+# for each app EXTENSION. Selecting a widget/Live Activity scheme and hitting
+# Run gives "failed to launch or exited before the debugger could attach":
+# an app-extension cannot be launched standalone, it only runs inside its host.
+# Declaring HSCC here makes it a SHARED scheme (committed under
+# xcshareddata/xcschemes), so it is present on a fresh clone and is the obvious
+# thing to run.
+schemes:
+  HSCC:
+    build:
+      targets:
+        HSCC: all
+        HSCCWidgets: [run, archive]
+        HSCCLiveActivity: [run, archive]
+        HSCCLiveActivitySession: [run, archive]
+    run:
+      config: Debug
+      # The extensions are embedded in the app; running the app runs them in
+      # their real host process, which is the only way they can run at all.
+    test:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
+
 targets:
   HSCC:
     type: application
