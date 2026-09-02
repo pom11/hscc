@@ -15,8 +15,19 @@ import SwiftUI
 @main
 struct HSCCApp: App {
     @StateObject private var settings = SettingsStore()
-    @StateObject private var unread = ProjectUnreadCenter()
-    @StateObject private var replyWatcher = StreamReplyWatcher(unread: unread)
+    @StateObject private var unread: ProjectUnreadCenter
+    @StateObject private var replyWatcher: StreamReplyWatcher
+
+    /// `replyWatcher` needs the SAME `ProjectUnreadCenter` the rest of the app
+    /// sees, but a property initializer cannot reference another property —
+    /// they run before `self` exists. Build both in `init()` and seed the
+    /// wrappers directly, which keeps one shared unread center rather than two
+    /// that silently disagree about what has been read.
+    init() {
+        let center = ProjectUnreadCenter()
+        _unread = StateObject(wrappedValue: center)
+        _replyWatcher = StateObject(wrappedValue: StreamReplyWatcher(unread: center))
+    }
 
     var body: some Scene {
         WindowGroup {
