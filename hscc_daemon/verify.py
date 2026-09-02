@@ -955,14 +955,19 @@ def check_plugin_payload(repo_root=None, plugins_dir=None, names=None,
     for d in repo_dirs:
         repo_dir = os.path.join(repo_root, d)
         inst_dir = os.path.join(plugins_dir, d)
+        # What THIS repo ships as deployable payload for the dir. Resource-only
+        # payloads (e.g. assets/*.png, configs/*.template) contain no source/
+        # docs files, so there is nothing to diff — skip rather than flag.
+        repo = _payload_snapshot(repo_dir)
+        if not repo:
+            continue
+        checked += len(repo)
         inst = snapshot(inst_dir) if snapshot else _payload_snapshot(inst_dir)
         if not inst:
             issues.append(
                 f"{d}: installed at {inst_dir} missing or has no payload — "
                 f"merged but not deployed")
             continue
-        repo = _payload_snapshot(repo_dir)
-        checked += len(repo)
         missing = sorted(set(repo) - set(inst))
         changed = sorted(r for r in repo if r in inst and repo[r] != inst[r])
         if missing:
