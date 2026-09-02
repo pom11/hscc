@@ -170,7 +170,51 @@ def _enum_board_names(kanban_db):
     return autodown._enum_board_names(kanban_db)
 
 
-def _board_snapshot(kanban_db, board, multi, max_in_progress):
+def _any_assignee_under_cap(kanban_db, board, multi, max_per_profile):
+    """True iff some assignee with unclaimed ready/review work is under its cap.
+
+    Read-only. On any error, return True (fail toward "there is room"), which
+    keeps this helper from silencing a real stall — the stall path still has
+    its own cooldown and attempt cap.
+    """
+    try:
+        with kanban_db.connect_closing(board=board) if multi \
+                else kanban_db.connect_closing() as conn:
+            waiting = [r[0] for r in conn.execute(
+                "SELECT DISTINCT assignee FROM tasks "
+                "WHERE status IN ('ready', 'review') "
+                "AND assignee IS NOT NULL AND claim_lock IS NULL"
+            ).fetchall()]
+            if not waiting:
+                return True
+            running = dict(conn.execute(
+                "SELECT assignee, COUNT(*) FROM tasks "
+                "WHERE status = 'running' AND assignee IS NOT NULL "
+                "GROUP BY assignee"
+            ).fetchall())
+    except Exception:  # noqa: BLE001
+        return True
+    return any(running.get(a, 0) < max_per_profile for a in waiting)
+
+
+def _read_max_per_profile():
+    """Read ``kanban.max_in_progress_per_profile`` from the operator's config.
+
+    Returns None when unset/unreadable, meaning "no per-profile cap".
+    """
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        v = (cfg.get("kanban") or {}).get("max_in_progress_per_profile")
+        if v is None:
+            return None
+        return int(v)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _board_snapshot(kanban_db, board, multi, max_in_progress,
+                    max_per_profile=None):
     """Gather one board's dispatcher-relevant state.
 
     Returns a dict with:
@@ -211,6 +255,15 @@ def _board_snapshot(kanban_db, board, multi, max_in_progress):
                 "roomy": False, "error": str(e)}
     roomy = (max_in_progress is None
              or in_progress < max_in_progress)
+    # A board with global room can still be unable to spawn ANYTHING when every
+    # profile holding ready work is at its own per-profile cap. Treating that as
+    # a wedge is a false alarm — the dispatcher is behaving exactly as
+    # configured. Observed live: board running=5 under a global cap of 6, all
+    # ready work assigned to ios-engineer which was at its per-profile cap of 3,
+    # so the detector declared a "GENUINE STALL" every 5s against a healthy
+    # dispatcher.
+    if roomy and spawnable and max_per_profile is not None:
+        roomy = _any_assignee_under_cap(kanban_db, board, multi, max_per_profile)
     return {"board": "default" if not board else board,
             "spawnable": spawnable, "in_progress": in_progress,
             "roomy": roomy, "error": None}
@@ -252,7 +305,8 @@ _detector = {
 _recovery_detection_streak = 0
 
 
-def _capture_kanban(kanban_db=None, max_in_progress=None):
+def _capture_kanban(kanban_db=None, max_in_progress=None,
+                    max_per_profile=None):
     """Read dispatcher-relevant state across every board (read-only).
 
     Returns a dict that is the input to the stall decision:
@@ -271,6 +325,8 @@ def _capture_kanban(kanban_db=None, max_in_progress=None):
                 "max_in_progress": None, "errors": []}
     if max_in_progress is None:
         max_in_progress = _read_max_in_progress()
+    if max_per_profile is None:
+        max_per_profile = _read_max_per_profile()
     try:
         boards, multi = _enum_board_names(kanban_db)
     except Exception as e:  # noqa: BLE001
@@ -281,7 +337,8 @@ def _capture_kanban(kanban_db=None, max_in_progress=None):
     spawnable, roomy_spawnable, at_capacity, errors = [], [], [], []
     total_running = 0
     for board in boards:
-        snap = _board_snapshot(kanban_db, board, multi, max_in_progress)
+        snap = _board_snapshot(kanban_db, board, multi, max_in_progress,
+                               max_per_profile)
         total_running += snap["in_progress"]
         if snap["error"]:
             errors.append(f"{snap['board']}: {snap['error']}")
@@ -365,7 +422,7 @@ def evaluate_stall_tick(capture, detector_state, now):
 
 
 def check_dispatcher_wedge(kanban_db=None, max_in_progress=None, now=None,
-                           write_state_fn=None):
+                           write_state_fn=None, max_per_profile=None):
     """The dispatcher-wedge probe (the ``dispatcher`` CHECK STREAM).
 
     Runs on the daemon's periodic cadence (see ``PERIODIC_INTERVALS``). Reads
@@ -386,6 +443,7 @@ def check_dispatcher_wedge(kanban_db=None, max_in_progress=None, now=None,
         now = time.time()
 
     capture = _capture_kanban(kanban_db=kanban_db,
+                              max_per_profile=max_per_profile,
                               max_in_progress=max_in_progress)
 
     if capture.get("unreachable"):
