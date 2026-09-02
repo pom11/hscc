@@ -144,12 +144,13 @@ struct ProjectsView: View {
     private func unreadBadge(_ project: String) -> some View {
         let count = unread.count(for: project)
         if count > 0 {
-            Text("\(count)")
+            Text("\(count) unread")
                 .font(.caption2.weight(.bold))
                 .foregroundColor(.white)  // theme-allow: white on the amber unread chip, fixed hue
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(Theme.Semantic.warn, in: Capsule())
+                .accessibilityLabel("\(count) unread")
         }
     }
 
