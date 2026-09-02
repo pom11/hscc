@@ -916,25 +916,39 @@ def check_plugin_payload(repo_root=None, plugins_dir=None, names=None,
     if plugins_dir is None:
         plugins_dir = os.path.expanduser("~/.hermes/plugins")
 
-    # Default scope: repo top-level dirs whose name looks like a plugin and
-    # that are present in the repo.
+    # Default scope: the deployable plugin set is the SINGLE source of truth in
+    # hscc-bootstrap/install_payload.py::DEFAULT_PAYLOAD — the list bootstrap
+    # actually installs. Loading it by file path (not re-globbing `hscc-*` here)
+    # means verify can never drift from what deploy ships. It correctly excludes
+    # non-plugin dirs like hscc-cli (the CLI source) while including hscc_daemon
+    # (underscore). Only dirs present in THIS checked-out repo are diffable.
     if names is None:
-        try:
-            repo_dirs = sorted(
-                d for d in os.listdir(repo_root)
-                if os.path.isdir(os.path.join(repo_root, d))
-                and d.startswith("hscc-")
-            )
-        except OSError:
-            return {"name": "plugin_payload", "ok": None,
-                    "detail": "unverified: cannot list repo root",
-                    "next_step": "run hscc verify from a checked-out repo tree"}
+        payload = []
+        install_payload_py = os.path.join(
+            repo_root, "hscc-bootstrap", "install_payload.py")
+        if os.path.isfile(install_payload_py):
+            try:
+                import importlib.util
+                spec = importlib.util.spec_from_file_location(
+                    "hscc_install_payload", install_payload_py)
+                if spec is not None and spec.loader is not None:
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    payload = getattr(mod, "DEFAULT_PAYLOAD", []) or []
+            except Exception:
+                payload = []
+        repo_dirs = sorted(
+            name for name in payload
+            if os.path.isdir(os.path.join(repo_root, name))
+        )
     else:
         repo_dirs = list(names)
 
     if not repo_dirs:
         return {"name": "plugin_payload", "ok": None,
-                "detail": "unverified: no plugin dirs found in repo root"}
+                "detail": "unverified: no deployable plugin dirs found "
+                          "(install_payload.DEFAULT_PAYLOAD not loadable)",
+                "next_step": "run hscc verify from a checked-out repo tree"}
 
     issues = []
     checked = 0

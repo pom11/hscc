@@ -1228,6 +1228,55 @@ class TestCheckPluginPayload:
                                  names=["hscc-commands"])
         assert r["ok"] is True
 
+    def test_default_scope_derives_from_install_payload(self, tmp_path):
+        """names=None must follow install_payload.DEFAULT_PAYLOAD, not re-glob.
+
+        The old `hscc-*` glob wrongly flagged hscc-cli (the CLI source, NOT a
+        plugin) as "merged but not deployed" on every real run — making verify
+        always fail. The default scope must come from the single source of
+        truth bootstrap deploys (DEFAULT_PAYLOAD): include hscc_daemon
+        (underscore), exclude hscc-cli (not deployable).
+        """
+        from hscc_daemon.verify import check_plugin_payload
+        # Fake repo root: bootstrap defines the canonical payload.
+        repo = tmp_path / "repo"
+        boot = repo / "hscc-bootstrap"
+        boot.mkdir(parents=True)
+        (boot / "install_payload.py").write_text(
+            "DEFAULT_PAYLOAD = ['hscc_daemon', 'hscc-commands', 'hscc-cli']\n")
+        (repo / "hscc_daemon").mkdir(parents=True)
+        (repo / "hscc_daemon" / "__init__.py").write_text("x = 1\n")
+        (repo / "hscc-commands").mkdir(exist_ok=True)
+        # Plant installed counterparts for the deployable ones; hscc-cli has
+        # none but must NOT be flagged because it is not in DEFAULT_PAYLOAD.
+        inst = tmp_path / "plugins"
+        (inst / "hscc_daemon").mkdir(parents=True)
+        (inst / "hscc_daemon" / "__init__.py").write_text("x = 1\n")
+        (inst / "hscc-commands").mkdir(parents=True)
+        (inst / "hscc-commands" / "__init__.py").write_text(
+            "register('workers-up')\nregister('cluster-restart')\nregister('template')\n")
+        r = check_plugin_payload(repo_root=str(repo), plugins_dir=str(inst))
+        # Covers hscc_daemon + hscc-commands; hscc-cli must be excluded. If
+        # hscc-cli were wrongly included, it would be flagged (merged but not
+        # deployed) and ok would be False — so ok==True alone proves exclusion.
+        assert r["ok"] is True
+        assert "hscc-cli" not in r["detail"]
+
+    def test_default_scope_fails_nondeployed_plugin(self, tmp_path):
+        """A deployable plugin (in DEFAULT_PAYLOAD) with no install fails."""
+        from hscc_daemon.verify import check_plugin_payload
+        repo = tmp_path / "repo"
+        boot = repo / "hscc-bootstrap"
+        boot.mkdir(parents=True)
+        (boot / "install_payload.py").write_text(
+            "DEFAULT_PAYLOAD = ['hscc_daemon']\n")
+        (repo / "hscc_daemon").mkdir(parents=True)
+        (repo / "hscc_daemon" / "__init__.py").write_text("x = 1\n")
+        inst = str(tmp_path / "plugins")  # empty — nothing installed
+        r = check_plugin_payload(repo_root=str(repo), plugins_dir=inst)
+        assert r["ok"] is False
+        assert "merged but not deployed" in r["detail"]
+
     def test_fail_repo_not_deployed(self, tmp_path):
         from hscc_daemon.verify import check_plugin_payload
         repo = self._tree(tmp_path / "repo", "hscc-roles",
