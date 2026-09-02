@@ -20,7 +20,14 @@ import AVFoundation
 /// doesn't re-fire while the operator decides.
 struct QRScannerView: View {
     /// Delivers the raw scanned payload text (unvalidated).
-    let onScan: (String) -> Void
+    ///
+    /// `@MainActor` so the callback always runs on the main actor. The
+    /// AVFoundation metadata delegate fires on a background dispatch queue; a
+    /// non-isolated closure calling a `@MainActor` sync handler would mutate
+    /// SwiftUI `@State` on that background thread (a silent data race — the
+    /// compiler provides no hop under Swift 5.9's minimal concurrency). MainActor
+    /// isolation on the closure type inserts the hop at every call site.
+    let onScan: @MainActor (String) -> Void
     /// Dismisses the scanner (the sheet's Cancel / the trailing close button).
     var onCancel: () -> Void = {}
 
@@ -186,7 +193,12 @@ private struct QRCameraPreview: UIViewRepresentable {
                 // operator reads/confirms. Stop synchronously on our queue —
                 // we're already on it.
                 session.stopRunning()
-                onScan(value)
+                // Deliver on the main actor: `onScan` is `@MainActor` (it feeds
+                // SwiftUI `@State`), and we are on the background AVFoundation
+                // queue here.
+                Task { @MainActor in
+                    onScan(value)
+                }
                 break
             }
         }
