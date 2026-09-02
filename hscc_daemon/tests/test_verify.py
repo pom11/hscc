@@ -10,6 +10,54 @@ from unittest.mock import patch, MagicMock
 import pytest
 import yaml
 
+# Canonical hscc-commands payload every synthetic-fleet test plants (both the
+# repo stub and the installed plugin use the same bytes, so a content-addressed
+# plugin_payload comparison passes).
+_CANON_PLUGIN = ('register("workers-up")\n'
+                 'register("cluster-restart")\n'
+                 'register("template")\n')
+
+
+def _hermetic_new_checks_overrides(tmp_path, healthy=True):
+    """Hermetic overrides for the api_routes / chat_roundtrip / plugin_payload
+    checks added to hscc verify.
+
+    Without these, run_all() reaches REAL external state: api_route_sweep.py
+    against the live API, a real chat round-trip to a served model, and the
+    real repo + real ~/.hermes/plugins install. The three checks introduced in
+    this task must therefore be pinned to tmp-only state so the run_all suite
+    stays hermetic. ``healthy`` selects a passing vs a failing stub.
+
+    Returns override keys consumed by run_all's param matching: ``script`` and
+    ``python`` (api_routes), ``probe`` (chat_roundtrip), ``repo_root`` and
+    ``names`` (plugin_payload).
+    """
+    # api_routes — point at a tiny stub script that exits 0 (healthy) or 1.
+    sweep = tmp_path / "scripts" / "api_route_sweep.py"
+    sweep.parent.mkdir(parents=True, exist_ok=True)
+    sweep.write_text("import sys\n" + ("sys.exit(0)\n" if healthy else "sys.exit(1)\n"))
+
+    # chat_roundtrip — fake probe returning (or withholding) generated text.
+    def _ok_probe(node, port, timeout=None, max_tokens=None):
+        return {"ok": True, "text": "ok", "status": 200}
+
+    def _bad_probe(node, port, timeout=None, max_tokens=None):
+        return {"ok": False, "error": "no text", "status": None}
+
+    # plugin_payload — hermetic repo root whose hscc-commands payload matches
+    # the installed plugin bytes planted next to it.
+    repo_hscc = tmp_path / "repo" / "hscc-commands"
+    repo_hscc.mkdir(parents=True)
+    (repo_hscc / "__init__.py").write_text(_CANON_PLUGIN)
+
+    return {
+        "script": str(sweep),
+        "python": sys.executable,
+        "probe": _ok_probe if healthy else _bad_probe,
+        "repo_root": str(tmp_path / "repo"),
+        "names": ["hscc-commands"],
+    }
+
 
 class TestCheckPlugins:
     """check_plugins — ok when core commands found, fail when missing, skip when unreadable."""
@@ -703,10 +751,11 @@ class TestRunAll:
                 state_dir=str(state_dir),
                 url="http://localhost:4000/v1/models",
                 serving_path=str(serving),
+                **_hermetic_new_checks_overrides(tmp_path),
             )
 
         assert result["ok"] is True
-        assert len(result["checks"]) == 6
+        assert len(result["checks"]) == 9
         assert all(c["ok"] for c in result["checks"])
 
     def test_run_all_fail_aggregation(self, tmp_path):
@@ -733,9 +782,10 @@ class TestRunAll:
                 state_dir=str(tmp_path / "missing_state"),
                 profiles_dir=str(empty_profiles),
                 serving_path=str(serving),
+                **_hermetic_new_checks_overrides(tmp_path),
             )
 
-        assert len(result["checks"]) == 6
+        assert len(result["checks"]) == 9
         # At least the proxy check passes here — overall ok depends on individual checks
         names = [c["name"] for c in result["checks"]]
         assert "plugins" in names
@@ -745,10 +795,11 @@ class TestRunAll:
 
     def test_run_all_overrides_selective(self, tmp_path):
         from hscc_daemon.verify import run_all
-        # Only override plugins_dir; others use defaults (which skip)
+        # Only override some checks; the new checks get hermetic stubs via the
+        # helper so nothing reaches real network/repo/install state.
         plugins_dir = tmp_path / "plugins" / "hscc-commands"
         plugins_dir.mkdir(parents=True)
-        (plugins_dir / "__init__.py").write_text('register("workers-up")\nregister("cluster-restart")\nregister("template")\n')
+        (plugins_dir / "__init__.py").write_text(_CANON_PLUGIN)
 
         serving = tmp_path / "serving.json"
         serving.write_text(json.dumps({
@@ -760,8 +811,9 @@ class TestRunAll:
 
         result = run_all(plugins_dir=str(tmp_path / "plugins"),
                          profiles_dir=str(empty_profiles),
-                         serving_path=str(serving))
-        assert len(result["checks"]) == 6
+                         serving_path=str(serving),
+                         **_hermetic_new_checks_overrides(tmp_path))
+        assert len(result["checks"]) == 9
 
     def test_run_all_ok_none_is_not_pass(self, tmp_path):
         """When multiplex is enabled but gateway state is missing (ok=None),
@@ -806,6 +858,7 @@ class TestRunAll:
                 state_dir=str(state_dir),
                 url="http://localhost:4000/v1/models",
                 serving_path=str(serving),
+                **_hermetic_new_checks_overrides(tmp_path),
             )
 
         assert result["ok"] is False
@@ -909,6 +962,7 @@ class TestRunAllFullVerifyIntentionalAutodown:
             "state_dir": str(state_dir),
             "url": "http://localhost:4000/v1/models",
             "serving_path": str(serving),
+            **_hermetic_new_checks_overrides(tmp_path),
         }
 
     def _proxy_no_models(self):
@@ -1057,3 +1111,157 @@ class TestRunAllFullVerifyIntentionalAutodown:
         by_name = {c["name"]: c for c in result["checks"]}
         assert by_name["daemon_streams"]["ok"] is False
         assert "heartbeat" in by_name["daemon_streams"]["detail"]
+
+
+class TestCheckApiRoutes:
+    """check_api_routes — runs scripts/api_route_sweep.py and interprets exits."""
+
+    def _script(self, tmp_path, body):
+        s = tmp_path / "scripts" / "api_route_sweep.py"
+        s.parent.mkdir(parents=True, exist_ok=True)
+        s.write_text(body)
+        return str(s)
+
+    def test_ok_exit_zero(self, tmp_path):
+        from hscc_daemon.verify import check_api_routes
+        r = check_api_routes(script=self._script(tmp_path, "import sys; sys.exit(0)\n"),
+                             python=sys.executable)
+        assert r["ok"] is True
+
+    def test_fail_exit_one(self, tmp_path):
+        from hscc_daemon.verify import check_api_routes
+        # The real script emits --json on exit 1; the check must parse it to
+        # name the failing route + status as the cause.
+        script = self._script(
+            tmp_path,
+            "import json; print(json.dumps({'routes': ["
+            "{'route': '/v1/chat', 'status': 404, 'ok': False}]})); "
+            "import sys; sys.exit(1)\n")
+        r = check_api_routes(script=script, python=sys.executable)
+        assert r["ok"] is False
+        assert "/v1/chat (404)" in r["detail"]
+        assert r["next_step"]
+
+    def test_fail_exit_two_no_api(self, tmp_path):
+        from hscc_daemon.verify import check_api_routes
+        script = self._script(
+            tmp_path, "import sys; print('no HSCC_API_HOST'); sys.exit(2)\n")
+        r = check_api_routes(script=script, python=sys.executable)
+        assert r["ok"] is False
+        assert "API not reachable" in r["detail"]
+
+    def test_unverified_script_missing(self, tmp_path):
+        from hscc_daemon.verify import check_api_routes
+        r = check_api_routes(script=str(tmp_path / "nope.py"), python=sys.executable)
+        assert r["ok"] is None
+        assert "unverified" in r["detail"]
+
+
+class TestCheckChatRoundtrip:
+    """check_chat_roundtrip — real chat round-trip via the engine-wedge probe."""
+
+    def _serving(self, tmp_path, units):
+        p = tmp_path / "serving.json"
+        p.write_text(json.dumps({"units": units}))
+        return str(p)
+
+    def test_ok_all_units_answer(self, tmp_path, monkeypatch):
+        from hscc_daemon.verify import check_chat_roundtrip
+
+        def probe(node, port, timeout=None, max_tokens=None):
+            return {"ok": True, "text": "ok", "status": 200}
+
+        monkeypatch.setattr("hscc_daemon.verify._intentional_window_verdict",
+                            lambda: None)
+        serving = self._serving(tmp_path, [{"role": "orchestrator",
+                                            "nodes": ["10.0.0.1"], "port": 8000}])
+        r = check_chat_roundtrip(serving_path=serving, probe=probe)
+        assert r["ok"] is True
+        assert "1 serving unit" in r["detail"]
+
+    def test_fail_unit_does_not_answer(self, tmp_path, monkeypatch):
+        from hscc_daemon.verify import check_chat_roundtrip
+
+        def probe(node, port, timeout=None, max_tokens=None):
+            return {"ok": False, "error": "no text", "status": None}
+
+        monkeypatch.setattr("hscc_daemon.verify._intentional_window_verdict",
+                            lambda: None)
+        serving = self._serving(tmp_path, [{"role": "orchestrator",
+                                            "nodes": ["10.0.0.1"], "port": 8000}])
+        r = check_chat_roundtrip(serving_path=serving, probe=probe)
+        assert r["ok"] is False
+        assert "did not answer" in r["detail"]
+        assert r["next_step"]
+
+    def test_no_serving_file_unverified(self, tmp_path):
+        from hscc_daemon.verify import check_chat_roundtrip
+
+        def probe(node, port, timeout=None, max_tokens=None):
+            return {"ok": True, "text": "ok"}
+
+        r = check_chat_roundtrip(serving_path=str(tmp_path / "missing.json"),
+                                 probe=probe)
+        assert r["ok"] is None
+        assert "unverified" in r["detail"]
+
+
+class TestCheckPluginPayload:
+    """check_plugin_payload — installed payload must match what the repo deploys."""
+
+    def _tree(self, root, plugin, files):
+        base = root / plugin
+        base.mkdir(parents=True)
+        for rel, content in files.items():
+            p = base / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content)
+        return str(root)
+
+    def test_ok_installed_matches_repo(self, tmp_path):
+        from hscc_daemon.verify import check_plugin_payload
+        repo = self._tree(tmp_path / "repo", "hscc-commands",
+                          {"__init__.py": "register('x')\n"})
+        inst = self._tree(tmp_path / "plugins", "hscc-commands",
+                          {"__init__.py": "register('x')\n"})
+        r = check_plugin_payload(repo_root=repo, plugins_dir=inst,
+                                 names=["hscc-commands"])
+        assert r["ok"] is True
+
+    def test_fail_repo_not_deployed(self, tmp_path):
+        from hscc_daemon.verify import check_plugin_payload
+        repo = self._tree(tmp_path / "repo", "hscc-roles",
+                          {"__init__.py": "register('x')\n"})
+        inst_dir = str(tmp_path / "plugins")  # empty — nothing installed
+        r = check_plugin_payload(repo_root=repo, plugins_dir=inst_dir,
+                                 names=["hscc-roles"])
+        assert r["ok"] is False
+        assert "merged but not deployed" in r["detail"]
+        assert r["next_step"]
+
+    def test_fail_installed_differs_from_repo(self, tmp_path):
+        from hscc_daemon.verify import check_plugin_payload
+        repo = self._tree(tmp_path / "repo", "hscc-commands",
+                          {"__init__.py": "register('newcmd')\n"})
+        inst = self._tree(tmp_path / "plugins", "hscc-commands",
+                          {"__init__.py": "register('oldcmd')\n"})
+        r = check_plugin_payload(repo_root=repo, plugins_dir=inst,
+                                 names=["hscc-commands"])
+        assert r["ok"] is False
+        assert "__init__.py" in r["detail"]
+
+    def test_fail_test_files_ignored(self, tmp_path):
+        """tests/ and __pycache__ are NOT payload — they must not cause a diff."""
+        from hscc_daemon.verify import check_plugin_payload
+        repo = self._tree(
+            tmp_path / "repo", "hscc-commands",
+            {"__init__.py": "register('x')\n",
+             "tests/test_cmd.py": "def test():\n    pass\n",
+             "__pycache__/hscc.cpython.pyc": "junk"})
+        inst = self._tree(
+            tmp_path / "plugins", "hscc-commands",
+            {"__init__.py": "register('x')\n"})
+        r = check_plugin_payload(repo_root=repo, plugins_dir=inst,
+                                 names=["hscc-commands"])
+        assert r["ok"] is True
+

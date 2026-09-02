@@ -13,6 +13,11 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 try:
+    import subprocess
+except ImportError:  # pragma: no cover - subprocess is stdlib, safety net only
+    subprocess = None
+
+try:
     import yaml
 except ImportError:
     yaml = None
@@ -21,6 +26,44 @@ try:
     from . import serving as _serving
 except Exception:  # pragma: no cover - import-time safety
     _serving = None
+
+try:
+    from . import health as _health
+except Exception:  # pragma: no cover - import-time safety
+    _health = None
+
+
+def _repo_root():
+    """Absolute path to the checked-out repo root from verify.py's location.
+
+    verify.py always ships at ``<repo>/hscc_daemon/verify.py``, so the repo
+    root is two levels up. Used to locate the existing scripts/ payload
+    (api_route_sweep.py, the plugin trees to diff against) rather than
+    duplicating their logic here.
+    """
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _capture(cmd, timeout=None):
+    """Run ``cmd`` (no shell) and return (returncode, combined output).
+
+    Degrades to a synthetic failure instead of raising, so a check never
+    crashes verify. ``cmd`` is a list — never a shell string — so no path or
+    argument can be interpreted as a shell metacharacter.
+    """
+    if subprocess is None:
+        return (2, "subprocess unavailable")
+    timeout = timeout or 120
+    try:
+        cp = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+        )
+        out = (cp.stdout or "") + ("\n" + cp.stderr if cp.stderr else "")
+        return cp.returncode, out
+    except FileNotFoundError:
+        return (2, f"command not found: {cmd[0]}")
+    except (OSError, ValueError) as exc:
+        return (2, str(exc))
 
 
 def check_plugins(plugins_dir=None):
@@ -649,6 +692,304 @@ def run_chat_roundtrip():
     except (json.JSONDecodeError, TypeError):
         return {"name": "chat_roundtrip", "ok": True,
                 "detail": "round trip succeeded (machine output unparseable)"}
+def check_api_routes(script=None, python=None, timeout=None):
+    """Prove the API is up and every route the app calls actually answers.
+
+    Reuses ``scripts/api_route_sweep.py`` — the existing sweep that discovered
+    the 2026-09-01 dead-chat regression — by shelling out to it. No route
+    discovery is duplicated here; the sweep script owns the iOS-client route
+    list and the read-only GET sweep. ``verify`` just runs it and interprets
+    the exit code:
+
+      * exit 0 → API up, every swept route answered with parseable JSON.
+      * exit 1 → some route the app calls did not answer (API reachable but a
+        screen would be dead).
+      * exit 2 → the sweep could not run at all (no API host/token) — the API
+        is not up, which is a real failure for "is the app going to work?".
+
+    ``ok`` is None (unverified, not pass/fail) only when the sweep script
+    itself is not found, i.e. verify is not running from a checked-out repo
+    tree.
+    """
+    if script is None:
+        script = os.path.join(_repo_root(), "scripts", "api_route_sweep.py")
+    if not os.path.isfile(script):
+        return {"name": "api_routes", "ok": None,
+                "detail": "unverified: scripts/api_route_sweep.py not found "
+                          f"({script})",
+                "next_step": "run hscc verify from a checked-out repo tree"}
+
+    py = python or os.environ.get("HSCC_TEST_PY") or "python3"
+    rc, out = _capture([py, script, "--json"], timeout=timeout)
+    if rc == 0:
+        return {"name": "api_routes", "ok": True,
+                "detail": "API is up; every route the app calls answers"}
+    if rc == 2:
+        # api_route_sweep returns 2 when it has no API host or token — i.e. the
+        # API is not actually up. This is a genuine "would the app work?" fail.
+        return {"name": "api_routes", "ok": False,
+                "detail": "API not reachable: " + _first_line(out),
+                "next_step": "start the API (hscc api start / the daemon) and "
+                             "confirm `hscc api status` reports Listening"}
+
+    # rc == 1 → some swept route did not answer. The sweep's --json output names
+    # them; surface the failing routes (and their HTTP status) as the cause.
+    failed = _sweep_failures(out)
+    detail = "; ".join(failed) if failed else _first_line(out)
+    return {"name": "api_routes", "ok": False,
+            "detail": "route(s) the app calls did not answer: " + detail,
+            "next_step": "open the failing route(s) above; that screen would be "
+                         "dead for the operator"}
+
+
+def check_chat_roundtrip(serving_path=None, probe=None, timeout=None,
+                         max_tokens=None):
+    """Prove a real chat round-trip reaches a served model and returns text.
+
+    This is NOT an HTTP-reachability handshake. It POSTs a tiny STREAMING
+    chat-completions request ("Reply with the single word: ok.") to every
+    serving.json unit and requires REAL generated text back within a short
+    window — the same probe the daemon's engine-wedge monitor runs
+    (``health._probe_unit_generation``), reused so there is one definition of
+    "the model actually answered."
+
+    Excused (non-failing, named) during an intentional autodown when the
+    serving layer is down by design — mirrors ``check_proxy``. ``ok`` is None
+    (unverified) only when serving.json is missing/unparseable or the probe
+    module is unavailable.
+    """
+    if probe is None:
+        if _health is None or not hasattr(_health, "_probe_unit_generation"):
+            return {"name": "chat_roundtrip", "ok": None,
+                    "detail": "unverified: chat probe unavailable"}
+        probe = _health._probe_unit_generation
+    if timeout is None:
+        timeout = getattr(_health, "ENGINE_WEDGE_TIMEOUT", 10) if _health else 10
+
+    if serving_path is None:
+        if _serving is None:
+            return {"name": "chat_roundtrip", "ok": None,
+                    "detail": "unverified: serving module unavailable"}
+        serving_path = _serving.SERVING_JSON
+    else:
+        serving_path = os.path.expanduser(serving_path)
+
+    # Intentional autodown ⇒ serving layer down by design; nothing to chat
+    # with yet, and that is expected. Mirror check_proxy's excuse.
+    window_verdict = _intentional_window_verdict()
+    if window_verdict:
+        return {"name": "chat_roundtrip", "ok": True,
+                "detail": f"{_intentional_window_label(window_verdict)}: "
+                          f"serving layer not serving, chat not expected"}
+
+    serving_data = None
+    if _serving is not None:
+        serving_data = _serving.load_serving(serving_path)
+    if not serving_data:
+        return {"name": "chat_roundtrip", "ok": None,
+                "detail": "unverified: serving.json missing/unparseable — "
+                          "cannot reach a model",
+                "next_step": "install/write ~/.hscc/serving.json, then re-run"}
+
+    units = [u for u in (serving_data.get("units") or [])
+             if (u.get("nodes") or [])]
+    if not units:
+        return {"name": "chat_roundtrip", "ok": None,
+                "detail": "unverified: no units in serving.json to probe"}
+
+    failures = []
+    checked = 0
+    for u in units:
+        node = u.get("nodes")[0]
+        try:
+            port = int(u.get("port"))
+        except (TypeError, ValueError):
+            port = None
+        if not port:
+            # Zero or absent unit port means nothing is affirmed to be serving
+            # here; do not guess a port and do not hardcode one.
+            failures.append(f"{node}: no serving port declared")
+            continue
+        checked += 1
+        try:
+            res = probe(node, port, timeout=timeout, max_tokens=max_tokens)
+        except Exception as exc:
+            res = {"ok": False, "error": str(exc), "status": None}
+        if not res.get("ok"):
+            why = res.get("error") or res.get("status") or "no text returned"
+            failures.append(f"model on {node}:{port} did not answer ({why})")
+
+    if failures:
+        return {"name": "chat_roundtrip", "ok": False,
+                "detail": "; ".join(failures),
+                "next_step": "that model is not generating — check the vLLM/"
+                             "sparkrun serving unit and the worker proxy"}
+    return {"name": "chat_roundtrip", "ok": True,
+            "detail": f"real chat round-trip returned text from {checked} "
+                      f"serving unit(s)"}
+
+
+# Base-name payload files (non-test, non-cache) that constitute a deployed
+# plugin's payload. Subdirectories are walked recursively for the same kinds of
+# source/docs files, so nested payloads (roles/, templates/, hooks/, skills/)
+# are compared too. Test and cache artifacts are NOT part of the deployed
+# payload and are excluded.
+_PAYLOAD_EXCLUDE = {
+    "tests", "__pycache__", ".pytest_cache", "test_", "tests_",
+}
+_PAYLOAD_EXT = (".py", ".yaml", ".yml", ".json", ".md", ".sh", ".toml", ".txt")
+
+
+def _is_payload_file(rel):
+    """True for a file that is part of a deployed plugin payload.
+
+    Excludes test dirs, python caches, hidden files, binary assets and files
+    without a source/docs extension — the things installation does NOT ship.
+    """
+    parts = rel.split("/")
+    if any(p in _PAYLOAD_EXCLUDE for p in parts):
+        return False
+    if any(p.startswith("test_") or p.startswith("tests_") for p in parts[:-1]):
+        return False
+    leaf = parts[-1]
+    if leaf.startswith(".") or leaf.endswith((".pyc", ".pyo")):
+        return False
+    return leaf.endswith(_PAYLOAD_EXT)
+
+
+def _payload_snapshot(root):
+    """Map ``{relative_path: sha256}`` for a dir's payload files.
+
+    Content-addressed, so two trees with identical file bytes compare equal
+    regardless of mtime or inode — the honest test of "the installed payload
+    is what the repo ships." Compares by relative path on both sides.
+    ``root`` may be None → empty snapshot (caller reports skipped).
+    """
+    if not root or not os.path.isdir(root):
+        return {}
+    out = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in _PAYLOAD_EXCLUDE
+                       and not d.startswith((".", "test_"))]
+        for fn in filenames:
+            full = os.path.join(dirpath, fn)
+            rel = os.path.relpath(full, root)
+            if not _is_payload_file(rel):
+                continue
+            try:
+                out[rel] = _sha256(full)
+            except OSError:
+                continue
+    return out
+
+
+def _sha256(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def check_plugin_payload(repo_root=None, plugins_dir=None, names=None,
+                         snapshot=None):
+    """Check installed plugin payloads match what the repo deploys.
+
+    "Merging is not deploying": a plugin merged/committed in the repo is only
+    a real fix once it is installed. This diffs each repo plugin directory
+    against its installed counterpart under ``~/.hermes/plugins`` for the
+    payload files installation actually ships (source/docs files recursively,
+    excluding tests/caches). A repo plugin with no installed directory is
+    flagged (merged but never deployed); a payload file whose CONTENT differs
+    from the repo counterpart (sha256 keyed by relative path) is flagged for
+    that plugin.
+
+    Reuses no duplicated logic — ``_payload_snapshot`` walks the same single
+    source tree the repo publishes, and the comparison is mechanical. ``names``
+    defaults to the repo plugin dirs that also exist under ``plugins_dir``.
+    ``snapshot`` (root -> {...}) is injectable for tests.
+    """
+    if repo_root is None:
+        repo_root = _repo_root()
+    if plugins_dir is None:
+        plugins_dir = os.path.expanduser("~/.hermes/plugins")
+
+    # Default scope: repo top-level dirs whose name looks like a plugin and
+    # that are present in the repo.
+    if names is None:
+        try:
+            repo_dirs = sorted(
+                d for d in os.listdir(repo_root)
+                if os.path.isdir(os.path.join(repo_root, d))
+                and d.startswith("hscc-")
+            )
+        except OSError:
+            return {"name": "plugin_payload", "ok": None,
+                    "detail": "unverified: cannot list repo root",
+                    "next_step": "run hscc verify from a checked-out repo tree"}
+    else:
+        repo_dirs = list(names)
+
+    if not repo_dirs:
+        return {"name": "plugin_payload", "ok": None,
+                "detail": "unverified: no plugin dirs found in repo root"}
+
+    issues = []
+    checked = 0
+    for d in repo_dirs:
+        repo_dir = os.path.join(repo_root, d)
+        inst_dir = os.path.join(plugins_dir, d)
+        inst = snapshot(inst_dir) if snapshot else _payload_snapshot(inst_dir)
+        if not inst:
+            issues.append(
+                f"{d}: installed at {inst_dir} missing or has no payload — "
+                f"merged but not deployed")
+            continue
+        repo = _payload_snapshot(repo_dir)
+        checked += len(repo)
+        missing = sorted(set(repo) - set(inst))
+        changed = sorted(r for r in repo if r in inst and repo[r] != inst[r])
+        if missing:
+            issues.append(f"{d}: repo files not installed: {', '.join(missing)}")
+        if changed:
+            issues.append(
+                f"{d}: installed payload differs from repo: {', '.join(changed)}")
+
+    if issues:
+        return {"name": "plugin_payload", "ok": False,
+                "detail": "; ".join(issues),
+                "next_step": "run hscc-bootstrap/bootstrap.sh (or the plugin's "
+                             "install step) to deploy the repo state to "
+                             "~/.hermes/plugins, then re-run"}
+    return {"name": "plugin_payload", "ok": True,
+            "detail": f"installed payload matches the repo across {len(repo_dirs)} "
+                      f"plugins ({checked} payload files)"}
+
+
+def _first_line(text):
+    """First non-empty line of a multi-line string, trimmed; else a fallback."""
+    for line in (text or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return "no output"
+
+
+def _sweep_failures(out):
+    """Extract ``["route (HTTP status)", ...]`` from the sweep's --json output.
+
+    Returns [] when the output is not the sweep's JSON (e.g. a sweep run from
+    a version that predates --json, or an interpreter-level error), so the
+    caller falls back to the raw first line.
+    """
+    try:
+        parsed = json.loads(out)
+        rows = parsed.get("routes") or []
+    except (ValueError, AttributeError, TypeError):
+        return []
+    return [f"{r.get('route')} ({r.get('status')})"
+            for r in rows if not r.get("ok")]
 
 
 def run_all(**overrides):
@@ -664,6 +1005,9 @@ def run_all(**overrides):
         check_proxy,
         check_config_wiring,
         check_profile_endpoints,
+        check_api_routes,
+        check_chat_roundtrip,
+        check_plugin_payload,
     ]
 
     results = []

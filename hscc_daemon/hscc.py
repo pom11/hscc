@@ -558,6 +558,10 @@ def _handle_verify():
                 name = c.get("name", "").ljust(max_name)
                 detail = c.get("detail", "")
                 print(f"  {glyph} {name}  {detail}")
+                next_step = c.get("next_step")
+                if not c.get("ok") and next_step:
+                    pad = " " * (max_name + 2)
+                    print(f"  {glyph} {pad}  next step: {next_step}")
         overall = "\u2713 All checks passed" if result.get("ok") else "\u2717 Some checks failed"
         print(f"\n  {overall}")
     sys.exit(0 if result.get("ok") else 1)
