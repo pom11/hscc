@@ -53,13 +53,14 @@ struct FleetControlView: View {
 
     private func loadStatus() async {
         guard let client else { return }
-        status = .loading
-        do { status = .loaded(try await client.templateStatus()) }
-        catch { status = .failed(errorMessage(for: error)) }
-    }
-
-    private func errorMessage(for error: Error) -> String {
-        (error as? HSCCError)?.localizedDescription ?? "Something went wrong."
+        // Offline-aware: on failure with last-known (cached) data we render
+        // `.stale` (last-known + "showing state from X ago") instead of a hard
+        // error — matches TemplatesView for the same /v1/template/status source.
+        status = await Offline.load(status,
+                                    cacheKey: EndpointPath.templateStatus,
+                                    client: client) {
+            try await client.templateStatus()
+        }
     }
 
     // MARK: - Applied template
@@ -72,39 +73,52 @@ struct FleetControlView: View {
                 ProgressView()
             case .failed(let message):
                 errorLabel(message)
-            case .loaded(let state):
+            case .stale(let state, let ageMessage):
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(state.speak)
-                        .font(.subheadline)
-                        .italic()
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    if let applied = state.applied {
-                        if let name = applied.template, !name.isEmpty {
-                            LabeledContent("Template") { Text(name) }
-                        }
-                        if let at = applied.applied_at, !at.isEmpty {
-                            LabeledContent("Applied at") { Text(at) }
-                        }
-                        if let node = applied.orchestrator_node, !node.isEmpty {
-                            LabeledContent("Orchestrator") { Text(node) }
-                        }
-                        if let fams = applied.families, !fams.isEmpty {
-                            LabeledContent("Families") { Text(fams.joined(separator: ", ")) }
-                        }
-                        if let units = applied.units {
-                            LabeledContent("Units") { Text(displayJSON(units)) }
-                        }
-                    } else {
-                        emptyLabel("No template applied.")
+                    StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
+                        Task { await loadStatus() }
                     }
-                    if let note = state.note, !note.isEmpty {
-                        Label(note, systemImage: "info.circle")
-                            .font(.caption)
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    }
+                    statusBody(state)
                 }
+            case .loaded(let state):
+                statusBody(state)
             default:
                 EmptyView()
+            }
+        }
+    }
+
+    /// The rendered body for a successfully-loaded (or stale last-known) status.
+    @ViewBuilder
+    private func statusBody(_ state: TemplateStatusResponse) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(state.speak)
+                .font(.subheadline)
+                .italic()
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            if let applied = state.applied {
+                if let name = applied.template, !name.isEmpty {
+                    LabeledContent("Template") { Text(name) }
+                }
+                if let at = applied.applied_at, !at.isEmpty {
+                    LabeledContent("Applied at") { Text(at) }
+                }
+                if let node = applied.orchestrator_node, !node.isEmpty {
+                    LabeledContent("Orchestrator") { Text(node) }
+                }
+                if let fams = applied.families, !fams.isEmpty {
+                    LabeledContent("Families") { Text(fams.joined(separator: ", ")) }
+                }
+                if let units = applied.units {
+                    LabeledContent("Units") { Text(displayJSON(units)) }
+                }
+            } else {
+                emptyLabel("No template applied.")
+            }
+            if let note = state.note, !note.isEmpty {
+                Label(note, systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
             }
         }
     }
