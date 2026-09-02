@@ -129,8 +129,8 @@ struct FleetView: View {
             } else {
                 ForEach(state.checks) { check in
                     HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: check.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
-                            .foregroundColor(check.ok ? Theme.Semantic.ok : Theme.Semantic.bad)
+                        Image(systemName: HealthCheckIndicator.icon(check.ok))
+                            .foregroundColor(HealthCheckIndicator.tint(check.ok))
                         VStack(alignment: .leading, spacing: 2) {
                             Text(check.name)
                                 .font(.body)
