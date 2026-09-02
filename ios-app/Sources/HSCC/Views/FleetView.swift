@@ -7,6 +7,9 @@ import SwiftUI
 /// section with its own `LoadState`, so one degraded endpoint never blanks the
 /// rest of the screen. Errors surface `HSCCError.localizedDescription`, never a
 /// raw dump. Every section shows its `speak` one-liner (B5 reuses it for voice).
+/// Every section routes through `Offline.load`, so an unreachable cluster
+/// surfaces last-known data (clearly marked stale) instead of a hard "failed" —
+/// a transient blip must not make the whole fleet look idle or down.
 struct FleetView: View {
     let client: HSCCClient
 
@@ -48,37 +51,48 @@ struct FleetView: View {
     }
 
     private func loadHealth() async {
-        health = .loading
-        do { health = .loaded(try await client.health()) }
-        catch { health = .failed(errorMessage(for: error)) }
+        if health.value == nil { health = .loading }
+        health = await Offline.load(health,
+                                    cacheKey: "/v1/health",
+                                    client: client) {
+            try await client.health()
+        }
     }
 
     private func loadStats() async {
-        stats = .loading
-        do { stats = .loaded(try await client.fleetStats()) }
-        catch { stats = .failed(errorMessage(for: error)) }
+        if stats.value == nil { stats = .loading }
+        stats = await Offline.load(stats,
+                                   cacheKey: "/v1/fleet/stats",
+                                   client: client) {
+            try await client.fleetStats()
+        }
     }
 
     private func loadThroughput() async {
-        throughput = .loading
-        do { throughput = .loaded(try await client.fleetThroughput()) }
-        catch { throughput = .failed(errorMessage(for: error)) }
+        if throughput.value == nil { throughput = .loading }
+        throughput = await Offline.load(throughput,
+                                        cacheKey: "/v1/fleet/throughput",
+                                        client: client) {
+            try await client.fleetThroughput()
+        }
     }
 
     private func loadStreams() async {
-        streams = .loading
-        do { streams = .loaded(try await client.fleetStreams()) }
-        catch { streams = .failed(errorMessage(for: error)) }
+        if streams.value == nil { streams = .loading }
+        streams = await Offline.load(streams,
+                                     cacheKey: "/v1/fleet/streams",
+                                     client: client) {
+            try await client.fleetStreams()
+        }
     }
 
     private func loadAutoscale() async {
-        autoscale = .loading
-        do { autoscale = .loaded(try await client.autoscale()) }
-        catch { autoscale = .failed(errorMessage(for: error)) }
-    }
-
-    private func errorMessage(for error: Error) -> String {
-        (error as? HSCCError)?.localizedDescription ?? "Something went wrong."
+        if autoscale.value == nil { autoscale = .loading }
+        autoscale = await Offline.load(autoscale,
+                                       cacheKey: "/v1/autoscale",
+                                       client: client) {
+            try await client.autoscale()
+        }
     }
 
     // MARK: - Health (5-check verify)
@@ -91,34 +105,44 @@ struct FleetView: View {
                 ProgressView()
             case .failed(let message):
                 errorLabel(message)
-            case .loaded(let state):
-                VStack(alignment: .leading, spacing: 10) {
-                    Label(state.speak, systemImage: state.ok ? "checkmark.seal.fill" : "xmark.seal.fill")
-                        .font(.subheadline)
-                        .foregroundColor(state.ok ? Theme.Semantic.ok : Theme.Semantic.bad)
-                    if state.checks.isEmpty {
-                        emptyLabel("No health checks reported.")
-                    } else {
-                        ForEach(state.checks) { check in
-                            HStack(alignment: .top, spacing: 8) {
-                                Image(systemName: check.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                    .foregroundColor(check.ok ? Theme.Semantic.ok : Theme.Semantic.bad)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(check.name)
-                                        .font(.body)
-                                    if let detail = check.detail, !detail.isEmpty {
-                                        Text(detail)
-                                            .font(.caption)
-                                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                                    }
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
+            case .stale(let state, let age):
+                StaleBanner(age: age, reason: "Can't reach the cluster right now.") {
+                    Task { await loadHealth() }
                 }
+                healthBody(state)
+            case .loaded(let state):
+                healthBody(state)
             default:
                 EmptyView()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func healthBody(_ state: HealthResponse) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(state.speak, systemImage: state.ok ? "checkmark.seal.fill" : "xmark.seal.fill")
+                .font(.subheadline)
+                .foregroundColor(state.ok ? Theme.Semantic.ok : Theme.Semantic.bad)
+            if state.checks.isEmpty {
+                emptyLabel("No health checks reported.")
+            } else {
+                ForEach(state.checks) { check in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: check.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundColor(check.ok ? Theme.Semantic.ok : Theme.Semantic.bad)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(check.name)
+                                .font(.body)
+                            if let detail = check.detail, !detail.isEmpty {
+                                Text(detail)
+                                    .font(.caption)
+                                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
     }
@@ -133,35 +157,45 @@ struct FleetView: View {
                 ProgressView()
             case .failed(let message):
                 errorLabel(message)
-            case .loaded(let state):
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(state.speak)
-                        .font(.subheadline)
-                        .italic()
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
-
-                    if let fleet = state.fleet {
-                        HStack(spacing: 10) {
-                            statBadge(value: "\(fleet.nodes_ok ?? 0)/\(fleet.nodes_total ?? 0)",
-                                      label: "nodes ok",
-                                      color: (fleet.nodes_ok ?? 0) >= (fleet.nodes_total ?? 1) ? Theme.Semantic.ok : Theme.Semantic.warn)
-                            statBadge(value: fmt(fleet.prompt_tokens), label: "prompt",
-                                      color: Theme.Semantic.onSurfaceMuted)
-                            statBadge(value: fmt(fleet.generation_tokens), label: "generation",
-                                      color: Theme.Semantic.onSurfaceMuted)
-                        }
-                        HStack(spacing: 10) {
-                            statBadge(value: fmt(fleet.running), label: "running",
-                                      color: Theme.Semantic.onSurface)
-                            statBadge(value: fmt(fleet.waiting), label: "waiting",
-                                      color: Theme.Semantic.warn)
-                        }
-                    } else {
-                        emptyLabel("No throughput data.")
-                    }
+            case .stale(let state, let age):
+                StaleBanner(age: age, reason: "Can't reach the cluster right now.") {
+                    Task { await loadThroughput() }
                 }
+                throughputBody(state)
+            case .loaded(let state):
+                throughputBody(state)
             default:
                 EmptyView()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func throughputBody(_ state: FleetThroughputResponse) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(state.speak)
+                .font(.subheadline)
+                .italic()
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+
+            if let fleet = state.fleet {
+                HStack(spacing: 10) {
+                    statBadge(value: "\(fleet.nodes_ok ?? 0)/\(fleet.nodes_total ?? 0)",
+                              label: "nodes ok",
+                              color: (fleet.nodes_ok ?? 0) >= (fleet.nodes_total ?? 1) ? Theme.Semantic.ok : Theme.Semantic.warn)
+                    statBadge(value: fmt(fleet.prompt_tokens), label: "prompt",
+                              color: Theme.Semantic.onSurfaceMuted)
+                    statBadge(value: fmt(fleet.generation_tokens), label: "generation",
+                              color: Theme.Semantic.onSurfaceMuted)
+                }
+                HStack(spacing: 10) {
+                    statBadge(value: fmt(fleet.running), label: "running",
+                              color: Theme.Semantic.onSurface)
+                    statBadge(value: fmt(fleet.waiting), label: "waiting",
+                              color: Theme.Semantic.warn)
+                }
+            } else {
+                emptyLabel("No throughput data.")
             }
         }
     }
@@ -176,31 +210,41 @@ struct FleetView: View {
                 ProgressView()
             case .failed(let message):
                 errorLabel(message)
-            case .loaded(let state):
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(state.speak)
-                        .font(.subheadline)
-                        .italic()
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
-
-                    if let completions = state.completions {
-                        statBadge(value: "\(completions.total)", label: "work items",
-                                  color: Theme.Semantic.onSurface)
-
-                        if let byProfile = completions.by_profile, !byProfile.isEmpty {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("By profile").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                                ForEach(byProfile.sorted { $0.value > $1.value }, id: \.key) { key, value in
-                                    row(key, value: "\(value)")
-                                }
-                            }
-                        }
-                    } else {
-                        emptyLabel("No stats reported.")
-                    }
+            case .stale(let state, let age):
+                StaleBanner(age: age, reason: "Can't reach the cluster right now.") {
+                    Task { await loadStats() }
                 }
+                statsBody(state)
+            case .loaded(let state):
+                statsBody(state)
             default:
                 EmptyView()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func statsBody(_ state: FleetStatsResponse) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(state.speak)
+                .font(.subheadline)
+                .italic()
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+
+            if let completions = state.completions {
+                statBadge(value: "\(completions.total)", label: "work items",
+                          color: Theme.Semantic.onSurface)
+
+                if let byProfile = completions.by_profile, !byProfile.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("By profile").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        ForEach(byProfile.sorted { $0.value > $1.value }, id: \.key) { key, value in
+                            row(key, value: "\(value)")
+                        }
+                    }
+                }
+            } else {
+                emptyLabel("No stats reported.")
             }
         }
     }
@@ -215,35 +259,52 @@ struct FleetView: View {
                 ProgressView()
             case .failed(let message):
                 errorLabel(message)
-            case .loaded(let state):
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(state.speak)
-                        .font(.subheadline)
-                        .italic()
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    if state.streams.isEmpty {
-                        emptyLabel("No daemon streams reported.")
-                    } else {
-                        let sorted = state.streams.sorted { $0.key < $1.key }
-                        ForEach(sorted, id: \.key) { name, stream in
-                            HStack(spacing: 8) {
-                                Image(systemName: stream.ok == true ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                    .foregroundColor(stream.ok == true ? Theme.Semantic.ok : Theme.Semantic.bad)
-                                Text(name)
-                                    .font(.body)
-                                Spacer()
-                                if let ts = stream.timestamp {
-                                    Text(shortTimestamp(ts))
-                                        .font(.caption2)
-                                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                                }
-                            }
-                            .frame(maxWidth: .infinity)
-                        }
-                    }
+            case .stale(let state, let age):
+                StaleBanner(age: age, reason: "Can't reach the cluster right now.") {
+                    Task { await loadStreams() }
                 }
+                streamsBody(state)
+            case .loaded(let state):
+                streamsBody(state)
             default:
                 EmptyView()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func streamsBody(_ state: FleetStreamsResponse) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(state.speak)
+                .font(.subheadline)
+                .italic()
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            if state.streams.isEmpty {
+                emptyLabel("No daemon streams reported.")
+            } else {
+                let sorted = state.streams.sorted { $0.key < $1.key }
+                ForEach(sorted, id: \.key) { name, stream in
+                    HStack(spacing: 8) {
+                        Image(systemName: stream.ok == true ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundColor(stream.ok == true ? Theme.Semantic.ok : Theme.Semantic.bad)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(name)
+                                .font(.body)
+                            if let message = stream.message, !message.isEmpty {
+                                Text(message)
+                                    .font(.caption)
+                                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            }
+                        }
+                        Spacer()
+                        if let ts = stream.timestamp {
+                            Text(shortTimestamp(ts))
+                                .font(.caption2)
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                }
             }
         }
     }
@@ -258,20 +319,30 @@ struct FleetView: View {
                 ProgressView()
             case .failed(let message):
                 errorLabel(message)
-            case .loaded(let state):
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(state.speak)
-                        .font(.subheadline)
-                        .italic()
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    if let reason = state.reason, !reason.isEmpty {
-                        Text(reason)
-                            .font(.caption)
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    }
+            case .stale(let state, let age):
+                StaleBanner(age: age, reason: "Can't reach the cluster right now.") {
+                    Task { await loadAutoscale() }
                 }
+                autoscaleBody(state)
+            case .loaded(let state):
+                autoscaleBody(state)
             default:
                 EmptyView()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func autoscaleBody(_ state: AutoscaleResponse) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(state.speak)
+                .font(.subheadline)
+                .italic()
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            if let reason = state.reason, !reason.isEmpty {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
             }
         }
     }
