@@ -13,7 +13,7 @@ returns — the way the operator experiences it, not just that a route answers.
 ## Executed proof (live fleet, 2026-09-02)
 The script was run against the LIVE API — real POSTs, real model traffic:
 
-1. **Derive API base** from `hscc api status` → `http://100.115.243.3:8788`
+1. **Derive API base** from `hscc api status` → `http://100.64.0.1:8788`
    (never hardcoded; derived at runtime in `api_base()`).
 2. **POST** `/v1/orchestrator/chat` with `confirm=true` → `202` + `job_id`.
    - `job chat-3`: status done, elapsed 6.0s, reply `'pong'`, orch
@@ -30,7 +30,7 @@ orchestrator unit's `vllm:generation_tokens_total` moved during every run
 outage where every profile pointed at a dead host.
 
 ### How the metric is read (read-only)
-The orchestrator unit (`role=="orch"`, serving.json nodes[0]=192.168.88.244,
+The orchestrator unit (`role=="orch"`, serving.json nodes[0]=10.0.0.244,
 port 8000) exposes vLLM Prometheus metrics at `http://<node>:<port>/metrics`.
 We parse the `vllm:generation_tokens_total` counter (the standard vLLM counter
 surface the codebase already uses in `throughput.py`). Note: the orch unit is
