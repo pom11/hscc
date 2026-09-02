@@ -220,71 +220,79 @@ struct AutodownView: View {
 
     @ViewBuilder
     private func controlSection(client: HSCCClient) -> some View {
-        let enabled = value?.enabled == true
-        HSSectionCard(title: "Controls", systemImage: "slider.horizontal.3") {
-            VStack(alignment: .leading, spacing: 14) {
-                if enabled {
-                    // Disable — confirm-gated. Names what will happen.
-                    MutationButton(
-                        title: "Disable Autodown",
-                        systemImage: "pause.circle",
-                        destructive: false,
-                        prompt: "Disable autodown? The serving layer is NOT restarted (use Wake to bring it up).",
-                        run: {
-                            let result = try await client.autodownDisable()
-                            await reloadAfterMutation()
-                            return result.message ?? "Autodown disabled."
-                        }
-                    )
+        // Only show actionable controls once we actually KNOW the current
+        // enabled state. Before a status value has arrived (loading / idle /
+        // failed-with-no-fallback) `value?.enabled` is nil, which would drop us
+        // into the ENABLE branch and show a misleading "Enable Autodown" set
+        // on an already-armed cluster — the operator's most-used surface, and
+        // every visit flashes the wrong controls at the start of a load.
+        if let value {
+            let enabled = value.enabled == true
+            HSSectionCard(title: "Controls", systemImage: "slider.horizontal.3") {
+                VStack(alignment: .leading, spacing: 14) {
+                    if enabled {
+                        // Disable — confirm-gated. Names what will happen.
+                        MutationButton(
+                            title: "Disable Autodown",
+                            systemImage: "pause.circle",
+                            destructive: false,
+                            prompt: "Disable autodown? The serving layer is NOT restarted (use Wake to bring it up).",
+                            run: {
+                                let result = try await client.autodownDisable()
+                                await reloadAfterMutation()
+                                return result.message ?? "Autodown disabled."
+                            }
+                        )
 
-                    // Wake — confirm-gated; enters the polling "waking" state.
-                    MutationButton(
-                        title: "Wake Now",
-                        systemImage: "bolt.circle",
-                        destructive: false,
-                        prompt: "Force-wake the serving layer now? This starts every serving unit and can take up to ~9 minutes.",
-                        run: {
-                            let result = try await client.autodownWake()
-                            beginWaking(result)
-                            return result.message ?? "Wake initiated."
-                        }
-                    )
+                        // Wake — confirm-gated; enters the polling "waking" state.
+                        MutationButton(
+                            title: "Wake Now",
+                            systemImage: "bolt.circle",
+                            destructive: false,
+                            prompt: "Force-wake the serving layer now? This starts every serving unit and can take up to ~9 minutes.",
+                            run: {
+                                let result = try await client.autodownWake()
+                                beginWaking(result)
+                                return result.message ?? "Wake initiated."
+                            }
+                        )
 
-                    // Cancel — confirm-gated.
-                    MutationButton(
-                        title: "Cancel Teardown",
-                        systemImage: "xmark.circle",
-                        destructive: true,
-                        prompt: "Cancel an in-progress autodown teardown? Any stop already issued stays stopped.",
-                        run: {
-                            let result = try await client.autodownCancel()
-                            await reloadAfterMutation()
-                            return result.message ?? "Cancel requested."
+                        // Cancel — confirm-gated.
+                        MutationButton(
+                            title: "Cancel Teardown",
+                            systemImage: "xmark.circle",
+                            destructive: true,
+                            prompt: "Cancel an in-progress autodown teardown? Any stop already issued stays stopped.",
+                            run: {
+                                let result = try await client.autodownCancel()
+                                await reloadAfterMutation()
+                                return result.message ?? "Cancel requested."
+                            }
+                        )
+                    } else {
+                        // Enable — confirm-gated, with an idle-minutes picker and a
+                        // force toggle. The confirmation names what enabling does.
+                        Picker("Idle minutes", selection: $idleMinutes) {
+                            ForEach(idleOptions, id: \.self) { m in
+                                Text("\(m) min").tag(m)
+                            }
                         }
-                    )
-                } else {
-                    // Enable — confirm-gated, with an idle-minutes picker and a
-                    // force toggle. The confirmation names what enabling does.
-                    Picker("Idle minutes", selection: $idleMinutes) {
-                        ForEach(idleOptions, id: \.self) { m in
-                            Text("\(m) min").tag(m)
-                        }
+                        .pickerStyle(.menu)
+
+                        Toggle("Force (override cron guard)", isOn: $force)
+                            .font(.subheadline)
+
+                        MutationButton(
+                            title: "Enable Autodown",
+                            systemImage: "play.circle",
+                            prompt: "Enable autodown\(force ? " (forced)" : "") with a \(idleMinutes)-min idle limit? The cluster will power down after \(idleMinutes) min idle.",
+                            run: {
+                                let result = try await client.autodownEnable(idleMinutes: idleMinutes, force: force)
+                                await reloadAfterMutation()
+                                return result.message ?? "Autodown enabled (\(idleMinutes) min)."
+                            }
+                        )
                     }
-                    .pickerStyle(.menu)
-
-                    Toggle("Force (override cron guard)", isOn: $force)
-                        .font(.subheadline)
-
-                    MutationButton(
-                        title: "Enable Autodown",
-                        systemImage: "play.circle",
-                        prompt: "Enable autodown\(force ? " (forced)" : "") with a \(idleMinutes)-min idle limit? The cluster will power down after \(idleMinutes) min idle.",
-                        run: {
-                            let result = try await client.autodownEnable(idleMinutes: idleMinutes, force: force)
-                            await reloadAfterMutation()
-                            return result.message ?? "Autodown enabled (\(idleMinutes) min)."
-                        }
-                    )
                 }
             }
         }
