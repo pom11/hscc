@@ -6,11 +6,16 @@ confirm-gated apply with post-apply reload polling. Apply is destructive, so
 gating and feedback are the crux.
 
 ## Verdict
-View is sound end-to-end. The one CLEARLY-broken defect was the error state's
-"Pull to retry" copy advertising a gesture that did not exist (no `.refreshable`)
-— FIXED. Everything else is verified-good or a deliberate non-fix (documented
-below). The destructive apply is double-gated (confirm sheet in UI + HTTP 409
-`confirm_required` server-side) — both gates proven live.
+View is sound end-to-end. Two clearly-broken defects found and FIXED:
+(1) the error state's "Pull to retry" copy advertising a gesture that did not
+exist (no `.refreshable`); (2) the post-apply reload's `verify` feed would
+**never decode** on this live fleet because `HealthCheck.ok` was modeled as a
+non-optional `Bool` while the server emits `ok: null` for an unverifiable check
+— that abort silently forced every apply to the `.degraded` banner after 9
+minutes even on success. Both fixed and proven live. Everything else is
+verified-good or a deliberate non-fix (documented below). The destructive apply
+is double-gated (confirm sheet in UI + HTTP 409 `confirm_required`
+server-side) — both gates proven live.
 
 Addresses redacted to placeholders (`100.64.0.1` tailnet host; LAN nodes → `10.0.0.x`).
 Real IPs seen in live data (`192.168.88.x`) are deliberately NOT reproduced here.
@@ -37,7 +42,8 @@ GET /v1/template/preview/4node-dual-dsv4 → speak "Preview: 5 changes."
                                     5 changes (write/write/update/create/provision)
                                     3 routing consumers (delegation, compaction,
                                     auxiliaries) + routing_untouched: []
-GET /v1/verify                   → ok: true, 6 checks all ok
+GET /v1/verify                   → ok: true, 9 checks (incl. api_routes:
+                                    ok=null — "unverifiable", see §4)
 ```
 
 Every field the view reads decodes from the real server shape:
@@ -120,6 +126,20 @@ on healthy return → `.applied` banner "…applied — the fleet is back up."
 On failure/timeout → `.degraded(<message>)` banner in red. Real, visible feedback.
 `onDisappear` cancels the poll (86), `onApplied` lets the parent list refresh (142).
 
+**BUG FOUND + FIXED here (HIGH):** `client.verify()` (155) decodes the whole
+`/v1/verify` into `HealthResponse` (typealias `VerifyResponse`, Models.swift:684),
+whose per-check `HealthCheck.ok` was declared a **non-optional `Bool`**
+(Models.swift:68). The live server emits `ok: null` for the `api_routes` check —
+a DOCUMENTED tri-state (`bool|None`, verify.py:3-4): `null` = "could not be
+verified, not a pass, not a hard fail". With `ok: Bool`, that single null
+aborted decoding of the ENTIRE verify response → `pollReload`'s `catch`
+swallowed the throw → the `healthy` check never ran → poll ran the full 9 min →
+every apply surfaced `.degraded("the fleet hasn't confirmed it's back up")`
+EVEN ON SUCCESS. Proven: `live_decode_check.sh` showed `v1_verify` + `v1_health`
+both FAIL (typeMismatch Bool/null) BEFORE; `33/33` AFTER the fix.
+Fixed by `HealthCheck.ok: Bool?` + a tri-state `HealthCheckIndicator`
+(Models.swift:66-77, Views/HealthCheckIndicator.swift).
+
 ## 5. OBSERVATION — VERIFIED (no re-render bug)
 
 All state is `@State` value types (LoadState enum + bools + phase) — **no
@@ -155,8 +175,16 @@ caption/subheadline scale, no fixed heights. Low risk.
    Error state (206) said pull to retry; the ScrollView had no `.refreshable`.
    Added one (TemplateDetailView.swift:86-90) that re-fetches only the read-only
    preview, never a re-apply — matching the sibling-view pattern.
-   Proof: `build_check.sh` → `full compile clean, 0 warnings`; change is the
-   only delta from `dev` (verified `git diff dev --name-only`).
+   Proof: `build_check.sh` → `full compile clean, 0 warnings`.
+
+2. **`HealthCheck.ok` tri-state — verify/health decode abort (CLEARLY BROKEN).**
+   Modeled `HealthCheck.ok` as `Bool?` (Models.swift:68), matching the server's
+   documented `bool|None` contract. Added `HealthCheckIndicator.swift`
+   (nil → `questionmark.circle.fill` + `Semantic.neutral`, so an unverified check
+   is never conflated with a red fail). Updated the two check-list consumers
+   (OpsView.swift, FleetView.swift) to render the tri-state.
+   Proof: `live_decode_check.sh` 31/33 → **33/33** (v1_verify + v1_health were the
+   two failing routes); `build_check.sh` 0 warnings across all 4 targets.
 
 ## Deliberate non-fixes (why)
 1. **No offline/stale fallback for preview.** The preview is a point-in-time
@@ -171,24 +199,30 @@ caption/subheadline scale, no fixed heights. Low risk.
    case that does not occur in the fleet. Not worth it now.
 
 ## Findings ranked (by how likely the operator hits it)
-1. **HIGH — was: "Pull to retry" dead copy** (error state advertised a gesture
+1. **HIGH — verify/health decode abort broke post-apply reload** (`HealthCheck.ok`
+   modeled as non-optional `Bool` while the server emits `ok: null` for an
+   unverifiable `api_routes` check) → **FIXED**. Consequence was every apply —
+   even a successful one — degrading after 9 min. Proven live: live_decode_check
+   31/33 → 33/33. Files: Models.swift:68, Views/HealthCheckIndicator.swift.
+2. **HIGH — was: "Pull to retry" dead copy** (error state advertised a gesture
    that didn't exist) → **FIXED** (add `.refreshable`, TemplateDetailView.swift:86).
-   This was the one bug a real-device tester would hit as soon as a preview fetch
-   failed.
-2. **LOW — `routing_untouched` never rendered** (Models.swift:945 decoded,
+   A real-device tester would hit this as soon as a preview fetch failed.
+3. **LOW — `routing_untouched` never rendered** (Models.swift:945 decoded,
    previewContent:225-256 drops it). Live `[]` → zero current impact. Deliberate
    non-fix.
-3. **LOW — no offline fallback for preview.** Deliberate non-fix (destructive
+4. **LOW — no offline fallback for preview.** Deliberate non-fix (destructive
    surface should show live truth or a clear failure, not stale dry-run).
-4. **INFORMATIONAL — topology shape is approximate** (TemplateTopologyView.swift).
+5. **INFORMATIONAL — topology shape is approximate** (TemplateTopologyView.swift).
    Self-documented; exact split shown in preview details. Not a bug.
 
 ## Evidence commands (all executed)
 - `hscc api status | sed -n 's/.*Listening: *\([0-9.]*:[0-9]*\).*/http:\/\/\1/p'` — derived host
 - `curl GET /v1/template/list|status|preview/…|verify` — live values above
 - `curl -X POST /v1/template/apply` without/with `confirm:false` → HTTP 409s (gate proof)
-- `bash ios-app/scripts/build_check.sh` → `full compile clean, 0 warnings`
+- `bash ios-app/scripts/build_check.sh` → `full compile clean, 0 warnings` (all 4 targets, before + after fixes)
 - `bash ios-app/scripts/model_decode_check.sh` → `ALL DECODE CHECKS PASSED — 48/48`
+- `bash ios-app/scripts/capture_live.sh` → captured 33 real GET routes (read-only; live_captures/ is gitignored)
+- `bash ios-app/scripts/live_decode_check.sh` → **33/33 populated** (was 31/33 before the `HealthCheck.ok` fix; v1_verify + v1_health were the 2 failures)
 - `bash ios-app/scripts/check_sources.sh` → `sources in sync: 62 Swift files`
 
 ## Proof vs reasoning
