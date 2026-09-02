@@ -63,9 +63,14 @@ struct ClusterHostsResponse: Decodable, Speakable {
 }
 
 /// GET /v1/health — one fleet check entry.
+///
+/// `ok` is the server's documented TRI-STATE (`bool | None`): `true` = pass,
+/// `false` = hard fail, `nil` = could not be verified (not a pass, not a fail).
+/// It must be Optional or a single unverified check (e.g. `api_routes` racing
+/// a repo-tree absence) fails the decode of the WHOLE health/verify response.
 struct HealthCheck: Decodable, Identifiable {
     let name: String
-    let ok: Bool
+    let ok: Bool?
     let detail: String?
 
     var id: String { name }
