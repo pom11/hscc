@@ -62,7 +62,10 @@ The single most useful check. It found the outage that made the app look dead:
 
 ```
 TOK=$(cat ~/.hscc/api-token | tr -d '\n')
-curl -s -X POST http://100.115.243.3:8788/v1/orchestrator/chat \
+# Derive the host — never paste it. This repo is public, and a hardcoded
+# address here is how the real tailnet IP reached origin twice.
+API=$(python3 -c "import json,os;d=json.load(open(os.path.expanduser('~/.hscc/api.json')));print('http://%s:%s'%(d['host'],d['port']))")
+curl -s -X POST "$API/v1/orchestrator/chat" \
   -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
   -d '{"project":"hscc","prompt":"Reply with exactly: alive","confirm":true}'
 # then poll /v1/orchestrator/chat/<job_id> until status is done
