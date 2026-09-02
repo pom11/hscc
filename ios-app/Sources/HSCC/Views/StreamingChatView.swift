@@ -52,8 +52,13 @@ struct StreamingChatView: View {
                 ScrollView {
                     LazyVStack(spacing: Theme.Spacing.md.rawValue) {
                         if store.rows.isEmpty {
-                            emptyState
-                                .padding(.top, 64)
+                            if case .failed = store.phase {
+                                failedState
+                                    .padding(.top, 64)
+                            } else {
+                                emptyState
+                                    .padding(.top, 64)
+                            }
                         } else {
                             ForEach(store.rows) { row in
                                 rowView(row)
@@ -220,6 +225,32 @@ struct StreamingChatView: View {
         }
     }
 
+    /// Distinct state for a stream that COULD NOT load — shown instead of the
+    /// live-chat invite so a failure never masquerades as an idle, working
+    /// chat. The banner repeats the reason, but the body here makes the dead
+    /// state unmistakable (the two must not look the same).
+    private var failedState: some View {
+        VStack(spacing: Theme.Spacing.sm.rawValue) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.largeTitle)
+                .foregroundColor(Theme.Semantic.bad)
+            Text("Couldn't connect to the session stream")
+                .font(.headline)
+            if case .failed(let reason) = store.phase {
+                Text(reason)
+                    .font(.footnote)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+            }
+            Text("Check Settings → Host, Port, and Token, then pull to reconnect.")
+                .font(.footnote)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+        }
+    }
+
     // MARK: - Composer (confirm-gated)
 
     private var composer: some View {
@@ -239,6 +270,7 @@ struct StreamingChatView: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(!canSend)
+            .accessibilityLabel("Send")
         }
         .confirmationDialog(confirmTitle, isPresented: $showConfirm, titleVisibility: .visible) {
             Button(store.phase == .connected ? "Send" : "Send anyway") {
