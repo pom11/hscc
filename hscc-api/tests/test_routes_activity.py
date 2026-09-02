@@ -161,6 +161,29 @@ _A_CARD = {
     "started_at": "2026-08-29T10:00:00+00:00",
 }
 
+# Two more running cards (distinct assignees) for feed-saturation tests.
+_B_CARD = {
+    "board": "hscc",
+    "id": "t_def",
+    "title": "fix the API",
+    "assignee": "backend-engineer",
+    "status": "running",
+    "pid": 2345,
+    "host_local": True,
+    "started_at": "2026-08-29T11:00:00+00:00",
+}
+
+_C_CARD = {
+    "board": "hscc",
+    "id": "t_ghi",
+    "title": "tune the cluster",
+    "assignee": "orchestrator",
+    "status": "running",
+    "pid": 3456,
+    "host_local": False,
+    "started_at": "2026-08-29T12:00:00+00:00",
+}
+
 
 # --------------------------------------------------------------------------- #
 # GET /v1/activity/feed
@@ -253,8 +276,38 @@ def test_feed_limit_caps_entries(running, token, fake_backing):
     status, payload = _request(running, token, "GET",
                                "/v1/activity/feed?limit=3")
     assert status == 200
-    assert payload["count"] <= 3
-    assert len(payload["entries"]) <= 3
+    # `limit` caps TOOL-CALL entries only; the single running row is always
+    # present, so count = 1 running + <=3 tool = <= 4.
+    assert payload["count"] <= 4
+    assert len(payload["entries"]) <= 4
+    assert len([e for e in payload["entries"] if e["kind"] == "running"]) == 1
+
+
+def test_feed_running_rows_survive_limit_cap(running, token, fake_backing):
+    """A saturated timeline must not truncate running rows.
+
+    Regression for the on-screen count disagreement: ``speak``/``running_count``
+    count all running tasks, so if ``limit`` could drop the "running" rows the
+    operator would see a header claiming "N running tasks" next to a list with
+    fewer (or zero) Running badges. Every running row must always be present.
+    """
+    # 3 running cards; each profile floods the timeline with tool calls so the
+    # cap would previously have pushed all running rows off the page.
+    cards = [_A_CARD, _B_CARD, _C_CARD]
+    fake_backing.set_tasks(cards)
+    for card in cards:
+        db = _fake_db_with_tools(
+            *[dict(tool_name=f"tool_{i}", timestamp=float(1000 + i))
+              for i in range(20)],
+        )
+        fake_backing.set_db(card["assignee"], db)
+    status, payload = _request(running, token, "GET",
+                               "/v1/activity/feed?limit=10")
+    assert status == 200
+    visible_running = [e for e in payload["entries"] if e["kind"] == "running"]
+    # Every running card's row is present, so running_count never over-states
+    # what the operator actually sees.
+    assert len(visible_running) == payload["running_count"] == 3
 
 
 def test_feed_limit_bad_400(running, token, fake_backing):
