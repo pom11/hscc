@@ -33,6 +33,19 @@ final class SessionActivityDriver {
     private var project: String?
     private var activityCount = 0
 
+    /// Belt-and-suspenders for the view-owner teardown: if this driver is
+    /// released while an activity is live (the StreamingChatView that owns it
+    /// is torn down), end the activity rather than leave an orphaned bubble.
+    /// `onDisappear` normally handles it, but is not guaranteed to fire before
+    /// the owner dies; releasing the `Activity` object does NOT end it.
+    deinit {
+        if let activity = current {
+            Task { @MainActor in
+                await activity.end(nil, dismissalPolicy: .immediate)
+            }
+        }
+    }
+
     /// Reflect a new snapshot of the foreground project's live session.
     ///
     /// - Parameters:
