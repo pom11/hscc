@@ -74,10 +74,17 @@ struct NodeTopologyView: View {
     }
 
     /// The bond between the pair's two nodes.
+    /// A fixed 12pt width (matching the widget's `miniPair` link) so the
+    /// connector is a short `●──●` element as the design intends. Without a
+    /// width, the Rectangle is flexible and stretches to fill whatever space
+    /// the HStack offers — measured 36pt at iPhone-SE width and 170pt in a
+    /// wide container (see ios-app/docs/nodetopologyview-audit.md), which
+    /// visually pulls each pair's dots far apart and defeats the compact
+    /// legible-at-a-glance intent.
     private var pairLink: some View {
         Rectangle()
             .fill(Theme.Palette.mist.opacity(0.5))
-            .frame(height: 2)
+            .frame(width: 12, height: 2)
     }
 
     private var accessibilitySummary: String {
