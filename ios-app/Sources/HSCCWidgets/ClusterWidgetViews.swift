@@ -150,13 +150,13 @@ struct MediumClusterWidget: View {
         }
     }
 
-    private func miniPair(_ pair: TopologyPair) -> some View {
+    private func miniPair(_ pair: TopologyPair, dimmed: Bool = false) -> some View {
         HStack(spacing: 4) {
-            dot(pair.nodes[0])
+            dot(pair.nodes[0], dimmed: dimmed)
             Rectangle()
                 .fill(Theme.Palette.mist.opacity(0.5))
                 .frame(width: 12, height: 2)
-            dot(pair.nodes[1])
+            dot(pair.nodes[1], dimmed: dimmed)
         }
         .overlay(alignment: .bottom) {
             Text(pair.role)
@@ -167,14 +167,14 @@ struct MediumClusterWidget: View {
         .padding(.bottom, 6)
     }
 
-    private func dot(_ node: TopologyNode) -> some View {
+    private func dot(_ node: TopologyNode, dimmed: Bool = false) -> some View {
         HStack(spacing: 3) {
             Circle()
-                .fill(node.state.color)
+                .fill(dimmed ? Theme.Palette.mist.opacity(0.55) : node.state.color)
                 .frame(width: 8, height: 8)
             Text(node.label)
                 .font(.hsccMono(10, weight: .semibold))
-                .foregroundColor(Theme.Semantic.onSurface)
+                .foregroundColor(dimmed ? Theme.Semantic.onSurfaceMuted : Theme.Semantic.onSurface)
         }
     }
 
@@ -219,7 +219,7 @@ struct MediumClusterWidget: View {
             if !entry.pairs.isEmpty {
                 HStack(spacing: 16) {
                     ForEach(entry.pairs) { pair in
-                        miniPair(pair)
+                        miniPair(pair, dimmed: true)
                     }
                     Spacer(minLength: 0)
                 }
