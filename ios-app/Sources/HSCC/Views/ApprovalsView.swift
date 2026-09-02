@@ -178,6 +178,10 @@ struct ApprovalsView: View {
             .font(.caption)
             .buttonStyle(.borderless)
             .foregroundColor(Theme.Semantic.ok)
+            // A11Y: each row has its own Allow; VoiceOver reads the bare label
+            // "Allow" identically for every row and the user can't tell which
+            // card a given button acts on. Name the card so the two are linked.
+            .accessibilityLabel("Allow \(card.displayTitle)")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
