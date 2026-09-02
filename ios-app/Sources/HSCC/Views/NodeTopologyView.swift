@@ -82,7 +82,9 @@ struct NodeTopologyView: View {
 
     private var accessibilitySummary: String {
         pairs.map { pair in
-            "\(pair.role): \(pair.nodes[0].label) paired with \(pair.nodes[1].label)"
+            let nodes = pair.nodes.map { "\($0.label) (\($0.state.rawValue))" }
+                .joined(separator: " paired with ")
+            return "\(pair.role): \(nodes)"
         }.joined(separator: ", ")
     }
 }

@@ -425,6 +425,7 @@ struct StaleBanner: View {
             Spacer(minLength: 0)
             Button(action: retry) {
                 Image(systemName: "arrow.clockwise")
+                    .accessibilityLabel("Retry")
             }
             .buttonStyle(.borderless)
             .foregroundColor(Theme.Semantic.onSurfaceMuted)
