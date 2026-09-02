@@ -30,6 +30,24 @@ final class LiveActivityManager {
     /// When the current wake started — drives the enforced elapsed-time gauge.
     private var wakeStart = Date()
 
+    /// The operator can leave the Autodown screen (or the app) mid-wake; the
+    /// wake can take ~9 minutes. If this manager is torn down while a wake is
+    /// live — the view that owns it (@State in AutodownView) is popped and the
+    /// polling Task holds `[weak self]`, so it dies with us — an ActivityKit
+    /// activity that is not ended keeps an orphaned, never-updated bubble on
+    /// the Lock Screen/Dynamic Island ("started and never ended"). Releasing
+    /// the `Activity` object does NOT end it. So end it from `deinit` (an
+    /// `onDisappear` can't be relied on — TabViews and nav pops fire it at
+    /// unpredictable times, and SwiftUI may destroy the view before `end`
+    /// reaches the system).
+    deinit {
+        if let activity = current {
+            Task { @MainActor in
+                await activity.end(nil, dismissalPolicy: .immediate)
+            }
+        }
+    }
+
     /// Begin tracking a wake. Starts a Live Activity and polls the API until
     /// the autodown state leaves "waking", then ends with success/failure.
     ///
