@@ -73,12 +73,29 @@ _NODE_RE = re.compile(r"^memory:(memory|profile):(\d+)$")
 def _memory_dir(profile: str) -> Path | None:
     """Return the profile's memories dir, or None if the profile has none.
 
+    Resolves the profile dir through ``hermes_cli.profiles`` — the same robust
+    resolver ``routes_sessions`` uses — rather than ``_hermes_profiles_dir``.
+    ``_hermes_profiles_dir`` honors a leaked ``HERMES_HOME`` env (the live API
+    process runs with ``HERMES_HOME`` pointing at the orchestrator's own
+    profile dir), which would resolve every profile's memory to a non-existent
+    path and render the Memories screen empty for every profile. The
+    ``hermes_cli.profiles`` resolver instead anchors on the real default home
+    (``hermes_constants.get_default_hermes_root``), matching sessions.
+
     A profile that doesn't exist (or has no memories dir) yields None rather
     than raising, so the read path degrades to an honest empty list instead of
-    leaking a filesystem error. Mirrors ``_hermes_profiles_dir`` resolution.
+    leaking a filesystem error.
     """
-    d = _profiles._hermes_profiles_dir() / profile / "memories"
-    return d if d.is_dir() else None
+    try:
+        from hermes_cli import profiles as profiles_mod
+        canon = profiles_mod.normalize_profile_name(profile)
+        profiles_mod.validate_profile_name(canon)
+        if not profiles_mod.profile_exists(canon):
+            return None
+        d = Path(profiles_mod.get_profile_dir(canon)) / "memories"
+        return d if d.is_dir() else None
+    except Exception:
+        return None
 
 
 def _parse_entries(raw: str) -> list[str]:
