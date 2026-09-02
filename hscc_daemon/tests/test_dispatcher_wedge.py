@@ -139,7 +139,8 @@ def _capture(boards, cap=None):
     return dw._capture_kanban(kanban_db=kb, max_in_progress=cap)
 
 
-def _run_detect(boards, cap=None, n=None, now=0.0, writes=None):
+def _run_detect(boards, cap=None, n=None, now=0.0, writes=None,
+                per_profile=1_000_000):
     """Run one probe pass with injectables; return (ok, written_stream)."""
     if n is not None:
         old = dw.DISPATCHER_DETECT_TICKS
@@ -149,8 +150,12 @@ def _run_detect(boards, cap=None, n=None, now=0.0, writes=None):
     captured = {}
     def wf(name, data):
         captured[name] = data
+    # per_profile defaults to effectively-unlimited so existing cases keep
+    # testing the GLOBAL cap only, and none of them read the operator's live
+    # config.
     ok = dw.check_dispatcher_wedge(
-        kanban_db=kb, max_in_progress=cap, now=now, write_state_fn=wf)
+        kanban_db=kb, max_in_progress=cap, now=now, write_state_fn=wf,
+        max_per_profile=per_profile)
     if n is not None:
         dw.DISPATCHER_DETECT_TICKS = old
     return ok, captured.get("dispatcher")
@@ -213,6 +218,52 @@ class TestAtCapacityIsNotAStall:
         assert ok is False
         assert stream["ok"] is False
 
+
+
+class TestPerProfileCapIsNotAStall:
+    """A board with GLOBAL room can still be legitimately unable to spawn.
+
+    Observed live: board running=5 under a global cap of 6, every ready task
+    assigned to ios-engineer which was at its per-profile cap of 3. The
+    detector looked only at the global cap, saw room, saw nothing spawn, and
+    declared "GENUINE STALL" every 5 seconds against a perfectly healthy
+    dispatcher.
+    """
+
+    def test_all_waiting_profiles_capped_stays_green(self):
+        # 3 running + 2 ready, all one profile. Global cap 6 => room.
+        # Per-profile cap 3 => that profile cannot spawn. Not a stall.
+        boards = {"default": [RUNNING] * 3 + [READY] * 2}
+        ok, stream = _run_detect(boards, cap=6, n=1, per_profile=3)
+        assert ok is True, "per-profile-capped must never go red"
+        assert stream["ok"] is True
+        assert stream["roomy_spawnable"] == []
+        assert stream["at_capacity"] == ["default"]
+
+    def test_capped_stays_green_across_many_ticks(self):
+        boards = {"default": [RUNNING] * 3 + [READY] * 2}
+        for t in range(8):
+            ok, _ = _run_detect(boards, cap=6, n=1, now=t * 60.0, per_profile=3)
+            assert ok is True, f"tick {t} must stay green"
+        assert dw._detector["declared"] is False
+
+    def test_an_uncapped_profile_with_work_is_still_a_stall(self):
+        """The fix must not mask a real wedge.
+
+        worker-a is at its cap, but worker-b has ready work and nothing
+        running — that IS spawnable, so a genuine stall must still be caught.
+        """
+        boards = {"default": [RUNNING] * 3 + [READY] + [("ready", "worker-b")]}
+        ok, stream = _run_detect(boards, cap=6, n=1, per_profile=3)
+        assert ok is False, "a profile under its cap with ready work is a stall"
+        assert stream["ok"] is False
+        assert stream["roomy_spawnable"] == ["default"]
+
+    def test_no_per_profile_cap_behaves_as_before(self):
+        boards = {"default": [RUNNING] * 3 + [READY] * 2}
+        ok, stream = _run_detect(boards, cap=6, n=1, per_profile=None)
+        assert ok is False, "without a per-profile cap this is the old stall"
+        assert stream["roomy_spawnable"] == ["default"]
 
 class TestNoSpawnableWorkIsNotAStall:
     def test_no_ready_work_goes_green(self):
