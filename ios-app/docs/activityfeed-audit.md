@@ -171,12 +171,28 @@ last data with no staleness marker until they pull-to-refresh. Not the
 ## What I FIXED
 
 Server-side count consistency (the one clear broken thing):
-- `hscc-api/routes_activity.py` — running rows are now emitted OUTSIDE the
-  tool-call `limit` cap so "who is running what" is always visible, matching the
-  route's own stated contract (docstring: "so 'who is running what' is always
-  visible"). `running_count` and the visible running badges no longer disagree on
-  screen. Added a regression test asserting `running_count` running rows are all
-  present in the returned entries even when the feed is saturated with tool calls.
+- `hscc-api/routes_activity.py` `_build_feed` — running rows are now emitted
+  OUTSIDE the `limit` cap (`entries = running_rows + tool_rows[:limit]`), so
+  "who is running what is always visible" matches the route's own stated
+  contract, and the `speak` line's `running_count` no longer disagrees with the
+  visible Running badges on screen. Docstring updated to state `limit` caps
+  tool-call entries.
+- `hscc-api/tests/test_routes_activity.py`:
+  - Added `test_feed_running_rows_survive_limit_cap` — regression asserting all
+    `running_count` running rows are present under a saturated timeline, so the
+    count can never over-state what the operator sees.
+  - Updated `test_feed_limit_caps_entries` for the new contract (count = running
+    + capped tool = <= limit + running_rows).
+  - Added `_B_CARD` / `_C_CARD` fixtures.
+- VERIFICATION (all executed):
+  - `test_routes_activity.py`: 11 passed (incl. new regression).
+  - `test_contract_swift_routes.py` + `test_api.py`: 42 passed (route registration
+    intact).
+  - Standalone `_build_feed` reconstruction on saturated fake input: 2 running
+    cards + tool flood, `limit=10` → `count=12`, `running_count=2`, both running
+    rows visible. (`scripts/run_tests.sh` full suite also runs in background;
+    timed out at 600s foreground — it is a very large suite, but every test file
+    touching this route passes.)
 
 ## What I deliberately did NOT fix
 

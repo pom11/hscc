@@ -18,7 +18,10 @@ sessions) and the ``card_id`` (to open that card) plus the ``session_id``.
 Contract:
 
   * ``GET /v1/activity/feed?limit=N`` — the feed, newest first. ``limit`` caps
-    the number of returned entries (default 50, max 200). Read-only (no
+    the number of returned TOOL-CALL entries (default 50, max 200). Running
+    rows are never truncated by ``limit`` — every running card is always in the
+    timeline, so the on-screen ``speak``/``running_count`` never contradicts the
+    visible list. Read-only (no
     ``confirm``). Always carries a top-level ``speak`` (design §B).
   * Two kinds of entry, both in one timeline:
       * ``kind = "running"``  — a worker is on a card (from the running-task
@@ -221,7 +224,18 @@ def _build_feed(running_tasks: list, limit: int) -> dict:
     # Sort by (has_timestamp, timestamp-string) descending so a missing
     # timestamp sinks to the bottom rather than bubbling to the top.
     entries.sort(key=lambda e: _norm_sort(e.get("at")), reverse=True)
-    entries = entries[:limit]
+
+    # `limit` caps TOOL-CALL entries only. A "running" row is one per running
+    # card and cheap; it must ALWAYS survive the cap. Otherwise a saturated
+    # timeline (many tool calls) truncates the running rows, and the on-screen
+    # `speak` ("N running tasks") — which counts ALL running tasks, see
+    # `running_count` below — contradicts the visible list (fewer Running
+    # badges). Keeping every running row preserves the route's stated contract:
+    # "who is running what is always visible".
+    tool_rows = [e for e in entries if e.get("kind") != "running"][:limit]
+    running_rows = [e for e in entries if e.get("kind") == "running"]
+    entries = running_rows + tool_rows
+    entries.sort(key=lambda e: _norm_sort(e.get("at")), reverse=True)
 
     profiles = sorted(by_profile.keys())
     return {
