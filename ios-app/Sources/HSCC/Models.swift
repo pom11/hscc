@@ -185,6 +185,13 @@ struct CardDetailResponse: Decodable, Speakable {
     let id: String
     let title: String?
     let status: String?
+    /// Full card description. The API returns it (live-checked 2026-09: the
+    /// detail endpoint carries `body`, `assignee`, `board` beyond the four
+    /// fields the detail view originally declared). OPTIONAL so old captures
+    /// still decode; the view drops the row when it is absent.
+    let body: String?
+    let assignee: String?
+    let board: String?
     let speak: String
 }
 

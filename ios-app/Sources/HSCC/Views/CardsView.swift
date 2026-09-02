@@ -25,10 +25,19 @@ struct CardDetailView: View {
                         Label(card.speak, systemImage: "text.bubble")
                             .font(.subheadline)
                     }
+                    if let body = card.body, !body.isEmpty {
+                        Section("Description") {
+                            Text(body)
+                                .font(.hsccMono(13))
+                                .textSelection(.enabled)
+                        }
+                    }
                     Section("Card") {
                         row("ID", value: card.id)
                         row("Title", value: card.title)
                         row("Status", value: card.status)
+                        row("Assignee", value: card.assignee)
+                        row("Board", value: card.board)
                     }
                 }
             } else {
