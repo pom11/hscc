@@ -100,16 +100,18 @@ struct SessionsView: View {
     private func load(_ client: HSCCClient) async {
         let trimmed = profile.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        list = .loading
-        do {
-            list = .loaded(try await client.sessions(profile: trimmed))
-        } catch {
-            list = .failed(errorMessage(for: error))
+        // Only show the explicit spinner on a first load (no value to fall back
+        // to). On a refresh/reload we keep holding the last-known value so a
+        // transient failure can degrade to `.stale` instead of blanking the
+        // screen — the offline-robustness contract (see `Offline.load`).
+        if list.value == nil {
+            list = .loading
         }
-    }
-
-    private func errorMessage(for error: Error) -> String {
-        (error as? HSCCError)?.localizedDescription ?? "Something went wrong."
+        list = await Offline.load(list,
+                                  cacheKey: EndpointPath.sessions,
+                                  client: client) {
+            try await client.sessions(profile: trimmed)
+        }
     }
 
     // MARK: - List
@@ -124,24 +126,15 @@ struct SessionsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             case .failed(let message):
                 errorLabel(message)
-            case .loaded(let state):
+            case .stale(let state, let ageMessage):
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(state.speak)
-                        .font(.subheadline)
-                        .italic()
-                        .foregroundColor(.secondary)
-                    let items = state.sessions ?? []
-                    if items.isEmpty {
-                        emptyLabel("No sessions on this profile.")
-                    } else {
-                        ForEach(items) { session in
-                            sessionRow(client, session)
-                            if session.id != items.last?.id {
-                                Divider()
-                            }
-                        }
+                    StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
+                        Task { await load(client) }
                     }
+                    sessListBody(client, state)
                 }
+            case .loaded(let state):
+                sessListBody(client, state)
             default:
                 EmptyView()
             }
@@ -152,6 +145,28 @@ struct SessionsView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Theme.Semantic.surfaceRaised)
         )
+    }
+
+    /// The rendered session list for a live or stale-last-known response.
+    @ViewBuilder
+    private func sessListBody(_ client: HSCCClient, _ state: SessionsListResponse) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(state.speak)
+                .font(.subheadline)
+                .italic()
+                .foregroundColor(.secondary)
+            let items = state.sessions ?? []
+            if items.isEmpty {
+                emptyLabel("No sessions on this profile.")
+            } else {
+                ForEach(items) { session in
+                    sessionRow(client, session)
+                    if session.id != items.last?.id {
+                        Divider()
+                    }
+                }
+            }
+        }
     }
 
     private func sessionRow(_ client: HSCCClient, _ session: SessionItem) -> some View {
