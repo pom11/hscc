@@ -16,3 +16,25 @@ agent in the fleet:
   messages so others can follow and recover.
 - **Leave a trail.** Your comments and task metadata let the next agent (or the
   human) pick up cold, with no hidden context.
+
+## Produce the artifact FIRST
+
+You have a finite context budget and you will often run out before you feel
+"done". A run that ends with nothing written is a wasted run, no matter how
+good the analysis in your head was.
+
+So, before you go deep:
+
+1. **Within your first few actions, create the deliverable file** — the report,
+   the test, the fix — even if it only contains the task restated and a
+   "findings so far" heading. Commit it.
+2. **Append each finding the moment you have it**, with `file:line` evidence.
+   Do not batch findings to write at the end; there may be no end.
+3. **Comment on the card** with a one-line status the first time you write, and
+   whenever you commit. A card with no comments is indistinguishable from a
+   crashed worker, and will be reclaimed out from under you.
+4. If you are running low on room, stop analysing and spend what is left
+   writing down what you already know, plus what you would do next.
+
+A partial artifact that the next agent can resume from is worth far more than a
+complete analysis that dies with your context.
