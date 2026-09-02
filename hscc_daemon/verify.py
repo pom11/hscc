@@ -592,6 +592,57 @@ def check_profile_endpoints(serving_path=None, profiles_dir=None,
                       f"profiles served by cluster endpoints"}
 
 
+def run_chat_roundtrip():
+    """Deep, OPT-IN check: prove a chat message reaches the model and returns.
+
+    Delegates to ``scripts/verify_chat_roundtrip.py`` — the single operator-grade
+    end-to-end proof (POST /v1/orchestrator/chat → poll to a terminal state →
+    assert a real reply → assert the orchestrator unit's
+    ``vllm:generation_tokens_total`` moved). That distinguishes "the API
+    accepted the message" from "the model actually answered" — the gap that hid
+    the outage where every orchestrator profile pointed at a dead host while the
+    cluster looked idle.
+
+    This is OPT-IN because it fires a real prompt at the live orchestrator and
+    can take up to the chat timeout (~600 s) to complete — far too slow and too
+    invasive for the default fast smoke test. It is invoked by ``hscc verify
+    --chat``. Never raises. Returns the standard ``{name, ok, detail}`` shape,
+    with ``ok`` True only when the full round trip (including the model-token
+    movement) succeeds.
+    """
+    import subprocess
+    import sys as _sys
+
+    script = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "scripts", "verify_chat_roundtrip.py")
+    try:
+        proc = subprocess.run(
+            [_sys.executable, script, "--json"],
+            capture_output=True, text=True, timeout=700)
+    except subprocess.TimeoutExpired:
+        return {"name": "chat_roundtrip", "ok": False,
+                "detail": "chat round trip exceeded 700s budget"}
+    if proc.returncode != 0:
+        try:
+            detail = json.loads(proc.stdout).get("error", "round trip failed")
+        except (json.JSONDecodeError, AttributeError):
+            detail = (proc.stdout or proc.stderr).strip() or "round trip failed"
+        return {"name": "chat_roundtrip", "ok": False, "detail": detail}
+    try:
+        data = json.loads(proc.stdout)
+        return {
+            "name": "chat_roundtrip", "ok": True,
+            "detail": "job %s replied %r, orch generation_tokens %s->%s (+%s), %.1fs"
+                      % (data.get("job_id"), data.get("reply"),
+                         data.get("tokens_before"), data.get("tokens_after"),
+                         data.get("delta"), data.get("elapsed")),
+        }
+    except (json.JSONDecodeError, TypeError):
+        return {"name": "chat_roundtrip", "ok": True,
+                "detail": "round trip succeeded (machine output unparseable)"}
+
+
 def run_all(**overrides):
     """Run all checks, returning aggregated results.
 
