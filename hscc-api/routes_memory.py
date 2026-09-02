@@ -95,6 +95,22 @@ def _memory_dir(profile: str) -> Path | None:
         d = Path(profiles_mod.get_profile_dir(canon)) / "memories"
         return d if d.is_dir() else None
     except Exception:
+        # hermes_cli is not importable from every runtime that serves this
+        # route (the API process runs under its own interpreter). Swallowing
+        # that and returning None made the Memories screen empty for EVERY
+        # profile — the exact symptom this resolver was written to fix, just
+        # with a different cause. Fall back to the default Hermes root
+        # computed directly, deliberately NOT honouring $HERMES_HOME, since a
+        # leaked HERMES_HOME pointing at the orchestrator's own profile dir is
+        # the original bug.
+        pass
+    try:
+        canon = profile.strip().lower()
+        if not canon or "/" in canon or canon.startswith("."):
+            return None
+        d = Path(os.path.expanduser("~/.hermes/profiles")) / canon / "memories"
+        return d if d.is_dir() else None
+    except Exception:
         return None
 
 
