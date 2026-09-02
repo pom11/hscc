@@ -26,6 +26,8 @@ struct StreamingChatView: View {
     let project: String
 
     @EnvironmentObject private var settings: SettingsStore
+    @EnvironmentObject private var unread: ProjectUnreadCenter
+    @EnvironmentObject private var replyWatcher: StreamReplyWatcher
     @StateObject private var store: StreamingChatStore
     @State private var showConfirm = false
     /// Drives the session Live Activity (lock screen / Dynamic Island mirror
@@ -91,11 +93,19 @@ struct StreamingChatView: View {
                 .padding(.vertical, Theme.Spacing.sm.rawValue)
         }
         .onAppear {
+            // Opening this chat declares it the reading project (suppresses
+            // badging a reply that lands while it is on screen) and clears any
+            // badge that was waiting. Wire the live-stream watermark to the
+            // shared watcher so replies seen here are never re-badged later.
+            unread.setReading(project)
+            unread.markRead(project: project)
             startStream()
         }
         .onDisappear {
             store.persistDraft()
             store.stop()
+            // No longer reading this chat — a reply that lands now must badge.
+            unread.setReading(nil)
             // Leaving the live chat ends the lock-screen mirror.
             sessionActivity.end()
         }
@@ -122,6 +132,9 @@ struct StreamingChatView: View {
         let s = StreamSettings(host: settings.host, port: port,
                                token: settings.token ?? "",
                                isConfigured: settings.isConfigured)
+        store.onEvent = { [weak replyWatcher] seq in
+            replyWatcher?.noteSeen(project: project, seq: seq)
+        }
         Task { await store.start(settings: s) }
     }
 

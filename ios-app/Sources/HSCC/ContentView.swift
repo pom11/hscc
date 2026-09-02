@@ -18,6 +18,7 @@ import SwiftUI
 /// colors that adapt to light/dark automatically.
 struct ContentView: View {
     @EnvironmentObject private var settings: SettingsStore
+    @EnvironmentObject private var replyWatcher: StreamReplyWatcher
     @State private var selectedTab: Tab = .projects
     @State private var pingState: PingState = .idle
     @StateObject private var approvals = ApprovalPoller()
@@ -53,10 +54,12 @@ struct ContentView: View {
             // Probe once at launch so the banner reflects reality immediately.
             refreshConnection()
             approvals.setClient(makeClient())
+            replyWatcher.setClient(makeClient())
         }
         .onChange(of: settings.connectionIdentity) {
             refreshConnection()
             approvals.setClient(makeClient())
+            replyWatcher.setClient(makeClient())
         }
         .onChange(of: settings.appGroupUnavailable) {
             refreshConnection()

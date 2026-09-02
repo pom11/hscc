@@ -16,12 +16,14 @@ import SwiftUI
 struct HSCCApp: App {
     @StateObject private var settings = SettingsStore()
     @StateObject private var unread = ProjectUnreadCenter()
+    @StateObject private var replyWatcher = StreamReplyWatcher(unread: unread)
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(settings)
                 .environmentObject(unread)
+                .environmentObject(replyWatcher)
         }
     }
 }
