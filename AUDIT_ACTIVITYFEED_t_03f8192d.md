@@ -190,9 +190,8 @@ Server-side count consistency (the one clear broken thing):
     intact).
   - Standalone `_build_feed` reconstruction on saturated fake input: 2 running
     cards + tool flood, `limit=10` → `count=12`, `running_count=2`, both running
-    rows visible. (`scripts/run_tests.sh` full suite also runs in background;
-    timed out at 600s foreground — it is a very large suite, but every test file
-    touching this route passes.)
+    rows visible. Full `scripts/run_tests.sh` suite: 672 passed, 1 skipped,
+    ALL GREEN across every package including hscc-api.
 
 ## What I deliberately did NOT fix
 
