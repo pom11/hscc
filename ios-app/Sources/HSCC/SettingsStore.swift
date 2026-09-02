@@ -31,6 +31,14 @@ final class SettingsStore: ObservableObject {
     /// so a saved host/port is never mistaken for a saved CONNECTION — the
     /// token is what makes it usable. Cleared on the next successful write.
     @Published private(set) var tokenSaveFailure: String?
+    /// True when the shared App-Group `UserDefaults` suite could not be
+    /// opened, so `saveCluster` fell back to the app's own `.standard` defaults.
+    /// The main app still reads that fallback (so it looks configured and
+    /// works), but the widget / Live Activity / Siri intents read the shared
+    /// suite directly with NO fallback (see `APIConfig`) and would see
+    /// nothing. Surfaced so a broken App Group never silently strands the
+    /// extended surfaces while the app reports success.
+    @Published private(set) var appGroupUnavailable: Bool
 
     /// The shared suite the extensions read from too.
     ///
@@ -46,6 +54,19 @@ final class SettingsStore: ObservableObject {
 
     init() {
         let defaults = Self.suite
+
+        // Detect a silent App-Group fallback BEFORE seeding state, so the flag
+        // is set on the very first launch even when nothing is saved yet. A
+        // missing suite means the app is about to write to its own `.standard`
+        // defaults while the extensions read the (absent) shared suite.
+        // `containerURL(forSecurityApplicationGroupIdentifier:)` is the
+        // canonical check: it returns nil on a REAL device when the App-Group
+        // entitlement is absent / the container isn't provisioned. (Note: on
+        // macOS it always returns a URL even for an unregistered group, so this
+        // flag cannot be exercised headlessly here — it is a device-only signal;
+        // the headless harness instead proves the identity/save logic.)
+        appGroupUnavailable = FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: AppGroup.suiteName) == nil
 
         // Decode the saved cluster list, tolerating a corrupt/missing value.
         if let raw = defaults.data(forKey: AppGroup.clustersKey),
@@ -112,6 +133,20 @@ final class SettingsStore: ObservableObject {
     }
 
     var hasToken: Bool { token != nil }
+
+    /// A value that changes whenever the ACTIVE cluster's host, port, or token
+    /// change. Used by the root connection banner to know when to re-probe.
+    ///
+    /// `isConfigured` alone is not enough: it stays `true` when an
+    /// already-configured cluster's token is swapped for a wrong one (or its
+    /// host changed to an unreachable address), so a banner keyed only on
+    /// `isConfigured` would keep showing the last successful ping — a stale
+    /// green check while the stored config is unusable. A fingerprint of
+    /// the actual host/port/token catches every edit. The token is reduced to a
+    /// presence/hash marker here, never the raw secret.
+    var connectionIdentity: String {
+        "\(host)|\(port)|\((token ?? "<none>").hashValue)"
+    }
 
     /// True when the app is configured to be useful against the active cluster
     /// (a host and a token are both set).

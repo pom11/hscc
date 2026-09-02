@@ -129,6 +129,12 @@ struct SettingsView: View {
                             .foregroundColor(Theme.Semantic.bad)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    if settings.appGroupUnavailable {
+                        Label("The shared App Group isn't reachable on this install, so saved settings won't reach the widget or Siri. Reinstall the app to fix it — the app itself still connects fine.", systemImage: "exclamationmark.triangle.fill")
+                            .font(.footnote)
+                            .foregroundColor(Theme.Semantic.bad)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             .navigationTitle("Settings")

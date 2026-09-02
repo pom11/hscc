@@ -54,9 +54,12 @@ struct ContentView: View {
             refreshConnection()
             approvals.setClient(makeClient())
         }
-        .onChange(of: settings.isConfigured) {
+        .onChange(of: settings.connectionIdentity) {
             refreshConnection()
             approvals.setClient(makeClient())
+        }
+        .onChange(of: settings.appGroupUnavailable) {
+            refreshConnection()
         }
     }
 
@@ -64,12 +67,23 @@ struct ContentView: View {
     /// old Settings NavigationLink here was the duplicate entry point and has
     /// been removed; Settings is its own tab now).
     private var connectionBanner: some View {
-        HStack(spacing: 8) {
-            Image(systemName: bannerIcon)
-                .foregroundColor(bannerColor)
-            Text(bannerText)
-                .font(.footnote)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Image(systemName: bannerIcon)
+                    .foregroundColor(bannerColor)
+                Text(bannerText)
+                    .font(.footnote)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if settings.appGroupUnavailable {
+                Label(
+                    "Sharing broken: the widget & Siri can't see this. Reinstall the app to fix the App Group.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption2)
+                .foregroundColor(Theme.Semantic.bad)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
@@ -78,6 +92,13 @@ struct ContentView: View {
     }
 
     private var bannerText: String {
+        // A broken App Group is more important than a green ping: the app
+        // would report "Connected" while the widget/intents read nothing.
+        if settings.appGroupUnavailable {
+            return settings.isConfigured
+                ? "App Group unavailable — check the install."
+                : "Set host, port, and token in Settings to connect."
+        }
         switch pingState {
         case .checking:
             return "Checking connection…"
@@ -94,6 +115,9 @@ struct ContentView: View {
     }
 
     private var bannerIcon: String {
+        if settings.appGroupUnavailable {
+            return "exclamationmark.triangle.fill"
+        }
         switch pingState {
         case .success: return "checkmark.circle.fill"
         case .failure: return "exclamationmark.triangle.fill"
@@ -102,6 +126,9 @@ struct ContentView: View {
     }
 
     private var bannerColor: Color {
+        if settings.appGroupUnavailable {
+            return Theme.Semantic.bad
+        }
         switch pingState {
         case .success: return Theme.Semantic.ok
         case .failure: return Theme.Semantic.bad
