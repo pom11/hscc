@@ -1288,6 +1288,49 @@ class TestCheckPluginPayload:
         assert "merged but not deployed" in r["detail"]
         assert r["next_step"]
 
+    def test_resource_only_dir_not_flagged(self, tmp_path):
+        """assets/ (only .png) ships no deployable payload — must be skipped.
+
+        Without this, verify flags resource-only dirs like assets/ and configs/
+        as 'merged but not deployed' even on a correctly deployed system,
+        because their files (.png, .template) never count as payload. That
+        would make plugin_payload fail on every healthy run.
+        """
+        from hscc_daemon.verify import check_plugin_payload
+        repo = self._tree(tmp_path / "repo", "assets", {"hscc.png": "binary"})
+        # installed side matches — also only hscc.png
+        self._tree(tmp_path / "plugins", "assets", {"hscc.png": "binary"})
+        r = check_plugin_payload(repo_root=str(tmp_path / "repo"),
+                                 plugins_dir=str(tmp_path / "plugins"),
+                                 names=["assets"])
+        # Nothing deployable in assets ⇒ not a plugin_payload failure
+        assert r["ok"] is True
+        assert "merged but not deployed" not in r["detail"]
+
+    def test_resource_only_dir_skipped_not_checked(self, tmp_path):
+        """A mixed payload (real plugin + resource-only dir) only counts the plugin."""
+        from hscc_daemon.verify import check_plugin_payload
+        repo_root = tmp_path / "repo"
+        # hscc-commands plugin
+        (repo_root / "hscc-commands").mkdir(parents=True)
+        (repo_root / "hscc-commands" / "__init__.py").write_text(
+            "register('workers-up')\n")
+        # resource-only dir
+        (repo_root / "assets").mkdir(parents=True)
+        (repo_root / "assets" / "hscc.png").write_text("binary")
+        plugins = tmp_path / "plugins"
+        (plugins / "hscc-commands").mkdir(parents=True)
+        (plugins / "hscc-commands" / "__init__.py").write_text(
+            "register('workers-up')\n")
+        (plugins / "assets").mkdir(parents=True)
+        (plugins / "assets" / "hscc.png").write_text("binary")
+        r = check_plugin_payload(repo_root=str(repo_root),
+                                 plugins_dir=str(plugins),
+                                 names=["hscc-commands", "assets"])
+        # assets ships no deployable payload ⇒ must not fail the check.
+        assert r["ok"] is True
+        assert "merged but not deployed" not in r["detail"]
+
     def test_fail_installed_differs_from_repo(self, tmp_path):
         from hscc_daemon.verify import check_plugin_payload
         repo = self._tree(tmp_path / "repo", "hscc-commands",
