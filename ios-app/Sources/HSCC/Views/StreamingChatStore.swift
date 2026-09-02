@@ -199,6 +199,13 @@ final class StreamingChatStore: ObservableObject {
     /// Open (or resume) the live WebSocket to the project's session stream.
     @MainActor
     private func openSocket() {
+        // The view may have disappeared while history was loading (a quick
+        // navigate-away during `.loadingHistory` runs `stop()` first). Do not
+        // open a socket for a store that is no longer live — that would leak
+        // an uncancelled WS connection that nothing will ever clean up.
+        guard isActive else {
+            return
+        }
         guard let settings else {
             phase = .failed("Not started.")
             return
@@ -382,6 +389,9 @@ final class StreamingChatStore: ObservableObject {
     func send(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        // Clear the previous send's error (if any) so a stale failure does not
+        // linger above the composer after a later attempt succeeded.
+        sendError = nil
         guard let wsTask else {
             sendError = "Not connected yet — the stream is still opening. Try again."
             return
