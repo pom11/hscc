@@ -153,16 +153,21 @@ init (StreamingChatView.swift:38-40) — fresh per ProjectDetailView. PASS: no
 ## Summary / ranked for operator exposure
 1. **R1 HIGH** — overview says "58 open" while the board says "32 open". Fix is
    server-side (routes_project.py `_speak_project_detail` counts the `total`
-   key as an open status); client faithfully shows both. -> backend task.
+   key as an open status); client faithfully shows both. Spawned backend task
+   **t_b0091d92** (assignee backend-engineer) to fix it — NOT done here because
+   it is backend code, out of the iOS client's scope.
 2. **F1** — fixed. Headroom false-alarm red bar on the primary project.
 3. **C1 MEDIUM** — blocked/stale board rows not tappable while active cards are.
 4. **F2** — a11y labels added.
 5. Low: board blocked/stale read failures surface no cue; HSMetaLine truncation;
    colour-only dots (mitigated by text).
 
-## What I deliberately did NOT fix (and why)
-- Server **R1** `_speak_project_detail` — backend code in a client card; out of
-  scope and would be cross-specialty. Recommend a backend task.
-- **C1** blocked rows tappable — a product/UX decision; display-only may be
-  intended. Flagged for the operator rather than changed.
-- Board blocked/stale `.failed` silent swallow — deliberate best-effort design.
+## Diff hygiene (executed)
+`git diff --name-only` vs the card's base (435d20c) is exactly 3 files:
+`ios-app/Sources/HSCC/Views/ProjectsView.swift`,
+`ios-app/Sources/HSCC/Views/Theme.swift`,
+`ios-app/docs/audit_projectsview.md` — everything I intended, nothing else.
+No real addresses committed: live host shown only as placeholder `100.64.0.1`
+in prose; token never written anywhere; harness (/tmp-proj_audit + the
+un-committed `headroom_check/` sibling dir) holds the live-detail captures.
+working tree clean (git status empty).
