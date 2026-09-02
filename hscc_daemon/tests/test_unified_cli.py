@@ -484,6 +484,40 @@ class TestVerifyCommand:
         assert "\u2717" in output
         assert "Some checks failed" in output
 
+    def test_verify_failure_prints_next_step(self, tmp_path, monkeypatch):
+        """A failing check with a next_step hint renders it on its own line.
+
+        Drives the REAL _handle_verify (not the routing fake) with verify.run_all
+        patched, so the plain-language "next step" rendering is actually
+        exercised — the at-a-glance requirement.
+        """
+        import io
+        from contextlib import redirect_stdout
+
+        from hscc_daemon import hscc as hscc_mod
+        from hscc_daemon import verify as verify_mod
+
+        monkeypatch.setattr(sys, "argv", ["hscc", "verify"])
+        fake_result = {
+            "ok": False,
+            "checks": [
+                {"name": "api_routes", "ok": False,
+                 "detail": "one or more routes did not answer: POST /chat 404",
+                 "next_step": "open the failing route; that screen would be dead"},
+                {"name": "plugins", "ok": True, "detail": "all core commands found"},
+            ],
+        }
+        out = io.StringIO()
+        with monkeypatch.context() as m:
+            m.setattr(verify_mod, "run_all", lambda **kw: fake_result)
+            with redirect_stdout(out):
+                try:
+                    hscc_mod._handle_verify()
+                except SystemExit:
+                    pass
+        assert "next step: open the failing route; that screen would be dead" in out.getvalue()
+        assert "\u2717" in out.getvalue()
+
     def test_verify_json_output(self, monkeypatch):
         fake_result = {
             "ok": True,
