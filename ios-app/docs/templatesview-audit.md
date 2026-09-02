@@ -3,7 +3,20 @@
 Full audit of `ios-app/Sources/HSCC/Views/TemplatesView.swift` + its detail
 screen (`TemplateDetailView.swift`, `TemplateTopologyView.swift`).
 
-Status: IN PROGRESS. Live probes executed against the running API (read-only).
+Status: COMPLETE. Live probes executed against the running API (read-only).
+
+## EVIDENCE (executed)
+- `bash ios-app/scripts/capture_live.sh` -> captured `/v1/template/list`,
+  `/v1/template/status`, `/v1/template/preview/{name}` all HTTP 200.
+- `bash ios-app/scripts/live_decode_check.sh` -> all three template responses
+  DECODE+ [POPULATED] against the real models; "ALL 33 LIVE ROUTES DECODE AND
+  CARRY REAL DATA" (this is executed proof the models match the wire).
+- `bash ios-app/scripts/api_route_sweep.py` -> `ok 200` list/status, preview
+  dynamic (probed 200 live), apply `post 405` (route exists, POST-only).
+- `bash ios-app/scripts/build_check.sh` -> "full compile clean, 0 warnings".
+- `bash ios-app/scripts/check_sources.sh` -> "sources in sync: 62 Swift files".
+- pytest tests/test_routes_template.py + test_contract_swift_routes.py ->
+  "19 passed".
 
 ## Risk note (address guard)
 All live addresses redacted to `100.64.0.1` placeholder in this report. Real
@@ -92,10 +105,15 @@ All routes answer; controls have visible feedback. Green.
 Mostly green.
 
 ## FINDINGS RANKED (by likelihood operator hits it)
-1. (fix) Applied card shows raw Python dict `speak` (internal IP + debug repr)
-   instead of clean applied metadata. Hit every time a template is applied:
-   the applied card is the FIRST thing shown. -> fix rendering from structured
-   `applied` fields with speak fallback.
+1. (FIXED) Applied card showed raw Python dict `speak` (internal IP + debug
+   repr) instead of clean applied metadata. Hit every time a template is
+   applied — the applied card is the FIRST thing shown. Now renders structured
+   `applied` fields (applied-at age · families · N units) via `appliedSummary()`
+   with the dict-repr `speak` dropped. Fix at TemplatesView.swift:141-145,
+   160-198. Compile-verified clean, and the underlying fields are live-decode
+   POPULATED (TemplateStatusResponse). Reasoned change, but the new logic is
+   exercised by compile + live models (NO iOS runtime here, so the rendered UI
+   is reasoning, not an on-device screenshot).
 2. (report) `version` not shown in rows. Low impact (names unique today).
 3. (report) Cluster topology block HStack is not scrollable — could overflow on
    an extreme template (many families). All 14 live templates fit. Low risk.
