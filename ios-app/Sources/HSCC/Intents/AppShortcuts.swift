@@ -49,9 +49,19 @@ struct AppShortcuts: AppShortcutsProvider {
         )
         AppShortcut(
             intent: DispatchCannedCardIntent(),
+            // The `card` parameter MUST be referenced in a phrase: App Intents
+            // requires every non-optional, non-defaulted parameter to appear in
+            // at least one phrase, and this intent's `card` has no
+            // requestValueDialog for Siri to prompt for. Before this fix the
+            // phrase named no card, so Siri had no way to resolve WHICH card to
+            // dispatch — an invisible intent-processor failure (the same class
+            // as the two-parameter rejection fixed in 9d7903a). Each phrase
+            // keeps exactly ONE parameter (`$card`) so the single-parameter-per-
+            // phrase rule still holds; `.applicationName` is a built-in, not a
+            // parameter.
             phrases: [
-                "Dispatch a \(.applicationName) card",
-                "\(.applicationName) dispatch a card",
+                "Dispatch the \(.applicationName) \(\.$card) card",
+                "\(.applicationName) dispatch the \(\.$card) card",
             ],
             shortTitle: "Dispatch a card",
             systemImageName: "paperplane"
