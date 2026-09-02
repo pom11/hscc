@@ -25,9 +25,10 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."   # the ios-app/ project dir
 
-# Default derived from ~/.hscc/api.json rather than hardcoded: this repo is
-# public and a literal host here leaks the operator's tailnet address.
-DEFAULT_BASE=$(python3 -c "import json,os;d=json.load(open(os.path.expanduser('~/.hscc/api.json')));print('http://%s:%s'%(d['host'],d['port']))" 2>/dev/null)
+# Derived from the RUNNING service, not hardcoded: this repo is public and a
+# literal host leaks the operator's tailnet address. ~/.hscc/api.json holds
+# only {port, bind} — the address itself is resolved at runtime.
+DEFAULT_BASE=$(hscc api status 2>/dev/null | sed -n 's/.*Listening: *\([0-9.]*:[0-9]*\).*/http:\/\/\1/p' | head -1)
 BASE="${1:-${DEFAULT_BASE:?cannot derive API base; pass it as arg 1}}"
 TOKEN_FILE="${2:-$HOME/.hscc/api-token}"
 
