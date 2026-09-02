@@ -98,6 +98,12 @@ final class StreamingChatStore: ObservableObject {
     /// The view is alive (stops reconnect + closes socket on disappear).
     private var isActive = false
 
+    /// Callback fired for every accepted (new, non-gap) session event folded via
+    /// the live socket, with the event's seq. The view wires this to the shared
+    /// `StreamReplyWatcher` watermark so a reply the operator SAW live in the
+    /// chat is never re-badged by the background poll after they navigate away.
+    var onEvent: ((Int) -> Void)?
+
     private static let keyPrefix = "streaming.chat."
 
     init(project: String, urlSession: URLSession = .shared) {
@@ -297,6 +303,9 @@ final class StreamingChatStore: ObservableObject {
         case .accept:
             transcript.fold(event)
             rows = transcript.rows
+            // Tell the shared watermark this seq is now accounted for (seen
+            // live) so the background poll never re-badges it.
+            onEvent?(event.seq)
             // The resume tail (if any) is consumed; from here on jumps are
             // real gaps and must be detected as such.
             isResume = false
