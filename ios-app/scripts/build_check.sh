@@ -30,6 +30,10 @@ sources_for() {  # extract one target's Swift file list from project.yml
 import re, sys
 name = sys.argv[1]
 spec = open('project.yml').read()
+# Anchor on the targets: section FIRST. Other top-level sections (schemes:)
+# use the same target names as two-space keys, and splitting on the bare name
+# would silently grab the scheme block, which has no sources.
+spec = '\n' + spec.split('\ntargets:\n', 1)[1]  # keep a leading \n: first target has none
 blk = spec.split(f'\n  {name}:', 1)[1]
 blk = re.split(r'\n  [A-Za-z]\w*:\n', blk, maxsplit=1)[0]
 for m in re.findall(r'- path: (Sources/[^\s]+\.swift)', blk):
