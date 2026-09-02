@@ -46,10 +46,10 @@ struct SmallClusterWidget: View {
 
     var body: some View {
         Group {
-            if entry.state == .unreachable {
-                unreachableStateView
-            } else if !entry.configured {
+            if !entry.configured {
                 unconfiguredView
+            } else if entry.state == .unreachable {
+                unreachableStateView
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     stateLine
@@ -116,10 +116,10 @@ struct MediumClusterWidget: View {
 
     var body: some View {
         Group {
-            if entry.state == .unreachable {
-                unreachableStateView
-            } else if !entry.configured {
+            if !entry.configured {
                 unconfiguredView
+            } else if entry.state == .unreachable {
+                unreachableStateView
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     // State + the two metrics that matter.
