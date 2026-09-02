@@ -554,7 +554,9 @@ def _handle_verify():
             max_name = max(len(c.get("name", "")) for c in checks)
             max_name = max(max_name, 4)  # minimum padding
             for c in checks:
-                glyph = "\u2713" if c.get("ok") else "\u2717"
+                ok = c.get("ok")
+                # Three states, not two: pass, fail, and "could not check".
+                glyph = "\u2713" if ok else ("\u2717" if ok is False else "\u25cb")
                 name = c.get("name", "").ljust(max_name)
                 detail = c.get("detail", "")
                 print(f"  {glyph} {name}  {detail}")
@@ -562,7 +564,14 @@ def _handle_verify():
                 if not c.get("ok") and next_step:
                     pad = " " * (max_name + 2)
                     print(f"  {glyph} {pad}  next step: {next_step}")
-        overall = "\u2713 All checks passed" if result.get("ok") else "\u2717 Some checks failed"
+        unver = result.get("unverified") or []
+        if not result.get("ok"):
+            overall = "\u2717 Some checks failed"
+        elif unver:
+            overall = "\u2713 All checks passed (%d unverified: %s)" % (
+                len(unver), ", ".join(unver))
+        else:
+            overall = "\u2713 All checks passed"
         print(f"\n  {overall}")
     sys.exit(0 if result.get("ok") else 1)
 

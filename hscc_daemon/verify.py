@@ -6,6 +6,7 @@ ok=None means the check could not be verified (not a pass, not a hard fail).
 
 import json
 import os
+import re
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
@@ -712,7 +713,28 @@ def check_api_routes(script=None, python=None, timeout=None):
     tree.
     """
     if script is None:
-        script = os.path.join(_repo_root(), "scripts", "api_route_sweep.py")
+        # Same dual-layout resolution as the chat round-trip script: installed,
+        # hscc_daemon sits directly under ~/.hermes/plugins, where a
+        # repo-relative "scripts/" does not exist. Shipping the sweep inside the
+        # package means one path is right in both layouts.
+        here = os.path.dirname(os.path.abspath(__file__))
+        candidates = (
+            os.path.join(here, "api_route_sweep.py"),                    # installed
+            os.path.join(_repo_root(), "scripts", "api_route_sweep.py"), # repo
+        )
+        script = next((c for c in candidates if os.path.exists(c)), candidates[0])
+    # The sweep derives the app's routes by PARSING HSCCClient.swift. That file
+    # ships only in a repo checkout, so in an installed layout the check cannot
+    # run at all. That is "unverified", not a failure: the API may be perfectly
+    # healthy, and reporting red here would train the operator to ignore reds.
+    client_src = os.path.join(_repo_root(), "ios-app", "Sources", "HSCC",
+                              "HSCCClient.swift")
+    if not os.path.isfile(client_src):
+        return {"name": "api_routes", "ok": None,
+                "detail": "unverified: HSCCClient.swift not present (installed "
+                          "layout has no repo tree to derive routes from)",
+                "next_step": "run hscc verify from a checked-out repo tree to "
+                             "sweep the app's routes"}
     if not os.path.isfile(script):
         return {"name": "api_routes", "ok": None,
                 "detail": "unverified: scripts/api_route_sweep.py not found "
@@ -740,6 +762,39 @@ def check_api_routes(script=None, python=None, timeout=None):
             "detail": "route(s) the app calls did not answer: " + detail,
             "next_step": "open the failing route(s) above; that screen would be "
                          "dead for the operator"}
+
+
+def _generation_is_advancing(node, port, window=20.0):
+    """True if the unit's vLLM generation counter climbs across `window` secs.
+
+    This is the difference between congestion and a wedge. Failure to read the
+    metric returns False (no evidence of life), leaving the caller's original
+    verdict intact.
+    """
+    import time as _time
+    import urllib.request
+
+    def _sample():
+        try:
+            url = "http://%s:%s/metrics" % (node, port)
+            with urllib.request.urlopen(urllib.request.Request(url),
+                                        timeout=8) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+        except Exception:
+            return None
+        for line in body.splitlines():
+            if line.startswith("vllm:generation_tokens_total"):
+                m = re.search(r"\}\s+([0-9.]+)", line)
+                if m:
+                    return float(m.group(1))
+        return None
+
+    first = _sample()
+    if first is None:
+        return False
+    _time.sleep(window)
+    second = _sample()
+    return second is not None and second > first
 
 
 def check_chat_roundtrip(serving_path=None, probe=None, timeout=None,
@@ -817,6 +872,14 @@ def check_chat_roundtrip(serving_path=None, probe=None, timeout=None,
             res = {"ok": False, "error": str(exc), "status": None}
         if not res.get("ok"):
             why = res.get("error") or res.get("status") or "no text returned"
+            # "wedged" means HTTP 200 with no tokens inside the probe window.
+            # Under real load that is ALSO what a busy-but-healthy unit looks
+            # like: the probe queues behind production traffic. Corroborate
+            # against the generation counter before calling it a wedge — a
+            # counter that is still climbing proves the engine is generating,
+            # just not for us. Only a frozen counter is a genuine wedge.
+            if why == "wedged" and _generation_is_advancing(node, port):
+                continue
             failures.append(f"model on {node}:{port} did not answer ({why})")
 
     if failures:
@@ -1037,7 +1100,12 @@ def run_all(**overrides):
         kwargs = {k: v for k, v in overrides.items() if k in params}
         results.append(check_fn(**kwargs))
 
+    # ok is None ⇒ UNVERIFIED, not failed. A check that could not run (no repo
+    # tree to parse, serving.json absent) must not turn the overall verdict
+    # red: "I could not check this" is not "this is broken", and conflating
+    # them teaches the operator to ignore a red verdict.
     return {
         "checks": results,
-        "ok": all(r["ok"] for r in results),
+        "ok": all(r["ok"] is not False for r in results),
+        "unverified": [r["name"] for r in results if r.get("ok") is None],
     }

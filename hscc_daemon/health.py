@@ -1380,6 +1380,27 @@ def _read_sse_content_until(resp, stop_event, out_box):
         pass
 
 
+def _served_model_name(node, port, timeout=5):
+    """First model id the unit reports at /v1/models, or None.
+
+    Kept deliberately cheap and failure-tolerant: if we cannot ask, the caller
+    falls back and the probe fails as it did before rather than crashing.
+    """
+    import urllib.request
+    try:
+        url = "http://%s:%s/v1/models" % (node, port)
+        with urllib.request.urlopen(urllib.request.Request(url),
+                                    timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        for entry in (data.get("data") or []):
+            mid = entry.get("id")
+            if mid:
+                return mid
+    except Exception:
+        pass
+    return None
+
+
 def _probe_unit_generation(node, port, timeout=None, max_tokens=None):
     """Send a tiny streaming chat-completions request to a unit's direct
     endpoint and confirm it returns REAL generated text within a short window.
@@ -1398,8 +1419,14 @@ def _probe_unit_generation(node, port, timeout=None, max_tokens=None):
 
     timeout = timeout or ENGINE_WEDGE_TIMEOUT
     max_tokens = max_tokens or ENGINE_WEDGE_MAX_TOKENS
+    # Ask the unit which model it actually serves. This used to send a
+    # placeholder "x", which vLLM answers with HTTP 404 (no such model) — so
+    # the probe could NEVER return ok against a real engine, and every unit was
+    # classified "down" forever. A 404 also means the server answered, which is
+    # positive evidence of liveness, making the old reading exactly backwards.
+    model = _served_model_name(node, port) or "x"
     body = json.dumps({
-        "model": "x",
+        "model": model,
         "messages": [{"role": "user",
                       "content": "Reply with the single word: ok."}],
         "max_tokens": max_tokens,
