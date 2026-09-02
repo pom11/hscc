@@ -151,6 +151,11 @@ fleet-level folded into one Cluster tab.
     against them, so it can never drift into a false green like a mirrored
     validator could. Replaces the old field-for-field mirror
     (`model_decode_check.swift`, removed).
+  - `shared_store_check.sh` — proves the App Group sharing failure is **loud,
+    not silent**: a grep guard asserts SettingsStore no longer falls back to
+    `?? .standard` on the shared suite and that the share write is gated on
+    availability, plus a compiled harness exercises the real `SharedStore`
+    availability logic (nil provider → unavailable; real store → available).
 
 **Offline last-known state** is a first-class feature: every successful read is
 cached, and when the cluster (or Tailscale) is unreachable, views show the
@@ -316,7 +321,13 @@ explicitly when auto-detection finds nothing:
 HSCC_DEVELOPMENT_TEAM=YOURTEAMID scripts/generate.sh
 ```
 
-A free personal Apple ID team works for sideloading onto your own device.
+A free personal Apple ID team works for sideloading onto your own device —
+**but a free team cannot provision App Groups**, so the Home Screen widget and
+Live Activities will not see the app's shared settings (host/port/token) even
+though the app itself works. The app detects this and shows a loud "App Group
+sharing unavailable" banner in Settings (see `SharedStore` in
+`Sources/Shared/SharedModels.swift`). Sharing across the app, widget, and Live
+Activities requires a **paid** Apple Developer team.
 
 - `project.yml` lists every source file under `Sources`. If you add a new Swift
   file, add it to the `Sources` list in `project.yml` too (or use a folder glob;
