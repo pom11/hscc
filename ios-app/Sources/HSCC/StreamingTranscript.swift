@@ -140,6 +140,22 @@ struct StreamingTranscript {
 
     private var _noticeCounter: Int = 0
 
+    /// Rows shown before the server confirmed them, keyed by their text. The
+    /// server echoes every operator message back as a `user` frame, so without
+    /// this the optimistic row and the echo would render as TWO identical
+    /// bubbles. Instead the echo ADOPTS the pending row (below).
+    private var _pendingLocalUserText: [String] = []
+
+    /// Show the operator's own message immediately, before the server echo.
+    /// Anchored on a negative counter like notices so its id cannot collide
+    /// with a real seq; `foldMessage` re-anchors it when the echo arrives.
+    mutating func addLocalUserMessage(_ text: String) {
+        _noticeCounter -= 1
+        _pendingLocalUserText.append(text)
+        push(ChatItem.message(role: "user", text: text, streaming: false),
+             anchorSeq: _noticeCounter)
+    }
+
     /// Append a single-frame row with its anchor seq as its identity.
     private mutating func push(_ item: ChatItem, anchorSeq: Int) {
         let id = stableID(for: item, anchorSeq: anchorSeq)
@@ -179,6 +195,21 @@ struct StreamingTranscript {
     /// frame. A `done` delta of the same role closes the bubble so the next
     /// turn starts fresh.
     private mutating func foldMessage(_ m: MessagePayload, seq: Int) {
+        // The server echoes the operator's own message back. If we already
+        // showed it optimistically, ADOPT that row (re-anchor its id to the
+        // real seq) rather than pushing a duplicate bubble.
+        if m.role == "user", m.done,
+           let pendingIdx = _pendingLocalUserText.firstIndex(of: m.delta),
+           let rowIdx = rows.lastIndex(where: {
+               if case .message(let r, let t, _) = $0.item { return r == "user" && t == m.delta }
+               return false
+           }) {
+            _pendingLocalUserText.remove(at: pendingIdx)
+            rows[rowIdx] = ChatRow(
+                id: stableID(for: rows[rowIdx].item, anchorSeq: seq),
+                item: rows[rowIdx].item)
+            return
+        }
         // Is the LAST row an in-progress message from the same role? Stream
         // onto it; otherwise this delta starts a new turn.
         if let idx = rows.indices.last,

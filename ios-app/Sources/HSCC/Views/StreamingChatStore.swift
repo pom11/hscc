@@ -377,6 +377,15 @@ final class StreamingChatStore: ObservableObject {
             sendError = "Not connected yet — the stream is still opening. Try again."
             return
         }
+        // Show the operator's own line IMMEDIATELY, before the socket round trip.
+        // The server also appends this message to the store and broadcasts it
+        // back, but that echo can take a round trip — and if anything upstream
+        // is wrong the operator would otherwise stare at a composer that
+        // cleared with nothing to show for it. The transcript folds by seq, so
+        // the echo that follows is idempotent and does not duplicate this row.
+        transcript.addLocalUserMessage(trimmed)
+        rows = transcript.rows
+
         let payload: [String: String] = ["kind": "send", "text": trimmed]
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
               let frame = String(data: data, encoding: .utf8) else {
