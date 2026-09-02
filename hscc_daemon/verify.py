@@ -613,9 +613,17 @@ def run_chat_roundtrip():
     import subprocess
     import sys as _sys
 
-    script = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "scripts", "verify_chat_roundtrip.py")
+    # The script lives in scripts/ in the repo, but INSTALLED the package sits
+    # directly under ~/.hermes/plugins/, where "../scripts" does not exist —
+    # the deploy step copies the script in beside this module instead. Check
+    # both, or the check works from a checkout and fails everywhere real.
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = (
+        os.path.join(here, "verify_chat_roundtrip.py"),          # installed
+        os.path.join(os.path.dirname(here), "scripts",
+                     "verify_chat_roundtrip.py"),                # repo
+    )
+    script = next((c for c in candidates if os.path.exists(c)), candidates[-1])
     try:
         proc = subprocess.run(
             [_sys.executable, script, "--json"],
