@@ -50,6 +50,7 @@ struct ContentView: View {
         .onAppear {
             approvals.setClient(makeClient())
             replyWatcher.setClient(makeClient())
+            NotificationCoordinator.shared.setClient(makeClient())
             // Re-hydration: end any Live Activity left over from a prior process
             // kill (deinit doesn't run when the process is killed, so ActivityKit
             // would otherwise keep a stale wake/session bubble alive forever).
@@ -66,6 +67,7 @@ struct ContentView: View {
             ConnectionMonitor.shared.reset()
             approvals.setClient(makeClient())
             replyWatcher.setClient(makeClient())
+            NotificationCoordinator.shared.setClient(makeClient())
         }
         .onChange(of: settings.appGroupUnavailable) {
             // ConnectionBanner observes SettingsStore directly and redraws.
