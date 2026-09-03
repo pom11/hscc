@@ -511,7 +511,8 @@ def fakes(monkeypatch):
         }
 
     def _invoke(profile, session, prompt, timeout=None,
-                image_data=None, image_mime=None):
+                image_data=None, image_mime=None,
+                cancel_evt=None, on_spawn=None):
         return ("hello from the contract-test orchestrator", profile, session)
 
     monkeypatch.setattr(routes_orchestrator, "_backing_resolve", _resolve)
