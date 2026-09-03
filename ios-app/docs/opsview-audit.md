@@ -3,7 +3,7 @@
 Operations / health surface (`ios-app/Sources/HSCC/Views/OpsView.swift`).
 Full screen audit: DATA IN / RENDER / STATES / CONTROLS / OBSERVATION / LAYOUT / ACCESSIBILITY.
 
-Status: IN PROGRESS (draft). Evidence-backed. Live API read-only proven.
+Status: COMPLETE. Evidence-backed; live API read-only proven; one broken render fixed.
 
 ---
 
@@ -85,4 +85,86 @@ the view never reads the cache back for those four — so on an unreachable
 cluster they show a plain red error, not last-known data. Inconsistent with the
 verify section on the same screen. (Design gap, not a crash.)
 
-(Continuing…)
+## 4. CONTROLS
+
+| Control | Action | Route (verified) | Confirm | Feedback |
+|---------|--------|------------------|---------|----------|
+| Run Triggers Now (line 258-268) | `client.triggersRun()` → POST `/v1/triggers/run` | route 405 on GET = registered POST, routes_ops.py:397 | MutationButton·destructive:false, confirm dialog | success → section `.loaded` refresh + MutationButton alert; failure → "Failed" alert ✓ |
+| Perform Escalations (line 304-314) | `client.escalateRun()` → POST `/v1/escalate` | GET/200 + POST registered, routes_ops.py:399 | MutationButton·destructive:true, confirm dialog | success → section `.loaded` refresh + alert; failure → "Failed" alert ✓ |
+| Pull-to-refresh (line 39) | `loadAll()` → re-GET all 5 | — | — | spinners then content ✓ |
+
+Both mutating controls are confirm-gated and send `confirm:true` (HSCCClient.swift:506,514).
+Live API POSTs NOT fired (mutations) — route liveness proven by 405-on-GET (read-only).
+
+## 5. OBSERVATION
+
+OpsView has ZERO ObservableObjects. All state is value-type `@State LoadState`.
+`client` is a plain `let HSCCClient?` (not observable — correct). No
+`@StateObject` keyed by a changing value, so the "stale instance after tab
+switch" class of bug cannot occur here. Clean. ✓
+
+Hosted via `NavigationLink` push from `ClusterView.hubLinks` → `OpsView(client:)`
+(ClusterView.swift:190) — a fresh instance + fresh idle state each entry.
+
+## 6. LAYOUT
+
+ScrollView + VStack + HSSectionCard per section. Stream/rule rows use HStack with
+`Spacer(minLength:0)` + `frame(maxWidth:.infinity)` — text wraps, survives
+Dynamic Type up via ~default Dynamic Type caps (fixed content-size categories
+applied in the app root). Top-level sections flow vertically in a ScrollView —
+no fixed-height container, so no truncation. Fine. ✓
+
+## 7. ACCESSIBILITY
+
+- Text is arbitrary (SF fonts welcome), colors from Theme tokens (no
+  inverted-color footguns). Buttons are real `Button`s.
+- No explicit accessibility labels on the HStack rows, but each row's content is
+  all text/icon Data points — VoiceOver reads the concatenated text. Acceptable.
+- `HSSectionCard` provides section headers. No obvious a11y defect.
+
+---
+
+## 8. FINDINGS + FIX
+
+### FIXED — escalated tasks rendered as "<complex>" (hides all meaning)
+Live `/v1/escalate` returns pending escalations as objects `{task, action,
+category}`. OpsView.swift:294 rendered each via `displayJSON`, whose
+`.object`/`.array` branches returned the literal placeholder `"<complex>"`
+(line 373). So the operator saw `<complex>` for EVERY pending escalation — no
+task id, no action, no category — defeating the section's entire purpose
+("who needs escalation now").
+
+**Fix (OpsView.swift:373-382):** `displayJSON` now renders objects as a sorted
+`key: value · key: value` string and arrays as `[a, b, c]`. Executed proof:
+
+```
+before:  <complex>
+after:   action: human · category: test-failure · task: t_2472675d
+```
+
+Compile: full clean, 0 warnings (build_check.sh).
+
+### Ranked findings (no further code change — reported)
+
+Severity: HIGH → the `<complex>` fix above.
+MED → `triggers.last_run` shows only the message, not its age (`last_run.timestamp`
+dropped) — operator can't judge staleness of trigger evaluation. `recent_events`
+(the server's "recent firings" feed) never shown.
+MED → daemon/triggers/escalations/profiles lack offline/stale fallback: they
+cache on success (`get(_:)` → StateCache.store, HSCCClient.swift:223) but never
+read the cache back, so on an unreachable cluster they show a plain red error
+whereas verify (one card up) shows last-known + StaleBanner. Inconsistent on the
+same screen.
+LOW → `daemon_running` is `Bool?` rendered green/red with only two branches
+(line 170): a nil daemon_running shows red "not running", conflating unknown with
+down.
+LOW → `escalations.count` / `profiles.total_running` decoded but not shown
+(speak text already conveys the number, so not user-visible loss).
+
+---
+
+## Verified-by summary
+
+Compile full-clean (4 targets, 0 warnings), model_decode 48/48, live_decode
+33/33 populated (incl. all 5 OpsView models against current live wire). The one
+clearly-broken render — escalations as `<complex>` — is fixed and proof-tested.

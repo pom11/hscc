@@ -370,7 +370,18 @@ struct OpsView: View {
         case .double(let d): return String(format: "%.2f", d)
         case .bool(let b): return b ? "true" : "false"
         case .null: return "null"
-        case .object, .array: return "<complex>"
+        case .object(let o):
+            // Render small objects readably instead of the opaque "<complex>"
+            // placeholder. Escalation entries are {task, action, category}
+            // (live /v1/escalate) — the operator needs to SEE which tasks are
+            // pending, not a placeholder that hides every field.
+            let items = o.keys.sorted().compactMap { key -> String? in
+                guard let v = o[key] else { return nil }
+                return key + ": " + displayJSON(v)
+            }
+            return items.joined(separator: " · ")
+        case .array(let a):
+            return "[" + a.map { displayJSON($0) }.joined(separator: ", ") + "]"
         }
     }
 }
