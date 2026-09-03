@@ -63,16 +63,18 @@ struct ActivityFeedView: View {
     // MARK: - Load
 
     private func load(_ client: HSCCClient) async {
-        feed = .loading
-        do {
-            feed = .loaded(try await client.activityFeed())
-        } catch {
-            feed = .failed(errorMessage(for: error))
+        // Only show the explicit spinner on a first load (no value to fall back
+        // to). On a refresh we keep holding the last-known value so a transient
+        // failure degrades to `.stale` (last-known data, clearly labelled)
+        // instead of blanking the screen.
+        if feed.value == nil {
+            feed = .loading
         }
-    }
-
-    private func errorMessage(for error: Error) -> String {
-        (error as? HSCCError)?.localizedDescription ?? "Something went wrong."
+        feed = await Offline.load(feed,
+                                  cacheKey: EndpointPath.activityFeed,
+                                  client: client) {
+            try await client.activityFeed()
+        }
     }
 
     // MARK: - List
@@ -87,24 +89,15 @@ struct ActivityFeedView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             case .failed(let message):
                 errorLabel(message)
-            case .loaded(let state):
+            case .stale(let state, let ageMessage):
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(state.speak)
-                        .font(.subheadline)
-                        .italic()
-                        .foregroundColor(.secondary)
-                    let items = state.entries ?? []
-                    if items.isEmpty {
-                        emptyLabel("No agents running right now.")
-                    } else {
-                        ForEach(items) { entry in
-                            entryRow(entry)
-                            if entry.id != items.last?.id {
-                                Divider()
-                            }
-                        }
+                    StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
+                        Task { await load(client) }
                     }
+                    feedBody(client, state)
                 }
+            case .loaded(let state):
+                feedBody(client, state)
             default:
                 EmptyView()
             }
@@ -115,6 +108,26 @@ struct ActivityFeedView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Theme.Semantic.surfaceRaised)
         )
+    }
+
+    private func feedBody(_ client: HSCCClient, _ state: ActivityFeedResponse) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(state.speak)
+                .font(.subheadline)
+                .italic()
+                .foregroundColor(.secondary)
+            let items = state.entries ?? []
+            if items.isEmpty {
+                emptyLabel("No agents running right now.")
+            } else {
+                ForEach(items) { entry in
+                    entryRow(entry)
+                    if entry.id != items.last?.id {
+                        Divider()
+                    }
+                }
+            }
+        }
     }
 
     private func entryRow(_ entry: ActivityEntry) -> some View {
