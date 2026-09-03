@@ -755,6 +755,38 @@ struct ProfilesResponse: Decodable, Speakable {
     let speak: String
 }
 
+/// GET /v1/profiles/list — one entry in the full profile list.
+///
+/// Verified live shape (routes_profiles.py `_profile_info_to_dict`):
+/// `{ name, is_default, gateway_running, model, provider, skill_count,
+///   description, description_auto, distribution_name, distribution_version }`.
+/// Only `name` is required for the memory picker; the rest are kept for
+/// display. Never any secrets.
+struct ProfileSummary: Decodable, Identifiable, Equatable, Hashable {
+    let name: String
+    let is_default: Bool?
+    let gateway_running: Bool?
+    let model: String?
+    let provider: String?
+    let skill_count: Int?
+    let description: String?
+
+    var id: String { name }
+}
+
+/// GET /v1/profiles/list — every profile the API can see.
+///
+/// This is the REAL full profile roster (`hermes_cli.profiles.list_profiles()`),
+/// NOT the running-task subset that `/v1/profiles` (ProfilesResponse) serves.
+/// The memory picker consumes this so the operator can select any profile by
+/// name without knowing the slug by heart. Shape:
+/// `{ profiles: [{name, ...}], count, speak }`.
+struct ProfileListResponse: Decodable, Speakable {
+    let profiles: [ProfileSummary]?
+    let count: Int?
+    let speak: String
+}
+
 // MARK: - Profile editor (per-project profile read / edit)
 
 /// GET/POST /v1/profile/editor/{profile} — a profile's editable surface.

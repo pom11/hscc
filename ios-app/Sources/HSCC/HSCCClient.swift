@@ -535,6 +535,18 @@ struct HSCCClient {
         try await get("/v1/profiles", as: ProfilesResponse.self)
     }
 
+    /// GET /v1/profiles/list — the full profile roster (any profile, running
+    /// or not).
+    ///
+    /// Unlike `/v1/profiles` (which only lists profiles currently running a
+    /// task), this route returns EVERY profile the API can see — the memory
+    /// picker uses it so the operator can select any profile by name, not just
+    /// the ones busy at this instant. The list is large (~40 entries), never
+    /// truncated on the server.
+    func profileList() async throws -> ProfileListResponse {
+        try await get("/v1/profiles/list", as: ProfileListResponse.self)
+    }
+
     // MARK: - Profile editor (per-project profile read / edit)
 
     /// GET /v1/profile/editor/{profile} — read a profile's editable fields.
