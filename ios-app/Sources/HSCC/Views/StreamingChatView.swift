@@ -198,7 +198,14 @@ struct StreamingChatView: View {
     private func rowView(_ row: ChatRow) -> some View {
         switch row.item {
         case .message(let role, let text, let streaming):
-            MessageBubble(role: role, text: text, streaming: streaming)
+            // Only the operator's own last message is editable — it is the one
+            // that can be corrected and re-sent as a new turn. Everything else
+            // (the orchestrator's replies, older user turns) has no edit
+            // affordance, so history is never rewritten.
+            let edit: (() -> Void)? = (role == "user" && row.id == store.editableLastUserRowID)
+                ? { store.beginEdit(rowID: row.id) }
+                : nil
+            MessageBubble(role: role, text: text, streaming: streaming, edit: edit)
         case .tool(let t):
             ToolChip(render: t, rowID: row.id, store: store)
         case .card(let c):
@@ -261,6 +268,12 @@ struct StreamingChatView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+            // When editing the last operator message, surface that clearly and
+            // offer a Cancel. Sending still sends as a fresh turn (the original
+            // is never rewritten in the session history the cluster holds).
+            if store.editingRowID != nil {
+                editBanner
+            }
             // Slash-command palette (server-sourced command catalog) at a "/"
             // command position; selecting a command inserts it into the draft.
             SlashCommandPalette(draft: $store.draft, client: computedClient)
@@ -272,6 +285,12 @@ struct StreamingChatView: View {
                     .focused($composerFocused)
                     .onChange(of: store.draft) { _, _ in
                         store.persistDraft()
+                    }
+                    .onChange(of: store.composerFocusedRequested) { _, requested in
+                        if requested {
+                            composerFocused = true
+                            store.composerFocusedRequested = false
+                        }
                     }
 
                 // Voice / Dictate — focuses the composer field so the system
@@ -337,6 +356,35 @@ struct StreamingChatView: View {
     private func trimmed(_ s: String) -> String {
         ComposerText.sendable(s)
     }
+
+    // MARK: - Edit banner
+
+    /// A quiet banner shown above the composer while an edit is active. It
+    /// makes the edit explicit: the corrected text is NOT silently spliced
+    /// into history, it is sent as a NEW turn. Cancel clears the edit and
+    /// empties the prefilled draft.
+    private var editBanner: some View {
+        HStack(spacing: Theme.Spacing.sm.rawValue) {
+            Image(systemName: "pencil")
+                .font(.caption)
+                .foregroundColor(Theme.Semantic.warn)
+            Text("Editing your last message — sending sends it as a new turn; the original stays in the session.")
+                .font(.caption)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Cancel") {
+                store.cancelEdit()
+                composerFocused = false
+            }
+            .font(.caption.weight(.semibold))
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Cancel editing")
+        }
+        .padding(.horizontal, Theme.Spacing.sm.rawValue)
+        .padding(.vertical, Theme.Spacing.xs.rawValue)
+        .background(Theme.Semantic.warn.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous))
+    }
 }
 
 // MARK: - Message bubble
@@ -360,6 +408,11 @@ private struct MessageBubble: View {
     let role: String
     let text: String
     let streaming: Bool
+    /// When non-nil, this is the operator's own LAST message — show an Edit
+    /// button that pre-fills the composer so it can be corrected and re-sent
+    /// as a new turn. Nil for every other row (nothing else is editable, so
+    /// history is never rewritten).
+    var edit: (() -> Void)? = nil
 
     private var isUser: Bool { role == "user" }
 
@@ -382,11 +435,24 @@ private struct MessageBubble: View {
     private var bubble: some View {
         VStack(alignment: isUser ? .trailing : .leading, spacing: Theme.Spacing.xxs.rawValue) {
             // Turn marker — the operator can tell WHO said it at a glance, and
-            // that a new turn began here.
-            Text(isUser ? "YOU" : "ORCHESTRATOR")
-                .font(.caption2.weight(.semibold))
-                .textCase(.uppercase)
-                .foregroundColor(isUser ? accentRoleColor : Theme.Semantic.onSurfaceMuted)
+            // that a new turn began here. The operator's own LAST message gets
+            // a small Edit affordance alongside it.
+            HStack(spacing: Theme.Spacing.xs.rawValue) {
+                Text(isUser ? "YOU" : "ORCHESTRATOR")
+                    .font(.caption2.weight(.semibold))
+                    .textCase(.uppercase)
+                    .foregroundColor(isUser ? accentRoleColor : Theme.Semantic.onSurfaceMuted)
+                if let edit {
+                    Button(action: edit) {
+                        Label("Edit", systemImage: "pencil")
+                            .font(.caption2.weight(.semibold))
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundColor(isUser ? accentRoleColor.opacity(0.9) : Theme.Semantic.onSurfaceMuted)
+                    .accessibilityLabel("Edit last message")
+                    .accessibilityHint("Loads it into the message field; sending sends a corrected copy as a new turn.")
+                }
+            }
             Text(text + (streaming ? " ▍" : ""))
                 .font(.body)
                 .foregroundColor(textColor)

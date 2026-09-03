@@ -149,11 +149,33 @@ struct StreamingTranscript {
     /// Show the operator's own message immediately, before the server echo.
     /// Anchored on a negative counter like notices so its id cannot collide
     /// with a real seq; `foldMessage` re-anchors it when the echo arrives.
-    mutating func addLocalUserMessage(_ text: String) {
+    /// Returns the new row's id so the caller can remove it if the send turns
+    /// out NOT to have reached the cluster (there will then be no echo to
+    /// adopt it, and the row would otherwise be a phantom).
+    @discardableResult
+    mutating func addLocalUserMessage(_ text: String) -> String {
         _noticeCounter -= 1
         _pendingLocalUserText.append(text)
-        push(ChatItem.message(role: "user", text: text, streaming: false),
-             anchorSeq: _noticeCounter)
+        let item = ChatItem.message(role: "user", text: text, streaming: false)
+        let id = stableID(for: item, anchorSeq: _noticeCounter)
+        rows.append(ChatRow(id: id, item: item))
+        return id
+    }
+
+    /// Remove a locally-shown operator message that never reached the server
+    /// (the WS send failed — there will be no echo to adopt it, so keeping
+    /// the row would leave a phantom message the server never got). Also
+    /// forgets its pending text so a late echo cannot adopt a removed row.
+    /// Returns true if a row was actually removed (the send genuinely did not
+    /// reach the cluster); false if the row is gone (an echo already adopted
+    /// it — meaning the message DID reach the server and must not be re-drafted).
+    mutating func removeLocalUserMessage(rowID: String) -> Bool {
+        guard let idx = rows.firstIndex(where: { $0.id == rowID }) else { return false }
+        if case .message(_, let t, _) = rows[idx].item {
+            _pendingLocalUserText.removeAll { $0 == t }
+        }
+        rows.remove(at: idx)
+        return true
     }
 
     /// Append a single-frame row with its anchor seq as its identity.
