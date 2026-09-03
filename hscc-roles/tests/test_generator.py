@@ -546,3 +546,48 @@ def test_cluster_orchestrator_preserves_lower_operator_threshold_tokens(tmp_path
         yaml.safe_dump(cur, f, sort_keys=False)
     cfg2 = _gen_config(tmp_path, monkeypatch, spec)
     assert cfg2["compression"]["threshold_tokens"] == 50000
+
+
+# -- every HSCC-owned worker profile has a role spec (t_5ca88538) --
+#
+# ios-engineer had NO roles/ios-engineer.yaml, so `hscc-roles generate` (which
+# loops only over role specs) silently skipped it — every base-identity
+# improvement had to be hand-patched into its live SOUL.md. This test catches
+# the next hand-made profile: any profile dir under PROFILES_DIR whose SOUL
+# carries the hscc-generated worker signature (base identity + `## Role:` + the
+# worker operational block that mentions "your own git worktree") MUST have a
+# matching roles/<name>.yaml spec. Per-project <project>-orch profiles are
+# excluded deliberately — they are created dynamically by orchestrators.py, not
+# from a roles/*.yaml spec, and carry the gateway operational block, not the
+# worker one.
+
+
+def _spec_names():
+    """Set of role names that have a spec under roles/*.yaml."""
+    names = set()
+    for spec_path in rolelib.list_spec_files():
+        spec = yaml.safe_load(open(spec_path)) or {}
+        names.add(spec.get("name"))
+    return names
+
+
+def test_every_hscc_owned_worker_profile_has_role_spec():
+    """A profile whose SOUL carries the hscc-generated worker signature MUST
+    have a roles/<name>.yaml spec, so a hand-made profile is caught."""
+    worker_marker = "your own git worktree"  # worker ops block; orchestrators lack it
+    spec_names = _spec_names()
+    missing = []
+    for name in sorted(os.listdir(rolelib.PROFILES_DIR)):
+        pdir = os.path.join(rolelib.PROFILES_DIR, name)
+        if not os.path.isdir(pdir):
+            continue
+        soul = os.path.join(pdir, "SOUL.md")
+        if not os.path.isfile(soul):
+            continue
+        text = open(soul, encoding="utf-8").read()
+        if "## Role:" in text and worker_marker in text and name not in spec_names:
+            missing.append(name)
+    assert not missing, (
+        "HSCC-owned worker profile(s) with no role spec (`hscc-roles generate` "
+        "will skip them): " + ", ".join(missing)
+    )
