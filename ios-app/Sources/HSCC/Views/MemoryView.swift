@@ -8,7 +8,7 @@ import SwiftUI
 /// Backed by `GET /v1/memory?profile=<name>` plus the confirm-gated
 /// `POST /v1/memory/{node_id}/delete` and `/v1/memory/{node_id}/edit` endpoints
 /// (routes_memory.py). Memories are per-profile — exactly like sessions — so
-/// the profile is chosen in the field at the top, not guessed.
+/// the profile is chosen in the header, not guessed.
 ///
 /// Design contract mirrored from the API:
 ///   * List is READ-ONLY (no `confirm`). It reloads on pull-to-refresh, on
@@ -29,7 +29,9 @@ struct MemoryView: View {
 
     @State private var profile = "hscc-orch"
     @State private var list = LoadState<MemoryListResponse>.idle
+    @State private var profileOptions = LoadState<ProfileListResponse>.idle
     @State private var editingItem: MemoryItem?
+    @State private var profilePickerShown = false
 
     var body: some View {
         ScrollView {
@@ -44,16 +46,28 @@ struct MemoryView: View {
             }
         }
         .navigationTitle("Memories")
-        .refreshable { if let client { await load(client) } }
+        .refreshable { if let client { await loadAll(client) } }
         .task {
             if let client, list.value == nil, !list.isLoading {
-                await load(client)
+                await loadAll(client)
             }
         }
         .sheet(item: $editingItem) { item in
             if let client {
                 MemoryEditSheet(client: client, profile: trimmedProfile, item: item) {
                     await reloadAfterMutation(client)
+                }
+            }
+        }
+        .sheet(isPresented: $profilePickerShown) {
+            if let client {
+                ProfilePickerSheet(options: profileOptions,
+                                   selection: $profile) {
+                    // A profile was chosen from the picker. Clear any stale
+                    // list (the new profile's memories differ) and load fresh —
+                    // no separate "Load" tap.
+                    list = .idle
+                    await load(client)
                 }
             }
         }
@@ -84,18 +98,53 @@ struct MemoryView: View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Profile", systemImage: "person.crop.circle")
                 .font(.headline)
-            TextField("hscc-orch", text: $profile)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .textFieldStyle(.roundedBorder)
-                .onSubmit { Task { await load(client) } }
+            // A tappable control (not a text field) that shows which profile is
+            // selected and opens the searchable picker. No Load tap — selecting
+            // from the picker loads the profile's memories immediately.
             Button {
-                Task { await load(client) }
+                profilePickerShown = true
             } label: {
-                Label("Load", systemImage: "arrow.clockwise")
+                HStack {
+                    Text(trimmedProfile.isEmpty ? "Choose a profile…" : trimmedProfile)
+                        .font(.body)
+                        .foregroundColor(trimmedProfile.isEmpty ? .secondary : .primary)
+                    Spacer()
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Theme.Semantic.surface)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+                )
             }
-            .font(.subheadline)
-            Text("The Hermes profile whose memories you want to inspect and correct.")
+            .buttonStyle(.plain)
+            .accessibilityLabel("Profile: \(trimmedProfile.isEmpty ? "none" : trimmedProfile)")
+            .accessibilityHint("Opens a searchable list of profiles")
+            switch profileOptions {
+            case .failed(let message):
+                // We couldn't fetch the roster — the profile field degrades to a
+                // retry-able error instead of silently showing an empty picker.
+                HStack(spacing: 8) {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundColor(Theme.Semantic.bad)
+                        .lineLimit(2)
+                    Spacer()
+                    Button("Retry") {
+                        Task { await loadProfiles(client) }
+                    }
+                    .font(.caption)
+                }
+            default:
+                EmptyView()
+            }
+            Text("The Hermes profile whose memories you want to inspect and correct. Picker shows every profile the cluster serves.")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
@@ -108,6 +157,20 @@ struct MemoryView: View {
     }
 
     // MARK: - Load
+
+    private func loadAll(_ client: HSCCClient) async {
+        async let m: Void = load(client)
+        async let p: Void = loadProfiles(client)
+        _ = await (m, p)
+    }
+
+    private func loadProfiles(_ client: HSCCClient) async {
+        profileOptions = await Offline.load(profileOptions,
+                                            cacheKey: "/v1/profiles/list",
+                                            client: client) {
+            try await client.profileList()
+        }
+    }
 
     private func load(_ client: HSCCClient) async {
         let trimmed = trimmedProfile
@@ -123,10 +186,6 @@ struct MemoryView: View {
                                   client: client) {
             try await client.memories(profile: trimmed)
         }
-    }
-
-    private func errorMessage(for error: Error) -> String {
-        operatorErrorMessage(error)
     }
 
     private var trimmedProfile: String {
@@ -254,6 +313,129 @@ struct MemoryView: View {
         Label(text, systemImage: "tray")
             .font(.subheadline)
             .foregroundColor(Theme.Semantic.onSurfaceMuted)
+    }
+}
+
+/// The searchable profile picker sheet.
+///
+/// Shows every profile the cluster serves in a searchable list (not a 40-row
+/// wheel) so the operator can find a profile by typing part of its slug. The
+/// currently-selected profile is marked with a checkmark. Tapping a row picks
+/// it, dismisses the sheet, and triggers the load of that profile's memories —
+/// there is no separate "Load" tap.
+private struct ProfilePickerSheet: View {
+    let options: LoadState<ProfileListResponse>
+    @Binding var selection: String
+    let onPick: () async -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    private var profiles: [ProfileSummary] {
+        guard case .loaded(let state) = options else { return [] }
+        return state.profiles ?? []
+    }
+
+    private var filtered: [ProfileSummary] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return profiles }
+        return profiles.filter {
+            $0.name.localizedCaseInsensitiveContains(trimmed)
+                || ($0.description ?? "").localizedCaseInsensitiveContains(trimmed)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                switch options {
+                case .loading:
+                    ProgressView("Loading profiles…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                case .failed(let message):
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 36))
+                            .foregroundColor(Theme.Semantic.bad)
+                        Text("Couldn't load profiles")
+                            .font(.headline)
+                        Text(message)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                        Text("Close and pull to refresh to retry.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                default:
+                    if filtered.isEmpty {
+                        ContentUnavailableView.search(text: query)
+                    } else {
+                        List(filtered) { p in
+                            row(p)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Choose Profile")
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $query, prompt: "Search profiles…")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.large])
+    }
+
+    @ViewBuilder
+    private func row(_ p: ProfileSummary) -> some View {
+        let isSelected = (p.name == selection)
+        Button {
+            selection = p.name
+            dismiss()
+            Task { await onPick() }
+        } label: {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(p.name)
+                        .font(.body)
+                        .foregroundColor(.primary)
+                    if let desc = p.description, !desc.isEmpty {
+                        Text(desc)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    } else if let model = p.model, !model.isEmpty {
+                        Text(model)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .foregroundColor(Color.accentColor)
+                        .fontWeight(.semibold)
+                }
+                if p.is_default == true {
+                    Text("default")
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(p.name)
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 }
 
