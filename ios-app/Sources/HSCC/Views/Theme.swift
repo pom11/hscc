@@ -36,6 +36,27 @@ enum Theme {
         static let halt = Theme.hex(0xE56A6A)
         /// #A7B0C0 — secondary text.
         static let mist = Theme.hex(0xA7B0C0)
+
+        // Light-appearance variants of the signal/surface set. The dark palette
+        // is a cool near-black designed to sit UNDER light text (mint, amber,
+        // muted-red are bright and glow on graphite). Reused verbatim in light
+        // mode they collapse to near-invisible on white (ok #7AE2B0 on white =
+        // 1.58:1; and `surfaceRaised` stays dark slate while `onSurface` text
+        // flips to black = 1.40:1). These slots remap the SAME roles to
+        // darker/toned values that hold ≥4.5:1 on white so light mode stays
+        // legible. Values measured with WCAG relative-luminance contrast.
+        /// #F1F2F6 — light raised surfaces / cards (black text = 18.8:1).
+        static let lightRaised = Theme.hex(0xF1F2F6)
+        /// #E6E8EE — light elevated chips/banners (black text = 17.1:1).
+        static let lightElevated = Theme.hex(0xE6E8EE)
+        /// #1B7E55 — healthy, tuned for light surfaces (5.05:1 on white).
+        static let lightSignal = Theme.hex(0x1B7E55)
+        /// #B45309 — busy/warning, tuned for light surfaces (5.02:1 on white).
+        static let lightThermal = Theme.hex(0xB45309)
+        /// #B3261E — fault, tuned for light surfaces (6.54:1 on white).
+        static let lightHalt = Theme.hex(0xB3261E)
+        /// #55606E — secondary text, tuned for light surfaces (6.39:1 on white).
+        static let lightMist = Theme.hex(0x55606E)
     }
 
     // MARK: - Semantic roles (the ONLY thing views should reference)
@@ -48,21 +69,21 @@ enum Theme {
         /// Primary surface background (the app's canvas).
         static var surface: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.graphite) : .white } }
         /// Raised surfaces / cards sitting on `surface`.
-        static var surfaceRaised: Color { dynamic { _ in UIColor(Palette.slate) } }
+        static var surfaceRaised: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.slate) : UIColor(Palette.lightRaised) } }
         /// One step higher than `surfaceRaised` (badges, chips).
-        static var surfaceElevated: Color { dynamic { _ in UIColor(Palette.slate).withAlphaComponent(0.6) } }
+        static var surfaceElevated: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.slate).withAlphaComponent(0.6) : UIColor(Palette.lightElevated) } }
         /// Primary text on a surface.
         static var onSurface: Color { dynamic { _ in UIColor.label } }
         /// Secondary / muted text.
         static var onSurfaceMuted: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.mist) : .secondaryLabel } }
         /// Healthy / serving / ok.
-        static var ok: Color { Palette.signal }
+        static var ok: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.signal) : UIColor(Palette.lightSignal) } }
         /// Busy / waking / warning.
-        static var warn: Color { Palette.thermal }
+        static var warn: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.thermal) : UIColor(Palette.lightThermal) } }
         /// Down / fault.
-        static var bad: Color { Palette.halt }
+        static var bad: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.halt) : UIColor(Palette.lightHalt) } }
         /// A neutral signal for an unknown / indeterminate state.
-        static var neutral: Color { Palette.mist }
+        static var neutral: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.mist) : UIColor(Palette.lightMist) } }
     }
 
     // MARK: - Spacing scale (the ONE spacing scale)
@@ -204,6 +225,12 @@ struct HSEmpty: View {
 // HStack(:firstTextBaseline) per view.
 
 /// A compact status dot (e.g. the 10pt circle ahead of a card title).
+///
+/// Decorative: it is a colour-only glyph. Everywhere it is used the state it
+/// hints at is ALSO spelled out as text in the same row (e.g. the meta line),
+/// so it carries no meaning on its own. It is hidden from VoiceOver so it
+/// never surfaces as an unlabeled element that polls the reading order — the
+/// coloured dot is pure embellishment, the text conveys the state.
 struct HSStatusDot: View {
     let color: Color
     init(_ color: Color) { self.color = color }
@@ -212,6 +239,7 @@ struct HSStatusDot: View {
         Circle()
             .fill(color)
             .frame(width: 10, height: 10)
+            .accessibilityHidden(true)
     }
 }
 
@@ -425,7 +453,6 @@ struct StaleBanner: View {
             Spacer(minLength: 0)
             Button(action: retry) {
                 Image(systemName: "arrow.clockwise")
-                    .accessibilityLabel("Retry")
             }
             .buttonStyle(.borderless)
             .foregroundColor(Theme.Semantic.onSurfaceMuted)

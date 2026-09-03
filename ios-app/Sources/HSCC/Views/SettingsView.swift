@@ -75,6 +75,8 @@ struct SettingsView: View {
                                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
                             }
                             .buttonStyle(.borderless)
+                            .accessibilityLabel(showingToken ? "Hide token" : "Show token")
+                            .accessibilityHint("Controls whether the bearer token is visible or masked")
                         }
                     } label: {
                         Text("Token")
