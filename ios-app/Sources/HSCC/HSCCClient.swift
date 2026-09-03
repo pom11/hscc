@@ -316,6 +316,7 @@ struct HSCCClient {
         do {
             (data, response) = try await session.data(for: req)
         } catch {
+            ConnectionMonitor.shared.requestFailed()
             throw HSCCError.transport(underlying: error)
         }
 
@@ -326,6 +327,7 @@ struct HSCCClient {
         let status = http.statusCode
         if (200...299).contains(status) {
             do {
+                ConnectionMonitor.shared.requestSucceeded()
                 return try Self.decoder.decode(T.self, from: data)
             } catch {
                 throw HSCCError.decoding(String(describing: error))
@@ -333,7 +335,9 @@ struct HSCCClient {
         }
 
         // Non-2xx (409 confirm missing/refused, 502 merge/apply/stop failed):
-        // surface the real error. Never a success value.
+        // surface the real error. Never a success value. We DID reach the API,
+        // so this is not a reachability failure — keep the banner honest.
+        ConnectionMonitor.shared.requestSucceeded()
         throw Self.error(from: data, status: status)
     }
 
