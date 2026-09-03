@@ -302,15 +302,18 @@ def test_driver_installs_and_removes_relay_hook(monkeypatch):
     monkeypatch.setattr(drv, "_run_pty_loop", lambda: None)
 
     assert routes_ws.relay_user_message is routes_ws._default_relay  # default before
+    assert routes_ws.interrupt_user_turn is routes_ws._interrupt_relay  # default before
     drv.start()
     try:
         assert routes_ws.relay_user_message is drv._relay_hook
         # The hook narrows to the driver's project; other projects fall through.
         # (Calling send_user_message would hit the fake unconnected socket, so
         # we assert the hook identity rather than a live call.)
+        assert routes_ws.interrupt_user_turn is drv._interrupt_hook  # t_68432c2d
     finally:
         drv.stop()
     assert routes_ws.relay_user_message is routes_ws._default_relay  # restored
+    assert routes_ws.interrupt_user_turn is routes_ws._interrupt_relay  # restored
 
 
 def test_send_user_message_types_into_pty(send_pty):
@@ -360,3 +363,50 @@ def test_send_user_message_fails_when_not_connected():
     cfg = GatewayConfig(host="127.0.0.1", port=1, token="t", project="hscc")
     drv = GatewayDriver(cfg)
     assert drv.send_user_message("hello") is False
+
+
+def test_interrupt_sends_ctrlc_then_cr(send_pty):
+    """GatewayDriver.interrupt() (t_68432c2d requirement D) sends a Ctrl-C byte
+    (0x03) followed by a CR to the live PTY — the abort keystroke hermes's TUI
+    recognizes — as two distinct text frames, and reports True.
+
+    This is the live-streaming cancel path: when a GatewayDriver owns a project
+    (a ``hermes serve`` session streaming in real time), a ``stop`` frame routes
+    here to interrupt the running turn rather than killing the whole driver.
+    """
+    drv = send_pty.drv
+    peer = send_pty.peer
+    decoder = send_pty.decoder
+
+    frames = []
+
+    def _reader():
+        peer.settimeout(2.0)
+        try:
+            while True:
+                data = peer.recv(65536)
+                if not data:
+                    return
+                for opcode, payload, fin in decoder.feed(data):
+                    if opcode == ws_frame_server.OP_TEXT:
+                        frames.append(payload.decode("utf-8"))
+        except OSError:
+            return
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+
+    assert drv.interrupt() is True
+    t.join(timeout=3)
+    # Exactly two frames: the Ctrl-C byte, then the CR that submits the abort —
+    # the same shape the native TUI produces. Anything else would not interrupt
+    # a running ``hermes chat``.
+    assert frames == ["\x03", "\r"], "interrupt frames: %r" % (frames,)
+
+
+def test_interrupt_fails_when_not_connected():
+    """Not started -> no pty socket -> interrupt returns False, does not raise."""
+    cfg = GatewayConfig(host="127.0.0.1", port=1, token="t", project="hscc")
+    drv = GatewayDriver(cfg)
+    assert drv.interrupt() is False
+

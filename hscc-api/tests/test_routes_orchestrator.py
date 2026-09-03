@@ -26,6 +26,7 @@ Coverage required by the card:
 """
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -161,7 +162,8 @@ def _poll_done(running, token, job_id, timeout=5.0):
     while time.time() < deadline:
         status, payload = _get(running, token, f"/v1/orchestrator/chat/{job_id}")
         assert status == 200
-        if payload.get("status") in ("done", "timeout", "unavailable", "error"):
+        if payload.get("status") in ("done", "stopped", "timeout",
+                                     "unavailable", "error"):
             return payload
         time.sleep(0.01)
     raise AssertionError(f"job {job_id} did not finish within {timeout}s")
@@ -1924,4 +1926,214 @@ def test_chat_post_surfaces_session_rotation(running, token, fakes, monkeypatch)
     # The background job still continues the (same-named) `<project>` session.
     _poll_done(running, token, payload["job_id"])
     assert fakes["invoke_calls"][0][1] == "hscc"   # session name unchanged
+
+
+# --------------------------------------------------------------------------- #
+# Stop / cancel (t_68432c2d) — the retained-Popen kill + the stop route
+# --------------------------------------------------------------------------- #
+
+class _WaitForeverProc:
+    """A fake Popen that never exits on its own — only when terminated/killed.
+
+    Models a real ``hermes chat`` subprocess mid-turn. ``wait()`` always raises
+    ``TimeoutExpired`` (still running), so a test can prove that the ONLY way
+    ``_backing_invoke``'s ``_run_proc`` loop leaves is via ``cancel_evt``
+    (which drives ``terminate()`` then ``kill()``) or the timeout. Records the
+    terminate/kill calls so a test can assert the retained handle was actually
+    killed — the core acceptance criterion of t_68432c2d.
+    """
+
+    def __init__(self, **kw):
+        self.returncode = None
+        self.terminated = 0
+        self.killed = 0
+        self._out = "never finishes"
+        self._err = ""
+
+    def wait(self, timeout=None):
+        raise subprocess.TimeoutExpired(cmd=["hermes"], timeout=timeout or 1)
+
+    def poll(self):
+        return self.returncode
+
+    def communicate(self):
+        return (self._out, self._err)   # drained only after termination
+
+    def terminate(self):
+        self.terminated += 1
+        self.returncode = -15
+
+    def kill(self):
+        self.killed += 1
+        self.returncode = -9
+
+
+def test_backing_invoke_cancel_terminates_popen(monkeypatch):
+    """THE acceptance test: setting cancel_evt mid-flight terminates the
+    retained Popen and surfaces `_OrchestratorCancelled` (never an error).
+
+    The old transport used ``subprocess.run`` which never exposed the Popen, so
+    a running turn was unkillable (the audit t_6efb89ff found exactly this). Now
+    ``_backing_invoke`` uses ``Popen`` + an ``on_spawn`` callback that retains
+    the handle, and ``_run_proc`` polls ``cancel_evt`` on a short interval — so
+    a stop terminates the process directly. This test proves both halves: the
+    process is killed, and the cancellation maps to ``_OrchestratorCancelled``.
+    """
+    import subprocess as _sp
+    import routes_orchestrator as ro
+
+    procs = []
+
+    def _spawn(argv=None, **kw):
+        p = _WaitForeverProc()
+        procs.append(p)
+        return p
+
+    monkeypatch.setattr(_sp, "Popen", _spawn)
+
+    cancel_evt = threading.Event()
+    retained = []
+    outcome = {}
+
+    def _target():
+        try:
+            ro._backing_invoke("hscc-orch", "hscc", "hi", timeout=30,
+                               cancel_evt=cancel_evt, on_spawn=retained.append)
+            outcome["exc"] = None
+        except ro._OrchestratorCancelled as exc:
+            outcome["exc"] = exc
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    # Wait until the Popen has actually been spawned and retained, then cancel
+    # MID-FLIGHT (the operator hitting stop while hermes is mid-turn).
+    deadline = time.time() + 5
+    while not retained and time.time() < deadline:
+        time.sleep(0.005)
+    assert retained, "the subprocess was never spawned"
+    cancel_evt.set()
+    t.join(timeout=10)
+
+    assert isinstance(outcome["exc"], ro._OrchestratorCancelled), (
+        "expected _OrchestratorCancelled, got: %r" % (outcome["exc"],))
+    assert len(procs) == 1
+    proc = retained[0]
+    assert proc is procs[0]
+    # The retained handle was terminated (then escalated to kill for anything
+    # that ignored SIGTERM — our fake always times out on wait).
+    assert proc.terminated == 1
+    assert proc.killed == 1
+    assert "cancelled" in str(outcome["exc"])
+
+
+def test_cancel_job_finds_by_project_and_kills_retained_proc(monkeypatch):
+    """The registry + stop primitive: a running job is found by project,
+    cancelled, its retained Popen killed, and it lands the terminal `stopped`
+    state (requirement C + B + E's job mapping)."""
+    import routes_orchestrator as ro
+
+    job = ro._new_job("hscc", "hscc-orch", "hscc", "do the thing",
+                      timeout=30)
+    ro._jobs[job.job_id] = job   # _new_job already stores it; keep explicit
+    # Simulate the job running with a retained subprocess handle.
+    proc = _WaitForeverProc()
+    with job.lock:
+        job.status = "running"
+        job.proc = proc
+
+    # The stop dispatches BY PROJECT (the WS frame carries no job id).
+    assert ro._in_flight_job("hscc") is job
+    assert ro._in_flight_job("other-project") is None
+
+    cancelled = ro.cancel_job(job, "chat turn cancelled by operator")
+    assert cancelled is job
+    # The retained Popen was actually killed — the out-of-band kill.
+    assert proc.terminated == 1 and proc.killed == 1
+    # The cancel event is set so the worker's poll loop agrees.
+    assert job.cancel_evt.is_set()
+    # Terminal `stopped` state — never an error (an operator action).
+    assert job.status == "stopped"
+    assert job.error["code"] == "orchestrator_stopped"
+    assert job.finished_at is not None
+    # Cancelling an already-terminal job is a clean no-op.
+    assert ro.cancel_job(job) is None
+
+
+def test_chat_stop_route_cancels_running_job(running, token, fakes, monkeypatch):
+    """POST /v1/orchestrator/chat/{id}/stop with confirm terminates a running
+    job (retained-Popen kill) and reports `stopped` — end-to-end over HTTP.
+
+    The fake invoke is cancel-aware (like the real ``_backing_invoke``: it polls
+    ``cancel_evt`` and raises ``_OrchestratorCancelled`` when a stop sets it), so
+    the worker thread observes the cancellation and lands ``_finish_cancelled``
+    rather than racing back to ``done`` after the stop."""
+    def cancel_aware_invoke(profile, session, prompt,
+                            timeout=routes_orchestrator._DEFAULT_TIMEOUT,
+                            image_data=None, image_mime=None,
+                            cancel_evt=None, on_spawn=None):
+        fakes["invoke_calls"].append((profile, session, prompt, timeout))
+        if on_spawn is not None:
+            on_spawn(_WaitForeverProc())
+        # Block like a real hermes subprocess until stopped (then honours the
+        # cancel the same way _run_proc does: raise the cancellation).
+        if cancel_evt is not None:
+            cancel_evt.wait(timeout=5)
+            raise routes_orchestrator._OrchestratorCancelled(
+                "chat turn cancelled by operator")
+        return ("I dispatched a card for you.", profile, session)
+
+    _install(monkeypatch, {"invoke": cancel_aware_invoke})
+
+    status, payload = _post(running, token, body={
+        "project": "hscc", "prompt": "hi", "confirm": True,
+    })
+    assert status == 202
+    job_id = payload["job_id"]
+    # Wait until the job is actually running (worker entered the invoke).
+    jp = {}
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        _, jp = _get(running, token, f"/v1/orchestrator/chat/{job_id}")
+        if jp["status"] == "running":
+            break
+        time.sleep(0.005)
+    assert jp["status"] == "running"
+
+    # Stop it (confirm-gated, like every mutating endpoint).
+    status, stop_payload = _post(
+        running, token, f"/v1/orchestrator/chat/{job_id}/stop",
+        body={"confirm": True})
+    assert status == 200
+    assert stop_payload["status"] == "stopped"
+    assert stop_payload["stopped"] is True
+    assert stop_payload["error"]["code"] == "orchestrator_stopped"
+
+    # The job is terminal; the worker observes the cancel and lands the same
+    # `stopped` state (idempotent — never clobbered back to done).
+    dead = _poll_done(running, token, job_id)
+    assert dead["status"] == "stopped"
+    assert dead["error"]["code"] == "orchestrator_stopped"
+    # A second stop is a clean no-op (already terminal), not an error.
+    status, again = _post(
+        running, token, f"/v1/orchestrator/chat/{job_id}/stop",
+        body={"confirm": True})
+    assert status == 200
+    assert again.get("already") is True
+    assert again["status"] == "stopped"
+
+
+def test_chat_stop_route_confirm_gate_and_unknown(running, token, fakes):
+    """Stop is confirm-gated like every mutating endpoint; unknown job -> 404."""
+    # Missing confirm -> 409, no mutation.
+    status, payload = _post(
+        running, token, "/v1/orchestrator/chat/nope/stop", body={})
+    assert status == 409
+    assert payload["error"]["code"] == "confirm_required"
+
+    # confirm but unknown id -> 404.
+    status, payload = _post(
+        running, token, "/v1/orchestrator/chat/nope/stop",
+        body={"confirm": True})
+    assert status == 404
+    assert payload["error"]["code"] == "not_found"
 

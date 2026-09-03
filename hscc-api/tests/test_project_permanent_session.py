@@ -167,15 +167,56 @@ def _install_relay_registry(monkeypatch, session_id_getter):
     return fake_reg
 
 
+class _NoopProc:
+    """No-op retained subprocess handle (cancellable job path).
+
+    The stop machinery calls ``terminate()``/``kill()`` on the retained Popen;
+    no real subprocess is spawned in these relay tests, so a no-op handle
+    satisfies the contract without touching the OS.
+    """
+
+    def poll(self):
+        return None
+
+    def wait(self, timeout=None):
+        return None
+
+    def terminate(self):
+        pass
+
+    def kill(self):
+        pass
+
+
 def _install_backing(monkeypatch, invoke):
-    fake = types.ModuleType("routes_orchestrator")
-    fake._registry_path = lambda path: "/none"
-    fake._backing_resolve = lambda project, path: {
-        "profile": "hscc-orch", "session": "hscc"}
-    fake._backing_invoke = invoke
-    monkeypatch.setitem(__import__("sys").modules, "routes_orchestrator", fake)
+    """Redirect the relay's orchestrator backing to a fake, real job machinery.
+
+    Since t_68432c2d the relay (routes_ws._default_relay) runs its turn as a
+    real ``routes_orchestrator._ChatJob`` through that module's own job
+    machinery, so a bare fake module can no longer stand in (it would lack
+    ``_new_job``/``_run_job``/``_job_dict`` and the relay would error). Keep the
+    REAL module and patch only the process-bound pieces.
+    """
+    import sys
+    import routes_orchestrator as ro
+    monkeypatch.setitem(sys.modules, "routes_orchestrator", ro)
+
+    def _fake_backing_resolve(project, path):
+        return {"profile": "hscc-orch", "session": "hscc"}
+
+    def _fake_backing_invoke(profile, session, text, timeout=None,
+                             image_data=None, image_mime=None,
+                             cancel_evt=None, on_spawn=None):
+        result = invoke(profile, session, text)
+        if on_spawn is not None:
+            on_spawn(_NoopProc())
+        return result
+
+    monkeypatch.setattr(ro, "_registry_path", lambda ctx: "/none")
+    monkeypatch.setattr(ro, "_backing_resolve", _fake_backing_resolve)
+    monkeypatch.setattr(ro, "_backing_invoke", _fake_backing_invoke)
     monkeypatch.setattr(routes_ws, "_registry_path", lambda ctx: "/none")
-    return fake
+    return ro
 
 
 @pytest.fixture(autouse=True)
