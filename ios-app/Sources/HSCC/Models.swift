@@ -43,6 +43,32 @@ struct PingResponse: Decodable, Speakable {
     let speak: String
 }
 
+// MARK: - Slash commands
+
+/// One slash command from GET /v1/commands — the server-driven catalog the
+/// chat palette lists. NOT a hardcoded Swift array (that would rot the moment
+/// a command is added/removed server-side): it is fetched live from the
+/// endpoint, which itself sources from the authoritative `hscc-commands`
+/// plugin `register()`.
+struct SlashCommand: Decodable, Hashable, Identifiable {
+    let name: String
+    let description: String
+    let takesArgs: Bool
+
+    var id: String { name }
+
+    enum CodingKeys: String, CodingKey {
+        case name, description
+        case takesArgs = "takes_args"
+    }
+}
+
+/// GET /v1/commands — the slash commands available to the chat client.
+struct CommandsResponse: Decodable, Speakable {
+    let commands: [SlashCommand]
+    let speak: String
+}
+
 // MARK: - Cluster
 
 /// `hosts` is an array of node dicts `{ id, name, ip, role, ssh_user }` (every
