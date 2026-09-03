@@ -56,6 +56,17 @@ real file sets (not just -typecheck):
   from a headless CLI (repo convention); `SlashCommand` `takes_args` maps to
   `takesArgs` per the server contract.
 
+## Logic tests
+
+`scripts/slash_palette_check.swift` (macOS CLI, no UIKit — repo convention) —
+19 assertions, all pass:
+
+    ✅ slash_palette_check: ALL PASS
+
+Covers: command-position detection (incl. `http://x` not triggering), filter
+query extraction, prefix-then-contains matching order, draft insertion
+(preserving leading text), and decoding the real `takes_args` server contract.
+
 ## Files
 
 - `Sources/HSCC/Views/SlashCommandPalette.swift` (new) — palette + pure logic
