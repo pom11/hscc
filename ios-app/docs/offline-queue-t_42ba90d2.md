@@ -80,6 +80,16 @@ path, and a message that lands in the queue and flushes is fully collected.
 - The view's composer shows a small queue chip ("N queued") when the queue has
   pending items.
 
+### Cluster switch drains, never silently
+If the operator changes clusters while messages are queued, `reset()`-ing the
+queue would silently discard them. Instead `drainDueToClusterSwitch()` clears
+the queue and publishes the dropped set on `drainedDueToClusterSwitch`;
+ContentView shows a bottom banner (count + "re-send by hand") so nothing is
+silently lost. A per-cluster queue instead of a drain was considered and
+rejected: messages destined for the old cluster must never flush into the new
+one, and the safer default is to surface-and-drop than to risk cross-cluster
+mis-delivery.
+
 ## "Never send twice"
 - Identity is `UUID`, held in a persisted set; flush skips in-flight ids.
 - A queued item is removed ONLY after `.delivered` (job created) or `.rejected`
