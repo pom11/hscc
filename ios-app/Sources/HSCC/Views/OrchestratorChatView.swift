@@ -93,6 +93,11 @@ private struct ChatBody: View {
     /// honest impossible-to-collect states can end the spinner (t_c0953d4c).
     @State private var pollTask: Task<Void, Never>? = nil
 
+    /// Focus of the composer TextField. The Voice button sets this true to
+    /// summon the keyboard and its built-in SYSTEM DICTATION key — the chat's
+    /// voice-input affordance (system dictation, not a custom speech pipeline).
+    @FocusState private var composerFocused: Bool
+
     init(project: String) {
         self.project = project
         _store = StateObject(wrappedValue: ChatStore(project: project))
@@ -284,7 +289,23 @@ private struct ChatBody: View {
                 TextField("Ask the \(project) orchestrator…", text: $store.draft, axis: .vertical)
                     .lineLimit(1...4)
                     .textFieldStyle(.roundedBorder)
+                    .focused($composerFocused)
                     .disabled(store.isSending)
+
+                // Voice / Dictate — focuses the composer field so the system
+                // keyboard (with its built-in dictation key) comes up. This is
+                // the same "system dictation affordance" as the live chat: no
+                // custom speech pipeline, no new app-level permission.
+                Button {
+                    startDictation()
+                } label: {
+                    Image(systemName: "mic.fill")
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.bordered)
+                .disabled(store.isSending)
+                .accessibilityLabel("Start dictation")
+                .accessibilityHint("Focuses the message field and opens the keyboard's dictation key.")
 
                 Button {
                     // Pressing send sends — sending a chat message is neither
@@ -322,7 +343,16 @@ private struct ChatBody: View {
     }
 
     private var canSend: Bool {
-        !store.isSending && !trimmed(store.draft).isEmpty
+        !store.isSending && !ComposerText.isEmpty(store.draft)
+    }
+
+    /// The Voice button's action. There is no public API to launch the system
+    /// dictation UI directly, so we focus the composer field: that summons the
+    /// system keyboard with its built-in dictation key, which the operator taps
+    /// next. The recognized text lands in `store.draft` through the binding;
+    /// draft shaping is owned by the pure, harness-tested `ComposerText` helpers.
+    private func startDictation() {
+        composerFocused = true
     }
 
     // MARK: - Fleet readiness probe
@@ -550,7 +580,7 @@ private struct ChatBody: View {
     }
 
     private func trimmed(_ s: String) -> String {
-        s.trimmingCharacters(in: .whitespacesAndNewlines)
+        ComposerText.sendable(s)
     }
 }
 
