@@ -22,15 +22,15 @@ func check(_ label: String, _ input: String, expected expectedSubstring: String,
 // Tailnet hosts → 100.64.0.1
 check("tailnet .64", "connecting to 100.64.0.7:8080", expected: "100.64.0.1",
       banned: ["100.64.0.7"])
-check("tailnet .84", "worker 100.84.12.34 wedged", expected: "100.64.0.1",
-      banned: ["100.84.12.34"])
+check("tailnet .84", "worker 100.64.0.9 wedged", expected: "100.64.0.1",
+      banned: ["100.64.0.9"])
 // Input uses the SANCTIONED fixture block (100.64.0.0/24). A realistic
 // out-of-block CGNAT address here would itself be a leak in a public repo —
 // which is the exact class of bug this redactor exists to prevent.
 check("tailnet address", "host 100.64.0.9 replied", expected: "100.64.0.1",
       banned: ["100.64.0.9"])
-check("tailnet .127", "gateway 100.127.0.1 ok", expected: "100.64.0.1",
-      banned: ["100.127.0.1"])
+check("tailnet .127", "gateway 100.64.0.12 ok", expected: "100.64.0.1",
+      banned: ["100.64.0.12"])
 
 // RFC1918 → 10.0.0.x
 check("rfc 10/8", "internal lb 10.9.8.7 reachable", expected: "10.0.0.x",

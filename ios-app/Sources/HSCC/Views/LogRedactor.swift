@@ -44,7 +44,9 @@ enum LogRedactor {
     /// Mask Tailnet (100.64.0.0/10) and RFC1918 addresses to documented
     /// placeholders, then any other IPv4 to a generic placeholder.
     static func maskIPs(_ text: String) -> String {
-        // Tailnet CGNAT range 100.64.0.0/10 (100.64.0.0 – 100.127.255.255).
+        // Tailnet CGNAT range 100.64.0.0/10. The upper bound is deliberately not
+        // spelled out as a literal: a real-looking address in this repo trips the
+        // committed-address guard, which is the bug this redactor prevents.
         let tailnet = try! NSRegularExpression(pattern: #"\b100\.(?:[6-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}\b"#)
         // RFC1918: 10/8, 172.16/12, 192.168/16.
         let rfc1918 = try! NSRegularExpression(pattern: #"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b"#)
