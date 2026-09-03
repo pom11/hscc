@@ -13,6 +13,11 @@ enum HSCCError: Error {
     var localizedDescription: String { "can't reach the cluster" }
 }
 
+// Stub for the real shared copy helper (defined in APIError.swift in the app).
+// LoadState.swift calls it for the non-HSCCError fallback; slice it in so the
+// standalone LoadState compile resolves.
+func operatorErrorMessage(_ error: Error?) -> String { "something went wrong" }
+
 struct HSCCClient {
     func cachedValue<T: Decodable>(_ type: T.Type, for key: String) -> T? {
         guard let data = cacheStore[key] else { return nil }

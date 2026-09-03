@@ -44,13 +44,19 @@ final class Harness {
         }
         check(out5.title == "Pairing failed", "5b other outcome headline is 'Pairing failed'")
 
-        // ---- 6. decoding error -> .other("Unexpected response...") ----
-        let dec = HSCCError.decoding("garbage")
+        // ---- 6. decoding error -> .other(actionable, non-leaky) ----
+        // Regression guard (t_b89d0b9a): a `.decoding` failure used to surface as
+        // "Unexpected response from the cluster: <raw DecodingError>", leaking
+        // internal symbols. It must now read as an actionable version-mismatch
+        // hint and must NOT interpolate the raw detail.
+        let dec = HSCCError.decoding("garbage-symbol-dump")
         let out6 = QRPairing.classify(dec)
         if case .other(let m) = out6 {
-            check(m.hasPrefix("Unexpected response from the cluster:"), "6a decoding -> .other(prefixed detail)")
+            check(m.contains("version mismatch"), "6a decoding -> .other(version-mismatch guidance)")
+            check(!m.contains("garbage-symbol-dump") && !m.hasPrefix("Unexpected response from the cluster:"),
+                  "6b decoding message does not leak raw detail")
         } else {
-            check(false, "6a decoding -> .other(prefixed detail)")
+            check(false, "6a decoding -> .other(version-mismatch guidance)")
         }
 
         // ---- 7. non-HSCCError -> .other(localizedDescription) ----
