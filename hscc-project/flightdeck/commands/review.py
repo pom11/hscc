@@ -264,6 +264,106 @@ def _branch_facts(repo, branch, base=DEFAULT_BASE, _run=None):
     }
 
 
+def _path_from_diffgit(header: str) -> str:
+    """The changed file's path from a ``diff --git a/X b/Y`` header.
+
+    Uses the ``b/`` (final) side of the header so a rename or a path with
+    spaces still resolves to the file's current path. Falls back to the whole
+    header when unparseable rather than raising.
+    """
+    idx = header.find(" b/")
+    if idx != -1:
+        return header[idx + 3:]
+    marker = "diff --git "
+    if header.startswith(marker):
+        return header[len(marker):].lstrip("a/")
+    return header
+
+
+def _parse_patch(patch_text: str) -> list[dict]:
+    """Parse a unified diff (``git diff`` output) into per-file structures.
+
+    Returns a list of file dicts shaped for the diff API endpoint:
+      ``{path, status, additions, deletions, hunks}``
+    where ``status`` is one of ``A`` (added), ``M`` (modified), ``D``
+    (deleted) and ``hunks`` is a list of ``{header, lines}`` — each ``lines``
+    item is ``{type: "+"|"-"|"context", text}`` (``text`` stripped of its
+    leading ``+``/``-``/space marker; context is the unchanged line).
+
+    A binary file appears with its path/status/counts and ``hunks: []`` (git
+    renders no patch body for it). A non-diff / empty input yields ``[]``.
+    """
+    files: list[dict] = []
+    current: dict | None = None
+    for raw in (patch_text or "").splitlines():
+        line = raw
+        if line.startswith("diff --git "):
+            current = {
+                "path": _path_from_diffgit(line),
+                "status": "M",
+                "additions": 0,
+                "deletions": 0,
+                "hunks": [],
+            }
+            files.append(current)
+            continue
+        if current is None:
+            continue
+        if line.startswith("new file mode"):
+            current["status"] = "A"
+            continue
+        if line.startswith("deleted file mode"):
+            current["status"] = "D"
+            continue
+        if line.startswith("@@ "):
+            current["hunks"].append({"header": line, "lines": []})
+            continue
+        # Metadata-only lines carry no change content: file mode indexes,
+        # ---/+++ path markers, binary notices, rename similarity, etc.
+        if line.startswith(("---", "+++", "index ", "Binary files ",
+                            "GIT binary patch", "similarity index ",
+                            "rename from ", "rename to ",
+                            "old mode ", "new mode ", "copy ")):
+            continue
+        if not current["hunks"]:
+            continue
+        hunk = current["hunks"][-1]
+        if line.startswith("+"):
+            current["additions"] += 1
+            hunk["lines"].append({"type": "+", "text": line[1:]})
+        elif line.startswith("-"):
+            current["deletions"] += 1
+            hunk["lines"].append({"type": "-", "text": line[1:]})
+        elif line.startswith(" "):
+            hunk["lines"].append({"type": "context", "text": line[1:]})
+        else:
+            # Blank line inside a hunk or a trailing "\ No newline..." note —
+            # keep it as neutral context so the renderer's line numbering
+            # stays honest.
+            hunk["lines"].append({"type": "context", "text": line})
+    return files
+
+
+def _branch_diff(repo: str, branch: str, base: str = DEFAULT_BASE,
+                 _run=None) -> str | None:
+    """Full unified diff of ``base...branch`` as raw git patch text.
+
+    Read-only (the same ``git diff`` family ``_branch_facts`` already runs
+    safely server-side). Returns the raw patch string (possibly ``""`` for a
+    clean/no-op diff). Returns ``None`` when the branch does not resolve in
+    ``repo`` so the diff endpoint can 404 exactly like an unresolvable card
+    rather than fabricate an empty file list.
+    """
+    if not git_state.branch_exists(repo, branch, _run=_run):
+        return None
+    diff = _dispatch(
+        ["git", "diff", "--no-color", f"{base}...{branch}"], repo, _run
+    )
+    if diff.returncode != 0:
+        return ""
+    return diff.stdout or ""
+
+
 # --------------------------------------------------------------------------- #
 # The merge + close performed by --apply
 # --------------------------------------------------------------------------- #

@@ -63,6 +63,15 @@ DEFAULT_REGISTRY = _registry.DEFAULT_REGISTRY
 # Base branch the review facts merge against (matches flightdeck review).
 _DEFAULT_BASE = "main"
 
+# Diff endpoint paging / safety limits. ``limit`` bounds how many FILES one
+# response returns (file-level pagination so the iOS view lazy-loads); the
+# ``max_lines`` cap bounds how many diff LINES one response serves so a
+# 2000-line diff degrades to ``truncated: true`` instead of a huge payload.
+_DIFF_DEFAULT_LIMIT = 20
+_DIFF_MAX_LIMIT = 200
+_DIFF_DEFAULT_MAX_LINES = 2000
+_DIFF_ABSOLUTE_MAX_LINES = 20000
+
 
 # --------------------------------------------------------------------------- #
 # Registry path resolution
@@ -272,6 +281,118 @@ def handle_review_detail(server, ctx, query, body):
         projects=projects, landing=bool(landed),
     )
     payload["speak"] = _speak_review_detail(payload)
+    return 200, payload
+
+
+def _speak_review_diff(data: dict) -> str:
+    """§B headline for the diff endpoint.
+
+    e.g. "3 file(s) changed — showing 2 (truncated)" for a paginated/truncated
+    page, or "No file changes on this branch." for an empty clean diff.
+    """
+    file_count = data.get("file_count") or 0
+    shown = len(data.get("files") or [])
+    if file_count == 0:
+        return "No file changes on this branch."
+    truncated = bool(data.get("truncated"))
+    if shown < file_count:
+        words = f"{shown} of {file_count} file{'s' if file_count != 1 else ''}"
+    else:
+        words = f"{file_count} file{'s' if file_count != 1 else ''}"
+    if truncated:
+        return f"{words} shown (truncated — more available)."
+    return f"{words} shown."
+
+
+def handle_review_diff(server, ctx, query, body):
+    """GET /v1/review/{card_id}/diff — the branch's per-file diff (read-only).
+
+    Resolves card → project → branch exactly like :func:`handle_review_detail`,
+    then serves the unified diff for ``base...branch`` as per-file hunks of
+    ``+``/``-``/context lines. Read-only: never merges, never closes, never
+    mutates. A card that does not resolve → 404 (mirrors review_detail).
+
+    Paging / truncation (both read-only):
+      * ``?offset=<file index>&limit=<max files>`` — file-level pagination so
+        the iOS view lazy-loads files one page at a time.
+      * server-side ``max_lines`` cap — when the selected files' combined diff
+        line count exceeds it, the response stops early and sets
+        ``truncated: true`` (a 2000-line diff degrades, never blows up).
+    """
+    card_id = query.get("card_id")
+    if card_id is None:
+        raise ApiError(400, "bad_request", "missing card_id")
+    registry_path = _registry_path(ctx)
+    try:
+        cards = _kanban.list_cards()
+        projects = _registry.load_registry(registry_path)
+        card, project, branch = _review_cmd._resolve(cards, projects, card_id)
+    except _review_cmd.ReviewError:
+        # Same contract as review_detail: an unresolvable card is a 404.
+        raise ApiError(
+            404, "not_found",
+            f"card {card_id!r} does not resolve to a reviewable branch",
+            f"Card {card_id} could not be resolved.",
+        )
+    repo = project.repo
+    # The backing _branch_diff is read-only git; None means the branch does not
+    # resolve in the repo (not reviewable) → 404, mirroring review_detail's
+    # "no branch" case rather than inventing an empty file list.
+    patch_text = _review_cmd._branch_diff(repo, branch, _DEFAULT_BASE)
+    if patch_text is None:
+        raise ApiError(
+            404, "not_found",
+            f"branch {branch!r} for card {card_id!r} does not exist",
+            f"Card {card_id}'s branch could not be resolved.",
+        )
+    all_files = _review_cmd._parse_patch(patch_text)
+
+    # --- paging / truncation (read-only, applied over the parsed files) ---
+    try:
+        offset = int(query.get("offset", 0))
+    except (TypeError, ValueError):
+        offset = 0
+    offset = max(0, offset)
+    try:
+        limit = int(query.get("limit", _DIFF_DEFAULT_LIMIT))
+    except (TypeError, ValueError):
+        limit = _DIFF_DEFAULT_LIMIT
+    limit = max(0, min(limit, _DIFF_MAX_LIMIT))
+    try:
+        max_lines = int(query.get("max_lines", _DIFF_DEFAULT_MAX_LINES))
+    except (TypeError, ValueError):
+        max_lines = _DIFF_DEFAULT_MAX_LINES
+    max_lines = max(0, min(max_lines, _DIFF_ABSOLUTE_MAX_LINES))
+
+    window = all_files[offset:offset + limit] if limit > 0 else []
+    truncated = (offset + limit) < len(all_files)  # more files beyond this page
+    served_lines = 0
+    out_files = []
+    for f in window:
+        total_lines = sum(len(h["lines"]) for h in f["hunks"])
+        if max_lines > 0 and served_lines + total_lines > max_lines:
+            # Serving this whole file would push past the line cap — stop here
+            # and flag truncation so a huge diff degrades instead of ballooning
+            # the response.
+            truncated = True
+            break
+        served_lines += total_lines
+        out_files.append(f)
+
+    payload = {
+        "id": card_id,
+        "project": project.name,
+        "repo": repo,
+        "branch": branch,
+        "base": _DEFAULT_BASE,
+        "offset": offset,
+        "limit": limit,
+        "files": out_files,
+        "file_count": len(all_files),
+        "truncated": truncated,
+        "total_lines_served": served_lines,
+    }
+    payload["speak"] = _speak_review_diff(payload)
     return 200, payload
 
 
@@ -944,6 +1065,7 @@ ROUTES.append(("GET", re.compile(r"^/v1/cards$"), handle_cards))
 ROUTES.append(("GET", re.compile(r"^/v1/cards/(?P<card_id>[^/]+)$"), handle_card_detail))
 ROUTES.append(("GET", re.compile(r"^/v1/review/queue$"), handle_review_queue))
 ROUTES.append(("GET", re.compile(r"^/v1/review/(?P<card_id>[^/]+)$"), handle_review_detail))
+ROUTES.append(("GET", re.compile(r"^/v1/review/(?P<card_id>[^/]+)/diff$"), handle_review_diff))
 ROUTES.append(("GET", re.compile(r"^/v1/qa/queue$"), handle_qa_queue))
 ROUTES.append(("GET", re.compile(r"^/v1/projects$"), handle_projects))
 ROUTES.append(("GET", re.compile(r"^/v1/projects/(?P<name>[^/]+)$"), handle_project_detail))
