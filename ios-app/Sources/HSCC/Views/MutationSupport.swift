@@ -95,8 +95,7 @@ struct MutationButton: View {
             // A non-2xx (409 confirm refused, 502 failed merge/apply/stop) makes
             // the client throw, so it lands here — surfaced as a FAILURE, never
             // a success. Especially: a failed merge is NOT presented as merged.
-            let message = (error as? HSCCError)?.localizedDescription
-                ?? "Something went wrong."
+            let message = operatorErrorMessage(error)
             outcome = .failure(message)
         }
     }

@@ -809,7 +809,7 @@ struct ProjectBoardView: View {
         do {
             blocked = .loaded(try await client.kanbanBlocked())
         } catch {
-            blocked = .failed((error as? HSCCError)?.localizedDescription ?? "Something went wrong.")
+            blocked = .failed(operatorErrorMessage(error))
         }
     }
 
@@ -817,7 +817,7 @@ struct ProjectBoardView: View {
         do {
             stale = .loaded(try await client.kanbanStale(olderThan: 0))
         } catch {
-            stale = .failed((error as? HSCCError)?.localizedDescription ?? "Something went wrong.")
+            stale = .failed(operatorErrorMessage(error))
         }
     }
 }

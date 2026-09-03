@@ -96,7 +96,7 @@ struct OpsView: View {
     }
 
     private func errorMessage(for error: Error) -> String {
-        (error as? HSCCError)?.localizedDescription ?? "Something went wrong."
+        operatorErrorMessage(error)
     }
 
     // MARK: - Verify (per-check pass/fail)

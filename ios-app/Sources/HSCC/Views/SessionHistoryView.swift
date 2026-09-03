@@ -182,7 +182,7 @@ struct SessionHistoryView: View {
             pagingError = nil
             phase = .ready
         } catch {
-            let msg = (error as? HSCCError)?.localizedDescription ?? "Something went wrong."
+            let msg = operatorErrorMessage(error)
             phase = .failed(msg)
         }
     }
@@ -212,8 +212,7 @@ struct SessionHistoryView: View {
             // Keep current history on screen, but surface the paging failure
             // inline so the operator knows the older page didn't load and can
             // retry — never a silent stop at the edge of loaded history.
-            pagingError = (error as? HSCCError)?.localizedDescription
-                ?? "Something went wrong."
+            pagingError = operatorErrorMessage(error)
             phase = .ready
         }
     }

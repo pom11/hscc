@@ -87,7 +87,7 @@ struct ClusterView: View {
     }
 
     private func errorMessage(for error: Error) -> String {
-        (error as? HSCCError)?.localizedDescription ?? "Something went wrong."
+        operatorErrorMessage(error)
     }
 
     // MARK: - Signature element: the node topology strip
