@@ -196,12 +196,24 @@ struct StreamStatus: Decodable {
 /// Treated as an on-demand read whose LoadState never blocks the rest of the
 /// screen.
 ///
-/// Verified live shape (captured 2026-09-03):
+/// Verified live shape (captured 2026-09-03) — what the API route ACTUALLY
+/// returns. `handle_cluster_monitor` (hscc-api/routes_cluster.py:363) calls
+/// `cmd_monitor()` which wraps the sparkrun first-line payload, then adds
+/// `speak`:
 ///   {
-///     "timestamp": <Double epoch>,
-///     "hosts": [ { "host": "<ip>", "error": null, "sample": { ... },
-///                   "workloads": [...], "used_slots": 1, "free_slots": 0 } ]
+///     "success": true,
+///     "output": "<raw sparkrun first line, string>",
+///     "json": {                       ← the REAL per-node payload lives here
+///       "timestamp": <Double epoch>,
+///       "hosts": [ { "host": "<ip>", "error": null, "sample": { ... },
+///                    "workloads": [...], "used_slots": 1, "free_slots": 0 } ]
+///     },
+///     "speak": "Fleet snapshot: 4 hosts sampled."
 ///   }
+/// When the cluster is unreachable the route returns just `{"speak": "fleet
+/// monitor unavailable"}` (no `json`), hence `json` is optional here. `hosts`
+/// and `timestamp` are computed passthroughs so views can read the node list
+/// directly without peeking into the `json` wrapper.
 /// Every numeric field inside `sample` arrives as a STRING, and many are empty
 /// (`""`) when a metric is unreadable for that node (e.g. GB10 reports its
 /// unified-memory VRAM as empty). So the fields are decoded as `String?` and
@@ -209,9 +221,21 @@ struct StreamStatus: Decodable {
 /// or empty string yields nil, never a decode failure that blanks the whole
 /// route.
 struct ClusterMonitorResponse: Decodable, Speakable {
+    /// The nested per-node payload (`cmd_monitor()['json']`). Absent when the
+    /// route degraded to `{"speak": "..."}`.
+    let json: ClusterMonitorPayload?
+    let speak: String
+
+    /// Computed passthroughs so `FleetView` reads the node list directly.
+    var hosts: [ClusterMonitorHost] { json?.hosts ?? [] }
+    var timestamp: Double? { json?.timestamp }
+}
+
+/// The nested `json` payload of /v1/cluster/monitor — the per-node snapshot
+/// emitted by `sparkrun cluster monitor --simple --json`.
+struct ClusterMonitorPayload: Decodable {
     let timestamp: Double?
     let hosts: [ClusterMonitorHost]
-    let speak: String
 }
 
 /// One node's entry in the monitor `hosts` array. `error` is non-null when the
