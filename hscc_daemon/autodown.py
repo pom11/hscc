@@ -235,6 +235,60 @@ def list_active_cron_jobs(jobs_file=None):
     return active
 
 
+def list_all_cron_jobs(jobs_file=None):
+    """Return ALL Hermes cron jobs (active AND paused), or ``CRON_UNREADABLE``.
+
+    Read-only sibling of :func:`list_active_cron_jobs`: it reads the same
+    ``~/.hermes/cron/jobs.json`` source of truth but does NOT filter to
+    active/enabled jobs. A scheduled-jobs roster view wants the whole
+    population — active and paused alike — each tagged with its current
+    ``enabled``/``state`` so the client can colour the roster, plus each
+    job's last-run outcome.
+
+    Returns a list of dicts, one per job in file order, each:
+      ``{id, name, schedule_display, enabled, state, next_run_at,
+        last_run_at, last_status, last_error}``
+    — a 1:1 mapping onto the on-disk ``jobs.json`` fields for the fields the
+    contract needs; nothing is derived or invented. ``name`` falls back to
+    ``id``, and ``schedule_display`` falls back to the schedule expr's display
+    (mirroring ``list_active_cron_jobs``) so a sparse record is still usable.
+
+    ``enabled`` is the job's boolean gate and ``state`` the string
+    (``scheduled`` | ``paused``) — carried through as-is from the store.
+
+    Fail-closed, same as its sibling: absent/unreadable/malformed jobs.json
+    yields ``CRON_UNREADABLE`` — never an empty list — so the caller can tell
+    \"no jobs\" from \"cannot determine\".
+    """
+    p = os.path.expanduser(jobs_file or CRON_JOBS_FILE)
+    try:
+        with open(p) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return CRON_UNREADABLE
+    jobs = data.get("jobs") if isinstance(data, dict) else None
+    if not isinstance(jobs, list):
+        return CRON_UNREADABLE
+    out = []
+    for j in jobs:
+        if not isinstance(j, dict):
+            continue
+        sch = j.get("schedule") if isinstance(j.get("schedule"), dict) else {}
+        out.append({
+            "id": j.get("id"),
+            "name": j.get("name") or j.get("id"),
+            "schedule_display": j.get("schedule_display")
+                or sch.get("display") or sch.get("expr"),
+            "enabled": j.get("enabled"),
+            "state": j.get("state"),
+            "next_run_at": j.get("next_run_at"),
+            "last_run_at": j.get("last_run_at"),
+            "last_status": j.get("last_status"),
+            "last_error": j.get("last_error"),
+        })
+    return out
+
+
 def _enum_board_names(kanban_db):
     """The ordered list of board names to scan — the SINGLE enumeration.
 

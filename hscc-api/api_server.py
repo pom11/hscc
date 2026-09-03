@@ -735,6 +735,7 @@ import routes_sessions  # noqa: E402,F401  (registers /v1/sessions list + retire
 import routes_memory  # noqa: E402,F401  (registers /v1/memory list + delete/edit)
 import routes_activity  # noqa: E402,F401  (registers /v1/activity/feed — live agent activity feed)
 import routes_commands  # noqa: E402,F401  (registers /v1/commands — slash-command catalog)
+import routes_cron  # noqa: E402,F401  (registers /v1/cron/list — read-only scheduled-jobs roster)
 
 # t_47f51a71: session-event wire contract — history read endpoint over the
 # per-project chat event store (the bridge's live WS half appends to the same
