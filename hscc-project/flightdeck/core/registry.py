@@ -8,6 +8,10 @@ Each project maps to the surfaces that report on it::
     - name:    project key (defaults to the repo basename when absent)
     - repo:    local git checkout path             (REQUIRED)
     - board:   Hermes kanban board slug            (optional -> "unknown")
+    - session: the project's permanent Hermes session id. Set once and
+               persisted server-side (via ensure_session) so a reinstall /
+               new phone resolves the SAME ongoing session; optional ->
+               deterministic default = project name
     - topic:   Telegram topic id                    (optional -> "unknown")
     - topic_name: expected Telegram topic NAME      (optional -> falls back to name)
     - verify:  shell command that proves it works   (optional -> "unknown")
@@ -47,6 +51,7 @@ be called; when ``topic_name`` is absent it falls back to ``name``.
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -72,9 +77,17 @@ class DuplicateProjectError(RegistryError):
 
 DEFAULT_REGISTRY = "~/.flightdeck/registry.yaml"
 
+# Serialises every read-modify-write of the registry file. ensure_session uses
+# it so two concurrent first-messages for the same project can never race: the
+# first persists the session, the second sees it already exists and returns it.
+# The relay and history path both funnel through this lock, so "two concurrent
+# first-sends produce exactly one session" holds within this process.
+_registry_lock = threading.Lock()
+
 # Optional data fields -- absent means "unknown", never an error.
 _OPTIONAL_FIELDS = (
     "board",
+    "session",
     "topic",
     "topic_name",
     "verify",
@@ -93,6 +106,7 @@ class Project:
     name: str
     repo: str
     board: str | None = None
+    session: str | None = None
     topic: int | None = None
     topic_name: str | None = None
     verify: str | None = None
@@ -198,6 +212,7 @@ def _row_to_project(row: dict) -> Project:
         name=_name_for(row, repo_str),
         repo=expanded_repo,
         board=row.get("board"),
+        session=row.get("session"),
         topic=row.get("topic"),
         topic_name=row.get("topic_name"),
         verify=row.get("verify"),
@@ -370,6 +385,7 @@ def add_project(
     name: str,
     repo: str,
     board: str | None = None,
+    session: str | None = None,
     topic: int | None = None,
     verify: str | None = None,
     roadmap: str | None = None,
@@ -405,6 +421,7 @@ def add_project(
         name=str(name).strip(),
         repo=_expand(str(repo).strip()) or str(repo).strip(),
         board=board,
+        session=session,
         topic=topic,
         verify=verify,
         roadmap=roadmap,
@@ -489,6 +506,69 @@ def set_board(
             proj.board = board
             save_registry(projects, path)
             return proj
+    raise ProjectNotFoundError(f"no project named {name!r} in the registry")
+
+
+def set_session(
+    name: str,
+    session: str | None,
+    path: str | None = None,
+) -> Project:
+    """Set (or clear) the permanent Hermes session id for a project.
+
+    Returns the updated Project. ``session`` overrides any prior id and may be
+    ``None`` to clear it. Raises :class:`ProjectNotFoundError` if the project is
+    absent. This is a registry-only write — it never touches the session itself,
+    so no thread is lost or recreated by it.
+    """
+    with _registry_lock:
+        projects = load_registry(path)
+        for proj in projects:
+            if proj.name == name:
+                proj.session = session
+                save_registry(projects, path)
+                return proj
+    raise ProjectNotFoundError(f"no project named {name!r} in the registry")
+
+
+def ensure_session(name: str, path: str | None = None) -> str:
+    """Return the project's permanent session id, persisting one if absent.
+
+    The conversation thread for a project must survive a phone reinstall, so
+    the session id is stored server-side in the registry, not handed to the
+    client. If the project already carries a ``session`` (from a prior
+    ``ensure_session`` or ``set_session``), it is returned unchanged — the id
+    is immutable once the thread has started, so two devices always rejoin the
+    SAME ongoing session.
+
+    When no session is set yet (a project's very first message), the id is
+    chosen deterministically as the project name and persisted: re-running is a
+    stable no-op, and the same project always resolves to the same id.
+
+    Idempotent + concurrency-safe: the read-modify-write runs under
+    ``_registry_lock``, so two concurrent first-messages for the same project
+    cannot create two sessions — the first persists, the second returns it.
+
+    Raises :class:`ProjectNotFoundError` if the project is not in the registry.
+
+    >>> ensure_session("hscc")  # first call persists "hscc"
+    'hscc'
+    >>> ensure_session("hscc")  # second call: unchanged, same id
+    'hscc'
+    """
+    with _registry_lock:
+        projects = load_registry(path)
+        session_id: str | None = None
+        for proj in projects:
+            if proj.name == name:
+                # Default deterministically to the project name (this is the
+                # id the orchestrator already resolves to), so the first call
+                # and every later call agree on the same durable id.
+                session_id = proj.session or name
+                if proj.session is None:
+                    proj.session = session_id
+                    save_registry(projects, path)
+                return session_id
     raise ProjectNotFoundError(f"no project named {name!r} in the registry")
 
 

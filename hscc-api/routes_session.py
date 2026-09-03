@@ -83,6 +83,13 @@ def handle_session_events(server, ctx, query, body):
             f"Project {name} was not found.",
         )
 
+    # Resolve the project's PERMANENT session id (idempotent, deterministic):
+    # the same id the chat relay (routes_ws._default_relay) invokes, so history
+    # and the live relay read/write the SAME session for a project. Persisting
+    # it here (server-side) is what lets a reinstalled phone rejoin the ongoing
+    # thread instead of starting a new one.
+    session = _registry.ensure_session(name, _registry_path(ctx))
+
     # Query params.
     before = query.get("before")
     limit = query.get("limit")
@@ -107,10 +114,11 @@ def handle_session_events(server, ctx, query, body):
     if limit > 1000:
         limit = 1000
 
-    store = get_store(name)
+    store = get_store(session)
     data = store.history(before=before, limit=limit)
     payload = {
         "project": name,
+        "session": session,
         "events": data["events"],
         "next_before": data["next_before"],
         "oldest_seq": data["oldest_seq"],

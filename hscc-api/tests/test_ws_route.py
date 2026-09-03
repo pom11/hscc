@@ -38,6 +38,10 @@ def _project(name="hscc"):
 def fakes(monkeypatch):
     fake_registry = types.SimpleNamespace(
         get_project=lambda name, path=None: _project(name=name),
+        # The relay's _default_relay now persists/resolves the session via
+        # ensure_session (idempotent default = project name). The WS stream and
+        # history stay keyed by the project name, so the fake returns it as-is.
+        ensure_session=lambda name, path=None: name,
         ProjectNotFoundError=type("ProjectNotFoundError", (Exception,), {}),
     )
     monkeypatch.setattr(routes_ws, "_registry", fake_registry)

@@ -69,6 +69,7 @@ def test_missing_optional_fields_are_none_not_errors(tmp_path):
     assert p.verify is None and p.roadmap is None
     assert p.missing_fields() == [
         "board",
+        "session",
         "topic",
         "topic_name",
         "verify",
@@ -82,7 +83,8 @@ def test_missing_optional_fields_are_none_not_errors(tmp_path):
 
 def test_tilde_expansion(tmp_path):
     """A `~` in repo expands to the user's home directory."""
-    reg = _write(tmp_path / "registry.yaml", "projects:\n  - name: p\n    repo: ~/dev/thing\n")
+    reg = _write(tmp_path / "registry.yaml",
+                 "projects:\n  - name: p\n    repo: ~/dev/thing\n")
 
     p = load_registry(str(reg))[0]
 

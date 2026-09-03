@@ -54,6 +54,13 @@ def _install_backing(monkeypatch, invoke):
         "profile": "orch", "session": "s1"}
     fake._backing_invoke = invoke
     monkeypatch.setitem(__import__("sys").modules, "routes_orchestrator", fake)
+    # The relay now persists/resolves the session via routes_ws's registry
+    # (ensure_session). Fake it so NO test writes to the real ~/.flightdeck
+    # registry. Idempotent default = project name.
+    monkeypatch.setattr(
+        routes_ws, "_registry",
+        types.SimpleNamespace(ensure_session=lambda name, path=None: name))
+    monkeypatch.setattr(routes_ws, "_registry_path", lambda ctx: "/dev/null")
     return fake
 
 
@@ -70,7 +77,11 @@ def test_relay_actually_reaches_the_orchestrator(monkeypatch):
     assert routes_ws._default_relay("hscc", "restart the orchestrator") is True
 
     events = _wait_for("hscc", lambda evs: any(e["type"] == TYPE_MESSAGE for e in evs))
-    assert seen == [("orch", "s1", "restart the orchestrator")], (
+    # The relay resolves the session through routes_ws's registry (ensure_session),
+    # which the fake maps deterministically to the project name, NOT through the
+    # _backing_resolve seam (whose "s1" is an unrelated placeholder). "hscc" is
+    # the durable, registry-persisted id — exactly what survives a reinstall.
+    assert seen == [("orch", "hscc", "restart the orchestrator")], (
         "relay did not reach the orchestrator: %r" % (seen,))
     replies = [e for e in events if e["type"] == TYPE_MESSAGE]
     assert replies, "no assistant reply appended to the store"
