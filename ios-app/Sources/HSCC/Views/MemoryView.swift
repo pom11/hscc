@@ -323,7 +323,10 @@ struct MemoryView: View {
 /// currently-selected profile is marked with a checkmark. Tapping a row picks
 /// it, dismisses the sheet, and triggers the load of that profile's memories —
 /// there is no separate "Load" tap.
-private struct ProfilePickerSheet: View {
+///
+/// Reused by the Memory picker and the CreateCardSheet assignee field, so it
+/// is `internal` (not private) to the module.
+struct ProfilePickerSheet: View {
     let options: LoadState<ProfileListResponse>
     @Binding var selection: String
     let onPick: () async -> Void

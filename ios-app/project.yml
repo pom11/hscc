@@ -147,6 +147,7 @@ targets:
       - path: Sources/HSCC/Views/SlashCommandPalette.swift
       - path: Sources/HSCC/Views/ActivityFeedView.swift
       - path: Sources/HSCC/Views/MemoryView.swift
+      - path: Sources/HSCC/Views/CreateCardSheet.swift
       - path: Sources/HSCC/Intents/IntentClient.swift
       - path: Sources/HSCC/Intents/ClusterStatusIntent.swift
       - path: Sources/HSCC/Intents/ReviewQueueIntent.swift

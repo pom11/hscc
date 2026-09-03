@@ -1,10 +1,14 @@
 import SwiftUI
 
-/// One card's detail (GET /v1/cards/{id}). READ-ONLY.
+/// One card's detail (GET /v1/cards/{id}) plus the card actions that have
+/// routes in the API.
 ///
 /// Reached from a project's Board section (`ProjectBoardView`). This is the
-/// per-card read surface under the project-centric IA; dispatch/merge actions
-/// are wired in by the follow-up "project depth" card.
+/// per-card surface under the project-centric IA. Read-only for the card's
+/// body/fields; the one mutating action surfaced is UNBLOCK (the recover
+/// route) for a blocked card. Comment / block / complete-standalone / edit
+/// have no HTTP route in the API yet — they are NOT invented here, they are
+/// recorded on t_89f693ac for an API follow-up.
 struct CardDetailView: View {
     @EnvironmentObject private var settings: SettingsStore
     let cardID: String
@@ -39,6 +43,14 @@ struct CardDetailView: View {
                         row("Assignee", value: card.assignee)
                         row("Board", value: card.board)
                     }
+                    // Board actions that have routes. Only surface what the API
+                    // actually supports — a control that can't act is worse than
+                    // none. Today that is UNBLOCK (POST /v1/kanban/blocked/{id}/recover)
+                    // for a blocked card. Comment / block / complete-standalone /
+                    // edit have no HTTP route yet (recorded on t_89f693ac).
+                    if let status = card.status, status.lowercased() == "blocked" {
+                        actionsSection(card)
+                    }
                 }
             } else {
                 HSLoading("Loading…")
@@ -56,22 +68,52 @@ struct CardDetailView: View {
         }
     }
 
+    /// The card-actions section for a BLOCKED card: a confirm-gated Unblock
+    /// that uses the existing recover route.
+    private func actionsSection(_ card: CardDetailResponse) -> some View {
+        Section("Actions") {
+            MutationButton(
+                title: "Unblock",
+                systemImage: "arrow.counterclockwise",
+                prompt: "Recover \(card.id) (\"\(card.title ?? card.id)\") to ready so it re-runs? Only unblock a card you're sure is safe to re-run.",
+                run: {
+                    guard let client = makeClient() else {
+                        throw HSCCError.invalidURL
+                    }
+                    let result = try await client.recoverBlockedCard(card.id)
+                    await load()   // refresh detail status
+                    return result.message ?? "Recovered \(card.id)."
+                }
+            )
+            Text("Blocks can only be lifted here — blocking a card, commenting, or completing it outright needs a route that isn't in the API yet.")
+                .font(.footnote)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        }
+    }
+
     private func load() async {
         guard !isLoading else { return }
-        guard settings.isConfigured,
-              let token = settings.token,
-              let port = Int(settings.port) else {
+        guard let client = makeClient() else {
             loadError = .invalidURL
             return
         }
         isLoading = true
         defer { isLoading = false }
-        let client = HSCCClient(host: settings.host, port: port, token: token)
         do {
             card = try await client.cardDetail(cardID)
             loadError = nil
         } catch {
             loadError = (error as? HSCCError) ?? .transport(underlying: nil)
         }
+    }
+
+    /// A configured client from the current settings, or nil when the operator
+    /// hasn't set a usable host/port/token yet. Both the detail fetch and the
+    /// card actions use this so they share one source of truth.
+    private func makeClient() -> HSCCClient? {
+        guard settings.isConfigured,
+              let token = settings.token,
+              let port = Int(settings.port) else { return nil }
+        return HSCCClient(host: settings.host, port: port, token: token)
     }
 }
