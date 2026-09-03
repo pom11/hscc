@@ -92,6 +92,7 @@ struct QRScannerView: View {
             Image(systemName: "camera.fill")
                 .font(.system(size: 44))
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .accessibilityHidden(true)
             Text("Camera access is off")
                 .font(.headline)
             Text("HSCC needs the camera only to scan the setup QR code from `hscc api status`. Turn on camera access in Settings to continue.")
