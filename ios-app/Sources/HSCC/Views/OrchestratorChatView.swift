@@ -546,8 +546,8 @@ private struct ChatBody: View {
                 return "Can't reach the cluster — is Tailscale connected? Your prompt is saved below; re-send when connected."
             case .invalidURL:
                 return "The host or port is invalid. Set them in Settings."
-            case .decoding(let detail):
-                return "Unexpected response from the cluster: \(detail)"
+            case .decoding:
+                return "The cluster returned something this app can't read — likely an app/cluster version mismatch."
             }
         }
         return operatorErrorMessage(error)

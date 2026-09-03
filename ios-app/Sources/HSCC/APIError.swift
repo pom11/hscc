@@ -32,8 +32,14 @@ enum HSCCError: Error, Equatable {
                 return "Not authorized — check your token."
             }
             return message
-        case .decoding(let detail):
-            return "Unexpected response from the cluster: \(detail)"
+        case .decoding:
+            // We deliberately do NOT interpolate the raw `detail` here. The
+            // detail is often a `String(describing:)` of Swift's `DecodingError`
+            // (e.g. `keyNotFound(CodingKeys(...))`) or an internal field name
+            // (`missing speak field`) — internal symbols a stranger can't act
+            // on. A decode failure of a 2xx body almost always means the app and
+            // cluster disagree on the API schema; say that and what to do.
+            return "The cluster returned something this app can't read — likely an app/cluster version mismatch. Update the app (or the cluster) so they match."
         case .transport:
             return "Can't reach the cluster — is Tailscale connected?"
         case .invalidURL:
