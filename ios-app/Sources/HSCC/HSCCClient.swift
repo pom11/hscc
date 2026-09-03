@@ -235,9 +235,19 @@ struct HSCCClient {
     ///
     /// Same semantics as `get(_:as:)` but builds the URL via `URLQueryItem`s
     /// (see `url(for:queryItems:)`). The response is cached under the plain
-    /// `path` ONLY when `queryItems` is empty — i.e. the newest-page (tail)
-    /// read — so the offline last-known cache always holds the freshest page
-    /// and a paging read never clobbers it.
+    /// `path` except when it is a PAGING (`before`) read, so the offline
+    /// last-known cache always holds the freshest page and an older-page read
+    /// never clobbers it.
+    ///
+    /// This is the offline-fallback fix: single-shot query reads (sessions by
+    /// profile, fleet stats by days, kanban stale by older_than, memory by
+    /// profile, activity feed by limit) each stabilize on a canonical path
+    /// their view already passes to `Offline.load` as `cacheKey`. Previously
+    /// the guard was `if queryItems.isEmpty`, so NONE of these ever wrote to
+    /// the cache and their offline fallback (`.stale`) was dead — on a
+    /// cold-start offline they surfaced `.failed` instead of last-known data.
+    /// The only paging call site is `sessionEvents`, which marks older pages
+    /// with a `before` cursor; a paging read must not overwrite the tail.
     func get<T: Decodable>(path: String,
                            queryItems: [URLQueryItem],
                            as type: T.Type = T.self) async throws -> T {
@@ -258,7 +268,12 @@ struct HSCCClient {
         if (200...299).contains(status) {
             do {
                 let decoded = try Self.decoder.decode(T.self, from: data)
-                if queryItems.isEmpty {
+                // Cache the last-known value under the plain path, EXCEPT for a
+                // paging (`before`) read which must not overwrite the freshest
+                // page. Query single-shot reads cache here so their offline
+                // fallback (Offline.load → .stale) actually has a value to show.
+                let isPaging = queryItems.contains { $0.name == "before" }
+                if !isPaging {
                     StateCache.store(data, for: path)
                 }
                 return decoded

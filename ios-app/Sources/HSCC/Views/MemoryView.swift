@@ -112,11 +112,16 @@ struct MemoryView: View {
     private func load(_ client: HSCCClient) async {
         let trimmed = trimmedProfile
         guard !trimmed.isEmpty else { return }
-        list = .loading
-        do {
-            list = .loaded(try await client.memories(profile: trimmed))
-        } catch {
-            list = .failed(errorMessage(for: error))
+        // Only show the explicit spinner on a first load. On refresh we keep
+        // holding the last-known value so a transient failure degrades to
+        // `.stale` (last-known, clearly labelled) instead of blanking the screen.
+        if list.value == nil {
+            list = .loading
+        }
+        list = await Offline.load(list,
+                                  cacheKey: "/v1/memory",
+                                  client: client) {
+            try await client.memories(profile: trimmed)
         }
     }
 
@@ -140,24 +145,15 @@ struct MemoryView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             case .failed(let message):
                 errorLabel(message)
-            case .loaded(let state):
+            case .stale(let state, let ageMessage):
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(state.speak)
-                        .font(.subheadline)
-                        .italic()
-                        .foregroundColor(.secondary)
-                    let items = state.memories ?? []
-                    if items.isEmpty {
-                        emptyLabel("This profile holds no memories.")
-                    } else {
-                        ForEach(items) { item in
-                            memoryRow(client, item)
-                            if item.id != items.last?.id {
-                                Divider()
-                            }
-                        }
+                    StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
+                        Task { await load(client) }
                     }
+                    memoryBody(client, state)
                 }
+            case .loaded(let state):
+                memoryBody(client, state)
             default:
                 EmptyView()
             }
@@ -168,6 +164,26 @@ struct MemoryView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Theme.Semantic.surfaceRaised)
         )
+    }
+
+    private func memoryBody(_ client: HSCCClient, _ state: MemoryListResponse) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(state.speak)
+                .font(.subheadline)
+                .italic()
+                .foregroundColor(.secondary)
+            let items = state.memories ?? []
+            if items.isEmpty {
+                emptyLabel("This profile holds no memories.")
+            } else {
+                ForEach(items) { item in
+                    memoryRow(client, item)
+                    if item.id != items.last?.id {
+                        Divider()
+                    }
+                }
+            }
+        }
     }
 
     private func memoryRow(_ client: HSCCClient, _ item: MemoryItem) -> some View {
