@@ -548,7 +548,7 @@ private struct ChatBody: View {
                 return "Unexpected response from the cluster: \(detail)"
             }
         }
-        return "Something went wrong."
+        return operatorErrorMessage(error)
     }
 
     /// Build the configured client, or fail with a clear message when settings

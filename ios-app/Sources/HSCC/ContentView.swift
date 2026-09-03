@@ -167,8 +167,7 @@ struct ContentView: View {
                 _ = try await client.ping()
                 pingState = .success
             } catch {
-                pingState = .failure((error as? HSCCError)?.localizedDescription
-                                     ?? "Connection failed.")
+                pingState = .failure(operatorErrorMessage(error))
             }
         }
     }

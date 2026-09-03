@@ -62,3 +62,19 @@ enum HSCCError: Error, Equatable {
         }
     }
 }
+
+/// Turn any thrown `Error` into an operator-actionable message.
+///
+/// This is the single shared "what went wrong + what to do" translator for the
+/// app's error surfaces. `HSCCError` keeps its own specific `localizedDescription`
+/// (that path already says what happened and what to do next). A NON-`HSCCError`
+/// is an unexpected internal failure that escaped the typed client path — a
+/// coding error, a data race, a decode outside the API layer. The operator still
+/// needs an honest, actionable message, never a vague dead-end like the old
+/// "Something went wrong." So every view that used to copy-paste
+/// `(error as? HSCCError)?.localizedDescription ?? "Something went wrong."`
+/// now calls this one function.
+func operatorErrorMessage(_ error: Error?) -> String {
+    if let e = error as? HSCCError { return e.localizedDescription }
+    return "Something unexpected went wrong on this screen. Try again — if it keeps failing, restart the app."
+}
