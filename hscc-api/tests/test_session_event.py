@@ -45,6 +45,10 @@ def fakes(monkeypatch):
     """Hermetic flightdeck registry fake so no real registry file is read."""
     fake_registry = types.SimpleNamespace(
         get_project=lambda name, path=None: _project(name=name),
+        # ensure_session is idempotent: same project -> same deterministic id
+        # (default = project name). The tests assert against get_store("hscc"),
+        # so the fake's default must equal the project name.
+        ensure_session=lambda name, path=None: name,
         ProjectNotFoundError=type("ProjectNotFoundError", (Exception,), {}),
     )
     monkeypatch.setattr(routes_session, "_registry", fake_registry)

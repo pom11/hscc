@@ -114,10 +114,14 @@ def resolve_orchestrator(project: Optional[str] = None, path: Optional[str] = No
                     f"project {name!r} has no 'board' in the registry; "
                     "cannot resolve an orchestrator for it"
                 )
+            # The session id may be persisted in the registry (ensure_session /
+            # set_session) so a reinstall resolves the SAME ongoing thread.
+            # Falls back deterministically to the project name, which matches
+            # ensure_session's default — relay and history always agree.
             return {
                 "project": name,
                 "profile": f"{name}-orch",
-                "session": name,
+                "session": row.get("session") or name,
                 "board": str(board),
                 "repo": row.get("repo"),
             }

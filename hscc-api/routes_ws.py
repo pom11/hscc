@@ -158,8 +158,16 @@ def _default_relay(project: str, text: str) -> bool:
         try:
             import routes_orchestrator as _ro
             resolved = _ro._backing_resolve(project, _ro._registry_path(None))
+            # Persist + resolve the project's permanent session id server-side
+            # (idempotent, deterministic default = project name). This is what
+            # makes a phone reinstall rejoin the SAME ongoing thread: the id is
+            # in the registry, not on the device. Two concurrent first-messages
+            # for the same project funnel through the registry's lock, so they
+            # resolve one session, never two.
+            session_id = _registry.ensure_session(
+                project, _registry_path(None))
             reply, _profile, _session = _ro._backing_invoke(
-                resolved["profile"], resolved["session"], text)
+                resolved["profile"], session_id, text)
             payload = MessagePayload(role="assistant", delta=reply, done=True)
             get_store(project).append(TYPE_MESSAGE, payload)
         except Exception as exc:  # noqa: BLE001 - surface, never swallow
