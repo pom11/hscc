@@ -193,6 +193,10 @@ struct ClusterView: View {
                    subtitle: "verify, daemon, triggers, escalations, profiles") {
                 OpsView(client: client)
             }
+            hubRow("Logs", systemImage: "doc.text.magnifyingglass",
+                   subtitle: "tail the daemon, API, or worker log — redacted") {
+                LogsView(client: client)
+            }
             hubRow("Fleet", systemImage: "wave.3.right",
                    subtitle: "stats, throughput, streams, autoscale") {
                 FleetView(client: client)
