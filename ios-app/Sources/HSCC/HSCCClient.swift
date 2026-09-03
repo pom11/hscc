@@ -481,6 +481,13 @@ struct HSCCClient {
         try await get(path, as: ReadResponse.self)
     }
 
+    /// GET /v1/commands — the server-driven slash-command catalog for the chat
+    /// palette. Read-only; sourced from the authoritative `hscc-commands`
+    /// plugin registration (not a hardcoded list).
+    func commands() async throws -> CommandsResponse {
+        try await get("/v1/commands", as: CommandsResponse.self)
+    }
+
     // MARK: - C6 reads (autodown / projects / ops / board hygiene / fleet control)
 
     /// GET /v1/autodown/status — the autodown report (operator's most-used surface).
