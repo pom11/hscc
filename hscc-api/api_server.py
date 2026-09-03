@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import re
+import sys
 import secrets
 import socket
 import subprocess
@@ -466,6 +467,27 @@ class _ApiServer(http.server.ThreadingHTTPServer):
     def __init__(self, server_address, handler_cls, context: ApiContext):
         super().__init__(server_address, handler_cls)
         self.ctx = context
+
+    def handle_error(self, request, client_address):
+        """Do not print a stack trace when a client simply hung up.
+
+        socketserver prints a full traceback for ANY exception escaping a
+        handler, including the entirely routine case of the app backgrounding,
+        the phone leaving wifi, or a socket being closed mid-response. The
+        operator sees an alarming ConnectionResetError trace in the API log for
+        something that is not a fault and needs no action.
+
+        Genuine errors still print — this only filters the three disconnect
+        exceptions, and logs a single quiet line so the event is not invisible.
+        """
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError,
+                            ConnectionAbortedError)):
+            host = client_address[0] if client_address else "?"
+            sys.stderr.write("client %s disconnected mid-request (%s)\n"
+                             % (host, type(exc).__name__))
+            return
+        super().handle_error(request, client_address)
 
 
 class ApiHandler(http.server.BaseHTTPRequestHandler):
