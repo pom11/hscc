@@ -21,6 +21,9 @@ struct ContentView: View {
     @EnvironmentObject private var replyWatcher: StreamReplyWatcher
     @State private var selectedTab: Tab = .projects
     @StateObject private var approvals = ApprovalPoller()
+    /// Queued messages dropped because the user switched clusters mid-queue
+    /// (t_42ba90d2) — surfaced here so nothing is silently lost.
+    @State private var droppedBanner: [OfflineSendQueue.QueuedMessage]?
 
     enum Tab: Hashable {
         case projects, cluster, settings
@@ -47,10 +50,44 @@ struct ContentView: View {
                 .tabItem { Label("Settings", systemImage: "gearshape") }
                 .tag(Tab.settings)
         }
+        .overlay(alignment: .bottom) {
+            // Cluster-switch drop banner (t_42ba90d2): queued messages were
+            // cleared because the user pointed the app at a different cluster.
+            // Surface them (never silently dropped); Dismiss clears the banner
+            // (the messages must be re-sent by hand on the new cluster).
+            if let dropped = droppedBanner, !dropped.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(
+                        "\(dropped.count) queued message\(dropped.count == 1 ? "" : "s") not sent — cluster changed",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.subheadline.weight(.semibold))
+                    Text("Switch back to the previous cluster to send them, or re-send by hand.")
+                        .font(.caption)
+                    Button("Dismiss") {
+                        OfflineSendQueue.shared.consumeDrained()
+                        droppedBanner = nil
+                    }
+                    .font(.subheadline.weight(.semibold))
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.Semantic.warn.opacity(0.15))
+                .overlay(alignment: .leading) {
+                    Rectangle().fill(Theme.Semantic.warn).frame(width: 4)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .padding()
+            }
+        }
+        .onReceive(OfflineSendQueue.shared.$drainedDueToClusterSwitch) { dropped in
+            droppedBanner = dropped
+        }
         .onAppear {
             approvals.setClient(makeClient())
             replyWatcher.setClient(makeClient())
             NotificationCoordinator.shared.setClient(makeClient())
+            seedOfflineQueue()
             // Re-hydration: end any Live Activity left over from a prior process
             // kill (deinit doesn't run when the process is killed, so ActivityKit
             // would otherwise keep a stale wake/session bubble alive forever).
@@ -68,6 +105,12 @@ struct ContentView: View {
             approvals.setClient(makeClient())
             replyWatcher.setClient(makeClient())
             NotificationCoordinator.shared.setClient(makeClient())
+            // A different cluster is a different session: queued messages destined
+            // for the OLD cluster must never flush into the new one. Drain (clear)
+            // the queue but SURFACE what was dropped so nothing is silently lost;
+            // a banner shows the count and the messages can be re-sent by hand.
+            seedOfflineQueue()
+            OfflineSendQueue.shared.drainDueToClusterSwitch()
         }
         .onChange(of: settings.appGroupUnavailable) {
             // ConnectionBanner observes SettingsStore directly and redraws.
@@ -83,6 +126,44 @@ struct ContentView: View {
             return nil
         }
         return HSCCClient(host: settings.host, port: port, token: token)
+    }
+
+    /// Wire the offline queue's one real delivery path (t_42ba90d2). The queue
+    /// is app-scoped and persisted; it must be able to flush a queued message
+    /// regardless of which view is open, so the handler is seeded at the app
+    /// root rather than by any single chat view.
+    ///
+    /// For an orchestrator-chat message this is exactly the fresh-delivery path:
+    /// POST to create the job, then persist the job_id to the SAME key the chat
+    /// view reads (`ChatStore.persistJobID`), so when the operator next opens
+    /// that project's chat, `resumeInFlightJob()` polls and collects the answer.
+    /// Delivering = a job was created. A transport failure returns `.unreachable`
+    /// (keep queued); a server rejected/failed returns `.rejected` (the queue
+    /// can't fix a 400/502, so it removes the message rather than hammer the
+    /// server in a loop).
+    private func seedOfflineQueue() {
+        let client = makeClient()
+        // NOTE: no `self`/no `weak` — ContentView is a View struct, not a class,
+        // so `weak self` is illegal, and `deliverFromQueue` doesn't read any view
+        // state (it only uses `client`). Capturing `client` alone keeps the
+        // handler free of any view lifetime.
+        OfflineSendQueue.shared.sendHandler = { msg in
+            guard let client else { return .unreachable }
+            do {
+                let started = try await client.orchestratorChatStart(project: msg.project, prompt: msg.text)
+                // Persist the job so the chat view resumes and collects the reply.
+                ChatStore.persistJobID(started.jobID, for: msg.project)
+                return .delivered
+            } catch {
+                if let e = error as? HSCCError, case .transport = e {
+                    return .unreachable  // still can't reach — keep queued, retry later
+                }
+                return .rejected(
+                    (error as? HSCCError)?.localizedDescription
+                        ?? "The cluster reached but rejected the queued message."
+                )
+            }
+        }
     }
 }
 

@@ -64,6 +64,15 @@ final class ChatStore: ObservableObject {
         UserDefaults.standard.string(forKey: Self.jobKey(project))
     }
 
+    /// Persist a job_id for `project` without a live ChatStore instance. Used by
+    /// the offline queue so a message it delivered is collected when the operator
+    /// next opens that project's chat (`resumeInFlightJob` reads the same key —
+    /// t_42ba90d2). Writing to `resumedJobID`'s exact key is what makes the
+    /// queue-to-resume handoff seamless.
+    static func persistJobID(_ jobID: String, for project: String) {
+        UserDefaults.standard.set(jobID, forKey: Self.jobKey(project))
+    }
+
     /// Whether a reply is currently being awaited. Send is disabled while true
     /// — the session is sequential, one turn at a time (requirement 6).
     var isSending: Bool { inFlight != nil }
@@ -128,6 +137,50 @@ final class ChatStore: ObservableObject {
         }
         inFlight = nil
         clearJob()
+        persist()
+    }
+
+    /// A message was QUEUED because the cluster was unreachable at send time
+    /// (t_42ba90d2). The optimistic `.prompt` from `beginSend` becomes a
+    /// `.queued` entry, distinct from delivered, so the operator knows it has
+    /// NOT landed yet. It stays visible and persisted; the offline queue flushes
+    /// it when the connection returns. Idempotent: only converts the trailing
+    /// `.prompt`.
+    func markQueued(messageID: UUID) {
+        if case .prompt(let text)? = transcript.last {
+            transcript[transcript.count - 1] = .queued(text: text, messageID: messageID)
+        }
+        inFlight = nil
+        clearJob()
+        persist()
+    }
+
+    /// Reconcile `.queued` entries against the app-scoped offline queue
+    /// (t_42ba90d2). Called on appear and when the queue reports a message
+    /// handled. Any `.queued` entry whose message is no longer pending was
+    /// finished by the queue:
+    ///   * delivered → the queue persisted the returned job_id into the same
+    ///     key `resumedJobID` reads, so flip to `.prompt` and let the caller
+    ///     resume the poll to collect the answer;
+    ///   * otherwise (rejected / flushed-away) → no job, the message did not
+    ///     land; convert to a clear failure so it is never presented as sent.
+    /// Idempotent and safe to call repeatedly.
+    func reconcileQueued() {
+        for (i, entry) in transcript.enumerated() {
+            guard case .queued(let text, let messageID) = entry else { continue }
+            if OfflineSendQueue.shared.isPending(messageID) {
+                continue  // still waiting — leave as QUEUED
+            }
+            // The queue finished this message. Delivered implies a job_id was
+            // persisted (same key as `resumedJobID`); otherwise it never landed.
+            if let jobID = resumedJobID, !jobID.isEmpty {
+                transcript[i] = .prompt(text)
+            } else {
+                transcript[i] = .failure(
+                    "This queued message could not be delivered when the connection returned. Send it again."
+                )
+            }
+        }
         persist()
     }
 

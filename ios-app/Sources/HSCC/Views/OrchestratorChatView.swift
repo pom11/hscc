@@ -172,10 +172,29 @@ private struct ChatBody: View {
             // fleet note rather than a silent hang (requirement 5).
             store.restoreDraft()
             await refreshFleetState()
+            // Reconcile any offline-queued entries against the app-scoped queue
+            // (t_42ba90d2): if the queue already flushed+delivered one of our
+            // queued messages while we were away, reflect it now (see
+            // `reconcileQueued`).
+            store.reconcileQueued()
             // Resume polling for an in-flight job persisted from a previous
             // session (t_bc242def): a backgrounded/relaunched app picks the
             // finished answer up instead of losing it.
             await resumeInFlightJob()
+        }
+        // Live offline-queue reflection (t_42ba90d2): while the store is open,
+        // if the queue handles one of OUR queued messages (delivered/rejected),
+        // reconcile the transcript so the QUEUED entry flips to prompt/poll or
+        // failure instead of lingering.
+        .onChange(of: OfflineSendQueue.shared.lastHandled?.id) {
+            // The zero-parameter `.onChange(of:)` here resolves to the SYNC
+            // closure variant on this SDK, so launch the async work in a Task.
+            if store.transcript.contains(where: { if case .queued = $0 { true } else { false } }) {
+                Task {
+                    store.reconcileQueued()
+                    await resumeInFlightJob()
+                }
+            }
         }
     }
 
@@ -285,6 +304,8 @@ private struct ChatBody: View {
             // as you type. Selecting one inserts it into the draft.
             SlashCommandPalette(draft: $store.draft, client: commandPalette)
 
+            offlineQueueChip
+
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Ask the \(project) orchestrator…", text: $store.draft, axis: .vertical)
                     .lineLimit(1...4)
@@ -344,6 +365,32 @@ private struct ChatBody: View {
 
     private var canSend: Bool {
         !store.isSending && !ComposerText.isEmpty(store.draft)
+    }
+
+    /// Per-project offline-queue chip (t_42ba90d2): shows when this project has
+    /// messages stuck in the app-scoped offline queue because the cluster was
+    /// unreachable when they were sent. Reassures the operator the messages are
+    /// NOT lost and NOT silently dropped — they'll flush when the connection
+    /// returns. Hidden when there's nothing queued for this project (the common
+    /// case).
+    @ViewBuilder
+    private var offlineQueueChip: some View {
+        let n = OfflineSendQueue.shared.queuedCount(for: project)
+        if n > 0 {
+            Label(
+                n == 1
+                    ? "1 message queued — will send when the cluster is reachable"
+                    : "\(n) messages queued — will send when the cluster is reachable",
+                systemImage: "clock.arrow.circlepath"
+            )
+            .font(.caption)
+            .foregroundColor(Theme.Semantic.warn)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 4)
+            .accessibilityLabel(
+                "\(n) message(s) queued and waiting to send when the connection returns"
+            )
+        }
     }
 
     /// The Voice button's action. There is no public API to launch the system
@@ -416,12 +463,38 @@ private struct ChatBody: View {
             pollTask = Task { await poll(jobID: started.jobID, client: client) }
         } catch {
             // Delivery failed: the POST never created a job (transport error, or
-            // a 4xx/5xx before any background work started). Nothing will arrive.
-            // Keep the message visible as UNSENT with a Retry — never silently
-            // discarded, never rendered as a bogus reply — and surface why
-            // delivery failed so the operator knows what to fix before Retry.
-            store.markUnsent(reason: message(for: error))
+            // a 4xx/5xx before any background work started).
+            //
+            // If the cluster is genuinely UNREACHABLE (a transport failure, which
+            // is exactly the signal ConnectionMonitor tracks — t_42ba90d2), the
+            // message goes into the app-scoped offline queue: it is NOT dropped,
+            // NOT marked unsent-and-forgotten. It will flush when the connection
+            // returns and the reply will be collected via the resumed job.
+            //
+            // Any other failure (a server REACHED and rejected/failed, e.g. a
+            // 400 or a bad decode) is not an offline condition — keep it as UNSENT
+            // with a Retry, since re-sending while the cluster is reachable (what
+            // Retry implies) is the right remedy.
+            if isUnreachable(error) {
+                let messageID = OfflineSendQueue.shared.enqueue(
+                    project: project, text: text, kind: .orchestratorChat
+                )
+                store.markQueued(messageID: messageID)
+            } else {
+                store.markUnsent(reason: message(for: error))
+            }
         }
+    }
+
+    /// True when `error` means the cluster is genuinely unreachable (a transport
+    /// failure — no HTTP response: refused, DNS, timeout). This is precisely the
+    /// signal that drives `ConnectionMonitor.requestFailed()`, so "unreachable"
+    /// here agrees with the shared connection truth. A server-side response
+    /// (.api / .decoding) means the cluster was reached and is NOT an offline
+    /// condition — the offline queue would only retry into the same response.
+    private func isUnreachable(_ error: Error) -> Bool {
+        if let e = error as? HSCCError, case .transport = e { return true }
+        return false
     }
 
     /// Poll GET /v1/orchestrator/chat/{id} until it reaches a terminal state,
@@ -607,6 +680,11 @@ enum ChatEntry: Codable, Equatable {
     /// discarded (t_c0953d4c). Holds the failed prompt text and an optional
     /// human reason for why delivery failed (transport, bad request, etc.).
     case unsent(prompt: String, reason: String?)
+    /// A QUEUED message: the cluster was unreachable at send time (t_42ba90d2).
+    /// The message is held by the app-scoped `OfflineSendQueue` and will be sent
+    /// when the connection returns. Rendered distinctly so the operator knows it
+    /// has NOT landed yet. The `messageID` links this entry to its queue item.
+    case queued(text: String, messageID: UUID)
 
     var text: String {
         switch self {
@@ -614,6 +692,7 @@ enum ChatEntry: Codable, Equatable {
         case .reply(let t): return t
         case .failure(let t): return t
         case .unsent(let prompt, _): return prompt
+        case .queued(let text, _): return text
         }
     }
 
@@ -627,7 +706,7 @@ enum ChatEntry: Codable, Equatable {
     // future case can be added without breaking old persisted transcripts.
 
     private enum Kind: String, Codable {
-        case prompt, reply, failure, unsent
+        case prompt, reply, failure, unsent, queued
     }
 
     private struct Payload: Codable {
@@ -636,6 +715,11 @@ enum ChatEntry: Codable, Equatable {
         /// Present only for `.unsent` — the reason delivery failed. Optional so
         /// older (pre-unsent) persisted records and reason-less unsents decode.
         var reason: String? = nil
+        /// Present only for `.queued` — links the entry to its offline-queue
+        /// item. Optional (and defaults nil on decode) so transcripts queued
+        /// before this field shipped still decode; a nil ids simply never
+        /// reconciles, which is safe.
+        var messageID: UUID? = nil
     }
 
     init(from decoder: Decoder) throws {
@@ -645,12 +729,18 @@ enum ChatEntry: Codable, Equatable {
         case .reply: self = .reply(payload.text)
         case .failure: self = .failure(payload.text)
         case .unsent: self = .unsent(prompt: payload.text, reason: payload.reason)
+        case .queued:
+            // A queued entry with a missing/undecodable id cannot link to any
+            // queue item. Treat it as never-delivered failure rather than a
+            // silent black-box — the operator re-sends.
+            self = .queued(text: payload.text, messageID: payload.messageID ?? UUID())
         }
     }
 
     func encode(to encoder: Encoder) throws {
         let kind: Kind
         var reason: String? = nil
+        var messageID: UUID? = nil
         switch self {
         case .prompt(let t):
             kind = .prompt
@@ -665,8 +755,12 @@ enum ChatEntry: Codable, Equatable {
             kind = .unsent
             _ = prompt
             reason = r
+        case .queued(let t, let mid):
+            kind = .queued
+            _ = t
+            messageID = mid
         }
-        try Payload(kind: kind, text: text, reason: reason).encode(to: encoder)
+        try Payload(kind: kind, text: text, reason: reason, messageID: messageID).encode(to: encoder)
     }
 }
 
@@ -711,6 +805,22 @@ private struct ChatBubble: View {
                         .background(Theme.Semantic.bad.opacity(0.12))
                 }
                 Spacer(minLength: 48)
+            case .queued:
+                // An outbound message waiting in the offline queue — right-side
+                // like other own-messages, but amber-tinted with a QUEUED label
+                // and a note so the operator knows it has NOT landed yet
+                // (t_42ba90d2). It will flush automatically when the cluster is
+                // reachable again.
+                Spacer(minLength: 48)
+                bubble
+                    .background(Theme.Semantic.warn.opacity(0.14))
+                    .foregroundColor(.primary)
+                    .overlay(alignment: .bottomLeading) {
+                        Text("Will send when connected")
+                            .font(.caption2)
+                            .foregroundColor(Theme.Semantic.warn)
+                            .padding(.leading, 2)
+                    }
             }
         }
     }
@@ -758,6 +868,7 @@ private struct ChatBubble: View {
         case .reply: return "ORCHESTRATOR"
         case .failure: return "FAILED"
         case .unsent: return "UNSENT"
+        case .queued: return "QUEUED"
         }
     }
 }

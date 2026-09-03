@@ -50,11 +50,21 @@ if ! grep -q 'case unsent(prompt' "$TMP/ChatEntry.swift"; then
   echo "error: sliced ChatEntry lacks the .unsent case (t_c0953d4c gone?)" >&2
   exit 1
 fi
+# The slice is a standalone file (the app's import lives above the enum in the
+# view file). Prepend the import the enum's Codable/UUID types need to compile.
+{ printf 'import Foundation\n\n'; cat "$TMP/ChatEntry.swift"; } > "$TMP/ChatEntry.swift.tmp"
+mv "$TMP/ChatEntry.swift.tmp" "$TMP/ChatEntry.swift"
 
 real_sources=(
   Sources/HSCC/Views/ChatStore.swift
   Sources/HSCC/Views/ProjectUnreadCenter.swift
   "$TMP/ChatEntry.swift"
+  # t_42ba90d2: ChatStore.reconcileQueued() consults OfflineSendQueue, which
+  # depends on ConnectionMonitor + APIError for HSCCError. Compile them so the
+  # store's offline integration is exercised here too.
+  Sources/HSCC/OfflineSendQueue.swift
+  Sources/HSCC/ConnectionMonitor.swift
+  Sources/HSCC/APIError.swift
 )
 harness=(
   scripts/chat_state_check/main.swift
