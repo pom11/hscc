@@ -854,6 +854,13 @@ def preview_template(template_name: str, *, _http_get=None) -> dict:
     if routing_disc["routing"]:
         out["routing"] = routing_disc["routing"]
         out["routing_untouched"] = routing_disc["routing_untouched"]
+
+    # Unit-level delta — the concrete "what will actually change" the operator
+    # cannot see from file summaries alone. Diff the LIVE serving.json units
+    # against the resolved NEW serving units so the preview names which units
+    # START, STOP, and MOVE (relocate/rescale) and which nodes are touched.
+    # Always present (even "no change") so the app is never guessing. Read-only.
+    out["serve_delta"] = _diff_serving_delta(read_json(SERVING_JSON), new_serving)
     return out
 
 
@@ -2025,6 +2032,168 @@ def _diff_serving_summary(current: Optional[dict], new: dict) -> str:
     old_units = len(current.get("units", [])) if current else 0
     new_units = len(new.get("units", []))
     return f"{old_units} units → {new_units} units"
+
+
+def _serving_signature(unit: dict) -> tuple:
+    """A unit's concrete serving signature — what it takes to run it.
+
+    (role, model, sorted nodes, port, tp, pp) fully describes WHERE and HOW a
+    unit serves, so two units with an equal signature are interchangeable and
+    one with a different signature is a real change. Missing tp/pp default to 1
+    so an orchestrator (which has no tp/pp keys) compares cleanly against a
+    worker that happens to be 1x1.
+    """
+    return (
+        unit.get("role", ""),
+        unit.get("model", ""),
+        tuple(sorted(unit.get("nodes") or [])),
+        int(unit.get("port", 0)),
+        int(unit.get("tp", 1) or 1),
+        int(unit.get("pp", 1) or 1),
+    )
+
+
+def _serving_workload(unit: dict) -> tuple:
+    """The workload identity: role + model. Survives relocation/rescaling.
+
+    Two units with the same workload but different signatures are the SAME
+    model being moved or rescaled — reported as a MOVE, not stop+start as two
+    unrelated events.
+    """
+    return (unit.get("role", ""), unit.get("model", ""))
+
+
+def _trim_serving_unit(unit: dict) -> dict:
+    """A compact, stable view of a serving unit for the delta output — only the
+    keys that identify it and matter to an operator, in a fixed order."""
+    return {
+        "id": unit.get("id"),
+        "role": unit.get("role"),
+        "model": unit.get("model"),
+        "nodes": unit.get("nodes") or [],
+        "port": unit.get("port"),
+        "tp": unit.get("tp"),
+        "pp": unit.get("pp"),
+        "family": unit.get("family"),
+    }
+
+
+def _diff_serving_delta(current: Optional[dict], new: dict) -> dict:
+    """Compute the unit-level delta between the LIVE serving.json and the NEW
+    serving units an apply would write.
+
+    Returns:
+      start[]        units present in NEW only (brand-new serving units)
+      stop[]         units present in CURRENT only (would be torn down)
+      move[]         workloads present in BOTH whose placement/scaling changes
+                     (model stays, but nodes/port/tp/pp change)
+      unchanged[]    units with an identical serving signature in both
+      affected_nodes the sorted union of every node across start/stop/move
+
+    Matching is by full serving signature for start/stop/unchanged, and by
+    workload (role+model) for MOVE so a relocation is one event ("moves") and
+    not a phantom stop + start. When CURRENT is absent/corrupt every new unit
+    is a START and no stop/move is reported — the app must not over-claim
+    teardowns it cannot see.
+    """
+    current_units = (current or {}).get("units") or []
+    new_units = new.get("units") or []
+
+    # GUARD against malformed unit lists (non-dict entries) — never crash the
+    # preview over a bad serving.json.
+    current_units = [u for u in current_units if isinstance(u, dict)]
+    new_units = [u for u in new_units if isinstance(u, dict)]
+
+    # Pair up same-workload units 1:1 so a family resizing (grow/shrink) and a
+    # relocation never cross-contaminate. A unit whose exact signature also
+    # exists in CURRENT is UNCHANGED; otherwise, if the workload has an unused
+    # CURRENT unit, it's a MOVE (the model relocates/rescales); else it's a
+    # START. Leftover CURRENT units are STOPS.
+    start = []
+    stop = []
+    unchanged = []
+    moves = []
+    used_current = set()          # indices of current units already consumed
+    matched_new = set()           # object ids of new units already accounted for
+
+    # Index current units by signature so each identical pair consumes a
+    # distinct current unit (a family grown from 1→2 units must keep its
+    # existing unit UNCHANGED, not steal it as a MOVE source for the new one).
+    current_by_sig = {}
+    for i, cu in enumerate(current_units):
+        current_by_sig.setdefault(_serving_signature(cu), []).append(i)
+
+    # PASS 1 — unchanged: a new unit whose exact signature has a free CURRENT
+    # partner is unchanged (identical placement/scaling, no action).
+    for u in new_units:
+        cand = [i for i in current_by_sig.get(_serving_signature(u), [])
+                if i not in used_current]
+        if not cand:
+            continue
+        used_current.add(cand[0])
+        matched_new.add(id(u))
+        unchanged.append(_trim_serving_unit(u))
+
+    # PASS 2 — move / start: every remaining new unit either relocates/rescales
+    # an existing CURRENT unit with the same workload (MOVE), or is brand-new
+    # (START).
+    current_by_workload = {}
+    for i, cu in enumerate(current_units):
+        if i not in used_current:
+            current_by_workload.setdefault(_serving_workload(cu), []).append(i)
+    for u in new_units:
+        if id(u) in matched_new:
+            continue  # already unchanged
+        workload = _serving_workload(u)
+        open_current = [i for i in current_by_workload.get(workload, [])
+                        if i not in used_current]
+        if not open_current:
+            start.append(_trim_serving_unit(u))   # brand-new serving unit
+            continue
+        # Same workload already serving but with a different signature → MOVE.
+        ci = open_current[0]
+        used_current.add(ci)
+        moves.append(_move_record(current_units[ci], u))
+
+    # PASS 3 — stop: a CURRENT unit with no matching new unit (by signature or
+    # as a move source) would be torn down.
+    new_by_sig = {_serving_signature(u) for u in new_units}
+    for i, cu in enumerate(current_units):
+        if i in used_current or _serving_signature(cu) in new_by_sig:
+            continue
+        stop.append(_trim_serving_unit(cu))
+
+    affected = set()
+    for u in start:
+        affected.update(u["nodes"])
+    for u in stop:
+        affected.update(u["nodes"])
+    for m in moves:
+        affected.update(m["from_nodes"] or [])
+        affected.update(m["to_nodes"] or [])
+
+    return {
+        "start": start,
+        "stop": stop,
+        "move": moves,
+        "unchanged": unchanged,
+        "affected_nodes": sorted(affected),
+    }
+
+
+def _move_record(current_unit, new_unit) -> dict:
+    """Build the from→to record for a workload whose placement changed."""
+    rec = {"model": (current_unit or {}).get("model") or (new_unit or {}).get("model"),
+           "role": (current_unit or {}).get("role") or (new_unit or {}).get("role")}
+    rec["from_nodes"] = (current_unit or {}).get("nodes") or []
+    rec["from_port"] = (current_unit or {}).get("port")
+    rec["from_tp"] = (current_unit or {}).get("tp")
+    rec["from_pp"] = (current_unit or {}).get("pp")
+    rec["to_nodes"] = (new_unit or {}).get("nodes") or []
+    rec["to_port"] = (new_unit or {}).get("port")
+    rec["to_tp"] = (new_unit or {}).get("tp")
+    rec["to_pp"] = (new_unit or {}).get("pp")
+    return rec
 
 
 # ── Utility helpers ────────────────────────────────────────────────────────
