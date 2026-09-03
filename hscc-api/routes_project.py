@@ -314,10 +314,15 @@ def _speak_project_detail(data: dict) -> str:
     board = data.get("board_counts") or {}
     running = 0
     open_total = 0
+    # "total" is a SUMMARY key the caller adds alongside the per-status counts
+    # (board_counts["total"] = len(cards)), not a status. Counting it as one
+    # added the whole board into "open cards" and roughly doubled the number
+    # the operator hears. Skip it, and skip the closed statuses.
+    _NOT_OPEN = ("total", "done", "archived", "blocked")
     for status, cnt in board.items():
         if status == "running":
             running = cnt
-        if status not in ("done", "archived", "blocked"):
+        if status not in _NOT_OPEN:
             open_total += cnt
     return (f"{name}: {running} running, {open_total} open cards"
             f" on board {data.get('board') or 'unknown'}.")
