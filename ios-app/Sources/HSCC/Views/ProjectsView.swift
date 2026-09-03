@@ -651,6 +651,7 @@ struct ProjectBoardView: View {
     @State private var cards = LoadState<CardsResponse>.idle
     @State private var blocked = LoadState<KanbanBlockedResponse>.idle
     @State private var stale = LoadState<KanbanStaleResponse>.idle
+    @State private var showCreate = false
 
     var body: some View {
         Group {
@@ -665,6 +666,22 @@ struct ProjectBoardView: View {
                 content(response, staleMessage: ageMessage)
             case .loaded(let response):
                 content(response, staleMessage: nil)
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showCreate = true
+                } label: {
+                    Label("New Card", systemImage: "plus")
+                }
+                .accessibilityLabel("Create a new card on this board")
+            }
+        }
+        .sheet(isPresented: $showCreate) {
+            CreateCardSheet(client: client, board: board) {
+                // A card was created — refresh so it shows up in the open list.
+                Task { await load() }
             }
         }
         .task {
