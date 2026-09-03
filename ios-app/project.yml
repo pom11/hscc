@@ -127,6 +127,7 @@ targets:
       - path: Sources/HSCC/Views/ChatStore.swift
       - path: Sources/HSCC/Views/StreamingChatStore.swift
       - path: Sources/HSCC/Views/StreamingChatView.swift
+      - path: Sources/HSCC/Views/ComposerText.swift
       - path: Sources/HSCC/Views/StreamReplyWatcher.swift
       - path: Sources/HSCC/Views/SessionHistoryView.swift
       - path: Sources/HSCC/Views/AutodownView.swift

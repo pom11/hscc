@@ -34,6 +34,13 @@ struct StreamingChatView: View {
     /// state, it just reflects changes when the stream updates.
     private let sessionActivity = SessionActivityDriver()
 
+    /// Focus of the composer TextField. The Voice button sets this true to
+    /// summon the keyboard and its built-in SYSTEM DICTATION key — the chat's
+    /// voice-input affordance (a custom speech pipeline would be more code and
+    /// a fresh permission story; system dictation is the OS-owned one-tap
+    /// path and is exactly what the operator reaches for one-handed / in-car).
+    @FocusState private var composerFocused: Bool
+
     init(project: String) {
         self.project = project
         // `project` is captured; the @StateObject is created here so the store
@@ -262,9 +269,26 @@ struct StreamingChatView: View {
                 TextField("Ask \(project)…", text: $store.draft, axis: .vertical)
                     .lineLimit(1...4)
                     .textFieldStyle(.roundedBorder)
+                    .focused($composerFocused)
                     .onChange(of: store.draft) { _, _ in
                         store.persistDraft()
                     }
+
+                // Voice / Dictate — focuses the composer field so the system
+                // keyboard (with its built-in dictation key) comes up. Tapping
+                // the system dictation key captures the operator's speech into
+                // this draft. This is the "system dictation affordance" the card
+                // asks for: no custom speech pipeline, no new app-level
+                // permission (the keyboard manages the microphone itself).
+                Button {
+                    startDictation()
+                } label: {
+                    Image(systemName: "mic.fill")
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityLabel("Start dictation")
+                .accessibilityHint("Focuses the message field and opens the keyboard's dictation key.")
 
                 Button {
                     // Pressing send sends — chat messages are neither destructive
@@ -297,11 +321,21 @@ struct StreamingChatView: View {
     }
 
     private var canSend: Bool {
-        !trimmed(store.draft).isEmpty
+        !ComposerText.isEmpty(store.draft)
+    }
+
+    /// The Voice button's action. There is no public API to launch the system
+    /// dictation UI directly, so we focus the composer field: that summons the
+    /// system keyboard with its built-in dictation key, which the operator
+    /// taps next (one further tap, one-handed / in-car friendly). The recognized
+    /// text lands in `store.draft` through the binding; draft shaping is owned
+    /// by the pure, harness-tested `ComposerText` helpers.
+    private func startDictation() {
+        composerFocused = true
     }
 
     private func trimmed(_ s: String) -> String {
-        s.trimmingCharacters(in: .whitespacesAndNewlines)
+        ComposerText.sendable(s)
     }
 }
 
