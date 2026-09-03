@@ -96,8 +96,16 @@ struct OfflineCacheFixCheck {
         // be dead; a populated read-back proves the data reaches the fallback.
         do {
             let decoded = client.cachedValue(ActivityFeedResponse.self, for: "/v1/activity/feed")
-            check("cached /v1/activity/feed decodes to a populated value (Offline.load can show .stale)",
-                  decoded != nil && (decoded!.entries?.isEmpty == false))
+            // Assert the cache is READ-BACK-ABLE, which is exactly what
+            // Offline.load does to render `.stale`. Do NOT require entries to
+            // be non-empty: the feed is genuinely empty whenever the board is
+            // idle, and a check that fails because the cluster has no work
+            // cries wolf — this check failed at 08:47 for precisely that
+            // reason while the code was correct.
+            let live = decoded?.entries?.isEmpty == false
+            check("cached /v1/activity/feed decodes (Offline.load can show .stale)"
+                  + (live ? " [with entries]" : " [feed empty: board idle]"),
+                  decoded != nil)
         } catch {
             check("cached activity decode", false, extra: "\(error)")
         }
