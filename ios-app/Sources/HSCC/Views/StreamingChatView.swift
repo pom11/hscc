@@ -29,7 +29,6 @@ struct StreamingChatView: View {
     @EnvironmentObject private var unread: ProjectUnreadCenter
     @EnvironmentObject private var replyWatcher: StreamReplyWatcher
     @StateObject private var store: StreamingChatStore
-    @State private var showConfirm = false
     /// Drives the session Live Activity (lock screen / Dynamic Island mirror
     /// of this project's live session). A plain `let` — it holds no published
     /// state, it just reflects changes when the stream updates.
@@ -251,43 +250,41 @@ struct StreamingChatView: View {
         }
     }
 
-    // MARK: - Composer (confirm-gated)
+    // MARK: - Composer
 
     private var composer: some View {
-        HStack(alignment: .bottom, spacing: Theme.Spacing.sm.rawValue) {
-            TextField("Ask \(project)…", text: $store.draft, axis: .vertical)
-                .lineLimit(1...4)
-                .textFieldStyle(.roundedBorder)
-                .onChange(of: store.draft) { _, _ in
-                    store.persistDraft()
-                }
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+            HStack(alignment: .bottom, spacing: Theme.Spacing.sm.rawValue) {
+                TextField("Ask \(project)…", text: $store.draft, axis: .vertical)
+                    .lineLimit(1...4)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: store.draft) { _, _ in
+                        store.persistDraft()
+                    }
 
-            Button {
-                showConfirm = true
-            } label: {
-                Image(systemName: "paperplane.fill")
-                    .frame(width: 24, height: 24)
+                Button {
+                    // Pressing send sends — chat messages are neither destructive
+                    // nor expensive, so there is no confirm gate. `send` adds the
+                    // optimistic user row immediately and clears the composer.
+                    store.send(store.draft)
+                } label: {
+                    Image(systemName: "paperplane.fill")
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canSend)
+                .accessibilityLabel("Send")
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(!canSend)
-            .accessibilityLabel("Send")
-        }
-        .confirmationDialog(confirmTitle, isPresented: $showConfirm, titleVisibility: .visible) {
-            Button(store.phase == .connected ? "Send" : "Send anyway") {
-                store.send(store.draft)
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Sends this to \(project)'s session. The orchestrator processes it and the typed events stream back here — its tool calls, card moves, and reply.")
+            // Quiet context near the composer (not a modal gate): which session
+            // the message lands in.
+            Text("Sends to \(project)'s session — its tool calls, card moves, and reply stream back here.")
+                .font(.caption)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
     }
 
     private var canSend: Bool {
         !trimmed(store.draft).isEmpty
-    }
-
-    private var confirmTitle: String {
-        "Send to \(project)?"
     }
 
     private func trimmed(_ s: String) -> String {

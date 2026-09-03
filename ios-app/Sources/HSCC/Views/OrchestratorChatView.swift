@@ -34,12 +34,12 @@ import SwiftUI
 ///      (the session is sequential).
 ///
 /// SENDING IS A MUTATION: the orchestrator can decompose a prompt and dispatch
-/// real work onto its board. So sending follows the SAME explicit confirm
-/// pattern as every other mutating surface (`MutationButton` /
-/// `.confirmationDialog`): a tap on Send only ARMS the confirmation naming
-/// exactly what will happen, and the request fires only after the user
-/// confirms. There is no send-on-return and no other path that bypasses the
-/// confirm step — this is the single place a chat request can fire.
+/// real work onto its board. But sending a chat message is neither destructive
+/// nor expensive, so it does NOT sit behind a confirm gate — pressing send
+/// sends immediately. The quiet caption under the composer names which
+/// orchestrator/session the message lands in. Genuinely destructive or
+/// expensive actions elsewhere (cluster restart, template apply, autodown
+/// disarm) keep their confirm gate.
 ///
 /// Honest results: a non-2xx makes the client throw, appended to the
 /// transcript as a FAILURE with the API's message — never as a reply.
@@ -89,10 +89,6 @@ private struct ChatBody: View {
     @State private var answeringProfile: String? = nil
     /// Fleet readiness: nil (unknown), or a state string from /v1/autodown/status.
     @State private var fleetState: String? = nil
-    @State private var showConfirm = false
-    /// The text of an UNSENT message awaiting a retry decision (t_c0953d4c).
-    /// Non-nil only while a Retry confirmation is pending; reset after send/retry.
-    @State private var retryCandidate: String? = nil
     /// Handle to the running poll task, so "Stop waiting" can cancel it and the
     /// honest impossible-to-collect states can end the spinner (t_c0953d4c).
     @State private var pollTask: Task<Void, Never>? = nil
@@ -285,12 +281,12 @@ private struct ChatBody: View {
                     .textFieldStyle(.roundedBorder)
                     .disabled(store.isSending)
 
-                // STEP 1 — a tap only arms the confirmation. No request is sent,
-                // so a double-tap on Send can never double-send. A fresh typed
-                // message is never a retry, so clear any pending retry target.
                 Button {
-                    retryCandidate = nil
-                    showConfirm = true
+                    // Pressing send sends — sending a chat message is neither
+                    // destructive nor expensive, so there is no confirm gate.
+                    // `submitSend` optimistically appends the prompt row and
+                    // clears the composer before the network call.
+                    Task { await submitSend() }
                 } label: {
                     if store.isSending {
                         ProgressView()
@@ -303,40 +299,19 @@ private struct ChatBody: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!canSend)
                 .accessibilityLabel("Send message")
-                .accessibilityHint("Arms a confirmation before sending")
+                .accessibilityHint("Sends the message to the \(project) orchestrator")
             }
-        }
-        .confirmationDialog(confirmTitle, isPresented: $showConfirm, titleVisibility: .visible) {
-            // STEP 2 — the deliberate second step naming exactly what will happen.
-            Button("Send") {
-                if let text = retryCandidate {
-                    Task { await retrySend(text) }
-                } else {
-                    Task { await submitSend() }
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(confirmMessage)
+            // Quiet context near the composer (not a modal gate): which
+            // orchestrator the message lands in.
+            Text("Sends to the \(project) orchestrator, which may decompose your prompt and dispatch real work onto the \(project) board.")
+                .font(.caption)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private var canSend: Bool {
         !store.isSending && !trimmed(store.draft).isEmpty
-    }
-
-    private var confirmTitle: String {
-        if retryCandidate != nil {
-            return "Retry this UNSENT message?"
-        }
-        return "Send to the \(project) orchestrator?"
-    }
-
-    private var confirmMessage: String {
-        if retryCandidate != nil {
-            return "Re-sends the failed prompt to the \(project) orchestrator. It may decompose your prompt and dispatch real work onto the \(project) project's board."
-        }
-        return "It may decompose your prompt and dispatch real work onto the \(project) project's board."
     }
 
     // MARK: - Fleet readiness probe
@@ -365,18 +340,16 @@ private struct ChatBody: View {
     @MainActor
     private func submitSend() async {
         let text = trimmed(store.draft)
-        retryCandidate = nil
         store.beginSend(prompt: text)
         store.draft = ""   // the prompt now lives in the transcript; never lost
         await deliver(text: text)
     }
 
-    /// Re-send an UNSENT message (t_c0953d4c). Same confirm-gated path as a
-    /// fresh send — the command is a mutation and never bypasses the gate. The
-    /// historical UNSENT entry stays as the record of the failed attempt.
+    /// Re-send an UNSENT message (t_c0953d4c). Same send path as a fresh
+    /// message — no confirm gate (re-sending isn't destructive). The historical
+    /// UNSENT entry stays as the record of the failed attempt.
     @MainActor
     private func retrySend(_ text: String) async {
-        retryCandidate = nil
         store.retry(prompt: text)   // appends a fresh `.prompt`, starts in-flight
         await deliver(text: text)
     }
@@ -466,17 +439,18 @@ private struct ChatBody: View {
         pollTask = nil
     }
 
-    /// The Retry action for an UNSENT entry: shows the confirm-gated retry
-    /// dialog targeting the exact failed text. Only `.unsent` entries get one
-    /// (there is nothing to retry otherwise). Each failed message stays
-    /// individually retriable — the failed prompt is never silently dropped.
-    /// The command (re-send) is a mutation and stays behind the confirm gate.
+    /// The Retry action for an UNSENT entry: re-sends the exact failed text.
+    /// Only `.unsent` entries get one (there is nothing to retry otherwise).
+    /// Each failed message stays individually retriable — the failed prompt is
+    /// never silently dropped. Re-sending a chat message is neither destructive
+    /// nor expensive, so Retry sends immediately (no confirm gate), same as a
+    /// fresh send.
     private func retry(for entry: ChatEntry) -> (() -> Void)? {
         switch entry {
         case .unsent:
             return {
-                retryCandidate = entry.text
-                showConfirm = true
+                let text = entry.text
+                Task { await retrySend(text) }
             }
         default:
             return nil
