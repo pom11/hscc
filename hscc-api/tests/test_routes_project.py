@@ -79,6 +79,33 @@ def _review_facts(exists=True):
     }
 
 
+def _diff_patch():
+    """A small canned unified diff over two files (one added, one modified).
+
+    Mirrors what ``git diff --no-color base...branch`` emits. Used by the
+    hermetic diff-route tests (through the faked ``_branch_diff``).
+    """
+    return (
+        "diff --git a/newfile.txt b/newfile.txt\n"
+        "new file mode 100644\n"
+        "index 0000000..abc1234\n"
+        "--- /dev/null\n"
+        "+++ b/newfile.txt\n"
+        "@@ -0,0 +1,2 @@\n"
+        "+hello\n"
+        "+world\n"
+        "diff --git a/app.py b/app.py\n"
+        "index 1111111..2222222 100644\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,3 +1,3 @@\n"
+        " def setup():\n"
+        "-    old = True\n"
+        "+    new = True\n"
+        "     return 0\n"
+    )
+
+
 def _project(name="hscc", repo="/tmp/repo", board="default"):
     return types.SimpleNamespace(name=name, repo=repo, board=board)
 
@@ -165,6 +192,23 @@ def fakes(monkeypatch):
                 _card(cid=card_id), _project(), "wt/" + card_id
             ),
             _branch_facts=lambda repo, branch, base="main": _review_facts(),
+            _branch_diff=lambda repo, branch, base="main": _diff_patch(),
+            _parse_patch=lambda patch_text: [
+                {"path": "newfile.txt", "status": "A", "additions": 2,
+                 "deletions": 0,
+                 "hunks": [{"header": "@@ -0,0 +1,2 @@", "lines": [
+                     {"type": "+", "text": "hello"},
+                     {"type": "+", "text": "world"},
+                 ]}]},
+                {"path": "app.py", "status": "M", "additions": 1,
+                 "deletions": 1,
+                 "hunks": [{"header": "@@ -1,3 +1,3 @@", "lines": [
+                     {"type": "context", "text": "def setup():"},
+                     {"type": "-", "text": "    old = True"},
+                     {"type": "+", "text": "    new = True"},
+                     {"type": "context", "text": "     return 0"},
+                 ]}]},
+            ],
             _verify_line=lambda body: (True, "pytest"),
             _render_json=lambda *a, **k: {
                 "id": "t_abc123", "title": "Add the thing", "board": "default",
@@ -416,6 +460,147 @@ def test_review_detail_is_dry_run_no_mutation(running, token, fakes, monkeypatch
     )
 
     status, payload = _request(running, token, path="/v1/review/t_abc123")
+    assert status == 200
+    assert calls == []  # neither mutation seam was invoked
+
+
+# --------------------------------------------------------------------------- #
+# /v1/review/{id}/diff — per-file diff for a reviewable card
+# --------------------------------------------------------------------------- #
+
+def test_review_diff_200_shape(running, token, fakes):
+    status, payload = _request(running, token, path="/v1/review/t_abc123/diff")
+    assert status == 200
+    assert payload["id"] == "t_abc123"
+    assert payload["branch"] == "wt/t_abc123"
+    assert payload["file_count"] == 2
+    assert payload["truncated"] is False
+    assert payload["total_lines_served"] == 6
+    files = payload["files"]
+    assert [f["path"] for f in files] == ["newfile.txt", "app.py"]
+    # Shape per file: path/status/counts/hunks, with typed lines.
+    nf = files[0]
+    assert nf["status"] == "A" and nf["additions"] == 2 and nf["deletions"] == 0
+    assert nf["hunks"][0]["header"] == "@@ -0,0 +1,2 @@"
+    assert nf["hunks"][0]["lines"] == [
+        {"type": "+", "text": "hello"},
+        {"type": "+", "text": "world"},
+    ]
+    ap = files[1]
+    assert ap["status"] == "M" and ap["additions"] == 1 and ap["deletions"] == 1
+    assert ap["hunks"][0]["lines"][1] == {"type": "-", "text": "    old = True"}
+    assert isinstance(payload["speak"], str) and payload["speak"]
+
+
+def test_review_diff_404_unresolvable(running, token, fakes, monkeypatch):
+    def raises(cards, projects, card_id):
+        raise fakes["_review_cmd"].ReviewError("no card")
+    monkeypatch.setattr(fakes["_review_cmd"], "_resolve", raises)
+    status, payload = _request(running, token, path="/v1/review/ghost/diff")
+    assert status == 404
+    assert payload["error"]["code"] == "not_found"
+
+
+def test_review_diff_404_branch_missing(running, token, fakes, monkeypatch):
+    monkeypatch.setattr(fakes["_review_cmd"], "_branch_diff",
+                        lambda repo, branch, base="main": None)
+    status, payload = _request(running, token, path="/v1/review/t_abc123/diff")
+    assert status == 404
+    assert payload["error"]["code"] == "not_found"
+
+
+def test_review_diff_pagination(running, token, fakes):
+    # offset=1&limit=1 returns only the second file; the whole remainder was
+    # consumed (offset+limit == file_count) so there is nothing more to fetch.
+    status, payload = _request(
+        running, token, path="/v1/review/t_abc123/diff?offset=1&limit=1")
+    assert status == 200
+    assert [f["path"] for f in payload["files"]] == ["app.py"]
+    assert payload["offset"] == 1 and payload["limit"] == 1
+    assert payload["file_count"] == 2
+    assert payload["truncated"] is False
+    # limit that leaves more files after the window -> truncated True.
+    status, payload = _request(
+        running, token, path="/v1/review/t_abc123/diff?offset=0&limit=1")
+    assert status == 200
+    assert [f["path"] for f in payload["files"]] == ["newfile.txt"]
+    assert payload["truncated"] is True  # file index 1 remains to be paged
+
+
+def test_review_diff_pagination_all_files_ranges(running, token, fakes):
+    # limit large enough to cover every file -> not truncated.
+    status, payload = _request(
+        running, token, path="/v1/review/t_abc123/diff?offset=0&limit=10")
+    assert status == 200
+    assert len(payload["files"]) == 2
+    assert payload["truncated"] is False
+    # offset beyond the end -> empty files, still not truncated.
+    status, payload = _request(
+        running, token, path="/v1/review/t_abc123/diff?offset=99")
+    assert status == 200
+    assert payload["files"] == []
+    assert payload["truncated"] is False
+
+
+def test_review_diff_line_cap_truncation(running, token, fakes):
+    # max_lines=4: the first file (2 lines) fits, the second (4 lines) would
+    # push past 4 -> the response stops, truncated=True.
+    status, payload = _request(
+        running, token, path="/v1/review/t_abc123/diff?max_lines=4")
+    assert status == 200
+    assert [f["path"] for f in payload["files"]] == ["newfile.txt"]
+    assert payload["total_lines_served"] == 2
+    assert payload["truncated"] is True
+
+
+def test_review_diff_line_cap_not_reached(running, token, fakes):
+    status, payload = _request(
+        running, token, path="/v1/review/t_abc123/diff?max_lines=1000")
+    assert status == 200
+    assert len(payload["files"]) == 2
+    assert payload["truncated"] is False
+
+
+def test_review_diff_invalid_query_params_degrade(running, token, fakes):
+    status, payload = _request(
+        running, token, path="/v1/review/t_abc123/diff?limit=abc&offset=-5")
+    assert status == 200
+    assert payload["offset"] == 0
+    assert payload["limit"] == 20  # default when the value is non-numeric
+    assert payload["truncated"] is False
+
+
+def test_review_diff_is_read_only_no_mutation(running, token, fakes, monkeypatch):
+    """Proof the diff path never merges or closes a card.
+
+    The handler must only resolve + read git. Any merge/close seam would be a
+    mutation on a GET. We swap the whole _review_cmd for one whose mutation
+    functions are BOOMS; a successful 200 proves they were never called.
+    """
+    calls = []
+
+    def bomb_apply(*a, **k):
+        calls.append("_do_apply")
+        raise AssertionError("MUTATION: diff GET called _do_apply")
+
+    def bomb_close(*a, **k):
+        calls.append("_real_close_card")
+        raise AssertionError("MUTATION: diff GET called _real_close_card")
+
+    base = fakes["_review_cmd"]
+    monkeypatch.setattr(
+        routes_project, "_review_cmd",
+        _fake_module(
+            ReviewError=base.ReviewError,
+            _resolve=base._resolve,
+            _branch_diff=base._branch_diff,
+            _parse_patch=base._parse_patch,
+            _do_apply=bomb_apply,
+            _real_close_card=bomb_close,
+        ),
+    )
+
+    status, payload = _request(running, token, path="/v1/review/t_abc123/diff")
     assert status == 200
     assert calls == []  # neither mutation seam was invoked
 
