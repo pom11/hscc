@@ -79,16 +79,19 @@ struct ProfileEditorView: View {
                 TextField("model", text: $model)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                    .onChange(of: model) { _, _ in edited = true }
                 if !provider.isEmpty {
                     TextField("provider", text: $provider)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .onChange(of: provider) { _, _ in edited = true }
                 }
             }
 
             Section("Description") {
                 TextField("What this project's bot is for", text: $profileDescription, axis: .vertical)
                     .lineLimit(2...4)
+                    .onChange(of: profileDescription) { _, _ in edited = true }
             }
 
             Section {
@@ -106,6 +109,7 @@ struct ProfileEditorView: View {
                         Image(systemName: "chevron.right").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
                     }
                 }
+                .onChange(of: selectedToolsets) { _, _ in edited = true }
             } footer: {
                 Text("Tool groups this bot can use.")
             }
@@ -125,6 +129,7 @@ struct ProfileEditorView: View {
                         Image(systemName: "chevron.right").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
                     }
                 }
+                .onChange(of: selectedSkills) { _, _ in edited = true }
             } footer: {
                 Text("Skills the bot loads at startup.")
             }
@@ -136,6 +141,7 @@ struct ProfileEditorView: View {
                             .font(.hsccMono(14))
                     }
                 }
+                .onChange(of: thresholdTokens) { _, _ in edited = true }
             } header: {
                 Text("Compression")
             } footer: {
