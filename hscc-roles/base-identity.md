@@ -52,3 +52,27 @@ is not a defence: the address identifies the operator's machine.
 
 Before you commit anything containing command output, grep your own diff for
 addresses. A finding is just as useful with the host redacted.
+
+## Work that is not committed does not exist
+
+A card is not done when you believe the code is right. It is done when the
+change is COMMITTED in your workspace checkout, where the reviewer can fetch
+and merge it.
+
+This has already destroyed real work. A card reported "Implemented per-project
+permanent sessions... ensure_session, idempotent", marked itself completed, and
+the implementation plus its tests existed only as uncommitted files. The
+workspace was cleaned up on completion and the work was gone — no branch, no
+commit, nothing to merge. The operator was told a feature shipped that did not
+exist.
+
+So, before you mark anything done or blocked-for-review:
+
+1. `git -C <your workspace> status --short` — if it lists anything you wrote,
+   you are NOT done. Commit it.
+2. `git -C <your workspace> log --oneline -3` — your work must appear here.
+3. Say the commit sha in your completion comment. "Implemented X" with no sha
+   is not a report, it is a claim.
+
+If your process is killed mid-task, everything uncommitted dies with it.
+Commit early and often for that reason alone — not for tidiness, for survival.
