@@ -84,6 +84,12 @@ final class OfflineSendQueue: ObservableObject {
     /// whole queue. `nil` until the first message is handled.
     @Published private(set) var lastHandled: (id: UUID, outcome: SendOutcome)?
 
+    /// Messages dropped when the user switched clusters (`drainDueToClusterSwitch`),
+    /// so the app can surface them rather than silently discarding. Reset to nil
+    /// after a view reads/banners it (the consuming view calls
+    /// `consumeDrained()`).
+    @Published private(set) var drainedDueToClusterSwitch: [QueuedMessage]?
+
     /// How the app actually delivers a queued message. Seeded once by the app
     /// root (ContentView.onAppear) with the real POST+persist path. Until it is
     /// set, flush is a no-op — messages stay queued, never lost.
@@ -162,23 +168,35 @@ final class OfflineSendQueue: ObservableObject {
     }
 
     /// Clear the whole queue (used when settings/cluster change so messages for
-    /// one cluster don't leak into another; the view surfaces what was dropped
-    /// — see `drainDueToClusterSwitch()`).
-    func clearAll() {
+    /// one cluster don't leak into another). The messages are published on
+    /// `drainedDueToClusterSwitch` so the app can SURFACE what was dropped —
+    /// clearing silently would violate the card's "never silently drop".
+    func drainDueToClusterSwitch() {
         guard !pending.isEmpty else { return }
+        let dropped = pending
         pending = []
+        inFlight = []
+        isFlushing = false
+        drainedDueToClusterSwitch = dropped
         persist()
     }
 
     /// Reset in-memory + persisted state. Test support; also called when the
     /// user switches cluster so old-cluster queued messages are not flushed
-    /// into the new cluster (ContentView.onChange settings.connectionIdentity).
+    /// into the new cluster.
     func reset() {
         pending = []
         inFlight = []
         isFlushing = false
         lastHandled = nil
+        drainedDueToClusterSwitch = nil
         persist()
+    }
+
+    /// Consume (and clear) the dropped-on-cluster-switch set once a view has
+    /// surfaced it, so it is not re-bannered on every redraw.
+    func consumeDrained() {
+        drainedDueToClusterSwitch = nil
     }
 
     // MARK: - Flush

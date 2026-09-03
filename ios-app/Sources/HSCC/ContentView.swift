@@ -21,6 +21,9 @@ struct ContentView: View {
     @EnvironmentObject private var replyWatcher: StreamReplyWatcher
     @State private var selectedTab: Tab = .projects
     @StateObject private var approvals = ApprovalPoller()
+    /// Queued messages dropped because the user switched clusters mid-queue
+    /// (t_42ba90d2) — surfaced here so nothing is silently lost.
+    @State private var droppedBanner: [OfflineSendQueue.QueuedMessage]?
 
     enum Tab: Hashable {
         case projects, cluster, settings
@@ -47,6 +50,39 @@ struct ContentView: View {
                 .tabItem { Label("Settings", systemImage: "gearshape") }
                 .tag(Tab.settings)
         }
+        .overlay(alignment: .bottom) {
+            // Cluster-switch drop banner (t_42ba90d2): queued messages were
+            // cleared because the user pointed the app at a different cluster.
+            // Surface them (never silently dropped); Dismiss clears the banner
+            // (the messages must be re-sent by hand on the new cluster).
+            if let dropped = droppedBanner, !dropped.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(
+                        "\(dropped.count) queued message\(dropped.count == 1 ? "" : "s") not sent — cluster changed",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.subheadline.weight(.semibold))
+                    Text("Switch back to the previous cluster to send them, or re-send by hand.")
+                        .font(.caption)
+                    Button("Dismiss") {
+                        OfflineSendQueue.shared.consumeDrained()
+                        droppedBanner = nil
+                    }
+                    .font(.subheadline.weight(.semibold))
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.Semantic.warn.opacity(0.15))
+                .overlay(alignment: .leading) {
+                    Rectangle().fill(Theme.Semantic.warn).frame(width: 4)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .padding()
+            }
+        }
+        .onReceive(OfflineSendQueue.shared.$drainedDueToClusterSwitch) { dropped in
+            droppedBanner = dropped
+        }
         .onAppear {
             approvals.setClient(makeClient())
             replyWatcher.setClient(makeClient())
@@ -70,10 +106,11 @@ struct ContentView: View {
             replyWatcher.setClient(makeClient())
             NotificationCoordinator.shared.setClient(makeClient())
             // A different cluster is a different session: queued messages destined
-            // for the OLD cluster must never flush into the new one. Re-seed the
-            // delivery handler AND clear the queue so nothing leaks across.
+            // for the OLD cluster must never flush into the new one. Drain (clear)
+            // the queue but SURFACE what was dropped so nothing is silently lost;
+            // a banner shows the count and the messages can be re-sent by hand.
             seedOfflineQueue()
-            OfflineSendQueue.shared.reset()
+            OfflineSendQueue.shared.drainDueToClusterSwitch()
         }
         .onChange(of: settings.appGroupUnavailable) {
             // ConnectionBanner observes SettingsStore directly and redraws.
