@@ -205,6 +205,10 @@ struct ClusterView: View {
                    subtitle: "bring fleet up / down") {
                 FleetControlView(client: client)
             }
+            hubRow("Serving Control", systemImage: "cpu",
+                   subtitle: "stop or restart ONE serving unit — confirm-gated") {
+                ServingControlView(client: client)
+            }
             hubRow("Templates", systemImage: "square.grid.2x2",
                    subtitle: "browse layouts, preview, apply a fleet template") {
                 TemplatesView(client: client)
