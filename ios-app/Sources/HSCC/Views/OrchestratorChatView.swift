@@ -302,6 +302,8 @@ private struct ChatBody: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!canSend)
+                .accessibilityLabel("Send message")
+                .accessibilityHint("Arms a confirmation before sending")
             }
         }
         .confirmationDialog(confirmTitle, isPresented: $showConfirm, titleVisibility: .visible) {

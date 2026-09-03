@@ -237,6 +237,7 @@ struct SearchView: View {
             Circle()
                 .fill(statusColor(card.displayStatus))
                 .frame(width: 10, height: 10)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 Text(card.displayTitle)
                     .foregroundColor(Theme.Semantic.onSurface)
