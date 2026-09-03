@@ -243,8 +243,48 @@ struct FleetView: View {
                         }
                     }
                 }
+
+                if let byDay = completions.by_day, !byDay.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("By day").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        let maxValue = byDay.values.max() ?? 1
+                        ForEach(byDay.keys.sorted(), id: \.self) { date in
+                            let value = byDay[date] ?? 0
+                            HStack(spacing: Theme.Spacing.sm.rawValue) {
+                                Text(shortDay(date))
+                                    .font(.caption2)
+                                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                                    .frame(width: 44, alignment: .leading)
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .fill(Theme.Semantic.ok)
+                                    .frame(width: CGFloat(value) / CGFloat(maxValue) * 140, height: 8)
+                                Text("\(value)")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundColor(Theme.Semantic.onSurface)
+                            }
+                        }
+                    }
+                }
             } else {
                 emptyLabel("No stats reported.")
+            }
+
+            if let activity = state.activity,
+               !(activity.top_tools?.isEmpty ?? true) ||
+               !(activity.tool_calls_by_profile?.isEmpty ?? true) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Activity").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    if let tools = activity.top_tools, !tools.isEmpty {
+                        ForEach(tools.compactMap(Self.parseToolPair), id: \.0) { name, count in
+                            row(name, value: "\(count)")
+                        }
+                    }
+                    if let byProfile = activity.tool_calls_by_profile, !byProfile.isEmpty {
+                        ForEach(byProfile.sorted { $0.value > $1.value }, id: \.key) { key, value in
+                            row(key, value: "\(value)")
+                        }
+                    }
+                }
             }
         }
     }
@@ -397,5 +437,22 @@ struct FleetView: View {
         let start = iso.index(iso.startIndex, offsetBy: 11)
         let end = iso.index(iso.startIndex, offsetBy: 16)
         return String(iso[start..<end])
+    }
+
+    /// "2026-08-27" → "08-27" (drop the year; by_day keys are full ISO dates).
+    private func shortDay(_ iso: String) -> String {
+        guard iso.count >= 10 else { return iso }
+        let start = iso.index(iso.startIndex, offsetBy: 5)
+        let end = iso.index(iso.startIndex, offsetBy: 10)
+        return String(iso[start..<end])
+    }
+
+    /// Parse one `top_tools` entry — `["test_tool", 134]` → ("test_tool", 134).
+    /// Returns nil for malformed pairs so they're safely skipped.
+    private static func parseToolPair(_ pair: [JSONValue]) -> (String, Int)? {
+        guard pair.count >= 2,
+              let name = pair[0].string,
+              case .int(let count) = pair[1] else { return nil }
+        return (name, count)
     }
 }
