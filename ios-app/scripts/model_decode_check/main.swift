@@ -177,6 +177,48 @@ do {
     print("FAIL kanban_blocked.json → approvals classification: \(error)")
 }
 
+// ---- Cluster monitor (per-node fleet telemetry, t_a1aaba69) ----
+// The /v1/cluster/monitor route wraps the sparkrun payload under `json`
+// (`cmd_monitor()['json']`), so ClusterMonitorResponse must decode that nested
+// shape, not a flat one. This catches a regression to a flat model (which
+// decodes `hosts` to empty and shows zero node cards). Assert both the healthy
+// and the degraded `{"speak": "..."}` wire bodies.
+do {
+    let healthy = try JSONDecoder().decode(
+        ClusterMonitorResponse.self,
+        from: try Data(contentsOf: URL(fileURLWithPath: fixtureDir + "/v1_cluster_monitor.json")))
+    var ok = healthy.hosts.count == 4
+    ok = ok && healthy.hosts.allSatisfy { $0.sample != nil }
+    ok = ok && healthy.timestamp != nil && !healthy.speak.isEmpty
+    // every per-node metric the view reads parses from a bare STRING field.
+    ok = ok && healthy.hosts.allSatisfy { $0.sample?.gpuUtilPct != nil }
+    ok = ok && healthy.hosts.allSatisfy { $0.sample?.cpuUsagePct != nil }
+    ok = ok && healthy.hosts.allSatisfy { $0.sample?.memUsedPct != nil }
+    ok = ok && healthy.hosts.allSatisfy { $0.sample?.gpuTempC != nil }
+    ok = ok && healthy.hosts.allSatisfy { $0.sample?.cpuTempC != nil }
+    ok = ok && healthy.hosts.allSatisfy { $0.sample?.uptimeText != nil }
+    if ok {
+        c.passed += 1
+        print("OK   v1_cluster_monitor.json  →  ClusterMonitorResponse nested json: 4 nodes, GPU/CPU/RAM/temp all parse")
+    } else {
+        c.failures.append(("v1_cluster_monitor.json", "ClusterMonitorResponse nested json", "assertion failed"))
+        print("FAIL v1_cluster_monitor.json → ClusterMonitorResponse nested json")
+    }
+    let degraded = try JSONDecoder().decode(
+        ClusterMonitorResponse.self,
+        from: try Data(contentsOf: URL(fileURLWithPath: fixtureDir + "/v1_cluster_monitor_unavailable.json")))
+    if degraded.hosts.isEmpty && degraded.speak == "fleet monitor unavailable" {
+        c.passed += 1
+        print("OK   v1_cluster_monitor_unavailable.json  →  degraded {speak} body decodes, empty hosts")
+    } else {
+        c.failures.append(("v1_cluster_monitor_unavailable.json", "degraded decode", "expected empty hosts + unavailable speak"))
+        print("FAIL v1_cluster_monitor_unavailable.json → degraded decode")
+    }
+} catch {
+    c.failures.append(("v1_cluster_monitor.json", "ClusterMonitorResponse decode", "\(error)"))
+    print("FAIL v1_cluster_monitor.json → ClusterMonitorResponse decode: \(error)")
+}
+
 // ---- Summary + exit code. A single failure is a non-zero exit — a guard that
 // exits 0 here has proven, right now, that every committed fixture decodes
 // against the real models. ----
