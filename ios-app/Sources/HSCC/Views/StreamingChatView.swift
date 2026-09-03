@@ -254,6 +254,10 @@ struct StreamingChatView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+            // Slash-command palette (server-sourced command catalog) at a "/"
+            // command position; selecting a command inserts it into the draft.
+            SlashCommandPalette(draft: $store.draft, client: computedClient)
+
             HStack(alignment: .bottom, spacing: Theme.Spacing.sm.rawValue) {
                 TextField("Ask \(project)…", text: $store.draft, axis: .vertical)
                     .lineLimit(1...4)
@@ -281,6 +285,15 @@ struct StreamingChatView: View {
                 .font(.caption)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
+    }
+
+    /// The client used by the slash palette, from current settings (nil when
+    /// unconfigured — the palette then stays hidden; no hardcoded command list).
+    private var computedClient: HSCCClient? {
+        guard settings.isConfigured,
+              let token = settings.token,
+              let port = Int(settings.port) else { return nil }
+        return HSCCClient(host: settings.host, port: port, token: token)
     }
 
     private var canSend: Bool {

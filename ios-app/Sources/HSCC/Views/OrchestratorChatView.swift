@@ -275,6 +275,11 @@ private struct ChatBody: View {
 
     private var composer: some View {
         VStack(spacing: 8) {
+            // Slash-command palette: opens at a "/" command position, listing
+            // the server-sourced commands with one-line descriptions, filtering
+            // as you type. Selecting one inserts it into the draft.
+            SlashCommandPalette(draft: $store.draft, client: commandPalette)
+
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Ask the \(project) orchestrator…", text: $store.draft, axis: .vertical)
                     .lineLimit(1...4)
@@ -308,6 +313,12 @@ private struct ChatBody: View {
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    /// The client used by the slash palette, cached so `load()` runs against a
+    /// stable instance (constructed from current settings; nil when unconfigured).
+    private var commandPalette: HSCCClient? {
+        try? clientOrThrow()
     }
 
     private var canSend: Bool {
