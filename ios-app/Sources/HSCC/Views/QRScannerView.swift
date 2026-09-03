@@ -33,13 +33,26 @@ struct QRScannerView: View {
 
     @State private var authorization: AVAuthorizationStatus = .notDetermined
 
+    /// A camera/session setup failure that leaves the preview unable to start.
+    /// Non-nil means "the camera is authorized but won't run" — surfaced as a
+    /// distinct error state so a dead black preview can never masquerade as
+    /// "scanning" (the smoke checklist's "camera stays black" failure).
+    @State private var cameraError: String?
+
     var body: some View {
         NavigationStack {
             Group {
                 switch authorization {
                 case .authorized:
-                    QRCameraPreview(onScan: onScan)
+                    if let cameraError {
+                        cameraUnavailableView(cameraError)
+                    } else {
+                        QRCameraPreview(
+                            onScan: onScan,
+                            onError: { cameraError = $0 }
+                        )
                         .ignoresSafeArea(edges: .bottom)
+                    }
                 case .denied, .restricted:
                     permissionDeniedView
                 case .notDetermined:
@@ -96,6 +109,19 @@ struct QRScannerView: View {
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+
+    /// A camera/session failure state, distinct from a live (even black)
+    /// preview: permission is granted but the capture session could not be
+    /// configured or started. "Try again" clears the error, which re-creates
+    /// the preview representable and re-runs `start()`. A dead screen is never
+    /// shown without telling the operator why.
+    private func cameraUnavailableView(_ message: String) -> some View {
+        HSError(
+            "Camera unavailable",
+            message: message,
+            retry: { cameraError = nil }
+        )
+    }
 }
 
 /// A `UIViewRepresentable` that runs an `AVCaptureSession` and reports QR codes.
@@ -105,9 +131,13 @@ struct QRScannerView: View {
 /// single read so the same code doesn't fire repeatedly.
 private struct QRCameraPreview: UIViewRepresentable {
     let onScan: (String) -> Void
+    /// Reports a camera/session setup failure the view must surface (never a
+    /// silent black screen). Runs on the main actor: `start(on:)` is called
+    /// from `makeUIView` on the main thread and hops to main to deliver.
+    let onError: @MainActor (String) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onScan: onScan)
+        Coordinator(onScan: onScan, onError: onError)
     }
 
     func makeUIView(context: Context) -> PreviewView {
@@ -129,14 +159,20 @@ private struct QRCameraPreview: UIViewRepresentable {
     /// session on a background queue, and translates `.qr` reads to `onScan`.
     final class Coordinator: NSObject, AVCaptureMetadataOutputObjectsDelegate {
         private let onScan: (String) -> Void
+        private let onError: @MainActor (String) -> Void
         private let session = AVCaptureSession()
         private let queue = DispatchQueue(label: "com.hscc.ios.qr-scan")
         private var isRunning = false
 
-        init(onScan: @escaping (String) -> Void) {
+        init(onScan: @escaping (String) -> Void,
+             onError: @escaping @MainActor (String) -> Void) {
             self.onScan = onScan
+            self.onError = onError
         }
 
+        /// Configure the session and start it. Called from
+        /// `UIViewRepresentable.makeUIView` (main thread), so the setup guards
+        /// call `onError` through a main-actor hop — it is `@MainActor`.
         func start(on preview: PreviewView) {
             guard !isRunning else { return }
             preview.videoPreviewLayer.session = session
@@ -145,13 +181,19 @@ private struct QRCameraPreview: UIViewRepresentable {
             session.beginConfiguration()
             // Back (world) camera — the one that looks at a printed code.
             guard let device = AVCaptureDevice.default(
-                    .builtInWideAngleCamera, for: .video, position: .back),
-                  let input = try? AVCaptureDeviceInput(device: device) else {
+                    .builtInWideAngleCamera, for: .video, position: .back) else {
                 session.commitConfiguration()
+                Task { @MainActor in onError("This device has no back camera to scan with.") }
+                return
+            }
+            guard let input = try? AVCaptureDeviceInput(device: device) else {
+                session.commitConfiguration()
+                Task { @MainActor in onError("Could not open the camera.") }
                 return
             }
             guard session.canAddInput(input) else {
                 session.commitConfiguration()
+                Task { @MainActor in onError("Could not attach the camera to the scanner.") }
                 return
             }
             session.addInput(input)
@@ -159,6 +201,7 @@ private struct QRCameraPreview: UIViewRepresentable {
             let output = AVCaptureMetadataOutput()
             guard session.canAddOutput(output) else {
                 session.commitConfiguration()
+                Task { @MainActor in onError("Could not configure the QR scanner.") }
                 return
             }
             session.addOutput(output)
