@@ -55,6 +55,13 @@ struct ContentView: View {
             refreshConnection()
             approvals.setClient(makeClient())
             replyWatcher.setClient(makeClient())
+            // Re-hydration: end any Live Activity left over from a prior process
+            // kill (deinit doesn't run when the process is killed, so ActivityKit
+            // would otherwise keep a stale wake/session bubble alive forever).
+            // Both sweeps are idempotent and only end what the staleness heuristic
+            // flags; a genuinely in-flight wake is left untouched.
+            LiveActivityManager.sweepLeftoverWakes()
+            SessionActivityDriver.sweepLeftoverSessions()
         }
         .onChange(of: settings.connectionIdentity) {
             refreshConnection()
