@@ -445,8 +445,8 @@ final class StreamingChatStore: ObservableObject {
             return "Can't reach the cluster for history — is Tailscale connected? The live stream may still connect."
         case .invalidURL:
             return "The host or port is invalid. Set them in Settings."
-        case .decoding(let detail):
-            return "Unexpected history response: \(detail)"
+        case .decoding:
+            return "The cluster returned history this app can't read — likely an app/cluster version mismatch."
         case .api(_, let message, _):
             return message
         }

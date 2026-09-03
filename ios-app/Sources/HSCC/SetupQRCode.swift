@@ -187,8 +187,8 @@ enum QRPairing {
             return .other(message)
         case .invalidURL:
             return .unreachableHost
-        case .decoding(let detail):
-            return .other("Unexpected response from the cluster: \(detail)")
+        case .decoding:
+            return .other("The cluster answered, but returned something this app can't read — likely an app/cluster version mismatch.")
         }
     }
 }
