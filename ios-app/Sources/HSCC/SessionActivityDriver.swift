@@ -46,6 +46,23 @@ final class SessionActivityDriver {
         }
     }
 
+    /// Re-hydration sweep: end any leftover session activity left behind by a
+    /// process kill. Unlike a wake, a session activity is a *passive mirror* —
+    /// it exists only while the operator is actively viewing a project's live
+    /// chat, and is re-derived fresh from the chat rows whenever that view is
+    /// on screen. There is no long-lived in-flight operation that must survive
+    /// a restart (a frozen session bubble is never legitimate). So on a fresh
+    /// launch when nothing is being reflected yet, every leftover session
+    /// activity is an orphan → end them all. If the operator reopens the live
+    /// chat, `reflect` lazily starts a fresh activity.
+    static func sweepLeftoverSessions() {
+        for activity in Activity<SessionActivityAttributes>.activities {
+            Task { @MainActor in
+                await activity.end(nil, dismissalPolicy: .immediate)
+            }
+        }
+    }
+
     /// Reflect a new snapshot of the foreground project's live session.
     ///
     /// - Parameters:

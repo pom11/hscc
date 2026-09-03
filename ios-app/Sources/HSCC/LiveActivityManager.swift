@@ -20,6 +20,14 @@ import ActivityKit
 /// The canonical node labels, in the topology-pair order the UI draws.
 private let wakeNodeLabels = [".244", ".246", ".247", ".248"]
 
+/// How long a wake may legitimately stay in the "waking" state before we judge
+/// it stale. A wake takes up to ~9 minutes; anything still "waking" after this
+/// budget has long exceeded that and can only be a process-killed orphan (the
+/// app's poll loop was alive and would have settled+ended it long before). Kept
+/// comfortably above the real maximum so we never cut a wake that is genuinely
+/// still in flight.
+private let wakeMaxInflight: TimeInterval = 10 * 60
+
 @MainActor
 final class LiveActivityManager {
     /// The in-flight activity, if any. Exactly one wake activity at a time.
@@ -42,6 +50,44 @@ final class LiveActivityManager {
     /// reaches the system).
     deinit {
         if let activity = current {
+            Task { @MainActor in
+                await activity.end(nil, dismissalPolicy: .immediate)
+            }
+        }
+    }
+
+    /// Re-hydration sweep: end any leftover wake activity left behind by a
+    /// process kill (force-quit / OS eviction). When the app process dies
+    /// mid-wake, `deinit` never runs and ActivityKit keeps the "Waking the
+    /// fleet" bubble + timer alive forever — a started-never-ended orphan whose
+    /// poll loop is gone. Call this once at app launch.
+    ///
+    /// Staleness heuristic: a found activity is a genuine orphan (→ end it)
+    /// unless it is *provably still in flight*:
+    ///   * state is NOT "waking" → it already settled (up/down/other) but the
+    ///     app died before it could end it → stale.
+    ///   * state is "waking" but `startedAt` is nil or older than
+    ///     `wakeMaxInflight` → a real wake always records a recent `startedAt`
+    ///     and settles within ~9 min; one still "waking" past that budget can
+    ///     only be a stuck orphan → stale.
+    ///   * state is "waking" AND `startedAt` is recent → the wake is still
+    ///     genuinely underway (the operator started it, backgrounded the app,
+    ///     and the process was killed); ending it would kill a legitimate wake,
+    ///     so leave it alone.
+    ///
+    /// Ends run on a background Task (the actual `end` is async); this is safe
+    /// because it only reads the static `Activity.activities` snapshot and ends
+    /// the specific activities the heuristic flagged.
+    static func sweepLeftoverWakes() {
+        let now = Date()
+        for activity in Activity<WakingActivityAttributes>.activities {
+            let contentState = activity.content.state  // the current ContentState
+            let stateLabel = contentState.state        // "waking" / "up" / "down"
+            let startedAt = contentState.startedAt
+            // Genuinely in flight only if still "waking" AND started recently.
+            let inFlight = stateLabel == "waking"
+                && startedAt.map { now.timeIntervalSince($0) <= wakeMaxInflight } ?? false
+            guard !inFlight else { continue }  // genuinely still running — keep it
             Task { @MainActor in
                 await activity.end(nil, dismissalPolicy: .immediate)
             }
