@@ -481,6 +481,28 @@ struct HSCCClient {
         try await get(path, as: ReadResponse.self)
     }
 
+    // MARK: - Logs (t_2eda26a6)
+
+    /// GET /v1/logs?source=…&limit=… — the bounded daemon/API/worker log tail.
+    ///
+    /// Only requests the most recent `limit` lines (the view bounds this to a
+    /// small constant); the server must never return an unbounded file. The
+    /// server is expected to redact before serving, but the view still applies
+    /// `LogRedactor` on display (defence in depth).
+    ///
+    /// - Parameters:
+    ///   - source: which log to tail (daemon | api | worker).
+    ///   - limit: how many recent lines to request (capped client-side).
+    func logs(source: LogSource, limit: Int = 200) async throws -> LogsResponse {
+        let capped = min(max(limit, 1), 200)
+        return try await get(path: "/v1/logs",
+                             queryItems: [
+                                URLQueryItem(name: "source", value: source.rawValue),
+                                URLQueryItem(name: "limit", value: String(capped)),
+                             ],
+                             as: LogsResponse.self)
+    }
+
     /// GET /v1/commands — the server-driven slash-command catalog for the chat
     /// palette. Read-only; sourced from the authoritative `hscc-commands`
     /// plugin registration (not a hardcoded list).

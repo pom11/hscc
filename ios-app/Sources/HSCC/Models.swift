@@ -1207,3 +1207,55 @@ struct MemoryMutationResponse: Decodable, Speakable {
     let message: String?
     let speak: String
 }
+
+// MARK: - Logs (t_2eda26a6)
+
+/// One log line returned by GET /v1/logs (bounded tail).
+///
+/// Contract (backend card t_3a995be5): the endpoint returns a BARE JSON
+/// array of these objects — `[{timestamp, level, source, line}]` — holding
+/// only the most recent `limit` lines, already redacted server-side. The
+/// iOS client applies `LogRedactor` again on display as a second line of
+/// defence (defence in depth, see LogRedactor.swift).
+///
+/// All fields optional so a partial line never blanks the row; `id` is
+/// synthesized for SwiftUI's `ForEach` (the server does not ship an id).
+struct LogEntry: Decodable, Identifiable {
+    /// ISO-8601 timestamp string as served (kept as String; display may
+    /// reformat or fall back to the raw form — never parse-and-fail).
+    let timestamp: String?
+    /// Severity as served, e.g. "INFO" / "WARN" / "ERROR" / "DEBUG".
+    let level: String?
+    /// Source bucket the line belongs to: daemon | api | worker.
+    let source: String?
+    /// The log line text. Redacted by LogRedactor before display.
+    let line: String?
+
+    /// Stable-ish identity for SwiftUI ForEach. Falls back to a positional
+    /// hash when the line has no timestamp, so refresh never churns rows.
+    var id: String { (timestamp ?? "") + "|" + (line ?? "") }
+}
+
+/// The sources /v1/logs accepts (must match the backend contract exactly).
+enum LogSource: String, CaseIterable, Identifiable {
+    case daemon
+    case api
+    case worker
+
+    var id: String { rawValue }
+
+    /// Render label for the segmented picker.
+    var label: String { rawValue.capitalized }
+
+    /// Human subtitle shown under the picker.
+    var subtitle: String {
+        switch self {
+        case .daemon: return "the daemon core — scheduler, fleet, trigger engine"
+        case .api:    return "the HSCC HTTP API server requests"
+        case .worker: return "worker nodes / job execution"
+        }
+    }
+}
+
+/// GET /v1/logs?source=…&limit=… — the bounded log tail (bare array).
+typealias LogsResponse = [LogEntry]
