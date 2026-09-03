@@ -195,14 +195,14 @@ def test_logs_unreadable_log_degrades_to_empty(running, token, monkeypatch):
 
 def test_redact_tailnet_host_to_placeholder():
     """Tailnet CGNAT (100.64.0.0/10) -> 100.64.0.1."""
-    line = "connecting to worker at 100.122.7.9:8080"
+    line = "connecting to worker at 100.64.0.9:8080"
     assert "100.64.0.1" in routes_logs._redact(line)
-    assert "100.122.7.9" not in routes_logs._redact(line)
+    assert "100.64.0.9" not in routes_logs._redact(line)
 
 
 def test_redact_rfc1918_to_placeholder():
     """LAN (10/8, 172.16/12, 192.168/16) -> 10.0.0.x."""
-    for ip in ("10.0.0.42", "172.20.1.2", "192.168.88.247"):
+    for ip in ("10.0.0.42", "172.20.1.2", "192.168.1.5"):
         out = routes_logs._redact(f"served from {ip}:8788")
         assert "10.0.0.x" in out
         assert ip not in out
@@ -248,11 +248,11 @@ def test_redact_session_and_long_run():
 def test_served_entries_are_redacted(running, token, fakes):
     """The HTTP payload is already redacted — not just the client-side filter."""
     fakes["lines"] = [
-        "[2026-09-03T16:05:00+00:00] [ INFO] hit 100.122.7.9 token=sk-secret-abcdef long-run-sessionid-but-not-short",
+        "[2026-09-03T16:05:00+00:00] [ INFO] hit 100.64.0.9 token=sk-secret-abcdef long-run-sessionid-but-not-short",
     ]
     _, payload = _req(running, token, "/v1/logs?source=daemon&limit=1")
     entry = payload[0]["line"]
-    assert "100.122.7.9" not in entry
+    assert "100.64.0.9" not in entry
     assert "sk-secret-abcdef" not in entry
     assert "100.64.0.1" in entry or "***" in entry
 
