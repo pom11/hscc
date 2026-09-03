@@ -187,6 +187,119 @@ struct StreamStatus: Decodable {
     let message: String?
 }
 
+// MARK: - Cluster monitor (per-node fleet telemetry)
+
+/// GET /v1/cluster/monitor — a per-node snapshot of CPU/RAM/GPU metrics from
+/// `sparkrun cluster monitor --simple --json` (hscc-cluster/hscc.py:184
+/// `cmd_monitor()`). This is the SLOWEST route the API serves (~3.02s median —
+/// see docs/audits/phone-performance.md): it shells out over SSH to every node.
+/// Treated as an on-demand read whose LoadState never blocks the rest of the
+/// screen.
+///
+/// Verified live shape (captured 2026-09-03):
+///   {
+///     "timestamp": <Double epoch>,
+///     "hosts": [ { "host": "<ip>", "error": null, "sample": { ... },
+///                   "workloads": [...], "used_slots": 1, "free_slots": 0 } ]
+///   }
+/// Every numeric field inside `sample` arrives as a STRING, and many are empty
+/// (`""`) when a metric is unreadable for that node (e.g. GB10 reports its
+/// unified-memory VRAM as empty). So the fields are decoded as `String?` and
+/// parsed defensively via `NodeSample`'s computed `Double?` accessors — a bad
+/// or empty string yields nil, never a decode failure that blanks the whole
+/// route.
+struct ClusterMonitorResponse: Decodable, Speakable {
+    let timestamp: Double?
+    let hosts: [ClusterMonitorHost]
+    let speak: String
+}
+
+/// One node's entry in the monitor `hosts` array. `error` is non-null when the
+/// node could not be sampled; `sample` is then absent.
+struct ClusterMonitorHost: Decodable, Identifiable {
+    /// The node's address as reported by the API (e.g. a LAN IP).
+    let host: String
+    let error: String?
+    let sample: NodeSample?
+    let used_slots: Int?
+    let free_slots: Int?
+
+    var id: String { host }
+}
+
+/// The per-node `sample` dict — all numeric metrics are STRINGS (may be empty
+/// `""` when a metric is unreadable on that node). Parsed via the computed
+/// `Double?` accessors below.
+struct NodeSample: Decodable {
+    let timestamp: String?
+    let hostname: String?
+    let uptime_sec: String?
+    let cpu_load_1m: String?
+    let cpu_load_5m: String?
+    let cpu_load_15m: String?
+    let cpu_usage_pct: String?
+    let cpu_freq_mhz: String?
+    let cpu_temp_c: String?
+    let mem_total_mb: String?
+    let mem_used_mb: String?
+    let mem_available_mb: String?
+    let mem_used_pct: String?
+    let swap_total_mb: String?
+    let swap_used_mb: String?
+    let gpu_name: String?
+    let gpu_util_pct: String?
+    let gpu_mem_used_mb: String?
+    let gpu_mem_total_mb: String?
+    let gpu_mem_used_pct: String?
+    let gpu_temp_c: String?
+    let gpu_power_w: String?
+    let gpu_power_limit_w: String?
+    let gpu_clock_mhz: String?
+    let gpu_mem_clock_mhz: String?
+    let sparkrun_jobs: String?
+    let sparkrun_job_names: String?
+    /// Fields below are often empty/unreported on these boxes; kept for
+    /// completeness but not surfaced in the current UI.
+    let gpu_encoder_pct: String?
+    let gpu_decoder_pct: String?
+    let gpu_fan_pct: String?
+    let mem_bufcache_mb: String?
+
+    // MARK: Parsed numeric accessors (nil when unreadable/empty)
+
+    var uptimeSeconds: Double? { Self.num(uptime_sec) }
+    var cpuUsagePct: Double? { Self.num(cpu_usage_pct) }
+    var cpuTempC: Double? { Self.num(cpu_temp_c) }
+    var memUsedPct: Double? { Self.num(mem_used_pct) }
+    var memTotalMB: Double? { Self.num(mem_total_mb) }
+    var memUsedMB: Double? { Self.num(mem_used_mb) }
+    var gpuUtilPct: Double? { Self.num(gpu_util_pct) }
+    var gpuMemUsedMB: Double? { Self.num(gpu_mem_used_mb) }
+    var gpuMemTotalMB: Double? { Self.num(gpu_mem_total_mb) }
+    var gpuMemUsedPct: Double? { Self.num(gpu_mem_used_pct) }
+    var gpuTempC: Double? { Self.num(gpu_temp_c) }
+    var gpuPowerW: Double? { Self.num(gpu_power_w) }
+
+    /// A human uptime ("2d 11h") from `uptime_sec`, or nil when unreadable.
+    var uptimeText: String? {
+        guard let s = uptimeSeconds, s >= 0 else { return nil }
+        let total = Int(s)
+        let days = total / 86400
+        let hours = (total % 86400) / 3600
+        let mins = (total % 3600) / 60
+        if days > 0 { return "\(days)d \(hours)h" }
+        if hours > 0 { return "\(hours)h \(mins)m" }
+        return "\(mins)m"
+    }
+
+    /// Parse a numeric STRING ('2.84', '77.0', '0') to Double, or nil when the
+    /// string is empty/non-numeric (the unreadable-metric sentinel "").
+    private static func num(_ raw: String?) -> Double? {
+        guard let raw, !raw.isEmpty else { return nil }
+        return Double(raw)
+    }
+}
+
 // MARK: - Projects / kanban
 
 /// A single flightdeck card. This is the full flightdeck card dict; only the

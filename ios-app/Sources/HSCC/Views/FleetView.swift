@@ -18,6 +18,11 @@ struct FleetView: View {
     @State private var throughput = LoadState<FleetThroughputResponse>.idle
     @State private var streams = LoadState<FleetStreamsResponse>.idle
     @State private var autoscale = LoadState<AutoscaleResponse>.idle
+    // The per-node monitor is LAZY: it is intentionally NOT part of loadAll()
+    // and stays idle until the operator taps "Load per-node monitor". The
+    // /v1/cluster/monitor route costs ~3.02s (SSH subprocess to every node) and
+    // must never gate the screen's initial render or pull-to-refresh.
+    @State private var monitor = LoadState<ClusterMonitorResponse>.idle
 
     var body: some View {
         ScrollView {
@@ -27,6 +32,7 @@ struct FleetView: View {
                 statsSection
                 streamsSection
                 autoscaleSection
+                monitorSection
             }
             .padding()
         }
@@ -92,6 +98,15 @@ struct FleetView: View {
                                        cacheKey: "/v1/autoscale",
                                        client: client) {
             try await client.autoscale()
+        }
+    }
+
+    private func loadMonitor() async {
+        if monitor.value == nil { monitor = .loading }
+        monitor = await Offline.load(monitor,
+                                     cacheKey: "/v1/cluster/monitor",
+                                     client: client) {
+            try await client.clusterMonitor()
         }
     }
 
@@ -385,6 +400,231 @@ struct FleetView: View {
                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
             }
         }
+    }
+
+    // MARK: - Per-node monitor (lazy, on-demand)
+
+    @ViewBuilder
+    private var monitorSection: some View {
+        HSSectionCard(title: "Per-node monitor", systemImage: "gauge.medium") {
+            switch monitor {
+            case .idle:
+                // LAZY via Offline.load FIFO semantics: nothing is fetched until
+                // the operator opts in. Button opens with a note about the cost.
+                Button {
+                    Task { await loadMonitor() }
+                } label: {
+                    Label("Load per-node monitor", systemImage: "arrow.down.circle")
+                        .font(.subheadline)
+                }
+                Text("Samples each node over SSH — takes a few seconds.")
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            case .loading:
+                ProgressView("Sampling every node…")
+            case .failed(let message):
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
+                    errorLabel(message)
+                    Button("Try again") {
+                        Task { await loadMonitor() }
+                    }
+                    .font(.subheadline)
+                }
+            case .stale(let state, let age):
+                StaleBanner(age: age, reason: "Can't reach the cluster right now.") {
+                    Task { await loadMonitor() }
+                }
+                monitorBody(state)
+            case .loaded(let state):
+                monitorBody(state)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func monitorBody(_ state: ClusterMonitorResponse) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
+            Text(state.speak)
+                .font(.subheadline)
+                .italic()
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+
+            if state.hosts.isEmpty {
+                emptyLabel("No nodes reported.")
+            } else {
+                ForEach(state.hosts) { host in
+                    monitorNodeCard(host)
+                }
+            }
+        }
+    }
+
+    /// One node's saturation + heat readout. Makes load and temperature visible
+    /// at a glance via colored bars: GPU/CPU/RAM utilization and VRAM usage are
+    /// shown as proportional bars tinted by `saturationColor`, temperatures by
+    /// `heatColor`. A node that failed to be sampled shows its error instead.
+    @ViewBuilder
+    private func monitorNodeCard(_ host: ClusterMonitorHost) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
+            // Header: hostname (mono) + address + slots.
+            let displayName = host.sample.flatMap(\.hostname).flatMap {
+                $0.isEmpty ? nil : $0
+            } ?? host.host
+            HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.xs.rawValue) {
+                Text(displayName)
+                    .font(.headline)
+                    .font(.hsccMono(16, weight: .semibold))
+                    .foregroundColor(Theme.Semantic.onSurface)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                HSStatusDot(host.sample != nil ? Theme.Semantic.ok : Theme.Semantic.bad)
+            }
+
+            if let error = host.error, !error.isEmpty {
+                HSErrorLabel(message: error)
+            } else if let sample = host.sample {
+                metricsBlock(sample)
+                // Slots line under the metrics.
+                HStack(spacing: Theme.Spacing.sm.rawValue) {
+                    HSMetaLine([
+                        host.host,
+                        slotsText(host),
+                        sample.uptimeText.map { "up \($0)" },
+                    ])
+                    Spacer(minLength: 0)
+                }
+            } else {
+                HSEmptyLabel(message: "No sample for this node.")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(Theme.Spacing.sm.rawValue)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous)
+                .fill(Theme.Semantic.surfaceElevated)
+        )
+    }
+
+    /// The GPU + RAM/CPU readouts for one sampled node.
+    @ViewBuilder
+    private func metricsBlock(_ s: NodeSample) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
+            // GPU utilization + name.
+            if let gpuName = s.gpu_name, !gpuName.isEmpty {
+                Text(gpuName)
+                    .font(.caption2)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .lineLimit(1)
+            }
+            if let util = s.gpuUtilPct {
+                monitorBar(label: "GPU",
+                           percent: util,
+                           text: "\(fmt(util))%",
+                           color: saturationColor(util))
+            }
+            // VRAM usage (used/total + percent bar).
+            if let total = s.gpuMemTotalMB, total > 0 {
+                let usedPct = s.gpuMemUsedPct ?? (total > 0 ? (s.gpuMemUsedMB ?? 0) / total * 100 : 0)
+                monitorBar(label: "VRAM",
+                           percent: usedPct,
+                           text: "\(fmtMB(s.gpuMemUsedMB)) / \(fmtMB(total))",
+                           color: saturationColor(usedPct))
+            }
+            // GPU temperature — the heat signal that has throttled a node before.
+            if let temp = s.gpuTempC {
+                monitorBar(label: "GPU temp",
+                           percent: temp / 100,
+                           text: "\(fmt(temp))°C",
+                           color: heatColor(temp))
+            }
+            // RAM utilization.
+            if let mem = s.memUsedPct {
+                monitorBar(label: "RAM",
+                           percent: mem,
+                           text: "\(fmt(mem))%",
+                           color: saturationColor(mem))
+            } else if let total = s.memTotalMB, let used = s.memUsedMB, total > 0 {
+                let pct = used / total * 100
+                monitorBar(label: "RAM",
+                           percent: pct,
+                           text: "\(fmtMB(used)) / \(fmtMB(total))",
+                           color: saturationColor(pct))
+            }
+            // CPU utilization + temperature.
+            if let cpu = s.cpuUsagePct {
+                monitorBar(label: "CPU",
+                           percent: cpu,
+                           text: "\(fmt(cpu))%",
+                           color: saturationColor(cpu))
+            }
+            if let cpuTemp = s.cpuTempC {
+                monitorBar(label: "CPU temp",
+                           percent: cpuTemp / 100,
+                           text: "\(fmt(cpuTemp))°C",
+                           color: heatColor(cpuTemp))
+            }
+        }
+    }
+
+    /// A labeled horizontal saturation bar: `label` + a proportional fill + the
+    /// value text on the right. `percent` is 0...100; clamped into the bar.
+    private func monitorBar(label: String, percent: Double, text: String, color: Color) -> some View {
+        HStack(spacing: Theme.Spacing.sm.rawValue) {
+            Text(label)
+                .font(.caption2)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .frame(width: 52, alignment: .leading)
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Theme.Semantic.surfaceRaised)
+                    Capsule()
+                        .fill(color)
+                        .frame(width: geo.size.width * CGFloat(min(max(percent, 0), 100)) / 100)
+                }
+            }
+            .frame(height: 8)
+            Text(text)
+                .font(.caption.monospacedDigit())
+                .foregroundColor(Theme.Semantic.onSurface)
+                .frame(width: 86, alignment: .trailing)
+        }
+    }
+
+    /// Saturation ramp for utilization/VRAM percents (higher = busier).
+    /// Ok < 70, warn 70...90, bad > 90. (RAM on these DGX boxes legitimately
+    /// sits ~96% used with buff/cache counted as used, so a full RAM bar reads
+    /// as amber — busy but normal, NOT a fault. GPU/VRAM are the true signals.)
+    private func saturationColor(_ percent: Double) -> Color {
+        if percent > 90 { return Theme.Semantic.bad }
+        if percent >= 70 { return Theme.Semantic.warn }
+        return Theme.Semantic.ok
+    }
+
+    /// Heat ramp for temperatures in °C. Designed around a DGX Spark's thermal
+    /// envelope — the node that throttled runs hottest, so >85 is the danger
+    /// band, 70...85 busy but fine, <70 cool.
+    private func heatColor(_ celsius: Double) -> Color {
+        if celsius > 85 { return Theme.Semantic.bad }
+        if celsius >= 70 { return Theme.Semantic.warn }
+        return Theme.Semantic.ok
+    }
+
+    /// "1/1" or "1 used · 1 free" — slots for a node.
+    private func slotsText(_ host: ClusterMonitorHost) -> String? {
+        let used = host.used_slots, free = host.free_slots
+        if let used, let free {
+            let total = used + free
+            return total > 0 ? "\(used)/\(total) slots" : nil
+        }
+        return nil
+    }
+
+    /// Format a MB integer ("119681" → "117G") into a readable size.
+    private func fmtMB(_ mb: Double?) -> String {
+        guard let mb else { return "—" }
+        let gb = mb / 1024
+        return "\(fmt(gb))G"
     }
 
     // MARK: - Shared building blocks

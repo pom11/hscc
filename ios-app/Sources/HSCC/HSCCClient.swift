@@ -90,6 +90,7 @@ enum EndpointPath {
     static let templateStatus = "/v1/template/status"
     static let kanbanBlocked = "/v1/kanban/blocked"
     static let activityFeed = "/v1/activity/feed"
+    static let clusterMonitor = "/v1/cluster/monitor"
     static let sessions = "/v1/sessions"
 }
 
@@ -402,10 +403,15 @@ struct HSCCClient {
         try await get("/v1/cluster/hosts", as: ClusterHostsResponse.self)
     }
 
-    /// GET /v1/cluster/monitor — fleet monitor snapshot (aggregate metrics).
-    /// Shape is dynamic; use the generic `ReadResponse` for `speak` + payload.
-    func clusterMonitor() async throws -> ReadResponse {
-        try await read("/v1/cluster/monitor")
+    /// GET /v1/cluster/monitor — per-node fleet telemetry (CPU/RAM/GPU/uptime).
+    ///
+    /// This route is the SLOWEST the API serves (~3.02s median — it shells out
+    /// over SSH to every node; see docs/audits/phone-performance.md). Views must
+    /// fetch it lazily/on-demand and never block other content on it. The plain
+    /// (query-item-free) GET is cached by `StateCache`, so a subsequent unreachable
+    /// cluster still falls back to last-known data via `Offline.load`.
+    func clusterMonitor() async throws -> ClusterMonitorResponse {
+        try await get(EndpointPath.clusterMonitor, as: ClusterMonitorResponse.self)
     }
 
     /// GET /v1/cluster/jobs — Spark job list. Shape is dynamic; `ReadResponse`.
