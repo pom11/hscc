@@ -758,9 +758,14 @@ def test_get_on_a_given_job_is_readonly(running, token, fakes):
 
 def test_backing_invoke_passes_argv_as_list(monkeypatch):
     """The real _backing_invoke must shell out with an argv LIST — never a
-    string. We capture the argv by faking subprocess.run and assert the prompt
+    string. We capture the argv by faking subprocess.Popen and assert the prompt
     arrives as a single element, so a prompt like ``uname; rm -rf /`` cannot be
-    executed by a shell."""
+    executed by a shell.
+
+    The seam changed from ``subprocess.run`` to ``subprocess.Popen`` so the
+    running process can be retained and terminated by a stop (t_68432c2d); the
+    fake therefore provides the Popen surface ``_backing_invoke`` consumes.
+    """
     captured = {}
 
     class _FakeProc:
@@ -768,11 +773,24 @@ def test_backing_invoke_passes_argv_as_list(monkeypatch):
             captured["argv"] = argv
             captured["kw"] = kw
             self.returncode = 0
-            self.stdout = "the orchestrator reply\n"
-            self.stderr = ""
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def communicate(self):
+            return ("the orchestrator reply\n", "")
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):  # noqa: D401
+            pass
+
+        def kill(self):  # noqa: D401
+            pass
 
     import subprocess as _sp
-    monkeypatch.setattr(_sp, "run", _FakeProc)
+    monkeypatch.setattr(_sp, "Popen", _FakeProc)
     reply, profile, session = routes_orchestrator._backing_invoke(
         "hscc-orch", "hscc", "uname; rm -rf /"
     )
@@ -783,30 +801,85 @@ def test_backing_invoke_passes_argv_as_list(monkeypatch):
     assert "--continue" in argv
     # The dangerous prompt is a SINGLE argv element, never interpolated.
     assert "uname; rm -rf /" in argv
-    assert "timeout" in captured["kw"] and captured["kw"]["timeout"] == routes_orchestrator._DEFAULT_TIMEOUT
+    # _backing_invoke uses Popen now; the timeout is enforced by its own loop.
+    assert "timeout" not in captured["kw"]
     # --continue carries the named session so the thread persists.
     assert "hscc" in argv
+    # The call opened stdout/stderr as pipes so output can be drained.
+    assert captured["kw"]["stdout"] == _sp.PIPE
+    assert captured["kw"]["stderr"] == _sp.PIPE
 
 
 def test_backing_invoke_timeout_raises(monkeypatch):
     import subprocess as _sp
 
-    def raise_timeout(*a, **k):
-        raise _sp.TimeoutExpired(cmd=["hermes"], timeout=1)
-    monkeypatch.setattr(_sp, "run", raise_timeout)
+    class _SlowProc:
+        def __init__(self, *a, **k):
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            raise _sp.TimeoutExpired(cmd=["hermes"], timeout=1)
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(_sp, "Popen", _SlowProc)
     with pytest.raises(routes_orchestrator._OrchestratorTimeout):
         routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi", timeout=1)
 
 
-def test_backing_invoke_session_not_found_raises_unavailable(monkeypatch):
+def _popen(monkeypatch, stdout="", stderr="", returncode=0, spawn_exc=None):
+    """Install a fake ``subprocess.Popen`` returning a controllable proc.
+
+    The production seam changed from ``subprocess.run`` to ``subprocess.Popen``
+    (t_68432c2d) so a running turn can be retained + terminated by a stop.
+    These tests therefore install a Popen fake whose instances model a process:
+    ``wait()`` returns immediately, ``communicate()`` yields the configured
+    stdout/stderr, and ``poll()`` reports the returncode. ``spawn_exc`` (e.g.
+    ``FileNotFoundError``) makes construction raise, modelling a missing
+    binary.
+    """
     import subprocess as _sp
 
-    def notfound(*a, **k):
-        _p = types.SimpleNamespace(returncode=1)
-        _p.stderr = "Session not found: hscc\nUse a session ID from a previous CLI run."
-        _p.stdout = ""
-        return _p
-    monkeypatch.setattr(_sp, "run", notfound)
+    class _FakePopen:
+        def __init__(self, argv=None, **kw):
+            self.argv = argv
+            self.kw = kw
+            self.returncode = returncode
+            self._out = stdout
+            self._err = stderr
+            if spawn_exc is not None:
+                raise spawn_exc
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def communicate(self):
+            return (self._out, self._err)
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):  # noqa: D401
+            self.returncode = -15
+
+        def kill(self):  # noqa: D401
+            self.returncode = -9
+
+    monkeypatch.setattr(_sp, "Popen", _FakePopen)
+    return _FakePopen
+
+
+def test_backing_invoke_session_not_found_raises_unavailable(monkeypatch):
+    _popen(monkeypatch, returncode=1,
+           stderr="Session not found: hscc\nUse a session ID from a previous "
+                  "CLI run.")
     with pytest.raises(routes_orchestrator._OrchestratorUnavailable) as ei:
         routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
     assert "not ready" in str(ei.value)
@@ -818,14 +891,7 @@ def test_backing_invoke_session_not_found_returncode_0_still_unavailable(monkeyp
     Preserves the original combinator: a literal missing-session signal is
     reported as unavailable regardless of the exit code.
     """
-    import subprocess as _sp
-
-    def notfound0(*a, **k):
-        _p = types.SimpleNamespace(returncode=0)
-        _p.stderr = "Session not found: hscc"
-        _p.stdout = ""
-        return _p
-    monkeypatch.setattr(_sp, "run", notfound0)
+    _popen(monkeypatch, returncode=0, stderr="Session not found: hscc")
     with pytest.raises(routes_orchestrator._OrchestratorUnavailable):
         routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
 
@@ -840,17 +906,9 @@ def test_backing_invoke_model_unreachable_names_itself(monkeypatch):
     becomes a distinct invocation error carrying the ACTUAL stderr tail, so
     the operator sees the true cause and is never sent chasing a ghost.
     """
-    import subprocess as _sp
-
-    def unreachable(*a, **k):
-        _p = types.SimpleNamespace(returncode=1)
-        _p.stderr = (
-            "openai.APIConnectionError: Failed to connect to the model "
-            "endpoint at api.openai.com:443\nConnection refused"
-        )
-        _p.stdout = ""
-        return _p
-    monkeypatch.setattr(_sp, "run", unreachable)
+    _popen(monkeypatch, returncode=1, stderr=(
+        "openai.APIConnectionError: Failed to connect to the model "
+        "endpoint at api.openai.com:443\nConnection refused"))
     with pytest.raises(routes_orchestrator._OrchestratorInvocationError) as ei:
         routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
     msg = str(ei.value)
@@ -864,19 +922,12 @@ def test_backing_invoke_model_unreachable_names_itself(monkeypatch):
 
 def test_backing_invoke_nonzero_exit_carries_bounded_stderr_tail(monkeypatch):
     """A crash's real stderr tail is surfaced, bounded, never discarded."""
-    import subprocess as _sp
-
-    def crashed(*a, **k):
-        big_err = "\n".join(f"line {i} of an internal stack" for i in range(200))
-        _p = types.SimpleNamespace(returncode=2)
-        _p.stderr = big_err
-        _p.stdout = ""
-        return _p
-    monkeypatch.setattr(_sp, "run", crashed)
+    big_err = "\n".join(f"line {i} of an internal stack" for i in range(200))
+    _popen(monkeypatch, returncode=2, stderr=big_err)
     with pytest.raises(routes_orchestrator._OrchestratorInvocationError) as ei:
         routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
     msg = str(ei.value)
-    assert f"exit 2" in msg
+    assert "exit 2" in msg
     assert "stderr tail:" in msg
     # Bounded: the tail is capped, not the whole 200-line stack.
     assert len(msg) < 2000
@@ -886,14 +937,7 @@ def test_backing_invoke_nonzero_exit_carries_bounded_stderr_tail(monkeypatch):
 
 def test_backing_invoke_nonzero_exit_no_stderr(monkeypatch):
     """A nonzero exit with empty stderr still names itself, not 'not ready'."""
-    import subprocess as _sp
-
-    def silent(*a, **k):
-        _p = types.SimpleNamespace(returncode=1)
-        _p.stderr = ""
-        _p.stdout = ""
-        return _p
-    monkeypatch.setattr(_sp, "run", silent)
+    _popen(monkeypatch, returncode=1)
     with pytest.raises(routes_orchestrator._OrchestratorInvocationError) as ei:
         routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
     msg = str(ei.value)
@@ -904,15 +948,8 @@ def test_backing_invoke_nonzero_exit_no_stderr(monkeypatch):
 def test_backing_invoke_strips_channel_notice_lines(monkeypatch):
     """`-Q` can emit a cwd-restore notice on stdout BEFORE the reply; the parsed
     reply must not be polluted by it (observed real transport, t_bc242def)."""
-    import subprocess as _sp
-
-    def with_notice(*a, **k):
-        _p = types.SimpleNamespace(returncode=0)
-        _p.stderr = ""
-        _p.stdout = ("↪ restored workspace dir: /Users/desac\n\n"
-                     "the actual reply here\n")
-        return _p
-    monkeypatch.setattr(_sp, "run", with_notice)
+    _popen(monkeypatch, stdout=("↪ restored workspace dir: /Users/desac\n\n"
+                                "the actual reply here\n"))
     reply, _, _ = routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
     assert "restored workspace" not in reply
     assert reply == "the actual reply here"
@@ -927,17 +964,9 @@ def test_backing_invoke_strips_tirith_preamble(monkeypatch):
     would be spoken aloud by Siri intents. `_cprint` -> stdout when no prompt
     app is active (cli.py:7018-7021). `_backing_invoke` must strip it.
     """
-    import subprocess as _sp
-
-    def with_tirith(*a, **k):
-        _p = types.SimpleNamespace(returncode=0)
-        _p.stderr = ""
-        _p.stdout = (
-            "⚠ tirith security scanner enabled but not available — command "
-            "scanning will use pattern matching only\nIDLETEST\n"
-        )
-        return _p
-    monkeypatch.setattr(_sp, "run", with_tirith)
+    _popen(monkeypatch, stdout=(
+        "⚠ tirith security scanner enabled but not available — command "
+        "scanning will use pattern matching only\nIDLETEST\n"))
     reply, _, _ = routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
     assert "tirith" not in reply
     assert "scanner" not in reply
@@ -952,17 +981,9 @@ def test_backing_invoke_strips_resume_banner_defensively(monkeypatch):
     case a config change routes it to stdout — a distinctive line that no model
     reply naturally matches.
     """
-    import subprocess as _sp
-
-    def with_banner(*a, **k):
-        _p = types.SimpleNamespace(returncode=0)
-        _p.stderr = ""
-        _p.stdout = (
-            "↻ Resumed session seed-hscc \"hscc\" (21 user messages, 266 total "
-            "messages)\nthe answer\n"
-        )
-        return _p
-    monkeypatch.setattr(_sp, "run", with_banner)
+    _popen(monkeypatch, stdout=(
+        "↻ Resumed session seed-hscc \"hscc\" (21 user messages, 266 total "
+        "messages)\nthe answer\n"))
     reply, _, _ = routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
     assert "Resumed session" not in reply
     assert reply == "the answer"
@@ -1004,24 +1025,13 @@ def test_notice_line_strips_known_preamble_shapes():
 
 
 def test_backing_invoke_empty_reply_raises(monkeypatch):
-    import subprocess as _sp
-
-    def empty(*a, **k):
-        _p = types.SimpleNamespace(returncode=0)
-        _p.stderr = ""
-        _p.stdout = "   \n"
-        return _p
-    monkeypatch.setattr(_sp, "run", empty)
+    _popen(monkeypatch, stdout="   \n")
     with pytest.raises(routes_orchestrator._OrchestratorInvocationError):
         routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
 
 
 def test_backing_invoke_missing_hermes_raises_unavailable(monkeypatch):
-    import subprocess as _sp
-
-    def missing(*a, **k):
-        raise FileNotFoundError("hermes")
-    monkeypatch.setattr(_sp, "run", missing)
+    _popen(monkeypatch, spawn_exc=FileNotFoundError("hermes"))
     with pytest.raises(routes_orchestrator._OrchestratorUnavailable):
         routes_orchestrator._backing_invoke("hscc-orch", "hscc", "hi")
 

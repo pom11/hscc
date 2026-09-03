@@ -557,6 +557,7 @@ class GatewayDriver:
         self._stop_evt = threading.Event()
         self._alive = False
         self._relay_hook = None
+        self._interrupt_hook = None
 
     # -- lifecycle ---------------------------------------------------------- #
 
@@ -589,6 +590,18 @@ class GatewayDriver:
 
         self._relay_hook = _relay
         _routes_ws.relay_user_message = _relay
+
+        # Install the interrupt hook so a WS ``stop`` frame reaches this
+        # driver's PTY (Ctrl-C) when it owns the project (t_68432c2d). The
+        # default — no driver — falls back to cancelling the in-flight relay
+        # job, which is correct only when no GatewayDriver is attached.
+        def _interrupt(proj: str) -> bool:
+            if proj != project:
+                return False
+            return self.interrupt()
+
+        self._interrupt_hook = _interrupt
+        _routes_ws.interrupt_user_turn = _interrupt
 
         ev_thread = threading.Thread(
             target=self._run_events_loop, name="gateway-events",
@@ -693,6 +706,28 @@ class GatewayDriver:
             log.warning("gateway: send_user_message failed: %s", exc)
             return False
 
+    def interrupt(self) -> bool:
+        """Send an interrupt (Ctrl-C, then CR) to abort the running turn.
+
+        t_68432c2d: the live PTY path's cancel. ``hermes chat`` in the TUI
+        treats a Ctrl-C byte (0x03) as the abort keystroke; the trailing CR
+        submits the interrupt like the native TUI does. Safe when idle (a
+        stray Ctrl-C is harmless), never raises, and returns True once the
+        bytes are written (or False when the PTY is gone / stopping).
+        """
+        pty = self._pty
+        if pty is None or self._stop_evt.is_set():
+            return False
+        try:
+            with self._send_lock:
+                pty.send_text("\x03")
+                time.sleep(0.1)
+                pty.send_text("\r")
+            return True
+        except ConnectionError as exc:
+            log.warning("gateway: interrupt failed: %s", exc)
+            return False
+
     # -- teardown ----------------------------------------------------------- #
 
     def stop(self) -> None:
@@ -707,6 +742,12 @@ class GatewayDriver:
             if _routes_ws.relay_user_message is self._relay_hook:
                 _routes_ws.relay_user_message = _routes_ws._default_relay
             self._relay_hook = None
+        # Restore the default interrupt hook (cancels the relay job) too.
+        if self._interrupt_hook is not None:
+            import routes_ws as _routes_ws
+            if _routes_ws.interrupt_user_turn is self._interrupt_hook:
+                _routes_ws.interrupt_user_turn = _routes_ws._interrupt_relay
+            self._interrupt_hook = None
         for ws in (self._pty, self._events):
             if ws is not None:
                 ws.close()
