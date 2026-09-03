@@ -310,6 +310,18 @@ struct StreamingChatView: View {
 /// A message turn: the orchestrator's reply (or the operator's echo). Streams
 /// while `streaming == true` — the text grows as deltas land and a subtle
 /// caret signals it is still being typed.
+///
+/// Operator vs assistant must be tellable at a glance, so the two use OPPOSITE
+/// alignment and OPPOSITE backgrounds (the same recipe OrchestratorChatView
+/// ships):
+///  * the operator's echo sits RIGHT on a solid accent field with white text,
+///    tagged "YOU";
+///  * the orchestrator sits LEFT on a raised gray field with primary text,
+///    tagged "ORCHESTRATOR".
+/// Each bubble carries a TURN MARKER (the role label) and real vertical
+/// separation (turnGap) so the transcript reads as distinct turns rather than
+/// a wall of same-weight text. Long replies are capped to a readable measure
+/// (chatMeasure) so text never runs edge-to-edge.
 private struct MessageBubble: View {
     let role: String
     let text: String
@@ -318,35 +330,80 @@ private struct MessageBubble: View {
     private var isUser: Bool { role == "user" }
 
     var body: some View {
-        HStack {
-            if isUser { Spacer(minLength: 60) }
-            Text(text + (streaming ? " ▍" : ""))
-                .font(.body)
-                .foregroundColor(Theme.Semantic.onSurface)
-                .padding(.horizontal, Theme.Spacing.md.rawValue)
-                .padding(.vertical, Theme.Spacing.sm.rawValue)
-                .background(
-                    RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
-                        .fill(streamBubbleColor)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
-                        .stroke(outlineColor, lineWidth: 1)
-                )
-            if !isUser { Spacer(minLength: 40) }
+        HStack(alignment: .bottom, spacing: 0) {
+            if isUser {
+                Spacer(minLength: 56)
+                bubble
+            } else {
+                bubble
+                Spacer(minLength: 40)
+            }
         }
         .frame(maxWidth: .infinity)
+        // Real vertical separation between turns — builds on top of the
+        // LazyVStack base spacing so a new turn never blurs into the row above.
+        .padding(.top, turnGap)
+    }
+
+    private var bubble: some View {
+        VStack(alignment: isUser ? .trailing : .leading, spacing: Theme.Spacing.xxs.rawValue) {
+            // Turn marker — the operator can tell WHO said it at a glance, and
+            // that a new turn began here.
+            Text(isUser ? "YOU" : "ORCHESTRATOR")
+                .font(.caption2.weight(.semibold))
+                .textCase(.uppercase)
+                .foregroundColor(isUser ? accentRoleColor : Theme.Semantic.onSurfaceMuted)
+            Text(text + (streaming ? " ▍" : ""))
+                .font(.body)
+                .foregroundColor(textColor)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+        }
+        .padding(.horizontal, Theme.Spacing.md.rawValue)
+        .padding(.vertical, Theme.Spacing.sm.rawValue)
+        .frame(maxWidth: chatMeasure, alignment: isUser ? .trailing : .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
+                .fill(streamBubbleColor)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
+                .stroke(outlineColor, lineWidth: 1)
+        )
+    }
+
+    /// A readable measure for long replies — the bubble never spans the full
+    /// width edge-to-edge, even on a wide screen (the iPhone shorter leg just
+    /// keeps the Spacer approach; this cap is what protects iPad/large text).
+    private var chatMeasure: CGFloat { 560 }
+
+    /// Breathing room above each new turn so turns don't blur together.
+    private var turnGap: CGFloat { Theme.Spacing.md.rawValue }
+
+    /// The role label over a SOLID accent field is white for contrast — the
+    /// established OrchestratorChat pattern (white on fixed accent, readable
+    /// in both appearances).
+    private var accentRoleColor: Color {
+        .white  // theme-allow: white on the solid accent role tag
+    }
+
+    private var textColor: Color {
+        if isUser { return .white /* theme-allow: white on solid accent, readable in both appearances */ }
+        return Theme.Semantic.onSurface
     }
 
     private var streamBubbleColor: Color {
         if isUser {
-            return Color.accentColor.opacity(0.18)
+            // Solid accent, not a pale tint — the operator's own message must
+            // not blend into the raised gray the assistant uses.
+            return Color.accentColor
         }
         return streaming ? Theme.Semantic.surfaceRaised : Theme.Semantic.surfaceElevated
     }
 
     private var outlineColor: Color {
-        if isUser { return Color.accentColor.opacity(0.35) }
+        if isUser { return Color.accentColor }
         return streaming ? Theme.Semantic.ok.opacity(0.6) : .clear
     }
 }
@@ -375,8 +432,11 @@ private struct ToolChip: View {
                     VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
                         HStack(spacing: Theme.Spacing.xs.rawValue) {
                             Text(render.name)
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundColor(Theme.Semantic.onSurface)
+                                // Machine metadata — quieter than prose so a
+                                // collapsed tool call reads as a side-note,
+                                // not a competing conversational turn.
+                                .font(.subheadline)
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
                             if let dur = render.duration {
                                 Text(String(format: "%.1fs", dur))
                                     .font(.caption)
@@ -494,7 +554,9 @@ private struct CardChip: View {
                     .foregroundColor(Theme.Semantic.neutral)
                 VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
                     Text(card.title)
-                        .font(.subheadline.weight(.semibold))
+                        // Card moves are metadata under the conversation —
+                        // quieter than prose so they don't compete for the eye.
+                        .font(.subheadline)
                         .foregroundColor(Theme.Semantic.onSurface)
                         .lineLimit(2)
                     HStack(spacing: Theme.Spacing.xs.rawValue) {
