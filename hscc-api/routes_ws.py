@@ -152,6 +152,12 @@ def _default_relay(project: str, text: str) -> bool:
     socket keeps serving, and folds the reply into the SAME store, so every
     subscriber sees it with correct seq ordering.
 
+    Cancellation (t_68432c2d): the turn runs as a real :class:`_ro._ChatJob`, so
+    it is registered in the job store, findable by project via
+    ``_ro._in_flight_job``, and its transport is cancellable (\u2192 a ``stop`` frame
+    can interrupt it). The reply (or a ``turn stopped`` notice) is still folded
+    into the store on completion/interruption, so subscribers see the outcome.
+
     Returns True if the relay was started.
     """
     def _work():
@@ -166,10 +172,30 @@ def _default_relay(project: str, text: str) -> bool:
             # resolve one session, never two.
             session_id = _registry.ensure_session(
                 project, _registry_path(None))
-            reply, _profile, _session = _ro._backing_invoke(
-                resolved["profile"], session_id, text)
-            payload = MessagePayload(role="assistant", delta=reply, done=True)
-            get_store(project).append(TYPE_MESSAGE, payload)
+            # Run as a cancellable job so a ``stop`` frame can find + interrupt
+            # this turn by project (_in_flight_job), and so _backing_invoke gets
+            # the cancel_evt/retained-Popen it needs to end the process.
+            job = _ro._new_job(project, resolved["profile"], session_id, text,
+                               timeout=_ro._chat_timeout(None))
+            _ro._run_job(job)
+            d = _ro._job_dict(job)
+            if d.get("status") == "done" and d.get("reply"):
+                payload = MessagePayload(role="assistant", delta=d["reply"],
+                                         done=True)
+                get_store(project).append(TYPE_MESSAGE, payload)
+            elif d.get("status") == "stopped":
+                # A live client already saw the ``turn stopped`` notice via
+                # notify_turn_stopped; nothing more to fold in here. (If the
+                # notice raced, the store still carries the user's message, so
+                # the transcript reads coherently.)
+                pass
+            # timeout/unavailable/error: the job snapshot means the turn ended
+            # unsuccessfully; surface it in the transcript so it is not silent.
+            elif d.get("error"):
+                get_store(project).append(TYPE_ERROR, ErrorPayload(
+                    code=d["error"].get("code", "orchestrator_error"),
+                    message=d["error"].get("speak", "The orchestrator call "
+                                                      "failed.")))
         except Exception as exc:  # noqa: BLE001 - surface, never swallow
             # Tell the operator in the transcript rather than failing silently:
             # a dropped message with no explanation is exactly the bug this
@@ -182,9 +208,62 @@ def _default_relay(project: str, text: str) -> bool:
     return True
 
 
+def _interrupt_relay(project: str) -> bool:
+    """Interrupt the in-flight relay turn for ``project`` (if any).
+
+    The ``stop`` action lands here when NO GatewayDriver is attached (so there
+    is no PTY to send Ctrl-C to). It finds the running :class:`_ro._ChatJob` for
+    the project and cancels it — setting the cancel event, terminating the
+    retained Popen, and landing the terminal ``stopped`` state. The job's own
+    worker thread folds the outcome into the store (via ``_default_relay._work``
+    or ``notify_turn_stopped``).
+
+    Returns True if a live turn was found and cancelled; False if there was
+    nothing in flight to stop (e.g. an idle project, or a stop arriving after
+    the turn already completed).
+    """
+    try:
+        import routes_orchestrator as _ro
+        job = _ro._in_flight_job(project)
+    except Exception:
+        return False
+    if job is None:
+        return False
+    try:
+        _ro.cancel_job(job, "chat turn cancelled by operator")
+        notify_turn_stopped(project)
+        return True
+    except Exception:
+        return False
+
+
 # Installable by GatewayDriver.start() so the WS endpoint need not import the
 # driver. Kept decoupled: the endpoint talks only to the store + this hook.
 relay_user_message = _default_relay
+
+# The interrupt counterpart of ``relay_user_message`` (t_68432c2d): GatewayDriver
+# installs ``_driver.interrupt`` here so a ``stop`` frame reaches the live PTY;
+# the default (no driver attached) cancels the in-flight relay job instead.
+interrupt_user_turn = _interrupt_relay
+
+
+def notify_turn_stopped(project: str) -> None:
+    """Append a ``turn stopped`` notice to a project's store (requirement E).
+
+    Folds a role=\"system\" line into the project's transcript so a connected
+    client sees the interruption instead of a hang. Best-effort: any failure
+    (e.g. no store yet — though ``get_store`` creates one on first use) is
+    swallowed so a stop acknowledgement is never broken by a notice. The WS
+    stop path calls this directly; the REST job path routes through
+    ``routes_orchestrator._notify_stopped`` which defers here lazily.
+    """
+    try:
+        get_store(project).append(
+            TYPE_MESSAGE, MessagePayload(
+                role="system", delta="Turn stopped by operator.", done=True))
+    except Exception:
+        pass
+
 
 
 def _process_inbound(sock: socket.socket, project: str, opcode, payload):
@@ -201,7 +280,40 @@ def _process_inbound(sock: socket.socket, project: str, opcode, payload):
             return
         if isinstance(obj, dict) and obj.get("kind") == "send":
             _handle_client_send(sock, project, obj)
+        elif isinstance(obj, dict) and obj.get("kind") == "stop":
+            _handle_client_stop(sock, project, obj)
     # Binary frames are ignored (no application-defined binary protocol yet).
+
+
+def _handle_client_stop(sock: socket.socket, project: str, payload: dict) -> None:
+    """Stop the in-flight chat turn for ``project`` (t_68432c2d).
+
+    Ack'd like any other live event, so the operator sees the interruption take
+    effect in the transcript. Dispatches through :data:`interrupt_user_turn`:
+      * GatewayDriver attached -> ``interrupt()`` sends Ctrl-C (0x03)+CR over the
+        PTY, letting hermes itself abort the turn;
+      * no driver -> ``_interrupt_relay`` cancels the in-flight relay job (sets
+        the cancel event, terminates the retained Popen, lands ``stopped``).
+
+    A ``stop`` for a project with nothing in flight is a benign no-op: we still
+    ack it (idempotent) but the notice is not appended (there is no turn to
+    stop). The return value of the interrupt hook tells us which happened, so
+    the client gets an honest ``stopped`` vs ``nothing_in_flight`` ack.
+    """
+    stopped = False
+    try:
+        stopped = bool(interrupt_user_turn(project))
+    except Exception:
+        stopped = False
+    _send_text(sock, json.dumps({
+        "seq": 0, "type": "ack", "ts": _now_iso(),
+        "payload": {
+            "kind": "stop",
+            "stopped": stopped,
+            "message": ("Turn stopped." if stopped else
+                        "No chat turn in flight to stop."),
+        },
+    }))
 
 
 # --------------------------------------------------------------------------- #

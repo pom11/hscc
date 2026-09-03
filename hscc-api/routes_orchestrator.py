@@ -230,7 +230,8 @@ def _stderr_tail(err: str, max_chars: int = 300) -> str:
 
 
 def _backing_invoke(profile, session, prompt, timeout=_DEFAULT_TIMEOUT,
-                    image_data=None, image_mime=None):
+                    image_data=None, image_mime=None, cancel_evt=None,
+                    on_spawn=None):
     """Send a prompt to an orchestrator and return its reply.
 
     The transport: shell Hermes headlessly as the orchestrator profile, in the
@@ -252,8 +253,24 @@ def _backing_invoke(profile, session, prompt, timeout=_DEFAULT_TIMEOUT,
     removed afterwards (try/finally) — even on failure — so a background job
     never leaks a copy of the image on disk.
 
+    Cancellation (t_68432c2d): the invocation uses ``subprocess.Popen`` (NOT a
+    blocking ``subprocess.run``) so the underlying process can be stopped
+    mid-flight. Two cooperating hooks:
+
+      * ``cancel_evt`` — a ``threading.Event``. When set, :func:`_backing_invoke`
+        terminates the running process (SIGTERM, then SIGKILL after a grace)
+        and raises :class:`_OrchestratorCancelled`. The job/relay maps that to
+        the terminal ``stopped`` state.
+      * ``on_spawn`` — an optional callback ``on_spawn(proc)`` invoked the
+        moment the Popen is created, so the caller (the job) can RETAIN the
+        handle for an immediate out-of-band ``proc.terminate()``/``proc.kill()``
+        (the stop path this card's tests cover). When ``cancel_evt`` is None
+        (the non-cancellable fallback), the invoke still polls nothing and runs
+        to completion exactly as before.
+
     Returns ``(reply_text, profile, session)``. Raises:
       * ``_OrchestratorTimeout`` when the reply exceeds ``timeout``;
+      * ``_OrchestratorCancelled`` when ``cancel_evt`` fired mid-flight;
       * ``_OrchestratorUnavailable`` when the profile/session cannot be
         reached (e.g. no matching session yet, or hermes not installed).
       * ``_OrchestratorInvocationError`` on any other failed invocation
@@ -274,17 +291,37 @@ def _backing_invoke(profile, session, prompt, timeout=_DEFAULT_TIMEOUT,
                 f.write(image_data)
             argv += ["--image", tmp_path]
 
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        raise _OrchestratorTimeout(
-            f"orchestrator {profile!r} did not reply within {timeout:.0f}s"
+        # Popen (not blocking subprocess.run) so a stop can retain + kill the
+        # handle. Command stays a LIST — no shell interpolation of the prompt.
+        proc = subprocess.Popen(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
     except (FileNotFoundError, OSError) as exc:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
         raise _OrchestratorUnavailable(
             f"cannot invoke `hermes`: {exc!r}"
         )
+
+    # Hand the live Popen to the caller so a stop can terminate/kill it
+    # directly (the retained-handle this card exists to provide).
+    if on_spawn is not None:
+        try:
+            on_spawn(proc)
+        except Exception:   # never let a retention callback break the invoke
+            pass
+
+    try:
+        out, err = _run_proc(proc, timeout, cancel_evt)
+    except _OrchestratorCancelled:
+        _terminate_proc(proc)
+        raise
+    except _OrchestratorTimeout:
+        _terminate_proc(proc)
+        raise
     finally:
         if tmp_path is not None:
             try:
@@ -292,7 +329,7 @@ def _backing_invoke(profile, session, prompt, timeout=_DEFAULT_TIMEOUT,
             except OSError:
                 pass   # best-effort cleanup; never mask the real outcome
 
-    err = (proc.stderr or "").strip()
+    err = (err or "").strip()
     # A clean "no such session yet" failure — the orchestrator's named session
     # must exist before it can be continued (created by provisioning / first
     # Telegram topic). Surface it honestly rather than synthesising a reply.
@@ -306,6 +343,11 @@ def _backing_invoke(profile, session, prompt, timeout=_DEFAULT_TIMEOUT,
         )
 
     if proc.returncode != 0:
+        # A cancellation (not a failure) if the stop event fired — the process
+        # was terminated externally (SIGTERM/SIGKILL), so this nonzero exit is
+        # the operator's doing, never an invocation error.
+        if cancel_evt is not None and cancel_evt.is_set():
+            raise _OrchestratorCancelled("chat turn cancelled by operator")
         # A nonzero exit that is NOT a missing-session signal. This is where
         # every real failure lands — model unreachable, an internal hermes
         # error, a crash. It must NAME ITSELF with the actual stderr tail so
@@ -319,7 +361,7 @@ def _backing_invoke(profile, session, prompt, timeout=_DEFAULT_TIMEOUT,
             f"{proc.returncode}): {_stderr_tail(err)}"
         )
 
-    reply = (proc.stdout or "").strip()
+    reply = (out or "").strip()
     # ``-Q`` still lets a couple of harmless one-line notices through to stdout
     # BEFORE the reply (observed empirically, t_bc242def Phase 1) — e.g. the
     # cwd-restore line ``↪ restored workspace dir: <path>``. Strip those so the
@@ -332,6 +374,71 @@ def _backing_invoke(profile, session, prompt, timeout=_DEFAULT_TIMEOUT,
             f"orchestrator {profile!r} returned an empty reply"
         )
     return reply, profile, session
+
+
+def _run_proc(proc, timeout: float, cancel_evt=None):
+    """Notify-compatible run of ``proc`` that polls the cancel event.
+
+    Replaces the previous blocking ``subprocess.run`` wait with a Popen wait
+    loop that checks ``cancel_evt`` on a short interval, so a stop can interrupt
+    promptly instead of waiting out the whole timeout. On the timeout it
+    terminates the process and raises :class:`_OrchestratorTimeout`; on cancel
+    it terminates and raises :class:`_OrchestratorCancelled`.
+
+    Returns ``(out, err)`` — the drained stdout/stderr strings — so the caller
+    never inspects ``proc.stdout``/``proc.stderr`` (which remain file wrappers
+    until closed). This mirrors what the old ``subprocess.run(capture_output=…)``
+    produced.
+    """
+    start = time.time()
+    poll = 0.25
+    while True:
+        if cancel_evt is not None and cancel_evt.is_set():
+            _terminate_proc(proc)
+            raise _OrchestratorCancelled("chat turn cancelled by operator")
+        remaining = timeout - (time.time() - start)
+        if remaining <= 0:
+            _terminate_proc(proc)
+            raise _OrchestratorTimeout(f"orchestrator did not reply within {timeout:.0f}s")
+        try:
+            proc.wait(timeout=min(poll, remaining))
+            break                                  # exited cleanly/internally
+        except subprocess.TimeoutExpired:
+            continue
+    out, err = proc.communicate()   # drain remaining buffered stdout/stderr
+    if out is None:
+        out = ""
+    if err is None:
+        err = ""
+    return out, err
+
+
+def _terminate_proc(proc) -> None:
+    """Best-effort terminate (SIGTERM) then kill (SIGKILL) a running process.
+
+    Core of the stop path: a cancellable turn must be able to end the running
+    ``hermes chat`` immediately, not wait it out. SIGTERM first (a graceful
+    shutdown hermes can catch), then SIGKILL after a short grace for anything
+    that ignores SIGTERM. Idempotent and never raises — terminating an already
+    exited process is a no-op.
+    """
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except OSError:
+        return
+    try:
+        proc.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def _backing_busy_tasks(profile: str) -> int:
@@ -1039,6 +1146,15 @@ class _OrchestratorInvocationError(_OrchestratorError):
     """A failed invocation with no clean session message."""
 
 
+class _OrchestratorCancelled(_OrchestratorError):
+    """The chat turn was explicitly cancelled (stopped) by the operator.
+
+    Raised by :func:`_backing_invoke` when its ``cancel_evt`` fires mid-flight.
+    ``_run_job`` maps this to the terminal ``stopped`` job state (never an error
+    — a cancellation is an operator action, not a failure).
+    """
+
+
 # --------------------------------------------------------------------------- #
 # Job store (in-memory, thread-safe). Lives as long as the server process, so
 # a dropped POST connection does NOT lose a reply the background thread later
@@ -1084,6 +1200,8 @@ class _ChatJob:
                         "The orchestrator is not available right now."),
         "error": ("orchestrator_error",
                   "The orchestrator call failed."),
+        "stopped": ("orchestrator_stopped",
+                    "The chat turn was stopped by the operator."),
     }
 
     def __init__(self, job_id, project, profile, session, prompt,
@@ -1105,6 +1223,13 @@ class _ChatJob:
         self.finished_at: float | None = None
         self.lock = threading.Lock()
         self.status = "queued"
+        # Cancellation (t_68432c2d): set by the stop handler. ``_run_job`` polls
+        # it via ``cancel_evt`` (forwarded into ``_backing_invoke``) and the stop
+        # handler also holds the retained ``proc`` handle for an immediate
+        # ``terminate()``/``kill()``.
+        self.cancel_evt = threading.Event()
+        self.proc = None                 # the live subprocess.Popen, when running
+        self.stop_notified = False       # "turn stopped" transcript once (E)
         # done-state payload
         self.reply: str | None = None
         self.speak: str | None = None
@@ -1238,7 +1363,13 @@ def _run_job(job: _ChatJob):
         reply, profile, session = _backing_invoke(
             job.profile, job.session, job.prompt, timeout=job.timeout,
             image_data=job.image_data, image_mime=job.image_mime,
+            cancel_evt=job.cancel_evt, on_spawn=_retain_proc(job),
         )
+    except _OrchestratorCancelled:
+        # An operator-initiated stop, not a failure. Land the job in the
+        # terminal ``stopped`` state (never an error) — see _finish_cancelled.
+        _finish_cancelled(job, "chat turn cancelled by operator")
+        return
     except _OrchestratorTimeout as exc:
         _finish_job_error(job, "timeout", str(exc))
         return
@@ -1259,6 +1390,69 @@ def _run_job(job: _ChatJob):
         job.reply = reply
         job.speak = f"{profile} says: {_shorten(reply)}"
         job.finished_at = time.time()
+
+
+def _retain_proc(job: _ChatJob):
+    """Return an ``on_spawn`` callback that stores the live Popen on the job.
+
+    The moment ``_backing_invoke`` creates the subprocess it reports it here,
+    so ``_run_job``'s worker thread and the CLI thread both see ``job.proc``.
+    The stop handler reads this retained handle under the job lock to call
+    ``terminate()``/``kill()`` immediately — the out-of-band kill the audit
+    (t_68432c2d) requires, independent of the poll loop.
+    """
+    def _cb(proc):
+        with job.lock:
+            job.proc = proc
+    return _cb
+
+
+def _finish_cancelled(job: _ChatJob, message: str):
+    """Land a job in the terminal ``stopped`` (cancelled) state.
+
+    Maps to the ``orchestrator_stopped`` code — a cancellation is an operator
+    action, never an error. Safe to call from both the worker thread (when
+    ``_backing_invoke`` raises :class:`_OrchestratorCancelled`) and the stop
+    handler (which acknowledges promptly). Idempotent under the job lock.
+    """
+    code, headline = _ChatJob._ERROR_MAP["stopped"]
+    with job.lock:
+        job.status = "stopped"
+        job.error = {"code": code, "message": message,
+                     "speak": headline}
+        job.finished_at = time.time()
+
+
+def cancel_job(job: _ChatJob, message: str = "chat turn cancelled by operator"):
+    """Cancel a live job: request stop AND land the terminal ``stopped`` state.
+
+    Central stop primitive shared by the REST stop route and the WS ``stop``
+    kind (t_68432c2d). Three cooperating actions, all idempotent:
+
+      1. Set ``job.cancel_evt`` — the worker's ``_backing_invoke`` poll loop
+         sees it, terminates the process and raises ``_OrchestratorCancelled``;
+      2. Terminate/kill the retained ``job.proc`` Popen directly — the
+         out-of-band kill that works even if the worker thread is blocked;
+      3. Land the ``stopped`` terminal state immediately, so the response /
+         transcript reflects the operator action without waiting for the
+         worker thread to observe the event.
+
+    Returns the job (so the caller can snapshot it) or ``None`` if the job has
+    already reached a terminal state (nothing left to cancel).
+    """
+    with job.lock:
+        if job.finished_at is not None:
+            return None      # already terminal; nothing to cancel
+        terminal = job.status in ("done",)
+    if terminal:
+        return None
+    job.cancel_evt.set()
+    with job.lock:
+        proc = job.proc
+    if proc is not None:
+        _terminate_proc(proc)
+    _finish_cancelled(job, message)
+    return job
 
 
 def _finish_job_error(job: _ChatJob, status: str, message: str):
@@ -1539,6 +1733,89 @@ def handle_orchestrator_chat_job(server, ctx, query, body):
     return 200, _job_dict(job)
 
 
+def _in_flight_job(project) -> _ChatJob | None:
+    """Return the live job for a project, if any (``None`` otherwise).
+
+    The WS relay path has no ``job_id`` at hand — a ``stop`` frame carries only
+    the ``project`` — so the stop handler finds the running turn by project
+    here. A job counts as in-flight while it is ``queued`` or ``running`` (not
+    yet terminal). Scans the job store; there is at most one live job per
+    project in practice, but if several somehow coexist the oldest is returned.
+    """
+    best = None
+    with _jobs_lock:
+        for job in _jobs.values():
+            if job.project != project:
+                continue
+            if job.finished_at is not None:
+                continue
+            if best is None or job.submitted_at < best.submitted_at:
+                best = job
+    return best
+
+
+def handle_orchestrator_chat_stop(server, ctx, query, body):
+    """POST /v1/orchestrator/chat/{id}/stop — cancel a running chat job.
+
+    Body: ``{\"confirm\": true}`` — REQUIRED (409 otherwise), mirroring the
+    confirm gate every mutating endpoint enforces (the analogous
+    ``POST /v1/cluster/stop`` is confirm-gated too; stopping a turn is a
+    destructive action on a running process and gets the same guard).
+
+    Behavior (t_68432c2d):
+      * finds the job by id; unknown -> 404;
+      * if the job is already terminal (``done``/``timeout``/``unavailable``/
+        ``error``/``stopped``) -> 200 with the CURRENT state and ``already``
+        flag, so a double-tap stop (or a stop racing completion) is a clean
+        no-op, not an error;
+      * otherwise cancels it: sets the cancel event, terminates/kills the
+        retained Popen, lands the terminal ``stopped`` state, and (if the
+        project has a live store) appends a ``turn stopped`` transcript notice
+        (requirement E).
+
+    Response (fresh snapshot after cancellation):
+      ``{job_id, project, status: \"stopped\", elapsed, error:
+        {code: \"orchestrator_stopped\", ...}, stopped: true}``.
+    """
+    data = _parse_body(body)
+    _require_confirm(data)
+    job_id = query.get("id")
+    with _jobs_lock:
+        job = _jobs.get(job_id)  # type: ignore[arg-type]
+    if job is None:
+        raise ApiError(404, "not_found", f"unknown chat job {job_id!r}",
+                       "That chat job does not exist (it may have expired).")
+
+    cancelled = cancel_job(job, "chat turn cancelled by operator")
+    payload = _job_dict(job)
+    payload["job_id"] = job.job_id
+    if cancelled is None:
+        # Already terminal — report its real current state, flag the no-op.
+        payload["already"] = True
+    else:
+        payload["stopped"] = True
+        # Requirement E: surface a "turn stopped" notice in the project's live
+        # transcript so a connected client sees the interruption, not a hang.
+        _notify_stopped(job.project)
+    return 200, payload
+
+
+def _notify_stopped(project) -> None:
+    """Append a one-time ``turn stopped`` notice to the project's chat store.
+
+    Requirement E of t_68432c2d. Deliberately late-bound into ``routes_ws``
+    (importing it at module top would be circular — routes_ws already imports
+    this module). Best-effort: a project with no live store (nobody subscribed)
+    simply gets no notice. The idempotency (one notice per stop burst) is owned
+    inside routes_ws, not here.
+    """
+    try:
+        from . import routes_ws
+        routes_ws.notify_turn_stopped(project)
+    except Exception:
+        pass   # never break the stop response over a best-effort notice
+
+
 def _shorten(text: str, limit: int = 120) -> str:
     """Trim a long reply for the one-line ``speak`` summary."""
     text = " ".join(text.split())
@@ -1555,3 +1832,5 @@ ROUTES.append(("POST", re.compile(r"^/v1/orchestrator/chat$"),
                handle_orchestrator_chat))
 ROUTES.append(("GET", re.compile(r"^/v1/orchestrator/chat/(?P<id>[^/]+)$"),
                handle_orchestrator_chat_job))
+ROUTES.append(("POST", re.compile(r"^/v1/orchestrator/chat/(?P<id>[^/]+)/stop$"),
+               handle_orchestrator_chat_stop))
