@@ -14,6 +14,9 @@ import SwiftUI
 /// did not compile.
 @main
 struct HSCCApp: App {
+    /// Requests notification authorization once at launch so the foreground
+    /// NotificationCoordinator can present needs-operator banners (t_0454eb56).
+    @UIApplicationDelegateAdaptor(NotificationsAppDelegate.self) private var appDelegate
     @StateObject private var settings = SettingsStore()
     @StateObject private var unread: ProjectUnreadCenter
     @StateObject private var replyWatcher: StreamReplyWatcher

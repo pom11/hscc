@@ -102,6 +102,13 @@ targets:
       - path: Sources/HSCC/ContentView.swift
       - path: Sources/HSCC/HSCCClient.swift
       - path: Sources/HSCC/ConnectionMonitor.swift
+      # Notify-operator (t_0454eb56): pure differential engine + foreground
+      # coordinator + one-time auth delegate.
+      - path: Sources/HSCC/Notify/OperatorAlert.swift
+      - path: Sources/HSCC/Notify/ObservedState+LastSeenState.swift
+      - path: Sources/HSCC/Notify/NeedsOperatorNotifier.swift
+      - path: Sources/HSCC/Notify/NotificationCoordinator.swift
+      - path: Sources/HSCC/Notify/NotificationsAppDelegate.swift
       - path: Sources/HSCC/SessionStreamCursor.swift
       - path: Sources/HSCC/StreamConnectionError.swift
       - path: Sources/HSCC/SessionEvent.swift

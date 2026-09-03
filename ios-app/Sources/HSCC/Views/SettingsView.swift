@@ -26,6 +26,21 @@ struct SettingsView: View {
     @State private var testIsSuccess: Bool?
     @State private var isTesting = false
 
+    // Notification toggles — backed by the shared App-Group suite so the
+    // foreground NotificationCoordinator reads the identical store the operator
+    // edits here (one source of truth, reachable across processes/widgets).
+    // The default-`true` on a fresh install matches `NotifyPreferences.isEnabled`
+    // (absent key ⇒ on), so what the toggle shows always equals what fires.
+    @AppStorage("hscc.notify.enabled.needsReview",
+                store: UserDefaults(suiteName: AppGroup.suiteName))
+    private var notifyNeedsReview = true
+    @AppStorage("hscc.notify.enabled.cardFailedBlocked",
+                store: UserDefaults(suiteName: AppGroup.suiteName))
+    private var notifyCardFailedBlocked = true
+    @AppStorage("hscc.notify.enabled.fleetUnreachable",
+                store: UserDefaults(suiteName: AppGroup.suiteName))
+    private var notifyFleetUnreachable = true
+
     // QR-scan flow state.
     @State private var showingScanner = false
     /// A valid scanned code awaiting the operator's confirm before it is
@@ -119,6 +134,30 @@ struct SettingsView: View {
                             Image(systemName: testIsSuccess == true ? "checkmark.circle.fill" : "xmark.circle.fill")
                         }
                         .foregroundColor(testIsSuccess == true ? Theme.Semantic.ok : Theme.Semantic.bad)
+                    }
+                }
+
+                Section {
+                    Toggle("New card needs review", isOn: $notifyNeedsReview)
+                    Toggle("Card failed or blocked", isOn: $notifyCardFailedBlocked)
+                    Toggle("Cluster unreachable", isOn: $notifyFleetUnreachable)
+
+                    Button {
+                        Task { await NotificationCoordinator.shared.testNotification() }
+                    } label: {
+                        Label("Send test notification", systemImage: "bell.badge")
+                    }
+                } header: {
+                    Text("Notifications")
+                } footer: {
+                    // Be honest: toggles flipped on do nothing if iOS-level
+                    // authorization was denied or never granted. Surface that
+                    // right here instead of the operator wondering why no banner
+                    // ever arrives.
+                    if !NotificationCoordinator.shared.canDeliver {
+                        Text("Notifications are off in iOS Settings — enable them for HSCC there to receive alerts.")
+                    } else {
+                        Text("Get a banner when the daemon reports something needing you: a card in the review queue, a failed or blocked card, or the cluster going unreachable.")
                     }
                 }
 
