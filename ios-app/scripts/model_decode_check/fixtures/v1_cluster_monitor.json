@@ -1,0 +1,230 @@
+{
+  "success": true,
+  "output": "{\"timestamp\": 1788468629.041858, \"hosts\": [{\"host\": \"10.0.0.1\", \"error\": null, \"sample\": {\"timestamp\": \"2026-09-03T20:50:27Z\", \"hostname\": \"gx10-cad0\", \"uptime_sec\": \"2644262\", \"cpu_load_1m\": \"1.66\", \"cpu_load_5m\": \"2.69\", \"cpu_load_15m\": \"2.15\", \"cpu_usage_pct\": \"8.1\", \"cpu_freq_mhz\": \"3354\", \"cpu_temp_c\": \"70.7\", \"mem_total_mb\": \"124546\", \"mem_used_mb\": \"120131\", \"mem_available_mb\": \"4415\", \"mem_used_pct\": \"96.4\", \"swap_total_mb\": \"16383\", \"swap_used_mb\": \"2859\", \"gpu_name\": \"NVIDIA GB10\", \"gpu_util_pct\": \"0\", \"gpu_mem_used_mb\": \"\", \"gpu_mem_total_mb\": \"\", \"gpu_mem_used_pct\": \"\", \"gpu_temp_c\": \"63\", \"gpu_power_w\": \"26.44\", \"gpu_power_limit_w\": \"\", \"gpu_clock_mhz\": \"2405\", \"gpu_mem_clock_mhz\": \"\", \"sparkrun_jobs\": \"1\", \"sparkrun_job_names\": \"sparkrun_9a0467d69586ef5f_4e690f2e56f8_node_0\", \"gpu_encoder_pct\": \"\", \"gpu_decoder_pct\": \"\", \"gpu_fan_pct\": \"\", \"mem_bufcache_mb\": \"\"}, \"workloads\": [{\"cluster_id\": \"sparkrun_9a0467d69586ef5f_4e690f2e56f8\", \"recipe\": \"/Users/desac/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml\", \"runtime\": \"vllm-distributed\", \"ranks_on_host\": 1, \"containers\": [{\"name\": \"sparkrun_9a0467d69586ef5f_4e690f2e56f8_node_0\", \"role\": \"node_0\", \"status\": \"Up 32 hours\", \"image\": \"scitrera/dgx-spark-vllm-jasl-ds4:20260609-hscc\"}]}], \"used_slots\": 1, \"free_slots\": 0}, {\"host\": \"10.0.0.2\", \"error\": null, \"sample\": {\"timestamp\": \"2026-09-03T20:50:27Z\", \"hostname\": \"gx10-3725\", \"uptime_sec\": \"4185000\", \"cpu_load_1m\": \"1.37\", \"cpu_load_5m\": \"2.17\", \"cpu_load_15m\": \"1.75\", \"cpu_usage_pct\": \"7.4\", \"cpu_freq_mhz\": \"3354\", \"cpu_temp_c\": \"68.2\", \"mem_total_mb\": \"124546\", \"mem_used_mb\": \"119586\", \"mem_available_mb\": \"4959\", \"mem_used_pct\": \"96.0\", \"swap_total_mb\": \"16383\", \"swap_used_mb\": \"1806\", \"gpu_name\": \"NVIDIA GB10\", \"gpu_util_pct\": \"0\", \"gpu_mem_used_mb\": \"\", \"gpu_mem_total_mb\": \"\", \"gpu_mem_used_pct\": \"\", \"gpu_temp_c\": \"63\", \"gpu_power_w\": \"28.00\", \"gpu_power_limit_w\": \"\", \"gpu_clock_mhz\": \"2392\", \"gpu_mem_clock_mhz\": \"\", \"sparkrun_jobs\": \"1\", \"sparkrun_job_names\": \"sparkrun_9a0467d69586ef5f_4e690f2e56f8_node_1\", \"gpu_encoder_pct\": \"\", \"gpu_decoder_pct\": \"\", \"gpu_fan_pct\": \"\", \"mem_bufcache_mb\": \"\"}, \"workloads\": [{\"cluster_id\": \"sparkrun_9a0467d69586ef5f_4e690f2e56f8\", \"recipe\": \"/Users/desac/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml\", \"runtime\": \"vllm-distributed\", \"ranks_on_host\": 1, \"containers\": [{\"name\": \"sparkrun_9a0467d69586ef5f_4e690f2e56f8_node_1\", \"role\": \"node_1\", \"status\": \"Up 32 hours\", \"image\": \"scitrera/dgx-spark-vllm-jasl-ds4:20260609-hscc\"}]}], \"used_slots\": 1, \"free_slots\": 0}, {\"host\": \"10.0.0.3\", \"error\": null, \"sample\": {\"timestamp\": \"2026-09-03T20:50:27Z\", \"hostname\": \"gx10-d859\", \"uptime_sec\": \"4184996\", \"cpu_load_1m\": \"4.02\", \"cpu_load_5m\": \"2.38\", \"cpu_load_15m\": \"2.46\", \"cpu_usage_pct\": \"17.5\", \"cpu_freq_mhz\": \"3354\", \"cpu_temp_c\": \"87.1\", \"mem_total_mb\": \"124546\", \"mem_used_mb\": \"111764\", \"mem_available_mb\": \"12782\", \"mem_used_pct\": \"89.7\", \"swap_total_mb\": \"16383\", \"swap_used_mb\": \"2530\", \"gpu_name\": \"NVIDIA GB10\", \"gpu_util_pct\": \"96\", \"gpu_mem_used_mb\": \"\", \"gpu_mem_total_mb\": \"\", \"gpu_mem_used_pct\": \"\", \"gpu_temp_c\": \"78\", \"gpu_power_w\": \"71.06\", \"gpu_power_limit_w\": \"\", \"gpu_clock_mhz\": \"2431\", \"gpu_mem_clock_mhz\": \"\", \"sparkrun_jobs\": \"1\", \"sparkrun_job_names\": \"sparkrun_eaa6ce556fd1e21d_f4de31453fdf_node_0\", \"gpu_encoder_pct\": \"\", \"gpu_decoder_pct\": \"\", \"gpu_fan_pct\": \"\", \"mem_bufcache_mb\": \"\"}, \"workloads\": [{\"cluster_id\": \"sparkrun_eaa6ce556fd1e21d_f4de31453fdf\", \"recipe\": \"/Users/desac/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml\", \"runtime\": \"vllm-distributed\", \"ranks_on_host\": 1, \"containers\": [{\"name\": \"sparkrun_eaa6ce556fd1e21d_f4de31453fdf_node_0\", \"role\": \"node_0\", \"status\": \"Up 8 hours\", \"image\": \"scitrera/dgx-spark-vllm-jasl-ds4:20260609-hscc\"}]}], \"used_slots\": 1, \"free_slots\": 0}, {\"host\": \"10.0.0.4\", \"error\": null, \"sample\": {\"timestamp\": \"2026-09-03T20:50:27Z\", \"hostname\": \"gx10-e95b\", \"uptime_sec\": \"2721884\", \"cpu_load_1m\": \"2.87\", \"cpu_load_5m\": \"1.84\", \"cpu_load_15m\": \"1.64\", \"cpu_usage_pct\": \"17.9\", \"cpu_freq_mhz\": \"3354\", \"cpu_temp_c\": \"81.6\", \"mem_total_mb\": \"124546\", \"mem_used_mb\": \"110724\", \"mem_available_mb\": \"13821\", \"mem_used_pct\": \"88.9\", \"swap_total_mb\": \"16383\", \"swap_used_mb\": \"1717\", \"gpu_name\": \"NVIDIA GB10\", \"gpu_util_pct\": \"96\", \"gpu_mem_used_mb\": \"\", \"gpu_mem_total_mb\": \"\", \"gpu_mem_used_pct\": \"\", \"gpu_temp_c\": \"74\", \"gpu_power_w\": \"69.42\", \"gpu_power_limit_w\": \"\", \"gpu_clock_mhz\": \"2450\", \"gpu_mem_clock_mhz\": \"\", \"sparkrun_jobs\": \"1\", \"sparkrun_job_names\": \"sparkrun_eaa6ce556fd1e21d_f4de31453fdf_node_1\", \"gpu_encoder_pct\": \"\", \"gpu_decoder_pct\": \"\", \"gpu_fan_pct\": \"\", \"mem_bufcache_mb\": \"\"}, \"workloads\": [{\"cluster_id\": \"sparkrun_eaa6ce556fd1e21d_f4de31453fdf\", \"recipe\": \"/Users/desac/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml\", \"runtime\": \"vllm-distributed\", \"ranks_on_host\": 1, \"containers\": [{\"name\": \"sparkrun_eaa6ce556fd1e21d_f4de31453fdf_node_1\", \"role\": \"node_1\", \"status\": \"Up 8 hours\", \"image\": \"scitrera/dgx-spark-vllm-jasl-ds4:20260609-hscc\"}]}], \"used_slots\": 1, \"free_slots\": 0}]}",
+  "json": {
+    "timestamp": 1788468629.041858,
+    "hosts": [
+      {
+        "host": "10.0.0.1",
+        "error": null,
+        "sample": {
+          "timestamp": "2026-09-03T20:50:27Z",
+          "hostname": "gx10-cad0",
+          "uptime_sec": "2644262",
+          "cpu_load_1m": "1.66",
+          "cpu_load_5m": "2.69",
+          "cpu_load_15m": "2.15",
+          "cpu_usage_pct": "8.1",
+          "cpu_freq_mhz": "3354",
+          "cpu_temp_c": "70.7",
+          "mem_total_mb": "124546",
+          "mem_used_mb": "120131",
+          "mem_available_mb": "4415",
+          "mem_used_pct": "96.4",
+          "swap_total_mb": "16383",
+          "swap_used_mb": "2859",
+          "gpu_name": "NVIDIA GB10",
+          "gpu_util_pct": "0",
+          "gpu_mem_used_mb": "",
+          "gpu_mem_total_mb": "",
+          "gpu_mem_used_pct": "",
+          "gpu_temp_c": "63",
+          "gpu_power_w": "26.44",
+          "gpu_power_limit_w": "",
+          "gpu_clock_mhz": "2405",
+          "gpu_mem_clock_mhz": "",
+          "sparkrun_jobs": "1",
+          "sparkrun_job_names": "sparkrun_9a0467d69586ef5f_4e690f2e56f8_node_0",
+          "gpu_encoder_pct": "",
+          "gpu_decoder_pct": "",
+          "gpu_fan_pct": "",
+          "mem_bufcache_mb": ""
+        },
+        "workloads": [
+          {
+            "cluster_id": "sparkrun_9a0467d69586ef5f_4e690f2e56f8",
+            "recipe": "/Users/desac/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
+            "runtime": "vllm-distributed",
+            "ranks_on_host": 1,
+            "containers": [
+              {
+                "name": "sparkrun_9a0467d69586ef5f_4e690f2e56f8_node_0",
+                "role": "node_0",
+                "status": "Up 32 hours",
+                "image": "scitrera/dgx-spark-vllm-jasl-ds4:20260609-hscc"
+              }
+            ]
+          }
+        ],
+        "used_slots": 1,
+        "free_slots": 0
+      },
+      {
+        "host": "10.0.0.2",
+        "error": null,
+        "sample": {
+          "timestamp": "2026-09-03T20:50:27Z",
+          "hostname": "gx10-3725",
+          "uptime_sec": "4185000",
+          "cpu_load_1m": "1.37",
+          "cpu_load_5m": "2.17",
+          "cpu_load_15m": "1.75",
+          "cpu_usage_pct": "7.4",
+          "cpu_freq_mhz": "3354",
+          "cpu_temp_c": "68.2",
+          "mem_total_mb": "124546",
+          "mem_used_mb": "119586",
+          "mem_available_mb": "4959",
+          "mem_used_pct": "96.0",
+          "swap_total_mb": "16383",
+          "swap_used_mb": "1806",
+          "gpu_name": "NVIDIA GB10",
+          "gpu_util_pct": "0",
+          "gpu_mem_used_mb": "",
+          "gpu_mem_total_mb": "",
+          "gpu_mem_used_pct": "",
+          "gpu_temp_c": "63",
+          "gpu_power_w": "28.00",
+          "gpu_power_limit_w": "",
+          "gpu_clock_mhz": "2392",
+          "gpu_mem_clock_mhz": "",
+          "sparkrun_jobs": "1",
+          "sparkrun_job_names": "sparkrun_9a0467d69586ef5f_4e690f2e56f8_node_1",
+          "gpu_encoder_pct": "",
+          "gpu_decoder_pct": "",
+          "gpu_fan_pct": "",
+          "mem_bufcache_mb": ""
+        },
+        "workloads": [
+          {
+            "cluster_id": "sparkrun_9a0467d69586ef5f_4e690f2e56f8",
+            "recipe": "/Users/desac/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
+            "runtime": "vllm-distributed",
+            "ranks_on_host": 1,
+            "containers": [
+              {
+                "name": "sparkrun_9a0467d69586ef5f_4e690f2e56f8_node_1",
+                "role": "node_1",
+                "status": "Up 32 hours",
+                "image": "scitrera/dgx-spark-vllm-jasl-ds4:20260609-hscc"
+              }
+            ]
+          }
+        ],
+        "used_slots": 1,
+        "free_slots": 0
+      },
+      {
+        "host": "10.0.0.3",
+        "error": null,
+        "sample": {
+          "timestamp": "2026-09-03T20:50:27Z",
+          "hostname": "gx10-d859",
+          "uptime_sec": "4184996",
+          "cpu_load_1m": "4.02",
+          "cpu_load_5m": "2.38",
+          "cpu_load_15m": "2.46",
+          "cpu_usage_pct": "17.5",
+          "cpu_freq_mhz": "3354",
+          "cpu_temp_c": "87.1",
+          "mem_total_mb": "124546",
+          "mem_used_mb": "111764",
+          "mem_available_mb": "12782",
+          "mem_used_pct": "89.7",
+          "swap_total_mb": "16383",
+          "swap_used_mb": "2530",
+          "gpu_name": "NVIDIA GB10",
+          "gpu_util_pct": "96",
+          "gpu_mem_used_mb": "",
+          "gpu_mem_total_mb": "",
+          "gpu_mem_used_pct": "",
+          "gpu_temp_c": "78",
+          "gpu_power_w": "71.06",
+          "gpu_power_limit_w": "",
+          "gpu_clock_mhz": "2431",
+          "gpu_mem_clock_mhz": "",
+          "sparkrun_jobs": "1",
+          "sparkrun_job_names": "sparkrun_eaa6ce556fd1e21d_f4de31453fdf_node_0",
+          "gpu_encoder_pct": "",
+          "gpu_decoder_pct": "",
+          "gpu_fan_pct": "",
+          "mem_bufcache_mb": ""
+        },
+        "workloads": [
+          {
+            "cluster_id": "sparkrun_eaa6ce556fd1e21d_f4de31453fdf",
+            "recipe": "/Users/desac/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
+            "runtime": "vllm-distributed",
+            "ranks_on_host": 1,
+            "containers": [
+              {
+                "name": "sparkrun_eaa6ce556fd1e21d_f4de31453fdf_node_0",
+                "role": "node_0",
+                "status": "Up 8 hours",
+                "image": "scitrera/dgx-spark-vllm-jasl-ds4:20260609-hscc"
+              }
+            ]
+          }
+        ],
+        "used_slots": 1,
+        "free_slots": 0
+      },
+      {
+        "host": "10.0.0.4",
+        "error": null,
+        "sample": {
+          "timestamp": "2026-09-03T20:50:27Z",
+          "hostname": "gx10-e95b",
+          "uptime_sec": "2721884",
+          "cpu_load_1m": "2.87",
+          "cpu_load_5m": "1.84",
+          "cpu_load_15m": "1.64",
+          "cpu_usage_pct": "17.9",
+          "cpu_freq_mhz": "3354",
+          "cpu_temp_c": "81.6",
+          "mem_total_mb": "124546",
+          "mem_used_mb": "110724",
+          "mem_available_mb": "13821",
+          "mem_used_pct": "88.9",
+          "swap_total_mb": "16383",
+          "swap_used_mb": "1717",
+          "gpu_name": "NVIDIA GB10",
+          "gpu_util_pct": "96",
+          "gpu_mem_used_mb": "",
+          "gpu_mem_total_mb": "",
+          "gpu_mem_used_pct": "",
+          "gpu_temp_c": "74",
+          "gpu_power_w": "69.42",
+          "gpu_power_limit_w": "",
+          "gpu_clock_mhz": "2450",
+          "gpu_mem_clock_mhz": "",
+          "sparkrun_jobs": "1",
+          "sparkrun_job_names": "sparkrun_eaa6ce556fd1e21d_f4de31453fdf_node_1",
+          "gpu_encoder_pct": "",
+          "gpu_decoder_pct": "",
+          "gpu_fan_pct": "",
+          "mem_bufcache_mb": ""
+        },
+        "workloads": [
+          {
+            "cluster_id": "sparkrun_eaa6ce556fd1e21d_f4de31453fdf",
+            "recipe": "/Users/desac/.sparkrun-local/recipes/local-fixed/deepseek-v4-fp8-scitrera-hscc.yaml",
+            "runtime": "vllm-distributed",
+            "ranks_on_host": 1,
+            "containers": [
+              {
+                "name": "sparkrun_eaa6ce556fd1e21d_f4de31453fdf_node_1",
+                "role": "node_1",
+                "status": "Up 8 hours",
+                "image": "scitrera/dgx-spark-vllm-jasl-ds4:20260609-hscc"
+              }
+            ]
+          }
+        ],
+        "used_slots": 1,
+        "free_slots": 0
+      }
+    ]
+  },
+  "speak": "Fleet snapshot: 4 hosts sampled."
+}
