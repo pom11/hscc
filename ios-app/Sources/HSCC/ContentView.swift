@@ -20,7 +20,6 @@ struct ContentView: View {
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var replyWatcher: StreamReplyWatcher
     @State private var selectedTab: Tab = .projects
-    @State private var pingState: PingState = .idle
     @StateObject private var approvals = ApprovalPoller()
 
     enum Tab: Hashable {
@@ -31,7 +30,6 @@ struct ContentView: View {
         TabView(selection: $selectedTab) {
             // Primary tab — the dozen projects the operator actually cares about.
             ProjectsView(client: makeClient())
-                .safeAreaInset(edge: .top) { connectionBanner }
                 .tabItem { Label("Projects", systemImage: "folder") }
                 .tag(Tab.projects)
 
@@ -40,7 +38,6 @@ struct ContentView: View {
             // (approvals inbox, t_9a5cfc3b) — the operator's "is something
             // needing me right now?" signal.
             ClusterView(client: makeClient(), approvalCount: approvals.pendingCount)
-                .safeAreaInset(edge: .top) { connectionBanner }
                 .tabItem { Label("Cluster", systemImage: "bolt") }
                 .badge(approvals.pendingCount.flatMap { $0 > 0 ? String($0) : nil })
                 .tag(Tab.cluster)
@@ -51,8 +48,6 @@ struct ContentView: View {
                 .tag(Tab.settings)
         }
         .onAppear {
-            // Probe once at launch so the banner reflects reality immediately.
-            refreshConnection()
             approvals.setClient(makeClient())
             replyWatcher.setClient(makeClient())
             // Re-hydration: end any Live Activity left over from a prior process
@@ -64,19 +59,46 @@ struct ContentView: View {
             SessionActivityDriver.sweepLeftoverSessions()
         }
         .onChange(of: settings.connectionIdentity) {
-            refreshConnection()
+            // Cluster switched: reset the shared monitor so the banner reflects
+            // the NEW cluster's first real request, not an outcome from the old
+            // one. The banner itself is rendered by ConnectionBanner inside each
+            // tab's content, below the nav bar (t_4889e978 — never overlapping).
+            ConnectionMonitor.shared.reset()
             approvals.setClient(makeClient())
             replyWatcher.setClient(makeClient())
         }
         .onChange(of: settings.appGroupUnavailable) {
-            refreshConnection()
+            // ConnectionBanner observes SettingsStore directly and redraws.
         }
     }
 
-    /// A compact banner summarizing connection state (informational only — the
-    /// old Settings NavigationLink here was the duplicate entry point and has
-    /// been removed; Settings is its own tab now).
-    private var connectionBanner: some View {
+    /// Build the client from current settings, or nil when not configured/useful.
+    /// Views receive this client so networking stays in the client layer.
+    private func makeClient() -> HSCCClient? {
+        guard settings.isConfigured,
+              let token = settings.token,
+              let port = Int(settings.port) else {
+            return nil
+        }
+        return HSCCClient(host: settings.host, port: port, token: token)
+    }
+}
+
+/// Connection status banner — driven by the shared `ConnectionMonitor`, which
+/// `HSCCClient` updates on EVERY completed real request (not a one-shot launch
+/// probe). It reflects the MOST RECENT API OUTCOME, so a screenful of
+/// freshly-loaded data can never sit under a stale "\"Can't reach the cluster\""
+/// alarm (t_4889e978).
+///
+/// Placement: rendered as the FIRST element inside each tab's NavigationStack
+/// content, BELOW the nav bar. It must never be attached with
+/// `.safeAreaInset(edge: .top)` on the stack root, which draws over the nav bar
+/// and toolbar items.
+struct ConnectionBanner: View {
+    @EnvironmentObject private var settings: SettingsStore
+    @ObservedObject private var monitor = ConnectionMonitor.shared
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Image(systemName: bannerIcon)
@@ -98,29 +120,29 @@ struct ContentView: View {
         .padding(.horizontal)
         .padding(.vertical, 8)
         .background(bannerColor.opacity(0.12))
-        .padding(.top, 8)
     }
 
     private var bannerText: String {
-        // A broken App Group is more important than a green ping: the app
+        // A broken App Group is more important than reachability: the app
         // would report "Connected" while the widget/intents read nothing.
         if settings.appGroupUnavailable {
             return settings.isConfigured
                 ? "App Group unavailable — check the install."
                 : "Set host, port, and token in Settings to connect."
         }
-        switch pingState {
-        case .checking:
-            return "Checking connection…"
-        case .success:
+        if !settings.isConfigured {
+            return "Set host, port, and token in Settings to connect."
+        }
+        // The MOST RECENT REAL API OUTCOME. `.unknown` = not yet known (neutral);
+        // `.reachable` = a real request reached the API (clears the alarm);
+        // `.unreachable` = a transport failure (the only state that alarms red).
+        switch monitor.status {
+        case .unknown:
+            return "Configured — waiting for the first request…"
+        case .reachable:
             return "Connected to \(settings.host)."
-        case .failure(let message):
+        case .unreachable(let message):
             return message
-        case .idle:
-            if !settings.isConfigured {
-                return "Set host, port, and token in Settings to connect."
-            }
-            return "Configured — testing connection…"
         }
     }
 
@@ -128,10 +150,10 @@ struct ContentView: View {
         if settings.appGroupUnavailable {
             return "exclamationmark.triangle.fill"
         }
-        switch pingState {
-        case .success: return "checkmark.circle.fill"
-        case .failure: return "exclamationmark.triangle.fill"
-        case .checking, .idle: return "circle.dotted"
+        switch monitor.status {
+        case .reachable: return "checkmark.circle.fill"
+        case .unreachable: return "exclamationmark.triangle.fill"
+        case .unknown: return "circle.dotted"
         }
     }
 
@@ -139,51 +161,10 @@ struct ContentView: View {
         if settings.appGroupUnavailable {
             return Theme.Semantic.bad
         }
-        switch pingState {
-        case .success: return Theme.Semantic.ok
-        case .failure: return Theme.Semantic.bad
-        case .checking, .idle: return Theme.Semantic.neutral
+        switch monitor.status {
+        case .reachable: return Theme.Semantic.ok
+        case .unreachable: return Theme.Semantic.bad
+        case .unknown: return Theme.Semantic.neutral
         }
     }
-
-    /// Build the client from current settings, or nil when not configured/useful.
-    /// Views receive this client so networking stays in the client layer.
-    private func makeClient() -> HSCCClient? {
-        guard settings.isConfigured,
-              let token = settings.token,
-              let port = Int(settings.port) else {
-            return nil
-        }
-        return HSCCClient(host: settings.host, port: port, token: token)
-    }
-
-    private func refreshConnection() {
-        guard settings.isConfigured else {
-            pingState = .idle
-            return
-        }
-        pingState = .checking
-        Task {
-            guard let token = settings.token,
-                  let port = Int(settings.port) else {
-                pingState = .idle
-                return
-            }
-            let client = HSCCClient(host: settings.host, port: port, token: token)
-            do {
-                _ = try await client.ping()
-                pingState = .success
-            } catch {
-                pingState = .failure(operatorErrorMessage(error))
-            }
-        }
-    }
-}
-
-/// Connection-probe state shown in the banner.
-enum PingState {
-    case idle
-    case checking
-    case success
-    case failure(String)
 }

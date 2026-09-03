@@ -35,6 +35,10 @@ struct ClusterView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
+                // Connection banner sits BELOW the nav bar, inside the content —
+                // never .safeAreaInset(edge: .top) on the stack root, which
+                // would draw over the nav bar (t_4889e978).
+                ConnectionBanner()
                 if let client {
                     VStack(alignment: .leading, spacing: 16) {
                         topologyStrip
