@@ -126,7 +126,7 @@ struct MemoryView: View {
     }
 
     private func errorMessage(for error: Error) -> String {
-        (error as? HSCCError)?.localizedDescription ?? "Something went wrong."
+        operatorErrorMessage(error)
     }
 
     private var trimmedProfile: String {

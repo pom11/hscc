@@ -140,7 +140,7 @@ enum Offline {
                 return .stale(held, "showing state from 0s ago")
             }
             // 3) Nothing at all — honest never-fetched failure.
-            return .failed((error as? HSCCError)?.localizedDescription ?? "Something went wrong.")
+            return .failed(operatorErrorMessage(error))
         }
     }
 
