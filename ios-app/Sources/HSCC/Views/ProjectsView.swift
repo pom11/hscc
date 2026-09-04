@@ -13,13 +13,16 @@ struct ProjectsView: View {
     let client: HSCCClient?
 
     @EnvironmentObject private var unread: ProjectUnreadCenter
+    /// The navigation path of this stack, bound from the shared DeepLinkRouter
+    /// (t_136762f3). User taps and external deep links append to the same path.
+    @Binding var path: [ProjectRoute]
 
     @State private var projects = LoadState<ProjectsResponse>.idle
     /// Whether the cross-project search sheet is presented.
     @State private var showSearch = false
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             Group {
                 // Connection banner sits BELOW the nav bar, inside the content —
                 // never .safeAreaInset(edge: .top) on the stack root, which
@@ -32,6 +35,9 @@ struct ProjectsView: View {
                 }
             }
             .navigationTitle("Projects")
+            .navigationDestination(for: ProjectRoute.self) { destination in
+                destinationView(destination)
+            }
             .task {
                 // First load: fetch once the view appears (idle → loading).
                 if client != nil, projects.value == nil, !projects.isLoading {
@@ -60,6 +66,24 @@ struct ProjectsView: View {
             .sheet(isPresented: $showSearch) {
                 SearchView(client: client)
             }
+        }
+    }
+
+    /// The ViewBuilder for a deep-link destination (t_136762f3, registered via
+    /// navigationDestination(for:)). Returns a card or a project detail; when
+    /// no client is configured it shows the connect gate — a deep link must
+    /// never crash or produce a blank screen, however it arrives.
+    @ViewBuilder
+    private func destinationView(_ destination: ProjectRoute) -> some View {
+        if let client {
+            switch destination {
+            case .projectDetail(let name, let board):
+                ProjectDetailView(client: client, project: Project(name: name, repo: nil, board: board, topic: nil))
+            case .card(let id):
+                CardDetailView(cardID: id)
+            }
+        } else {
+            HSConnectGate(systemImage: "link", verb: "to open this link")
         }
     }
 
@@ -186,6 +210,8 @@ struct ProjectDetailView: View {
     let client: HSCCClient
     let project: Project
 
+    @EnvironmentObject private var router: DeepLinkRouter
+
     enum Section: String, CaseIterable, Identifiable {
         case overview, chat, board, settings
         var id: String { rawValue }
@@ -200,6 +226,10 @@ struct ProjectDetailView: View {
     }
 
     @State private var selected: Section = .overview
+    /// Whether the deep-link pending segment has already been applied. A link
+    /// that wants the Chat (session) or Board segment sets it once; user taps
+    /// afterwards own the picker normally.
+    @State private var appliedPendingSegment = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -221,6 +251,15 @@ struct ProjectDetailView: View {
         }
         .navigationTitle(project.name)
         .navigationBarTitleDisplayMode(.inline)
+        // Apply a deep-link's pending segment once (t_136762f3). A session link
+        // opens on Chat; a card link opens on Board. Consumed once so the user
+        // is never yanked back to a link segment after they've navigated away.
+        .onAppear {
+            guard !appliedPendingSegment, let segment = router.pendingSegment else { return }
+            appliedPendingSegment = true
+            router.pendingSegment = nil
+            selected = segment
+        }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 // Session history — the project's chat log as a window onto
