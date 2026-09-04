@@ -46,7 +46,11 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 real_sources=(
-  Sources/HSCC/HSCCClient.swift     # contains StateCache + EndpointPath + get
+  Sources/HSCC/HSCCClient.swift     # EndpointPath + get + cache accessors
+  Sources/HSCC/StateCache.swift     # extracted from HSCCClient by the
+  Sources/HSCC/ConnectionMonitor.swift  # HSCCClient reports outcomes to it
+                                    # multi-cluster work (4a47706); this list
+                                    # went stale and the harness stopped compiling
   Sources/HSCC/Models.swift
   Sources/Shared/SharedModels.swift
   Sources/HSCC/APIError.swift
