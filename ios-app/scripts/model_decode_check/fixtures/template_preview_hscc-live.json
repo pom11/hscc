@@ -27,5 +27,44 @@
       "summary": "1 orchestrator + 0 worker nodes"
     }
   ],
+  "serve_delta": {
+    "start": [
+      {
+        "id": "orch",
+        "role": "orchestrator",
+        "model": "orchestrator-model",
+        "nodes": ["10.0.0.244"],
+        "port": 8000,
+        "tp": null,
+        "pp": null,
+        "family": null
+      }
+    ],
+    "stop": [
+      {
+        "id": "a1",
+        "role": "worker",
+        "model": "worker-model",
+        "nodes": ["10.0.0.245"],
+        "port": 9000,
+        "tp": 1,
+        "pp": 1,
+        "family": "code"
+      },
+      {
+        "id": "orch-old",
+        "role": "orchestrator",
+        "model": "orchestrator-model",
+        "nodes": ["10.0.0.244"],
+        "port": 8000,
+        "tp": null,
+        "pp": null,
+        "family": null
+      }
+    ],
+    "move": [],
+    "unchanged": [],
+    "affected_nodes": ["10.0.0.244", "10.0.0.245"]
+  },
   "speak": "Preview: 4 changes."
 }

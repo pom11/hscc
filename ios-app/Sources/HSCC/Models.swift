@@ -1143,7 +1143,78 @@ struct TemplatePreviewResponse: Decodable, Speakable {
     let changes: [TemplateChange]?
     let routing: [TemplateRouting]?
     let routing_untouched: [TemplateRouting]?
+    let serve_delta: TemplateServeDelta?
     let speak: String
+}
+
+/// GET /v1/template/preview/{name} — the concrete per-unit delta (`serve_delta`).
+///
+/// This is the honest "WHAT WILL CHANGE" the operator cannot see from file
+/// summaries alone. It diffs the LIVE serving.json units against the resolved
+/// NEW serving units and names which units START, STOP, MOVE (relocate or
+/// rescale) and which nodes are affected. The server always includes it (even
+/// for "no change", where every list is empty) so the app never guesses.
+struct TemplateServeDelta: Decodable {
+    /// Units present only in the NEW plan → brand-new serving units.
+    let start: [TemplateServeUnit]?
+    /// Units present only in the LIVE serving.json → would be torn down.
+    let stop: [TemplateServeUnit]?
+    /// Workloads present in both whose placement/scaling changes.
+    let move: [TemplateServeMove]?
+    /// Units identical in both → no action.
+    let unchanged: [TemplateServeUnit]?
+    /// Sorted union of every node across start/stop/move (where action happens).
+    let affected_nodes: [String]?
+
+    /// True when the delta is genuinely a no-op (nothing would change).
+    var isEmpty: Bool {
+        (start?.isEmpty ?? true) && (stop?.isEmpty ?? true)
+            && (move?.isEmpty ?? true)
+    }
+}
+
+/// One serving unit row within `serve_delta`. Shape mirrors the server's
+/// `_trim_serving_unit`: only the keys that identify a unit and matter to an
+/// operator. The wire `id` is decoded into `unitID` so this struct can also
+/// expose a non-optional `Identifiable.id` (an optional stored `id` plus a
+/// computed `id` would be an invalid redeclaration in Swift).
+struct TemplateServeUnit: Decodable, Identifiable {
+    let unitID: String?
+    let role: String?
+    let model: String?
+    let nodes: [String]?
+    let port: Int?
+    let tp: Int?
+    let pp: Int?
+    let family: String?
+
+    var id: String { unitID ?? [role ?? "", model ?? ""].joined(separator: "-") }
+
+    enum CodingKeys: String, CodingKey {
+        case unitID = "id"
+        case role, model, nodes, port, tp, pp, family
+    }
+}
+
+/// One relocation/rescale record within `serve_delta.move`. A workload in both
+/// CURRENT and NEW whose placement changed (nodes/port/tp/pp). Reported as ONE
+/// event — never a phantom stop + start.
+struct TemplateServeMove: Decodable, Identifiable {
+    let model: String?
+    let role: String?
+    let from_nodes: [String]?
+    let from_port: Int?
+    let from_tp: Int?
+    let from_pp: Int?
+    let to_nodes: [String]?
+    let to_port: Int?
+    let to_tp: Int?
+    let to_pp: Int?
+
+    var id: String { [model ?? "", role ?? "",
+                      (from_nodes ?? []).joined(separator: ","),
+                      (to_nodes ?? []).joined(separator: ",")]
+        .joined(separator: "-") }
 }
 
 /// POST /v1/cluster/up — fleet-up result (routes_ops.py + hscc.py:301).

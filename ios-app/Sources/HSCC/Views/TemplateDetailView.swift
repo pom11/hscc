@@ -231,10 +231,33 @@ struct TemplateDetailView: View {
         let changes = state.changes ?? []
         let routing = state.routing ?? []
 
-        if changes.isEmpty && routing.isEmpty {
-            // Minimal { speak } body or empty preview → say what happened and
-            // what to do next. Applying still works; the server just has no
-            // dry-run detail for this template yet.
+        if let delta = state.serve_delta {
+            // serve_delta is ALWAYS present on a new server. Lead with the honest
+            // per-unit WHAT WILL CHANGE (start/stop/move + affected nodes), then
+            // the file changes and routing below. Even an empty delta (no
+            // serving change) is rendered — "nothing changes" is itself the
+            // reassurance the operator needs before a destructive apply.
+            serveDeltaSection(delta)
+            if !changes.isEmpty {
+                Divider().padding(.vertical, 4)
+                Text("Config changes")
+                    .font(.subheadline.weight(.semibold))
+                ForEach(changes) { change in
+                    changeRow(change)
+                }
+            }
+            if !routing.isEmpty {
+                Divider().padding(.vertical, 4)
+                Text("Workload routing")
+                    .font(.subheadline.weight(.semibold))
+                ForEach(routing) { route in
+                    routingRow(route)
+                }
+            }
+        } else if changes.isEmpty && routing.isEmpty {
+            // Older server with no serve_delta and a minimal { speak } body →
+            // say what happened and what to do next. Applying still works; the
+            // server just has no dry-run detail for this template yet.
             Label(state.speak, systemImage: "info.circle")
                 .font(.subheadline)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
@@ -258,6 +281,127 @@ struct TemplateDetailView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Serve delta (the per-unit WHAT WILL CHANGE)
+
+    @ViewBuilder
+    private func serveDeltaSection(_ delta: TemplateServeDelta) -> some View {
+        let starts = delta.start ?? []
+        let stops = delta.stop ?? []
+        let moves = delta.move ?? []
+        let unchanged = delta.unchanged ?? []
+        let affected = delta.affected_nodes ?? []
+
+        Text("Serving units")
+            .font(.subheadline.weight(.semibold))
+
+        if starts.isEmpty && stops.isEmpty && moves.isEmpty {
+            // Genuinely no serving change — the pre-apply reassurance.
+            Label("No serving units will change — the layout is already as applied.",
+                  systemImage: "checkmark.circle")
+                .font(.caption)
+                .foregroundColor(Theme.Semantic.ok)
+        } else {
+            if !starts.isEmpty {
+                ForEach(starts) { unit in
+                    serveDeltaRow(kind: "START", unit: unit,
+                                  color: Theme.Semantic.ok)
+                }
+            }
+            if !stops.isEmpty {
+                ForEach(stops) { unit in
+                    serveDeltaRow(kind: "STOP", unit: unit,
+                                  color: Theme.Semantic.bad)
+                }
+            }
+            if !moves.isEmpty {
+                ForEach(moves) { move in
+                    moveRow(move)
+                }
+            }
+            if !unchanged.isEmpty {
+                Text("\(unchanged.count) unit\(unchanged.count == 1 ? "" : "s") unchanged")
+                    .font(.caption2)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            }
+            if !affected.isEmpty {
+                nodeChips(affected)
+            }
+        }
+    }
+
+    /// A start/stop row: kind badge + model + nodes it lands on / comes off.
+    private func serveDeltaRow(kind: String, unit: TemplateServeUnit,
+                               color: Color) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Text(kind)
+                .font(.caption2.weight(.bold))
+                .foregroundColor(color)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(unit.model ?? unit.role ?? "")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(Theme.Semantic.onSurface)
+                if let nodes = unit.nodes, !nodes.isEmpty {
+                    Text(nodes.joined(separator: ", "))
+                        .font(.hsccMono(12))
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// A move row: model relocates/rescales from → to (nodes, maybe port/tp/pp).
+    private func moveRow(_ move: TemplateServeMove) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text("MOVE")
+                    .font(.caption2.weight(.bold))
+                    .foregroundColor(Theme.Semantic.warn)
+                Text(move.model ?? move.role ?? "")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(Theme.Semantic.onSurface)
+            }
+            let from = (move.from_nodes ?? []).joined(separator: ", ")
+            let to = (move.to_nodes ?? []).joined(separator: ", ")
+            Text("\(from.isEmpty ? "?" : from) → \(to.isEmpty ? "?" : to)")
+                .font(.hsccMono(12))
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            if let ft = move.from_tp, let tt = move.to_tp, ft != tt {
+                Text("tp \(ft) → \(tt)")
+                    .font(.caption2)
+                    .foregroundColor(Theme.Semantic.warn)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Chip row of every node where an action happens.
+    private func nodeChips(_ nodes: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Affected nodes")
+                .font(.caption2)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            HStack(spacing: 6) {
+                ForEach(nodes, id: \.self) { node in
+                    Text(node)
+                        .font(.hsccMono(11))
+                        .foregroundColor(Theme.Semantic.onSurface)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(
+                            Capsule().fill(Theme.Semantic.surfaceElevated)
+                        )
+                }
+            }
+        }
+        .padding(.top, 4)
     }
 
     private func changeRow(_ change: TemplateChange) -> some View {

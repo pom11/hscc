@@ -253,6 +253,35 @@ do {
     print("FAIL v1_cluster_monitor.json → ClusterMonitorResponse decode: \(error)")
 }
 
+// ---- serve_delta (t_acb19c01) — the concrete per-unit WHAT WILL CHANGE. The
+// preview must decode the new delta and expose start/stop/move/unchanged +
+// affected_nodes so the apply-preview section can render the honest delta. ----
+do {
+    let preview = try JSONDecoder().decode(
+        TemplatePreviewResponse.self,
+        from: try Data(contentsOf: URL(fileURLWithPath: fixtureDir + "/template_preview_hscc-live.json")))
+    guard let delta = preview.serve_delta else {
+        throw NSError(domain: "decodecheck", code: 1,
+                      userInfo: [NSLocalizedDescriptionKey: "serve_delta missing on preview"])
+    }
+    let stopIds = (delta.stop ?? []).map { $0.id ?? "" }
+    if delta.isEmpty == false
+        && (delta.start ?? []).count == 1
+        && stopIds.contains("a1")
+        && (delta.move ?? []).isEmpty
+        && delta.affected_nodes?.contains("10.0.0.244") == true {
+        c.passed += 1
+        print("OK   template_preview_hscc-live.json  →  serve_delta decodes (start/stop/move + affected nodes)")
+    } else {
+        c.failures.append(("template_preview_hscc-live.json", "serve_delta decode",
+                           "expected 1 start, stop containing a1, empty move, affected nodes"))
+        print("FAIL template_preview_hscc-live.json → serve_delta decode")
+    }
+} catch {
+    c.failures.append(("template_preview_hscc-live.json", "serve_delta decode", "\(error)"))
+    print("FAIL template_preview_hscc-live.json → serve_delta decode: \(error)")
+}
+
 // ---- Summary + exit code. A single failure is a non-zero exit — a guard that
 // exits 0 here has proven, right now, that every committed fixture decodes
 // against the real models. ----
