@@ -87,6 +87,40 @@ c.check(AutodownStatusResponse.self, "autodown_status.json", "AutodownStatusResp
 c.check(SessionsListResponse.self, "v1_sessions.json", "SessionsListResponse")
 c.check(ActivityFeedResponse.self, "v1_activity_feed.json", "ActivityFeedResponse")
 
+// ---- Watchdog & self-heal history (t_b5ce7935) — decode the timeline against
+// the REAL wire model and assert the enum/kinds contract the view relies on:
+// known kinds decode to their case, an unknown future kind decodes to nil
+// (the view renders it via the generic "Event" label), and the outcome field
+// (a raw String that feeds HistoryOutcome(rawValue:)) stays available. ----
+c.check(HistoryResponse.self, "v1_daemon_history.json", "HistoryResponse")
+do {
+    let resp = try JSONDecoder().decode(
+        HistoryResponse.self,
+        from: try Data(contentsOf: URL(fileURLWithPath: fixtureDir + "/v1_daemon_history.json")))
+    var ok = resp.count == 7 && resp.events.count == 7
+    ok = ok && resp.windowBytes == 33554432 && resp.exhausted == false
+    // kinds decode to the right case.
+    ok = ok && resp.events[0].kind == .block && resp.events[1].kind == .restart
+    ok = ok && resp.events[3].kind == .autodown && resp.events[6].kind == .recovery
+    // outcome is the raw string the display enum consumes.
+    ok = ok && resp.events[1].outcome == "success" && resp.events[2].outcome == "failed"
+    // outcome resolution helper: no `.autodown` case exists in HistoryOutcome,
+    // so raw "autodown" falls through to the .info display fallback.
+    ok = ok && resp.events[0].resolvedOutcome == .info
+    // unknown/arbitrary outcome string degrades to .info.
+    ok = ok && HistoryOutcome(rawValue: "nonsense") == nil
+    if ok {
+        c.passed += 1
+        print("OK   v1_daemon_history.json  →  history contract (7 events, kinds+outcomes decode, lenient unknowns)")
+    } else {
+        c.failures.append(("v1_daemon_history.json", "history contract", "assertion failed"))
+        print("FAIL v1_daemon_history.json → history contract")
+    }
+} catch {
+    c.failures.append(("v1_daemon_history.json", "history contract", "\(error)"))
+    print("FAIL v1_daemon_history.json → history contract: \(error)")
+}
+
 // ---- Session history paging (t_2776ea3c) ----
 // Decode the session-event history page against the REAL wire model and assert
 // the pager's contract: every event type decodes to its right case, seq is

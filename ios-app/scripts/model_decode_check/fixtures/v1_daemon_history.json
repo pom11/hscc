@@ -1,0 +1,63 @@
+{
+  "events": [
+    {
+      "kind": "block",
+      "outcome": "autodown",
+      "timestamp": "2026-08-27T06:45:05.468156+00:00",
+      "repeats": 52,
+      "last_ts": "2026-08-27T07:10:36.168532+00:00",
+      "detail": "Watchdog: intentional autodown in effect — block NOT cleared, orchestrator left down"
+    },
+    {
+      "kind": "restart",
+      "outcome": "success",
+      "timestamp": "2026-08-27T07:12:31.101992+00:00",
+      "repeats": 1,
+      "last_ts": null,
+      "detail": "Watchdog: vLLM auto-restart #1: success"
+    },
+    {
+      "kind": "restart",
+      "outcome": "failed",
+      "timestamp": "2026-08-27T09:04:39.510231+00:00",
+      "repeats": 1,
+      "last_ts": null,
+      "detail": "Watchdog: vLLM auto-restart #4: failed"
+    },
+    {
+      "kind": "autodown",
+      "outcome": "started",
+      "timestamp": "2026-08-27T11:50:09.191441+00:00",
+      "repeats": 3,
+      "last_ts": "2026-08-27T14:03:11.002118+00:00",
+      "detail": "Started autodown thread (interval=30s)"
+    },
+    {
+      "kind": "autodown",
+      "outcome": "recon",
+      "timestamp": "2026-08-27T15:58:48.330117+00:00",
+      "repeats": 1,
+      "last_ts": null,
+      "detail": "Autodown RECONCILED: stalled wake (state was waking, holder dead) but serving layer is up"
+    },
+    {
+      "kind": "recovery",
+      "outcome": "attempt",
+      "timestamp": "2026-08-28T21:11:29.717220+00:00",
+      "repeats": 1,
+      "last_ts": null,
+      "detail": "Worker proxy down on :4000 — relaunching"
+    },
+    {
+      "kind": "recovery",
+      "outcome": "success",
+      "timestamp": "2026-08-29T02:03:18.004492+00:00",
+      "repeats": 1,
+      "last_ts": null,
+      "detail": "Dispatcher-wedge recovery: restart invoked (attempt 2, success=True)"
+    }
+  ],
+  "count": 7,
+  "window_bytes": 33554432,
+  "exhausted": false
+}
