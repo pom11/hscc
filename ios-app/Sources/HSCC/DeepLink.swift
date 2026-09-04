@@ -133,10 +133,6 @@ final class DeepLinkRouter: ObservableObject {
     /// `ProjectDetailView` on first appear.
     @Published var pendingSegment: ProjectDetailView.Section?
 
-    /// True while the router is resolving a route against the cluster. Lets a
-    /// call site show "Opening…" instead of nothing while the fetch runs.
-    @Published var isResolving = false
-
     /// A human-readable error from the last attempt, shown as an alert by
     /// ContentView. Surfaces malformed OR stale (unresolvable) links honestly.
     @Published var lastError: String?
@@ -180,8 +176,6 @@ final class DeepLinkRouter: ObservableObject {
             lastError = "No cluster is configured — open Settings to connect before following this link."
             return
         }
-        isResolving = true
-        defer { isResolving = false }
         do {
             // Resolve the board name so the destination opens the RIGHT board
             // section. Fail open: the route is still a valid project even when
@@ -202,8 +196,6 @@ final class DeepLinkRouter: ObservableObject {
             lastError = "No cluster is configured — open Settings to connect before following this link."
             return
         }
-        isResolving = true
-        defer { isResolving = false }
         do {
             // Resolve the card's board, then the project that owns that board,
             // so the card opens inside its project context. Each read is
