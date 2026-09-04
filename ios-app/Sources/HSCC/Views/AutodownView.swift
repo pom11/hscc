@@ -101,7 +101,9 @@ struct AutodownView: View {
         case .loading:
             HSSectionCard(title: "Status", systemImage: "timer") { ProgressView() }
         case .failed(let message):
-            HSSectionCard(title: "Status", systemImage: "timer") { errorLabel(message) }
+            HSSectionCard(title: "Status", systemImage: "timer") {
+                errorLabel(message, retry: { Task { await loadStatus() } })
+            }
         case .stale(let state, let ageMessage):
             HSSectionCard(title: "Status", systemImage: "timer") {
                 VStack(alignment: .leading, spacing: 12) {
@@ -357,5 +359,5 @@ struct AutodownView: View {
     // MARK: - Shared building blocks
 
 
-    private func errorLabel(_ message: String) -> some View { HSErrorLabel(message: message) }
+    private func errorLabel(_ message: String, retry: (() -> Void)? = nil) -> some View { HSErrorLabel(message: message, retry: retry) }
 }

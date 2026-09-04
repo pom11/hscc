@@ -72,7 +72,7 @@ struct FleetControlView: View {
             case .loading:
                 ProgressView()
             case .failed(let message):
-                errorLabel(message)
+                errorLabel(message, retry: { Task { await loadStatus() } })
             case .stale(let state, let ageMessage):
                 VStack(alignment: .leading, spacing: 8) {
                     StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
@@ -165,7 +165,7 @@ struct FleetControlView: View {
     // MARK: - Shared building blocks
 
 
-    private func errorLabel(_ message: String) -> some View { HSErrorLabel(message: message) }
+    private func errorLabel(_ message: String, retry: (() -> Void)? = nil) -> some View { HSErrorLabel(message: message, retry: retry) }
     private func emptyLabel(_ text: String) -> some View { HSEmptyLabel(message: text) }
 
     private func displayJSON(_ value: JSONValue) -> String {

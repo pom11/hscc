@@ -104,7 +104,7 @@ struct FleetView: View {
             case .loading:
                 ProgressView()
             case .failed(let message):
-                errorLabel(message)
+                errorLabel(message, retry: { Task { await loadHealth() } })
             case .stale(let state, let age):
                 StaleBanner(age: age, reason: "Can't reach the cluster right now.") {
                     Task { await loadHealth() }
@@ -156,7 +156,7 @@ struct FleetView: View {
             case .loading:
                 ProgressView()
             case .failed(let message):
-                errorLabel(message)
+                errorLabel(message, retry: { Task { await loadThroughput() } })
             case .stale(let state, let age):
                 StaleBanner(age: age, reason: "Can't reach the cluster right now.") {
                     Task { await loadThroughput() }
@@ -209,7 +209,7 @@ struct FleetView: View {
             case .loading:
                 ProgressView()
             case .failed(let message):
-                errorLabel(message)
+                errorLabel(message, retry: { Task { await loadStats() } })
             case .stale(let state, let age):
                 StaleBanner(age: age, reason: "Can't reach the cluster right now.") {
                     Task { await loadStats() }
@@ -298,7 +298,7 @@ struct FleetView: View {
             case .loading:
                 ProgressView()
             case .failed(let message):
-                errorLabel(message)
+                errorLabel(message, retry: { Task { await loadStreams() } })
             case .stale(let state, let age):
                 StaleBanner(age: age, reason: "Can't reach the cluster right now.") {
                     Task { await loadStreams() }
@@ -358,7 +358,7 @@ struct FleetView: View {
             case .loading:
                 ProgressView()
             case .failed(let message):
-                errorLabel(message)
+                errorLabel(message, retry: { Task { await loadAutoscale() } })
             case .stale(let state, let age):
                 StaleBanner(age: age, reason: "Can't reach the cluster right now.") {
                     Task { await loadAutoscale() }
@@ -418,7 +418,7 @@ struct FleetView: View {
         }
     }
 
-    private func errorLabel(_ message: String) -> some View { HSErrorLabel(message: message) }
+    private func errorLabel(_ message: String, retry: (() -> Void)? = nil) -> some View { HSErrorLabel(message: message, retry: retry) }
     private func emptyLabel(_ text: String) -> some View { HSEmptyLabel(message: text) }
 
     // MARK: - Formatting

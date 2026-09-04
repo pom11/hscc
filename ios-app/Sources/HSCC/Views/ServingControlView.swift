@@ -108,7 +108,7 @@ struct ServingControlView: View {
             }
         case .failed(let message):
             HSSectionCard(title: "Serving Units", systemImage: "cpu") {
-                HSErrorLabel(message: message)
+                HSErrorLabel(message: message, retry: { Task { await loadStatus() } })
             }
         case .stale(let state, let ageMessage):
             HSSectionCard(title: "Serving Units", systemImage: "cpu") {

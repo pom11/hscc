@@ -207,10 +207,7 @@ struct TemplateDetailView: View {
                 ProgressView()
             case .failed(let message):
                 VStack(alignment: .leading, spacing: 8) {
-                    errorLabel(message)
-                    Text("Couldn't load the preview. Pull to retry, or try again later.")
-                        .font(.caption)
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    errorLabel(message, retry: { Task { await loadPreview() } })
                 }
             case .loaded(let state):
                 previewContent(state)
@@ -560,7 +557,7 @@ struct TemplateDetailView: View {
 
     // MARK: - Building blocks
 
-    private func errorLabel(_ message: String) -> some View { HSErrorLabel(message: message) }
+    private func errorLabel(_ message: String, retry: (() -> Void)? = nil) -> some View { HSErrorLabel(message: message, retry: retry) }
 }
 
 /// The confirm-gated apply sheet. This is where the operator reads the REAL
