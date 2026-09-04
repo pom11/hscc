@@ -166,6 +166,9 @@ targets:
       - path: Sources/HSCC/Views/ActivityFeedView.swift
       - path: Sources/HSCC/Views/MemoryView.swift
       - path: Sources/HSCC/Views/CreateCardSheet.swift
+      # Per-card read-only diff (t_cb93feee): a card's changed files + hunks,
+      # paged, from GET /v1/review/{card_id}/diff.
+      - path: Sources/HSCC/Views/DiffDetailView.swift
       - path: Sources/HSCC/Intents/IntentClient.swift
       - path: Sources/HSCC/Intents/ClusterStatusIntent.swift
       - path: Sources/HSCC/Intents/ReviewQueueIntent.swift

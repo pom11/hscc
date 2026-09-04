@@ -349,6 +349,22 @@ struct HSCCClient {
                       as: ReviewDetailResponse.self)
     }
 
+    /// GET /v1/review/{card_id}/diff — one card's per-file diff (read-only).
+    /// Resolves card → project → branch and serves the unified diff as file
+    /// hunks; file-level paging via `offset`/`limit` so a large diff is loaded
+    /// one window at a time. 404 when the card does not resolve to a
+    /// reviewable branch. Query GETs are not persisted to the StateCache —
+    /// diffs are read-once review data, so that's correct here.
+    func cardDiff(_ cardID: String,
+                  offset: Int? = nil,
+                  limit: Int? = nil) async throws -> DiffDetailResponse {
+        var items: [URLQueryItem] = []
+        if let offset { items.append(URLQueryItem(name: "offset", value: String(offset))) }
+        if let limit { items.append(URLQueryItem(name: "limit", value: String(limit))) }
+        let path = "/v1/review/\(cardID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? cardID)/diff"
+        return try await get(path: path, queryItems: items, as: DiffDetailResponse.self)
+    }
+
     /// GET /v1/qa/queue — the pre-merge QA queue + manual-QA store (B3).
     func qaQueue() async throws -> QAQueueResponse {
         try await get("/v1/qa/queue", as: QAQueueResponse.self)
