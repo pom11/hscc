@@ -20,6 +20,10 @@ struct SettingsView: View {
     @State private var portField: String = ""
     @State private var tokenField: String = ""
     @State private var showingToken = false
+    /// True while the operator is defining a brand-new cluster (Add Cluster was
+    /// tapped and the form fields were cleared). Save then CREATES a new
+    /// cluster instead of editing the active one. Reset to false on load.
+    @State private var addingCluster = false
 
     // Test-connection state.
     @State private var testResult: String?
@@ -53,6 +57,21 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    ForEach(settings.clusters) { cluster in
+                        clusterRow(cluster)
+                    }
+                    Button {
+                        beginAddingCluster()
+                    } label: {
+                        Label("Add Cluster", systemImage: "plus.circle")
+                    }
+                } header: {
+                    Text("Clusters")
+                } footer: {
+                    Text("Keep several clusters and switch with one tap. Each cluster keeps its own token in the Keychain. Switching clears all cached state from the previous cluster.")
+                }
+
                 Section {
                     LabeledContent {
                         TextField("e.g. dgx-tailscale (hostname or IP)", text: $hostField)
@@ -97,7 +116,7 @@ struct SettingsView: View {
                         Text("Token")
                     }
                 } header: {
-                    Text("Connection")
+                    Text(connectionHeader)
                 } footer: {
                     Text("Plain HTTP over Tailscale is fine — Tailscale is the encrypted transport. The token is stored only in the iOS Keychain.")
                 }
@@ -227,7 +246,102 @@ struct SettingsView: View {
             || tokenField != (settings.token ?? "")
     }
 
+    /// The Connection section header — names which cluster the fields edit, so
+    /// the operator always knows what they are about to change.
+    private var connectionHeader: String {
+        if addingCluster { return "Connection — New Cluster" }
+        if let c = settings.activeCluster { return "Connection — \(c.name)" }
+        return "Connection"
+    }
+
+    /// One row in the Clusters list. Shows name + host:port, a health dot, a
+    /// checkmark on the active cluster, and swipe-to-delete.
+    private func clusterRow(_ cluster: SavedCluster) -> some View {
+        let isActive = cluster.id == settings.activeClusterID
+        return Button {
+            if !isActive {
+                switchTo(cluster)
+            }
+        } label: {
+            HStack(spacing: 12) {
+                // Health dot: unknown/ok/failed from the last connection test.
+                Circle()
+                    .fill(healthColor(cluster.health))
+                    .frame(width: 10, height: 10)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(cluster.name)
+                        .foregroundColor(Theme.Semantic.onSurface)
+                        .lineLimit(1)
+                    if !cluster.host.isEmpty {
+                        Text("\(cluster.host):\(cluster.port)")
+                            .font(.caption)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer()
+                if isActive {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(Theme.Semantic.ok)
+                        .accessibilityLabel("Active cluster")
+                }
+            }
+        }
+        // On a plain Button row inside a Form, foreground styles set by the
+        // label would be overridden by the button tint; use .accessibilityAddTraits
+        // for the active marker instead of relying on color alone.
+        .buttonStyle(.plain)
+        .accessibilityLabel("Cluster \(cluster.name)")
+        .accessibilityHint(isActive
+            ? "This cluster is active"
+            : "Switch to this cluster")
+        .accessibilityAddTraits(isActive ? .isSelected : [])
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                deleteCluster(cluster)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+    }
+
+    private func healthColor(_ health: ClusterHealth) -> Color {
+        switch health {
+        case .ok: return Theme.Semantic.ok
+        case .failed: return Theme.Semantic.bad
+        case .unknown: return Theme.Semantic.neutral
+        }
+    }
+
+    /// Make `cluster` the active one and reload the edit fields to its values.
+    private func switchTo(_ cluster: SavedCluster) {
+        settings.selectCluster(cluster.id)
+        loadFromStore()
+        // The store cleared cached state on the switch; ContentView re-keys its
+        // content on activeClusterID so in-session @State is discarded too.
+    }
+
+    /// Start defining a brand-new cluster: blank the edit fields and flip into
+    /// add mode so Save creates (not edits) a cluster with a fresh id.
+    private func beginAddingCluster() {
+        addingCluster = true
+        hostField = ""
+        portField = ""
+        tokenField = ""
+        testResult = nil
+        testIsSuccess = nil
+    }
+
+    /// Delete a saved cluster (its token too), keeping the edit form coherent.
+    /// Deleting the ACTIVE cluster promotes the first remaining one and
+    /// switches — ContentView + the store handle the cache reset.
+    private func deleteCluster(_ cluster: SavedCluster) {
+        settings.deleteCluster(cluster.id)
+        loadFromStore()
+    }
+
     private func loadFromStore() {
+        addingCluster = false
         hostField = settings.host
         portField = settings.port
         tokenField = settings.token ?? ""
@@ -238,13 +352,24 @@ struct SettingsView: View {
     private func save() {
         // `host`/`port` are computed views onto the ACTIVE SavedCluster since
         // the multi-cluster model landed — they are read-only. Writing the
-        // fields means updating that cluster (or creating the first one).
+        // fields means updating that cluster, or CREATING a brand-new one when
+        // the operator tapped Add Cluster.
         let host = hostField.trimmingCharacters(in: .whitespaces)
         let port = Int(portField.trimmingCharacters(in: .whitespaces)) ?? 0
-        var cluster = settings.activeCluster
-            ?? SavedCluster(id: UUID(), name: host.isEmpty ? "Cluster" : host,
-                            host: host, port: port,
-                            lastConnected: nil, lastTestSuccess: nil)
+        var cluster: SavedCluster
+        if addingCluster {
+            // Add Cluster: always a fresh id, named from the host so the row in
+            // the list is recognizable even before the operator renames it.
+            cluster = SavedCluster(id: UUID(),
+                                   name: host.isEmpty ? "New Cluster" : host,
+                                   host: host, port: port,
+                                   lastConnected: nil, lastTestSuccess: nil)
+        } else {
+            cluster = settings.activeCluster
+                ?? SavedCluster(id: UUID(), name: host.isEmpty ? "Cluster" : host,
+                                host: host, port: port,
+                                lastConnected: nil, lastTestSuccess: nil)
+        }
         cluster.host = host
         cluster.port = port
         // Trim the token too: a trailing space/newline pasted from terminal
@@ -252,6 +377,7 @@ struct SettingsView: View {
         // but every request 401 — a silent dead end with no in-app explanation.
         let token = tokenField.trimmingCharacters(in: .whitespaces)
         settings.saveCluster(cluster, token: token.isEmpty ? nil : token)
+        addingCluster = false
         // The root view re-probes on isConfigured change.
     }
 

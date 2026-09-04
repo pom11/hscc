@@ -188,7 +188,15 @@ final class SettingsStore: ObservableObject {
             clusters[idx] = cluster
         } else {
             clusters.append(cluster)
+            // A brand-new cluster becomes active — connecting to it immediately
+            // is the expected flow. That is a real cluster switch, so drop the
+            // previous cluster's cached data too.
+            let switched = activeClusterID != cluster.id
             activeClusterID = cluster.id
+            persistClusters()
+            publishActiveCluster()
+            if switched { resetCachedStateOnSwitch() }
+            return
         }
         persistClusters()
         publishActiveCluster()
@@ -204,6 +212,10 @@ final class SettingsStore: ObservableObject {
         activeClusterID = id
         persistClusters()
         publishActiveCluster()
+        // A DIFFERENT cluster is now active: drop the old cluster's cached
+        // data so nothing from a previous cluster is ever served (offline
+        // fallback, stale banner, last-known state) under this cluster's name.
+        resetCachedStateOnSwitch()
     }
 
     /// Delete a saved cluster and its Keychain token. If it was active, the
@@ -212,11 +224,13 @@ final class SettingsStore: ObservableObject {
         guard clusters.contains(where: { $0.id == id }) else { return }
         KeychainStore.deleteToken(forCluster: id)
         clusters.removeAll { $0.id == id }
-        if activeClusterID == id {
+        let switched = activeClusterID == id
+        if switched {
             activeClusterID = clusters.first?.id
         }
         persistClusters()
         publishActiveCluster()
+        if switched { resetCachedStateOnSwitch() }
     }
 
     /// Record the outcome of a connection test / use for a cluster — drives the
@@ -263,5 +277,16 @@ final class SettingsStore: ObservableObject {
         if let t = KeychainStore.readToken(forCluster: c.id) {
             KeychainStore.saveToken(t)
         }
+    }
+
+    /// The ACTIVE cluster changed to a different one. Drop the last-known read
+    /// cache from the previous cluster so `Offline.load` never serves one
+    /// cluster's data under another cluster's name — that is worse than showing
+    /// nothing. This is the persistence-layer half of the "switch fully resets
+    /// cached state" contract; the view layer (ContentView) separately
+    /// discards in-session `@State` by re-keying its content on
+    /// `activeClusterID`.
+    private func resetCachedStateOnSwitch() {
+        StateCache.clear()
     }
 }
