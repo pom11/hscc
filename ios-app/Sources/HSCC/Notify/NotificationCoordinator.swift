@@ -1,5 +1,6 @@
 import Foundation
 import UserNotifications
+import UIKit
 
 // ===========================================================================
 // NotificationCoordinator — foreground delivery of needs-operator alerts.
@@ -53,7 +54,7 @@ enum NotifyPreferences {
 }
 
 @MainActor
-final class NotificationCoordinator {
+final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate {
 
     static let shared = NotificationCoordinator()
 
@@ -69,7 +70,7 @@ final class NotificationCoordinator {
     /// honest about whether notifications can even fire.
     private var authorizationAuthorized = false
 
-    private init() {}
+    private override init() {}
 
     // MARK: - One-time authorization (called from the app delegate)
 
@@ -78,6 +79,10 @@ final class NotificationCoordinator {
     /// by the `NotificationsAppDelegate`.
     func requestAuthorization() async {
         let center = UNUserNotificationCenter.current()
+        // We are the center's delegate so a tapped notification banner routes
+        // its deep link (t_136762f3) instead of the app silently opening at the
+        // root. Set before asking, so a tap during the prompt is handled too.
+        center.delegate = self
         let settings = await center.notificationSettings()
         guard settings.authorizationStatus == .notDetermined else {
             authorizationAuthorized = (settings.authorizationStatus == .authorized
@@ -86,6 +91,36 @@ final class NotificationCoordinator {
         }
         let granted = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
         authorizationAuthorized = (granted ?? false)
+    }
+
+    // MARK: - Notification deep-link routing (UNUserNotificationCenterDelegate)
+
+    /// Foreground banners: show the banner normally. The tap itself is handled
+    /// by `didReceive` below — showing the banner and routing a tap are separate.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
+    }
+
+    /// A tapped notification banner. If the alert carried an `hscc_url` deep
+    /// link (set in `fire`), route it through the shared router so the operator
+    /// lands on the exact card — not the root. Alerts without a link (fleet
+    /// down, no single target) just open the app normally.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        defer { completionHandler() }
+        let userInfo = response.notification.request.content.userInfo
+        guard let urlString = userInfo["hscc_url"] as? String,
+              let url = URL(string: urlString) else {
+            return
+        }
+        // Route on the main actor. `didReceive` arrives on a background queue;
+        // hop to MainActor and hand the URL to the router exactly like onOpenURL.
+        Task { @MainActor in
+            DeepLinkRouter.shared.handle(url)
+        }
     }
 
     // MARK: - Foreground poll loop
@@ -199,6 +234,16 @@ final class NotificationCoordinator {
             content.body = alert.body
             content.sound = alert.sound ? .default : nil
             content.threadIdentifier = alert.threadIdentifier
+            // Deep-link the notification (t_136762f3): alerts that name a card
+            // carry an `hscc://card/<id>` URL in userInfo so tapping the banner
+            // opens THAT card, not the app root. The delegate routes it through
+            // DeepLinkRouter.shared. Fleet-down alerts (no card) carry no link —
+            // they are not endpoints to open, and must not pretend to be.
+            if let firstID = alert.targetIDs.first {
+                if let url = URL(string: "hscc://card/\(firstID)") {
+                    content.userInfo["hscc_url"] = url.absoluteString
+                }
+            }
             let request = UNNotificationRequest(
                 identifier: "hscc.notify.\(alert.kind.rawValue).\(UUID().uuidString)",
                 content: content,

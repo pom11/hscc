@@ -20,6 +20,11 @@ struct HSCCApp: App {
     @StateObject private var settings = SettingsStore()
     @StateObject private var unread: ProjectUnreadCenter
     @StateObject private var replyWatcher: StreamReplyWatcher
+    /// Deep-link router (t_136762f3): the single entry point for `hscc://`
+    /// URLs, notification taps and Handoff, injected everywhere navigation
+    /// happens so every external link can land the operator on the exact
+    /// project, card or session.
+    @StateObject private var router = DeepLinkRouter.shared
 
     /// `replyWatcher` needs the SAME `ProjectUnreadCenter` the rest of the app
     /// sees, but a property initializer cannot reference another property —
@@ -38,6 +43,7 @@ struct HSCCApp: App {
                 .environmentObject(settings)
                 .environmentObject(unread)
                 .environmentObject(replyWatcher)
+                .environmentObject(router)
         }
     }
 }

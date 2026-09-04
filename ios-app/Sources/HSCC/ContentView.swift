@@ -19,6 +19,7 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var replyWatcher: StreamReplyWatcher
+    @EnvironmentObject private var router: DeepLinkRouter
     @State private var selectedTab: Tab = .projects
     @StateObject private var approvals = ApprovalPoller()
     /// Queued messages dropped because the user switched clusters mid-queue
@@ -32,7 +33,9 @@ struct ContentView: View {
     var body: some View {
         TabView(selection: $selectedTab) {
             // Primary tab — the dozen projects the operator actually cares about.
-            ProjectsView(client: makeClient())
+            // `router.projectsPath` is bound as this stack's navigation path so
+            // a deep link can push directly into a project / card (t_136762f3).
+            ProjectsView(client: makeClient(), path: $router.projectsPath)
                 .tabItem { Label("Projects", systemImage: "folder") }
                 .tag(Tab.projects)
 
@@ -87,7 +90,15 @@ struct ContentView: View {
             approvals.setClient(makeClient())
             replyWatcher.setClient(makeClient())
             NotificationCoordinator.shared.setClient(makeClient())
+            router.setClient(makeClient())
             seedOfflineQueue()
+            // Cold-start deep link: if a notification tap / Handoff set a
+            // requested tab before this view appeared, onChange(of:) won't fire
+            // for that initial value — apply it here (one-shot, then cleared).
+            if let requested = router.requestedTab {
+                selectedTab = requested
+                router.requestedTab = nil
+            }
             // Re-hydration: end any Live Activity left over from a prior process
             // kill (deinit doesn't run when the process is killed, so ActivityKit
             // would otherwise keep a stale wake/session bubble alive forever).
@@ -105,6 +116,7 @@ struct ContentView: View {
             approvals.setClient(makeClient())
             replyWatcher.setClient(makeClient())
             NotificationCoordinator.shared.setClient(makeClient())
+            router.setClient(makeClient())
             // A different cluster is a different session: queued messages destined
             // for the OLD cluster must never flush into the new one. Drain (clear)
             // the queue but SURFACE what was dropped so nothing is silently lost;
@@ -114,6 +126,32 @@ struct ContentView: View {
         }
         .onChange(of: settings.appGroupUnavailable) {
             // ConnectionBanner observes SettingsStore directly and redraws.
+        }
+        // Deep links (t_136762f3). Every entry point funnels through the router:
+        //   · onOpenURL  — `hscc://` URLs (typed, tapped in Messages, tapped in
+        //                  a Safari/Shortcuts URL, or launched via x-callback).
+        //   · onChange(requestedTab) — the router asks for a specific tab
+        //     (the Projects one) and we apply it to the TabView.
+        //   · alert      — a malformed / stale link surfaces an honest message
+        //                  instead of crashing or landing on a blank screen.
+        .onOpenURL { url in
+            router.handle(url)
+        }
+        .onChange(of: router.requestedTab) { _, requested in
+            guard let requested else { return }
+            selectedTab = requested
+            router.requestedTab = nil
+        }
+        .alert(
+            "Couldn't open that link",
+            isPresented: Binding(
+                get: { router.lastError != nil },
+                set: { if !$0 { router.lastError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(router.lastError ?? "That link couldn't be opened.")
         }
     }
 
