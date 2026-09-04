@@ -379,13 +379,32 @@ struct HSSectionCard<Content: View>: View {
 }
 
 /// The shared red inline error label under a section card.
+///
+/// When a `retry` closure is provided (most `.failed` cases are retryable), a
+/// "Try again" button is rendered beneath the message so the error state has an
+/// unmistakable next action and not just a passive text line. Backward
+/// compatible: callers that omit `retry` get exactly the old bare label.
 struct HSErrorLabel: View {
     let message: String
+    var retry: (() -> Void)?
+
+    init(message: String, retry: (() -> Void)? = nil) {
+        self.message = message
+        self.retry = retry
+    }
 
     var body: some View {
-        Label(message, systemImage: "exclamationmark.triangle.fill")
-            .font(.subheadline)
-            .foregroundColor(Theme.Semantic.bad)
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .font(.subheadline)
+                .foregroundColor(Theme.Semantic.bad)
+            if let retry {
+                Button("Try again", action: retry)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(Theme.Semantic.bad)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

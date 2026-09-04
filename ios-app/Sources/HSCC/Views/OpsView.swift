@@ -109,7 +109,7 @@ struct OpsView: View {
                 case .loading:
                     ProgressView()
                 case .failed(let message):
-                    errorLabel(message)
+                    errorLabel(message, retry: { Task { await loadVerify(client) } })
                 case .stale(let state, let ageMessage):
                     VStack(alignment: .leading, spacing: 10) {
                         StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
@@ -164,7 +164,7 @@ struct OpsView: View {
             case .loading:
                 ProgressView()
             case .failed(let message):
-                errorLabel(message)
+                errorLabel(message, retry: { Task { if let c = client { await loadDaemon(c) } } })
             case .loaded(let state):
                 VStack(alignment: .leading, spacing: 10) {
                     Label(state.speak, systemImage: state.daemon_running == true ? "checkmark.seal.fill" : "xmark.seal.fill")
@@ -210,7 +210,7 @@ struct OpsView: View {
             case .loading:
                 ProgressView()
             case .failed(let message):
-                errorLabel(message)
+                errorLabel(message, retry: { Task { await loadTriggers(client) } })
             case .loaded(let state):
                 VStack(alignment: .leading, spacing: 10) {
                     Text(state.speak)
@@ -282,7 +282,7 @@ struct OpsView: View {
             case .loading:
                 ProgressView()
             case .failed(let message):
-                errorLabel(message)
+                errorLabel(message, retry: { Task { await loadEscalations(client) } })
             case .loaded(let state):
                 VStack(alignment: .leading, spacing: 6) {
                     Text(state.speak)
@@ -328,7 +328,7 @@ struct OpsView: View {
             case .loading:
                 ProgressView()
             case .failed(let message):
-                errorLabel(message)
+                errorLabel(message, retry: { Task { if let c = client { await loadProfiles(c) } } })
             case .loaded(let state):
                 VStack(alignment: .leading, spacing: 8) {
                     Text(state.speak)
@@ -360,7 +360,7 @@ struct OpsView: View {
     // MARK: - Shared building blocks
 
 
-    private func errorLabel(_ message: String) -> some View { HSErrorLabel(message: message) }
+    private func errorLabel(_ message: String, retry: (() -> Void)? = nil) -> some View { HSErrorLabel(message: message, retry: retry) }
     private func emptyLabel(_ text: String) -> some View { HSEmptyLabel(message: text) }
 
     private func displayJSON(_ value: JSONValue) -> String {
