@@ -503,6 +503,24 @@ struct HSCCClient {
                              as: LogsResponse.self)
     }
 
+    /// GET /v1/daemon/history?limit=… — the automated-action timeline (watchdog
+    /// restarts, pipeline blocks, autodown transitions, recovery relaunches).
+    ///
+    /// The server reverse-scans a bounded window of daemon.log and returns the
+    /// DISTINCT automated decisions (collapsed runs) with timestamps, outcomes
+    /// and especially ``repeats``/``last_ts`` for a multi-cycle held state.
+    /// Read-only and bounded (limit clamped to [1, 500] client-side).
+    ///
+    /// - Parameter limit: how many distinct events to request (bounded).
+    func daemonHistory(limit: Int = 100) async throws -> HistoryResponse {
+        let capped = min(max(limit, 1), 500)
+        return try await get(path: "/v1/daemon/history",
+                             queryItems: [
+                                URLQueryItem(name: "limit", value: String(capped)),
+                             ],
+                             as: HistoryResponse.self)
+    }
+
     /// GET /v1/commands — the server-driven slash-command catalog for the chat
     /// palette. Read-only; sourced from the authoritative `hscc-commands`
     /// plugin registration (not a hardcoded list).
