@@ -53,8 +53,48 @@ struct SmallClusterWidget: View {
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     stateLine
+                    smallWorkLine
                     Spacer(minLength: 4)
                     MiniTopologyView(pairs: entry.pairs)
+                }
+            }
+        }
+    }
+
+    /// Compact one-line "what the fleet is DOING" strip for the small widget:
+    /// running + queue counts, with a red warning marker when there are blocked
+    /// cards. Omitted entirely when no kanban data is present, so the small
+    /// widget still fits its state + topology in a tight space.
+    @ViewBuilder
+    private var smallWorkLine: some View {
+        let hasWork = entry.runningCards != nil || entry.queueDepth != nil || (entry.blockedCards ?? 0) > 0
+        if hasWork {
+            HStack(spacing: 10) {
+                if let running = entry.runningCards {
+                    HStack(spacing: 3) {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 7))
+                            .foregroundColor(Theme.Semantic.ok)
+                        Text("\(running)")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundColor(Theme.Semantic.onSurface)
+                    }
+                }
+                if let queue = entry.queueDepth {
+                    HStack(spacing: 3) {
+                        Image(systemName: "square.stack.3d.up")
+                            .font(.system(size: 7))
+                            .foregroundColor(Theme.Semantic.neutral)
+                        Text("\(queue)")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundColor(Theme.Semantic.onSurface)
+                    }
+                }
+                Spacer(minLength: 0)
+                if let blocked = entry.blockedCards, blocked > 0 {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 8))
+                        .foregroundColor(Theme.Semantic.bad)
                 }
             }
         }
@@ -145,9 +185,56 @@ struct MediumClusterWidget: View {
                         }
                         Spacer(minLength: 0)
                     }
+                    // What the fleet is DOING: running cards, queue depth, and a
+                    // failure indicator (blocked cards needing attention).
+                    workMetricsRow
                 }
             }
         }
+    }
+
+    /// The board work row: running cards + queue depth as neutral metrics, and
+    /// a red failure badge when blocked cards need attention. Each count is
+    /// optional — a failed kanban fetch simply omits that metric.
+    @ViewBuilder
+    private var workMetricsRow: some View {
+        HStack(spacing: 12) {
+            if let running = entry.runningCards {
+                HStack(spacing: 4) {
+                    Image(systemName: "play.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(Theme.Semantic.ok)
+                    metricLabel(value: "\(running)", label: "running")
+                }
+            }
+            if let queue = entry.queueDepth {
+                HStack(spacing: 4) {
+                    Image(systemName: "square.stack.3d.up")
+                        .font(.system(size: 10))
+                        .foregroundColor(Theme.Semantic.neutral)
+                    metricLabel(value: "\(queue)", label: "queued")
+                }
+            }
+            Spacer(minLength: 0)
+            if let blocked = entry.blockedCards, blocked > 0 {
+                failureBadge(count: blocked)
+            }
+        }
+    }
+
+    /// The failure indicator — a red badge the operator can see at a glance.
+    private func failureBadge(count: Int) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10))
+                .foregroundColor(Theme.Semantic.bad)
+            Text("\(count)")
+                .font(.caption.weight(.semibold))
+                .foregroundColor(Theme.Semantic.bad)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(Theme.Semantic.bad.opacity(0.14)))
     }
 
     private func miniPair(_ pair: TopologyPair, dimmed: Bool = false) -> some View {
@@ -224,6 +311,9 @@ struct MediumClusterWidget: View {
                     Spacer(minLength: 0)
                 }
             }
+            // Last-known board work, clearly dimmed-for-stale like the topology:
+            // the operator still sees what the fleet WAS doing while it's down.
+            workMetricsRow
         }
     }
 }

@@ -21,19 +21,23 @@ struct ExtensionClient {
         return ExtensionClient(config: config)
     }
 
-    private func url(for path: String) -> URL? {
+    private func url(for path: String, queryItems: [URLQueryItem] = []) -> URL? {
         var components = URLComponents()
         components.scheme = "http"
         components.host = config.host
         components.port = config.port
         components.path = path
+        if !queryItems.isEmpty {
+            components.queryItems = queryItems
+        }
         return components.url
     }
 
     /// Perform a read-only GET and decode into `T`. Returns nil on any failure
     /// (transport, HTTP error, or decode) — the caller decides how to surface it.
-    func get<T: Decodable>(_ path: String, as type: T.Type) async -> T? {
-        guard let url = url(for: path) else { return nil }
+    func get<T: Decodable>(_ path: String, as type: T.Type,
+                           queryItems: [URLQueryItem] = []) async -> T? {
+        guard let url = url(for: path, queryItems: queryItems) else { return nil }
         var req = URLRequest(url: url)
         req.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
