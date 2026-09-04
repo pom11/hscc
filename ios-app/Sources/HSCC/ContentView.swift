@@ -35,7 +35,13 @@ struct ContentView: View {
             // Primary tab — the dozen projects the operator actually cares about.
             // `router.projectsPath` is bound as this stack's navigation path so
             // a deep link can push directly into a project / card (t_136762f3).
+            // .id(activeClusterID): a cluster switch rebuilds the whole subtree
+            // from scratch, discarding every in-session @State cache so the NEW
+            // cluster's data starts clean (never one cluster's rows shown under
+            // another cluster's name). Token edits within one cluster (same id)
+            // do not trigger a rebuild here.
             ProjectsView(client: makeClient(), path: $router.projectsPath)
+                .id(settings.activeClusterID)
                 .tabItem { Label("Projects", systemImage: "folder") }
                 .tag(Tab.projects)
 
@@ -44,6 +50,7 @@ struct ContentView: View {
             // (approvals inbox, t_9a5cfc3b) — the operator's "is something
             // needing me right now?" signal.
             ClusterView(client: makeClient(), approvalCount: approvals.pendingCount)
+                .id(settings.activeClusterID)
                 .tabItem { Label("Cluster", systemImage: "bolt") }
                 .badge(approvals.pendingCount.flatMap { $0 > 0 ? String($0) : nil })
                 .tag(Tab.cluster)
