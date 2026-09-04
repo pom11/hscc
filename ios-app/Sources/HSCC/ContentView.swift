@@ -137,6 +137,18 @@ struct ContentView: View {
         .onOpenURL { url in
             router.handle(url)
         }
+        // Handoff (t_136762f3): a Mac session can continue a task on the phone
+        // (or vice versa) under the declared com.hscc.ios.open activity type.
+        // The activity carries the same hscc:// deep link as its webpageURL, so
+        // it routes through exactly the same path as a typed URL.
+        .onContinueUserActivity("com.hscc.ios.open") { activity in
+            if let url = activity.webpageURL {
+                router.handle(url)
+            } else if let urlString = activity.userInfo?["hscc_url"] as? String,
+                      let url = URL(string: urlString) {
+                router.handle(url)
+            }
+        }
         .onChange(of: router.requestedTab) { _, requested in
             guard let requested else { return }
             selectedTab = requested
