@@ -522,6 +522,9 @@ class ApiHandler(http.server.BaseHTTPRequestHandler):
     def do_DELETE(self):
         self._route("DELETE")
 
+    def do_PATCH(self):
+        self._route("PATCH")
+
     def _route(self, method):
         try:
             self._authorize()

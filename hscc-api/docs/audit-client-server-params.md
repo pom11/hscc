@@ -53,6 +53,10 @@ satisfied or correctly optional-defaulted.
 | POST /v1/cards | board, title | routes_actions.py:199 |
 | POST /v1/template/apply | name | routes_actions.py:281 |
 | POST /v1/cluster/stop | container_id | routes_actions.py:303 |
+| POST /v1/cards/{id}/comment | body | routes_actions.py:374 |
+| POST /v1/cards/{id}/block | reason | routes_actions.py:402 |
+| POST /v1/cards/{id}/close | (confirm only) | routes_actions.py:435 |
+| PATCH /v1/cards/{id} | assignee | routes_actions.py:468 |
 | POST /v1/sessions/{id}/retire | profile | routes_sessions.py:252-254 |
 | POST /v1/sessions/{id}/compact | profile | routes_sessions.py:291-293 |
 | POST /v1/memory/{node}/delete | profile | routes_memory.py:280-282 |

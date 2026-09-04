@@ -1012,6 +1012,93 @@ def create_task(
     return str(task_id)
 
 
+def add_card_comment(card_id: str, body: str, author: Optional[str] = None, *, _kdb=None) -> int:
+    """Add a comment to ``card_id``; returns the new comment id (an int).
+
+    Resolves the card's owning board via :func:`find_card` (which handles both
+    live and archived boards — an archived hit carries ``_board_path``) then
+    opens that board's DB and calls ``kanban_db.add_comment``. ``author`` is
+    required by the backing call's signature but defaults to None here so a
+    caller (or test) that doesn't know the author can let the reader fall back.
+    ``_kdb`` is the injectable kanban library (a fake in tests).
+    """
+    card = find_card(card_id, _kdb=_kdb)
+    if card is None:
+        raise KeyError(f"card {card_id!r} not found")
+    kdb = _kdb if _kdb is not None else _load_kanban_db()
+    db_path = card.get("_board_path")
+    conn = kdb.connect(db_path=db_path) if db_path else kdb.connect(board=card.get("board"))
+    try:
+        return kdb.add_comment(conn, card_id, author, body)
+    finally:
+        conn.close()
+
+
+def block_card(card_id: str, reason: str, kind: Optional[str] = None, *, _kdb=None) -> bool:
+    """Block ``card_id``; returns True when the block landed.
+
+    Resolves the card via :func:`find_card`, opens its board DB, and calls
+    ``kanban_db.block_task``. ``_kdb`` is the injectable kanban library (a fake
+    in tests).
+    """
+    card = find_card(card_id, _kdb=_kdb)
+    if card is None:
+        raise KeyError(f"card {card_id!r} not found")
+    kdb = _kdb if _kdb is not None else _load_kanban_db()
+    db_path = card.get("_board_path")
+    conn = kdb.connect(db_path=db_path) if db_path else kdb.connect(board=card.get("board"))
+    try:
+        return bool(kdb.block_task(conn, card_id, reason=reason, kind=kind))
+    finally:
+        conn.close()
+
+
+def close_card(card_id: str, result: Optional[str] = None, *, _kdb=None) -> bool:
+    """Complete/close ``card_id``; returns True when the close landed.
+
+    Resolves the card via :func:`find_card`, opens its board DB, and calls
+    ``kanban_db.complete_task``. ``_kdb`` is the injectable kanban library (a
+    fake in tests).
+    """
+    card = find_card(card_id, _kdb=_kdb)
+    if card is None:
+        raise KeyError(f"card {card_id!r} not found")
+    kdb = _kdb if _kdb is not None else _load_kanban_db()
+    db_path = card.get("_board_path")
+    conn = kdb.connect(db_path=db_path) if db_path else kdb.connect(board=card.get("board"))
+    try:
+        return bool(kdb.complete_task(conn, card_id, result=result))
+    finally:
+        conn.close()
+
+
+def edit_card(card_id: str, *, assignee: Optional[str] = None, _kdb=None) -> bool:
+    """Edit ``card_id`` (assignee only); returns True when the edit landed.
+
+    NOTE ON EDITABLE FIELDS: kanban_db exposes NO backing mutation for a card's
+    ``title`` or ``body`` — there is no ``update_title``/``update_body``
+    function. Only a card's ``assignee`` is changeable here, via
+    ``kanban_db.assign_task``. Attempting to edit title/body is therefore out of
+    scope (not backed); the route documents this and only accepts ``assignee``.
+
+    Resolves the card via :func:`find_card`, opens its board DB, and calls
+    ``kanban_db.assign_task`` when ``assignee`` is provided. ``_kdb`` is the
+    injectable kanban library (a fake in tests).
+    """
+    card = find_card(card_id, _kdb=_kdb)
+    if card is None:
+        raise KeyError(f"card {card_id!r} not found")
+    kdb = _kdb if _kdb is not None else _load_kanban_db()
+    db_path = card.get("_board_path")
+    conn = kdb.connect(db_path=db_path) if db_path else kdb.connect(board=card.get("board"))
+    try:
+        if assignee is not None:
+            return bool(kdb.assign_task(conn, card_id, assignee))
+        return True
+    finally:
+        conn.close()
+
+
 def classify(
     card: dict,
     git_facts: dict,
