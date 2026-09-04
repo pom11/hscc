@@ -88,7 +88,7 @@ struct ActivityFeedView: View {
                 ProgressView()
                     .frame(maxWidth: .infinity, alignment: .leading)
             case .failed(let message):
-                errorLabel(message)
+                errorLabel(message, retry: { Task { await load(client) } })
             case .stale(let state, let ageMessage):
                 VStack(alignment: .leading, spacing: 8) {
                     StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
@@ -203,10 +203,8 @@ struct ActivityFeedView: View {
         return Offline.agePhrase(seconds)
     }
 
-    private func errorLabel(_ message: String) -> some View {
-        Label(message, systemImage: "exclamationmark.triangle.fill")
-            .font(.subheadline)
-            .foregroundColor(Theme.Semantic.bad)
+    private func errorLabel(_ message: String, retry: (() -> Void)? = nil) -> some View {
+        HSErrorLabel(message: message, retry: retry)
     }
 
     private func emptyLabel(_ text: String) -> some View {

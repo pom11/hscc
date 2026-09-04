@@ -108,7 +108,7 @@ struct TemplatesView: View {
             case .loading:
                 ProgressView()
             case .failed(let message):
-                errorLabel(message)
+                errorLabel(message, retry: { Task { await refreshStatus() } })
             case .stale(let state, let ageMessage):
                 VStack(alignment: .leading, spacing: 10) {
                     StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
@@ -204,10 +204,7 @@ struct TemplatesView: View {
                 ProgressView()
             case .failed(let message):
                 VStack(alignment: .leading, spacing: 8) {
-                    errorLabel(message)
-                    Text("Pull to retry, or check that the cluster is reachable.")
-                        .font(.caption)
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    errorLabel(message, retry: { Task { await loadList(client) } })
                 }
             case .stale(let state, let ageMessage):
                 VStack(alignment: .leading, spacing: 12) {
@@ -348,7 +345,7 @@ struct TemplatesView: View {
 
     // MARK: - Building blocks
 
-    private func errorLabel(_ message: String) -> some View { HSErrorLabel(message: message) }
+    private func errorLabel(_ message: String, retry: (() -> Void)? = nil) -> some View { HSErrorLabel(message: message, retry: retry) }
     private func emptyLabel(_ text: String) -> some View { HSEmptyLabel(message: text) }
 }
 

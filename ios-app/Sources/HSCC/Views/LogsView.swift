@@ -54,7 +54,7 @@ struct LogsView: View {
                     logPlaceholder("Fetching \(source.label.lowercased()) log…")
                         .overlay { ProgressView() }
                 case .failed(let message):
-                    HSErrorLabel(message: message)
+                    HSErrorLabel(message: message, retry: { Task { await load(client) } })
                 case .stale(let entries, let ageMessage):
                     StaleBanner(age: ageMessage,
                                 reason: "Can't reach the cluster right now.") {

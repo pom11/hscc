@@ -126,9 +126,7 @@ struct ClusterView: View {
                 fleetStatusLine(state)
             case .failed(let message):
                 NodeTopologyView(pairs: pairs)
-                Label(message, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundColor(Theme.Semantic.bad)
+                HSErrorLabel(message: message, retry: { Task { await loadAll() } })
             default:
                 NodeTopologyView(pairs: pairs)
             }
