@@ -466,6 +466,82 @@ struct ReviewDetailResponse: Decodable, Speakable {
     }
 }
 
+/// GET /v1/review/{card_id}/diff — one card's per-file diff (read-only).
+///
+/// The endpoint never merges or closes; it resolves card → project → branch and
+/// serves the unified diff for `base...branch` as per-file hunks of
+/// `+`/`-`/context lines (see `DiffLine.type`). File-level paging is via
+/// `offset`/`limit` (echoed back here); when more files exist beyond the page
+/// or the server's line cap stopped it early, `truncated` is true and the next
+/// page can be fetched with `offset = offset + files.count`. HSCC `get` with
+/// queryItems is not persisted to the StateCache — diffs are read-once review
+/// data, so that's fine.
+struct DiffDetailResponse: Decodable, Speakable {
+    let id: String?
+    let project: String?
+    let repo: String?
+    let branch: String?
+    let base: String?
+    let offset: Int?
+    let limit: Int?
+    let files: [DiffFile]?
+    let file_count: Int?
+    let truncated: Bool?
+    let total_lines_served: Int?
+    let speak: String
+
+    var displayTitle: String { id ?? "Diff" }
+}
+
+/// One changed file in a `DiffDetailResponse`: its path, change status
+/// (`A` added / `M` modified / `D` deleted), line counts, and hunks.
+struct DiffFile: Decodable, Identifiable {
+    let path: String?
+    let status: String?
+    let additions: Int?
+    let deletions: Int?
+    let hunks: [DiffHunk]?
+
+    var id: String { path ?? UUID().uuidString }
+
+    /// Compact change badge, e.g. `M`, `A+12`, `D-8`.
+    var statusBadge: String {
+        guard let status else { return path ?? "" }
+        var badge = status
+        if let a = additions, a > 0 { badge += "+" + String(a) }
+        if let d = deletions, d > 0 { badge += "-" + String(d) }
+        return badge
+    }
+}
+
+/// One hunk (a `@@ ... @@` block) within a file's diff.
+struct DiffHunk: Decodable, Identifiable {
+    let header: String?
+    let lines: [DiffLine]?
+
+    var id: String { header ?? UUID().uuidString }
+}
+
+/// One rendered line of a diff hunk. `type` is `"+"`, `"-"`, or `"context"`;
+/// `text` is the line stripped of its leading marker (a context line's ` `
+/// marker was stripped too). `renderedText` re-adds the marker so `+`/`-`/
+/// context rows line up in monospace and read literally.
+struct DiffLine: Decodable, Identifiable {
+    let type: String?
+    let text: String?
+
+    var id: String { text ?? UUID().uuidString }
+
+    var isAddition: Bool { type == "+" }
+    var isDeletion: Bool { type == "-" }
+
+    var renderedText: String {
+        if isAddition { return "+" + (text ?? "") }
+        if isDeletion { return "-" + (text ?? "") }
+        return " " + (text ?? "")
+    }
+}
+
 /// GET /v1/qa/queue — one pre-merge QA row.
 struct QARow: Decodable, Identifiable {
     let project: String?
