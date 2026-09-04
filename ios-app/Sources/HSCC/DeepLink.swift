@@ -176,17 +176,15 @@ final class DeepLinkRouter: ObservableObject {
             lastError = "No cluster is configured — open Settings to connect before following this link."
             return
         }
-        do {
-            // Resolve the board name so the destination opens the RIGHT board
-            // section. Fail open: the route is still a valid project even when
-            // the list read hiccups — we just can't pre-resolve the board.
-            var board: String? = nil
-            if let projects = try? await client.projects() {
-                board = projects.projects.first { $0.name == name }?.board
-            }
-            pendingSegment = segment
-            projectsPath = [.projectDetail(name: name, board: board)]
+        // Resolve the board name so the destination opens the RIGHT board
+        // section. Fail open: the route is still a valid project even when
+        // the list read hiccups — we just can't pre-resolve the board.
+        var board: String? = nil
+        if let projects = try? await client.projects() {
+            board = projects.projects.first { $0.name == name }?.board
         }
+        pendingSegment = segment
+        projectsPath = [.projectDetail(name: name, board: board)]
     }
 
     /// Push a card (and its project detail when the board resolves to one) on
@@ -196,25 +194,23 @@ final class DeepLinkRouter: ObservableObject {
             lastError = "No cluster is configured — open Settings to connect before following this link."
             return
         }
-        do {
-            // Resolve the card's board, then the project that owns that board,
-            // so the card opens inside its project context. Each read is
-            // fail-open: the card itself loads by id regardless.
-            let detail = try? await client.cardDetail(id)
-            let cardBoard = detail?.board
-            var projectName: String? = nil
-            if let cardBoard, let projects = try? await client.projects() {
-                projectName = projects.projects.first { $0.board == cardBoard }?.name
-            }
-            if let projectName {
-                pendingSegment = .board
-                projectsPath = [.projectDetail(name: projectName, board: cardBoard), .card(id: id)]
-            } else {
-                // No owning project resolution — open the card directly. It
-                // fetches itself by id, so the operator still sees the real
-                // card rather than a dead end.
-                projectsPath = [.card(id: id)]
-            }
+        // Resolve the card's board, then the project that owns that board,
+        // so the card opens inside its project context. Each read is
+        // fail-open: the card itself loads by id regardless.
+        let detail = try? await client.cardDetail(id)
+        let cardBoard = detail?.board
+        var projectName: String? = nil
+        if let cardBoard, let projects = try? await client.projects() {
+            projectName = projects.projects.first { $0.board == cardBoard }?.name
+        }
+        if let projectName {
+            pendingSegment = .board
+            projectsPath = [.projectDetail(name: projectName, board: cardBoard), .card(id: id)]
+        } else {
+            // No owning project resolution — open the card directly. It
+            // fetches itself by id, so the operator still sees the real
+            // card rather than a dead end.
+            projectsPath = [.card(id: id)]
         }
     }
 }
