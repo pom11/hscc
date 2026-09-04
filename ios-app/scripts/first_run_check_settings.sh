@@ -48,7 +48,8 @@ trap 'rm -rf "$TMP"' EXIT
 for marker in \
   "Sources/Shared/SharedModels.swift" \
   "Sources/HSCC/KeychainStore.swift" \
-  "Sources/HSCC/SettingsStore.swift"; do
+  "Sources/HSCC/SettingsStore.swift" \
+  "Sources/HSCC/StateCache.swift"; do
   if [[ ! -f "$marker" ]]; then
     echo "error: missing source $marker (markers moved?)" >&2
     exit 1
@@ -97,6 +98,7 @@ real_sources=(
   "$TMP/SharedModels.swift"
   "Sources/HSCC/KeychainStore.swift"
   "Sources/HSCC/SettingsStore.swift"
+  "Sources/HSCC/StateCache.swift"
 )
 harness=(scripts/first_run_check_settings/main.swift)
 

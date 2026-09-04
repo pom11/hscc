@@ -103,6 +103,7 @@ targets:
       - path: Sources/HSCC/DeepLink.swift
       - path: Sources/HSCC/HSCCClient.swift
       - path: Sources/HSCC/ConnectionMonitor.swift
+      - path: Sources/HSCC/StateCache.swift
       # Offline queue (t_42ba90d2): app-scoped, persisted outbound chat queue
       # flushed when ConnectionMonitor reports reachable again.
       - path: Sources/HSCC/OfflineSendQueue.swift
