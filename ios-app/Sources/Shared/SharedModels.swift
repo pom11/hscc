@@ -69,6 +69,99 @@ struct AutodownStatusResponse: Decodable, Speakable {
     let speak: String
 }
 
+// ---------------------------------------------------------------------------
+// Kanban board work signals (cluster-wide card counts for the widget)
+// ---------------------------------------------------------------------------
+//
+// NOTE ON NAMING: these deliberately carry the `Lite` suffix and do NOT reuse
+// the app-only names (`KanbanBlockedResponse`, `KanbanStaleResponse` live in
+// Sources/HSCC/Models.swift — the app target compiles BOTH Models.swift AND
+// SharedModels.swift, so reusing those names is an "invalid redeclaration").
+// The widget target compiles ONLY SharedModels.swift, so these are its own
+// minimal decoders.
+
+/// GET /v1/kanban/running — running tasks across ALL boards + kill detail.
+///
+/// This is the strongest "what is the fleet DOING" signal: it names exactly
+/// what a kill would stop, each running task carrying its board, id, title,
+/// assignee, and PID (real worker processes). The widget shows `count` — cards
+/// actually being worked right now. Fields kept optional so a decode skips
+/// gracefully if the server adds/removes keys.
+struct KanbanRunningLite: Decodable {
+    let boards: [String]?
+    let tasks: [RunningCardLite]?
+    let errors: [String]?
+    let count: Int?
+    let speak: String?
+}
+
+/// One running card from /v1/kanban/running. The widget only needs `count`
+/// from the envelope, but the per-card shape is decoded so the field set stays
+/// anchored to the real API (routes_kanban.py handle_kanban_running):
+/// `{ board, id, title, assignee, status, pid, host_local, started_at }`.
+struct RunningCardLite: Decodable {
+    let board: String?
+    let id: String
+    let title: String?
+    let assignee: String?
+    let status: String?
+    let pid: Int?
+    let host_local: Bool?
+    let started_at: String?
+}
+
+/// GET /v1/kanban/blocked — blocked cards across ALL boards + why.
+///
+/// Blocked = work stuck waiting (a failure / attention signal) — the widget's
+/// "failure indicator". `count` is the number of blocked cards. Shape from
+/// routes_kanban.py: `{ boards:Int, tasks, errors, count }`.
+struct KanbanBlockedLite: Decodable {
+    let boards: Int?
+    let tasks: [BlockedCardLite]?
+    let errors: [String]?
+    let count: Int?
+    let speak: String?
+}
+
+/// One blocked card. Only `count` drives the widget, but the per-card shape is
+/// decoded to stay anchored to the API: `{ board, id, status, assignee,
+/// age_days, block_kind, why, title, comments }`.
+struct BlockedCardLite: Decodable {
+    let board: String?
+    let id: String
+    let status: String?
+    let assignee: String?
+    let age_days: Int?
+    let block_kind: String?
+    let title: String?
+}
+
+/// GET /v1/kanban/stale?older_than=0 — every non-terminal card across ALL
+/// boards, with per-card `status`. The widget derives BOARD QUEUE DEPTH from
+/// this: cards whose status is `ready`/`todo` are sitting in the queue waiting
+/// to be picked up. Shape from autodown.list_stale_tasks (autodown.py:439):
+/// `{ board, id, status, assignee, age_days, title }`, envelope
+/// `{ boards:[String], tasks, errors, older_than, count }`.
+struct KanbanStaleLite: Decodable {
+    let boards: [String]?
+    let tasks: [StaleCardLite]?
+    let errors: [String]?
+    let older_than: Int?
+    let count: Int?
+    let speak: String?
+}
+
+/// One non-terminal card from /v1/kanban/stale. `status` is what we actually
+/// read — the widget counts `ready`/`todo` as queued work.
+struct StaleCardLite: Decodable {
+    let board: String?
+    let id: String
+    let status: String?
+    let assignee: String?
+    let age_days: Int?
+    let title: String?
+}
+
 /// A saved cluster the operator can connect to: a named host/port/token set.
 ///
 /// The app holds a LIST of these (SettingsStore) so an operator can keep
@@ -145,6 +238,12 @@ enum AppGroup {
     static let snapNodes = "hscc.snap.nodes"
     static let snapTimestampKey = "hscc.snap.timestamp"
     static let snapErrorKey = "hscc.snap.error"
+    // Last-known board work counts (see ClusterWidget fetch): cards running,
+    // card queue depth, and blocked cards (the failure indicator). Persisted so
+    // an unreachable window can still show the last-known work with its age.
+    static let snapRunningKey = "hscc.snap.running"
+    static let snapQueueKey = "hscc.snap.queue"
+    static let snapBlockedKey = "hscc.snap.blocked"
 }
 
 /// A lightweight read of the token from the SHARED Keychain access group.
@@ -331,7 +430,8 @@ enum SnapshotStore {
     }
 
     /// Save the current successful snapshot.
-    static func save(state: ClusterState, modelCount: Int?, idleMinutes: Int?, pairs: [TopologyPair]) {
+    static func save(state: ClusterState, modelCount: Int?, idleMinutes: Int?, pairs: [TopologyPair],
+                     running: Int?, queueDepth: Int?, blocked: Int?) {
         let d = suite
         d?.set(state.rawValue, forKey: AppGroup.snapStateKey)
         if let modelCount { d?.set(modelCount, forKey: AppGroup.snapModelCountKey) }
@@ -339,6 +439,11 @@ enum SnapshotStore {
         d?.set(encodeNodes(pairs), forKey: AppGroup.snapNodes)
         d?.set(Date().timeIntervalSince1970, forKey: AppGroup.snapTimestampKey)
         d?.removeObject(forKey: AppGroup.snapErrorKey)
+        // Work counts (best-effort; only written when present so a nil keeps
+        // the prior last-known value rather than blanking it).
+        if let running { d?.set(running, forKey: AppGroup.snapRunningKey) }
+        if let queueDepth { d?.set(queueDepth, forKey: AppGroup.snapQueueKey) }
+        if let blocked { d?.set(blocked, forKey: AppGroup.snapBlockedKey) }
     }
 
     /// Load the last-known snapshot, or nil if none was ever recorded.
@@ -354,6 +459,16 @@ enum SnapshotStore {
             return Date(timeIntervalSince1970: t)
         }()
         return (state, modelCount, idleMinutes, nodes, timestamp)
+    }
+
+    /// Load just the last-known board work counts (running / queue depth /
+    /// blocked). Each is nil when never recorded. Used by the unreachable
+    /// widget view so a stale window still shows what the fleet WAS doing.
+    static func workCounts() -> (running: Int?, queueDepth: Int?, blocked: Int?) {
+        let d = UserDefaults(suiteName: AppGroup.suiteName)
+        return (d?.object(forKey: AppGroup.snapRunningKey) as? Int,
+                d?.object(forKey: AppGroup.snapQueueKey) as? Int,
+                d?.object(forKey: AppGroup.snapBlockedKey) as? Int)
     }
 
     /// Keep the timestamp from a prior snapshot even when the current fetch
