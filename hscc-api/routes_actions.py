@@ -13,6 +13,11 @@ Backing (libraries, never CLI text-parsing — the same rule as A2/A3):
   * ``POST /v1/template/apply``     -> ``cluster_template_cli.cmd_cluster_template``
       exactly as ``hscc_daemon/hscc.py:_handle_template`` loads it
   * ``POST /v1/cluster/stop``       -> ``hscc-cluster.hscc.cmd_stop``
+  * ``POST /v1/cards/{id}/comment`` -> ``flightdeck.core.kanban.add_card_comment``
+  * ``POST /v1/cards/{id}/block``   -> ``flightdeck.core.kanban.block_card``
+  * ``POST /v1/cards/{id}/close``   -> ``flightdeck.core.kanban.close_card``
+  * ``PATCH /v1/cards/{id}``        -> ``flightdeck.core.kanban.edit_card`` (assignee only)
+      — title/body are NOT backed by a kanban_db mutation, so only assignee is editable
 
 Test seam: every backing call goes through a ``_backing_*`` module function so
 tests can monkeypatch them without ever creating a card, merging a branch,
@@ -103,6 +108,32 @@ def _require_confirm(data: dict, what: str) -> None:
 def _backing_create_task(board, title, assignee=None, body=None, _kdb=None):
     """Dispatch a card via flightdeck ``kanban.create_task``."""
     return _kanban.create_task(board, title, assignee=assignee, body=body, _kdb=_kdb)
+
+
+def _backing_add_comment(card_id, body, author=None, _kdb=None):
+    """Add a comment via flightdeck ``kanban.add_card_comment``; returns comment id."""
+    return _kanban.add_card_comment(card_id, body, author=author, _kdb=_kdb)
+
+
+def _backing_block_card(card_id, reason=None, kind=None, _kdb=None):
+    """Block a card via flightdeck ``kanban.block_card``; returns bool."""
+    return _kanban.block_card(card_id, reason, kind=kind, _kdb=_kdb)
+
+
+def _backing_complete_card(card_id, result=None, _kdb=None):
+    """Complete/close a card via flightdeck ``kanban.close_card``; returns bool.
+
+    Named ``complete`` (not ``close``) to avoid colliding with the pre-existing
+    ``_backing_close_card(card_id, board)`` seam used by the merge handler
+    (which archives via ``_real_close_card``). This one completes via
+    ``kanban_db.complete_task``.
+    """
+    return _kanban.close_card(card_id, result=result, _kdb=_kdb)
+
+
+def _backing_edit_card(card_id, assignee=None, _kdb=None):
+    """Edit a card (assignee) via flightdeck ``kanban.edit_card``; returns bool."""
+    return _kanban.edit_card(card_id, assignee=assignee, _kdb=_kdb)
 
 
 def _backing_resolve_card(card_id, ctx):
@@ -317,6 +348,160 @@ def handle_cluster_stop(server, ctx, query, body):
     }
 
 
+def _resolve_card_or_404(card_id):
+    """Resolve a card via flightdeck ``find_card``; 404 when not found.
+
+    ``find_card`` returns a flightdeck card dict (with ``board`` / optionally
+    ``_board_path``) or None. Backing functions re-open the owning board's DB
+    via that path, so this handler only needs confirmation the card EXISTS.
+    """
+    card = _kanban.find_card(card_id)
+    if card is None:
+        raise ApiError(
+            404, "not_found",
+            f"card {card_id!r} not found",
+            f"Card {card_id} could not be found.",
+        )
+    return card
+
+
+def handle_card_comment(server, ctx, query, body):
+    """POST /v1/cards/{card_id}/comment — comment on a card (confirm-gated).
+
+    Requires ``body`` (the comment text) AND ``author`` (the DB's
+    ``kanban_db.add_comment`` hard-requires a non-empty author). Returns the
+    new comment id.
+    """
+    data = _parse_body(body)
+    _require_confirm(data, "comment on this card")
+    card_id = query.get("card_id")
+    if card_id is None or not str(card_id).strip():
+        raise ApiError(400, "bad_request", "missing card_id")
+    comment_body = data.get("body")
+    if comment_body is None or (isinstance(comment_body, str) and not comment_body.strip()):
+        raise ApiError(400, "bad_request", "missing required field 'body'", "Field body is required.")
+    comment_author = data.get("author")
+    if comment_author is None or (isinstance(comment_author, str) and not comment_author.strip()):
+        raise ApiError(400, "bad_request", "missing required field 'author'", "Field author is required.")
+    _resolve_card_or_404(card_id)
+    try:
+        comment_id = _backing_add_comment(card_id, comment_body, author=comment_author)
+    except Exception as exc:
+        raise ApiError(
+            502, "comment_failed", str(exc), f"Comment could not be added to card {card_id}."
+        )
+    return 200, {
+        "id": str(card_id),
+        "comment_id": int(comment_id),
+        "message": f"added comment to card {card_id}",
+    }
+
+
+def handle_card_block(server, ctx, query, body):
+    """POST /v1/cards/{card_id}/block — block a card (confirm-gated).
+
+    Requires ``reason``. ``kind`` is optional and passed through to
+    ``kanban_db.block_task``.
+    """
+    data = _parse_body(body)
+    _require_confirm(data, "block this card")
+    card_id = query.get("card_id")
+    if card_id is None or not str(card_id).strip():
+        raise ApiError(400, "bad_request", "missing card_id")
+    reason = data.get("reason")
+    if reason is None or (isinstance(reason, str) and not reason.strip()):
+        raise ApiError(400, "bad_request", "missing required field 'reason'", "Field reason is required.")
+    _resolve_card_or_404(card_id)
+    try:
+        ok = bool(_backing_block_card(card_id, reason=reason, kind=data.get("kind")))
+    except Exception as exc:
+        raise ApiError(
+            502, "block_failed", str(exc), f"Card {card_id} could not be blocked."
+        )
+    if not ok:
+        return 200, {
+            "id": str(card_id),
+            "blocked": False,
+            "message": f"card {card_id} could not be blocked (may already be blocked)",
+        }
+    return 200, {
+        "id": str(card_id),
+        "blocked": True,
+        "message": f"blocked card {card_id}",
+    }
+
+
+def handle_card_close(server, ctx, query, body):
+    """POST /v1/cards/{card_id}/close — complete/close a card (confirm-gated).
+
+    ``result`` is optional and passed through to ``kanban_db.complete_task``.
+    """
+    data = _parse_body(body)
+    _require_confirm(data, "close this card")
+    card_id = query.get("card_id")
+    if card_id is None or not str(card_id).strip():
+        raise ApiError(400, "bad_request", "missing card_id")
+    _resolve_card_or_404(card_id)
+    try:
+        ok = bool(_backing_complete_card(card_id, result=data.get("result")))
+    except Exception as exc:
+        raise ApiError(
+            502, "close_failed", str(exc), f"Card {card_id} could not be closed."
+        )
+    if not ok:
+        return 200, {
+            "id": str(card_id),
+            "closed": False,
+            "message": f"card {card_id} could not be closed (may already be closed)",
+        }
+    return 200, {
+        "id": str(card_id),
+        "closed": True,
+        "message": f"closed card {card_id}",
+    }
+
+
+def handle_card_edit(server, ctx, query, body):
+    """PATCH /v1/cards/{card_id} — edit a card (confirm-gated, assignee only).
+
+    NOTE: only ``assignee`` is editable. kanban_db exposes no backing mutation
+    for a card's ``title`` or ``body``, so those fields are not accepted here —
+    editing them via this route is not backed and is out of scope (see
+    ``flightdeck.core.kanban.edit_card``). Pass ``assignee`` to re-assign.
+    """
+    data = _parse_body(body)
+    _require_confirm(data, "edit this card")
+    card_id = query.get("card_id")
+    if card_id is None or not str(card_id).strip():
+        raise ApiError(400, "bad_request", "missing card_id")
+    assignee = data.get("assignee")
+    if assignee is None:
+        raise ApiError(
+            400, "bad_request",
+            "only 'assignee' is editable (title/body have no backing DB mutation)",
+            "Field assignee is required (only the assignee is editable).",
+        )
+    _resolve_card_or_404(card_id)
+    try:
+        ok = bool(_backing_edit_card(card_id, assignee=assignee))
+    except Exception as exc:
+        raise ApiError(
+            502, "edit_failed", str(exc), f"Card {card_id} could not be edited."
+        )
+    if not ok:
+        return 200, {
+            "id": str(card_id),
+            "edited": False,
+            "message": f"card {card_id} could not be edited",
+        }
+    return 200, {
+        "id": str(card_id),
+        "edited": True,
+        "assignee": assignee,
+        "message": f"edited card {card_id}",
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Route registration (import side-effect; loaded by api_server.py)
 # --------------------------------------------------------------------------- #
@@ -327,3 +512,10 @@ ROUTES.append(
 )
 ROUTES.append(("POST", re.compile(r"^/v1/template/apply$"), handle_template_apply))
 ROUTES.append(("POST", re.compile(r"^/v1/cluster/stop$"), handle_cluster_stop))
+# Card-actions (mutating, confirm-gated). PATCH and the GET routes in
+# routes_project share the same path shape but differ by HTTP method, so they
+# coexist — api_server._dispatch matches on (method, path) together.
+ROUTES.append(("POST", re.compile(r"^/v1/cards/(?P<card_id>[^/]+)/comment$"), handle_card_comment))
+ROUTES.append(("POST", re.compile(r"^/v1/cards/(?P<card_id>[^/]+)/block$"), handle_card_block))
+ROUTES.append(("POST", re.compile(r"^/v1/cards/(?P<card_id>[^/]+)/close$"), handle_card_close))
+ROUTES.append(("PATCH", re.compile(r"^/v1/cards/(?P<card_id>[^/]+)$"), handle_card_edit))
