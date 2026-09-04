@@ -100,6 +100,7 @@ targets:
       # listed is simply not compiled).
       - path: Sources/HSCC/HSCCApp.swift
       - path: Sources/HSCC/ContentView.swift
+      - path: Sources/HSCC/DeepLink.swift
       - path: Sources/HSCC/HSCCClient.swift
       - path: Sources/HSCC/ConnectionMonitor.swift
       # Offline queue (t_42ba90d2): app-scoped, persisted outbound chat queue
@@ -215,6 +216,20 @@ targets:
       properties:
         CFBundleDisplayName: HSCC
         UILaunchScreen: {}
+        # Deep links (t_136762f3): the `hscc://` URL scheme lets a notification,
+        # a Telegram message, or a Mac session open a specific project, card or
+        # session directly instead of starting from the root. CFBundleURLTypes
+        # is what makes the system deliver those URLs to onOpenURL. The
+        # CFBundleURLName is a reverse-DNS identifier, not a live network host.
+        CFBundleURLTypes:
+          - CFBundleTypeRole: Editor
+            CFBundleURLName: com.hscc.ios.deeplink
+            CFBundleURLSchemes:
+              - hscc
+        # Handoff: the advertised NSUserActivity type. A Mac session can
+        # continue a task on the phone (or vice versa) under this activity type.
+        NSUserActivityTypes:
+          - com.hscc.ios.open
         # Declared HERE, not as INFOPLIST_KEY_* build settings: this target has
         # an explicit INFOPLIST_FILE, and XcodeGen REGENERATES that file from
         # this block. A key hand-added to Sources/Info.plist survives only until
