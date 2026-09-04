@@ -265,6 +265,15 @@ struct StreamingChatView: View {
             // command position; selecting a command inserts it into the draft.
             SlashCommandPalette(draft: $store.draft, client: computedClient)
 
+            // Slash-command PREVIEW: once a command name is committed in the
+            // draft ("/name " or "/name args…"), show what it WILL do — what it
+            // targets, what it changes, and whether it is destructive — with an
+            // explicit Run. Destructive commands get the confirm word appended
+            // behind the scenes; read-only / non-destructive stay one-tap.
+            SlashPreviewCard(draft: store.draft, client: computedClient) { text in
+                store.send(text)
+            }
+
             HStack(alignment: .bottom, spacing: Theme.Spacing.sm.rawValue) {
                 TextField("Ask \(project)…", text: $store.draft, axis: .vertical)
                     .lineLimit(1...4)
