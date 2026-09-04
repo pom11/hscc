@@ -1,8 +1,33 @@
 # Chat: attachments and images in the transcript — WIRE GAP report (t_3fc4801c)
 
-Date: 2026-09-03
+Date: 2026-09-03 (initial) / 2026-09-04 (re-audit, run 477)
 Branch: audit/chat-attachments-t_3fc4801c
 Assignee: ios-engineer
+
+## RE-AUDIT (run 477, completed 2026-09-04) — findings still hold, this is the terminal deliverable
+
+Re-claimed after the previous run blocked for review. Re-audited against the CURRENT
+operator dev head (`/Users/desac/dev/hscc`, branch `dev` @ `b2668ba`) and the workspace
+tree. The session-event contract is STILL attachment-less on every path:
+
+- `ProjectsView.swift:217` — `case .chat:` still routes to `StreamingChatView` (the only
+  reachable transcript); OrchestratorChatView is STILL un-instantiated (dead code).
+- `session_event.py` (both workspace + ops `dev`) — still the same seven types
+  (`hello/message/tool_call/card/agent/system/error`); `MessagePayload` is still
+  `{role, delta, done}` with NO image/file field.
+- `StreamingChatStore.swift:408` — the WS send frame is still `{kind:send, text}` only.
+  The WS handler (`hscc-api/routes_ws.py:281`) accepts only text; it has no image path.
+- No attachment type has been added to the wire in the 11h since the first audit.
+
+The card's own rule is explicit and its condition is met: *"if the wire format has no
+attachment type, record exactly what is missing and stop rather than inventing one."*
+Inventing an attachment type or resurrecting the abandoned OrchestratorChatView to bolt
+on a half-feature would violate the rule, so neither is done. THIS document is the
+deliverable. The one REAL, committed image capability — `POST /v1/orchestrator/chat`
+accepting `image_data`/`image_mime` (t_a779c06f) — remains unwired to any reachable iOS
+surface, and DOES NOT help: its reply is the same attachment-less `message` contract, so
+nothing can be rendered back. This is the terminal state; no further iOS work is possible
+until the wire contract is extended by the API owner.
 
 ## Status: NO DELIVERABLE SHIPPED — the session-event contract has no attachment type
 
