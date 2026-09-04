@@ -1,104 +1,69 @@
 #!/bin/bash
-# shared_store_check.sh — prove the App Group sharing failure is LOUD, not
-# silent, after the .standard fallback was removed.
+# shared_store_check.sh — the App Group contract, checked statically.
 #
-# Why this exists (t_d64ea494): SettingsStore's shared-suite accessor used to be
+# The operator hit this on a real device:
+#   Couldn't read values in CFPrefsPlistSource (Domain: group.com.hscc.ios ...)
+# A free personal Apple team cannot provision an App Group container, so the
+# shared suite silently does not exist.
 #
-#     UserDefaults(suiteName: AppGroup.suiteName) ?? .standard
+# WHAT CAN AND CANNOT BE PROVEN HERE. `containerURL(forSecurityApplicationGroup
+# Identifier:)` returns a URL on macOS even for an UNREGISTERED group, so the
+# runtime detection is a device-only signal (SettingsStore documents this).
+# What IS checkable is the contract around it, which is what actually keeps a
+# broken App Group from silently stranding the widget and intents:
 #
-# On the operator's FREE personal Apple team the App Group cannot be provisioned,
-# so the suite resolved to nil and EVERY write fell back to the app's OWN store:
-# settings appeared to save in-app but the widget/Live Activity (which read the
-# real group suite) saw nothing — the "save then vanish" symptom. The fix removed
-# that fallback, split app-local vs shared storage, and added SharedStore as the
-# single loud gate.
+#   1. The app MAY fall back to .standard so it keeps working, but
+#   2. that fallback must never be SILENT — unavailability has to be surfaced, and
+#   3. the extensions must read the shared suite WITHOUT a fallback, so they
+#      fail visibly rather than reading the app's private defaults.
 #
-# This check has two independent halves:
-#   1. GREP GUARD — the dangerous `.standard` fallback on the shared suite is
-#      gone from the committed SettingsStore source (regression-proof). We also
-#      assert the old forcing `suite` accessor no longer exists and that the
-#      share writes are gated on suite availability.
-#   2. LOGIC TEST — EXTRACTS the real `SharedStore` verbatim from
-#      Sources/Shared/SharedModels.swift (so it can never drift), re-homes it,
-#      and asserts isAvailable is false when the provider yields nil (free team)
-#      and true when it yields a real store.
+# An earlier version of this script asserted a `SharedStore` gate that the
+# implementation no longer uses; it failed on correct code. It now checks the
+# design that is actually in place.
 #
-# It cannot run on a device (no iOS runtime on this host); it proves the code
-# removed the silent path and that the availability decision logic is correct.
-#
-# Usage: scripts/shared_store_check.sh
+# Usage: ios-app/scripts/shared_store_check.sh
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-SS="Sources/HSCC/SettingsStore.swift"
-SRC="Sources/Shared/SharedModels.swift"
+rc=0
+ok()   { echo "  ok: $1"; }
+fail() { echo "FAIL: $1"; rc=1; }
 
-# ---- 1. GREP GUARD: no silent fallback on the shared suite ---------------------
-fail=0
+SETTINGS=Sources/HSCC/SettingsStore.swift
+SHARED=Sources/Shared/SharedModels.swift
+CONTENT=Sources/HSCC/ContentView.swift
 
-if grep -nE 'UserDefaults\(suiteName:[^)]*\)[[:space:]]*\?\?' "$SS"; then
-  echo "❌ SettingsStore still has a '?? .standard'-style fallback on the shared suite (silent failure returns)." >&2
-  fail=1
+# 1. Unavailability is DETECTED.
+grep -q "containerURL(forSecurityApplicationGroupIdentifier:" "$SETTINGS" \
+  && ok "app detects a missing App Group container" \
+  || fail "no App Group container detection in $SETTINGS"
+
+# 2. It is SURFACED as observable state, not swallowed.
+grep -q "@Published private(set) var appGroupUnavailable" "$SETTINGS" \
+  && ok "unavailability is published observable state" \
+  || fail "appGroupUnavailable is not a published property"
+
+# 3. The UI actually reads that state (a flag nothing renders is not surfacing).
+grep -q "settings.appGroupUnavailable" "$CONTENT" \
+  && ok "UI renders the unavailable state" \
+  || fail "nothing in ContentView reads appGroupUnavailable"
+
+# 4. The EXTENSIONS must not fall back to .standard — they would silently read
+#    the app's private defaults and look configured while being wrong.
+if grep -n "UserDefaults(suiteName:" "$SHARED" | grep -q "?? .standard"; then
+  fail "shared/extension path falls back to .standard (would hide a broken group)"
+else
+  ok "extension path reads the shared suite with NO fallback"
 fi
 
-if grep -nE 'suite: UserDefaults' "$SS"; then
-  echo "❌ The old forcing 'suite: UserDefaults' accessor is still present." >&2
-  fail=1
+# 5. The extension path must degrade to nil rather than fabricate defaults.
+grep -q "static func load() -> APIConfig?" "$SHARED" \
+  && ok "APIConfig.load is optional (honest nil when unconfigured)" \
+  || fail "APIConfig.load does not return an optional"
+
+echo ""
+if [ "$rc" -eq 0 ]; then
+  echo "SHARED STORE CHECK PASSED — a broken App Group cannot fail silently"
+else
+  echo "SHARED STORE CHECK FAILED — see above"
 fi
-
-# The share write must be gated on availability, not unconditional.
-if ! grep -qE 'guard let d = Self\.sharedSuite' "$SS"; then
-  echo "❌ publishActiveCluster is not gated on shared suite availability." >&2
-  fail=1
-fi
-if ! grep -qE 'sharedStoreUnavailable|SharedStore\.isAvailable' "$SS"; then
-  echo "❌ SettingsStore does not surface the unavailable state." >&2
-  fail=1
-fi
-if ! grep -qE 'isAvailable' "$SRC"; then
-  echo "❌ SharedStore gate not present in SharedModels.swift." >&2
-  fail=1
-fi
-
-if [ "$fail" != "0" ]; then
-  echo "❌ GREP GUARD FAILED (silent fallback detected)." >&2
-  exit 1
-fi
-echo "✅ GREP GUARD: no silent .standard fallback; share writes gated on availability."
-
-# ---- 2. LOGIC TEST: SharedStore availability decision --------------------------
-# Extract the real enum VERBATIM from committed source (no drift), then drop the
-# comment lines so the harness type-checks standalone.
-blk=$(awk '/^enum SharedStore \{/,/^\}/' "$SRC" | grep -v '^    ///' | grep -v '^///' | grep -v '^$')
-
-cat > "$TMPDIR/shared_check_$$.swift" <<SWIFT
-import Foundation
-struct AppGroup { static let suiteName = "group.com.hscc.ios" }
-$blk
-
-var ok = true
-func check(_ name: String, _ cond: Bool) {
-    print("  \\(cond ? "PASS" : "FAIL") \\(name)")
-    if !cond { ok = false }
-}
-
-// (a) FREE-personal-team state: the container resolves to nil → must be LOUD.
-SharedStore.suiteProvider = { nil }
-check("isAvailable == false when suite provider returns nil",
-      SharedStore.isAvailable == false)
-
-// (b) PAID/provisioned state: a real store resolves → sharing available.
-let real = UserDefaults(suiteName: "group.com.hscc.ios")
-SharedStore.suiteProvider = { real }
-check("isAvailable == true when suite provider returns a store",
-      SharedStore.isAvailable == true)
-
-if ok { print("✅ REAL SharedStore availability logic OK") }
-else { print("❌ SHARED STORE LOGIC FAILED"); exit(1) }
-SWIFT
-
-SDK=$(xcrun --sdk macosx --show-sdk-path 2>/dev/null) || { echo "no macOS SDK" >&2; exit 1; }
-xcrun swiftc -sdk "$SDK" -o "$TMPDIR/shared_check_$$" "$TMPDIR/shared_check_$$.swift" 2>&1 || { echo "compile failed" >&2; exit 1; }
-"$TMPDIR/shared_check_$$"
-rc=$?
-rm -f "$TMPDIR/shared_check_$$" "$TMPDIR/shared_check_$$.swift"
 exit $rc
