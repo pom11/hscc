@@ -1,0 +1,102 @@
+{
+  "id": "t_cb93feee",
+  "project": "hscc",
+  "repo": "/Users/desac/dev/hscc",
+  "branch": "audit/show-worker-diffs-t_cb93feee",
+  "base": "main",
+  "offset": 0,
+  "limit": 20,
+  "files": [
+    {
+      "path": "Sources/HSCC/Models.swift",
+      "status": "M",
+      "additions": 12,
+      "deletions": 2,
+      "hunks": [
+        {
+          "header": "@@ -470,6 +470,16 @@ struct ReviewDetailResponse: Decodable, Speakable {",
+          "lines": [
+            { "type": "context", "text": "        let speak: String" },
+            { "type": "context", "text": "    }" },
+            { "type": "context", "text": "}" },
+            { "type": "context", "text": "" },
+            { "type": "context", "text": "/// GET /v1/review/{card_id}/diff — one card's per-file diff (read-only)." },
+            { "type": "context", "text": "///" },
+            { "type": "+", "text": "struct DiffDetailResponse: Decodable, Speakable {" },
+            { "type": "+", "text": "    let id: String?" },
+            { "type": "+", "text": "    let files: [DiffFile]?" },
+            { "type": "+", "text": "    let truncated: Bool?" },
+            { "type": "+", "text": "    let speak: String" },
+            { "type": "+", "text": "}" },
+            { "type": "context", "text": "" },
+            { "type": "context", "text": "/// GET /v1/qa/queue — one pre-merge QA row." }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "Sources/HSCC/HSCCClient.swift",
+      "status": "M",
+      "additions": 16,
+      "deletions": 0,
+      "hunks": [
+        {
+          "header": "@@ -349,6 +349,22 @@ func reviewDetail(_ cardID: String) async throws -> ReviewDetailResponse {",
+          "lines": [
+            { "type": "context", "text": "    var id: String { path ?? UUID().uuidString }" },
+            { "type": "+", "text": "    func cardDiff(_ cardID: String," },
+            { "type": "+", "text": "                  offset: Int? = nil," },
+            { "type": "+", "text": "                  limit: Int? = nil) async throws -> DiffDetailResponse {" },
+            { "type": "+", "text": "        var items: [URLQueryItem] = []" },
+            { "type": "+", "text": "        if let offset { items.append(URLQueryItem(name: \"offset\", value: String(offset))) }" },
+            { "type": "+", "text": "        return try await get(path: path, queryItems: items, as: DiffDetailResponse.self)" },
+            { "type": "+", "text": "    }" },
+            { "type": "context", "text": "    /// GET /v1/qa/queue." }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "docs/show-worker-diffs-gap.md",
+      "status": "A",
+      "additions": 90,
+      "deletions": 0,
+      "hunks": [
+        {
+          "header": "@@ -7,0 +8,12 @@",
+          "lines": [
+            { "type": "+", "text": "## Verdict" },
+            { "type": "+", "text": "" },
+            { "type": "+", "text": "The API serves NO commit diff content." }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "old/deleted.file",
+      "status": "D",
+      "additions": 0,
+      "deletions": 5,
+      "hunks": [
+        {
+          "header": "@@ -1,5 +0,0 @@",
+          "lines": [
+            { "type": "-", "text": "old line one" },
+            { "type": "-", "text": "old line two" }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "assets/logo.png",
+      "status": "M",
+      "additions": 0,
+      "deletions": 0,
+      "hunks": []
+    }
+  ],
+  "file_count": 5,
+  "truncated": true,
+  "total_lines_served": 38,
+  "speak": "3 of 5 files shown (truncated — more available)."
+}
