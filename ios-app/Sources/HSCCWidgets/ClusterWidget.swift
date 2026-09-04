@@ -8,6 +8,12 @@ import WidgetKit
 /// A single widget snapshot. `.unreachable` carries the last-known state and
 /// its age so the widget is never blank or stale-looking-live. `.unconfigured`
 /// is the honest state when the operator hasn't set host/port/token yet.
+///
+/// The board work signals (`runningCards`, `queueDepth`, `blockedCards`) are
+/// the "what the fleet is DOING" half: cards being worked, cards waiting in
+/// the queue, and blocked cards (the failure indicator). Each is optional and
+/// independently nil-able — a failed kanban fetch nils only that field, never
+/// the whole widget (the state/topology live unreachable stay intact).
 struct ClusterEntry: TimelineEntry {
     let date: Date
     let state: ClusterState
@@ -18,6 +24,12 @@ struct ClusterEntry: TimelineEntry {
     let lastKnownAgeMinutes: Int?
     /// Set only when `state == .unconfigured`.
     let configured: Bool
+    /// Cards being worked right now (GET /v1/kanban/running count).
+    let runningCards: Int?
+    /// Cards sitting in the queue waiting to be picked up (ready/todo).
+    let queueDepth: Int?
+    /// Blocked cards needing attention — the failure indicator.
+    let blockedCards: Int?
 
     static let unconfigured = ClusterEntry(date: .now,
                                            state: .unknown,
@@ -25,7 +37,10 @@ struct ClusterEntry: TimelineEntry {
                                            modelCount: nil,
                                            idleMinutesRemaining: nil,
                                            lastKnownAgeMinutes: nil,
-                                           configured: false)
+                                           configured: false,
+                                           runningCards: nil,
+                                           queueDepth: nil,
+                                           blockedCards: nil)
 }
 
 // ---------------------------------------------------------------------------
@@ -40,7 +55,10 @@ struct ClusterTimelineProvider: TimelineProvider {
                      modelCount: 3,
                      idleMinutesRemaining: 34,
                      lastKnownAgeMinutes: nil,
-                     configured: true)
+                     configured: true,
+                     runningCards: 2,
+                     queueDepth: 4,
+                     blockedCards: 1)
     }
 
     func getSnapshot(in context: Context, completion: @escaping (ClusterEntry) -> Void) {
@@ -76,24 +94,34 @@ struct ClusterTimelineProvider: TimelineProvider {
         }
 
         let client = ExtensionClient(config: config!)
-        // Fetch autodown status (drives state + idle) and cluster status
-        // (drives topology + model count) in parallel.
+        // Fetch cluster/autodown (drive state + topology) and the board work
+        // signals (running / queue / blocked) in parallel. Each is independent
+        // and best-effort: a failure nils only its own field, never the widget.
         async let autoTask = client.get("/v1/autodown/status", as: AutodownStatusResponse.self)
         async let clusterTask = client.get("/v1/cluster/status", as: ClusterStatusResponse.self)
-        let (auto, cluster) = await (autoTask, clusterTask)
+        async let runningTask = client.get("/v1/kanban/running", as: KanbanRunningLite.self)
+        async let blockedTask = client.get("/v1/kanban/blocked", as: KanbanBlockedLite.self)
+        async let staleTask = client.get("/v1/kanban/stale", as: KanbanStaleLite.self,
+                                         queryItems: [URLQueryItem(name: "older_than", value: "0")])
+        let (auto, cluster, running, blocked, stale) = await (autoTask, clusterTask, runningTask, blockedTask, staleTask)
 
         guard let auto, let cluster else {
             // Unreachable — fall back to the last-known snapshot for honest
-            // stale data with its age. Never present failure as liveness.
+            // stale data with its age, including the last-known work counts.
+            // Never present failure as liveness.
             if let last = SnapshotStore.load() {
                 let age = last.timestamp.map { Int(Date().timeIntervalSince($0) / 60) } ?? 0
+                let work = SnapshotStore.workCounts()
                 return ClusterEntry(date: .now,
                                     state: .unreachable,
                                     pairs: pairs(fromNodes: last.nodes),
                                     modelCount: last.modelCount,
                                     idleMinutesRemaining: last.idleMinutes,
                                     lastKnownAgeMinutes: age,
-                                    configured: true)
+                                    configured: true,
+                                    runningCards: work.running,
+                                    queueDepth: work.queueDepth,
+                                    blockedCards: work.blocked)
             }
             return ClusterEntry(date: .now,
                                 state: .unreachable,
@@ -101,20 +129,29 @@ struct ClusterTimelineProvider: TimelineProvider {
                                 modelCount: nil,
                                 idleMinutesRemaining: nil,
                                 lastKnownAgeMinutes: nil,
-                                configured: true)
+                                configured: true,
+                                runningCards: nil,
+                                queueDepth: nil,
+                                blockedCards: nil)
         }
 
         let clusterState = Self.resolveState(autodownState: auto.state)
         let pairs = Self.canonicalPairs(up: cluster.total_hosts > 0, state: clusterState)
         let modelCount = cluster.workloads.count
         let idleRemaining = Self.idleRemaining(auto: auto, clusterState: clusterState)
+        let runningCards = running?.count ?? 0
+        let queueDepth = Self.queueDepth(stale: stale)
+        let blockedCards = blocked?.count ?? 0
 
         // Record the last-known good snapshot so a later unreachable window can
         // show yesterday's real state with its age.
         SnapshotStore.save(state: clusterState,
                            modelCount: modelCount,
                            idleMinutes: idleRemaining ?? auto.idle_minutes,
-                           pairs: pairs)
+                           pairs: pairs,
+                           running: runningCards,
+                           queueDepth: queueDepth,
+                           blocked: blockedCards)
 
         return ClusterEntry(date: .now,
                             state: clusterState,
@@ -122,7 +159,10 @@ struct ClusterTimelineProvider: TimelineProvider {
                             modelCount: modelCount,
                             idleMinutesRemaining: idleRemaining,
                             lastKnownAgeMinutes: nil,
-                            configured: true)
+                            configured: true,
+                            runningCards: runningCards,
+                            queueDepth: queueDepth,
+                            blockedCards: blockedCards)
     }
 
     // MARK: - State + topology derivation (honest)
@@ -181,6 +221,21 @@ struct ClusterTimelineProvider: TimelineProvider {
         let elapsed = Date().timeIntervalSince(date) / 60
         let remaining = Int(limit) - Int(elapsed)
         return max(remaining, 0)
+    }
+
+    /// Board queue depth — cards sitting in the queue waiting to be picked up.
+    ///
+    /// Derived from /v1/kanban/stale (all non-terminal cards with per-card
+    /// `status`): queue depth = cards whose status is `ready` or `todo` — work
+    /// the dispatcher has not yet started. Skips the running/claimed cards (in
+    /// progress) and any other status. Returns nil when the stale list is
+    /// absent, so a failed fetch omits the metric instead of showing a false 0.
+    private static func queueDepth(stale: KanbanStaleLite?) -> Int? {
+        guard let tasks = stale?.tasks else { return nil }
+        return tasks.reduce(0) { acc, card in
+            guard let s = card.status?.lowercased() else { return acc }
+            return (s == "ready" || s == "todo") ? acc + 1 : acc
+        }
     }
 
     private func pairs(fromNodes nodes: [TopologyNode]) -> [TopologyPair] {
