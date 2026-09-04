@@ -197,6 +197,10 @@ struct ClusterView: View {
                    subtitle: "tail the daemon, API, or worker log — redacted") {
                 LogsView(client: client)
             }
+            hubRow("Self-Heal History", systemImage: "clock.arrow.circlepath",
+                   subtitle: "what automation decided — restarts, blocks, autodown") {
+                SelfHealHistoryView(client: client)
+            }
             hubRow("Fleet", systemImage: "wave.3.right",
                    subtitle: "stats, throughput, streams, autoscale") {
                 FleetView(client: client)

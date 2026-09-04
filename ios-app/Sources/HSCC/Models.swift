@@ -1396,3 +1396,75 @@ enum LogSource: String, CaseIterable, Identifiable {
 
 /// GET /v1/logs?source=…&limit=… — the bounded log tail (bare array).
 typealias LogsResponse = [LogEntry]
+
+// MARK: - /v1/daemon/history — automated-action timeline
+
+/// The kinds of automated action the daemon records (mirrors the backend
+/// classifier in routes_history.py). Stays a String at the wire so the app
+/// tolerates a new kind the backend may add later (renders via label()).
+enum HistoryEventKind: String, Codable {
+    case restart
+    case block
+    case autodown
+    case recovery
+    case escalate
+
+    /// User-facing label for the timeline row chip.
+    var label: String {
+        switch self {
+        case .restart:  return "Restart"
+        case .block:    return "Block"
+        case .autodown: return "Autodown"
+        case .recovery: return "Recovery"
+        case .escalate: return "Escalation"
+        }
+    }
+}
+
+/// Outcome of one automated action (server normalized: success / failed /
+/// cleared / attempt / wake / started / recon / info). The view resolves it
+/// to a tint; unknown server values fall through to `.info`.
+enum HistoryOutcome: String {
+    case success, failed, cleared, attempt, wake, started, recon, info
+}
+
+/// One entry on the automation timeline: an automated action decision with its
+/// timestamp and outcome. A server-collapsed run carries ``repeats`` (>1) and
+/// ``lastTs`` so the row can show duration.
+struct HistoryEvent: Decodable, Identifiable {
+    let timestamp: String?
+    /// kind / outcome come back as arbitrary strings; decode into the enum
+    /// when it is known, else fall through to a generic text row.
+    let kind: HistoryEventKind?
+    let outcome: String?
+    /// How many raw log lines the collapsed run spans (1 = single event).
+    let repeats: Int?
+    /// Timestamp of the run's final line (only present when repeats > 1).
+    let lastTs: String?
+    /// The redacted source line describing the action.
+    let detail: String?
+
+    /// Resolved outcome for display (unknown server values -> .info).
+    var resolvedOutcome: HistoryOutcome { HistoryOutcome(rawValue: outcome ?? "") ?? .info }
+
+    var id: String { (timestamp ?? "") + "|" + (kind?.rawValue ?? "?") + "|" + (outcome ?? "") + "|" + (detail ?? "") }
+
+    enum CodingKeys: String, CodingKey {
+        case timestamp, kind, outcome, repeats, lastTs = "last_ts", detail
+    }
+}
+
+/// GET /v1/daemon/history — the structured automated-action timeline.
+struct HistoryResponse: Decodable {
+    let events: [HistoryEvent]
+    let count: Int?
+    let windowBytes: Int?
+    let exhausted: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case events, count
+        case windowBytes = "window_bytes"
+        case exhausted
+    }
+}
+
