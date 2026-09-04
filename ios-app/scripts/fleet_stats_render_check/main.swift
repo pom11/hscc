@@ -62,7 +62,12 @@ if let byDay = state.completions?.by_day, !byDay.isEmpty {
     let sortedDays = byDay.keys.sorted()
     print("\nBY DAY (chronological, bar width ∝ value/max \(maxValue), full width 140):")
     check(sortedDays == byDay.keys.sorted(), "sorted chronologically")
-    check(sortedDays.last == "2026-09-03", "newest day sorted last: \(sortedDays.last ?? "nil")")
+    // Assert the ORDERING PROPERTY, not a literal date. This used to pin
+    // "2026-09-03", so the check failed on every subsequent day regardless of
+    // whether the code was correct — a harness that rots by the calendar
+    // teaches the operator to ignore a red run.
+    check(sortedDays.last == byDay.keys.max(),
+          "newest day sorted last: \(sortedDays.last ?? "nil")")
     for date in sortedDays {
         let value = byDay[date] ?? 0
         let width = Int(Double(value) / Double(maxValue) * 140)
