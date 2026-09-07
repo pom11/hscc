@@ -56,7 +56,7 @@ struct BoardHygieneView: View {
     }
 
     private var notConfiguredView: some View {
-        HSConnectGate(systemImage: "broom", verb: "to manage boards")
+        HSConnectGate(systemImage: "wand.and.sparkles", verb: "to manage boards")
     }
 
     // MARK: - Blocked pane

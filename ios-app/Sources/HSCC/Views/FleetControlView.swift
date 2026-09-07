@@ -67,7 +67,7 @@ struct FleetControlView: View {
 
     @ViewBuilder
     private var appliedSection: some View {
-        HSSectionCard(title: "Applied Template", systemImage: "rectangle.stack.badge.checkmark") {
+        HSSectionCard(title: "Applied Template", systemImage: "checkmark.rectangle.stack") {
             switch status {
             case .loading:
                 ProgressView()

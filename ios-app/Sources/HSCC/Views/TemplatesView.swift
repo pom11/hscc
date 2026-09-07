@@ -102,7 +102,7 @@ struct TemplatesView: View {
     @ViewBuilder
     private var appliedCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("Applied Template", systemImage: "rectangle.stack.badge.checkmark")
+            Label("Applied Template", systemImage: "checkmark.rectangle.stack")
                 .font(.headline)
             switch status {
             case .loading:

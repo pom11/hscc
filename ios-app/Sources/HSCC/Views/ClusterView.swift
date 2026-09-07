@@ -219,7 +219,7 @@ struct ClusterView: View {
                    subtitle: "the idle power-down you can arm or wake") {
                 AutodownView(client: client)
             }
-            hubRow("Board Hygiene", systemImage: "broom",
+            hubRow("Board Hygiene", systemImage: "wand.and.sparkles",
                    subtitle: "blocked and stale cards across every board") {
                 BoardHygieneView(client: client)
             }
