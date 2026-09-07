@@ -1,10 +1,23 @@
 #!/bin/bash
 # shared_store_check.sh — the App Group contract, checked statically.
 #
-# The operator hit this on a real device:
+# ORIGIN, AND THE CORRECTION. This started from a device console line:
 #   Couldn't read values in CFPrefsPlistSource (Domain: group.com.hscc.ios ...)
-# A free personal Apple team cannot provision an App Group container, so the
-# shared suite silently does not exist.
+#   Using kCFPreferencesAnyUser with a container is only allowed for System
+#   Containers
+# It was first read as proof that a free personal Apple team cannot provision
+# the App Group. That conclusion was WRONG. On 2026-09-07 the operator checked
+# the device with the group-unavailable banner shipped and wired: NO banner.
+# The container is provisioned and the shared suite works. That cfprefsd line
+# is common benign noise and is NOT evidence of a broken App Group.
+#
+# The reliable signal is containerURL(forSecurityApplicationGroupIdentifier:),
+# which returns nil on iOS when the group is genuinely missing — that is what
+# SettingsStore checks and what the banner reflects. Do not re-diagnose this
+# from console output alone.
+#
+# The contract below is still worth enforcing: it is what makes a REAL App
+# Group failure loud instead of silently stranding the widget and intents.
 #
 # WHAT CAN AND CANNOT BE PROVEN HERE. `containerURL(forSecurityApplicationGroup
 # Identifier:)` returns a URL on macOS even for an UNREGISTERED group, so the

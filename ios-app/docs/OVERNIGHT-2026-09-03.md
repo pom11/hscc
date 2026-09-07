@@ -33,8 +33,13 @@ on this host, so device behaviour is the one thing only you can confirm.
 
 ## What I could not verify
 
-- **App Group container fails on device** (`t_d64ea494`) — still open. Most
-  likely the free personal Apple team; needs your device to confirm.
+- **App Group container fails on device** (`t_d64ea494`) — RESOLVED 2026-09-07,
+  and the guess below was wrong. The operator checked the device with the
+  group-unavailable banner shipped and wired: no banner, container provisioned,
+  shared suite working. The cfprefsd console line is benign noise, not a free
+  personal team limit (App Groups DO work on free teams; the real free-tier
+  limits are push, CloudKit and iCloud). Original note, kept for the record:
+  "Most likely the free personal Apple team; needs your device to confirm."
 - Anything requiring a real camera, real Lock Screen, real Siri, or real
   backgrounding. The logic behind each is harness-tested; the surface is not.
 
