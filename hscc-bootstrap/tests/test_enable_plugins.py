@@ -173,6 +173,34 @@ def test_routing_preserves_operator_choices(tmp_path):
     assert out["delegation"]["base_url"] == "http://my-proxy:9000/v1"
 
 
+def test_delegation_low_cap_survives_reconcile(tmp_path):
+    # The operator bug: max_concurrent_children 2 was silently flipped to the
+    # default 9 on every enable() run, because the old guard only PRESERVED
+    # values LARGER than the default and raised smaller ones toward it. A lower
+    # operator cap is STRICTER (throttles fan-out — a safety brake), so a
+    # bootstrap must preserve it, exactly as kanban max_in_progress is. Run a
+    # full reconcile over a config whose capacity is deliberately 2 and prove
+    # it stays 2.
+    cfg = _fully_wired_cfg()
+    cfg["delegation"]["max_concurrent_children"] = 2  # operator's cap, below default
+    path = _write(tmp_path / "config.yaml", cfg)
+    res = enable_plugins.enable(path)
+    # Nothing changed at all — the reconcile is a no-op over the operator config.
+    assert "max_concurrent_children" not in res["delegation"]
+    assert yaml.safe_load(open(path))["delegation"]["max_concurrent_children"] == 2
+
+
+def test_delegation_string_cap_preserved(tmp_path):
+    # A cap stored int-like as a digit string ("2") is an operator value and
+    # must survive, matching how the kanban caps treat int-like values.
+    cfg = _fully_wired_cfg()
+    cfg["delegation"]["max_concurrent_children"] = "2"
+    path = _write(tmp_path / "config.yaml", cfg)
+    res = enable_plugins.enable(path)
+    assert "max_concurrent_children" not in res["delegation"]
+    assert yaml.safe_load(open(path))["delegation"]["max_concurrent_children"] == "2"
+
+
 def test_fallback_seeded_when_absent(tmp_path):
     """M5: a fresh config gets a worker-LB fallback provider."""
     path = _write(tmp_path / "config.yaml",
