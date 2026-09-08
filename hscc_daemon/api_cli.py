@@ -7,7 +7,10 @@ conventions from ``daemon_ops`` (parameterized to the API's own ``api.pid`` /
 (loopback default, tailnet opt-in, NEVER 0.0.0.0). All HTTP handling lives in
 the server module; this file only manages the background process lifecycle.
 
-Reference: docs/DESIGN-api.md §C (Operational shape, `hscc api` verb group).
+On ``start`` we also run the payload-drift check (``verify.check_plugin_payload``)
+so an API that will serve an installed (possibly stale) payload cannot start
+silently. Reference: docs/DESIGN-api.md §C (Operational shape, `hscc api` verb
+group).
 """
 
 import os
@@ -18,6 +21,7 @@ from pathlib import Path
 
 from hscc_daemon import daemon_ops
 from hscc_daemon import qr_code
+from hscc_daemon import verify
 
 # The API server is a SEPARATE background process from the monitoring daemon,
 # so it gets its own PID + log files (distinct from daemon.pid / daemon.log).
@@ -191,6 +195,46 @@ def _sigterm_handler(signum, frame):
     os._exit(0)
 
 
+def _warn_payload_drift(repo_root=None, plugins_dir=None):
+    """Run the payload-drift check and warn LOUDLY on drift, silently otherwise.
+
+    Uses ``verify.check_plugin_payload`` — the SAME check already wired into
+    ``hscc verify`` (run_all), so there is one source of truth for the diff. On
+    a real user install there is no repo checkout to diff against, in which
+    case the check returns ``ok=None`` and we say nothing and start normally
+    (graceful degrade). Only ``ok=False`` (actual drift) prints the warning
+    naming the drifted plugins and the exact remedy.
+
+    ``repo_root`` / ``plugins_dir`` are injectable for tests (defaults go to
+    the real repo root and ``~/.hermes/plugins``).
+    """
+    try:
+        res = verify.check_plugin_payload(
+            repo_root=repo_root, plugins_dir=plugins_dir)
+    except Exception as exc:  # never let the drift check block startup
+        print(f"Warning: payload-drift check failed ({exc})", file=sys.stderr)
+        return
+    if res is None or res.get("ok") is not False:
+        # ok=None: no repo checkout -> nothing to diff, start normally.
+        # ok=True:  installed payload matches the repo.
+        return
+    print(
+        "\n"
+        "====================================================================\n"
+        "WARNING: the INSTALLED payload differs from this repo. `hscc api`\n"
+        "serves ~/.hermes/plugins, NOT the repo — merging here did not deploy.\n"
+        "\n"
+        + "  " + (res.get("detail") or "installed payload differs from repo")
+        + "\n"
+        "\n"
+        "Fix: re-deploy the repo state to ~/.hermes/plugins:\n"
+        "    python3 hscc-bootstrap/install_payload.py\n"
+        "then restart the API. Startup continues anyway (a stale payload that\n"
+        "still boots is better than an API that refuses to start).\n"
+        "====================================================================\n"
+    )
+
+
 def _handle_start(argv):
     """`hscc api start` — resolve bind/config + token, fork into background.
 
@@ -204,6 +248,11 @@ def _handle_start(argv):
     if existing:
         print(f"HSCC API already running (PID {existing})")
         return 0
+
+    # Surface installed-payload drift at the moment it matters: the API serves
+    # the INSTALLED payload, so before we start it, check that payload against
+    # the repo. Silent on ok=None (no repo) / ok=True (match); loud on drift.
+    _warn_payload_drift()
 
     # Fail-closed BEFORE forking: resolve bind/port + validate/generate the
     # token. We never fork a child that would then fail on disk state we can

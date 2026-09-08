@@ -264,11 +264,15 @@ def _ensure_delegation(cfg):
         if not (d.get(key) or "").strip():
             d[key] = want
             changed.append(key)
-    # Subagent parallelism: only RAISE toward the default (never lower a
-    # deliberately higher value). Spawn depth is left to Hermes' default (flat) —
-    # nesting is opt-in and not set here.
+    # Subagent parallelism (`delegation.max_concurrent_children`). Mirror the
+    # kanban-concurrency pattern (_ensure_kanban_routing): a LOWER operator value
+    # is deliberate — it throttles fan-out to protect the fleet under load — so
+    # we preserve it and NEVER raise it back toward the default. Only fill when
+    # the key is absent or not an int-like value. This is a safety cap; silently
+    # replacing the operator's 2 with 9 is exactly the reversion a bootstrap
+    # must not do.
     cur = d.get("max_concurrent_children")
-    if not isinstance(cur, int) or cur < MAX_CONCURRENT_CHILDREN:
+    if not _is_int_like(cur):
         d["max_concurrent_children"] = MAX_CONCURRENT_CHILDREN
         changed.append("max_concurrent_children")
     return changed
