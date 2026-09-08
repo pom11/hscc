@@ -1,8 +1,9 @@
 """project_lifecycle.py — orchestration for `flightdeck project new`.
 
-Wires the five lifecycle steps — git repo, telegram topic, kanban board,
-ROADMAP.md, registry entry — into one idempotent command, under the hard rule
-that partial failure never leaves a half-registered project.
+Wires the lifecycle steps — git repo, telegram topic, kanban board,
+ROADMAP.md, orchestrator profile + chat session, registry entry — into one
+idempotent command, under the hard rule that partial failure never leaves a
+half-registered project.
 
 It does NOT edit the existing core modules (registry / git_state / kanban /
 telegram); it composes them. The only new things here are the orchestration of
@@ -329,6 +330,120 @@ def ensure_registry(
 
 
 # --------------------------------------------------------------------------- #
+# Step 6 — orchestrator profile (<name>-orch) + chat session (<name>)
+# --------------------------------------------------------------------------- #
+
+def _orch_profile_name(name: str) -> str:
+    """The orchestrator profile name for a project: ``<name>-orch``."""
+    return f"{name}-orch"
+
+
+def ensure_profile(name: str, _run=None) -> str:
+    """Step 6a — ensure the ``<name>-orch`` orchestrator profile exists.
+
+    The chat transport is ``hermes -p <name>-orch ...``. Before this step,
+    ``flightdeck project new`` registered a project but created no such
+    profile, so a brand-new project could never be chatted with — hermes
+    errors ``Profile '<name>-orch' does not exist`` and the transport has no
+    fallback. This makes provisioning the profile part of the lifecycle.
+
+    Idempotent via the injectable ``_run`` seam (same as every other
+    subprocess step): if ``hermes profile list`` already shows the profile it
+    is a no-op ``skipped``, NEVER an error. Returns ``created`` | ``skipped``.
+    Raises :class:`LifecycleError` only when the create command itself fails
+    for a reason other than the profile existing.
+    """
+    profile = _orch_profile_name(name)
+    # Existence probe. A nonzero probe (unreadable environment) is NOT an
+    # error — it just proceeds to create, and create reports the truth.
+    listed = _run_cmd(["hermes", "profile", "list"], os.getcwd(), _run)
+    exists = (
+        listed.returncode == 0 and profile in (listed.stdout or "").split()
+    )
+    if exists:
+        return "skipped"
+    created = _run_cmd(["hermes", "profile", "create", profile], os.getcwd(), _run)
+    if created.returncode != 0:
+        raise LifecycleError(
+            f"hermes profile create {profile} failed: "
+            f"{(created.stderr or '').strip() or '(no error output)'}"
+        )
+    return "created"
+
+
+def _open_profile_session_db(profile: str):
+    """Open ``<profile>``'s state.db via Hermes' own SessionDB, or None.
+
+    Mirrors ``routes_orchestrator._open_profile_session_db`` (same call
+    sequence, same fail-safe-to-None) so this module and the REST chat handler
+    agree on what "the project's session" is. Returns ``None`` when the
+    profile is unresolvable or has no state.db — the caller then reports an
+    honest step failure rather than guessing.
+    """
+    try:
+        from hermes_cli import profiles as profiles_mod
+        from hermes_state import SessionDB
+        canon = profiles_mod.normalize_profile_name(profile)
+        profiles_mod.validate_profile_name(canon)
+        if not profiles_mod.profile_exists(canon):
+            return None
+        db_path = Path(profiles_mod.get_profile_dir(canon)) / "state.db"
+        if not db_path.exists():
+            return None
+        return SessionDB(db_path=db_path)
+    except Exception:
+        return None
+
+
+def _resolve_session_db(profile, _session_db):
+    """Resolve the session-db provider seam (default: open the real profile)."""
+    return _session_db if _session_db is not None else _open_profile_session_db
+
+
+def ensure_session(name: str, profile: str, _session_db=None) -> dict:
+    """Step 6b — ensure a Hermes session titled ``name`` exists on ``profile``.
+
+    Identical to ``routes_orchestrator._ensure_session_exists`` (the REST
+    chat handler's own back-fill, reused here rather than reimplemented
+    divergent): open the profile's state.db and, when no session is titled
+    ``name``, create one via ``create_session`` + ``set_session_title``.
+
+    Idempotent + never clobbers: an existing titled session is left exactly as
+    it is. Returns ``{"status": "exists"}`` when already present, or
+    ``{"status": "created", "session": <id>, "title": name}``. Raises
+    :class:`LifecycleError` when the profile has no usable state.db, so the
+    caller records it as a step failure that ``repair`` retries idempotently.
+    """
+    opener = _resolve_session_db(profile, _session_db)
+    db = opener(profile)
+    if db is None:
+        raise LifecycleError(
+            f"profile {profile!r} has no state.db — cannot ensure session "
+            f"'{name}'"
+        )
+    import time as _t
+    import uuid as _u
+    try:
+        if db.resolve_session_by_title(name):
+            return {"status": "exists"}
+        new_id = f"{_t.strftime('%Y%m%d')}_first_{_u.uuid4().hex[:6]}"
+        db.create_session(
+            new_id, source="cli", model="orchestrator-model", profile_name=profile
+        )
+        db.set_session_title(new_id, name)
+        return {"status": "created", "session": new_id, "title": name}
+    except Exception as exc:
+        raise LifecycleError(
+            f"could not ensure session '{name}' on {profile!r}: {exc}"
+        ) from exc
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------- #
 # Orchestration — run the steps, record successes, never corrupt state
 # --------------------------------------------------------------------------- #
 
@@ -346,6 +461,7 @@ def create_project(
     _run=None,
     _client=None,
     _kanban=None,
+    _session_db=None,
 ) -> dict:
     """Run the lifecycle steps and record each success/failure.
 
@@ -448,7 +564,39 @@ def create_project(
     else:
         results.append({"id": "roadmap", "status": "skipped"})
 
-    # --- Step 5: registry entry (records every surface that succeeded) ---
+    # --- Step 5a: orchestrator profile (<name>-orch) ---
+    try:
+        prof = ensure_profile(name, _run=_run)
+        results.append(
+            {"id": "profile", "status": "ok" if prof == "created" else "skipped",
+             "detail": f"profile {name}-orch {prof}"}
+        )
+    except LifecycleError as exc:
+        failed = True
+        results.append(
+            {
+                "id": "profile", "status": "failed", "detail": str(exc),
+                "retry": f"flightdeck project new {name} --repo {repo} --apply",
+            }
+        )
+
+    # --- Step 5b: chat session titled <name> on the orchestrator profile ---
+    try:
+        sess = ensure_session(name, _orch_profile_name(name), _session_db=_session_db)
+        results.append(
+            {"id": "session", "status": "ok", "detail":
+             f"session {name} {sess['status']}"}
+        )
+    except LifecycleError as exc:
+        failed = True
+        results.append(
+            {
+                "id": "session", "status": "failed", "detail": str(exc),
+                "retry": f"flightdeck project new {name} --repo {repo} --apply",
+            }
+        )
+
+    # --- Step 6: registry entry (records every surface that succeeded) ---
     ensure_registry(
         registry_path,
         name=name,
