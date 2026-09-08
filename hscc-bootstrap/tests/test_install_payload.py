@@ -167,3 +167,40 @@ def test_default_payload_ships_hscc_api():
     the verb does NOT break with 'package not found' on a deployed host."""
     assert "hscc-api" in install_payload.DEFAULT_PAYLOAD
     assert "hscc_daemon" in install_payload.DEFAULT_PAYLOAD
+
+
+def test_run_tests_sh_covers_every_tested_payload_package():
+    """Every deployable python package in DEFAULT_PAYLOAD that ships a tests/
+    dir must appear in scripts/run_tests.sh DIRS. This is the drift guard for
+    the 2026-09-08 regression where hscc-project shipped in DEFAULT_PAYLOAD but
+    was silently absent from DIRS — the runner printed ALL GREEN while the only
+    changed package went completely untested. DEFAULT_PAYLOAD is the single
+    source of truth (same precedent as check_plugin_payload in
+    hscc_daemon/verify.py:959, which loads it by file path for this reason), so
+    the two lists can never drift again."""
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+
+    # DEFAULT_PAYLOAD is the single source of truth (same reason verify.py loads
+    # it by file path rather than re-globbing `hscc-*`).
+    payload = install_payload.DEFAULT_PAYLOAD
+
+    # Parse the DIRS=() array out of the actual runner script.
+    script = (root / "scripts" / "run_tests.sh").read_text()
+    m = re.search(r"DIRS=\(([^)]*)\)", script)
+    assert m, "could not find DIRS=(...) in scripts/run_tests.sh"
+    dirs = set(m.group(1).split())
+
+    for pkg in payload:
+        pkg_dir = root / pkg
+        # Only deployable python packages that actually ship tests are relevant:
+        # non-dirs (docs, assets, VERSION) and testless dirs have nothing to run.
+        if pkg_dir.is_dir() and (pkg_dir / "tests").is_dir():
+            assert pkg in dirs, (
+                f"{pkg} is in install_payload.DEFAULT_PAYLOAD and has "
+                f"{pkg}/tests/ but is missing from scripts/run_tests.sh DIRS — "
+                f"the runner would silently skip it"
+            )
+
