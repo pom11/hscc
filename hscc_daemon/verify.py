@@ -1050,6 +1050,160 @@ def check_plugin_payload(repo_root=None, plugins_dir=None, names=None,
                       f"plugins ({checked} payload files)"}
 
 
+def check_project_chat_ready(registry_path=None, profiles_dir=None):
+    """Check every registered project is still chattable.
+
+    The invariant we enforce forever: for EVERY project in the flightdeck
+    registry, both must hold —
+
+      1. a profile named ``<name>-orch`` exists under ``profiles_dir``
+      2. a Hermes session titled ``<name>`` exists in that profile's
+         ``state.db`` (``select count(*) from sessions where title = ?``)
+
+    If either is missing, the operator's iOS chat for that project is dead.
+    This is the continuous guard behind the creation-path fixes: regardless of
+    how a project got into the registry, it must never again exist in a state
+    where it cannot be chatted with.
+
+    Injectable ``registry_path`` (default ``~/.flightdeck/registry.yaml``) and
+    ``profiles_dir`` (default ``~/.hermes/profiles``) let tests drive the whole
+    check against temp dirs — exactly like ``check_plugin_payload`` takes
+    injectable repo_root/plugins_dir so tests never touch the live runtime.
+    The check is read-only: it opens each ``state.db`` with ``mode=ro`` and
+    never writes a profile or session.
+
+    Returns ``ok=None`` (not False) when the invariant cannot be determined —
+    no registry, no profiles dir, or a registry that cannot be parsed — so a
+    check that could not run never turns the overall verdict red. When it CAN
+    run, it reports EVERY failing project and names which half is missing
+    (profile vs session) so the fix is obvious.
+    """
+    import sqlite3 as _sqlite3
+
+    if registry_path is None:
+        registry_path = os.path.expanduser("~/.flightdeck/registry.yaml")
+    if profiles_dir is None:
+        profiles_dir = os.path.expanduser("~/.hermes/profiles")
+
+    if not os.path.isfile(registry_path):
+        return {"name": "project_chat_ready", "ok": None,
+                "detail": f"unverified: no registry at {registry_path}",
+                "next_step": "create the flightdeck registry first"}
+    if not os.path.isdir(profiles_dir):
+        return {"name": "project_chat_ready", "ok": None,
+                "detail": f"unverified: no profiles dir at {profiles_dir}",
+                "next_step": "install Hermes profiles first"}
+
+    # Load project names from the registry. Reuse the SAME parsing the
+    # flightdeck registry module ships (load_registry -> _name_for) so we never
+    # drift from how names are actually derived (explicit ``name`` else the
+    # repo basename). Loaded by file path, mirroring how check_plugin_payload
+    # loads install_payload.py, so hscc_daemon stays decoupled from the
+    # flightdeck package layout on sys.path.
+    try:
+        projects = _load_registry_projects(registry_path)
+    except Exception as exc:
+        return {"name": "project_chat_ready", "ok": None,
+                "detail": f"unverified: could not read registry {registry_path}: {exc}",
+                "next_step": "fix the registry file"}
+    if projects is None:
+        return {"name": "project_chat_ready", "ok": None,
+                "detail": f"unverified: could not load registry {registry_path}",
+                "next_step": "run from an environment with the flightdeck registry "
+                            "available"}
+
+    if not projects:
+        return {"name": "project_chat_ready", "ok": True,
+                "detail": "no projects in the registry — nothing to verify"}
+
+    issues = []
+    checked = 0
+    for proj in projects:
+        profile_dir = os.path.join(profiles_dir, proj["profile"])
+        half = None
+        if not os.path.isdir(profile_dir):
+            half = "profile"
+        else:
+            db_path = os.path.join(profile_dir, "state.db")
+            if not _state_db_has_session(db_path, proj["name"], _sqlite3):
+                half = "session"
+        checked += 1
+        if half is not None:
+            issues.append(
+                f"{proj['name']}: missing {half} "
+                f"(expected profile {proj['profile']} at {profile_dir}"
+                + (" with a session titled " + proj["name"] if half == "session" else "")
+                + ")")
+
+    if issues:
+        return {"name": "project_chat_ready", "ok": False,
+                "detail": "; ".join(issues),
+                "next_step": "ensure the <name>-orch profile exists and has a "
+                             "Hermes session titled <name> (re-run the project "
+                             "create/repair lifecycle)"}
+    return {"name": "project_chat_ready", "ok": True,
+            "detail": f"all {checked} registered projects are chattable "
+                      f"(profile <name>-orch + session titled <name> present)"}
+
+
+def _load_registry_projects(registry_path):
+    """Load the flightdeck registry and return [{name, profile}] for each project.
+
+    Returns ``None`` when the flightdeck registry module cannot be located or
+    loaded (so the caller reports ``ok=None``, not a false failure). Project
+    names come from the real ``load_registry`` so the ``name``-else-repo-default
+    rule is applied exactly as flightdeck does it.
+    """
+    repo_root = _repo_root()
+    registry_py = os.path.join(
+        repo_root, "hscc-project", "flightdeck", "core", "registry.py")
+    if not os.path.isfile(registry_py):
+        return None
+    try:
+        import importlib.util
+        import sys as _sys
+        spec = importlib.util.spec_from_file_location(
+            "hscc_flightdeck_registry", registry_py)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        # register in sys.modules BEFORE exec: registry.py uses @dataclass,
+        # whose metaclass looks up the module by name in sys.modules.
+        _sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        projects = mod.load_registry(registry_path)
+    except Exception:
+        return None
+    return [
+        {"name": p.name, "profile": f"{p.name}-orch"}
+        for p in projects
+    ]
+
+
+def _state_db_has_session(db_path, title, sqlite3_mod):
+    """True if ``<profile>/state.db`` has a session row titled ``title``.
+
+    Opens the DB read-only (``mode=ro``) — a busy profile's state.db is never
+    contended and the check never writes. Any failure (missing file, locked
+    DB, bad query) returns False so a project with an unreadable state.db is
+    surfaced as missing rather than silently passed.
+    """
+    if not os.path.isfile(db_path):
+        return False
+    try:
+        conn = sqlite3_mod.connect(
+            f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        try:
+            cur = conn.execute(
+                "select count(*) from sessions where title = ?", (title,))
+            row = cur.fetchone()
+            return bool(row and row[0] > 0)
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
 def _first_line(text):
     """First non-empty line of a multi-line string, trimmed; else a fallback."""
     for line in (text or "").splitlines():
@@ -1090,6 +1244,7 @@ def run_all(**overrides):
         check_api_routes,
         check_chat_roundtrip,
         check_plugin_payload,
+        check_project_chat_ready,
     ]
 
     results = []
