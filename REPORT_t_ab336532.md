@@ -105,6 +105,29 @@ Caps that now hold (untouched, already correct for these): max_concurrent_childr
 (now preserved), max_in_progress, max_in_progress_per_profile (kanban already
 preserved lower values).
 
+Full suite (scripts/run_tests.sh, HSCC_TEST_PY=miniconda p313):
+  ✓ hscc-bootstrap  (272 passed — includes enable_plugins fix tests)
+  ✓ hscc-commands   (56 passed)
+  ✗ hscc-roles      (1 failed, 93 passed — PRE-EXISTING environment-only)
+  ✓ hscc-cluster    (1037 passed)
+  ✓ hscc_daemon     (1037 passed — includes api_cli drift fix tests)
+  ✓ sparkrun-hermes (8 passed)
+  ✓ hscc-api        (785 passed, 1 skipped)
+  FAILURES ABOVE
+
+The only failure is hscc-roles/tests/test_generator.py::
+test_every_hscc_owned_worker_profile_has_role_spec, which reads the LIVE
+profile dir rolelib.PROFILES_DIR (~/.hermes/profiles/<profile>/profiles) via
+os.listdir with NO tmp_path isolation. On this box that nested dir does not
+exist, so it raises FileNotFoundError. It is a live-deployment layout test with
+no skip marker, fails identically regardless of branch, and is unrelated to
+both changes here (neither touches hscc-roles, rolelib, or profile layout). I
+deliberately did NOT "fix" it: it asserts a real-deployment invariant about
+hand-made profiles that only makes sense against a deployed fleet, and
+rewriting it to fabricate a dir would mask what it checks. Flagging as a
+pre-existing environmental failure, not a regression.
+
+
 ────────────────────────────────────────────────────────────────────────────
 What I deliberately did NOT do
 ────────────────────────────────────────────────────────────────────────────
