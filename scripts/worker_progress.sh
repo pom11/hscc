@@ -11,11 +11,29 @@
 #   3. The checkout path is NOT fixed. Observed layouts under one board:
 #      <ws>/ios-app, <ws>/hscc, <ws>/wt, and the repo cloned at <ws> itself.
 #      Discover the git root; never hardcode it.
+#   4. The WORKSPACE ROOT is not fixed either — that is bug 3 one level up, and
+#      it was still here after bug 3 was "fixed". A card created with
+#      `--workspace worktree` lives at <repo>/.worktrees/<id>, NOT under the
+#      board's scratch workspaces dir, so hardcoding the scratch dir reported
+#      NO WORKSPACE for three demonstrably-working workers on 2026-09-08. The
+#      card itself states the truth ("workspace: <kind> @ <path>") — ask it.
 #
 # Ground truth is the workspace's own git state.
 # Usage: scripts/worker_progress.sh
 set -uo pipefail
 BOARD_WS="$HOME/.hermes/kanban/boards/hscc/workspaces"
+
+# Resolve a card's workspace from the CARD, not from a guessed directory.
+# `hermes kanban show` prints e.g. "workspace: worktree @ /path/to/ws".
+# Falls back to the scratch dir when the line is absent.
+resolve_ws() {
+  local t="$1" path
+  path=$(hermes kanban show "$t" 2>/dev/null \
+         | sed -n 's/^[[:space:]]*workspace:[[:space:]]*[a-z]*[[:space:]]*@[[:space:]]*//p' \
+         | head -1)
+  [ -n "$path" ] && [ -d "$path" ] && { echo "$path"; return; }
+  echo "$BOARD_WS/$t"
+}
 
 running=$(hermes kanban list --json 2>/dev/null | python3 -c "
 import json,sys
@@ -25,7 +43,7 @@ print(' '.join(x['id'] for x in t if x.get('status')=='running'))")
 [ -z "$running" ] && { echo "no running cards"; exit 0; }
 
 for t in $running; do
-  ws="$BOARD_WS/$t"
+  ws="$(resolve_ws "$t")"
   if [ ! -d "$ws" ]; then echo "$t  NO WORKSPACE"; continue; fi
   # Find the git root: the workspace itself, or the shallowest dir containing .git
   root=""
