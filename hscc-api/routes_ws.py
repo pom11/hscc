@@ -172,6 +172,17 @@ def _default_relay(project: str, text: str) -> bool:
             # resolve one session, never two.
             session_id = _registry.ensure_session(
                 project, _registry_path(None))
+            # Ensure the project's Hermes session row exists BEFORE relaying,
+            # exactly like the REST chat path. A brand-new project has NO chat
+            # session yet; without this the job's
+            # ``hermes chat -Q --continue <session>`` fails with
+            # ``orchestrator_unavailable`` and the project can never be chatted
+            # with over WS (the app's path). ``_ensure_session_exists`` is
+            # idempotent — it CREATEs the row on first use and leaves an
+            # existing session untouched — and fail-safe: on a genuine failure
+            # it propagates here (surfaced below as ``relay_failed``, never a
+            # silent no-op) or lets the downstream job fail honestly.
+            _ro._ensure_session_exists(resolved["profile"], session_id)
             # Run as a cancellable job so a ``stop`` frame can find + interrupt
             # this turn by project (_in_flight_job), and so _backing_invoke gets
             # the cancel_evt/retained-Popen it needs to end the process.
