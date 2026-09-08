@@ -36,9 +36,11 @@ class FakeRun:
     arbitrary command to exercise partial-failure paths deterministically.
     """
 
-    def __init__(self, *, is_repo=False, committed=False):
+    def __init__(self, *, is_repo=False, committed=False, profiles=()):
         self.is_repo = is_repo
         self.committed = committed
+        self.profiles = set(profiles)   # profiles `hermes profile list` reports
+        self.created_profiles = []      # profiles actually created
         self.fail_cmd = None      # e.g. ("git", "init") fail next matching call
         self.fail_stderr = "boom"
         self.calls: list[list[str]] = []
@@ -56,6 +58,17 @@ class FakeRun:
         if self.fail_cmd and cmd[: len(self.fail_cmd)] == list(self.fail_cmd):
             self.fail_cmd = None
             return self._proc(cmd, 1, "", self.fail_stderr)
+
+        if cmd[0] == "hermes":
+            if cmd[1] == "profile":
+                if cmd[2] == "list":
+                    return self._proc(cmd, 0, "\n".join(sorted(self.profiles)) + "\n")
+                if cmd[2] == "create":
+                    target = cmd[3]
+                    self.created_profiles.append(target)
+                    self.profiles.add(target)
+                    return self._proc(cmd, 0)
+            raise AssertionError(f"FakeRun does not know this hermes command: {cmd!r}")
 
         if cmd[0] == "git":
             if cmd[1] == "rev-parse":
@@ -125,10 +138,62 @@ def _ns(**kw):
     defaults = dict(
         client=None, run=None, kanban=None, registry=None, json=False,
         apply=False, dry_run=False, name="", repo=None, github=False,
-        private=False, project_cmd=None,
+        private=False, project_cmd=None, session_db=None,
     )
     defaults.update(kw)
     return argparse.Namespace(**defaults)
+
+
+class FakeSessionDB:
+    """In-memory stand-in for the session step's state.db (never real files).
+
+    Mirrors ``hermes_state.SessionDB`` for the three methods the lifecycle
+    session step uses. ``_open()`` adapts it into the ``_session_db`` seam the
+    command layer threads to ``create_project``.
+    """
+
+    def __init__(self, titled=()):
+        self._titled = set(titled)
+        self._ids = []
+        self.closed = False
+
+    def resolve_session_by_title(self, title):
+        return title in self._titled
+
+    def create_session(self, sid, **kwargs):
+        self._ids.append(sid)
+
+    def set_session_title(self, sid, title):
+        self._titled.add(title)
+
+    def close(self):
+        self.closed = True
+
+
+def _db_session(name):
+    """Adapt ``name``-scoped fakes into the ``session_db`` args seam value."""
+    return _FakeSessionDBProvider(name)
+
+
+class _FakeSessionDBProvider:
+    """A ``session_db`` seam value: an opener keyed to one project's state.
+
+    Tracks the titled sessions for the orchestrator profile of ``name``. Pass
+    the SAME provider to a new-then-repair pair so the repair sees the session
+    that `new` created (idempotency is real, not assumed).
+    """
+
+    def __init__(self, name):
+        self._name = name
+        self._db = FakeSessionDB()
+
+    def __call__(self, profile):
+        # The lifecycle resolves the "this project's session title" from `name`.
+        return self._db
+
+    @property
+    def db(self):
+        return self._db
 
 
 def _reg(tmp_path):
@@ -177,10 +242,12 @@ def test_new_apply_creates_everything_and_repairs(tmp_path, capsys):
     re-running with apply repairs (no duplication, nothing re-created)."""
     reg = _reg(tmp_path)
     run, tg, kb = FakeRun(), FakeTG(), FakeKanban()
+    sdb = _db_session("zeta")
     repo = str(tmp_path / "zeta")
 
     rc = project_cmd.cmd_new(_ns(
-        name="zeta", repo=repo, registry=reg, run=run, client=tg, kanban=kb, apply=True,
+        name="zeta", repo=repo, registry=reg, run=run, client=tg, kanban=kb,
+        session_db=sdb, apply=True,
     ))
     capsys.readouterr()
     assert rc == 0
@@ -199,16 +266,25 @@ def test_new_apply_creates_everything_and_repairs(tmp_path, capsys):
     # Board created once.
     assert kb.created == ["zeta"]
 
+    # Orchestrator profile + chat session provisioned once.
+    assert run.created_profiles == ["zeta-orch"]
+    assert len(sdb.db._ids) == 1  # exactly one session created
+    assert list(sdb.db._titled) == ["zeta"]
+
     # ---- re-run (repair) must not duplicate anything ----
-    run2, tg2, kb2 = FakeRun(is_repo=True, committed=True), FakeTG(tg.state), FakeKanban(kb.boards)
+    run2, tg2, kb2 = FakeRun(is_repo=True, committed=True, profiles={"zeta-orch"}), FakeTG(tg.state), FakeKanban(kb.boards)
     rc = project_cmd.cmd_new(_ns(
-        name="zeta", repo=repo, registry=reg, run=run2, client=tg2, kanban=kb2, apply=True,
+        name="zeta", repo=repo, registry=reg, run=run2, client=tg2, kanban=kb2,
+        session_db=sdb, apply=True,
     ))
     capsys.readouterr()
     assert rc == 0
     # No second topic created, no second board created, no second commit.
     assert len(tg2.state) == len(tg.state)
     assert kb2.created == []
+    # Profile + session not recreated on repair (idempotent).
+    assert run2.created_profiles == []
+    assert list(sdb.db._titled) == ["zeta"] and len(sdb.db._ids) == 1
     # Registry still one entry.
     assert len(registry.load_registry(reg)) == 1
 
@@ -269,6 +345,7 @@ def test_partial_failure_records_successes_and_reports_retry(tmp_path, capsys):
     repo = str(tmp_path / "beta")
     run = FakeRun()
     tg = FakeTG()
+    sdb = _db_session("beta")
 
     # Make the board step fail: board_exists raises.
     class FlakyKanban:
@@ -279,7 +356,7 @@ def test_partial_failure_records_successes_and_reports_retry(tmp_path, capsys):
 
     rc = project_cmd.cmd_new(_ns(
         name="beta", repo=repo, registry=reg, run=run, client=tg,
-        kanban=FlakyKanban(), apply=True,
+        kanban=FlakyKanban(), session_db=sdb, apply=True,
     ))
     out = capsys.readouterr().out
     assert rc == 1
@@ -296,18 +373,19 @@ def test_partial_failure_records_successes_and_reports_retry(tmp_path, capsys):
     assert (tmp_path / "beta" / "ROADMAP.md").exists()
 
     # Re-run with a healthy kanban provider repairs ONLY the board.
-    run2 = FakeRun(is_repo=True, committed=True)
+    run2 = FakeRun(is_repo=True, committed=True, profiles={"beta-orch"})
     tg2 = FakeTG(tg.state)
     kb2 = FakeKanban()
     rc = project_cmd.cmd_new(_ns(
         name="beta", repo=repo, registry=reg, run=run2, client=tg2,
-        kanban=kb2, apply=True,
+        kanban=kb2, session_db=sdb, apply=True,
     ))
     capsys.readouterr()
     assert rc == 0
     # No new topic (adopted), no new roadmap (exists), only the board created.
     assert kb2.created == ["beta"]
     assert len(tg2.state) == len(tg.state)
+    assert run2.created_profiles == []  # profile not recreated on repair
     p = _assert_has(reg, "beta")
     assert p.board == "beta"              # now repaired
     assert len(registry.load_registry(reg)) == 1
@@ -326,7 +404,8 @@ def test_partial_failure_board_failed_records_topic(tmp_path, capsys):
 
     rc = project_cmd.cmd_new(_ns(
         name="gamma", repo=repo, registry=reg,
-        run=FakeRun(), client=FakeTG(), kanban=AlwaysFail(), apply=True,
+        run=FakeRun(), client=FakeTG(), kanban=AlwaysFail(),
+        session_db=_db_session("gamma"), apply=True,
     ))
     capsys.readouterr()
     assert rc == 1
@@ -464,7 +543,8 @@ def test_repair_fills_only_missing_pieces(tmp_path, capsys):
     tg = FakeTG()
     kb = FakeKanban(boards={"kappa"})
     rc = project_cmd.cmd_repair(_ns(
-        name="kappa", registry=reg, run=run, client=tg, kanban=kb, apply=True,
+        name="kappa", registry=reg, run=run, client=tg, kanban=kb,
+        session_db=_db_session("kappa"), apply=True,
     ))
     out = capsys.readouterr().out
     assert rc == 0
@@ -499,7 +579,8 @@ def test_new_with_github_creates_remote(tmp_path, capsys):
     run = FakeRun()  # gh succeeds
     rc = project_cmd.cmd_new(_ns(
         name="ghproj", repo=repo, registry=reg, run=run, client=FakeTG(),
-        kanban=FakeKanban(), github=True, private=True, apply=True,
+        kanban=FakeKanban(), github=True, private=True,
+        session_db=_db_session("ghproj"), apply=True,
     ))
     capsys.readouterr()
     assert rc == 0

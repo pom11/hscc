@@ -62,6 +62,7 @@ def cmd_new(args: argparse.Namespace) -> int:
         _run=args.run,
         _client=args.client,
         _kanban=args.kanban,
+        _session_db=args.session_db,
     )
 
     print("\nresult:")
@@ -184,6 +185,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
             _run=args.run,
             _client=args.client,
             _kanban=args.kanban,
+            _session_db=args.session_db,
         )
     except Exception as exc:  # the exact retry needs args; surface clearly
         print(f"error: {exc}", file=sys.stderr)
@@ -452,6 +454,7 @@ def run(args: argparse.Namespace, registry_path: str) -> int:
     args.run = getattr(args, "run", None)
     args.client = getattr(args, "client", None)
     args.kanban = getattr(args, "kanban", None)
+    args.session_db = getattr(args, "session_db", None)
 
     func = getattr(args, "func", None)
     if func is None:
