@@ -168,7 +168,11 @@ def test_console_script_declared():
     except ModuleNotFoundError:  # Python 3.10, still in requires-python
         import tomli as tomllib
 
-    with open("pyproject.toml", "rb") as fh:
+    # Anchor on THIS file, not the cwd: scripts/run_tests.sh invokes pytest
+    # from the repo root, where "pyproject.toml" is a different file.
+    import pathlib as _pl
+    _pyproject = _pl.Path(__file__).resolve().parent.parent / "pyproject.toml"
+    with open(_pyproject, "rb") as fh:
         data = tomllib.load(fh)
     assert data["project"]["scripts"]["flightdeck-mcp"] == "flightdeck.mcp_server:main"
 
