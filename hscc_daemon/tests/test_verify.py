@@ -50,13 +50,49 @@ def _hermetic_new_checks_overrides(tmp_path, healthy=True):
     repo_hscc.mkdir(parents=True)
     (repo_hscc / "__init__.py").write_text(_CANON_PLUGIN)
 
+    # project_chat_ready — hermetic registry so the check's registry_path is
+    # never the live ~/.flightdeck. All four run_all tests pass
+    # profiles_dir=tmp_path/"profiles", so plant the alpha-orch profile + its
+    # titled session there — the chat check then reads the SAME profiles dir
+    # those tests already target, and can't collide with the explicit
+    # ``profiles_dir=`` kwarg (which the other checks need too).
+    registry = tmp_path / "registry.yaml"
+    registry.write_text("projects:\n- name: alpha\n  repo: /tmp/alpha\n")
+    prof_dir = tmp_path / "profiles" / "alpha-orch"
+    prof_dir.mkdir(parents=True, exist_ok=True)
+    _make_state_db_with_session(prof_dir / "state.db", "alpha")
+
     return {
         "script": str(sweep),
         "python": sys.executable,
         "probe": _ok_probe if healthy else _bad_probe,
         "repo_root": str(tmp_path / "repo"),
         "names": ["hscc-commands"],
+        "registry_path": str(registry),
     }
+
+
+def _make_state_db_with_session(db_path, title):
+    """Create a minimal Hermes-style state.db with a session row titled ``title``.
+
+    Mirrors the real Hermes ``sessions`` table shape just enough for
+    ``select count(*) from sessions where title = ?`` to return 1. Pure test
+    helper — writes only under tmp_path, never the live runtime.
+    """
+    import sqlite3
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "create table sessions ("
+            "id text primary key, source text not null, title text, "
+            "started_at real not null)")
+        conn.execute(
+            "insert into sessions (id, source, title, started_at) values (?,?,?,?)",
+            (f"id-{title}", "cli", title, 0.0))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 class TestCheckPlugins:
@@ -719,7 +755,11 @@ class TestRunAll:
         config.write_text(yaml.dump(cfg))
 
         gw_state = tmp_path / "gw.json"
-        json.dump({"served_profiles": ["backend-engineer"]}, open(gw_state, "w"))
+        # served_profiles must cover the alpha-orch profile the hermetic
+        # project_chat_ready check plants under tmp_path/profiles — exactly as
+        # the real gateway serves the <name>-orch profiles.
+        json.dump({"served_profiles": ["backend-engineer", "alpha-orch"]},
+                  open(gw_state, "w"))
 
         profiles = tmp_path / "profiles" / "backend-engineer"
         profiles.mkdir(parents=True)
@@ -755,7 +795,7 @@ class TestRunAll:
             )
 
         assert result["ok"] is True
-        assert len(result["checks"]) == 9
+        assert len(result["checks"]) == 10
         assert all(c["ok"] for c in result["checks"])
 
     def test_run_all_fail_aggregation(self, tmp_path):
@@ -785,7 +825,7 @@ class TestRunAll:
                 **_hermetic_new_checks_overrides(tmp_path),
             )
 
-        assert len(result["checks"]) == 9
+        assert len(result["checks"]) == 10
         # At least the proxy check passes here — overall ok depends on individual checks
         names = [c["name"] for c in result["checks"]]
         assert "plugins" in names
@@ -813,7 +853,7 @@ class TestRunAll:
                          profiles_dir=str(empty_profiles),
                          serving_path=str(serving),
                          **_hermetic_new_checks_overrides(tmp_path))
-        assert len(result["checks"]) == 9
+        assert len(result["checks"]) == 10
 
     def test_run_all_ok_none_is_not_pass(self, tmp_path):
         """When multiplex is enabled but gateway state is missing (ok=None),
@@ -931,7 +971,10 @@ class TestRunAllFullVerifyIntentionalAutodown:
         profiles = tmp_path / "profiles"
         (profiles / "backend-engineer").mkdir(parents=True)
         (profiles / "writer").mkdir(parents=True)
-        json.dump({"served_profiles": ["backend-engineer", "writer"]},
+        # + alpha-orch: the hermetic project_chat_ready check plants it under
+        # profiles_dir, so served_profiles must cover it (as the real gateway
+        # serves the <name>-orch profiles).
+        json.dump({"served_profiles": ["backend-engineer", "writer", "alpha-orch"]},
                   open(gw_state, "w"))
 
         # daemon state — every serving stream truthfully down WITH the
@@ -1356,4 +1399,120 @@ class TestCheckPluginPayload:
         r = check_plugin_payload(repo_root=repo, plugins_dir=inst,
                                  names=["hscc-commands"])
         assert r["ok"] is True
+
+
+def _registry_yaml(projects):
+    """Render a flightdeck registry.yaml body for project names ``projects``."""
+    lines = ["projects:"]
+    for name in projects:
+        lines.append(f"- name: {name}")
+        lines.append(f"  repo: /tmp/{name}")
+    return "\n".join(lines) + "\n"
+
+
+class TestCheckProjectChatReady:
+    """check_project_chat_ready — the continuous 'can't be un-chattable' guard.
+
+    All four invariants from the card, driven against temp dirs so the live
+    runtime is never touched (read-only check, injectable paths):
+      - all-good fixture -> ok True
+      - missing profile -> ok False, names project + "profile"
+      - profile but no session -> ok False, names project + "session"
+      - no registry / no profiles dir -> ok None, NOT False
+    """
+
+    def _call(self, tmp_path, registry_content, profiles_with_sessions):
+        """Build a temp registry + profiles dir and run the check.
+
+        ``registry_content`` — raw YAML for the registry file, or None to omit
+            the registry entirely.
+        ``profiles_with_sessions`` — {profile_name: [session titles]} planted
+            as profile dirs with a state.db per profile.
+        """
+        registry_path = None
+        if registry_content is not None:
+            registry_path = tmp_path / "registry.yaml"
+            registry_path.write_text(registry_content)
+        profiles_dir = tmp_path / "profiles"
+        for prof, titles in (profiles_with_sessions or {}).items():
+            dir_ = profiles_dir / prof
+            dir_.mkdir(parents=True, exist_ok=True)
+            if titles:
+                _make_state_db_with_session(dir_ / "state.db", titles[0])
+        from hscc_daemon.verify import check_project_chat_ready
+        kwargs = {}
+        if registry_path is not None:
+            kwargs["registry_path"] = str(registry_path)
+        if profiles_with_sessions is not None:
+            kwargs["profiles_dir"] = str(profiles_dir)
+        return check_project_chat_ready(**kwargs)
+
+    def test_ok_all_good(self, tmp_path):
+        """Every project has its <name>-orch profile + titled session -> True."""
+        r = self._call(
+            tmp_path,
+            _registry_yaml(["alpha", "beta"]),
+            {"alpha-orch": ["alpha"], "beta-orch": ["beta"]})
+        assert r["name"] == "project_chat_ready"
+        assert r["ok"] is True
+        assert "2 registered projects" in r["detail"]
+
+    def test_fail_missing_profile(self, tmp_path):
+        """A project whose <name>-orch profile dir is absent -> False + 'profile'."""
+        r = self._call(
+            tmp_path,
+            _registry_yaml(["alpha", "beta"]),
+            {"alpha-orch": ["alpha"]})  # beta-orch profile missing
+        assert r["ok"] is False
+        assert "beta" in r["detail"] and "profile" in r["detail"]
+
+    def test_fail_profile_but_no_session(self, tmp_path):
+        """Profile present but no state.db session titled <name> -> False + 'session'."""
+        r = self._call(
+            tmp_path,
+            _registry_yaml(["alpha"]),
+            {"alpha-orch": []})  # profile dir exists, no titled session
+        assert r["ok"] is False
+        assert "alpha" in r["detail"] and "session" in r["detail"]
+
+    def test_fail_reports_every_project_not_just_first(self, tmp_path):
+        """detail must name EVERY failing project AND both halves (profile/session)."""
+        r = self._call(
+            tmp_path,
+            _registry_yaml(["alpha", "beta", "gamma"]),
+            {"alpha-orch": ["alpha"],   # passes
+             "beta-orch": []})           # profile present, no session -> 'session'
+                                         # gamma: profile absent -> 'profile'
+        assert r["ok"] is False
+        for name in ("beta", "gamma"):
+            assert name in r["detail"]
+        assert "profile" in r["detail"] and "session" in r["detail"]
+
+    def test_no_registry_unverified(self, tmp_path):
+        """No registry file -> ok None, NOT False."""
+        from hscc_daemon.verify import check_project_chat_ready
+        r = check_project_chat_ready(
+            registry_path=str(tmp_path / "nope.yaml"),
+            profiles_dir=str(tmp_path / "profiles"))
+        assert r["ok"] is None
+
+    def test_no_profiles_dir_unverified(self, tmp_path):
+        """No profiles dir -> ok None, NOT False."""
+        registry = tmp_path / "registry.yaml"
+        registry.write_text(_registry_yaml(["alpha"]))
+        from hscc_daemon.verify import check_project_chat_ready
+        r = check_project_chat_ready(
+            registry_path=str(registry),
+            profiles_dir=str(tmp_path / "no-profiles"))
+        assert r["ok"] is None
+
+    def test_no_projects_ok(self, tmp_path):
+        """Empty registry (projects: []) -> ok True, nothing to verify."""
+        r = self._call(
+            tmp_path,
+            "projects: []\n",
+            {"alpha-orch": []})
+        assert r["ok"] is True
+        assert "nothing to verify" in r["detail"]
+
 
