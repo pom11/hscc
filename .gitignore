@@ -33,6 +33,12 @@ __pycache__/
 # Scratch review notes
 hscc-*/REVIEW-*.md
 
+# Per-card worker working notes — never project documentation. Keep these out
+# of the repo entirely (write to a non-repo scratch dir); this is a backstop so
+# an accidental write at the repo root is never committed to this PUBLIC repo.
+REPORT_*.md
+ARTIFACT_t_*.md
+
 # Python build artifacts
 *.egg-info/
 build/

@@ -1,5 +1,9 @@
 # Fix: memory endpoint profile resolution (t_7a16aed0)
 
+Preserved from `REPORT_t_7a16aed0.md` (repo root) on 2026-09-08 — per-card working
+note with a lasting incident lesson (HERMES_HOME env leak) and a design decision
+(use the `hermes_cli.profiles` resolver).
+
 ## Problem
 The `GET /v1/memory?profile=...` endpoint returned empty for every profile on
 the live API, even though profiles had real memories on disk (ios-engineer had
@@ -9,9 +13,9 @@ Root cause: `_memory_dir` (hscc-api/routes_memory.py) resolved the profile's
 memories dir through `routes_profile._hermes_profiles_dir()`, which honors the
 `HERMES_HOME` env var verbatim. The live API process (PID 65129,
 `hscc api start --tailscale`) runs with
-`HERMES_HOME=/Users/desac/.hermes/profiles/hscc-orch` — the orchestrator's own
+`HERMES_HOME=~/.hermes/profiles/hscc-orch` — the orchestrator's own
 profile dir leaked into the env. So memory resolved to
-`/Users/desac/.hermes/profiles/hscc-orch/profiles/<profile>/memories`, which
+`~/.hermes/profiles/hscc-orch/profiles/<profile>/memories`, which
 does not exist → `_memory_dir` returned None → every profile reported
 "no memory store".
 
@@ -34,8 +38,8 @@ other route touched; `/v1/sessions`, `/v1/profiles` unchanged.
 
 ## Verification
 1. Subshell with leaked env
-   `HERMES_HOME=/Users/desac/.hermes/profiles/hscc-orch`:
-   - ios-engineer → /Users/desac/.hermes/profiles/ios-engineer/memories
+   `HERMES_HOME=~/.hermes/profiles/hscc-orch`:
+   - ios-engineer → ~/.hermes/profiles/ios-engineer/memories
      (7 cards) ✓
    - backend-engineer → 7 cards ✓
    - hscc-orch → 5 cards ✓
@@ -44,7 +48,7 @@ other route touched; `/v1/sessions`, `/v1/profiles` unchanged.
 3. Diff vs base 81d6de5 touches only routes_memory.py (sessions/profiles
    endpoints untouched by construction) ✓
 
-Commit: `d0e9b41` on branch `wt/t_7a16aed0`.
+Commit: `d0e9b41`.
 
 ## Note (out of scope, logged for follow-up)
 The `_hermes_profiles_dir()` helper in routes_profile.py still honors the raw
