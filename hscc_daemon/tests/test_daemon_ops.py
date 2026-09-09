@@ -500,5 +500,86 @@ class TestPruneDeadFiles:
         assert res == {"removed_dead": 0, "pruned_bak": 0}
 
 
+class TestLogRotation:
+    """daemon_ops.append_rotating() size-caps + gzips rolled generations.
+
+    The daemon log (~/.hscc/daemon.log) had NO rotation and grew unbounded
+    (289 MiB / 104.6 days ≈ 2.8 MiB/day average, 3.5-3.8 MiB/day recent).
+    append_rotating() routes every line through a stdlib RotatingFileHandler
+    so the live file is size-capped and each rolled generation is gzipped.
+    These tests exercise that on temp files with a tiny cap.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_handlers(self):
+        """Reset the module-level handler cache around each test.
+
+        _get_logger() reads LOG_MAX_BYTES / LOG_BACKUP_COUNT ONCE when it
+        first sees a path, caching the handler forever. Clearing the cache lets
+        each test (re)bind the small cap without leaking handlers between
+        tests or paths.
+        """
+        import hscc_daemon.daemon_ops as d
+        d._handlers.clear()
+        yield
+        d._handlers.clear()
+
+    def test_caps_file_size(self, tmp_path):
+        from hscc_daemon import daemon_ops as d
+        d.LOG_MAX_BYTES = 500
+        d.LOG_BACKUP_COUNT = 2
+        log_file = str(tmp_path / "daemon.log")
+        # Write well past the cap so at least one rollover must happen.
+        for i in range(50):
+            d.append_rotating(log_file, f"line {i} " + "x" * 60)
+        assert os.path.getsize(log_file) <= 500
+
+    def test_rolls_gzipped_generations(self, tmp_path):
+        import gzip as gz
+        from hscc_daemon import daemon_ops as d
+        d.LOG_MAX_BYTES = 500
+        d.LOG_BACKUP_COUNT = 3
+        log_file = str(tmp_path / "daemon.log")
+        for i in range(80):
+            d.append_rotating(log_file, f"line {i} " + "y" * 60)
+        gens = sorted(tmp_path.glob("daemon.log.*.gz"))
+        assert len(gens) <= 3
+        # Each rolled generation is valid gzip and retains its content.
+        data = gz.open(gens[0], "rt").read()
+        assert "line" in data                       # content preserved
+        assert data[:20].rstrip().endswith("y")     # verbatim, no mangling
+
+    def test_retention_capped(self, tmp_path):
+        from hscc_daemon import daemon_ops as d
+        d.LOG_MAX_BYTES = 300
+        d.LOG_BACKUP_COUNT = 2
+        log_file = str(tmp_path / "daemon.log")
+        for i in range(120):
+            d.append_rotating(log_file, f"line {i} " + "z" * 60)
+        # Only maxBytes + backupCount generations survive on disk at once.
+        leftovers = sorted(tmp_path.glob("daemon.log.*.gz"))
+        assert len(leftovers) <= 2
+        assert all(str(p).endswith(".gz") for p in leftovers)
+
+    def test_existing_large_file_untouched_until_cap(self, tmp_path):
+        """append_rotating must NOT truncate an existing large file.
+
+        The operator's 289 MiB ~/.hscc/daemon.log must keep its contents and
+        only rotate after the cap is crossed going forward — never truncate or
+        delete it as part of the change.
+        """
+        from hscc_daemon import daemon_ops as d
+        d.LOG_MAX_BYTES = 10 ** 12      # effectively no rotation this run
+        d.LOG_BACKUP_COUNT = 3
+        log_file = tmp_path / "daemon.log"
+        log_file.write_text("[2026-01-01T00:00:00+00:00] [ INFO] big old line\n" * 50)
+        before = log_file.read_bytes()
+        d.append_rotating(str(log_file), "a new line going forward")
+        after = log_file.read_bytes()
+        assert after.startswith(before)             # old contents preserved
+        assert b"a new line going forward" in after  # new line appended
+        assert not list(tmp_path.glob("daemon.log.*.gz"))  # no premature rollover
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
