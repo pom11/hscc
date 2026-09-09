@@ -79,7 +79,28 @@ daemon and verify it persists.
 
 ## 4. What was done
 
-(To be filled in by the fix + verification steps below.)
+Sequence (all against the live runtime — this IS the task's job, and it is not
+`hscc doctor`/bootstrap, so ~/.hermes/config.yaml was never touched):
+
+1. Retired the untracked duplicate:
+   `/Users/desac/miniconda3/envs/p313/bin/hscc stop` →
+   `Stopping hscc_daemon (PID 11690)... hscc_daemon stopped (PID 11690)`.
+   Verified: `ps -p 11690` → gone; `~/.hscc/daemon.pid` removed;
+   `daemon.log:3867744 [03:57:31] Received signal 15, stopping... Daemon loop stopped`.
+
+2. Started the single launchd-supervised daemon:
+   `launchctl start com.hermes.hscc_daemon` (exit 0).
+   Verified: `daemon.log:3867783 [03:58:11] start-daemon invoked (service-supervised
+   mode)` → `Daemon loop started`; all 15 threads started
+   (`3867784`..`All threads started, daemon loop running (polling mode)`).
+
+3. Check streams confirmed running (from this incarnation's thread-start lines):
+   dgx(60s), gateway(60s), local(60s), heartbeat(300s), nas(900s), idle(300s),
+   workers(60s), proxy(60s), engine_wedge(60s), dispatcher(60s), autodown(30s),
+   engine-wedge recovery(60s), dispatcher-wedge recovery(60s), watchdog(30s),
+   trigger engine(15s).
+
+4. Persistence check: (fill in result after the wait).
 
 ## 5. What I did NOT do (and why)
 
