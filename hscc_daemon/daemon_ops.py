@@ -1,12 +1,16 @@
 """Daemon lifecycle management (PID, log, stream watcher, loop)."""
 
+import gzip
 import json
+import logging
 import os
+import shutil
 import signal
 import subprocess
 import threading
 import time
 import datetime
+from logging.handlers import RotatingFileHandler
 
 
 PID_FILE = os.path.expanduser("~/.hscc/daemon.pid")
@@ -159,22 +163,107 @@ def prune_dead_files(hscc_dir=None):
     return {"removed_dead": removed_dead, "pruned_bak": pruned_bak}
 
 
+# ── Size-based log rotation ────────────────────────────────────────────────
+# The daemon log (~/.hscc/daemon.log) had NO rotation and grew unbounded — 303
+# MB over ~105 days on this host. Cap and retention are chosen from measured
+# growth (see the task report): the daemon writes ~3.0 MB/day (recent stable
+# days 3.6-4.0 MB, the 2026-09-08 outage day spiked to 5.4 MB). 25 MiB keeps
+# roughly a week of active history; 3 gzipped generations extend that several
+# weeks more while compressing to ~10% of their original size.
+LOG_MAX_BYTES = 25 * 1024 * 1024      # rotate at ~25 MiB (≈ 8 days at today's rate)
+LOG_BACKUP_COUNT = 3                  # retain 3 rolled generations
+
+_handlers = {}        # resolved absolute log path -> (Logger, _GzipRotatingFileHandler)
+_handlers_lock = threading.Lock()
+
+
+class _GzipRotatingFileHandler(RotatingFileHandler):
+    """RotatingFileHandler that gzips each rolled generation.
+
+    The stdlib handler does everything boring and correct already: size-based
+    rollover, generation retention, per-handler locking (thread-safe across the
+    daemon's worker threads). The ONLY addition here is compressing each
+    rotated file with gzip. ``doRollover`` calls ``rotation_filename`` to pick
+    the destination name and ``rotate`` to move the file; we name the target
+    ``*.log.N.gz`` and gzip into it instead of a plain rename.
+    """
+
+    def rotation_filename(self, default_name):
+        return default_name + ".gz"
+
+    def rotate(self, source, dest):
+        with open(source, "rb") as f_in, \
+                gzip.open(dest, "wb", compresslevel=6) as f_out:
+            shutil.copyfileobj(f_in, f_out)
+        try:
+            os.remove(source)
+        except OSError:
+            pass
+
+
+def _get_logger(log_file):
+    """Return the (lazily created) rotating Logger for *absolute* log_file.
+
+    A dedicated ``logging.Logger`` owns the handler (one per resolved path).
+    RotatingFileHandler is a *Handler*, not a *Logger* — it has ``emit`` /
+    ``handle`` but no ``info()``, so we route through a Logger + handler pair
+    (the Python-logging idiom) to get the stdlib's thread-safe, size-based
+    rollover for free. The Logger/Handler are both pinned to INFO so records
+    are never filtered, and propagation is off so the daemon log line does not
+    also leak to the root logger's handlers.
+    """
+    with _handlers_lock:
+        entry = _handlers.get(log_file)
+        if entry is None:
+            handler = _GzipRotatingFileHandler(
+                log_file, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT)
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            handler.setLevel(logging.INFO)
+            logger = logging.getLogger("hscc_daemon.rotating." + log_file)
+            logger.setLevel(logging.INFO)
+            logger.propagate = False
+            logger.addHandler(handler)
+            _handlers[log_file] = (logger, handler)
+            return logger
+        return entry[0]
+
+
+def append_rotating(log_file, line):
+    """Append a fully-formatted line to ``log_file`` under size-based rotation.
+
+    Shared by every daemon write path (daemon_ops.log, event_driven._event_log)
+    so the whole log gets the same cap/retention — a rotation that only covered
+    one writer would leave the other growing (the half-fixed bug this exists to
+    prevent). Builds the handler against the CURRENT ``log_file`` so a test or
+    another service passing a different path gets its own rotation. The line is
+    always passed as the single positional message (never as a ``%``-style
+    format + args), so the literal text is written verbatim. Never raises:
+    RotatingFileHandler swallows IO hiccups via handleError, matching the old
+    ``except IOError: pass`` guarantee.
+    """
+    try:
+        _get_logger(os.path.abspath(log_file)).info(line)
+    except Exception:
+        # Absorb anything the handler could not handle (the old log() contract
+        # was never to raise). The daemon must not die because of logging.
+        pass
+
+
 def log(msg, level="INFO", log_file=None, pid_file=None):
     """Write a timestamped log line to the daemon log file.
 
     ``log_file`` / ``pid_file`` default to the daemon's LOG_FILE / PID_FILE.
     Pass explicit paths to reuse the same timestamped format for a different
     service's log (~/.hscc/api.log) — one log convention, not a parallel one.
+
+    Writes go through a stdlib RotatingFileHandler (see append_rotating) with
+    gzip compression, so the log is size-capped and cannot grow unbounded.
     """
     log_file = log_file or LOG_FILE
     pid_file = pid_file or PID_FILE
     ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
     line = f"[{ts}] [{level:>5s}] {msg}"
-    try:
-        with open(log_file, "a") as f:
-            f.write(line + "\n")
-    except IOError:
-        pass
+    append_rotating(log_file, line)
     # Also print if daemon is running in foreground mode
     if not os.path.exists(pid_file):
         print(line)
