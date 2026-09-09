@@ -86,10 +86,20 @@ def _ns(**kw):
     """Build an argparse.Namespace with sensible defaults for a message cmd."""
     import argparse
 
+    class _PermissiveProfiles:
+        """Test-double for hermes_cli.profiles.profile_exists: any name valid."""
+
+        @staticmethod
+        def profile_exists(name):
+            return True
+
     defaults = dict(
         client=None, registry=None, json=False,
         project="", message="", task="", assignee=None, n=10, to=None,
         message_cmd=None, apply=False, body_file=None, cwd=None,
+        # Test default: treat any assignee as a valid profile. Individual
+        # tests override this to exercise the unknown-assignee guard.
+        _profiles=_PermissiveProfiles(),
     )
     defaults.update(kw)
     return argparse.Namespace(**defaults)
@@ -279,6 +289,73 @@ def test_dispatch_creates_card_and_announces(monkeypatch, tmp_path, capsys):
     assert kb.created[0]["body"] == "do the widget"
     # Announcement posted to the project's topic.
     assert ("telegram_send", {"group": GROUP, "message": "do the widget", "topic_id": 140}) in fake.calls
+
+
+def test_dispatch_preserves_requested_assignee_unmodified(monkeypatch, tmp_path, capsys):
+    """REG ROUT-0005: an explicitly requested assignee must land on the card
+    EXACTLY as requested — never silently rewritten (e.g. to a default or the
+    orchestrator profile). This is the regression for the reported dispatch
+    bug where cards came out assigned to `architect` instead of the requested
+    `backend-engineer`/`devops-engineer`. The dispatcher later re-assigns; the
+    create path must not preempt it."""
+    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
+    kb = FakeKB(new_id="card-7")
+    _stub_kb(kb, monkeypatch)
+    fake = FakeTG(topics={140: "hscc"})
+
+    rc = msg_cmd.cmd_dispatch(
+        _ns(client=fake, project="hscc", task="build the widget", assignee="backend-engineer", apply=True),
+        projects,
+    )
+    assert rc == 0
+    # The requested assignee survives verbatim — NOT rewritten to any default.
+    assert kb.created[0]["assignee"] == "backend-engineer"
+    assert kb.created[0]["assignee"] != "architect"
+
+
+def test_dispatch_unknown_assignee_fails_loudly_without_card(monkeypatch, tmp_path, capsys):
+    """Unknown assignees must fail loudly BEFORE any mutation — exit non-zero,
+    name the bad profile on stderr, and create no card. A silent create with a
+    misspelled profile is exactly the footgun that routes work nowhere (or to
+    the wrong person)."""
+    class _StrictProfiles:
+        """Real-ish double: only 'backend-engineer' and 'architect' are valid."""
+
+        @staticmethod
+        def profile_exists(name):
+            return name in ("backend-engineer", "architect")
+
+    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
+    kb = FakeKB(new_id="card-7")
+    _stub_kb(kb, monkeypatch)
+    fake = FakeTG(topics={140: "hscc"})
+
+    rc = msg_cmd.cmd_dispatch(
+        _ns(client=fake, project="hscc", task="build the widget", assignee="bcknd-engneer", _profiles=_StrictProfiles(), apply=True),
+        projects,
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "unknown assignee" in err
+    assert "bcknd-engneer" in err
+    # Fail before any mutation: no card, no announcement.
+    assert kb.created == []
+    assert fake.calls == []
+
+
+def test_dispatch_known_assignee_still_accepted(monkeypatch, tmp_path, capsys):
+    """A valid profile passes the guard and the card is created normally."""
+    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
+    kb = FakeKB(new_id="card-7")
+    _stub_kb(kb, monkeypatch)
+    fake = FakeTG(topics={140: "hscc"})
+
+    rc = msg_cmd.cmd_dispatch(
+        _ns(client=fake, project="hscc", task="build the widget", assignee="devops-engineer", apply=True),
+        projects,
+    )
+    assert rc == 0
+    assert kb.created[0]["assignee"] == "devops-engineer"
 
 
 def test_dispatch_anchors_card_in_projects_repo_worktree(monkeypatch, tmp_path, capsys):
