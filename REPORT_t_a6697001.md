@@ -100,7 +100,35 @@ Sequence (all against the live runtime — this IS the task's job, and it is not
    engine-wedge recovery(60s), dispatcher-wedge recovery(60s), watchdog(30s),
    trigger engine(15s).
 
-4. Persistence check: (fill in result after the wait).
+4. Persistence check (post-cleanup): at 04:08:44 UTC the launchd job shows PID
+   72498, `~/.hscc/daemon.pid` = 72498, `ps -p 72498` alive with PPID 1 (launchd),
+   elapsed 10:33 and climbing; `~/.hscc/daemon.log` still appending (last line
+   04:08:42). No untracked `hscc start` duplicates remain.
+
+## 4b. Additional duplicates found and retired
+
+After bringing up the launchd job it became clear the "duplicate untracked
+daemon" was actually MULTIPLE stale `hscc start` processes, left over from the
+crashed prior attempts during the outage. Each ran the FULL daemon loop (all
+check + watchdog + trigger streams), so multiple watchdog/trigger engines were
+firing concurrently — the likely driver of the auto-heal force-recreate churn
+the operator described.
+
+- PID 11026 `hscc start` (started 9:56PM local) — retired via `kill -TERM 11026`.
+- PID 57758 `hscc start` (started Thu 11PM local) — retired via `kill -TERM 57758`.
+
+Verified after: only PID 72498 (launchd-supervised `start-daemon`) remains.
+
+## 4c. Latent pid-file race discovered (documented, not "fixed" in code)
+
+All daemon paths (`hscc start` and `start-daemon`) share one pid file
+`~/.hscc/daemon.pid`. Each `hscc start` daemon's SIGTERM handler calls
+`write_stopped()` which `os.remove`s the pid file — so when a stale duplicate
+was killed, it deleted the pid file that belonged to the live launchd daemon
+(72498). The live daemon kept running (it only writes the pid at startup) but
+the pid file vanished; I restored it to `72498`. Not changing this in code:
+resolving the duplicates is the real fix; the shared-pid-file design is a
+separate concern and out of scope for this card.
 
 ## 5. What I did NOT do (and why)
 
