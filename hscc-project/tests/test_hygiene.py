@@ -37,12 +37,37 @@ def card(
     }
 
 
-def facts(card_id, *, branch_exists=True, is_merged=False, commits_ahead=3):
-    return {card_id: {"branch_exists": branch_exists, "is_merged": is_merged, "commits_ahead": commits_ahead}}
+def facts(
+    card_id,
+    *,
+    branch_exists=True,
+    is_merged=False,
+    commits_ahead=3,
+    is_clean=False,
+    no_unreachable=False,
+):
+    return {
+        card_id: {
+            "branch_exists": branch_exists,
+            "is_merged": is_merged,
+            "commits_ahead": commits_ahead,
+            "is_clean": is_clean,
+            "no_unreachable": no_unreachable,
+        }
+    }
 
 
 def merged_facts(card_id, commits=3):
-    return facts(card_id, branch_exists=True, is_merged=True, commits_ahead=commits)
+    """A branch that is merged AND whose worktree is fully prune-safe
+    (no uncommitted changes, no commits unreachable from dev/origin)."""
+    return facts(
+        card_id,
+        branch_exists=True,
+        is_merged=True,
+        commits_ahead=commits,
+        is_clean=True,
+        no_unreachable=True,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -225,6 +250,65 @@ def test_stale_worktree_maps_board_for_repo():
     assert stale[0]["board"] == "hscc"
 
 
+def test_stale_worktree_skipped_when_dirty():
+    """NEW: a worktree with uncommitted changes is never prune-safe — even if
+    the card is done and the branch merged. Prevents destroying uncommitted
+    work (the recurring lost-work incident hygiene exists to stop)."""
+    g = facts("c1", branch_exists=True, is_merged=True, commits_ahead=0,
+              is_clean=False, no_unreachable=True)
+    stale = hygiene.find_stale_worktrees([_wt("c1")], g, closed_ids={"c1"})
+    assert stale == []
+    verdicts = hygiene.classify_worktrees([_wt("c1")], g, {"c1"})
+    assert verdicts[0]["prune_safe"] is False
+    assert any("uncommitted changes" in r for r in verdicts[0]["keep_reasons"])
+
+
+def test_stale_worktree_skipped_when_unreachable_commits():
+    """NEW: a worktree whose branch has commits NOT on dev/origin is kept —
+    its work would be lost. This is the reachability (not just merge) check."""
+    g = facts("c1", branch_exists=True, is_merged=False, commits_ahead=3,
+              is_clean=True, no_unreachable=False)
+    stale = hygiene.find_stale_worktrees([_wt("c1")], g, closed_ids={"c1"})
+    assert stale == []
+    verdicts = hygiene.classify_worktrees([_wt("c1")], g, {"c1"})
+    assert verdicts[0]["prune_safe"] is False
+    assert any("dev/origin" in r for r in verdicts[0]["keep_reasons"])
+
+
+def test_stale_worktree_prune_safe_when_card_absent():
+    """NEW: a worktree whose card is entirely ABSENT from the board (deleted /
+    board removed) is prune-safe along with clean + no-unreachable — the card
+    can neither be in closed_ids (it is gone) nor open, so absence is settled."""
+    g = merged_facts("ghost")
+    # all_ids excludes "ghost" -> absent; it is not in closed_ids either.
+    stale = hygiene.find_stale_worktrees([_wt("ghost")], g, closed_ids=set(), all_ids={"t_other"})
+    assert len(stale) == 1
+    assert stale[0]["card_id"] == "ghost"
+
+
+def test_stale_worktree_card_absent_but_present_in_all_ids_kept():
+    """Absence is judged against all_ids: a card that IS on the board (even
+    open) is NOT absent, so its worktree is kept."""
+    g = merged_facts("c1")
+    stale = hygiene.find_stale_worktrees([_wt("c1")], g, closed_ids=set(), all_ids={"c1"})
+    assert stale == []
+    verdicts = hygiene.classify_worktrees([_wt("c1")], g, set(), all_ids={"c1"})
+    assert verdicts[0]["prune_safe"] is False
+    assert any("still open" in r for r in verdicts[0]["keep_reasons"])
+
+
+def test_classify_worktrees_missing_facts_are_conservative_keep():
+    """NEW: a worktree with NO git facts entry defaults to KEEP — an unknown
+    is never pruned. All three keep reasons surface."""
+    verdicts = hygiene.classify_worktrees([_wt("c1")], {}, {"c1"}, all_ids={"c1"})
+    assert verdicts[0]["prune_safe"] is False
+    # c1 is in all_ids so it is NOT absent; and closed_ids={"c1"} is settled.
+    # Only the two git-safety facts fail (conservative defaults).
+    assert len(verdicts[0]["keep_reasons"]) == 2
+    assert any("uncommitted changes" in r for r in verdicts[0]["keep_reasons"])
+    assert any("dev/origin" in r for r in verdicts[0]["keep_reasons"])
+
+
 # --------------------------------------------------------------------------- #
 # build_plan — clean inputs propose nothing.
 # --------------------------------------------------------------------------- #
@@ -235,7 +319,12 @@ def test_build_plan_clean_proposes_nothing():
     g = {"a": {"branch_exists": True, "is_merged": False, "commits_ahead": 2},
          "b": {"branch_exists": True, "is_merged": False, "commits_ahead": 1}}
     plan = hygiene.build_plan(cards, g, worktrees=[], closed_ids=set(), threshold=0.88)
-    assert plan == {"duplicates": [], "triage": [], "stale_worktrees": []}
+    assert plan == {
+        "duplicates": [],
+        "triage": [],
+        "stale_worktrees": [],
+        "worktree_keeps": [],
+    }
 
 
 def test_build_plan_finds_all_three_modes():
@@ -250,7 +339,8 @@ def test_build_plan_finds_all_three_modes():
         "dup1": {"branch_exists": True, "is_merged": True, "commits_ahead": 4},
         "dup2": {"branch_exists": True, "is_merged": True, "commits_ahead": 4},
         "trp1": {"branch_exists": True, "is_merged": False, "commits_ahead": 7},
-        "wt1": {"branch_exists": True, "is_merged": True, "commits_ahead": 3},
+        "wt1": {"branch_exists": True, "is_merged": True, "commits_ahead": 3,
+                "is_clean": True, "no_unreachable": True},
         "live": {"branch_exists": True, "is_merged": False, "commits_ahead": 0},
     }
     closed_ids = {"wt1"}

@@ -156,16 +156,29 @@ def find_duplicates(
 
 def _facts_for_git_facts(git_facts: dict, card_id: Optional[str]) -> dict:
     """Conservative git-fact defaults for one card (branch_exists=False,
-    is_merged=False, commits_ahead=0) when no entry is present."""
+    is_merged=False, commits_ahead=0, is_clean=False, no_unreachable=False)
+    when no entry is present.
+
+    The two worktree-safety fields default to **False** so an unknown is
+    treated as KEEP (never prune what we could not verify). ``is_clean``
+    means the worktree has no uncommitted changes; ``no_unreachable`` means
+    no commits on the worktree are reachable only from itself (they are all
+    already on ``dev``/``origin``). Only an explicit True from the caller
+    lets a worktree be classified prune-safe.
+    """
     if card_id is None:
-        return {"branch_exists": False, "is_merged": False, "commits_ahead": 0}
+        return {"branch_exists": False, "is_merged": False, "commits_ahead": 0,
+                "is_clean": False, "no_unreachable": False}
     facts = git_facts.get(card_id)
     if not isinstance(facts, dict):
-        return {"branch_exists": False, "is_merged": False, "commits_ahead": 0}
+        return {"branch_exists": False, "is_merged": False, "commits_ahead": 0,
+                "is_clean": False, "no_unreachable": False}
     return {
         "branch_exists": bool(facts.get("branch_exists", False)),
         "is_merged": bool(facts.get("is_merged", False)),
         "commits_ahead": int(facts.get("commits_ahead", 0) or 0),
+        "is_clean": bool(facts.get("is_clean", False)),
+        "no_unreachable": bool(facts.get("no_unreachable", False)),
     }
 
 
@@ -223,47 +236,99 @@ def find_triage_traps(cards: list[dict], git_facts: dict) -> list[dict]:
 # --------------------------------------------------------------------------- #
 
 
+def classify_worktrees(
+    worktrees: list[dict],
+    git_facts: dict,
+    closed_ids: set,
+    *,
+    all_ids: set | None = None,
+) -> list[dict]:
+    """Classify every worktree under .worktrees as PRUNE-SAFE or KEEP.
+
+    ``worktrees`` is a list of ``{"card_id", "worktree", "branch", "board",
+    "repo"}`` — the existing ``.worktrees/<card>`` directories under each
+    registered repo, as discovered by the caller. ``closed_ids`` is the set of
+    card IDs that are settled (done/archived/cancelled); ``all_ids`` is the set
+    of EVERY card id seen across all boards (including archived) — a worktree
+    whose card id is not in ``all_ids`` is ABSENT from the board (deleted /
+    board removed), which is also settled. ``git_facts`` is ``{card_id:
+    {branch_exists, is_merged, commits_ahead, is_clean, no_unreachable}}``.
+
+    A worktree is PRUNE-SAFE only when ALL of:
+
+      * its card is SETTLED: in ``closed_ids`` (done/archived/cancelled) OR
+        absent from the board (``all_ids`` is given and the id is not in it)
+      * the worktree has NO uncommitted changes (``git_facts`` ``is_clean``)
+      * NO commits on the worktree are reachable only from itself —
+        ``git_facts`` ``no_unreachable`` (everything is already on dev/origin)
+
+    Anything else is KEEP. Each returned entry:::
+
+        {
+            "card_id", "worktree", "branch", "board", "repo",
+            "prune_safe": <bool>,
+            "keep_reasons": [<str>, ...],   # empty when prune_safe
+        }
+
+    ``keep_reasons`` lists exactly why it is kept, so the operator sees the
+    work sustained by a live worktree instead of a bare "keep". Never mutates.
+    """
+    out: list[dict] = []
+    for wt in worktrees:
+        cid = wt.get("card_id")
+        facts = _facts_for_git_facts(git_facts, cid)
+        reasons: list[str] = []
+
+        # 1. Card settled?
+        in_closed = cid in closed_ids
+        absent = all_ids is not None and cid not in all_ids
+        if not (in_closed or absent):
+            reasons.append("card is still open on the board")
+
+        # 2. No uncommitted changes?
+        if not facts["is_clean"]:
+            reasons.append("worktree has uncommitted changes")
+
+        # 3. No commits unreachable from dev/origin?
+        if not facts["no_unreachable"]:
+            reasons.append("branch has commits not reachable from dev/origin")
+
+        prune_safe = not reasons
+        out.append(
+            {
+                "card_id": cid,
+                "worktree": wt.get("worktree"),
+                "branch": wt.get("branch"),
+                "board": wt.get("board"),
+                "repo": wt.get("repo"),
+                "prune_safe": prune_safe,
+                "keep_reasons": reasons,
+            }
+        )
+    return out
+
+
 def find_stale_worktrees(
     worktrees: list[dict],
     git_facts: dict,
     closed_ids: set,
+    *,
+    all_ids: set | None = None,
 ) -> list[dict]:
-    """Worktree checkouts whose card is closed AND whose branch is merged.
+    """The PRUNE-SAFE subset of :func:`classify_worktrees`.
 
-    ``worktrees`` is a list of ``{"card_id", "board", "worktree", "branch"}`` —
-    the existing ``.worktrees/<card>`` directories under each registered repo,
-    as discovered by the caller. ``closed_ids`` is the set of card IDs that are
-    closed (done/archived/cancelled); it is passed in explicitly because
-    archived cards are excluded from the usual non-archived read, yet an
-    archived card's worktree is precisely a prime stale candidate. ``git_facts``
-    is ``{card_id: {branch_exists, is_merged, commits_ahead}}``.
-
-    A worktree is stale only when BOTH hold:
-
-    * its card's id is in ``closed_ids`` (done/archived/cancelled)
-    * its branch is merged into main (per ``git_facts`` ``is_merged``)
-
-    Returns a list of ``{"card_id", "board", "worktree", "branch"}``. Never
-    mutates.
+    Retained under the original name for callers that act only on what is safe
+    to remove (the ``--apply`` path) and for the ``build_plan`` ``stale_worktrees``
+    key. A worktree is stale (prune-safe) only when :func:`classify_worktrees`
+    says ``prune_safe`` — i.e. ALL of: card settled, no uncommitted changes, no
+    commits unreachable from dev/origin. Anything else is kept and never listed
+    here; see :func:`classify_worktrees` for the per-worktree reasons.
     """
-    stale: list[dict] = []
-    for wt in worktrees:
-        cid = wt.get("card_id")
-        if cid not in closed_ids:
-            continue  # card still open — keep the worktree
-        facts = _facts_for_git_facts(git_facts, cid)
-        if not facts["is_merged"]:
-            continue  # branch not merged — work may still be needed
-        stale.append(
-            {
-                "card_id": cid,
-                "board": wt.get("board"),
-                "repo": wt.get("repo"),
-                "worktree": wt["worktree"],
-                "branch": wt["branch"],
-            }
-        )
-    return stale
+    return [
+        entry
+        for entry in classify_worktrees(worktrees, git_facts, closed_ids, all_ids=all_ids)
+        if entry["prune_safe"]
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -278,19 +343,28 @@ def build_plan(
     closed_ids: set,
     *,
     threshold: float = DEFAULT_SIMILARITY,
+    all_ids: set | None = None,
 ) -> dict:
-    """The full hygiene plan: ``{duplicates, triage, stale_worktrees}``.
+    """The full hygiene plan: ``{duplicates, triage, stale_worktrees,
+    worktree_keeps}``.
 
     ``cards`` (non-archived read) drives duplicate + triage detection;
     ``closed_ids`` is the set of closed card ids (including archived) used by
-    the stale-worktree detector. Pure — never mutates the board, git, or any
+    the stale-worktree detector. ``all_ids`` is the set of EVERY card id across
+    all boards (including archived); when given, a worktree whose card id is
+    not in it counts as ABSENT (settled). ``stale_worktrees`` holds the
+    PRUNE-SAFE ones (see :func:`find_stale_worktrees`); ``worktree_keeps``
+    holds every other worktree with its keep reasons (see
+    :func:`classify_worktrees`). Pure — never mutates the board, git, or any
     input. The caller renders it and, only with an explicit ``--apply``, hands
     it to the ``apply_*`` helpers.
     """
+    classifications = classify_worktrees(worktrees, git_facts, closed_ids, all_ids=all_ids)
     return {
         "duplicates": find_duplicates(cards, threshold=threshold),
         "triage": find_triage_traps(cards, git_facts),
-        "stale_worktrees": find_stale_worktrees(worktrees, git_facts, closed_ids),
+        "stale_worktrees": [c for c in classifications if c["prune_safe"]],
+        "worktree_keeps": [c for c in classifications if not c["prune_safe"]],
     }
 
 

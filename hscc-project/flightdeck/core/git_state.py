@@ -15,6 +15,14 @@ from typing import Callable, Optional, Sequence
 
 _CMD = Sequence[str]
 
+# Candidate trunk refs for :func:`reachable_from_trunk`. ``origin/dev`` and
+# ``dev`` are tried first because the hscc repo's real integration trunk is
+# ``dev`` (every merge is "into dev") even though ``default_branch()`` — which
+# reads ``origin/HEAD`` — reports ``main``. Being an ancestor of any of these
+# that exist is sufficient proof the work is on a shared trunk.
+_TRUNK_CANDIDATES = ("origin/dev", "dev", "origin/main", "main", "origin/master", "master")
+
+
 
 def _default_run(cmd, repo):
     """Production subprocess runner. ``_run=None`` falls back to this.
@@ -59,6 +67,35 @@ def is_merged(repo, branch, base="main", _run: Optional[Callable] = None):
     """
     cp = _dispatch(["git", "merge-base", "--is-ancestor", branch, base], repo, _run)
     return cp.returncode == 0
+
+
+def reachable_from_trunk(repo, branch, _run: Optional[Callable] = None) -> bool:
+    """True when ``branch``'s commits are ALL reachable from the shared trunk.
+
+    This answers the worktree-pruning safety question: a worktree is only safe
+    to remove if nothing on it would be lost. Its committed work is lost if any
+    commit on the worktree is reachable ONLY from itself — i.e. NOT reachable
+    from ``dev`` or ``origin`` (the task's language for "no commits that are
+    not reachable from dev/origin").
+
+    The check is ancestry: ``branch`` must be an ancestor of a trunk ref. We
+    probe a small set of candidate trunk refs — ``origin/dev`` and local
+    ``dev`` first (the operator's real integration trunk for the hscc repo,
+    where ``default_branch()`` misleadingly reports ``main``), then the
+    conventional ``main`` / ``origin/main`` / ``master`` so the same default
+    works across repos. Being an ancestor of ANY existing trunk ref is
+    sufficient: its commits then live on a trunk that the repo already has.
+
+    Returns False (conservative) for a non-repo path, an unresolvable branch,
+    or when no candidate trunk ref exists — we never claim work is safe to
+    drop unless we can actually prove it is on a trunk. Never raises.
+    """
+    for base in _TRUNK_CANDIDATES:
+        if not branch_exists(repo, base, _run=_run):
+            continue
+        if is_merged(repo, branch, base=base, _run=_run):
+            return True
+    return False
 
 
 def branch_exists(repo, branch, _run: Optional[Callable] = None):
