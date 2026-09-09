@@ -928,6 +928,7 @@ class TestDoctorFixNoopWhenFresh:
             },
             "multiplex_profiles": True,
             "gateway": {"multiplex_profiles": True},
+            "approvals": {"single_query_mode": "approve"},
         }
         with open(config_path, "w") as fh:
             yaml.safe_dump(cfg, fh)
