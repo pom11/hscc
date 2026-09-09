@@ -133,6 +133,18 @@ DASHBOARD_PUBLIC_URL = os.environ.get(
     "HSCC_DASHBOARD_PUBLIC_URL",
     f"http://{GATEWAY_HOST}:3000")
 
+# Approvals in single-query mode. Hermes defaults approvals.single_query_mode
+# to ``deny`` (tools/approval.py:3552), so EVERY dispatched kanban worker —
+# which runs ``hermes -c ... -p <profile>`` in single-query (-q) mode — has
+# execute_code denied, and by definition NO human can approve in single-query
+# mode. Hermes' own error text points at the remedy: "set
+# approvals.single_query_mode: approve in config.yaml". A fresh HSCC install
+# MUST get ``approve`` or every worker is born unable to run code. Only these
+# values are valid; an operator-set value outside the set (e.g. a deliberate
+# ``deny``) is preserved, never overwritten.
+SINGLE_QUERY_MODES = {"approve", "deny"}
+SINGLE_QUERY_MODE = os.environ.get("HSCC_SINGLE_QUERY_MODE", "approve")
+
 
 def _is_int_like(v) -> bool:
     """True if ``v`` is a whole number stored as int, float (``6.0``), or a
@@ -518,6 +530,27 @@ def _ensure_multiplex(cfg):
     return changed
 
 
+def _ensure_approvals(cfg):
+    """Wire approvals.single_query_mode so workers can execute code.
+
+    Dispatched kanban workers run single-query (-q) mode, where deny means
+    execute_code is blocked with no interactive approver available. Default
+    it to ``approve`` for a working fleet. Mirror the preserve-the-operator
+    semantics of delegation.max_concurrent_children (see _ensure_delegation):
+    only set the key when it is ABSENT or NOT a valid value. If the operator
+    has deliberately set a valid mode (e.g. ``deny``), DO NOT overwrite it —
+    that is their call, and silently flipping an approval setting is worse
+    than the bug it fixes. Returns keys changed.
+    """
+    a = cfg.setdefault("approvals", {})
+    if not isinstance(a, dict):
+        return []
+    if "single_query_mode" in a and a["single_query_mode"] in SINGLE_QUERY_MODES:
+        return []  # operator-set valid value — preserve it
+    a["single_query_mode"] = SINGLE_QUERY_MODE
+    return ["single_query_mode"]
+
+
 def _ensure_dashboard(cfg):
     """Ensure the dashboard block has a public_url for network access.
 
@@ -692,7 +725,8 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
 
     empty = {"plugins": [], "toolsets": [], "kanban": [], "delegation": [],
              "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [],
-             "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": []}
+             "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": [],
+             "approvals": []}
     if not os.path.exists(config_path):
         return empty
     with open(config_path) as fh:
@@ -712,6 +746,7 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
     changed_dashboard = _ensure_dashboard(cfg)
     changed_multiplex = _ensure_multiplex(cfg)
     changed_hooks = _ensure_hooks(cfg)
+    changed_approvals = _ensure_approvals(cfg)
 
     # Sanity-probe the compaction endpoint (prints a warning to gateway logs
     # if the model is missing — non-fatal but alerts the operator).
@@ -723,7 +758,7 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
     if (added_plugins or added_toolsets or changed_kanban or changed_delegation
             or changed_compaction or changed_text_aux or changed_fallback
             or changed_bitwarden or changed_prompt_caching or changed_dashboard
-            or changed_multiplex or changed_hooks):
+            or changed_multiplex or changed_hooks or changed_approvals):
         import shutil
         import time
         shutil.copy(config_path,
@@ -739,7 +774,8 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
             "prompt_caching": changed_prompt_caching,
             "dashboard": changed_dashboard,
             "multiplex": changed_multiplex,
-            "hooks": changed_hooks}
+            "hooks": changed_hooks,
+            "approvals": changed_approvals}
 
 
 if __name__ == "__main__":

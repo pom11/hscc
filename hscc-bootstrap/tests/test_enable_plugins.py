@@ -122,6 +122,7 @@ def _fully_wired_cfg():
         },
         "gateway": {"multiplex_profiles": True},
         "multiplex_profiles": True,
+        "approvals": {"single_query_mode": "approve"},
     }
 
 
@@ -129,13 +130,13 @@ def test_fully_wired_is_noop(tmp_path):
     path = _write(tmp_path / "config.yaml", _fully_wired_cfg())
     before = open(path).read()
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": [], "approvals": []}
     assert open(path).read() == before              # no rewrite, no backup churn
 
 
 def test_missing_config_noop(tmp_path):
     res = enable_plugins.enable(str(tmp_path / "nope.yaml"))
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": [], "approvals": []}
 
 
 # ── fleet routing (kanban + delegation) ──────────────────────────────────────
@@ -166,7 +167,7 @@ def test_routing_preserves_operator_choices(tmp_path):
     cfg["delegation"]["base_url"] = "http://my-proxy:9000/v1"
     path = _write(tmp_path / "config.yaml", cfg)
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": [], "approvals": []}
     out = yaml.safe_load(open(path))
     assert out["kanban"]["default_assignee"] == "my-special-worker"
     assert out["kanban"]["max_in_progress"] == 99   # not lowered
@@ -199,6 +200,33 @@ def test_delegation_string_cap_preserved(tmp_path):
     res = enable_plugins.enable(path)
     assert "max_concurrent_children" not in res["delegation"]
     assert yaml.safe_load(open(path))["delegation"]["max_concurrent_children"] == "2"
+
+
+# ── approvals.single_query_mode ────────────────────────────────────────────────
+
+def test_single_query_mode_seeded_when_absent(tmp_path):
+    # A fresh config with no approvals key must get single_query_mode=approve,
+    # so every dispatched single-query (-q) worker can execute code (no human
+    # exists to approve in -q mode; deny blocks execute_code outright).
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]}, "toolsets": ["kanban"]})
+    res = enable_plugins.enable(path)
+    assert res["approvals"] == ["single_query_mode"]
+    cfg = yaml.safe_load(open(path))
+    assert cfg["approvals"]["single_query_mode"] == "approve"
+
+
+def test_single_query_mode_deny_survives_reconcile(tmp_path):
+    # An operator who has deliberately set single_query_mode=deny (their call;
+    # they may WANT interactive-only approval) must keep it. Silently flipping
+    # an approval setting to approve would be worse than the bug it fixes —
+    # mirror the preserve-the-operator semantics of max_concurrent_children.
+    cfg = _fully_wired_cfg()
+    cfg["approvals"]["single_query_mode"] = "deny"
+    path = _write(tmp_path / "config.yaml", cfg)
+    res = enable_plugins.enable(path)
+    assert "single_query_mode" not in res["approvals"]
+    assert yaml.safe_load(open(path))["approvals"]["single_query_mode"] == "deny"
 
 
 def test_fallback_seeded_when_absent(tmp_path):
