@@ -945,11 +945,12 @@ def test_hygiene_apply_reaches_cli_command(monkeypatch):
     core_hygiene = hygiene.hygiene
     monkeypatch.setattr(
         core_hygiene, "build_plan",
-        lambda active, git_facts, worktrees, closed_ids, threshold=0.88: {
+        lambda active, git_facts, worktrees, closed_ids, threshold=0.88, all_ids=None: {
             "duplicates": [{"board": "hscc", "keep": active[0] if active else {},
                             "archive": [active[1] if len(active) > 1 else {}]}],
             "triage": [],
             "stale_worktrees": [],
+            "worktree_keeps": [],
         },
     )
 
