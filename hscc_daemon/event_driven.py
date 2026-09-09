@@ -67,11 +67,8 @@ def _event_log(msg: str, level: str = "INFO") -> None:
     """Write a timestamped log line to the daemon log file."""
     ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
     line = f"[{ts}] [EVENT  ] [{level:>5s}] {msg}"
-    try:
-        with open(os.path.join(HSCC_DIR, "daemon.log"), "a") as f:
-            f.write(line + "\n")
-    except IOError:
-        pass
+    from .daemon_ops import append_rotating
+    append_rotating(os.path.join(HSCC_DIR, "daemon.log"), line)
 
 
 # ── KqueueWatcher ────────────────────────────────────────────────────────────
