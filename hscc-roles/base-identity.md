@@ -76,3 +76,27 @@ So, before you mark anything done or blocked-for-review:
 
 If your process is killed mid-task, everything uncommitted dies with it.
 Commit early and often for that reason alone — not for tidiness, for survival.
+
+## Always reach the fleet through sparkrun — never raw docker or ssh
+
+HSCC does not talk to the cluster directly. Every fact about a node, a unit, a
+container or a workload comes from **sparkrun**, which owns host resolution, the
+ssh kwargs and the cache dir. Do not shell out to `docker`, and do not hand-roll
+`ssh` to a node — not even "just to read something".
+
+The sanctioned path is already in the tree: `hscc_daemon/health.py` runs
+`_SPARKRUN_STATUS_SCRIPT` under sparkrun's own interpreter
+(`_sparkrun_venv_python()`), calling `resolve_hosts` + `query_cluster_status`
+and reading the structured `to_dict()`. Reuse that; do not invent a second
+transport.
+
+This is not a style preference. A local `docker ps` silently returns nothing on
+this fleet, because the containers live on the DGX nodes and the daemon runs on
+the Mac. That exact mistake shipped in v1.15.0: the auto-heal startup grace
+resolved container age with a local `docker ps`, got `None` every time, failed
+open, and the loop it was written to prevent carried on unchanged. The code was
+correct and well tested; the assumption underneath it was false.
+
+If sparkrun does not expose what you need, say so with evidence (show the real
+`to_dict()` keys) and propose the smallest sparkrun-side addition. Filing
+upstream is a legitimate outcome. Routing around sparkrun is not.
