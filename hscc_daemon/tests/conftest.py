@@ -89,8 +89,8 @@ def _isolate_hscc(tmp_path, monkeypatch):
     # (b) Module-level constants already computed at import — overwrite each.
     def _module_attrs():
         from hscc_daemon import (
-            autodown, daemon_ops, desktop, hscc, lifecycle, replay, serving,
-            state, trigger, usage,
+            autodown, daemon_ops, desktop, health, hscc, lifecycle, replay,
+            serving, state, trigger, usage,
         )
         def p(sub):
             return os.path.join(base, sub)
@@ -145,6 +145,14 @@ def _isolate_hscc(tmp_path, monkeypatch):
             (serving, "CLUSTER_JSON", p("cluster.json")),
             (serving, "PROFILES_DIR", p("profiles")),
             (serving, "ORCH_ENDPOINT_STATE", p("orch-endpoint")),
+            # health.py — the worker relaunch + container-age state files.
+            # The auto-heal startup grace keyed on container creation time
+            # persists has-served / created_ts here, so it MUST be redirected
+            # or the sandboxed no-live-leak audit trips (it appeared as a new
+            # file in the planted ~/.hscc). Redirect both to the per-test base.
+            (health, "_WORKER_RELATCH_FILE", p("worker_relaunch.json")),
+            (health, "_WORKER_CONTAINER_STATE_FILE",
+             p("worker_container_state.json")),
         ]
 
     for mod, attr, val in _module_attrs():

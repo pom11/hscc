@@ -69,11 +69,35 @@ NAS_PROBE_TIMEOUT = float(os.environ.get("HSCC_NAS_PROBE_TIMEOUT", "5"))
 WORKER_AUTOHEAL_DEBOUNCE = int(os.environ.get("HSCC_WORKER_AUTOHEAL_DEBOUNCE", "3"))
 WORKER_AUTOHEAL_COOLDOWN_MINUTES = int(
     os.environ.get("HSCC_WORKER_AUTOHEAL_COOLDOWN_MINUTES", "10"))
+# Startup grace (durable, container-age keyed): a unit whose container is
+# younger than this AND has never served is still LOADING, not dead, and must
+# NOT be auto-healed — and that must hold ACROSS a daemon restart. The
+# debounce/cooldown books are in-memory (reset on daemon start, so a restart
+# begins clean); keying the grace on container creation time (docker inspect)
+# + a persisted has-served flag makes it durable, so a still-loading unit never
+# gets a fresh 3-strike countdown into a force-recreate after a restart.
+# Default derives from the repository's real observed load bound:
+# VLLM_LOAD_GRACE_MINUTES (lifecycle.py:125, default 20 min = 1200s) — the
+# documented large-model weight-staging phase (5-10+ min to first serving).
+# Configurable via env, never hardcoded.
+WORKER_AUTOHEAL_LOAD_GRACE = int(
+    os.environ.get("HSCC_WORKER_AUTOHEAL_LOAD_GRACE", "1200"))
 
 # In-memory per-unit debounce/cooldown bookkeeping (reset on daemon start, so a
 # restart begins clean). Keyed by (node, port) — the unit identity.
 _worker_down_streak = {}     # (node, port) -> consecutive down-checks
 _worker_last_autoheal = {}   # (node, port) -> wall-clock ts of last auto-heal
+
+# Durable per-unit container-age bookkeeping — the signal the startup grace
+# keys on. For each (node, port): the container's creation epoch (from docker
+# inspect) and whether that container has ever answered /health. PERSISTED to
+# disk (worker_container_state.json) so it survives daemon restarts — the whole
+# point of keying on container age, not the in-memory debounce. A changed
+# created_ts means the container was recreated → a freshly-loading container
+# gets a fresh grace (has_served resets).
+_worker_container_state = {}  # (node, port) -> {"created_ts": float|None, "has_served": bool}
+_WORKER_CONTAINER_STATE_FILE = os.path.expanduser(
+    "~/.hscc/worker_container_state.json")
 
 
 # Inline script run under sparkrun's OWN venv python to invoke the structured
@@ -1005,6 +1029,152 @@ def _save_worker_relaunch_timestamps():
         pass
 
 
+# ── Worker container-age state (startup grace) — persisted ────────────────
+# The startup grace keys on container creation time + a has-served flag, both
+# PERSISTED so a still-loading unit is never auto-healed across a daemon
+# restart (the debounce resets; container age does not).
+
+def _load_worker_container_state():
+    """Load persisted per-unit container-age state from disk (best-effort)."""
+    try:
+        with open(_WORKER_CONTAINER_STATE_FILE) as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            for key_str, rec in data.items():
+                try:
+                    parts = key_str.strip("()").split(",")
+                    key = (parts[0], int(parts[1]))
+                except (ValueError, IndexError):
+                    continue
+                _worker_container_state[key] = {
+                    "created_ts": rec.get("created_ts"),
+                    "has_served": bool(rec.get("has_served")),
+                }
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+
+
+def _save_worker_container_state():
+    """Persist per-unit container-age state to disk (best-effort)."""
+    try:
+        serializable = {
+            f"({k[0]},{k[1]})": v for k, v in _worker_container_state.items()
+        }
+        tmp = _WORKER_CONTAINER_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(serializable, f)
+        os.replace(tmp, _WORKER_CONTAINER_STATE_FILE)
+    except OSError:
+        pass
+
+
+# ── Worker container-age helper (startup grace) ───────────────────────────
+# Injectable (like _autoheal_worker_fn) so tests can control the age signal
+# without touching a real node/docker. The real implementation inspects the
+# docker container publishing the unit's port. Any failure fails OPEN: if we
+# cannot determine the container age, we do NOT suppress the auto-heal.
+
+def _parse_docker_createdat(text):
+    """Parse `docker ps --format '{{.CreatedAt}}'` (e.g. '2026-09-08 21:30:45
+    +0000 UTC') into epoch-seconds, or None on any parse failure."""
+    try:
+        s = text.strip()
+        # Drop the trailing tz NAME (UTC) but keep the +0000 offset (last 6).
+        dt = datetime.datetime.strptime(s.rsplit(" ", 1)[0],
+                                        "%Y-%m-%d %H:%M:%S %z")
+        return dt.timestamp()
+    except (ValueError, AttributeError, IndexError):
+        return None
+
+
+def _default_worker_container_created_ts(node, port):
+    """Epoch-seconds when the docker container publishing `port` was created,
+    or None if it cannot be determined. Real implementation: ``docker ps
+    --filter publish=<port>`` (the docker container inspect path). Best-effort
+    and fail-open — docker is local to this daemon host, which is correct for
+    the (primary) single-node deployment the fleet runs; on a remote multi-node
+    span the container is co-located and this reports the local one, so the age
+    signal degrades to 'unknown/old' rather than suppressing incorrectly.
+    """
+    try:
+        r = run_cmd(
+            ["docker", "ps", "--filter", f"publish={port}",
+             "--format", "{{.ID}} {{.CreatedAt}}"], timeout=10)
+    except Exception:
+        return None
+    if not r.get("ok") or not r.get("output"):
+        return None
+    for line in r["output"].splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        ts = _parse_docker_createdat(" ".join(parts[1:]))
+        if ts is not None:
+            return ts
+    return None
+
+
+_worker_container_created_ts = _default_worker_container_created_ts
+
+
+def _suppress_autoheal_for_startup_grace(key, label, node, port, now_wall):
+    """True if the down unit is still LOADING, not dead: its container is
+    younger than WORKER_AUTOHEAL_LOAD_GRACE AND has never served.
+
+    Both facts are durable: container age comes from docker inspect (re-resolved
+    here on the down-threshold path, so a recreate is detected and has_served
+    resets for the fresh container's load), and the has-served flag is persisted
+    in worker_container_state.json. So the shield holds ACROSS a daemon restart
+    — a still-loading unit never gets a fresh in-memory 3-strike countdown into
+    a force-recreate.
+
+    A unit that HAS served and then stopped is exempt (has_served=True) and
+    heals promptly. Fail-open: if the container age cannot be determined (None)
+    we do NOT suppress — preserve the existing auto-heal behavior.
+    """
+    rec = _worker_container_state.get(key)
+    stored_ts = rec["created_ts"] if rec else None
+    has_served = bool(rec and rec["has_served"])
+    live_ts = _worker_container_created_ts(node, port)
+    # Recreate detection: the live container differs from the one we recorded →
+    # a freshly-recreated, still-loading container must get a fresh grace.
+    # Compare with a tolerance: created_ts round-trips through JSON (float), so
+    # a few-microsecond drift must not look like a new container.
+    if (live_ts is not None and stored_ts is not None
+            and abs(live_ts - stored_ts) > 1.0):
+        has_served = False
+    created_ts = live_ts if live_ts is not None else stored_ts
+    if (created_ts, has_served) != (stored_ts, bool(rec and rec["has_served"])):
+        _worker_container_state[key] = {
+            "created_ts": created_ts, "has_served": has_served}
+        _save_worker_container_state()
+    if created_ts is None:
+        return False                       # fail-open: can't prove still-loading
+    if has_served:
+        return False                       # has served -> genuine failure, heal
+    if now_wall - created_ts < WORKER_AUTOHEAL_LOAD_GRACE:
+        return True                        # young container, never served -> loading
+    return False
+
+
+def _record_container_served(key, node, port):
+    """Persist that the current container for (node, port) HAS served — the
+    durable exemption from the startup grace. Called when /health answers OK.
+
+    Only the has-served flag is stored/updated here. The healthy path must stay
+    side-effect-free (no docker shell-out) — that invariant is pinned by the
+    suite. If created_ts is unknown it stays None and is resolved later on the
+    down-threshold path where docker is legitimately consulted. Cheap in the
+    steady state: no-op once already recorded served."""
+    rec = _worker_container_state.get(key)
+    if rec and rec["has_served"]:
+        return            # already recorded — nothing to do (no shell-out)
+    _worker_container_state[key] = {
+        "created_ts": rec["created_ts"] if rec else None,
+        "has_served": True}
+    _save_worker_container_state()
+
+
 # ── Worker auto-heal helper ────────────────────────────────────────────────
 # The heal ACTION is injectable (``_autoheal_worker_fn``) so tests can stub it;
 # production uses the REAL template-apply path via cmd_cluster_template — the
@@ -1168,8 +1338,10 @@ def check_workers():
         })
         return True
 
-    # Load persisted grace timestamps on each check (survives restarts)
+    # Load persisted grace timestamps + container-age state on each check
+    # (both survive daemon restarts).
     _load_worker_relaunch_timestamps()
+    _load_worker_container_state()
 
     # tp-peer awareness (the SAME primary-node-only blind spot /cluster had
     # before v1.6.0): a node that is a NON-primary member of a multi-node /
@@ -1200,6 +1372,10 @@ def check_workers():
             # timestamp is deliberately NOT reset: it still guards against an
             # immediate re-fire if this unit flaps back down within the window.
             _worker_down_streak.pop(key, None)
+            # Durable: this container HAS served. Exempts it from the startup
+            # grace so a later stop is a genuine failure healed promptly (the
+            # has-served flag persists across daemon restarts).
+            _record_container_served(key, node, port)
             continue
         # DEBOUNCED AUTO-HEAL (WD1): the unit is DOWN. Increment its
         # consecutive-down streak and, once it crosses the debounce threshold
@@ -1210,13 +1386,28 @@ def check_workers():
         # already running). Debounce/cooldown are configurable, not hardcoded.
         # The streak counts REGARDLESS of the gentle-relaunch grace below:
         # mid-load a unit is still not-serving, but the debounce (3 checks
-        # ≈ 90s) is far shorter than a load (minutes), so a slow load alone can
-        # never trip it — yet a genuinely wedged unit will.
+        # ≈ 90s) is far shorter than a load (minutes). The STARTUP GRACE below
+        # (container-age + has-served) is what shields a still-loading unit; a
+        # genuinely wedged unit with an old container and no serve history
+        # still auto-heals.
         streak = _worker_down_streak.get(key, 0) + 1
         _worker_down_streak[key] = streak
         cooldown_s = WORKER_AUTOHEAL_COOLDOWN_MINUTES * 60
         if (streak >= WORKER_AUTOHEAL_DEBOUNCE
                 and now_wall - _worker_last_autoheal.get(key, 0.0) >= cooldown_s):
+            # STARTUP GRACE (durable): a unit whose container is younger than
+            # the grace AND has never served is still LOADING, not dead — do
+            # NOT force-recreate it. Keyed on container age (docker inspect) +
+            # a persisted has-served flag, so this holds ACROSS a daemon
+            # restart (the in-memory debounce resets; container age does not).
+            # A unit that HAS served and then stopped is exempt and heals
+            # promptly. The unit still counts as down (not online).
+            if _suppress_autoheal_for_startup_grace(key, label, node, port, now_wall):
+                log(f"Auto-heal: worker {label} ({node}:{port}) down {streak}x "
+                    f"but container <{WORKER_AUTOHEAL_LOAD_GRACE}s old and has "
+                    f"never served — still loading, NOT auto-healing")
+                down.append(label)
+                continue
             log(f"Auto-heal: worker {label} ({node}:{port}) down {streak}x "
                 f"consecutively — force-recreate via template apply")
             _worker_last_autoheal[key] = now_wall
