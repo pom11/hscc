@@ -708,8 +708,11 @@ class TestCheckWorkersAutoHeal:
         health._worker_relaunch_at.clear()
         health._worker_down_streak.clear()
         health._worker_last_autoheal.clear()
+        health._worker_container_state.clear()
         monkeypatch.setattr(health, "_WORKER_RELATCH_FILE",
                             str(tmp_hfcc_dir / "worker_relaunch.json"))
+        monkeypatch.setattr(health, "_WORKER_CONTAINER_STATE_FILE",
+                            str(tmp_hfcc_dir / "worker_container_state.json"))
         return health, serving
 
     def _down(self, health, monkeypatch):
@@ -885,6 +888,136 @@ class TestCheckWorkersAutoHeal:
         assert fake_calls == []
         assert res.get("ok") is False
         assert "no applied template" in res.get("error", "")
+
+
+class TestWorkersStartupGrace:
+    """WD2: auto-heal startup grace keyed on container age + has-served.
+
+    A unit whose container is younger than WORKER_AUTOHEAL_LOAD_GRACE AND has
+    never served is still LOADING, not dead — it must NOT be auto-healed, and
+    that must hold ACROSS a daemon restart (container age + has-served are
+    durable; the in-memory debounce resets). A unit that HAS served and then
+    stopped is a genuine failure and heals promptly. No real node/docker is
+    touched — the container-age probe is injected (like _autoheal_worker_fn).
+    """
+
+    def _setup(self, tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"]):
+        from hscc_daemon import health, serving
+        from hscc_daemon import state as state_mod
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        units = [{"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"],
+                  "recipe": "~/r/orch.yaml", "model": "M"}]
+        for n in nodes:
+            units.append({"id": f"w-{n}", "role": "worker", "keepalive": True,
+                          "nodes": [n], "recipe": "~/r/27b.yaml", "model": "W"})
+        monkeypatch.setattr(serving, "ORCH_NODES", {"10.0.0.1"})
+        monkeypatch.setattr(serving, "load_serving",
+                            lambda: {"version": 1, "units": units})
+        health._worker_relaunch_at.clear()
+        health._worker_down_streak.clear()
+        health._worker_last_autoheal.clear()
+        health._worker_container_state.clear()
+        monkeypatch.setattr(health, "_WORKER_RELATCH_FILE",
+                            str(tmp_hfcc_dir / "worker_relaunch.json"))
+        monkeypatch.setattr(health, "_WORKER_CONTAINER_STATE_FILE",
+                            str(tmp_hfcc_dir / "worker_container_state.json"))
+        # Unit is DOWN the whole time; stub the gentle relaunch so only the
+        # auto-heal path is observable.
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
+        monkeypatch.setattr(health, "run_cmd", lambda args, **k: {"ok": True})
+        monkeypatch.setattr(health.subprocess, "Popen", lambda *a, **k: None)
+        return health
+
+    def _heals_recorder(self, health, monkeypatch):
+        heals = []
+        monkeypatch.setattr(health, "_autoheal_worker_fn",
+                            lambda *a: heals.append(a) or {"status": "ok"})
+        return heals
+
+    def test_young_never_served_no_autoheal(self, tmp_hfcc_dir, monkeypatch):
+        import time as _t
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        heals = self._heals_recorder(health, monkeypatch)
+        # Container was JUST created (young) and has no serve history.
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: _t.time())
+        # Many consecutive down-checks — well past the debounce — must NOT
+        # auto-heal a still-loading unit.
+        for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE * 4):
+            health.check_workers()
+        assert heals == []
+
+    def test_young_never_served_survives_daemon_restart(self, tmp_hfcc_dir, monkeypatch):
+        import time as _t
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        heals = self._heals_recorder(health, monkeypatch)
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: _t.time())
+        created_ts = _t.time()
+        health._worker_container_state[("10.0.0.2", 8000)] = {
+            "created_ts": created_ts, "has_served": False}
+        health._save_worker_container_state()  # durable on disk
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: created_ts)
+        # Simulate a daemon restart: in-memory debounce + container state are
+        # wiped, ONLY the on-disk container-age record survives.
+        health._worker_down_streak.clear()
+        health._worker_container_state.clear()
+        for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
+            health.check_workers()
+        assert heals == []           # still loading — never auto-healed
+
+    def test_old_never_served_is_genuine_wedge_and_heals(self, tmp_hfcc_dir, monkeypatch):
+        import time as _t
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        heals = self._heals_recorder(health, monkeypatch)
+        # Container created LONG ago (older than the grace) and never served —
+        # that is a genuine wedge, not a load. Auto-heal must fire.
+        old = _t.time() - health.WORKER_AUTOHEAL_LOAD_GRACE - 60
+        health._worker_container_state[("10.0.0.2", 8000)] = {
+            "created_ts": old, "has_served": False}
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: old)
+        for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
+            health.check_workers()
+        assert len(heals) == 1
+        assert heals[0][2] == "10.0.0.2"
+
+    def test_served_then_stopped_still_heals(self, tmp_hfcc_dir, monkeypatch):
+        """A unit that HAS served and then stopped is a genuine failure — it
+        must auto-heal promptly regardless of its container's age."""
+        import time as _t
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        heals = self._heals_recorder(health, monkeypatch)
+        # The unit served before (persisted has_served=True) and its container
+        # is young — but it IS a real crash, so it must still be healed.
+        health._worker_container_state[("10.0.0.2", 8000)] = {
+            "created_ts": _t.time(), "has_served": True}
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: _t.time())
+        for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
+            health.check_workers()
+        assert len(heals) == 1
+        assert heals[0][2] == "10.0.0.2"
+
+    def test_recreated_container_gets_fresh_grace(self, tmp_hfcc_dir, monkeypatch):
+        """A container that was recreated (new created_ts) resets the serve
+        history, so its fresh load is shielded again."""
+        import time as _t
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        heals = self._heals_recorder(health, monkeypatch)
+        old_ts = _t.time() - health.WORKER_AUTOHEAL_LOAD_GRACE - 600
+        # The OLD container served before (recorded with the old ts).
+        health._worker_container_state[("10.0.0.2", 8000)] = {
+            "created_ts": old_ts, "has_served": True}
+        # It was recreated just now — a brand-new container, younger than grace.
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: _t.time())
+        for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
+            health.check_workers()
+        assert heals == []           # fresh container loading — no auto-heal
 
 
 class TestCheckProxy:
