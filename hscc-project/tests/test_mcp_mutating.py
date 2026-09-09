@@ -647,6 +647,8 @@ def _install_dispatch_seams(monkeypatch, *, kdb, sent=None, projects=None):
         projects = [_project(name="hscc", board="hscc", repo="/repo", topic=140)]
     monkeypatch.setattr(registry, "load_registry", lambda path: projects)
     monkeypatch.setattr(mcp_server, "_kdb", kdb)
+    monkeypatch.setattr(message.kanban, "valid_assignee",
+                        lambda name, _profiles=None: True)
     monkeypatch.setattr(message.telegram, "send_message",
                         lambda tid, text, _client=None:
                         sent.append((tid, text)) if sent is not None else None)

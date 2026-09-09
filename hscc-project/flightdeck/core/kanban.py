@@ -111,6 +111,49 @@ def _load_kanban_db() -> Any:
     return kanban_db
 
 
+def _load_profiles() -> Any:
+    """Import Hermes' ``hermes_cli.profiles`` module (same lazy pattern as
+    :func:`_load_kanban_db`) so tests can stub the depth and this module can
+    be imported without Hermes present. Returns the profiles module or raises
+    KanbanError."""
+    hermes_path = os.path.expanduser(
+        os.environ.get("HERMES_AGENT_PATH", _HERMES_AGENT_PATH)
+    )
+    if not os.path.isdir(hermes_path):
+        raise KanbanError(
+            f"Hermes agent source not found at {hermes_path!r}; cannot validate "
+            "assignees. Set HERMES_AGENT_PATH if it lives elsewhere."
+        )
+    if hermes_path not in sys.path:
+        sys.path.insert(0, hermes_path)
+    try:
+        from hermes_cli import profiles  # noqa: PLC0415
+    except ImportError as exc:  # pragma: no cover - defensive
+        raise KanbanError(
+            f"could not import hermes_cli.profiles from {hermes_path!r}: {exc}"
+        ) from exc
+    return profiles
+
+
+def valid_assignee(name: Optional[str], _profiles: Any = None) -> bool:
+    """True when *name* is a valid Hermes profile to assign work to.
+
+    ``None`` or an empty string means \"no assignee constraint\" and is always
+    valid (the dispatcher will fall back to its configured default). A
+    non-empty name must be a live (non-tombstoned) profile, validated against
+    Hermes' own ``hermes_cli.profiles.profile_exists`` so dispatch and the
+    kanban CLI agree on what counts as a real worker. ``_profiles`` is
+    injectable for tests.
+    """
+    if not name:
+        return True
+    profiles_mod = _profiles or _load_profiles()
+    try:
+        return bool(profiles_mod.profile_exists(name))
+    except Exception:  # pragma: no cover - defensive
+        return False
+
+
 def _card_branch(card: dict) -> str:
     """The branch a card's work lives on.
 
