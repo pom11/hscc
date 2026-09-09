@@ -114,11 +114,16 @@ def test_json_emits_only_json_on_stdout(monkeypatch, capsys):
     monkeypatch.setattr(cmd, "_git_facts_for_cards", lambda *a, **k: {})
     monkeypatch.setattr(cmd, "_collect_worktrees", lambda *a, **k: [])
 
+    # The action on stale worktrees needs the safety facts (stubbed clean+reachable)
+    # so the archive card is not reported stale; this test only has duplicates.
+    monkeypatch.setattr(cmd, "_worktree_safety_facts", lambda *a, **k: {})
+    monkeypatch.setattr(cmd, "_dir_size", lambda *a, **k: 0)
+
     rc = cmd.cmd_hygiene(_args(json=True), [_project()])
     assert rc == 0
     stdout = capsys.readouterr().out.strip()
     payload = json.loads(stdout)  # must be parseable standalone = pure JSON
-    assert set(payload) == {"duplicates", "triage", "stale_worktrees"}
+    assert set(payload) == {"duplicates", "triage", "stale_worktrees", "worktree_keeps"}
     assert payload["duplicates"][0]["keep"] == "b"
 
 
@@ -160,11 +165,17 @@ def test_closed_ids_includes_archived_worktree_cards(monkeypatch, capsys):
         "t_old": {"branch_exists": True, "is_merged": True, "commits_ahead": 3},
         "t_live": {"branch_exists": True, "is_merged": True, "commits_ahead": 0},
     })
+    # The worktree-safety facts (computed live per worktree in the real command)
+    # make t_old's worktree prune-safe (clean + all commits on dev/origin).
+    monkeypatch.setattr(cmd, "_worktree_safety_facts", lambda *a, **k: {
+        "t_old": {"is_clean": True, "no_unreachable": True},
+    })
+    monkeypatch.setattr(cmd, "_dir_size", lambda *a, **k: 0)
 
     rc = cmd.cmd_hygiene(_args(), [_project()])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "STALE WORKTREES (1)" in out
+    assert "STALE WORKTREES (prune-safe: 1, kept: 0)" in out
     assert "wt/t_old" in out
     # The live worktree is not reported.
     assert "wt/t_live" not in out
