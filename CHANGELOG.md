@@ -7,7 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-09-09
+
+The headline is the **operator console**: a real HSCC HTTP API (`hscc api`) and
+an iOS app that put the whole cluster on the operator's phone — cluster
+health, fleet, projects, the kanban board, and live chat. It also closes the
+"new project can never be chatted with" gap end-to-end, expands `hscc verify`
+with several new read-only gates, hardens daemon state permissions, and bumps
+the pinned runtime (hermes-agent v2026.7.30 → v2026.8.31, sparkrun v0.3.1 →
+v0.3.6). 330 commits since v1.14.2 sit behind this section.
+
 ### Added
+- **`hscc api` — an HTTP API for the whole cluster surface, plus an iOS
+  operator console that consumes it.** The API serves `~/.hermes/plugins`
+  read/write routes for cluster and fleet status, projects and kanban, the
+  daemon's health/streams, templates, orchestrator chat, cron, logs, and
+  memory (Tailscale-bound, token-authed, confirm-gated on every mutating
+  endpoint). The iOS app pairs with the cluster by scanning a **QR code**
+  printed by `hscc api start` (pure-stdlib encoder) and gives read and
+  write access from the phone: cluster status/hosts/workloads, fleet health
+  and per-node stats, project overview (with a ~3s "state of this project?",
+  git ahead/behind and per-project unread badges), the kanban board
+  (standup, cards, review, QA, create/unblock), a **templates library** with
+  preview-against-topology and confirm-gated apply, per-project orchestrator
+  chat, per-unit serving control (stop/restart one unit), a fleet-board
+  widget and session Live Activity, Siri voice shortcuts, offline
+  last-known-state everywhere, and deep links (`hscc://project`, `card`,
+  `session`). Multi-cluster switch with full cache reset is supported.
+  (commits across the window; API server e.g. `hscc api start|stop|status`
+  via the daemon lifecycle — see `hscc api` verb group).
+- **Live streaming chat.** Chat now streams tokens over a real WebSocket
+  (`/v1/projects/{name}/session/ws`) with a standards RFC6455 framing layer,
+  an event-store that fans out live updates and resumes gap-free, and a
+  client-side `SessionStreamCursor` that reconnects with no-gap/no-repeat.
+  Meanwhile the older **job-based** orchestrator chat was made honest: the
+  long dead-wait before a reply was replaced with a job-based flow whose
+  timeout is configurable (default now 600s, was a hard 90s dead wait via a
+  different path).
+- **`project new` provisions a project's orchestrator profile and its chat
+  session** (1398809). create_project now also ensures the `<name>-orch`
+  profile exists and a Hermes session titled `<name>` lives in it, so a
+  freshly created project can be chatted with immediately — previously a new
+  project could never be chatted with.
+- **`hscc verify` gains several read-only gates.** New
+  `check_project_chat_ready` (d83f881) enforces that every registry project
+  has its `<name>-orch` profile + titled session; `--chat` proves an
+  end-to-end chat round-trip; plus api-routes, plugin-payload, and
+  profile-endpoints checks. `hscc api start` also warns loudly on installed
+  payload drift (786bb67).
+- **`hscc hygiene` classifies worktrees** (15f4a1a). Each `.worktrees/<card>`
+  is now classified **prune-safe** vs **keep** (settled card + clean status +
+  no commit unreachable from trunk), dry-run by default, with `--apply` to
+  GC dead worktrees via git's own bookkeeping and a freed-bytes report.
+- **Daemon self-heal timeline.** A `GET /v1/daemon/history` endpoint and an
+  iOS `SelfHealHistory` view show when the daemon's automated actions fired.
+  The daemon also now detects and self-heals a silently-wedged kanban
+  dispatcher.
 - **engine-wedge auto-recovery (operator-approved ACTING automation).** The
   E-stream probe (`check_engine_wedge`) only alerts when a unit answers HTTP
   200 but never generates tokens. New `hscc_daemon/recover.py` is the acting
@@ -25,7 +80,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   autodown teardown/wake. Hermetic test suite (`test_recover.py`) maps 1:1 to
   the proof requirements with zero real subprocess/HTTP and no live state.
 
+### Changed
+- **`hscc api start` warns on installed-payload drift** (786bb67). Because the
+  API serves the *installed* payload under `~/.hermes/plugins` rather than the
+  repo, a stale install could boot silently; startup now names the drifted
+  plugin and the exact remedy.
+- **enable_plugins no longer clobbers an operator's `max_concurrent_children`**
+  (b3632a7). A lower operator cap is deliberate (stricter) and is preserved;
+  the key is only filled when absent or not int-like — so an operator's
+  runaway-queue safety brake survives every `enable()`/`doctor` reconcile.
+- **Runtime dependency bump.** hermes-agent v2026.7.30 → v2026.8.31 and
+  sparkrun v0.3.1 → v0.3.6 (24c5fc2).
+- **Daemon state is written with a private umask on every writer path** — the
+  loop alone was not enough — and `triggers.json`/`cluster.json` are written
+  0600, so operator state is no longer world-readable.
+
 ### Fixed
+- **WS relay now ensures the project's Hermes session exists before relaying.**
+  The WebSocket path (the one the iOS app uses for chat) called
+  `hermes chat -Q --continue <session>` without first creating the project's
+  session row, so a brand-new project failed with `orchestrator_unavailable`
+  and could never be chatted with over WS while the REST path self-healed. It
+  now calls the same idempotent `_ensure_session_exists` helper the REST path
+  uses before dispatching the job (cfb3851, preceded by the RED test 5b2923d).
 - **daemon: NAS health check no longer goes silent, and `hscc verify` stops
   crying wolf on a healthy cluster.** Two coupled root causes, both fixed.
   (1) **Schedule/tolerance mismatch:** the live daemon's NAS stream refreshes
@@ -55,6 +132,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   recorded `serve_cmd`; a `serve_cmd` that disagrees with the unit's
   `recipe`/`nodes`/`port` is refused (loudly flagged, never run) so a corrupt
   record can never start a model on the wrong hosts.
+- **run_tests.sh now covers hscc-project** (8792ed6), with a guard so the
+  package list cannot drift from `install_payload.DEFAULT_PAYLOAD`
+  (8fe7c75 fixed two tests that depended on the cwd).
+- **iOS: two SF Symbols that resolved to nothing** (02601c1) now resolve, with
+  a guard so a future bad symbol is caught instead of silently empty.
+- A large batch of correctness/a11y fixes across the app: honest error and
+  terminal chat states (unsent/retry) instead of vague "Something went wrong"
+  fallbacks, refresh failures that keep last-known lists instead of going
+  blank, VoiceOver labels on icon-only controls, light-mode contrast, and
+  dozens of decode mismatches against the live API corrected.
+
+### Removed
+- **The 'Send anyway' confirmation on chat send paths** (t_e97e8945) — the
+  extra step was dropped; an unsent message now shows an honest retry state
+  instead of a dead-end confirm.
 
 ## [1.8.4] — 2026-08-20 — Pre-release audit: three silent-success / caps bugs fixed
 
