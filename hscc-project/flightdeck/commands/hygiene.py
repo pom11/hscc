@@ -117,6 +117,82 @@ def _collect_worktrees(
     return found
 
 
+def _worktree_safety_facts(
+    worktrees: list[dict],
+    *,
+    _run=None,
+) -> dict:
+    """{card_id: {is_clean, no_unreachable}} per worktree, computed LIVE.
+
+    These two facts power the prune-safe classification's second and third
+    conditions and must be read from the worktree itself / against its repo,
+    NOT from the main checkout:
+
+      * ``is_clean`` — the worktree has no uncommitted changes. Computed by
+        :func:`git_state.uncommitted_files` run INSIDE the worktree path
+        (``git status`` on a linked worktree reflects that worktree's own
+        index + working tree, not the repo root's).
+      * ``no_unreachable`` — no commits on the worktree branch are reachable
+        only from itself; everything is already on ``dev``/``origin``. Computed
+        by :func:`git_state.reachable_from_trunk` against the worktree's repo.
+
+    A worktree lacking a resolvable repo/path/branch gets the conservative
+    reading (``is_clean=False, no_unreachable=False``) so it is never proposed
+    for pruning. Never raises.
+    """
+    facts: dict[str, dict] = {}
+    for wt in worktrees:
+        cid = wt.get("card_id")
+        repo = wt.get("repo")
+        worktree = wt.get("worktree")
+        branch = wt.get("branch")
+        if not cid:
+            continue
+        if not repo or not worktree or not branch:
+            facts[cid] = {"is_clean": False, "no_unreachable": False}
+            continue
+        dirty = git_state.uncommitted_files(worktree, _run=_run)
+        facts[cid] = {
+            "is_clean": len(dirty) == 0,
+            "no_unreachable": git_state.reachable_from_trunk(repo, branch, _run=_run),
+        }
+    return facts
+
+
+def _dir_size(path: str, *, _walk=None) -> int:
+    """Total bytes under ``path`` (recursive), for freed-space reporting.
+
+    A linked worktree owns its whole directory — ``git worktree remove``
+    deletes it (the git object store lives in the main repo's ``.git``, so
+    walking the directory is an accurate measure of what would be freed).
+    Best-effort: unreadable files are skipped, and a missing path is 0.
+    """
+    walk = _walk if _walk is not None else os.walk
+    total = 0
+    try:
+        for dirpath, _dirnames, filenames in walk(path):
+            for name in filenames:
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, name))
+                except OSError:
+                    continue
+    except OSError:
+        return 0
+    return total
+
+
+def _human_bytes(n: int) -> str:
+    """Compact human size: '512 B', '3.1 KiB', '1.4 MiB', ..."""
+    size = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if abs(size) < 1024 or unit == "TiB":
+            if unit == "B":
+                return f"{int(size)} B"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{n} B"
+
+
 # --------------------------------------------------------------------------- #
 # presentation
 # --------------------------------------------------------------------------- #
@@ -154,13 +230,24 @@ def _render(plan: dict) -> list[str]:
     lines.append("")
 
     stale = plan["stale_worktrees"]
-    lines.append(f"STALE WORKTREES ({len(stale)})")
-    if not stale:
+    keeps = plan.get("worktree_keeps", [])
+    lines.append(f"STALE WORKTREES (prune-safe: {len(stale)}, kept: {len(keeps)})")
+    if not stale and not keeps:
         lines.append("  none")
     for s in stale:
+        size_n = s.get("freed_bytes") or 0
         lines.append(
-            f"  [{s['board']}] {s['worktree']} (branch {s['branch']} merged)"
+            f"  [PRUNE] [{s['board']}] {s['worktree']} "
+            f"(branch {s['branch']}, frees {_human_bytes(size_n)})"
         )
+    for k in keeps:
+        reason = "; ".join(k.get("keep_reasons") or []) or "kept"
+        lines.append(
+            f"  [KEEP]  [{k['board']}] {k['worktree']} — {reason}"
+        )
+    total_freed = sum((s.get("freed_bytes") or 0) for s in stale)
+    if stale:
+        lines.append(f"  would free {_human_bytes(total_freed)} total")
     lines.append("")
     return lines
 
@@ -188,8 +275,24 @@ def _render_json(plan: dict) -> dict:
             for r in plan["triage"]
         ],
         "stale_worktrees": [
-            {"card_id": s["card_id"], "board": s["board"], "worktree": s["worktree"]}
+            {
+                "card_id": s["card_id"],
+                "board": s["board"],
+                "worktree": s["worktree"],
+                "branch": s["branch"],
+                "freed_bytes": s.get("freed_bytes") or 0,
+            }
             for s in plan["stale_worktrees"]
+        ],
+        "worktree_keeps": [
+            {
+                "card_id": k["card_id"],
+                "board": k["board"],
+                "worktree": k["worktree"],
+                "branch": k["branch"],
+                "keep_reasons": k.get("keep_reasons") or [],
+            }
+            for k in plan.get("worktree_keeps", [])
         ],
     }
 
@@ -230,6 +333,10 @@ def cmd_hygiene(args: argparse.Namespace, projects: list[registry.Project]) -> i
     all_cards = kanban.list_cards(board=None, include_archived=True)
     worktrees = _collect_worktrees(projects, _listdir=args.listdir)
     active = [c for c in all_cards if str(c.get("status") or "") != "archived"]
+    # all_ids = every card id seen anywhere (including archived). A worktree
+    # whose card id is NOT in it is ABSENT from the board (deleted / board
+    # removed) and counts as settled for prune-safety.
+    all_ids = {c["id"] for c in all_cards}
     closed_ids = {
         c["id"] for c in all_cards if str(c.get("status") or "") in hygiene.CLOSED_STATUSES
     }
@@ -244,11 +351,22 @@ def cmd_hygiene(args: argparse.Namespace, projects: list[registry.Project]) -> i
     git_facts = _git_facts_for_cards(
         all_cards, projects, card_ids=need_facts, _run=args.run
     )
+    # Merge the worktree-safety facts (is_clean / no_unreachable) computed
+    # live per worktree. These are the second+third prune-safe conditions and
+    # must be read from each worktree, not the main checkout.
+    for cid, saf in _worktree_safety_facts(worktrees, _run=args.run).items():
+        git_facts.setdefault(cid, {})
+        git_facts[cid].update(saf)
 
     threshold = args.similarity if args.similarity is not None else hygiene.DEFAULT_SIMILARITY
     plan = hygiene.build_plan(
-        active, git_facts, worktrees, closed_ids, threshold=threshold
+        active, git_facts, worktrees, closed_ids, threshold=threshold, all_ids=all_ids
     )
+
+    # Freed-space reporting: how much disk each prune-safe worktree would free.
+    for s in plan["stale_worktrees"]:
+        path = s.get("worktree")
+        s["freed_bytes"] = _dir_size(path) if path else 0
 
     n_issues = len(plan["duplicates"]) + len(plan["triage"]) + len(plan["stale_worktrees"])
 
