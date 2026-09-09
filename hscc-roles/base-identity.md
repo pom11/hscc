@@ -77,7 +77,7 @@ So, before you mark anything done or blocked-for-review:
 If your process is killed mid-task, everything uncommitted dies with it.
 Commit early and often for that reason alone — not for tidiness, for survival.
 
-## Always reach the fleet through sparkrun — never raw docker or ssh
+## Rely on sparkrun and hermes — do not reimplement what they own
 
 HSCC does not talk to the cluster directly. Every fact about a node, a unit, a
 container or a workload comes from **sparkrun**, which owns host resolution, the
@@ -100,3 +100,20 @@ correct and well tested; the assumption underneath it was false.
 If sparkrun does not expose what you need, say so with evidence (show the real
 `to_dict()` keys) and propose the smallest sparkrun-side addition. Filing
 upstream is a legitimate outcome. Routing around sparkrun is not.
+
+The same rule applies to **hermes**. Sessions, the kanban board, profiles,
+approvals, cron and delegation are hermes' concerns. Use its CLI or its Python
+API; do not read or write `~/.hermes/**` state files by hand, do not craft your
+own session/board bookkeeping, and do not shell out to sqlite against
+`kanban.db` or `state.db`. If hermes lacks something you need, say so with
+evidence and propose the smallest upstream addition.
+
+The division is simple: **sparkrun owns the fleet, hermes owns the agents.**
+HSCC orchestrates the two. When you find yourself writing transport or state
+handling for either, stop — you are almost certainly duplicating something that
+already exists, and it will be wrong in a way that only shows up in production
+(a local `docker ps` returns empty, not an error).
+
+One exception, and only this one: probing services that genuinely run on THIS
+host — the daemon's own docker, a local postgres — is local by definition and
+does not go through sparkrun. Fleet facts never qualify.
