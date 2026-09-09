@@ -310,6 +310,29 @@ def cmd_dispatch(args: argparse.Namespace, projects: list[registry.Project]) -> 
             file=sys.stderr,
         )
         return 2
+    # Refuse a genuinely unknown assignee up front — a misspelled or retired
+    # profile would otherwise be written onto the card silently and the worker
+    # never spawns (or, worst case, the orchestrator greps it up later and the
+    # wrong person gets a card they never asked for). The requested profile is
+    # validated against Hermes' own profile registry, so dispatch and `hermes
+    # kanban create --assignee` agree on what counts as a real worker. Empty /
+    # absent means "no constraint" (dispatcher applies its default) and is fine.
+    requested = getattr(args, "assignee", None)
+    if requested:
+        try:
+            assignee_ok = kanban.valid_assignee(
+                requested, _profiles=getattr(args, "_profiles", None)
+            )
+        except kanban.KanbanError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if not assignee_ok:
+            print(
+                f"error: unknown assignee {requested!r} — no Hermes profile by "
+                f"that name. Use `hermes profiles list` to see the real ones.",
+                file=sys.stderr,
+            )
+            return 2
     board, used_fallback = kanban.resolve_project_board(proj, _kdb=getattr(args, "_kdb", None))
     if used_fallback:
         print(
