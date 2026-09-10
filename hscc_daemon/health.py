@@ -108,22 +108,29 @@ _WORKER_CONTAINER_STATE_FILE = os.path.expanduser(
 # dynamically from the `sparkrun` CLI binary's shebang, never hardcoded — and
 # parse its structured JSON output. This mirrors EXACTLY how `sparkrun status`
 # resolves its own defaults (SparkrunConfig → ClusterManager → resolve_hosts →
-# build_ssh_kwargs → query_cluster_status) but emits structured JSON instead of
+# api.status → classify_cluster_status) but emits structured JSON instead of
 # the human-readable text we used to string-parse.
+#
+# sparkrun 0.3.6 REMOVED `query_cluster_status` — `api.status` is now THE status
+# source (owns executor resolution + the merge) and `classify_cluster_status`
+# (pure presentation, no ssh) turns that snapshot into the ClusterStatusResult
+# whose to_dict() we consume. Ported to that API; the old import raised
+# ImportError every tick, forcing the fragile `sparkrun status` text-parse
+# fallback and a DGX false-FAIL on a healthy cluster.
 _SPARKRUN_STATUS_SCRIPT = (
     "import json,sys\n"
+    "import sparkrun.api as api\n"
     "from sparkrun.core.config import SparkrunConfig,get_config_root\n"
-    "from sparkrun.core.cluster_manager import ClusterManager,query_cluster_status\n"
+    "from sparkrun.core.cluster_manager import ClusterManager,classify_cluster_status\n"
     "from sparkrun.core.hosts import resolve_hosts\n"
-    "from sparkrun.orchestration.primitives import build_ssh_kwargs\n"
     "config=SparkrunConfig()\n"
     "mgr=ClusterManager(get_config_root())\n"
     "hosts=resolve_hosts(None,None,None,mgr,config.default_hosts)\n"
     "if not hosts:\n"
     "    print(json.dumps({'host_list':[]})); sys.exit(0)\n"
-    "ssh_kwargs=build_ssh_kwargs(config)\n"
-    "r=query_cluster_status(hosts,ssh_kwargs=ssh_kwargs,cache_dir=str(config.cache_dir))\n"
-    "print(json.dumps(r.to_dict()))\n"
+    "snapshot=api.status(hosts=hosts)\n"
+    "result=classify_cluster_status(snapshot,cache_dir=str(config.cache_dir),host_list=hosts)\n"
+    "print(json.dumps(result.to_dict()))\n"
 )
 
 
