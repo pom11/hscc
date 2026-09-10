@@ -713,6 +713,15 @@ class TestCheckWorkersAutoHeal:
                             str(tmp_hfcc_dir / "worker_relaunch.json"))
         monkeypatch.setattr(health, "_WORKER_CONTAINER_STATE_FILE",
                             str(tmp_hfcc_dir / "worker_container_state.json"))
+        # These tests exercise debounce/cooldown mechanics, not the startup
+        # grace. Default the container-age probe to an OLD container (older
+        # than the grace) so the unit is a genuine wedge that heals promptly —
+        # the fail-closed startup grace (unknown age ⇒ shield) must not mask
+        # the auto-heal path these tests pin.
+        import time as _t
+        _old = _t.time() - health.WORKER_AUTOHEAL_LOAD_GRACE - 60
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: _old)
         return health, serving
 
     def _down(self, health, monkeypatch):
@@ -1018,6 +1027,117 @@ class TestWorkersStartupGrace:
         for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
             health.check_workers()
         assert heals == []           # fresh container loading — no auto-heal
+
+    def test_unknown_age_fails_closed_shields_unit(self, tmp_hfcc_dir, monkeypatch):
+        """Age cannot be determined (live sparkrun age unknown AND no stored
+        created_ts) → fail CLOSED: assume still-loading, shield for the grace
+        window (bounded). No docker/ssh fallback — the unknown age is the
+        actual remote-exec result via the injected seam."""
+        import time as _t
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        heals = self._heals_recorder(health, monkeypatch)
+        # Sparkrun cannot tell us the container's age (no entry / query fail).
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: None)
+        for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
+            health.check_workers()
+        assert heals == []           # unknown age → assumed loading → no heal
+        # The fresh-assumption was persisted (durable) for the down unit.
+        rec = health._worker_container_state.get(("10.0.0.2", 8000))
+        assert rec is not None and rec["created_ts"] is not None
+        assert rec["has_served"] is False
+
+    def test_unknown_age_survives_daemon_restart_bounded(self, tmp_hfcc_dir, monkeypatch):
+        """Fail-closed fresh-assumption is DURABLE: after a restart the unit is
+        still shielded (no fresh in-memory debounce into a force-recreate), and
+        the shield EXPIRES after the grace so a genuinely dead unit heals."""
+        import time as _t
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        heals = self._heals_recorder(health, monkeypatch)
+        # First sight: unknown age → assume fresh, persisted.
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: None)
+        for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
+            health.check_workers()
+        assert heals == []
+        created_ts = health._worker_container_state[("10.0.0.2", 8000)]["created_ts"]
+        # Simulate a daemon restart: in-memory debounce + container state wiped,
+        # ONLY the on-disk durable record survives. Probe still unknown.
+        health._worker_down_streak.clear()
+        health._worker_container_state.clear()
+        for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
+            health.check_workers()
+        assert heals == []           # still bounded-shielded after restart
+        # Bounded: once the youthful window elapses, a genuinely dead unit heals.
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
+        expired = created_ts - health.WORKER_AUTOHEAL_LOAD_GRACE - 60
+        health._worker_container_state[("10.0.0.2", 8000)] = {
+            "created_ts": expired, "has_served": False}
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: expired)
+        health._worker_down_streak.clear()
+        for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
+            health.check_workers()
+        assert len(heals) == 1       # grace elapsed → genuine failure → heal
+        assert heals[0][2] == "10.0.0.2"
+
+    def test_sparkrun_created_map_builds_host_port_launch(self, monkeypatch):
+        """_sparkrun_created_map() turns a ClusterStatusResult.to_dict()-shaped
+        dict into a (host, port) → launch-epoch map — the signal the grace keys
+        on. Groups span multiple hosts (one shared launch epoch) and solo
+        entries map via their own host."""
+        import time as _t
+        from hscc_daemon import health
+        now = _t.time()
+        fake = {
+            "groups": {
+                "cid_a": {
+                    "meta": {"port": 8000, "started_at": now - 100},
+                    "containers": [
+                        {"host": "10.0.0.2", "role": "node_0", "status": "Up",
+                         "image": "img"},
+                        {"host": "10.0.0.3", "role": "node_1", "status": "Up",
+                         "image": "img"},
+                    ],
+                },
+            },
+            "solo_entries": [
+                {"cluster_id": "cid_b", "host": "10.0.0.4",
+                 "meta": {"port": 8001, "started_at": now - 50},
+                 "status": "Up", "image": "img"},
+            ],
+        }
+        monkeypatch.setattr(health, "_WORKER_CREATED_CACHE_AT", 0.0)
+        monkeypatch.setattr(health, "_WORKER_CREATED_CACHE", {})
+        # Stub the sweep so the map is built purely from the injected JSON.
+        monkeypatch.setattr(health, "_SPARKRUN_STATUS_SCRIPT", "stubbed")
+        monkeypatch.setattr(health, "_sparkrun_venv_python", lambda: "/py")
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: {"ok": True, "output": json.dumps(fake)})
+        m = health._sparkrun_created_map()
+        assert m[("10.0.0.2", 8000)] == now - 100   # group span member
+        assert m[("10.0.0.3", 8000)] == now - 100   # shared launch epoch
+        assert m[("10.0.0.4", 8001)] == now - 50    # solo entry
+        assert ("10.0.0.2", 8001) not in m          # wrong port doesn't match
+
+    def test_default_created_ts_resolves_remote_via_sparkrun(self, monkeypatch):
+        """The REAL _default_worker_container_created_ts resolves the remote
+        unit's container age through sparkrun (never local docker) — the exact
+        inert-grace regression the card reports. Injecting the (host,port)→
+        launch map must feed the lookup directly."""
+        import time as _t
+        from hscc_daemon import health
+        now = _t.time()
+        monkeypatch.setattr(health, "_WORKER_CREATED_CACHE_AT", 0.0)
+        monkeypatch.setattr(
+            health, "_WORKER_CREATED_CACHE",
+            {("10.0.0.7", 8000): now - 30, ("10.0.0.8", 8000): now - 5})
+        monkeypatch.setattr(health, "_sparkrun_created_map",
+                            lambda: health._WORKER_CREATED_CACHE)
+        ts = health._default_worker_container_created_ts("10.0.0.7", 8000)
+        assert ts == now - 30
+        # A node the map doesn't know → unknown → None (caller fails closed).
+        assert health._default_worker_container_created_ts("10.0.0.9", 8000) is None
 
 
 class TestCheckProxy:
