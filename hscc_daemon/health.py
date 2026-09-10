@@ -123,12 +123,14 @@ _SPARKRUN_STATUS_SCRIPT = (
     "from sparkrun.core.config import SparkrunConfig,get_config_root\n"
     "from sparkrun.core.cluster_manager import ClusterManager,classify_cluster_status\n"
     "from sparkrun.core.hosts import resolve_hosts\n"
+    "from sparkrun.orchestration.primitives import build_ssh_kwargs\n"
     "config=SparkrunConfig()\n"
     "mgr=ClusterManager(get_config_root())\n"
     "hosts=resolve_hosts(None,None,None,mgr,config.default_hosts)\n"
     "if not hosts:\n"
     "    print(json.dumps({'host_list':[]})); sys.exit(0)\n"
-    "snapshot=api.status(hosts=hosts)\n"
+    "ssh_kwargs=build_ssh_kwargs(config)\n"
+    "snapshot=api.status(hosts,ssh_kwargs=ssh_kwargs)\n"
     "result=classify_cluster_status(snapshot,cache_dir=str(config.cache_dir),host_list=hosts)\n"
     "print(json.dumps(result.to_dict()))\n"
 )
@@ -1042,23 +1044,41 @@ def _save_worker_relaunch_timestamps():
 # restart (the debounce resets; container age does not).
 
 def _load_worker_container_state():
-    """Load persisted per-unit container-age state from disk (best-effort)."""
+    """Load persisted per-unit container-age state from disk (best-effort).
+
+    Entries whose created_ts is None are DROPPED: they carry no usable age.
+    They were written by the inert pre-sparkrun grace (which could never
+    resolve a remote container's age) and by old tests (placeholder nodes).
+    The fail-closed path re-derives a real created_ts for any unit that is
+    genuinely down, so dropping a null entry loses no signal and the file no
+    longer carries dead rows. If any are dropped the cleaned dict is rewritten
+    to disk once.
+    """
+    dropped = False
     try:
         with open(_WORKER_CONTAINER_STATE_FILE) as f:
             data = json.load(f)
         if isinstance(data, dict):
+            cleaned = {}
             for key_str, rec in data.items():
                 try:
                     parts = key_str.strip("()").split(",")
                     key = (parts[0], int(parts[1]))
                 except (ValueError, IndexError):
                     continue
-                _worker_container_state[key] = {
-                    "created_ts": rec.get("created_ts"),
+                created_ts = rec.get("created_ts")
+                if created_ts is None:
+                    dropped = True          # stale null entry — drop
+                    continue
+                cleaned[key] = {
+                    "created_ts": created_ts,
                     "has_served": bool(rec.get("has_served")),
                 }
+            _worker_container_state.update(cleaned)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        pass
+        return
+    if dropped:
+        _save_worker_container_state()
 
 
 def _save_worker_container_state():
@@ -1077,48 +1097,87 @@ def _save_worker_container_state():
 
 # ── Worker container-age helper (startup grace) ───────────────────────────
 # Injectable (like _autoheal_worker_fn) so tests can control the age signal
-# without touching a real node/docker. The real implementation inspects the
-# docker container publishing the unit's port. Any failure fails OPEN: if we
-# cannot determine the container age, we do NOT suppress the auto-heal.
+# without touching a real node/docker. The real implementation resolves the
+# unit's container age through SPARKRUN's structured status (the sanctioned
+# path — HSCC never shells to docker/ssh directly): the (host, port) → launch
+# epoch map below. A sparkrun sweep costs up to ~25s, so the map is cached
+# module-wide with a short TTL; the down-threshold path only refreshes when
+# stale, so a slow/unreachable node never stalls the health cycle.
 
-def _parse_docker_createdat(text):
-    """Parse `docker ps --format '{{.CreatedAt}}'` (e.g. '2026-09-08 21:30:45
-    +0000 UTC') into epoch-seconds, or None on any parse failure."""
-    try:
-        s = text.strip()
-        # Drop the trailing tz NAME (UTC) but keep the +0000 offset (last 6).
-        dt = datetime.datetime.strptime(s.rsplit(" ", 1)[0],
-                                        "%Y-%m-%d %H:%M:%S %z")
-        return dt.timestamp()
-    except (ValueError, AttributeError, IndexError):
-        return None
+# (host, port) -> launch-epoch cache built from sparkrun's status to_dict().
+_WORKER_CREATED_CACHE: dict = {}
+_WORKER_CREATED_CACHE_TTL = 30.0           # seconds; one sweep per check cycle
+_WORKER_CREATED_CACHE_AT = 0.0
+# check_workers and check_dgx run on separate daemon threads and share this
+# cache; the lock keeps a refresh from racing (a redundant ~25s sweep, or a
+# partial clear/update) when both see it stale at once.
+_WORKER_CREATED_LOCK = threading.Lock()
+
+
+def _sparkrun_created_map():
+    """Return {(host, port): launch_epoch} from sparkrun's corrected status.
+
+    The launch epoch (meta.started_at from job metadata) is rewritten by a
+    fresh ``sparkrun run`` — which is exactly what a force-recreate does — so
+    it is a faithful proxy for "this unit's container was (re)created at T".
+    Built from ClusterStatusResult.to_dict(): groups[*].containers[*].host +
+    meta.port → meta.started_at, and solo_entries[*].host + meta.port →
+    meta.started_at. Cached with _WORKER_CREATED_CACHE_TTL. Best-effort: any
+    failure returns the existing cache (stale data beats none on the down
+    path) — never {} overwriting populated entries.
+    """
+    now = time.time()
+    global _WORKER_CREATED_CACHE_AT
+    if now - _WORKER_CREATED_CACHE_AT < _WORKER_CREATED_CACHE_TTL:
+        return _WORKER_CREATED_CACHE
+    with _WORKER_CREATED_LOCK:
+        # Re-check after acquiring — the other thread may have refreshed.
+        if now - _WORKER_CREATED_CACHE_AT < _WORKER_CREATED_CACHE_TTL:
+            return _WORKER_CREATED_CACHE
+        venv_py = _sparkrun_venv_python()
+        if not venv_py:
+            return _WORKER_CREATED_CACHE
+        try:
+            res = run_cmd([venv_py, "-c", _SPARKRUN_STATUS_SCRIPT], timeout=25)
+            if not (res.get("ok") and res.get("output")):
+                return _WORKER_CREATED_CACHE
+            data = json.loads(res["output"])
+        except Exception:
+            return _WORKER_CREATED_CACHE
+        mapping = {}
+        for cid, group in (data.get("groups") or {}).items():
+            meta = group.get("meta") or {}
+            port = meta.get("port")
+            started = meta.get("started_at")
+            if port is None:
+                continue
+            for c in group.get("containers") or []:
+                host = c.get("host")
+                if host:
+                    mapping[(host, int(port))] = started
+        for entry in data.get("solo_entries") or []:
+            meta = entry.get("meta") or {}
+            port = meta.get("port")
+            started = meta.get("started_at")
+            host = entry.get("host")
+            if host and port is not None:
+                mapping[(host, int(port))] = started
+        _WORKER_CREATED_CACHE.clear()
+        _WORKER_CREATED_CACHE.update(mapping)
+        _WORKER_CREATED_CACHE_AT = now
+        return _WORKER_CREATED_CACHE
 
 
 def _default_worker_container_created_ts(node, port):
-    """Epoch-seconds when the docker container publishing `port` was created,
-    or None if it cannot be determined. Real implementation: ``docker ps
-    --filter publish=<port>`` (the docker container inspect path). Best-effort
-    and fail-open — docker is local to this daemon host, which is correct for
-    the (primary) single-node deployment the fleet runs; on a remote multi-node
-    span the container is co-located and this reports the local one, so the age
-    signal degrades to 'unknown/old' rather than suppressing incorrectly.
+    """Epoch-seconds when the unit's container on `node` was (re)created, or
+    None if it cannot be determined. Resolved through SPARKRUN's structured
+    status (see _sparkrun_created_map) — HSCC never shells to docker/ssh
+    directly. The launch epoch is rewritten by a fresh ``sparkrun run``, which
+    is exactly what a force-recreate does, so it stays faithful across a
+    recreate. Best-effort: unknown (no entry / query failure) returns None and
+    the caller decides fail-open vs fail-closed.
     """
-    try:
-        r = run_cmd(
-            ["docker", "ps", "--filter", f"publish={port}",
-             "--format", "{{.ID}} {{.CreatedAt}}"], timeout=10)
-    except Exception:
-        return None
-    if not r.get("ok") or not r.get("output"):
-        return None
-    for line in r["output"].splitlines():
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        ts = _parse_docker_createdat(" ".join(parts[1:]))
-        if ts is not None:
-            return ts
-    return None
+    return _sparkrun_created_map().get((node, int(port)))
 
 
 _worker_container_created_ts = _default_worker_container_created_ts
@@ -1128,16 +1187,26 @@ def _suppress_autoheal_for_startup_grace(key, label, node, port, now_wall):
     """True if the down unit is still LOADING, not dead: its container is
     younger than WORKER_AUTOHEAL_LOAD_GRACE AND has never served.
 
-    Both facts are durable: container age comes from docker inspect (re-resolved
+    Both facts are durable: container age comes from sparkrun (re-resolved
     here on the down-threshold path, so a recreate is detected and has_served
-    resets for the fresh container's load), and the has-served flag is persisted
-    in worker_container_state.json. So the shield holds ACROSS a daemon restart
-    — a still-loading unit never gets a fresh in-memory 3-strike countdown into
-    a force-recreate.
+    resets for the fresh container's load), and the has-served flag is
+    persisted in worker_container_state.json. So the shield holds ACROSS a
+    daemon restart — a still-loading unit never gets a fresh in-memory
+    3-strike countdown into a force-recreate.
 
     A unit that HAS served and then stopped is exempt (has_served=True) and
-    heals promptly. Fail-open: if the container age cannot be determined (None)
-    we do NOT suppress — preserve the existing auto-heal behavior.
+    heals promptly.
+
+    FAIL-CLOSED (bounded): when the container age cannot be determined at all
+    (live sparkrun age unknown AND no stored created_ts), we ASSUME the unit is
+    still loading rather than dead — store created_ts = now_wall and shield it
+    for the grace window. Rationale: a force-recreate costs a full multi-minute
+    model reload and can loop (the incident this grace exists to kill), which is
+    strictly worse than a bounded grace-window of suppressed healing. The
+    fresh-assumption is durable, so it holds across a daemon restart, and it
+    EXPIRES after WORKER_AUTOHEAL_LOAD_GRACE — a genuinely dead unit still
+    heals once the window elapses. A unit that HAS served and then stopped is
+    exempt regardless (has_served=True → heals promptly).
     """
     rec = _worker_container_state.get(key)
     stored_ts = rec["created_ts"] if rec else None
@@ -1151,12 +1220,16 @@ def _suppress_autoheal_for_startup_grace(key, label, node, port, now_wall):
             and abs(live_ts - stored_ts) > 1.0):
         has_served = False
     created_ts = live_ts if live_ts is not None else stored_ts
+    if created_ts is None:
+        # Fail-closed: cannot determine age and have never recorded one —
+        # assume this is a freshly (re)created, still-loading container and
+        # shield it for the grace window. Durable so a restart doesn't reset
+        # the window; expires after the grace so a genuinely dead unit heals.
+        created_ts = now_wall
     if (created_ts, has_served) != (stored_ts, bool(rec and rec["has_served"])):
         _worker_container_state[key] = {
             "created_ts": created_ts, "has_served": has_served}
         _save_worker_container_state()
-    if created_ts is None:
-        return False                       # fail-open: can't prove still-loading
     if has_served:
         return False                       # has served -> genuine failure, heal
     if now_wall - created_ts < WORKER_AUTOHEAL_LOAD_GRACE:
