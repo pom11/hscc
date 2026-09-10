@@ -9,12 +9,13 @@ import json, os, subprocess
 
 try:
     from . import discovery as _discovery  # package context (runtime)
+    from . import sparkrun_bridge  # package context (runtime)
 except ImportError:
     import discovery as _discovery  # direct import context (tests)
+    import sparkrun_bridge  # direct import context (tests)
 
 DiscoveryError = _discovery.DiscoveryError
 
-SSH_USER = "spark"
 CLUSTER_JSON = os.path.expanduser("~/.hscc/cluster.json")
 SERVING_JSON = os.path.expanduser("~/.hscc/serving.json")
 SPARKRUN = "sparkrun"
@@ -51,8 +52,20 @@ def run_cmd(args, timeout=30):
 
 
 def ssh_cmd(host, command, timeout=30):
-    return run_cmd(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
-                    f"{SSH_USER}@{host}", command], timeout=timeout)
+    """Run a remote command on a fleet node THROUGH sparkrun.
+
+    sparkrun owns host resolution and the ssh kwargs (user, key, options,
+    timeouts). We do not hand-roll ``ssh -o BatchMode=yes ...`` here — that
+    drifts from sparkrun's configured transport and fails invisibly until
+    production (t_17cdc637). The underlying bridge resolves sparkrun's own
+    venv python and drives ``run_remote_script`` with sparkrun's ssh kwargs.
+    Returns the same ``{ok, stdout, stderr, code}`` dict run_cmd produces.
+
+    ``ssh_user`` on the Node/cluster is no longer threaded into the command:
+    sparkrun owns the user. If the bridge is unreachable the call fails open
+    to an unreachable result (never fabricates output).
+    """
+    return sparkrun_bridge.remote_cmd(host, command, timeout=timeout)
 
 
 def read_serving_units():
