@@ -33,8 +33,9 @@ ssh_kwargs=...)` returning a `ClusterStatus` snapshot, shaped via
 host_list=...)` → `ClusterStatusResult.to_dict()`.
 This is why the DGX check reports ok=False (t_3fe0cd05): the structured call
 fails and it falls back to the text-parse path. Per the operator directive I
-record the root cause on t_3fe0cd05, but fixing the script is REQUIRED for this
-task anyway (the grace must read the corrected status), so it lands here.
+record the root cause on t_3fe0cd05 (comment #559), but fixing the script is
+REQUIRED for this task anyway (the grace must read the corrected status), so
+it lands here.
 
 ### Finding 2 — per-container creation time is NOT exposed; launch epoch IS
 Real `ClusterStatusResult.to_dict()` (sanitized, live fleet, host ids redacted
