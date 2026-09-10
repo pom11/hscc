@@ -156,8 +156,8 @@ class TestNasStatus:
         topo = d.topology_from_sparkrun(
             d.parse_sparkrun_clusters(SPARKRUN_FIXTURE), enrich=CLUSTER_JSON_FIXTURE)
         monkeypatch.setattr(d, "discover", lambda **k: topo)
-        monkeypatch.setattr(d, "_run",
-                            lambda args, timeout=20: {"ok": True, "stdout": "ok", "stderr": ""})
+        monkeypatch.setattr(d.sparkrun_bridge, "remote_cmd",
+                            lambda host, command, timeout=30: {"ok": True, "stdout": "ok", "stderr": "", "code": 0})
         res = d.nas_status()
         assert res["nas"] == "192.0.2.20" and res["mounted"] is True
 
@@ -165,8 +165,8 @@ class TestNasStatus:
         topo = d.topology_from_sparkrun(
             d.parse_sparkrun_clusters(SPARKRUN_FIXTURE), enrich=CLUSTER_JSON_FIXTURE)
         monkeypatch.setattr(d, "discover", lambda **k: topo)
-        monkeypatch.setattr(d, "_run",
-                            lambda args, timeout=20: {"ok": True, "stdout": "fail", "stderr": ""})
+        monkeypatch.setattr(d.sparkrun_bridge, "remote_cmd",
+                            lambda host, command, timeout=30: {"ok": True, "stdout": "fail", "stderr": "", "code": 0})
         res = d.nas_status()
         assert res["mounted"] is False
 
@@ -176,10 +176,10 @@ class TestNasStatus:
             d.parse_sparkrun_clusters(SPARKRUN_FIXTURE), enrich=CLUSTER_JSON_FIXTURE)
         monkeypatch.setattr(d, "discover", lambda **k: topo)
         calls = []
-        monkeypatch.setattr(d, "_run",
-                            lambda args, timeout=20: calls.append(args) or {"ok": True, "stdout": "ok", "stderr": ""})
+        monkeypatch.setattr(d.sparkrun_bridge, "remote_cmd",
+                            lambda host, command, timeout=30: calls.append(host) or {"ok": True, "stdout": "ok", "stderr": "", "code": 0})
         d.nas_status()
-        assert len(calls) == 1   # exactly one ssh probe
+        assert len(calls) == 1   # exactly one sparkrun remote probe
 
 
 class TestAutoAdopt:
@@ -207,31 +207,36 @@ class TestAutoAdopt:
 class TestProbeNodeRealPort:
     """_probe_node reads serving.json for real ports instead of hardcoding 8000."""
 
-    def _patch_run(self, monkeypatch, call_results):
-        """call_results is a list of dicts; each call pops the next result."""
-        iterator = iter(call_results)
-        def fake_run(args, timeout=20):
-            return next(iterator)
-        monkeypatch.setattr(d, "_run", fake_run)
+    # Facts that sparkrun would fetch for a node's GPU capability.
+    NVIDIA_OK = {"ok": True, "stdout": "GB10, 124416, 119000, 12.5", "stderr": "", "code": 0}
+
+    def _patch_sparkrun_seam(self, monkeypatch, result=NVIDIA_OK):
+        """Inject a fake at the sparkrun seam — tests never ssh anywhere."""
+        monkeypatch.setattr(d.sparkrun_bridge, "remote_cmd",
+                            lambda host, command, timeout=30: dict(result))
 
     def test_fallback_8000_when_no_serving_json(self, monkeypatch, tmp_path):
         """When serving.json is missing, probe port 8000."""
         monkeypatch.setattr(d, "SERVING_JSON", str(tmp_path / "serving.json"))
+        self._patch_sparkrun_seam(monkeypatch)
         call_args = []
         def fake_run(args, timeout=20):
             call_args.append(args)
-            if args[0] == "ssh":
-                return {"ok": True, "stdout": "GB10, 124416, 119000, 12.5", "stderr": ""}
             return {"ok": True, "stdout": '{"data":[]}', "stderr": ""}
         monkeypatch.setattr(d, "_run", fake_run)
 
         node = d.Node(ip="10.0.0.5", role="worker")
         d._probe_node(node)
 
+        assert node.gpu_model == "GB10"
+        assert node.vram_total_gb == 121.5
+        assert node.vram_free_gb == 116.21
         assert node.vllm_healthy is True
         curl_calls = [a for a in call_args if a[0] == "curl"]
         assert len(curl_calls) == 1
         assert ":8000" in curl_calls[0][-1]
+        # No raw ssh reaches _run — that route lives at the sparkrun seam now.
+        assert all(a[0] != "ssh" for a in call_args)
 
     def test_probes_real_port_from_serving_json(self, monkeypatch, tmp_path):
         """When serving.json declares a non-8000 port, probe that port."""
@@ -244,12 +249,11 @@ class TestProbeNodeRealPort:
             }]
         }))
         monkeypatch.setattr(d, "SERVING_JSON", str(serving_path))
+        self._patch_sparkrun_seam(monkeypatch)
 
         call_args = []
         def fake_run(args, timeout=20):
             call_args.append(args)
-            if args[0] == "ssh":
-                return {"ok": True, "stdout": "GB10, 124416, 119000, 12.5", "stderr": ""}
             if ":8000" in args[-1]:
                 return {"ok": False, "stdout": "", "stderr": "timeout"}
             return {"ok": True, "stdout": '{"data":[]}', "stderr": ""}
@@ -259,6 +263,7 @@ class TestProbeNodeRealPort:
         d._probe_node(node)
 
         assert node.vllm_healthy is True
+        assert node.gpu_model == "GB10"
         curl_calls = [a for a in call_args if a[0] == "curl"]
         assert len(curl_calls) == 2
         assert ":8000" in curl_calls[0][-1]
@@ -275,12 +280,11 @@ class TestProbeNodeRealPort:
             }]
         }))
         monkeypatch.setattr(d, "SERVING_JSON", str(serving_path))
+        self._patch_sparkrun_seam(monkeypatch)
 
         call_args = []
         def fake_run(args, timeout=20):
             call_args.append(args)
-            if args[0] == "ssh":
-                return {"ok": True, "stdout": "GB10, 124416, 119000, 12.5", "stderr": ""}
             return {"ok": True, "stdout": '{"data":[]}', "stderr": ""}
         monkeypatch.setattr(d, "_run", fake_run)
 
@@ -302,18 +306,18 @@ class TestProbeNodeRealPort:
             }]
         }))
         monkeypatch.setattr(d, "SERVING_JSON", str(serving_path))
+        self._patch_sparkrun_seam(monkeypatch)
 
         call_args = []
         def fake_run(args, timeout=20):
             call_args.append(args)
-            if args[0] == "ssh":
-                return {"ok": True, "stdout": "GB10, 124416, 119000, 12.5", "stderr": ""}
             return {"ok": True, "stdout": '{"data":[]}', "stderr": ""}
         monkeypatch.setattr(d, "_run", fake_run)
 
         node = d.Node(ip="10.0.0.5", role="worker")
         d._probe_node(node)
 
+        assert node.gpu_model == "GB10"
         curl_calls = [a for a in call_args if a[0] == "curl"]
         assert len(curl_calls) == 1
         assert ":8000" in curl_calls[0][-1]
@@ -329,10 +333,9 @@ class TestProbeNodeRealPort:
             }]
         }))
         monkeypatch.setattr(d, "SERVING_JSON", str(serving_path))
+        self._patch_sparkrun_seam(monkeypatch)
 
         def fake_run(args, timeout=20):
-            if args[0] == "ssh":
-                return {"ok": True, "stdout": "GB10, 124416, 119000, 12.5", "stderr": ""}
             return {"ok": False, "stdout": "", "stderr": "connection refused"}
         monkeypatch.setattr(d, "_run", fake_run)
 

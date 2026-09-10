@@ -20,6 +20,11 @@ import subprocess
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Dict, Any
 
+try:
+    from . import sparkrun_bridge  # package context (runtime)
+except ImportError:
+    import sparkrun_bridge  # direct import context (tests)
+
 CLUSTER_JSON = os.path.expanduser("~/.hscc/cluster.json")
 DISCOVERY_CACHE = os.path.expanduser("~/.hscc/discovery_cache.json")
 SERVING_JSON = os.path.expanduser("~/.hscc/serving.json")
@@ -236,11 +241,17 @@ def _write_cache(topo: ClusterTopology) -> None:
 
 
 def _probe_node(node: Node) -> None:
-    """Fill capability fields in place via ssh nvidia-smi + vLLM health."""
+    """Fill capability fields via sparkrun + a local vLLM health probe.
+
+    GPU capability (model / VRAM / power) is fetched THROUGH sparkrun's own
+    remote-execution primitive with sparkrun's ssh kwargs — never a hand-rolled
+    ``ssh -o BatchMode=yes`` (t_17cdc637). The nvidia-smi output is parsed
+    identically to before. vLLM health probes the node's HTTP port locally
+    (that's a plain curl, not ssh, so it stays as is).
+    """
     q = ("nvidia-smi --query-gpu=name,memory.total,memory.free,power.draw "
          "--format=csv,noheader,nounits")
-    r = _run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
-              f"{node.ssh_user}@{node.ip}", q], timeout=15)
+    r = sparkrun_bridge.remote_cmd(node.ip, q, timeout=15)
     node.reachable = r["ok"]
     if r["ok"]:
         caps = parse_nvidia_smi(r["stdout"])
@@ -322,9 +333,8 @@ def nas_status(args=None, **kwargs) -> dict:
     if not topo.nas:
         return {"ok": True, "nas": None, "note": "no NAS configured (optional)"}
     probe_node = topo.workers[0].ip if topo.workers else topo.orchestrator.ip
-    r = _run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
-              f"{topo.orchestrator.ssh_user}@{probe_node}",
-              "ls /mnt/nas >/dev/null 2>&1 && echo ok || echo fail"], timeout=15)
+    r = sparkrun_bridge.remote_cmd(
+        probe_node, "ls /mnt/nas >/dev/null 2>&1 && echo ok || echo fail", timeout=15)
     mounted = r["ok"] and "ok" in (r["stdout"] or "")
     return {"ok": True, "nas": topo.nas.ip, "probe_node": probe_node,
             "mounted": mounted,
