@@ -10,6 +10,27 @@ def test_full_toolset_excludes_cluster():
     assert "kanban" in ts
 
 
+def test_orchestrator_toolset_includes_cluster():
+    """The orchestrator set is the full set PLUS cluster control — the single
+    capability boundary, from the other side. Workers lose cluster control;
+    orchestrators gain it. Everything else is identical."""
+    worker = rolelib.role_toolsets()
+    orch = rolelib.orchestrator_toolsets()
+    assert "hscc-cluster" in orch
+    assert "sparkrun" in orch
+    # The orchestrator set is exactly the worker set plus the two cluster tools
+    # — nothing widened, nothing dropped, nothing reordered underneath.
+    assert set(orch) == set(worker) | {"hscc-cluster", "sparkrun"}
+    for t in worker:
+        assert t in orch
+    # kanban + delegation are already in the worker set (subagent spawning /
+    # task creation already work) — the orchestrator gains cluster control only.
+    assert "kanban" in worker and "delegation" in worker
+    # Returns a fresh list, not a shared reference (callers may mutate safely).
+    assert orch is not rolelib.orchestrator_toolsets()
+    assert orch != worker
+
+
 def test_paths_are_under_plugin_dir():
     assert rolelib.ROLES_DIR.endswith("hscc-roles/roles")
     assert rolelib.BASE_IDENTITY_PATH.endswith("hscc-roles/base-identity.md")

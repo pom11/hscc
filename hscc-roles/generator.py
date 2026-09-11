@@ -192,6 +192,42 @@ def _read_existing_config(pdir):
     return comp, aux
 
 
+def _read_existing_toolsets(pdir):
+    """Existing per-profile toolsets list, if any (operator hand-edits survive).
+
+    Returns ``None`` when absent/unreadable so the caller starts from the
+    generated default. Never touches anything but the given profile dir.
+    """
+    path = os.path.join(pdir, "config.yaml")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except (yaml.YAMLError, OSError, UnicodeDecodeError):
+        return None
+    ts = data.get("toolsets") if isinstance(data, dict) else None
+    return ts if isinstance(ts, list) else None
+
+
+def _merge_toolsets(existing, desired):
+    """Merge ``desired`` toolsets into ``existing`` without clobbering hand-edits.
+
+    Regeneration must NEVER clobber an operator's hand-edited per-profile
+    toolsets — it only ADDS the missing entries. ``existing`` is returned
+    verbatim when (as in the common case) it already contains every desired
+    entry, so a no-op regeneration stays byte-identical (idempotent). Only
+    entries genuinely missing are appended, in desired order — nothing existing
+    is dropped or reordered.
+    """
+    if not existing:
+        return list(desired)
+    missing = [t for t in desired if t not in existing]
+    if not missing:
+        return list(existing)
+    return list(existing) + missing
+
+
 def _worker_compaction(existing_compression=None):
     """Route a worker role's context-compaction to the idle orchestrator.
 
@@ -346,8 +382,19 @@ def generate_profile(spec, base_identity):
     changed |= _write_if_changed(os.path.join(pdir, "SOUL.md"), soul)
 
     # 3. Write config.yaml (HSCC-specific: model block + compaction + toolsets)
+    # Toolsets: orchestrator profiles get the FULL set PLUS cluster control
+    # (hscc-cluster + sparkrun); every other role keeps the worker set (cluster
+    # excluded) — that restriction is deliberate and must not widen. The desired
+    # set is MERGED into the profile's existing toolsets (only ADDING missing
+    # entries) so an operator's hand-edited per-profile toolsets survive a
+    # regeneration. See rolelib._FULL_TOOLSETS / _ORCH_TOOLSETS for the single
+    # capability boundary.
+    desired_toolsets = (rolelib.orchestrator_toolsets()
+                        if _is_orchestrator(name)
+                        else rolelib.role_toolsets())
+    existing_toolsets = _read_existing_toolsets(pdir)
     config = {
-        "toolsets": rolelib.role_toolsets(),
+        "toolsets": _merge_toolsets(existing_toolsets, desired_toolsets),
         "skills": {"preload": spec["preload_skills"]},
     }
     # Read the profile's EXISTING on-disk compaction blocks (if any) so a
