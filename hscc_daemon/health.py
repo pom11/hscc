@@ -1520,9 +1520,29 @@ def check_workers():
             log(f"Worker {label} down but no recipe in serving.json — skipping", "WARN")
             continue
         log(f"Worker {label} down — relaunching ({recipe}) on :{port}")
-        # Stop only THIS recipe on the node (not --all) so a co-located sibling
-        # on another port survives.
-        stop_result = run_cmd(["sparkrun", "stop", recipe, "--hosts", node], timeout=60)
+        # Restore the unit AS DEFINED in serving.json: the FULL TP span, with
+        # --tp, not a solo on the head. keepalive_units() now carries the unit's
+        # full span (`nodes`) and tensor-parallel count (`tp`) on every per-node
+        # entry, so a TP unit is relaunched as a whole group (head + workers),
+        # exactly like fleet_up_plan (serving.py:383-398), never a single-host
+        # solo that contends for :port and the GPU with the surviving span.
+        # For a plain single-node unit (tp<=1) this reduces to the same
+        # single-host, no-`--tp` command as before.
+        span = u.get("nodes") or [node]
+        relaunch_cmd = ["sparkrun", "run", recipe, "--cluster", serving.HSCC_CLUSTER,
+                        "--hosts", ",".join(span), "--port", str(port),
+                        "--no-follow", "--ensure"]
+        _tp = u.get("tp")
+        if _tp is not None and int(_tp) > 1:
+            relaunch_cmd.extend(["--tp", str(int(_tp))])
+        # Stop the WHOLE span first (not just this node) so requirement #3 holds:
+        # never leave two workloads bound to the same host:port. Stopping the
+        # full span clears the surviving pair members on the peer(s) before the
+        # re-provisioned group binds :port. --hosts <span> scopes the stop to the
+        # span (not --all), so an unrelated co-located sibling on another port
+        # survives.
+        stop_result = run_cmd(["sparkrun", "stop", recipe, "--hosts", ",".join(span)],
+                              timeout=60)
         if not stop_result.get("ok"):
             log(f"sparkrun stop for {label} failed: {stop_result.get('output', '')}", "WARN")
         # Record relaunch time before launching so we do not thrash even if
@@ -1533,9 +1553,7 @@ def check_workers():
         try:
             with open(log_path, "a") as log_file:
                 subprocess.Popen(
-                    ["sparkrun", "run", recipe, "--cluster", serving.HSCC_CLUSTER,
-                     "--hosts", node, "--port", str(port),
-                     "--no-follow", "--ensure"],
+                    relaunch_cmd,
                     stdout=log_file, stderr=log_file,
                     start_new_session=True,
                 )

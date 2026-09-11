@@ -632,12 +632,18 @@ class TestCheckWorkers:
         assert state["relaunched"] == []
         assert popen_calls == []
 
-    def test_span_member_never_given_solo_unit(self, tmp_hfcc_dir, monkeypatch):
-        """A span member whose OWN endpoint is down is still never relaunched as
-        a solo unit — it serves as part of the span, not standalone."""
+    def test_span_member_relaunched_as_group_not_solo(self, tmp_hfcc_dir, monkeypatch):
+        """A down span is relaunched as the WHOLE TP group, not a solo on the head.
+
+        The card t_4c9dd6d4 regression: the gentle relaunch in check_workers used
+        to drop to a single-host, no-`--tp` `sparkrun run --hosts <head>` — the
+        `_SOLO` that wedged the unit. Now the down primary .2 is relaunched as the
+        full span (--hosts 10.0.0.2,10.0.0.3 --tp 2), and the peer .3 is never
+        solo-provisioned as a separate single-host run.
+        """
         health, _, state_dir = self._setup_span(tmp_hfcc_dir, monkeypatch)
         monkeypatch.setattr(health, "_tp_peer_nodes", lambda: {"10.0.0.3"})
-        # Both endpoints down — but the peer must NOT be solo-relaunched
+        # Both endpoints down — spans pair must be re-provisioned together
         monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
         ran = []
         monkeypatch.setattr(health, "run_cmd",
@@ -650,13 +656,24 @@ class TestCheckWorkers:
 
         health.check_workers()
         state = json.loads((state_dir / "workers.json").read_text())
-        # exactly ONE sparkrun run launched (the down primary .2) — the peer .3
-        # is never solo-provisioned
+        # exactly ONE sparkrun run (one GROUP relaunch, not one per node / not a solo)
         assert len(popen_calls) == 1
-        assert any("10.0.0.2" in str(x) for x in popen_calls[0][0])
-        assert not any("10.0.0.3" in str(x) for x in popen_calls[0][0])
+        cmd = popen_calls[0][0]   # first positional arg to Popen = the argv list
+        assert cmd[0] == "sparkrun" and cmd[1] == "run"
+        # the full span is in --hosts (comma-joined head,peer)
+        i = cmd.index("--hosts")
+        assert cmd[i + 1] == "10.0.0.2,10.0.0.3"
+        # --tp 2 carried so the pair re-binds host-network as a TP group, not a solo
+        j = cmd.index("--tp")
+        assert cmd[j + 1] == "2"
+        # --served-model-name not required here (unit w/o model alias path); the
+        # span command is what matters. peer:8000 never health-hit standalone.
         assert state["down"] == []                # peer never counted down
-        assert state["relaunched"] != []          # primary relaunch still works
+        assert state["relaunched"] != []          # the group relaunch logs a relaunch
+        # requirement #3: the stop also targets the FULL span (hosts .2,.3), so
+        # no two workloads are ever left bound to the same host:port.
+        stop_cmds = [a for a in ran if a[:2] == ["sparkrun", "stop"]]
+        assert any(a[a.index("--hosts") + 1] == "10.0.0.2,10.0.0.3" for a in stop_cmds)
 
     def test_genuinely_down_primary_still_relaunched(self, tmp_hfcc_dir, monkeypatch):
         """Regression: real self-heal must be preserved — a genuinely down

@@ -186,10 +186,18 @@ def keepalive_nodes(serving):
 def keepalive_units(serving):
     """Unit-keyed keep-alive workers for multi-model-per-node supervision (G1).
 
-    Returns a list of {node, port, recipe, id} — one per keep-alive worker unit.
-    A node may appear multiple times on different ports (co-located models), so
-    the daemon health-checks + relaunches each (node,port) independently. Port
-    comes from the unit (v2 schema), else the serving-level port / VLLM_PORT.
+    Returns a list of {node, port, recipe, id, nodes, tp} — one per keep-alive
+    worker unit NODE. A node may appear multiple times on different ports
+    (co-located models), so the daemon health-checks + relaunches each (node,port)
+    independently. Port comes from the unit (v2 schema), else the serving-level
+    port / VLLM_PORT.
+
+    ``nodes`` (the unit's FULL span, list) and ``tp`` (the unit's tensor-parallel
+    count) are carried on every per-node entry so a consumer that relaunches one
+    member can rebuild the WHOLE span command (--hosts <span> --tp N) instead of
+    dropping to a single-host solo. Legacy callers that only read node/port/
+    recipe/id are unaffected; ``nodes`` falls back to [node] and ``tp`` to None
+    whenever the unit does not carry them (env-derived nodes, tp<=1).
     """
     out = []
     default_port = serving_port(serving) if isinstance(serving, dict) else VLLM_PORT
@@ -200,20 +208,25 @@ def keepalive_units(serving):
                 continue
             recipe = u.get("recipe")
             port = int(u.get("port") or default_port)
-            for node in (u.get("nodes") or []):
+            unit_nodes = [n for n in (u.get("nodes") or []) if n]
+            tp = u.get("tp")
+            for node in unit_nodes:
                 key = (node, port)
                 if key in seen:
                     continue
                 seen.add(key)
                 out.append({"node": node, "port": port,
                             "recipe": os.path.expanduser(recipe) if recipe else None,
-                            "id": u.get("id") or f"{node}:{port}"})
+                            "id": u.get("id") or f"{node}:{port}",
+                            "nodes": unit_nodes or [node],
+                            "tp": tp})
     for node in _env_keepalive_nodes():
         key = (node, default_port)
         if key not in seen:
             seen.add(key)
             out.append({"node": node, "port": default_port, "recipe": None,
-                        "id": f"{node}:{default_port}"})
+                        "id": f"{node}:{default_port}",
+                        "nodes": [node], "tp": None})
     return out
 
 
