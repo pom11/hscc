@@ -139,6 +139,50 @@ class TestHttpCheck:
         result = http_check("http://localhost:19997/health", timeout=1)
         assert result["ok"] is False
 
+    def test_lan_errno65_gets_macos_hint(self, monkeypatch):
+        """errno 65 (EHOSTUNREACH) to a LAN/private IP should carry the macOS
+        Local Network hint — this is the daemon-keeps-failing footgun where a
+        denied app gets 'No route to host' for a reachable fleet endpoint."""
+        from hscc_daemon import util
+        import urllib.error
+
+        def _throw(*a, **kw):
+            raise urllib.error.URLError(
+                OSError(65, "No route to host", "10.0.0.10"))
+
+        monkeypatch.setattr("urllib.request.urlopen", _throw)
+        result = util.http_check("http://10.0.0.10:8000/health", timeout=5)
+        assert result["ok"] is False
+        assert "Local Network" in result["output"]
+        assert "No route to host" in result["output"]
+
+    def test_lan_errno65_on_public_ip_no_hint(self, monkeypatch):
+        """Same errno to a public IP should NOT get the LAN hint."""
+        from hscc_daemon import util
+        import urllib.error
+
+        def _throw(*a, **kw):
+            raise urllib.error.URLError(OSError(65, "No route to host", "1.1.1.1"))
+
+        monkeypatch.setattr("urllib.request.urlopen", _throw)
+        result = util.http_check("http://1.1.1.1/health", timeout=5)
+        assert result["ok"] is False
+        assert "Local Network" not in result["output"]
+
+    def test_non_host_unreach_error_no_hint(self, monkeypatch):
+        """A refusal to a private IP (different errno) should not get the hint."""
+        from hscc_daemon import util
+        import urllib.error
+
+        def _throw(*a, **kw):
+            raise urllib.error.URLError(
+                OSError(61, "Connection refused", "10.0.0.10"))
+
+        monkeypatch.setattr("urllib.request.urlopen", _throw)
+        result = util.http_check("http://10.0.0.10:8000/health", timeout=5)
+        assert result["ok"] is False
+        assert "Local Network" not in result["output"]
+
 
 class TestEnsureDir:
     """ensure_dir() creates directories."""
