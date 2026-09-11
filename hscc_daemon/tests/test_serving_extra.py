@@ -109,7 +109,14 @@ class TestKeepaliveUnits:
         # rebuild the whole-span --hosts <span> --tp N command, not a solo).
         assert all(u["nodes"] == ["10.0.0.247", "10.0.0.248"] for u in units)
         assert all(u["tp"] is None for u in units)
-        assert all(set(u.keys()) == {"node", "port", "recipe", "id", "nodes", "tp"}
+        # model + role are carried too (for rebuilding the --served-model-name
+        # the unit was declared with, so a relaunch reuses the SAME cluster_id
+        # instead of deriving a duplicate — t_e1ff0e8e). This unit has no
+        # `model`, so it is carried as None (no --served-model-name on relaunch).
+        assert all(u["model"] is None for u in units)
+        assert all(u["role"] == "worker" for u in units)
+        assert all(set(u.keys()) == {"node", "port", "recipe", "id", "nodes",
+                                     "tp", "model", "role"}
                    for u in units)
 
     def test_dedupes_dup_nodes_same_unit(self, monkeypatch):
