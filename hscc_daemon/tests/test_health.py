@@ -306,6 +306,65 @@ class TestCheckWorkers:
         kwargs = popen_calls[0][1]
         assert kwargs.get("start_new_session") is True
 
+    def test_relaunch_reuses_declared_cluster_id(self, tmp_hfcc_dir, monkeypatch):
+        """t_e1ff0e8e: the gentle relaunch MUST re-issue the unit AS DEFINED,
+        carrying EVERY input sparkrun folds into the intent hash (recipe, port,
+        --served-model-name, --tp). Before the fix the relaunch dropped
+        --served-model-name, so sparkrun derived a DIFFERENT cluster_id for the
+        same hosts and `--ensure` launched a PARALLEL DUPLICATE instead of
+        re-issuing the declared workload. The relaunch command must therefore
+        equal fleet_up_plan's command for the same TP worker."""
+        import time as _time
+        health, serving = self._setup(tmp_hfcc_dir, monkeypatch, nodes=[])
+        from hscc_daemon import serving as serving_mod
+        # A TP=2 keep-alive worker with a declared model (so --served-model-name
+        # must be carried through, exactly as fleet_up_plan does).
+        monkeypatch.setattr(
+            serving_mod, "load_serving",
+            lambda: {"version": 2, "units": [
+                {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"],
+                 "recipe": "~/r/orch.yaml", "model": "M"},
+                {"id": "w-tp", "role": "worker", "keepalive": True,
+                 "nodes": ["10.0.0.247", "10.0.0.248"], "port": 8000,
+                 "recipe": "~/r/27b.yaml", "model": "W", "tp": 2},
+            ]})
+        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
+        ran = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(("run_cmd", args)) or {"ok": True})
+        popen_calls = []
+        real_popen = health.subprocess.Popen
+        def fake_popen(*args, **kwargs):
+            popen_calls.append((args, kwargs))
+            return real_popen.__class__.__new__(real_popen.__class__)
+        monkeypatch.setattr(health.subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(health, "time", _time)
+
+        health.check_workers()
+        assert len(popen_calls) >= 1
+        # Both span members may be probed independently (the test env has no
+        # live serving.json for _tp_peer_nodes), but EVERY relaunch must
+        # re-issue the SAME defined unit — no divergence.
+        plan = serving_mod.fleet_up_plan()
+        wk = next(p["cmd"] for p in plan if p["unit_id"] == "w-tp")
+        for (args, _kwargs) in popen_calls:
+            relaunch = args[0]
+            # Same full-span hosts + --tp as the declared worker…
+            assert "--hosts" in relaunch
+            assert relaunch[relaunch.index("--hosts") + 1] == "10.0.0.247,10.0.0.248"
+            assert "--tp" in relaunch
+            assert relaunch[relaunch.index("--tp") + 1] == "2"
+            # …AND the --served-model-name that fleet_up_plan carries (the
+            # missing piece that previously changed the intent hash →
+            # duplicate cluster_id).
+            assert "--served-model-name" in relaunch
+            assert (relaunch[relaunch.index("--served-model-name") + 1]
+                    == "W worker-model")
+            # Byte-identical to fleet_up_plan's command for the same unit, so
+            # sparkrun derives the SAME cluster_id and --ensure re-issues the
+            # declared workload instead of duplicating it (t_e1ff0e8e).
+            assert relaunch == wk
+
     def test_grace_window_skips_relaunch(self, tmp_hfcc_dir, monkeypatch):
         import time as _time
         health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])

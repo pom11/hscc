@@ -219,7 +219,9 @@ def keepalive_units(serving):
                             "recipe": os.path.expanduser(recipe) if recipe else None,
                             "id": u.get("id") or f"{node}:{port}",
                             "nodes": unit_nodes or [node],
-                            "tp": tp})
+                            "tp": tp,
+                            "model": u.get("model"),
+                            "role": u.get("role")})
     for node in _env_keepalive_nodes():
         key = (node, default_port)
         if key not in seen:
@@ -333,6 +335,41 @@ def _serve_cmd_mismatch(u, cmd):
     return ""
 
 
+def _unit_run_cmd(unit):
+    """The ``sparkrun run`` command that (re)starts a unit AS DEFINED.
+
+    SINGLE source of truth for the launch command, shared by ``fleet_up_plan``
+    (``hscc cluster up`` / wake) and the daemon's gentle relaunch
+    (health.check_workers). It MUST carry every input sparkrun folds into the
+    intent hash (``recipe``, ``port``, ``--served-model-name``, ``--tp``) — if
+    the two paths ever diverge here, sparkrun derives a DIFFERENT cluster_id
+    for the same logical unit and ``--ensure`` then launches a PARALLEL
+    DUPLICATE instead of re-issuing the declared workload (t_e1ff0e8e).
+
+    ``unit`` needs ``recipe``, ``nodes``, ``port``, and (for the served name /
+    parallelism) ``model``, ``role``, ``tp``. ``fleet_up_plan``'s plan entries
+    and ``keepalive_units``' per-node entries both provide these.
+    """
+    nodes = [n for n in (unit.get("nodes") or []) if n]
+    cmd = ["sparkrun", "run", unit["recipe"], "--cluster", HSCC_CLUSTER,
+           "--hosts", ",".join(nodes), "--port", str(unit["port"]),
+           "--no-follow", "--ensure"]
+    # --served-model-name <concrete> <role-alias>: carry the served model
+    # names through from the unit into the start command, the SAME way the
+    # sanctioned template path renders them (cluster_template._render_serve_cmd).
+    # This is what makes vLLM (re)started by a wake serve the alias, so the
+    # 38 role profiles that pin worker-model / orchestrator-model keep
+    # working after an autodown cycle. The names come from the unit's own
+    # fields (role → alias, model/recipe → concrete), NEVER from serve_cmd.
+    smn = _served_model_name(unit)
+    if smn:
+        cmd.extend(["--served-model-name", smn])
+    tp = unit.get("tp")
+    if tp is not None and int(tp) > 1:
+        cmd.extend(["--tp", str(int(tp))])
+    return cmd
+
+
 def fleet_up_plan(serving=None):
     """Ordered start plan for EVERY serving.json unit (orchestrator FIRST, then
     workers sorted by id) — the full fleet-up set.
@@ -393,22 +430,7 @@ def fleet_up_plan(serving=None):
     plan = orch + workers
     cmds = []
     for e in plan:
-        cmd = ["sparkrun", "run", e["recipe"], "--cluster", HSCC_CLUSTER,
-               "--hosts", ",".join(e["nodes"]), "--port", str(e["port"]),
-               "--no-follow", "--ensure"]
-        # --served-model-name <concrete> <role-alias>: carry the served model
-        # names through from the unit into the start command, the SAME way the
-        # sanctioned template path renders them (cluster_template._render_serve_cmd).
-        # This is what makes vLLM (re)started by a wake serve the alias, so the
-        # 38 role profiles that pin worker-model / orchestrator-model keep
-        # working after an autodown cycle. The names come from the unit's own
-        # fields (role → alias, model/recipe → concrete), NEVER from serve_cmd.
-        smn = _served_model_name(e)
-        if smn:
-            cmd.extend(["--served-model-name", smn])
-        tp = e.get("tp")
-        if tp is not None and int(tp) > 1:
-            cmd.extend(["--tp", str(int(tp))])
+        cmd = _unit_run_cmd(e)
         # Surface (loudly, but do NOT run) a serve_cmd that disagrees with the
         # authoritative recipe/nodes/port — refusing to act on a corrupt record
         # rather than starting a model on the wrong hosts. The unit's OWN

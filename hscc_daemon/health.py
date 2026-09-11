@@ -1520,21 +1520,20 @@ def check_workers():
             log(f"Worker {label} down but no recipe in serving.json — skipping", "WARN")
             continue
         log(f"Worker {label} down — relaunching ({recipe}) on :{port}")
-        # Restore the unit AS DEFINED in serving.json: the FULL TP span, with
-        # --tp, not a solo on the head. keepalive_units() now carries the unit's
-        # full span (`nodes`) and tensor-parallel count (`tp`) on every per-node
-        # entry, so a TP unit is relaunched as a whole group (head + workers),
-        # exactly like fleet_up_plan (serving.py:383-398), never a single-host
-        # solo that contends for :port and the GPU with the surviving span.
-        # For a plain single-node unit (tp<=1) this reduces to the same
-        # single-host, no-`--tp` command as before.
+        # Re-issue the unit AS DEFINED in serving.json, using the SAME shared
+        # command builder as fleet_up_plan (_unit_run_cmd), so sparkrun derives
+        # the SAME cluster_id as the declared workload. keepalive_units() now
+        # carries the unit's full span (`nodes`), tp, model and role on every
+        # per-node entry, so a TP unit is relaunched as a whole group
+        # (head + workers) WITH `--served-model-name`, exactly like
+        # fleet_up_plan. Passing --served-model-name is essential: sparkrun
+        # folds it into the intent hash, so omitting it (the pre-fix behaviour)
+        # derived a DIFFERENT cluster_id and `--ensure` then launched a
+        # PARALLEL DUPLICATE instead of re-issuing the declared workload
+        # (t_e1ff0e8e). For a plain single-node unit (tp<=1, no model) this
+        # reduces to the same single-host, no-`--tp` command as before.
         span = u.get("nodes") or [node]
-        relaunch_cmd = ["sparkrun", "run", recipe, "--cluster", serving.HSCC_CLUSTER,
-                        "--hosts", ",".join(span), "--port", str(port),
-                        "--no-follow", "--ensure"]
-        _tp = u.get("tp")
-        if _tp is not None and int(_tp) > 1:
-            relaunch_cmd.extend(["--tp", str(int(_tp))])
+        relaunch_cmd = serving._unit_run_cmd(u)
         # Stop the WHOLE span first (not just this node) so requirement #3 holds:
         # never leave two workloads bound to the same host:port. Stopping the
         # full span clears the surviving pair members on the peer(s) before the
