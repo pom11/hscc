@@ -885,3 +885,155 @@ def test_push_dry_run_json(tmp_path, capsys):
     assert fake.mutations == []
 
 
+# --------------------------------------------------------------------------- #
+# project chat — interactive hermes on the project's orchestrator
+# --------------------------------------------------------------------------- #
+
+class CaptureExec:
+    """Injected exec seam: records the exec call instead of replacing the
+    process. Mirrors ``os.execvp``'s ``(file, argv)`` contract exactly so the
+    production path (which does call ``os.execvp``) is what the tests assert on.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, file, argv):
+        self.calls.append((file, list(argv)))
+        return 0  # os.execvp never returns; this is only for the seam
+
+
+def test_chat_explicit_name_resolves_orchestrator_argv(tmp_path, capsys):
+    """`chat hscc` resolves the SAME {profile, session} the REST handler uses
+    and execs hermes interactively (no -Q/-q), passing trailing args through."""
+    reg = _reg(tmp_path)
+    repo = str(tmp_path / "hscc")
+    registry.add_project("hscc", repo=repo, board="hscc", path=reg)
+    # session not yet titled -> resolve_orchestrator falls back to the name
+    sdb = _db_session("hscc")
+    seam = CaptureExec()
+    args = _ns(registry=reg, session_db=sdb, exec_seam=seam,
+               name="hscc", extra=["--", "--resume", "abc"])
+
+    rc = project_cmd.cmd_chat(args)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert seam.calls, "exec seam must have been invoked"
+    file, argv = seam.calls[0]
+    assert file == "hermes"
+    assert argv == ["hermes", "-p", "hscc-orch", "chat", "--continue", "hscc",
+                    "--", "--resume", "abc"]
+    # INTERACTIVE — never -Q/-q, never capture; the banner names the identity.
+    assert "-Q" not in argv and "-q" not in argv
+    assert "project hscc -> profile hscc-orch, session 'hscc'" in out
+    assert "(permanent, shared with the app)" in out
+
+
+def test_chat_detect_project_from_cwd(tmp_path, capsys):
+    """`chat` with no name detects the project from cwd, like pull/push do."""
+    reg = _reg(tmp_path)
+    repo = str(tmp_path / "flightdeck")
+    registry.add_project("flightdeck", repo=repo, board="flightdeck", path=reg)
+    sdb = _db_session("flightdeck")
+    seam = CaptureExec()
+    args = _ns(registry=reg, session_db=sdb, exec_seam=seam,
+               cwd=str(tmp_path / "flightdeck" / "core"), extra=None)
+
+    rc = project_cmd.cmd_chat(args)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    file, argv = seam.calls[0]
+    assert file == "hermes"
+    assert argv == ["hermes", "-p", "flightdeck-orch", "chat", "--continue",
+                    "flightdeck"]
+    assert "using project 'flightdeck' (detected from cwd)" in out
+    assert "project flightdeck -> profile flightdeck-orch" in out
+
+
+def test_chat_unknown_name_fails_loudly_and_lists_valid(tmp_path, capsys):
+    """An unknown project must never silently fall back to a default/general
+    orchestrator — fail non-zero and print the valid names."""
+    reg = _reg(tmp_path)
+    registry.add_project("hscc", repo=str(tmp_path / "hscc"), board="hscc",
+                         path=reg)
+    registry.add_project("flightdeck", repo=str(tmp_path / "flightdeck"),
+                         board="flightdeck", path=reg)
+    sdb = _db_session("nope")
+    seam = CaptureExec()
+    args = _ns(registry=reg, session_db=sdb, exec_seam=seam, name="nope")
+
+    rc = project_cmd.cmd_chat(args)
+    err = capsys.readouterr().err
+
+    assert rc != 0
+    assert seam.calls == []  # never exec'd an orchestrator for an unknown name
+    assert "unknown project" in err
+    assert "hscc" in err and "flightdeck" in err  # lists the valid names
+
+
+def test_chat_no_name_no_cwd_falls_through(tmp_path, capsys):
+    """`chat` with no name and no cwd match -> non-zero + valid names; no
+    fallback to a default project or the general orchestrator."""
+    reg = _reg(tmp_path)
+    registry.add_project("hscc", repo=str(tmp_path / "hscc"), board="hscc",
+                         path=reg)
+    sdb = _db_session("hscc")
+    seam = CaptureExec()
+    args = _ns(registry=reg, session_db=sdb, exec_seam=seam, name=None,
+               cwd=str(tmp_path / "outside"))
+
+    rc = project_cmd.cmd_chat(args)
+    err = capsys.readouterr().err
+
+    assert rc != 0
+    assert seam.calls == []
+    assert "no project given" in err
+    assert "hscc" in err  # lists the valid names
+
+
+def test_chat_creates_session_on_first_use(tmp_path, capsys):
+    """A brand-new project has no titled session yet; chat creates it
+    idempotently (like _ensure_session_exists) so `--continue <session>`
+    resolves instead of failing with 'No session found'."""
+    reg = _reg(tmp_path)
+    registry.add_project("brandnew", repo=str(tmp_path / "brandnew"),
+                         board="brandnew", path=reg)
+    sdb = _db_session("brandnew")  # fresh db: no titled sessions yet
+    seam = CaptureExec()
+    args = _ns(registry=reg, session_db=sdb, exec_seam=seam, name="brandnew")
+
+    rc = project_cmd.cmd_chat(args)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert sdb.db.resolve_session_by_title("brandnew"), \
+        "session must be created so the exec'd hermes can --continue it"
+    assert "created session 'brandnew'" in out
+    file, argv = seam.calls[0]
+    assert argv == ["hermes", "-p", "brandnew-orch", "chat", "--continue",
+                    "brandnew"]
+
+
+def test_chat_session_already_exists_is_idempotent(tmp_path, capsys):
+    """Already-titled session -> no re-create, no 'created' banner; the argv
+    still targets the permanent session."""
+    reg = _reg(tmp_path)
+    registry.add_project("hscc", repo=str(tmp_path / "hscc"), board="hscc",
+                         path=reg)
+    sdb = _db_session("hscc")
+    sdb.db.set_session_title("pre-existing-id", "hscc")  # already present
+    seam = CaptureExec()
+    args = _ns(registry=reg, session_db=sdb, exec_seam=seam, name="hscc")
+
+    rc = project_cmd.cmd_chat(args)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "created session" not in out
+    assert "permanent, shared with the app" in out
+    file, argv = seam.calls[0]
+    assert argv == ["hermes", "-p", "hscc-orch", "chat", "--continue", "hscc"]
+
+
