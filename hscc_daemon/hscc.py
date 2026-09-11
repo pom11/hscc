@@ -689,6 +689,12 @@ def _handle_profiles():
     return _emit(eng.cmd_profile_status())
 
 
+# Verbs of flightdeck's `project` subgroup, aliased to the top of
+# `hscc project` so the group name does not have to be typed twice.
+_PROJECT_SUBGROUP_VERBS = frozenset(
+    {"new", "list", "remove", "repair", "pull", "push", "chat", "sync"})
+
+
 def _handle_project():
     """Route 'project ...' to the relocated flightdeck CLI as a library.
 
@@ -730,6 +736,34 @@ def _handle_project():
         return 1
     # Everything after `hscc project`.
     remaining = sys.argv[2:]
+    # Lifecycle/registry verbs live in flightdeck's `project` SUBGROUP, which
+    # made the real invocation `hscc project project chat` — the group name
+    # doubled because flightdeck's own top-level already sits under
+    # `hscc project`. Promote them so `hscc project chat` works, and keep the
+    # explicit `hscc project project chat` form working too.
+    #
+    # Safe because the two namespaces are disjoint: none of these names is a
+    # flightdeck top-level command (ask, daemon, decompose, doctor, hygiene,
+    # incident, ingest, init, legacy-cards, migrate-card, lint-cards, message,
+    # metrics, monitor, project, qa, reconcile, release, report, review,
+    # roadmap, standup, start, topics, update, verify, why). The guard below
+    # re-checks that at runtime, so adding a colliding top-level command later
+    # makes the alias step aside rather than shadow it.
+    if remaining and remaining[0] in _PROJECT_SUBGROUP_VERBS:
+        try:
+            # Ask the PARSER what is actually invokable, not
+            # _discover_commands() — that returns MODULE names (`sync`,
+            # `legacy`, `lint`) which differ from the registered command names
+            # (`legacy-cards`, `lint-cards`) and would veto valid aliases.
+            from flightdeck.cli import build_parser
+            _sub = build_parser()._subparsers
+            top_level = set()
+            for _act in (_sub._group_actions if _sub else []):
+                top_level |= set(getattr(_act, "choices", {}) or {})
+        except Exception:
+            top_level = set()
+        if remaining[0] not in top_level:
+            remaining = ["project"] + remaining
     try:
         return flightdeck_main(remaining)
     except SystemExit as exc:
