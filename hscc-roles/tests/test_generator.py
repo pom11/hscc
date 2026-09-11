@@ -58,6 +58,90 @@ def test_generate_profile_idempotent(tmp_path, monkeypatch):
     assert changed_second is False  # unchanged content → no rewrite
 
 
+# -- orchestrator cluster-control toolsets (t_ef4a6c1d) --
+#
+# An orchestrator is supposed to have FULL control — its profiles must carry the
+# cluster tools (hscc-cluster, sparkrun), while worker roles keep the restricted
+# set. Regeneration must only ADD missing entries, never clobber an operator's
+# hand-edited per-profile toolsets.
+
+
+def test_cluster_orchestrator_gets_cluster_toolsets(tmp_path, monkeypatch):
+    """The cluster-wide `orchestrator` profile gets hscc-cluster + sparkrun."""
+    cfg = _gen_config(tmp_path, monkeypatch, {
+        "name": "orchestrator", "identity": "You orchestrate.\n",
+        "preload_skills": [], "model_tier": "strong"})
+    ts = cfg["toolsets"]
+    assert "hscc-cluster" in ts
+    assert "sparkrun" in ts
+    assert "kanban" in ts and "delegation" in ts  # subagent/task work already present
+    # still has its strong gateway model block unchanged
+    assert cfg["model"]["base_url"] == generator.STRONG_URL
+
+
+def test_project_orch_gets_cluster_toolsets(tmp_path, monkeypatch):
+    """A <project>-orch profile gets hscc-cluster + sparkrun too."""
+    cfg = _gen_config(tmp_path, monkeypatch, {
+        "name": "ecofire-app-orch", "identity": "You orch.\n",
+        "preload_skills": [], "model_tier": "strong"})
+    ts = cfg["toolsets"]
+    assert "hscc-cluster" in ts
+    assert "sparkrun" in ts
+
+
+def test_worker_still_excludes_cluster_toolsets(tmp_path, monkeypatch):
+    """A worker role must NOT get cluster control — the restriction is
+    deliberate and must not widen. The existing worker toolset is unchanged."""
+    cfg = _gen_config(tmp_path, monkeypatch, {
+        "name": "coder", "identity": "You build.\n",
+        "preload_skills": [], "model_tier": "fast"})
+    ts = cfg["toolsets"]
+    assert "hscc-cluster" not in ts
+    assert "sparkrun" not in ts
+    expected_worker = generator.rolelib.role_toolsets()
+    assert ts == expected_worker  # byte-identical to the worker default
+
+
+def test_regen_orch_only_adds_missing_not_clobber_hand_edits(tmp_path, monkeypatch):
+    """Regenerating an orchestrator preserves an operator's hand-added toolsets
+    and only ADDS the newly-required cluster entries (never removes/drops)."""
+    spec = {"name": "ecofire-app-orch", "identity": "You orch.\n",
+            "preload_skills": [], "model_tier": "strong"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    pdir = os.path.join(str(tmp_path / "profiles" / "ecofire-app-orch"))
+    # Operator hand-adds a toolset to the generated profile.
+    with open(os.path.join(pdir, "config.yaml")) as f:
+        cur = yaml.safe_load(f)
+    cur["toolsets"].append("operator-custom-tool")
+    with open(os.path.join(pdir, "config.yaml"), "w") as f:
+        yaml.safe_dump(cur, f, sort_keys=False)
+    # Regenerate — the hand-added toolset must survive, cluster tools present,
+    # and nothing dropped.
+    cfg2 = _gen_config(tmp_path, monkeypatch, spec)
+    ts2 = cfg2["toolsets"]
+    assert "operator-custom-tool" in ts2          # hand-edit preserved
+    assert "hscc-cluster" in ts2 and "sparkrun" in ts2  # cluster tools present
+    expected = generator.rolelib.orchestrator_toolsets()
+    for t in expected:
+        assert t in ts2                           # nothing lost
+    # Dedup: regenerating again with the same hand-edit present is byte-stable.
+    cfg3 = _gen_config(tmp_path, monkeypatch, spec)
+    assert cfg3["toolsets"] == ts2                # idempotent, no dup cluster tools
+
+
+def test_regen_idempotent_with_cluster_toolsets(tmp_path, monkeypatch):
+    """A regenerated orchestrator profile reports changed=False on the next run —
+    the merged config is byte-stable so a no-op regeneration never rewrites."""
+    spec = {"name": "orchestrator", "identity": "You orchestrate.\n",
+            "preload_skills": [], "model_tier": "strong"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR",
+                        str(tmp_path / "profiles"))
+    changed_second = generator.generate_profile(spec, base_identity="BASE")
+    assert changed_second is False
+
+
 import subprocess
 import sys
 
