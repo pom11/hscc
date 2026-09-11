@@ -13,6 +13,9 @@ Commands:
     remove  <name>  registry entry only — NEVER deletes the repo or the topic
     repair  <name>  same as re-running `new` on an existing (possibly partial)
                     project — fills only what is missing
+    pull/push       safe fast-forward pull / gated branch push of registered repos
+    chat    [name]  open an INTERACTIVE hermes session on the project's
+                    orchestrator (the permanent thread the app + WS relay use)
 """
 
 from __future__ import annotations
@@ -20,8 +23,27 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 from ..core import git_state, project_lifecycle, registry
+
+# --------------------------------------------------------------------------- #
+# Orchestrator resolver (reused from hscc-roles so CLI/REST/WS never disagree)
+# --------------------------------------------------------------------------- #
+# The project → orchestrator identity resolver lives in hscc-roles/
+# orchestrators.py (vendored verbatim; the REST chat handler in
+# hscc-api/routes_orchestrator.py loads it the exact same way). We load it under
+# the same sys.path pattern so `hscc project chat <name>` maps a project to the
+# SAME {profile, session, board, repo} the iOS app and the WS relay use.
+_ROLES_DIR = Path(__file__).resolve().parent.parent.parent.parent / "hscc-roles"
+if _ROLES_DIR.is_dir() and str(_ROLES_DIR) not in sys.path:
+    sys.path.insert(0, str(_ROLES_DIR))
+
+from orchestrators import (                      # noqa: E402
+    OrchestratorError,
+    UnknownProjectError,
+    resolve_orchestrator,
+)
 
 
 def _not_implemented() -> int:
@@ -375,6 +397,109 @@ def cmd_push(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# chat — drop the operator into an INTERACTIVE hermes session on the
+# project's orchestrator (the permanent thread the app + WS relay use)
+# --------------------------------------------------------------------------- #
+
+def _detect_project(args, registry_path) -> str | None:
+    """Resolve the chat target project: explicit name, else detect from cwd.
+
+    Returns the project name, or ``None`` when neither an explicit ``--name``
+    nor a cwd match was available (the caller then fails loudly listing the
+    valid names). An explicit choice always wins; detection is never silent.
+    The detection note goes to STDOUT (the operator's TTY) alongside the
+    identity banner — stderr is reserved for errors that exit non-zero.
+    """
+    projects = registry.load_registry(registry_path)
+    explicit = getattr(args, "name", None)
+    name, _detected = registry.resolve_project_arg(
+        projects, explicit,
+        cwd=getattr(args, "cwd", None),
+        _print=print,
+    )
+    return name
+
+
+def _valid_names(registry_path) -> list[str]:
+    from orchestrators import list_registry_projects
+    return list_registry_projects(registry_path)
+
+
+def cmd_chat(args: argparse.Namespace) -> int:
+    """`hscc project chat [name] [-- <hermes args>]` — interactive hermes.
+
+    Resolves the project → orchestrator identity exactly as the REST chat
+    handler does (``resolve_orchestrator``), ensures the permanent session
+    exists (creating it on first use, idempotently), prints a banner naming
+    the identity the operator is about to speak as, then EXECs hermes
+    interactively — a real TTY, stdout never captured, no -q/-Q.
+
+    Unknown project: fail loudly, exit 2, and list the valid names. We never
+    fall back to a default project or the general orchestrator — silently
+    talking to the wrong orchestrator is worse than an error.
+    """
+    name = _detect_project(args, args.registry)
+    if not name:
+        valid = _valid_names(args.registry)
+        listed = ", ".join(valid) if valid else "(none registered)"
+        print(
+            f"project chat: no project given and none detected from the current "
+            f"directory.\nvalid projects: {listed}",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        resolved = resolve_orchestrator(name, path=args.registry)
+    except UnknownProjectError as exc:
+        valid = _valid_names(args.registry)
+        listed = ", ".join(valid) if valid else "(none registered)"
+        print(f"project chat: {exc}\nvalid projects: {listed}", file=sys.stderr)
+        return 2
+    except OrchestratorError as exc:
+        print(f"project chat: {exc}", file=sys.stderr)
+        return 2
+
+    profile = resolved["profile"]
+    session = resolved["session"]
+
+    # A brand-new project has no session yet; CREATE it on first use so the
+    # subsequent `--continue <session>` resolves. Idempotent, never clobbers.
+    # Fail-soft: an ensure that can't verify must not block the attach — the
+    # exec'd hermes then fails honestly if the session truly doesn't exist.
+    try:
+        ensured = project_lifecycle.ensure_session(session, profile, _session_db=args.session_db)
+    except project_lifecycle.LifecycleError:
+        ensured = None
+    if ensured and ensured.get("status") == "created":
+        # STDOUT like the identity banner: all operator-facing status before
+        # exec'ing belongs on the TTY; stderr is reserved for failing non-zero.
+        print(
+            f"created session '{session}' on {profile!r} (first use)",
+        )
+
+    # Banner: make the joined identity unmistakable — this is the project's
+    # PERMANENT orchestrator thread, shared with the iOS app and the WS relay.
+    # A worker once contaminated hscc-orch's permanent session with
+    # worker-scoped context; the operator must never be in doubt who they speak
+    # as. Explicit > implicit; print before exec'ing so it is on the terminal.
+    print(f"project {name} -> profile {profile}, session '{session}' "
+          f"(permanent, shared with the app)")
+
+    argv = ["hermes", "-p", profile, "chat", "--continue", session]
+    trailing = getattr(args, "extra", None) or []
+    if trailing:
+        argv += list(trailing)
+
+    exec_seam = getattr(args, "exec_seam", None) or os.execvp
+    # os.execvp replaces this process — the operator gets a real TTY. On a
+    # success path this never returns; the return 0 is for the seam-injected
+    # tests (and is unreachable in production).
+    exec_seam("hermes", argv)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # argparse
 # --------------------------------------------------------------------------- #
 
@@ -429,6 +554,14 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     _add_apply(sp)
     sp.set_defaults(func=cmd_push)
 
+    sp = subsub.add_parser("chat", help="open an INTERACTIVE hermes session on the project's orchestrator",
+                           epilog="example: flightdeck project chat flightdeck   (attaches to the permanent orchestrator thread the app uses)")
+    sp.add_argument("name", nargs="?", default=None,
+                    help="project name (default: detect from the current directory)")
+    sp.add_argument("extra", nargs=argparse.REMAINDER,
+                    help="trailing args passed through to hermes (after --), e.g. '-- --resume <id>'")
+    sp.set_defaults(func=cmd_chat)
+
 
 def _add_apply(sp: argparse.ArgumentParser) -> None:
     sp.add_argument(
@@ -455,6 +588,8 @@ def run(args: argparse.Namespace, registry_path: str) -> int:
     args.client = getattr(args, "client", None)
     args.kanban = getattr(args, "kanban", None)
     args.session_db = getattr(args, "session_db", None)
+    args.cwd = getattr(args, "cwd", None)
+    args.exec_seam = getattr(args, "exec_seam", None)
 
     func = getattr(args, "func", None)
     if func is None:
