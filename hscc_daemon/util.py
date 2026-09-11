@@ -1,11 +1,13 @@
 """Utility functions for the HSCC daemon."""
 
+import ipaddress
 import json
 import os
 import subprocess
 import socket
 import urllib.request
 import urllib.error
+import urllib.parse
 
 
 def run_cmd(args, timeout=30, as_json=False, shell=False):
@@ -49,13 +51,54 @@ def ssh_cmd(host, command, timeout=20):
     return run_cmd(cmd, timeout=timeout + 5, shell=True)
 
 
+_LAN_HINT = (
+    " (if host is a LAN/private IP, macOS may be blocking this app's "
+    "Local Network access: grant it in System Settings > Privacy & "
+    "Security > Local Network, or verify the host is actually up)"
+)
+
+
+def _errno_from_urlerror(reason):
+    """Extract an errno int from a URLError reason, or None."""
+    if isinstance(reason, OSError):
+        return reason.errno
+    if isinstance(reason, Exception):
+        # socket.gaierror / OSError subclasses already covered above.
+        return getattr(reason, "errno", None)
+    return None
+
+
+def _is_private_host(url):
+    """True if the URL's host is a private/LAN IP or a localhost name."""
+    host = urllib.parse.urlsplit(url).hostname
+    if not host:
+        return False
+    lowered = host.lower()
+    if lowered in ("localhost", "localhost.localdomain") or lowered.endswith(".local"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_private
+    except ValueError:
+        return False
+
+
 def http_check(url, timeout=5):
-    """Check if an HTTP endpoint is reachable."""
+    """Check if an HTTP endpoint is reachable.
+
+    Note: on macOS, an app that does not hold the "Local Network" privacy
+    permission gets ``errno 65 (EHOSTUNREACH, "No route to host")`` for every
+    connect() to a LAN/private address — even when the endpoint is up and
+    reachable from other processes (nc/ssh/ping). We detect that pattern and
+    append an actionable hint so operators are not misled into believing the
+    fleet is down.
+    """
     try:
         req = urllib.request.urlopen(url, timeout=timeout)
         return {"ok": True, "status": req.status}
     except urllib.error.URLError as e:
-        return {"ok": False, "output": str(e.reason)}
+        errno = _errno_from_urlerror(e.reason)
+        hint = _LAN_HINT if errno in (64, 65, 51) and _is_private_host(url) else ""
+        return {"ok": False, "output": f"{e.reason}{hint}"}
     except Exception as e:
         return {"ok": False, "output": str(e)}
 
