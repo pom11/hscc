@@ -8,7 +8,7 @@
 
 Say *"build X"* in chat and a fleet of role-specialized agents brainstorms, decomposes, codes, reviews, and lands it — across multiple GPU nodes, hands-off.
 
-[![v1.15.0](https://img.shields.io/badge/version-1.15.0-blue.svg)](CHANGELOG.md)
+[![v1.16.0](https://img.shields.io/badge/version-1.16.0-blue.svg)](CHANGELOG.md)
 [![MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![pure-stdlib](https://img.shields.io/badge/python-pure--stdlib-orange.svg)](README.md)
 [![1000+ tests](https://img.shields.io/badge/tests-1000%2B-brightgreen.svg)](https://github.com/pom11/hscc)

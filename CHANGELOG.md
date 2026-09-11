@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-09-11
+
+### Added
+- **`hscc project chat <name>`.** Opens an INTERACTIVE hermes session on a
+  project's orchestrator — the same permanent session the iOS app and the API
+  already use. Resolves profile/session through the existing orchestrator
+  resolver so the CLI, REST and WS paths cannot disagree, creates the session on
+  first use, and fails loudly (listing valid names) on an unknown project rather
+  than silently attaching to a default orchestrator.
+- **Flightdeck's project-subgroup verbs are aliased to the top of
+  `hscc project`.** `new list remove repair pull push chat sync` no longer need
+  the doubled `hscc project project <verb>`; the explicit form still works. The
+  guard queries the parser for what is actually invokable, so a verb that later
+  becomes a top-level command shadows the alias rather than the reverse.
+
+### Changed
+- **Orchestrator profiles now carry cluster control.** `hscc-cluster` and
+  `sparkrun` are added to orchestrator toolsets (18 vs a worker's 16). Worker
+  roles are unchanged and still cannot alter cluster shape — the boundary
+  `rolelib` always documented, now actually enforced on both sides.
+
+### Fixed
+- **auto-heal no longer spawns a solo container.** After a force-recreate
+  restored a pair, a still-down unit got a gentle relaunch as a SINGLE-host
+  workload; that solo contended for the unit's port and GPU, wedged the load,
+  and re-triggered the cycle — a self-sustaining restart storm. The relaunch now
+  re-provisions the whole tensor-parallel span.
+
+
 ## [1.15.0] - 2026-09-09
 
 The headline is the **operator console**: a real HSCC HTTP API (`hscc api`) and
