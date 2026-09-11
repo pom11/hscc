@@ -18,10 +18,24 @@ _FULL_TOOLSETS = [
     "session_search", "clarify", "delegation", "cronjob", "messaging",
 ]
 
+# The OTHER side of the same single boundary: orchestrator profiles get the full
+# set PLUS cluster control. Where a worker may not change cluster shape, an
+# orchestrator is the only role that may — it spawns subagents, creates and
+# monitors kanban worker tasks, and drives the cluster. `hscc-cluster` and
+# `sparkrun` are the cluster tools that must stay orchestrator-only. Everything
+# else is identical to _FULL_TOOLSETS; this is the one capability boundary
+# visible here so the two sides read side by side.
+_ORCH_TOOLSETS = _FULL_TOOLSETS + ["hscc-cluster", "sparkrun"]
+
 
 def role_toolsets():
-    """Toolsets every generated role profile receives (cluster excluded)."""
+    """Toolsets every generated ROLE (worker) profile receives (cluster excluded)."""
     return list(_FULL_TOOLSETS)
+
+
+def orchestrator_toolsets():
+    """Toolsets orchestrator profiles receive: the full set PLUS cluster control."""
+    return list(_ORCH_TOOLSETS)
 
 
 def file_md5(path):
