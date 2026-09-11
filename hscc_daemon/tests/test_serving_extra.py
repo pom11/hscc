@@ -105,7 +105,12 @@ class TestKeepaliveUnits:
         assert all(u["port"] == 8000 for u in units)
         assert all(u["id"] == "ka-1" for u in units)
         assert all(u["recipe"] == "r" for u in units)
-        assert all(set(u.keys()) == {"node", "port", "recipe", "id"} for u in units)
+        # Full span + tp carried on every per-node entry (so a consumer can
+        # rebuild the whole-span --hosts <span> --tp N command, not a solo).
+        assert all(u["nodes"] == ["10.0.0.247", "10.0.0.248"] for u in units)
+        assert all(u["tp"] is None for u in units)
+        assert all(set(u.keys()) == {"node", "port", "recipe", "id", "nodes", "tp"}
+                   for u in units)
 
     def test_dedupes_dup_nodes_same_unit(self, monkeypatch):
         """The same unit listed twice is not double-emitted per node."""
