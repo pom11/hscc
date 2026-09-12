@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.16.1] - 2026-09-12
+
+### Fixed
+- **The gentle relaunch no longer creates a duplicate workload.** When a unit
+  was still down after a force-recreate, the relaunch provisioned a PARALLEL
+  copy of it rather than re-issuing the declared one, so hosts accumulated a
+  second, untracked workload that `serving.json` never declared. It now
+  re-issues the declared cluster.
+- **LAN failures caused by macOS Local Network privacy are now identifiable.**
+  A launchd-run daemon that is denied Local Network access fails every LAN probe
+  with errno 65 while the identical check passes from a Terminal that already
+  holds the grant — which reads as an inexplicable code discrepancy. The probe
+  now surfaces the actual cause. Note the remedy is a system permission, not
+  code: grant Local Network access to the daemon's python in System Settings >
+  Privacy & Security. Root-cause write-up in
+  `docs/audits/stream-flow-tcc-t_fc2e955d.md`.
+
+
 ## [1.16.0] - 2026-09-11
 
 ### Added
