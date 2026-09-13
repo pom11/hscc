@@ -1,37 +1,43 @@
-From c67ebf0cf3ea787744b1580cac9d285bb88b0df4 Mon Sep 17 00:00:00 2001
+From 7afb897440f6b994bf5eb3225cd52201a35ecaee Mon Sep 17 00:00:00 2001
 From: pom11 <parsecoriginalmastercraft@gmail.com>
-Date: Tue, 9 Jun 2026 12:16:05 +0300
-Subject: [PATCH 2/9] feat(kanban): pure review-pairing transform for decompose
+Date: Mon, 14 Sep 2026 02:10:02 +0300
+Subject: [PATCH] feat(kanban): pure review-pairing transform for decompose
 
+Add _pair_review_tasks: a pure transform that appends a reviewer task for
+each impl child whose assignee is in kanban.auto_review.review_roles, gated
+behind its impl child via parents=[impl_index]. No-op for empty policy.
+
+Includes the full tests/test_kanban_review_pairing.py (all pairing + policy
+tests folded into the single re-created file per the re-carry task).
+
+[re-carry c67ebf0c / part of 09e1357f73 onto v2026.9.11]
 ---
- hermes_cli/kanban_decompose.py      | 43 ++++++++++++++++++++++++
- tests/test_kanban_review_pairing.py | 52 +++++++++++++++++++++++++++++
- 2 files changed, 95 insertions(+)
+ hermes_cli/kanban_decompose.py      | 39 ++++++++++++++
+ tests/test_kanban_review_pairing.py | 84 +++++++++++++++++++++++++++++
+ 2 files changed, 123 insertions(+)
  create mode 100644 tests/test_kanban_review_pairing.py
 
 diff --git a/hermes_cli/kanban_decompose.py b/hermes_cli/kanban_decompose.py
-index 8af2da911..d1413af79 100644
+index 3bdb89927e..e64a0b6d3d 100644
 --- a/hermes_cli/kanban_decompose.py
 +++ b/hermes_cli/kanban_decompose.py
-@@ -268,6 +268,49 @@ def _normalize_assignee_choice(
-     return chosen
+@@ -214,6 +214,45 @@ def _load_routing() -> _Routing:
+     )
  
  
-+def _pair_review_tasks(children, policy):
-+    """Append a reviewer task for each impl child whose role is in review_roles.
++def _pair_review_tasks(children: list[dict], policy: dict) -> list[dict]:
++    """Append a reviewer task for each impl child whose assignee is a review role.
 +
-+    Pure transform: takes the built children list (each a dict with title,
-+    body, assignee, parents=indices) and returns a NEW list with review
-+    children appended. Each review child is gated behind its impl child via
-+    ``parents=[impl_index]``. Review children are appended AFTER all impl
-+    children so every pre-existing parent index stays valid.
++    Pure transform: takes the built ``children`` list (each a dict with
++    ``title``/``body``/``assignee``/``parents`` where parents are indices into
++    this list) and returns a NEW list with review children appended. Each
++    review child is gated behind its impl child via ``parents=[impl_index]``.
++    Review children are appended AFTER all impl children so every pre-existing
++    parent index stays valid.
 +
-+    ``policy`` is ``kanban.auto_review`` config:
-+      {"review_roles": [<assignee names that produce reviewable work>],
-+       "reviewer": "<reviewer profile name>"}
-+    Empty/None policy or missing reviewer -> returns ``children`` unchanged.
-+    A child already assigned to the reviewer is never paired (no review of a
-+    review).
++    Empty/None ``policy`` (or missing reviewer/roles) returns ``children``
++    unchanged. A child already assigned to the reviewer is never paired
++    (no review of a review).
 +    """
 +    if not policy:
 +        return children
@@ -42,16 +48,14 @@ index 8af2da911..d1413af79 100644
 +    out = list(children)
 +    for idx, child in enumerate(children):
 +        assignee = child.get("assignee")
-+        if assignee == reviewer:
-+            continue
-+        if assignee not in review_roles:
++        if assignee == reviewer or assignee not in review_roles:
 +            continue
 +        out.append({
 +            "title": f"review: {child.get('title', '')}".strip()[:200],
 +            "body": (
 +                "Review the work produced by the parent task. Read the diff for "
 +                "correctness, run its tests and confirm they pass, and verify the "
-+                "work matches the task spec. Approve, or send back with precise "
++                "work matches the task spec. Approve, or send it back with precise "
 +                "change requests."
 +            ),
 +            "assignee": reviewer,
@@ -60,15 +64,15 @@ index 8af2da911..d1413af79 100644
 +    return out
 +
 +
- def decompose_task(
-     task_id: str,
-     *,
+ def _apply_single(task: kb.Task, parsed: dict, routing: _Routing, author: str) -> DecomposeOutcome:
+     """``fanout=false``: single-task spec promotion (same effect as specify)."""
+     title_val, body_val = _title_body(parsed)
 diff --git a/tests/test_kanban_review_pairing.py b/tests/test_kanban_review_pairing.py
 new file mode 100644
-index 000000000..3bc688fc3
+index 0000000000..550c74719b
 --- /dev/null
 +++ b/tests/test_kanban_review_pairing.py
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,84 @@
 +from hermes_cli import kanban_decompose as kd
 +
 +
@@ -77,7 +81,7 @@ index 000000000..3bc688fc3
 +        {"title": "Build API", "body": "spec", "assignee": "backend-engineer", "parents": []},
 +    ]
 +    out = kd._pair_review_tasks(children, policy={"review_roles": ["backend-engineer"],
-+                                                 "reviewer": "reviewer"})
++                                                  "reviewer": "reviewer"})
 +    assert len(out) == 2
 +    impl, review = out[0], out[1]
 +    assert impl["assignee"] == "backend-engineer"
@@ -91,7 +95,7 @@ index 000000000..3bc688fc3
 +        {"title": "Write spec", "body": "", "assignee": "product-manager", "parents": []},
 +    ]
 +    out = kd._pair_review_tasks(children, policy={"review_roles": ["backend-engineer"],
-+                                                 "reviewer": "reviewer"})
++                                                  "reviewer": "reviewer"})
 +    assert len(out) == 1
 +
 +
@@ -100,7 +104,7 @@ index 000000000..3bc688fc3
 +        {"title": "Review X", "body": "", "assignee": "reviewer", "parents": []},
 +    ]
 +    out = kd._pair_review_tasks(children, policy={"review_roles": ["reviewer"],
-+                                                 "reviewer": "reviewer"})
++                                                  "reviewer": "reviewer"})
 +    assert len(out) == 1
 +
 +
@@ -110,7 +114,7 @@ index 000000000..3bc688fc3
 +        {"title": "B", "body": "", "assignee": "coder", "parents": [0]},
 +    ]
 +    out = kd._pair_review_tasks(children, policy={"review_roles": ["coder"],
-+                                                 "reviewer": "reviewer"})
++                                                  "reviewer": "reviewer"})
 +    assert len(out) == 4
 +    assert out[1]["parents"] == [0]
 +    reviews = [c for c in out if c["assignee"] == "reviewer"]
@@ -121,6 +125,38 @@ index 000000000..3bc688fc3
 +    children = [{"title": "X", "body": "", "assignee": "coder", "parents": []}]
 +    assert kd._pair_review_tasks(children, policy={}) == children
 +    assert kd._pair_review_tasks(children, policy=None) == children
++
++
++def test_review_policy_reads_config():
++    cfg = {"kanban": {"auto_review": {"review_roles": ["coder", "backend-engineer"],
++                                      "reviewer": "reviewer"}}}
++    pol = kd._review_policy(cfg)
++    assert pol["reviewer"] == "reviewer"
++    assert "coder" in pol["review_roles"]
++
++
++def test_review_policy_absent_returns_empty():
++    assert kd._review_policy({}) == {}
++    assert kd._review_policy({"kanban": {}}) == {}
++
++
++def test_policy_and_transform_compose():
++    """Contract the Task-3 wiring: children = _pair_review_tasks(children, _review_policy(cfg))."""
++    cfg = {"kanban": {"auto_review": {"review_roles": ["backend-engineer"],
++                                      "reviewer": "reviewer"}}}
++    children = [{"title": "Build API", "body": "spec",
++                 "assignee": "backend-engineer", "parents": []}]
++    out = kd._pair_review_tasks(children, kd._review_policy(cfg))
++    assert len(out) == 2
++    assert out[1]["assignee"] == "reviewer"
++    assert out[1]["parents"] == [0]
++
++
++def test_decompose_no_longer_autopairs_reviews():
++    """Phase 3: built-in review path replaces Phase 2 auto-pairing.
++    auto_review is removed from config, so _review_policy returns {}."""
++    from hermes_cli.config import load_config
++    assert kd._review_policy(load_config()) == {}
 -- 
-2.50.1 (Apple Git-155)
+2.54.0 (Apple Git-157)
 
