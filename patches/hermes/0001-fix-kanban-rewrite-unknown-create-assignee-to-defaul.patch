@@ -1,30 +1,28 @@
-From 63ec4880581d39a14bba5df9cc8182cd2c333ceb Mon Sep 17 00:00:00 2001
+From 789a0fcbbc612dc60a4a520753fc2a21c382ca8b Mon Sep 17 00:00:00 2001
 From: pom11 <parsecoriginalmastercraft@gmail.com>
-Date: Tue, 9 Jun 2026 11:13:22 +0300
-Subject: [PATCH 1/9] fix(kanban): rewrite unknown create-assignee to
+Date: Mon, 14 Sep 2026 01:57:39 +0300
+Subject: [PATCH] fix(kanban): rewrite unknown create-assignee to
  default_assignee
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
 kanban_create accepted any assignee string verbatim. Agents sometimes pass
-a generic name (e.g. "worker") that is not a profile on disk — the
-dispatcher silently skips such cards, stranding them in `ready` forever.
+a generic name (e.g. "worker") that is not a profile on disk - the
+dispatcher silently skips such cards, stranding them in ready forever.
 Validate the requested assignee via profiles.profile_exists; if it isn't a
 real profile, rewrite to kanban.default_assignee (same guarantee the
 decomposer's _normalize_assignee_choice already provides). Best-effort:
 if neither resolves, leave as-is rather than drop.
 
+[re-carry 63ec4880 / bfe6cd3f08 onto v2026.9.11]
 ---
  tools/kanban_tools.py | 42 ++++++++++++++++++++++++++++++++++++++++++
  1 file changed, 42 insertions(+)
 
 diff --git a/tools/kanban_tools.py b/tools/kanban_tools.py
-index 67157dfc1..151a7ab3c 100644
+index 57128b4191..b158666c9a 100644
 --- a/tools/kanban_tools.py
 +++ b/tools/kanban_tools.py
-@@ -274,6 +274,41 @@ def _normalize_profile(value: Any) -> Optional[str]:
-     return text
+@@ -293,6 +293,41 @@ def _require_text(args: dict, name: str, message: Optional[str] = None) -> Any:
+ _BOOL_WORDS = {"true": True, "1": True, "yes": True, "false": False, "0": False, "no": False}
  
  
 +def _default_assignee() -> Optional[str]:
@@ -62,13 +60,13 @@ index 67157dfc1..151a7ab3c 100644
 +    return assignee, None
 +
 +
- def _parse_bool_arg(args: dict, name: str, *, default: bool = False):
+ def _parse_bool_arg(args: dict, name: str) -> bool:
      value = args.get(name)
-     if value is None:
-@@ -735,6 +770,13 @@ def _handle_create(args: dict, **kw) -> str:
-             "assignee is required — name the profile that should execute this "
-             "task (the dispatcher will only spawn tasks with an assignee)"
-         )
+     if value is None or isinstance(value, bool):
+@@ -818,6 +853,13 @@ def _handle_create(args: dict, **kw) -> str:
+     assignee = args.get("assignee")
+     _check(assignee, "assignee is required — name the profile that should execute this "
+                      "task (the dispatcher will only spawn tasks with an assignee)")
 +    # Guard against stranded cards: an assignee that is not a real on-disk
 +    # profile (e.g. the generic "worker") is silently skipped by the dispatcher
 +    # and sits in `ready` forever. Rewrite unknown assignees to the configured
@@ -76,9 +74,9 @@ index 67157dfc1..151a7ab3c 100644
 +    assignee, _assignee_note = _resolve_valid_assignee(str(assignee))
 +    if _assignee_note:
 +        logger.warning("kanban_create: %s", _assignee_note)
-     body = args.get("body")
-     parents = args.get("parents") or []
-     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
+     # Workspace sharing is always explicit: omitted fields mean a fresh scratch workspace
+     # even for a dispatcher-spawned creator (reusing the parent's path would let a child
+     # mutate review evidence or race its checkout). Project identity is the one safe thing
 -- 
-2.50.1 (Apple Git-155)
+2.54.0 (Apple Git-157)
 
