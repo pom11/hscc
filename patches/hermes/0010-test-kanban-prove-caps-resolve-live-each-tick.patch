@@ -1,0 +1,92 @@
+From 1f215cd0025d6f9173985b51839efbe2c74f4876 Mon Sep 17 00:00:00 2001
+From: pom11 <parsecoriginalmastercraft@gmail.com>
+Date: Mon, 14 Sep 2026 03:30:09 +0300
+Subject: [PATCH] test(kanban): prove caps resolve live each tick, not cached
+ at boot
+
+Unit tests for _resolve_dispatch_limits in gateway/kanban_watchers_dispatcher
+(re-carry 9640c9c441 onto the v2026.9.11 decomposed watcher): fresh-read each
+call (no cache), safe degradation of stale/lowered caps to None, raw
+pass-through of max_spawn. 4 passed.
+
+[re-carry 595286edd6 + 9640c9c441 test portion, adapted to decomposed watcher]
+---
+ tests/gateway/test_kanban_caps_live_reload.py | 66 +++++++++++++++++++
+ 1 file changed, 66 insertions(+)
+ create mode 100644 tests/gateway/test_kanban_caps_live_reload.py
+
+diff --git a/tests/gateway/test_kanban_caps_live_reload.py b/tests/gateway/test_kanban_caps_live_reload.py
+new file mode 100644
+index 0000000000..ea9b833c41
+--- /dev/null
++++ b/tests/gateway/test_kanban_caps_live_reload.py
+@@ -0,0 +1,66 @@
++"""Dispatch caps are resolved LIVE from config each tick, not snapshotted at
++boot.
++
++The embedded gateway resolved ``kanban.max_in_progress`` /
++``max_in_progress_per_profile`` / ``max_spawn`` once at boot into
++``_DispatcherSettings`` and never re-read them, so a config edit left the
++live gateway enforcing stale caps while ``hermes kanban dispatch --dry-run``
++(fresh config) reported different numbers — silent disagreement until a
++gateway restart. ``_KanbanDispatcher._refresh_limits()`` (re-carry 9640c9c441)
++re-reads the caps from current config on every ``tick_once``; a config edit
++applies on the next tick with no restart.
++
++These unit tests pin the per-call fresh-read contract directly against
++``gateway.kanban_watchers_dispatcher._resolve_dispatch_limits``.
++"""
++
++import pytest
++
++from gateway.kanban_watchers_dispatcher import _resolve_dispatch_limits
++
++
++def _cfg(d: dict):
++    return {"kanban": d}
++
++
++def test_reads_live_values_from_config():
++    limits = _resolve_dispatch_limits(lambda: _cfg({
++        "max_in_progress": 3,
++        "max_in_progress_per_profile": 2,
++        "max_spawn": 4,
++    }))
++    assert limits == {"max_spawn": 4, "max_in_progress": 3, "max_in_progress_per_profile": 2}
++
++
++def test_absent_keys_are_none_not_error():
++    limits = _resolve_dispatch_limits(lambda: {})  # config without kanban key
++    assert limits == {"max_spawn": None, "max_in_progress": None, "max_in_progress_per_profile": None}
++
++
++def test_non_positive_lowered_treated_as_no_gate():
++    # A lowered stale value must never be widened: non-positive or garbage
++    # degrades to None (no gate) rather than resurrecting a higher number.
++    limits = _resolve_dispatch_limits(lambda: _cfg({
++        "max_in_progress": 0,
++        "max_in_progress_per_profile": -1,
++        "max_spawn": "many",
++    }))
++    assert limits["max_in_progress"] is None
++    assert limits["max_in_progress_per_profile"] is None
++    # max_spawn is passed through raw (resolved later, as _resolve_dispatcher_settings does)
++    assert limits["max_spawn"] == "many"
++
++
++def test_refreshes_on_each_call_not_cached():
++    state = {"max_in_progress": 8}
++
++    def flaky_cfg():
++        # "flaky" only in the sense that the value changes between calls:
++        # the real config changed on disk — each call must reflect it.
++        return _cfg({"max_in_progress": state["max_in_progress"]})
++
++    first = _resolve_dispatch_limits(flaky_cfg)
++    assert first["max_in_progress"] == 8
++    state["max_in_progress"] = 2
++    second = _resolve_dispatch_limits(flaky_cfg)
++    assert second["max_in_progress"] == 2
+-- 
+2.54.0 (Apple Git-157)
+
