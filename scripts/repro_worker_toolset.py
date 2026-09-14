@@ -17,7 +17,7 @@ os.environ["HERMES_HOME"] = "/Users/desac/.hermes"  # dispatcher home
 os.environ["TERMINAL_ENV"] = "local"
 os.environ["HERMES_SESSION_SOURCE"] = "kanban"
 
-from hermes_cli.kanban_db import _resolve_worker_cli_toolsets
+from hermes_cli.kanban_db_dispatch import _resolve_worker_cli_toolsets
 from model_tools import _compute_tool_definitions
 
 # 1. What the dispatcher pins
