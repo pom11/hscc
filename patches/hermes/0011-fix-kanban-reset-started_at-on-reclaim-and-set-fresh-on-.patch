@@ -1,0 +1,62 @@
+From 0ce9a53c5ddf419a15e18fb96bb3ad9922f917a7 Mon Sep 17 00:00:00 2001
+From: pom11 <parsecoriginalmastercraft@gmail.com>
+Date: Mon, 14 Sep 2026 03:27:23 +0300
+Subject: [PATCH] fix(kanban): reset started_at on reclaim and set fresh on
+ each claim
+
+reclaim_task left the original started_at in place, and the shared
+_claim_and_open_run used COALESCE(started_at, now) so a re-claim KEPT the
+old (possibly hours-old) timestamp. Staleness checks keyed on runtime then
+concluded a freshly re-dispatched worker had been running for hours and
+reclaimed healthy cards (observed: task showed 485min when real runtime was
+~20min).
+
+Fix (single shared point covers claim_task AND claim_review_task):
+- _claim_and_open_run now SETs started_at = now on every fresh claim.
+- reclaim_task clears started_at (NULL) so a reclaimed card has no active
+  start time; reassign_task(reclaim_first=True) routes through reclaim_task.
+
+[re-carry 8c82fa75d9 onto v2026.9.11 refactored claim path]
+---
+ hermes_cli/kanban_db.py | 18 +++++++++---------
+ 1 file changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/hermes_cli/kanban_db.py b/hermes_cli/kanban_db.py
+index 92ce4b25a2..93dad036c0 100644
+--- a/hermes_cli/kanban_db.py
++++ b/hermes_cli/kanban_db.py
+@@ -2101,14 +2101,14 @@ def _claim_and_open_run(
+     cur = conn.execute(
+         f"""
+         UPDATE tasks
+-           SET status        = 'running',
+-               claim_lock    = ?,
+-               claim_expires = ?,
+-               started_at    = COALESCE(started_at, ?)
+-         WHERE id = ?
+-           AND status = '{source_status}'
+-           AND claim_lock IS NULL
+-        """,
++          SET status        = 'running',
++              claim_lock    = ?,
++              claim_expires = ?,
++              started_at    = ?
++        WHERE id = ?
++          AND status = '{source_status}'
++          AND claim_lock IS NULL
++       """,
+         (lock, expires, now, task_id),
+     )
+     if cur.rowcount != 1:
+@@ -2434,7 +2434,7 @@ def reclaim_task(
+         retry_status = _retry_status_for_run(conn, task_id)
+         cur = conn.execute(
+             "UPDATE tasks SET status = ?, claim_lock = NULL, "
+-            "claim_expires = NULL, worker_pid = NULL "
++            "claim_expires = NULL, worker_pid = NULL, started_at = NULL "
+             "WHERE id = ? AND status IN ('running', 'ready', 'blocked') "
+             "AND claim_lock IS ?", (retry_status, task_id, prev_lock),
+         )
+-- 
+2.54.0 (Apple Git-157)
+

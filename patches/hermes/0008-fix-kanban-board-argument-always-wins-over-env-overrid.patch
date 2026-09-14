@@ -1,0 +1,57 @@
+From 7ba33067de48076f3c9f40a04ace07dda1677592 Mon Sep 17 00:00:00 2001
+From: pom11 <parsecoriginalmastercraft@gmail.com>
+Date: Mon, 14 Sep 2026 03:01:35 +0300
+Subject: [PATCH] fix(kanban): board argument always wins over env override in
+ path resolution
+
+kanban_db_path/workspaces_root/attachments_root shared _board_path resolver:
+an explicit board argument now always resolves to that board's own DB; the
+HERMES_KANBAN_*_ROOT / HERMES_KANBAN_DB env overrides are honoured only when
+board is None. Prevents silent redirection of explicitly-named boards inside
+dispatched workers (flightdeck data-loss incident, fixed 2026-08-17).
+
+[re-carry c873decc80 onto v2026.9.11]
+---
+ hermes_cli/kanban_db.py | 24 ++++++++++++++++++------
+ 1 file changed, 18 insertions(+), 6 deletions(-)
+
+diff --git a/hermes_cli/kanban_db.py b/hermes_cli/kanban_db.py
+index ec7f16f05e..92ce4b25a2 100644
+--- a/hermes_cli/kanban_db.py
++++ b/hermes_cli/kanban_db.py
+@@ -473,14 +473,26 @@ def _dir_holds_board(d: Path) -> bool:
+ def _board_path(
+     env_var: Optional[str], board: Optional[str], default_parts: tuple[str, ...], leaf: str,
+ ) -> Path:
+-    """Shared resolver: ``env_var`` override, else legacy ``<root>/<default_parts>``
+-    for the ``default`` board, else ``board_dir(slug)/leaf``."""
+-    if env_var:
+-        override = os.environ.get(env_var, "").strip()
+-        if override:
+-            return Path(override).expanduser()
++    """Shared resolver: an explicit ``board`` argument always wins; the
++    ``env_var`` override is only honoured when ``board`` is None (i.e. it
++    pins the default/active board, never pre-empts a caller that named a
++    specific board). Otherwise legacy ``<root>/<default_parts>`` for the
++    ``default`` board, else ``board_dir(slug)/leaf``.
++
++    Resolving an explicit board first matters: a caller that names a board
++    (e.g. an isolated scratch/test board) must actually reach it, never be
++    silently redirected. Previously the env override pre-empted even an
++    explicit ``board`` argument, so code that opened a differently-named
++    board while running inside a dispatched worker was silently redirected
++    to the worker's own real board — a data-loss incident on the flightdeck
++    board traced to exactly this. (Fixed 2026-08-17.)
++    """
+     slug = _normalize_board_slug(board)
+     if slug is None:
++        if env_var:
++            override = os.environ.get(env_var, "").strip()
++            if override:
++                return Path(override).expanduser()
+         slug = get_current_board()
+     if slug == DEFAULT_BOARD:
+         return kanban_home().joinpath(*default_parts)
+-- 
+2.54.0 (Apple Git-157)
+
