@@ -34,6 +34,12 @@ Notes on the re-base:
   (helpers present, auto-pairing OFF) is preserved by 0002+0003 alone.
 - **0006 dropped (absorbed)**: upstream v2026.9.11 already implements the
   review flow natively as `kanban_request_review` (see above).
+- **c873decc80's `cli.py` half absorbed**: the carried `deterministic
+  session-end flush` (c873decc80) touched both `cli.py` and `kanban_db.py`.
+  v2026.9.11 already finalizes the single-query worker session deterministically
+  (`finally: _finalize_single_query(cli)` @ cli.py:4436) and flushes the
+  session-store before the kanban `os._exit(0)` signal path (@ cli.py:4222-4228),
+  so only the `kanban_db.py` board-precedence half survives as patch 0008.
 - Spread across 6 modules + tests; the decompose review-pairing helpers
   (0002/0003) are dormant — `_apply_fanout` does NOT call them; review is
   handled by the native built-in review-status path.
