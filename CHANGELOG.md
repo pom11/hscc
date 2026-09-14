@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.17.0] - 2026-09-14
+
+### Changed
+- **Runtime bump, verified and actually installed.** hermes-agent
+  v2026.8.31 -> v2026.9.11 and sparkrun v0.3.6 -> v0.3.9. A read-only audit
+  checked every upstream symbol HSCC consumes before the bump — the precedent
+  being sparkrun 0.3.6, which removed `query_cluster_status` while HSCC kept
+  importing it, silently degrading the DGX check for days.
+- **The carried hermes patch set was re-based onto v2026.9.11.** All six fork
+  commits conflicted with the new tag. Three carried fixes were missing from the
+  patch set entirely (dispatch caps live-reload, its test, and the `started_at`
+  reset on reclaim); they are now patches 0008-0011, and three older patches
+  were dropped as absorbed upstream. Without this, upgrading would have silently
+  dropped fixes the fleet depends on.
+
+### Added
+- WS3 verification evidence for the native profile API (`docs/verification/`).
+
+
 ## [1.16.1] - 2026-09-12
 
 ### Fixed
