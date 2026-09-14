@@ -8,22 +8,40 @@ small curated delta, done.
 
 ## hermes/ — applies onto NousResearch/hermes-agent
 
-The kanban review-flow feature (powers HSCC's WS4 autonomous review gate).
-Isolated to 6 files: `tools/kanban_tools.py`, `hermes_cli/kanban_db.py`,
-`hermes_cli/kanban_decompose.py`, `agent/prompt_builder.py`, + 2 tests.
+**Re-based onto v2026.9.11.** The kanban review-flow feature that powered
+HSCC's WS4 autonomous-review gate was absorbed upstream — upstream now ships
+`kanban_request_review` / `request_review` / `claim_review_task` /
+`request_changes` + KANBAN_GUIDANCE coverage (strict superset of the fork's
+`kanban_submit_review`), so the old 0006 patch is **dropped** (documented
+below). What remains carried is the unabsorbed delta:
 
 | Patch | What |
 |-------|------|
-| 0001 | fix(kanban): rewrite unknown create-assignee to default_assignee |
-| 0002 | feat(kanban): pure review-pairing transform for decompose |
-| 0003 | feat(kanban): auto_review config policy reader |
-| 0004 | feat(kanban): wire review-pairing into decompose_task (policy-gated) |
-| 0005 | refactor(kanban): use built-in review path; stop Phase-2 auto-pairing |
-| 0006 | feat(kanban): kanban_submit_review tool + running->review transition |
+| 0001 | fix(kanban): rewrite unknown create-assignee to default_assignee (`tools/kanban_tools.py`) |
+| 0002 | feat(kanban): pure review-pairing transform for decompose (`hermes_cli/kanban_decompose.py` + `tests/test_kanban_review_pairing.py`) |
+| 0003 | feat(kanban): auto_review config policy reader (`hermes_cli/kanban_decompose.py`) |
+| 0007 | chore: remove obsolete holographic-memory plugin |
+| 0008 | fix(kanban): board argument always wins over env override in path resolution (`hermes_cli/kanban_db.py`) |
+| 0009 | fix(kanban): re-read dispatch caps live every tick, not at boot (`gateway/kanban_watchers_dispatcher.py`) |
+| 0010 | test(kanban): prove caps resolve live each tick (`tests/gateway/test_kanban_caps_live_reload.py`) |
+| 0011 | fix(kanban): reset started_at on reclaim and set fresh on each claim (`hermes_cli/kanban_db.py`) |
+
+Notes on the re-base:
+
+- **0004/0005 dropped**: these wired review-pairing into decompose then removed
+  that wiring (net-zero churn). Under the acceptance gate each patch must apply
+  independently to pristine, which a removal-only patch cannot. The net intent
+  (helpers present, auto-pairing OFF) is preserved by 0002+0003 alone.
+- **0006 dropped (absorbed)**: upstream v2026.9.11 already implements the
+  review flow natively as `kanban_request_review` (see above).
+- Spread across 6 modules + tests; the decompose review-pairing helpers
+  (0002/0003) are dormant — `_apply_fanout` does NOT call them; review is
+  handled by the native built-in review-status path.
 
 Excluded from the curated set (not HSCC-essential): the holographic-memory
-plugin removal and the Jun-3 autostash recovery commit — these were local
-cleanup, not features HSCC needs to carry forward.
+plugin removal was re-based as 0007 (retained for historical continuity) but is
+a no-op against v2026.9.11; the Jun-3 autostash recovery commit was local
+cleanup, not a feature HSCC needs to carry forward.
 
 ## sparkrun/ — applies onto spark-arena/sparkrun
 
