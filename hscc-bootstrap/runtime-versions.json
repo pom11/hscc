@@ -3,11 +3,11 @@
   "dependencies": {
     "hermes-agent": {
       "repo": "NousResearch/hermes-agent",
-      "tag": "v2026.8.31"
+      "tag": "v2026.9.11"
     },
     "sparkrun": {
       "repo": "spark-arena/sparkrun",
-      "tag": "v0.3.6"
+      "tag": "v0.3.8"
     }
   }
 }
