@@ -276,14 +276,49 @@ def test_cluster_status_shows_metrics(monkeypatch):
          "id": "w1", "role": "worker", "detail": "tp peer of a multi-node span"},
     ])
     monkeypatch.setattr(cmdlib, "cluster_metrics", lambda: {
-        "10.0.0.1": {"cpu_usage_pct": "12", "cpu_temp_c": "55",
-                     "cpu_load_1m": "0.5", "mem_used_pct": "40",
-                     "mem_available_mb": "90000", "gpu_name": "GB10",
-                     "gpu_util_pct": "30", "gpu_temp_c": "60", "gpu_power_w": "40",
-                     "gpu_mem_used_pct": "80"}})
+        "10.0.0.1": {"host": "10.0.0.1", "error": None, "sample": {
+            "cpu_usage_pct": "12", "cpu_temp_c": "55",
+            "cpu_load_1m": "0.5", "mem_used_pct": "40",
+            "mem_available_mb": "90000", "gpu_name": "GB10",
+            "gpu_util_pct": "30", "gpu_temp_c": "60", "gpu_power_w": "40",
+            "gpu_mem_used_pct": "80"}}})
     out = plugin.cmd_cluster("")
     assert "GPU GB10" in out and "30% util" in out
     assert "VRAM: 80% used by model" in out   # loaded-but-idle is unambiguous
+
+
+def test_cluster_metrics_returns_dict_keyed_by_ip(monkeypatch):
+    """cluster_metrics() must parse sparkrun's `cluster monitor --json` payload
+    — hosts is a LIST of host rows {host, error, sample} with metric fields
+    NESTED under `sample` — into {host_ip: host_row}. Regression for the
+    'list' object has no attribute 'get' crash in cmd_cluster."""
+    payload = json.dumps({
+        "timestamp": 1770000000.0,
+        "hosts": [
+            {"host": "10.0.0.1", "error": None,
+             "sample": {"cpu_usage_pct": "12", "gpu_util_pct": "30"}},
+            {"host": "10.0.0.2", "error": None,
+             "sample": {"cpu_usage_pct": "5", "gpu_util_pct": "0"}},
+            {"host": "10.0.0.3", "error": "collect failed", "sample": None},
+        ],
+    })
+    monkeypatch.setattr(cmdlib, "_run", lambda *a, **k: (True, payload, ""))
+    metrics = cmdlib.cluster_metrics()
+    assert isinstance(metrics, dict)
+    assert set(metrics) == {"10.0.0.1", "10.0.0.2", "10.0.0.3"}
+    # each value is the full host entry, metric fields nested under sample
+    assert metrics["10.0.0.2"]["sample"]["gpu_util_pct"] == "0"
+    assert metrics["10.0.0.3"]["error"] == "collect failed"
+    assert metrics["10.0.0.3"]["sample"] is None
+
+
+def test_cluster_metrics_empty_when_hosts_not_a_list(monkeypatch):
+    """A monitor JSON whose hosts field is not a list degrades to {} — never
+    leaks a raw value into cmd_cluster's .get()."""
+    monkeypatch.setattr(
+        cmdlib, "_run",
+        lambda *a, **k: (True, json.dumps({"timestamp": 0, "hosts": "nope"}), ""))
+    assert cmdlib.cluster_metrics() == {}
 
 
 def test_cluster_metrics_empty_on_failure(monkeypatch):
@@ -395,10 +430,12 @@ def test_cluster_loaded_but_idle_label(monkeypatch):
     monkeypatch.setattr(cmdlib, "serving_unit_scoreboard", lambda: score)
     monkeypatch.setattr(cmdlib, "enumerate_cluster_nodes", lambda *a, **k: nodes)
     monkeypatch.setattr(cmdlib, "cluster_metrics", lambda: {
-        "10.0.0.247": {"gpu_name": "GB10", "gpu_util_pct": "0", "gpu_temp_c": "60",
-                       "gpu_power_w": "40", "gpu_mem_used_pct": "85",
-                       "cpu_usage_pct": "1", "cpu_temp_c": "50", "cpu_load_1m": "0.1",
-                       "mem_used_pct": "70", "mem_available_mb": "30000"}})
+        "10.0.0.247": {"host": "10.0.0.247", "error": None, "sample": {
+            "gpu_name": "GB10", "gpu_util_pct": "0", "gpu_temp_c": "60",
+            "gpu_power_w": "40", "gpu_mem_used_pct": "85",
+            "cpu_usage_pct": "1", "cpu_temp_c": "50", "cpu_load_1m": "0.1",
+            "mem_used_pct": "70", "mem_available_mb": "30000"}}}
+    )
     out = plugin.cmd_cluster("")
     # state line already says serving + the loaded-but-idle note appears
     assert "✅ serving `deepseek-ai/DeepSeek-V4-Flash-0731` @ 10.0.0.247" in out
@@ -406,6 +443,25 @@ def test_cluster_loaded_but_idle_label(monkeypatch):
     # 0% util is kept as the true number, not tampered
     assert "0% util" in out
     assert "VRAM: 85% used by model" in out
+
+
+def test_cluster_metrics_none_sample_renders_without_crash(monkeypatch):
+    """A reachable host whose monitor row has sample=None (no telemetry yet)
+    must render without raising — _fmt_metrics reads the nested sample and
+    degrades to empty fields instead of crashing on None."""
+    hosts, score, nodes = _four_node_engine()
+    monkeypatch.setattr(cmdlib, "read_cluster_json", lambda: hosts)
+    monkeypatch.setattr(cmdlib, "read_units", lambda: SERVING_LIVE["units"])
+    monkeypatch.setattr(cmdlib, "serving_unit_scoreboard", lambda: score)
+    monkeypatch.setattr(cmdlib, "enumerate_cluster_nodes", lambda *a, **k: nodes)
+    monkeypatch.setattr(cmdlib, "cluster_metrics", lambda: {
+        "10.0.0.244": {"host": "10.0.0.244", "error": None, "sample": None},
+        "10.0.0.247": {"host": "10.0.0.247", "error": None, "sample": None},
+    })
+    out = plugin.cmd_cluster("")
+    # both serving nodes still render their state lines, no traceback
+    assert "✅ serving `deepseek-ai/DeepSeek-V4-Flash-0731` @ 10.0.0.247" in out
+    assert "@ 10.0.0.244" in out
 
 
 # ── restart_one shells out correctly ─────────────────────────────────────────
