@@ -92,6 +92,104 @@ class TestCmdCheck:
         assert "DGX" in output or "dgx" in output.lower() or "Result" in output
 
 
+class TestCmdCheckDoesNotClobberDaemonState:
+    """Regression: an ad-hoc `hscc check` must not overwrite the daemon's
+    shared stream state, or a CLI-side failure fakes a fleet-wide FAIL.
+
+    Bug (reproduced 2026-09-21): `hscc check` and the daemon both call the
+    same check_* functions, which write ~/.hscc/state/<stream>.json. A CLI
+    failure 74ms after the daemon's green result won the file, and `hscc
+    status` then reported the fleet as FAIL while both TP pairs were up.
+    Fix: the CLI prints only — it never writes the stream state. `hscc
+    status` keeps meaning "what the daemon observes".
+    """
+
+    def test_cli_fail_does_not_flip_status(self, tmp_hfcc_dir, monkeypatch):
+        from hscc_daemon import cli
+        from hscc_daemon import daemon_ops
+        from hscc_daemon import state as state_mod
+        from hscc_daemon import health
+
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir()
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        monkeypatch.setattr(daemon_ops, "PID_FILE", str(tmp_hfcc_dir / "pid"))
+
+        # Daemon's own (green) result is already on disk.
+        daemon_entry = {"ok": True, "message": "daemon sees fleet healthy",
+                        "timestamp": "2026-09-21T08:52:56"}
+        (state_dir / "dgx.json").write_text(json.dumps(daemon_entry))
+
+        # A real CLI-side LAN/TCC failure, indistinguishable from the daemon's
+        # thread EXCEPT that it runs under cmd_check (persist_disabled). It
+        # returns False and calls write_state with ok=False, as the real
+        # check_dgx does on failure.
+        def failing_check():
+            state_mod.write_state("dgx", {"ok": False, "message": "No route to host"})
+            return False
+
+        monkeypatch.setattr(health, "check_dgx", failing_check)
+
+        f = io.StringIO()
+        with redirect_stdout(f):
+            cli.cmd_check("dgx")
+        output = f.getvalue()
+        # The CLI still tells the operator its own result.
+        assert "Result: FAIL" in output
+
+        # But the daemon's on-disk state is untouched — still green.
+        on_disk = json.loads((state_dir / "dgx.json").read_text())
+        assert on_disk["ok"] is True
+
+        # And `hscc status` still reports the daemon's observation (OK, not FAIL).
+        f2 = io.StringIO()
+        with redirect_stdout(f2):
+            cli.cmd_status()
+        status_out = f2.getvalue()
+        assert "dgx" in status_out or "dgx" in status_out.lower()
+        dgx_line = [l for l in status_out.splitlines() if l.strip().startswith("dgx")]
+        assert dgx_line, "dgx stream should be listed"
+        assert "OK" in dgx_line[0] and "FAIL" not in dgx_line[0]
+
+    def test_status_still_shows_daemon_green_after_cli_check(self, tmp_hfcc_dir, monkeypatch):
+        # Same guarantee expressed via read_state the way the daemon readers
+        # consume it: state on disk is unchanged by a suppressed write.
+        from hscc_daemon import state as state_mod
+
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir()
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+
+        # Simulate the full bug shape: daemon wrote ok=True, then the CLI tried
+        # to write ok=False. With the fix the on-disk file must stay ok=True.
+        (state_dir / "dgx.json").write_text(json.dumps({"ok": True}))
+        with state_mod.persist_disabled():
+            state_mod.write_state("dgx", {"ok": False})
+            # Inside the block the read reflects the CLI's own run...
+            inside = state_mod.read_state("dgx")
+            assert inside is not None and inside["ok"] is False
+        # ...but the file on disk is still the daemon's green result.
+        after = state_mod.read_state("dgx")
+        assert after is not None and after["ok"] is True
+        assert json.loads((state_dir / "dgx.json").read_text())["ok"] is True
+
+    def test_daemon_write_unaffected_outside_block(self, tmp_hfcc_dir, monkeypatch):
+        # The suppression must not leak: writes outside a persist_disabled()
+        # block (i.e. the daemon's normal path) still persist normally.
+        from hscc_daemon import state as state_mod
+
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir()
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+
+        with state_mod.persist_disabled():
+            state_mod.write_state("dgx", {"ok": False})
+        assert state_mod.read_state("dgx") is None  # nothing written
+
+        state_mod.write_state("dgx", {"ok": True})
+        assert json.loads((state_dir / "dgx.json").read_text())["ok"] is True
+
+
 class TestCmdTriggers:
     """cmd_triggers() shows trigger engine status."""
 
