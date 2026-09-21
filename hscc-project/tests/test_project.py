@@ -139,9 +139,53 @@ def _ns(**kw):
         client=None, run=None, kanban=None, registry=None, json=False,
         apply=False, dry_run=False, name="", repo=None, github=False,
         private=False, project_cmd=None, session_db=None,
+        default_db=_FakeDefaultDBProvider(),
     )
     defaults.update(kw)
     return argparse.Namespace(**defaults)
+
+
+class FakeDefaultDB:
+    """In-memory stand-in for the DEFAULT profile's state.db (telegram side).
+
+    Mirrors the tiny slice of ``hermes_state.SessionDB`` the discovery path
+    uses: ``list_sessions_rich(source='telegram')``. ``rows`` are raw row
+    dicts (with ``thread_id``, ``id``, ``title``, ``message_count``,
+    ``started_at``, ``last_active``) exactly as hermes returns them. This fake
+    never touches a real file — no ``~/.hermes/state.db`` is ever opened in
+    tests.
+    """
+
+    def __init__(self, rows=()):
+        self._rows = list(rows)
+        self.closed = False
+
+    def list_sessions_rich(self, source, limit=5000):
+        assert source == "telegram", f"unexpected source {source!r}"
+        return list(self._rows)
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeDefaultDBProvider:
+    """A ``default_db`` seam value: an opener returning a shared fake DB.
+
+    Pass the SAME provider to the command under test so any read-only default
+    open returns the configured telegram rows. The default in ``_ns`` is a
+    fresh empty one, so existing chat tests never reach the real default
+    profile's state.db (again: no test touches the operator's ~/.hermes DB).
+    """
+
+    def __init__(self, rows=()):
+        self._db = FakeDefaultDB(rows)
+
+    def __call__(self, profile):
+        return self._db
+
+    @property
+    def db(self):
+        return self._db
 
 
 class FakeSessionDB:
