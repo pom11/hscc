@@ -12,11 +12,12 @@ that ARE the product:
     only when ``apply=True``.
   * ``apply=True`` reaches the SAME command function the CLI uses (thin
     adapter, not a reimplementation).
-  * ``flightdeck_message_send`` is the ONE exception: it posts immediately,
-    exactly like the CLI, and has no apply gate.
+  * ``flightdeck_message_send`` has no apply gate: it just renders the
+    message for a project (Telegram delivery was removed), so nothing is
+    actually sent.
 
-Every external surface is injected (registry, kanban board, git, telegram,
-clock) exactly as the underlying command tests do, so no test touches a live
+Every external surface is injected (registry, kanban board, git, clock)
+exactly as the underlying command tests do, so no test touches a live
 board, repo, the network, or real time, and no test starts a real server.
 """
 
@@ -38,7 +39,6 @@ from flightdeck.commands import (
     roadmap,
     message,
     legacy,
-    report,
     incident,
     hygiene,
 )
@@ -198,10 +198,10 @@ def test_each_apply_gated_tool_docstring_first_sentence_mentions_apply_gate():
         )
 
 
-def test_message_send_docstring_says_immediate_no_gate():
-    """message_send is the one exception: it says it posts immediately, no gate."""
+def test_message_send_docstring_notes_no_delivery():
+    """message_send no longer delivers: docstring states Telegram removal, no gate."""
     doc = (inspect.getdoc(mcp_server.flightdeck_message_send) or "").lower()
-    assert "immediately" in doc or "immediate" in doc
+    assert "telegram" in doc and "no delivery" in doc
 
 
 # --------------------------------------------------------------------------- #
@@ -522,15 +522,16 @@ def test_start_apply_reaches_cli_command(monkeypatch):
 def _install_ingest_seams(monkeypatch, tmp_path, *, create_rec):
     """Wire the ingest seams so no network/board/repo work is real.
 
-    The three context gatherers are patched to fixed (content, report) pairs
-    (so ``any_content`` is true and nothing reaches Telegram/git), the context
+    The context gatherers are patched to fixed (content, report) pairs (so
+    ``any_content`` is true and nothing reaches git or the board), the context
     staging dir is a tmp_path, and ``kanban.create_task`` records calls.
+    (Telegram — the removed ``_gather_topic`` source — is gone, so only the
+    skill-refs and repo sources remain.)
     """
     monkeypatch.setattr(registry, "load_registry",
                         lambda path: [_project(name="hscc", board="hscc",
                                                repo="/repo", topic=140)])
     monkeypatch.setattr(ingest, "_gather_repo", lambda proj, **k: ("repo stuff", "ok"))
-    monkeypatch.setattr(ingest, "_gather_topic", lambda proj, limit, client=None: ("topic stuff", "ok"))
     monkeypatch.setattr(mcp_server, "_read_refs",
                         lambda proj: ("ref stuff", "ok"))
     monkeypatch.setattr(mcp_server, "_context_dir", str(tmp_path / "ctx"))
@@ -606,19 +607,17 @@ def test_roadmap_adopt_apply_reaches_cli_command(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_message_send_posts_immediately(monkeypatch):
-    """flightdeck_message_send posts right away — no apply gate, like the CLI."""
-    sent = []
+def test_message_send_renders_no_delivery(monkeypatch):
+    """flightdeck_message_send renders the message; Telegram delivery is removed."""
     monkeypatch.setattr(registry, "load_registry",
                         lambda path: [_project(name="hscc", board="hscc",
                                                repo="/repo", topic=140)])
-    monkeypatch.setattr(message.telegram, "send_message",
-                        lambda tid, text, _client=None: sent.append((tid, text)))
 
     out = mcp_server.flightdeck_message_send(project="hscc", text="hello")
 
-    assert sent == [(140, "hello")]
-    assert "sent to hscc" in out
+    assert "no delivery target" in out.lower()
+    assert "telegram has been removed" in out.lower()
+    assert "hello" in out
 
 
 def test_message_send_unknown_project_clear_text(monkeypatch):
@@ -636,12 +635,12 @@ def test_message_send_unknown_project_clear_text(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def _install_dispatch_seams(monkeypatch, *, kdb, sent=None, projects=None):
-    """Wire the message-dispatch seams: registry + kdb for create + telegram send.
+def _install_dispatch_seams(monkeypatch, *, kdb, projects=None):
+    """Wire the message-dispatch seams: registry + kdb for create-card.
 
-    ``create_task`` and ``send_message`` go through the injected ``kdb`` fake
-    and a recorded ``sent`` list, so neither a real board nor real Telegram is
-    touched.
+    ``create_task`` goes through the injected ``kdb`` fake, so no real board is
+    touched. The former in-topic Telegram announce step was removed along with
+    Telegram, so nothing is posted.
     """
     if projects is None:
         projects = [_project(name="hscc", board="hscc", repo="/repo", topic=140)]
@@ -649,16 +648,12 @@ def _install_dispatch_seams(monkeypatch, *, kdb, sent=None, projects=None):
     monkeypatch.setattr(mcp_server, "_kdb", kdb)
     monkeypatch.setattr(message.kanban, "valid_assignee",
                         lambda name, _profiles=None: True)
-    monkeypatch.setattr(message.telegram, "send_message",
-                        lambda tid, text, _client=None:
-                        sent.append((tid, text)) if sent is not None else None)
 
 
 def test_message_dispatch_defaults_apply_false_and_mutates_nothing(monkeypatch):
-    """flightdeck_message_dispatch(...) with defaults creates/announces nothing."""
+    """flightdeck_message_dispatch(...) with defaults creates nothing."""
     kdb = _RecordingKdb()
-    sent = []
-    _install_dispatch_seams(monkeypatch, kdb=kdb, sent=sent)
+    _install_dispatch_seams(monkeypatch, kdb=kdb)
 
     out = mcp_server.flightdeck_message_dispatch(project="hscc", task="fix login",
                                                  body="VERIFY: pytest\nACCEPT: green")
@@ -667,16 +662,13 @@ def test_message_dispatch_defaults_apply_false_and_mutates_nothing(monkeypatch):
     assert "dry-run" in out
     assert "card title: fix login" in out
     assert kdb.writes == [], "dispatch dry-run must not create via kdb"
-    assert sent == [], "dispatch dry-run must not announce"
 
 
 def test_message_dispatch_apply_reaches_cli_command(monkeypatch):
-    """flightdeck_message_dispatch(apply=True) creates the card and announces
-    via the SAME cmd the CLI uses, with body as the card body and message as the
-    announcement (which may differ)."""
+    """flightdeck_message_dispatch(apply=True) creates the card via the SAME cmd
+    the CLI uses, with body as the card body."""
     kdb = _RecordingKdb()
-    sent = []
-    _install_dispatch_seams(monkeypatch, kdb=kdb, sent=sent)
+    _install_dispatch_seams(monkeypatch, kdb=kdb)
 
     out = mcp_server.flightdeck_message_dispatch(
         project="hscc", task="fix login", assignee="coder",
@@ -685,7 +677,6 @@ def test_message_dispatch_apply_reaches_cli_command(monkeypatch):
     )
 
     assert ("create", "t_new") in kdb.writes
-    assert sent == [(140, "fix the login bug")], "announcement = --message, not the body"
     assert "created on board" in out.lower()
 
 
@@ -796,36 +787,29 @@ def _install_report_seams(monkeypatch, *, cards):
     monkeypatch.setattr(mcp_server, "_now", lambda: _NOW)
     monkeypatch.setattr(mcp_server, "_state", None)
     monkeypatch.setattr(mcp_server, "_client",
-                        lambda tool, arguments: _received.append((tool, arguments)))
+                        lambda tool, arguments: None)
 
 
 def test_report_defaults_apply_false_and_mutates_nothing(monkeypatch):
-    """flightdeck_report(...) with defaults posts nothing to Telegram."""
-    global _received
-    _received = []
+    """flightdeck_report(...) with defaults posts nothing (no delivery)."""
     _install_report_seams(monkeypatch, cards=[_report_hcard("a", title="Landed A", completed_at=9_950_000)])
-    monkeypatch.setattr(report.telegram, "send_message",
-                        lambda tid, text, _client=None: _received.append((tid, text)))
 
     out = mcp_server.flightdeck_report(project="hscc")
 
     assert "APPLY GATE: apply=False" in out and "nothing was changed" in out
     assert "dry-run" in out
-    assert _received == [], "report dry-run must not post"
+    assert "no delivery target" not in out.lower() or "dry-run" in out
 
 
 def test_report_apply_reaches_cli_command(monkeypatch):
-    """flightdeck_report(apply=True) posts via the same cmd the CLI uses."""
-    global _received
-    _received = []
+    """flightdeck_report(apply=True) reaches the CLI's _post path (records timestamp)."""
     _install_report_seams(monkeypatch, cards=[_report_hcard("a", title="Landed A", completed_at=9_950_000)])
-    monkeypatch.setattr(report.telegram, "send_message",
-                        lambda tid, text, _client=None: _received.append((tid, text)))
 
     out = mcp_server.flightdeck_report(project="hscc", apply=True)
 
-    assert _received, "apply=True must reach telegram.send_message (the CLI path)"
-    assert "posted" in out.lower()
+    assert "no delivery target" in out.lower()
+    assert "telegram removed" in out.lower()
+    assert "Landed A" in out
 
 
 def test_report_unknown_project_clear_text(monkeypatch):

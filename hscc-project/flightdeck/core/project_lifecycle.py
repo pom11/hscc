@@ -1,27 +1,28 @@
 """project_lifecycle.py — orchestration for `flightdeck project new`.
 
-Wires the lifecycle steps — git repo, telegram topic, kanban board,
-ROADMAP.md, orchestrator profile + chat session, registry entry — into one
-idempotent command, under the hard rule that partial failure never leaves a
-half-registered project.
+Wires the lifecycle steps — git repo, kanban board, ROADMAP.md, orchestrator
+profile + chat session, registry entry — into one idempotent command, under
+the hard rule that partial failure never leaves a half-registered project.
 
-It does NOT edit the existing core modules (registry / git_state / kanban /
-telegram); it composes them. The only new things here are the orchestration of
-the lifecycle steps and a registry *upsert* helper (load + mutate + save is
-all the existing registry's public API allows — there is no update function,
-so it is built here from ``load_registry`` + ``save_registry``).
+It does NOT edit the existing core modules (registry / git_state / kanban);
+it composes them. The only new things here are the orchestration of the
+lifecycle steps and a registry *upsert* helper (load + mutate + save is all
+the existing registry's public API allows — there is no update function, so
+it is built here from ``load_registry`` + ``save_registry``).
 
 Every external effect flows through an injectable hook so tests stub them and
-never touch git, the network, Telegram, or the live cluster:
+never touch git, the network, or the live cluster:
 
 - ``_run``      ``(cmd_list, cwd) -> proc``  git + ``gh`` subprocesses
-- ``_client``   ``(tool, args) -> str``      the telegram MCP client
 - ``_kanban``   ``() -> kb module``          providor for board operations
 
 Each step is INDEPENDENTLY idempotent: re-running on state that already
 satisfies it is a true no-op (adopt, not duplicate). The registry is the
 record of what succeeded, so a step that fails is reported with the exact
 command to retry — never silently dropped.
+
+The registry ``topic`` field is retained for historical/imported data but is
+no longer fed by a Telegram step (Telegram was removed).
 """
 
 from __future__ import annotations
@@ -31,8 +32,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import kanban, registry, telegram
-from .telegram import TelegramError, TopicLockedError
+from . import kanban, registry
 
 
 class LifecycleError(Exception):
@@ -230,25 +230,6 @@ def ensure_github(repo: str, _run=None, *, private: bool = False,
     if "already exists" in err:
         return "exists"
     raise LifecycleError(f"gh repo create failed: {err or '(no error output)'}")
-
-
-# --------------------------------------------------------------------------- #
-# Step 2 — telegram topic
-# --------------------------------------------------------------------------- #
-
-def ensure_topic(name: str, _client=None) -> int:
-    """Step 2 — create (or adopt) the telegram topic named ``name``.
-
-    Idempotent: if a topic with that name already exists it is adopted (its id
-    returned) rather than duplicated, so re-running never spawns a second
-    topic. Returns the topic id.
-    """
-    topics = telegram.list_topics(_client=_client)
-    for t in topics:
-        if t.name == name:
-            return t.id
-    created = telegram.create_topic(name, _client=_client)
-    return created.id
 
 
 # --------------------------------------------------------------------------- #
@@ -483,7 +464,7 @@ def create_project(
     recorded, never lost. Only a failed *repo* step withholds the registry
     entry (``repo`` is the one mandatory field). Functional step failures
     never escape as exceptions: they are collected into the report. Only a
-    genuinely unexpected error (not a LifecycleError/TelegramError) propagates.
+    genuinely unexpected error (not a LifecycleError) propagates.
     """
     results: list[dict] = []
     failed = False
@@ -516,26 +497,15 @@ def create_project(
         return {"steps": results, "repo": repo, "ok": False,
                 "retry": f"flightdeck project new {name} --repo {repo} --apply"}
 
-    # --- Step 2: telegram topic ---
-    # When Telegram is disabled the topic step is SKIPPED (recorded, never a
-    # failure): the project is created without a topic, and the registry already
-    # tolerates that (topic -> "unknown"). The operator may later re-enable and
-    # run `project repair` to add the topic.
+    # --- Step 2: topic (telegram) ---
+    # The Telegram surface has been removed, so no topic is created and the
+    # registry topic field is left unset (it is retained only for
+    # historical/imported data). Recorded as skipped so the report shows where
+    # a topic would have been.
     topic_val: int | None = None
-    if telegram.enabled() and include_topic:
-        try:
-            topic_val = ensure_topic(name, _client=_client)
-            results.append({"id": "topic", "status": "ok", "detail": f"topic {topic_val}"})
-        except (LifecycleError, TelegramError, TopicLockedError) as exc:
-            failed = True
-            results.append(
-                {
-                    "id": "topic", "status": "failed", "detail": str(exc),
-                    "retry": f"flightdeck project new {name} --repo {repo} --apply",
-                }
-            )
-    else:
-        results.append({"id": "topic", "status": "skipped"})
+    if include_topic:
+        results.append({"id": "topic", "status": "skipped",
+                        "detail": "skipped (Telegram removed)"})
 
     # --- Step 3: kanban board ---
     if include_board:
@@ -612,7 +582,6 @@ def create_project(
             r["id"] == "board" and r["status"] == "ok" for r in results
         ) else None,
         topic=topic_val,
-        topic_name=name,
         roadmap=roadmap_val,
     )
     results.append({"id": "registry", "status": "ok", "detail": f"registered {name}"})
@@ -655,14 +624,8 @@ def project_health(
         except Exception:
             missing += 1
 
-    if project.topic is not None and telegram.enabled():
-        recorded += 1
-        try:
-            ids = {t.id for t in telegram.list_topics(_client=_client)}
-            if project.topic not in ids:
-                missing += 1
-        except (TopicLockedError, TelegramError, Exception):
-            missing += 1
+    # The topic field is retained for historical/imported data but is no
+    # longer verified against a live Telegram surface (Telegram removed).
 
     if recorded == 0:
         return "ok"

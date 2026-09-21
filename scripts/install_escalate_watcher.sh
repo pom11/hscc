@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Wire the failure-escalation watcher into Hermes' native cron. Installs the
 # runner under ~/.hermes/scripts/ and registers a Hermes cron job that runs it
-# (--no-agent: the script IS the job; --deliver telegram: its stdout goes to the
-# HSCC group, so an idle run stays silent and only real escalations message you).
+# (--no-agent: the script IS the job; --deliver desktop: its stdout is
+# delivered via desktop notification, so an idle run stays silent and only
+# real escalations message you).
 # The runner reassigns repeatedly-failing tasks to the strong tier and flags a
 # human when the strong tier also fails (deduped across runs). Idempotent:
 # re-running refreshes the job.
@@ -32,7 +33,7 @@ cp "$SCRIPT_DIR/escalate_watcher_run.py" "$HERMES_SCRIPTS/escalate_watcher_run.p
 "$HERMES_BIN" cron remove "$JOB" 2>/dev/null || true
 "$HERMES_BIN" cron create "$SCHEDULE" \
   --no-agent --script escalate_watcher_run.py \
-  --name "$JOB" --deliver telegram
+  --name "$JOB" --deliver desktop
 
 echo "installed Hermes cron job '$JOB' (schedule: $SCHEDULE)"
 echo "inspect:  $HERMES_BIN cron list"

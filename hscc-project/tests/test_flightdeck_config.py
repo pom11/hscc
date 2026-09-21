@@ -1,155 +1,30 @@
-"""Tests for flightdeck.core.config — the Telegram group id / MCP URL loader.
+"""Tests for flightdeck.core.config — the user connection settings loader.
 
-These cover the public-release blocker: the operator's private Telegram group
-id must come from configuration (env or ~/.flightdeck/config.yaml), never a
-hardcoded source constant. All tests use a tmp_path config file and injected
-env dicts — nothing touches real ~/.flightdeck, real env vars, or the network.
+Telegram has been removed from flightdeck: the group-id / MCP URL / enabled
+loaders that lived here are gone (config.py shrank to a path helper + error
+base). This file now covers only the surviving config surface.
 """
 
 from __future__ import annotations
 
-import pytest
-
 from flightdeck.core import config
-from flightdeck.core.config import ENV_GROUP_ID, ENV_MCP_URL, MissingGroupIdError
 
 
-def _write_config(tmp_path, **telegram_kwargs):
-    """Write a config.yaml under tmp_path with the given telegram keys."""
-    doc = {}
-    if telegram_kwargs:
-        doc["telegram"] = telegram_kwargs
-    path = tmp_path / "config.yaml"
-    if doc:
-        import yaml
-
-        path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
-    else:
-        path.write_text("", encoding="utf-8")
-    return str(path)
+def test_config_path_expands_home():
+    """A leading ~ is expanded to an absolute path."""
+    p = config.config_path("~/somewhere.yaml")
+    assert str(p).startswith("/")
+    assert str(p).endswith("somewhere.yaml")
+    assert "~" not in str(p)
 
 
-# --------------------------------------------------------------------------- #
-# group_id — file vs env precedence, missing raises
-# --------------------------------------------------------------------------- #
+def test_config_path_explicit_plus_overrides_default():
+    """An explicit path wins over the module default ~/.flightdeck/config.yaml."""
+    p = config.config_path("custom/dir/config.yaml")
+    assert str(p) == "custom/dir/config.yaml"
 
 
-def test_group_id_reads_config_file_value(tmp_path):
-    """A config-file telegram.group_id is used when no env var is set."""
-    cfg = _write_config(tmp_path, group_id="-100111222333")
-    assert config.telegram_group_id(path=cfg) == "-100111222333"
-
-
-def test_group_id_env_overrides_config_file(tmp_path):
-    """FLIGHTDECK_TELEGRAM_GROUP_ID wins over the config file."""
-    cfg = _write_config(tmp_path, group_id="-100111222333")
-    env = {ENV_GROUP_ID: "-100999888777"}
-    assert config.telegram_group_id(path=cfg, env=env) == "-100999888777"
-
-
-def test_public_release_blocker_missing_group_id_raises_actionable(tmp_path):
-    """No group id anywhere -> a clear, actionable error naming the config key.
-
-    Named for the public-release blocker: a missing id must never silently
-    fall back to a baked-in group. The message names `telegram.group_id`, the
-    config file path, and the env var, so the user knows exactly what to set.
-    """
-    cfg = _write_config(tmp_path)  # empty config, no telegram key
-    with pytest.raises(MissingGroupIdError) as excinfo:
-        config.telegram_group_id(path=cfg, env={})
-    msg = str(excinfo.value)
-    assert config._CONFIG_KEY_GROUP_ID in msg
-    assert ENV_GROUP_ID in msg
-    assert "never guesses" in msg
-
-
-def test_group_id_rejects_blank_config_value(tmp_path):
-    """A present-but-blank group_id is treated as unset (still raises)."""
-    cfg = _write_config(tmp_path, group_id="   ")
-    with pytest.raises(MissingGroupIdError):
-        config.telegram_group_id(path=cfg, env={})
-
-
-def test_group_id_env_wins_even_directly():
-    """The env-only path works with no config file at all."""
-    env = {ENV_GROUP_ID: "-100555444333"}
-    assert config.telegram_group_id(path="/nonexistent/nowhere.yaml", env=env) == "-100555444333"
-
-
-# --------------------------------------------------------------------------- #
-# mcp_url — env > file > localhost default
-# --------------------------------------------------------------------------- #
-
-
-def test_mcp_url_defaults_to_localhost_with_no_config(tmp_path):
-    """No config and no env -> the safe localhost default, never an error."""
-    cfg = _write_config(tmp_path)
-    assert config.telegram_mcp_url(path=cfg, env={}) == config.DEFAULT_MCP_URL
-    assert config.DEFAULT_MCP_URL == "http://127.0.0.1:8787/mcp"
-
-
-def test_mcp_url_reads_config_file_value(tmp_path):
-    """A config-file telegram.mcp_url is used when no env var is set."""
-    cfg = _write_config(tmp_path, mcp_url="http://10.0.0.5:9000/mcp")
-    assert config.telegram_mcp_url(path=cfg, env={}) == "http://10.0.0.5:9000/mcp"
-
-
-def test_mcp_url_env_overrides_config_file(tmp_path):
-    """FLIGHTDECK_MCP_URL wins over the config file."""
-    cfg = _write_config(tmp_path, mcp_url="http://10.0.0.5:9000/mcp")
-    env = {ENV_MCP_URL: "http://10.1.1.1:8787/mcp"}
-    assert config.telegram_mcp_url(path=cfg, env=env) == "http://10.1.1.1:8787/mcp"
-
-
-# --------------------------------------------------------------------------- #
-# telegram_enabled — the single fleet-wide switch
-# --------------------------------------------------------------------------- #
-
-
-def test_enabled_defaults_true_when_key_absent(tmp_path):
-    """No `enabled` key -> enabled. This preserves existing operators upgrading:
-    a config with group_id but no `enabled` key must keep working, so the code
-    default is ON. Fresh-install OFF comes from the installer writing `false`,
-    never from a code default of off."""
-    cfg = _write_config(tmp_path, group_id="-100111222333")
-    assert config.telegram_enabled(path=cfg, env={}) is True
-
-
-def test_enabled_reads_config_file_false(tmp_path):
-    """telegram.enabled: false disables telegram."""
-    cfg = _write_config(tmp_path, enabled=False, group_id="-100111222333")
-    assert config.telegram_enabled(path=cfg, env={}) is False
-
-
-def test_enabled_reads_config_file_true(tmp_path):
-    """telegram.enabled: true enables telegram."""
-    cfg = _write_config(tmp_path, enabled=True, group_id="-100111222333")
-    assert config.telegram_enabled(path=cfg, env={}) is True
-
-
-def test_enabled_env_overrides_config_file(tmp_path):
-    """FLIGHTDECK_TELEGRAM_ENABLED wins over the config file (booleans + text)."""
-    from flightdeck.core.config import ENV_ENABLED
-
-    cfg = _write_config(tmp_path, enabled=True)  # file says on
-    # env says off -> off
-    assert config.telegram_enabled(path=cfg, env={ENV_ENABLED: "false"}) is False
-    assert config.telegram_enabled(path=cfg, env={ENV_ENABLED: "0"}) is False
-    # env says on -> on
-    assert config.telegram_enabled(path=cfg, env={ENV_ENABLED: "true"}) is True
-    assert config.telegram_enabled(path=cfg, env={ENV_ENABLED: "1"}) is True
-
-
-def test_enabled_unrecognized_value_fails_safe(tmp_path):
-    """An unrecognised value (env or file) fails safe -> False (off).
-
-    Declining must never enable a channel the operator is leaving, so an
-    unparseable value is treated as False rather than guessed True."""
-    from flightdeck.core.config import ENV_ENABLED
-
-    # env garbage -> off even though the file says true
-    cfg = _write_config(tmp_path, enabled=True)
-    assert config.telegram_enabled(path=cfg, env={ENV_ENABLED: "maybe"}) is False
-    # file garbage -> off
-    cfg_garbage = _write_config(tmp_path, enabled="maybe")
-    assert config.telegram_enabled(path=cfg_garbage, env={}) is False
+def test_config_path_default_is_flightdeck_config():
+    """When no path is given, the default ~/.flightdeck/config.yaml is used."""
+    p = config.config_path()
+    assert str(p).endswith(".flightdeck/config.yaml")

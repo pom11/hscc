@@ -551,77 +551,12 @@ def _ensure_approvals(cfg):
     return ["single_query_mode"]
 
 
-# Default flightdeck config path (the file that holds telegram.group_id / mcp_url
-# and the new telegram.enabled switch). This is flightdeck's OWN config, not the
-# Hermes config that `enable()` rewrites — flightdeck reads only this file.
+# Default flightdeck config path (this file holds the fleet's general config).
 _FLIGHTDECK_CONFIG = "~/.flightdeck/config.yaml"
-# Env var carrying the bootstrap's --telegram interview result ("yes"/"no"),
-# resolved by hscc-bootstrap/telegram_choice.py and threaded through bootstrap.sh.
-_HCC_TELEGRAM_ENV = "HSCC_TELEGRAM"
 
 
 def _flightdeck_config_path() -> str:
     return os.path.expanduser(_FLIGHTDECK_CONFIG)
-
-
-def _ensure_flightdeck_telegram() -> str | None:
-    """Wire ``telegram.enabled`` into ~/.flightdeck/config.yaml (fresh default OFF).
-
-    Mirrors :func:`_ensure_approvals`: only set the key when it is ABSENT —
-    never overwrite an operator's explicit ``enabled: true/false``. The value
-    written reflects the bootstrap's own ``--telegram`` interview (the
-    ``HSCC_TELEGRAM`` env, resolved by ``telegram_choice.py``): ``yes`` →
-    ``enabled: true``, anything else (no / unset — the documented default) →
-    ``enabled: false``.
-
-    Why this belongs here and why it only writes when absent:
-
-    - The switch lives in flightdeck config (where the other telegram keys
-      live), so this boots the config file with ``enabled`` set for a fresh
-      install — the "default OFF for a fresh install" the card asks for.
-    - **never overwrite**: an existing ``enabled`` value (from a prior install,
-      or a re-run) is the operator's explicit call and is preserved verbatim.
-      Re-running bootstrap is thus idempotent.
-    - The code-side absent-key default is ENABLED (see
-      flightdeck core/config.py telegram_enabled) so older installs that never
-      get this key keep working. This function is what makes a FRESH install
-      start disabled.
-
-    Returns the config key changed (``telegram.enabled``) or None.
-    """
-    path = _flightdeck_config_path()
-    import yaml as _yaml
-
-    # Load an existing flightdeck config if present; otherwise start fresh.
-    if os.path.exists(path):
-        try:
-            with open(path, encoding="utf-8") as fh:
-                cfg = _yaml.safe_load(fh) or {}
-        except _yaml.YAMLError:
-            # Malformed config: do NOT touch it — silently rewriting an
-            # unparseable operator file is worse than leaving the key unset.
-            return None
-        if not isinstance(cfg, dict):
-            return None
-    else:
-        cfg = {}
-
-    tg = cfg.get("telegram")
-    if not isinstance(tg, dict):
-        tg = {}
-    # Only set when absent — the operator's explicit value (true/false) wins.
-    if "enabled" in tg:
-        return None
-
-    interview = (os.environ.get(_HCC_TELEGRAM_ENV) or "").strip().lower()
-    tg["enabled"] = interview in {"yes", "y", "true", "1"}
-    cfg["telegram"] = tg
-
-    # Write back the whole flightdeck config (creating the file if new).
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        _yaml.safe_dump(cfg, fh, sort_keys=False, default_flow_style=False)
-    return "telegram.enabled"
 
 
 def _ensure_dashboard(cfg):
@@ -855,10 +790,5 @@ if __name__ == "__main__":
     path = os.path.expanduser("~/.hermes/config.yaml")
     res = enable(path)
     parts = [f"{k}: {', '.join(v)}" for k, v in res.items() if v]
-    # Also wire the flightdeck telegram switch (may be a different file — the
-    # flightdeck config — so it is handled independently here, not in `enable`).
-    fd_changed = _ensure_flightdeck_telegram()
-    if fd_changed:
-        parts.append(f"flightdeck: {fd_changed}")
     print(" | ".join(parts) if parts else "already wired (no changes)")
     sys.exit(0)

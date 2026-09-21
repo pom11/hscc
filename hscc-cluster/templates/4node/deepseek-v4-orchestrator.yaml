@@ -18,7 +18,7 @@
 #
 # NOTE: cross-node tp=2 does an allreduce over the CX7 link on every token. This
 # has never been benchmarked on this cluster — measure interactive latency before
-# trusting it for always-on Telegram/agent traffic.
+# trusting it for always-on agent traffic.
 name: 4node-deepseek-v4-orchestrator
 version: 2
 description: "4 nodes: DeepSeek-V4-Flash 304B NVFP4 orchestrator (tp=2, 2 nodes) + coding family (2x 27B-FP8). cluster_size=4."

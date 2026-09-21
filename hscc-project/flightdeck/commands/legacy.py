@@ -5,8 +5,7 @@ Two commands:
   `flightdeck legacy-cards [--include-archived-boards]` — READ-ONLY. Surfaces
   every card that is NOT cleanly attributed to a registered project (an
   orphan board, or a workspace_path that resolves to no project), so a
-  reviewer — a human in a Telegram topic, or the orchestrator driving through
-  MCP — can decide which legacy cards are worth keeping and which project
+  reviewer — driving through MCP — can decide which legacy cards are worth
   they really belong to. A suggestion is shown ONLY when workspace_path
   mechanically resolves to a project despite the wrong board; a card with no
   resolvable hint gets no suggestion. Flightdeck never guesses a project from

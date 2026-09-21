@@ -1497,17 +1497,6 @@ def check_workers():
                          or heal_result.get("error") or "?")
             log(f"Auto-heal result for {label}: {heal_note} "
                 f"{heal_result.get('note') or ''}".strip())
-            # Announce through the existing watchdog notification channel (the
-            # Telegram ops topic) — reuse it, do not build a new one.
-            try:
-                from .telegram import notify_operations
-                notify_operations(
-                    f"🤖 HSCC auto-heal: worker `{label}` ({node}:{port}) down "
-                    f"{streak}x consecutively — re-applied template "
-                    f"`{heal_result.get('template') or '?'}` with --force-recreate "
-                    f"→ {heal_note}")
-            except Exception as e:
-                log(f"Auto-heal notify failed: {e}", "WARN")
             down.append(label)
             continue
         # Down. Respect the grace window after a relaunch (mid-load == not dead).

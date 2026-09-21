@@ -29,7 +29,7 @@ Every external call is injectable: ``_run`` (a ``(cmd_list, repo) -> process``
 runner, same contract as core/git_state, used for the per-card git facts) and
 ``_run_verify`` (a ``(command: str) -> process`` shell runner used for the
 project's registry ``verify`` command). Nothing here touches git, the network,
-Telegram, or a live board in tests.
+or a live board in tests.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from typing import Callable
 
 import yaml
 
-from ..core import git_state, kanban, registry, telegram
+from ..core import git_state, kanban, registry
 from . import review
 
 # Interval between --watch frames. Mirrors standup's DEFAULT_INTERVAL.
@@ -385,7 +385,8 @@ def _render_json(rows: list[dict], manual: list[dict] | None = None) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# notify — one message per card that ENTERS the needs-QA state
+# departed notify state helpers — kept so tests referencing the state file
+# still import cleanly; no longer reachable from the CLI
 # --------------------------------------------------------------------------- #
 
 
@@ -476,8 +477,7 @@ def _save_manual(entries: list[dict], _path=None) -> None:
 
     Always writes the full current list — the store never deletes entries
     (checked ones stay for history); ``qa`` simply hides checked entries from
-    the default view. The ``~/.flightdeck`` dir is created on demand, matching
-    ``_save_notified``.
+    the default view. The ``~/.flightdeck`` dir is created on demand.
     """
     path = _manual_path(_path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -576,82 +576,6 @@ def cmd_qa_done(args: argparse.Namespace) -> int:
     return 2
 
 
-def _project_topic(projects: list[registry.Project], project_name: str) -> int:
-    """Resolve a project's Telegram topic id through the registry.
-
-    Follows the message.py convention: a project with no configured topic is an
-    actionable error (``project repair``), never a silent skip and never a guess.
-    """
-    for proj in projects:
-        if proj.name == project_name:
-            if proj.topic is None:
-                raise telegram.TelegramError(
-                    f"project {project_name} has no topic; "
-                    f"run: flightdeck project repair {project_name}"
-                )
-            return proj.topic
-    raise telegram.TelegramError(f"unknown project: {project_name!r}")
-
-
-def _notify_one(row: dict, projects: list[registry.Project], *, _client=None) -> None:
-    """Post one message to the project's topic naming the card, VERIFY, branch."""
-    topic = _project_topic(projects, row["project"])
-    lines = [
-        f"QA needed: {row['title']}",
-        f"card: {row['id']}",
-        f"branch: {row['branch']}",
-    ]
-    if row["verify"]:
-        lines.append(f"VERIFY: {row['verify']}")
-    else:
-        lines.append("VERIFY: <none — no VERIFY line on the card>")
-    telegram.send_message(topic, "\n".join(lines), _client=_client)
-
-
-def _run_notify(rows: list[dict], projects: list[registry.Project], *,
-                _client=None, _state=None):
-    """Notify only the cards that just ENTERED the needs-QA queue.
-
-    The persisted set holds the cards we have already notified that are STILL in
-    the queue. A card that stays across ticks stays in the set and is never
-    re-notified (every-tick pings get muted). When a card leaves the queue it
-    drops out of the set, so re-entering counts as a fresh transition and
-    notifies again.
-
-    A card that fails to notify (telegram error, no configured topic) is NOT
-    added to the persisted set, so the next tick retries it; the failure is
-    returned for reporting, never raised — the loop must not crash.
-
-    Returns ``(newly_notified: list[str], errors: list[(card_id, message)])``.
-    """
-    if not telegram.enabled():
-        # Nothing is sent and nothing is recorded as notified, so re-enabling
-        # Telegram later re-enters every eligible card and notifies it fresh.
-        print("qa: telegram disabled — notifications skipped.", file=sys.stderr)
-        return [], []
-    current = {r["id"] for r in rows if r["id"] and not r["unattributed"]}
-    notified = _load_notified(_state)
-    entering = sorted(current - notified)
-    newly: list[str] = []
-    errors: list[tuple[str, str]] = []
-    for rid in entering:
-        row = next((r for r in rows if r["id"] == rid), None)
-        if row is None:
-            continue
-        try:
-            _notify_one(row, projects, _client=_client)
-            newly.append(rid)
-        except Exception as exc:  # never crash the loop on a notification failure
-            errors.append((rid, str(exc)))
-    keep = (notified & current) | set(newly)
-    _save_notified(keep, _state)
-    return newly, errors
-
-
-def _report_notify_errors(errors: list[tuple[str, str]]) -> None:
-    for rid, message in errors:
-        print(f"notify failed for {rid}: {message}", file=sys.stderr)
-
 
 # --------------------------------------------------------------------------- #
 # watch — re-render the queue on an interval, kept alive by mandate
@@ -672,8 +596,8 @@ def qa_frames(gather: Callable[[], list[dict]], *, interval: int,
     where ``lines`` is :func:`_render` of this frame's fresh ``rows`` — or,
     when the gather itself raised, the lines of the LAST good frame with
     ``error`` set so the caller keeps rendering a stale-but-real queue instead
-    of crashing. ``rows`` always holds the frame's (possibly last-good) rows so
-    the caller can run notify against fresh state. ``interval`` is passed to
+    of crashing. ``rows`` always holds the frame's (possibly last-good) rows.
+    ``interval`` is passed to
     ``_sleep`` so the injected sleep is respected.
 
     ``manual_loader`` (when given) is re-invoked on EVERY tick to produce this
@@ -728,9 +652,9 @@ def _watch(args: argparse.Namespace, projects: list[registry.Project],
     """The --watch loop: redraw the queue every ``interval`` seconds.
 
     Same renderer as one-shot. Clears between frames, prints a timestamp +
-    interval header, keeps the last good frame when a refresh fails, runs
-    ``--notify`` on fresh data each pass, and exits 0 with no traceback on
-    Ctrl-C.
+    interval header, keeps the last good frame when a refresh fails (Telegram
+    ``--notify`` was dropped with the Telegram removal), and exits 0 with no
+    traceback on Ctrl-C.
     """
     interval = max(1, int(args.interval))
 
@@ -747,18 +671,6 @@ def _watch(args: argparse.Namespace, projects: list[registry.Project],
     try:
         for frame in qa_frames(gather, interval=interval, _sleep=args.sleep,
                                manual_loader=load_manual):
-            if frame["error"] is None:
-                newly, errors = _run_notify(
-                    frame["rows"], projects,
-                    _client=getattr(args, "client", None),
-                    _state=getattr(args, "state", None),
-                )
-                _report_notify_errors(errors)
-                if newly:
-                    print(
-                        f"notified {len(newly)} card(s) entering the QA queue",
-                        file=sys.stderr,
-                    )
             _clear()
             _write_frame(
                 frame,
@@ -843,17 +755,8 @@ def cmd_qa(args: argparse.Namespace) -> int:
     unchecked = _unchecked_manual(getattr(args, "state", None), want)
 
     if getattr(args, "notify", False):
-        newly, errors = _run_notify(
-            rows, projects,
-            _client=getattr(args, "client", None),
-            _state=getattr(args, "state", None),
-        )
-        _report_notify_errors(errors)
-        if newly:
-            print(
-                f"notified {len(newly)} card(s) entering the QA queue",
-                file=sys.stderr,
-            )
+        print("qa: --notify is no longer supported (Telegram removed); running without it.",
+              file=sys.stderr)
 
     if json_out:
         print(json.dumps(_render_json(rows, unchecked)))
@@ -912,10 +815,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p.add_argument(
         "--notify",
         action="store_true",
-        help=(
-            "when a card enters the needs-QA queue, post one message to its "
-            "project's Telegram topic (once per card, on the transition)"
-        ),
+        help="(deprecated) previously posted to a project's Telegram topic; "
+             "Telegram is removed so this now prints a notice and does nothing",
     )
     p.set_defaults(func=cmd_qa)
 
@@ -928,8 +829,8 @@ def run(args: argparse.Namespace, registry_path: str) -> int:
     manual-QA store and never read the board. The command's git/verify runners
     default to the real subprocess implementations unless supplied on ``args``.
     ``--watch`` adds ``args.now``/``args.sleep`` (clock + pause, both
-    injectable) and ``--notify`` adds ``args.client`` (the Telegram MCP client)
-    and ``args.state`` (the notified-set file); the ``add``/``done`` forms
+    injectable) and ``args.state`` (the manual-QA store); Telegram has been
+    removed so there is no ``--notify`` client. The ``add``/``done`` forms
     reuse the same ``args.state`` for the manual-QA store, each defaulting to
     the real production behaviour when a test does not inject a fake.
 
