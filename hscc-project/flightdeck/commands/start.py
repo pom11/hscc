@@ -32,7 +32,7 @@ A milestone with no matching cards says so — it is never reported as success.
 
 Every external call is injectable (``_list_cards``, ``_run`` for git, the
 config path / loader) so tests drive it against fixtures and never touch the
-board, git, Telegram or the network.
+board, git or the network.
 
     REPO: ~/dev/flightdeck
     CONTRACTS: docs/DESIGN.md, docs/FEATURES-2.md
@@ -533,7 +533,7 @@ def run(args: argparse.Namespace, registry_path: str) -> int:
 
     ``args.list_cards``/``args.run``/``args.kdb``/``args.config_path`` default
     to None (use the real kanban library, real git, real board, real config);
-    tests set them to fakes so nothing here touches the board, git, Telegram,
+    tests set them to fakes so nothing here touches the board, git,
     the network or the live config.
     """
     args.registry = registry_path

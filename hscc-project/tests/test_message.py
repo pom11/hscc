@@ -1,10 +1,15 @@
 """Tests for flightdeck.commands.message + the core send/read/create helpers.
 
-Every test drives the command against STUBS: an injectable telegram client
-(``(tool, args) -> str``) and a stub Hermes kanban library (patching
-``kanban._load_kanban_db``). No test touches real Telegram, git, the live
+Every test drives the command against STUBS: an injectable client stand-in and
+a stub Hermes kanban library (patching ``kanban._load_kanban_db``). No test
+touches real Telegram (it has been removed from flightdeck), git, the live
 cluster, or the real kanban DB. Registry files are written to a pytest
 tmp_path, never ~/.flightdeck.
+
+Of the subcommands, only ``dispatch`` mutates (it creates a kanban card +
+worktree anchor; it announces nothing). ``send``/``read``/``broadcast`` were
+entirely Telegram topic delivery and are now reported as having no delivery
+mechanism.
 """
 
 from types import SimpleNamespace
@@ -12,13 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from flightdeck.commands import message as msg_cmd
-from flightdeck.core import kanban, registry, telegram
-from flightdeck.core.telegram import Message, Topic, TopicLockedError
-from conftest import TEST_GROUP_ID
-
-# The group the resolver injects for every test (see conftest). Needs to
-# match `TEST_GROUP_ID` so assertions on the resolved `group` arg hold.
-GROUP = TEST_GROUP_ID
+from flightdeck.core import kanban, registry
 
 
 # --------------------------------------------------------------------------- #
@@ -26,13 +25,13 @@ GROUP = TEST_GROUP_ID
 # --------------------------------------------------------------------------- #
 
 class FakeTG:
-    """Stands in for the MCP daemon client: callable (tool, args) -> str.
+    """Client stand-in injected as ``args.client``.
 
-    - ``telegram_topic_status`` answers from ``topics`` (id -> name).
-    - ``telegram_send`` records the send, mirrors the daemon's reply string.
-    - ``telegram_read`` answers from ``feed`` (a list of ``[ts] sender: text``
-      lines) — the topic's message history.
-    - ``locked=True`` makes every call raise the single-writer SQLite error.
+    Telegram has been removed from flightdeck, so no command actually sends,
+    reads or broadcasts — tests still pass a client object so the plumbing is
+    exercised, and several tests assert ``fake.calls == []`` to prove nothing
+    was ever delivered. Retained only as a call-recorder; ``__call__`` raises
+    if anything is ever invoked (a signal that Telegram crept back in).
     """
 
     def __init__(self, topics=None, feed=None, locked=False):
@@ -45,15 +44,10 @@ class FakeTG:
         self.calls.append((tool_name, arguments))
         if self.locked:
             raise ConnectionError("sqlite3.OperationalError: database is locked")
-        if tool_name == "telegram_topic_status":
-            return "\n".join(
-                f"topic_id={tid} title={name}" for tid, name in sorted(self.topics.items())
-            )
-        if tool_name == "telegram_send":
-            return f"Sent to {GROUP} topic {arguments['topic_id']}."
-        if tool_name == "telegram_read":
-            return "\n".join(self.feed[-arguments["limit"]:])
-        raise AssertionError(f"FakeTG does not know tool {tool_name!r}")
+        raise AssertionError(
+            f"FakeTG invoked with {tool_name!r} — Telegram has been removed "
+            "from flightdeck; no command should call a delivery tool."
+        )
 
 
 class FakeKB:
@@ -119,41 +113,6 @@ def _row(name="hscc", topic=140, board="hscc"):
 
 
 # --------------------------------------------------------------------------- #
-# core.telegram — send_message / read_messages
-# --------------------------------------------------------------------------- #
-
-def test_send_message_posts_to_topic_and_returns_raw():
-    fake = FakeTG(topics={140: "hscc"})
-    raw = telegram.send_message(140, "hello", _client=fake)
-    assert ("telegram_send", {"group": GROUP, "message": "hello", "topic_id": 140}) in fake.calls
-    assert "topic 140" in raw
-
-
-def test_read_messages_parses_newest_last():
-    fake = FakeTG(feed=["[08:00] Alice(@a): first", "[08:05] Bob(@b): second"])
-    msgs = telegram.read_messages(140, n=10, _client=fake)
-    assert msgs == [
-        Message(timestamp="08:00", sender="Alice(@a)", text="first"),
-        Message(timestamp="08:05", sender="Bob(@b)", text="second"),
-    ]
-    assert ("telegram_read", {"group": GROUP, "limit": 10, "topic_id": 140}) in fake.calls
-
-
-def test_read_messages_drops_blank_lines_keeps_unparsed():
-    fake = FakeTG(feed=["[08:00] Alice(@a): first", "", "  ", "some odd line"])
-    msgs = telegram.read_messages(140, n=10, _client=fake)
-    assert len(msgs) == 2
-    assert msgs[0].text == "first"
-    assert msgs[1].sender == "(unparsed)"  # never silently dropped
-
-
-def test_send_locked_surfaces_topiclocked():
-    fake = FakeTG(topics={140: "hscc"}, locked=True)
-    with pytest.raises(TopicLockedError):
-        telegram.send_message(140, "hello", _client=fake)
-
-
-# --------------------------------------------------------------------------- #
 # core.kanban — create_task
 # --------------------------------------------------------------------------- #
 
@@ -171,101 +130,7 @@ def test_kanban_create_task_calls_board_and_returns_id(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# send — resolves project -> topic
-# --------------------------------------------------------------------------- #
-
-def test_send_resolves_project_to_topic(capsys):
-    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140)]
-    fake = FakeTG(topics={140: "hscc"})
-    rc = msg_cmd.cmd_send(_ns(client=fake, project="hscc", message="hello"), projects)
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "sent to hscc" in out
-    # The operator gave a PROJECT; the topic id 140 was resolved, never typed.
-    assert ("telegram_send", {"group": GROUP, "message": "hello", "topic_id": 140}) in fake.calls
-
-
-def test_send_unknown_project_errors_clearly(tmp_path, capsys):
-    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140)]
-    rc = msg_cmd.cmd_send(_ns(client=FakeTG(), project="nope", message="x"), projects)
-    err = capsys.readouterr().err
-    assert rc == 2
-    assert "unknown project" in err
-    assert "nope" in err
-
-
-def test_send_project_without_topic_gives_actionable_error(tmp_path, capsys):
-    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=None)]
-    rc = msg_cmd.cmd_send(_ns(client=FakeTG(), project="hscc", message="x"), projects)
-    err = capsys.readouterr().err
-    assert rc == 2
-    assert "has no topic" in err
-    assert "flightdeck project repair hscc" in err
-
-
-def test_send_locked_surfaces_clear_message(tmp_path, capsys):
-    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140)]
-    fake = FakeTG(topics={140: "hscc"}, locked=True)
-    rc = msg_cmd.cmd_send(_ns(client=fake, project="hscc", message="x"), projects)
-    err = capsys.readouterr().err
-    assert rc == 3
-    assert "locked" in err
-    assert "retry" in err
-    assert "Traceback" not in err
-
-
-# --------------------------------------------------------------------------- #
-# read
-# --------------------------------------------------------------------------- #
-
-def test_read_shows_messages_newest_last(tmp_path, capsys):
-    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140)]
-    fake = FakeTG(feed=["[08:00] Alice(@a): first", "[08:05] Bob(@b): second"])
-    rc = msg_cmd.cmd_read(_ns(client=fake, project="hscc", n=10), projects)
-    out = capsys.readouterr().out
-    assert rc == 0
-    # Ordered newest last (the feed is already oldest->newest; core keeps order).
-    assert out.index("Alice") < out.index("Bob")
-
-
-def test_read_json_shape(tmp_path, capsys):
-    import json
-
-    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140)]
-    fake = FakeTG(feed=["[08:00] Alice(@a): first"])
-    rc = msg_cmd.cmd_read(_ns(client=fake, project="hscc", n=10, json=True), projects)
-    data = json.loads(capsys.readouterr().out)
-    assert rc == 0
-    assert data == [{"timestamp": "08:00", "sender": "Alice(@a)", "text": "first"}]
-
-
-def test_read_unknown_project_errors(tmp_path, capsys):
-    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140)]
-    rc = msg_cmd.cmd_read(_ns(client=FakeTG(), project="nope", n=10), projects)
-    assert rc == 2
-    assert "unknown project" in capsys.readouterr().err
-
-
-def test_read_project_without_topic_actionable(tmp_path, capsys):
-    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=None)]
-    rc = msg_cmd.cmd_read(_ns(client=FakeTG(), project="hscc", n=10), projects)
-    err = capsys.readouterr().err
-    assert rc == 2
-    assert "flightdeck project repair hscc" in err
-
-
-def test_read_locked_surfaces_clear_message(tmp_path, capsys):
-    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140)]
-    fake = FakeTG(feed=[], locked=True)
-    rc = msg_cmd.cmd_read(_ns(client=fake, project="hscc", n=10), projects)
-    err = capsys.readouterr().err
-    assert rc == 3
-    assert "locked" in err
-    assert "retry" in err
-
-
-# --------------------------------------------------------------------------- #
-# dispatch — creates the card AND announces
+# dispatch — creates the card (Telegram announce removed)
 # --------------------------------------------------------------------------- #
 
 def test_dispatch_creates_card_and_announces(monkeypatch, tmp_path, capsys):
@@ -285,10 +150,11 @@ def test_dispatch_creates_card_and_announces(monkeypatch, tmp_path, capsys):
     assert kb.created[0]["conn_board"] == "hscc"
     assert kb.created[0]["title"] == "build the widget"
     assert kb.created[0]["assignee"] == "coder"
-    # No --body-file given, so the card body defaults to the announcement.
+    # No --body-file given, so the card body defaults to the announcement text.
     assert kb.created[0]["body"] == "do the widget"
-    # Announcement posted to the project's topic.
-    assert ("telegram_send", {"group": GROUP, "message": "do the widget", "topic_id": 140}) in fake.calls
+    # Telegram removed — the card is created but NOT announced.
+    assert "not announced" in out
+    assert fake.calls == []  # no delivery call ever made
 
 
 def test_dispatch_preserves_requested_assignee_unmodified(monkeypatch, tmp_path, capsys):
@@ -452,7 +318,8 @@ def test_dispatch_does_not_mutate_global_current_board_even_on_failure(monkeypat
 
 
 def test_dispatch_defaults_announcement_to_task_title(monkeypatch, capsys):
-    """A bare dispatch <project> \"task\" (no --message) announces the task title."""
+    """A bare dispatch <project> \"task\" (no --message) uses the task title as
+    the card BODY (the old announcement default now feeds the card body)."""
     projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
     kb = FakeKB(new_id="card-8")
     _stub_kb(kb, monkeypatch)
@@ -464,27 +331,34 @@ def test_dispatch_defaults_announcement_to_task_title(monkeypatch, capsys):
     )
     out = capsys.readouterr().out
     assert rc == 0
-    # The announcement sent to the topic defaults to the task title.
-    assert ("telegram_send", {"group": GROUP, "message": "do the thing", "topic_id": 140}) in fake.calls
+    # Card created; body defaults to the task title (no --message given).
+    assert kb.created[0]["title"] == "do the thing"
+    assert kb.created[0]["body"] == "do the thing"
+    # Telegram removed — created but not announced.
+    assert "not announced" in out
+    assert fake.calls == []
 
 
-def test_dispatch_no_topic_actionable_without_mutation(monkeypatch, capsys):
+def test_dispatch_no_topic_still_creates_card_without_announce(monkeypatch, capsys):
+    """A project with NO topic still dispatches: Telegram removed, so the topic
+    is no longer required. The card is created and nothing is announced."""
     projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=None, board="hscc")]
-    kb = FakeKB()
+    kb = FakeKB(new_id="card-9")
     _stub_kb(kb, monkeypatch)
     fake = FakeTG(topics={})
 
     rc = msg_cmd.cmd_dispatch(
-        _ns(client=fake, project="hscc", task="t", assignee=None, message="m"),
+        _ns(client=fake, project="hscc", task="t", assignee=None, message="m", apply=True),
         projects,
     )
-    err = capsys.readouterr().err
-    assert rc == 2
-    assert "has no topic" in err
-    assert "flightdeck project repair hscc" in err
-    # Nothing was created or posted — no half-done dispatch.
-    assert kb.created == []
-    assert fake.calls == []
+    out = capsys.readouterr().out
+    assert rc == 0
+    # No topic guard anymore — the card is created on the project's board.
+    assert kb.created[0]["conn_board"] == "hscc"
+    assert kb.created[0]["title"] == "t"
+    assert kb.created[0]["body"] == "m"
+    assert "not announced" in out
+    assert fake.calls == []  # nothing delivered even though there is no topic
 
 
 def test_dispatch_no_repo_refuses_without_mutation(monkeypatch, capsys):
@@ -520,13 +394,14 @@ def test_dispatch_unknown_project_errors(tmp_path, capsys):
     err = capsys.readouterr().err
     assert rc == 2
     assert "unknown project" in err
-def test_dispatch_failing_announcement_reports_card_id_and_partial(monkeypatch, tmp_path, capsys):
-    """Card created but announcement fails: say so, print the card id, never a
-    plain success."""
+def test_dispatch_ignores_broken_client_still_creates_card(monkeypatch, tmp_path, capsys):
+    """No announcement exists anymore, so a client that would have failed the
+    announce step (e.g. a locked daemon) no longer matters: the card is created
+    cleanly (rc=0), the card id is reported, and there is no PARTIAL/FAILED."""
     projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
     kb = FakeKB(new_id="card-42")
     _stub_kb(kb, monkeypatch)
-    fake = FakeTG(topics={140: "hscc"}, locked=True)  # announcement will fail
+    fake = FakeTG(topics={140: "hscc"}, locked=True)  # would fail any delivery call
 
     rc = msg_cmd.cmd_dispatch(
         _ns(client=fake, project="hscc", task="t", assignee=None, message="m", apply=True),
@@ -534,11 +409,12 @@ def test_dispatch_failing_announcement_reports_card_id_and_partial(monkeypatch, 
     )
     out_err = capsys.readouterr()
     combined = out_err.out + out_err.err
-    assert rc == 1                       # partial failure, not success
-    assert "card-42" in combined         # created card id still reported
-    assert "PARTIAL" in combined
-    assert "FAILED" in combined
-    assert "announced to topic" not in out_err.out  # NOT a success line
+    assert rc == 0                      # clean success — nothing to announce
+    assert "card-42" in combined        # created card id still reported
+    assert "not announced" in combined  # no announce -> no partial-failure path
+    assert "PARTIAL" not in combined
+    assert "FAILED" not in combined
+    assert fake.calls == []
 
 
 def test_dispatch_dry_run_by_default_mutates_nothing(monkeypatch, capsys):
@@ -555,12 +431,14 @@ def test_dispatch_dry_run_by_default_mutates_nothing(monkeypatch, capsys):
     )
     out_err = capsys.readouterr()
     assert rc == 0
-    # The plan previews the resolved board and the card title.
+    # The plan previews the resolved board and the card title/body.
     assert "dry-run" in out_err.out
     assert "board='hscc'" in out_err.out
     assert "card title: build the widget" in out_err.out
-    assert "announce  : ping" in out_err.out
+    assert "card body : ping" in out_err.out
     assert "pass --apply" in out_err.err
+    # Telegram removed — dry-run notes there is nothing to announce.
+    assert "nothing to announce" in out_err.err
     # Nothing was created or posted.
     assert kb.created == []
     assert fake.calls == []
@@ -587,8 +465,9 @@ def test_dispatch_body_file_sets_card_body(monkeypatch, tmp_path, capsys):
     assert "card-11" in out
     # The card body comes verbatim from the file, multi-line.
     assert kb.created[0]["body"] == "VERIFY: pytest\nACCEPT: it passes\nfix the login bug at auth.py:10"
-    # The announcement is the short --message text, not the full spec.
-    assert ("telegram_send", {"group": GROUP, "message": "fix the login bug", "topic_id": 140}) in fake.calls
+    # Telegram removed — nothing announced; created card noted as not announced.
+    assert "not announced" in out
+    assert fake.calls == []
 
 
 def test_dispatch_body_file_dash_reads_stdin(monkeypatch, capsys, tmp_path):
@@ -700,82 +579,9 @@ def test_dispatch_dry_run_shows_dependents_notice(monkeypatch, capsys):
 
 
 # --------------------------------------------------------------------------- #
-# broadcast — per-target results, never a single aggregate
-# --------------------------------------------------------------------------- #
-
-def test_broadcast_reports_each_target_individually(capsys):
-    projects = [
-        registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc"),
-        registry.Project(name="ecofire", repo="~/dev/ecofire", topic=2257, board="ecofire"),
-    ]
-    fake = FakeTG(topics={140: "hscc", 2257: "ecofire"})
-    rc = msg_cmd.cmd_broadcast(_ns(client=fake, message="hi", to=None), projects)
-    out = capsys.readouterr().out
-    assert rc == 0
-    # Per-target lines for BOTH projects.
-    assert "OK   hscc" in out
-    assert "OK   ecofire" in out
-    assert ("telegram_send", {"group": GROUP, "message": "hi", "topic_id": 140}) in fake.calls
-    assert ("telegram_send", {"group": GROUP, "message": "hi", "topic_id": 2257}) in fake.calls
-
-
-def test_broadcast_to_limited_subset(capsys):
-    projects = [
-        registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc"),
-        registry.Project(name="ecofire", repo="~/dev/ecofire", topic=2257, board="ecofire"),
-    ]
-    fake = FakeTG(topics={140: "hscc", 2257: "ecofire"})
-    rc = msg_cmd.cmd_broadcast(_ns(client=fake, message="hi", to="hscc"), projects)
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "OK   hscc" in out
-    assert "ecofire" not in out  # only the --to target was hit
-    assert all(a["topic_id"] == 140 for (t, a) in fake.calls if t == "telegram_send")
-
-
-def test_broadcast_mixed_success_failure_reports_each(capsys):
-    projects = [
-        registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc"),
-        registry.Project(name="nos", repo="~/dev/nos", topic=None, board="nos"),  # no topic
-        registry.Project(name="ecofire", repo="~/dev/ecofire", topic=2257, board="ecofire"),
-    ]
-    fake = FakeTG(topics={140: "hscc", 2257: "ecofire"})
-    rc = msg_cmd.cmd_broadcast(_ns(client=fake, message="hi", to=None), projects)
-    out = capsys.readouterr().out
-    assert rc == 1                       # not "all done" — a target failed
-    assert "OK   hscc" in out            # per-target success
-    assert "OK   ecofire" in out
-    assert "FAIL nos" in out             # per-target failure with the actionable error
-    assert "has no topic" in out
-    assert "flightdeck project repair nos" in out
-
-
-def test_broadcast_unknown_target_fails_individually(capsys):
-    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
-    fake = FakeTG(topics={140: "hscc"})
-    rc = msg_cmd.cmd_broadcast(_ns(client=fake, message="hi", to="hscc,nope"), projects)
-    out = capsys.readouterr().out
-    assert rc == 1
-    assert "OK   hscc" in out
-    assert "FAIL nope" in out
-    assert "unknown project" in out
-
-
-def test_broadcast_locked_surfaces_clear_message(capsys):
-    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
-    fake = FakeTG(topics={140: "hscc"}, locked=True)
-    rc = msg_cmd.cmd_broadcast(_ns(client=fake, message="hi", to="hscc"), projects)
-    out = capsys.readouterr().out
-    assert rc == 1
-    assert "FAIL hscc" in out
-    assert "locked" in out
-    assert "retry" in out        # the single-writer retry hint surfaces per-target
-    assert "Traceback" not in out
-
-
-# --------------------------------------------------------------------------- #
 # AUTO-DETECT project from cwd (through the run() entry)
 # --------------------------------------------------------------------------- #
+
 
 
 def _run_args(tmp_path, name="hscc", **overrides):
@@ -789,33 +595,6 @@ def _run_args(tmp_path, name="hscc", **overrides):
     return base, reg
 
 
-def test_run_send_detects_project_from_cwd(tmp_path, capsys, monkeypatch):
-    """`message send` with no project + cwd inside a repo -> detected project.
-
-    Here the namespace carries the MESSAGE text (what a real single-token
-    parse would bind to the message slot), no project, and a cwd under the hscc
-    repo; run() detects hscc and posts there.
-    """
-    args, reg = _run_args(tmp_path, func=msg_cmd.cmd_send, message="hello")
-    fake = args.client
-    rc = msg_cmd.run(args, reg)
-    captured = capsys.readouterr()
-    assert rc == 0
-    assert "used project 'hscc' (detected from cwd)" in captured.err or \
-        "detected from cwd" in captured.err
-    assert ("telegram_send", {"group": GROUP, "message": "hello", "topic_id": 140}) in fake.calls
-
-
-def test_run_read_detects_project_from_cwd(tmp_path, capsys):
-    args, reg = _run_args(tmp_path, func=msg_cmd.cmd_read, n=10)
-    fake = args.client
-    rc = msg_cmd.run(args, reg)
-    captured = capsys.readouterr()
-    assert rc == 0
-    assert "detected from cwd" in captured.err
-    assert ("telegram_read", {"group": GROUP, "limit": 10, "topic_id": 140}) in fake.calls
-
-
 def test_run_dispatch_detects_project_from_cwd(tmp_path, capsys, monkeypatch):
     """`message dispatch` with no project + cwd inside a repo -> detected."""
     kb = FakeKB(new_id="card-77")
@@ -827,9 +606,10 @@ def test_run_dispatch_detects_project_from_cwd(tmp_path, capsys, monkeypatch):
     captured = capsys.readouterr()
     assert rc == 0
     assert "detected from cwd" in captured.err
-    # Created on the detected hscc project's board, announced to hscc's topic.
+    # Created on the detected hscc project's board; Telegram removed, not announced.
     assert kb.created[0]["conn_board"] == "hscc"
-    assert ("telegram_send", {"group": GROUP, "message": "build the widget", "topic_id": 140}) in fake.calls
+    assert "not announced" in captured.out
+    assert fake.calls == []
 
 
 def test_run_detection_note_uses_detected_project_name(tmp_path, capsys):
@@ -854,8 +634,10 @@ def test_run_explicit_project_wins_over_cwd(tmp_path, capsys):
     captured = capsys.readouterr()
     assert rc == 0
     assert "detected from cwd" not in captured.err
-    # Posted to OTHER's topic (150), not the hscc one the cwd matched.
-    assert ("telegram_send", {"group": GROUP, "message": "hi", "topic_id": 150}) in fake.calls
+    # Explicit project wins, referenced on the (no-delivery) output, not by the
+    # cwd-matched hscc. Telegram removed, so no send call is made.
+    assert "would post to other" in captured.out
+    assert fake.calls == []
 
 
 def test_single_token_disambiguation(tmp_path, capsys, monkeypatch):
@@ -879,7 +661,9 @@ def test_single_token_disambiguation(tmp_path, capsys, monkeypatch):
     captured = capsys.readouterr()
     assert rc == 0
     assert "detected from cwd" in captured.err
-    assert ("telegram_send", {"group": GROUP, "message": "hello", "topic_id": 140}) in fake.calls
+    # Telegram removed — send reports no delivery target; nothing is delivered.
+    assert "would post to hscc" in captured.out
+    assert fake.calls == []
 
     # Case B: single token that IS a project name -> it is the project; the
     # message is missing, so cmd_send reports it (no detection, no send).
@@ -1046,55 +830,14 @@ def test_ensure_cluster_ready_unknown_state_refuses(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# TG-optional: telegram disabled — the single fleet-wide switch
+# dispatch — always creates the card with no announce (Telegram removed)
 # --------------------------------------------------------------------------- #
 
-def _tg_disabled(monkeypatch):
-    monkeypatch.setattr(telegram, "enabled", lambda: False)
-
-
-def test_send_fails_cleanly_when_disabled(monkeypatch, capsys):
-    """cmd_send with the switch off -> clean error, exit 2, no daemon call."""
-    fake = FakeTG()
-    _tg_disabled(monkeypatch)
-    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
-    rc = msg_cmd.cmd_send(_ns(client=fake, project="hscc", message="hi"), projects)
-    out = capsys.readouterr()
-    assert rc == 2
-    assert "disabled" in (out.out + out.err).lower()
-    assert fake.calls == []            # never touched the (fake) daemon
-
-
-def test_read_fails_cleanly_when_disabled(monkeypatch, capsys):
-    """cmd_read with the switch off -> clean error, exit 2, no daemon call."""
-    fake = FakeTG()
-    _tg_disabled(monkeypatch)
-    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
-    rc = msg_cmd.cmd_read(_ns(client=fake, project="hscc"), projects)
-    out = capsys.readouterr()
-    assert rc == 2
-    assert "disabled" in (out.out + out.err).lower()
-    assert fake.calls == []
-
-
-def test_broadcast_fails_cleanly_when_disabled(monkeypatch, capsys):
-    """cmd_broadcast with the switch off -> clean error, exit 2, no daemon call."""
-    fake = FakeTG()
-    _tg_disabled(monkeypatch)
-    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
-    rc = msg_cmd.cmd_broadcast(_ns(client=fake, message="hi"), projects)
-    out = capsys.readouterr()
-    assert rc == 2
-    assert "disabled" in (out.out + out.err).lower()
-    assert fake.calls == []
-
-
-def test_dispatch_disabled_still_creates_card_no_announce(monkeypatch, tmp_path, capsys):
-    """The core card: with Telegram disabled, `message dispatch` still creates
-    the card but does NOT announce — and it works even when the project has no
-    topic (the topic requirement is bypassed)."""
-    _tg_disabled(monkeypatch)
-    # No topic on the project, no daemon — dispatch must still succeed.
+def test_dispatch_creates_card_no_announce_without_topic(monkeypatch, tmp_path, capsys):
+    """Now the DEFAULT behavior: `message dispatch` always creates the card and
+    NEVER announces — even when the project has no topic (the topic is only kept
+    for historical registry data and is no longer required)."""
+    # No topic on the project — dispatch must still succeed by default.
     projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=None, board="hscc")]
     kb = FakeKB(new_id="card-99")
     _stub_kb(kb, monkeypatch)
@@ -1105,10 +848,12 @@ def test_dispatch_disabled_still_creates_card_no_announce(monkeypatch, tmp_path,
             message="body", apply=True),
         projects,
     )
-    combined = capsys.readouterr().out + capsys.readouterr().err
+    out = capsys.readouterr().out
+    err = capsys.readouterr().err
+    combined = out + err
     assert rc == 0
-    assert kb.created, "card must still be created with telegram disabled"
+    assert kb.created, "card must still be created"
     assert kb.created[0]["title"] == "do it"
     # Honest reporting: created but NOT announced.
     assert "not announced" in combined
-    assert fake.calls == []            # no daemon call, no announcement sent
+    assert fake.calls == []            # no delivery call, no announcement sent

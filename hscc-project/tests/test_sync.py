@@ -16,8 +16,8 @@ answer.
 """
 
 from flightdeck.commands import sync as sync_cmd
+from flightdeck.commands.sync import Topic
 from flightdeck.core import kanban, registry
-from flightdeck.core.telegram import Topic
 
 # --------------------------------------------------------------------------- #
 # Real-data fixture (NOT hardcoded results — just the discoverable inputs)
@@ -333,7 +333,9 @@ def test_cmd_sync_apply_writes_only_unambiguous(tmp_path, capsys):
         repos=["~/dev/hscc", "~/dev/ecofire", "~/dev/EcoFire_customizations_bc"],
         _run=None,
         _boards={"hscc": 0, "ecofire": 5},
-        client=None,
+        # A non-None client makes cmd_sync consult the injected discover_topics
+        # (Telegram removed, so discovery otherwise returns no topics).
+        client=object(),
         roots=None,
         registry=reg,
     )
@@ -375,7 +377,7 @@ def test_cmd_sync_dry_run_writes_nothing(tmp_path, capsys):
         repos=["~/dev/hscc"],
         _run=None,
         _boards={"hscc": 0},
-        client=None,
+        client=object(),  # non-None so injected discover_topics is consulted
         roots=None,
         registry=reg,
     )
@@ -467,13 +469,18 @@ def test_project_sync_apply_end_to_end_is_idempotent(tmp_path, monkeypatch, caps
 
     monkeypatch.setattr(mod, "discover_repos", fake_repos)
     monkeypatch.setattr(mod, "discover_boards", lambda: ["hscc"])
-    monkeypatch.setattr(mod, "discover_topics", lambda _client=None: [Topic(140, "HSCC cluster")])
+    # Telegram removed: cmd_sync only consults discover_topics when given a
+    # client. Inject topics directly via the _topics seam instead.
+    def _inject_topics(args):
+        args._topics = [Topic(140, "HSCC cluster")]
+        return args
+
     # Stub the per-board card-count I/O so nothing touches the live board
     # (HOME-coupled); this test asserts on the apply lifecycle, not board reads.
     monkeypatch.setattr(kanban, "board_card_count", lambda b: 0)
 
     # Apply pass.
-    args = build_parser().parse_args(["project", "sync", "--apply"])
+    args = _inject_topics(build_parser().parse_args(["project", "sync", "--apply"]))
     args.registry = reg  # registry normally defaults to ~/.flightdeck — force tmp
     rc = _dispatch(args)
     out = capsys.readouterr().out
@@ -482,7 +489,7 @@ def test_project_sync_apply_end_to_end_is_idempotent(tmp_path, monkeypatch, caps
     assert registry.get_project("hscc", reg).topic == 140
 
     # Re-run (dry): everything now MATCHED, nothing proposed.
-    args2 = build_parser().parse_args(["project", "sync"])
+    args2 = _inject_topics(build_parser().parse_args(["project", "sync"]))
     args2.registry = reg
     rc2 = _dispatch(args2)
     out2 = capsys.readouterr().out
@@ -636,7 +643,7 @@ def test_ignore_topic_persists_and_suppresses_on_next_run(tmp_path, capsys):
         repos=["~/dev/sphoin_engine"],
         _run=None,
         _boards={},
-        client=None,
+        client=object(),  # non-None so injected discover_topics is consulted
         roots=None,
         registry=reg,
         ignore_topic=[6369],
@@ -657,7 +664,7 @@ def test_ignore_topic_persists_and_suppresses_on_next_run(tmp_path, capsys):
         repos=["~/dev/sphoin_engine"],
         _run=None,
         _boards={},
-        client=None,
+        client=object(),  # non-None so injected discover_topics is consulted
         roots=None,
         registry=reg,
         ignore_topic=None,

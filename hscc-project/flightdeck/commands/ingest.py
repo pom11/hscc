@@ -4,7 +4,7 @@ Drafts a project's ROADMAP.md from what ALREADY exists. The operator runs 8
 live projects with YEARS of context and hand-written roadmaps for none of them;
 this command turns the context flightdeck can already see into a first roadmap.
 
-It GATHERS context from three LOCAL sources, in order of trust:
+It GATHERS context from two LOCAL sources, in order of trust:
 
   a. ``~/.hermes/skills/**/references/*.md`` — Hermes' own distilled project
      notes. THE BEST SOURCE: curated understanding, not raw chat. We select the
@@ -13,17 +13,14 @@ It GATHERS context from three LOCAL sources, in order of trust:
   b. the project's repo — ``README.md``, ``docs/*.md``, and
      ``git log --oneline -n 200`` (subject lines describe what was actually
      built), via an injectable ``_run`` runner.
-  c. the project's Telegram topic, last N messages (default 200), via the
-     EXISTING ``flightdeck.core.telegram.read_messages`` — never a Telethon
-     session directly, the session is single-writer.
 
 Any source that is missing or unreadable is REPORTED and skipped; one missing
 source never aborts the draft, and a source is never pretended to have been
 read when it was not.
 
-It then ASKS the cluster orchestrator (reusing ``decompose._default_ask`` — the
-existing send+read seam; we do NOT write a second sender) to synthesise that
-context into the EXACT ROADMAP.md format ``core/roadmap.parse_roadmap`` handles:
+It then dispatches the synthesis as a kanban CARD (see N11 below) whose body
+points the fleet worker at the staged context file, to synthesise that context
+into the EXACT ROADMAP.md format ``core/roadmap.parse_roadmap`` handles:
 
     # Subproject: <name>
     ## Milestone: <title> <!-- id: <stable-slug> -->
@@ -66,7 +63,6 @@ to a generated one is unacceptable.
 from __future__ import annotations
 
 import argparse
-import functools
 import os
 import re
 import sys
@@ -74,9 +70,8 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as _FutureTimeout
 from pathlib import Path
 
-from ..core import git_state, kanban, registry, roadmap, telegram
-from ..core.telegram import TelegramError, TopicLockedError
-from .decompose import NoReplyError, _default_ask
+from ..core import git_state, kanban, registry, roadmap
+from .decompose import NoReplyError
 
 # How many git-log subject lines to gather (a hard cap; a longer log is
 # truncated and the truncation is reported in the gather report -- a single
@@ -301,42 +296,6 @@ def _git_log(repo: str, n: int, run=None) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Source C — the project's Telegram topic (reuses core/telegram.read_messages)
-# --------------------------------------------------------------------------- #
-
-
-def _gather_topic(project, limit: int, client=None) -> tuple[str, str | None]:
-    """The topic's last ``limit`` messages as one block.
-
-    Returns ``(content, report)`` where ``report`` always states the count
-    (e.g. ``ok (37 messages)``); a topic that yielded zero messages renders
-    ``EMPTY (0 messages)`` so an empty read is unmistakable at a glance. Uses
-    the EXISTING ``core/telegram.read_messages`` — never a Telethon session
-    directly. A project with no topic, or a read failure, is reported and
-    skipped; it never aborts the draft.
-    """
-    if not telegram.enabled():
-        return "", "EMPTY (0 messages): telegram is disabled"
-    if project.topic is None:
-        return "", "EMPTY (0 messages): project has no topic"
-    try:
-        msgs = telegram.read_messages(project.topic, n=limit, _client=client)
-    except TelegramError as exc:
-        return "", f"EMPTY (0 messages): telegram source unavailable: {exc}"
-    # Trust no further than the cap: the daemon may ignore ``limit`` and return
-    # MORE messages than asked for (the live run returned 309 for --limit 40).
-    # Cap locally so the count REPORTED equals the count ACTUALLY used in the
-    # prompt — a gather line that says 309 while the flag said 40 is the same
-    # dishonesty this command exists to remove. read_messages is newest-last, so
-    # ``[:limit]`` keeps the LAST (newest) ``limit`` messages.
-    msgs = msgs[:limit]
-    if not msgs:
-        return "", "EMPTY (0 messages): topic returned no messages"
-    lines = [f"- [{m.sender}] {m.text}" for m in msgs]
-    return "\n".join(lines), f"ok ({len(msgs)} messages)"
-
-
-# --------------------------------------------------------------------------- #
 # Ask the orchestrator — reuse decompose's send+read seam (no second sender)
 # --------------------------------------------------------------------------- #
 
@@ -390,11 +349,10 @@ def _build_prompt(project, context_path: str) -> str:
 Read the gathered context from this file on the host:
 {context_path}
 
-That file holds context gathered from three sources, most trusted first:
+That file holds context gathered from these sources, most trusted first:
 1. Hermes' own distilled skill references (curated understanding).
 2. the project's repository (README, docs, and the git log — the git log
    subject lines are the EVIDENCE for what was actually built and shipped).
-3. the project's Telegram topic messages (raw conversation).
 
 Open the file above. TURN ITS CONTEXT INTO A ROADMAP STRICTLY IN THIS EXACT
 FORMAT (the only format flightdeck's parser understands):
@@ -446,11 +404,10 @@ def _build_card_body(project, context_path: str) -> str:
 Read the gathered context from this file (absolute path, local to this host):
 {context_path}
 
-That file holds context from three sources, most trusted first:
+That file holds context from these sources, most trusted first:
 1. Hermes' own distilled skill references (curated understanding).
 2. the project's repository (README, docs, git log — the git log subject
    lines are the EVIDENCE for what was actually built and shipped).
-3. the project's Telegram topic messages (raw conversation).
 
 STEPS:
 1. Open the context file above with your file tools.
@@ -702,9 +659,7 @@ def cmd_ingest(args: argparse.Namespace, projects: list[registry.Project]) -> in
     read = getattr(args, "read", None) or _default_read
     run = getattr(args, "run", None)
     client = getattr(args, "client", None)
-    limit = getattr(args, "limit", 200) or 200
-
-    # Gather the three sources. Each is reported, and a missing one is skipped
+    # Gather the sources. Each is reported, and a missing one is skipped
     # — it never aborts the draft, and we never claim a source we did not read.
     # If EVERY source yields nothing, we do NOT ask: sending an empty prompt
     # and asking a model to invent a roadmap invites the fabricated reply the
@@ -734,12 +689,6 @@ def cmd_ingest(args: argparse.Namespace, projects: list[registry.Project]) -> in
         any_content = True
     _print_report(repo_report, "project repository")
 
-    topic_content, topic_report = _gather_topic(proj, limit, client=client)
-    if topic_content:
-        context_blocks.append(("Telegram topic (last %d messages)" % limit, topic_content))
-        any_content = True
-    _print_report(topic_report, "telegram topic")
-
     if not any_content:
         print(
             "error: every source is empty — nothing to synthesise a roadmap from.",
@@ -768,41 +717,23 @@ def cmd_ingest(args: argparse.Namespace, projects: list[registry.Project]) -> in
     if not getattr(args, "ask_inline", False):
         return _dispatch_card(proj, context_path, args)
 
-    # ---- --ask-inline: the synchronous path (today's behaviour, preserved) ----
+    # ---- --ask-inline: the synchronous path (Telegram removed) ----
     ask = getattr(args, "ask", None)
     using_default_ask = ask is None
     timeout = getattr(args, "timeout", _DEFAULT_TIMEOUT) or _DEFAULT_TIMEOUT
     if using_default_ask:
-        # Thread the caller's --timeout INTO the default ask seam so ONE flag
-        # governs the whole wait. _default_ask polls the topic with its OWN
-        # internal deadline (default _DEFAULT_ASK_TIMEOUT = 300); left untouched
-        # that inner bound fires BEFORE --timeout and the flag is ignored — the
-        # live 300s-vs-420s failure. Binding it here makes _default_ask raise
-        # NoReplyError("...within {N}s") quoting the value actually used.
-        # Also pass the N8 `accept` predicate (reuses the N3 extraction helper)
-        # so the seam KEEPS POLLING past the orchestrator's acknowledgement
-        # preamble and only returns when the reply actually contains a roadmap
-        # region — the live 2026-08-10 failure captured the "I'll read the
-        # ingest context file" ack and stopped.
-        ask = functools.partial(
-            _default_ask, timeout=timeout, accept=_roadmap_accept
-        )
-    # The default ask reaches the orchestrator THROUGH the project's topic. A
-    # project with no topic can only be asked via an injected seam; with the
-    # default we must say so rather than posting to a None topic id.
-    if using_default_ask and proj.topic is None:
+        # Telegram (the topic transport the default ask seam read the reply
+        # from) has been removed, so there is no default delivery for
+        # --ask-inline any more. The kanban-card path above is the supported
+        # way to synthesise a roadmap; --ask-inline only works when the caller
+        # injects a concrete ask seam (an orchestrator it can reach by other
+        # means), e.g. through the MCP bridge or a scripted seam.
         print(
-            f"error: project {args.project} has no topic; cannot reach the "
-            f"orchestrator to draft a roadmap. run: flightdeck project repair {args.project}",
-            file=sys.stderr,
-        )
-        return 2
-    if using_default_ask and not telegram.enabled():
-        print(
-            f"error: {telegram.disabled_message()} — --ask-inline asks through "
-            f"the project's Telegram topic and cannot run while it is disabled. "
-            f"Drop --ask-inline to dispatch the roadmap draft as a kanban card "
-            f"instead (the default, which works without Telegram).",
+            f"error: --ask-inline is no longer supported — Telegram (the "
+            f"default ask seam's transport) has been removed. Drop --ask-inline "
+            f"and ingest will dispatch the roadmap draft as a kanban card "
+            f"(the default). To ask synchronously, inject an ask seam via the "
+            f"MCP bridge or a custom orchestrator.",
             file=sys.stderr,
         )
         return 2
@@ -818,17 +749,6 @@ def cmd_ingest(args: argparse.Namespace, projects: list[registry.Project]) -> in
     except NoReplyError as exc:
         print(f"error: {exc}; nothing written.", file=sys.stderr)
         return 3
-    except TopicLockedError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        print(
-            "hint: another process is probably holding the ~/.hermes-tg session; "
-            "wait a moment and retry.",
-            file=sys.stderr,
-        )
-        return 2
-    except TelegramError as exc:
-        print(f"error: could not reach the orchestrator: {exc}", file=sys.stderr)
-        return 2
 
     if not draft or not draft.strip():
         print("error: the orchestrator returned no roadmap draft.", file=sys.stderr)
@@ -897,7 +817,7 @@ def _print_parse_evidence(parsed) -> None:
 def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "ingest",
-        help="draft a project's ROADMAP.md from existing context (skills, repo, topic)",
+        help="draft a project's ROADMAP.md from existing context (skills, repo)",
         epilog="example: flightdeck ingest flightdeck --apply",
     )
     p.add_argument("project", help="project name in the registry")
@@ -905,7 +825,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
         "--limit",
         type=int,
         default=200,
-        help="number of Telegram topic messages to gather (default: %(default)s)",
+        help="(deprecated) was the Telegram topic gather cap; Telegram is "
+        "removed so this flag is ignored",
     )
     p.add_argument(
         "--timeout",
@@ -924,9 +845,9 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p.add_argument(
         "--ask-inline",
         action="store_true",
-        help="synthesise synchronously by asking the orchestrator in chat "
-        "(the default dispatches a kanban card instead; use this for small "
-        "projects that fit the old behaviour)",
+        help="(deprecated) asynchronously ask an injected orchestrator seam; "
+        "Telegram (the default seam) is removed so without an injected ask "
+        "this errors — the default kanban-card dispatch is the way to go",
     )
     p.set_defaults(func=cmd_ingest)
 
