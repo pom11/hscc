@@ -30,30 +30,45 @@ def _fmt_units(units, label):
     )
 
 
+def _sample_of(m):
+    """Extract the telemetry field dict from a per-host metrics entry.
+
+    sparkrun `cluster monitor --json` host rows carry the util/mem/temp fields
+    NESTED under ``sample`` (``{host, error, sample, ...}``), and ``sample`` may
+    be None until a host's first reading. Accept a flat metrics dict too
+    (pre-nesting callers) so both shapes render — consistency with what
+    sparkrun actually returns is the nested read."""
+    if not isinstance(m, dict):
+        return {}
+    s = m.get("sample")
+    return s if isinstance(s, dict) else m
+
+
 def _fmt_metrics(m):
-    """Format a metrics dict into a compact per-node block.
+    """Format a metrics entry into a compact per-node block.
 
     Surfaces VRAM used by the model when available so a loaded-but-idle node
     (0% GPU util, high VRAM) is never misread as broken — see 2b.
     """
+    s = _sample_of(m)
     parts = []
-    cpu_temp = m.get("cpu_temp_c", "")
-    cpu_load = m.get("cpu_load_1m", "")
-    cpu_pct = m.get("cpu_usage_pct", "")
-    mem_used = m.get("mem_used_pct", "")
-    mem_avail = m.get("mem_available_mb", "")
-    gpu = m.get("gpu_name", "")
-    gpu_util = m.get("gpu_util_pct", "")
-    gpu_temp = m.get("gpu_temp_c", "")
-    gpu_power = m.get("gpu_power_w", "")
+    cpu_temp = s.get("cpu_temp_c", "")
+    cpu_load = s.get("cpu_load_1m", "")
+    cpu_pct = s.get("cpu_usage_pct", "")
+    mem_used = s.get("mem_used_pct", "")
+    mem_avail = s.get("mem_available_mb", "")
+    gpu = s.get("gpu_name", "")
+    gpu_util = s.get("gpu_util_pct", "")
+    gpu_temp = s.get("gpu_temp_c", "")
+    gpu_power = s.get("gpu_power_w", "")
 
     parts.append(f"  CPU: {cpu_pct}% | temp {cpu_temp}°C | load {cpu_load}")
     parts.append(f"  MEM: {mem_used}% used ({mem_avail} MB free)")
     if gpu:
         parts.append(f"  GPU {gpu}: {gpu_util}% util | {gpu_temp}°C | {gpu_power}W")
-        vram_pct = m.get("gpu_mem_used_pct", "")
-        vram_used = m.get("gpu_mem_used_mb", "")
-        vram_total = m.get("gpu_mem_total_mb", "")
+        vram_pct = s.get("gpu_mem_used_pct", "")
+        vram_used = s.get("gpu_mem_used_mb", "")
+        vram_total = s.get("gpu_mem_total_mb", "")
         if vram_pct not in ("", None):
             parts.append(f"  VRAM: {vram_pct}% used by model")
         elif vram_used not in ("", None) and vram_total not in ("", None):
@@ -103,7 +118,7 @@ def _gpu_idle_note(node, m):
     this instant — the label is the fix, never the number (2b)."""
     if node.get("state") != "serving":
         return ""
-    util = m.get("gpu_util_pct")
+    util = _sample_of(m).get("gpu_util_pct")
     if util in (0, 0.0, "0", "0.0", "0%"):
         return "  (model loaded, idle between requests)"
     return ""
