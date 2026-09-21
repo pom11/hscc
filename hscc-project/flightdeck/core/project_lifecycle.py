@@ -371,14 +371,17 @@ def ensure_profile(name: str, _run=None) -> str:
     return "created"
 
 
-def _open_profile_session_db(profile: str):
+def _open_profile_session_db(profile: str, read_only: bool = False):
     """Open ``<profile>``'s state.db via Hermes' own SessionDB, or None.
 
     Mirrors ``routes_orchestrator._open_profile_session_db`` (same call
     sequence, same fail-safe-to-None) so this module and the REST chat handler
-    agree on what "the project's session" is. Returns ``None`` when the
-    profile is unresolvable or has no state.db — the caller then reports an
-    honest step failure rather than guessing.
+    agree on what "the project's session" is. ``read_only=True`` opens the DB
+    HERMES-native read-only (``SessionDB(read_only=...)``, the equivalent of
+    ``mode=ro`` on the underlying connection) — used by the discovery paths
+    that must never write to the operator's live session databases. Returns
+    ``None`` when the profile is unresolvable or has no state.db — the caller
+    then reports an honest step failure rather than guessing.
     """
     try:
         from hermes_cli import profiles as profiles_mod
@@ -390,7 +393,7 @@ def _open_profile_session_db(profile: str):
         db_path = Path(profiles_mod.get_profile_dir(canon)) / "state.db"
         if not db_path.exists():
             return None
-        return SessionDB(db_path=db_path)
+        return SessionDB(db_path=db_path, read_only=read_only)
     except Exception:
         return None
 
