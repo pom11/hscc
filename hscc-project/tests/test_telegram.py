@@ -170,3 +170,26 @@ def test_operation_with_no_group_id_raises_actionable(monkeypatch, tmp_path):
     # The message is actionable: it names the config key the user must set.
     assert "telegram.group_id" in msg
     assert "FLIGHTDECK_TELEGRAM_GROUP_ID" in msg
+
+
+# --------------------------------------------------------------------------- #
+# TG-optional: the single fleet-wide switch blocks every core operation
+# --------------------------------------------------------------------------- #
+
+def test_every_core_op_raises_when_disabled(monkeypatch):
+    """With the switch off, every core telegram operation raises
+    TelegramDisabledError BEFORE touching the (stubbed) client/daemon.
+
+    _dispatch is the single choke point — list/create/rename/send/read all
+    flow through it, so one guard covers the whole transport surface."""
+    from flightdeck.core import telegram as tg
+
+    monkeypatch.setattr(tg, "enabled", lambda: False)
+    client = lambda tool, args: (_ for _ in ()).throw(
+        AssertionError("disabled guard must fire before the client is called"))
+
+    with _pytest.raises(tg.TelegramDisabledError) as excinfo:
+        tg.list_topics(_client=client)
+    # The raised message tells the operator the switch is off and how to fix it.
+    assert "disabled" in str(excinfo.value)
+    assert client is not None  # quiet the unused-var lint

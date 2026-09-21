@@ -1003,7 +1003,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
             if args.repos is not None
             else discover_repos(roots, _run=args._run)
         )
-        topics = discover_topics(_client=args.client)
+        # When Telegram is disabled there are no topics to discover — sync is
+        # still fully useful over repos + boards (a project is matched on its
+        # non-topic surfaces; bound projects simply lack the topic dimension).
+        topics = [] if not telegram.enabled() else discover_topics(_client=args.client)
         boards = discover_boards()
     except TopicLockedError as exc:
         print(f"error: {exc}", file=sys.stderr)
