@@ -140,7 +140,11 @@ def _curl_model(node):
 
 def cluster_metrics():
     """One-shot snapshot of CPU/GPU/mem/power metrics across all nodes.
-    Returns dict keyed by IP, or empty dict on failure."""
+
+    Returns ``{host_ip: host_entry}`` keyed by IP, or empty dict on failure.
+    Each host_entry is sparkrun's serialized host row
+    ``{host, error, sample, workloads, ...}`` where the util/mem/temp fields
+    live NESTED under ``sample`` (may be None before a host's first reading)."""
     # sparkrun --json streams continuously — pipe through head -1
     ok, out, err = _run(
         ["bash", "-c", "sparkrun cluster monitor --simple --json 2>/dev/null | head -1"],
@@ -149,9 +153,13 @@ def cluster_metrics():
     if not ok or not out:
         return {}
     try:
-        return json.loads(out).get("hosts", {})
+        hosts = json.loads(out).get("hosts")
     except Exception:
         return {}
+    if not isinstance(hosts, list):
+        return {}
+    return {h.get("host"): h for h in hosts
+            if isinstance(h, dict) and h.get("host")}
 
 
 def _import_cluster_module(name):
