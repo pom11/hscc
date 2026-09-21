@@ -61,7 +61,7 @@ def test_suite_never_writes_live_hscc(tmp_path):
     # cluster's files (watchdog-block.json, autodown.json, agents.json,
     # lifecycle.json, events.jsonl, triggers.json, cooldowns.json, bridge.json,
     # daemon.pid, daemon.log, orch-endpoint, activity.json, state/dgx.json,
-    # gateway.json, watchdog.json, telegram_probe.offset). Any test leaking
+    # gateway.json, watchdog.json). Any test leaking
     # even one write/delete against these MUST trip the manifest diff.
     _plant(ws, "watchdog-block.json", '{"blocked": false, "failures": []}\n')
     _plant(ws, "autodown.json", '{"enabled": false}\n')
@@ -79,7 +79,6 @@ def test_suite_never_writes_live_hscc(tmp_path):
     _plant(ws, "state/watchdog.json", '{"ok": true}\n')
     # activity.json is EVENT-DRIVEN and lives OUTSIDE state/ (at ~/.hscc root):
     _plant(ws, "activity.json", '{"ts": "planted"}\n')
-    _plant(ws, "state/telegram_probe.offset", "0\n")
     # serving.json + profile config.yaml — added (t_2985e00b) because
     # serving.update_orchestrator_followers() rewrites orchestrator-tracking
     # profile config.yaml files. The sandbox must plant those so a regression

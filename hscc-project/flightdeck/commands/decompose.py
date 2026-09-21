@@ -1,6 +1,6 @@
 """decompose.py — `flightdeck decompose <project> "<goal>"`.
 
-Asks the cluster orchestrator (through the project's Telegram topic) to break
+Asks the cluster orchestrator (through an injectable ask seam) to break
 a goal into atomic cards, then GATES the proposal on card quality BEFORE
 anything is created. Card quality is the single strongest predictor of whether
 work lands (measured in docs/FEATURES-2.md): a card phrased abstractly stalled
@@ -29,15 +29,14 @@ is never created — it is reported and the operator re-runs.
 
 The prompt is the shipped ``decompose`` template (G4's ask template machinery
 in :mod:`flightdeck.core.templates`), rendered with the goal injected and the
-project context auto-filled. The sender is NOT duplicated: we reuse
-:mod:`flightdeck.core.telegram` (the existing transport) — send the rendered
-prompt into the project's topic, then read the orchestrator's reply back from
-the same topic.
-
-The whole ask is one injectable seam (``args.ask``: ``(prompt, topic_id) ->
-proposal_text``), defaulting to :func:`_default_ask` (send + read). Tests stub
-it with a fixture, following the ``_client``/``_run`` house convention — no
-test touches Telegram, git, the network or the cluster.
+project context auto-filled. The whole ask is one injectable seam
+(``args.ask``: ``(prompt, topic_id) -> proposal_text``). The default seam was
+:func:`_default_ask`, which sent the prompt into the project's Telegram topic
+and read the reply back — that transport (:mod:`flightdeck.core.telegram`) has
+been REMOVED, so the default now raises :class:`NoReplyError` and a caller must
+inject its own ``ask`` seam (or pass ``--proposal``). Tests stub it with a
+fixture, following the ``_client``/``_run`` house convention — no test touches
+a live network or the cluster.
 
 ## Reference locating
 
@@ -62,9 +61,8 @@ import time as _time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from ..core import kanban, registry, roadmap, telegram, templates
+from ..core import kanban, registry, roadmap, templates
 from ..core.lint import referenced_modules
-from ..core.telegram import Message, TelegramError, TopicLockedError
 
 # A ``.py`` reference with a concrete anchor: ``mod.py:123`` or ``mod.py:func``.
 _CONCRETE_REF_RE = re.compile(r"[A-Za-z0-9_./-]+\.py\s*:\s*[A-Za-z0-9_]+")
@@ -380,33 +378,15 @@ def _render_prompt(
 # The ask seam
 # --------------------------------------------------------------------------- #
 
-# How many recent messages to read per poll. Generous so the reply (plus a
-# multi-part split) stays inside the window even on a busy topic.
-_ASK_READ_N = 100
-# Seconds between polls. Capped by the remaining time to the deadline.
-_ASK_POLL = 2
-# Seconds of quiet AFTER a genuine fragment before we consider the reply
-# complete. The bot splits long answers into "(1/2)", "(2/2)" parts posted back
-# to back; returning the instant the first lands would truncate the answer.
-_ASK_SETTLE = 3
-# Default bound on how long we wait for a genuine reply before raising
-# :class:`NoReplyError` — a day-old message must never be read as the answer.
 _DEFAULT_ASK_TIMEOUT = 300
 
-# Status/progress noise the orchestrator posts around its real answer. These
-# are ack lines ("⏳ Working on it...", "✓ Context compaction done") that carry
-# no answer content and must not be concatenated into the reply.
-_NOISE_PREFIXES = ("⏳ Working", "✓ Context compaction", "✅ Context compaction")
 
+class NoReplyError(Exception):
+    """No reply to the prompt arrived within the timeout.
 
-class NoReplyError(TelegramError):
-    """No genuine reply to the prompt arrived in the topic within the timeout.
-
-    ``raw_reply`` is the concatenated fragments the seam COLLECTED before giving
-    up (empty when nothing was seen). It is carried so the caller can surface
-    the most recent raw reply as a diagnostic under ``RAW REPLY`` — the
-    alternative to a bare count that makes a wrong-shaped answer diagnosable
-    rather than indistinguishable from silence.
+    ``raw_reply`` is any fragments the seam collected before giving up (empty
+    when nothing was seen). It is carried so the caller can surface the most
+    recent raw reply as a diagnostic under ``RAW REPLY``.
     """
 
     def __init__(self, message: str, raw_reply: str | None = None):
@@ -414,235 +394,24 @@ class NoReplyError(TelegramError):
         self.raw_reply = raw_reply
 
 
-def _msg_identity(m: Message) -> tuple:
-    """A stable identity for one message: (timestamp, sender, text).
+def _default_ask(prompt, topic_id, _client=None, *, timeout=300, accept=None, now=None, sleep=None, **kw):
+    """The default orchestrator seam — was Telegram, now removed.
 
-    Messages in a topic are immutable, so this tuple uniquely identifies a
-    message for watermark correlation — a message whose identity was already
-    present before the send is never the reply.
+    Previously sent ``prompt`` to the project's Telegram topic and polled for
+    a JSON reply, correlating by watermark and slicing away status noise.
+    ``core/telegram.py`` (the transport) has been removed, so there is NO
+    default delivery: a caller must inject an ``ask`` seam (or pass
+    ``--proposal``). Raising here keeps the failure honest instead of
+    inventing a proposal.
     """
-
-    return (m.timestamp, m.sender, m.text)
-
-
-def _is_noise(m: Message) -> bool:
-    """True when a message is not an answer fragment (status/progress noise).
-
-    A message the reader could not parse (sender ``(unparsed)``), an empty
-    message, or a status/ack line (``⏳ Working``, ``✓ Context compaction``) is
-    skippable noise — it carries no answer content. Everything else is a
-    genuine fragment that belongs in the concatenated reply.
-    """
-
-    if m.sender == "(unparsed)":
-        return True
-    text = m.text or ""
-    if not text.strip():
-        return True
-    return text.lstrip().startswith(_NOISE_PREFIXES)
-
-
-def _default_ask(
-    prompt: str,
-    topic_id: int,
-    _client=None,
-    *,
-    timeout: float = _DEFAULT_ASK_TIMEOUT,
-    now=None,
-    sleep=None,
-    accept: Callable[[str], bool] | None = None,
-) -> str:
-    """Send the prompt into the topic and poll for a GENUINE reply to it.
-
-    Reuses the existing telegram sender + reader (never duplicates them). The
-    whole ask is one injectable seam; ``now``/``sleep`` are injected so tests
-    drive the clock/sleep and never wait real time.
-
-    The reply is CORRELATED to the prompt instead of being "the newest thing
-    in the topic":
-
-    1. WATERMARK — record every message identity already in the topic BEFORE
-       sending. A message that predates the prompt is NEVER the reply. This is
-       the fix for the live failure where a day-old chain-of-thought block was
-       read as the answer because it happened to be the newest message.
-    2. POLL — read the topic repeatedly until a genuine reply arrives (never
-       once, immediately). Reading once is why a day-old message could win.
-    3. SKIP noise — ``(unparsed)`` fragments, and status lines (``⏳ Working``,
-       ``✓ Context compaction``, empty). Genuine fragments are CONCATENATED in
-       order, so multi-part ``(1/2)``/``(2/2)`` answers are not truncated.
-    4. TIMEOUT — if no genuine reply arrives within ``timeout`` seconds, raise
-       :class:`NoReplyError` so the failure is honest instead of silently
-       answering with old content. The reply is considered complete after
-       ``settle`` quiet seconds following the last fragment, so a split answer
-       is not cut short.
-    5. ACCEPT — an optional ``accept(text)`` predicate. When given, keep
-       polling past any non-matching message until ``accept`` returns True for
-       the concatenated reply (re-tested as every fragment lands — a split
-       answer may only satisfy it once all parts are present) or the timeout
-       expires. Preamble and acknowledgements are skipped automatically. With
-       ``accept`` given, ``(unparsed)`` continuation lines are also preserved
-       into the concatenated reply, so a JSON answer wrapped in a ```json
-       fence (whose tail reads as unparsed continuation) reaches the predicate
-       and is extractable. On timeout the error reports how many messages were
-       seen and rejected, so a wrong-shaped answer is diagnosable rather than
-       silent.
-    """
-    now = now or _time.monotonic
-    sleep = sleep or _time.sleep
-
-    # 1. Watermark: every message already present before we send.
-    msgs = telegram.read_messages(topic_id, n=_ASK_READ_N, _client=_client)
-    watermark = {_msg_identity(m) for m in msgs}
-
-    # 2. Send the prompt.
-    telegram.send_message(topic_id, prompt, _client=_client)
-
-    # 3. Poll for a genuine reply, concatenating fragments in order.
-    collected: list[str] = []
-    seen: set[tuple] = set()
-    last_fragment = now()
-    deadline = now() + timeout
-    while True:
-        remaining = deadline - now()
-        if remaining <= 0:
-            break  # hard timeout: no accepted reply within Ns
-        msgs = telegram.read_messages(topic_id, n=_ASK_READ_N, _client=_client)
-        new_this_poll = False
-        # read_messages returns newest-last; walk oldest-first so fragments
-        # concatenate in the order the bot posted them, and dedupe against
-        # what we already collected (an old fragment re-read is skipped).
-        for m in reversed(msgs):
-            identity = _msg_identity(m)
-            if identity in seen or identity in watermark:
-                continue
-            if m.text == prompt:
-                # Our own just-sent prompt, not a reply to it.
-                seen.add(identity)
-                continue
-            if _is_noise(m):
-                # Not an answer fragment. ``(unparsed)`` continuation lines
-                # carry no sender but may hold the tail of a fenced JSON reply
-                # (the ```json fence, the JSON itself, the closing fence). When
-                # `accept` is given we KEEP them so the predicate — and the
-                # caller — see the full raw reply and can extract the JSON
-                # despite the fence; without `accept` they stay noise (today's
-                # behaviour).
-                if accept is not None and m.sender == "(unparsed)":
-                    seen.add(identity)
-                    collected.append(m.text)
-                    new_this_poll = True
-                else:
-                    seen.add(identity)
-                continue
-            seen.add(identity)
-            collected.append(m.text)
-            new_this_poll = True
-        if not collected:
-            pass  # no fragment yet; keep polling
-        elif accept is not None:
-            # ACCEPT seam: re-test the concatenated reply AS IT GROWS — a split
-            # answer may only satisfy the predicate once every "(1/2)"/"(2/2)"
-            # fragment has landed. This is what lets ingest skip the
-            # orchestrator's "I'll read the ingest context file" preamble and
-            # wait for the reply that actually ANSWERS. Never settle-break on a
-            # non-matching reply: keep polling until accept passes or timeout.
-            if accept("\n".join(collected)):
-                return "\n".join(collected)
-        elif new_this_poll:
-            last_fragment = now()
-        elif (now() - last_fragment) >= _ASK_SETTLE:
-            break  # the reply is complete: quiet since the last fragment
-        sleep(min(_ASK_POLL, remaining))
-
-    # 4. An accepted reply or a clear failure — never old content.
-    if not collected:
-        raise NoReplyError(f"no reply in the topic within {timeout:g}s")
-    # With `accept` given we only get here on a timeout: fragments arrived but
-    # none shaped a reply that satisfied the predicate. Report how many were
-    # seen and rejected so a wrong-shaped answer is diagnosable rather than
-    # indistinguishable from silence.
-    if accept is not None:
-        n = len(collected)
-        raise NoReplyError(
-            f"no accepted reply within {timeout:g}s "
-            f"({n} message{'s' if n != 1 else ''} seen)",
-            raw_reply="\n".join(collected),
-        )
-    return "\n".join(collected)
-
-
-def _proposal_accept(text: str) -> bool:
-    """True when ``text`` already contains a parseable decompose proposal.
-
-    The ``accept`` predicate passed to the ask seam (the decompose analogue of
-    ingest's ``_roadmap_accept``). It reports True ONLY once the growing reply
-    carries a JSON object of the shape decompose expects — a ``cards`` list of
-    mapping entries with ``id``/``title``, i.e. anything :func:`parse_proposal`
-    would accept. It REUSES :func:`parse_proposal` (which reuses
-    :func:`_extract_json`), so the fence-stripping and shape rules are EXACTLY
-    the ones the gate relies on — no second, looser parser. A prose preamble or
-    acknowledgement that contains no such JSON is rejected and the seam keeps
-    polling for the message that actually ANSWERS. This is the fix for the live
-    failure where ``decompose`` grabbed the orchestrator's prose preamble and
-    then failed because it carried no JSON.
-    """
-    try:
-        parse_proposal(text)
-        return True
-    except ProposalParseError:
-        return False
-
-
-def _resolve_project(projects, name: str):
-    """Return ``(project, None)`` or ``(None, error_string)`` (mirrors message.py)."""
-    for proj in projects:
-        if proj.name == name:
-            return proj, None
-    return None, (
-        f"unknown project: {name!r} (check `flightdeck projects list`)"
+    raise NoReplyError(
+        "Telegram (the default orchestrator seam) has been removed; "
+        "decompose requires an injected ask seam or --proposal"
     )
 
 
-def _default_read_milestone(project, milestone_id: str):
-    """Read a milestone's items from the project's ROADMAP.md as the goal.
-
-    Returns ``(goal_text, None)`` on success or ``(None, error_string)``. An
-    unknown milestone id is an error LISTING the ids that DO exist — never a
-    silent empty decomposition. A roadmap with no matching milestone but other
-    valid ids therefore reports them rather than decomposing nothing. This is
-    the injectable ``args.read_milestone`` default; tests stub it.
-    """
-    r = roadmap.project_roadmap(project)
-    if not r.present:
-        return None, (
-            f"no roadmap for project {project.name}: {r.path} does not exist"
-        )
-    m = r.milestone(milestone_id)
-    if m is None:
-        valid = ", ".join(sorted(x.name for x in r.milestones)) or "none"
-        return None, (
-            f"unknown milestone {milestone_id!r} for project {project.name} "
-            f"(valid ids: {valid})"
-        )
-    if not m.items:
-        return None, (
-            f"milestone {milestone_id!r} for project {project.name} has no items"
-        )
-    items = "\n".join(f"- {it.text}" for it in m.items)
-    return items, None
-
-
-
-# --------------------------------------------------------------------------- #
-# Command
-# --------------------------------------------------------------------------- #
-
-def _locked_message(exc: TopicLockedError) -> str:
-    return (
-        f"error: {exc}\n"
-        "hint: another process is probably holding the ~/.hermes-tg session; "
-        "wait a moment and retry."
-    )
+def _locked_message(exc: Exception) -> str:
+    return f"error: {exc}\n"
 
 
 def _print_raw_reply(raw: str) -> None:
@@ -661,6 +430,15 @@ def _print_raw_reply(raw: str) -> None:
     print("-" * 60, file=sys.stderr)
 
 
+def _resolve_project(projects, name: str):
+    """Return ``(project, None)`` or ``(None, error_string)``."""
+    for proj in projects:
+        if proj.name == name:
+            return proj, None
+    known = ", ".join(sorted(p.name for p in projects)) or "none"
+    return None, f"unknown project: {name!r} (known projects: {known})"
+
+
 def cmd_decompose(args: argparse.Namespace, projects: list[registry.Project]) -> int:
     """Decompose a goal: ask the orchestrator, gate the proposal, maybe apply.
 
@@ -673,16 +451,10 @@ def cmd_decompose(args: argparse.Namespace, projects: list[registry.Project]) ->
         print(f"error: {err}", file=sys.stderr)
         return 2
     assert proj is not None  # _resolve_project returns (None, err) on failure
-    if proj.topic is None:
-        print(
-            f"error: project {args.project} has no topic; "
-            f"run: flightdeck project repair {args.project}",
-            file=sys.stderr,
-        )
-        return 2
-    if not telegram.enabled():
-        print(f"error: {telegram.disabled_message()}", file=sys.stderr)
-        return 2
+    # Telegram — the default orchestrator seam — has been removed. decompose
+    # now only works with an injected ``ask`` seam (or ``--proposal``); the
+    # default ask raises NoReplyError with a clear message. We don't hard-fail
+    # here so an injected caller with its own delivery can still run.
     # Resolve the board UP FRONT: the project's OWN board (registry ``board``),
     # falling back to Hermes' current board when the project has none — and we
     # SAY SO, because a silent fallback is how cards end up on the wrong board.
@@ -763,10 +535,7 @@ def cmd_decompose(args: argparse.Namespace, projects: list[registry.Project]) ->
         if raw_reply:
             _print_raw_reply(raw_reply)
         return 2
-    except TopicLockedError as exc:
-        print(_locked_message(exc), file=sys.stderr)
-        return 2
-    except TelegramError as exc:
+    except Exception as exc:  # injected ask seam failure -> report, don't crash
         print(f"error: could not reach the orchestrator: {exc}", file=sys.stderr)
         return 2
 

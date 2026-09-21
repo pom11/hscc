@@ -22,11 +22,11 @@ Behaviour contract:
   state plainly — ``[ok]``, ``[MISSING]`` (nothing there) or ``[UNVERIFIED]``
   (something there, but not confirmable, with the reason) — and only a missing
   ``~/.flightdeck`` is fatal to flightdeck's own use. git, roadmap and lint
-  keep working with no Telegram and no Hermes at all — those absences are
+  keep working with no Hermes at all — those absences are
   reported but never block.
 - Everything external is injectable (``home``, and per-check ``_*`` handles) so
   tests build pass and fail worlds without touching the network, a real board,
-  Telegram, or the operator's real ``~/.flightdeck`` / ``~/.hermes``.
+  or the operator's real ``~/.flightdeck`` / ``~/.hermes``.
 """
 
 from __future__ import annotations
@@ -37,7 +37,6 @@ import shutil
 import sys
 from pathlib import Path
 
-from ..core import probe as _probe
 from ..core import templates as _templates
 
 # The example files init seeds from. Located relative to the package root so a
@@ -59,14 +58,9 @@ DEFAULT_HOME = "~/.flightdeck"
 
 _NEXT_STEPS = """\
 Next steps:
-  1. Set `telegram.group_id` in {config} -- it has no default, and every
-     Telegram command (topics, message, ask, ingest, sync, standup,
-     decompose) fails with a clear message until it is set. Find your
-     group id; a private group id is usually a large negative number like
-     -1001234567890.
-  2. Run `flightdeck project sync --apply` to adopt your existing repos
+  1. Run `flightdeck project sync --apply` to adopt your existing repos
      into the registry.
-  3. Register flightdeck's MCP server with your MCP client so an agent can
+  2. Register flightdeck's MCP server with your MCP client so an agent can
      drive flightdeck:{nl}{nl}    {mcp}{nl}
      Hermes takes the same shape under its `mcp:` config key.
 """
@@ -236,131 +230,6 @@ def _check_hermes_kanban(*, _db_path=None, _open=None) -> dict:
             "detail": f"Hermes kanban DB reachable and readable at {db}"}
 
 
-def _default_probe_client() -> int:
-    """Run a REAL MCP handshake against the configured daemon; return tool count.
-
-    Reuses the SAME transport telegram.py uses to talk to the daemon —
-    ``flightdeck.core.telegram._streamable_http_client`` (the factory helper
-    ``telegram._default_client`` is built on). This is NOT a second transport
-    and NOT a hand-rolled HTTP request: it is the shared streamable-HTTP MCP
-    connection, doing a genuine client ``initialize()`` handshake and a
-    ``list_tools`` so the reported tool count is actually verified.
-
-    Returns the number of tools the daemon exposes. Raises on any failure:
-    connection refused raises (likely a nested ``ConnectionRefusedError``) and
-    a live port that fails the handshake raises the protocol/transport error —
-    the caller classifies which.
-    """
-    import asyncio
-
-    from mcp import ClientSession
-
-    from ..core import config as _cfg
-    from ..core import telegram as _tg
-
-    http_client = _tg._streamable_http_client()
-
-    async def _run() -> int:
-        async with http_client(_cfg.telegram_mcp_url()) as streams:
-            # mcp < 2 yields (read, write, get_session_id); 2.0 yields
-            # (read, write). Take the two stream ends positionally so the
-            # extra element is tolerated rather than required.
-            read, write = streams[0], streams[1]
-            async with ClientSession(read, write) as session:
-                await session.initialize()          # the handshake
-                result = await session.list_tools()  # tool count
-        # mcp < 2 exposes tools under .result.tools; 2.x at .tools.
-        tools = getattr(result, "tools", None)
-        if tools is None:
-            inner = getattr(result, "result", None)
-            tools = getattr(inner, "tools", None)
-        return len(tools) if tools is not None else 0
-
-    return asyncio.run(_run())
-
-
-def _probe_telegram_daemon(_client=None) -> dict:
-    """Production probe: real MCP handshake to the configured daemon.
-
-    Returns a TRI-STATE dict — never collapses distinct outcomes:
-
-    - ``status="ok"``        the handshake completed (and tools were listed);
-                             ``tools`` holds the verified tool count.
-    - ``status="missing"``   nothing is listening (connection refused).
-    - ``status="unverified"`` something IS listening but the handshake did not
-                             complete; ``detail`` names the reason.
-
-    A protocol-level error against a live port is UNVERIFIED, never MISSING.
-    ``_client`` is injectable (tests pass a stub that follows the same contract
-    as ``_default_probe_client``: return tool count or raise). The probe never
-    raises — init always exits 0: git/roadmap/lint work with no Telegram at all.
-    """
-    try:
-        from ..core import config as _cfg
-    except ImportError:  # pragma: no cover - defensive
-        return {"ok": False, "status": "unverified", "tools": 0,
-                "detail": "flightdeck core import failed"}
-    if not _cfg.telegram_enabled():
-        return {"ok": True, "status": "ok", "tools": 0,
-                "detail": "telegram disabled (telegram.enabled=false) — not probed"}
-    try:
-        url = _cfg.telegram_mcp_url()
-    except Exception as exc:  # pragma: no cover - defensive
-        return {"ok": False, "status": "unverified", "tools": 0,
-                "detail": f"could not resolve MCP URL: {exc}"}
-    if not url:
-        return {"ok": False, "status": "unverified", "tools": 0,
-                "detail": "telegram not configured (no mcp_url)"}
-
-    if _client is None:
-        _client = _default_probe_client
-    try:
-        n_tools = _client()
-    except Exception as exc:
-        if _probe.is_connection_refused(exc):
-            return {"ok": False, "status": "missing", "tools": 0,
-                    "detail": f"no Telegram MCP daemon listening at {url} (connection refused)"}
-        return {"ok": False, "status": "unverified", "tools": 0,
-                "detail": (f"something is listening at {url} but the MCP "
-                           f"handshake did not complete: "
-                           f"{type(exc).__name__}: {exc}")}
-    return {"ok": True, "status": "ok", "tools": n_tools,
-            "detail": f"Telegram MCP daemon answered ({n_tools} tools)"}
-
-
-def _check_telegram_daemon(*, _answers=None) -> dict:
-    """Normalize the injected/probed Telegram result into a TRI-STATE dict.
-
-    ``_answers`` is the injectable probe result. Accepted: ``None`` = not
-    probed; a ``callable`` = production probe (attached by ``run``), called to
-    get a result; a ``dict`` = already a tri-state result (production, or a
-    test stub); a bare bool for backward compatibility (``True`` = ok,
-    ``False`` = missing). The dict always carries ``ok``, ``status``
-    (ok|missing|unverified), ``tools``, and ``detail`` — so a live port whose
-    handshake failed is reported UNVERIFIED, never collapsed into MISSING.
-    """
-    if _answers is None:
-        return {"ok": False, "status": "unverified", "tools": 0,
-                "detail": "Telegram MCP daemon not probed (missing config)"}
-    if callable(_answers):
-        _answers = _answers()  # production -> _probe_telegram_daemon tri-state dict
-    if isinstance(_answers, dict):
-        return _answers  # already a tri-state result (production or a dict stub)
-    # Backward-compatible bare bools for tests that predate the tri-state.
-    if _answers is True:
-        return {"ok": True, "status": "ok", "tools": 0,
-                "detail": "Telegram MCP daemon answered"}
-    if _answers is False:
-        return {"ok": False, "status": "missing", "tools": 0,
-                "detail": "Telegram MCP daemon did not answer (connection refused)"}
-    # A legacy string detail survives as UNVERIFIED: something was reachable
-    # but did not complete, so it is NOT reported as missing.
-    if not _answers:
-        return {"ok": True, "status": "ok", "tools": 0,
-                "detail": "Telegram MCP daemon answered"}
-    return {"ok": False, "status": "unverified", "tools": 0, "detail": str(_answers)}
-
-
 # --------------------------------------------------------------------------- #
 # Composition
 # --------------------------------------------------------------------------- #
@@ -383,7 +252,6 @@ def _env_report(args: argparse.Namespace) -> list[tuple[str, dict]]:
             _open=getattr(args, "_hermes_open", None),
         ),
     ))
-    checks.append(("telegram-daemon", _check_telegram_daemon(_answers=getattr(args, "_tg_answer", None))))
     return checks
 
 
@@ -488,11 +356,4 @@ def run(args: argparse.Namespace, registry_path: str) -> int:
     args._which = getattr(args, "_which", None)
     args._hermes_db = getattr(args, "_hermes_db", None)
     args._hermes_open = getattr(args, "_hermes_open", None)
-    # Production Telegram probe: `_probe_telegram_daemon` (a callable, called
-    # by _check_telegram_daemon). Tests may substitute a bare bool.
-    args._tg_answer = (
-        _probe_telegram_daemon
-        if getattr(args, "_tg_answer", None) is None
-        else getattr(args, "_tg_answer", None)
-    )
     return cmd_init(args)

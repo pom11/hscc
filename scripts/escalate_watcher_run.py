@@ -2,8 +2,8 @@
 """Escalate repeatedly-failing kanban tasks, and alert the human when the
 strong tier also fails.
 
-Run on the gateway via Hermes native cron (``--no-agent --deliver telegram``):
-the script's stdout is delivered verbatim to the HSCC Telegram group, so an
+Run on the gateway via Hermes native cron (``--no-agent --deliver desktop``):
+the script's stdout is delivered verbatim via desktop notification, so an
 empty run stays silent and only real escalations produce a message.
 
 For each task with ``consecutive_failures >= fail_limit``
@@ -73,7 +73,7 @@ def main():
     notified = _load_notified()
     before = set(notified)
 
-    # Drive the human alert off stdout (Telegram), not the desktop notifier:
+    # Drive the human alert off stdout (desktop delivery), not the notifier:
     # the returned actions + the before/after dedup diff decide what we print.
     actions = escalate_watcher.scan_and_escalate(
         fail_limit=FAIL_LIMIT,

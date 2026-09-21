@@ -1,6 +1,6 @@
 # HSCC Monitoring Daemon
 
-Continuous monitoring daemon for the DGX Spark cluster. Runs a 60s cycle of health checks. **Workers** are auto-healed: each keep-alive serving unit is health-checked per (node, port) — so co-located multi-model nodes are supervised independently — and a crashed one is relaunched with its own recipe + port. If a worker unit stays DOWN across `HSCC_WORKER_AUTOHEAL_DEBOUNCE` consecutive checks (default 3 ≈ 90s), the watchdog escalates to a **force-recreate** of that unit by re-applying the currently applied template (`template apply <applied> --confirm --force-recreate`) — this heals a unit whose container is "Up" in docker but whose vLLM never answers (a plain `--ensure` relaunch no-ops on it), debounced and cooldown-guarded so it never fights a slow load or spins. An **orchestrator** wedge is NOT auto-restarted (too disruptive): the daemon alerts via Telegram + the active fallback keeps the gateway answering, and a human runs `/cluster-restart` (which re-applies the active template). On startup it also self-cleans dead `~/.hscc` cruft (`.corrupt`/`.stale` + uncapped `.bak`).
+Continuous monitoring daemon for the DGX Spark cluster. Runs a 60s cycle of health checks. **Workers** are auto-healed: each keep-alive serving unit is health-checked per (node, port) — so co-located multi-model nodes are supervised independently — and a crashed one is relaunched with its own recipe + port. If a worker unit stays DOWN across `HSCC_WORKER_AUTOHEAL_DEBOUNCE` consecutive checks (default 3 ≈ 90s), the watchdog escalates to a **force-recreate** of that unit by re-applying the currently applied template (`template apply <applied> --confirm --force-recreate`) — this heals a unit whose container is "Up" in docker but whose vLLM never answers (a plain `--ensure` relaunch no-ops on it), debounced and cooldown-guarded so it never fights a slow load or spins. An **orchestrator** wedge is NOT auto-restarted (too disruptive): the daemon logs the alert while the active fallback keeps the gateway answering, and a human runs `/cluster-restart` (which re-applies the active template). On startup it also self-cleans dead `~/.hscc` cruft (`.corrupt`/`.stale` + uncapped `.bak`).
 
 ## Installation
 
@@ -18,12 +18,6 @@ Create `~/.hscc/daemon/config.json`:
     "gateway": {"url": "http://localhost:18789/health"},
     "container": {"id": "hscc-orchestrator"},
     "nas": {"host": "nas.local", "path": "/", "key_path": null}
-  },
-  "telegram": {
-    "chat_id": "YOUR_CHAT_ID",
-    "bot_token": "YOUR_BOT_TOKEN",
-    "max_restarts": 1,
-    "max_alerts_per_60s": 5
   }
 }
 ```
@@ -44,7 +38,7 @@ Create `~/.hscc/daemon/config.json`:
 | Status | Meaning | Action |
 |--------|---------|--------|
 | `healthy` | Explicit success | No action |
-| `unhealthy` | Explicit failure | Worker: auto-relaunch (per node:port). Orchestrator: Telegram alert + fallback (human runs `/cluster-restart`). |
+| `unhealthy` | Explicit failure | Worker: auto-relaunch (per node:port). Orchestrator: alert + fallback (human runs `/cluster-restart`). |
 | `unknown` | Timeout / connection refused | Warn only (no restart) |
 
 ## File Layout
@@ -75,7 +69,7 @@ Create `~/.hscc/daemon/config.json`:
 1. **Max 1 restart per cycle** — prevents restart loops
 2. **10s timeout per handler** — no blocking on slow checks
 3. **unknown ≠ unhealthy** — timeouts don't trigger restarts
-4. **Telegram rate-limited** — max 5 alerts per 60s
+4. **Alert rate-limited** — max 5 alerts per 60s
 5. **Handler exceptions caught** — one handler crash doesn't kill the daemon
 6. **Graceful shutdown** — current cycle finishes before exit
 
@@ -86,5 +80,4 @@ Create `~/.hscc/daemon/config.json`:
 | `config.json not found` | Create it with defaults + your values |
 | `docker: not found` | Ensure docker CLI is in PATH |
 | `SSH to NAS fails` | Check host, SSH key, and network |
-| `Telegram not sending` | Verify chat_id and bot_token in config |
 | `Daemon won't start` | Run `hscc_daemon check` for self-diagnostic |

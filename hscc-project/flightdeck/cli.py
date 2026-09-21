@@ -2,11 +2,9 @@
 
 Entry point (see pyproject.toml): ``flightdeck = flightdeck.cli:main``.
 
-The skeleton shipped subcommand stubs that exit 2 until each card lands its
-module. This card implements ``topics``; ``topics`` is now a real subcommand
-built by :func:`~flightdeck.commands.topics.build_subparser` and dispatched to
-:func:`~flightdeck.commands.topics.run`. The remaining subcommands keep their
-not-implemented stub.
+Subcommands are implemented as their own modules under ``flightdeck.commands``
+and auto-discovered. Commands with no ``build_subparser``/``run`` implementation
+keep a not-implemented stub that exits 2 with a clear message.
 """
 
 from __future__ import annotations

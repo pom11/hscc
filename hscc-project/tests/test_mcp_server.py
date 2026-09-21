@@ -25,7 +25,6 @@ import pytest
 from flightdeck import mcp_server
 from flightdeck.core import git_state, registry
 from flightdeck.core.registry import Project
-from flightdeck.core.telegram import Topic
 from flightdeck.commands import (
     standup,
     qa,
@@ -36,7 +35,6 @@ from flightdeck.commands import (
     project,
     why,
     metrics,
-    topics,
 )
 
 # A clock advanced just past the stale threshold so an in-flight card with zero
@@ -118,8 +116,6 @@ EXPECTED_TOOLS = {
     "flightdeck_legacy_cards",
     "flightdeck_why",
     "flightdeck_metrics",
-    "flightdeck_topics_list",
-    "flightdeck_topics_audit",
 }
 
 
@@ -221,22 +217,14 @@ def test_qa_thin_adapter_with_project_filter(monkeypatch):
 def test_doctor_thin_adapter(monkeypatch):
     """flightdeck_doctor == `flightdeck doctor` for the same fixture.
 
-    doctor's board/topic checks are injected (kanban.list_boards + telegram
-    topic list) so no network is touched; the equality proves the adapter.
+    doctor's board check is injected (kanban.list_boards) so no network is
+    touched; the equality proves the adapter.
     """
     projects = [_project(topic=140)]
-    # Note: doctor reads topics via telegram.list_topics(_client=args.client);
-    # args.client defaults to None via doctor.run, and list_topics has its own
-    # default client. We stub telegram.list_topics directly so no real client
-    # is ever built.
     monkeypatch.setattr(
         registry, "load_registry", lambda path: projects,
     )
     monkeypatch.setattr(doctor.kanban, "list_boards", lambda: ["hscc"])
-    monkeypatch.setattr(
-        doctor.telegram, "list_topics",
-        lambda *a, **k: [Topic(id=140, name="HSCC cluster")],
-    )
     monkeypatch.setattr(doctor.git_state, "head_sha",
                         lambda *a, **k: "a" * 40)
     monkeypatch.setattr(doctor, "_repo_ok", lambda proj, **k: {"ok": True, "detail": "repo ok"})
@@ -253,7 +241,6 @@ def test_doctor_reports_unverifiable_project(monkeypatch):
         lambda path: [_project(repo="/missing/repo", topic=None)],
     )
     monkeypatch.setattr(doctor.kanban, "list_boards", lambda: ["hscc"])
-    monkeypatch.setattr(doctor.telegram, "list_topics", lambda *a, **k: [])
     monkeypatch.setattr(doctor, "_repo_ok",
                         lambda proj, **k: {"ok": False, "detail": "repo path missing"})
 
@@ -542,47 +529,6 @@ def test_metrics_thin_adapter(monkeypatch):
     got = mcp_server.flightdeck_metrics()
     # Equality is by construction (same run() path + seeded empty-board facts).
     assert got == cli or "metrics" in got.lower()
-
-
-def _fake_topics_client(*a, **k):
-    return [Topic(id=140, name="HSCC cluster"), Topic(id=142, name="Acme web")]
-
-
-def test_topics_list_thin_adapter(monkeypatch):
-    """flightdeck_topics_list == `flightdeck topics list` for the same fixture."""
-    monkeypatch.setattr(registry, "load_registry",
-                        lambda path: [_project(name="hscc", board="hscc",
-                                               repo="/repo", topic=140)])
-    monkeypatch.setattr(topics.telegram, "list_topics", _fake_topics_client)
-
-    cli = _cli_output(
-        topics,
-        argparse.Namespace(json=False, func=topics.cmd_list),
-    )
-    assert mcp_server.flightdeck_topics_list() == cli
-    assert "140" in cli and "HSCC cluster" in cli
-
-
-def test_topics_audit_thin_adapter(monkeypatch):
-    """flightdeck_topics_audit == `flightdeck topics audit` for the same fixture.
-
-    A topic whose current name differs from its registry-mapped name is a
-    [MISMATCH]; a topic with no project mapping is [UNMAPPED].
-    """
-    monkeypatch.setattr(registry, "load_registry",
-                        lambda path: [_project(name="hscc", board="hscc",
-                                               repo="/repo", topic=140)])
-    monkeypatch.setattr(topics.telegram, "list_topics", lambda *a, **k: [
-        Topic(id=140, name="RENAMED"),       # mismatched vs registry name "hscc"
-        Topic(id=999, name="orphan"),        # no project mapping -> unmapped
-    ])
-
-    cli = _cli_output(
-        topics,
-        argparse.Namespace(json=False, func=topics.cmd_audit),
-    )
-    assert mcp_server.flightdeck_topics_audit() == cli
-    assert "MISMATCH" in cli and "UNMAPPED" in cli
 
 
 # --------------------------------------------------------------------------- #
