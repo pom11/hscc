@@ -1063,6 +1063,58 @@ bytes, files) so nothing silently dropped.
 
 ---
 
+### `flightdeck map-sessions`
+
+PROPOSE a project owner for every Telegram session whose `thread_id` is NULL —
+the sessions `archive-sessions` files under `unmapped/` because no topic can
+name them. The operator wants each mapped to one of the 12 registry projects so
+they can be re-filed; a naive string match misattributes ("pom" matches
+"compose", sphoin's topic id `2` matches every bare "2"), so this command
+resolves conservatively and **proposes, never silently applies**.
+
+**Two passes, cheapest and safest first:**
+
+1. **Deterministic (repo-path).** Match each project's repo path in every form
+   it appears in content (full path, `/dev/<name>`, `~/dev/<name>`,
+   `/tmp/<name>`, `/Volumes/NAS/<name>`, plus HSCC's daemon home
+   `~/.hermes/plugins`). A session whose words mention **exactly one** project's
+   repo path resolves at `high` confidence, method `repo-path`, with the matched
+   path as evidence — no model, no cost.
+2. **Orchestrator (model) for the remainder.** A session with no unambiguous
+   repo-path hit (silent, or ambiguous between projects) gets a **bounded
+   sample** (first 6 + last 4 user/assistant messages, tool dumps skipped, 20 KB
+   cap) sent to an injectable `ask(sample, session_id)` callback that returns
+   one of the registry names, `unknown`, or `None`. The default fails **closed**
+   to `unknown` / method `none` when no orchestrator transport is reachable — a
+   wrong attribution is worse than none, and a hung ask must never stall the run.
+
+`unknown` is a first-class answer. Every result is a **reviewable proposal** —
+per session: id, msgs, dates, proposed project, **method**, confidence, and the
+**evidence** (matched path or the model's one-line reason) — written as Markdown
+(human) + JSON (tooling) under the proposal output root.
+
+**PROPOSE, never apply.** The default run is **READ-ONLY** on `state.db` and
+writes **no** registry/board/DB state — only the proposal report files.
+`--apply` is a SEPARATE, explicit step that persists the machine `mapping.json`
++ a Markdown changelog recording exactly what it changed. It is **reversible**
+(files only: delete the two files it wrote; it never touches `state.db`).
+
+**Real totals are reported** so the operator knows coverage: resolved
+deterministically / resolved by model / left unknown, per project.
+
+**Args:**
+
+| Flag | Meaning |
+|---|---|
+| `--out DIR` | Proposal output root. Default `~/.hermes/archive/telegram/proposals` (private hermes home, not a git checkout). |
+| `--apply` | The separate, explicit, reversible apply step: write `mapping.json` + a changelog (files only, never `state.db`). Omit for a read-only proposal. |
+| `--ask-module module:function` | Orchestrator callback `(bounded_sample, session_id) -> a project name, 'unknown', or None`. Default fails closed to `unknown`/`none` when no transport is set. |
+| `--json` | (top-level global flag) emit the proposal as machine-readable JSON. |
+
+**Reachable as** `hscc project map-sessions`.
+
+---
+
 ## Quick reference: mutability at a glance
 
 | Command | Mutates? | Gate |
@@ -1093,6 +1145,7 @@ bytes, files) so nothing silently dropped.
 | update | Yes (updates the tool itself) | `--apply` |
 | incident | Yes (appends to INCIDENTS.md) | `--apply` |
 | archive-sessions | No (read-only export) | — |
+| map-sessions | No by default (read-only proposal); files-only mapping with `--apply` | `--apply` |
 
 ---
 
