@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 
 from ..core import git_state, project_lifecycle, registry
+from ..core import session_discovery
 
 # --------------------------------------------------------------------------- #
 # Orchestrator resolver (reused from hscc-roles so CLI/REST/WS never disagree)
@@ -425,14 +426,60 @@ def _valid_names(registry_path) -> list[str]:
     return list_registry_projects(registry_path)
 
 
+def _resume_argv(resume_id: str, discovery: dict) -> tuple[str, list] | None:
+    """Pick ``(profile, argv)`` for ``--resume <id>`` from a discovery result.
+
+    The id may name the project's orchestrator session (on ``<name>-orch``) or
+    a telegram session belonging to the project (on the DEFAULT profile). Both
+    are resumable; the difference is ONLY the profile hermes must run under —
+    get this wrong and `hermes --resume` looks in the wrong profile's DB and
+    reports the session missing. Returns ``None`` when the id is not one of the
+    project's sessions (the caller fails loudly rather than guessing).
+    """
+    orch = discovery.get("orchestrator") or {}
+    if orch.get("id") == resume_id:
+        return (discovery["orch_profile"], ["hermes", "-p", discovery["orch_profile"], "--resume", resume_id])
+    for row in discovery.get("telegram", []):
+        if row.get("id") == resume_id:
+            return (discovery["telegram_profile"], ["hermes", "-p", discovery["telegram_profile"], "--resume", resume_id])
+    return None
+
+
+def _print_history_note(discovery: dict) -> None:
+    """Print a TTY note when a project has Telegram history to discover.
+
+    Does NOT auto-resume: telegram sessions are a different thread and merging
+    identities silently is worse than the current behaviour. The note points at
+    ``project sessions`` and ``--resume``. Writes to stdout (operator-facing),
+    matching the identity banner; stderr stays reserved for fail-non-zero.
+    """
+    rows = discovery.get("telegram", [])
+    if not rows:
+        return
+    total_msgs = sum(r.get("message_count") or 0 for r in rows)
+    plural = "" if len(rows) == 1 else "s"
+    print(
+        f"note: {len(rows)} earlier telegram session{plural} for this project "
+        f"({total_msgs} msgs) — `hscc project sessions {discovery['project']}` "
+        f"to list, `--resume <id>` to open"
+    )
+
+
 def cmd_chat(args: argparse.Namespace) -> int:
-    """`hscc project chat [name] [-- <hermes args>]` — interactive hermes.
+    """`hscc project chat [name] [--resume <id>] [-- <hermes args>]` — interactive hermes.
 
     Resolves the project → orchestrator identity exactly as the REST chat
     handler does (``resolve_orchestrator``), ensures the permanent session
     exists (creating it on first use, idempotently), prints a banner naming
     the identity the operator is about to speak as, then EXECs hermes
     interactively — a real TTY, stdout never captured, no -q/-Q.
+
+    ``--resume <session_id>`` opens a SPECIFIC session by id instead of the
+    orchestrator thread: a telegram session for the project (lives on the
+    DEFAULT profile) or the orchestrator session itself. The id is validated
+    against the project's discovered sessions so a typo never silently opens a
+    fresh, wrong identity. When the project has Telegram history and no resume
+    id is given, a note says so rather than silently starting fresh.
 
     Unknown project: fail loudly, exit 2, and list the valid names. We never
     fall back to a default project or the general orchestrator — silently
@@ -462,6 +509,19 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
     profile = resolved["profile"]
     session = resolved["session"]
+
+    resume_id = getattr(args, "resume_id", None)
+    if resume_id:
+        return _cmd_chat_resume(name, resume_id, args, resolved)
+
+    # Surface any discoverable Telegram history BEFORE attaching, so the
+    # operator is never left thinking a project with months of real work is
+    # empty. Read-only through hermes' own API (see session_discovery).
+    discovery = session_discovery.list_project_sessions(
+        name, path=args.registry,
+        _session_db=args.session_db, _default_db=args.default_db,
+    )
+    _print_history_note(discovery)
 
     # A brand-new project has no session yet; CREATE it on first use so the
     # subsequent `--continue <session>` resolves. Idempotent, never clobbers.
@@ -497,6 +557,125 @@ def cmd_chat(args: argparse.Namespace) -> int:
     # tests (and is unreachable in production).
     exec_seam("hermes", argv)
     return 0
+
+
+def _cmd_chat_resume(name: str, resume_id: str, args, resolved: dict) -> int:
+    """Exec hermes resuming ``resume_id`` on the project session's right profile.
+
+    Resolves the resume target against the project's discovered sessions so a
+    typo'd or foreign session id fails loudly instead of silently starting a
+    fresh, wrong identity. The orchestrator session resumes on ``<name>-orch``;
+    a telegram session resumes on the DEFAULT profile (get this wrong and
+    ``hermes --resume`` looks in the wrong profile's DB and reports "not found").
+    """
+    discovery = session_discovery.list_project_sessions(
+        name, path=args.registry,
+        _session_db=args.session_db, _default_db=args.default_db,
+    )
+    target = _resume_argv(resume_id, discovery)
+    if target is None:
+        valid = (
+            f"  {discovery['orch_profile']}: {discovery['orchestrator']['id']}"
+            if discovery.get("orchestrator") else ""
+        )
+        telegram = ", ".join(
+            r["id"] for r in discovery.get("telegram", [])
+        ) or "(none for this project)"
+        print(
+            f"project chat: no session '{resume_id}' belongs to project "
+            f"{name!r}.\n"
+            f"  this project's sessions:\n"
+            f"  {valid}\n"
+            f"  {discovery['telegram_profile']} (telegram): {telegram}",
+            file=sys.stderr,
+        )
+        return 2
+
+    profile, argv = target
+    print(f"project {name} -> profile {profile}, resuming session '{resume_id}'")
+    exec_seam = getattr(args, "exec_seam", None) or os.execvp
+    exec_seam("hermes", argv)
+    return 0
+
+
+def cmd_sessions(args: argparse.Namespace) -> int:
+    """`hscc project sessions <name>` — every session belonging to a project.
+
+    Lists the project's sessions — the permanent CLI orchestrator session AND
+    the Telegram ones whose ``thread_id`` equals the project's registry
+    ``topic`` — with id, title, message count, first/last activity and source,
+    newest first. Read-only: it opens every state.db through Hermes' own
+    ``SessionDB`` in read-only mode; nothing is ever written.
+
+    Name & ordering: called ``sessions`` (not ``history`` / ``list``) to match
+    ``hermes sessions`` — the CLI the data actually comes from — so the
+    subcommand reads as "the project's view of *those* sessions". Actually
+    ``sessions`` also shadows nothing in ``project`` and reads naturally:
+    ``hscc project sessions <name>``.
+    """
+    name = args.name
+    try:
+        discovery = session_discovery.list_project_sessions(
+            name, path=args.registry,
+            _session_db=args.session_db, _default_db=args.default_db,
+        )
+    except UnknownProjectError as exc:
+        valid = _valid_names(args.registry)
+        listed = ", ".join(valid) if valid else "(none registered)"
+        print(f"project sessions: {exc}\nvalid projects: {listed}", file=sys.stderr)
+        return 2
+    except OrchestratorError as exc:
+        print(f"project sessions: {exc}", file=sys.stderr)
+        return 2
+
+    topic = discovery.get("topic")
+    print(f"project {name} sessions (topic "
+          f"{topic if topic is not None else '(none)'}, "
+          f"telegram profile {discovery['telegram_profile']}):")
+    # Orchestrator session first (the primary identity), then telegram newest-first.
+    orch = discovery.get("orchestrator")
+    if orch:
+        print(_format_session_row(orch, discovery["orch_profile"], current=True))
+    else:
+        print(
+            f"  {discovery['orch_profile']}: (no orchestrator session found)\n"
+            f"    - `hscc project chat {name}` creates it on first use"
+        )
+    if discovery["telegram"]:
+        for row in discovery["telegram"]:
+            print(_format_session_row(row, discovery["telegram_profile"], current=True))
+    else:
+        reason = (
+            "project has no telegram topic"
+            if topic is None
+            else f"no telegram sessions on thread {topic}"
+        )
+        print(f"  {discovery['telegram_profile']}: (no telegram history — {reason})")
+    return 0
+
+
+def _format_session_row(row: dict, profile: str, *, current: bool = False) -> str:
+    """One human-readable ``sessions`` line: id, title, msgs, activity, source."""
+    first = _fmt_time(row.get("first"))
+    last = _fmt_time(row.get("last"))
+    marker = " *" if current else "  "
+    src = f"{row['source']} ({profile})"
+    msgs = row.get("message_count", 0)
+    return (
+        f"{marker} {src:<24} {msgs:>4} msgs  {first} .. {last}\n"
+        f"    {row.get('id')}  {row.get('title')}"
+    )
+
+
+def _fmt_time(ts) -> str:
+    """Format a hermes timestamp (float epoch) to a compact ISO/Y-M-D, or '—'."""
+    if not ts:
+        return "—"
+    try:
+        import datetime as _dt
+        return _dt.datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return str(ts)
 
 
 # --------------------------------------------------------------------------- #
@@ -558,9 +737,16 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                            epilog="example: flightdeck project chat flightdeck   (attaches to the permanent orchestrator thread the app uses)")
     sp.add_argument("name", nargs="?", default=None,
                     help="project name (default: detect from the current directory)")
+    sp.add_argument("--resume", dest="resume_id", metavar="SESSION_ID", default=None,
+                    help="resume a SPECIFIC session by id (a telegram session for this project, on the DEFAULT profile, or the orchestrator session) instead of attaching to the orchestrator thread")
     sp.add_argument("extra", nargs=argparse.REMAINDER,
                     help="trailing args passed through to hermes (after --), e.g. '-- --resume <id>'")
     sp.set_defaults(func=cmd_chat)
+
+    sp = subsub.add_parser("sessions", help="list every session belonging to a project (orchestrator + telegram), newest first",
+                           epilog="example: flightdeck project sessions flightdeck   (resolves registry topic -> sessions.thread_id on the DEFAULT profile; read-only)")
+    sp.add_argument("name", help="project name in the registry")
+    sp.set_defaults(func=cmd_sessions)
 
 
 def _add_apply(sp: argparse.ArgumentParser) -> None:
@@ -588,6 +774,7 @@ def run(args: argparse.Namespace, registry_path: str) -> int:
     args.client = getattr(args, "client", None)
     args.kanban = getattr(args, "kanban", None)
     args.session_db = getattr(args, "session_db", None)
+    args.default_db = getattr(args, "default_db", None)
     args.cwd = getattr(args, "cwd", None)
     args.exec_seam = getattr(args, "exec_seam", None)
 
