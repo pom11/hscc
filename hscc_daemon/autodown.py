@@ -677,6 +677,22 @@ def _load_kanban_db_or_default():
         _note_kanban_unavailable(
             f"could not import hermes_cli.kanban_db from {hermes_path!r}: {e}")
         return None
+    # ``connect``/``connect_closing`` moved to ``hermes_cli.kanban_db_connect``;
+    # ``kanban_db.connect`` is a removal-scheduled compat shim that emits
+    # HermesPluginCompatWarning. Bind the canonical callables from the new
+    # module onto ``kanban_db`` so ``.connect`` / ``.connect_closing`` resolve
+    # from __dict__ (never the shim). Do NOT make this a hard gate: a Hermes
+    # with only the pre-move path still works (its ``kanban_db.connect`` is a
+    # native compat shim there — no warning) — only bind what the new module
+    # provides, silently falling back otherwise.
+    try:
+        from hermes_cli import kanban_db_connect  # noqa: PLC0415
+    except Exception:
+        kanban_db_connect = None
+    if kanban_db_connect is not None:
+        for _n in ("connect", "connect_closing"):
+            if hasattr(kanban_db_connect, _n):
+                setattr(kanban_db, _n, getattr(kanban_db_connect, _n))
     _KANBAN_LOAD["ok"] = True
     _KANBAN_LOAD["reason"] = ""
     return kanban_db

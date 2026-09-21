@@ -89,6 +89,18 @@ def scan_and_escalate(*, fail_limit=3, strong_profile="architect",
     if _kb is None:
         try:
             from hermes_cli import kanban_db as _kb
+            # ``connect`` moved to ``hermes_cli.kanban_db_connect``; ``kanban_db``
+            # retains it only as a removal-scheduled compat shim that emits
+            # HermesPluginCompatWarning. Bind the canonical version from the new
+            # module unless a test already set it explicitly on the module (only
+            # ``connect_closing`` is used here, but bind both for consistency).
+            if "connect" not in _kb.__dict__:
+                try:
+                    from hermes_cli import kanban_db_connect as _kbc  # noqa: PLC0415
+                    _kb.connect = _kbc.connect
+                    _kb.connect_closing = _kbc.connect_closing
+                except Exception:
+                    pass
         except Exception:
             return []
 
