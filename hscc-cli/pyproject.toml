@@ -7,7 +7,7 @@ name = "hscc-cli"
 version = "2026.6.15"
 description = "HSCC CLI — Hermes Spark Cluster Control command-line interface"
 requires-python = ">=3.10"
-dependencies = ["click"]
+dependencies = ["rich>=13,<16"]
 
 [project.scripts]
 hscc = "hscc_cli:main"
