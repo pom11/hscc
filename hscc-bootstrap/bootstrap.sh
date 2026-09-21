@@ -18,7 +18,6 @@ PYBIN="$HERMES_HOME/hermes-agent/venv/bin/python"
 
 ASSUME_YES=false; FORCE=false; NO_BACKUP=false
 SKIP_SKILLS=false; SKIP_ROLES=false; SKIP_DAEMON=false; SKIP_PATCHES=false
-HSCC_TELEGRAM="${HSCC_TELEGRAM:-}"
 for a in "$@"; do case "$a" in
   --yes|-y) ASSUME_YES=true ;;
   --force) FORCE=true ;;
@@ -27,9 +26,7 @@ for a in "$@"; do case "$a" in
   --skip-roles) SKIP_ROLES=true ;;
   --skip-daemon) SKIP_DAEMON=true ;;
   --skip-patches) SKIP_PATCHES=true ;;
-  --telegram=yes) HSCC_TELEGRAM=yes ;;
-  --telegram=no) HSCC_TELEGRAM=no ;;
-  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches] [--telegram=yes|no]"; exit 0 ;;
+  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches]"; exit 0 ;;
   *) echo "Unknown option: $a" >&2; exit 1 ;;
 esac; done
 
@@ -91,18 +88,6 @@ if [ -n "$RECIPE" ]; then
 else
   warn "no recipes found in $RECIPES_DIR — serving.json model will be blank"
   MODEL=""
-fi
-
-# Telegram: OPTIONAL out-of-band fallback. ASK rather than assume, default No.
-# Resolved by telegram_choice.py — HSCC_TELEGRAM env override → --yes documented
-# default (No) → interactive prompt. Declining must never break an install.
-TG_ARGS=""; $ASSUME_YES && TG_ARGS="--yes"
-TG_JSON=$(HSCC_TELEGRAM="${HSCC_TELEGRAM:-}" "$PYBIN" "$BOOT_DIR/telegram_choice.py" $TG_ARGS 2>/dev/null)
-TELEGRAM=$(echo "$TG_JSON" | "$PYBIN" -c 'import sys,json;print(json.load(sys.stdin)["telegram"])' 2>/dev/null || echo no)
-if [ "$TELEGRAM" = "yes" ]; then
-  ok "telegram: enabled (optional out-of-band fallback)"
-else
-  warn "telegram: declined — HSCC runs fully without it (cluster ops, kanban, dispatch, API unaffected)"
 fi
 
 # Suggest a cluster template matching the detected host count (suggestion only;
@@ -226,33 +211,13 @@ if $SKIP_PATCHES; then warn "skipped"; else
 fi
 
 hdr "Install: enable HSCC plugins + toolsets"
-# Thread the resolved Telegram interview decision through so enable_plugins can
-# seed ~/.flightdeck/config.yaml with telegram.enabled: true (--telegram=yes)
-# or false (the default no) — only when the key is ABSENT, never overwriting an
-# operator's explicit value (mirrors the approvals.single_query_mode wiring).
-WIRED=$(HSCC_TELEGRAM="${TELEGRAM:-no}" "$PYBIN" "$BOOT_DIR/enable_plugins.py" 2>/dev/null) && ok "config wired ($WIRED)" || warn "plugin/toolset enable reported issues"
+# Seed the general plugin/toolset wiring in ~/.flightdeck/config.yaml
+# (plugins.enabled, toolsets, kanban, delegation, compaction, fallback
+# provider). Call enable_plugins.py without any extra env.
+WIRED=$("$PYBIN" "$BOOT_DIR/enable_plugins.py" 2>/dev/null) && ok "config wired ($WIRED)" || warn "plugin/toolset enable reported issues"
 
 hdr "Install: agent instructions (SOUL + ops personality)"
 INSTR=$("$PYBIN" "$BOOT_DIR/install_soul.py" 2>/dev/null) && ok "$INSTR" || warn "SOUL/personality update reported issues"
-
-hdr "Install: worker Telegram credential hygiene"
-# Telegram is optional. Stripping seeded creds from worker role profiles is
-# part of wiring Telegram CORRECTLY (only the `default` profile should hold the
-# bot token). When Telegram is DECLINED we SKIP — never strip or destroy any
-# operator's existing config. Clear ok/warn, never a silent skip or a hard die.
-if [ "$TELEGRAM" != "yes" ]; then
-  warn "telegram declined — skipping worker credential hygiene (existing Telegram config untouched)"
-else
-  # Comment out TELEGRAM_* vars in non-default role profiles so the multiplex
-  # gateway does not log ~24 ERROR lines on each restart (0.19+). Non-fatal:
-  # a failure here should warn, not die.
-  if STRIP_JSON=$("$PYBIN" "$BOOT_DIR/strip_worker_telegram.py" 2>/dev/null); then
-    STRIP_N=$("$PYBIN" -c "import sys,json;print(json.loads(sys.argv[2])['scanned'])" _ "$STRIP_JSON" 2>/dev/null || echo 0)
-    ok "worker telegram creds stripped ($STRIP_N profiles)"
-  else
-    warn "strip_worker_telegram failed (profiles may still hold seeded Telegram creds)"
-  fi
-fi
 
 hdr "Install: ensure kanban review feature in Hermes runtime"
 # Re-apply the kanban_submit_review / auto_review feature (upstream PR #43425)
