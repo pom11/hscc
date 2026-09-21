@@ -11,21 +11,17 @@ mirrors message.py in the house convention: the operations live under it.
 ``ask`` renders a stored template, fills it with context flightdeck ALREADY
 knows about the project (never retyped — project name, repo, branch, HEAD sha,
 ROADMAP "Now" items, open + awaiting-review cards, verify command), applies any
-``--set`` overrides, and sends the result to that project's topic. All render
-and context logic lives in :mod:`flightdeck.core.templates`; the send reuses
-:mod:`flightdeck.core.telegram` (the same sender ``message send`` uses — no
-second sender is written).
+``--set`` overrides, and prints the result. All render and context logic lives
+in :mod:`flightdeck.core.templates`. Telegram (the only outbound topic-delivery
+surface) has been removed, so the rendered prompt is printed to stdout rather
+than sent to a topic.
 
 Behavior contract (docs/FEATURES-2.md "P0 — prompt templates"):
-- ``ask`` is the interactive path: sending is the default, ``--dry-run``
-  prints the rendered text and sends NOTHING.
-- An unfilled slot is an ERROR listing what the template expects, and sends
-  NOTHING — a message containing a literal ``{{slot}}`` is never sent.
+- ``ask`` renders and prints the filled template; no message is delivered.
+- An unfilled slot is an ERROR listing what the template expects, and prints
+  NOTHING — a message containing a literal ``{{slot}}`` is never written.
 - Unknown template lists the available ones.
-- A project with no topic gives the actionable error, never a crash.
 - ``template edit`` opens $EDITOR on a template (user-editable store).
-- The single-writer Telegram session ("database is locked") surfaces as a clear
-  message with a retry hint, never a traceback.
 """
 
 from __future__ import annotations
@@ -35,26 +31,8 @@ import os
 import subprocess
 import sys
 
-from ..core import registry, telegram, templates
-from ..core.telegram import TelegramError, TopicLockedError
-
-
-def _resolve_topic(projects: list[registry.Project], project_name: str):
-    """Return ``(topic_id, None)`` or ``(None, error_string)`` for a project.
-
-    Same contract as commands/message.py so the actionable "no topic" error is
-    identical across both commands — an operator never handles a raw topic id.
-    """
-    for proj in projects:
-        if proj.name == project_name:
-            if proj.topic is None:
-                return (
-                    None,
-                    f"project {project_name} has no topic; "
-                    f"run: flightdeck project repair {project_name}",
-                )
-            return proj.topic, None
-    return None, f"unknown project: {project_name!r} (check `flightdeck projects list`)"
+from ..core import registry, templates
+from ..core.templates import UnfilledSlotError
 
 
 def _get_project(projects: list[registry.Project], project_name: str):
@@ -84,16 +62,8 @@ def _parse_overrides(pairs: list[str] | None) -> dict:
     return overrides
 
 
-def _locked_message(exc: TopicLockedError) -> str:
-    return (
-        f"error: {exc}\n"
-        "hint: another process is probably holding the ~/.hermes-tg session; "
-        "wait a moment and retry."
-    )
-
-
 # --------------------------------------------------------------------------- #
-# ask — the interactive path (send by default, --dry-run sends nothing)
+# ask — render a template with project context (prints the rendered text)
 # --------------------------------------------------------------------------- #
 
 def cmd_ask(args: argparse.Namespace, projects: list[registry.Project]) -> int:
@@ -102,16 +72,6 @@ def cmd_ask(args: argparse.Namespace, projects: list[registry.Project]) -> int:
         print(
             f"error: unknown project: {args.project!r} "
             "(check `flightdeck projects list`)",
-            file=sys.stderr,
-        )
-        return 2
-    if not telegram.enabled():
-        print(f"error: {telegram.disabled_message()}", file=sys.stderr)
-        return 2
-    if proj.topic is None:
-        print(
-            f"error: project {args.project} has no topic; "
-            f"run: flightdeck project repair {args.project}",
             file=sys.stderr,
         )
         return 2
@@ -133,30 +93,22 @@ def cmd_ask(args: argparse.Namespace, projects: list[registry.Project]) -> int:
         return 2
 
     # Auto-fill context from the registry + repo. An unfilled slot here raises
-    # and sends NOTHING — a literal {{slot}} is never posted.
+    # and prints NOTHING — a literal {{slot}} is never emitted as a prompt.
     context = templates.gather_context(
         proj, _run=args.run, _list_cards=args.list_cards
     )
     try:
         rendered = templates.render_template(text, context, overrides=overrides)
-    except templates.UnfilledSlotError as exc:
+    except UnfilledSlotError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    if args.dry_run:
-        print(rendered)
-        print("\n[dry-run] rendered above; nothing was sent.")
-        return 0
-
-    try:
-        telegram.send_message(proj.topic, rendered, _client=args.client)
-    except TopicLockedError as exc:
-        print(_locked_message(exc), file=sys.stderr)
-        return 3
-    except TelegramError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    print(f"sent {args.template!r} template to {args.project} (topic {proj.topic}).")
+    # Telegram (the only outbound topic-delivery surface for ask) has been
+    # removed, so the rendered prompt is printed to stdout instead of sent to a
+    # topic. The template-manager subcommands below are unaffected.
+    print(rendered)
+    print(f"\n[ask] rendered {args.template!r} for {args.project} "
+          f"(no delivery target — Telegram removed).")
     return 0
 
 
@@ -238,7 +190,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "ask",
         help=(
-            "render a prompt template filled with project context and send it; "
+            "render a prompt template filled with project context and print it; "
             "or 'ask template list|show|edit' to manage the template store"
         ),
         epilog="example: flightdeck ask flightdeck standup --set focus=q3 --dry-run",
@@ -248,7 +200,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
         nargs="*",
         metavar="ARG",
         help=(
-            "<project> <template> to render+send, or "
+            "<project> <template> to render+print, or "
             "'template list|show <name>|edit <name>' to manage the store"
         ),
     )
@@ -262,7 +214,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p.add_argument(
         "--dry-run",
         action="store_true",
-        help="print the rendered text and send NOTHING (render form only)",
+        help="print the rendered text and deliver nothing (render form only)",
     )
     p.add_argument(
         "--editor",
@@ -274,13 +226,12 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
 def run(args: argparse.Namespace, registry_path: str) -> int:
     """Entry from cli.py: run an ask subcommand with shared injectables.
 
-    Attaches the injectable client / git runner / board reader / templates home
+    Attaches the injectable git runner / board reader / templates home
     so core calls are stubbable in tests, then disambiguates the variadic
     ``parts`` into either a template-manager call or a render call, loading
     projects from the registry once if the render path needs them.
     """
     args.registry = registry_path
-    args.client = getattr(args, "client", None)
     args.run = getattr(args, "run", None)
     args.list_cards = getattr(args, "list_cards", None)
     args.templates_home = getattr(args, "templates_home", None)

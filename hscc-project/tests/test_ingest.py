@@ -28,7 +28,10 @@ import pytest
 from flightdeck.commands import ingest as ing
 from flightdeck.commands import decompose as dec
 from flightdeck.core import registry, roadmap
-from flightdeck.core.telegram import MAX_MESSAGE_LENGTH, MessageTooLongError, TopicLockedError
+# NOTE: Telegram has been removed from flightdeck, so MAX_MESSAGE_LENGTH,
+# MessageTooLongError and TopicLockedError no longer exist. The tests that
+# exercised the removed Telegram read/send path have been deleted; only tests
+# covering the surviving ingest logic remain below.
 
 
 # --------------------------------------------------------------------------- #
@@ -218,9 +221,6 @@ def test_all_sources_contribute_and_nothing_written_without_apply(tmp_path, monk
     assert "SOME SKILL REF about demo" in staged
     assert "## project repository (README, docs, git log)" in staged
     assert "local readme" in staged and "some docs" in staged
-    assert "shipped the auth hardening" in staged
-    # Source C (telegram) was actually read via read_messages.
-    assert any(t == "telegram_read" for t, _ in args._tg.calls)
     # No --apply: nothing written.
     assert not os.path.exists(os.path.join(args._repo, "ROADMAP.md"))
     assert not os.path.exists(os.path.join(args._repo, "docs", "ROADMAP.draft.md"))
@@ -320,8 +320,7 @@ def test_missing_sources_reported_but_draft_still_happens(tmp_path, monkeypatch,
     # Every present source reported with a count; absent ones report EMPTY.
     err = capsys.readouterr().err
     assert "ok (1 files)" not in err  # (bare-string stub renders "ok") see below
-    assert "EMPTY (0 messages)" in err   # topic: no topic -> 0 messages
-    assert "repo source" in err          # repo: nothing readable
+    assert "repo source unavailable" in err  # repo: nothing readable
     # skill references (bare-string stub) rendered "ok"
     assert "[ingest] skill references: ok" in err
 
@@ -355,35 +354,6 @@ def test_unknown_project_errors_listing_known_ones(tmp_path, capsys):
     assert rc == 2
     assert "unknown project" in err
     assert "demo" in err  # the known one is listed
-
-
-def test_project_without_topic_and_default_ask_errors(tmp_path, monkeypatch, capsys):
-    """With the DEFAULT ask seam, a topic-less project cannot be reached."""
-    args = _ns(
-        read_refs=lambda p: "skill notes\n",
-        read=lambda p: "# readme\n",
-        run=FakeGit(log="feat: x\n"),
-        client=None,
-        ask=None,               # default ask seam -> requires a topic
-        project="demo",
-        apply=False,
-        limit=200,
-    )
-    rc = ing.cmd_ingest(args, [_project(repo=_repo(tmp_path), topic=None)])
-    err = capsys.readouterr().err
-    assert rc == 2
-    assert "has no topic" in err
-
-
-def test_ask_lock_error_reports_and_returns_2(tmp_path, monkeypatch, capsys):
-    def _locked_ask(prompt, topic_id, client=None):
-        raise TopicLockedError("database is locked")
-    args = _build_args(tmp_path, repo_files={"README.md": "# demo\n"})
-    args.ask = _locked_ask
-    rc = ing.cmd_ingest(args, [_project(repo=args._repo, topic=140)])
-    err = capsys.readouterr().err
-    assert rc == 2
-    assert "locked" in err
 
 
 # =========================================================================== #
@@ -538,160 +508,6 @@ def test_timeout_attr_default(monkeypatch):
 # N6 — --timeout and --limit must reach where they are used (the live failure)
 # =========================================================================== #
 
-def test_limit_caps_read_and_reported_count_309_vs_40(tmp_path, monkeypatch, capsys):
-    """--limit N must cap BOTH the messages actually used in the prompt AND the
-    count reported, and the two must be equal — the 309-vs-40 live failure.
-
-    The daemon returned 309 messages although the flag said ``--limit 40`` (it
-    ignored the cap). ingest must not trust the daemon further than the cap:
-    only ``limit`` messages reach the orchestrator's prompt and the gather line
-    reports the SAME ``limit`` — never a number larger than what was used.
-    """
-    captured = {}
-
-    def _capturing_ask(prompt, topic_id, client=None):
-        captured["prompt"] = prompt
-        return _ROADMAP
-
-    # The daemon stub returns 50 messages for ANY read, ignoring the limit arg
-    # (mirrors the live daemon returning 309 for --limit 40).
-    lines = "\n".join(f"[12:00] alice: msg {i:02d}" for i in range(50))
-    args = _build_args(tmp_path, topic_lines=lines, limit=40)
-    args.ask = _capturing_ask
-    rc = ing.cmd_ingest(args, [_project(repo=args._repo, topic=140)])
-    assert rc == 0
-    err = capsys.readouterr().err
-    # the reported count equals the cap, NOT the 50 the daemon returned
-    assert "ok (40 messages)" in err
-    assert "ok (50 messages)" not in err
-    # N7: the capped context now lands in the staged FILE (the prompt only
-    # points at it), so the limit is verified on the file's content — exactly
-    # --limit messages (the newest 40), not the 50 the daemon returned.
-    context_path = os.path.join(args.context_dir, "ingest-context-demo.md")
-    with open(context_path, encoding="utf-8") as f:
-        staged = f.read()
-    assert staged.count("- [alice] msg") == 40
-    assert "msg 49" not in staged  # daemon's extra (newest) messages are cut
-    assert "msg 10" in staged      # the newest of the kept --limit
-
-
-def test_gather_topic_caps_when_daemon_overflows():
-    """_gather_topic reports the capped count, even when read_messages returns
-    more than ``limit`` — the daemon's cover-up of the cap is undone here."""
-    lines = "\n".join(f"[12:00] alice: msg {i}" for i in range(50))
-    client = FakeTG(lines=lines)
-    content, report = ing._gather_topic(_project(topic=140), 40, client=client)
-    assert report == "ok (40 messages)"
-    # exactly 40 messages (newest 40) made it into the content block
-    assert content.count("\n- [") + 1 == 40
-
-
-def test_timeout_reaches_default_ask_seam(tmp_path, monkeypatch, capsys):
-    """--timeout N must be exactly the value the DEFAULT ask seam polls with.
-
-    ``cmd_ingest`` threads the caller's flag into ``_default_ask`` (which has
-    its OWN internal default of 300s). A spy on the default seam proves the
-    flag (420) — NOT the module default (300) — is what governs the poll.
-    """
-    seen = {}
-
-    def _spy_default_ask(prompt, topic_id, _client=None, *, timeout=300, now=None, sleep=None, accept=None):
-        seen["timeout"] = timeout
-        return _ROADMAP
-
-    monkeypatch.setattr(ing, "_default_ask", _spy_default_ask)
-    args = _ns(
-        read_refs=lambda p: "skill notes about demo\n",
-        read=ing._default_read,
-        run=FakeGit(log="feat: a\n"),
-        client=FakeTG(lines="[12:00] alice: shipped x\n"),
-        ask=None,          # DEFAULT ask seam -> timeout threaded through
-        project="demo",
-        apply=False,
-        timeout=420,
-        topic=140,
-        limit=200,
-    )
-    args._repo = _repo(tmp_path)
-    args.context_dir = str(tmp_path / "context")
-    rc = ing.cmd_ingest(args, [_project(repo=args._repo, topic=140)])
-    assert rc == 0
-    assert seen["timeout"] == 420
-
-
-def test_default_ask_timeout_message_quotes_flag_value(tmp_path, monkeypatch, capsys):
-    """When the default ask times out, the error quotes the --timeout value
-    actually used (420), never the module default (300) — the 300-vs-420 live
-    failure. The flag must be what the seam both waits with and reports.
-    """
-    def _timing_out_default_ask(prompt, topic_id, _client=None, *, timeout=300, now=None, sleep=None, accept=None):
-        raise dec.NoReplyError(f"no reply in the topic within {timeout:g}s")
-
-    monkeypatch.setattr(ing, "_default_ask", _timing_out_default_ask)
-    args = _ns(
-        read_refs=lambda p: "skill notes about demo\n",
-        read=ing._default_read,
-        run=FakeGit(log="feat: a\n"),
-        client=FakeTG(lines="[12:00] alice: shipped x\n"),
-        ask=None,          # DEFAULT ask seam
-        project="demo",
-        apply=False,
-        timeout=420,
-        topic=140,
-        limit=200,
-    )
-    args._repo = _repo(tmp_path)
-    args.context_dir = str(tmp_path / "context")
-    rc = ing.cmd_ingest(args, [_project(repo=args._repo, topic=140)])
-    err = capsys.readouterr().err
-    assert rc != 0
-    assert "within 420s" in err
-    assert "within 300s" not in err  # never the internal default
-    assert "nothing written" in err
-
-
-def test_default_ask_receives_roadmap_accept_predicate(tmp_path, monkeypatch, capsys):
-    """N8: the DEFAULT ask seam is wired with `accept=_roadmap_accept` so it
-    waits for the answer, not the acknowledgement.
-
-    A spy on ``_default_ask`` proves ``cmd_ingest`` binds the N3 roadmap-region
-    predicate when the default seam is used (``ask=None``) — the live-failure
-    fix. The predicate must be exactly ingest's own, so preamble/acquaintance
-    messages are skipped automatically.
-    """
-    seen = {}
-
-    def _spy_default_ask(prompt, topic_id, _client=None, *, timeout=300, now=None, sleep=None, accept=None):
-        seen["accept"] = accept
-        return _ROADMAP
-
-    monkeypatch.setattr(ing, "_default_ask", _spy_default_ask)
-    args = _ns(
-        read_refs=lambda p: "skill notes about demo\n",
-        read=ing._default_read,
-        run=FakeGit(log="feat: a\n"),
-        client=FakeTG(lines="[12:00] alice: shipped x\n"),
-        ask=None,          # DEFAULT ask seam -> accept predicate wired in
-        project="demo",
-        apply=False,
-        timeout=300,
-        topic=140,
-        limit=200,
-    )
-    args._repo = _repo(tmp_path)
-    args.context_dir = str(tmp_path / "context")
-    rc = ing.cmd_ingest(args, [_project(repo=args._repo, topic=140)])
-    assert rc == 0
-    assert seen.get("accept") is ing._roadmap_accept
-    # The predicate accepts a reply that has begun a roadmap region and rejects
-    # an acknowledgement preamble — the live-failure shape.
-    assert seen["accept"]("# Subproject: demo\n## Milestone: m <!-- id: m -->\n- [ ] i\n")
-    assert not seen["accept"](
-        "Draft a ROADMAP.md proposal for project 'demo'.\n"
-        "I'll read the ingest context file, then produce the roadmap in the exact format."
-    )
-
-
 def test_skill_reference_cap_reported(tmp_path, monkeypatch, capsys):
     """The default read_refs caps at _SKILL_REF_MAX files and reports the
     truncation with the counts."""
@@ -783,7 +599,6 @@ def test_large_project_sent_prompt_stays_under_the_4096_limit(tmp_path, monkeypa
     prompt = captured["prompt"]
     # Assert the SENT text length — the prompt that actually goes to the seam.
     assert len(prompt) < 3000
-    assert len(prompt) < MAX_MESSAGE_LENGTH
     # The context is NOT in this small prompt; it lives in the staged file.
     context_path = os.path.join(args.context_dir, "ingest-context-demo.md")
     with open(context_path, encoding="utf-8") as f:
@@ -826,39 +641,10 @@ def test_context_file_written_with_blocks_and_prompt_has_absolute_path(tmp_path,
     assert "SOME SKILL REF about demo" in staged
     assert "## project repository (README, docs, git log)" in staged
     assert "local readme" in staged and "some docs" in staged
-    assert "## Telegram topic" in staged
-    assert "shipped the auth hardening" in staged
     # The prompt names the ABSOLUTE path (matches what cmd_ingest wrote).
     prompt = captured["prompt"]
     assert context_path in prompt
     assert os.path.isabs(context_path)
-
-
-def test_send_failure_fails_ingest_immediately_without_polling(tmp_path, monkeypatch, capsys):
-    """A failed send fails ingest immediately, before any poll/sleep.
-
-    The default ask seam SENDS the prompt before it polls. When ``send_message``
-    raises (an oversize prompt, a locked session, a dead daemon), the failure
-    must surface NOW — ingest must not go on to wait --timeout for a reply that
-    can never come. (That the poll/sleep seam itself is never touched after a
-    failed send is asserted at the seam level in test_ask_seam.py; here we
-    assert the command fails immediately with the send reason, non-zero.)"""
-
-    def _failing_ask(prompt, topic_id, _client=None, *, timeout=300, now=None, sleep=None, accept=None):
-        raise MessageTooLongError(
-            f"message of {len(prompt)} characters exceeds Telegram's limit"
-        )
-
-    monkeypatch.setattr(ing, "_default_ask", _failing_ask)
-    args = _build_args(tmp_path, repo_files={"README.md": "# demo\n"})
-    args.client = FakeTG(lines="[12:00] alice: x\n")
-    args.ask = None  # use the (monkeypatched) DEFAULT ask seam so the send runs
-    rc = ing.cmd_ingest(args, [_project(repo=args._repo, topic=140)])
-    err = capsys.readouterr().err
-    assert rc != 0
-    # The send failure (not a timeout, not a poll) is what failed ingest.
-    assert "exceeds Telegram's limit" in err
-    assert not os.path.exists(os.path.join(args._repo, "ROADMAP.md"))
 
 
 def test_extract_roadmap_helpers():

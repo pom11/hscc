@@ -30,11 +30,11 @@ def test_main_help_exits_zero():
 def test_global_flags_parsed():
     """Global flags are available alongside a discovered subcommand."""
     args = build_parser().parse_args(
-        ["--json", "--registry", "/tmp/reg.yaml", "topics", "list"]
+        ["--json", "--registry", "/tmp/reg.yaml", "project", "list"]
     )
     assert args.json is True
     assert args.registry == "/tmp/reg.yaml"
-    assert args.command == "topics"
+    assert args.command == "project"
 
 
 @pytest.mark.parametrize("cmd", ["projects"])
@@ -54,16 +54,9 @@ def test_undiscovered_command_is_rejected_with_exit_2(capsys, cmd):
 
 
 def test_discovered_command_is_registered():
-    """`topics` ships as a module, so discovery must expose it."""
-    args = build_parser().parse_args(["topics", "list"])
-    assert args.command == "topics"
-
-
-def test_topics_without_subcommand_exits_2(capsys):
-    """`flightdeck topics` with no action must not silently run; exit 2 + hint."""
-    rc = main(["topics"])
-    assert rc == 2
-    assert "topics" in capsys.readouterr().err
+    """`project` ships as a module, so discovery must expose it."""
+    args = build_parser().parse_args(["project", "list"])
+    assert args.command == "project"
 
 
 def test_no_command_exits_2_and_prints_help(capsys):

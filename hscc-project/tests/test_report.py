@@ -23,8 +23,15 @@ import time
 import pytest
 
 from flightdeck.commands import report as cmd
-from flightdeck.core import telegram
+from flightdeck.commands.report import MAX_SUMMARY_LENGTH
 from flightdeck.core.registry import Project
+
+# NOTE: Telegram has been removed from flightdeck. The report command no longer
+# delivers summaries to a Telegram topic via a client; --apply now just records
+# the reported timestamp and prints the summary. Tests that asserted on the old
+# client.telegram_send delivery / missing-topic error / MAX_MESSAGE_LENGTH cap
+# have been removed; the surviving renderer-cap tests use MAX_SUMMARY_LENGTH
+# (the cap that replaced telegram.MAX_MESSAGE_LENGTH).
 
 
 # --------------------------------------------------------------------------- #
@@ -153,7 +160,7 @@ def test_backfill_renderer_ends_on_complete_line_and_fits_cap():
         "anything": True,
     }
     out = cmd.render_backfill(data)
-    assert len(out) <= telegram.MAX_MESSAGE_LENGTH
+    assert len(out) <= MAX_SUMMARY_LENGTH
     # Ends on a complete line: it must not end mid-sentence, and every retained
     # line is whole (no partial "merge: branch number 12..." line).
     assert out.endswith("main") or "SHIPPED:" in out  # last kept line is whole
@@ -194,49 +201,6 @@ def test_backfill_keeps_notable_cause_carrying_facts():
 # --------------------------------------------------------------------------- #
 
 
-def test_all_applies_posts_once_per_project_and_skips_empty(monkeypatch, tmp_path, capsys):
-    state = str(tmp_path / "report-state.yaml")
-    # alpha: one newly-done card (in-window) -> posts.
-    # beta:  nothing -> skipped.
-    # gamma: no topic bound -> cannot post (error, clear message).
-    cards = [
-        _hcard("a", title="Landed A", status="done", completed_at=9_950_000),
-        _hcard("b", title="Open B", status="review", workspace_path="/repo/.worktrees/b"),
-        # beta's only card is open -> nothing to report
-        _hcard("bx", title="Beta open", status="todo", workspace_path="/repoB/.worktrees/bx"),
-        # gamma has content but no topic bound -> post fails clearly
-        _hcard("g1", title="Gamma work", status="done", completed_at=9_960_000,
-               workspace_path="/repoG/.worktrees/g1"),
-    ]
-    run = FakeRun(merges=[], merged_branches={"wt/a"})
-    client = FakeClient()
-
-    projects = [
-        Project(name="alpha", repo="/repo", board="default", topic=7),
-        Project(name="beta", repo="/repoB", board="default", topic=8),
-        Project(name="gamma", repo="/repoG", board="default", topic=None),
-    ]
-
-    rc = cmd.cmd_report_all(
-        _args(apply=True, cards=cards, run=run, client=client, report_state=state, now=lambda: 10_000_000),
-        projects,
-    )
-    assert rc == 2  # gamma's missing topic is a clear failure, surfaced not hidden
-    # Exactly ONE post, for alpha (beta had nothing; gamma has no topic).
-    assert len(client.sent) == 1
-    tool, args_ = client.sent[0]
-    assert tool == "telegram_send"
-    assert args_["topic_id"] == 7
-    # The posted summary is the detailed render for alpha.
-    assert "Landed A [a]" in args_["message"]
-    captured = capsys.readouterr()
-    assert "report --all: 1 project(s) posted, 1 with nothing to report." in captured.out
-    # beta was skipped.
-    assert "nothing to report for beta" in captured.out
-    # gamma's missing topic is surfaced, not silently dropped.
-    assert "no topic bound" in captured.err
-
-
 def test_all_dry_run_posts_nothing(monkeypatch, tmp_path, capsys):
     state = str(tmp_path / "report-state.yaml")
     cards = [_hcard("a", title="Landed A", status="done", completed_at=9_950_000)]
@@ -265,13 +229,14 @@ def test_all_never_double_posts_respected_timestamp(tmp_path, capsys):
     client = FakeClient()
     projects = [_project("alpha")]
 
-    # First --all --apply reports it and records last_report.
+    # First --all --apply reports it and records last_report: 1 posted.
     rc1 = cmd.cmd_report_all(
         _args(apply=True, cards=cards, run=run, client=client, report_state=state, now=lambda: 10_000_000),
         projects,
     )
     assert rc1 == 0
-    assert len(client.sent) == 1
+    out1 = capsys.readouterr().out
+    assert "report --all: 1 project(s) posted" in out1
 
     # A second --all (no --since) must not re-post: now it resolves to the
     # recorded timestamp, the card is out-of-window, nothing new merged -> skip.
@@ -280,7 +245,6 @@ def test_all_never_double_posts_respected_timestamp(tmp_path, capsys):
         projects,
     )
     assert rc2 == 0
-    assert len(client.sent) == 1  # still just the first post — no double-post
     out = capsys.readouterr().out
     assert "report --all: 0 project(s) posted" in out
     assert "nothing to report for alpha" in out
@@ -289,41 +253,6 @@ def test_all_never_double_posts_respected_timestamp(tmp_path, capsys):
 # --------------------------------------------------------------------------- #
 # --backfill: one-shot long-window catch-up, cap-respecting
 # --------------------------------------------------------------------------- #
-
-
-def test_backfill_posts_summarised_harder_and_respects_cap(tmp_path, capsys):
-    state = str(tmp_path / "report-state.yaml")
-    # A huge window of merges that would overflow any listing renderer.
-    merges = [(10_300_000 - 3600 * i, f"merge: branch {i}") for i in range(400)]
-    cards = [_hcard("a", title="Old done", status="done", completed_at=9_000_000,
-                    workspace_path="/repo/.worktrees/a")]
-    run = FakeRun(merges=merges, merged_branches=set())
-    client = FakeClient()
-    projects = [_project("alpha")]
-
-    rc = cmd.cmd_backfill(
-        _args(apply=True, backfill="72h", cards=cards, run=run, client=client,
-              report_state=state, now=lambda: 10_300_000),
-        projects,
-        "72h",
-    )
-    assert rc == 0
-    # Exactly one post.
-    assert len(client.sent) == 1
-    tool, args_ = client.sent[0]
-    assert tool == "telegram_send"
-    text = args_["message"]
-    # The SENT text respects the cap.
-    assert len(text) <= telegram.MAX_MESSAGE_LENGTH
-    # And ends on a complete line: no mid-sentence truncation.
-    lines = text.splitlines()
-    assert lines
-    assert text == "\n".join(lines)  # every retained line is whole
-    assert "SHIPPED:" in text
-    # Because merges are aggregated to a count, not listed.
-    assert all(f"merge: branch {i}" not in text for i in range(400))
-    out = capsys.readouterr().out
-    assert "report --backfill 72h: 1 project(s) posted" in out
 
 
 def test_backfill_bad_duration_exits_2(tmp_path, capsys):

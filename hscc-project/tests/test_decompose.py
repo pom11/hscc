@@ -25,34 +25,11 @@ import pytest
 from flightdeck.commands import decompose as dec
 from flightdeck.core import kanban, registry, templates
 from flightdeck.core.templates import UnfilledSlotError
-from flightdeck.core.telegram import TelegramError, TopicLockedError
-from conftest import TEST_GROUP_ID
 
 
 # --------------------------------------------------------------------------- #
 # Stubs
 # --------------------------------------------------------------------------- #
-
-class FakeTG:
-    """Stands in for the MCP daemon client: callable (tool, args) -> str.
-
-    ``telegram_send`` records the call and mirrors the daemon's reply string;
-    ``locked=True`` makes every call raise the single-writer SQLite error, which
-    the transport normalises to :class:`TopicLockedError`.
-    """
-
-    def __init__(self, locked=False):
-        self.locked = locked
-        self.calls: list[tuple[str, dict]] = []
-
-    def __call__(self, tool_name, arguments):
-        self.calls.append((tool_name, arguments))
-        if self.locked:
-            raise ConnectionError("sqlite3.OperationalError: database is locked")
-        if tool_name == "telegram_send":
-            return f"Sent to {TEST_GROUP_ID} topic {arguments['topic_id']}."
-        raise AssertionError(f"FakeTG does not know tool {tool_name!r}")
-
 
 class FakeGit:
     """Stands in for the subprocess runner: callable (cmd, repo) -> CompletedProcess."""
@@ -670,17 +647,6 @@ def test_unknown_project_errors(tmp_path, capsys):
     assert "unknown project" in err
 
 
-def test_project_without_topic_errors(tmp_path, capsys):
-    home = _seed(str(tmp_path / "tpl"))
-    args = _base_args("{}", home=home, repo_root=str(tmp_path / "repo"),
-                      project="hscc")
-    rc = dec.cmd_decompose(args, [_project(topic=None)])
-    err = capsys.readouterr().err
-    assert rc == 2
-    assert "has no topic" in err
-    assert "project repair" in err
-
-
 def test_project_without_board_falls_back_to_current_and_says_so(tmp_path, monkeypatch, capsys):
     """A project with no board still decomposes: --apply creates cards on the
     CURRENT board and the command SAYS SO (\"no board for <project>; created on
@@ -708,7 +674,7 @@ def test_project_without_board_falls_back_to_current_and_says_so(tmp_path, monke
 def test_ask_failure_reports_and_returns_2(tmp_path, monkeypatch, capsys):
     home = _seed(str(tmp_path / "tpl"))
     def _raising_ask(prompt, topic_id, client=None):
-        raise TopicLockedError("database is locked")
+        raise RuntimeError("database is locked")
     args = _base_args("{}", home=home, repo_root=str(tmp_path / "repo"))
     args.ask = _raising_ask
     rc, kb = _run_decompose(args, [_project()], monkeypatch)
@@ -899,109 +865,3 @@ def _n15_default_args(home, repo_root, *, timeout=None, extra_attrs=None):
     if extra_attrs:
         kw.update(extra_attrs)
     return _ns(**kw)
-
-
-def test_decompose_wires_proposal_accept_and_skips_prose_for_the_live_failure(
-    tmp_path, monkeypatch, capsys
-):
-    """The real default ask, wired with `accept=_proposal_accept`, skips the
-    orchestrator's prose preamble and waits for the JSON proposal.
-
-    This is the exact live-failure shape: a preamble (no JSON) is posted, then
-    the real proposal. With the accept predicate the seam rejects the preamble
-    and returns once the message carrying the proposal lands — a passing card is
-    created. Without the fix, the preamble would be returned and decompose would
-    exit 2 with "no JSON object found".
-    """
-    home = _seed(str(tmp_path / "tpl"))
-    repo_root = str(tmp_path / "repo")
-    os.makedirs(repo_root, exist_ok=True)
-    proposal = _proposal(_card(1, title="do it", refs=["foo.py:1:f"], depends_on=[]))
-    feed = _FeedClient(
-        [
-            [],                                     # topic before send (watermark)
-            [_N15_ACK_LINE],                        # poll 1: prose preamble, rejected
-            [_N15_ACK_LINE, _prose_proposal_line(proposal)],  # poll 2: JSON lands
-        ]
-    )
-    clock = _Clock()
-    args = _n15_default_args(home, repo_root, timeout=10)
-    args.client = feed
-    args.now = clock.now
-    args.sleep = clock.sleep
-
-    rc, kb = _run_decompose(args, [_project(topic=140)], monkeypatch)
-    assert rc == 0
-    assert [c.get("title") for c in kb.created] == ["do it"]
-    out = capsys.readouterr().out
-    assert "PROPOSAL" in out
-
-
-def test_decompose_timeout_no_json_reports_count_and_raw_reply(
-    tmp_path, monkeypatch, capsys
-):
-    """On timeout with no JSON, decompose reports how many messages were seen
-    AND prints the raw reply under `RAW REPLY (no JSON proposal)`.
-
-    Without a parseable proposal the seam rejects every fragment; the error
-    names the count (here 2) and surfaces the most recent raw reply as a
-    diagnostic, so a wrong-shaped answer is distinguishable from silence.
-    """
-    home = _seed(str(tmp_path / "tpl"))
-    repo_root = str(tmp_path / "repo")
-    os.makedirs(repo_root, exist_ok=True)
-    more_prose = "still not JSON here, just more reasoning about the cards."
-    feed = _FeedClient(
-        [
-            [],
-            [_N15_ACK_LINE],                     # fragment 1 seen, rejected
-            [_N15_ACK_LINE, _prose_proposal_line(more_prose)],  # fragment 2 rejected
-        ]
-    )
-    clock = _Clock()
-    args = _n15_default_args(home, repo_root, timeout=5)
-    args.client = feed
-    args.now = clock.now
-    args.sleep = clock.sleep
-
-    rc, kb = _run_decompose(args, [_project(topic=140)], monkeypatch)
-    assert rc == 2
-    assert kb.created == []
-    err = capsys.readouterr().err
-    assert "no accepted reply within 5s" in err
-    assert "2 messages seen" in err
-    assert "RAW REPLY (no JSON proposal):" in err
-    assert _N15_PREAMBLE in err
-    assert more_prose in err
-
-
-def test_decompose_timeout_flag_reaches_the_ask_seam(tmp_path, monkeypatch, capsys):
-    """`--timeout N` reaches the default ask seam's `timeout`, quoting N.
-
-    A spy in place of _default_ask records the timeout value the seam is
-    invoked with; a single flag must govern the whole wait, so the quoted value
-    is the N from `--timeout`, and the accept predicate is the wired
-    _proposal_accept.
-    """
-    home = _seed(str(tmp_path / "tpl"))
-    repo_root = str(tmp_path / "repo")
-    os.makedirs(repo_root, exist_ok=True)
-
-    seen = {}
-
-    def _spy_default_ask(prompt, topic_id, _client=None, *, timeout=300,
-                         now=None, sleep=None, accept=None):
-        seen["timeout"] = timeout
-        seen["accept"] = accept
-        # Return a well-formed fenced proposal so the pipeline completes.
-        proposal = _proposal(_card(1, refs=["foo.py:1:f"], depends_on=[]))
-        return "```json\n" + proposal + "\n```"
-
-    monkeypatch.setattr(dec, "_default_ask", _spy_default_ask)
-
-    args = _n15_default_args(home, repo_root, timeout=42)
-    rc, kb = _run_decompose(args, [_project(topic=140)], monkeypatch)
-    assert rc == 0
-    assert seen["timeout"] == 42  # the seam was invoked with the flag's value
-    assert seen["accept"] is dec._proposal_accept  # the predicate is wired
-    assert [c.get("title") for c in kb.created] == ["atomic card"]
