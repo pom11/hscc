@@ -31,7 +31,7 @@ cp "$SCRIPT_DIR/dep_pr_watcher.py" "$HERMES_SCRIPTS/dep_pr_watcher.py"
 "$HERMES_BIN" cron remove "$JOB" 2>/dev/null || true
 "$HERMES_BIN" cron create "$SCHEDULE" \
   --no-agent --script dep_pr_watcher.py \
-  --name "$JOB" --deliver telegram
+  --name "$JOB" --deliver desktop
 
 echo "installed Hermes cron job '$JOB' (schedule: $SCHEDULE)"
 echo "inspect:  $HERMES_BIN cron list"

@@ -77,7 +77,6 @@ def block_file(tmp_path, monkeypatch):
 @pytest.fixture
 def closed_env(monkeypatch):
     """Stub notifications so no verb actually tries to notify."""
-    monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
     monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
 
 

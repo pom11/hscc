@@ -68,7 +68,7 @@ def _isolate_hscc(tmp_path, monkeypatch):
     base = str(tmp_path / "hscc")
 
     from hscc_daemon import (
-        autodown, daemon_ops, desktop, hscc, lifecycle, recover, replay, state,
+        autodown, daemon_ops, desktop, hscc, lifecycle, recover, state,
         trigger,
     )
 
@@ -89,7 +89,7 @@ def _isolate_hscc(tmp_path, monkeypatch):
     # (b) Module-level constants already computed at import — overwrite each.
     def _module_attrs():
         from hscc_daemon import (
-            autodown, daemon_ops, desktop, health, hscc, lifecycle, replay,
+            autodown, daemon_ops, desktop, health, hscc, lifecycle,
             serving, state, trigger, usage,
         )
         def p(sub):
@@ -100,17 +100,11 @@ def _isolate_hscc(tmp_path, monkeypatch):
             (autodown, "AUTODOWN_LOCK", p("autodown.lock")),
             (autodown, "AGENTS_FILE", p("agents.json")),
             (autodown, "HTTP_ACTIVITY_STATE", p("activity.json")),
-            (autodown, "TELEGRAM_OFFSET_FILE", p("state/telegram_probe.offset")),
             # Hermes cron jobs.json is Hermes' source of truth (feat
             # t_2b711a94) — redirect so no test ever reads the real host's
             # scheduled jobs. A missing tmp file yields CRON_UNREADABLE (fail-
             # closed); CLI tests stub list_active_cron_jobs for their cases.
             (autodown, "CRON_JOBS_FILE", p("cron/jobs.json")),
-            # replay.py (inbound-message queue — never touch the real one;
-            # REGISTRY_PATH is redirected so delivery tests never read the real
-            # flightdeck registry)
-            (replay, "QUEUE_FILE", p("queued_messages.json")),
-            (replay, "REGISTRY_PATH", p("registry.yaml")),
             # lifecycle.py
             (lifecycle, "BRIDGE_FILE", p("bridge.json")),
             (lifecycle, "WATCHDOG_BLOCK_FILE", p("watchdog-block.json")),
@@ -157,21 +151,6 @@ def _isolate_hscc(tmp_path, monkeypatch):
 
     for mod, attr, val in _module_attrs():
         monkeypatch.setattr(mod, attr, val, raising=False)
-
-    # (c) Hermetic delivery stub so NO test can ever reach a live gateway or
-    # orchestrator. Replay's default production delivery invokes the
-    # orchestrator + Telegram; both the REGISTRY_PATH redirect above (no
-    # live registry read) and this stub (an accidental call returns False —
-    # fail-closed → message retained) keep every test off the live stack. We
-    # deliberately do NOT stub autodown._notify / _waking_notice here: existing
-    # notification tests patch notify_operations/send_macos_notification
-    # themselves and assert on them firing, and the new replay tests pass their
-    # own injectable notify_fn / notify=False — so a blanket _notify stub would
-    # silently swallow those and break real assertions. Individual tests that
-    # want a no-op notifier still patch it (LIFO teardown -> the test's patch
-    # wins during the test).
-    monkeypatch.setattr(replay, "default_deliver_message",
-                        lambda msg: False, raising=False)
 
 
 class _SubprocessResult:

@@ -1,7 +1,7 @@
 """HSCC HTTP API — Phase C2: orchestrator chat (job-based).
 
-The conversational endpoint: talk to a project's orchestrator DIRECTLY,
-bypassing Telegram. Unlike the deterministic structured ops (A2-A4), this is
+The conversational endpoint: talk to a project's orchestrator DIRECTLY.
+Unlike the deterministic structured ops (A2-A4), this is
 the one endpoint where an operator can say "go build X" and the orchestrator
 decomposes it and dispatches real work onto its board. Because it can cause an
 orchestrator to dispatch real work, it is a *mutation* and therefore REQUIRES
@@ -21,7 +21,7 @@ shell Hermes directly, ``hermes -p <profile> chat -Q --continue <session>
 -q <prompt>``, passing argv as a LIST (never string-interpolating the user's
 prompt into a shell command) with a hard timeout. ``chat --continue`` resolves
 the named session by title from the profile's state.db and persists the
-exchange into it — the Telegram-topic analog. The localhost:4000 proxy is
+exchange into it — the chat-topic analog. The localhost:4000 proxy is
 litellm, a stateless OpenAI-compatible inference relay with no Hermes session
 store / profile / memory; it cannot bind a named session, so it cannot satisfy
 the session-continuity requirement.
@@ -243,7 +243,7 @@ def _backing_invoke(profile, session, prompt, timeout=_DEFAULT_TIMEOUT,
     argv is passed as a LIST — the user's prompt is a plain element, never
     interpolated into a shell string (no shell-injection). ``--continue
     <session>`` resolves the session by title from the profile's state.db and
-    persists this exchange into it, preserving the thread (the Telegram-topic
+    persists this exchange into it, preserving the thread (the chat-topic
     analog). Quiet mode (``-Q``) keeps status/banner lines on stderr so stdout
     is machine-readable.
 
@@ -332,7 +332,7 @@ def _backing_invoke(profile, session, prompt, timeout=_DEFAULT_TIMEOUT,
     err = (err or "").strip()
     # A clean "no such session yet" failure — the orchestrator's named session
     # must exist before it can be continued (created by provisioning / first
-    # Telegram topic). Surface it honestly rather than synthesising a reply.
+    # chat). Surface it honestly rather than synthesising a reply.
     # This is the ONLY stderr signal that means "session not ready": a missing
     # session is reported verbatim and is checkable. It is checked FIRST so
     # that no OTHER nonzero exit can be misreported as a missing session.
