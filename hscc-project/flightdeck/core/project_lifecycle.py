@@ -517,8 +517,12 @@ def create_project(
                 "retry": f"flightdeck project new {name} --repo {repo} --apply"}
 
     # --- Step 2: telegram topic ---
+    # When Telegram is disabled the topic step is SKIPPED (recorded, never a
+    # failure): the project is created without a topic, and the registry already
+    # tolerates that (topic -> "unknown"). The operator may later re-enable and
+    # run `project repair` to add the topic.
     topic_val: int | None = None
-    if include_topic:
+    if telegram.enabled() and include_topic:
         try:
             topic_val = ensure_topic(name, _client=_client)
             results.append({"id": "topic", "status": "ok", "detail": f"topic {topic_val}"})
@@ -651,7 +655,7 @@ def project_health(
         except Exception:
             missing += 1
 
-    if project.topic is not None:
+    if project.topic is not None and telegram.enabled():
         recorded += 1
         try:
             ids = {t.id for t in telegram.list_topics(_client=_client)}

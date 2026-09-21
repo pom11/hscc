@@ -47,6 +47,16 @@ class TelegramError(Exception):
     """Base class for telegram transport errors."""
 
 
+class TelegramDisabledError(TelegramError):
+    """A Telegram operation was attempted while Telegram is disabled.
+
+    Raised when ``telegram.enabled`` is False (or absent — the default is
+    disabled). Command handlers catch this and print ONE clear line saying
+    Telegram is disabled and how to re-enable it — never a traceback, never a
+    silent no-op.
+    """
+
+
 class TelegramConfigError(TelegramError, _config.MissingGroupIdError):
     """A Telegram operation was attempted with no configured group id.
 
@@ -94,6 +104,32 @@ class MessageTooLongError(TelegramError):
     never silently sent. The message names the actual length so the fix is
     obvious (write the bulk to a file and send a short pointer instead).
     """
+
+
+def enabled() -> bool:
+    """True if Telegram is enabled (the single fleet-wide switch).
+
+    Reads ``config.telegram_enabled()`` — the ``telegram.enabled`` config key
+    (or ``FLIGHTDECK_TELEGRAM_ENABLED`` env), defaulting to enabled-when-absent.
+    Commands consult this to decide whether a Telegram path runs or takes the
+    clean disabled path. Tests can override by monkeypatching
+    ``config.telegram_enabled``.
+    """
+    return _config.telegram_enabled()
+
+
+def disabled_message() -> str:
+    """One clear line explaining Telegram is disabled and how to re-enable it.
+
+    Every command that fails cleanly on a disabled Telegram prints this exact
+    message so the operator always knows the state and the fix.
+    """
+    return (
+        "Telegram is disabled (telegram.enabled=false in "
+        f"{_config.config_path()}). To use this command, set "
+        "`telegram.enabled: true` in that file (or export "
+        "FLIGHTDECK_TELEGRAM_ENABLED=true)."
+    )
 
 
 def _resolve_group_id() -> str:
@@ -208,7 +244,16 @@ def _dispatch(
     ``_client=None`` falls back to the real daemon client. Any error whose text
     mentions the single-writer condition is normalised to :class:`TopicLockedError`
     so commands can present it as a clear message rather than a traceback.
+
+    The single fleet-wide switch lives here: when Telegram is disabled the
+    operation raises :class:`TelegramDisabledError` BEFORE any dispatch, so
+    every telegram core call degrades to one clean line and no daemon is
+    touched. This is the one choke point every telegram operation flows
+    through (list/create/rename topics, send, read) — there is no path that
+    bypasses the disabled flag.
     """
+    if not enabled():
+        raise TelegramDisabledError(disabled_message())
     if client is None:
         client = _default_client()
     try:
