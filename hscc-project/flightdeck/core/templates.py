@@ -1,10 +1,10 @@
 """templates.py — prompt templates with auto-filled project context.
 
-The ``ask`` command stops the operator retyping the same framings into Telegram
-topics ("decompose this task…", "here is the project and where I want to reach…",
-"please review X"). It renders a stored markdown template, fills it with context
-flightdeck ALREADY knows about the project, and sends it to that project's
-topic. The operator supplies only what is genuinely new (via ``--set``).
+The ``ask`` command stops the operator retyping the same framings ("decompose
+this task…", "here is the project and where I want to reach…", "please review
+X"). It renders a stored markdown template, fills it with context flightdeck
+ALREADY knows about the project, and delivers the rendered result. The
+operator supplies only what is genuinely new (via ``--set``).
 
 This module owns the pure logic — where templates live, how they are seeded,
 what auto-fill context flightdeck can derive, and how a template is rendered.

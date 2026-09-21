@@ -51,7 +51,7 @@ mcp = FastMCP("flightdeck")
 # seam a command reads is covered.
 _run = None            # git runner (standup/qa/reconcile/review/start/decompose/ingest)
 _run_verify = None     # verify-command runner (qa)
-_client = None         # telegram client (doctor/project/decompose/ingest/message)
+_client = None         # injected outbound seam (doctor/project/decompose/ingest/message; Telegram removed)
 _kdb = None            # kanban_db provider (reconcile/start)
 _now = None            # clock (standup/qa review/decompose)
 _now_fn = None         # callable clock (review baseline)
@@ -262,27 +262,6 @@ def flightdeck_metrics(project: str | None = None, since: str = "24h") -> str:
     )
 
 
-@mcp.tool()
-def flightdeck_topics_list() -> str:
-    """Read-only list of every Telegram topic: id, name, mapped project. Read-only; never mutates."""
-    from .commands import topics
-
-    return _run_cmd(
-        topics,
-        _namespace(json=False, func=topics.cmd_list),
-    )
-
-
-@mcp.tool()
-def flightdeck_topics_audit() -> str:
-    """Read-only audit: flags topics whose CURRENT name differs from their registry name, and topics with no project mapping. Read-only; never mutates."""
-    from .commands import topics
-
-    return _run_cmd(
-        topics,
-        _namespace(json=False, func=topics.cmd_audit),
-    )
-
 
 # --------------------------------------------------------------------------- #
 # Mutating tools — every one defaults to apply=False and mutates nothing then.
@@ -406,7 +385,7 @@ def flightdeck_migrate_card(card_id: str, project: str, apply: bool = False) -> 
 
 @mcp.tool()
 def flightdeck_message_send(project: str, text: str) -> str:
-    """Post a message to a project's topic IMMEDIATELY — by design, exactly like the CLI. This is the one tool with no apply gate: sending happens right away."""
+    """Render a message for a project (Telegram removed — no delivery; the send path now only renders catalogued text)."""
     from .commands import message
 
     return _run_cmd(
@@ -424,7 +403,7 @@ def flightdeck_message_dispatch(
     message: str | None = None,
     apply: bool = False,
 ) -> str:
-    """Mutates only when apply=True: create a card on a project's board AND announce it in its topic (dry-runs the board/title/body/announcement by default). ``body`` is the card body string; ``message`` is the (optional, short) Telegram announcement text, which may differ from ``body``. Mutates nothing when apply=False."""
+    """Mutates only when apply=True: create a card on a project's board (dry-runs the board/title/body by default). ``body`` is the card body string. (The former in-topic announcement step was removed with Telegram.) Mutates nothing when apply=False."""
     from .commands import message as message_mod
 
     return _run_gated(

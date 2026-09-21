@@ -16,7 +16,6 @@ import pytest
 
 from flightdeck.commands import doctor as cmd
 from flightdeck.core.registry import Project
-from flightdeck.core.telegram import Topic
 
 
 def _args(**overrides):
@@ -52,7 +51,6 @@ def _healthy_world(repo="/tmp/hscc", board="hscc", topic=140, repo_ok=True):
     snap = {
         "run": None,
         "boards": [board],
-        "topics": [Topic(id=topic, name="HSCC cluster")],
         "repo_check": _repo_ok_fake(repo_ok),
     }
     return projects, snap
@@ -85,35 +83,6 @@ def test_missing_board_is_a_problem(monkeypatch, capsys):
     assert rc == 1
     out = capsys.readouterr().out
     assert "[PROBLEM] board 'hscc' NOT found" in out
-
-
-def test_topic_not_resolving_is_a_problem(monkeypatch, capsys):
-    projects, snap = _healthy_world(topic=140)
-    snap["topics"] = [Topic(id=999, name="unrelated")]  # 140 absent
-    rc = cmd.cmd_doctor(_args(**snap), projects)
-    assert rc == 1
-    out = capsys.readouterr().out
-    assert "[PROBLEM] topic 140 does NOT resolve" in out
-
-
-def test_telegram_transport_down_marks_topic_unverifiable(monkeypatch, capsys):
-    """When the transport fails, the topic dimension is unverifiable, and the
-    command says so loudly rather than guessing it is fine."""
-    projects, snap = _healthy_world()
-    # Inject everything but topics: leave topics at its default (None) so the
-    # command actually goes to read it — and stub that read to fail, which is
-    # the real production shape of a transport outage.
-    snap.pop("topics")
-    import flightdeck.core.telegram as tcore
-
-    def _boom(**kwargs):
-        raise tcore.TelegramError("daemon unreachable")
-
-    monkeypatch.setattr(cmd.telegram, "list_topics", _boom)
-    rc = cmd.cmd_doctor(_args(**snap), projects)
-    assert rc == 1
-    out = capsys.readouterr().out
-    assert "[PROBLEM] Telegram unverifiable" in out
 
 
 def test_exit_nonzero_when_anything_unverifiable():
@@ -172,7 +141,6 @@ def _triangle_world(projects=None, **overrides):
     snap = {
         "run": None,
         "boards": [p.board for p in projects if p.board],
-        "topics": [Topic(id=p.topic, name=f"t{p.topic}") for p in projects if p.topic is not None],
         "repo_check": _repo_ok_fake(True),
         "workdirs": {p.board: p.repo for p in projects if p.board},
     }

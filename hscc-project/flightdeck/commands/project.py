@@ -157,7 +157,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
     print(f"flightdeck project remove {name}")
     print("  this removes the REGISTRY ENTRY only.")
     print("  it does NOT delete the git repo.")
-    print("  it does NOT delete the Telegram topic.")
+    print("  (the registry 'topic' field is cleared too — Telegram is removed.)")
     if not args.apply:
         print("\nplan printed; nothing performed.")
         print("pass --apply to remove the registry entry.")
@@ -765,7 +765,7 @@ def _add_apply(sp: argparse.ArgumentParser) -> None:
 def run(args: argparse.Namespace, registry_path: str) -> int:
     """Entry from cli.py: run a project subcommand.
 
-    Attaches the injectable hooks (git runner, telegram client, kanban
+    Attaches the injectable hooks (git runner, kanban
     provider) to args so core calls are stubbable in tests without any of
     them touching a real system.
     """

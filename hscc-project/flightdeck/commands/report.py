@@ -29,23 +29,24 @@ The summary layout is:
     NOTE         surprising facts worth remembering — facts WITH a cause
 
 The window is ``--since DURATION`` (default 24h on the first run, then the
-previously recorded last-reported timestamp). ``--apply`` posts the rendered
-summary to the project's topic via :mod:`flightdeck.core.telegram` (the
-single-writer MCP path — never a direct Telethon session). Dry-run prints it
-and posts nothing.
+previously recorded last-reported timestamp). ``--apply`` used to post the
+rendered summary to the project's topic via :mod:`flightdeck.core.telegram`;
+Telegram has since been removed, so the summary is printed to stdout and the
+reported timestamp is still recorded so the next run skips the same window.
+A dry-run prints the summary too.
 
 Hard rules:
 
-  * If there is NOTHING to report, say so and post nothing — never post an
+  * If there is NOTHING to report, say so and print nothing — never emit an
     empty or filler update (that is how a channel gets muted).
-  * Never post the same window twice: the last-reported timestamp per project
+  * Never report the same window twice: the last-reported timestamp per project
     is recorded under ``~/.flightdeck/`` and becomes the default ``--since``.
-  * The SENT text never exceeds ``telegram.MAX_MESSAGE_LENGTH`` — the renderer
+  * The SENT text never exceeds ``MAX_SUMMARY_LENGTH`` characters — the renderer
     hard-caps the summary, and the send path asserts the actual length.
 
 All external access is injectable: ``_run`` (git subprocess), ``_now`` (clock),
-``_client`` (Telegram MCP), and the board via monkeypatched ``kanban.list_cards``
-so tests never touch Telegram, the board, git, or the network in reality.
+and the board via monkeypatched ``kanban.list_cards`` so tests never touch the
+board, git, or the network in reality.
 """
 
 from __future__ import annotations
@@ -57,12 +58,12 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ..core import git_state, kanban, registry, roadmap, telegram, verify
+from ..core import git_state, kanban, registry, roadmap, verify
 
-# The hard character cap for the full rendered summary. The summary is the
-# body of exactly one Telegram message, so it must always fit under
-# telegram.MAX_MESSAGE_LENGTH. Use the constant, never a literal 4096.
-MAX_SUMMARY_LENGTH = telegram.MAX_MESSAGE_LENGTH
+# The hard character cap for the full rendered summary. It was inherited from
+# Telegram's per-message limit; kept as a constant so the renderer still caps
+# its output deterministically even though Telegram is no longer a target.
+MAX_SUMMARY_LENGTH = 4096
 
 # The default window on the very first run, before any timestamp is recorded.
 DEFAULT_SINCE_SECONDS = 24 * 60 * 60  # 24h
@@ -743,47 +744,24 @@ def cmd_backfill(
 
 
 def _post(project: registry.Project, summary: str, args: argparse.Namespace) -> int:
-    """Post ``summary`` to the project's topic; record the timestamp on success.
+    """Record the report timestamp and report the summary.
 
-    ``--apply`` is the only path that touches Telegram and the only path that
-    records a reported timestamp. A failure is reported clearly and does not
-    crash (returns non-zero). The SENT text length is asserted against
-    ``telegram.MAX_MESSAGE_LENGTH`` before dispatch — an over-long body is never
-    silently sent, and a recorded timestamp is only written after the send
-    succeeded, so a failed post does not suppress the next window.
+    Telegram (the only outbound topic-delivery surface) has been removed, so
+    ``--apply`` no longer sends anything to a topic. It now just records the
+    reported timestamp (so repeated runs never re-report the same window) and
+    prints the summary to stdout. A summary is still printed regardless; the
+    ``--apply`` distinction no longer changes whether anything is delivered.
     """
-    if project.topic is None:
-        print(
-            f"error: project {project.name!r} has no topic bound — cannot post. "
-            f"Bind one with `flightdeck topics bind <id> {project.name}`.",
-            file=sys.stderr,
-        )
-        return 2
-    if not telegram.enabled():
-        print(f"error: {telegram.disabled_message()}", file=sys.stderr)
-        return 2
-
-    try:
-        telegram.send_message(project.topic, summary, _client=args.client)
-    except telegram.MessageTooLongError as exc:
-        # The renderer caps, but belt-and-braces: an oversize body is named and
-        # refused BEFORE dispatch — it must never be silently truncated by a send.
-        print(f"error: {exc}", file=sys.stderr)
-        return 3
-    except telegram.TopicLockedError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 3
-    except telegram.TelegramError as exc:
-        print(f"error: failed to post summary to topic {project.topic}: {exc}", file=sys.stderr)
-        return 2
-
     record_report(
         project.name,
         _now=args.now,
         milestones=_current_milestones(project),
         path=args.report_state,
     )
-    print(f"posted {len(summary)}-char summary to topic {project.topic} ({project.name}).")
+    print(summary)
+    print()
+    print(f"[report] {project.name}: summary '{len(summary)} chars' — "
+          f"no delivery target (Telegram removed); timestamp recorded.")
     return 0
 
 
@@ -834,7 +812,7 @@ def run(args: argparse.Namespace, registry_path: str) -> int:
     """Entry from cli.py: run a report.
 
     Attaches the injectable handles (``run``, ``now``, ``state``,
-    ``report_state``, ``client``, ``cards``) so core calls are stubbable in
+    ``report_state``, ``cards``) so core calls are stubbable in
     tests and nothing here touches git, a board, or the network in reality.
 
     Routes three ways: ``--all`` reports every project; ``--backfill`` reports
