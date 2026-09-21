@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.17.1] - 2026-09-21
+
+### Fixed
+- **`/cluster` rendered empty utilisation, memory and temperature.** The metrics
+  reader treated each sparkrun host row as a flat dict, but the telemetry fields
+  live NESTED under `sample` (which is `None` until a host's first reading), so
+  every field read as missing. `cluster_metrics` now returns
+  `{ip: host_entry}` and unwraps `sample`, accepting the flat shape too.
+
+### Changed
+- Runtime lock: hermes-agent v2026.9.11 -> v2026.9.14 (installed and verified;
+  all eight carried patches apply to the new tag unchanged).
+
+
 ## [1.17.0] - 2026-09-14
 
 ### Changed
