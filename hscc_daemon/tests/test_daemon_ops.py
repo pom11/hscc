@@ -108,7 +108,7 @@ class TestNoLiveHsccLeak:
     These tests replay that EXACT path (patched loader returning a partial
     3-key dict + real record_activity/save_config/cycle) and assert the real
     file is untouched. Green because the autouse ``_isolate_hscc`` fixture
-    redirects ``AUTODOWN_FILE`` (and the activity/telegram state paths) to a
+    redirects ``AUTODOWN_FILE`` (and the activity state paths) to a
     tmp dir for every test. If that isolation is ever removed or weakened,
     these FAIL.
     """
