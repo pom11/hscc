@@ -276,7 +276,7 @@ def _render_session_md(session: dict, messages: list[dict],
 # Main export
 # --------------------------------------------------------------------------- #
 
-def _topic_owner_map(registry_path: str) -> dict[str, str]:
+def _topic_owner_map(registry_path: str | None) -> dict[str, str]:
     """thread-id-string -> project name, from the registry ``topic`` fields."""
     from . import registry as _registry
 
@@ -312,7 +312,7 @@ def archive_sessions(
     root = Path(os.path.expanduser(out_dir))
     root.mkdir(parents=True, exist_ok=True)
 
-    topic_projects = _topic_owner_map(registry_path) if registry_path else {}
+    topic_projects = _topic_owner_map(registry_path)
 
     conn = open_readonly(db_path)
     try:
