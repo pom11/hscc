@@ -1015,6 +1015,54 @@ flightdeck incident --project acme --cause "auth token expired" --lesson "rotate
 
 ---
 
+### `flightdeck archive-sessions`
+
+Export every Telegram-originated Hermes session to durable, human-readable
+Markdown files. The operator is leaving Telegram and wants the history kept;
+this command turns the rows in `~/.hermes/state.db` into a browsable archive
+that survives hermes migrations and is diffable / grep-able without sqlite.
+
+**Export only — it removes nothing** and is **READ-ONLY** on `state.db`
+(`file:...?mode=ro`); it never writes to, VACUUMs, or deletes a session.
+
+**Layout** — one `.md` file per session, grouped by project for sessions whose
+`thread_id` maps to a registry `topic`, else under `unmapped/` (the NULL-thread
+sessions and any non-null thread with no registry owner). An `INDEX.md` lists
+every exported session (project, title, msgs, dates, file) so the archive is
+browsable without tooling.
+
+```
+<out>/
+  <project>/
+    <session_id>_<title-slug>.md
+  unmapped/
+    <session_id>_<title-slug>.md
+  INDEX.md
+```
+
+**Message fidelity** — the operator's own words (`user`/`assistant`) are
+exported in FULL, never truncated. `tool` result dumps and assistant
+`tool_calls` arguments can be 200 KB+ and are compressed to a truncated,
+single-line record (`TOOL_MAX_CHARS`, default 4000) so the archive never
+bloats. Losing the operator's words is unacceptable; losing the tail of a
+tool dump is fine.
+
+**Idempotent** — re-running fully regenerates the tree (files keyed by the
+immutable session id), so it overwrites deterministically and never
+duplicates or corrupts. Runs report the real totals (sessions, messages,
+bytes, files) so nothing silently dropped.
+
+**Args:**
+
+| Flag | Meaning |
+|---|---|
+| `--project NAME` | Only export sessions whose thread maps to this project. |
+| `--out DIR` | Output root. Default `~/.hermes/archive/telegram` — the operator's hermes home, deliberately NOT inside a git repo (this is private content; we don't tempt a commit). Suppress with `--out`. |
+
+**Reachable as** `hscc project archive-sessions`.
+
+---
+
 ## Quick reference: mutability at a glance
 
 | Command | Mutates? | Gate |
@@ -1044,6 +1092,7 @@ flightdeck incident --project acme --cause "auth token expired" --lesson "rotate
 | release | Yes (bumps version) | `--apply` |
 | update | Yes (updates the tool itself) | `--apply` |
 | incident | Yes (appends to INCIDENTS.md) | `--apply` |
+| archive-sessions | No (read-only export) | — |
 
 ---
 
