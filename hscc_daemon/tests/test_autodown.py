@@ -324,8 +324,8 @@ class TestRecordActivity:
 
     def test_source_recorded(self, autodown_file):
         """The passed source is recorded in wake_source."""
-        ad.record_activity("telegram")
-        assert ad.load_config()["wake_source"] == "telegram"
+        ad.record_activity("http")
+        assert ad.load_config()["wake_source"] == "http"
 
 
 # ---------------------------------------------------------------------------
@@ -1268,7 +1268,6 @@ class TestTeardown:
         _write_idle_cfg(autodown_file)
         runner = _FakeRunner(block_file, results=results)
         # Stub notifiers so no notification is actually attempted.
-        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
         monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
         return serving, runner, block_file
 
@@ -1693,7 +1692,6 @@ class TestAutoup:
         _write_down_cfg(autodown_file)
         runner = _FakeRunner(block_file, results=results)
         # Stub notifiers (both channels) so nothing is actually sent.
-        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
         monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
         return serving, runner, block_file
 
@@ -1848,9 +1846,6 @@ class TestAutoup:
                                                   autodown_file)
         notes = []
         monkeypatch.setattr(
-            ad, "notify_operations",
-            lambda msg, *a, **k: notes.append(("tg", str(msg))))
-        monkeypatch.setattr(
             ad, "send_macos_notification",
             lambda title, msg, *a, **k: notes.append(("desk", str(msg))))
         # Units never become ready + a small deadline (wake_grace_minutes=0 ⇒
@@ -1877,10 +1872,9 @@ class TestAutoup:
             blk = json.load(f)
         assert blk.get("blocked") is False
         assert blk.get("intentional") is None
-        # Loud notify: critical-priority desktop + ops Telegram both fired.
-        assert len(notes) == 2
-        assert "TIMEOUT" in notes[0][1] or "TIMEOUT" in notes[1][1]
-        assert "TIMEOUT" in notes[1][1] or "TIMEOUT" in notes[0][1]
+        # Loud notify: critical-priority desktop notification fired.
+        assert len(notes) == 1
+        assert "TIMEOUT" in notes[0][1]
 
     def test_start_failure_failure_path(self, tmp_path, monkeypatch,
                                         autodown_file):
@@ -1890,8 +1884,6 @@ class TestAutoup:
                                                   autodown_file,
                                                   results=[False])
         notes = []
-        monkeypatch.setattr(ad, "notify_operations",
-                            lambda msg, *a, **k: notes.append(msg))
         monkeypatch.setattr(ad, "send_macos_notification",
                             lambda *a, **k: notes.append("desk"))
         res = ad.autoup(
@@ -1949,7 +1941,7 @@ class TestAutoup:
         serving, runner, block_file = self._setup(tmp_path, monkeypatch,
                                                   autodown_file)
         cfg = ad.load_config()
-        cfg["wake_source"] = "telegram"   # will be cleared on success
+        cfg["wake_source"] = "cli"   # will be cleared on success
         cfg["wake_at"] = "2026-08-23T09:00:00+00:00"
         cfg["down_since"] = "2026-08-23T07:59:00+00:00"  # stale; cleared on success
         ad.save_config(cfg)
@@ -2062,7 +2054,6 @@ class TestAutoup:
         block_file = str(tmp_path / "watchdog-block.json")
         monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
         _write_idle_cfg(autodown_file)
-        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
         monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
         agents = tmp_path / "agents.json"
         agents.write_text(json.dumps({"agents": [{"name": "a",
@@ -2275,7 +2266,6 @@ class TestReconcileToReality:
         clear intentional block, set state=up, clear down_since, log loudly."""
         block_file = str(tmp_path / "watchdog-block.json")
         monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
-        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
         monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
         monkeypatch.setattr(ad, "autoup", lambda: None, raising=False)
         self._down_cfg(autodown_file)
@@ -2310,7 +2300,6 @@ class TestReconcileToReality:
         state stays honestly down (a real drain or a flaky one-off up)."""
         block_file = str(tmp_path / "watchdog-block.json")
         monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
-        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
         monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
         monkeypatch.setattr(ad, "autoup", lambda: None, raising=False)
         self._down_cfg(autodown_file)
@@ -2342,7 +2331,6 @@ class TestReconcileToReality:
         state=waking returns from cycle() BEFORE the reconcile probe runs."""
         block_file = str(tmp_path / "watchdog-block.json")
         monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
-        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
         monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
         monkeypatch.setattr(ad, "autoup", lambda: None, raising=False)
         self._down_cfg(autodown_file)
@@ -2364,7 +2352,6 @@ class TestReconcileToReality:
         silent half-state §8 forbids, so it must be unmissable."""
         block_file = str(tmp_path / "watchdog-block.json")
         monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
-        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
         monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
         self._down_cfg(autodown_file)
         _lifecycle.save_watchdog_block({"blocked": True, "intentional": "autodown"})
@@ -2388,7 +2375,7 @@ class TestReconcileToReality:
 # actually healthy, else resume the wake (autoup is idempotent). A LIVE holder
 # is the "in-flight" signal and must be left alone. Tests drive liveness via
 # monkeypatched _lock_holder_alive and reality via _reconcile_up_fn — never a
-# real cluster read and never a real telegram/sparkrun.
+# real cluster read and never a real sparkrun.
 
 class TestStalledWakeRecovery:
     """cycle() recovers a STALLED wake (state=waking, no live lock holder)."""
@@ -2405,7 +2392,6 @@ class TestStalledWakeRecovery:
     def _setup(self, autodown_file, tmp_path, monkeypatch):
         block_file = str(tmp_path / "watchdog-block.json")
         monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
-        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
         monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
         self._cfg(autodown_file)
         _lifecycle.save_watchdog_block(
@@ -2516,7 +2502,7 @@ class TestStalledWakeRecovery:
 # CONTRADICTION (block intentional × state not down/waking), not by one state;
 # a LEGITIMATE in-flight teardown/wake (state down/waking, live holder) must
 # be left untouched. Tests drive state + block directly via tmp files — never a
-# real cluster, never a real telegram/sparkrun.
+# real cluster, never a real sparkrun.
 
 class TestReconcileStaleIntentionalBlock:
     """cycle() / resume_from_restart() clear a STALE intentional block."""
@@ -2534,7 +2520,6 @@ class TestReconcileStaleIntentionalBlock:
     def _latch_block(self, tmp_path, monkeypatch, intentional="autodown"):
         block_file = str(tmp_path / "watchdog-block.json")
         monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
-        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
         monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
         block = {"blocked": True, "reason": ad.WATCHDOG_TEARDOWN_REASON,
                  "blocked_at": NOW.isoformat(), "failures": []}
@@ -2811,320 +2796,6 @@ class TestProbeHttpActivity:
         assert ad.load_config()["last_activity_iso"] == before
 
 
-class TestProbeTelegramActivity:
-    """probe_telegram_activity stamps record_activity('telegram') on NEW
-    inbound Telegram messages observed via the Hermes gateway log (§1d.2,
-    design correction). Reads a fake gateway log — never the real one."""
-
-    def _setup(self, tmp_path):
-        gw = tmp_path / "gateway.log"
-        off = tmp_path / "telegram_probe.offset"
-        return str(gw), str(off)
-
-    def test_baselines_first_call_no_stamp(self, tmp_path, autodown_file):
-        """First probe on an existing log with markers baselines at EOF and
-        stamps NOTHING (old mail is not fresh activity)."""
-        gw, off = self._setup(tmp_path)
-        with open(gw, "w") as f:
-            f.write("blah\n" + ad.TELEGRAM_MARKER + " old msg\n")
-        cfg = dict(ad.DEFAULT_CONFIG)
-        cfg["last_activity_iso"] = "2000-01-01T00:00:00+00:00"
-        ad.save_config(cfg)
-        before = ad.load_config()["last_activity_iso"]
-        assert ad.probe_telegram_activity(gw, off) is False
-        assert ad.load_config()["last_activity_iso"] == before
-        # Offset now pinned to EOF (measured by the probe having consumed it).
-        assert ad._load_telegram_offset(off) == len(
-            "blah\n" + ad.TELEGRAM_MARKER + " old msg\n")
-
-    def test_stamps_on_new_marker(self, tmp_path, autodown_file):
-        """After the baseline, a NEW inbound marker line ⇒ telegram activity
-        stamped, last_activity advances."""
-        gw, off = self._setup(tmp_path)
-        with open(gw, "w") as f:
-            f.write("noise line\n")
-        cfg = dict(ad.DEFAULT_CONFIG)
-        cfg["last_activity_iso"] = "2000-01-01T00:00:00+00:00"
-        ad.save_config(cfg)
-        ad.probe_telegram_activity(gw, off)   # baseline
-        before = ad.load_config()["last_activity_iso"]
-
-        with open(gw, "a") as f:
-            f.write(ad.TELEGRAM_MARKER + " new inbound\n")
-        assert ad.probe_telegram_activity(gw, off) is True
-        loaded = ad.load_config()
-        assert loaded["wake_source"] == "telegram"
-        assert loaded["last_activity_iso"] != before
-
-    def test_captures_trigger_text(self, tmp_path, autodown_file):
-        """On a fresh marker the probe ALSO captures the msg= text of the
-        triggering message into wake_trigger_text (first ~120 chars), so the
-        wake-complete notice can quote it (§4)."""
-        gw, off = self._setup(tmp_path)
-        with open(gw, "w") as f:
-            f.write("seed\n")
-        ad.save_config(dict(ad.DEFAULT_CONFIG))
-        ad.probe_telegram_activity(gw, off)   # baseline
-
-        long_body = "wake the cluster up please " + ("x" * 200)
-        with open(gw, "a") as f:
-            f.write(ad.TELEGRAM_MARKER +
-                    " ... msg='" + long_body + "' ts=2026-08-25\n")
-        assert ad.probe_telegram_activity(gw, off) is True
-        loaded = ad.load_config()
-        # Truncated to the first 120 chars (the trigger text, not the whole
-        # line, and no msg= / quote delimiters).
-        assert loaded["wake_trigger_text"] == long_body[:120]
-        assert "'" not in loaded["wake_trigger_text"]
-        assert "msg=" not in loaded["wake_trigger_text"]
-
-    def test_capture_survives_marker_without_msg_field(
-            self, tmp_path, autodown_file):
-        """A marker line with NO msg= field doesn't crash and does not clobber
-        an existing captured text (nothing to quote ⇒ not an empty quote)."""
-        gw, off = self._setup(tmp_path)
-        with open(gw, "w") as f:
-            f.write("seed\n")
-        cfg = dict(ad.DEFAULT_CONFIG)
-        cfg["wake_trigger_text"] = "older text still waiting"
-        ad.save_config(cfg)
-        ad.probe_telegram_activity(gw, off)   # baseline
-        with open(gw, "a") as f:
-            f.write(ad.TELEGRAM_MARKER + " some inbound without msg field\n")
-        assert ad.probe_telegram_activity(gw, off) is True
-        # Existing captured text is left untouched (not overwritten / cleared).
-        assert ad.load_config()["wake_trigger_text"] == "older text still waiting"
-
-    def test_no_stamp_when_nothing_new(self, tmp_path, autodown_file):
-        """Second probe with no appended content ⇒ no stamp (idempotent)."""
-        gw, off = self._setup(tmp_path)
-        with open(gw, "w") as f:
-            f.write(ad.TELEGRAM_MARKER + " one\n")
-        cfg = dict(ad.DEFAULT_CONFIG)
-        cfg["last_activity_iso"] = "2000-01-01T00:00:00+00:00"
-        ad.save_config(cfg)
-        ad.probe_telegram_activity(gw, off)   # baseline
-        before = ad.load_config()["last_activity_iso"]
-        assert ad.probe_telegram_activity(gw, off) is False
-        assert ad.load_config()["last_activity_iso"] == before
-
-    def test_log_rotation_rebaselines(self, tmp_path, autodown_file):
-        """Truncated log (size < offset) re-baselines from 0 and can stamp."""
-        gw, off = self._setup(tmp_path)
-        with open(gw, "w") as f:
-            f.write("A" * 100 + "\n")
-        cfg = dict(ad.DEFAULT_CONFIG)
-        cfg["last_activity_iso"] = "2000-01-01T00:00:00+00:00"
-        ad.save_config(cfg)
-        ad.probe_telegram_activity(gw, off)   # baseline offset=100+
-        assert ad._load_telegram_offset(off) == 101  # 100 A's + 1 newline
-
-        # Rotate: fresh (smaller) file with a marker line (no trailing giant
-        # prefix). Offset (101) > new size ⇒ re-baseline from 0 and stamp.
-        with open(gw, "w") as f:
-            f.write(ad.TELEGRAM_MARKER + " post-rotation\n")
-        assert ad.probe_telegram_activity(gw, off) is True
-        assert ad.load_config()["wake_source"] == "telegram"
-        # Offset re-pinned to the new EOF.
-        assert ad._load_telegram_offset(off) == len(
-            ad.TELEGRAM_MARKER + " post-rotation\n")
-
-    def test_missing_log_no_stamp(self, tmp_path, autodown_file):
-        """Missing gateway log ⇒ no stamp, no crash."""
-        gw, off = self._setup(tmp_path)
-        cfg = dict(ad.DEFAULT_CONFIG)
-        cfg["last_activity_iso"] = "2000-01-01T00:00:00+00:00"
-        ad.save_config(cfg)
-        before = ad.load_config()["last_activity_iso"]
-        assert ad.probe_telegram_activity(gw, off) is False
-        assert ad.load_config()["last_activity_iso"] == before
-
-    def test_telegram_probe_in_cycle_wakes_when_down(
-            self, tmp_path, monkeypatch, autodown_file):
-        """Wired through cycle(): when DOWN, a fresh inbound telegram marker
-        (via the default telegram probe) triggers autoup."""
-        calls = []
-        monkeypatch.setattr(ad, "autoup", lambda: calls.append("autoup"),
-                            raising=False)
-        # Hermetic: reconcile probe reports NOT up so this only exercises the
-        # wake seam (no real-cluster read, no cross-test contamination).
-        monkeypatch.setattr(ad, "_reconcile_up_fn", lambda **kw: False)
-        ad._reconcile_up_streak = 0
-        gw, off = self._setup(tmp_path)
-        with open(gw, "w") as f:
-            f.write("seed line\n")
-        # Point the module-level paths at the fake log/offset so the DEFAULT
-        # probes (which read module globals) observe it.
-        monkeypatch.setattr(ad, "GATEWAY_LOG", gw)
-        monkeypatch.setattr(ad, "TELEGRAM_OFFSET_FILE", off)
-        # Baseline first (outside a cycle), as the daemon would on first run.
-        ad.probe_telegram_activity()
-        # DOWN config with an ANCIENT down_since so the probe's real-clock stamp
-        # is deterministically fresh (> down_since) regardless of the clock.
-        down = "2020-01-01T00:00:00+00:00"
-        cfg = dict(ad.DEFAULT_CONFIG)
-        cfg["enabled"] = True
-        cfg["state"] = "down"
-        cfg["idle_minutes"] = 10
-        cfg["down_since"] = down
-        cfg["last_activity_iso"] = down
-        ad.save_config(cfg)
-        with open(gw, "a") as f:
-            f.write(ad.TELEGRAM_MARKER + " fresh while down\n")
-        ad.cycle(kanban_db=_FakeKb([]), agents_file="",
-                 now=NOW, keepalive_ok=lambda: True)
-        assert calls == ["autoup"]
-
-
-# ---------------------------------------------------------------------------
-# §4 — telegram wake notices (the wake-triggering message is NOT processed)
-# ---------------------------------------------------------------------------
-# The gateway CONSUMES the wake-triggering Telegram message on arrival while the
-# model is still loading, so it is never answered; the operator must re-send it.
-# autodown notifies the operator: a "waking" notice at wake-trigger time (the
-# message will NOT be processed) and, on wake complete, an "up" notice that
-# QUOTES the triggering message so the operator can re-send without hunting. It
-# does NOT auto-replay the message (§4).
-class TestWakeNotices:
-    """The two telegram wake notices fire exactly when they should (§4):
-    waking-notice once at wake-trigger, up-notice with a quote at wake complete.
-    Never for CLI/HTTP/kanban triggers, never when disabled, never a false
-    up-notice on a failed wake. Uses injected fakes — no real telegram sent.
-    """
-
-    def _setup(self, tmp_path, monkeypatch, autodown_file):
-        """Wire a wakeable DOWN config + fakes and capture telegram ops notes."""
-        block_file = str(tmp_path / "watchdog-block.json")
-        monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
-        serving = _write_serving(tmp_path)
-        _lifecycle.save_watchdog_block(
-            {"blocked": True, "intentional": "autodown",
-             "reason": ad.WATCHDOG_TEARDOWN_REASON,
-             "blocked_at": NOW.isoformat(), "failures": []})
-        tg_notes = []
-        monkeypatch.setattr(ad, "notify_operations",
-                            lambda msg, *a, **k: tg_notes.append(str(msg)))
-        monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: None)
-        _write_down_cfg(autodown_file)
-        return serving, tg_notes
-
-    def _cfg_telegram(self, autodown_file, text="wake test \u2014 bring it up"):
-        cfg = ad.load_config()
-        cfg["wake_source"] = "telegram"
-        cfg["wake_trigger_text"] = text
-        ad.save_config(cfg)
-        return cfg
-
-    def test_telegram_wake_sends_waking_notice_once(
-            self, tmp_path, monkeypatch, autodown_file):
-        """A telegram-triggered wake posts the waking-notice exactly ONCE.
-
-        The notice fires at the state->waking transition (not per tick); a
-        second autoup while already waking is a no-op and never re-sends it.
-        """
-        serving, tg_notes = self._setup(tmp_path, monkeypatch, autodown_file)
-        self._cfg_telegram(autodown_file)
-        runner = _FakeRunner(str(tmp_path / "watchdog-block.json"))
-        res = ad.autoup(
-            serving_path=serving, run_cmd_fn=runner,
-            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
-            sleep_fn=_noop_sleep, notify=True,
-        )
-        assert res["result"] == "up"
-        waking = [n for n in tg_notes if "NOT be processed" in n]
-        assert len(waking) == 1
-        # A second autoup while ALREADY WAKING is a no-op and re-sends nothing.
-        cfg = ad.load_config()
-        cfg["state"] = "waking"
-        ad.save_config(cfg)
-        ad.autoup(
-            serving_path=serving, run_cmd_fn=runner,
-            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
-            sleep_fn=_noop_sleep, notify=True,
-        )
-        waking = [n for n in tg_notes if "NOT be processed" in n]
-        assert len(waking) == 1   # still once, never per tick
-
-    def test_wake_complete_quotes_trigger_text(
-            self, tmp_path, monkeypatch, autodown_file):
-        """On wake complete the up-notice quotes the triggering message."""
-        serving, tg_notes = self._setup(tmp_path, monkeypatch, autodown_file)
-        trigger = "wake test \u2014 please run the quarterly report"
-        self._cfg_telegram(autodown_file, text=trigger)
-        runner = _FakeRunner(str(tmp_path / "watchdog-block.json"))
-        res = ad.autoup(
-            serving_path=serving, run_cmd_fn=runner,
-            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
-            sleep_fn=_noop_sleep, notify=True,
-        )
-        assert res["result"] == "up"
-        up = [n for n in tg_notes
-              if "wake complete" in n and "NOT processed" in n]
-        assert len(up) == 1
-        assert trigger in up[0]           # quotes the full trigger text
-        assert "NOT processed" in up[0]   # honest: not auto-replayed
-        # wake bookkeeping cleared on success (incl. trigger text).
-        cfg = ad.load_config()
-        assert cfg["wake_source"] is None
-        assert cfg["wake_trigger_text"] is None
-
-    def test_non_telegram_wake_no_quote(
-            self, tmp_path, monkeypatch, autodown_file):
-        """CLI/HTTP/kanban-triggered wake sends NO telegram quote and does not
-        crash — there is nothing to quote."""
-        for source in ("cli", "http", "kanban"):
-            serving, tg_notes = self._setup(tmp_path, monkeypatch,
-                                            autodown_file)
-            cfg = ad.load_config()
-            cfg["wake_source"] = source
-            ad.save_config(cfg)
-            runner = _FakeRunner(str(tmp_path / "watchdog-block.json"))
-            res = ad.autoup(
-                serving_path=serving, run_cmd_fn=runner,
-                http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
-                sleep_fn=_noop_sleep, notify=True,
-            )
-            assert res["result"] == "up"
-            # No waking notice, no quoted up-notice — nothing telegram-specific.
-            assert not any("NOT process" in n for n in tg_notes)
-
-    def test_failed_wake_no_false_up_notice(
-            self, tmp_path, monkeypatch, autodown_file):
-        """A failed wake still sends the honest failure notice and NEVER sends
-        a false \"cluster is up\" (quoted) notice."""
-        serving, tg_notes = self._setup(tmp_path, monkeypatch, autodown_file)
-        self._cfg_telegram(autodown_file)
-        runner = _FakeRunner(str(tmp_path / "watchdog-block.json"),
-                             results=[False])   # first start fails
-        res = ad.autoup(
-            serving_path=serving, run_cmd_fn=runner,
-            http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
-            sleep_fn=_noop_sleep, notify=True,
-        )
-        assert res["result"] == "start-failed"
-        # No false "cluster is UP" telegram quote notice.
-        assert not any("wake complete" in n for n in tg_notes)
-        # The honest failure notice DID fire on the telegram ops channel too.
-        assert any("wake FAILED" in n for n in tg_notes)
-
-    def test_no_notices_when_disabled(self, tmp_path, monkeypatch,
-                                      autodown_file):
-        """Notices are never sent when autodown is disabled — even if a
-        telegram source+text is present. Call the helpers directly with a
-        disabled config byte-for-byte (nothing fires)."""
-        cfg = dict(ad.DEFAULT_CONFIG)
-        cfg["enabled"] = False
-        cfg["wake_source"] = "telegram"
-        cfg["wake_trigger_text"] = "should not be sent"
-        ad.save_config(cfg)
-        tg_notes = []
-        monkeypatch.setattr(ad, "notify_operations",
-                            lambda msg, *a, **k: tg_notes.append(str(msg)))
-        ad._notify_wake_triggered(cfg)
-        ad._notify_wake_complete(cfg)
-        assert tg_notes == []
-
-
 class TestWaitReadySilentSpin:
     """_wait_ready must not swallow probe errors silently (the real defect
     confirmed by live testing)."""
@@ -3198,7 +2869,6 @@ class TestResumeFromRestart:
         """
         block_file = str(tmp_path / "watchdog-block.json")
         monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
-        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
         monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
         return block_file
 
@@ -3407,7 +3077,6 @@ class TestSelfHeal:
         re-asserted every cycle (self-heal)."""
         block_file = str(tmp_path / "watchdog-block.json")
         monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
-        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
         monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
         # Hermetic: the reconcile probe reports the layer NOT up, so this test
         # only exercises the self-heal-block path regardless of the live fleet.
@@ -3438,7 +3107,6 @@ class TestSelfHeal:
         """cycle while state:down with an already-correct block ⇒ left as-is."""
         block_file = str(tmp_path / "watchdog-block.json")
         monkeypatch.setattr(_lifecycle, "WATCHDOG_BLOCK_FILE", block_file)
-        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
         monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
         # Hermetic: reconcile probe reports NOT up (no cross-test contamination).
         monkeypatch.setattr(ad, "_reconcile_up_fn", lambda **kw: False)
@@ -3498,7 +3166,6 @@ class TestLockAndGates:
         bf = self._block_file(tmp_path, monkeypatch)
         serving = _write_serving(tmp_path)
         runner = _FakeRunner(bf, results=results)
-        monkeypatch.setattr(ad, "notify_operations", lambda *a, **k: True)
         monkeypatch.setattr(ad, "send_macos_notification", lambda *a, **k: True)
         return serving, runner, bf
 
@@ -3756,7 +3423,7 @@ class TestLockAndGates:
     # -- F7 residual: empty wake plan ⇒ LOUD notify -------------------------
     def test_empty_wake_plan_notifies_loudly(self, tmp_path, monkeypatch,
                                              autodown_file):
-        """Empty wake plan ⇒ critical notify delivered (desktop + ops)."""
+        """Empty wake plan ⇒ critical notify delivered (desktop)."""
         serving, runner, bf = self._setup(tmp_path, monkeypatch, autodown_file)
         _lifecycle.save_watchdog_block({"blocked": True, "intentional": "autodown",
                                         "reason": ad.WATCHDOG_TEARDOWN_REASON,
@@ -3764,8 +3431,6 @@ class TestLockAndGates:
                                         "failures": []})
         _write_down_cfg(autodown_file)
         notified = []
-        monkeypatch.setattr(ad, "notify_operations",
-                            lambda m: notified.append(("ops", m)))
         monkeypatch.setattr(ad, "send_macos_notification",
                             lambda t, m, priority="normal": (
                                 notified.append((t, m, priority))))
@@ -3774,7 +3439,7 @@ class TestLockAndGates:
                         http_check_fn=_HealthyProbe(), clock=lambda: 0.0,
                         sleep_fn=_noop_sleep, notify=True)
         assert res["result"] == "no-units"
-        assert len(notified) >= 2            # ops + desktop both fired
+        assert len(notified) >= 1            # desktop fired
         assert any(t == "HSCC Autodown Wake Failed" for t, *_ in notified)
 
     # -- F7 residual: subsequent normal cycle() not wedged — can recover -----

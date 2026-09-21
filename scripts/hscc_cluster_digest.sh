@@ -1,6 +1,6 @@
 #!/bin/bash
 # hscc_cluster_digest.sh — periodic cluster state summary.
-# Emits always (digest, not watchdog). Routed to delivery target (telegram).
+# Emits always (digest, not watchdog). Routed to delivery target (desktop).
 
 set -u
 SPARKRUN="/Users/desac/.local/bin/sparkrun"

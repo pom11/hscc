@@ -199,8 +199,8 @@ def _backing_create_project(name, repo, registry_path, github, private):
         registry_path=registry_path,
         github=github,
         private=private,
-        include_topic=False,   # a phone-driven bootstrap does not mint a
-        # Telegram topic by default — the operator can
+        include_topic=False,   # a phone-driven bootstrap does not mint an
+        # ops topic by default — the operator can
         # add chat wiring later via the board.
     )
 

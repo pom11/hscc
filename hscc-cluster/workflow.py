@@ -235,9 +235,7 @@ def on_kanban_task_blocked(task_id=None, profile_name=None, reason=None,
     """Hook handler for `kanban_task_blocked` (fires when a task is blocked).
 
     Surfaces blocked tasks so the ops team sees them:
-    1. Posts a concise alert to the HSCC ops Telegram topic via the existing
-       ``hscc_daemon.telegram.notify_operations`` path (reused at import time).
-    2. Appends a JSON line to ``~/.hscc/blocked_tasks.jsonl`` so the dashboard
+    1. Appends a JSON line to ``~/.hscc/blocked_tasks.jsonl`` so the dashboard
        or status tools can read stuck-task history.
 
     Best-effort: never raises. The ``reason`` field is new in hermes 0.17 —
@@ -268,14 +266,6 @@ def on_kanban_task_blocked(task_id=None, profile_name=None, reason=None,
         if not any(parts[1:]):
             parts = ["\U0001f6a7 **Task blocked** (no context available)"]
         alert = "\n".join(parts)
-
-        # Post to Telegram ops topic (best-effort; may not be importable outside
-        # the daemon context).
-        try:
-            from . import _telegram_compat as _tg
-            _tg.notify_operations(alert)
-        except ImportError:
-            pass
 
         # Persist to the local log so the dashboard can read it.
         try:

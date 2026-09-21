@@ -8,7 +8,7 @@ Pure shell scripts (no LLM) that monitor the HSCC cluster + Mac dispatcher host.
 |---|---|
 | `hscc_proxy_watchdog.sh` | Probe `localhost:4000` (sparkrun LiteLLM proxy). If unreachable, restart via `sparkrun proxy start --cluster hscc --port 4000`. Covers the stale-PID regression where the proxy dies and sparkrun doesn't auto-restart it. |
 | `hscc_worker_health.sh` | Probe all 4 vLLM endpoints (`.244/.246/.247/.248:8000`). Verifies each serves the expected model id; reports unreachable hosts and model-id mismatches. |
-| `hscc_cluster_digest.sh` | Periodic summary: container count per host, endpoint health, proxy state, per-job uptime. Designed to be delivered to a chat (e.g. the HSCC Telegram channel). |
+| `hscc_cluster_digest.sh` | Periodic summary: container count per host, endpoint health, proxy state, per-job uptime. Designed to be delivered to a chat via Hermes `--deliver` (e.g. desktop notification). |
 | `hscc_nas_watchdog.sh` | NAS health: ping QNAP `.249`, check Mac `/Volumes/NAS` mount listability. Falls back to project docs for remediation. |
 
 ## Install
@@ -43,8 +43,8 @@ hermes cron create 'every 5m'   --name 'hscc-proxy-watchdog'  --no-agent --scrip
 hermes cron create 'every 10m'  --name 'hscc-worker-health'   --no-agent --script hscc_worker_health.sh
 hermes cron create 'every 4h'   --name 'hscc-nas-watchdog'    --no-agent --script hscc_nas_watchdog.sh
 
-# Cluster digest — replace <chat_id> with your delivery target (e.g. telegram:-100...).
-hermes cron create 'every 2h'   --name 'hscc-cluster-digest'  --no-agent --script hscc_cluster_digest.sh --deliver 'telegram:<chat_id>'
+# Cluster digest — delivered via desktop notification.
+hermes cron create 'every 2h'   --name 'hscc-cluster-digest'  --no-agent --script hscc_cluster_digest.sh --deliver desktop
 ```
 
 Verify with `hermes cron list`.

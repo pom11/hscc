@@ -26,7 +26,7 @@ You have a few powerful computers and a team of AI helpers. **HSCC is the manage
 - **A whole org, not one bot** — 22+ role profiles (architect, coder, reviewer, QA, engineers, analysts), each with its own identity, skills, and disposition. New roles are minted on demand.
 - **Autonomous quality gates** — code is reviewed by a dedicated agent (diff + tests + spec) before it lands on an integration branch. Main stays human-gated.
 - **Spreads across your GPUs and self-heals** — work dispatches to worker nodes kept alive and health-monitored by the daemon. Crashed models relaunch automatically.
-- **Failure escalation** — a cron watcher reassigns repeatedly-failing tasks to stronger models and pings you on Telegram when even that doesn't fix it. Silent when nothing is stuck.
+- **Failure escalation** — a cron watcher reassigns repeatedly-failing tasks to stronger models and notifies you (desktop) when even that doesn't fix it. Silent when nothing is stuck.
 - **One-command install** — `git clone` + `bootstrap.sh` detects your cluster from sparkrun, asks two questions (or `--yes` for zero), and installs everything.
 
 ## How it looks in practice
@@ -36,7 +36,7 @@ You type in chat: *"Build a REST API for the project tracker in ~/dev/tracker."*
 1. The **orchestrator** brainstorms a spec with the **architect**, then decomposes it into a dependency-ordered task graph on the kanban board.
 2. Tasks dispatch to role-specialized workers — **backend-engineer** scaffolds the API, **qa** writes tests, **coder** fills in the routes — each in its own git worktree on a GPU worker node.
 3. When the coder finishes, it submits its work to **review**. The **reviewer** agent checks the diff, runs the tests, confirms the work matches the spec, and merges to the integration branch.
-4. The whole chain runs hands-off. If a worker model crashes, the daemon relaunches it. If a task fails repeatedly, the escalation watcher reassigns it — and alerts you on Telegram if it gets stuck.
+4. The whole chain runs hands-off. If a worker model crashes, the daemon relaunches it. If a task fails repeatedly, the escalation watcher reassigns it — and notifies you (desktop) if it gets stuck.
 
 This runs on a DGX Spark cluster with Hermes agents and sparkrun — not a turnkey product for arbitrary hardware, but a proven pattern if you already have (or are building) that stack.
 
@@ -174,7 +174,7 @@ hscc template validate 4node-coding --structural-only  # offline, CI-friendly
 
 ## Idle autodown
 
-When your cluster is just sitting there idle — no kanban work moving, no agent busy, nobody talking to it — the **GPU serving layer** (the vLLM containers that power your models) is still drawing power for nothing. **Idle autodown** watches for that. After the cluster has been quiet for X minutes, it shuts the serving layer down to save power, and brings it back up automatically the moment anything comes in — a Telegram message, an HTTP API request, a new kanban card, or you running `hscc autodown wake`.
+When your cluster is just sitting there idle — no kanban work moving, no agent busy, nobody talking to it — the **GPU serving layer** (the vLLM containers that power your models) is still drawing power for nothing. **Idle autodown** watches for that. After the cluster has been quiet for X minutes, it shuts the serving layer down to save power, and brings it back up automatically the moment anything comes in — an HTTP API request, a new kanban card, or you running `hscc autodown wake`.
 
 **It is OFF by default.** Nothing tears anything down until you arm it deliberately — that's the single most important thing to know. You opt in:
 
@@ -193,9 +193,9 @@ hscc autodown disable                    # disarm it — stop the automation
 
 **CPU-only watchdogs** (e.g. `hscc-dep-watcher`, `hscc-escalate-watcher`): these active jobs are `no_agent: true` + `model: null` — pure-CPU script watchdogs that never touch the GPU serving layer, so they run fine while the cluster is down. They do **not** block arming — `enable` arms and simply notes them, and autodown does **not** wake the cluster for them (waking a ~9-min model load for a no-model script job would waste GPU and, for the every-15-min watcher, defeat idle teardown entirely).
 
-### If a Telegram message wakes a down cluster
+### Messages arriving while the cluster is down
 
-A Telegram message sent while the serving layer is down will wake it up, but the **message itself is not processed** — the gateway consumes it on arrival while the model is still loading and replies with an error. Autodown posts two notices to the ops Telegram topic so you're never left wondering: (1) a "cluster is waking, this message will not be processed" notice the moment the wake starts, and (2) a "cluster is up" notice when the wake completes, **quoting the message** so you can re-send it with one tap. Autodown deliberately does **not** auto-replay the message — re-executing your instruction minutes later without confirmation isn't safe. Just send it again once the cluster is up.
+Telegram is no longer a wake source — the daemon wakes only on HTTP API activity, kanban activity, or PRCI messages viewed on the cluster. A message sent through another channel while the serving layer is down is not processed or replayed; when the cluster comes back up, the daemon posts a desktop "cluster is back up" notice. Autodown deliberately does **not** auto-replay any dropped message — re-executing an instruction you sent minutes later without confirmation isn't safe, so send it again once the cluster is up.
 
 ### What it will never do
 
