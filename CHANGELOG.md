@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-21
+
+### Removed
+- **Telegram is gone from HSCC entirely.** The operator no longer uses Telegram,
+  so the transport and every delivery path built on it have been deleted rather
+  than left dormant: `flightdeck/core/telegram.py`, `flightdeck/commands/topics.py`,
+  `hscc_daemon/telegram.py`, `hscc_daemon/replay.py` (inbound-message replay for
+  autodown wake, which existed only to recover lost Telegram messages),
+  `hscc-bootstrap/telegram_choice.py`, `hscc-bootstrap/strip_worker_telegram.py`
+  and their tests. Roughly 3,300 lines removed across six packages.
+- `message send` / `read` / `broadcast` were Telegram topic delivery in their
+  entirety and no longer exist. `message dispatch` keeps its non-Telegram logic
+  (kanban card creation + worktree wiring).
+
+  **This is why the release is 2.0.0** — commands were removed, not deprecated.
+
+### Kept deliberately
+- **The registry `topic` field.** It is the only key mapping an old Telegram
+  thread to a project, and the archive's attribution depends on it. It is now
+  historical metadata rather than a live integration.
+- **`flightdeck/core/archive.py` and `session_discovery.py`.** Telegram-sourced
+  rows already in `state.db` remain readable: `source='telegram'` is still a
+  valid thing to read, it is simply no longer a thing to write. Verified after
+  removal — all 134 sessions / 18,995 messages still export with per-project
+  attribution, and `project sessions` still resolves topic 2046 to hscc.
+- `project chat --resume <id>` still opens an archived session by id.
+
+### Added
+- `project archive-sessions` — exports every Telegram session to readable
+  Markdown. Read-only on `state.db` (`mode=ro`); deletes nothing.
+- `project map-sessions` — proposes owners for the 103 sessions with a NULL
+  `thread_id`. Deterministic repo-path matching first (resolves ~37 with no
+  model call), orchestrator only for the ambiguous remainder; `unknown` is a
+  first-class outcome and every proposal carries its method and evidence.
+  Read-only by default, `--apply` is separate and reversible.
+- `project sessions` — surfaces a project's Telegram history; `chat --resume`
+  is explicit and never auto-resumes an old session into the orchestrator's
+  permanent thread.
+- A single fleet-wide `telegram.enabled` switch preceded the removal, proving
+  every command worked with Telegram off before anything was deleted.
+
+### Fixed
+- `archive-sessions` filed 100% of history under `unmapped/` when
+  `registry_path` was omitted — a truthy-guard suppressed the default registry
+  lookup. Restored attribution for 27 of 134 sessions.
+- `hscc check` run from the CLI overwrote the daemon's stream state, making
+  `hscc status` report a healthy fleet as FAIL.
+- Migrated off `hermes_cli.kanban_db.connect`, whose removal date (2026-09-14)
+  had already passed.
+
 ## [1.17.1] - 2026-09-21
 
 ### Fixed
