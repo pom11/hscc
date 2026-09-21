@@ -39,6 +39,9 @@ def _not_implemented() -> int:
 # --------------------------------------------------------------------------- #
 
 def cmd_list(args: argparse.Namespace, projects: list[registry.Project]) -> int:
+    if not telegram.enabled():
+        print(telegram.disabled_message())
+        return 0
     topic_map = _registry_topic_map(projects)
     try:
         top = telegram.list_topics(_client=args.client)
@@ -73,6 +76,9 @@ def cmd_list(args: argparse.Namespace, projects: list[registry.Project]) -> int:
 def cmd_audit(args: argparse.Namespace, projects: list[registry.Project]) -> int:
     """Flag topics whose CURRENT name differs from their registry name, and
     topics with no project mapping. Read-only; never mutates anything."""
+    if not telegram.enabled():
+        print(telegram.disabled_message())
+        return 0
     topic_map = _registry_topic_map(projects)
     # Known-permanent topics (the operator's persisted ignored_topics list,
     # always plus Telegram's built-in General topic) are excluded from the
@@ -141,6 +147,9 @@ def cmd_audit(args: argparse.Namespace, projects: list[registry.Project]) -> int
 # --------------------------------------------------------------------------- #
 
 def cmd_rename(args: argparse.Namespace, projects: list[registry.Project]) -> int:
+    if not telegram.enabled():
+        print(f"error: {telegram.disabled_message()}", file=sys.stderr)
+        return 2
     topic_id = args.id
     name = args.name
     topic_map = _registry_topic_map(projects)
@@ -182,6 +191,9 @@ def cmd_rename(args: argparse.Namespace, projects: list[registry.Project]) -> in
 # --------------------------------------------------------------------------- #
 
 def cmd_create(args: argparse.Namespace, projects: list[registry.Project]) -> int:
+    if not telegram.enabled():
+        print(f"error: {telegram.disabled_message()}", file=sys.stderr)
+        return 2
     name = args.name
     print(f"will create topic {name!r}")
     if args.bind:

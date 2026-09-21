@@ -624,6 +624,11 @@ def _run_notify(rows: list[dict], projects: list[registry.Project], *,
 
     Returns ``(newly_notified: list[str], errors: list[(card_id, message)])``.
     """
+    if not telegram.enabled():
+        # Nothing is sent and nothing is recorded as notified, so re-enabling
+        # Telegram later re-enters every eligible card and notifies it fresh.
+        print("qa: telegram disabled — notifications skipped.", file=sys.stderr)
+        return [], []
     current = {r["id"] for r in rows if r["id"] and not r["unattributed"]}
     notified = _load_notified(_state)
     entering = sorted(current - notified)

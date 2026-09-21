@@ -680,6 +680,9 @@ def cmd_decompose(args: argparse.Namespace, projects: list[registry.Project]) ->
             file=sys.stderr,
         )
         return 2
+    if not telegram.enabled():
+        print(f"error: {telegram.disabled_message()}", file=sys.stderr)
+        return 2
     # Resolve the board UP FRONT: the project's OWN board (registry ``board``),
     # falling back to Hermes' current board when the project has none — and we
     # SAY SO, because a silent fallback is how cards end up on the wrong board.
