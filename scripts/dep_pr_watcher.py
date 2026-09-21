@@ -93,6 +93,16 @@ def ensure_cards(prs, *, _kb=None):
     """Create one idempotent verification card per PR. Returns list of task ids."""
     if _kb is None:
         from hermes_cli import kanban_db as _kb
+        # ``kanban_db.connect_closing`` is a removal-scheduled compat shim that
+        # emits HermesPluginCompatWarning; bind the canonical version from the
+        # new module unless a test already set it explicitly on the module.
+        if "connect" not in _kb.__dict__:
+            try:
+                from hermes_cli import kanban_db_connect as _kbc  # noqa: PLC0415
+                _kb.connect = _kbc.connect
+                _kb.connect_closing = _kbc.connect_closing
+            except Exception:
+                pass
     created = []
     with _kb.connect_closing(board=BOARD) as conn:
         for pr in prs:

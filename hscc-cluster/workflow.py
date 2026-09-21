@@ -202,6 +202,18 @@ def on_kanban_task_claimed(task_id=None, board=None, profile_name=None,
     try:
         import os as _os
         from hermes_cli import kanban_db as _kb
+        # ``kanban_db.connect`` is a removal-scheduled compat shim that emits
+        # HermesPluginCompatWarning; bind the canonical ``connect`` from the new
+        # module so ``_kb.connect`` resolves from __dict__, not the shim. Only
+        # bind when ``connect`` isn't already explicitly set on the module (tests
+        # monkeypatch ``hermes_cli.kanban_db.connect`` into __dict__; we must not
+        # clobber that). If the new module is absent (old Hermes), fall back.
+        if "connect" not in _kb.__dict__:
+            try:
+                from hermes_cli import kanban_db_connect as _kbc  # noqa: PLC0415
+                _kb.connect = _kbc.connect
+            except Exception:
+                pass
         c = _kb.connect(board=board) if board else _kb.connect()
         try:
             task_row = _kb.get_task(c, task_id)
@@ -316,6 +328,14 @@ def _try_auto_unblock(child_task_id, parent_task_id):
     try:
         import re
         from hermes_cli import kanban_db as _kb
+        # Bind canonical ``connect`` from the new module (see on_kanban_task_claimed),
+        # unless a test already set it explicitly on the module.
+        if "connect" not in _kb.__dict__:
+            try:
+                from hermes_cli import kanban_db_connect as _kbc  # noqa: PLC0415
+                _kb.connect = _kbc.connect
+            except Exception:
+                pass
         c = _kb.connect()
         child_row = _kb.get_task(c, child_task_id)
         if not child_row:

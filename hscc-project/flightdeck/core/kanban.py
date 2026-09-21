@@ -84,13 +84,25 @@ class KanbanError(Exception):
 
 
 def _load_kanban_db() -> Any:
-    """Import Hermes' ``hermes_cli.kanban_db`` module, raising a clear error
-    when Hermes is not installed.
+    """Import Hermes' kanban library, raising a clear error when Hermes is not
+    installed.
 
     The import is deliberately kept inside this function (never at module
     top level) so tests can stub it, and so importing this module never
     depends on Hermes being present. The agent source tree is put on
     ``sys.path`` only for the duration of this one import.
+
+    ``connect``/``connect_closing`` formerly lived on ``hermes_cli.kanban_db``
+    but moved to ``hermes_cli.kanban_db_connect`` (``kanban_db.connect`` is a
+    compat shim that emits ``HermesPluginCompatWarning`` and is scheduled for
+    removal). We import the full ``kanban_db`` module for its native read/write
+    helpers (``list_tasks``, ``create_task``, ...), then resolve
+    ``connect``/``connect_closing`` defensively: try the new
+    ``kanban_db_connect`` module first, fall back to the old ``kanban_db``
+    path. The resolved functions are bound onto the returned module so every
+    call site's ``kdb.connect(...)`` / ``kdb.connect_closing(...)`` keeps
+    working unchanged against a Hermes that has ONLY the new path or ONLY the
+    old one, and never trips the removal-scheduled compat shim.
     """
     hermes_path = os.path.expanduser(
         os.environ.get("HERMES_AGENT_PATH", _HERMES_AGENT_PATH)
@@ -108,6 +120,32 @@ def _load_kanban_db() -> Any:
         raise KanbanError(
             f"could not import hermes_cli.kanban_db from {hermes_path!r}: {exc}"
         ) from exc
+
+    # ``connect``/``connect_closing`` moved to ``hermes_cli.kanban_db_connect``.
+    # ``kanban_db.connect`` was kept as a removal-scheduled compat shim that
+    # emits ``HermesPluginCompatWarning`` — we must not use it. Prefer the new
+    # module; fall back to the old ``kanban_db`` path so we keep working against
+    # a Hermes that only has the old. If BOTH are unavailable, raise loudly
+    # naming both paths — never degrade to a silent no-op board. The resolved
+    # callables are bound onto the module so ``kdb.connect(...)`` /
+    # ``kdb.connect_closing(...)`` resolve from ``__dict__`` (never the shim).
+    try:
+        from hermes_cli import kanban_db_connect  # noqa: PLC0415
+        _conn_module = kanban_db_connect
+    except ImportError:  # pragma: no cover - defensive
+        _conn_module = kanban_db
+    _conn = getattr(_conn_module, "connect", None)
+    _conn_closing = getattr(_conn_module, "connect_closing", None)
+    if _conn is None or _conn_closing is None:
+        raise KanbanError(
+            "cannot resolve the kanban connect helper: "
+            "hermes_cli.kanban_db_connect.connect/connect_closing and "
+            "hermes_cli.kanban_db.connect/connect_closing are both unavailable "
+            f"from {hermes_path!r}. HSCC needs one of them to read the kanban "
+            "board — refusing to run with a silent no-op board."
+        )
+    kanban_db.connect = _conn
+    kanban_db.connect_closing = _conn_closing
     return kanban_db
 
 
