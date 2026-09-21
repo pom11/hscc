@@ -759,6 +759,9 @@ def _post(project: registry.Project, summary: str, args: argparse.Namespace) -> 
             file=sys.stderr,
         )
         return 2
+    if not telegram.enabled():
+        print(f"error: {telegram.disabled_message()}", file=sys.stderr)
+        return 2
 
     try:
         telegram.send_message(project.topic, summary, _client=args.client)

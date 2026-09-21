@@ -226,7 +226,11 @@ if $SKIP_PATCHES; then warn "skipped"; else
 fi
 
 hdr "Install: enable HSCC plugins + toolsets"
-WIRED=$("$PYBIN" "$BOOT_DIR/enable_plugins.py" 2>/dev/null) && ok "config wired ($WIRED)" || warn "plugin/toolset enable reported issues"
+# Thread the resolved Telegram interview decision through so enable_plugins can
+# seed ~/.flightdeck/config.yaml with telegram.enabled: true (--telegram=yes)
+# or false (the default no) — only when the key is ABSENT, never overwriting an
+# operator's explicit value (mirrors the approvals.single_query_mode wiring).
+WIRED=$(HSCC_TELEGRAM="${TELEGRAM:-no}" "$PYBIN" "$BOOT_DIR/enable_plugins.py" 2>/dev/null) && ok "config wired ($WIRED)" || warn "plugin/toolset enable reported issues"
 
 hdr "Install: agent instructions (SOUL + ops personality)"
 INSTR=$("$PYBIN" "$BOOT_DIR/install_soul.py" 2>/dev/null) && ok "$INSTR" || warn "SOUL/personality update reported issues"

@@ -77,6 +77,8 @@ def _topic_ok(proj: registry.Project, topics: list[telegram.Topic] | None) -> di
     ``topics=None`` means the Telegram transport failed, so this dimension is
     *unverifiable*, not merely missing.
     """
+    if not telegram.enabled():
+        return {"ok": True, "detail": "telegram disabled (topic not checked)"}
     if proj.topic is None:
         return {"ok": True, "detail": "no topic mapped (unknown, not an error)"}
     if topics is None:

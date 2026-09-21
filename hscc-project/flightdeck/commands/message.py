@@ -91,6 +91,9 @@ def cmd_send(args: argparse.Namespace, projects: list[registry.Project]) -> int:
             file=sys.stderr,
         )
         return 2
+    if not telegram.enabled():
+        print(f"error: {telegram.disabled_message()}", file=sys.stderr)
+        return 2
     topic_id, err = _resolve_topic(projects, args.project)
     if err:
         print(f"error: {err}", file=sys.stderr)
@@ -112,6 +115,9 @@ def cmd_send(args: argparse.Namespace, projects: list[registry.Project]) -> int:
 # --------------------------------------------------------------------------- #
 
 def cmd_read(args: argparse.Namespace, projects: list[registry.Project]) -> int:
+    if not telegram.enabled():
+        print(f"error: {telegram.disabled_message()}", file=sys.stderr)
+        return 2
     topic_id, err = _resolve_topic(projects, args.project)
     if err:
         print(f"error: {err}", file=sys.stderr)
@@ -291,7 +297,14 @@ def cmd_dispatch(args: argparse.Namespace, projects: list[registry.Project]) -> 
     # board is resolved from the project's OWN board (registry ``board``); a
     # project with NO board falls back to Hermes' current board and we SAY SO —
     # a silent fallback is how cards end up on the wrong board.
-    if proj.topic is None:
+    #
+    # When Telegram is DISABLED a topic is NOT required: dispatch still creates
+    # the card and reports success (it just cannot announce — a different step,
+    # handled below, never a failure).
+    tg_enabled = telegram.enabled()
+    if not tg_enabled:
+        pass  # no topic needed when telegram is off
+    elif proj.topic is None:
         print(
             f"error: project {args.project} has no topic; "
             f"run: flightdeck project repair {args.project}",
@@ -377,10 +390,13 @@ def cmd_dispatch(args: argparse.Namespace, projects: list[registry.Project]) -> 
             print(f"  card body : {body}")
         elif announcement != args.task:
             print(f"  card body : {announcement}")
-        print(f"  announce  : {announcement}")
+        print(f"  announce  : {announcement if tg_enabled else '(telegram disabled — not announced)'}")
         if dependents_notice:
             print(f"  dependents: {dependents_notice}")
-        print("dry-run: pass --apply to create the card and send the announcement.", file=sys.stderr)
+        if tg_enabled:
+            print("dry-run: pass --apply to create the card and send the announcement.", file=sys.stderr)
+        else:
+            print("dry-run: pass --apply to create the card (telegram is disabled, so nothing will be announced).", file=sys.stderr)
         return 0
 
     # 0. Cluster-readiness guard (§6-dispatch-guard, docs/design/idle-autodown.md).
@@ -417,20 +433,33 @@ def cmd_dispatch(args: argparse.Namespace, projects: list[registry.Project]) -> 
         print(f"error: could not create card on board {board!r}: {exc}", file=sys.stderr)
         return 2
 
-    # 2. Announce it in the topic.
-    try:
-        telegram.send_message(proj.topic, announcement, _client=args.client)
-    except (TopicLockedError, TelegramError) as exc:
+    # 2. Announce it in the topic. When Telegram is disabled the dispatch is
+    #    complete WITHOUT announcing — the card exists and nothing was posted,
+    #    which is exactly what an operator leaving Telegram wants. It must NOT
+    #    fail, warn repeatedly, or claim it announced something it did not.
+    if tg_enabled:
+        # When telegram is enabled and we got here, the topic was required up
+        # front (proj.topic is None -> already returned). Narrow it for the
+        # type checker / send_message's int parameter.
+        if proj.topic is None:  # pragma: no cover - defensive, unreachable
+            raise AssertionError("dispatch reached announce with no topic")
+        try:
+            telegram.send_message(proj.topic, announcement, _client=args.client)
+        except (TopicLockedError, TelegramError) as exc:
+            print(
+                f"error: card {card_id} was created on board {board!r} but the "
+                f"announcement FAILED: {exc}",
+                file=sys.stderr,
+            )
+            print(f"card id: {card_id}", file=sys.stderr)
+            print("dispatch is PARTIAL — the card exists but was not announced.", file=sys.stderr)
+            return 1
+        print(f"card {card_id} created on board {board!r} and announced to topic {proj.topic}.")
+    else:
         print(
-            f"error: card {card_id} was created on board {board!r} but the "
-            f"announcement FAILED: {exc}",
-            file=sys.stderr,
+            f"card {card_id} created on board {board!r} "
+            "(telegram disabled — not announced)."
         )
-        print(f"card id: {card_id}", file=sys.stderr)
-        print("dispatch is PARTIAL — the card exists but was not announced.", file=sys.stderr)
-        return 1
-
-    print(f"card {card_id} created on board {board!r} and announced to topic {proj.topic}.")
     return 0
 
 
@@ -439,6 +468,9 @@ def cmd_dispatch(args: argparse.Namespace, projects: list[registry.Project]) -> 
 # --------------------------------------------------------------------------- #
 
 def cmd_broadcast(args: argparse.Namespace, projects: list[registry.Project]) -> int:
+    if not telegram.enabled():
+        print(f"error: {telegram.disabled_message()}", file=sys.stderr)
+        return 2
     if args.to:
         targets = [t.strip() for t in args.to.split(",") if t.strip()]
     else:

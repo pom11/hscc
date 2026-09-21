@@ -300,6 +300,9 @@ def _probe_telegram_daemon(_client=None) -> dict:
     except ImportError:  # pragma: no cover - defensive
         return {"ok": False, "status": "unverified", "tools": 0,
                 "detail": "flightdeck core import failed"}
+    if not _cfg.telegram_enabled():
+        return {"ok": True, "status": "ok", "tools": 0,
+                "detail": "telegram disabled (telegram.enabled=false) — not probed"}
     try:
         url = _cfg.telegram_mcp_url()
     except Exception as exc:  # pragma: no cover - defensive
