@@ -39,6 +39,7 @@ prefix changes.
 | `flightdeck metrics` | `hscc project metrics` |
 | `flightdeck daemon …` | `hscc project daemon …` |
 | `flightdeck doctor/why/monitor/hygiene/reconcile/lint-cards/legacy-cards/migrate-card/incident/ask/update/topics/init` | `hscc project <same>` |
+| `flightdeck archive-sessions` | `hscc project archive-sessions` |
 
 ---
 
