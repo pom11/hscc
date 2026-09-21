@@ -176,7 +176,22 @@ def cmd_status():
 
 
 def cmd_check(stream=None):
-    """Run a single check cycle."""
+    """Run a single check cycle.
+
+    Ad-hoc (from the terminal): prints the result only and NEVER writes the
+    shared stream-state files the daemon owns. If a CLI-side check fails where
+    the daemon succeeds (TCC, off-LAN laptop, a transient blip), `hscc status`
+    must keep reporting what the daemon observes — a manual failure must not
+    masquerade as a fleet failure.
+    """
+    from .state import persist_disabled
+
+    with persist_disabled():
+        return _cmd_check_impl(stream)
+
+
+def _cmd_check_impl(stream=None):
+    """The actual check cycle; runs under persist_disabled()."""
     from .health import check_dgx, check_gateway, check_local, check_heartbeat, check_nas, check_idle_monitor, check_workers, check_engine_wedge
     from .dispatcher_wedge import check_dispatcher_wedge
     from .lifecycle import pipeline_watchdog
