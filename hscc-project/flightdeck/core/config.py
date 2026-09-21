@@ -8,9 +8,20 @@ Values are read from ``~/.flightdeck/config.yaml`` (overridable for tests via
 a ``path`` argument), with environment variables taking precedence over the
 file. Precedence (highest wins)::
 
+    FLIGHTDECK_TELEGRAM_ENABLED    >  config.yaml telegram.enabled
+                                      >  default ``True`` (enabled)
     FLIGHTDECK_TELEGRAM_GROUP_ID   >  config.yaml telegram.group_id
     FLIGHTDECK_MCP_URL             >  config.yaml telegram.mcp_url
                                      >  default ``http://127.0.0.1:8787/mcp``
+
+``telegram.enabled`` is the single switch that disables Telegram fleet-wide.
+When the key is **absent** it defaults to **enabled** (``True``) so an operator
+upgrading from a pre-switch build — whose config has ``telegram.group_id`` but
+no ``enabled`` key — keeps working unchanged. "Default OFF for a fresh install"
+is NOT an absent-key default here: it is achieved by the installers (HSCC
+bootstrap / ``flightdeck init``) writing ``enabled: false`` when they seed a
+new config. The operator leaves Telegram by setting ``enabled: false``, and
+re-opts in with ``enabled: true`` or the env var above.
 
 A missing config file is fine for everything EXCEPT the Telegram group id,
 which has no safe, universally-valid default: publishing a baked-in id would
@@ -48,12 +59,18 @@ DEFAULT_CONFIG = "~/.flightdeck/config.yaml"
 DEFAULT_MCP_URL = "http://127.0.0.1:8787/mcp"
 
 # Environment overrides; these win over the config file when both are set.
+ENV_ENABLED = "FLIGHTDECK_TELEGRAM_ENABLED"
 ENV_GROUP_ID = "FLIGHTDECK_TELEGRAM_GROUP_ID"
 ENV_MCP_URL = "FLIGHTDECK_MCP_URL"
 
 # Config-file keys, for the actionable error message.
+_CONFIG_KEY_ENABLED = "telegram.enabled"
 _CONFIG_KEY_GROUP_ID = "telegram.group_id"
 _CONFIG_KEY_MCP_URL = "telegram.mcp_url"
+
+# How the `telegram.enabled` config value / env var parse to a bool.
+_TRUE_TOKENS = {"1", "true", "yes", "y", "on"}
+_FALSE_TOKENS = {"0", "false", "no", "n", "off"}
 
 
 def config_path(path: str | None = None) -> Path:
@@ -139,3 +156,41 @@ def telegram_mcp_url(path: str | None = None, env: dict | None = None) -> str:
     if value is None or str(value).strip() == "":
         return DEFAULT_MCP_URL
     return str(value).strip()
+
+
+def telegram_enabled(path: str | None = None, env: dict | None = None) -> bool:
+    """The single fleet-wide switch: is Telegram enabled?
+
+    Env override wins, then the config-file ``telegram.enabled`` key, then
+    the default. When the key is ABSENT the default is **True** (enabled) so
+    an operator upgrading from a pre-switch build — whose config has
+    ``telegram.group_id`` but no ``enabled`` key — keeps working unchanged.
+    "Default OFF for a fresh install" is achieved by the installer (bootstrap
+    / ``flightdeck init``) writing ``enabled: false`` when it seeds a new
+    config, never by an absent-key default of disabled (which would break
+    every existing install on upgrade).
+
+    Accepted truthy values: ``1/true/yes/y/on``. Accepted falsy values:
+    ``0/false/no/n/off``. A YAML boolean works direct; a string value is
+    parsed case-insensitively. Anything unrecognized is treated as **False**
+    (safe: declining must never enable a channel the operator is leaving) and
+    the caller can rely on a plain bool.
+    """
+    env_map = os.environ if env is None else env
+    from_env = env_map.get(ENV_ENABLED)
+    if from_env is not None and str(from_env).strip() != "":
+        return _parse_bool(str(from_env).strip().lower())
+
+    raw = _telegram_mapping(path).get("enabled")
+    if raw is None:
+        return True  # absent key -> keep pre-switch behaviour (enabled)
+    if isinstance(raw, bool):
+        return raw
+    return _parse_bool(str(raw).strip().lower())
+
+
+def _parse_bool(token: str) -> bool:
+    """Parse a normalized lowercase token to a bool; unrecognized -> False."""
+    if token in _TRUE_TOKENS:
+        return True
+    return False

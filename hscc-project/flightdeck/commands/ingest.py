@@ -315,6 +315,8 @@ def _gather_topic(project, limit: int, client=None) -> tuple[str, str | None]:
     directly. A project with no topic, or a read failure, is reported and
     skipped; it never aborts the draft.
     """
+    if not telegram.enabled():
+        return "", "EMPTY (0 messages): telegram is disabled"
     if project.topic is None:
         return "", "EMPTY (0 messages): project has no topic"
     try:
@@ -792,6 +794,15 @@ def cmd_ingest(args: argparse.Namespace, projects: list[registry.Project]) -> in
         print(
             f"error: project {args.project} has no topic; cannot reach the "
             f"orchestrator to draft a roadmap. run: flightdeck project repair {args.project}",
+            file=sys.stderr,
+        )
+        return 2
+    if using_default_ask and not telegram.enabled():
+        print(
+            f"error: {telegram.disabled_message()} — --ask-inline asks through "
+            f"the project's Telegram topic and cannot run while it is disabled. "
+            f"Drop --ask-inline to dispatch the roadmap draft as a kanban card "
+            f"instead (the default, which works without Telegram).",
             file=sys.stderr,
         )
         return 2

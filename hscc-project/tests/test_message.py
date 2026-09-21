@@ -1043,3 +1043,72 @@ def test_ensure_cluster_ready_unknown_state_refuses(monkeypatch, tmp_path):
     assert "unexpected" in err
     assert "--no-wait" in err
     assert ad.autoup_calls == 0
+
+
+# --------------------------------------------------------------------------- #
+# TG-optional: telegram disabled — the single fleet-wide switch
+# --------------------------------------------------------------------------- #
+
+def _tg_disabled(monkeypatch):
+    monkeypatch.setattr(telegram, "enabled", lambda: False)
+
+
+def test_send_fails_cleanly_when_disabled(monkeypatch, capsys):
+    """cmd_send with the switch off -> clean error, exit 2, no daemon call."""
+    fake = FakeTG()
+    _tg_disabled(monkeypatch)
+    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
+    rc = msg_cmd.cmd_send(_ns(client=fake, project="hscc", message="hi"), projects)
+    out = capsys.readouterr()
+    assert rc == 2
+    assert "disabled" in (out.out + out.err).lower()
+    assert fake.calls == []            # never touched the (fake) daemon
+
+
+def test_read_fails_cleanly_when_disabled(monkeypatch, capsys):
+    """cmd_read with the switch off -> clean error, exit 2, no daemon call."""
+    fake = FakeTG()
+    _tg_disabled(monkeypatch)
+    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
+    rc = msg_cmd.cmd_read(_ns(client=fake, project="hscc"), projects)
+    out = capsys.readouterr()
+    assert rc == 2
+    assert "disabled" in (out.out + out.err).lower()
+    assert fake.calls == []
+
+
+def test_broadcast_fails_cleanly_when_disabled(monkeypatch, capsys):
+    """cmd_broadcast with the switch off -> clean error, exit 2, no daemon call."""
+    fake = FakeTG()
+    _tg_disabled(monkeypatch)
+    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
+    rc = msg_cmd.cmd_broadcast(_ns(client=fake, message="hi"), projects)
+    out = capsys.readouterr()
+    assert rc == 2
+    assert "disabled" in (out.out + out.err).lower()
+    assert fake.calls == []
+
+
+def test_dispatch_disabled_still_creates_card_no_announce(monkeypatch, tmp_path, capsys):
+    """The core card: with Telegram disabled, `message dispatch` still creates
+    the card but does NOT announce — and it works even when the project has no
+    topic (the topic requirement is bypassed)."""
+    _tg_disabled(monkeypatch)
+    # No topic on the project, no daemon — dispatch must still succeed.
+    projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=None, board="hscc")]
+    kb = FakeKB(new_id="card-99")
+    _stub_kb(kb, monkeypatch)
+    fake = FakeTG(topics={140: "hscc"})
+
+    rc = msg_cmd.cmd_dispatch(
+        _ns(client=fake, project="hscc", task="do it", assignee=None,
+            message="body", apply=True),
+        projects,
+    )
+    combined = capsys.readouterr().out + capsys.readouterr().err
+    assert rc == 0
+    assert kb.created, "card must still be created with telegram disabled"
+    assert kb.created[0]["title"] == "do it"
+    # Honest reporting: created but NOT announced.
+    assert "not announced" in combined
+    assert fake.calls == []            # no daemon call, no announcement sent
