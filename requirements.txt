@@ -3,3 +3,4 @@
 # install/ and _archive/ plugins are not loaded at runtime.
 
 PyYAML>=6.0
+rich>=13,<16
