@@ -12,12 +12,25 @@
 # MCP daemon to talk to), never the project registry.
 #
 # Precedence (highest wins):
+#   - environment variable FLIGHTDECK_TELEGRAM_ENABLED   overrides telegram.enabled
 #   - environment variable FLIGHTDECK_TELEGRAM_GROUP_ID overrides telegram.group_id
 #   - environment variable FLIGHTDECK_MCP_URL             overrides telegram.mcp_url
 #   - otherwise the values below are used; mcp_url falls back to the localhost
 #     default, group_id has NO default and must be set for any Telegram command.
 
 telegram:
+  # The single fleet-wide switch. `false` = Telegram is disabled everywhere:
+  # every flightdeck/HSCC command still works fully, but skips Telegram (no
+  # topic is created on `project new`, no announcement is posted). Set to
+  # `true` to re-enable all Telegram surfaces.
+  #
+  # The code default when this key is ABSENT is `true` (enabled), so an
+  # operator upgrading from a pre-switch build keeps working unchanged. A
+  # FRESH install is seeded with `enabled: false` by the installers (HSCC
+  # bootstrap / `flightdeck init`) via this example — never by a code default
+  # of disabled, which would silently break every existing install on upgrade.
+  enabled: false
+
   # The Telegram FORUM/GROUP id flightdeck reads and writes topics against.
   # REQUIRED for every Telegram command (topics, message, ask, ingest, sync,
   # report, decompose). When absent, Telegram commands fail with a clear

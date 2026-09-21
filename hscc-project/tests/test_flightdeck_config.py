@@ -99,3 +99,57 @@ def test_mcp_url_env_overrides_config_file(tmp_path):
     cfg = _write_config(tmp_path, mcp_url="http://10.0.0.5:9000/mcp")
     env = {ENV_MCP_URL: "http://10.1.1.1:8787/mcp"}
     assert config.telegram_mcp_url(path=cfg, env=env) == "http://10.1.1.1:8787/mcp"
+
+
+# --------------------------------------------------------------------------- #
+# telegram_enabled — the single fleet-wide switch
+# --------------------------------------------------------------------------- #
+
+
+def test_enabled_defaults_true_when_key_absent(tmp_path):
+    """No `enabled` key -> enabled. This preserves existing operators upgrading:
+    a config with group_id but no `enabled` key must keep working, so the code
+    default is ON. Fresh-install OFF comes from the installer writing `false`,
+    never from a code default of off."""
+    cfg = _write_config(tmp_path, group_id="-100111222333")
+    assert config.telegram_enabled(path=cfg, env={}) is True
+
+
+def test_enabled_reads_config_file_false(tmp_path):
+    """telegram.enabled: false disables telegram."""
+    cfg = _write_config(tmp_path, enabled=False, group_id="-100111222333")
+    assert config.telegram_enabled(path=cfg, env={}) is False
+
+
+def test_enabled_reads_config_file_true(tmp_path):
+    """telegram.enabled: true enables telegram."""
+    cfg = _write_config(tmp_path, enabled=True, group_id="-100111222333")
+    assert config.telegram_enabled(path=cfg, env={}) is True
+
+
+def test_enabled_env_overrides_config_file(tmp_path):
+    """FLIGHTDECK_TELEGRAM_ENABLED wins over the config file (booleans + text)."""
+    from flightdeck.core.config import ENV_ENABLED
+
+    cfg = _write_config(tmp_path, enabled=True)  # file says on
+    # env says off -> off
+    assert config.telegram_enabled(path=cfg, env={ENV_ENABLED: "false"}) is False
+    assert config.telegram_enabled(path=cfg, env={ENV_ENABLED: "0"}) is False
+    # env says on -> on
+    assert config.telegram_enabled(path=cfg, env={ENV_ENABLED: "true"}) is True
+    assert config.telegram_enabled(path=cfg, env={ENV_ENABLED: "1"}) is True
+
+
+def test_enabled_unrecognized_value_fails_safe(tmp_path):
+    """An unrecognised value (env or file) fails safe -> False (off).
+
+    Declining must never enable a channel the operator is leaving, so an
+    unparseable value is treated as False rather than guessed True."""
+    from flightdeck.core.config import ENV_ENABLED
+
+    # env garbage -> off even though the file says true
+    cfg = _write_config(tmp_path, enabled=True)
+    assert config.telegram_enabled(path=cfg, env={ENV_ENABLED: "maybe"}) is False
+    # file garbage -> off
+    cfg_garbage = _write_config(tmp_path, enabled="maybe")
+    assert config.telegram_enabled(path=cfg_garbage, env={}) is False

@@ -105,6 +105,9 @@ def cmd_ask(args: argparse.Namespace, projects: list[registry.Project]) -> int:
             file=sys.stderr,
         )
         return 2
+    if not telegram.enabled():
+        print(f"error: {telegram.disabled_message()}", file=sys.stderr)
+        return 2
     if proj.topic is None:
         print(
             f"error: project {args.project} has no topic; "
