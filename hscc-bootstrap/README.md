@@ -29,13 +29,6 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
    code is ALWAYS loaded (the setup script leaves an already-running daemon
    alone) and verifies the PID turned over; a failed restart warns, never aborts.
 
-**Telegram is optional.** During configuration bootstrap asks
-`Add Telegram integration? [y/N]` (default **No**). Declining skips Telegram
-credential wiring cleanly — HSCC stays fully functional without it (cluster ops,
-kanban, dispatch, and the API path are all Telegram-independent). An operator's
-existing Telegram config is never stripped or destroyed by answering "no" on a
-later run.
-
 ## Files
 | File | Role |
 |------|------|
@@ -48,15 +41,11 @@ later run.
 | `serving_gen.py` | build serving.json from the detected cluster |
 | `suggest_template.py` | suggest a node-count template |
 | `apply_patches.py` | reapply the WS8 upstream patch set (see `../patches/`) |
-| `telegram_choice.py` | resolve the optional Telegram decision (env → --yes → prompt) |
 | `restart_daemon.sh` | restart the daemon via `hscc stop`/`hscc start` + verify PID turned over |
 
 ## Flags
 `--yes` non-interactive · `--force` regenerate serving.json · `--no-backup` ·
 `--skip-skills|--skip-roles|--skip-daemon|--skip-patches`.
-Telegram: `--telegram=yes|no` or env `HSCC_TELEGRAM=yes|no` force the decision
-without prompting (unattended runs); otherwise `--yes` declines (documented
-default) and an interactive run asks `Add Telegram integration? [y/N]`.
 
 ## Tests
 `tests/` — 258 tests incl. an end-to-end stage-sequence test and the daemon-restart helper tests. `python -m pytest tests/ -q`.

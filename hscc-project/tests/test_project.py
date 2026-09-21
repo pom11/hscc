@@ -296,12 +296,13 @@ def test_new_apply_creates_everything_and_repairs(tmp_path, capsys):
     capsys.readouterr()
     assert rc == 0
 
-    # Registry entry bound to all three surfaces.
+    # Registry entry bound to repo + board; the topic field is retained for
+    # historical data only and is NOT set (Telegram surface removed).
     p = _assert_has(reg, "zeta")
     assert p.repo == repo
     assert p.board == "zeta"
-    assert p.topic is not None and p.topic in tg.state
-    assert p.topic_name == "zeta"
+    assert p.topic is None and tg.state == {}  # no telegram topic created
+    assert p.topic_name is None
 
     # Repo inited + seeded ROADMAP.md.
     assert run.is_repo and run.committed
@@ -350,12 +351,7 @@ def test_each_step_is_idempotent_when_run_twice(tmp_path):
     assert second["status"] == "exists"
     assert run.calls.count(["git", "init"]) == 1
 
-    # Step 2: topic
-    tg = FakeTG()
-    t1 = project_lifecycle.ensure_topic("alpha", _client=tg)
-    t2 = project_lifecycle.ensure_topic("alpha", _client=tg)
-    assert t1 == t2
-    assert len(tg.state) == 1  # one topic, adopted not duplicated
+    # Step 2 (topic) is removed with the Telegram surface — see create_project.
 
     # Step 3: board
     kb = FakeKanban()
@@ -407,13 +403,14 @@ def test_partial_failure_records_successes_and_reports_retry(tmp_path, capsys):
     assert "partial failure" in out
     assert "retry command: flightdeck project new beta --repo" in out
 
-    # Repo + topic + roadmap succeeded and ARE recorded; board/topic not lost.
+    # Repo + roadmap succeeded and ARE recorded; board not recorded (failed)
+    # and topic is left unset (Telegram surface removed -> step skipped).
     p = _assert_has(reg, "beta")
     assert p.repo == repo
-    assert p.topic is not None            # topic succeeded -> recorded
+    assert p.topic is None                # topic step skipped (Telegram removed)
     assert p.roadmap == "ROADMAP.md"      # roadmap succeeded -> recorded
     assert p.board is None                # board failed -> NOT recorded (unknown)
-    assert p.topic_name == "beta"
+    assert p.topic_name is None
     assert (tmp_path / "beta" / "ROADMAP.md").exists()
 
     # Re-run with a healthy kanban provider repairs ONLY the board.
@@ -426,36 +423,13 @@ def test_partial_failure_records_successes_and_reports_retry(tmp_path, capsys):
     ))
     capsys.readouterr()
     assert rc == 0
-    # No new topic (adopted), no new roadmap (exists), only the board created.
+    # No new roadmap (exists), only the board created.
     assert kb2.created == ["beta"]
     assert len(tg2.state) == len(tg.state)
     assert run2.created_profiles == []  # profile not recreated on repair
     p = _assert_has(reg, "beta")
     assert p.board == "beta"              # now repaired
     assert len(registry.load_registry(reg)) == 1
-
-
-def test_partial_failure_board_failed_records_topic(tmp_path, capsys):
-    """Explicit: when board fails, the succeeded topic is still recorded."""
-    reg = _reg(tmp_path)
-    repo = str(tmp_path / "gamma")
-
-    class AlwaysFail:
-        def board_exists(self, slug):
-            raise RuntimeError("boom")
-        def create_board(self, slug):
-            raise RuntimeError("boom")
-
-    rc = project_cmd.cmd_new(_ns(
-        name="gamma", repo=repo, registry=reg,
-        run=FakeRun(), client=FakeTG(), kanban=AlwaysFail(),
-        session_db=_db_session("gamma"), apply=True,
-    ))
-    capsys.readouterr()
-    assert rc == 1
-    p = _assert_has(reg, "gamma")
-    assert p.topic is not None and p.board is None
-    assert p.repo == repo
 
 
 def test_failed_repo_step_writes_no_registry(tmp_path, capsys):
@@ -482,10 +456,9 @@ def test_list_shows_columns_and_health(tmp_path, capsys):
     repo = str(tmp_path / "sigma")
     (tmp_path / "sigma").mkdir()
     kb = FakeKanban(boards={"sigma"})
-    tg = FakeTG({140: "sigma"})
     registry.add_project("sigma", repo=repo, board="sigma", topic=140, path=reg)
 
-    rc = project_cmd.cmd_list(_ns(registry=reg, run=FakeRun(), client=tg, kanban=kb))
+    rc = project_cmd.cmd_list(_ns(registry=reg, run=FakeRun(), kanban=kb))
     out = capsys.readouterr().out
     assert rc == 0
     assert "sigma" in out
@@ -494,7 +467,6 @@ def test_list_shows_columns_and_health(tmp_path, capsys):
 
     # Read-only: nothing was created or mutated.
     assert kb.created == []
-    assert tg.calls  # a status read happened, but no create
 
 
 def test_list_json_shape(tmp_path, capsys):
@@ -531,7 +503,7 @@ def test_remove_requires_apply(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "does NOT delete the git repo" in out
-    assert "does NOT delete the Telegram topic" in out
+    assert "Telegram is removed" in out
     assert "pass --apply" in out
     assert _assert_has(reg, "zeta2")  # still there
 
@@ -576,7 +548,8 @@ def test_repair_requires_apply(tmp_path, capsys):
 
 
 def test_repair_fills_only_missing_pieces(tmp_path, capsys):
-    """A project with repo+roadmap but no board/topic: repair adds only those."""
+    """A project with repo+roadmap but no board: repair adds only the board
+    (the topic step is removed with the Telegram surface)."""
     reg = _reg(tmp_path)
     repo = str(tmp_path / "kappa")
     (tmp_path / "kappa").mkdir()
@@ -596,8 +569,8 @@ def test_repair_fills_only_missing_pieces(tmp_path, capsys):
 
     p = _assert_has(reg, "kappa")
     assert p.board == "kappa"
-    assert p.topic is not None
-    assert p.topic_name == "kappa"
+    assert p.topic is None     # topic field unset (Telegram surface removed)
+    assert p.topic_name is None
     # roadmap file untouched by repair (existed already)
     assert "## Now" in (tmp_path / "kappa" / "ROADMAP.md").read_text()
 

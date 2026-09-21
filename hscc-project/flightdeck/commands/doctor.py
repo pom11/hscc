@@ -7,19 +7,20 @@ For each project it verifies:
 
   - the repo path exists and is a git repository        (via git_state)
   - its board slug exists on this host                  (via kanban.list_boards)
-  - its Telegram topic id resolves                       (via telegram.topic_exists)
-  - the Telegram transport itself works                 (via telegram.list_topics)
+  - its recorded topic (the registry ``topic`` field) is reported; it is
+    retained for historical import reads but, with Telegram removed, can no
+    longer be verified against a live topic list.
 
-Beyond those three up/down checks, doctor verifies the THREE-WAY BINDING —
-the topic <-> board <-> repo triangle — that decides where a project's work
+Beyond those checks, doctor verifies the THREE-WAY BINDING — the
+topic <-> board <-> repo triangle — that decides where a project's work
 actually lands:
 
   - the board's ``default_workdir`` matches the project's ``repo`` (a mismatch
     means new cards get a worktree in the WRONG repo);
   - no two projects share the same board slug (a mis-binding that silently
     merges two projects' work into one board);
-  - no two projects share the same Telegram topic id (work discussed in one
-    topic would be attributed to more than one project).
+  - no two projects share the same recorded topic id (work attributed to one
+    topic would be double-attributed to more than one project).
 
 The triangle is checked per project with a clear reason, and a healthy fleet
 prints an explicit ALL-CLEAR line naming how many projects passed, so a clean
@@ -30,7 +31,7 @@ can produce. So an unreadable project is reported *distinctly* from a healthy
 one, never silently downgraded to "clean", and the command exits non-zero the
 moment any dimension is unverifiable.
 
-Everything is injectable (`_run`, `_client`, `_boards`, `_workdirs`, `_topics`)
+Everything is injectable (`_run`, `_boards`, `_workdirs`, `_topics`)
 so tests build healthy and broken worlds without touching a live repo, board,
 or the network.
 """
@@ -45,8 +46,7 @@ import sys
 import time
 from pathlib import Path
 
-from ..core import git_state, kanban, probe, registry, telegram
-from ..core.telegram import TelegramError, TopicLockedError
+from ..core import git_state, kanban, probe, registry
 
 
 def _repo_ok(proj: registry.Project, *, _run=None) -> dict:
@@ -71,21 +71,19 @@ def _board_ok(proj: registry.Project, boards: list[str]) -> dict:
     return {"ok": False, "detail": f"board {proj.board!r} NOT found on this host"}
 
 
-def _topic_ok(proj: registry.Project, topics: list[telegram.Topic] | None) -> dict:
-    """Topic resolves — or, when the whole topic list is unreadable, that too.
+def _topic_ok(proj: registry.Project, topics=None) -> dict:
+    """The recorded topic field is reported; it can no longer be verified.
 
-    ``topics=None`` means the Telegram transport failed, so this dimension is
-    *unverifiable*, not merely missing.
+    Telegram (the only live source of topic truth) has been removed, so the
+    registry's ``topic`` field is retained for historical import reads but is
+    not verifiable against a live topic list. A project with a topic is
+    reported as recorded-but-unverifiable; a project with none is simply
+    unmapped. The ``topics`` argument is accepted for backward-compatible call
+    signature but is no longer consulted.
     """
-    if not telegram.enabled():
-        return {"ok": True, "detail": "telegram disabled (topic not checked)"}
     if proj.topic is None:
         return {"ok": True, "detail": "no topic mapped (unknown, not an error)"}
-    if topics is None:
-        return {"ok": False, "detail": "Telegram unverifiable (transport failed); topic couldn't be checked"}
-    if telegram.topic_exists(proj.topic, topics):
-        return {"ok": True, "detail": f"topic {proj.topic} resolves"}
-    return {"ok": False, "detail": f"topic {proj.topic} does NOT resolve in the HSCC group"}
+    return {"ok": True, "detail": f"topic {proj.topic} recorded (Telegram removed; unverifiable)"}
 
 
 def _workdir_ok(proj: registry.Project, workdirs: dict | None) -> dict:
@@ -687,11 +685,10 @@ def _run_checks(projects: list[registry.Project], *, _run=None, _client=None,
             except kanban.KanbanError:
                 _workdirs = None  # unverifiable -> workdir check flags it
 
-    if _topics is _NOT_PROVIDED:
-        try:
-            _topics = telegram.list_topics(_client=_client)
-        except (TelegramError, TopicLockedError):
-            _topics = None  # telegram transport down
+    # Topics are no longer read from a live Telegram transport (removed). The
+    # ``topic`` check now only reports the recorded field; any injected
+    # ``_topics`` value is ignored by ``_topic_ok``.
+    _topics = None
 
     repo_check = _repo_check if _repo_check is not None else _repo_ok
 

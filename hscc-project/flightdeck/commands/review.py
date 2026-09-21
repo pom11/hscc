@@ -27,7 +27,7 @@ for branch-merge facts, and :mod:`~flightdeck.core.registry`):
    slow suite (a shipped change made a suite 33x slower with all tests green,
    caught only by reading ``--durations`` by hand).
 
-Flow (all I/O injectable so tests never touch git, the network, Telegram, or
+Flow (all I/O injectable so tests never touch git, the network, or
 a live board):
 
 1. resolve card -> branch (``wt/<card_id>`` convention from core/kanban)

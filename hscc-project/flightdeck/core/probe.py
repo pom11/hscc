@@ -5,9 +5,6 @@ probing an endpoint with a method it does not accept. This rule has now been
 broken THREE times in this repo, each time producing a false "unreachable"
 report against a healthy endpoint:
 
-  - ``init`` bare-GET'd the Telegram MCP HTTP daemon (reported a healthy
-    daemon as MISSING);
-  - INST2 fixed that one with a real MCP handshake;
   - D2 reintroduced it by GETting a vLLM ``/v1/chat/completions`` URL — which
     is POST-only — so a healthy endpoint read as UNVERIFIED "unreachable".
 

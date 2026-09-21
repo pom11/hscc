@@ -106,6 +106,29 @@ def _db_provider(db):
     return _open
 
 
+class FakeKanban:
+    """A stand-in for ``hermes_cli.kanban_db``: ``board_exists`` + ``create_board``.
+
+    ``create_board`` is mkdir-p (returns existing when present), mirroring the
+    real Hermes semantics so idempotency is real. Injecting ``_kanban`` also
+    keeps the board step from touching the real kanban provider, which these
+    tests do not exercise (their focus is the profile/session steps).
+    """
+
+    def __init__(self, boards=()):
+        self.boards = set(boards)
+        self.created = []
+
+    def board_exists(self, slug):
+        return slug in self.boards
+
+    def create_board(self, slug):
+        if slug not in self.boards:
+            self.boards.add(slug)
+            self.created.append(slug)
+        return {"slug": slug}
+
+
 def _default_project_args():
     """Default (succeeding) create_project kwargs for the under-test steps.
 
@@ -190,6 +213,7 @@ def test_create_project_includes_profile_and_session_steps():
         **_default_project_args(),
         _run=FakeRunner(FakeHermes(exists=())),
         _session_db=_db_provider(FakeSessionDB()),
+        _kanban=FakeKanban(),
     )
     steps = _steps_by_id(results)
     assert "profile" in steps and steps["profile"]["status"] == "ok"
@@ -205,6 +229,7 @@ def test_create_project_is_idempotent_for_profile_and_session():
         **_default_project_args(),
         _run=FakeRunner(FakeHermes(exists=("myproj-orch",))),
         _session_db=_db_provider(db),
+        _kanban=FakeKanban(),
     )
     steps = _steps_by_id(results)
     assert steps["profile"]["status"] == "skipped"
@@ -218,6 +243,7 @@ def test_create_project_reports_profile_failure_not_raise():
         **_default_project_args(),
         _run=FakeRunner(FakeHermes(exists=(), create_fails=True)),
         _session_db=_db_provider(db),
+        _kanban=FakeKanban(),
     )
     steps = _steps_by_id(results)
     assert steps["profile"]["status"] == "failed"
@@ -230,6 +256,7 @@ def test_create_project_reports_session_failure_not_raise():
         **_default_project_args(),
         _run=FakeRunner(FakeHermes(exists=())),
         _session_db=lambda profile: None,  # profile has no state.db
+        _kanban=FakeKanban(),
     )
     steps = _steps_by_id(results)
     assert steps["session"]["status"] == "failed"

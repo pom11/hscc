@@ -6,8 +6,9 @@ happens on THREE independent sources, each owned by an existing core module:
 
 - **repos**   — git repositories under the configured roots (default `~/dev`),
                 verified through :mod:`flightdeck.core.git_state`.
-- **topics**  — Telegram forum topics in the HSCC group, through
-                :mod:`flightdeck.core.telegram`.
+- **topics**  — forum topics in the HSCC group (previously surfaced through
+                :mod:`flightdeck.core.telegram`; that transport is removed, so
+                sync now runs with NO topics)
 - **boards**  — Hermes kanban board slugs, through
                 :mod:`flightdeck.core.kanban`.
 
@@ -24,12 +25,13 @@ correlation order is therefore fixed:
 2. normalised name match for topics whose names still look like names;
 3. anything left over is reported, never guessed.
 
-Topics whose current title looks like message text rather than a name are
+Topics whose recorded title looks like message text rather than a name are
 flagged NAME-CORRUPTED, with the registry's expected name and the exact
-`flightdeck topics rename` command to restore each.
+command to restore each. (Telegram — the live surface that overwrote titles —
+has been removed, so this now applies only to historically recorded topics.)
 
 Every external call is injectable (``_run`` / ``_client`` / board discovery)
-so tests never touch git, Telegram or the cluster.
+so tests never touch git, the cluster or a network.
 """
 
 from __future__ import annotations
@@ -40,8 +42,24 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..core import git_state, kanban, registry, telegram
-from ..core.telegram import TelegramError, TopicLockedError
+from ..core import git_state, kanban, registry
+
+
+@dataclass
+class Topic:
+    """A forum topic, as Telegram previously surfaced it (retained type).
+
+    ``core/telegram.py`` (the real transport) has been removed and live
+    topics no longer exist, so sync always operates on an EMPTY topic list.
+    The dataclass keeps the original ``Topic`` shape so the rest of
+    the sync algorithm (match/bind/diff/render) can still import and run
+    unchanged against whatever a caller injects.
+    """
+
+    id: int
+    name: str
+    repo: str | None = None
+
 
 DEFAULT_ROOT = "~/dev"
 
@@ -184,9 +202,14 @@ def discover_repos(roots: list[str], _run=None) -> list[str]:
     return seen
 
 
-def discover_topics(_client=None) -> list[telegram.Topic]:
-    """Every topic in the HSCC group as Telegram currently sees it."""
-    return telegram.list_topics(_client=_client)
+def discover_topics(_client=None) -> list[Topic]:
+    """Every topic as previously seen via Telegram.
+
+    The live Telegram transport has been removed, so this always returns an
+    EMPTY list — sync runs against no topics. A caller may still inject
+    historical/imported topics through ``_client`` in tests.
+    """
+    return []
 
 
 def discover_boards() -> list[str]:
@@ -297,7 +320,7 @@ class SyncReport:
     matched: list[Matched] = field(default_factory=list)
     partial: list[Partial] = field(default_factory=list)
     orphan_repos: list[str] = field(default_factory=list)
-    orphan_topics: list[telegram.Topic] = field(default_factory=list)
+    orphan_topics: list[Topic] = field(default_factory=list)
     orphan_boards: list[tuple[str, int]] = field(default_factory=list)
     name_corrupted: list[Corrupted] = field(default_factory=list)
     ambiguous: list[Ambiguous] = field(default_factory=list)
@@ -333,7 +356,7 @@ def _board_map(projects: list[registry.Project]) -> dict[str, registry.Project]:
 def run_sync(
     *,
     repos: list[str],
-    topics: list[telegram.Topic],
+    topics: list[Topic],
     boards: list[str],
     projects: list[registry.Project],
     board_cards: dict[str, int] | None = None,
@@ -371,7 +394,7 @@ def run_sync(
     # ------------------------------------------------------------------ #
     bound_repos = [r for r in repos if git_state_head_norm(r) in repo_map]
     free_repos = [r for r in repos if git_state_head_norm(r) not in repo_map]
-    free_topics: list[telegram.Topic] = []
+    free_topics: list[Topic] = []
     for t in sorted(topics, key=lambda x: x.id):
         if t.id in topic_map:
             _record_bound_topic(report, t, topic_map[t.id])
@@ -399,7 +422,7 @@ def run_sync(
     #    would have been handled above (name_corrupted); an unbound corrupted
     #    topic has no expected name to restore, so it surfaces as an orphan and
     #    is never guessed into a project. ----------------------------------- #
-    nameable_free_topics: list[telegram.Topic] = []
+    nameable_free_topics: list[Topic] = []
     for t in free_topics:
         if looks_corrupted(t.name):
             report.orphan_topics.append(t)
@@ -408,7 +431,7 @@ def run_sync(
 
     # -- Name-match free repos against nameable free topics and free boards. - #
     # A source that matches more than one repo is ambiguous and never bound.   #
-    repo_topics: dict[str, list[telegram.Topic]] = {r: [] for r in free_repos}
+    repo_topics: dict[str, list[Topic]] = {r: [] for r in free_repos}
     repo_boards: dict[str, list[str]] = {r: [] for r in free_repos}
 
     for t in nameable_free_topics:
@@ -626,7 +649,7 @@ def plan_board_creation(
     return conflicts, to_create
 
 
-def _record_bound_topic(report: SyncReport, t: telegram.Topic, proj: registry.Project) -> None:
+def _record_bound_topic(report: SyncReport, t: Topic, proj: registry.Project) -> None:
     """Report a bound topic. If its live name is corrupted, flag it with the
     exact command to restore it (the invisible decay made a one-line fix)."""
     if not looks_corrupted(t.name):
@@ -644,7 +667,7 @@ def _record_bound_topic(report: SyncReport, t: telegram.Topic, proj: registry.Pr
 
 
 def _new_project(
-    name: str, repo: str, topic: telegram.Topic, board: str | None
+    name: str, repo: str, topic: Topic, board: str | None
 ) -> registry.Project:
     """Build a registry Project for an unambiguous new match (to write on apply)."""
     return registry.Project(
@@ -762,7 +785,7 @@ def _reflect_created_boards(report: SyncReport, created: list[str]) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _fmt_topic(t: telegram.Topic) -> str:
+def _fmt_topic(t: Topic) -> str:
     return f"{t.id} {t.name!r}"
 
 
@@ -1003,17 +1026,15 @@ def cmd_sync(args: argparse.Namespace) -> int:
             if args.repos is not None
             else discover_repos(roots, _run=args._run)
         )
-        # When Telegram is disabled there are no topics to discover — sync is
-        # still fully useful over repos + boards (a project is matched on its
-        # non-topic surfaces; bound projects simply lack the topic dimension).
-        topics = [] if not telegram.enabled() else discover_topics(_client=args.client)
+        # Telegram (the live topic transport) has been removed, so there are no
+        # topics to discover — sync is still fully useful over repos + boards
+        # (a project is matched on its non-topic surfaces; bound projects
+        # simply lack the topic dimension). A caller may still inject topics in
+        # tests via ``args._topics``/the ``_client`` seam.
+        topics = [] if getattr(args, "_topics", None) is None else args._topics
+        if not topics and getattr(args, "client", None) is not None:
+            topics = discover_topics(_client=args.client)
         boards = discover_boards()
-    except TopicLockedError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 3
-    except TelegramError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
     except kanban.KanbanError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

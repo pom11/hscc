@@ -22,12 +22,6 @@ from flightdeck.commands import ask as ask_cmd
 from flightdeck.core import registry, templates
 from flightdeck.core.templates import UnfilledSlotError
 from flightdeck.cli import build_parser
-from conftest import TEST_GROUP_ID
-
-# The Telegram group the resolver injects for every test (see conftest). Used
-# only in the stubbed daemon reply; kept in sync with the injected value.
-GROUP = TEST_GROUP_ID
-
 
 # --------------------------------------------------------------------------- #
 # Stubs
@@ -50,7 +44,7 @@ class FakeTG:
         if self.locked:
             raise ConnectionError("sqlite3.OperationalError: database is locked")
         if tool_name == "telegram_send":
-            return f"Sent to {GROUP} topic {arguments['topic_id']}."
+            return f"Sent to group topic {arguments['topic_id']}."
         raise AssertionError(f"FakeTG does not know tool {tool_name!r}")
 
 
@@ -243,14 +237,13 @@ def _write_ask_template(home, body):
 def test_ask_auto_fill_appears_without_being_passed(tmp_path, capsys):
     home = _seed(str(tmp_path / "tpl"))
     fake_git = FakeGit(branch="feat/auto", head="b" * 40)
-    fake = FakeTG()
     proj = _project(verify="pytest")
     body = "PROJECT {{project}} on {{branch}} verify {{verify}} head {{head_sha}}"
     _write_ask_template(home, body)
 
     rc = ask_cmd.cmd_ask(
         _ns(
-            client=fake,
+            client=FakeTG(),
             run=fake_git,
             list_cards=_list_cards_factory([]),
             templates_home=home,
@@ -262,22 +255,19 @@ def test_ask_auto_fill_appears_without_being_passed(tmp_path, capsys):
     )
     out = capsys.readouterr().out
     assert rc == 0
-    assert "sent 'myask' template to hscc" in out
-    # The rendered text actually went to the topic.
-    sent = fake.calls[0][1]["message"]
-    assert "PROJECT hscc on feat/auto verify pytest" in sent
-    assert "head bbbbbbb…" in sent
+    # Telegram removed: the rendered prompt is printed to stdout (no topic send).
+    assert "PROJECT hscc on feat/auto verify pytest" in out
+    assert "head bbbbbbb…" in out
 
 
 def test_ask_set_overrides_auto_fill(tmp_path, capsys):
     home = _seed(str(tmp_path / "tpl"))
-    fake = FakeTG()
     proj = _project()
     _write_ask_template(home, "branch={{branch}} project={{project}}")
 
     rc = ask_cmd.cmd_ask(
         _ns(
-            client=fake,
+            client=FakeTG(),
             run=FakeGit(branch="main"),
             list_cards=_list_cards_factory([]),
             templates_home=home,
@@ -288,10 +278,9 @@ def test_ask_set_overrides_auto_fill(tmp_path, capsys):
         ),
         [proj],
     )
-    capsys.readouterr()
+    out = capsys.readouterr().out
     assert rc == 0
-    sent = fake.calls[0][1]["message"]
-    assert "branch=hacked project=over" in sent
+    assert "branch=hacked project=over" in out
 
 
 def test_ask_missing_slot_errors_and_sends_nothing(tmp_path, capsys):
@@ -323,13 +312,12 @@ def test_ask_missing_slot_errors_and_sends_nothing(tmp_path, capsys):
 
 def test_ask_dry_run_prints_and_sends_nothing(tmp_path, capsys):
     home = _seed(str(tmp_path / "tpl"))
-    fake = FakeTG()
     proj = _project()
     _write_ask_template(home, "{{project}} {{goal}}")
 
     rc = ask_cmd.cmd_ask(
         _ns(
-            client=fake,
+            client=FakeTG(),
             run=FakeGit(),
             list_cards=_list_cards_factory([]),
             templates_home=home,
@@ -343,8 +331,8 @@ def test_ask_dry_run_prints_and_sends_nothing(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "hscc ziptie" in out          # rendered text printed
-    assert "dry-run" in out
-    assert fake.calls == []              # NOTHING sent
+    assert "(no delivery target" in out  # Telegram removed: nothing is sent
+    assert "Telegram removed" in out
 
 
 def test_ask_unknown_template_lists_available(tmp_path, capsys):
@@ -366,27 +354,6 @@ def test_ask_unknown_template_lists_available(tmp_path, capsys):
     assert rc == 2
     assert "unknown template" in err
     assert "decompose" in err  # lists the available ones (a shipped name)
-
-
-def test_ask_project_without_topic_actionable(tmp_path, capsys):
-    home = _seed(str(tmp_path / "tpl"))
-    proj = _project(topic=None)
-    rc = ask_cmd.cmd_ask(
-        _ns(
-            client=FakeTG(),
-            run=FakeGit(),
-            list_cards=_list_cards_factory([]),
-            templates_home=home,
-            project="hscc",
-            template="decompose",
-            dry_run=False,
-        ),
-        [proj],
-    )
-    err = capsys.readouterr().err
-    assert rc == 2
-    assert "has no topic" in err
-    assert "flightdeck project repair hscc" in err
 
 
 def test_ask_unknown_project_errors(tmp_path, capsys):
@@ -430,32 +397,6 @@ def test_ask_unknown_template_checked_before_git(tmp_path, capsys):
     assert rc == 2
     assert "unknown template" in err
     assert "Available" in err
-
-
-def test_ask_locked_surfaces_retry_hint(tmp_path, capsys):
-    home = _seed(str(tmp_path / "tpl"))
-    fake = FakeTG(locked=True)
-    proj = _project()
-    _write_ask_template(home, "{{project}} {{goal}}")
-
-    rc = ask_cmd.cmd_ask(
-        _ns(
-            client=fake,
-            run=FakeGit(),
-            list_cards=_list_cards_factory([]),
-            templates_home=home,
-            project="hscc",
-            template="myask",
-            set=["goal=g"],
-            dry_run=False,
-        ),
-        [proj],
-    )
-    err = capsys.readouterr().err
-    assert rc == 3
-    assert "locked" in err
-    assert "retry" in err
-    assert "Traceback" not in err
 
 
 # --------------------------------------------------------------------------- #
@@ -583,7 +524,7 @@ def _write_registry(tmp_path, rows):
 
 
 def test_cli_render_dispatch_sends(monkeypatch, tmp_path, capsys):
-    """`ask <project> <template>` renders with auto-fill and sends to the topic."""
+    """`ask <project> <template>` renders with auto-fill (printed to stdout)."""
     reg = _write_registry(tmp_path, [{"name": "hscc", "repo": "~/dev/hscc", "topic": 140, "board": "hscc", "verify": "pytest"}])
     home = _seed(str(tmp_path / "tpl"))
     args = _parsed(["ask", "hscc", "decompose", "goal=ship it"])
@@ -591,12 +532,11 @@ def test_cli_render_dispatch_sends(monkeypatch, tmp_path, capsys):
     rc = ask_cmd.run(args, reg)
     out = capsys.readouterr().out
     assert rc == 0
-    assert "sent 'decompose' template to hscc" in out
-    # The rendered auto-filled text reached the topic.
-    sent = args.client.calls[0][1]["message"]
-    assert "GOAL: ship it" in sent
-    assert "Project: hscc" in sent
-    assert "feat/x" in sent
+    assert "[ask] rendered 'decompose' for hscc" in out
+    # Telegram removed: the rendered auto-filled text is printed, not sent.
+    assert "GOAL: ship it" in out
+    assert "Project: hscc" in out
+    assert "feat/x" in out
 
 
 def test_cli_template_list_dispatch(monkeypatch, tmp_path, capsys):
@@ -637,12 +577,11 @@ def test_cli_bare_keyvalue_tokens_absorbed_into_set(monkeypatch, tmp_path, capsy
     args = _parsed(["ask", "hscc", "bugfix", "symptom=boom", "repro=run it", "expected=no crash"])
     args.templates_home = str(home)
     rc = ask_cmd.run(args, reg)
-    capsys.readouterr()
+    out = capsys.readouterr().out
     assert rc == 0
-    sent = args.client.calls[0][1]["message"]
-    assert "SYMPTOM: boom" in sent
-    assert "REPRO: run it" in sent
-    assert "EXPECTED: no crash" in sent
+    assert "SYMPTOM: boom" in out
+    assert "REPRO: run it" in out
+    assert "EXPECTED: no crash" in out
 
 
 def test_cli_render_unknown_project_errors(tmp_path, capsys):

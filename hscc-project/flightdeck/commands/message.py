@@ -1,7 +1,6 @@
 """message.py — send / read / dispatch / broadcast, addressed by PROJECT.
 
-Mirrors topics.py (``flightdeck topics ...``) in the house convention: this one
-file owns ONE top-level subcommand, ``message``, whose operations are its
+This file owns ONE top-level subcommand, ``message``, whose operations are its
 sub-subcommands, so it integrates with cli.py's auto-discovery seam without
 touching cli.py:
 
@@ -10,29 +9,20 @@ touching cli.py:
     flightdeck message dispatch <project> "task" [--assignee X]
     flightdeck message broadcast "msg" [--to a,b,c]
 
-This is the DESIGN "Messaging" addendum rendered through the mechanism cli.py
-gives us (module name -> top-level subcommand). Every operation resolves its
-Telegram topic through the project registry — an operator never handles a raw
-topic id.
+Presentation only: transport logic lives in core modules reused rather than
+reimplemented. Telegram has been REMOVED from flightdeck, so:
 
-Presentation only: all transport logic lives in core modules, both reused
-rather than reimplemented — :mod:`flightdeck.core.telegram` (send / read) and
-:mod:`flightdeck.core.kanban` (card creation in dispatch).
+- ``send`` / ``read`` / ``broadcast`` were entirely Telegram topic delivery —
+  they are retained but now report that no delivery mechanism exists (the
+  registry ``topic`` field is kept only for historical/imported data).
+- ``dispatch`` keeps its non-Telegram logic (kanban card creation + worktree
+  anchoring). It creates the card and announces nothing.
 
-Behavior contract:
-- ``send`` / ``read`` are the interactive path and act immediately (no --apply).
-- ``dispatch`` is mutating: it creates a card on the project's board AND
-  announces it in the topic, so chat and board cannot diverge. Dry-run by
-  default — ``--apply`` actually creates the card and sends the announcement.
-  If the card is created but the announcement fails, it says so explicitly and
-  prints the card id — never reports success for a half-done dispatch.
-- ``broadcast`` reports per-project success/failure individually, never a
-  single aggregate "done".
-- A project with no ``topic`` in the registry gives the actionable error
-  "project <X> has no topic; run: flightdeck project repair <X>", never a crash
-  or a silent no-op. Unknown projects error clearly too.
-- The single-writer Telegram session ("database is locked") surfaces as a clear
-  message with a retry hint, never a traceback.
+Behavior contract (what remains):
+- ``dispatch`` is mutating: it creates a card on the project's board. Dry-run
+  by default — ``--apply`` actually creates the card.
+- A project with no ``topic`` in the registry is fine for dispatch (the topic
+  is no longer required). Unknown projects error clearly.
 """
 
 from __future__ import annotations
@@ -40,27 +30,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from ..core import kanban, registry, telegram
-from ..core.telegram import TelegramError, TopicLockedError
-
-
-def _resolve_topic(projects: list[registry.Project], project_name: str):
-    """Return ``(topic_id, None)`` or ``(None, error_string)`` for a project.
-
-    Resolves the topic through the registry so the operator never handles a raw
-    topic id. Unknown projects and topic-less projects produce a clear,
-    actionable string rather than raising — the caller decides the exit code.
-    """
-    for proj in projects:
-        if proj.name == project_name:
-            if proj.topic is None:
-                return (
-                    None,
-                    f"project {project_name} has no topic; "
-                    f"run: flightdeck project repair {project_name}",
-                )
-            return proj.topic, None
-    return None, f"unknown project: {project_name!r} (check `flightdeck projects list`)"
+from ..core import kanban, registry
 
 
 def _get_project(projects: list[registry.Project], project_name: str):
@@ -69,14 +39,6 @@ def _get_project(projects: list[registry.Project], project_name: str):
         if proj.name == project_name:
             return proj
     return None
-
-
-def _locked_message(exc: TopicLockedError) -> str:
-    return (
-        f"error: {exc}\n"
-        "hint: another process is probably holding the ~/.hermes-tg session; "
-        "wait a moment and retry."
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -91,22 +53,10 @@ def cmd_send(args: argparse.Namespace, projects: list[registry.Project]) -> int:
             file=sys.stderr,
         )
         return 2
-    if not telegram.enabled():
-        print(f"error: {telegram.disabled_message()}", file=sys.stderr)
-        return 2
-    topic_id, err = _resolve_topic(projects, args.project)
-    if err:
-        print(f"error: {err}", file=sys.stderr)
-        return 2
-    try:
-        telegram.send_message(topic_id, args.message, _client=args.client)
-    except TopicLockedError as exc:
-        print(_locked_message(exc), file=sys.stderr)
-        return 3
-    except TelegramError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    print(f"sent to {args.project} (topic {topic_id}).")
+    print(f"message send: no delivery target — Telegram has been removed.")
+    print(f"would post to {args.project or '<detected>'} (topic records kept in the "
+          f"registry but no outbound send exists).")
+    print(f"---\n{args.message}\n---")
     return 0
 
 
@@ -115,44 +65,15 @@ def cmd_send(args: argparse.Namespace, projects: list[registry.Project]) -> int:
 # --------------------------------------------------------------------------- #
 
 def cmd_read(args: argparse.Namespace, projects: list[registry.Project]) -> int:
-    if not telegram.enabled():
-        print(f"error: {telegram.disabled_message()}", file=sys.stderr)
-        return 2
-    topic_id, err = _resolve_topic(projects, args.project)
-    if err:
-        print(f"error: {err}", file=sys.stderr)
-        return 2
-    try:
-        msgs = telegram.read_messages(topic_id, n=args.n, _client=args.client)
-    except TopicLockedError as exc:
-        print(_locked_message(exc), file=sys.stderr)
-        return 3
-    except TelegramError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    if not msgs:
-        print(f"{args.project}: no messages in topic {topic_id}.")
-        return 0
-    if args.json:
-        import json
-
-        print(
-            json.dumps(
-                [
-                    {"timestamp": m.timestamp, "sender": m.sender, "text": m.text}
-                    for m in msgs
-                ]
-            )
-        )
-        return 0
-    for m in msgs:  # already newest last from the core
-        prefix = f"[{m.timestamp}] " if m.timestamp else ""
-        print(f"{prefix}{m.sender}: {m.text}")
+    print(f"message read: no source — Telegram has been removed.")
+    print(f"topic records for {args.project or '<detected>'} are kept in the "
+          f"registry for historical import reads, but there is no live "
+          f"Telegram transport to read from.")
     return 0
 
 
 # --------------------------------------------------------------------------- #
-# dispatch — create a card AND announce, so chat and board cannot diverge
+# dispatch — create a card on the board (Telegram delivery removed)
 # --------------------------------------------------------------------------- #
 
 def _read_body(args: argparse.Namespace) -> tuple[str | None, str | None]:
@@ -292,25 +213,14 @@ def cmd_dispatch(args: argparse.Namespace, projects: list[registry.Project]) -> 
         )
         return 2
 
-    # Resolve BOTH surfaces up front so a half-config project fails before any
-    # mutation — never a half-done dispatch. No topic -> cannot announce. The
-    # board is resolved from the project's OWN board (registry ``board``); a
-    # project with NO board falls back to Hermes' current board and we SAY SO —
-    # a silent fallback is how cards end up on the wrong board.
+    # Resolve the board up front so a half-config project fails before any
+    # mutation — never a half-done dispatch. The board is resolved from the
+    # project's OWN board (registry ``board``); a project with NO board falls
+    # back to Hermes' current board and we SAY SO — a silent fallback is how
+    # cards end up on the wrong board.
     #
-    # When Telegram is DISABLED a topic is NOT required: dispatch still creates
-    # the card and reports success (it just cannot announce — a different step,
-    # handled below, never a failure).
-    tg_enabled = telegram.enabled()
-    if not tg_enabled:
-        pass  # no topic needed when telegram is off
-    elif proj.topic is None:
-        print(
-            f"error: project {args.project} has no topic; "
-            f"run: flightdeck project repair {args.project}",
-            file=sys.stderr,
-        )
-        return 2
+    # Telegram (the outbound announce surface) has been removed, so dispatch
+    # creates the card and never announces — no topic guard is needed.
     # Anchor the card in the project's OWN repo as a fresh worktree — a card
     # with no repo anchor is exactly the bug this fixes (silently degrades to
     # an unanchored scratch dir with no access to the project's git files).
@@ -377,10 +287,11 @@ def cmd_dispatch(args: argparse.Namespace, projects: list[registry.Project]) -> 
     dependents_notice = registry.dependent_notice(proj.name, projects)
 
     # Dry-run by default: preview exactly what would be written, then require
-    # --apply to actually create the card AND send the announcement — matching
-    # every other mutating flightdeck command (migrate-card, roadmp adopt,
-    # release, ...). dispatch is a stronger action than a plain `send` (it also
-    # creates a durable card and anchors a worktree), so it earns the gate.
+    # --apply to actually create the card — matching every other mutating
+    # flightdeck command (migrate-card, roadmp adopt, release, ...). dispatch
+    # is a stronger action than a plain `send` (it also creates a durable card
+    # and anchors a worktree), so it earns the gate. Telegram has been removed,
+    # so there is no announce step.
     if not getattr(args, "apply", False):
         print(f"dispatch (dry-run) project={args.project} board={board!r}:")
         print(f"  card title: {args.task}")
@@ -390,13 +301,9 @@ def cmd_dispatch(args: argparse.Namespace, projects: list[registry.Project]) -> 
             print(f"  card body : {body}")
         elif announcement != args.task:
             print(f"  card body : {announcement}")
-        print(f"  announce  : {announcement if tg_enabled else '(telegram disabled — not announced)'}")
         if dependents_notice:
             print(f"  dependents: {dependents_notice}")
-        if tg_enabled:
-            print("dry-run: pass --apply to create the card and send the announcement.", file=sys.stderr)
-        else:
-            print("dry-run: pass --apply to create the card (telegram is disabled, so nothing will be announced).", file=sys.stderr)
+        print("dry-run: pass --apply to create the card (Telegram removed, so there is nothing to announce).", file=sys.stderr)
         return 0
 
     # 0. Cluster-readiness guard (§6-dispatch-guard, docs/design/idle-autodown.md).
@@ -433,33 +340,12 @@ def cmd_dispatch(args: argparse.Namespace, projects: list[registry.Project]) -> 
         print(f"error: could not create card on board {board!r}: {exc}", file=sys.stderr)
         return 2
 
-    # 2. Announce it in the topic. When Telegram is disabled the dispatch is
-    #    complete WITHOUT announcing — the card exists and nothing was posted,
-    #    which is exactly what an operator leaving Telegram wants. It must NOT
-    #    fail, warn repeatedly, or claim it announced something it did not.
-    if tg_enabled:
-        # When telegram is enabled and we got here, the topic was required up
-        # front (proj.topic is None -> already returned). Narrow it for the
-        # type checker / send_message's int parameter.
-        if proj.topic is None:  # pragma: no cover - defensive, unreachable
-            raise AssertionError("dispatch reached announce with no topic")
-        try:
-            telegram.send_message(proj.topic, announcement, _client=args.client)
-        except (TopicLockedError, TelegramError) as exc:
-            print(
-                f"error: card {card_id} was created on board {board!r} but the "
-                f"announcement FAILED: {exc}",
-                file=sys.stderr,
-            )
-            print(f"card id: {card_id}", file=sys.stderr)
-            print("dispatch is PARTIAL — the card exists but was not announced.", file=sys.stderr)
-            return 1
-        print(f"card {card_id} created on board {board!r} and announced to topic {proj.topic}.")
-    else:
-        print(
-            f"card {card_id} created on board {board!r} "
-            "(telegram disabled — not announced)."
-        )
+    # Telegram (the outbound announce surface) has been removed, so dispatch
+    # is complete once the card exists — nothing is announced.
+    print(
+        f"card {card_id} created on board {board!r} "
+        "(Telegram removed — not announced)."
+    )
     return 0
 
 
@@ -468,43 +354,18 @@ def cmd_dispatch(args: argparse.Namespace, projects: list[registry.Project]) -> 
 # --------------------------------------------------------------------------- #
 
 def cmd_broadcast(args: argparse.Namespace, projects: list[registry.Project]) -> int:
-    if not telegram.enabled():
-        print(f"error: {telegram.disabled_message()}", file=sys.stderr)
-        return 2
+    # Telegram (the outbound topic-delivery surface) has been removed, so a
+    # broadcast cannot deliver to any project. The command is retained but
+    # reports it has no delivery mechanism.
+    print("message broadcast: no delivery mechanism — Telegram has been removed.")
     if args.to:
         targets = [t.strip() for t in args.to.split(",") if t.strip()]
     else:
         targets = [p.name for p in projects]
-
-    results: list[dict] = []
     for name in targets:
-        topic_id, err = _resolve_topic(projects, name)
-        entry = {"project": name}
-        if err:
-            entry["ok"] = False
-            entry["error"] = err
-        else:
-            try:
-                telegram.send_message(topic_id, args.message, _client=args.client)
-                entry["ok"] = True
-                entry["topic"] = topic_id
-            except (TopicLockedError, TelegramError) as exc:
-                entry["ok"] = False
-                entry["error"] = str(exc)
-        results.append(entry)
-
-    if args.json:
-        import json
-
-        print(json.dumps(results))
-    else:
-        for r in results:
-            if r["ok"]:
-                print(f"OK   {r['project']} (topic {r['topic']})")
-            else:
-                print(f"FAIL {r['project']}: {r['error']}")
-
-    return 0 if all(r["ok"] for r in results) else 1
+        print(f"  would broadcast to {name} (not delivered — Telegram removed)")
+    print(f"---\n{args.message}\n---")
+    return 0
 
 
 # --------------------------------------------------------------------------- #
@@ -516,42 +377,41 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        epilog="example: flightdeck message dispatch flightdeck \"ship 0.6.0\" --apply")
     msub = p.add_subparsers(dest="message_cmd", metavar="MESSAGE_CMD")
 
-    sp = msub.add_parser("send", help="post a message to a project's topic",
+    sp = msub.add_parser("send", help="render a message for a project (no delivery — Telegram removed)",
                          epilog='example: flightdeck message send flightdeck "standing up now"')
     sp.add_argument("project", nargs="?", default=None,
                     help="project name in the registry (default: detected from cwd)")
     sp.add_argument("message", nargs="?", default=None, help="message text to post")
     sp.set_defaults(func=cmd_send)
 
-    sp = msub.add_parser("read", help="recent messages from a project's topic",
+    sp = msub.add_parser("read", help="list a project's recorded messages (Telegram removed — no live source)",
                          epilog="example: flightdeck message read flightdeck -n 20")
     sp.add_argument("project", nargs="?", default=None,
                     help="project name in the registry (default: detected from cwd)")
     sp.add_argument("-n", type=int, default=10, help="number of messages (default: 10)")
     sp.set_defaults(func=cmd_read)
 
-    sp = msub.add_parser("dispatch", help="create a card on a project's board AND announce it",
+    sp = msub.add_parser("dispatch", help="create a card on a project's board",
                          epilog='example: flightdeck message dispatch flightdeck "ship 0.6.0" --apply')
     sp.add_argument("project", nargs="?", default=None,
                     help="project name in the registry (default: detected from cwd)")
     sp.add_argument("task", nargs="?", default=None, help="card title on the project's board")
     sp.add_argument("--assignee", metavar="X", help="profile to assign the card to")
-    sp.add_argument("--message", default=None, help="announcement text (default: the task title)")
+    sp.add_argument("--message", default=None, help="card body text (default: the task title)")
     sp.add_argument(
         "--body-file",
         metavar="PATH",
         default=None,
         help=(
             "read the CARD BODY from PATH ('-' reads the full body from stdin). "
-            "When given, --message becomes ONLY the announcement text and may "
-            "differ from the card body (a short chat ping vs. a long spec). "
-            "Default: the card body is the announcement text."
+            "When given, --message is ignored for the body. "
+            "Default: the card body is --message or the task title."
         ),
     )
     sp.add_argument(
         "--apply",
         action="store_true",
-        help="actually create the card and send the announcement (dry-run by "
+        help="actually create the card (dry-run by "
         "default; nothing is created or posted without this)",
     )
     sp.add_argument(
@@ -565,7 +425,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     )
     sp.set_defaults(func=cmd_dispatch)
 
-    sp = msub.add_parser("broadcast", help="one message to several projects' topics",
+    sp = msub.add_parser("broadcast", help="render one message for several projects (no delivery — Telegram removed)",
                          epilog='example: flightdeck message broadcast "outage over" --to flightdeck,hscc')
     sp.add_argument("message", help="message text to broadcast")
     sp.add_argument("--to", metavar="a,b,c", default=None, help="comma-separated project names (default: all)")
