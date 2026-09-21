@@ -13,6 +13,7 @@ import pytest
 
 from flightdeck.commands import archive as archive_cmd
 from flightdeck.core import archive as core_archive
+from flightdeck.core import registry as _registry_mod
 
 from flightdeck.core.archive import archive_sessions
 from flightdeck.commands.archive import run as archive_run
@@ -252,3 +253,23 @@ def test_discovery_registers_command():
     for act in (sub._group_actions if sub else []):
         names |= set(getattr(act, "choices", {}) or {})
     assert "archive-sessions" in names
+
+
+def test_default_registry_path_still_groups_by_project(db_and_registry, tmp_path,
+                                                       monkeypatch):
+    """Omitting ``registry_path`` must NOT silently drop all attribution.
+
+    Every other test passes ``registry_path`` explicitly, so a guard of the form
+    ``_topic_owner_map(registry_path) if registry_path else {}`` passed them all
+    while filing 100% of real sessions under ``unmapped/`` — the default call is
+    the one operators actually make. Pin the default at the registry the fixture
+    built and assert grouping still happens.
+    """
+    db, reg = db_and_registry
+    monkeypatch.setattr(_registry_mod, "DEFAULT_REGISTRY", str(reg))
+
+    result = archive_sessions(out_dir=str(tmp_path / "out"), db_path=db)
+
+    assert result.by_project != {"unmapped": result.sessions}, (
+        "default registry_path lost every project mapping")
+    assert any(p != "unmapped" for p in result.by_project)
