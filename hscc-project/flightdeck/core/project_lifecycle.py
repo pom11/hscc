@@ -28,6 +28,7 @@ no longer fed by a Telegram step (Telegram was removed).
 from __future__ import annotations
 
 import os
+import sys
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
@@ -352,6 +353,14 @@ def ensure_profile(name: str, _run=None) -> str:
     return "created"
 
 
+class HermesRuntimeUnavailable(RuntimeError):
+    """Raised when hermes_cli/hermes_state cannot be imported at all.
+
+    Distinct from "profile has no state.db": this means the *interpreter* is
+    wrong, so callers must say so rather than reporting an empty result.
+    """
+
+
 def _open_profile_session_db(profile: str, read_only: bool = False):
     """Open ``<profile>``'s state.db via Hermes' own SessionDB, or None.
 
@@ -367,6 +376,18 @@ def _open_profile_session_db(profile: str, read_only: bool = False):
     try:
         from hermes_cli import profiles as profiles_mod
         from hermes_state import SessionDB
+    except ImportError as exc:
+        # NOT "this profile has no sessions" — this interpreter cannot see the
+        # Hermes runtime at all. Swallowing it made `project sessions` print
+        # "no telegram history" for projects with years of history, because the
+        # `hscc` entry point runs under miniconda while hermes_cli lives in the
+        # hermes venv. An environment fault must never render as a data fact.
+        raise HermesRuntimeUnavailable(
+            f"cannot import the Hermes runtime ({exc}). The `hscc` CLI runs "
+            f"under {sys.executable}; hermes_cli/hermes_state live in the "
+            f"Hermes venv. Session history cannot be read from here."
+        ) from exc
+    try:
         canon = profiles_mod.normalize_profile_name(profile)
         profiles_mod.validate_profile_name(canon)
         if not profiles_mod.profile_exists(canon):

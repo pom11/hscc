@@ -465,3 +465,27 @@ def test_chat_no_note_when_no_telegram_history(tmp_path, capsys):
     assert "earlier telegram session" not in out
     assert seam.calls[0][1] == ["hermes", "-p", "ecofire-orch", "chat",
                                 "--continue", "20260921_abc"]
+
+
+def test_unimportable_runtime_reports_error_not_empty_history(monkeypatch):
+    """A wrong interpreter must not render as "no telegram history".
+
+    `hscc` runs under miniconda, where `hermes_cli` is not importable, while
+    the sessions live in the Hermes venv. The resolver used to swallow that
+    ImportError and return None, so `project sessions ecofire-bc` printed
+    "no telegram history" for a project with six sessions and 1,128 messages —
+    an environment fault reported as a fact about the operator's data.
+    """
+    from flightdeck.core import project_lifecycle as pl
+
+    def _boom(*a, **k):
+        raise pl.HermesRuntimeUnavailable("cannot import the Hermes runtime (test)")
+
+    monkeypatch.setattr(session_discovery, "_open_profile_sdb_ro", _boom, raising=False)
+    monkeypatch.setattr(pl, "_open_profile_session_db", _boom)
+
+    result = session_discovery.list_project_sessions("hscc")
+
+    assert result["runtime_error"], "must say the runtime was unreadable"
+    assert "Hermes runtime" in result["runtime_error"]
+    assert result["telegram"] == []

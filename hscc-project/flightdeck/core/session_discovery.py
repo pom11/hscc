@@ -26,6 +26,7 @@ from pathlib import Path
 
 from . import registry
 from .project_lifecycle import _open_profile_session_db as _open_profile_sdb_ro
+from . import project_lifecycle as _lifecycle
 
 
 # The project -> orchestrator identity resolver lives in hscc-roles/
@@ -57,6 +58,20 @@ def _open_profile_session_db(profile: str):
     then reports an honest "no profile / no db" line rather than guessing).
     """
     return _open_profile_sdb_ro(profile, read_only=True)
+
+
+def _runtime_error() -> str | None:
+    """Return a message when the Hermes runtime is unimportable, else None.
+
+    Callers use this to distinguish "no history" from "wrong interpreter".
+    """
+    try:
+        _open_profile_sdb_ro("default", read_only=True)
+    except _lifecycle.HermesRuntimeUnavailable as exc:
+        return str(exc)
+    except Exception:
+        return None
+    return None
 
 
 def _session_row_summary(row: dict, source: str) -> dict:
@@ -159,6 +174,21 @@ def list_project_sessions(
     orch_session = resolved["session"]
     topic = _load_project_topic(name, path)
 
+    # Bail out with an explicit reason rather than empty lists when this
+    # interpreter cannot see the Hermes runtime at all.
+    _rt = _runtime_error()
+    if _rt is not None:
+        return {
+            "project": name,
+            "topic": topic,
+            "orchestrator": None,
+            "telegram": [],
+            "telegram_unmapped": 0,
+            "orch_profile": orch_profile,
+            "telegram_profile": DEFAULT_PROFILE,
+            "runtime_error": _rt,
+        }
+
     # Orchestrator session row (read-only from its own profile's db).
     orch_row = None
     orch_provider = (
@@ -210,4 +240,8 @@ def list_project_sessions(
         "telegram_unmapped": unmapped,
         "orch_profile": orch_profile,
         "telegram_profile": DEFAULT_PROFILE,
+        # Non-None when this interpreter cannot import the Hermes runtime, in
+        # which case the empty lists above mean "could not look", NOT "nothing
+        # there". The caller must say which.
+        "runtime_error": _runtime_error(),
     }
