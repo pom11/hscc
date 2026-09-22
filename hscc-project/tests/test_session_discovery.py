@@ -18,6 +18,7 @@ temp file.
 """
 
 import argparse
+import json
 import tempfile
 from pathlib import Path
 
@@ -204,6 +205,141 @@ def test_discovery_session_int_vs_string_thread_match(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Binding store (mapping.json): the second ownership rule
+# --------------------------------------------------------------------------- #
+
+def _write_mapping(tmp_path, **entries):
+    """Write a temp mapping.json (session_id -> {project, ...}) and return its
+    path, matching the canonical binding-store schema produced by map_sessions
+    (which card 1 reads but never writes)."""
+    p = tmp_path / "mapping.json"
+    p.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+    return str(p)
+
+
+def test_discovery_maps_session_via_binding_store_only(tmp_path):
+    """A telegram session whose thread_id does NOT match the topic but which
+    the binding store links to the project DOES appear (manual linking)."""
+    reg = _reg(tmp_path, "ecofire", topic=8891)
+    tg_rows = [
+        _tg("tg-linked", "7788", title="linked by hand"),  # other thread, bound
+        _tg("tg-other", "8899", title="someone else's"),   # neither matches
+    ]
+    mapping = _write_mapping(
+        tmp_path, **{"tg-linked": {"project": "ecofire", "method": "manual",
+                                   "confidence": 1.0, "evidence": "linked"}}
+    )
+    result = session_discovery.list_project_sessions(
+        "ecofire", path=reg,
+        _session_db=FakeOrchProvider(),
+        _default_db=FakeDefaultProvider(tg_rows),
+        _mapping_path=mapping,
+    )
+    assert [r["id"] for r in result["telegram"]] == ["tg-linked"]
+    assert result["telegram"][0]["source"] == "telegram"
+
+
+def test_discovery_thread_and_binding_union_dedup(tmp_path):
+    """A session that matches BOTH rules appears once; the union is exact."""
+    reg = _reg(tmp_path, "ecofire", topic=8891)
+    tg_rows = [
+        _tg("t1", "8891", title="by thread"),
+        _tg("t2", "7788", title="by binding only"),
+    ]
+    mapping = _write_mapping(
+        tmp_path,
+        **{"t1": {"project": "ecofire", "method": "manual", "confidence": 1.0,
+                   "evidence": "dup"},
+           "t2": {"project": "ecofire", "method": "manual", "confidence": 1.0,
+                   "evidence": "linked"}},
+    )
+    result = session_discovery.list_project_sessions(
+        "ecofire", path=reg,
+        _session_db=FakeOrchProvider(),
+        _default_db=FakeDefaultProvider(tg_rows),
+        _mapping_path=mapping,
+    )
+    ids = [r["id"] for r in result["telegram"]]
+    assert sorted(ids) == ["t1", "t2"]  # t1 not doubled by the binding entry
+
+
+def test_discovery_binding_for_other_project_excluded(tmp_path):
+    """A binding pointing at a DIFFERENT project must not leak this session in;
+    neither thread nor binding match -> not included."""
+    reg = _reg(tmp_path, "ecofire", topic=8891)
+    tg_rows = [_tg("tg-x", "7788", title="bound elsewhere")]
+    mapping = _write_mapping(
+        tmp_path, **{"tg-x": {"project": "prime", "method": "model",
+                              "confidence": 0.9, "evidence": "repo path"}}
+    )
+    result = session_discovery.list_project_sessions(
+        "ecofire", path=reg,
+        _session_db=FakeOrchProvider(),
+        _default_db=FakeDefaultProvider(tg_rows),
+        _mapping_path=mapping,
+    )
+    assert result["telegram"] == []
+
+
+def test_discovery_absent_mapping_behaves_as_today(tmp_path):
+    """No mapping.json -> no bindings, exactly the pre-card behaviour (only
+    thread_id == topic maps). A bound-to-this-project session with no thread
+    match must NOT appear when no mapping file exists."""
+    reg = _reg(tmp_path, "ecofire", topic=8891)
+    tg_rows = [
+        _tg("tg-ok", "8891", title="by thread"),
+        _tg("tg-linked", "7788", title="would only match via store"),
+    ]
+    missing = str(tmp_path / "nope" / "mapping.json")  # does not exist
+    result = session_discovery.list_project_sessions(
+        "ecofire", path=reg,
+        _session_db=FakeOrchProvider(),
+        _default_db=FakeDefaultProvider(tg_rows),
+        _mapping_path=missing,
+    )
+    assert [r["id"] for r in result["telegram"]] == ["tg-ok"]
+
+
+def test_discovery_linked_via_mapping_when_no_topic(tmp_path):
+    """A project with NO registry topic can still own a session through the
+    binding store alone (manual link is independent of the thread mapping)."""
+    reg = str(tmp_path / "registry.yaml")
+    registry.add_project("plain", repo=str(tmp_path / "plain"), board="plain",
+                         path=reg)
+    tg_rows = [_tg("tg-hand", "7788", title="hand-linked")]
+    mapping = _write_mapping(
+        tmp_path, **{"tg-hand": {"project": "plain", "method": "manual",
+                                 "confidence": 1.0, "evidence": "x"}}
+    )
+    result = session_discovery.list_project_sessions(
+        "plain", path=reg,
+        _session_db=FakeOrchProvider(),
+        _default_db=FakeDefaultProvider(tg_rows),
+        _mapping_path=mapping,
+    )
+    assert result["topic"] is None
+    assert [r["id"] for r in result["telegram"]] == ["tg-hand"]
+
+
+def test_discovery_malformed_mapping_behaves_as_today(tmp_path):
+    """A mapping.json that is not a JSON object is a data fault, not an
+    environment fault: it yields no bindings, never raises, and never renders
+    as runtime_error."""
+    reg = _reg(tmp_path, "ecofire", topic=8891)
+    bad = tmp_path / "mapping.json"
+    bad.write_text("not json {{{", encoding="utf-8")
+    tg_rows = [_tg("tg-ok", "8891", title="by thread")]
+    result = session_discovery.list_project_sessions(
+        "ecofire", path=reg,
+        _session_db=FakeOrchProvider(),
+        _default_db=FakeDefaultProvider(tg_rows),
+        _mapping_path=str(bad),
+    )
+    assert [r["id"] for r in result["telegram"]] == ["tg-ok"]
+    assert result["runtime_error"] is None  # a data fault, not a runtime one
+
+
+# --------------------------------------------------------------------------- #
 # REAL hermes SessionDB, read-only — the `mode=ro` proof
 # --------------------------------------------------------------------------- #
 
@@ -284,6 +420,45 @@ def test_real_readonly_connection_is_truly_read_only(tmp_path):
     with pytest.raises(Exception):
         ro.set_session_title("tg-a", "should-fail")
     ro.close()
+
+
+def test_real_sessiondb_readonly_with_binding_store(tmp_path):
+    """The binding store works through the REAL read-only SessionDB path, and
+    reading mapping.json never touches state.db (a session bound via the store
+    on another thread is discovered; state.db is unchanged)."""
+    db_path = _real_sdb_seed(tmp_path)  # tg-a/tg-b on thread 8891, tg-null
+    reg = _reg(tmp_path, "ecofire", topic=8891)
+
+    # Bind tg-null (thread_id NULL, would otherwise be unmapped) to ecofire.
+    mapping = _write_mapping(
+        tmp_path, **{"tg-null": {"project": "ecofire", "method": "manual",
+                                 "confidence": 1.0, "evidence": "hand"}}
+    )
+    real_ro = _list_telegram_via_real_sessiondb(db_path)
+    result = session_discovery.list_project_sessions(
+        "ecofire", path=reg,
+        _session_db=FakeOrchProvider([_cli("20260921_abc", "ecofire", msgs=1)]),
+        _default_db=real_ro,
+        _mapping_path=mapping,
+    )
+
+    # tg-null now belongs (via the binding store) despite thread_id == None.
+    assert sorted(r["id"] for r in result["telegram"]) == \
+        ["tg-a", "tg-b", "tg-null"]
+    # A NULL thread mapped via the store is now owned, not counted unmapped.
+    assert result["telegram_unmapped"] == 0
+
+    # Read-only invariant: reopening the SAME file read-only proves nothing was
+    # written; the bound session came from the store, not from a state.db edit.
+    fresh = _list_telegram_via_real_sessiondb(db_path)
+    again = session_discovery.list_project_sessions(
+        "ecofire", path=reg,
+        _session_db=FakeOrchProvider([_cli("20260921_abc", "ecofire", msgs=1)]),
+        _default_db=fresh,
+        _mapping_path=mapping,
+    )
+    assert sorted(r["id"] for r in again["telegram"]) == \
+        ["tg-a", "tg-b", "tg-null"]
 
 
 # --------------------------------------------------------------------------- #
