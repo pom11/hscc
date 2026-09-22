@@ -26,7 +26,19 @@ rc=0
 declare -a summary
 for d in "${DIRS[@]}"; do
   echo "━━━ $d ━━━"
-  "$PY" -m pytest -q "$ROOT/$d/tests" -p no:cacheprovider "$@"
+  # Run each suite OUTSIDE the delegated-child execution context so a kanban
+  # dispatcher worker invoking this script gets an isolated, non-read-only
+  # fixture environment. When HERMES_DELEGATED_CHILD_CONTEXT is set (it is for
+  # every dispatched worker), hermes_cli.kanban_db_connect.connect() opens the
+  # kanban DB ?mode=ro and refuses to create/migrate a missing tmp-path board,
+  # so any test that builds a fresh fixture board fails with "unable to open
+  # database file". Tests run here against isolated tmp fixtures/boards, never
+  # the operator's real board, so the worker-delegation read fence does not
+  # apply and its absence cannot let a test touch real state. This is a harness
+  # fix: a test that only fails inside the delegated worker context is a harness
+  # bug, not a code failure — do not report it as "pre-existing".
+  env -u HERMES_DELEGATED_CHILD_CONTEXT \
+    "$PY" -m pytest -q "$ROOT/$d/tests" -p no:cacheprovider "$@"
   code=$?
   if [ $code -eq 0 ]; then
     summary+=("  ✓ $d")
