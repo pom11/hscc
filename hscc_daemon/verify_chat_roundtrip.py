@@ -46,6 +46,8 @@ import time
 import urllib.error
 import urllib.request
 
+from hscc_daemon import cli_theme as theme
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
@@ -270,34 +272,91 @@ def run(verbose=True):
     return 0, result
 
 
+def _strip_theme(args):
+    """Remove ``--theme <name>`` / ``--theme=<name>`` tokens from an argv slice.
+
+    ``--theme`` only selects the palette for the human view; it is not part of
+    the machine ``--json`` contract. Mirrors ``hscc._strip_theme_arg`` so the
+    standalone round-trip honors the same flag as the rest of the CLI. Returns
+    ``(cleaned, theme_name_or_None)``.
+    """
+    theme_name = None
+    cleaned = []
+    i = 0
+    n = len(args)
+    while i < n:
+        a = args[i]
+        if a == "--theme":
+            if i + 1 < n:
+                theme_name = args[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        if a.startswith("--theme="):
+            theme_name = a.split("=", 1)[1]
+            i += 1
+            continue
+        cleaned.append(a)
+        i += 1
+    return cleaned, theme_name
+
+
+def render_human(code, result, theme_name=None):
+    """Render the round-trip's human view through a themed Rich console.
+
+    ``code``/``result`` come straight from ``run()``. ``theme_name`` selects
+    the palette (dark | light) or None for auto-detect. On a NON-tty stdout
+    Rich degrades to PLAIN text with NO ANSI escape codes. Only fixed labels
+    are colourised; job ids / replies / token counts stay plain so live data
+    can never inject Rich markup.
+    """
+    console = theme.make_console(theme_name)
+    if code == 2:
+        console.print(theme.make_status_panel(
+            "cannot run chat round trip: %s" % result.get("error"),
+            status="error", title="chat round trip"))
+    elif code == 1:
+        body = [
+            "  CHAT ROUND TRIP FAILED at step:",
+            "      %s" % result.get("error"),
+            "      http=%s job=%s reply=%r"
+            % (result.get("http"), result.get("job_id"), result.get("reply")),
+        ]
+        if result.get("tokens_before") is not None:
+            body.append(
+                "      generation_tokens_total: %s -> %s"
+                % (result["tokens_before"], result.get("tokens_after")))
+        console.print(theme.make_status_panel(
+            "\n".join(body), status="error", title="chat round trip failed"))
+    else:
+        body = [
+            "  POST accepted  -> job %s" % result["job_id"],
+            "  status=%s  elapsed=%.1fs"
+            % (result["status"], result["elapsed"]),
+            "  reply = %r" % result["reply"],
+            "  orchestrator vllm:generation_tokens_total  %s -> %s  (delta +%s)"
+            % (result["tokens_before"], result["tokens_after"],
+               result.get("delta")),
+        ]
+        if result.get("metric_verified") is False:
+            body.append(
+                "  (metric re-read unavailable, reply treated as proof)")
+        console.print(theme.make_status_panel(
+            "\n".join(body), status="ok", title="chat round trip ok"))
+    return code
+
+
 def main():
     json_mode = "--json" in sys.argv[1:]
+    # ``--theme`` is only for the human palette; strip it so it can never leak
+    # into argv handling or the machine --json path.
+    argv, theme_name = _strip_theme(sys.argv[1:])
     code, result = run()
     if json_mode:
         print(json.dumps(result, indent=2))
     else:
-        if code == 2:
-            print("\n  \u2717 cannot run chat round trip: %s" % result.get("error"))
-        elif code == 1:
-            print("\n  \u2717 CHAT ROUND TRIP FAILED at step:")
-            print("      %s" % result.get("error"))
-            print("      http=%s job=%s reply=%r"
-                  % (result.get("http"), result.get("job_id"),
-                     result.get("reply")))
-            if result.get("tokens_before") is not None:
-                print("      generation_tokens_total: %s -> %s"
-                      % (result["tokens_before"], result.get("tokens_after")))
-        else:
-            print("\n  \u2713 CHAT ROUND TRIP OK")
-            print("      POST accepted  -> job %s" % result["job_id"])
-            print("      status=%s  elapsed=%.1fs" % (result["status"], result["elapsed"]))
-            print("      reply = %r" % result["reply"])
-            print("      orchestrator vllm:generation_tokens_total  "
-                  "%s -> %s  (delta +%s)"
-                  % (result["tokens_before"], result["tokens_after"],
-                     result.get("delta")))
-            if result.get("metric_verified") is False:
-                print("      (metric re-read unavailable, reply treated as proof)")
+        render_human(code, result, theme_name)
     return code
 
 
