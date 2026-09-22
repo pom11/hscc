@@ -532,44 +532,55 @@ def apply_mapping(result: MapResult, out_dir: str,
                   timestamp: str) -> tuple[str, str]:
     """Persist the reviewable mapping + a changelog (the explicit, reversible step).
 
-    Writes two files under ``out_dir``: the machine ``mapping.json``
-    (``session_id -> {project, method, confidence, evidence}``) that a future
-    step (e.g. re-filing the archive) can consume, and a Markdown changelog that
-    RECORDS every assignment it made. It touches ONLY files in ``out_dir`` —
-    never ``state.db``, the registry, or a kanban board — so it is reversible by
-    deleting the two files it wrote. Returns ``(mapping_path, changelog_path)``.
+    MERGES the resolved proposals into the canonical binding store,
+    ``<out_dir>/mapping.json`` (the same canonical file ``hscc project link`` /
+    ``unlink`` write and session discovery reads — ONE store, no second one).
+    The merge is non-clobbering: existing entries the proposal does NOT touch
+    (e.g. earlier manual links, or bindings for sessions outside this run) are
+    preserved intact. Unknown proposals (``project is None``) are NOT written
+    — a binding with no owner is meaningless, and a wrong attribution is worse
+    than none.
+
+    Writes two files under ``out_dir``: the canonical ``mapping.json`` (the
+    machine mapping) and a Markdown changelog that RECORDS every assignment it
+    made. It touches ONLY files in ``out_dir`` — never ``state.db``, the
+    registry, or a kanban board — so it is reversible by removing just the
+    entries it wrote from ``mapping.json`` (or deleting the file). Returns
+    ``(mapping_path, changelog_path)``.
     """
+    from . import bindings
+
     out = Path(os.path.expanduser(out_dir))
     out.mkdir(parents=True, exist_ok=True)
 
-    mapping = {
-        p.session_id: {
+    # Merge only resolved proposals into the canonical store (never clobber).
+    store = bindings.load(str(out / "mapping.json"))
+    applied = [p for p in result.proposals if p.project is not None]
+    for p in applied:
+        store[p.session_id] = {
             "project": p.project,
             "method": p.method,
             "confidence": p.confidence,
             "evidence": p.evidence,
         }
-        for p in result.proposals
-    }
-    mapping_path = out / f"mapping-{timestamp}.json"
-    mapping_path.write_text(json.dumps(mapping, indent=2), encoding="utf-8")
-
-    applied = [p for p in result.proposals if p.project is not None]
     unknown = [p for p in result.proposals if p.project is None]
+    mapping_path = out / "mapping.json"
+    bindings.save(store, str(mapping_path))
+
     lines = [
         f"# Mapping applied {timestamp}",
         "",
-        f"Applied {len(applied)} assignment(s); left {len(unknown)} unknown "
-        "(no owner proposed — wrong attribution is worse than none).",
+        f"Applied {len(applied)} assignment(s) to the canonical mapping; left "
+        f"{len(unknown)} unknown (no owner proposed — wrong attribution is "
+        "worse than none).",
         "",
-        "This mapping is a FILE-ONLY, reversible record: it wrote the two files",
-        f"`map-sessions-{timestamp}.json` and `mapping-{timestamp}.json` (and this "
-        "changelog) into the proposal dir. It never wrote state.db, the registry, "
-        "or a kanban board. Delete these files to revert.",
+        "This mapping is a FILE-ONLY, reversible record merged into the "
+        f"canonical binding store `mapping.json` inside the proposal dir. It "
+        "never wrote state.db, the registry, or a kanban board.",
         "",
     ]
     for p in result.proposals:
-        who = p.project if p.project is not None else "unknown"
+        who = p.project if p.project is not None else "unknown (not written)"
         lines.append(f"- `{p.session_id}` -> {who}  [{p.method}, {p.confidence}]")
     changelog_path = out / f"mapping-APPLIED-{timestamp}.md"
     changelog_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
