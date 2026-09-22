@@ -675,18 +675,34 @@ def _handle_verify():
     else:
         console = theme.make_console(theme_name)
         checks = result.get("checks", [])
+        # A per-check Rich Table with ok/warn/error glyphs: three states, not
+        # two — pass (✓), fail (✗), and "could not check" (○).
+        table = theme.make_table("verify")
+        table.add_column("status", width=2, no_wrap=True)
+        table.add_column("check", no_wrap=True)
+        table.add_column("detail")
+        next_steps = []
         for c in checks:
             ok = c.get("ok")
-            # Three states, not two: pass, fail, and "could not check".
             glyph = "\N{CHECK MARK}" if ok else (
                 "\N{BALLOT X}" if ok is False else "\N{WHITE CIRCLE}")
             colour = "ok" if ok else ("error" if ok is False else "warn")
             name = c.get("name", "")
             detail = c.get("detail", "")
-            console.print(f"[{colour}]{glyph}[/] [label]{name}[/]  {detail}")
             next_step = c.get("next_step")
+            # A Rich Table wraps long cell text, which would fold the
+            # plain-language hint and break the greppable "next step: <hint>"
+            # contract. Render hints as their own lines BELOW the table so the
+            # substring stays contiguous and at-a-glance guidance is kept.
             if not ok and next_step:
-                console.print(f"[{colour}]{glyph}[/]    next step: {next_step}")
+                next_steps.append(next_step)
+            table.add_row(f"[{colour}]{glyph}[/]",
+                          f"[label]{name}[/]", detail)
+        console.print(table)
+        for hint in next_steps:
+            # Keep the exact "next step: <hint>" substring the pre-Rich
+            # rendering produced (automation greps it), just dimmed.
+            console.print(f"[dim]next step: {hint}[/dim]")
         unver = result.get("unverified") or []
         if not result.get("ok"):
             overall = "\N{BALLOT X} Some checks failed"
@@ -695,7 +711,7 @@ def _handle_verify():
                 len(unver), ", ".join(unver))
         else:
             overall = "\N{CHECK MARK} All checks passed"
-        console.print(f"\n[{'error' if not result.get('ok') else 'ok'}]{overall}[/]")
+        console.print(f"[{'error' if not result.get('ok') else 'ok'}]{overall}[/]")
     sys.exit(0 if result.get("ok") else 1)
 
 
