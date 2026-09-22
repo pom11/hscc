@@ -22,13 +22,12 @@ source/session_key/cwd but has no ``thread_id`` parameter.
 
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 
 from . import registry
 from .project_lifecycle import _open_profile_session_db as _open_profile_sdb_ro
 from . import project_lifecycle as _lifecycle
+from . import bindings
 
 
 # The project -> orchestrator identity resolver lives in hscc-roles/
@@ -50,35 +49,25 @@ from orchestrators import (  # noqa: E402
 DEFAULT_PROFILE = "default"
 
 # The single canonical binding store (orchestrator-settled): session_id ->
-# {project, method, confidence, evidence}, written by `map_sessions --apply`
-# (card 2 makes it the canonical merge target; today it may be absent — then
-# there are simply no bindings and discovery behaves exactly as before). The
-# file lives under the SAME proposals dir map_sessions writes to.
-MAPPING_FILE = "~/.hermes/archive/telegram/proposals/mapping.json"
+# {project, method, confidence, evidence}. Owned by the shared store helper
+# :mod:`bindings`; card 2 makes link/unlink and `map-sessions --apply` write
+# and merge into it. Today it may be absent — then there are simply no
+# bindings and discovery behaves exactly as before.
+MAPPING_FILE = bindings.MAPPING_FILE
 
 
 def _load_binding_store(mapping_path: str | None = None) -> dict:
     """``session_id -> {project, method, confidence, evidence}``, or ``{}``.
 
-    Read-only on the plain binding-store file: no file, or a file that is
-    unreadable / not a JSON object, yields no bindings (discovery then behaves
-    exactly as before this card — a missing or malformed mapping is a data
-    fact, never an environment fault, so it fails soft rather than raising).
-    ``mapping_path`` defaults to the module :data:`MAPPING_FILE` and is
-    injectable for tests to point at a temp ``mapping.json``.
+    Read-only on the plain binding-store file via the shared
+    :func:`bindings.load`: no file, or a file that is unreadable / not a JSON
+    object, yields no bindings (discovery then behaves exactly as before this
+    epic — a missing or malformed mapping is a data fact, never an environment
+    fault, so it fails soft rather than raising). ``mapping_path`` defaults to
+    the module :data:`MAPPING_FILE` and is injectable for tests to point at a
+    temp ``mapping.json``.
     """
-    if mapping_path is None:
-        mapping_path = MAPPING_FILE
-    path = Path(os.path.expanduser(mapping_path))
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return data
+    return bindings.load(mapping_path)
 
 
 def _open_profile_session_db(profile: str):
