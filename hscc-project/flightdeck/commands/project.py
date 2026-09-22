@@ -27,6 +27,7 @@ from pathlib import Path
 
 from ..core import git_state, project_lifecycle, registry
 from ..core import session_discovery
+from ..core import bindings
 
 # --------------------------------------------------------------------------- #
 # Orchestrator resolver (reused from hscc-roles so CLI/REST/WS never disagree)
@@ -661,6 +662,98 @@ def cmd_sessions(args: argparse.Namespace) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- #
+# link / unlink / link --list — metadata on the canonical binding store
+# --------------------------------------------------------------------------- #
+
+def cmd_link(args: argparse.Namespace) -> int:
+    """`hscc project link <project> <session-id>` — bind a session to a project.
+
+    ``link --list [<project>]`` prints the current bindings instead of writing.
+    A real link writes ONE file — the canonical ``~/.hermes/archive/telegram/
+    proposals/mapping.json`` — inserting or replacing ``session-id``'s entry
+    with ``project = <project>``, ``method = \"manual\"``, ``confidence = 1.0``
+    (numeric), and an evidence string naming the operator and date. IDEMPOTENT:
+    re-linking the same session to the same project is a no-op; linking to a
+    different project overwrites (last-write-wins). It NEVER touches state.db,
+    the registry, or a kanban board — fully reversible by editing the file.
+    Linking is metadata only; it never physically merges sessions.
+    """
+    mapping_path = getattr(args, "mapping_path", None)
+
+    if getattr(args, "list", False):
+        project_filter = getattr(args, "project", None)
+        store = bindings.list(mapping_path, project=project_filter)
+        if not store:
+            if project_filter:
+                print(f"project link: no bindings for {project_filter!r}.")
+            else:
+                print("project link: no bindings.")
+            return 0
+        if not project_filter:
+            print("project session bindings (project / session / method / confidence):")
+            for sid in sorted(store):
+                meta = store[sid]
+                print(f"  {meta.get('project','?'):<20} {sid}  "
+                      f"[{meta.get('method','?')}, {meta.get('confidence','?')}]")
+        else:
+            for sid in sorted(store):
+                meta = store[sid]
+                print(f"  {sid}  [{meta.get('method','?')}, {meta.get('confidence','?')}]")
+        return 0
+
+    project = getattr(args, "project", None)
+    session_id = getattr(args, "session_id", None)
+    if not project or not session_id:
+        print(
+            "project link: need <project> <session-id> (or --list). "
+            "Try `hscc project link --help`.",
+            file=sys.stderr,
+        )
+        return 2
+
+    entry = bindings.bind(
+        session_id,
+        project,
+        evidence=getattr(args, "evidence", None),
+        mapping_path=mapping_path,
+    )
+    print(f"linked session {session_id} -> project {project!r} "
+          f"[method {entry['method']}, confidence {entry['confidence']}]")
+    print(f"  evidence: {entry['evidence']}")
+    print(f"  store: {mapping_path or bindings.MAPPING_FILE}")
+    return 0
+
+
+def cmd_unlink(args: argparse.Namespace) -> int:
+    """`hscc project unlink <project> <session-id>` — remove a binding.
+
+    Removes ``session-id``'s entry from the canonical binding store entirely.
+    If there was no such binding, says so and returns 0 (not an error). Writes
+    ONLY ``mapping.json`` — never state.db, the registry, or a kanban board.
+    Linking is metadata, never a physical merge of sessions.
+    """
+    session_id = getattr(args, "session_id", None)
+    mapping_path = getattr(args, "mapping_path", None)
+    if not session_id:
+        print(
+            "project unlink: need <project> <session-id>. "
+            "Try `hscc project unlink --help`.",
+            file=sys.stderr,
+        )
+        return 2
+    removed = bindings.unbind(session_id, mapping_path=mapping_path)
+    project = getattr(args, "project", None)
+    if removed:
+        print(f"unlinked session {session_id} "
+              + (f"from project {project!r} " if project else "")
+              + "from the binding store.")
+    else:
+        print(f"unlink: session {session_id} had no binding — nothing removed.")
+    print(f"  store: {mapping_path or bindings.MAPPING_FILE}")
+    return 0
+
+
 def _format_session_row(row: dict, profile: str, *, current: bool = False) -> str:
     """One human-readable ``sessions`` line: id, title, msgs, activity, source."""
     first = _fmt_time(row.get("first"))
@@ -755,6 +848,35 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("name", help="project name in the registry")
     sp.set_defaults(func=cmd_sessions)
 
+    # link — bind a session to a project (metadata only; never merges).
+    # `link --list [<project>]` prints; `link <project> <session-id>` writes.
+    sp = subsub.add_parser("link", help="bind a session to a project (or --list bindings)",
+                           epilog="example: flightdeck project link flightdeck <session-id>\n"
+                                  "         flightdeck project link --list\n"
+                                  "         flightdeck project link --list flightdeck  (just one project)")
+    sp.add_argument("project", nargs="?", default=None,
+                    help="project name (with --list: filter to this project)")
+    sp.add_argument("session_id", nargs="?", default=None,
+                    help="session id to bind to the project")
+    sp.add_argument("--list", action="store_true",
+                    help="print bindings instead of writing (optionally filtered to <project>)")
+    sp.add_argument("--mapping-path", dest="mapping_path", default=None,
+                    help=argparse.SUPPRESS)  # hidden seam for tests
+    sp.add_argument("--evidence", dest="evidence", default=None,
+                    help=argparse.SUPPRESS)  # hidden seam for deterministic tests
+    sp.set_defaults(func=cmd_link)
+
+    # unlink — remove a session's binding entry entirely.
+    sp = subsub.add_parser("unlink", help="remove a session's binding from the binding store",
+                           epilog="example: flightdeck project unlink flightdeck <session-id>")
+    sp.add_argument("project", nargs="?", default=None,
+                    help="project name the session was linked to (informational)")
+    sp.add_argument("session_id", nargs="?", default=None,
+                    help="session id to unbind (removed from mapping.json entirely)")
+    sp.add_argument("--mapping-path", dest="mapping_path", default=None,
+                    help=argparse.SUPPRESS)  # hidden seam for tests
+    sp.set_defaults(func=cmd_unlink)
+
 
 def _add_apply(sp: argparse.ArgumentParser) -> None:
     sp.add_argument(
@@ -784,6 +906,7 @@ def run(args: argparse.Namespace, registry_path: str) -> int:
     args.default_db = getattr(args, "default_db", None)
     args.cwd = getattr(args, "cwd", None)
     args.exec_seam = getattr(args, "exec_seam", None)
+    args.mapping_path = getattr(args, "mapping_path", None)
 
     func = getattr(args, "func", None)
     if func is None:

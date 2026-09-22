@@ -371,7 +371,8 @@ def test_cli_run_apply_writes_mapping(db_and_registry, tmp_path, capsys):
     captured = capsys.readouterr().out
     assert "applied (reversible, files-only)" in captured
     names = [p.name for p in out.iterdir()]
-    assert any(n.startswith("mapping-") and n.endswith(".json") for n in names)
+    # canonical merged store is mapping.json (the same file discovery reads)
+    assert "mapping.json" in names
     assert any(n.startswith("mapping-APPLIED-") for n in names)
 
 
