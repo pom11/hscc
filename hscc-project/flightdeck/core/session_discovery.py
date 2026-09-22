@@ -257,7 +257,20 @@ def list_project_sessions(
     # store). The two rules are UNIONED and de-duplicated — a session that
     # matches both appears once.
     telegram_rows = _list_telegram_sessions(_default_db=_default_db)
-    unmapped = sum(1 for r in telegram_rows if r.get("thread_id") is None)
+    # Binding store: a session whose stored `project` equals `name` belongs
+    # even when its thread_id doesn't match the topic (manual linking).
+    bindings = _load_binding_store(_mapping_path)
+    bound_ids = {
+        sid for sid, meta in bindings.items()
+        if isinstance(meta, dict) and meta.get("project") == name
+    }
+    # NULL-thread telegram sessions are unmapped — cannot own them by thread —
+    # UNLESS the binding store links them to this project (then they are owned,
+    # not unmapped). Missing/empty store: every NULL-thread session is unmapped.
+    unmapped = sum(
+        1 for r in telegram_rows
+        if r.get("thread_id") is None and r.get("id") not in bound_ids
+    )
     mined: list[dict] = []
     thread_matched: set = set()
 
@@ -276,13 +289,6 @@ def list_project_sessions(
                     thread_matched.add(sid)
                 mined.append(_session_row_summary(r, "telegram"))
 
-    # Binding store: a session whose stored `project` equals `name` belongs
-    # even when its thread_id doesn't match the topic (manual linking).
-    bindings = _load_binding_store(_mapping_path)
-    bound_ids = {
-        sid for sid, meta in bindings.items()
-        if isinstance(meta, dict) and meta.get("project") == name
-    }
     if bound_ids:
         for r in telegram_rows:
             sid = r.get("id")
