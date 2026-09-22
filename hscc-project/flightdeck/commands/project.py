@@ -632,6 +632,13 @@ def cmd_sessions(args: argparse.Namespace) -> int:
     print(f"project {name} sessions (topic "
           f"{topic if topic is not None else '(none)'}, "
           f"telegram profile {discovery['telegram_profile']}):")
+    # An unreadable runtime is NOT an empty history — say which one it is.
+    if discovery.get("runtime_error"):
+        print(f"  cannot read session history: {discovery['runtime_error']}")
+        print(f"    - retry under the Hermes venv, e.g.")
+        print(f"      ~/.hermes/hermes-agent/venv/bin/hscc project sessions {name}")
+        return 3
+
     # Orchestrator session first (the primary identity), then telegram newest-first.
     orch = discovery.get("orchestrator")
     if orch:
