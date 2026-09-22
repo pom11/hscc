@@ -25,6 +25,9 @@ from pathlib import Path
 # ── CLI rendering theme (Rich, Hermes-default gold palette; dark + light) ──
 from hscc_daemon import cli_theme as theme
 
+# ── Human-view renderers for cluster/template/profiles (replaces _emit) ──
+from hscc_daemon import cluster_render
+
 # ── Re-exports for backward compatibility (tests load this file directly) ──
 
 from hscc_daemon.serving import (
@@ -449,14 +452,19 @@ def _load_cluster_engine():
 
 
 def _emit(result):
-    """Print an engine result dict as pretty JSON (the cluster engine's format)."""
+    """Print an engine result dict as pretty JSON (the cluster engine's format).
+
+    Kept for the machine ``--json`` path and any callers that still need a raw
+    dump; the human path of cluster/template/profiles now routes through
+    :mod:`hscc_daemon.cluster_render` instead.
+    """
     print(json.dumps(result, indent=2, default=str))
     # A result carrying an ``error`` key is a failed command.
     return 1 if isinstance(result, dict) and result.get("error") else 0
 
 
 def _handle_cluster():
-    """Route 'cluster' subcommands to hscc-cluster plugin."""
+    """Route 'cluster' subcommands to hscc-cluster plugin, render human view."""
     if len(sys.argv) < 3 or sys.argv[2] == "--help":
         print("Cluster management commands:")
         print()
@@ -468,10 +476,7 @@ def _handle_cluster():
         print("  hscc cluster stop <id>    Stop a running workload by container id")
         print("  hscc cluster down [--dry-run]  Stop ALL sparkrun workloads fleet-wide")
         print("  hscc cluster up   [--dry-run]  Start every unit in serving.json (orch + keepalive)")
-        if len(sys.argv) < 3:
-            return 0
-        else:
-            return 0
+        return 0
 
     sub = sys.argv[2]
     if sub not in CLUSTER_SUBCOMMANDS:
@@ -479,23 +484,33 @@ def _handle_cluster():
         print(f"Valid subcommands: {', '.join(sorted(CLUSTER_SUBCOMMANDS))}")
         return 1
 
+    # `--theme` selects the palette for the human view only; strip it before
+    # the engine sees argv (it is not a cluster argument).
+    cluster_args, theme_name = _strip_theme_arg(sys.argv[2:])
+    sub = cluster_args[0] if cluster_args else sub
+
     eng = _load_cluster_engine()
     if eng is None:
         return 1
 
+    console = theme.make_console(theme_name)
+
     if sub == "stop":
-        if len(sys.argv) < 4:
+        if len(cluster_args) < 2:
             print("Usage: hscc cluster stop <id>")
             return 1
-        return _emit(eng.cmd_stop(sys.argv[3]))
+        result = eng.cmd_stop(cluster_args[1])
+        return cluster_render.render_stop(console, result)
 
     if sub == "down":
-        dry_run = "--dry-run" in sys.argv[3:]
-        return _emit(eng.cmd_cluster_down(dry_run=dry_run))
+        dry_run = "--dry-run" in cluster_args
+        result = eng.cmd_cluster_down(dry_run=dry_run)
+        return cluster_render.render_down(console, result)
 
     if sub == "up":
-        dry_run = "--dry-run" in sys.argv[3:]
-        return _emit(eng.cmd_cluster_up(dry_run=dry_run))
+        dry_run = "--dry-run" in cluster_args
+        result = eng.cmd_cluster_up(dry_run=dry_run)
+        return cluster_render.render_up(console, result)
 
     fn = {
         "status": eng.cmd_cluster_status,
@@ -504,11 +519,51 @@ def _handle_cluster():
         "jobs": eng.cmd_jobs,
         "info": eng.cmd_info,
     }[sub]
-    return _emit(fn())
+    result = fn()
+    renderer = {
+        "status": cluster_render.render_cluster_status,
+        "hosts": cluster_render.render_hosts,
+        "monitor": cluster_render.render_monitor,
+        "jobs": cluster_render.render_jobs,
+        "info": cluster_render.render_info,
+    }[sub]
+    return renderer(console, result)
+
+
+def _strip_theme_and_json(args):
+    """Strip ``--theme``/``--json`` tokens from a template argv slice.
+
+    Returns ``(engine_args, theme_name, json_mode)``. ``--json`` is the machine
+    contract for ``template validate`` and must never be forwarded to the engine
+    as if it were a template name; ``--theme`` similarly only selects the human
+    palette.
+    """
+    cleaned = []
+    json_mode = "--json" in args
+    theme_name = None
+    i = 0
+    n = len(args)
+    while i < n:
+        a = args[i]
+        if a == "--theme":
+            if i + 1 < n:
+                theme_name = args[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        if a.startswith("--theme="):
+            theme_name = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a != "--json":
+            cleaned.append(a)
+        i += 1
+    return cleaned, theme_name, json_mode
 
 
 def _handle_template():
-    """Route 'template' subcommands to hscc-cluster plugin."""
+    """Route 'template' subcommands to hscc-cluster plugin, render human view."""
     if len(sys.argv) < 3 or sys.argv[2] == "--help":
         print("Cluster template commands:")
         print()
@@ -517,10 +572,7 @@ def _handle_template():
         print("  hscc template preview <name>       Dry-run: what applying <name> would change")
         print("  hscc template validate <name> [--structural-only] [--json]  Validate: structural (offline) layer always; placement (live) layer unless --structural-only")
         print("  hscc template apply <name> [--confirm] [--force-recreate]  Apply a template (--force-recreate re-applies changed serve flags)")
-        if len(sys.argv) < 3:
-            return 0
-        else:
-            return 0
+        return 0
 
     sub = sys.argv[2]
     if sub not in TEMPLATE_SUBCOMMANDS:
@@ -537,19 +589,26 @@ def _handle_template():
         print(f"Error: hscc-cluster plugin not found at {_resolve_cluster_dir()}",
               file=sys.stderr)
         return 1
-    result = cmd_cluster_template([sub, *sys.argv[3:]])
-    # _emit exits non-zero on an ``error`` key; validate instead reports the
-    # layer results and MUST exit non-zero when EITHER layer fails (spec: "Exit
-    # non-zero if either layer fails, so it scripts cleanly"). So check the
-    # validate result's top-level ``ok`` explicitly before delegating to _emit.
-    rc = _emit(result)
+
+    engine_args, theme_name, json_mode = _strip_theme_and_json(sys.argv[3:])
+    result = cmd_cluster_template([sub, *engine_args])
+
+    # The machine ``--json`` path (template validate) stays byte-exact.
+    if json_mode:
+        return _emit(result)
+
+    # Human path: overall failure semantics preserved from _emit (+ the apply
+    # and validate non-zero extensions) so scripts chaining on exit codes still
+    # behave. Exit codes are computed from the result here (not in the renderer)
+    # only for the flags the renderer does not carry.
+    console = theme.make_console(theme_name)
+    rc = cluster_render.render_template(console, sub, result)
+    # validate exits non-zero when EITHER layer fails (spec: "Exit non-zero if
+    # either layer fails, so it scripts cleanly").
     if sub == "validate" and isinstance(result, dict) and result.get("ok") is False:
         return 1
     # An apply that was BLOCKED by pre-flight validation, or only PARTIALLY
-    # succeeded, must exit non-zero. _emit only flags an "error" key, but a
-    # blocked/partial apply returns {"success": False} with no "error" — so
-    # `hscc template apply <bad> --confirm` would otherwise exit 0 and a script
-    # chaining `apply && proceed` would treat a NON-deployed fleet as success.
+    # succeeded, must exit non-zero (never treat a non-deployment as success).
     if sub == "apply" and isinstance(result, dict) and result.get("success") is False:
         return 1
     return rc
@@ -616,18 +675,34 @@ def _handle_verify():
     else:
         console = theme.make_console(theme_name)
         checks = result.get("checks", [])
+        # A per-check Rich Table with ok/warn/error glyphs: three states, not
+        # two — pass (✓), fail (✗), and "could not check" (○).
+        table = theme.make_table("verify")
+        table.add_column("status", width=2, no_wrap=True)
+        table.add_column("check", no_wrap=True)
+        table.add_column("detail")
+        next_steps = []
         for c in checks:
             ok = c.get("ok")
-            # Three states, not two: pass, fail, and "could not check".
             glyph = "\N{CHECK MARK}" if ok else (
                 "\N{BALLOT X}" if ok is False else "\N{WHITE CIRCLE}")
             colour = "ok" if ok else ("error" if ok is False else "warn")
             name = c.get("name", "")
             detail = c.get("detail", "")
-            console.print(f"[{colour}]{glyph}[/] [label]{name}[/]  {detail}")
             next_step = c.get("next_step")
+            # A Rich Table wraps long cell text, which would fold the
+            # plain-language hint and break the greppable "next step: <hint>"
+            # contract. Render hints as their own lines BELOW the table so the
+            # substring stays contiguous and at-a-glance guidance is kept.
             if not ok and next_step:
-                console.print(f"[{colour}]{glyph}[/]    next step: {next_step}")
+                next_steps.append(next_step)
+            table.add_row(f"[{colour}]{glyph}[/]",
+                          f"[label]{name}[/]", detail)
+        console.print(table)
+        for hint in next_steps:
+            # Keep the exact "next step: <hint>" substring the pre-Rich
+            # rendering produced (automation greps it), just dimmed.
+            console.print(f"[dim]next step: {hint}[/dim]")
         unver = result.get("unverified") or []
         if not result.get("ok"):
             overall = "\N{BALLOT X} Some checks failed"
@@ -636,7 +711,7 @@ def _handle_verify():
                 len(unver), ", ".join(unver))
         else:
             overall = "\N{CHECK MARK} All checks passed"
-        console.print(f"\n[{'error' if not result.get('ok') else 'ok'}]{overall}[/]")
+        console.print(f"[{'error' if not result.get('ok') else 'ok'}]{overall}[/]")
     sys.exit(0 if result.get("ok") else 1)
 
 
@@ -774,11 +849,13 @@ def _handle_help():
 
 
 def _handle_profiles():
-    """Route 'profiles' to the cluster engine's profile-status."""
+    """Route 'profiles' to the cluster engine's profile-status, render human view."""
     eng = _load_cluster_engine()
     if eng is None:
         return 1
-    return _emit(eng.cmd_profile_status())
+    _, theme_name = _strip_theme_arg(sys.argv[1:])
+    console = theme.make_console(theme_name)
+    return cluster_render.render_profiles(console, eng.cmd_profile_status())
 
 
 # Verbs of flightdeck's `project` subgroup, aliased to the top of
