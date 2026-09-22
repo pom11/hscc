@@ -467,6 +467,116 @@ def _print_history_note(discovery: dict) -> None:
     )
 
 
+def _seed_empty_orchestrator(
+    name: str, session: str, profile: str, args, discovery: dict, ensured: dict | None,
+) -> int:
+    """Seed the project's EMPTY orchestrator session with the digest; return an exit code.
+
+    Idempotency is the whole point: seed ONLY when the orchestrator session is
+    CONFIRMED empty — either freshly created in this command (``ensured`` is
+    ``created``) or a persisted row with ``message_count == 0`` (the provisioning
+    placeholder). After one seed the session has the digest message, so the next
+    chat sees a non-empty session and does NOT re-seed. Never guessed at: an
+    unconﬁrmable session (no row, not just-created) fails closed to no-seed.
+
+    ENV FAULT VS DATA (mandatory): an unreadable Hermes runtime renders as
+    ``runtime_error`` — never as "empty session" and never as an uninformed
+    seed. When the runtime is unreadable we return 3 (matching ``sessions`` /
+    ``digest``) and do NOT seed, because seeding would claim to know a history
+    we could not read.
+
+    The digest is a SYNTHESIS, and it lands in the project's OWN orchestrator
+    thread only — the Telegram sessions stay untouched on the DEFAULT profile.
+    This is never a merge (no tool_call adjacency, no compaction-header hijack).
+
+    Returns 0 to continue the attach, or a non-zero exit code to abort (3 on a
+    runtime fault). All status goes to stdout (operator TTY); only a genuine
+    failure goes to stderr.
+    """
+    # An unreadable runtime is NOT an empty session — report it and stop rather
+    # than seeding an uninformed digest. Discovery already probed the runtime
+    # (skip its own probe; it may be unreadable, so reuse discovery's verdict).
+    if discovery.get("runtime_error"):
+        print(
+            f"project chat: cannot read session history: {discovery['runtime_error']}",
+            file=sys.stderr,
+        )
+        print(
+            "    - retry under the Hermes venv, e.g. "
+            "~/.hermes/hermes-agent/venv/bin/hscc project chat " + name,
+            file=sys.stderr,
+        )
+        return 3
+
+    just_created = bool(ensured and ensured.get("status") == "created")
+    orch_row = discovery.get("orchestrator")
+    orch_empty = just_created or bool(
+        orch_row is not None and (orch_row.get("message_count") or 0) == 0
+    )
+
+    # Build the digest with the archive/mapping seams (hidden argv for tests).
+    # `_runtime_error_fn` returns discovery's verdict so the digest and the
+    # discovery agree about the runtime — one source of truth, no double probe.
+    digest = digest_core.build_digest(
+        name,
+        archive_dir=getattr(args, "archive_dir", None),
+        mapping_path=getattr(args, "mapping_path", None),
+        _runtime_error_fn=lambda: discovery.get("runtime_error"),
+    )
+    digest_sessions = digest.get("sessions") or []
+    digest_msgs = digest.get("total_messages", 0)
+
+    if not orch_empty:
+        # Non-empty orchestrator session: never re-seed. Honest about what we're
+        # NOT doing, and only when a digest would have been seeded (so an active
+        # plain session with no archive history isn't spammed on every chat).
+        if digest_sessions:
+            print(
+                f"session '{session}' already has history — not re-seeding "
+                f"the {len(digest_sessions)}-thread / {digest_msgs}-message digest"
+            )
+        return 0
+
+    # Orchestrator session IS empty — seed the digest if there is one.
+    if not digest_sessions:
+        # Nothing to seed. Keep the honest empty-start messaging (a genuinely
+        # new project with no archived history, or an empty project with none).
+        if just_created:
+            print(f"created session '{session}' on {profile!r} (first use)")
+        else:
+            print(f"session '{session}' has no archived history — starting fresh")
+        return 0
+
+    # Seed: append the digest verbatim as the opening user message. This is the
+    # ONE sanctioned read-write to a session DB in the chat flow, and it targets
+    # ONLY this project's own empty orchestrator thread.
+    # The target id: for a freshly-created session (no persisted id yet) we must
+    # seed the REAL created id (``ensured["session"]``), not the name that
+    # ``--continue`` happens to resolve by title — otherwise the message would
+    # land on an id hermes never continues. For an existing placeholder the
+    # resolved ``session`` IS the id.
+    seed_target = session
+    if just_created and ensured and ensured.get("session"):
+        seed_target = ensured["session"]
+    seeded = project_lifecycle.seed_session_with_digest(
+        seed_target, profile, digest_core.format_digest(digest),
+        _session_db=args.session_db,
+    )
+    if seeded:
+        plural = "" if len(digest_sessions) == 1 else "s"
+        print(
+            f"seeded session '{seed_target}' with the project digest "
+            f"({len(digest_sessions)} thread{plural}, {digest_msgs} messages)"
+        )
+    else:
+        print(
+            f"could not seed session '{seed_target}' with the project digest "
+            f"(write failed) — continuing with a blank session",
+            file=sys.stderr,
+        )
+    return 0
+
+
 def cmd_chat(args: argparse.Namespace) -> int:
     """`hscc project chat [name] [--resume <id>] [-- <hermes args>]` — interactive hermes.
 
@@ -516,14 +626,13 @@ def cmd_chat(args: argparse.Namespace) -> int:
     if resume_id:
         return _cmd_chat_resume(name, resume_id, args, resolved)
 
-    # Surface any discoverable Telegram history BEFORE attaching, so the
-    # operator is never left thinking a project with months of real work is
-    # empty. Read-only through hermes' own API (see session_discovery).
+    # Read-only discovery (see session_discovery): surfaces any Telegram
+    # history that belongs to the project AND the orchestrator session's own
+    # row (title / message count) — the input for the empty-seed decision.
     discovery = session_discovery.list_project_sessions(
         name, path=args.registry,
         _session_db=args.session_db, _default_db=args.default_db,
     )
-    _print_history_note(discovery)
 
     # A brand-new project has no session yet; CREATE it on first use so the
     # subsequent `--continue <session>` resolves. Idempotent, never clobbers.
@@ -533,12 +642,20 @@ def cmd_chat(args: argparse.Namespace) -> int:
         ensured = project_lifecycle.ensure_session(session, profile, _session_db=args.session_db)
     except project_lifecycle.LifecycleError:
         ensured = None
-    if ensured and ensured.get("status") == "created":
-        # STDOUT like the identity banner: all operator-facing status before
-        # exec'ing belongs on the TTY; stderr is reserved for failing non-zero.
-        print(
-            f"created session '{session}' on {profile!r} (first use)",
-        )
+
+    # Seed the EMPTY orchestrator session with the project digest so the
+    # operator lands in a session that already knows the history instead of a
+    # blank slate. Idempotent: seed ONLY when the session is confirmed empty —
+    # after one seed the session is non-empty, so a second chat never re-injects.
+    # This is a SYNTHESIS seeded into the project's OWN orchestrator thread;
+    # the telegram sessions stay untouched in the DEFAULT profile (no merge).
+    seed_rc = _seed_empty_orchestrator(
+        name, session, profile, args, discovery, ensured,
+    )
+    if seed_rc != 0:
+        return seed_rc
+
+    _print_history_note(discovery)
 
     # Banner: make the joined identity unmistakable — this is the project's
     # PERMANENT orchestrator thread, shared with the iOS app and the WS relay.
@@ -874,6 +991,10 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                     help="project name (default: detect from the current directory)")
     sp.add_argument("--resume", dest="resume_id", metavar="SESSION_ID", default=None,
                     help="resume a SPECIFIC session by id (a telegram session for this project, on the DEFAULT profile, or the orchestrator session) instead of attaching to the orchestrator thread")
+    sp.add_argument("--archive-dir", dest="archive_dir", default=None,
+                    help=argparse.SUPPRESS)  # hidden seam for seed tests
+    sp.add_argument("--mapping-path", dest="mapping_path", default=None,
+                    help=argparse.SUPPRESS)  # hidden seam for seed tests
     sp.add_argument("extra", nargs=argparse.REMAINDER,
                     help="trailing args passed through to hermes (after --), e.g. '-- --resume <id>'")
     sp.set_defaults(func=cmd_chat)
