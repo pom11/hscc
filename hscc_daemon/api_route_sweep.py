@@ -24,6 +24,8 @@ import re
 import subprocess
 import sys
 
+from hscc_daemon import cli_theme as theme
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLIENT = os.path.join(REPO, "ios-app/Sources/HSCC/HSCCClient.swift")
 
@@ -127,31 +129,108 @@ def sweep():
     return rows, failures, dynamic
 
 
+def _strip_theme(args):
+    """Remove ``--theme <name>`` / ``--theme=<name>`` tokens from an argv slice.
+
+    ``--theme`` only selects the palette for the human view; it is not part of
+    the machine ``--json`` contract. Mirrors ``hscc._strip_theme_arg`` so the
+    standalone sweep honors the same flag as the rest of the CLI. Returns
+    ``(cleaned, theme_name_or_None)``.
+    """
+    theme_name = None
+    cleaned = []
+    i = 0
+    n = len(args)
+    while i < n:
+        a = args[i]
+        if a == "--theme":
+            if i + 1 < n:
+                theme_name = args[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        if a.startswith("--theme="):
+            theme_name = a.split("=", 1)[1]
+            i += 1
+            continue
+        cleaned.append(a)
+        i += 1
+    return cleaned, theme_name
+
+
+def render_human(rows, failures, dynamic, theme_name=None):
+    """Render the sweep's human view through a themed Rich console.
+
+    ``theme_name`` selects the palette (dark | light) or None for auto-detect.
+    On a NON-tty stdout (pipe/redirect) Rich degrades to PLAIN text with NO
+    ANSI escape codes, so scripts capturing the human view still get clean
+    text. Only fixed labels are colourised; route/status values stay plain so
+    sweep-derived data can never inject Rich markup.
+    """
+    console = theme.make_console(theme_name)
+
+    console.print(theme.make_panel(
+        "api route sweep",
+        "Sweeping %d literal GET routes the app calls" % len(rows)))
+
+    table = theme.make_table("api route sweep")
+    table.add_column("result", no_wrap=True)
+    table.add_column("http", justify="right", no_wrap=True)
+    table.add_column("secs", justify="right", no_wrap=True)
+    table.add_column("route")
+    table.add_column("note")
+    for r in rows:
+        if r["status"] == "200":
+            mark = "ok  "
+            glyph = "ok"
+        elif r["status"] == "405":
+            mark = "post"
+            glyph = "label"
+        else:
+            mark = "FAIL"
+            glyph = "error"
+        table.add_row(f"[{glyph}]{mark}[/{glyph}]", str(r["status"]),
+                      "%.1f" % r["seconds"], r["route"], r["note"])
+    console.print(table)
+
+    if dynamic:
+        console.print("")
+        console.print(theme.make_panel(
+            "interpolated routes (not swept)",
+            "\n".join("  %s" % d for d in dynamic) +
+            "\n\nSwept GETs only cover literal paths; interpolated routes need "
+            "a live id to exercise."))
+
+    console.print("")
+    console.print("Mutating POSTs are deliberately NOT fired by this sweep.")
+    if failures:
+        console.print(theme.make_status_panel(
+            "%d ROUTE(S) FAILED: %s\n"
+            "A route the app calls that does not answer means that screen is "
+            "dead." % (len(failures), ", ".join(failures)),
+            status="error", title="failures"))
+    else:
+        console.print(theme.make_status_panel(
+            "All swept routes answered with parseable JSON.",
+            status="ok", title="result"))
+
+
 def main():
     result = sweep()
     if result == 2:
         return 2
     rows, failures, dynamic = result
 
+    # ``--theme`` is only for the human palette; strip it before the --json
+    # check so it can never leak into the machine path or argv handling.
+    _, theme_name = _strip_theme(sys.argv[1:])
+
     if "--json" in sys.argv:
         print(json.dumps({"routes": rows, "failures": failures,
                           "not_swept_dynamic": dynamic}, indent=2))
     else:
-        print("Sweeping %d literal GET routes the app calls\n" % len(rows))
-        for r in rows:
-            mark = ("ok  " if r["status"] == "200" else
-                    "post" if r["status"] == "405" else "FAIL")
-            print("  %s %s %5.1fs  %-34s %s"
-                  % (mark, r["status"], r["seconds"], r["route"], r["note"]))
-        print("\n%d interpolated route(s) not swept (need a live id):" % len(dynamic))
-        for d in dynamic:
-            print("   ", d)
-        print("\nMutating POSTs are deliberately NOT fired by this sweep.")
-        if failures:
-            print("\n%d ROUTE(S) FAILED: %s" % (len(failures), ", ".join(failures)))
-            print("A route the app calls that does not answer means that screen is dead.")
-        else:
-            print("\nAll swept routes answered with parseable JSON.")
+        render_human(rows, failures, dynamic, theme_name)
     return 1 if failures else 0
 
 
