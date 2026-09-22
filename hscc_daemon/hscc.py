@@ -22,6 +22,9 @@ import re
 import json
 from pathlib import Path
 
+# ── CLI rendering theme (Rich, Hermes-default gold palette; dark + light) ──
+from hscc_daemon import cli_theme as theme
+
 # ── Re-exports for backward compatibility (tests load this file directly) ──
 
 from hscc_daemon.serving import (
@@ -255,80 +258,109 @@ def _get_version():
 
 
 def _get_help_text():
-    """Build the full grouped help text with live version."""
+    """Build the full grouped help as a themed Rich renderable (Group).
+    The output is a single scrolling Group of section blocks in the
+    Hermes-default gold palette: gold section headings, plain cornsilk command
+    lines, dim footer. ``main()`` prints it through a themed Console.
+    """
+    from rich.console import Group
+    from rich.text import Text
+
     version = _get_version()
-    return f"""\
-HSCC — Hermes Spark Cluster Control   v{version}
-Turn a DGX Spark GPU cluster into a self-running fleet of AI agents.
 
-Usage:  hscc <command> [args]        hscc help <command>   for details
+    title = Text()
+    title.append("HSCC — Hermes Spark Cluster Control   ", style="title")
+    title.append(f"v{version}", style="label")
+    title.append("\nTurn a DGX Spark GPU cluster into a self-running fleet of AI agents.", style="dim")
+    title.append("\nUsage:  hscc <command> [args]        hscc help <command>   for details", style="text")
 
-Daemon control
-  start                Start the monitoring daemon in the background
-  stop                 Gracefully stop the running daemon
-  status               Daemon status + last result of every health stream
-  install              Install the launchd service (auto-start at login)
-  uninstall            Remove the service and stop the daemon
-  plist                Print the launchd plist (no install)
-  log                  Show the daemon log output
+    def _section(heading, lines):
+        block = [Text(heading, style="label")]
+        for line in lines:
+            block.append(Text(f"  {line}", style="text"))
+        block.append(Text(""))
+        return block
 
-Health & monitoring
-  check [stream]       Run one check cycle now (default: all)
-                         streams: dgx gateway local heartbeat nas watchdog triggers
-  watch [stream]       Live-tail check results
-  triggers             Show trigger-engine rules and recent firings
-  verify               Run a full compatibility/health smoke-test of the cluster
-  stats [days]         Fleet activity — completions & tool usage over N days (default 7)
-  throughput           Aggregate vLLM throughput + queue depth across the fleet
-  autoscale            Show autoscale decision from current queue depth (read-only)
-  escalate             Show pending failure escalations (dry-run, no mutations)
+    daemon = _section("Daemon control", [
+        "start                Start the monitoring daemon in the background",
+        "stop                 Gracefully stop the running daemon",
+        "status               Daemon status + last result of every health stream",
+        "install              Install the launchd service (auto-start at login)",
+        "uninstall            Remove the service and stop the daemon",
+        "plist                Print the launchd plist (no install)",
+        "log                  Show the daemon log output",
+    ])
 
-Cluster & templates
-  cluster status       Running workloads + idle hosts
-  cluster hosts        All cluster hosts and saved sparkrun clusters
-  cluster monitor      One CPU/RAM/GPU snapshot across the fleet
-  cluster jobs         All sparkrun jobs currently running
-  cluster info         Detailed resolved cluster configuration
-  cluster stop <id>    Stop a running workload by container id
-  cluster down [--dry-run]   Stop ALL sparkrun workloads fleet-wide
-  cluster up   [--dry-run]   Start every unit in serving.json (orch + keepalive)
-  template list        List available cluster templates (declared fleet layouts)
-  template status      Which template is currently applied
-  template preview <name>    Dry-run: what applying <name> would change
-  template validate <name> [--structural-only] [--json]   Validate a template: structural (offline) layer always; placement (live) layer unless --structural-only. Exit non-zero if either layer fails.
-  template apply <name> [--confirm] [--force-recreate]   Apply a template (--confirm executes; --force-recreate stops+reruns units so changed serve flags reach vLLM)
-  profiles             Running kanban task counts per profile
-  project <cmd>        Project-portfolio (flightdeck) commands: standup verify doctor ...
-  api <cmd>            HSCC HTTP API server: start stop status (external apps)
-  autodown <cmd>       Idle autodown/autoup: status enable disable wake cancel
-  kanban <cmd>         Board hygiene: blocked (show/recover), stale (list/archive)
+    health = _section("Health & monitoring", [
+        "check [stream]       Run one check cycle now (default: all)",
+        "                       streams: dgx gateway local heartbeat nas watchdog triggers",
+        "watch [stream]       Live-tail check results",
+        "triggers             Show trigger-engine rules and recent firings",
+        "verify               Run a full compatibility/health smoke-test of the cluster",
+        "stats [days]         Fleet activity — completions & tool usage over N days (default 7)",
+        "throughput           Aggregate vLLM throughput + queue depth across the fleet",
+        "autoscale            Show autoscale decision from current queue depth (read-only)",
+        "escalate             Show pending failure escalations (dry-run, no mutations)",
+    ])
 
-Utility
-  notify <message>     Send a desktop notification
+    cluster = _section("Cluster & templates", [
+        "cluster status       Running workloads + idle hosts",
+        "cluster hosts        All cluster hosts and saved sparkrun clusters",
+        "cluster monitor      One CPU/RAM/GPU snapshot across the fleet",
+        "cluster jobs         All sparkrun jobs currently running",
+        "cluster info         Detailed resolved cluster configuration",
+        "cluster stop <id>    Stop a running workload by container id",
+        "cluster down [--dry-run]   Stop ALL sparkrun workloads fleet-wide",
+        "cluster up   [--dry-run]   Start every unit in serving.json (orch + keepalive)",
+        "template list        List available cluster templates (declared fleet layouts)",
+        "template status      Which template is currently applied",
+        "template preview <name>    Dry-run: what applying <name> would change",
+        "template validate <name> [--structural-only] [--json]   Validate a template: structural (offline) layer always; placement (live) layer unless --structural-only. Exit non-zero if either layer fails.",
+        "template apply <name> [--confirm] [--force-recreate]   Apply a template (--confirm executes; --force-recreate stops+reruns units so changed serve flags reach vLLM)",
+        "profiles             Running kanban task counts per profile",
+        "project <cmd>        Project-portfolio (flightdeck) commands: standup verify doctor ...",
+        "api <cmd>            HSCC HTTP API server: start stop status (external apps)",
+        "autodown <cmd>       Idle autodown/autoup: status enable disable wake cancel",
+        "kanban <cmd>         Board hygiene: blocked (show/recover), stale (list/archive)",
+    ])
 
-Examples
-  hscc status                          # is the daemon healthy?
-  hscc check gateway                   # re-run just the gateway check
-  hscc template list                   # see the declared fleet layouts
-  hscc template preview 3node-coding
-  hscc template apply 3node-coding --confirm
-  hscc cluster status
+    util = _section("Utility", [
+        "notify <message>     Send a desktop notification",
+    ])
 
-Docs: ~/dev/hscc/README.md   Slash commands (in Hermes chat): /cluster /workers-up /cluster-restart /template
+    examples = _section("Examples", [
+        "hscc status                          # is the daemon healthy?",
+        "hscc check gateway                   # re-run just the gateway check",
+        "hscc template list                   # see the declared fleet layouts",
+        "hscc template preview 3node-coding",
+        "hscc template apply 3node-coding --confirm",
+        "hscc cluster status",
+    ])
 
-Run `hscc help advanced` for internal/service-manager commands."""
+    footer = Text("\nDocs: ~/dev/hscc/README.md   Slash commands (in Hermes chat): /cluster /workers-up /cluster-restart /template", style="dim")
+    footer.append("\nRun `hscc help advanced` for internal/service-manager commands.", style="dim")
+    footer.append("\nTheme: add `--theme dark|light` after any command to pick a palette (default: auto).", style="dim")
+
+    return Group(title, *daemon, *health, *cluster, *util, *examples, footer)
 
 
 def _get_advanced_help():
-    """Return help text for advanced/internal commands."""
-    return """\
-Advanced / internal commands (omitted from main help):
+    """Return advanced/internal help as a themed Rich Panel/Group."""
+    from rich.console import Group
+    from rich.text import Text
 
-  start-daemon       Run the daemon loop in the foreground (used by launchd)
-  ed-status          Event-driven mode status (placeholder, not yet available)
-  ed-install         Event-driven mode install (placeholder, not yet available)
-  ed-uninstall       Event-driven mode uninstall (placeholder, not yet available)
-"""
+    heading = Text("Advanced / internal commands (omitted from main help):", style="label")
+    lines = Text("", style="text")
+    lines.append("", style="text")
+    for cmd, desc in [
+        ("start-daemon", "Run the daemon loop in the foreground (used by launchd)"),
+        ("ed-status", "Event-driven mode status (placeholder, not yet available)"),
+        ("ed-install", "Event-driven mode install (placeholder, not yet available)"),
+        ("ed-uninstall", "Event-driven mode uninstall (placeholder, not yet available)"),
+    ]:
+        lines.append(f"  {cmd:<16}{desc}", style="text")
+        lines.append("", style="text")
+    return Group(heading, lines)
 
 
 COMMAND_HELP = {
@@ -523,8 +555,37 @@ def _handle_template():
     return rc
 
 
+def _strip_theme_arg(args):
+    """Remove ``--theme <name>`` / ``--theme=<name>`` tokens from an argv slice.
+
+    ``--theme`` only selects the palette for the human view; it is not part of
+    the machine ``--json`` contract, and it must never be mistaken for the
+    positional ``days`` in ``stats``. Returns ``(cleaned, theme_name_or_None)``.
+    """
+    theme_name = None
+    cleaned = []
+    i = 0
+    n = len(args)
+    while i < n:
+        a = args[i]
+        if a == "--theme":
+            if i + 1 < n:
+                theme_name = args[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        if a.startswith("--theme="):
+            theme_name = a.split("=", 1)[1]
+            i += 1
+            continue
+        cleaned.append(a)
+        i += 1
+    return cleaned, theme_name
+
+
 def _handle_verify():
-    """Run verify.run_all() and print a per-check table (or JSON with --json).
+    """Run verify.run_all() and print a Rich per-check table (or JSON with --json).
 
     With `--chat` an additional deep check is run: a full chat round trip
     against the live API (POST /v1/orchestrator/chat -> poll -> assert a real
@@ -533,11 +594,15 @@ def _handle_verify():
     accepts one. It is OPT-IN because it fires a real prompt at the live
     orchestrator and can take up to the chat timeout (~600 s) to complete —
     too expensive and too invasive for the default fast smoke test.
+
+    The human view is a themed Rich Table with ok/warn/error glyphs; the
+    ``--json`` machine view stays an exact raw JSON dump.
     """
     from hscc_daemon import verify as verify_mod
 
-    json_mode = "--json" in sys.argv[1:]
-    chat_mode = "--chat" in sys.argv[1:]
+    args, theme_name = _strip_theme_arg(sys.argv[1:])
+    json_mode = "--json" in args
+    chat_mode = "--chat" in args
     result = verify_mod.run_all()
 
     chat_check = None
@@ -549,40 +614,40 @@ def _handle_verify():
     if json_mode:
         print(json.dumps(result))
     else:
+        console = theme.make_console(theme_name)
         checks = result.get("checks", [])
-        if checks:
-            max_name = max(len(c.get("name", "")) for c in checks)
-            max_name = max(max_name, 4)  # minimum padding
-            for c in checks:
-                ok = c.get("ok")
-                # Three states, not two: pass, fail, and "could not check".
-                glyph = "\u2713" if ok else ("\u2717" if ok is False else "\u25cb")
-                name = c.get("name", "").ljust(max_name)
-                detail = c.get("detail", "")
-                print(f"  {glyph} {name}  {detail}")
-                next_step = c.get("next_step")
-                if not c.get("ok") and next_step:
-                    pad = " " * (max_name + 2)
-                    print(f"  {glyph} {pad}  next step: {next_step}")
+        for c in checks:
+            ok = c.get("ok")
+            # Three states, not two: pass, fail, and "could not check".
+            glyph = "\N{CHECK MARK}" if ok else (
+                "\N{BALLOT X}" if ok is False else "\N{WHITE CIRCLE}")
+            colour = "ok" if ok else ("error" if ok is False else "warn")
+            name = c.get("name", "")
+            detail = c.get("detail", "")
+            console.print(f"[{colour}]{glyph}[/] [label]{name}[/]  {detail}")
+            next_step = c.get("next_step")
+            if not ok and next_step:
+                console.print(f"[{colour}]{glyph}[/]    next step: {next_step}")
         unver = result.get("unverified") or []
         if not result.get("ok"):
-            overall = "\u2717 Some checks failed"
+            overall = "\N{BALLOT X} Some checks failed"
         elif unver:
-            overall = "\u2713 All checks passed (%d unverified: %s)" % (
+            overall = "\N{CHECK MARK} All checks passed (%d unverified: %s)" % (
                 len(unver), ", ".join(unver))
         else:
-            overall = "\u2713 All checks passed"
-        print(f"\n  {overall}")
+            overall = "\N{CHECK MARK} All checks passed"
+        console.print(f"\n[{'error' if not result.get('ok') else 'ok'}]{overall}[/]")
     sys.exit(0 if result.get("ok") else 1)
 
 
 def _handle_stats():
-    """Run stats.compute_stats and print formatted output (or JSON with --json)."""
+    """Run stats.compute_stats and print a themed Rich block (or JSON with --json)."""
     from hscc_daemon import stats as stats_mod
 
-    json_mode = "--json" in sys.argv[1:]
+    args, theme_name = _strip_theme_arg(sys.argv[1:])
+    json_mode = "--json" in args
     days = 7
-    rest = [a for a in sys.argv[1:] if a != "--json"]
+    rest = [a for a in args if a != "--json"]
     if len(rest) > 1:
         try:
             days = int(rest[1])
@@ -598,30 +663,39 @@ def _handle_stats():
     if json_mode:
         print(json.dumps(result))
     else:
-        print(stats_mod.format_stats(result))
+        console = theme.make_console(theme_name)
+        body = stats_mod.format_stats(result)
+        console.print(theme.make_panel("fleet stats", body))
     sys.exit(0)
 
 
 def _handle_throughput():
-    """Run throughput.compute_throughput() and print formatted output (or JSON with --json)."""
+    """Run throughput.compute_throughput() and print a themed Rich block (or JSON with --json)."""
     from hscc_daemon import throughput
 
-    json_mode = "--json" in sys.argv[1:]
+    args, theme_name = _strip_theme_arg(sys.argv[1:])
+    json_mode = "--json" in args
     tp = throughput.compute_throughput()
 
     if json_mode:
         print(json.dumps(tp))
     else:
-        print(throughput.format_throughput(tp))
+        console = theme.make_console(theme_name)
+        body = throughput.format_throughput(tp)
+        console.print(theme.make_panel("fleet throughput", body))
     sys.exit(0)
 
 
 def _handle_autoscale():
-    """Run autoscale decision from throughput data and print it (read-only, never scales)."""
+    """Run autoscale decision from throughput data and print a status Panel (or JSON with --json).
+
+    Read-only — this never scales anything, it only reports the decision.
+    """
     from hscc_daemon import throughput
     from hscc_daemon import autoscale
 
-    json_mode = "--json" in sys.argv[1:]
+    args, theme_name = _strip_theme_arg(sys.argv[1:])
+    json_mode = "--json" in args
     tp = throughput.compute_throughput()
     current = tp.get("fleet", {}).get("nodes_ok", 0) or len(tp.get("by_node", {}))
     d = autoscale.decide_scale(tp, current_workers=current)
@@ -631,15 +705,25 @@ def _handle_autoscale():
     else:
         # A "none" decision carries no target — only scale_up/down do.
         tgt = f" (target {d['target']})" if "target" in d else ""
-        print(f"autoscale: {d['action']}{tgt} — {d['reason']}")
+        body = f"autoscale: {d['action']}{tgt} — {d['reason']}"
+        # Colour by how the operator should read it: scale_up is a live
+        # capacity signal (warn), scale_down/none are calm (ok).
+        colour = "warn" if d.get("action") == "scale_up" else "ok"
+        console = theme.make_console(theme_name)
+        console.print(theme.make_status_panel(body, status=d.get("action", "none"), color=colour))
     sys.exit(0)
 
 
 def _handle_escalate():
-    """Run escalate_watcher scan in dry-run mode (read-only, no mutations)."""
+    """Run escalate_watcher scan in dry-run mode (read-only, no mutations).
+
+    Renders a themed Rich Table of the pending escalations (or JSON with
+    --json); an empty list prints a short "none pending" line.
+    """
     from hscc_daemon import escalate_watcher
 
-    json_mode = "--json" in sys.argv[1:]
+    args, theme_name = _strip_theme_arg(sys.argv[1:])
+    json_mode = "--json" in args
     actions = escalate_watcher.scan_and_escalate(
         _reassign=lambda *a: None,
         _notify=lambda *a: None,
@@ -648,26 +732,34 @@ def _handle_escalate():
     if json_mode:
         print(json.dumps(actions))
     else:
+        console = theme.make_console(theme_name)
         if actions:
+            table = theme.make_table("pending escalations")
+            table.add_column("card", no_wrap=True)
+            table.add_column("action", no_wrap=True)
+            table.add_column("target", no_wrap=True)
             for a in actions:
                 task_id = a.get("task", "?")
                 action = a.get("action", "?")
                 to = a.get("to", a.get("category", "?"))
-                print(f"card {task_id}: {action} -> {to}")
+                colour = "error" if action == "escalate_failed" else (
+                    "warn" if action == "escalate" else "accent")
+                table.add_row(f"[{colour}]{task_id}[/]", action, to)
+            console.print(table)
         else:
-            print("no escalations pending")
+            console.print("[dim]no escalations pending[/dim]")
     sys.exit(0)
 
 
 def _handle_help():
     """Handle 'hscc help [command]' and 'hscc --help' / '-h'."""
     if len(sys.argv) < 3:
-        print(_get_help_text())
+        theme.make_console().print(_get_help_text())
         return 0
 
     topic = sys.argv[2]
     if topic == "advanced":
-        print(_get_advanced_help())
+        theme.make_console().print(_get_advanced_help())
         return 0
 
     help_text = COMMAND_HELP.get(topic)
@@ -790,7 +882,7 @@ def main():
 
     # No args or explicit help flags -> full help
     if not args or args[0] in ("--help", "-h"):
-        print(_get_help_text())
+        theme.make_console().print(_get_help_text())
         sys.exit(0)
 
     cmd = args[0]
