@@ -22,6 +22,8 @@ source/session_key/cwd but has no ``thread_id`` parameter.
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 
 from . import registry
@@ -46,6 +48,37 @@ from orchestrators import (  # noqa: E402
 
 # Telegram sessions live on the DEFAULT profile, not the <name>-orch one.
 DEFAULT_PROFILE = "default"
+
+# The single canonical binding store (orchestrator-settled): session_id ->
+# {project, method, confidence, evidence}, written by `map_sessions --apply`
+# (card 2 makes it the canonical merge target; today it may be absent — then
+# there are simply no bindings and discovery behaves exactly as before). The
+# file lives under the SAME proposals dir map_sessions writes to.
+MAPPING_FILE = "~/.hermes/archive/telegram/proposals/mapping.json"
+
+
+def _load_binding_store(mapping_path: str | None = None) -> dict:
+    """``session_id -> {project, method, confidence, evidence}``, or ``{}``.
+
+    Read-only on the plain binding-store file: no file, or a file that is
+    unreadable / not a JSON object, yields no bindings (discovery then behaves
+    exactly as before this card — a missing or malformed mapping is a data
+    fact, never an environment fault, so it fails soft rather than raising).
+    ``mapping_path`` defaults to the module :data:`MAPPING_FILE` and is
+    injectable for tests to point at a temp ``mapping.json``.
+    """
+    if mapping_path is None:
+        mapping_path = MAPPING_FILE
+    path = Path(os.path.expanduser(mapping_path))
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
 
 
 def _open_profile_session_db(profile: str):
@@ -138,7 +171,8 @@ def _list_telegram_sessions(_default_db=None) -> list[dict]:
 
 
 def list_project_sessions(
-    name: str, path: str | None = None, _session_db=None, _default_db=None
+    name: str, path: str | None = None, _session_db=None, _default_db=None,
+    _mapping_path: str | None = None,
 ) -> dict:
     """Every session belonging to project ``name``, newest first.
 
@@ -148,8 +182,10 @@ def list_project_sessions(
         the SAME resolver the CLI chat, the REST handler and the WS relay use);
       * the orchestrator session's own row (title / message count / activity)
         from its ``<name>-orch`` profile's state.db;
-      * every Telegram session on the DEFAULT profile whose ``thread_id``
-        equals the project's registry ``topic``.
+      * every Telegram session on the DEFAULT profile that BELONGS to the
+        project — a session belongs if its ``thread_id`` equals the registry
+        ``topic`` OR the binding store explicitly maps its ``session_id`` to
+        this project (the ``mapping.json`` file; see :data:`MAPPING_FILE`).
 
     Returns a single dict::
 
@@ -157,7 +193,8 @@ def list_project_sessions(
           "project": name,
           "topic":  <int | None>,     # registry topic (telegram thread id)
           "orchestrator": <dict | None>,  # CLI/permanent orchestrator session
-          "telegram": [ <row>, ... ],     # thread_id == topic, newest first
+          "telegram": [ <row>, ... ],     # thread_id == topic OR linked via
+                                          # binding store, newest first
           "telegram_unmapped": <int>,     # default telegram sessions with
                                           # thread_id NULL — cannot own them
           "orch_profile": "<name>-orch",
@@ -167,7 +204,14 @@ def list_project_sessions(
     ``thread_id`` comes back from hermes as a string, so it is compared to the
     registry int ``topic`` after normalisation. Telegram sessions with
     ``thread_id = None`` cannot be mapped to any project by thread — they are
-    counted in ``telegram_unmapped``, never guessed at.
+    counted in ``telegram_unmapped``, never guessed at. A session is mapped by
+    ``thread_id == topic`` (rule 1) OR by an explicit ``session_id -> project``
+    entry in the binding store (rule 2, unioned and de-duplicated).
+
+    ``_mapping_path`` overrides the binding-store file for tests (defaults to
+    the module :data:`MAPPING_FILE`; an absent/empty store means \"no
+    bindings\"). The command wiring never passes it, so the real canonical
+    file is used in production.
     """
     resolved = resolve_orchestrator(name, path=path)
     orch_profile = resolved["profile"]
@@ -208,10 +252,15 @@ def list_project_sessions(
         if row:
             orch_row = _session_row_summary(row, "orchestrator")
 
-    # Telegram sessions (mapped by thread_id == topic on the DEFAULT profile).
+    # Telegram sessions (rule 1: thread_id == topic on the DEFAULT profile;
+    # rule 2: session_id explicitly linked to this project in the binding
+    # store). The two rules are UNIONED and de-duplicated — a session that
+    # matches both appears once.
     telegram_rows = _list_telegram_sessions(_default_db=_default_db)
     unmapped = sum(1 for r in telegram_rows if r.get("thread_id") is None)
     mined: list[dict] = []
+    thread_matched: set = set()
+
     if topic is not None:
         for r in telegram_rows:
             tid = r.get("thread_id")
@@ -222,15 +271,32 @@ def list_project_sessions(
             except (TypeError, ValueError):
                 matches = False
             if matches:
+                sid = r.get("id")
+                if sid is not None:
+                    thread_matched.add(sid)
                 mined.append(_session_row_summary(r, "telegram"))
-        mined.sort(
-            key=lambda s: (
-                -1 if s["last"] is None else s["last"],  # newest first, null last
-                s.get("first") or 0,                     # stable tiebreak
-                s.get("id") or "",                       # fully deterministic
-            ),
-            reverse=True,
-        )
+
+    # Binding store: a session whose stored `project` equals `name` belongs
+    # even when its thread_id doesn't match the topic (manual linking).
+    bindings = _load_binding_store(_mapping_path)
+    bound_ids = {
+        sid for sid, meta in bindings.items()
+        if isinstance(meta, dict) and meta.get("project") == name
+    }
+    if bound_ids:
+        for r in telegram_rows:
+            sid = r.get("id")
+            if sid in bound_ids and sid not in thread_matched:
+                mined.append(_session_row_summary(r, "telegram"))
+
+    mined.sort(
+        key=lambda s: (
+            -1 if s["last"] is None else s["last"],  # newest first, null last
+            s.get("first") or 0,                     # stable tiebreak
+            s.get("id") or "",                       # fully deterministic
+        ),
+        reverse=True,
+    )
 
     return {
         "project": name,
