@@ -1,12 +1,31 @@
-"""CLI commands and entry point for the HSCC daemon."""
+"""CLI commands and entry point for the HSCC daemon.
 
-import json
+Command OUTPUT (a result the user asked for) is rendered through the shared
+Rich theme module (``hscc_daemon.cli_theme``) so it matches the Hermes default
+palette. Lines a background daemon writes to stdout during its live loop (the
+``stream_watcher`` tail inside ``cmd_watch``, the ``log()`` calls inside
+``cmd_start_daemon``) are NOT restyled — see the per-command notes.
+
+``--json`` machine output is a hard invariant: any command whose output is
+parsed by the daemon / scripts / ios console stays byte-identical. Rich only
+decorates the human path, and Rich's Console auto-degrades to plain text (no
+ANSI) when stdout is not a tty, which the no-ANSI regression test pins.
+"""
+
 import os
 import signal
-import subprocess
-import sys
-import threading
 import time
+
+from .cli_theme import make_console, make_panel, make_status_panel, make_table
+
+
+def _console(**kwargs):
+    """A themed Console; theme auto-detects (dark/light) at render time.
+
+    Pass ``file=`` from tests to capture output; a non-tty ``file`` makes Rich
+    degrade to plain text (no ANSI escapes), which the regression tests pin.
+    """
+    return make_console(**kwargs)
 
 
 def cmd_start():
@@ -16,16 +35,23 @@ def cmd_start():
     from .state import ensure_state_dir
     from .daemon_ops import run_daemon_loop
 
+    console = _console()
+
     existing_pid = get_pid()
     if existing_pid:
-        print(f"Daemon already running (PID {existing_pid})")
         try:
             os.kill(existing_pid, 0)
+            console.print(
+                make_status_panel(
+                    f"Daemon already running (PID {existing_pid})",
+                    status="warn", title="start",
+                )
+            )
             return
         except OSError:
             write_stopped()
 
-    print("Starting hscc_daemon...")
+    console.print("Starting hscc_daemon...")
     log("Daemon starting")
 
     # Fork into background
@@ -33,9 +59,19 @@ def cmd_start():
     if pid > 0:
         try:
             save_pid()
-            print(f"hscc_daemon started (PID {pid})")
+            console.print(
+                make_status_panel(
+                    f"hscc_daemon started (PID {pid})",
+                    status="ok", title="start",
+                )
+            )
         except Exception:
-            print(f"hscc_daemon started (child PID {pid})")
+            console.print(
+                make_status_panel(
+                    f"hscc_daemon started (child PID {pid})",
+                    status="ok", title="start",
+                )
+            )
         return
 
     # Child — become daemon
@@ -80,13 +116,19 @@ def cmd_stop():
     from .daemon_ops import get_pid, write_stopped
     from . import log
 
+    console = _console()
+
     pid = get_pid()
     if not pid:
-        print("Daemon is not running")
+        console.print(
+            make_status_panel(
+                "Daemon is not running", status="warn", title="stop"
+            )
+        )
         write_stopped()
         return
 
-    print(f"Stopping hscc_daemon (PID {pid})...")
+    console.print(f"Stopping hscc_daemon (PID {pid})...")
     log("Daemon stop requested")
 
     try:
@@ -96,16 +138,40 @@ def cmd_stop():
             try:
                 os.kill(pid, 0)
             except OSError:
-                print(f"hscc_daemon stopped (PID {pid})")
+                console.print(
+                    make_status_panel(
+                        f"hscc_daemon stopped (PID {pid})",
+                        status="ok", title="stop",
+                    )
+                )
                 return
         os.kill(pid, signal.SIGKILL)
-        print(f"hscc_daemon force-killed (PID {pid})")
+        console.print(f"hscc_daemon force-killed (PID {pid})")
     except ProcessLookupError:
-        print("hscc_daemon already stopped")
+        console.print("hscc_daemon already stopped")
     except Exception as e:
-        print(f"Error stopping daemon: {e}")
+        console.print(f"Error stopping daemon: {e}")
     finally:
         write_stopped()
+
+
+# Streams shown in `hscc status`, in a stable order. Only streams with state on
+# disk (or the ones the daemon knows about) are listed; "heartbeat"/"nas" etc.
+# fall through to a "never" row when the daemon hasn't written them yet.
+_STATUS_STREAMS = ["dgx", "gateway", "local", "heartbeat", "nas", "watchdog",
+                   "triggers", "engine_wedge", "dispatcher"]
+
+
+def _status_for(state):
+    """Derive a human status string + ok sign from a stream state row."""
+    ok = state.get("ok", state.get("blocked", "?"))
+    if state.get("blocked"):
+        return "BLOCKED", "▌"
+    if ok is True:
+        return "OK", "✓"
+    if ok is False:
+        return "FAIL", "✗"
+    return str(ok), "—"
 
 
 def cmd_status():
@@ -113,66 +179,75 @@ def cmd_status():
     from .daemon_ops import get_pid
     from .state import read_all_states
 
+    console = _console()
+
     pid = get_pid()
-
-    print("=" * 60)
-    print("  HSCC Daemon Status")
-    print("=" * 60)
-
     if pid:
-        print(f"  Status:    RUNNING (PID {pid})")
         try:
             os.kill(pid, 0)
-            print(f"  Process:   alive")
+            status, proc = "RUNNING", f"alive (PID {pid})"
         except OSError:
-            print(f"  Process:   stale PID file")
+            status, proc = "STOPPED", "stale PID file"
             pid = None
     else:
-        print(f"  Status:    STOPPED")
+        status, proc = "STOPPED", ""
 
-    print()
+    state_role = "ok" if status == "RUNNING" else "warn"
+    console.print(
+        make_status_panel(
+            f"HSCC Daemon Status — {status} {proc}".strip(),
+            status=state_role, title="status",
+        )
+    )
 
     states = read_all_states()
 
     if not states:
-        print("  No state data yet (no checks have run)")
+        console.print("  No state data yet (no checks have run)")
         return
 
-    print("  ── Check Streams ──────────────────────")
-    print(f"  {'Stream':<12s} {'Status':<8s} {'Last Check':<22s} {'OK'}")
-    print(f"  {'─'*12} {'─'*8} {'─'*22} {'─'*8}")
-
-    for stream_name in ["dgx", "gateway", "local", "heartbeat", "nas", "watchdog", "triggers", "engine_wedge", "dispatcher"]:
-        state = states.get(stream_name)
-        if not state:
-            print(f"  {stream_name:<12s} {'—':<8s} {'never':<22s} —")
-            continue
-
-        ok = state.get("ok", state.get("blocked", "?"))
-        ts = state.get("timestamp", "?")[:19]
-        status_str = "BLOCKED" if state.get("blocked") else ("OK" if ok is True else "FAIL" if ok is False else str(ok))
-        ok_str = "✓" if ok is True else ("🚨" if ok is False else "—")
-        print(f"  {stream_name:<12s} {status_str:<8s} {ts:<22s} {ok_str}")
-
-    print()
+    stream_any = any(name in states for name in _STATUS_STREAMS)
+    if stream_any:
+        table = make_table("Check Streams")
+        table.box = None  # borderless: row lines lead with the stream name
+        table.add_column("Stream", justify="left")
+        table.add_column("Status", justify="left")
+        table.add_column("Last Check", justify="left")
+        table.add_column(" ", justify="left")
+        for stream_name in _STATUS_STREAMS:
+            state = states.get(stream_name)
+            if not state:
+                table.add_row(stream_name, "—", "never", "—")
+                continue
+            ts = state.get("timestamp", "?")[:19]
+            status_str, ok_char = _status_for(state)
+            if status_str == "FAIL":
+                row_status = f"[error]{status_str}[/error]"
+            elif status_str == "BLOCKED":
+                row_status = f"[warn]{status_str}[/warn]"
+            else:
+                row_status = status_str
+            table.add_row(stream_name, row_status, ts, ok_char)
+        console.print(table)
+        console.print()
 
     wd_state = states.get("watchdog")
     if wd_state:
-        print("  ── PipelineWatchdog ───────────────────")
-        print(f"  Blocked:   {wd_state.get('blocked', False)}")
-        if wd_state.get("blocked"):
-            print(f"  Reason:    {wd_state.get('reason', '')}")
-        print(f"  Restarts:  {wd_state.get('auto_restart_count', 0)}")
-        print()
+        console.print(make_panel(
+            "watchdog",
+            f"Blocked:  {wd_state.get('blocked', False)}\n"
+            f"Reason:   {wd_state.get('reason', '')}\n"
+            f"Restarts: {wd_state.get('auto_restart_count', 0)}",
+        ))
+        console.print()
 
     tr_state = states.get("triggers")
     if tr_state:
-        print("  ── Trigger Engine ─────────────────────")
-        print(f"  Rules:     {tr_state.get('rules_evaluated', 0)}")
-        print(f"  Actions:   {tr_state.get('actions_fired', 0)}")
-        print()
-
-    print("=" * 60)
+        console.print(make_panel(
+            "Trigger Engine",
+            f"Rules:   {tr_state.get('rules_evaluated', 0)}\n"
+            f"Actions: {tr_state.get('actions_fired', 0)}",
+        ))
 
 
 def cmd_check(stream=None):
@@ -198,6 +273,8 @@ def _cmd_check_impl(stream=None):
     from .trigger import trigger_engine
     from .state import read_state
 
+    console = _console()
+
     check_map = {
         "dgx": check_dgx, "gateway": check_gateway, "local": check_local,
         "heartbeat": check_heartbeat, "nas": check_nas,
@@ -210,45 +287,56 @@ def _cmd_check_impl(stream=None):
     if stream and stream == "all":
         results = {}
         for name, fn in check_map.items():
-            print(f"Running {name}...")
+            console.print(f"Running {name}...")
             try:
                 ok = fn()
                 results[name] = ok
             except Exception as e:
-                print(f"  Error: {e}")
+                console.print(f"  Error: {e}")
                 results[name] = False
-        print()
-        print("Results:")
+        console.print()
+        table = make_table("Results")
+        table.add_column("Check", justify="left")
+        table.add_column("Status", justify="left")
         for name, ok in results.items():
-            status = "OK" if ok else "FAIL"
-            print(f"  {name:<12s} {status}")
+            status = ("[ok]OK[/ok]" if ok
+                      else "[error]FAIL[/error]")
+            table.add_row(name, status)
+        console.print(table)
         return
 
     if stream and stream in check_map:
         fn = check_map[stream]
-        print(f"Running {stream} check...")
+        console.print(f"Running {stream} check...")
         try:
             ok = fn()
             state = read_state(stream)
-            print(f"  Result: {'OK' if ok else 'FAIL'}")
+            console.print(f"  Result: {'[ok]OK[/ok]' if ok else '[error]FAIL[/error]'}")
             if state:
                 msg = state.get("message", "")
                 if msg:
-                    print(f"  Detail: {msg}")
+                    console.print(f"  Detail: {msg}")
         except Exception as e:
-            print(f"  Error: {e}")
+            console.print(f"  Error: {e}")
         return
 
-    print("Running DGX check...")
+    console.print("Running DGX check...")
     try:
         ok = check_dgx()
-        print(f"  Result: {'OK' if ok else 'FAIL'}")
+        console.print(f"  Result: {'[ok]OK[/ok]' if ok else '[error]FAIL[/error]'}")
     except Exception as e:
-        print(f"  Error: {e}")
+        console.print(f"  Error: {e}")
 
 
 def cmd_watch(stream=None):
-    """Tail check results in real-time."""
+    """Tail check results in real-time.
+
+    This delegates to ``daemon_ops.stream_watcher``, a live infinite-loop
+    streaming tail whose output (including its own opening banner at
+    daemon_ops.py:85) is background streaming — NOT restyled, per the shared
+    design rule. Restyling here would duplicate the banner stream_watcher
+    already prints. Left as a thin passthrough.
+    """
     from .daemon_ops import stream_watcher
     stream_watcher(stream)
 
@@ -257,39 +345,51 @@ def cmd_triggers():
     """Show trigger engine status."""
     from .trigger import load_triggers, load_cooldowns
     from .state import read_state
+    import datetime
+
+    console = _console()
 
     rules = load_triggers()
     cooldowns = load_cooldowns()
     last_check = read_state("triggers")
 
-    print("Trigger Engine Status")
-    print(f"  Rules configured: {len(rules)}")
-    print(f"  Cooldowns: {len(cooldowns)} active")
-    print()
-
+    body = (
+        f"Rules configured: {len(rules)}\n"
+        f"Cooldowns: {len(cooldowns)} active"
+    )
     if last_check:
-        print(f"  Last run:  {last_check.get('timestamp', '?')[:19]}")
-        print(f"  Rules eval: {last_check.get('rules_evaluated', 0)}")
-        print(f"  Actions:   {last_check.get('actions_fired', 0)}")
+        body += (
+            f"\nLast run:   {last_check.get('timestamp', '?')[:19]}\n"
+            f"Rules eval: {last_check.get('rules_evaluated', 0)}\n"
+            f"Actions:    {last_check.get('actions_fired', 0)}"
+        )
     else:
-        print("  No check results yet")
-    print()
+        body += "\nLast run:   no check results yet"
+
+    console.print(make_panel("Trigger Engine Status", body))
+    console.print()
 
     if rules:
-        print("  Rules:")
+        table = make_table("Configured Rules")
+        table.add_column("", justify="left")  # enabled marker
+        table.add_column("ID", justify="left")
+        table.add_column("Cooldown", justify="right")
+        table.add_column("Last fired", justify="left")
         for r in rules:
             rid = r.get("id", "?")
-            enabled = "✓" if r.get("enabled", True) else "✗"
+            enabled = "[ok]✓[/ok]" if r.get("enabled", True) else "✗"
             cooldown = r.get("cooldown_seconds", 0)
             last = cooldowns.get(rid, "never")
-            import datetime
             if isinstance(last, (int, float)):
                 last = datetime.datetime.fromtimestamp(last).isoformat()[:19]
             else:
                 last = str(last)[:19]
-            print(f"    {enabled} {rid:<20s} cooldown={cooldown:>4s}s  last_fired={last}")
+            table.add_row(enabled, rid, f"{cooldown}s", last)
+        console.print(table)
     else:
-        print("  No rules configured.")
+        console.print(make_status_panel(
+            "No rules configured.", status="warn", title="triggers"
+        ))
 
 
 def cmd_notify(msg):
@@ -297,26 +397,45 @@ def cmd_notify(msg):
     from .desktop import send_macos_notification
     from .state import now_iso
 
+    console = _console()
+
     ts = now_iso()
     title = f"HSCC Manual: {ts[:19]}"
-    print(f"Sending notification: {title}")
+    console.print(f"Sending notification: {title}")
     ok = send_macos_notification(title, msg, priority="normal")
-    print(f"  {'Sent' if ok else 'Failed'}")
+    console.print(make_status_panel(
+        f"Notification {'sent' if ok else 'failed'}",
+        status="ok" if ok else "error", title="notify",
+    ))
 
 
 def cmd_log():
     """Show daemon log output."""
     from .daemon_ops import get_daemon_log_tail
+
+    console = _console()
+
     lines = get_daemon_log_tail(50)
     if not lines:
-        print("No daemon log entries.")
+        console.print(
+            make_status_panel(
+                "No daemon log entries.", status="warn", title="log"
+            )
+        )
         return
-    for line in lines:
-        print(line.rstrip())
+    console.print(make_panel(
+        "Daemon Log (last 50 lines)",
+        "\n".join(line.rstrip() for line in lines),
+    ))
 
 
 def cmd_start_daemon():
-    """Internal entry point: run the daemon loop directly (used by launchd/systemd)."""
+    """Internal entry point: run the daemon loop directly (used by launchd/systemd).
+
+    This is the supervised daemon entry point. Its only output is the
+    daemon's own ``log()`` background-level lines — NOT command output the
+    user asked for — so it is intentionally NOT restyled.
+    """
     from .daemon_ops import get_pid, save_pid, write_stopped, run_daemon_loop
     from . import log
     from .state import ensure_state_dir
@@ -335,16 +454,26 @@ def cmd_start_daemon():
 
 # Event-driven commands (placeholder)
 def cmd_ed_status():
-    """Show event-driven mode status."""
+    """Show event-driven mode status.
+
+    Placeholder — event_driven.py is not present, so there is no real command
+    surface to render. Left un-styled on purpose (see card decision).
+    """
     print("Event-driven mode: not available (event_driven.py not found)")
     print("  Daemon will use polling fallback.")
 
 
 def cmd_ed_install():
-    """Install event-driven launchd jobs."""
+    """Install event-driven launchd jobs.
+
+    Placeholder — event_driven.py is not present. Left un-styled on purpose.
+    """
     print("Event-driven mode: not available (event_driven.py not found)")
 
 
 def cmd_ed_uninstall():
-    """Remove event-driven launchd jobs."""
+    """Remove event-driven launchd jobs.
+
+    Placeholder — event_driven.py is not present. Left un-styled on purpose.
+    """
     print("Event-driven mode: not available (event_driven.py not found)")
