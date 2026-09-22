@@ -60,17 +60,20 @@ DIGEST_PROFILE = "default"
 
 # A session file's metadata header, as archive.py renders it. Parsed (never
 # regexed over the whole file) so a malformed file can never crash the digest.
+# Each line has the shape ``- **<field>**: <value>`` — the ``^- `` prefix is
+# part of the archive render, not of the value.
 _META_RE = {
-    "session_id": re.compile(r"^\*\*session id\*\*:\s*`([^`]*)`"),
-    "message_count": re.compile(r"^\*\*message count\*\*:\s*(\d+)"),
-    "started": re.compile(r"^\*\*started\*\*:\s*(.*)$"),
-    "ended": re.compile(r"^\*\*ended\*\*:\s*(.*)$"),
+    "session_id": re.compile(r"^-\s*\*\*session id\*\*:\s*`([^`]*)`"),
+    "message_count": re.compile(r"^-\s*\*\*message count\*\*:\s*(\d+)"),
+    "started": re.compile(r"^-\s*\*\*started\*\*:\s*(.*)$"),
+    "ended": re.compile(r"^-\s*\*\*ended\*\*:\s*(.*)$"),
 }
 
-# A message header line, e.g. ``**user** · 2026-07-02 10:05:16``. Only user and
-# assistant blocks feed the ``decision`` extract — tool dumps are never read.
-_MSG_HEAD = re.compile(r"^\*\*(user|assistant)\*\*")
-_MSG_HEAD_TIME = re.compile(r"^\*\*(user|assistant)\*\*\s*·\s*(.*)$")
+# A message header line, e.g. ``**user** · 2026-07-02 10:05:16`` or a bare
+# ``**tool**`` header. Matches ANY role so a tool/func block correctly ends the
+# previous user/assistant block; ``_collect_words`` then drops all non
+# user/assistant blocks so tool dumps never reach the digest.
+_MSG_HEAD = re.compile(r"^\*\*([a-z_/]+)\*\*")
 
 
 def _resolve(path: str | None, default: str) -> Path:
@@ -178,7 +181,9 @@ def _collect_words(body_lines: list[str]) -> list[tuple[str, str]]:
                 cur.append(ln)
     if cur_role is not None and cur:
         out.append((cur_role, "\n".join(cur).strip()))
-    return out
+    # Only user/assistant words are decision signal; tool/func dumps are never
+    # surfaced in the digest (a huge fs_read dump is exactly what must NOT leak).
+    return [(r, t) for r, t in out if r in ("user", "assistant")]
 
 
 def _bounded_decision(body_lines: list[str]) -> str:
