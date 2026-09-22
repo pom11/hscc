@@ -218,9 +218,15 @@ def list_project_sessions(
     orch_session = resolved["session"]
     topic = _load_project_topic(name, path)
 
-    # Bail out with an explicit reason rather than empty lists when this
-    # interpreter cannot see the Hermes runtime at all.
-    _rt = _runtime_error()
+    # The honesty invariant applies to the REAL runtime path. When the caller
+    # has injected `_session_db`/`_default_db` seams they are explicitly
+    # controlling the runtime (the unit/command tests below), so probing the
+    # real default profile would bypass their fakes and misreport. The command
+    # wiring never injects seams, so in production this probe always runs and
+    # an unreadable Hermes runtime surfaces as `runtime_error`, never as empty
+    # results.
+    _rt = None if (_default_db is not None or _session_db is not None) \
+        else _runtime_error()
     if _rt is not None:
         return {
             "project": name,
@@ -314,6 +320,7 @@ def list_project_sessions(
         "telegram_profile": DEFAULT_PROFILE,
         # Non-None when this interpreter cannot import the Hermes runtime, in
         # which case the empty lists above mean "could not look", NOT "nothing
-        # there". The caller must say which.
-        "runtime_error": _runtime_error(),
+        # there". Skipped when DB seams were injected (tests control the
+        # runtime). The caller must say which.
+        "runtime_error": _rt,
     }
