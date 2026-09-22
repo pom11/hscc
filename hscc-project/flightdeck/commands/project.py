@@ -28,6 +28,7 @@ from pathlib import Path
 from ..core import git_state, project_lifecycle, registry
 from ..core import session_discovery
 from ..core import bindings
+from ..core import digest as digest_core
 
 # --------------------------------------------------------------------------- #
 # Orchestrator resolver (reused from hscc-roles so CLI/REST/WS never disagree)
@@ -662,6 +663,40 @@ def cmd_sessions(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_digest(args: argparse.Namespace) -> int:
+    """`hscc project digest <name>` — a bounded, readable digest of a project's history.
+
+    Synthesises the project's archive markdown (``~/.hermes/archive/telegram/
+    <name>/``) into a short human extract: per session, title, date range,
+    message count, a bounded ``decided/outcome`` slice, and the resume line.
+    Bounded to a few thousand tokens — NEVER the raw transcripts, and never a
+    physical merge of sessions (synthesis only, read-only).
+    """
+    name = args.name
+    digest = digest_core.build_digest(
+        name,
+        archive_dir=getattr(args, "archive_dir", None),
+        mapping_path=getattr(args, "mapping_path", None),
+        _runtime_error_fn=getattr(args, "runtime_error_fn", None),
+    )
+
+    if getattr(args, "json", False):
+        import json
+        out = {
+            "project": digest["project"],
+            "archive_dir": digest["archive_dir"],
+            "total_messages": digest["total_messages"],
+            "runtime_error": digest["runtime_error"],
+            "sessions": digest["sessions"],
+        }
+        print(json.dumps(out, indent=2))
+        # An env fault is not an empty history — even in JSON, say which one.
+        return 3 if digest["runtime_error"] else 0
+
+    print(digest_core.format_digest(digest))
+    return 3 if digest["runtime_error"] else 0
+
+
 # --------------------------------------------------------------------------- #
 # link / unlink / link --list — metadata on the canonical binding store
 # --------------------------------------------------------------------------- #
@@ -847,6 +882,17 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                            epilog="example: flightdeck project sessions flightdeck   (resolves registry topic -> sessions.thread_id on the DEFAULT profile; read-only)")
     sp.add_argument("name", help="project name in the registry")
     sp.set_defaults(func=cmd_sessions)
+
+    # digest — bounded, readable synthesis of the project's archive history.
+    sp = subsub.add_parser("digest", help="bounded digest of a project's archive history (title/date-range/count/decision/resume per session)",
+                           epilog="example: flightdeck project digest flightdeck   (reads ~/.hermes/archive/telegram/flightdeck/; bounded to a few thousand tokens, never raw transcripts)")
+    sp.add_argument("name", help="project name in the registry")
+    sp.add_argument("--json", action="store_true", help="emit machine-readable JSON (clean, not byte-exact to anything)")
+    sp.add_argument("--archive-dir", dest="archive_dir", default=None,
+                    help=argparse.SUPPRESS)  # hidden seam for tests
+    sp.add_argument("--mapping-path", dest="mapping_path", default=None,
+                    help=argparse.SUPPRESS)  # hidden seam for tests
+    sp.set_defaults(func=cmd_digest)
 
     # link — bind a session to a project (metadata only; never merges).
     # `link --list [<project>]` prints; `link <project> <session-id>` writes.
