@@ -1,6 +1,5 @@
 """Install/uninstall/service management for the HSCC daemon."""
 
-import json
 import os
 import shutil
 import signal
@@ -8,6 +7,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+from .cli_theme import make_console, make_status_panel
 
 
 HSCC_DIR = os.path.expanduser("~/.hscc")
@@ -120,12 +121,17 @@ def _service_manager():
     return "none"
 
 
+def _console(**kwargs):
+    """Themed Console (theme auto-detects); ``file=`` lets tests capture."""
+    return make_console(**kwargs)
+
+
 def _stop_running_daemon():
     """Stop any running daemon instance (shared by install/uninstall)."""
     try:
         with open(PID_FILE) as f:
             pid = int(f.read().strip())
-        print(f"  Stopping existing daemon (PID {pid})")
+        _console().print(f"  Stopping existing daemon (PID {pid})")
         try:
             os.kill(pid, signal.SIGTERM)
             time.sleep(2)
@@ -178,27 +184,29 @@ def _install_launchd():
     Path(PLIST_DIR).mkdir(parents=True, exist_ok=True)
     plist_file = Path(PLIST_FILE)
     plist_file.write_text(generate_plist())
-    print(f"  Plist installed: {plist_file}")
+    _console().print(f"  Plist installed: {plist_file}")
 
     result = subprocess.run(
         ["launchctl", "load", str(plist_file)],
         capture_output=True, text=True, timeout=10
     )
     if result.returncode == 0:
-        print("  Loaded into launchd")
-        print(f"\n  hscc_daemon is now managed by launchd.")
-        print(f"  To check status: launchctl list | grep hscc")
+        _console().print(make_status_panel(
+            "Loaded into launchd — hscc_daemon is now managed by launchd.",
+            status="ok", title="install",
+        ))
+        _console().print(f"  Check status: launchctl list | grep hscc")
     else:
-        print(f"  launchctl load failed, starting manually...")
+        _console().print("  launchctl load failed, starting manually...")
         # Call the actual start function (imported later)
-        print(f"  To load on next boot: launchctl load {plist_file}")
+        _console().print(f"  To load on next boot: launchctl load {plist_file}")
 
 
 def _install_systemd():
     SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
     unit_file = Path(SYSTEMD_UNIT_FILE)
     unit_file.write_text(generate_systemd_unit())
-    print(f"  Unit installed: {unit_file}")
+    _console().print(f"  Unit installed: {unit_file}")
 
     subprocess.run(["systemctl", "--user", "daemon-reload"],
                    capture_output=True, text=True, timeout=10)
@@ -207,13 +215,16 @@ def _install_systemd():
         capture_output=True, text=True, timeout=15
     )
     if result.returncode == 0:
-        print("  Enabled + started via systemd --user")
-        print(f"\n  hscc_daemon is now managed by systemd.")
-        print(f"  To check status: systemctl --user status {SYSTEMD_UNIT_NAME}")
-        print(f"  Tip: run `loginctl enable-linger $USER` so it survives logout.")
+        _console().print(make_status_panel(
+            "Enabled + started via systemd --user — hscc_daemon is now "
+            "managed by systemd.",
+            status="ok", title="install",
+        ))
+        _console().print(f"  Check status: systemctl --user status {SYSTEMD_UNIT_NAME}")
+        _console().print("  Tip: run `loginctl enable-linger $USER` so it survives logout.")
     else:
-        print(f"  systemctl enable failed ({result.stderr.strip()}), starting manually...")
-        print(f"  To enable later: systemctl --user enable --now {SYSTEMD_UNIT_NAME}")
+        _console().print(f"  systemctl enable failed ({result.stderr.strip()}), starting manually...")
+        _console().print(f"  To enable later: systemctl --user enable --now {SYSTEMD_UNIT_NAME}")
 
 
 def _uninstall_launchd():
@@ -222,10 +233,12 @@ def _uninstall_launchd():
         subprocess.run(["launchctl", "unload", str(plist_file)],
                        capture_output=True, text=True, timeout=10)
         plist_file.unlink()
-        print(f"  Plist removed: {plist_file}")
-        print("  hscc_daemon uninstalled")
+        _console().print(make_status_panel(
+            f"Plist removed: {plist_file} — hscc_daemon uninstalled.",
+            status="ok", title="uninstall",
+        ))
     else:
-        print("  No plist found — nothing to remove")
+        _console().print("  No plist found — nothing to remove")
 
 
 def _uninstall_systemd():
@@ -235,10 +248,12 @@ def _uninstall_systemd():
         Path(SYSTEMD_UNIT_FILE).unlink()
         subprocess.run(["systemctl", "--user", "daemon-reload"],
                        capture_output=True, text=True, timeout=10)
-        print(f"  Unit removed: {SYSTEMD_UNIT_FILE}")
-        print("  hscc_daemon uninstalled")
+        _console().print(make_status_panel(
+            f"Unit removed: {SYSTEMD_UNIT_FILE} — hscc_daemon uninstalled.",
+            status="ok", title="uninstall",
+        ))
     else:
-        print("  No unit found — nothing to remove")
+        _console().print("  No unit found — nothing to remove")
 
 
 # ── CLI Command Wrappers ──────────────────────────────────────────────────
@@ -247,22 +262,30 @@ def cmd_plist():
     """Generate and display the auto-start service definition."""
     from .daemon_ops import get_pid, save_pid, write_stopped, run_daemon_loop
     mgr = _service_manager()
+    console = _console()
     if mgr == "systemd":
         unit = generate_systemd_unit()
-        print(unit)
-        print(f"\n# To install: write to {SYSTEMD_UNIT_FILE}")
-        print(f"#   systemctl --user daemon-reload && systemctl --user enable --now {SYSTEMD_UNIT_NAME}")
+        console.print(make_status_panel(
+            "Systemd unit (copy to "
+            + f"{SYSTEMD_UNIT_FILE})",
+            status="", title="plist", color="accent",
+        ))
+        console.print(unit)
+        console.print(f"  # systemctl --user daemon-reload && systemctl --user enable --now {SYSTEMD_UNIT_NAME}")
         return
     plist = generate_plist()
-    print(plist)
-    print(f"\n# To install: write to {PLIST_FILE}")
-    print(f"#   launchctl load {PLIST_FILE}")
+    console.print(make_status_panel(
+        f"Launchd plist (copy to {PLIST_FILE})",
+        status="", title="plist", color="accent",
+    ))
+    console.print(plist)
+    console.print(f"  # launchctl load {PLIST_FILE}")
 
 
 def cmd_install():
     """Install the auto-start service and start the daemon."""
     mgr = _service_manager()
-    print(f"Installing hscc_daemon ({mgr}) service...")
+    _console().print(f"Installing hscc_daemon ({mgr}) service...")
     _stop_running_daemon()
 
     if mgr == "launchd":
@@ -270,8 +293,8 @@ def cmd_install():
     elif mgr == "systemd":
         _install_systemd()
     else:
-        print("  No service manager (launchd/systemd) found — starting as a")
-        print("  background process (will NOT auto-start on boot).")
+        _console().print("  No service manager (launchd/systemd) found — starting as a")
+        _console().print("  background process (will NOT auto-start on boot).")
 
 
 def cmd_uninstall():
@@ -283,4 +306,4 @@ def cmd_uninstall():
     elif mgr == "systemd":
         _uninstall_systemd()
     else:
-        print("  No service manager — daemon stopped (nothing installed to remove)")
+        _console().print("  No service manager — daemon stopped (nothing installed to remove)")
