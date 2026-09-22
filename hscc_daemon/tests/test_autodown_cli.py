@@ -239,8 +239,12 @@ class TestStatus:
         rc = cmd_autodown(["status"])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "kanban work on board 'hscc': t-1 (forgotten card), " \
-               "t-2 (other)" in out
+        # Rich wraps long rows to the console width at word boundaries, so
+        # assert short fragments that cannot straddle a wrap point.
+        assert "blocked by:" in out
+        assert "forgotten card" in out
+        assert "t-2" in out
+        assert "╭─ autodown " in out  # status renders as a titled Panel
 
         # --json carries the same machine-readable signal.
         rc = cmd_autodown(["status", "--json"])

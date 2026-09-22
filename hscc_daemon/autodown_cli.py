@@ -23,6 +23,7 @@ import json
 import sys
 
 from hscc_daemon import autodown
+from hscc_daemon import cli_theme as theme
 
 VALID_SUBCOMMANDS = ("status", "enable", "disable", "wake", "cancel")
 
@@ -89,17 +90,61 @@ def _error(msg, json_mode):
     return 1
 
 
+def _print_status_panel(body, status="ok", title="status", theme_name=None):
+    """Render ``body`` (a \\n-joined string of labelled rows) in a themed Panel.
+
+    The panel border is coloured by ``status`` (ok green / warn amber / error
+    red) via ``cli_theme.make_status_panel``; markup inside ``body`` colours
+    individual state values. Rich consumes all markup and, on a non-tty stdout,
+    degrades to PLAIN text with NO ANSI codes — keeping ``--json`` the only
+    machine path and posted output clean when piped.
+    """
+    console = theme.make_console(theme_name)
+    console.print(theme.make_status_panel(body, status=status, title=title))
+
+
 def _has_force(argv):
     """True when ``--force`` is present in the (subcommand) argv."""
     return "--force" in argv
 
 
-def _cmd_status(rest, json_mode):
+def _strip_theme(args):
+    """Remove ``--theme <name>`` / ``--theme=<name>`` tokens from an argv slice.
+
+    ``--theme`` only selects the palette for the human view; it is not part of
+    the machine ``--json`` contract. Mirrors ``hscc._strip_theme_arg`` so the
+    autodown group honors the same flag via its own argv (hscc.py passes the
+    autodown argv through unstripped). Returns ``(cleaned, theme_name_or_None)``.
+    """
+    theme_name = None
+    cleaned = []
+    i = 0
+    n = len(args)
+    while i < n:
+        a = args[i]
+        if a == "--theme":
+            if i + 1 < n:
+                theme_name = args[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        if a.startswith("--theme="):
+            theme_name = a.split("=", 1)[1]
+            i += 1
+            continue
+        cleaned.append(a)
+        i += 1
+    return cleaned, theme_name
+
+
+def _cmd_status(rest, json_mode, theme_name=None):
     """``hscc autodown status`` — read-only report (§7).
 
     Reads autodown.json (absent ⇒ disabled default; load_config does NOT create
     the file) plus the watchdog block for context, and reports the state. Never
-    writes, never creates, never acts.
+    writes, never creates, never acts. The human view is a themed Rich Panel
+    ("autodown"); ``--json`` stays a raw dumps for scripting.
     """
     cfg = autodown.load_config()
     from hscc_daemon import lifecycle
@@ -205,58 +250,76 @@ def _cmd_status(rest, json_mode):
         return 0
 
     enabled = status["enabled"]
+
+    # Human view: a themed Rich Panel titled "autodown" with labelled rows.
+    # State is coloured (enabled=ok green, disabled=warn amber); interlocks
+    # that are ACTIVE/UNEVALUABLE read as warn/error. Rich markup tags are
+    # consumed by the console — on a non-tty stdout they degrade to plain text
+    # with no ANSI codes (the mandatory regression test pins this).
+    rows = []
     if not enabled:
-        line = "autodown: DISABLED"
+        head = "autodown: [warn]DISABLED[/warn]"
         if status["last_activity_iso"] is None and status["state"] == "up":
             # Never enabled / never touched — the fresh-config case.
-            line += " (never enabled)"
-        print(line)
+            head += " (never enabled)"
+        rows.append(head)
     else:
-        print(f"autodown: ENABLED (idle_minutes={status['idle_minutes']})")
+        rows.append("autodown: [ok]ENABLED[/ok] "
+                    f"(idle_minutes={status['idle_minutes']})")
     if status["force_armed"]:
-        print("  force-armed:     YES (armed despite active Hermes cron jobs)")
+        rows.append("  force-armed:     [warn]YES[/warn] "
+                    "(armed despite active Hermes cron jobs)")
         for job in status["force_armed_overrides"]:
-            print(f"    overridden job: {job}")
+            rows.append(f"    overridden job: {job}")
     # Informational note for any active CPU-only watchdog(s) — they do not
     # block arming (and autodown never wakes for them), but the operator
     # should still know they exist (feat t_c94f8b8c).
     if status["active_cron_cpu_only"]:
         names = ", ".join(status["active_cron_cpu_only"])
-        print(f"  active cron (cpu-only): {names} — CPU-side watchdog(s), "
-              "not GPU-dependent, do not block arming.")
+        rows.append(f"  active cron (cpu-only): {names} — CPU-side "
+                    "watchdog(s), not GPU-dependent, do not block arming.")
     if status["active_cron_model"]:
         names = ", ".join(status["active_cron_model"])
-        print(f"  active cron (model):    {names} — model-requiring, "
-              "the reason enable aborts/force-arms.")
-    print(f"  state:           {status['state']}")
+        rows.append(f"  active cron (model):    {names} — model-requiring, "
+                    "the reason enable aborts/force-arms.")
+    rows.append(f"  state:           {status['state']}")
     if status["blocked_by"]:
-        print(f"  blocked by:      {status['blocked_by']}")
-    print(f"  last activity:   {status['last_activity_iso']}")
+        rows.append("  blocked by:      "
+                    f"[warn]{status['blocked_by']}[/warn]")
+    rows.append(f"  last activity:   {status['last_activity_iso']}")
     if status["down_since"]:
         # Only show the down-since line when there is a value — a null/absent
         # down_since means the fleet is not down (never printed 'None').
-        print(f"  down since:      {status['down_since']}")
+        rows.append(f"  down since:      {status['down_since']}")
     if status["wake_source"]:
-        print(f"  wake source:     {status['wake_source']}")
+        rows.append(f"  wake source:     {status['wake_source']}")
     if status["reason"]:
-        print(f"  reason:          {status['reason']}")
-    print(f"  watchdog block:  {'set' if status['watchdog_blocked'] else 'clear'}"
-          f"{' (intentional: ' + str(status['watchdog_intentional']) + ')' if status['watchdog_intentional'] else ''}")
+        rows.append(f"  reason:          {status['reason']}")
+    rows.append("  watchdog block:  "
+                f"{'set' if status['watchdog_blocked'] else 'clear'}"
+                f"{' (intentional: ' + str(status['watchdog_intentional']) + ')' if status['watchdog_intentional'] else ''}")
     if kc is not None and kc["ok"] is False:
-        print(f"  kanban interlock: UNEVALUABLE — {kc['reason']}")
+        rows.append("  kanban interlock: [error]UNEVALUABLE[/error] — "
+                    f"{kc['reason']}")
     elif kc is not None and kc["ok"]:
-        print("  kanban interlock: ok (board readable)")
+        rows.append("  kanban interlock: [ok]ok[/ok] (board readable)")
     if status["prci_active"]:
         if prci == autodown._PRCI_UNREACHABLE:
-            print("  PR/CI interlock:  UNEVALUABLE — source unreachable")
+            rows.append("  PR/CI interlock:  [error]UNEVALUABLE[/error] — "
+                        "source unreachable")
         else:
-            print("  PR/CI interlock:  ACTIVE (open PR / active CI run)")
+            rows.append("  PR/CI interlock:  [warn]ACTIVE[/warn] "
+                        "(open PR / active CI run)")
     elif status["prci_ok"] is not None:
-        print("  PR/CI interlock:  ok (no open PR / no active CI run)")
+        rows.append("  PR/CI interlock:  [ok]ok[/ok] (no open PR / no active "
+                    "CI run)")
+    body = "\n".join(rows)
+    console = theme.make_console(theme_name)
+    console.print(theme.make_panel("autodown", body))
     return 0
 
 
-def _cmd_enable(rest, json_mode):
+def _cmd_enable(rest, json_mode, theme_name=None):
     """``hscc autodown enable [--idle-minutes N] [--force]`` — arm it (§7).
 
     Persists ``enabled: true`` (+ ``idle_minutes``) to autodown.json AND resets
@@ -382,31 +445,40 @@ def _cmd_enable(rest, json_mode):
             "force_armed_overrides": cfg["force_armed_overrides"],
         }))
     else:
+        # Human view: a themed status Panel. colouring "ok" for a clean arm,
+        # "warn" amber for a force-arm (which overrode model-requiring jobs).
+        rows = []
         if force and model_jobs:
             # Report which MODEL-REQUIRING jobs were overridden (§7).
-            print(f"autodown: ENABLED (idle_minutes={idle_minutes}, FORCED)")
+            rows.append("autodown: [warn]ENABLED[/warn] "
+                        f"(idle_minutes={idle_minutes}, FORCED)")
             for j in model_jobs:
-                print(f"  overrode schedule: {j.get('name') or j.get('id')}"
-                      f" (schedule {j.get('schedule_display') or '?'})")
+                rows.append(f"  overrode schedule: {j.get('name') or j.get('id')}"
+                            f" (schedule {j.get('schedule_display') or '?'})")
         else:
-            print(f"autodown: ENABLED (idle_minutes={idle_minutes})")
+            rows.append("autodown: [ok]ENABLED[/ok] "
+                        f"(idle_minutes={idle_minutes})")
         # Informational: active CPU-only watchdogs exist but did not block —
         # the operator should still know they are scheduled (feat t_c94f8b8c).
         if cpu_only_jobs:
             names = ", ".join(
                 (j.get("name") or j.get("id")) for j in cpu_only_jobs)
-            print(f"  Note: {len(cpu_only_jobs)} active CPU-only cron "
-                  f"watchdog(s) present ({names}) — not GPU-dependent, "
-                  "so they do not block arming.")
-        print("  Idle timer reset — will not tear down for at least "
-              f"{idle_minutes} minutes.")
+            rows.append(f"  Note: {len(cpu_only_jobs)} active CPU-only cron "
+                        f"watchdog(s) present ({names}) — not GPU-dependent, "
+                        "so they do not block arming.")
+        rows.append("  Idle timer reset — will not tear down for at least "
+                    f"{idle_minutes} minutes.")
         if cfg["state"] == "down":
-            print("  Note: serving layer is down; enable does not start it. "
-                  "Run 'hscc autodown wake' to bring it up.")
+            rows.append("  Note: serving layer is down; enable does not start "
+                        "it. Run 'hscc autodown wake' to bring it up.")
+        body = "\n".join(rows)
+        _print_status_panel(
+            body, status="warn" if (force and model_jobs) else "ok",
+            title="autodown enable", theme_name=theme_name)
     return 0
 
 
-def _cmd_disable(rest, json_mode):
+def _cmd_disable(rest, json_mode, theme_name=None):
     """``hscc autodown disable`` — disarm + release the intentional block (§7).
 
     Sets ``enabled: false`` in autodown.json and leaves ``state`` as the current
@@ -432,14 +504,20 @@ def _cmd_disable(rest, json_mode):
     if json_mode:
         print(json.dumps({"enabled": False, "state": cfg["state"]}))
     else:
-        print("autodown: DISABLED")
-        print(f"  state: {cfg['state']}")
-        print("  Intentional watchdog block cleared — normal supervision resumed.")
-        print("  Serving layer NOT restarted (use 'hscc autodown wake' to bring it up).")
+        rows = [
+            "autodown: [ok]DISABLED[/ok]",
+            f"  state: {cfg['state']}",
+            "  Intentional watchdog block cleared — normal supervision "
+            "resumed.",
+            "  Serving layer NOT restarted (use 'hscc autodown wake' to "
+            "bring it up).",
+        ]
+        _print_status_panel("\n".join(rows), status="ok",
+                            title="autodown disable", theme_name=theme_name)
     return 0
 
 
-def _cmd_wake(rest, json_mode):
+def _cmd_wake(rest, json_mode, theme_name=None):
     """``hscc autodown wake`` — force autoup now (§7).
 
     Records the CLI as an activity source (which advances the idle timer AND is
@@ -457,32 +535,42 @@ def _cmd_wake(rest, json_mode):
                           "wake_source": "cli"}))
     else:
         if res == "up":
-            print("autodown: serving layer is UP (wake complete)")
-            print("  watchdog block cleared; supervision resumed.")
+            _print_status_panel(
+                "autodown: serving layer is [ok]UP[/ok] (wake complete)\n"
+                "  watchdog block cleared; supervision resumed.",
+                status="ok", title="autodown wake", theme_name=theme_name)
         elif res == "already-waking":
-            print("autodown: a wake is already in flight (no-op)")
+            _print_status_panel(
+                "autodown: a wake is already in [warn]flight[/warn] (no-op)",
+                status="warn", title="autodown wake", theme_name=theme_name)
         elif res == "busy":
-            print("autodown: another teardown/wake is in progress, or the "
-                  "layer is already up — no starts issued.")
+            _print_status_panel(
+                "autodown: another teardown/wake is in progress, or the "
+                "layer is already up — no starts issued.",
+                status="warn", title="autodown wake", theme_name=theme_name)
             return 1
         elif res == "no-units":
-            print("autodown: wake did NOT complete — empty wake plan "
-                  "(no serving units to start).")
-            print("  Check ~/.hscc/serving.json.")
-            print("  Watchdog block cleared — normal supervision resumed so "
-                  "the watchdog can heal whatever is actually there.")
+            _print_status_panel(
+                "autodown: wake did NOT complete — empty wake plan "
+                "(no serving units to start).\n"
+                "  Check ~/.hscc/serving.json.\n"
+                "  Watchdog block cleared — normal supervision resumed so "
+                "the watchdog can heal whatever is actually there.",
+                status="error", title="autodown wake", theme_name=theme_name)
             return 1
         else:
             # start-failed / not-ready — autoup() has recorded the failure and
             # cleared the block so the watchdog can heal. Report it.
             msg = cfg.get("reason") or result.get("reason", res)
-            print(f"autodown: wake did NOT complete ({res})")
-            print(f"  {msg}")
+            _print_status_panel(
+                f"autodown: wake did [error]NOT complete[/error] ({res})\n"
+                f"  {msg}",
+                status="error", title="autodown wake", theme_name=theme_name)
             return 1
     return 0
 
 
-def _cmd_cancel(rest, json_mode):
+def _cmd_cancel(rest, json_mode, theme_name=None):
     """``hscc autodown cancel`` — abort an in-progress teardown (§6/§7).
 
     Sets ``cancel_requested: true`` in autodown.json; the teardown sequence
@@ -499,8 +587,10 @@ def _cmd_cancel(rest, json_mode):
     if json_mode:
         print(json.dumps({"cancel_requested": True}))
     else:
-        print("autodown: cancel requested — an in-progress teardown will abort "
-              "between stops.")
+        _print_status_panel(
+            "autodown: [ok]cancel requested[/ok] — an in-progress teardown "
+            "will abort between stops.",
+            status="ok", title="autodown cancel", theme_name=theme_name)
     return 0
 
 
@@ -520,20 +610,24 @@ def cmd_autodown(argv):
     json_mode = "--json" in argv
     # Strip --json so no subcommand has to re-filter it from its own rest.
     argv = [a for a in argv if a != "--json"]
+    # Strip --theme <name> / --theme=<name> too. hscc.py passes raw args[1:]
+    # through to cmd_autodown (it does not run _strip_theme_arg for this group),
+    # so --theme selection for the human palette is handled here.
+    argv, theme_name = _strip_theme(argv)
 
     sub = argv[0]
     rest = argv[1:]
 
     if sub == "status":
-        return _cmd_status(rest, json_mode)
+        return _cmd_status(rest, json_mode, theme_name)
     if sub == "enable":
-        return _cmd_enable(rest, json_mode)
+        return _cmd_enable(rest, json_mode, theme_name)
     if sub == "disable":
-        return _cmd_disable(rest, json_mode)
+        return _cmd_disable(rest, json_mode, theme_name)
     if sub == "wake":
-        return _cmd_wake(rest, json_mode)
+        return _cmd_wake(rest, json_mode, theme_name)
     if sub == "cancel":
-        return _cmd_cancel(rest, json_mode)
+        return _cmd_cancel(rest, json_mode, theme_name)
 
     print(f"Error: unknown autodown subcommand: {sub}")
     print(f"Valid subcommands: {', '.join(VALID_SUBCOMMANDS)}")
