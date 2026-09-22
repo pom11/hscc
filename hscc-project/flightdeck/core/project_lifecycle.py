@@ -448,6 +448,43 @@ def ensure_session(name: str, profile: str, _session_db=None) -> dict:
             pass
 
 
+def seed_session_with_digest(
+    session_id: str, profile: str, text: str, _session_db=None
+) -> bool:
+    """Append the project digest as the opening message of an EMPTY orchestrator session.
+
+    This is the ONE sanctioned read-write to a *session* DB in the chat flow:
+    seeding the project's own empty orchestrator thread with its digest (a
+    summary of the real history that stays on the DEFAULT profile). It is NOT a
+    merge — the telegram sessions are never touched, and `text` is a bounded
+    SYNTHESIS, not a raw transcript (bounded by ``DIGEST_MAX_CHARS`` upstream).
+
+    Opens the profile's state.db via Hermes' own ``SessionDB`` read-write and
+    appends ``text`` as a single ``user`` message, so the operator lands in a
+    session that already knows the project history instead of a blank slate.
+
+    Idempotency is the CALLER's contract: only call this when the session is
+    confirmed empty. After this write the session is non-empty, so the next chat
+    will not re-seed. Returns ``True`` only when the message was appended;
+    ``False`` (never raises) when the profile/db is unusable or the append fails
+    — the caller then records an honest "could not seed" rather than a fake one.
+    """
+    opener = _session_db if _session_db is not None else _open_profile_session_db
+    db = opener(profile)
+    if db is None:
+        return False
+    try:
+        db.append_message(session_id, "user", text)
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
 # --------------------------------------------------------------------------- #
 # Orchestration — run the steps, record successes, never corrupt state
 # --------------------------------------------------------------------------- #
