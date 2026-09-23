@@ -120,8 +120,18 @@ class TestScanAndEscalate:
         assert reassign_calls == []
         assert notify_calls == []
 
-    def test_at_limit_coder_escalated_to_architect(self):
-        """A non-strong assignee at the threshold gets reassigned."""
+    def test_default_does_not_reassign_to_architect(self):
+        """REGRESSION (t_7a8f126c): default scan must NOT silently reassign to architect.
+
+        Before the fix, an at-threshold card was unconditionally reassigned to
+        the hardcoded ``architect`` profile. That rewrote the card's assignee
+        and bounced it through pointless dispatch cycles — architect workers
+        die in ~1 min with 0 tool calls (protocol violation), so the card
+        never progressed and the operator had to ``assign``+``unblock`` it
+        back. With acting escalation opt-in (no strong profile configured),
+        the at-threshold failure must surface to a HUMAN, not corrupt the
+        assignment.
+        """
         rows = [_make_row("t-b", "coder", 3, "running", "timed out")]
         kb = _FakeKB(rows)
 
@@ -130,6 +140,30 @@ class TestScanAndEscalate:
 
         results = scan_and_escalate(
             fail_limit=3,
+            _kb=kb,
+            _reassign=lambda tid, to: reassign_calls.append((tid, to)) or True,
+            _notify=lambda title, body: notify_calls.append((title, body)),
+        )
+
+        # No strong profile configured → human alert, NO reassign.
+        assert reassign_calls == []
+        assert len(results) == 1
+        assert results[0]["action"] == "human"
+        assert results[0]["task"] == "t-b"
+        assert results[0]["category"] == "timeout"
+        assert len(notify_calls) == 1
+
+    def test_at_limit_coder_escalated_to_architect_opt_in(self):
+        """Acting reassign still works when a strong profile is configured."""
+        rows = [_make_row("t-b", "coder", 3, "running", "timed out")]
+        kb = _FakeKB(rows)
+
+        reassign_calls = []
+        notify_calls = []
+
+        results = scan_and_escalate(
+            fail_limit=3,
+            strong_profile="architect",
             _kb=kb,
             _reassign=lambda tid, to: reassign_calls.append((tid, to)) or True,
             _notify=lambda title, body: notify_calls.append((title, body)),
@@ -182,6 +216,7 @@ class TestScanAndEscalate:
 
         results = scan_and_escalate(
             fail_limit=3,
+            strong_profile="architect",
             _kb=kb,
             _reassign=lambda tid, to: reassign_calls.append((tid, to)) or True,
             _notify=lambda title, body: notify_calls.append((title, body)),
@@ -255,6 +290,7 @@ class TestScanAndEscalate:
 
         results = scan_and_escalate(
             fail_limit=2,
+            strong_profile="architect",
             _kb=kb,
             _reassign=lambda tid, to: reassign_calls.append((tid, to)) or True,
             _notify=lambda title, body: None,
@@ -290,6 +326,7 @@ class TestScanAndEscalate:
         kb = _FakeKB(rows)
 
         results = scan_and_escalate(
+            strong_profile="architect",
             _kb=kb,
             _reassign=lambda tid, to: True,
             _notify=lambda title, body: None,
@@ -423,6 +460,7 @@ class TestEscalateFailureRecording:
 
         results = scan_and_escalate(
             fail_limit=3,
+            strong_profile="architect",
             _kb=kb,
             _reassign=failing_reassign,
             _notify=lambda title, body: None,
@@ -446,6 +484,7 @@ class TestEscalateFailureRecording:
 
         results = scan_and_escalate(
             fail_limit=3,
+            strong_profile="architect",
             _kb=kb,
             _reassign=successful_reassign,
             _notify=lambda title, body: None,

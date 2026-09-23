@@ -38,14 +38,23 @@ def classify_failure(error_text):
     return "other"
 
 
-def decide_escalation(task, *, fail_limit=3, strong_profile="architect"):
+def decide_escalation(task, *, fail_limit=3, strong_profile=None):
     """Decide what to do with a failing kanban task.
+
+    Acting escalation (reassign to the strong tier) is OPT-IN: it runs only
+    when the operator explicitly configured a strong profile. With no
+    ``strong_profile`` (the default), at-threshold failures surface to a HUMAN
+    instead of silently rewriting the card's assignee — reassigning to a
+    profile that may not be able to execute the card corrupted the assignment,
+    bounced the card through pointless dispatch cycles, and left the operator
+    to manually ``assign``+``unblock`` it back.
 
     Args:
         task: dict with keys like id, assignee, consecutive_failures,
               status, last_failure_error.  Missing keys are tolerated.
         fail_limit: number of consecutive failures before escalation.
-        strong_profile: profile name considered the "strong tier".
+        strong_profile: profile name considered the "strong tier". When
+              falsy/None, no reassignment happens — the decision is "human".
 
     Returns:
         dict with at least {"action": ...} and context fields depending
@@ -59,22 +68,27 @@ def decide_escalation(task, *, fail_limit=3, strong_profile="architect"):
 
     category = classify_failure(task.get("last_failure_error"))
 
-    if assignee != strong_profile:
+    if strong_profile and assignee != strong_profile:
         return {
             "action": "escalate",
             "reassign_to": strong_profile,
             "category": category,
             "reason": (
                 f"{consecutive} consecutive failures on {assignee}; "
-                f"escalating to strong tier"
+                f"escalating to strong tier ({strong_profile})"
             ),
         }
 
+    # Human branch: either the configured strong profile is itself the failing
+    # assignee, or no strong profile was configured (acting escalation opt-in
+    # OFF). Name the actual failing assignee so the alert is actionable regardless
+    # of which case.
+    shown_assignee = assignee or strong_profile or "unassigned"
     return {
         "action": "human",
         "category": category,
         "reason": (
-            f"strong tier ({strong_profile}) also failing after "
-            f"{consecutive} attempts; needs a human"
+            f"{shown_assignee} ({strong_profile or 'no strong profile'}) "
+            f"also failing after {consecutive} attempts; needs a human"
         ),
     }

@@ -63,14 +63,21 @@ def _default_notify(title, body):
         pass
 
 
-def scan_and_escalate(*, fail_limit=3, strong_profile="architect",
+def scan_and_escalate(*, fail_limit=3, strong_profile=None,
                        _kb=None, _reassign=None, _notify=None,
                        _notified=None):
     """Scan live kanban tasks and escalate repeated failures.
 
+    Acting escalation (reassign) is OPT-IN: ``strong_profile`` defaults to
+    None, so by default at-threshold failures route to the "human" alert
+    instead of silently rewriting the card's assignee. Pass an explicit
+    ``strong_profile`` (e.g. from ``HSCC_STRONG_PROFILE`` env) to turn the
+    acting reassign back on.
+
     Args:
         fail_limit: consecutive failures before escalation kicks in.
-        strong_profile: profile name considered the "strong tier".
+        strong_profile: profile name considered the "strong tier". None/empty
+            disables acting reassign (repeated failures alert a human).
         _kb: kanban_db module (injected for testing).
         _reassign: callable(task_id, to_profile) — injected for testing.
         _notify: callable(title, body) — injected for testing.
