@@ -488,23 +488,37 @@ def test_new_profile_has_threshold_tokens(tmp_path, monkeypatch):
     comp = cfg["compression"]
     assert comp["threshold"] == generator.COMPACT_THRESHOLD
     assert comp["threshold_tokens"] == \
-        generator.SESSION_COMPACTION_THRESHOLD_TOKENS == 100000
+        generator.SESSION_COMPACTION_THRESHOLD_TOKENS == 200000
 
 
-def test_regen_keeps_threshold_tokens_100000(tmp_path, monkeypatch):
-    """THE regression: regenerating a profile that already has
-    threshold_tokens: 100000 leaves it at 100000 (a test that only asserted on
-    ``threshold`` would have passed on 2026-08-27)."""
+def test_regen_keeps_the_current_threshold_tokens(tmp_path, monkeypatch):
+    """Regenerating must not null the token cap (the 2026-08-27 regression)."""
     spec = {"name": "coder", "identity": "You build.\n",
             "preload_skills": [], "model_tier": "fast"}
     cfg = _gen_config(tmp_path, monkeypatch, spec)
     assert cfg["compression"]["threshold_tokens"] == \
-        generator.SESSION_COMPACTION_THRESHOLD_TOKENS == 100000
+        generator.SESSION_COMPACTION_THRESHOLD_TOKENS
     # Regenerate — must NOT null the token cap.
     cfg2 = _gen_config(tmp_path, monkeypatch, spec)
-    assert cfg2["compression"]["threshold_tokens"] == 100000
     assert cfg2["compression"]["threshold_tokens"] == \
         generator.SESSION_COMPACTION_THRESHOLD_TOKENS
+
+
+def test_legacy_cap_migrates_to_the_current_constant():
+    """A cap this generator wrote in an earlier version must be RAISED.
+
+    100000 on disk is our own old default, not an operator choice, and it is
+    indistinguishable from one. Without the `_LEGACY_COMPACTION_CAPS` carve-out
+    the "never raise a lower cap" rule pins every already-generated profile at
+    the old value forever, so raising the constant reaches only NEW profiles —
+    which is exactly how the live fleet ended up with ~39 profiles compacting
+    at 38% of the window.
+    """
+    for legacy in generator._LEGACY_COMPACTION_CAPS:
+        out = generator._compression_block({"threshold_tokens": legacy})
+        assert out["threshold_tokens"] == \
+            generator.SESSION_COMPACTION_THRESHOLD_TOKENS, \
+            f"legacy cap {legacy} must migrate, not persist"
 
 
 def test_regen_preserves_lower_operator_threshold_tokens(tmp_path, monkeypatch):
@@ -538,7 +552,8 @@ def test_regen_preserves_other_compression_keys(tmp_path, monkeypatch):
         yaml.safe_dump(cur, f, sort_keys=False)
     cfg2 = _gen_config(tmp_path, monkeypatch, spec)
     assert cfg2["compression"]["operator_key"] == "keep-me"
-    assert cfg2["compression"]["threshold_tokens"] == 100000
+    assert cfg2["compression"]["threshold_tokens"] == \
+        generator.SESSION_COMPACTION_THRESHOLD_TOKENS
 
 
 def test_project_orch_gets_threshold_tokens(tmp_path, monkeypatch):
@@ -551,10 +566,11 @@ def test_project_orch_gets_threshold_tokens(tmp_path, monkeypatch):
     assert cfg["model"]["base_url"]  # still has its strong model block
     comp = cfg["compression"]
     assert comp["threshold_tokens"] == \
-        generator.SESSION_COMPACTION_THRESHOLD_TOKENS == 100000
+        generator.SESSION_COMPACTION_THRESHOLD_TOKENS
     # Regeneration keeps it (not nulled).
     cfg2 = _gen_config(tmp_path, monkeypatch, spec)
-    assert cfg2["compression"]["threshold_tokens"] == 100000
+    assert cfg2["compression"]["threshold_tokens"] == \
+        generator.SESSION_COMPACTION_THRESHOLD_TOKENS
 
 
 def test_project_orch_preserves_operator_threshold_tokens(tmp_path, monkeypatch):
@@ -598,7 +614,7 @@ def test_cluster_orchestrator_gets_threshold_tokens(tmp_path, monkeypatch):
     comp = cfg["compression"]
     assert comp["threshold"] == generator.COMPACT_THRESHOLD
     assert comp["threshold_tokens"] == \
-        generator.SESSION_COMPACTION_THRESHOLD_TOKENS == 100000
+        generator.SESSION_COMPACTION_THRESHOLD_TOKENS
 
 
 def test_cluster_orchestrator_regen_keeps_threshold_tokens(tmp_path, monkeypatch):
@@ -611,7 +627,8 @@ def test_cluster_orchestrator_regen_keeps_threshold_tokens(tmp_path, monkeypatch
     _gen_config(tmp_path, monkeypatch, spec)
     # Regenerate — must NOT null the token cap.
     cfg2 = _gen_config(tmp_path, monkeypatch, spec)
-    assert cfg2["compression"]["threshold_tokens"] == 100000
+    assert cfg2["compression"]["threshold_tokens"] == \
+        generator.SESSION_COMPACTION_THRESHOLD_TOKENS
     assert cfg2["compression"]["threshold_tokens"] == \
         generator.SESSION_COMPACTION_THRESHOLD_TOKENS
 
