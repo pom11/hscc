@@ -661,6 +661,11 @@ def test_every_hscc_owned_worker_profile_has_role_spec():
     worker_marker = "your own git worktree"  # worker ops block; orchestrators lack it
     spec_names = _spec_names()
     missing = []
+    # PROFILES_DIR may not exist (e.g. when HERMES_HOME points at a profile dir
+    # rather than the global ~/.hermes); then there are no profiles to check and
+    # the invariant holds vacuously — don't crash on listdir.
+    if not os.path.isdir(rolelib.PROFILES_DIR):
+        return
     for name in sorted(os.listdir(rolelib.PROFILES_DIR)):
         pdir = os.path.join(rolelib.PROFILES_DIR, name)
         if not os.path.isdir(pdir):
