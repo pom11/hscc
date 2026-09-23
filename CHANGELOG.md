@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-09-23
+
+### Added
+- **Rich-themed CLI.** Every human-facing `hscc` view now renders through a
+  shared theme module (`hscc_daemon/cli_theme.py`) in the Hermes gold palette,
+  replacing raw `json.dumps` dumps and hand-rolled print(): daemon lifecycle,
+  cluster/template/profiles, stats/throughput/autoscale/escalate/verify,
+  autodown, and the secondary entry points (`api_route_sweep`,
+  `verify_chat_roundtrip`). `--json` output is byte-identical and non-TTY
+  output falls back to plain — there are no-ANSI regression tests per command,
+  because HSCC's own daemon, `scripts/` and the iOS console parse that output.
+- **Session-to-project binding.** `project link` / `unlink` / `link --list`
+  bind any Hermes session to a project, writing into the same canonical
+  `mapping.json` that `map-sessions --apply` produces. File-only, idempotent,
+  reversible; `state.db` is never written.
+- **Discovery honors the binding store.** A session belongs to a project if
+  `thread_id == registry topic` **or** the binding store says so. Previously
+  only the topic rule existed, which made manual linking impossible.
+- **`project digest <name>`** — a bounded (~3k token) synthesis of a project's
+  archived history: per session the ask, the conclusions, the end state, and
+  the `--resume` line. Reads decision content and counters from `state.db` via
+  `SessionDB`.
+- **`project chat` seeds an empty orchestrator session with the digest**
+  instead of starting blank, idempotently, and never auto-resumes a Telegram
+  session into the orchestrator's permanent session.
+
+### Fixed
+- An unreadable Hermes runtime no longer reports as empty history.
+  `project sessions` printed "no telegram history" for a project with 6
+  sessions and 964 live messages, because the `hscc` entry point runs under
+  miniconda where `hermes_cli` is unimportable and the resolver swallowed the
+  ImportError. It now raises `HermesRuntimeUnavailable` and prints the reason
+  and the venv to retry under.
+- The digest leaked raw tool-call JSON: 39 of 73 lines were
+  `chatcmpl-tool-...` payloads instead of decisions. Now zero, with compaction
+  blocks excluded too.
+- Message counts reconciled across `sessions` and `digest`. They disagreed on
+  one session (313 vs 149) because it had been compacted — 164 rows compacted
+  away, 149 live. Both now report **active** messages, which is the meaningful
+  count.
+- Test harness: `run_tests.sh` unsets `HERMES_DELEGATED_CHILD_CONTEXT` per
+  suite. Every dispatched worker runs with it set, which makes the kanban DB
+  open `?mode=ro` so any test building a fixture board fails — producing 28
+  phantom "failures" that exist in no code path. A test that only fails inside
+  the delegated context is a harness bug, not a pre-existing code failure.
+
 ## [2.0.0] - 2026-09-21
 
 ### Removed
