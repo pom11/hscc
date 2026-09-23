@@ -18,13 +18,19 @@ import pytest
 
 kb = pytest.importorskip("hermes_cli.kanban_db",
                          reason="hermes_cli not installed in this env")
+# ``connect`` moved to ``hermes_cli.kanban_db_connect`` (2026-09-14) and
+# ``_record_task_failure`` moved to ``hermes_cli.kanban_db_dispatch``; the old
+# ``kanban_db`` paths are removal-scheduled compat shims (or removed, in the
+# case of ``_record_task_failure``) and must not be used here.
+from hermes_cli import kanban_db_connect as _kbc    # noqa: E402
+from hermes_cli import kanban_db_dispatch as _kbd   # noqa: E402
 
 
 def _board():
     d = tempfile.mkdtemp()
     dbp = Path(d) / "kanban.db"
     kb.init_db(dbp)
-    return kb.connect(dbp)
+    return _kbc.connect(dbp)
 
 
 def _new_running_task(conn, title="C3 escalation task"):
@@ -40,8 +46,8 @@ def test_escalates_after_three_failures():
 
     states = []
     for i in (1, 2, 3):
-        blocked = kb._record_task_failure(conn, tid, f"crash {i}",
-                                          outcome="crashed", failure_limit=3)
+        blocked = _kbd._record_task_failure(conn, tid, f"crash {i}",
+                                            outcome="crashed", failure_limit=3)
         tk = kb.get_task(conn, tid)
         states.append((tk.consecutive_failures, tk.status, blocked))
 
@@ -59,8 +65,8 @@ def test_does_not_escalate_before_limit():
     conn = _board()
     tid = _new_running_task(conn)
     for i in (1, 2):
-        kb._record_task_failure(conn, tid, f"crash {i}",
-                                outcome="crashed", failure_limit=3)
+        _kbd._record_task_failure(conn, tid, f"crash {i}",
+                                  outcome="crashed", failure_limit=3)
     tk = kb.get_task(conn, tid)
     assert tk.status == "ready" and tk.consecutive_failures == 2
 
@@ -72,7 +78,7 @@ def test_stricter_per_task_limit_escalates_sooner():
     t = kb.create_task(conn, title="strict", assignee="coder",
                        initial_status="running", max_retries=1)
     tid = t.id if hasattr(t, "id") else t
-    blocked = kb._record_task_failure(conn, tid, "crash", outcome="crashed",
-                                      failure_limit=3)  # board says 3…
+    blocked = _kbd._record_task_failure(conn, tid, "crash", outcome="crashed",
+                                        failure_limit=3)  # board says 3…
     tk = kb.get_task(conn, tid)
     assert blocked is True and tk.status == "blocked"  # …but per-task 1 wins
