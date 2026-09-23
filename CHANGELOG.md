@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-09-24
+
+### Fixed
+- **Cards silently reassigned to `architect`, killing the worker.** The
+  `hscc-escalate-watcher` cron reassigned any task with
+  `consecutive_failures >= 3` to a hardcoded `architect` profile, which cannot
+  execute kanban cards here — the worker died in seconds with 0 tool calls and
+  rc=0, logged as a protocol violation. It survived four investigations because
+  everyone looked at card *creation*, which was always correct: the rewrite
+  happened later, from a scheduled job, and only to cards that had already
+  failed three times. The usual recovery (reassign + unblock) worked by
+  resetting the failure count, which removed the trigger and hid the cause.
+  Acting escalation is now **opt-in**: `strong_profile` defaults to `None` and
+  at-threshold failures report to a human instead of reassigning.
+- **Compaction fired at 38% of the context window.**
+  `SESSION_COMPACTION_THRESHOLD_TOKENS` was 100000 against a 262144 window, so
+  the absolute cap — not the intended 0.8 ratio (~209715) — governed, and long
+  sessions compacted constantly until one wedged past the summarizer's ceiling.
+  Raised to 200000. Editing config.yaml did not hold: the generator re-emits
+  this value into every profile it writes, so a hand-removed key came back on
+  the next regeneration across ~39 profiles. Two supporting changes make the
+  raise actually reach the fleet — a `_LEGACY_COMPACTION_CAPS` carve-out (the
+  "never raise a lower cap" rule is right for an operator's deliberate value,
+  but 100000 on disk is our own old default and indistinguishable from one, so
+  without this the raise would reach only NEW profiles), and `_ensure_compaction`
+  in bootstrap carrying the same rule, since the generator never touches the
+  flat config.
+- **`project sessions` could never find an orchestrator session, for any
+  project.** The lookup passed the registry `session:` value — a session TITLE
+  — to `get_session()`, which matches on id only, and a bare
+  `except Exception: row = None` rendered the miss as "(no orchestrator session
+  found)". Resolves by title with an explicit `list_sessions_rich(limit=...)`
+  (the default returns 20 rows and profiles here hold 126, so a title scan
+  without one works today and fails silently later) and a deterministic
+  newest-first tiebreak.
+
+### Tests
+Four separate failures this cycle came from tests reading live state, so they
+passed under one interpreter and failed under another — `run_tests.sh` defaults
+to the Hermes venv, while the canonical HSCC test interpreter is p313:
+- `test_no_per_profile_cap_behaves_as_before` passed `per_profile=None`, which
+  production resolves from the operator's live `max_in_progress_per_profile`.
+  With a real cap configured the expected stall never fires. It only passed
+  where `hermes_cli` was unimportable — a falsely-green suite, not a passing one.
+- `hscc-cluster` dispatch/review-escalation tests migrated off the removed
+  `hermes_cli.kanban_db` API (`connect` moved to `kanban_db_connect`,
+  `_record_task_failure` to `kanban_db_dispatch`).
+- worker-spec coverage no longer depends on a present `PROFILES_DIR`.
+- 11 tests hardcoded the old 100000 cap instead of asserting the constant —
+  which is why raising a single literal broke five suites.
+Full suite green on all 8 packages under **both** interpreters.
+
 ## [2.1.0] - 2026-09-23
 
 ### Added
