@@ -159,6 +159,47 @@ def _list_telegram_sessions(_default_db=None) -> list[dict]:
             pass
 
 
+def _find_orchestrator_row(db, orch_value: str) -> dict | None:
+    """Resolve the orchestrator session row by id, falling back to a TITLE match.
+
+    ``resolve_orchestrator`` returns the registry ``session:`` value, which is
+    the session's user-facing TITLE (e.g. ``"hscc"``), NOT its id. ``get_session``
+    matches by id only, so the title form returns None and discovery silently
+    reported "no orchestrator session found" for every project. Fall back by
+    scanning the profile's sessions and matching the stable title.
+
+    Two guards, both learned in production:
+
+      * an explicit ``limit`` is mandatory — ``list_sessions_rich`` defaults to
+        20, so a title scan without one works today and silently starts failing
+        once the session falls out of the newest 20;
+      * a genuine read failure here is NOT "no session" — we surface it to the
+        caller (the ``runtime_error`` path) rather than returning None.
+
+    When several sessions share a title, newest-active wins — the same
+    newest-first tiebreak ``list_project_sessions`` applies to telegram rows, so
+    the winner is deterministic.
+    """
+    row = db.get_session(orch_value)  # try the value as an id first
+    if row:
+        return row
+    matches = [
+        r for r in db.list_sessions_rich(limit=5000)
+        if (r.get("title") or r.get("display_name") or r.get("id")) == orch_value
+    ]
+    if not matches:
+        return None
+    matches.sort(
+        key=lambda s: (
+            -1 if s.get("last_active") is None else s.get("last_active"),
+            s.get("started_at") or 0,
+            s.get("id") or "",
+        ),
+        reverse=True,
+    )
+    return matches[0]
+
+
 def list_project_sessions(
     name: str, path: str | None = None, _session_db=None, _default_db=None,
     _mapping_path: str | None = None,
@@ -236,16 +277,33 @@ def list_project_sessions(
     orch_db = orch_provider(orch_profile)
     if orch_db is not None:
         try:
-            row = orch_db.get_session(orch_session)
-        except Exception:
-            row = None
+            row = _find_orchestrator_row(orch_db, orch_session)
+            if row:
+                summary = _session_row_summary(row, "orchestrator")
+                # The `message_count` column is the CURRENT-segment (active)
+                # window; under in-place compaction the session's real history
+                # is far larger, so the raw column under-reports the thread.
+                # Surface the full history via Hermes' own count API. A count
+                # refresh failure is NOT worth failing discovery over — degrade
+                # to the column value rather than abend the whole command.
+                try:
+                    total = orch_db.message_count(row.get("id"))
+                    if total:
+                        summary["message_count"] = total
+                except Exception:
+                    pass
+                orch_row = summary
+        except Exception as exc:
+            # A genuine read failure is NOT "no orchestrator session" — surface
+            # it the way HermesRuntimeUnavailable does (e2a3251): honesty over a
+            # false negative. The `runtime_error` field below renders it as
+            # "cannot read session history", never as an empty project.
+            _rt = f"cannot read orchestrator session for {name!r}: {exc}"
         finally:
             try:
                 orch_db.close()
             except Exception:
                 pass
-        if row:
-            orch_row = _session_row_summary(row, "orchestrator")
 
     # Telegram sessions (rule 1: thread_id == topic on the DEFAULT profile;
     # rule 2: session_id explicitly linked to this project in the binding
