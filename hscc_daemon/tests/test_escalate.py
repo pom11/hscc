@@ -110,6 +110,23 @@ class TestDecideEscalation:
             "last_failure_error": "timeout",
         }
         result = decide_escalation(task)
+        # REGRESSION (t_7a8f126c): the default must NOT silently reassign to a
+        # strong profile. Acting escalation is opt-in; with no strong profile
+        # configured, at-threshold failures surface to a human instead of
+        # rewriting the card's assignee.
+        assert result["action"] == "human"
+        assert "reassign_to" not in result
+        assert result["category"] == "timeout"
+
+    def test_at_limit_non_strong_opt_in_escalates(self):
+        """Acting reassign still works when a strong profile is configured."""
+        task = {
+            "id": "t-2b",
+            "assignee": "writer",
+            "consecutive_failures": 3,
+            "last_failure_error": "timeout",
+        }
+        result = decide_escalation(task, strong_profile="architect")
         assert result["action"] == "escalate"
         assert result["reassign_to"] == "architect"
         assert result["category"] == "timeout"
@@ -122,7 +139,7 @@ class TestDecideEscalation:
             "consecutive_failures": 5,
             "last_failure_error": "ImportError: missing thing",
         }
-        result = decide_escalation(task)
+        result = decide_escalation(task, strong_profile="architect")
         assert result["action"] == "escalate"
         assert result["reassign_to"] == "architect"
         assert result["category"] == "tooling"
@@ -162,7 +179,9 @@ class TestDecideEscalation:
             "consecutive_failures": 2,
             "last_failure_error": "oops",
         }
-        assert decide_escalation(task, fail_limit=2)["action"] == "escalate"
+        # Actioning at the lower threshold requires an explicitly configured
+        # strong profile (acting escalation is opt-in).
+        assert decide_escalation(task, fail_limit=2, strong_profile="architect")["action"] == "escalate"
         assert decide_escalation(task, fail_limit=5)["action"] == "none"
 
     # --- custom strong_profile ---
@@ -185,8 +204,8 @@ class TestDecideEscalation:
     def test_missing_assignee(self):
         task = {"id": "t-8", "consecutive_failures": 5, "last_failure_error": "err"}
         result = decide_escalation(task)
-        # Empty assignee != "architect" -> escalate
-        assert result["action"] == "escalate"
+        # No strong profile configured (opt-in off) -> human, not a reassign.
+        assert result["action"] == "human"
 
     def test_empty_task_dict(self):
         assert decide_escalation({}) == {"action": "none"}
