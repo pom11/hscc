@@ -56,5 +56,17 @@ With no `HSCC_STRONG_PROFILE` env set (current operator state: not set), the cro
 ## Verification needed
 - Full suite green on 8 packages under BOTH interpreters.
 
+## Corroborating in-repo doc
+`docs/dispatch-assignee-validation.md` (from prior task t_d3c929aa) independently
+documents the SAME pattern: cards created with correct assignee (devops-engineer/
+backend-engineer) get "bulk reassigned to architect via assign_task(..., 'architect')
+calls (plain assigned events, no source: default_assignee key)" on 08-14/08-30/09-02/
+09-03/09-08, "events carry no actor/run_id, so the source is not yet attributable",
+and recommends a follow-up to "gate whether bulk reassign to architect should be
+allowed". My finding attributes that unattributed bulk reassign to the
+hscc-escalate-watcher cron, and the fix implements the recommended gate (opt-in
+strong profile).
+
 ## Constraints respected
 - Did NOT change kanban caps (2/3/2), did NOT restart gateway, did NOT touch ~/.hermes/state.db. Did not re-litigate ruled-out paths.
+- Redacted real infra addresses from all evidence (only placeholders 100.64.0.1/10.0.0.x used; gateway LAN address redacted).
