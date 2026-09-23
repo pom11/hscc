@@ -128,14 +128,24 @@ COMPACT_TIMEOUT = int(os.environ.get("HSCC_COMPACT_TIMEOUT", "90"))
 # Compact less often: at this fraction of context (default 0.8 = ~210K of 262K),
 # so summarization is rare instead of firing at 40%.
 COMPACT_THRESHOLD = float(os.environ.get("HSCC_COMPACT_THRESHOLD", "0.8"))
-# The compaction TOKEN CAP (v1.14.0, t_a8e9b7ff): native compaction fires EARLY
-# at this many active tokens in the window — headroom for the compression call
-# itself — instead of at the 196608 ratio floor where it wedges. This is the
-# SINGLE source of truth, shared with the API-side ensure
-# (hscc-api/routes_orchestrator.py imports it from here); do NOT duplicate the
-# literal elsewhere. A lower operator value is always preserved (compaction
-# can only fire earlier — see _compression_block).
-SESSION_COMPACTION_THRESHOLD_TOKENS = 100000
+# The compaction TOKEN CAP: native compaction fires when the active window
+# reaches this many tokens, leaving headroom for the compression call itself.
+# This is the SINGLE source of truth — do NOT duplicate the literal elsewhere;
+# import it (hscc-bootstrap/enable_plugins.py does).
+#
+# Raised 100000 -> 200000 (2026-09-23). At 100000 against a 262144 window this
+# fired at 38% — barely a third of the way in — so the orchestrator session
+# compacted constantly and eventually wedged past the harness ceiling. The
+# ratio (COMPACT_THRESHOLD 0.8 = ~209715) is the intended trigger; the cap is
+# a backstop just under it, not the thing that governs.
+SESSION_COMPACTION_THRESHOLD_TOKENS = int(
+    os.environ.get("HSCC_COMPACT_THRESHOLD_TOKENS", "200000"))
+
+# Caps this generator itself wrote in earlier versions. They are indistinguishable
+# from a deliberate operator choice on disk, so without this list the "never raise
+# a lower cap" rule below would pin every one of the ~39 existing profiles at the
+# old value forever and the raise above would reach only NEW profiles.
+_LEGACY_COMPACTION_CAPS = (100000,)
 
 
 def _compression_block(existing=None):
@@ -149,9 +159,13 @@ def _compression_block(existing=None):
       * ``threshold`` (ratio) is only raised toward COMPACT_THRESHOLD, never
         lowered — an operator who set a smaller ratio keeps it.
       * ``threshold_tokens`` (token cap) is emitted at the shared
-        SESSION_COMPACTION_THRESHOLD_TOKENS unless an existing value already
-        ``<=`` that constant is present — a lower cap is deliberate and must
-        never be raised (same rule as the API-side ``_ensure_compaction``).
+        SESSION_COMPACTION_THRESHOLD_TOKENS unless a DELIBERATE lower operator
+        value is present — a lower cap means "compact earlier", which is always
+        safe, so it is never raised. The exception is a value this generator
+        wrote itself in an earlier version (``_LEGACY_COMPACTION_CAPS``): that
+        is our default, not an operator choice, so it migrates to the current
+        constant. Without that carve-out a raise would silently never reach any
+        profile that already exists.
       * every OTHER key in an existing compression block is preserved verbatim
         (the old generator replaced the whole block and dropped them).
 
@@ -162,9 +176,11 @@ def _compression_block(existing=None):
     if not isinstance(cur_thr, (int, float)) or cur_thr < COMPACT_THRESHOLD:
         comp["threshold"] = COMPACT_THRESHOLD
     cur_tok = comp.get("threshold_tokens")
-    if not (isinstance(cur_tok, (int, float))
-            and not isinstance(cur_tok, bool)
-            and cur_tok <= SESSION_COMPACTION_THRESHOLD_TOKENS):
+    operator_set = (isinstance(cur_tok, (int, float))
+                    and not isinstance(cur_tok, bool)
+                    and cur_tok <= SESSION_COMPACTION_THRESHOLD_TOKENS
+                    and cur_tok not in _LEGACY_COMPACTION_CAPS)
+    if not operator_set:
         comp["threshold_tokens"] = SESSION_COMPACTION_THRESHOLD_TOKENS
     return comp
 

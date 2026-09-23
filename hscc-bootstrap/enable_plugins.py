@@ -290,6 +290,30 @@ def _ensure_delegation(cfg):
     return changed
 
 
+def _compaction_cap():
+    """(cap, legacy_caps) from hscc-roles — the single source of truth.
+
+    Imported rather than duplicated: the literal lives in
+    ``hscc-roles/generator.py`` and a second copy here would drift the moment
+    one side is raised. Falls back to the shipped values only when hscc-roles
+    is not importable (bootstrap can run before every plugin is on the path).
+    """
+    try:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "_hscc_roles_generator",
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "hscc-roles", "generator.py"))
+        if _spec and _spec.loader:
+            _gen = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_gen)
+            return (int(_gen.SESSION_COMPACTION_THRESHOLD_TOKENS),
+                    tuple(_gen._LEGACY_COMPACTION_CAPS))
+    except Exception:  # noqa: BLE001 - bootstrap must never die on this
+        pass
+    return int(os.environ.get("HSCC_COMPACT_THRESHOLD_TOKENS", "200000")), (100000,)
+
+
 def _ensure_compaction(cfg):
     """Set context-compaction to compact rarely + summarize off the main model.
 
@@ -304,6 +328,20 @@ def _ensure_compaction(cfg):
         if not isinstance(cur, (int, float)) or cur < COMPACT_THRESHOLD:
             comp["threshold"] = COMPACT_THRESHOLD
             changed.append("threshold")
+        # threshold_tokens is an absolute cap and compaction fires at the LOWER
+        # of it and the ratio, so a stale low cap silently overrides the ratio.
+        # The generator emits this into every profile it writes; bootstrap has
+        # to carry the same rule or the flat config (which the generator never
+        # touches) keeps the old value and still governs.
+        cap, legacy = _compaction_cap()
+        cur_tok = comp.get("threshold_tokens")
+        operator_set = (isinstance(cur_tok, (int, float))
+                        and not isinstance(cur_tok, bool)
+                        and cur_tok <= cap
+                        and cur_tok not in legacy)
+        if not operator_set and cur_tok != cap:
+            comp["threshold_tokens"] = cap
+            changed.append("threshold_tokens")
     # Only wire the aux endpoint if an operator gave one (no safe generic default
     # for the summarization host — it's cluster-specific).
     if COMPACT_URL:
