@@ -8,7 +8,10 @@ empty run stays silent and only real escalations produce a message.
 
 For each task with ``consecutive_failures >= fail_limit``
 (``hscc_daemon.escalate.decide_escalation``):
-  * not yet on the strong tier  → reassign it there (announced once).
+  * acting reassign is OPT-IN — it happens only when ``HSCC_STRONG_PROFILE``
+    is explicitly set to a profile that can execute the card. With no
+    explicit strong profile (the default), at-threshold failures are reported
+    to a human instead of silently reassigning the card.
   * strong tier also failing     → flag a human (announced once, then deduped).
 
 Cross-run dedup for the human alert lives in ``~/.hscc/escalated.json`` so a
@@ -21,7 +24,9 @@ Run under the Hermes venv python (imports ``hermes_cli`` + ``hscc_daemon``):
 
 Config via env (sensible defaults):
   HSCC_FAIL_LIMIT      consecutive failures before escalating   (default: 3)
-  HSCC_STRONG_PROFILE  the "strong tier" profile                (default: architect)
+  HSCC_STRONG_PROFILE  the "strong tier" profile                (default: none —
+                       unset ⇒ at-threshold failures are REPORTED to a human,
+                       never silently reassigned)
   HSCC_ESCALATED_STATE dedup state file                         (default: ~/.hscc/escalated.json)
 """
 
@@ -37,7 +42,12 @@ for _p in (os.path.expanduser("~/.hermes/hermes-agent"),
         sys.path.insert(0, _p)
 
 FAIL_LIMIT = int(os.environ.get("HSCC_FAIL_LIMIT", "3"))
-STRONG_PROFILE = os.environ.get("HSCC_STRONG_PROFILE", "architect")
+# Acting reassign is OPT-IN: only set when the operator explicitly configured a
+# strong profile. Default None (not "architect") — silently reassigning cards to
+# a profile that could not execute them corrupted the assignment and forced
+# manual assign+unblock recovery. Unset here, at-threshold failures are REPORTED
+# to a human (see main()).
+STRONG_PROFILE = os.environ.get("HSCC_STRONG_PROFILE") or None
 STATE_PATH = os.path.expanduser(
     os.environ.get("HSCC_ESCALATED_STATE", "~/.hscc/escalated.json")
 )
