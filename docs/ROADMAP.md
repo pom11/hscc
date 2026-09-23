@@ -10,6 +10,26 @@ status: now
 - [x] adopt sparkrun's structured cluster-status API (`--json` / ClusterStatus dataclass) in place of text-parsing `Job:`/`Idle hosts:` in ops text parsing (v1.8.3)
 - [x] pre-release audit (core + bootstrap): fixed corrupt-trigger-defaults silent success, int-like cap preservation, and non-zero exit for a blocked/partial `template apply`; ELI5 README (v1.8.4)
 
+## Milestone: Bootstrap owns profile memory and compaction wiring <!-- id: profile-provisioning -->
+status: next
+- [ ] bootstrap/generator writes the `memory:` block. Today it emits only
+      `compression`, `auxiliary`, `toolsets` and `model`; `install_payload.py`
+      deploys the memori/memori_byodb plugin directories but nothing ever
+      configures the provider. So every generated profile silently falls back
+      to Hermes' built-in memory at its 2200-char default — which is what
+      blocked memory writes on the orchestrator profile.
+- [ ] bootstrap fills `auxiliary.compression` for generated orchestrator
+      profiles. `_ensure_compaction` already does this when HSCC_COMPACT_URL is
+      set, but 13 of 14 orchestrators were generated without it and so had NO
+      summarization endpoint — they would compact against the orchestrator node
+      itself (self-contention) on the 120s default, the exact shape that wedged
+      the hscc orchestrator session past the harness ceiling.
+- [ ] make provisioning verifiable: a check that reports, per profile, the
+      EFFECTIVE memory provider / char limit / compaction cap / summarization
+      endpoint. Reading the files is not enough — profile configs do not
+      inherit the flat config, so a value set centrally can read correct on
+      disk while the profile silently runs Hermes' default.
+
 ## Milestone: Explicit placement and routing in cluster templates <!-- id: template-routing -->
 status: next
 - [x] schema v3 parse of nodes / allow_colocation / routing (carry only, no behavior) (v1.7.0)
