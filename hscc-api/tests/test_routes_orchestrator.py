@@ -1530,7 +1530,7 @@ def test_session_health_readonly_reports_signals(tmp_path, monkeypatch):
     assert health["input_tokens"] > 0
     assert health["context_window"] == routes_orchestrator._ORCH_CONTEXT_WINDOW
     assert health["threshold_tokens"] == \
-        routes_orchestrator.SESSION_COMPACTION_THRESHOLD_TOKENS == 100000
+        routes_orchestrator.SESSION_COMPACTION_THRESHOLD_TOKENS
     # Read-only: the session is UNAFFECTED (still titled `<project>`, no retire).
     assert fake.resolve_session_by_title("hscc") == old_id
     assert fake.get_session(old_id)["title"] == "hscc"
@@ -1549,7 +1549,8 @@ def test_session_health_not_at_risk_for_large_healthy(tmp_path, monkeypatch):
     assert health is not None
     assert health["bloated"] is False
     assert health["compaction_at_risk"] is False
-    assert health["threshold_tokens"] == 100000
+    assert health["threshold_tokens"] == \
+        routes_orchestrator.SESSION_COMPACTION_THRESHOLD_TOKENS
 
 
 def test_session_guard_config_precedence_and_validation(tmp_path):
@@ -1661,22 +1662,25 @@ def test_ensure_compaction_threshold_writes_when_missing(tmp_path, monkeypatch):
     res = routes_orchestrator._ensure_compaction_threshold("hscc-orch")
     assert res is not None
     assert res["set"] is True
-    assert res["threshold_tokens"] == 100000
+    assert res["threshold_tokens"] == \
+        routes_orchestrator.SESSION_COMPACTION_THRESHOLD_TOKENS
     assert res["previous"] is None
     # The write actually landed on disk (agent_init reads this exact file).
     cfg_path = tmp_path / "config.yaml"
     assert str(cfg_path) in wrote
     import yaml as _yaml
     parsed = _yaml.safe_load(cfg_path.read_text())
-    assert parsed["compression"]["threshold_tokens"] == 100000
+    assert parsed["compression"]["threshold_tokens"] == \
+        routes_orchestrator.SESSION_COMPACTION_THRESHOLD_TOKENS
 
 
 def test_ensure_compaction_threshold_idempotent_noop(tmp_path, monkeypatch):
     """Ensure is a NO-OP when the profile already has threshold_tokens == the
-    constant — it never clobbers an operator value already <= 100000."""
+    constant — it never clobbers an operator value already <= it."""
     import yaml as _yaml
+    cap = routes_orchestrator.SESSION_COMPACTION_THRESHOLD_TOKENS
     (tmp_path / "config.yaml").write_text(
-        "compression:\n  threshold_tokens: 100000\n")
+        f"compression:\n  threshold_tokens: {cap}\n")
     wrote = []
     _install_fake_hermes_modules(monkeypatch, tmp_path, wrote)
     res = routes_orchestrator._ensure_compaction_threshold("hscc-orch")
@@ -1684,7 +1688,7 @@ def test_ensure_compaction_threshold_idempotent_noop(tmp_path, monkeypatch):
     assert wrote == []                     # nothing written
     # File unchanged (operator value preserved).
     parsed = _yaml.safe_load((tmp_path / "config.yaml").read_text())
-    assert parsed["compression"]["threshold_tokens"] == 100000
+    assert parsed["compression"]["threshold_tokens"] == cap
 
 
 def test_ensure_compaction_threshold_preserves_lower_operator_value(
@@ -1717,7 +1721,8 @@ def test_ensure_compaction_threshold_lowers_over_cap_value(tmp_path, monkeypatch
     assert res["set"] is True
     assert res["previous"] == 250000
     parsed = _yaml.safe_load((tmp_path / "config.yaml").read_text())
-    assert parsed["compression"]["threshold_tokens"] == 100000
+    assert parsed["compression"]["threshold_tokens"] == \
+        routes_orchestrator.SESSION_COMPACTION_THRESHOLD_TOKENS
 
 
 def test_ensure_compaction_threshold_preserves_other_config(tmp_path, monkeypatch):
@@ -1731,7 +1736,8 @@ def test_ensure_compaction_threshold_preserves_other_config(tmp_path, monkeypatc
     res = routes_orchestrator._ensure_compaction_threshold("hscc-orch")
     assert res is not None and res["set"] is True
     parsed = _yaml.safe_load((tmp_path / "config.yaml").read_text())
-    assert parsed["compression"]["threshold_tokens"] == 100000
+    assert parsed["compression"]["threshold_tokens"] == \
+        routes_orchestrator.SESSION_COMPACTION_THRESHOLD_TOKENS
     assert parsed["model"] == "orchestrator-model"   # untouched
     assert parsed["chat_timeout"] == 600             # untouched
 
@@ -1756,8 +1762,10 @@ def test_ensure_role_profiles_covers_new_profile(tmp_path, monkeypatch):
     threshold on the next ensure run. Roster mixes already-ensured roles, an
     under-cap operator value, and a brand-new profile with no config."""
     import yaml as _yaml
-    # coder: already at 100000 (idempotence target)
-    _seed_cfg(tmp_path, "coder", "compression:\n  threshold_tokens: 100000\n")
+    cap = routes_orchestrator.SESSION_COMPACTION_THRESHOLD_TOKENS
+    # coder: already at the cap (idempotence target)
+    _seed_cfg(tmp_path, "coder",
+              f"compression:\n  threshold_tokens: {cap}\n")
     # qa: operator set BELOW the constant — must be preserved
     _seed_cfg(tmp_path, "qa", "compression:\n  threshold_tokens: 60000\n")
     # worker: role profile already configured with OTHER keys, no compression
@@ -1780,26 +1788,27 @@ def test_ensure_role_profiles_covers_new_profile(tmp_path, monkeypatch):
     assert str(tmp_path / "new-role" / "config.yaml") in wrote
     assert _yaml.safe_load(
         (tmp_path / "new-role" / "config.yaml").read_text()
-    )["compression"]["threshold_tokens"] == 100000
+    )["compression"]["threshold_tokens"] == cap
     # worker's OTHER keys survived its ensure (only compression touched) ...
     worker_parsed = _yaml.safe_load((tmp_path / "worker" / "config.yaml").read_text())
-    assert worker_parsed["compression"]["threshold_tokens"] == 100000
+    assert worker_parsed["compression"]["threshold_tokens"] == cap
     assert worker_parsed["model"] == "worker-role"        # untouched
     assert worker_parsed["chat_timeout"] == 300           # untouched
     # qa's lower operator value preserved, coder already-ensured value intact.
     assert _yaml.safe_load((tmp_path / "qa" / "config.yaml").read_text()
                            )["compression"]["threshold_tokens"] == 60000
     assert _yaml.safe_load((tmp_path / "coder" / "config.yaml").read_text()
-                           )["compression"]["threshold_tokens"] == 100000
+                           )["compression"]["threshold_tokens"] == cap
     # hscc-orch was SKIPPED by the sweep — its (missing) config untouched.
     assert not (tmp_path / "hscc-orch" / "config.yaml").exists()
 
 
 def test_ensure_role_profiles_idempotent_noop(tmp_path, monkeypatch):
-    """When every role profile is already at 100000 the sweep is a NO-OP: it
+    """When every role profile is already at the cap the sweep is a NO-OP: it
     writes nothing and reports everything unchanged."""
+    cap = routes_orchestrator.SESSION_COMPACTION_THRESHOLD_TOKENS
     for name in ("coder", "reviewer", "worker"):
-        _seed_cfg(tmp_path, name, "compression:\n  threshold_tokens: 100000\n")
+        _seed_cfg(tmp_path, name, f"compression:\n  threshold_tokens: {cap}\n")
     roster = ["coder", "reviewer", "worker", "hscc-orch"]
     wrote = []
     _install_fake_hermes_modules(monkeypatch, tmp_path, wrote, roster=roster)
@@ -1868,7 +1877,8 @@ def test_guard_session_bloat_ensures_compaction_threshold(tmp_path, monkeypatch)
     assert str(cfg_path) in wrote
     import yaml as _yaml
     parsed = _yaml.safe_load(cfg_path.read_text())
-    assert parsed["compression"]["threshold_tokens"] == 100000
+    assert parsed["compression"]["threshold_tokens"] == \
+        routes_orchestrator.SESSION_COMPACTION_THRESHOLD_TOKENS
 
 
 def test_guard_session_bloat_also_sweeps_role_profiles(tmp_path, monkeypatch):
@@ -1897,7 +1907,8 @@ def test_guard_session_bloat_also_sweeps_role_profiles(tmp_path, monkeypatch):
     role_cfg = tmp_path / "coder" / "config.yaml"
     assert str(role_cfg) in wrote
     assert _yaml.safe_load(
-        role_cfg.read_text())["compression"]["threshold_tokens"] == 100000
+        role_cfg.read_text())["compression"]["threshold_tokens"] == \
+        routes_orchestrator.SESSION_COMPACTION_THRESHOLD_TOKENS
     # general-orch was NOT touched by the role sweep (orch behaviour intact).
     assert not (tmp_path / "general-orch" / "config.yaml").exists()
 

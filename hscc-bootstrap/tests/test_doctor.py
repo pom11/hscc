@@ -886,7 +886,8 @@ class TestDoctorFixNoopWhenFresh:
                 "api_key": "sk-sparkrun",
                 "max_concurrent_children": 9,
             },
-            "compression": {"threshold": 0.8},
+            "compression": {"threshold": 0.8,
+                            "threshold_tokens": enable_plugins._compaction_cap()[0]},
             "auxiliary": {
                 "compression": {
                     "base_url": "http://10.0.0.244:8000/v1",
