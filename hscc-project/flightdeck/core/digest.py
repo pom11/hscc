@@ -2,16 +2,26 @@
 
 ``project digest <name>`` synthesises the project's real history into a short
 human extract sized for a few thousand tokens — NEVER the raw transcripts.
-The primary source is the archive markdown export, ``~/.hermes/archive/telegram/
-<project>/``: one timestamped ``.md`` file per session, each holding the
-session's full body (operator's user/assistant words in full, tool dumps
-compressed). Because those files are the durable transcript of the project's
-Telegram history, this module reads them directly.
+
+The DECISION CONTENT and message COUNTERS come from the DEFAULT profile's
+``state.db`` ``messages`` table, read through Hermes' OWN ``SessionDB``
+(``get_messages``, default = ``active = 1`` only). The archive markdown export
+``~/.hermes/archive/telegram/<project>/`` is used ONLY for the per-session
+header metadata (title / session_id / started / ended) — never for bodies or
+counts, because its renderer re-inlines raw ``tool_calls`` JSON as text, which
+is exactly the corruption this module must never repeat.
+
+Decision extraction applies a strict whitelist over the ``messages`` rows (all
+must hold): ``role in ('user','assistant')`` (excludes ``tool``/``system``/
+``session_meta``), NOT an assistant message with ``tool_calls`` set (excludes
+the JSON leak), content must not start with ``[CONTEXT COMPACTION`` (excludes
+the compaction notice), and ``active = 1``.
 
 This is a SYNTHESIS, never a merge: it reads/mutates nothing about the sessions
 themselves. It never physically merges sessions (no tool_call adjacency, no
 compaction-header hijack), never writes to ``state.db``, the registry, or a
-kanban board. It only ever READS archive markdown files and the binding store.
+kanban board. It only ever READS archive markdown headers and ``state.db``
+messages via the sanctioned read-only ``SessionDB`` opener.
 
 Bounding (the hard requirement)
 ------------------------------
@@ -64,16 +74,9 @@ DIGEST_PROFILE = "default"
 # part of the archive render, not of the value.
 _META_RE = {
     "session_id": re.compile(r"^-\s*\*\*session id\*\*:\s*`([^`]*)`"),
-    "message_count": re.compile(r"^-\s*\*\*message count\*\*:\s*(\d+)"),
     "started": re.compile(r"^-\s*\*\*started\*\*:\s*(.*)$"),
     "ended": re.compile(r"^-\s*\*\*ended\*\*:\s*(.*)$"),
 }
-
-# A message header line, e.g. ``**user** · 2026-07-02 10:05:16`` or a bare
-# ``**tool**`` header. Matches ANY role so a tool/func block correctly ends the
-# previous user/assistant block; ``_collect_words`` then drops all non
-# user/assistant blocks so tool dumps never reach the digest.
-_MSG_HEAD = re.compile(r"^\*\*([a-z_/]+)\*\*")
 
 
 def _resolve(path: str | None, default: str) -> Path:
@@ -103,14 +106,15 @@ def _probe_runtime() -> str | None:
 # Archive file parsing (bounded; a malformed file cannot crash the digest)
 # --------------------------------------------------------------------------- #
 
-def _parse_session_file(path: Path) -> dict:
-    """Parse ONE archive markdown file into a digest entry.
+def _parse_session_header(path: Path) -> dict:
+    """Parse ONE archive markdown file for the per-session HEADER metadata.
 
-    Returns a dict with ``title``, ``session_id``, ``message_count``, ``started``,
-    ``ended`` (raw strings from the header; ``(unknown)``-style when absent) and
-    ``decision`` (the bounded head/tail user+assistant extract). Never raises on
-    a malformed file — everything falls back to defaults so one bad file cannot
-    sink the whole digest.
+    Returns ``title``, ``session_id``, ``started``, ``ended`` (raw strings from
+    the header; ``(unknown)``-style when absent). The body and message count are
+    deliberately NOT read from this file — they come from ``state.db`` (see
+    ``_fill_from_state_db``) because the archive renderer re-inlines raw
+    ``tool_calls`` JSON as text. Never raises on a malformed file — everything
+    falls back to defaults so one bad file cannot sink the whole digest.
     """
     text = path.read_text(encoding="utf-8", errors="replace")
     lines = text.splitlines()
@@ -122,78 +126,61 @@ def _parse_session_file(path: Path) -> dict:
             break
 
     meta: dict[str, str] = {}
-    in_body = False
-    body_lines: list[str] = []
     for ln in lines:
-        if not in_body and ln.strip() == "---":
-            in_body = True
-            continue
-        if not in_body:
-            for field, pat in _META_RE.items():
-                m = pat.search(ln)
-                if m:
-                    meta[field] = m.group(1).strip()
-                    break
-        else:
-            body_lines.append(ln)
+        if ln.strip() == "---":
+            break
+        for field, pat in _META_RE.items():
+            m = pat.search(ln)
+            if m:
+                meta[field] = m.group(1).strip()
+                break
 
-    session_id = meta.get("session_id", "")
-    started = meta.get("started", "")
-    ended = meta.get("ended", "")
-    try:
-        message_count = int(meta.get("message_count") or 0)
-    except ValueError:
-        message_count = 0
-
-    decision = _bounded_decision(body_lines)
-
-    # The resume line needs a real session id to be useful.
     return {
         "title": title or path.stem,
-        "session_id": session_id,
-        "message_count": message_count,
-        "started": started,
-        "ended": ended,
-        "decision": decision,
+        "session_id": meta.get("session_id", ""),
+        "started": meta.get("started", ""),
+        "ended": meta.get("ended", ""),
     }
 
 
-def _collect_words(body_lines: list[str]) -> list[tuple[str, str]]:
-    """Extract ``(role, text)`` for user/assistant messages from the body.
+def _is_message_whitelisted(msg: dict) -> bool:
+    """The decision-whitelist: a ``messages`` row that may appear in a digest.
 
-    A block starts at a ``**user**`` / ``**assistant**`` header and runs until
-    the next ``**<role>**`` header or end of file. Content lines are joined;
-    non-words (tool dumps) never appear because only user/assistant blocks are
-    collected.
+    ALL conditions must hold (orchestrator-settled, do not relax):
+      * ``role in ('user','assistant')``            — excludes tool/system/session_meta
+      * NOT (assistant with ``tool_calls`` set)     — excludes the JSON leak
+      * content must NOT start with ``[CONTEXT COMPACTION`` — excludes the
+        active compaction notice (no reliable column flag marks that row;
+        ``compacted`` marks the SUPERSEDED rows, not the notice)
+      * ``active = 1``                              — excludes inert/rewound rows
     """
-    out: list[tuple[str, str]] = []
-    cur_role: str | None = None
-    cur: list[str] = []
-    for ln in body_lines:
-        head = _MSG_HEAD.match(ln)
-        if head:
-            if cur_role is not None and cur:
-                out.append((cur_role, "\n".join(cur).strip()))
-            cur_role = head.group(1)
-            cur = []
-        else:
-            if cur_role is not None:
-                cur.append(ln)
-    if cur_role is not None and cur:
-        out.append((cur_role, "\n".join(cur).strip()))
-    # Only user/assistant words are decision signal; tool/func dumps are never
-    # surfaced in the digest (a huge fs_read dump is exactly what must NOT leak).
-    return [(r, t) for r, t in out if r in ("user", "assistant")]
+    role = msg.get("role")
+    if role not in ("user", "assistant"):
+        return False
+    if role == "assistant" and msg.get("tool_calls"):
+        return False
+    content = msg.get("content") or ""
+    if content.startswith("[CONTEXT COMPACTION"):
+        return False
+    if not msg.get("active", 1):  # belt-and-suspenders; get_messages already filters
+        return False
+    return True
 
 
-def _bounded_decision(body_lines: list[str]) -> str:
-    """A short, bounded extract of the session's own words (never a full body).
+def _bounded_decision(messages: list[dict]) -> str:
+    """A short, bounded extract of the session's own human words.
 
-    Mirrors ``map_sessions.bounded_sample``: first ``SLICE_HEAD`` + last
-    ``SLICE_TAIL`` user/assistant message bodies with the omitted middle marked,
-    hard-capped at ``SLICE_MAX_CHARS``. Flattens each message to a one-liner.
+    ``messages`` is the WHITELISTED, ordered (chronological) subset already
+    filtered by ``_is_message_whitelisted``. Mirrors ``map_sessions.bounded_sample``:
+    first ``SLICE_HEAD`` + last ``SLICE_TAIL`` user/assistant message bodies with
+    the omitted middle marked, hard-capped at ``SLICE_MAX_CHARS``. Flattens each
+    message to a one-liner.
     """
-    words = _collect_words(body_lines)
+    words = [
+        (m.get("role", ""), (m.get("content") or "").strip())
+        for m in messages
+        if (m.get("content") or "").strip()
+    ]
     if not words:
         return ""
 
@@ -210,6 +197,48 @@ def _bounded_decision(body_lines: list[str]) -> str:
         sample = sample[:SLICE_MAX_CHARS]
         sample += "\n[… decision extract truncated: over %d chars]" % SLICE_MAX_CHARS
     return sample
+
+
+def _resolve_session_db(_session_db):
+    """Resolve the session-db provider seam (default: open the real profile).
+
+    Mirrors ``project_lifecycle._resolve_session_db``: ``None`` means "open the
+    DEFAULT profile's state.db read-only" via the sanctioned opener; an injected
+    callable (the test seam) is used as-is.
+    """
+    from .project_lifecycle import _open_profile_session_db as _open
+
+    return _session_db if _session_db is not None else _open
+
+
+def _fill_from_state_db(entry: dict, db) -> None:
+    """Populate ``entry``'s ``message_count`` and ``decision`` from ``db``.
+
+    ``db`` is an opened ``SessionDB`` (read-only in production) or ``None``
+    (then the fields keep their defaults: count 0, empty decision). ``message_count``
+    counts the session's ACTIVE rows — the exact number ``project sessions``
+    shows — so digest and sessions reconcile by construction. The ``decision``
+    extract uses ONLY the whitelisted subset of those rows (see
+    ``_is_message_whitelisted``).
+
+    All reads go through Hermes' OWN ``get_messages`` (default = ``active = 1``
+    only); no hand-rolled SQL. Fail-soft: any error leaves the entry at its
+    defaults rather than sinking the whole digest.
+    """
+    sid = entry.get("session_id")
+    if db is None or not sid:
+        entry.setdefault("message_count", 0)
+        entry.setdefault("decision", "")
+        return
+    try:
+        messages = db.get_messages(sid)  # default = active=1 only
+    except Exception:
+        entry.setdefault("message_count", 0)
+        entry.setdefault("decision", "")
+        return
+    entry["message_count"] = len(messages)
+    whitelisted = [m for m in messages if _is_message_whitelisted(m)]
+    entry["decision"] = _bounded_decision(whitelisted)
 
 
 # --------------------------------------------------------------------------- #
@@ -237,12 +266,16 @@ def build_digest(
     archive_dir: str | None = None,
     mapping_path: str | None = None,
     _runtime_error_fn=None,
+    _session_db=None,
 ) -> dict:
     """Build a bounded digest of project ``name``'s archive history.
 
-    Reads the per-project archive markdown files (``<archive_dir>/<name>/``)
-    and optional canonical binding store, producing one bounded entry per
-    session. Returns a dict::
+    Reads each session's HEADER metadata (title/session_id/started/ended) from
+    the per-project archive markdown files (``<archive_dir>/<name>/``), and the
+    session's `message_count` and `decision` from Hermes' OWN `state.db`
+    ``messages`` table via SessionDB — the exact source ``project sessions``
+    uses — so digest and sessions reconcile. ``mapping_path`` is the optional
+    canonical binding store. Returns a dict::
 
         {
           "project": name,
@@ -254,10 +287,12 @@ def build_digest(
 
     Each ``entry`` is ``{title, session_id, message_count, started, ended,
     decision, resume}`` where ``resume`` is the ``hermes -p default --resume
-    <id>`` line. The digest NEVER merges or mutates sessions — it only reads
-    archive files. ``archive_dir``/``mapping_path`` default to the real paths
-    and are injectable for tests; ``_runtime_error_fn`` injects the env-fault
-    probe (default: real probe) so tests control the runtime deterministically.
+    <id>`` line and ``message_count``/``decision`` come from ``state.db`` (the
+    count of ACTIVE rows — identical to ``project sessions``). The digest NEVER
+    merges or mutates sessions — it only reads. ``archive_dir``/``mapping_path``
+    default to the real paths and are injectable for tests; ``_runtime_error_fn``
+    injects the env-fault probe and ``_session_db`` injects the session-db
+    provider (see ``_resolve_session_db``) so tests control both deterministically.
     """
     root = _resolve(archive_dir, DEFAULT_ARCHIVE_DIR)
     proj_dir = root / name
@@ -269,7 +304,26 @@ def build_digest(
         rt = _runtime_error_fn()
 
     files = list_session_files(proj_dir)
-    entries = [_parse_session_file(p) for p in files]
+    entries = [_parse_session_header(p) for p in files]
+
+    # Open the DEFAULT profile's state.db read-only (sanctioned opener) once and
+    # fill message_count + decision from its messages table; WITHOUT a usable
+    # runtime the entries keep message_count=0 and empty decision (honest).
+    db = None
+    if rt is None:
+        try:
+            db = _resolve_session_db(_session_db)("default", read_only=True)
+        except Exception:
+            db = None
+    try:
+        for e in entries:
+            _fill_from_state_db(e, db)
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
 
     # Resume line: archived (Telegram) sessions live on the DEFAULT profile.
     for e in entries:
