@@ -69,6 +69,13 @@ class FakeOrchDBSession:
             }
         return None
 
+    def list_sessions_rich(self, limit=5000):
+        row = self.get_session(self._title) if self._title else None
+        return [row] if row else []
+
+    def message_count(self, session_id):
+        return self._count
+
     def resolve_session_by_title(self, title):
         return self._title is not None and title == self._title
 
