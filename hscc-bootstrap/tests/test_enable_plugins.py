@@ -93,7 +93,8 @@ def _fully_wired_cfg():
                        "api_key": enable_plugins.WORKER_PROXY_KEY,
                        "max_concurrent_children":
                            enable_plugins.MAX_CONCURRENT_CHILDREN},
-        "compression": {"threshold": enable_plugins.COMPACT_THRESHOLD},
+        "compression": {"threshold": enable_plugins.COMPACT_THRESHOLD,
+                        "threshold_tokens": enable_plugins._compaction_cap()[0]},
         "auxiliary": {
             "compression": {
                 "base_url": enable_plugins.COMPACT_URL,
