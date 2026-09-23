@@ -61,7 +61,7 @@ Full suite run per-package via scripts/run_tests.sh:
 
 | package | venv python | p313 python |
 |---|---|---|
-| hscc-bootstrap | 7 pre-existing fail | same 7 pre-existing fail |
+| hscc-bootstrap | 3 pre-existing fail | same 3 pre-existing fail |
 | hscc-commands | 59 pass | 59 pass |
 | hscc-roles | 101 pass | 101 pass |
 | hscc-cluster | 402 pass | pass |
