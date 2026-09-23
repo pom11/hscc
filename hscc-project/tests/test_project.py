@@ -191,24 +191,58 @@ class _FakeDefaultDBProvider:
 class FakeSessionDB:
     """In-memory stand-in for the session step's state.db (never real files).
 
-    Mirrors ``hermes_state.SessionDB`` for the three methods the lifecycle
-    session step uses. ``_open()`` adapts it into the ``_session_db`` seam the
-    command layer threads to ``create_project``.
+    Mirrors ``hermes_state.SessionDB`` for the methods the lifecycle session
+    step AND session discovery use: ``resolve_session_by_title``,
+    ``get_session`` (id lookup), ``list_sessions_rich`` (title scan) and
+    ``message_count`` (full-history count). ``_open()`` adapts it into the
+    ``_session_db`` seam the command layer threads to ``create_project``.
     """
 
     def __init__(self, titled=()):
-        self._titled = set(titled)
-        self._ids = []
+        self._rows = {
+            sid: {"id": sid, "title": title, "message_count": 0,
+                  "started_at": None, "last_active": None, "source": "cli"}
+            for sid, title in titled
+        }
+        # Bookkeeping used by existing lifecycle-step tests (assert on the
+        # fake's internals for created ids / titled names) — keep in step with
+        # the row store so both views agree.
+        self._ids = [sid for sid, _ in titled]
+        self._titled = {t for _, t in titled}
         self.closed = False
 
     def resolve_session_by_title(self, title):
-        return title in self._titled
+        return title in self._titled or (
+            any(r["title"] == title for r in self._rows.values()))
 
     def create_session(self, sid, **kwargs):
-        self._ids.append(sid)
+        if sid not in self._rows:
+            self._rows[sid] = {
+                "id": sid, "title": "", "message_count": 0,
+                "started_at": None, "last_active": None, "source": "cli",
+            }
+            self._ids.append(sid)
 
     def set_session_title(self, sid, title):
+        if sid not in self._rows:
+            self._rows[sid] = {
+                "id": sid, "title": title, "message_count": 0,
+                "started_at": None, "last_active": None, "source": "cli",
+            }
+            self._ids.append(sid)
+        self._rows[sid]["title"] = title
         self._titled.add(title)
+
+    def get_session(self, session_id):
+        row = self._rows.get(session_id)
+        return dict(row) if row else None
+
+    def list_sessions_rich(self, limit=5000):
+        return [dict(r) for r in self._rows.values()]
+
+    def message_count(self, session_id):
+        row = self._rows.get(session_id)
+        return (row or {}).get("message_count") or 0
 
     def close(self):
         self.closed = True
