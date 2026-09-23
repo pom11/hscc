@@ -36,17 +36,30 @@ from flightdeck.core import session_discovery
 class FakeOrchDB:
     """DEFAULT-less state.db stand-in for the <name>-orch profile.
 
-    Implements just ``get_session(session_id)`` (an established CLI session
-    has a row on its own profile). Returns the whole row dict as hermes does.
+    Implements ``get_session`` (id lookup), ``list_sessions_rich`` (the title
+    scan fallback) and ``message_count`` (the full-history count enrichment),
+    mirroring the shapes the production ``SessionDB`` exposes. ``full_counts``
+    lets a test model in-place compaction: the ``message_count`` column may own
+    only the ACTIVE current segment while the full-history count is larger.
     """
 
-    def __init__(self, rows):
+    def __init__(self, rows, full_counts=None):
         self._rows = {r["id"]: dict(r) for r in rows}
+        self._full_counts = full_counts or {}
         self.closed = False
 
     def get_session(self, session_id):
         row = self._rows.get(session_id)
         return dict(row) if row else None
+
+    def list_sessions_rich(self, limit=5000):
+        return [dict(r) for r in self._rows.values()]
+
+    def message_count(self, session_id):
+        return self._full_counts.get(
+            session_id,
+            (self._rows.get(session_id) or {}).get("message_count") or 0,
+        )
 
     def close(self):
         self.closed = True
@@ -55,8 +68,8 @@ class FakeOrchDB:
 class FakeOrchProvider:
     """A ``_session_db`` seam value: an opener returning a shared orch fake."""
 
-    def __init__(self, rows=()):
-        self._db = FakeOrchDB(rows)
+    def __init__(self, rows=(), full_counts=None):
+        self._db = FakeOrchDB(rows, full_counts=full_counts)
 
     def __call__(self, profile):
         return self._db
@@ -156,6 +169,113 @@ def test_discovery_maps_thread_id_to_topic(tmp_path):
 
     # NULL-thread telegram sessions are counted, never guessed at.
     assert result["telegram_unmapped"] == 1
+
+
+def test_discovery_resolves_orchestrator_by_title_when_registry_holds_title(tmp_path):
+    """The registry ``session:`` value is the session's TITLE, not its id.
+
+    ``get_session`` matches by id only, so an id-lookup on the title used to
+    return None and ``project sessions`` reported "no orchestrator session
+    found" for EVERY project. Discovery must fall back to matching the title.
+    """
+    # The persisted `session:` is the TITLE "hscc" (as in production), and the
+    # orchestrator session row carries that same title under a real id.
+    reg = _reg(tmp_path, "ecofire", topic=8891, session="hscc")
+    orch = _cli(
+        "20260908_134933_152c5b", "hscc",
+        msgs=2, last=1700000100, started=1699999900,
+    )
+    result = session_discovery.list_project_sessions(
+        "ecofire", path=reg,
+        _session_db=FakeOrchProvider([orch]),
+        _default_db=FakeDefaultProvider([]),
+    )
+
+    assert result["orch_profile"] == "ecofire-orch"
+    assert result["orchestrator"]["id"] == "20260908_134933_152c5b"
+    assert result["orchestrator"]["source"] == "orchestrator"
+    assert result["orchestrator"]["title"] == "hscc"
+
+
+def test_discovery_title_scan_still_tries_id_first(tmp_path):
+    """When the registry `session:` holds a real id, `get_session` resolves it
+    directly (no title scan needed) — the id path stays the fast/first route."""
+    reg = _reg(tmp_path, "ecofire", topic=8891, session="20260921_abc")  # an id
+    orch = _cli("20260921_abc", "ecofire", msgs=2, last=1700000100)
+    result = session_discovery.list_project_sessions(
+        "ecofire", path=reg,
+        _session_db=FakeOrchProvider([orch]),
+        _default_db=FakeDefaultProvider([]),
+    )
+    assert result["orchestrator"]["id"] == "20260921_abc"
+    assert result["orchestrator"]["message_count"] == 2
+
+
+def test_discovery_title_scan_picks_newest_active_when_titles_collide(tmp_path):
+    """Several sessions may share a title; the scan must pick deterministically
+    the newest-active one, never a stale duplicate and never an arbitrary one."""
+    reg = _reg(tmp_path, "ecofire", topic=8891, session="hscc")
+    orch_old = _cli("stale-id", "hscc", msgs=1, last=1600000000, started=1599999000)
+    orch_new = _cli(
+        "20260908_134933_152c5b", "hscc",
+        msgs=2, last=1700000100, started=1699999900,
+    )
+    result = session_discovery.list_project_sessions(
+        "ecofire", path=reg,
+        _session_db=FakeOrchProvider([orch_old, orch_new]),
+        _default_db=FakeDefaultProvider([]),
+    )
+    # newest-active wins over the stale same-titled row
+    assert result["orchestrator"]["id"] == "20260908_134933_152c5b"
+
+
+def test_discovery_orchestrator_surfaces_full_history_count(tmp_path):
+    """Under in-place compaction the `message_count` column holds only the
+    active current segment; discovery must surface the FULL history via hermes'
+    own count API, not under-report the thread (the user-facing number)."""
+    reg = _reg(tmp_path, "ecofire", topic=8891, session="hscc")
+    orch = _cli(
+        "20260908_134933_152c5b", "hscc",
+        msgs=123, last=1700000100, started=1699999900,  # active window only
+    )
+    result = session_discovery.list_project_sessions(
+        "ecofire", path=reg,
+        _session_db=FakeOrchProvider(
+            [orch], full_counts={"20260908_134933_152c5b": 1819},
+        ),
+        _default_db=FakeDefaultProvider([]),
+    )
+    assert result["orchestrator"]["id"] == "20260908_134933_152c5b"
+    assert result["orchestrator"]["message_count"] == 1819  # full history, not 123
+
+
+def test_discovery_orchestrator_read_failure_is_surfaced_not_swallowed(tmp_path):
+    """A genuine read failure is NOT 'no orchestrator session' — it must surface
+    as runtime_error (e2a3251: a failure to look is never a false negative),
+    exactly as HermesRuntimeUnavailable does, not render as an empty project."""
+    reg = _reg(tmp_path, "ecofire", topic=8891, session="hscc")
+
+    class BoomOrchDB:
+        closed = False
+
+        def get_session(self, session_id):
+            raise RuntimeError("disk exploded")
+
+        def close(self):
+            self.closed = True
+
+    class BoomProvider:
+        def __call__(self, profile):
+            return BoomOrchDB()
+
+    result = session_discovery.list_project_sessions(
+        "ecofire", path=reg,
+        _session_db=BoomProvider(),
+        _default_db=FakeDefaultProvider([]),
+    )
+    assert result["orchestrator"] is None
+    assert result["runtime_error"] is not None
+    assert "cannot read orchestrator session" in result["runtime_error"]
 
 
 def test_discovery_newest_first_places_null_last(tmp_path):
