@@ -136,3 +136,59 @@ changes, no ~/.hermes/state.db writes. Nothing force-pushed.
 REDACTED: no tailnet/IP/token values appear in any of these diffs or logs
 (verified per worker/orchestrator grep), consistent with repo policy.
 
+
+----------------------------------------------
+FOLLOW-UP — 2026-09-23: digest content bug fix (card t_acff6dc3)
+----------------------------------------------
+Operator reported `hscc project digest ecofire-bc` content is wrong (card 3's
+digest): correctly bounded, but 39 lines are raw tool-call JSON
+(chatcmpl-tool-...) instead of a human summary, and the per-session message
+count disagrees with `project sessions`. Since card 4 seeds the orchestrator
+session with this digest, the tool noise primes the session instead of "here
+is where the waste-reversal design landed".
+
+CAUSE (orchestrator diag, verified 2026-09-23): digest.py parses ARCHIVE
+MARKDOWN text, splitting **user**/**assistant** headers. When an assistant
+message made a tool call, the archive renderer inlines the raw tool_calls JSON
+as text into the assistant block -> collected as "assistant" and leaked.
+state.db messages has clean columns (role/tool_calls/tool_name/active/
+compacted); 60/66 active assistant rows in 20260708 have tool_calls set; ZERO
+have chatcmpl-tool- in content (it lives in the tool_calls column). Compaction
+notice ([CONTEXT COMPACTION -- REFERENCE ONLY]) is active=1 role=assistant, so
+it also leaks.
+
+COUNT RECONCILIATION: digest read `message count:` from the archive FILE
+HEADER; `project sessions` reads sessions.message_count = count(active=1).
+Session 20260708 archive header says 313 but state.db has only 149 active rows
+(313 total incl 164 compacted=1) -> the archive header counted superseded
+rows. Measured active-row counts: [27, 71, 270, 318, 149, 129] => total 964
+(not 1128). digest@sessions disagree exactly on that one session.
+
+FIX SPEC (card t_acff6dc3 -> backend-engineer, worktree wt/t_acff6dc3):
+read decision bodies + message_count from state.db messages (active=1) via
+Hermes SessionDB read-only; whitelist role in (user,assistant), exclude
+assistant-with-tool_calls, exclude content starting '[CONTEXT COMPACTION';
+count = count(active=1). Reconciles with `project sessions` by construction.
+
+BEFORE (captured via digest_core.build_digest under Hermes venv):
+  12,039 chars / 73 lines / 39 occurrences of 'chatcmpl-tool-' / total 1128.
+AFTER (measured on dev@c425267 via digest_core.build_digest+format_digest
+under the Hermes venv, command: PYTHONPATH=hscc-project
+~/.hermes/hermes-agent/venv/bin/python -c "build_digest('ecofire-bc')"):
+  12,039 chars / 69 lines / 0 occurrences of 'chatcmpl-tool-' / 0 'CONTEXT
+  COMPACTION' / total_messages 964 / runtime_error None.
+  Per-session counts: 20260717=129, 20260708=149, 20260707=318,
+  20260706=270, 20260703=71, 20260702=27 -> sum 964. All six sections now
+  read as human summaries (framing user ASK + assistant CONCLUSIONS + end
+  state + resume line). Worker merged+pushed as commit c425267 (branch
+  wt/t_acff6dc3, fully merged: git rev-list --count dev..wt/t_acff6dc3 = 0).
+  Commit c425267: "feat(digest): read decision content + message counters
+  from state.db via SessionDB" (4 files, +349/-106: digest.py, project.py,
+  test_digest.py +174, test_chat_seed.py).
+
+  INDEPENDENT FULL SUITE on dev@c425267 (command:
+  HSCC_TEST_PY=/Users/desac/miniconda3/envs/p313/bin/python
+  bash scripts/run_tests.sh -> SUITE EXIT=0): bootstrap 248, commands 59,
+  roles 100, cluster 384 (14 skip), project 1249 (+2 new digest tests; was
+  1247), daemon 1121, sparkrun 8, api 787. ALL 8 GREEN.
+  origin/dev == local dev == c425267 (pushed, 0/0 ahead-behind).
