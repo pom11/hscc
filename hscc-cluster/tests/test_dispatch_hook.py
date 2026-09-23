@@ -15,6 +15,12 @@ import pytest
 
 kb = pytest.importorskip("hermes_cli.kanban_db",
                          reason="hermes_cli not installed in this env")
+# ``connect`` moved to ``hermes_cli.kanban_db_connect`` and ``_record_task_failure``
+# to ``hermes_cli.kanban_db_dispatch`` (2026-09-14); the old ``kanban_db`` paths
+# are removal-scheduled compat shims (or removed, for ``_record_task_failure``)
+# and must not be used here.
+from hermes_cli import kanban_db_connect as _kbc    # noqa: E402
+from hermes_cli import kanban_db_dispatch as _kbd   # noqa: E402
 import hermes_cli.plugins as plugins  # noqa: E402
 
 
@@ -22,7 +28,7 @@ def _board():
     d = tempfile.mkdtemp()
     dbp = Path(d) / "kanban.db"
     kb.init_db(dbp)
-    return kb.connect(dbp)
+    return _kbc.connect(dbp)
 
 
 def test_hook_in_valid_hooks():
@@ -60,7 +66,7 @@ def test_hook_fires_on_each_claim(monkeypatch):
     # 1st claim → hook fires
     kb.claim_task(conn, tid)
     # simulate a failure that returns the task to ready (crash path)
-    kb._record_task_failure(conn, tid, "crash", outcome="crashed", failure_limit=99)
+    _kbd._record_task_failure(conn, tid, "crash", outcome="crashed", failure_limit=99)
     conn.execute("UPDATE tasks SET status='ready', claim_lock=NULL WHERE id=?", (tid,))
     conn.commit()
     # 2nd claim → hook fires again
@@ -105,15 +111,15 @@ def test_hook_fires_on_reclaim(monkeypatch, tmp_path):
     # on this board, not the live DB.
     _dbp = tmp_path / "kanban.db"
     kb.init_db(_dbp)
-    _orig_connect = kb.connect
-    monkeypatch.setattr("hermes_cli.kanban_db.connect", lambda *a, **k: _orig_connect(_dbp))
+    _orig_connect = _kbc.connect
+    monkeypatch.setattr("hermes_cli.kanban_db_connect.connect", lambda *a, **k: _orig_connect(_dbp))
     conn = _orig_connect(_dbp)
     t = kb.create_task(conn, title="step task", assignee="coder")
     tid = t.id if hasattr(t, "id") else t
     conn.execute("UPDATE tasks SET status='ready',claim_lock=NULL,branch_name='task-resume' WHERE id=?", (tid,))
     conn.commit()
     kb.claim_task(conn, tid)                                   # run 1
-    kb._record_task_failure(conn, tid, "crash", outcome="crashed", failure_limit=99)
+    _kbd._record_task_failure(conn, tid, "crash", outcome="crashed", failure_limit=99)
     conn.execute("UPDATE tasks SET status='ready',claim_lock=NULL WHERE id=?", (tid,))
     conn.commit()
     kb.claim_task(conn, tid)                                   # run 2 → hook posts comment
