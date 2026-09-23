@@ -259,7 +259,21 @@ class TestPerProfileCapIsNotAStall:
         assert stream["ok"] is False
         assert stream["roomy_spawnable"] == ["default"]
 
-    def test_no_per_profile_cap_behaves_as_before(self):
+    def test_no_per_profile_cap_behaves_as_before(self, monkeypatch):
+        """No per-profile cap CONFIGURED -> the old global-cap behaviour.
+
+        `per_profile=None` is not "unlimited": production reads it from the
+        operator's live config (`_read_max_per_profile`). Passing None here
+        therefore made the assertion depend on the machine it ran on — with a
+        real `max_in_progress_per_profile: 2` configured, 3 running reads as
+        at-capacity, so the expected stall never fires and this test fails.
+        It passed only where the config was unreadable (an interpreter without
+        hermes_cli), which is a falsely-green suite, not a passing one.
+
+        Stub the lookup so the "operator configured no cap" case is tested
+        hermetically, which is what the name claims.
+        """
+        monkeypatch.setattr(dw, "_read_max_per_profile", lambda: None)
         boards = {"default": [RUNNING] * 3 + [READY] * 2}
         ok, stream = _run_detect(boards, cap=6, n=1, per_profile=None)
         assert ok is False, "without a per-profile cap this is the old stall"
