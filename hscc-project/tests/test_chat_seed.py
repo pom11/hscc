@@ -103,15 +103,23 @@ class FakeOrchProvider:
 
 
 class FakeDefaultDB:
-    """State.db stand-in for the DEFAULT profile (telegram side)."""
+    """State.db stand-in for the DEFAULT profile (telegram side): covers the
+    read slice the chat flow uses — ``list_sessions_rich`` (discovery) and
+    ``get_messages(sid)`` (the digest's message source). ``Close`` is a no-op so
+    read-only teardown is exercised."""
 
-    def __init__(self, rows=()):
+    def __init__(self, rows=(), messages_by_sid=None):
         self._rows = [dict(r) for r in rows]
+        self._messages = messages_by_sid or {}
         self.closed = False
 
     def list_sessions_rich(self, source, limit=5000):
         assert source == "telegram"
         return [dict(r) for r in self._rows]
+
+    def get_messages(self, sid):
+        # Faithful to real SessionDB.get_messages default: only active rows.
+        return [dict(m) for m in self._messages.get(sid, []) if m.get("active", 1)]
 
     def close(self):
         self.closed = True
@@ -120,10 +128,10 @@ class FakeDefaultDB:
 class FakeDefaultProvider:
     """A ``_default_db`` seam value: an opener returning a shared default fake."""
 
-    def __init__(self, rows=()):
-        self._db = FakeDefaultDB(rows)
+    def __init__(self, rows=(), messages_by_sid=None):
+        self._db = FakeDefaultDB(rows, messages_by_sid)
 
-    def __call__(self, profile):
+    def __call__(self, profile, read_only=True):
         return self._db
 
 
@@ -136,6 +144,12 @@ def _reg(tmp_path, name="ecofire", topic=8891, session="20260921_abc"):
     if session:
         registry.set_session(name, session, path=path)
     return path
+
+
+def _msg(role, content, *, active=1, tool_calls=None, mid=1):
+    """One fake ``messages`` row in Hermes' structure (role/content/tool_calls/active)."""
+    return {"id": mid, "role": role, "active": active, "content": content,
+            "tool_calls": tool_calls or [], "created_at": "2026-07-02 10:00:00"}
 
 
 def _session_md(session_id, title):
@@ -171,13 +185,14 @@ def _write_archive(tmp_path, project, sessions):
 
 
 def _ns(tmp_path, name, orch_db, *, archive_dir, registry_path=None,
-        default_rows=(), runtime_error=None, exec_seam=None):
+        default_rows=(), default_messages=None, runtime_error=None,
+        exec_seam=None):
     """Build a chat ``args`` namespace with all seams wired to the fakes."""
     reg = registry_path if registry_path is not None else _reg(tmp_path, name)
     ns = argparse.Namespace(
         name=name, registry=reg,
         session_db=FakeOrchProvider(orch_db),
-        default_db=FakeDefaultProvider(default_rows),
+        default_db=FakeDefaultProvider(default_rows, default_messages),
         archive_dir=archive_dir,
         mapping_path=None,
         exec_seam=exec_seam,
@@ -203,7 +218,11 @@ def test_seed_empty_orch_session_with_digest(tmp_path, capsys):
     _write_archive(tmp_path, "ecofire", [("s1", "Fire pipeline fix")])
     seam = CaptureExec()
     args = _ns(tmp_path, "ecofire", orch, archive_dir=str(tmp_path),
-               registry_path=reg, exec_seam=seam)
+               registry_path=reg, exec_seam=seam,
+               # the digest's message source: s1's two telegram messages
+               default_messages={"s1": [_msg("user", "Let's fix the fire reporting pipeline.", mid=1),
+                                         _msg("assistant", "Agreed. We'll deploy the new ingest service.", mid=2)],
+                                 "s2": []})
 
     rc = project_cmd.cmd_chat(args)
     out = capsys.readouterr().out
@@ -216,9 +235,14 @@ def test_seed_empty_orch_session_with_digest(tmp_path, capsys):
     assert sid == "20260921_abc"
     assert role == "user"
     assert "Fire pipeline fix" in text
-    # ... and the seed text is EXACTLY the digest render this project would print.
+    # ... and the seed text is EXACTLY the digest render this project would print
+    # (with the same state.db message source the command used).
     digest = digest_core.build_digest(
         "ecofire", archive_dir=str(tmp_path), _runtime_error_fn=lambda: None,
+        _session_db=FakeDefaultProvider((), {"s1": [
+            _msg("user", "Let's fix the fire reporting pipeline.", mid=1),
+            _msg("assistant", "Agreed. We'll deploy the new ingest service.", mid=2),
+        ], "s2": []}),
     )
     assert text == digest_core.format_digest(digest)
     # Honest messaging.

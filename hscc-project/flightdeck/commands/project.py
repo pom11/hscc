@@ -517,11 +517,15 @@ def _seed_empty_orchestrator(
     # Build the digest with the archive/mapping seams (hidden argv for tests).
     # `_runtime_error_fn` returns discovery's verdict so the digest and the
     # discovery agree about the runtime — one source of truth, no double probe.
+    # The digest reads the DEFAULT(telegram) profile's messages, so its
+    # session-db source is the same `_default_db` seam discovery uses (None in
+    # production -> the real read-only opener).
     digest = digest_core.build_digest(
         name,
         archive_dir=getattr(args, "archive_dir", None),
         mapping_path=getattr(args, "mapping_path", None),
         _runtime_error_fn=lambda: discovery.get("runtime_error"),
+        _session_db=getattr(args, "default_db", None),
     )
     digest_sessions = digest.get("sessions") or []
     digest_msgs = digest.get("total_messages", 0)
@@ -795,6 +799,7 @@ def cmd_digest(args: argparse.Namespace) -> int:
         archive_dir=getattr(args, "archive_dir", None),
         mapping_path=getattr(args, "mapping_path", None),
         _runtime_error_fn=getattr(args, "runtime_error_fn", None),
+        _session_db=getattr(args, "session_db", None),
     )
 
     if getattr(args, "json", False):
