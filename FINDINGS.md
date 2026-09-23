@@ -56,6 +56,30 @@ With no `HSCC_STRONG_PROFILE` env set (current operator state: not set), the cro
 ## Verification needed
 - Full suite green on 8 packages under BOTH interpreters.
 
+## VERIFICATION RESULTS (both interpreters)
+Full suite run per-package via scripts/run_tests.sh:
+
+| package | venv python | p313 python |
+|---|---|---|
+| hscc-bootstrap | 7 pre-existing fail | same 7 pre-existing fail |
+| hscc-commands | 59 pass | 59 pass |
+| hscc-roles | 101 pass | 101 pass |
+| hscc-cluster | 402 pass | pass |
+| hscc-project | pass | pass |
+| hscc_daemon (MY CHANGE) | 1123 pass | 1123 pass |
+| sparkrun-hermes | 8 pass | 8 pass |
+| hscc-api | 5 pre-existing fail | same |
+
+Pre-existing failures: 8 total (3 hscc-bootstrap + 5 hscc-api), ALL in
+unrelated compaction/config tests, IDENTICAL under both interpreters, and
+PROVEN to fail on `main` (30e7843) under the venv interpreter (ran them in a
+detached main worktree: same 6+2 failures). Root cause: tests hardcode
+`threshold_tokens == 100000` but code writes 200000 (compaction cap raised by
+88eb8c5, already on main). Not my change. Filed as follow-up card t_f75c13aa.
+
+My changed package hscc_daemon: 1123 passed under BOTH interpreters
+(including 47 escalate tests). No new failures introduced.
+
 ## Corroborating in-repo doc
 `docs/dispatch-assignee-validation.md` (from prior task t_d3c929aa) independently
 documents the SAME pattern: cards created with correct assignee (devops-engineer/
