@@ -318,3 +318,69 @@ def test_apply_zero_released_is_nonzero_exit(monkeypatch, tmp_path, capsys):
     err = capsys.readouterr().err
     assert "released nothing" in err, "must surface the total failure on stderr"
 
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted commands degrade to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI card (group C sub-a) mandated a NO-ANSI regression per converted
+# command: with stdout captured as a NON-tty (piped), the themed Console must
+# emit NO escape (\x1b) bytes. start's --json path must additionally stay
+# BYTE-IDENTICAL to the canonical json.dumps (never routed through a Console).
+
+import io as _io
+from contextlib import redirect_stdout as _redirect_stdout
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI found in piped start output: {out!r}"
+    assert "\x1b" not in out, f"ANSI found in piped start output: {out!r}"
+    return out
+
+
+class TestNoAnsiStart:
+    """`start` human view degrades to plain; --json stays byte-identical."""
+
+    def test_plan_human(self, monkeypatch, tmp_path):
+        config = _write_config(tmp_path, max_in_progress=50, per_profile=50)
+        cards = [_card(f"c{i}", title="task [dry-run]", branch=f"wt/c{i}") for i in range(3)]
+        monkeypatch.setattr(kanban, "list_cards", lambda **kw: cards)
+        run = FakeRun(merged=set())
+        args = _args(apply=False, run=run, config_path=config)
+        out = _no_ansi(lambda: cmd.cmd_start(args, [_project()]))
+        # The literal [dry-run] tag in a card title must render literally.
+        assert "[dry-run]" in out
+        assert "RELEASE PLAN" in out
+        assert "_assignee" not in out  # human plan, not raw json
+
+    def test_json_byte_identical(self, monkeypatch, tmp_path):
+        config = _write_config(tmp_path, max_in_progress=50, per_profile=50)
+        cards = [_card(f"c{i}", title="t", branch=f"wt/c{i}") for i in range(3)]
+        monkeypatch.setattr(kanban, "list_cards", lambda **kw: cards)
+        run = FakeRun(merged=set())
+        args = _args(apply=False, run=run, config_path=config, json=True)
+        out = _no_ansi(lambda: cmd.cmd_start(args, [_project()]))
+        # `--json` byte-identity: _print_json must print json.dumps(canonical)
+        # raw — the output is EXACTLY the canonical json, nothing wrapped around
+        # it (no panel borders), no ANSI. Round-robin assign -> coder,
+        # backend-engineer, devops-engineer for the 3 unsorted cards.
+        canonical = {
+            "milestone": "M1",
+            "total_cap": 3,
+            "per_profile_cap": 50,
+            "release": [
+                {"id": "c0", "title": "t", "assignee": "coder"},
+                {"id": "c1", "title": "t", "assignee": "backend-engineer"},
+                {"id": "c2", "title": "t", "assignee": "devops-engineer"},
+            ],
+            "held": [],
+            "not_released": 0,
+        }
+        import json as _j
+        assert out == _j.dumps(canonical) + "\n", f"byte-identity broken: {out!r}"
+        data = _j.loads(out)  # and it parses as valid JSON
+        assert data["milestone"] == "M1"
