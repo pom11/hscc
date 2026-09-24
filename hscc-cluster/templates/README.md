@@ -187,18 +187,25 @@ plain `Path.is_file()` check reports every `@reg/name` recipe as missing.
 |-----|----------|--------------|---------|-------|
 | `4node/` | **balanced** | Nemotron-3-Super 120B-A12B NVFP4+MTP, 23.6 tok/s | 2× Qwen3.8-27B-FP8 + 1× North-Mini-Code NVFP4 | **recommended default** |
 | `4node/` | throughput | A3B-NVFP4, **116 tok/s** | 3× North-Mini-Code NVFP4 (~530 tok/s aggregate) | burst mode for atomic cards |
-| `4node/` | quality | Qwen3.8-Flash-Next NVFP4, SWE-bench Pro **62.5** | Qwen3.8-27B NVFP4 DFlash2 (tp=2) + fast | **atlas runtime unproven here** |
+| `4node/` | quality | Qwen3.8-Flash-Next NVFP4, SWE-bench Pro **62.5** | 2× Qwen3.8-27B-FP8 + 1× North-Mini-Code NVFP4 | tightest VRAM of the seven |
 | `4node/` | dual-orch | 2× Nemotron-3-Super 120B-A12B | 2× North-Mini-Code NVFP4 | one brain per project board |
 | `4node/` | review-heavy | Nemotron-3-Super 120B-A12B | 1 coder + 2× Nemotron-3-Nano (88–100 tok/s) | sized for `auto_review` |
 | `3node/` | balanced | Nemotron-3-Super 120B-A12B | 1 coder + 1 fast | degraded fleet / idle-autodown |
 | `2node/` | fast | A3B-NVFP4, 116 tok/s | 1× North-Mini-Code NVFP4 | minimum viable pair |
 
 **Container images are per-node local disk, not NAS — and none of these images
-are on the fleet yet.** Five of the seven templates run entirely on
+are on the fleet yet.** All seven templates run on
 `ghcr.io/spark-arena/dgx-vllm-eugr-nightly:latest`, so they cost one pull per
-node. `4node/quality` additionally needs `ghcr.io/atlas-inf/atlas-gb10:latest`
-(pullable) and builds `vllm-node-b12x` locally via `build_args: --exp-b12x`.
-Watch disk: the gateway node was at **95% (44 GB free)** when these were written.
+node; `4node/quality` additionally builds `vllm-node-b12x` locally for its
+orchestrator via the eugr recipe's `build_args: --exp-b12x`. No template uses
+the atlas runtime. Watch disk: the gateway node was at **95% (44 GB free)** when
+these were written.
+
+**Check `max_nodes` and `max_batch_size` before putting a recipe in a family.**
+A recipe declaring `Nodes: 1 - 1` cannot take `tp: 2` at all, and one declaring
+`max_batch_size: 1` serializes behind a load-balanced proxy — `ModelIntent` has
+no field to raise either. Both ruled out the otherwise-fastest coder recipe for
+`4node/quality`; its header records what that cost.
 
 **A recipe whose `container:` has no registry prefix and no `build_args` cannot
 be used at all** — sparkrun can neither pull nor build it. That is what ruled
