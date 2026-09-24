@@ -94,3 +94,16 @@ interpreters; see run below.
 - Tests: new `hscc-cluster/tests/test_no_ansi.py` (20 regressions: no-ANSI per
   converted command + `--json` byte-identity). Updated `test_cli.py` subprocess
   to pass `--json` (default is now themed).
+
+## Verification
+
+- hscc-cluster dir alone (hermes venv): 402 → **422 passed** (+20).
+- hscc-cluster dir alone (p313): 384 (+14 skipped) → **404 passed, 14 skipped**
+  (+20; the 14 skips are pre-existing).
+- Both dir runs use the run_tests.sh `-m pytest` semantics.
+- Full 8-plugin suite via scripts/run_tests.sh: re-running under both
+  interpreters after a subprocess path-resolution fix (5d2d3e5). The first full
+  run had 7/8 dirs green; the only failure was a test subprocess path flake in
+  hscc-cluster, now fixed.
+- Verify script (docs/audits/t_e67544b1_verify_e2e.py): ALL INVARIANT CHECKS
+  PASSED under both interpreters.
