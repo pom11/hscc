@@ -126,6 +126,21 @@ def test_personality_missing_config_noop(tmp_path):
     assert IS.install_personality(str(tmp_path / "nope.yaml")) == "no-config"
 
 
+def test_personality_malformed_yaml_noops_not_crashes(tmp_path):
+    """Malformed YAML is a 'bad config' — the documented contract is a no-op,
+    so install_personality must return 'bad-config' WITHOUT raising and WITHOUT
+    writing the file. Regression: yaml.safe_load raised YAMLError here, which
+    crashed install_soul.py __main__ AFTER SOUL.md was already written
+    (bootstrap.sh:253 surfaced only a generic warn), leaving a partial write."""
+    path = tmp_path / "config.yaml"
+    path.write_text("personalities: [unclosed: {\\n  not: valid\n")
+    res = IS.install_personality(str(path))
+    assert res == "bad-config"
+    # file left byte-for-byte untouched (no backup, no rewrite)
+    assert path.read_text() == "personalities: [unclosed: {\\n  not: valid\n"
+    assert not list(tmp_path.glob("config.yaml.bak-*"))
+
+
 def test_personality_legacy_ip_header_stripped(tmp_path):
     """M4: an ops persona whose preamble hardcodes IPs gets it replaced by the
     topology-free HSCC header, preserving the rest of the user's prose."""

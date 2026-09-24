@@ -30,5 +30,13 @@ Evidence:
 - `install_scripts` distinguishes missing `scripts/` dir → `skipped:true` + reason (line 32-37); contrast with F1 in apply_patches. Correct.
 
 ## Fixes
-- [ ] F1 fix + regression test (test_apply_patches.py)
-- [ ] F2 fix + regression test (test_install_soul.py)
+- [x] F1 fix: `apply_patches.apply_set` now checks the patch dir exists before the empty-set quiet-success; a missing dir → `{"ok": False, "error": "patch directory not found: ..."}`. Regression test `test_missing_patch_dir_is_fault_not_quiet_success` in `tests/test_apply_patches.py`.
+- [x] F2 fix: `install_soul.install_personality` catches `yaml.YAMLError` and returns `"bad-config"` (no write, no crash) — matches the "No-op on ... bad config" docstring. Regression test `test_personality_malformed_yaml_noops_not_crashes` in `tests/test_install_soul.py`.
+
+## Verification
+- [ ] hscc-bootstrap suite green (host interpreter)
+- [ ] hscc-bootstrap suite green (p313 interpreter)
+- [ ] full `scripts/run_tests.sh` suite both interpreters
+- [ ] merge to main + push
+- [ ] deploy (install_payload.py)
+
