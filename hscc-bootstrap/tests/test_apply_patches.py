@@ -95,3 +95,19 @@ def test_non_git_target_errors(tmp_path, monkeypatch):
     res = apply_patches.apply_set("synthetic", plain, check=True)
     assert res["ok"] is False
     assert "not a git checkout" in res["error"]
+
+
+def test_missing_patch_dir_is_fault_not_quiet_success(tmp_path, monkeypatch):
+    """A MISSING patch set dir must be an environment fault (ok:false), NOT the
+    same as a legitimately-empty set (ok:true). bootstrap.sh:236-241 greps for
+    '\"ok\": true' to decide whether to apply — a silent ok:true would make it
+    print 'hermes patches applied' while a fresh checkout never gets patched.
+    Regression for the empty-set guard added in 3f4c388, which conflated
+    'empty because patches landed upstream' with 'patch dir is gone'."""
+    monkeypatch.setitem(apply_patches.SETS, "missing", tmp_path / "nope")
+    res = apply_patches.apply_set("missing", tmp_path, check=True)
+    assert res["ok"] is False
+    assert "not found" in res["error"]
+    # NOT the quiet-success shape bootstrap.sh greps for ('"ok": true') → it
+    # must be a hard fault, so a fresh checkout is never silently left unpatched.
+    assert "error" in res

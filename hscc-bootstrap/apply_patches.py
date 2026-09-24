@@ -42,6 +42,18 @@ def apply_set(set_name: str, target: Path, *, check: bool) -> dict:
     check=True uses `git apply --check` (no mutation) per patch and reports
     which would fail. check=False uses `git am` to apply with commit metadata;
     on failure it aborts the am and reports the offending patch."""
+    patch_dir = SETS.get(set_name)
+    if not patch_dir:
+        return {"ok": False, "set": set_name, "mode": "check",
+                "error": f"unknown patch set: {set_name!r}"}
+    if not patch_dir.is_dir():
+        # A MISSING patch directory is an environment/repo fault, never the same
+        # as a legitimately-empty set. Reporting ok:true here is a silent-failure
+        # footgun: bootstrap.sh:236-241 greps for '"ok": true' then applies and
+        # prints 'hermes patches applied' — a fresh checkout would silently never
+        # receive the kanban review/resume patches. Fail loud instead.
+        return {"ok": False, "set": set_name, "mode": "check",
+                "error": f"patch directory not found: {patch_dir}"}
     patches = list_patches(set_name)
     if not patches:
         # Intentionally empty patch set (patches landed upstream) — quiet success.
