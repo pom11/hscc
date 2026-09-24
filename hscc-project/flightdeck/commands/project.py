@@ -29,6 +29,7 @@ from ..core import git_state, project_lifecycle, registry
 from ..core import session_discovery
 from ..core import bindings
 from ..core import digest as digest_core
+from ._theme import escape, make_console, panel, status_panel, table
 
 # --------------------------------------------------------------------------- #
 # Orchestrator resolver (reused from hscc-roles so CLI/REST/WS never disagree)
@@ -66,16 +67,19 @@ def cmd_new(args: argparse.Namespace) -> int:
     apply = bool(args.apply)
     dry_run = bool(args.dry_run)
 
-    print(f"flightdeck project new {name}")
-    print(f"  repo    {repo}" + ("  (--github --private)" if private else ("  (--github)" if github else "")))
-    print("  topic   forum topic named after the project")
-    print("  board   kanban board slug = project name")
-    print("  roadmap ROADMAP.md seeded with Now/Next/Later")
-    print("  registry entry binding repo <-> board <-> topic")
-
+    plan_lines = [
+        f"flightdeck project new {name}",
+        f"  repo    {repo}" + ("  (--github --private)" if private else ("  (--github)" if github else "")),
+        "  topic   forum topic named after the project",
+        "  board   kanban board slug = project name",
+        "  roadmap ROADMAP.md seeded with Now/Next/Later",
+        "  registry entry binding repo <-> board <-> topic",
+    ]
     if dry_run or not apply:
-        print("\nplan printed; nothing performed.")
-        print("pass --apply to create the project.")
+        plan_lines.append("")
+        plan_lines.append("plan printed; nothing performed.")
+        plan_lines.append("pass --apply to create the project.")
+        make_console().print(panel("project new — plan", "\n".join(plan_lines)))
         return 0
 
     result = project_lifecycle.create_project(
@@ -90,21 +94,25 @@ def cmd_new(args: argparse.Namespace) -> int:
         _session_db=args.session_db,
     )
 
-    print("\nresult:")
+    lines = ["\nresult:"]
     for step in result["steps"]:
         mark = "ok " if step["status"] == "ok" else ("-- " if step["status"] == "skipped" else "FAIL")
-        print(f"  [{mark}] {step['id']:<8} {step['detail']}")
+        lines.append(f"  [{mark}] {step['id']:<8} {escape(step['detail'])}")
         if step["status"] == "failed":
-            print(f"         retry: {step.get('retry', '')}")
+            lines.append(f"         retry: {escape(step.get('retry', ''))}")
 
     if not result["ok"]:
         retry = result.get("retry")
-        print(f"\npartial failure recorded in the registry; what succeeded is kept.")
+        lines.append("\npartial failure recorded in the registry; what succeeded is kept.")
         if retry:
-            print(f"retry command: {retry}")
+            lines.append(f"retry command: {escape(retry)}")
+        # A partial failure surfaces as an error-coloured status panel so the
+        # operator sees at a glance the project was NOT cleanly created.
+        make_console().print(panel("project new", "\n".join(lines), border_style="error"))
         return 1
 
-    print(f"\nproject {name!r} created.")
+    lines.append(f"\nproject {name!r} created.")
+    make_console().print(panel("project new", "\n".join(lines)))
     return 0
 
 
@@ -115,7 +123,7 @@ def cmd_new(args: argparse.Namespace) -> int:
 def cmd_list(args: argparse.Namespace) -> int:
     projects = registry.load_registry(args.registry)
     if not projects:
-        print("No projects registered.")
+        make_console().print(panel("projects", "[dim]No projects registered.[/dim]"))
         return 0
 
     if args.json:
@@ -136,16 +144,28 @@ def cmd_list(args: argparse.Namespace) -> int:
         print(json.dumps(out))
         return 0
 
-    print(f"{'NAME':<20} {'REPO':<40} {'BOARD':<12} {'TOPIC':<8} HEALTH")
+    # Human view: a themed Table (NAME/REPO/BOARD/TOPIC/HEALTH). Rich degrades
+    # to plain text on a non-tty stdout — the --json path above stays untouched.
+    t = table("projects")
+    t.add_column("NAME")
+    t.add_column("REPO", no_wrap=True)
+    t.add_column("BOARD")
+    t.add_column("TOPIC")
+    t.add_column("HEALTH")
     for p in projects:
         health = project_lifecycle.project_health(
             p, _run=args.run, _client=args.client, _kanban=args.kanban
         )
-        print(
-            f"{p.name:<20} {p.repo:<40} "
-            f"{(p.board or 'unknown'):<12} "
-            f"{(str(p.topic) if p.topic is not None else 'unknown'):<8} {health}"
+        health_cell = f"[ok]{escape(health)}[/ok]" if health == "ok" \
+            else f"[error]{escape(health)}[/error]"
+        t.add_row(
+            escape(p.name),
+            escape(p.repo),
+            escape(p.board or "unknown"),
+            escape(str(p.topic) if p.topic is not None else "unknown"),
+            health_cell,
         )
+    make_console().print(t)
     return 0
 
 
@@ -156,13 +176,17 @@ def cmd_list(args: argparse.Namespace) -> int:
 def cmd_remove(args: argparse.Namespace) -> int:
     name = args.name
 
-    print(f"flightdeck project remove {name}")
-    print("  this removes the REGISTRY ENTRY only.")
-    print("  it does NOT delete the git repo.")
-    print("  (the registry 'topic' field is cleared too — Telegram is removed.)")
+    plan_lines = [
+        f"flightdeck project remove {name}",
+        "  this removes the REGISTRY ENTRY only.",
+        "  it does NOT delete the git repo.",
+        "  (the registry 'topic' field is cleared too — Telegram is removed.)",
+    ]
     if not args.apply:
-        print("\nplan printed; nothing performed.")
-        print("pass --apply to remove the registry entry.")
+        plan_lines.append("")
+        plan_lines.append("plan printed; nothing performed.")
+        plan_lines.append("pass --apply to remove the registry entry.")
+        make_console().print(panel("project remove — plan", "\n".join(plan_lines)))
         return 0
 
     try:
@@ -171,7 +195,9 @@ def cmd_remove(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    print(f"\nremoved registry entry for {name!r}. The repo and topic are untouched.")
+    make_console().print(status_panel(
+        f"removed registry entry for {name!r}. The repo and topic are untouched.",
+        status="ok", title="project remove"))
     return 0
 
 
@@ -192,12 +218,16 @@ def cmd_repair(args: argparse.Namespace) -> int:
     github = bool(args.github)
     private = bool(args.private)
 
-    print(f"flightdeck project repair {name}")
-    print(f"  repo    {repo}")
-    print("  .. ensures repo / topic / board / roadmap / registry are all present")
+    plan_lines = [
+        f"flightdeck project repair {name}",
+        f"  repo    {repo}",
+        "  .. ensures repo / topic / board / roadmap / registry are all present",
+    ]
     if not args.apply:
-        print("\nplan printed; nothing performed.")
-        print("pass --apply to repair the project.")
+        plan_lines.append("")
+        plan_lines.append("plan printed; nothing performed.")
+        plan_lines.append("pass --apply to repair the project.")
+        make_console().print(panel("project repair — plan", "\n".join(plan_lines)))
         return 0
 
     try:
@@ -216,19 +246,21 @@ def cmd_repair(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    print("\nresult:")
+    lines = ["\nresult:"]
     for step in result["steps"]:
         mark = "ok " if step["status"] == "ok" else ("-- " if step["status"] == "skipped" else "FAIL")
-        print(f"  [{mark}] {step['id']:<8} {step['detail']}")
+        lines.append(f"  [{mark}] {step['id']:<8} {escape(step['detail'])}")
         if step["status"] == "failed":
-            print(f"         retry: {step.get('retry', '')}")
+            lines.append(f"         retry: {escape(step.get('retry', ''))}")
 
     if not result["ok"]:
         retry = result.get("retry")
         if retry:
-            print(f"\nretry command: {retry}")
+            lines.append(f"\nretry command: {escape(retry)}")
+        make_console().print(panel("project repair", "\n".join(lines), border_style="error"))
         return 1
-    print(f"\nproject {name!r} repaired.")
+    lines.append(f"\nproject {name!r} repaired.")
+    make_console().print(panel("project repair", "\n".join(lines)))
     return 0
 
 
@@ -285,16 +317,18 @@ def cmd_pull(args: argparse.Namespace) -> int:
         print(json.dumps(rows))
         return 0
 
-    print(heading)
-    print(f"{'NAME':<20} RESULT")
+    t = table(heading)
+    t.add_column("NAME")
+    t.add_column("RESULT")
     for row in rows:
         if row["status"] == "pulled":
-            line = f"{row['name']:<20} pulled {row['n']} commit(s)"
+            line = f"pulled {row['n']} commit(s)"
         elif row["status"] == "up_to_date":
-            line = f"{row['name']:<20} already up to date"
+            line = "already up to date"
         else:
-            line = f"{row['name']:<20} SKIPPED: {row['detail']}"
-        print(line)
+            line = f"[warn]SKIPPED[/warn]: {escape(row['detail'])}"
+        t.add_row(escape(row["name"]), line)
+    make_console().print(t)
     return 0
 
 
@@ -384,18 +418,25 @@ def cmd_push(args: argparse.Namespace) -> int:
         print(json.dumps(rows))
         return 0
 
-    print(heading + "  (--apply not given: nothing was pushed)" if not apply else heading)
-    print(f"{'NAME':<20} RESULT")
+    if not apply:
+        # The gate note goes on its own (dim) line so a narrow Rich Table title
+        # cannot wrap it mid-phrase and swallow the "nothing was pushed" signal.
+        make_console().print(
+            f"[dim]{heading}  (--apply not given: nothing was pushed)[/dim]")
+    t = table(heading)
+    t.add_column("NAME")
+    t.add_column("RESULT")
     for row in rows:
         if row["status"] == "pushed":
-            line = f"{row['name']:<20} pushed {row['ahead']} commit(s) to {row['upstream']}"
+            line = f"pushed {row['ahead']} commit(s) to {escape(row['upstream'])}"
         elif row["status"] == "would_push":
-            line = f"{row['name']:<20} would push {row['ahead']} commit(s) to {row['upstream']}"
+            line = f"would push {row['ahead']} commit(s) to {escape(row['upstream'])}"
         elif row["status"] == "up_to_date":
-            line = f"{row['name']:<20} nothing to push"
+            line = "nothing to push"
         else:
-            line = f"{row['name']:<20} SKIPPED: {row['detail']}"
-        print(line)
+            line = f"[warn]SKIPPED[/warn]: {escape(row['detail'])}"
+        t.add_row(escape(row["name"]), line)
+    make_console().print(t)
     return 0
 
 
@@ -460,10 +501,10 @@ def _print_history_note(discovery: dict) -> None:
         return
     total_msgs = sum(r.get("message_count") or 0 for r in rows)
     plural = "" if len(rows) == 1 else "s"
-    print(
-        f"note: {len(rows)} earlier telegram session{plural} for this project "
-        f"({total_msgs} msgs) — `hscc project sessions {discovery['project']}` "
-        f"to list, `--resume <id>` to open"
+    make_console().print(
+        f"[dim]note: {len(rows)} earlier telegram session{plural} for this "
+        f"project ({total_msgs} msgs) — `hscc project sessions "
+        f"{discovery['project']}` to list, `--resume <id>` to open[/dim]"
     )
 
 
@@ -535,9 +576,10 @@ def _seed_empty_orchestrator(
         # NOT doing, and only when a digest would have been seeded (so an active
         # plain session with no archive history isn't spammed on every chat).
         if digest_sessions:
-            print(
-                f"session '{session}' already has history — not re-seeding "
-                f"the {len(digest_sessions)}-thread / {digest_msgs}-message digest"
+            make_console().print(
+                f"[dim]session '{session}' already has history — not re-seeding "
+                f"the {len(digest_sessions)}-thread / {digest_msgs}-message "
+                f"digest[/dim]"
             )
         return 0
 
@@ -546,9 +588,13 @@ def _seed_empty_orchestrator(
         # Nothing to seed. Keep the honest empty-start messaging (a genuinely
         # new project with no archived history, or an empty project with none).
         if just_created:
-            print(f"created session '{session}' on {profile!r} (first use)")
+            make_console().print(
+                f"[label]created session '{session}' on {profile!r} "
+                f"(first use)[/label]")
         else:
-            print(f"session '{session}' has no archived history — starting fresh")
+            make_console().print(
+                f"[label]session '{session}' has no archived history — "
+                f"starting fresh[/label]")
         return 0
 
     # Seed: append the digest verbatim as the opening user message. This is the
@@ -568,9 +614,9 @@ def _seed_empty_orchestrator(
     )
     if seeded:
         plural = "" if len(digest_sessions) == 1 else "s"
-        print(
-            f"seeded session '{seed_target}' with the project digest "
-            f"({len(digest_sessions)} thread{plural}, {digest_msgs} messages)"
+        make_console().print(
+            f"[ok]seeded session '{seed_target}' with the project digest "
+            f"({len(digest_sessions)} thread{plural}, {digest_msgs} messages)[/ok]"
         )
     else:
         print(
@@ -666,8 +712,10 @@ def cmd_chat(args: argparse.Namespace) -> int:
     # A worker once contaminated hscc-orch's permanent session with
     # worker-scoped context; the operator must never be in doubt who they speak
     # as. Explicit > implicit; print before exec'ing so it is on the terminal.
-    print(f"project {name} -> profile {profile}, session '{session}' "
-          f"(permanent, shared with the app)")
+    make_console().print(panel(
+        "project chat",
+        f"[accent]project {name} -> profile {profile}, session '{session}'[/accent] "
+        f"(permanent, shared with the app)"))
 
     argv = ["hermes", "-p", profile, "chat", "--continue", session]
     trailing = getattr(args, "extra", None) or []
@@ -715,7 +763,10 @@ def _cmd_chat_resume(name: str, resume_id: str, args, resolved: dict) -> int:
         return 2
 
     profile, argv = target
-    print(f"project {name} -> profile {profile}, resuming session '{resume_id}'")
+    make_console().print(panel(
+        "project chat",
+        f"[accent]project {name} -> profile {profile}, resuming session "
+        f"'{resume_id}'[/accent]"))
     exec_seam = getattr(args, "exec_seam", None) or os.execvp
     exec_seam("hermes", argv)
     return 0
@@ -752,35 +803,40 @@ def cmd_sessions(args: argparse.Namespace) -> int:
         return 2
 
     topic = discovery.get("topic")
-    print(f"project {name} sessions (topic "
-          f"{topic if topic is not None else '(none)'}, "
-          f"telegram profile {discovery['telegram_profile']}):")
+    lines = [
+        f"project {name} sessions (topic "
+        f"{topic if topic is not None else '(none)'}, "
+        f"telegram profile {discovery['telegram_profile']}):"
+    ]
     # An unreadable runtime is NOT an empty history — say which one it is.
     if discovery.get("runtime_error"):
-        print(f"  cannot read session history: {discovery['runtime_error']}")
-        print(f"    - retry under the Hermes venv, e.g.")
-        print(f"      ~/.hermes/hermes-agent/venv/bin/hscc project sessions {name}")
+        lines.append(f"  cannot read session history: {discovery['runtime_error']}")
+        lines.append("    - retry under the Hermes venv, e.g.")
+        lines.append(f"      ~/.hermes/hermes-agent/venv/bin/hscc project sessions {name}")
+        make_console().print(panel("project sessions", "\n".join(lines),
+                                   border_style="error"))
         return 3
 
     # Orchestrator session first (the primary identity), then telegram newest-first.
     orch = discovery.get("orchestrator")
     if orch:
-        print(_format_session_row(orch, discovery["orch_profile"], current=True))
+        lines.append(escape(_format_session_row(orch, discovery["orch_profile"], current=True)))
     else:
-        print(
+        lines.append(
             f"  {discovery['orch_profile']}: (no orchestrator session found)\n"
             f"    - `hscc project chat {name}` creates it on first use"
         )
     if discovery["telegram"]:
         for row in discovery["telegram"]:
-            print(_format_session_row(row, discovery["telegram_profile"], current=True))
+            lines.append(escape(_format_session_row(row, discovery["telegram_profile"], current=True)))
     else:
         reason = (
             "project has no telegram topic"
             if topic is None
             else f"no telegram sessions on thread {topic}"
         )
-        print(f"  {discovery['telegram_profile']}: (no telegram history — {reason})")
+        lines.append(f"  {discovery['telegram_profile']}: (no telegram history — {reason})")
+    make_console().print(panel("project sessions", "\n".join(lines)))
     return 0
 
 
@@ -815,7 +871,11 @@ def cmd_digest(args: argparse.Namespace) -> int:
         # An env fault is not an empty history — even in JSON, say which one.
         return 3 if digest["runtime_error"] else 0
 
-    print(digest_core.format_digest(digest))
+    text = digest_core.format_digest(digest)
+    # The digest is a bounded document; render it in a themed Panel so it reads
+    # as one editable block. Markup is escaped so session titles/body text that
+    # happen to contain brackets render literally (never interpreted as styling).
+    make_console().print(panel("project digest", escape(text)))
     return 3 if digest["runtime_error"] else 0
 
 
@@ -843,20 +903,22 @@ def cmd_link(args: argparse.Namespace) -> int:
         store = bindings.list(mapping_path, project=project_filter)
         if not store:
             if project_filter:
-                print(f"project link: no bindings for {project_filter!r}.")
+                make_console().print(panel(
+                    "project link", f"no bindings for {project_filter!r}."))
             else:
-                print("project link: no bindings.")
+                make_console().print(panel("project link", "no bindings."))
             return 0
+        lines = ["project session bindings (project / session / method / confidence):"]
         if not project_filter:
-            print("project session bindings (project / session / method / confidence):")
             for sid in sorted(store):
                 meta = store[sid]
-                print(f"  {meta.get('project','?'):<20} {sid}  "
-                      f"[{meta.get('method','?')}, {meta.get('confidence','?')}]")
+                lines.append(f"  {escape(meta.get('project','?')):<20} {escape(sid)}  "
+                             f"[{escape(meta.get('method','?'))}, {escape(str(meta.get('confidence','?')))}]")
         else:
             for sid in sorted(store):
                 meta = store[sid]
-                print(f"  {sid}  [{meta.get('method','?')}, {meta.get('confidence','?')}]")
+                lines.append(f"  {escape(sid)}  [{escape(meta.get('method','?'))}, {escape(str(meta.get('confidence','?')))}]")
+        make_console().print(panel("project link — bindings", "\n".join(lines)))
         return 0
 
     project = getattr(args, "project", None)
@@ -875,10 +937,12 @@ def cmd_link(args: argparse.Namespace) -> int:
         evidence=getattr(args, "evidence", None),
         mapping_path=mapping_path,
     )
-    print(f"linked session {session_id} -> project {project!r} "
-          f"[method {entry['method']}, confidence {entry['confidence']}]")
-    print(f"  evidence: {entry['evidence']}")
-    print(f"  store: {mapping_path or bindings.MAPPING_FILE}")
+    method_conf = escape(f"[method {entry['method']}, confidence {entry['confidence']}]")
+    make_console().print(panel(
+        "project link",
+        f"linked session {escape(session_id)} -> project {project!r} {method_conf}\n"
+        f"  evidence: {escape(entry['evidence'])}\n"
+        f"  store: {escape(mapping_path or bindings.MAPPING_FILE)}"))
     return 0
 
 
@@ -902,12 +966,13 @@ def cmd_unlink(args: argparse.Namespace) -> int:
     removed = bindings.unbind(session_id, mapping_path=mapping_path)
     project = getattr(args, "project", None)
     if removed:
-        print(f"unlinked session {session_id} "
-              + (f"from project {project!r} " if project else "")
-              + "from the binding store.")
+        body = (f"unlinked session {escape(session_id)} "
+                + (f"from project {project!r} " if project else "")
+                + "from the binding store.")
     else:
-        print(f"unlink: session {session_id} had no binding — nothing removed.")
-    print(f"  store: {mapping_path or bindings.MAPPING_FILE}")
+        body = f"unlink: session {escape(session_id)} had no binding — nothing removed."
+    body += f"\n  store: {escape(mapping_path or bindings.MAPPING_FILE)}"
+    make_console().print(panel("project unlink", body))
     return 0
 
 
