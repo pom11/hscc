@@ -25,6 +25,7 @@ below). What remains carried is the unabsorbed delta:
 | 0009 | fix(kanban): re-read dispatch caps live every tick, not at boot (`gateway/kanban_watchers_dispatcher.py`) |
 | 0010 | test(kanban): prove caps resolve live each tick (`tests/gateway/test_kanban_caps_live_reload.py`) |
 | 0011 | fix(kanban): reset started_at on reclaim and set fresh on each claim (`hermes_cli/kanban_db.py`) |
+| 0012 | feat(kanban): configurable out-of-tree worktree root for compiler-root repos (`hermes_cli/kanban_db_workspace.py` + `tests/hermes_cli/test_kanban_worktree_isolation.py`) |
 
 Notes on the re-base:
 
