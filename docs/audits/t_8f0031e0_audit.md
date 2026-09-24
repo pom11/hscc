@@ -103,6 +103,8 @@ Branch `wt/t_8f0031e0`, commits ahead of main before merge (conversion + regress
 - `72dcad0` flights(cli): no-ANSI + --json byte-identity regressions for daemon/daemon_install/start/update/init (Rich card 3a/21)
 
 (plus this audit note and the p313 numbers commit, both under docs/audits/).
-All four must merge to main, push, then deploy via `python3 hscc-bootstrap/install_payload.py`.
+Merged to main: YES (fast-forward, main `57b4656`). Pushed: YES (origin/main
+`57b4656`). Deployed: YES (`python3 hscc-bootstrap/install_payload.py`, exit 0,
+sync to `~/.hermes/plugins`; confirmed all 5 command files import `._theme`).
 
 ## No AI attribution; no secrets; LAN host scrubbed (100.64.0.1 placeholder).
