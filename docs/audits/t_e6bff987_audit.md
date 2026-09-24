@@ -107,6 +107,11 @@ it is NOT the MissingStyle flake this card was filed for.
 ## Commits
 
 - `287d444` fix(theme): register semantic styles in _theme fallback console
+- `f516808` docs(audits): record t_e6bff987 MissingStyle fallback fix + verification
+- `2b92d5d` docs(theme): clarify fallback console docstring (bound to _FALLBACK_THEME)
+- Merged to `main` (merge commits `2cf2c1a`, `143381e`), pushed to `origin/main`
+  (current main = `143381e`), deployed via `python3 hscc-bootstrap/install_payload.py`
+  (exit 0, deployed plugin matches main).
 
 ## Non-negotiables honoured
 
