@@ -28,6 +28,7 @@ import sys
 import time
 
 from ..core import map_sessions
+from ._theme import escape, make_console, panel
 
 _DEFAULT_OUT = map_sessions.DEFAULT_OUT_DIR
 _DEFAULT_DB = map_sessions.DEFAULT_STATE_DB
@@ -102,22 +103,24 @@ def cmd_map_sessions(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
         return 0
 
-    print(f"proposed owners for {result.total} unmapped session(s)")
-    print(f"  resolved deterministic (repo-path): {result.resolved_repo_path}")
+    lines = [f"proposed owners for {result.total} unmapped session(s)"]
+    lines.append(f"  resolved deterministic (repo-path): {result.resolved_repo_path}")
     for proj, n in sorted(result.deterministic_by_project.items()):
-        print(f"    {proj:<12} {n}")
-    print(f"  resolved by model: {result.resolved_model}")
+        lines.append(f"    {escape(proj):<12} {n}")
+    lines.append(f"  resolved by model: {result.resolved_model}")
     for proj, n in sorted(result.model_by_project.items()):
-        print(f"    {proj:<12} {n}")
-    print(f"  left unknown: {result.unknown}")
-    print(f"proposal: {md_path}")
-    print(f"json:     {json_path}")
+        lines.append(f"    {escape(proj):<12} {n}")
+    lines.append(f"  left unknown: {result.unknown}")
+    lines.append(f"proposal: {escape(md_path)}")
+    lines.append(f"json:     {escape(json_path)}")
 
     if args.apply:
         map_path, change_path = map_sessions.apply_mapping(result, out_dir, ts)
-        print(f"applied (reversible, files-only): {map_path}")
-        print(f"changelog: {change_path}")
+        lines.append("")
+        lines.append(f"[ok]applied (reversible, files-only): {escape(map_path)}[/ok]")
+        lines.append(f"changelog: {escape(change_path)}")
 
+    make_console().print(panel("map-sessions", "\n".join(lines)))
     return 0
 
 
