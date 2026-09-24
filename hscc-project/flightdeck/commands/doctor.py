@@ -47,6 +47,7 @@ import time
 from pathlib import Path
 
 from ..core import git_state, kanban, probe, registry
+from ._theme import escape, make_console, panel
 
 
 def _repo_ok(proj: registry.Project, *, _run=None) -> dict:
@@ -751,10 +752,10 @@ def _all_clear_count(report: list[dict]) -> int:
 def _render(report: list[dict]) -> list[str]:
     lines: list[str] = []
     for row in report:
-        lines.append(f"{row['name']}:")
+        lines.append(f"{escape(row['name'])}:")
         for dim, res in row["checks"].items():
             mark = "ok" if res["ok"] else "PROBLEM"
-            lines.append(f"  {dim:<6} [{mark}] {res['detail']}")
+            lines.append(f"  {dim:<6} {escape('[' + mark + ']')} {escape(str(res['detail']))}")
         lines.append("")
     return lines
 
@@ -815,16 +816,21 @@ def cmd_doctor(args: argparse.Namespace, projects: list[registry.Project]) -> in
         print(json.dumps(payload))
     else:
         if not report:
-            print("doctor: no projects in the registry — nothing to check.")
+            make_console().print(panel(
+                "doctor", "no projects in the registry — nothing to check."))
             return 0
-        for line in _render(report):
-            print(line)
+        lines = _render(report)
         if learning is not None:
-            print("learning pipeline:")
+            lines.append("learning pipeline:")
             for c in learning:
                 mark = _STATUS_MARK.get(c["status"], c["status"])
-                print(f"  {c['check']} [{mark}] {c['detail']}")
-            print("")
+                mark_str = str(mark)
+                lines.append(
+                    f"  {escape(c['check'])} {escape('[' + mark_str + ']')} "
+                    f"{escape(c['detail'])}"
+                )
+            lines.append("")
+        make_console().print(panel("doctor", "\n".join(lines)))
 
     problems = _any_problem(report) or (
         learning is not None and _learning_has_problem(learning)
