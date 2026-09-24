@@ -152,3 +152,15 @@ that is roadmap milestone `profile-provisioning`, done separately. Do NOT touch 
   theme commit 6d4ad17 + regressions c808d6b on main.
 - dispatcher fanned out sub-c (t_4a548958, run 724) while sub-b finalized → group-C now running approx-parallel;
   each is a correctly-scoped atomic card landing cleanly on main (not a pile), but not strict serial.
+
+### SESSION HANDOFF — as of 7464d2e (epic in progress, orchestrator context budget pressure)
+Landed & on main (all pushed, origin/main==main): RC1 (447e6c8), RC2 (a8ca754), flake-fix (39fb82d+93558fa),
+sub-a (68e680a), sub-b (9b956d8). User's own card t_2bcbe6f9 (CLI interpreter) also landed on main (7464d2e).
+IN FLIGHT: sub-c t_4a548958 (review/roadmap/standup/why — committed, not yet pushed; run 724), sub-b t_d7a8d1f3
+card still 'running' post-merge (run 725 finalizing), sub-d t_c2cae6e9 + sub-e t_1b206473 queued (parents=[t_36cea62f]
+satisfied). QUEUED BLOCKED: t_8306890e (dispatcher worktree-placement fix) — unblock AFTER Rich CLI epic's Part-1
+cards land. Part 1 remaining after group C: RC4..RC10 (hscc-project already done; then hscc_daemon, hscc-bootstrap,
+hscc-cluster, hscc-roles, hscc-api, hscc-commands, sparkrun-hermes). Part 2 (README) + Part 3 (bootstrap) not started.
+Deployment: install_payload re-run after each merge (worker does it). Worker-process crashes ("pid not alive") on
+sub-a (x2) + sub-b — code survives via commit; watch if it recurs. All group-C cards scratch (primary stays clean,
+each push verified lands on main). Tracking doc updated atomically per landing.
