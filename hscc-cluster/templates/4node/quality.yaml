@@ -6,8 +6,7 @@
 #
 # MEASURED, one GB10:
 #   orchestrator  Qwen3.8-Flash-Next NVFP4 (solo)  ~37 tok/s   SWE-bench Pro 62.5
-#   coding        Qwen3.8-27B NVFP4 + DFlash2      34 tok/s g8 / 45.5 g16
-#                                                  SWE-bench Pro 61.7
+#   coding x2     Qwen3.8-27B-FP8 + MTP            ~21 tok/s   SWE-bench Pro 61.7
 #   fast   x1     North-Mini-Code-1.0 NVFP4        56.7 C1 / 178 agg C10
 #
 # Qwen3.8-Flash-Next is the #1 open-weight model on SWE-bench Pro (62.5, ahead
@@ -36,42 +35,42 @@
 #    orchestrator would serialize all of them and error under load. The eugr
 #    solo recipe carries max_num_seqs: 8 and is the correct one here.
 #
-# ── ATLAS RUNTIME IS UNPROVEN ON THIS FLEET ─────────────────────────────────
-# The `coding` family below uses `runtime: atlas` (container
-# ghcr.io/atlas-inf/atlas-gb10). No node in this cluster has been verified to
-# run an atlas workload — every other shipped template is vLLM. The atlas
-# recipe is used here because it is the only one carrying the measured
-# 34 / 45.5 tok/s DFlash2 numbers for this checkpoint.
+# ── NO ATLAS RUNTIME HERE, AND THAT WAS A DELIBERATE REVERSAL ───────────────
+# An earlier draft used `@atlas/qwen3.8-27b-nvfp4-dflash2` for the coding
+# family because it carries the best measured numbers for this checkpoint
+# (34 tok/s at gamma=8, 45.5 at gamma=16). Two of its declared properties make
+# it unusable in a worker family, and a template can override neither — see the
+# comment on that family below. It is documented there rather than silently
+# dropped, because the throughput it gives up is real.
 #
-# IF ATLAS FAILS TO LAUNCH, substitute the vLLM equivalent:
-#     recipe: "@official/qwen3.8-27b-fp8-mtp-vllm"   # tp=1, 60.75 GB, ~21 tok/s
-#     workers: 2                                     # and drop tp: 2 below
-# That is the same model family at half the decode rate on a proven runtime.
+# The one thing this template still builds locally is the orchestrator's
+# `vllm-node-b12x` image (eugr `build_args: --exp-b12x`), which sparkrun builds.
 name: 4node-quality
 version: 3
-description: "4 nodes: Qwen3.8-Flash-Next NVFP4 orchestrator (SWE-bench Pro 62.5, #1 open weight) + Qwen3.8-27B NVFP4 DFlash2 coding + North-Mini-Code fast. ATLAS RUNTIME UNPROVEN. cluster_size=4."
+description: "4 nodes: Qwen3.8-Flash-Next NVFP4 orchestrator (SWE-bench Pro 62.5, #1 open weight) + 2x Qwen3.8-27B-FP8 coding + North-Mini-Code fast. cluster_size=4."
 
 orchestrator:
   recipe: "@eugr/qwen3.8-flash-next-nvfp4-solo"
 
 families:
   - name: coding
-    # ONE worker spanning TWO nodes at tp=2 — the eugr recipe's native cluster
-    # shape (its own header: "TP=1 on a solo DGX Spark, TP=2 on a cluster").
+    # Two single-node coders. (`workers:` counts NODES, not instances —
+    # resolve() computes `num_instances = len(avail) // max_tp` — but with a
+    # tp=1 recipe the two coincide: 2 nodes, 2 instances.)
     #
-    # Why not two tp=1 workers: HSCC's `_render_serve_cmd` emits `--tp` only
-    # when tp > 1, so a template cannot pin a tp=2-default recipe down to one
-    # node. `sparkrun recipe show --tp 1` confirms it WOULD fit on one GPU
-    # (52.42 GB) — the gap is HSCC-side, not a model limit. Until that is
-    # fixed, the honest layout is the span the recipe already declares.
-    #
-    # `workers:` COUNTS NODES, NOT INSTANCES. resolve() computes
-    # `num_instances = len(avail) // max_tp`, so a tp=2 family needs
-    # `workers: 2` to get ONE instance. Writing `workers: 1` here raises
-    # "tp=2 requires at least 2 nodes but only 1 available".
+    # NOT `@atlas/qwen3.8-27b-nvfp4-dflash2`, despite it carrying the best
+    # measured numbers for this checkpoint (34 tok/s at gamma=8, 45.5 at
+    # gamma=16, vs ~21 here). Two of its properties make it wrong for a
+    # proxy-backed worker pool, and a template can override neither:
+    #   * `Nodes: 1 - 1` (max_nodes: 1) — a tp=2 span is impossible, so it
+    #     cannot be given two nodes as one bigger worker.
+    #   * `max_batch_size: 1` — single-stream by default. Its own metadata says
+    #     batched DFlash2 works but only if served with
+    #     `max_batch_size/max_num_seqs >= your concurrency`, which ModelIntent
+    #     has no field to set. Behind a load-balanced proxy it would serialize.
+    # Using it would also pull in the atlas runtime, unproven on this fleet.
     models:
-      - recipe: "@atlas/qwen3.8-27b-nvfp4-dflash2"
-        tp: 2
+      - recipe: "@official/qwen3.8-27b-fp8-mtp-vllm"
     workers: 2
     proxy: true
 
