@@ -733,3 +733,61 @@ def test_doctor_probe_is_shared_probe_module():
     check a service, used by every command."""
     from flightdeck.core import probe
     assert cmd.probe is probe
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted command degrades to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI group C card mandated a NO-ANSI regression per converted
+# command: with stdout captured as a NON-tty StringIO, the themed Console must
+# emit NO escape (\x1b[) bytes — the daemon / scripts / iOS console parse this
+# output, and a single escaped byte in a pipe breaks a watcher. --json paths
+# stay byte-identical to canonical json.dumps (the machine contract).
+import io as _io
+import contextlib as _contextlib
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _contextlib.redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestDoctorNoAnsi:
+    """`doctor`'s human view is plain on a non-tty stdout; --json stays
+    byte-identical to canonical dumps."""
+
+    def test_human_view_is_plain(self):
+        projects, snap = _healthy_world()
+        snap["workdirs"] = {p.board: p.repo for p in projects}
+        out = _no_ansi(lambda: cmd.cmd_doctor(_args(**snap), projects))
+        assert "[ok]" in out
+        assert "repo ok" in out
+        assert "[PROBLEM]" not in out
+
+    def test_human_view_escapes_markup_in_detail(self):
+        """A literal problem detail with bracket text renders literally."""
+        projects, snap = _healthy_world(repo_ok=False)
+        snap["boards"] = ["otherboard"]
+        out = _no_ansi(lambda: cmd.cmd_doctor(_args(**snap), projects))
+        assert "PROBLEM" in out
+
+    def test_json_stays_byte_identical(self):
+        projects, snap = _healthy_world()
+        snap["workdirs"] = {p.board: p.repo for p in projects}
+        ns = _args(json=True, **snap)
+        report = cmd._run_checks(
+            projects,
+            _run=ns.run,
+            _client=ns.client,
+            _boards=ns.boards,
+            _workdirs=ns.workdirs,
+            _repo_check=ns.repo_check,
+        )
+        expected = json.dumps(cmd._render_json(report)) + "\n"
+        out = _no_ansi(lambda: cmd.cmd_doctor(ns, projects))
+        assert out == expected
