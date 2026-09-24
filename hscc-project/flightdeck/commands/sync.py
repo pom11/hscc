@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..core import git_state, kanban, registry
+from ._theme import escape, make_console, panel, status_panel
 
 
 @dataclass
@@ -1060,11 +1061,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
         ignored_topics=ignored,
     )
 
+    applied_lines: list[str] = []
     if args.apply:
         written = apply_writes(report.to_write, args.registry)
         for proj in written:
-            print(f"applied: wrote {proj.name!r} -> repo {proj.repo!r}, "
-                  f"topic {proj.topic}{', board ' + str(proj.board) if proj.board else ''}")
+            applied_lines.append(
+                f"applied: wrote {escape(proj.name)!r} -> repo "
+                f"{escape(proj.repo)!r}, topic {proj.topic}"
+                f"{', board ' + escape(str(proj.board)) if proj.board else ''}")
 
         # --apply with --ignore-topic persists the ignore set so the topic stops
         # being reported on every future run (not just this one).
@@ -1073,7 +1077,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
             merged = set(registry.load_ignored_topics(args.registry))
             merged.update(cli_ignored)
             registry.save_ignored_topics(sorted(merged), args.registry)
-            print(f"applied: ignored topics now {sorted(merged)}")
+            applied_lines.append(f"applied: ignored topics now {sorted(merged)}")
 
         # --create-boards --apply: give every project lacking a board its own.
         # Only meaningful together with --apply (no silent creation). Creating
@@ -1088,15 +1092,18 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 _kdb=getattr(args, "_kdb", None),
             )
             for slug in created:
-                print(f"applied: created board {slug!r} and bound it to its project")
+                applied_lines.append(
+                    f"applied: created board {escape(slug)!r} and bound it to "
+                    "its project")
             if not created and not report.board_conflicts:
-                print("applied: no boards needed creating (all projects have one).")
+                applied_lines.append(
+                    "applied: no boards needed creating (all projects have one).")
             if report.board_conflicts:
                 for c in report.board_conflicts:
-                    print(
-                        f"conflict: project {c.name!r} wants slug {c.slug!r} but that "
-                        f"board already exists; skipped (never silently adopted)."
-                    )
+                    applied_lines.append(
+                        f"conflict: project {escape(c.name)!r} wants slug "
+                        f"{escape(c.slug)!r} but that board already exists; "
+                        "skipped (never silently adopted).")
     else:
         created = []
 
@@ -1112,9 +1119,20 @@ def cmd_sync(args: argparse.Namespace) -> int:
         report.boards_to_create = []
 
     if getattr(args, "json", False):
+        # --json stdout stays machine-pure: the applied/conflict notes keep
+        # their raw print form (never boxed by a themed panel — a panel's
+        # border would pollute a JSON stream) and the JSON payload prints raw
+        # below. Byte-identity of the whole --json stdout is preserved.
+        for line in applied_lines:
+            print(line)
         print(_render_json(report, board_cards))
     else:
-        print(render(report, board_cards))
+        if applied_lines:
+            make_console().print(status_panel(
+                "\n".join(applied_lines), status="ok",
+                title="project sync --apply"))
+        make_console().print(panel(
+            "project sync", escape(render(report, board_cards))))
 
     # Exit nonzero if there's anything the operator must look at (so scripts /
     # the daily summary can key on it), but a clean sync exits 0.

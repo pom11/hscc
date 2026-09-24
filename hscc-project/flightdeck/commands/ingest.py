@@ -71,6 +71,7 @@ from concurrent.futures import TimeoutError as _FutureTimeout
 from pathlib import Path
 
 from ..core import git_state, kanban, registry, roadmap
+from ._theme import escape, make_console, panel
 from .decompose import NoReplyError
 
 # How many git-log subject lines to gather (a hard cap; a longer log is
@@ -778,13 +779,15 @@ def cmd_ingest(args: argparse.Namespace, projects: list[registry.Project]) -> in
         return 3
 
     # ACCEPTED. Present the CLEAN extracted roadmap (wrapper/preamble stripped)
-    # under PROPOSED ROADMAP, with the parse evidence surfaced.
+    # under PROPOSED ROADMAP, with the parse evidence surfaced. The roadmap's
+    # `- [x]` / `- [ ]` checklist marks are escaped so they render literally
+    # (never swallowed as Rich style tags).
     _print_parse_evidence(parsed)
 
-    print(f"\n# PROPOSED ROADMAP for {proj.name} (project {args.project})")
-    print("-" * 60)
-    print(extracted)
-    print("-" * 60)
+    make_console().print(panel(
+        "PROPOSED ROADMAP",
+        f"for {escape(proj.name)} (project {escape(args.project)})\n"
+        f"{escape(extracted)}"))
 
     if not args.apply:
         print("dry-run: nothing written. pass --apply to write it.", file=sys.stderr)

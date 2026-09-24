@@ -1296,3 +1296,51 @@ def test_execute_commit_stages_every_file_the_bump_wrote(tmp_path):
     commit_cmd = next(c for c in issued if c.startswith("git add"))
     assert "VERSION" in commit_cmd
     assert "pyproject.toml" in commit_cmd
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — themed human view degrades to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI group C card mandated a NO-ANSI regression per converted
+# command: with stdout captured as a NON-tty StringIO, the themed Console must
+# emit NO escape (\x1b) bytes — scripts / daemons parse this output and a
+# single escaped byte in a pipe breaks a watcher. release has no --json path;
+# every line is human, themed, and must stay plain in a pipe.
+import io as _io
+import contextlib as _contextlib
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _contextlib.redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestReleaseNoAnsi:
+    """`release`'s human view is plain on a non-tty stdout."""
+
+    def test_dry_run_plan_is_plain(self, tmp_path):
+        proj = _make_project(tmp_path)
+        reg = _write_registry(tmp_path, [{"name": "acme", "repo": proj.repo, "verify": "true"}])
+        run, _ = _make_run()
+        out = _no_ansi(lambda: release_cmd.run(
+            _ns(registry=reg, run=run, apply=False), reg))
+        assert "release plan for acme 1.9.0" in out
+        assert "1. bump VERSION" in out
+        assert "7. verify the installed version is live" in out
+
+    def test_apply_verified_view_is_plain(self, tmp_path):
+        proj = _make_project(tmp_path)
+        reg = _verified_registry(tmp_path, proj)
+        run, calls = _verified_run(installed_out="1.9.0\n")
+        out = _no_ansi(lambda: release_cmd.run(
+            _ns(registry=reg, run=run, apply=True), reg))
+        assert "bumped acme VERSION to 1.9.0" in out
+        for step in ("bump", "commit", "tag", "push", "gh-release", "install", "verify"):
+            assert f"released step: {step}" in out
+        assert "verified: installed version 1.9.0 matches released 1.9.0" in out
+
