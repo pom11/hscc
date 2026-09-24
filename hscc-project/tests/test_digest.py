@@ -18,7 +18,9 @@ runtime probe is injected.
 """
 
 import argparse
+import io
 import json
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
@@ -454,3 +456,48 @@ def test_digest_never_writes(tmp_path):
         assert p.read_text(encoding="utf-8") == snapshot[p.name]
     # The binding store was NOT created by a read-only digest.
     assert not mapping.exists()
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — the converted `project digest` must degrade to plain
+# --------------------------------------------------------------------------- #
+
+def _no_ansi(fn):
+    """Run ``fn()`` with stdout redirected to a non-tty StringIO (a pipe) and
+    assert no ANSI escape sequence leaks into the captured output."""
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestNoAnsiDigest:
+    def test_human_view_is_plain(self, tmp_path):
+        _write_archive(tmp_path, "ecofire", [("s1", "Fire pipeline fix")])
+        args = _digest_args("ecofire", archive_dir=str(tmp_path),
+                            session_db=_session_db_provider(
+                                {"s1": _default_messages()}))
+        args.runtime_error_fn = lambda: None
+        out = _no_ansi(lambda: project_cmd.cmd_digest(args))
+        # the digest content is intact under the themed panel, plain, no ANSI
+        assert "project ecofire — digest" in out
+        assert "## Fire pipeline fix" in out
+
+    def test_json_stays_clean(self, tmp_path):
+        _write_archive(tmp_path, "ecofire", [("s1", "One session")])
+        args = _digest_args("ecofire", archive_dir=str(tmp_path), json_=True,
+                            session_db=_session_db_provider(
+                                {"s1": _default_messages()}))
+        args.runtime_error_fn = lambda: None
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = project_cmd.cmd_digest(args)
+        out = buf.getvalue()
+        assert rc == 0
+        assert "\x1b[" not in out
+        payload = json.loads(out)
+        assert payload["project"] == "ecofire"
+        assert payload["sessions"][0]["resume"] == "hermes -p default --resume s1"

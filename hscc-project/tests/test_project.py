@@ -14,7 +14,10 @@ registry is written to a pytest tmp_path, never ~/.flightdeck.
 """
 
 import argparse
+import io
+import json
 import subprocess
+from contextlib import redirect_stdout
 
 import pytest
 
@@ -1087,4 +1090,185 @@ def test_chat_session_already_exists_is_idempotent(tmp_path, capsys):
     file, argv = seam.calls[0]
     assert argv == ["hermes", "-p", "hscc-orch", "chat", "--continue", "hscc"]
 
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted commands must degrade to plain on a non-tty
+# --------------------------------------------------------------------------- #
+# The RICH CLI card mandated a NO-ANSI regression per converted command: with
+# stdout captured as a NON-tty (piped), the themed Console must emit NO escape
+# (\x1b[) bytes — the daemon / scripts / iOS console parse this output, and a
+# single escaped byte in a pipe breaks a watcher. It also pins that the --json
+# path stays byte-identical (the exact canonical dumps, never themed).
+
+def _no_ansi(fn):
+    """Run ``fn()`` with stdout redirected to a non-tty StringIO (a pipe) and
+    assert the captured output contains no ANSI escape sequence."""
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+def _no_ansi_json(fn, expected):
+    """Run a --json command as a pipe and assert it is byte-identical to the
+    canonical ``json.dumps(expected)`` (plus trailing newline) with NO ANSI."""
+    out = _no_ansi(fn)
+    assert out == json.dumps(expected) + "\n", \
+        f"--json output not byte-identical to canonical dumps: {out!r}"
+
+
+class TestNoAnsiProject:
+    """Every `project` subcommand's human + --json view degrades to plain text
+    on a non-tty stdout, and the --json path is byte-identical to its canonical
+    dumps (the machine contract the daemon/scripts parse)."""
+
+    def test_new_dry_run_plan(self, tmp_path):
+        reg = _reg(tmp_path)
+        _no_ansi(lambda: project_cmd.cmd_new(_ns(
+            name="zeta", repo=str(tmp_path / "zeta"), registry=reg,
+            run=FakeRun(), client=FakeTG(), kanban=FakeKanban(),
+            dry_run=True, apply=False)))
+
+    def test_new_apply_result(self, tmp_path):
+        reg = _reg(tmp_path)
+        repo = str(tmp_path / "zeta")
+        sdb = _db_session("zeta")
+        _no_ansi(lambda: project_cmd.cmd_new(_ns(
+            name="zeta", repo=repo, registry=reg, run=FakeRun(),
+            client=FakeTG(), kanban=FakeKanban(), session_db=sdb,
+            apply=True)))
+
+    def test_list_human(self, tmp_path):
+        reg = _reg(tmp_path)
+        repo = str(tmp_path / "sigma")
+        (tmp_path / "sigma").mkdir()
+        kb = FakeKanban(boards={"sigma"})
+        registry.add_project("sigma", repo=repo, board="sigma", topic=140,
+                             path=reg)
+        out = _no_ansi(lambda: project_cmd.cmd_list(
+            _ns(registry=reg, run=FakeRun(), kanban=kb)))
+        # the table must not have lost its leading column (rich width collapse)
+        assert "sigma" in out
+
+    def test_list_json_stays_byte_identical(self, tmp_path):
+        import json
+        reg = _reg(tmp_path)
+        repo = str(tmp_path / "tau")
+        (tmp_path / "tau").mkdir()
+        kb = FakeKanban()
+        tg = FakeTG()
+        registry.add_project("tau", repo=repo, path=reg)
+        expected = [{
+            "name": "tau", "repo": repo, "board": "unknown",
+            "topic": "unknown", "health": "ok",
+        }]
+        _no_ansi_json(
+            lambda: project_cmd.cmd_list(_ns(
+                registry=reg, run=FakeRun(), client=tg, kanban=kb, json=True)),
+            expected)
+
+    def test_remove_plan(self, tmp_path):
+        reg = _reg(tmp_path)
+        registry.add_project("zeta", repo=str(tmp_path / "zeta"), path=reg)
+        _no_ansi(lambda: project_cmd.cmd_remove(
+            _ns(registry=reg, name="zeta", apply=False)))
+
+    def test_remove_apply(self, tmp_path):
+        reg = _reg(tmp_path)
+        registry.add_project("zeta", repo=str(tmp_path / "zeta"), path=reg)
+        _no_ansi(lambda: project_cmd.cmd_remove(
+            _ns(registry=reg, name="zeta", apply=True)))
+
+    def test_repair_plan(self, tmp_path):
+        reg = _reg(tmp_path)
+        registry.add_project("zeta", repo=str(tmp_path / "zeta"), path=reg)
+        _no_ansi(lambda: project_cmd.cmd_repair(
+            _ns(registry=reg, name="zeta", apply=False)))
+
+    def test_repair_apply(self, tmp_path):
+        reg = _reg(tmp_path)
+        repo = str(tmp_path / "zeta")
+        registry.add_project("zeta", repo=repo, path=reg)
+        sdb = _db_session("zeta")
+        _no_ansi(lambda: project_cmd.cmd_repair(_ns(
+            registry=reg, name="zeta", repo=repo, run=FakeRun(),
+            client=FakeTG(), kanban=FakeKanban(), session_db=sdb,
+            apply=True)))
+
+    def test_pull_human(self, tmp_path):
+        reg = _reg(tmp_path)
+        repo = str(tmp_path / "zeta")
+        fake = FakePullPush(branch="main", default="main", pull_moved=True,
+                            revlist_count=4)
+        registry.add_project("zeta", repo=repo, path=reg)
+        out = _no_ansi(lambda: project_cmd.cmd_pull(
+            _ns(registry=reg, run=fake)))
+        assert "pulled 4 commit(s)" in out
+
+    def test_pull_json_stays_byte_identical(self, tmp_path):
+        import json
+        reg = _reg(tmp_path)
+        repo = str(tmp_path / "alpha")
+        r2 = str(tmp_path / "beta")
+        registry.add_project("alpha", repo=repo, path=reg)
+        registry.add_project("beta", repo=r2, path=reg)
+        fa = FakePullPush(branch="main", default="main", pull_moved=True,
+                          revlist_count=3)
+        fb = FakePullPush(branch="feature/y", default="main")
+
+        class MultiRunner:
+            def __call__(self, cmd, repo):
+                return (fa if repo == repo0 else fb)(cmd, repo)
+
+        # capture repo0 to avoid a closure bug in the lambda above
+        repo0 = repo
+        expected = [
+            {"name": "alpha", "repo": repo0, "status": "pulled",
+             "detail": "pulled 3 commit(s)", "n": 3},
+            {"name": "beta", "repo": r2, "status": "skipped",
+             "detail": "on branch feature/y, not main, leaving untouched", "n": 0},
+        ]
+        _no_ansi_json(
+            lambda: project_cmd.cmd_pull(_ns(
+                registry=reg, run=MultiRunner(), json=True)),
+            expected)
+
+    def test_push_dry_run_human(self, tmp_path):
+        reg = _reg(tmp_path)
+        repo = str(tmp_path / "zeta")
+        fake = FakePullPush(branch="main", upstream="origin/main",
+                            has_upstream=True, revlist_count=5)
+        registry.add_project("zeta", repo=repo, path=reg)
+        out = _no_ansi(lambda: project_cmd.cmd_push(
+            _ns(registry=reg, run=fake, apply=False)))
+        assert "would push 5 commit(s) to origin/main" in out
+
+    def test_push_json_stays_byte_identical(self, tmp_path):
+        import json
+        reg = _reg(tmp_path)
+        repo = str(tmp_path / "zeta")
+        fake = FakePullPush(branch="main", upstream="origin/main",
+                            has_upstream=True, revlist_count=4)
+        registry.add_project("zeta", repo=repo, path=reg)
+        expected = [{
+            "name": "zeta", "repo": repo, "branch": "main",
+            "upstream": "origin/main", "ahead": 4, "status": "would_push",
+            "detail": "4 commit(s) ahead of origin/main (pass --apply to push)",
+        }]
+        _no_ansi_json(
+            lambda: project_cmd.cmd_push(_ns(
+                registry=reg, run=fake, apply=False, json=True)),
+            expected)
+
+    def test_chat_banner(self, tmp_path):
+        reg = _reg(tmp_path)
+        registry.add_project("hscc", repo=str(tmp_path / "hscc"), board="hscc",
+                             path=reg)
+        seam = CaptureExec()
+        out = _no_ansi(lambda: project_cmd.cmd_chat(
+            _ns(registry=reg, exec_seam=seam, name="hscc")))
+        assert "project hscc -> profile hscc-orch" in out
 

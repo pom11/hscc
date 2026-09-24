@@ -9,7 +9,9 @@ never a real model — so tests are deterministic and offline.
 
 import argparse
 import hashlib
+import io
 import sqlite3
+from contextlib import redirect_stdout
 
 import pytest
 
@@ -386,3 +388,50 @@ def test_discovery_registers_command():
     for act in (sub._group_actions if sub else []):
         names |= set(getattr(act, "choices", {}) or {})
     assert "map-sessions" in names
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — the converted map-sessions CLI must degrade to plain
+# --------------------------------------------------------------------------- #
+# The RICH CLI card mandated a NO-ANSI regression per converted command: with
+# stdout captured as a NON-tty (piped), the themed Console must emit NO escape
+# (\x1b[) bytes. The --json path must also stay byte-identical (canonical dumps
+# exactly as pre-conversion printed it, never themed).
+
+def _no_ansi(fn):
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestNoAnsiMapSessions:
+    def test_human_view_is_plain(self, db_and_registry, tmp_path):
+        db, reg = db_and_registry
+        out_dir = tmp_path / "out"
+        args = _run_args(reg, out=str(out_dir), db=db)
+        out = _no_ansi(lambda: map_run(args, reg))
+        assert "resolved deterministic (repo-path): 3" in out
+        assert "left unknown: 2" in out
+
+    def test_json_stays_byte_identical(self, db_and_registry, tmp_path):
+        import json as _json
+        db, reg = db_and_registry
+        out_dir = tmp_path / "out"
+        # Capture the raw --json output in a pipe (no tty).
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            args = _run_args(reg, out=str(out_dir), db=db)
+            # json flag is a CLI-level global; inject it directly on the ns.
+            args.json = True
+            rc = map_run(args, reg)
+        out = buf.getvalue()
+        assert rc == 0
+        assert "\x1b[" not in out
+        payload = _json.loads(out)  # valid JSON, not a themed blob
+        assert payload["total"] == 5
+        assert payload["resolved_repo_path"] == 3
+        assert payload["unknown"] == 2
