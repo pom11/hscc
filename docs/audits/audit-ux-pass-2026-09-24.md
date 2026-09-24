@@ -146,3 +146,9 @@ that is roadmap milestone `profile-provisioning`, done separately. Do NOT touch 
 - Group C (23 files) decomposed by the worker into 5 serial sub-cards: a=daemon/daemon_install/start/update/init,
   b=doctor/decompose/legacy/lint/verify, c=review/roadmap/standup/why, d=ingest/sync/release/monitor/metrics,
   e=archive/hygiene/incident/reconcile. All parents=[t_36cea62f] (t_36cea62f done).
+
+### RC3b t_d7a8d1f3 — RICH CLI group C sub-b (doctor/decompose/legacy/lint/verify) — LANDED
+- merged to main as 9b956d8 (branch merge), pushed (origin/main == main, rev-list count 0),
+  theme commit 6d4ad17 + regressions c808d6b on main.
+- dispatcher fanned out sub-c (t_4a548958, run 724) while sub-b finalized → group-C now running approx-parallel;
+  each is a correctly-scoped atomic card landing cleanly on main (not a pile), but not strict serial.
