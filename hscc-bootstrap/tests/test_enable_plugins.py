@@ -86,7 +86,10 @@ def _fully_wired_cfg():
                    "auto_review": {
                        "review_roles": [r.strip() for r in enable_plugins.REVIEW_ROLES if r.strip()],
                        "reviewer": enable_plugins.REVIEWER_PROFILE},
-                   "failure_limit": enable_plugins.REJECT_ESCALATE_LIMIT},
+                   "failure_limit": enable_plugins.REJECT_ESCALATE_LIMIT,
+                   "worktree": {
+                       "out_of_tree_root": enable_plugins.OUT_OF_TREE_WORKTREE_ROOT,
+                       "out_of_tree_repos": list(enable_plugins.OUT_OF_TREE_WORKTREE_REPOS)}},
         "delegation": {"base_url": enable_plugins.WORKER_PROXY_URL,
                        "model": enable_plugins.WORKER_MODEL,
                        "provider": "custom",
@@ -131,13 +134,13 @@ def test_fully_wired_is_noop(tmp_path):
     path = _write(tmp_path / "config.yaml", _fully_wired_cfg())
     before = open(path).read()
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": [], "approvals": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": [], "approvals": [], "worktree": []}
     assert open(path).read() == before              # no rewrite, no backup churn
 
 
 def test_missing_config_noop(tmp_path):
     res = enable_plugins.enable(str(tmp_path / "nope.yaml"))
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": [], "approvals": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": [], "approvals": [], "worktree": []}
 
 
 # ── fleet routing (kanban + delegation) ──────────────────────────────────────
@@ -168,7 +171,7 @@ def test_routing_preserves_operator_choices(tmp_path):
     cfg["delegation"]["base_url"] = "http://my-proxy:9000/v1"
     path = _write(tmp_path / "config.yaml", cfg)
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": [], "approvals": []}
+    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": [], "approvals": [], "worktree": []}
     out = yaml.safe_load(open(path))
     assert out["kanban"]["default_assignee"] == "my-special-worker"
     assert out["kanban"]["max_in_progress"] == 99   # not lowered
@@ -377,6 +380,47 @@ def test_text_auxiliaries_aliased_written_into_config(tmp_path):
     aux_root = yaml.safe_load(open(path))["auxiliary"]
     for task in enable_plugins._LOCAL_TEXT_AUX_TASKS:
         assert aux_root[task]["model"] == enable_plugins.COMPACT_MODEL
+
+
+def test_worktree_placement_seeded_when_absent(tmp_path):
+    path = _write(tmp_path / "config.yaml",
+                  {"plugins": {"enabled": ["hscc-cluster"]},
+                   "toolsets": ["kanban"]})
+    res = enable_plugins.enable(path)
+    k = yaml.safe_load(open(path))["kanban"]
+    wt = k["worktree"]
+    assert wt["out_of_tree_root"] == enable_plugins.OUT_OF_TREE_WORKTREE_ROOT
+    assert wt["out_of_tree_repos"] == enable_plugins.OUT_OF_TREE_WORKTREE_REPOS
+    assert "worktree.out_of_tree_root" in res["worktree"]
+    assert "worktree.out_of_tree_repos" in res["worktree"]
+
+
+def test_worktree_placement_preserves_operator_choice(tmp_path):
+    cfg = _fully_wired_cfg()
+    cfg["kanban"]["worktree"] = {
+        "out_of_tree_root": "/srv/other-anchor",
+        "out_of_tree_repos": ["/repo/custom-a"],
+    }
+    path = _write(tmp_path / "config.yaml", cfg)
+    res = enable_plugins.enable(path)
+    k = yaml.safe_load(open(path))["kanban"]["worktree"]
+    assert k["out_of_tree_root"] == "/srv/other-anchor"     # not overwritten
+    assert k["out_of_tree_repos"] == ["/repo/custom-a"]     # not overwritten
+    assert res["worktree"] == []
+
+
+def test_worktree_placement_fills_empty_root_only(tmp_path):
+    # out_of_tree_root empty string → filled; repos present → preserved.
+    cfg = _fully_wired_cfg()
+    cfg["kanban"]["worktree"] = {
+        "out_of_tree_root": "",
+        "out_of_tree_repos": ["/repo/custom-a"],
+    }
+    path = _write(tmp_path / "config.yaml", cfg)
+    enable_plugins.enable(path)
+    k = yaml.safe_load(open(path))["kanban"]["worktree"]
+    assert k["out_of_tree_root"] == enable_plugins.OUT_OF_TREE_WORKTREE_ROOT
+    assert k["out_of_tree_repos"] == ["/repo/custom-a"]  # preserved
 
 
 def test_auto_review_seeded_when_absent(tmp_path):
