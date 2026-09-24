@@ -1,0 +1,61 @@
+# 4-node DUAL ORCHESTRATOR — two strong brains, one per project board.
+#
+# USE THIS WHEN two orchestrator sessions are live at once — the recurring
+# shape here is `hscc-orch` and `ecofire-bc-orch` running different boards.
+# They currently share one orchestrator GPU, so a long decomposition on one
+# board stalls the other, and a wedged engine takes both down.
+#
+# TOPOLOGY NOTE: the template schema has exactly one `orchestrator:` key, so
+# the second brain is expressed as a one-worker family. That is not a
+# workaround — a family behind `proxy: true` gets a stable load-balanced
+# endpoint and a symbolic `family-<name>` routing target, which is exactly what
+# a second orchestrator needs. Point the second Hermes profile's base_url at
+# the `family-orch2` endpoint.
+#
+# MEASURED, one GB10, per brain:
+#   Nemotron-3-Super 120B-A12B NVFP4 + MTP nst=3   23.6 +/- 1.7 tok/s (N=5)
+#   coding x2  North-Mini-Code-1.0 NVFP4   56.7 C1 / 178 agg C10   26.22 GB
+#
+# WHY BOTH BRAINS ARE THE SAME MODEL: identical behaviour across boards makes
+# the two sessions comparable when something goes wrong. It also halves both
+# weight staging and image pulls — one checkpoint on the NAS and one container
+# serve both nodes, which matters on a 10G/SATA NAS and a fleet whose gateway
+# boot disk is 95% full.
+#
+# (The faster Qwen3.5-122B-A10B int4+MTP orchestrator — ~50 tok/s, BFCL-V4 72.2
+# — is unavailable: its only correctly-tuned recipe names an unbuildable
+# container. See the header of 4node/balanced.yaml for the full reasoning.)
+#
+# THE COST IS REAL: two nodes go to orchestration, leaving TWO coding workers.
+# With kanban `max_in_progress: 3` and `auto_review` spawning a reviewer card
+# per coder card, two workers is the floor, not comfortable. If both boards are
+# not actually busy, `4node-balanced` is the better layout.
+name: 4node-dual-orch
+version: 3
+description: "4 nodes: TWO Nemotron-3-Super 120B-A12B NVFP4 orchestrators (one per project board) + 2x North-Mini-Code NVFP4 coding. cluster_size=4."
+
+orchestrator:
+  recipe: "@experimental/nemotron-3-super-nvfp4-mtp-1x-vllm"
+
+families:
+  - name: orch2
+    # Second orchestrator. proxy: true gives it a stable endpoint that survives
+    # the node moving; point the second Hermes profile at `family-orch2`.
+    models:
+      - recipe: "@experimental/nemotron-3-super-nvfp4-mtp-1x-vllm"
+    workers: 1
+    proxy: true
+
+  - name: coding
+    models:
+      - recipe: "@community/north-mini-code-1.0-nvfp4-vllm-XanuNetworks"
+    workers: remaining
+    proxy: true
+
+routing:
+  delegation: family-coding
+  # Compaction on the SECOND orchestrator, not the first and not the coders.
+  # The primary orchestrator fans out to nine consumers already; the coders are
+  # down to two and are the throughput floor. orch2 is sized for orchestration
+  # and is idle whenever its board is quiet, which is most of the time.
+  compaction: family-orch2
