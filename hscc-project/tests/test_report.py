@@ -363,3 +363,67 @@ def test_run_all_doublepost_window_advanced():
         record_report("alpha", _now=lambda: 5000, path=state)
         since = _resolve_since("alpha", None, state, lambda: 9000)
         assert since == 5000
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted commands degrade to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI card (group B: message/ask/report/qa) mandated a NO-ANSI
+# regression per converted command: with stdout captured as a NON-tty (piped),
+# the themed Console must emit NO escape (\x1b[) bytes — the daemon / scripts /
+# iOS console parse this output, and a single escaped byte in a pipe breaks a
+# watcher.
+
+import io as _io
+from contextlib import redirect_stdout as _redirect_stdout
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestNoAnsiReport:
+    """`report`'s human views degrade to plain on a non-tty stdout."""
+
+    def _state(self, tmp_path):
+        return str(tmp_path / "report-state.yaml")
+
+    def _contentful(self):
+        cards = [_hcard("a", title="Landed A", status="done", completed_at=9_950_000)]
+        run = FakeRun(merges=[], merged_branches={"wt/a"})
+        return cards, run
+
+    def test_dry_run(self, tmp_path):
+        cards, run = self._contentful()
+        project = _project("alpha")
+        out = _no_ansi(lambda: cmd.cmd_report_all(
+            _args(apply=False, cards=cards, run=run,
+                  report_state=self._state(tmp_path), now=lambda: 10_000_000),
+            [project]))
+        assert "Landed A [a]" in out
+        assert "report --all: 1 project(s) rendered for review (dry-run)" in out
+
+    def test_apply(self, tmp_path):
+        cards, run = self._contentful()
+        project = _project("alpha")
+        out = _no_ansi(lambda: cmd.cmd_report_all(
+            _args(apply=True, cards=cards, run=run,
+                  report_state=self._state(tmp_path), now=lambda: 10_000_000),
+            [project]))
+        assert "Landed A [a]" in out
+        assert "report --all: 1 project(s) posted" in out
+
+    def test_nothing_to_report(self, tmp_path):
+        project = _project("alpha")
+        # No content -> the "nothing to report" status panel, no ANSI.
+        out = _no_ansi(lambda: cmd.cmd_report_all(
+            _args(apply=False, cards=[], run=FakeRun(),
+                  report_state=self._state(tmp_path), now=lambda: 10_000_000),
+            [project]))
+        assert "nothing to report for alpha" in out
