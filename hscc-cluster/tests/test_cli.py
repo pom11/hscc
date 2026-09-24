@@ -173,11 +173,13 @@ class TestCLIArgvNoScriptName:
     cluster_template_cli.py')."""
 
     def test_argv_without_script_name(self):
-        """When called with ['list'], the subcommand is 'list' not 'cluster_template_cli.py'."""
-        # Simulate the __main__ path: subprocess calls this with [script, 'list']
+        """When called with ['list', '--json'], the subcommand is 'list' not 'cluster_template_cli.py'."""
+        # Simulate the __main__ path: subprocess calls this with [script, 'list'].
+        # `--json` selects the machine path (the default human path is themed and
+        # no longer JSON), so pass it to keep the JSON contract this test pins.
         import subprocess
         result = subprocess.run(
-            ["python", "hscc-cluster/cluster_template_cli.py", "list"],
+            ["python", "hscc-cluster/cluster_template_cli.py", "list", "--json"],
             capture_output=True, text=True, cwd="/Users/desac/dev/hscc",
             timeout=30,
         )
