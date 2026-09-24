@@ -617,3 +617,63 @@ def test_cli_template_unknown_verb_errors(tmp_path, capsys):
     err = capsys.readouterr().err
     assert rc == 2
     assert "unknown 'template' verb" in err
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted commands degrade to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI card (group B: message/ask/report/qa) mandated a NO-ANSI
+# regression per converted command: with stdout captured as a NON-tty (piped),
+# the themed Console must emit NO escape (\x1b[) bytes — the daemon / scripts /
+# iOS console parse this output, and a single escaped byte in a pipe breaks a
+# watcher. --json paths stay byte-identical to canonical json.dumps.
+
+import io as _io
+from contextlib import redirect_stdout as _redirect_stdout
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestNoAnsiAsk:
+    """`ask`'s human views degrade to plain on a non-tty stdout; --json is
+    byte-identical to canonical dumps (the machine contract)."""
+
+    def test_render(self, tmp_path):
+        home = _seed(str(tmp_path / "tpl"))
+        _write_ask_template(home, "PROJECT {{project}} on {{branch}}")
+        proj = _project(verify="pytest")
+        out = _no_ansi(lambda: ask_cmd.cmd_ask(
+            _ns(client=FakeTG(), run=FakeGit(branch="main"),
+                list_cards=_list_cards_factory([]), templates_home=home,
+                project="hscc", template="myask"), [proj]))
+        assert "PROJECT hscc on main" in out
+        assert "[ask] rendered 'myask' for hscc" in out
+
+    def test_template_list_human(self, tmp_path):
+        home = _seed(str(tmp_path / "tpl"))
+        out = _no_ansi(lambda: ask_cmd.cmd_template_list(
+            _ns(templates_home=home), []))
+        assert "decompose" in out
+        assert "spike" in out
+
+    def test_template_list_json_stays_byte_identical(self, tmp_path):
+        import json as _json
+        home = _seed(str(tmp_path / "tpl"))
+        names = sorted(templates.list_templates(home=home))
+        out = _no_ansi(lambda: ask_cmd.cmd_template_list(
+            _ns(templates_home=home, json=True), []))
+        assert out == _json.dumps(names) + "\n"
+
+    def test_template_show_human(self, tmp_path):
+        home = _seed(str(tmp_path / "tpl"))
+        out = _no_ansi(lambda: ask_cmd.cmd_template_show(
+            _ns(templates_home=home, name="decompose"), []))
+        assert "GOAL" in out
