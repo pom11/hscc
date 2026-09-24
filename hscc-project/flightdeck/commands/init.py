@@ -27,6 +27,12 @@ Behaviour contract:
 - Everything external is injectable (``home``, and per-check ``_*`` handles) so
   tests build pass and fail worlds without touching the network, a real board,
   or the operator's real ``~/.flightdeck`` / ``~/.hermes``.
+
+Human output routes through the flightdeck themed Rich layer (``_theme``); there
+is no ``--json`` path in ``init``, so every line is themed. The ``[ok]`` /
+``[MISSING]`` / ``[UNVERIFIED]`` marks are literal user-visible text — they are
+escaped (``escape``) so Rich renders them as plain brackets, never swallows them
+as markup.
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ import sys
 from pathlib import Path
 
 from ..core import templates as _templates
+from ._theme import escape, make_console, panel, status_panel
 
 # The example files init seeds from. Located relative to the package root so a
 # source checkout (and ``pip install .`` from a checkout) always finds them;
@@ -313,35 +320,43 @@ def cmd_init(args: argparse.Namespace) -> int:
         else:
             ses[key] = p
 
+    body: list[str] = []
     if args.apply:
         result = _run_seed(home_root, ses)
         created = result["created"]
         kept = result["kept"]
-        print(f"flightdeck initialized at {home_root}")
+        lines = [f"flightdeck initialized at {escape(str(home_root))}"]
         if created:
-            print("  created: " + ", ".join(created))
+            lines.append("  created: " + ", ".join(created))
         if kept:
-            print("  kept (not overwritten): " + ", ".join(kept))
+            lines.append("  kept (not overwritten): " + ", ".join(kept))
+        body.append("\n".join(lines))
     else:
         plan = _would_create(home_root, ses)
-        print(f"flightdeck home: {home_root} (dry run — use --apply to write)")
-        print("Would create:")
-        print(_render_plan(plan))
+        lines = [
+            f"flightdeck home: {escape(str(home_root))} (dry run — use --apply to write)",
+            "Would create:",
+            _render_plan(plan),
+        ]
+        body.append("\n".join(lines))
 
     # Environment report is always shown, attach (apply) or preview (dry run).
+    # The env report carries literal [ok]/[MISSING]/[UNVERIFIED] marks which
+    # Must render literally — escape the whole block so Rich never swallows a
+    # bracket mark as a style tag (the same pitfall documented in card 2).
     checks = _env_report(args)
-    print()
-    print(_render_env(checks))
+    body.append(escape(_render_env(checks)))
 
     # Next steps always printed — the point of init is guiding the newcomer.
-    print()
-    print(
-        _NEXT_STEPS.format(
-            config=str(home_root / "config.yaml"),
-            nl="\n",
-            mcp=_MCP_REGISTRATION,
-        )
+    # escape() so the mcp snippet's brackets render literally.
+    next_steps = _NEXT_STEPS.format(
+        config=str(home_root / "config.yaml"),
+        nl="\n",
+        mcp=_MCP_REGISTRATION,
     )
+    body.append(escape(next_steps))
+
+    make_console().print(panel("flightdeck init", "\n\n".join(body)))
     return 0
 
 
