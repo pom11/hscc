@@ -410,9 +410,53 @@ def test_seed_write_failure_is_honest_but_still_attaches(tmp_path, capsys):
                registry_path=reg, exec_seam=seam)
 
     rc = project_cmd.cmd_chat(args)
-    err = capsys.readouterr().err
+    cap = capsys.readouterr()
+    err, out = cap.err, cap.out
 
     assert rc == 0
     assert "could not seed session '20260921_abc'" in err
-    assert "continuing with a blank session" in err
+    # The failure must be LOUD on the operator's TTY, not only on stderr.
+    # A stderr line scrolls past as the chat opens, which is exactly how the
+    # ecofire-bc case went unnoticed: "this project has no history" and "its
+    # history was dropped" looked identical.
+    assert "WARNING" in out
+    assert "are NOT in this session" in out
+    assert "hscc project digest ecofire" in out, "tell them how to recover it"
     assert seam.calls, "exec still proceeds so the operator can chat"
+
+
+def test_seed_targets_the_row_id_not_the_registry_title(tmp_path, capsys):
+    """The registry `session:` holds a TITLE; seed the row's real ID.
+
+    Provisioned placeholders are `id='seed-<name>'` with `title='<name>'`, and
+    the registry stores the TITLE. The old code passed that title straight to
+    `seed_session_with_digest`, which handed the real SessionDB an id that does
+    not exist — the write failed, and the operator landed in a blank session
+    with the failure on stderr. Observed live on ecofire-bc: it started with
+    none of its 6 threads / 964 messages and nobody noticed for a working
+    session.
+
+    Every pre-existing seed test used a fixture where title == id, so none of
+    them could catch this. That equality is the bug's hiding place, so this test
+    makes them DIFFER on purpose.
+    """
+    reg = _reg(tmp_path, "ecofire", session="ecofire")          # registry: a TITLE
+    orch = FakeOrchDBSession("ecofire", "seed-ecofire", message_count=0)  # id != title
+    _write_archive(tmp_path, "ecofire", [("s1", "Fire pipeline fix")])
+    seam = CaptureExec()
+    args = _ns(tmp_path, "ecofire", orch, archive_dir=str(tmp_path),
+               registry_path=reg, exec_seam=seam,
+               default_messages={"s1": [_msg("user", "Let's fix the pipeline.", mid=1)],
+                                 "s2": []})
+
+    rc = project_cmd.cmd_chat(args)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert len(orch.appended) == 1, "the digest must be seeded exactly once"
+    sid, role, _text = orch.appended[0]
+    assert sid == "seed-ecofire", (
+        f"seeded {sid!r} — must be the ROW ID, not the registry title 'ecofire'; "
+        "the title is not a session id and the real write would fail")
+    assert role == "user"
+    assert "seeded session 'seed-ecofire'" in out
