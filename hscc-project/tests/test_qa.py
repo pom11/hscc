@@ -1355,3 +1355,62 @@ def test_qa_done_run_dispatch(monkeypatch, tmp_path, capsys):
     rc = qa.run(args, reg)
     assert rc == 0
     assert qa._load_manual(state)[0]["checked"] is True
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted commands degrade to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI card (group B: message/ask/report/qa) mandated a NO-ANSI
+# regression per converted command: with stdout captured as a NON-tty (piped),
+# the themed Console must emit NO escape (\x1b[) bytes — the daemon / scripts /
+# iOS console parse this output, and a single escaped byte in a pipe breaks a
+# watcher. --json paths stay byte-identical to canonical json.dumps.
+
+import io as _io
+from contextlib import redirect_stdout as _redirect_stdout
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestNoAnsiQa:
+    """`qa`'s human view degrades to plain on a non-tty stdout; --json stays
+    byte-identical to canonical dumps (the machine contract)."""
+
+    def test_human_view_is_plain(self, tmp_path):
+        reg = _write_registry(tmp_path, [_project(verify="pytest")])
+        fake = FakeGit(numstat="1\t0\tx.py")
+        out = _no_ansi(lambda: qa.cmd_qa(_ns(
+            registry=reg, run=fake, run_verify=FakeVerify(passed=True),
+            cards=[_card(created=42)])))
+        assert "MANUAL-TESTING QUEUE" in out
+        assert "t_abc" in out
+        assert "VERIFY: pytest" in out
+
+    def test_empty_view_is_plain(self, tmp_path):
+        reg = _write_registry(tmp_path, [_project()])
+        fake = FakeGit()
+        out = _no_ansi(lambda: qa.cmd_qa(_ns(
+            registry=reg, run=fake, run_verify=FakeVerify(),
+            cards=[_card(status="done")])))
+        assert "nothing awaiting review" in out
+
+    def test_json_stays_byte_identical(self, tmp_path):
+        import json as _json
+        reg = _write_registry(tmp_path, [_project()])
+        fake = FakeGit(numstat="1\t0\tx.py")
+        state = str(tmp_path / "manual-qa.yaml")
+        rows = qa._collect([_card(created=42)], [_project()],
+                           _run=fake, _run_verify=FakeVerify(passed=True))
+        expected = qa._render_json(rows, [])
+        out = _no_ansi(lambda: qa.cmd_qa(_ns(
+            registry=reg, run=fake, run_verify=FakeVerify(passed=True),
+            json=True, cards=[_card(created=42)], state=state)))
+        assert out == _json.dumps(expected) + "\n"

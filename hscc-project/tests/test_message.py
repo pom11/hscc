@@ -857,3 +857,71 @@ def test_dispatch_creates_card_no_announce_without_topic(monkeypatch, tmp_path, 
     # Honest reporting: created but NOT announced.
     assert "not announced" in combined
     assert fake.calls == []            # no delivery call, no announcement sent
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted commands degrade to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI card (group B: message/ask/report/qa) mandated a NO-ANSI
+# regression per converted command: with stdout captured as a NON-tty (piped),
+# the themed Console must emit NO escape (\x1b[) bytes — the daemon / scripts /
+# iOS console parse this output, and a single escaped byte in a pipe breaks a
+# watcher.
+
+import io as _io
+from contextlib import redirect_stdout as _redirect_stdout
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestNoAnsiMessage:
+    """Every `message` subcommand's human view degrades to plain text on a
+    non-tty stdout (the daemon/scripts parse this output)."""
+
+    def test_send(self):
+        projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
+        out = _no_ansi(lambda: msg_cmd.cmd_send(
+            _ns(project="hscc", message="standing up now"), projects))
+        assert "would post to hscc" in out
+        assert "standing up now" in out
+
+    def test_read(self):
+        projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
+        out = _no_ansi(lambda: msg_cmd.cmd_read(_ns(project="hscc"), projects))
+        assert "no source — Telegram has been removed" in out
+
+    def test_dispatch_dry_run(self):
+        projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
+        out = _no_ansi(lambda: msg_cmd.cmd_dispatch(
+            _ns(client=FakeTG(), project="hscc", task="build the widget",
+                assignee="coder", message="ping", apply=False), projects))
+        assert "dry-run" in out
+        assert "card title: build the widget" in out
+
+    def test_dispatch_apply(self, monkeypatch):
+        projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
+        kb = FakeKB(new_id="card-77")
+        _stub_kb(kb, monkeypatch)
+        # autodown guard: disabled so dispatch never touches a real cluster.
+        ad = FakeAD({"enabled": False, "state": "up"})
+        _stub_ad(ad, monkeypatch)
+        out = _no_ansi(lambda: msg_cmd.cmd_dispatch(
+            _ns(client=FakeTG(), project="hscc", task="build the widget",
+                assignee=None, message="ping", apply=True), projects))
+        assert "card-77" in out
+        assert "not announced" in out
+
+    def test_broadcast(self):
+        projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
+        out = _no_ansi(lambda: msg_cmd.cmd_broadcast(
+            _ns(message="outage over", to=None), projects))
+        assert "would broadcast to hscc" in out
+        assert "outage over" in out
