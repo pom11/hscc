@@ -417,3 +417,55 @@ def test_install_is_gated_behind_apply(isolated_state, monkeypatch, tmp_path, ca
     assert code == 0
     out = capsys.readouterr().out
     assert "dry-run" in out
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted commands degrade to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI card (group C sub-a) mandated a NO-ANSI regression per converted
+# command: with stdout captured as a NON-tty (piped), the themed Console must
+# emit NO escape (\x1b) bytes — the daemon/scripts parse this output. The
+# covered commands are the safe read-only ones (status/check/log/install
+# dry-run); start/stop that mutate PIDs or fork are exercised only in their
+# no-side-effect paths (already-running / not-running).
+
+import io as _io
+from contextlib import redirect_stdout as _redirect_stdout
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI found in piped daemon output: {out!r}"
+    assert "\x1b" not in out, f"ANSI found in piped daemon output: {out!r}"
+    return out
+
+
+class TestNoAnsiDaemon:
+    """`daemon` human views degrade to plain text on a non-tty stdout."""
+
+    def test_status_stopped(self, isolated_state):
+        out = _no_ansi(lambda: cmd.cmd_status(argparse.Namespace(), "reg.yaml"))
+        assert "STOPPED" in out
+
+    def test_check_single_stream(self, isolated_state):
+        args = argparse.Namespace(
+            stream="fleet", max_fleet=5, cards=lambda: [_card("a")],
+            projects=None, now=None, run=None, cache=None,
+        )
+        out = _no_ansi(lambda: cmd.cmd_check(args, "reg.yaml"))
+        assert "fleet" in out
+        assert "in flight" in out
+
+    def test_log_empty(self, isolated_state):
+        out = _no_ansi(lambda: cmd.cmd_log(argparse.Namespace(lines=50), "reg.yaml"))
+        assert "No daemon log entries yet" in out
+
+    def test_install_dry_run(self, isolated_state):
+        # `daemon install` without --apply: read-only dry-run, nothing written.
+        out = _no_ansi(lambda: cmd.cmd_install(
+            argparse.Namespace(apply=False), "reg.yaml"))
+        assert "dry-run" in out
+        assert "launchd plist" in out
