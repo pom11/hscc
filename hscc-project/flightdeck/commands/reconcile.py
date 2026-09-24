@@ -29,6 +29,7 @@ import argparse
 import sys
 
 from ..core import git_state, kanban, registry
+from ._theme import escape, make_console, panel
 
 # Stale / dead thresholds are owned by kanban.core (single source of truth);
 # the command lets the operator override --days from the CLI.
@@ -109,10 +110,10 @@ def _render(plan: dict, *, dead_days: int = kanban.DEFAULT_DEAD_DAYS) -> list[st
             lines.append("  none")
         for item in entries:
             if isinstance(item, dict):
-                reason = f"  — {item['reason']}" if item.get("reason") else ""
-                lines.append(f"  {item['id']}  {item.get('title')!r}{reason}")
+                reason = f"  — {escape(item['reason'])}" if item.get("reason") else ""
+                lines.append(f"  {escape(item['id'])}  {escape(repr(item.get('title') or ''))}{reason}")
             else:
-                lines.append(f"  {item}")
+                lines.append(f"  {escape(item)}")
         lines.append("")
     return lines
 
@@ -189,8 +190,9 @@ def cmd_reconcile(args: argparse.Namespace, projects: list[registry.Project]) ->
 
         print(json.dumps(_render_json(display)))
     else:
-        for line in _render(display):
-            print(line)
+        # Line-looping human render: accumulate then print ONE themed panel.
+        body = "\n".join(_render(display)).rstrip("\n")
+        make_console().print(panel("reconcile", body))
 
     if args.apply:
         summary = _apply_plan(plan, by_id, _kdb=args.kdb)

@@ -19,6 +19,7 @@ import json
 import sys
 
 from ..core import archive
+from ._theme import escape, make_console, panel
 
 _DEFAULT_OUT = archive.DEFAULT_OUT_DIR
 _DEFAULT_DB = archive.DEFAULT_STATE_DB
@@ -56,15 +57,16 @@ def cmd_archive_sessions(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
         return 0
 
-    print(f"archived {result.sessions} session(s), {result.messages} message(s)")
-    print(f"bytes:  {result.bytes_written:,} across {result.files} file(s)")
+    lines = [f"archived {result.sessions} session(s), {result.messages} message(s)",
+             f"bytes:  {result.bytes_written:,} across {result.files} file(s)"]
     for proj, n in sorted(result.by_project.items()):
-        print(f"  {proj:<12} {n} session(s)")
+        lines.append(f"  {escape(proj):<12} {n} session(s)")
     if result.unmapped_threads:
-        print("non-null unmapped thread ids (no registry owner; reported, not guessed):")
+        lines.append("non-null unmapped thread ids (no registry owner; reported, not guessed):")
         for t in result.unmapped_threads:
-            print(f"  thread {t}")
-    print(f"index: {result.index_path}")
+            lines.append(f"  thread {escape(t)}")
+    lines.append(f"index: {escape(result.index_path or '')}")
+    make_console().print(panel("archive-sessions", "\n".join(lines)))
     return 0
 
 
