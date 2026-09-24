@@ -883,8 +883,17 @@ def validate_resolved_plan(plan: Any) -> List[str]:
     """
     errors: List[str] = []
 
+    try:
+        from . import recipe_cost as _rc
+    except ImportError:
+        import recipe_cost as _rc
+
     def _recipe_missing(recipe: str) -> bool:
-        return not Path(os.path.expanduser(recipe)).is_file()
+        # Registry-aware: a recipe may be a filesystem path OR a registry name
+        # (@reg/name). A bare is_file() check reported every registry recipe as
+        # missing, which blocked any template sourcing from the community /
+        # eugr / atlas / official registries.
+        return not _rc.recipe_exists(recipe)
 
     if _recipe_missing(plan.orchestrator.recipe):
         errors.append(f"orchestrator recipe not found: {plan.orchestrator.recipe}")
@@ -1166,7 +1175,10 @@ def _structural_validate(raw: dict, tpl: Any,
                          cluster_ips: Optional[List[str]] = None,
                          recipe_exists: Optional[Any] = None) -> Tuple[List[str], List[str]]:
     """Layer 1 — structural validation. Offline: uses only the static
-    cluster.json node list, never discovery/resolver/live state. Returns
+    cluster.json node list, never discovery/resolver/live state. (Recipe
+    existence for a ``@reg/name`` token is resolved by ``sparkrun show
+    --no-vram``, which reads sparkrun's LOCAL registry cache — no live cluster
+    state and no network.) Returns
     ``(errors, warnings)``. Every error names the offending unit and value so a
     reviewer can fix the template without re-deriving which key is wrong.
 
@@ -1220,10 +1232,19 @@ def _structural_validate(raw: dict, tpl: Any,
                             errors.append(
                                 f"{label} model {j}: unknown key '{k}'")
 
-    # ── recipe paths exist on disk ────────────────────────────────────────
+    # ── recipes resolve (filesystem path OR @reg/name) ────────────────────
+    try:
+        from . import recipe_cost as _rc_mod
+    except ImportError:
+        import recipe_cost as _rc_mod
+
     def _recipe_ok(recipe: str, label: str) -> None:
+        # Default is registry-aware: a recipe may be a filesystem path OR a
+        # registry name (@reg/name). The previous is_file() default reported
+        # every registry recipe as missing. Injected `recipe_exists` still wins,
+        # so tests keep full control.
         exists = (recipe_exists(recipe) if recipe_exists is not None
-                  else Path(os.path.expanduser(recipe)).is_file())
+                  else _rc_mod.recipe_exists(recipe))
         if not exists:
             errors.append(f"{label} recipe not found: {recipe}")
 

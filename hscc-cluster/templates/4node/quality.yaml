@@ -1,0 +1,89 @@
+# 4-node QUALITY — best judgement available on this hardware. Accept ~37 tok/s.
+#
+# USE THIS WHEN the work is hard: a design decision, a cross-file refactor, an
+# audit, an AL or Dart change where a wrong answer costs a deploy cycle. Do NOT
+# use it for a queue of small cards — `4node-throughput` exists for that.
+#
+# MEASURED, one GB10:
+#   orchestrator  Qwen3.8-Flash-Next NVFP4 (solo)  ~37 tok/s   SWE-bench Pro 62.5
+#   coding        Qwen3.8-27B NVFP4 + DFlash2      34 tok/s g8 / 45.5 g16
+#                                                  SWE-bench Pro 61.7
+#   fast   x1     North-Mini-Code-1.0 NVFP4        56.7 C1 / 178 agg C10
+#
+# Qwen3.8-Flash-Next is the #1 open-weight model on SWE-bench Pro (62.5, ahead
+# of GLM-5.2 at 62.1 and Qwen3.8-27B at 61.7). 125B total, 6B active, so the
+# quality is bought without the decode penalty a dense model of that class
+# would carry.
+#
+# ── TWO WARNINGS. READ BOTH BEFORE APPLYING. ────────────────────────────────
+#
+# 1. THE ORCHESTRATOR IS VRAM-TIGHT. `sparkrun recipe show` estimates 110.57 GB
+#    per-GPU and warns that weights (98.6 GB) exceed usable memory at 80%
+#    utilization. That estimate is CONSERVATIVE and wrong in a specific way:
+#    the eugr solo recipe sets VLLM_PLE_TABLE_MEMORY=disk, so the ~47.7 GB
+#    n-gram PLE table is read off NVMe by row and never made resident. Atlas
+#    measured the comparable NVIDIA pack at ~90.4 GB actual peak with ~27.8 GB
+#    free. It fits — but it is the tightest layout in this directory. Watch the
+#    first boot, and do not raise gpu_memory_utilization.
+#
+# 2. USE THE eugr SOLO RECIPE, NEVER `@atlas/qwen3.8-flash-next-nvfp4`, FOR
+#    THIS SLOT. The atlas recipe is pinned `max_num_seqs: 1` and its own
+#    metadata states a hard boundary: "SPECULATION IS C=1-ONLY ON THIS MODEL...
+#    with 2+ active sequences the batched verify declines and requests error
+#    mid-decode." The live ~/.hermes/config.yaml points NINE consumers at
+#    `orchestrator-model` (chat + kanban_decomposer, triage_specifier, curator,
+#    profile_describer, title_generation, skills_hub, approval, mcp). A C=1
+#    orchestrator would serialize all of them and error under load. The eugr
+#    solo recipe carries max_num_seqs: 8 and is the correct one here.
+#
+# ── ATLAS RUNTIME IS UNPROVEN ON THIS FLEET ─────────────────────────────────
+# The `coding` family below uses `runtime: atlas` (container
+# ghcr.io/atlas-inf/atlas-gb10). No node in this cluster has been verified to
+# run an atlas workload — every other shipped template is vLLM. The atlas
+# recipe is used here because it is the only one carrying the measured
+# 34 / 45.5 tok/s DFlash2 numbers for this checkpoint.
+#
+# IF ATLAS FAILS TO LAUNCH, substitute the vLLM equivalent:
+#     recipe: "@official/qwen3.8-27b-fp8-mtp-vllm"   # tp=1, 60.75 GB, ~21 tok/s
+#     workers: 2                                     # and drop tp: 2 below
+# That is the same model family at half the decode rate on a proven runtime.
+name: 4node-quality
+version: 3
+description: "4 nodes: Qwen3.8-Flash-Next NVFP4 orchestrator (SWE-bench Pro 62.5, #1 open weight) + Qwen3.8-27B NVFP4 DFlash2 coding + North-Mini-Code fast. ATLAS RUNTIME UNPROVEN. cluster_size=4."
+
+orchestrator:
+  recipe: "@eugr/qwen3.8-flash-next-nvfp4-solo"
+
+families:
+  - name: coding
+    # ONE worker spanning TWO nodes at tp=2 — the eugr recipe's native cluster
+    # shape (its own header: "TP=1 on a solo DGX Spark, TP=2 on a cluster").
+    #
+    # Why not two tp=1 workers: HSCC's `_render_serve_cmd` emits `--tp` only
+    # when tp > 1, so a template cannot pin a tp=2-default recipe down to one
+    # node. `sparkrun recipe show --tp 1` confirms it WOULD fit on one GPU
+    # (52.42 GB) — the gap is HSCC-side, not a model limit. Until that is
+    # fixed, the honest layout is the span the recipe already declares.
+    #
+    # `workers:` COUNTS NODES, NOT INSTANCES. resolve() computes
+    # `num_instances = len(avail) // max_tp`, so a tp=2 family needs
+    # `workers: 2` to get ONE instance. Writing `workers: 1` here raises
+    # "tp=2 requires at least 2 nodes but only 1 available".
+    models:
+      - recipe: "@atlas/qwen3.8-27b-nvfp4-dflash2"
+        tp: 2
+    workers: 2
+    proxy: true
+
+  - name: fast
+    models:
+      - recipe: "@community/north-mini-code-1.0-nvfp4-vllm-XanuNetworks"
+    workers: remaining
+    proxy: true
+
+routing:
+  delegation: family-coding
+  # Compaction to the fast family: the orchestrator is the scarce resource in
+  # this layout and is already fanning out to nine consumers, and the single
+  # coding worker is the throughput bottleneck. The fast node is the only slack.
+  compaction: family-fast
