@@ -107,3 +107,17 @@ interpreters; see run below.
   hscc-api 786+1skip; p313: identical, hscc-cluster 404+14skip, ALL GREEN).
 - Verify script (docs/audits/t_e67544b1_verify_e2e.py): ALL INVARIANT CHECKS
   PASSED under both interpreters.
+
+## Merge / push / deploy status
+
+- Branch: `wt/t_e67544b1` — 6 commits ahead of modern main before merge.
+- Base: worktree on main (tip `2cc6d15`), no upstream drift (origin/main fetched
+  fresh: 0/0).
+- Merged into main via `--no-ff` in /Users/desac/dev/hscc: `cf9330f`
+  (`merge(t_e67544b1): theme hscc-cluster standalone CLI entry points`), pushed
+  to origin/main (`2cc6d15..cf9330f`).
+- Deployed: `python3 hscc-bootstrap/install_payload.py` (EXIT=0) — themed
+  `hscc-cluster/_theme.py` + modified entry points are live in
+  `~/.hermes/plugins/hscc-cluster/`. Gateway NOT restarted (per card rule).
+- Primary checkout left clean apart from pre-existing untracked
+  `docs/audits/t_8306890e_review.md` (not touched).
