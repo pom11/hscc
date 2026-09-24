@@ -130,4 +130,19 @@ that is roadmap milestone `profile-provisioning`, done separately. Do NOT touch 
 - scope: only the 4 group-B command files + 4 test files + docs/audits. qa --watch left as-is
   (live TTY re-render, not a rich target). [ask]/[dry-run]/[report] tags escaped for Rich.
 
-### RC3 .. (pending)
+### FLK t_d5780187 — make test_standup.py hermetic (flake fix) — DONE
+- branch wt/t_d5780187; merged to main as 39fb82d, pushed (origin/main == main), deploy via install_payload.
+- Removed live ~/.hermes/hermes-agent sys.path import + live board state reads; injected faithful in-memory/fixture
+  board DB the code under test uses. test_standup.py now deterministic on clean checkout under both interpreters.
+- Context: the 30 "pre-existing" failures RC2 cited were transient (independent re-run on clean main worktree:
+  59 passed / 0 failed). This card makes them permanent-green. [orchestrator note]: the card's lifecycle transition
+  to done was pending last observation; substantive fix confirmed on main 39fb82d.
+
+### RC3a t_8f0031e0 — RICH CLI group C sub-a (daemon/daemon_install/start/update/init) — RUNNING
+- NOTE: RC3 worker created group-C sub-cards as scratch (kanban_create default), not worktree — deviates from the
+  operator's worktree-only rule. Worker self-corrected into an isolated scratch clone pushing to origin/main;
+  primary checkout has stayed clean the whole time (no staging onto primary, no merge blocking). Each sub-card's
+  push will be verified to land on main before the epic advances. sub-a committed ed23140 (theme these 5 files).
+- Group C (23 files) decomposed by the worker into 5 serial sub-cards: a=daemon/daemon_install/start/update/init,
+  b=doctor/decompose/legacy/lint/verify, c=review/roadmap/standup/why, d=ingest/sync/release/monitor/metrics,
+  e=archive/hygiene/incident/reconcile. All parents=[t_36cea62f] (t_36cea62f done).
