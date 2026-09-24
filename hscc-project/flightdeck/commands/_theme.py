@@ -87,7 +87,9 @@ def make_console(_name: str | None = None, **kwargs) -> Console:
 
     When ``hscc_daemon.cli_theme`` is available, the Console is themed and
     honours any ``HSCC_THEME`` env override (and would honour a ``--theme``
-    ``_name``); otherwise a plain ``rich.console.Console``. Rich detects the
+    ``_name``); otherwise a plain Console bound to ``_FALLBACK_THEME`` (the
+    semantic names registered as neutral styles, so markup never raises
+    MissingStyle while output stays unthemed). Rich detects the
     colour-system itself, so on a non-TTY stdout this emits PLAIN text with no
     ANSI — the mandatory regression is that ``--json`` stays the only machine
     path and piped output stays clean.
