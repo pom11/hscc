@@ -153,14 +153,17 @@ that is roadmap milestone `profile-provisioning`, done separately. Do NOT touch 
 - dispatcher fanned out sub-c (t_4a548958, run 724) while sub-b finalized → group-C now running approx-parallel;
   each is a correctly-scoped atomic card landing cleanly on main (not a pile), but not strict serial.
 
-### SESSION HANDOFF — as of 7464d2e (epic in progress, orchestrator context budget pressure)
+### SESSION HANDOFF — as of 4d44eb3 (epic in progress, orchestrator context budget exhausted — next session resumes here)
 Landed & on main (all pushed, origin/main==main): RC1 (447e6c8), RC2 (a8ca754), flake-fix (39fb82d+93558fa),
-sub-a (68e680a), sub-b (9b956d8). User's own card t_2bcbe6f9 (CLI interpreter) also landed on main (7464d2e).
-IN FLIGHT: sub-c t_4a548958 (review/roadmap/standup/why — committed, not yet pushed; run 724), sub-b t_d7a8d1f3
-card still 'running' post-merge (run 725 finalizing), sub-d t_c2cae6e9 + sub-e t_1b206473 queued (parents=[t_36cea62f]
-satisfied). QUEUED BLOCKED: t_8306890e (dispatcher worktree-placement fix) — unblock AFTER Rich CLI epic's Part-1
-cards land. Part 1 remaining after group C: RC4..RC10 (hscc-project already done; then hscc_daemon, hscc-bootstrap,
-hscc-cluster, hscc-roles, hscc-api, hscc-commands, sparkrun-hermes). Part 2 (README) + Part 3 (bootstrap) not started.
-Deployment: install_payload re-run after each merge (worker does it). Worker-process crashes ("pid not alive") on
-sub-a (x2) + sub-b — code survives via commit; watch if it recurs. All group-C cards scratch (primary stays clean,
-each push verified lands on main). Tracking doc updated atomically per landing.
+sub-a (68e680a), sub-b (9b956d8), sub-c (9d3c30b), sub-d (e490e40). t_2bcbe6f9 (operator's CLI-interpreter card)
+also landed (7464d2e). === GROUP C (RICH CLI hscc-project) IS COMPLETE — all 5 sub-cards on main ===
+IN FLIGHT: sub-d card t_c2cae6e9 still 'running' (run 728, merging-finished finalizing); sub-e t_1b206473 RUNNING
+(run 729, archive/hygiene/incident/reconcile). After sub-e lands, Part-1 hscc-project is fully converted.
+NEXT for Part 1 (RC4..RC10, one card each): hscc_daemon (190 raw, partly themed), hscc-bootstrap (26), hscc-cluster
+(21), hscc-roles (17), hscc-api (6), hscc-commands (1), sparkrun-hermes (1). Then Part 2 (READMEs, 8-10 cards) +
+Part 3 (bootstrap, 3 cards) — NOT started. QUEUED BLOCKED: t_8306890e (dispatcher worktree-placement fix) — unblock
+AFTER Rich CLI Part-1 cards land. Deployment: install_payload re-run after each merge (worker does it).
+CONCERN: multiple workers leaving the PRIMARY checkout dirty (test_why.py earlier, now t_2bcbe6f9's install_cli.py/
+bootstrap.sh/README/test_install_cli.py/audit doc, all UNSTAGED). Sub-c fixed its own (moved into its scratch, landed
+via merge). These dirty PRIMARY files are NOT mine and I do not clean them per operator rule — flag to operator and
+route the owning worker to move them into their worktree/scratch. Watch this recurring.
