@@ -1748,3 +1748,72 @@ def test_empty_digest_renders_watermark_unknown(monkeypatch):
     assert data["coverage"]["watermark"] is None
     out = cmd.render_digest(data)
     assert "data as of <unknown>" in out
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted commands degrade to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI card mandates a NO-ANSI regression per converted command: the
+# one-shot `standup` human view routes the pre-rendered digest through a themed
+# panel, and on a NON-tty (piped) stdout the Console must emit NO escape
+# (\x1b[) bytes — the daemon / scripts / iOS console parse this output. The
+# digest's byte-identical content must be preserved inside the panel; `--json`
+# stays raw json.dumps (no panel, no ANSI).
+
+import io as _io
+from contextlib import redirect_stdout as _redirect_stdout
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestNoAnsiStandup:
+    """`standup`'s one-shot human view degrades to plain on a non-tty stdout."""
+
+    def _inject(self, monkeypatch):
+        import argparse
+        monkeypatch.setattr(registry, "load_registry", lambda path: [_project(verify="pytest")])
+        monkeypatch.setattr(kanban, "list_cards", lambda **kw: [_hcard("t1", status="running")])
+        _install_git(monkeypatch, branch_exists=True, is_merged=False, commits_ahead=3)
+        monkeypatch.setattr(cmd.kanban, "read_max_in_progress", lambda *a, **k: 3)
+        monkeypatch.setattr(kanban, "list_board_watermarks", lambda **kw: {"hscc": NOW})
+        monkeypatch.setattr(cmd.kanban, "list_boards_searched", lambda *a, **k: ["hscc"])
+        monkeypatch.setattr(cmd.kanban, "freshness_watermark", lambda *a, **k: NOW)
+        monkeypatch.setattr(
+            cmd.deployment, "version_drift",
+            lambda p, _run=None: ("1.0", "0.9", "DRIFTED"),
+        )
+        monkeypatch.setattr(cmd.verify, "load_state", lambda *a, **k: {})
+        monkeypatch.setattr(cmd, "_version_update_notice", lambda *a, **k: None)
+        return argparse.Namespace(
+            registry="/tmp/reg.yaml", watch=False, interval=30, now=cmd.time,
+            run=None, sleep=None, state=None, listdir=None, config_path=None,
+            update_state=None, max_fleet=3, json=False,
+        )
+
+    def test_human_view(self, monkeypatch):
+        args = self._inject(monkeypatch)
+        out = _no_ansi(lambda: cmd.cmd_standup(args, "/tmp/reg.yaml"))
+        assert "NEEDS YOU" in out or "RUNNING" in out
+        assert "read 1 projects" in out
+
+    def test_json_has_no_ansi_no_panel(self, monkeypatch):
+        import json as _json
+        args = self._inject(monkeypatch)
+        args.json = True
+        buf = _io.StringIO()
+        with _redirect_stdout(buf):
+            cmd.cmd_standup(args, "/tmp/reg.yaml")
+        got = buf.getvalue()
+        assert "\x1b" not in got
+        parsed = _json.loads(got)
+        assert "needs_you" in parsed and "coverage" in parsed
+        assert not got.startswith("╭") and not got.startswith("┌")
+
