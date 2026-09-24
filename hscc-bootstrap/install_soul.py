@@ -20,6 +20,8 @@ import shutil
 import sys
 import time
 
+import _theme
+
 BEGIN = "<!-- HSCC:BEGIN (managed by hscc-bootstrap — edit above/below, not inside) -->"
 END = "<!-- HSCC:END -->"
 
@@ -246,5 +248,9 @@ if __name__ == "__main__":
     home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
     soul = install_soul(os.path.join(home, "SOUL.md"))
     pers = install_personality(os.path.join(home, "config.yaml"))
-    print(f"SOUL.md: {soul} | ops personality: {pers}")
+    _theme.make_console().print(_theme.panel(
+        "bootstrap",
+        _theme.escape(
+            f"SOUL.md: {soul} | ops personality: {pers}"),
+    ))
     sys.exit(0)

@@ -156,3 +156,31 @@ def test_soul_and_personality_share_one_block(tmp_path):
     ops = yaml.safe_load(open(cp))["personalities"]["ops"]
     pers_block = ops.split(IS.BEGIN, 1)[1].split(IS.END, 1)[0]
     assert soul_block == pers_block
+
+
+# ── NO-ANSI regression (RICH CLI hscc-bootstrap card) ──────────────────────
+# The themed __main__ summary must emit NO \x1b on a non-tty stdout — the same
+# output path the script prints in production, captured to a StringIO (Rich
+# detects a non-terminal and degrades to plain). Guards the copy-paste of the
+# __main__ render expression: if it ever omitted escape() or forced colour, a
+# literal escape byte would trip this.
+
+def test_main_summary_no_ansi(monkeypatch, tmp_path):
+    import contextlib
+    import io
+    import _theme
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    soul = IS.install_soul(str(tmp_path / "SOUL.md"))
+    pers = IS.install_personality(str(tmp_path / "config.yaml"))
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _theme.make_console().print(_theme.panel(
+            "bootstrap",
+            _theme.escape(f"SOUL.md: {soul} | ops personality: {pers}"),
+        ))
+    out = buf.getvalue()
+    assert "SOUL.md:" in out
+    assert "ops personality" in out
+    assert "\x1b" not in out, f"ANSI escape in piped output: {out!r}"
