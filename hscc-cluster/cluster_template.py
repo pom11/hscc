@@ -22,6 +22,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
+import _theme  # guarded themed render helper (peer cli_theme + neutral fallback)
+
 # ── Constants ──────────────────────────────────────────────────────────────
 
 PLUGIN_DIR = Path(__file__).parent
@@ -2210,10 +2212,60 @@ def _extract_model_name(recipe_path: str) -> str:
 
 # ── CLI entry point ────────────────────────────────────────────────────────
 
+def _emit_template(args, result) -> None:
+    """Emit a template command result: raw JSON with ``--json``, else themed.
+
+    The machine ``--json`` path stays ``json.dumps(result, indent=2)``
+    byte-identical (daemon / scripts parse it). The human path renders a themed
+    panel through the shared ``_theme`` layer (plain on non-TTY). Content-derived
+    lines are escaped so literal Rich markup in template content renders
+    literally.
+    """
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2))
+        return
+    esc = _theme.escape
+    console = _theme.make_console()
+    if isinstance(result, dict) and result.get("error"):
+        usage = result.get("usage")
+        body = esc(str(result["error"]))
+        if usage:
+            body = f"{body}\n\nusage: {esc(str(usage))}"
+        console.print(_theme.status_panel(
+            body, status="error", title=f"template {args.command}"))
+        return
+
+    def _flatten(value, depth=0):
+        pad = "  " * depth
+        if isinstance(value, dict):
+            for k, v in value.items():
+                if isinstance(v, (dict, list)) and v:
+                    lines.append(f"{pad}{esc(str(k))}:")
+                    _flatten(v, depth + 1)
+                elif isinstance(v, list) and not v:
+                    lines.append(f"{pad}{esc(str(k))}: (none)")
+                else:
+                    lines.append(f"{pad}{esc(str(k))}: {esc(str(v))}")
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, (dict, list)):
+                    _flatten(item, depth + 1)
+                else:
+                    lines.append(f"{pad}- {esc(str(item))}")
+        else:
+            lines.append(f"{pad}{esc(str(value))}")
+
+    lines = []
+    _flatten(result)
+    console.print(_theme.panel(f"template {args.command}", "\n".join(lines)))
+
+
 def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="HSCC Cluster Template Manager")
+    parser.add_argument("--json", action="store_true",
+                        help="emit raw JSON (machine path, byte-identical)")
     subparsers = parser.add_subparsers(dest="command")
     
     # list
@@ -2232,15 +2284,15 @@ def main():
     
     if args.command == "list":
         result = list_templates()
-        print(json.dumps(result, indent=2))
+        _emit_template(args, result)
     
     elif args.command == "preview":
         result = preview_template(args.template)
-        print(json.dumps(result, indent=2))
+        _emit_template(args, result)
     
     elif args.command == "apply":
         result = apply_template(args.template, confirm=args.confirm)
-        print(json.dumps(result, indent=2))
+        _emit_template(args, result)
     
     else:
         parser.print_help()
