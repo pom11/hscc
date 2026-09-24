@@ -1,0 +1,46 @@
+# 4-node THROUGHPUT — maximum aggregate tokens/sec. Burst mode.
+#
+# USE THIS WHEN the board is a queue of super-atomic single-file cards and
+# decomposition is already done. Nothing here is the smartest model available;
+# everything here is fast, and three workers in parallel beat one good one when
+# the cards are small.
+#
+# MEASURED, one GB10:
+#   orchestrator  Qwen3.6-35B-A3B NVFP4, K=1 spec   116.5 tok/s   31.82 GB
+#   coding x3     North-Mini-Code-1.0 NVFP4          56.7 C1 / 178 agg C10
+#                                                    -> ~530 tok/s fleet aggregate
+#
+# The orchestrator recipe is the LOCAL-FIXED path, not a registry name, on
+# purpose: it is the recipe already staged on the gateway node, so applying
+# this template pulls no weights across the NAS. The NAS is 10G/SATA and is the
+# known staging bottleneck — a template that needs no new weights can be
+# applied during working hours.
+#
+# K=1 IS THE OPTIMUM AND K=2 IS A LOSS. Atlas measured this exact model on a
+# GB10: K=1 116.5 tok/s, no-spec 89.7, K=2 82.2. Speculative depth is
+# model-specific; do not raise it because "more drafts sounds faster".
+#
+# TRADE-OFF, STATED PLAINLY: the A3B orchestrator is a weak decomposer compared
+# to the 122B in `4node-balanced`. Run this when the decomposition is already
+# good and you are paying for execution, not for judgement.
+name: 4node-throughput
+version: 3
+description: "4 nodes: Qwen3.6-35B-A3B NVFP4 orchestrator (116 tok/s) + 3x North-Mini-Code NVFP4 coding (~530 tok/s aggregate). Burst mode. cluster_size=4."
+
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+
+families:
+  - name: coding
+    models:
+      - recipe: "@community/north-mini-code-1.0-nvfp4-vllm-XanuNetworks"
+    workers: remaining
+    proxy: true
+
+routing:
+  delegation: family-coding
+  # Compaction goes to the orchestrator here, NOT the workers — the whole point
+  # of this template is that the worker pool stays saturated with cards. The
+  # A3B orchestrator is fast and comparatively idle, so it absorbs the large
+  # bursty compaction prompt without costing card throughput.
+  compaction: orchestrator

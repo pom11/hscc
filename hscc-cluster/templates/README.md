@@ -162,12 +162,66 @@ nemotron-550b **64 GB (tp=4, needs 4 nodes)**.
 | `1node/` | orchestrator-only | orch only, no workers |
 | `2node/` | coding | orch + 1× 27B-FP8 |
 | `3node/` | coding | orch + 2× 27B-FP8 |
-| `4node/` | **coding** | orch + 3× 27B-FP8 — **the live setup** |
+| `4node/` | coding | orch + 3× 27B-FP8 |
 | `4node/` | coding-plus-fast | coding (2× 27B) + fast (1× A3B-FP8), separate proxies |
 | `4node/` | colocated-dual | 3 workers each running **2× A3B-FP8** (89.8 GB/GPU) |
+| `4node/` | deepseek-v4-orchestrator · dsv4-plus-coding · dual-dsv4 | DSV4 spans — see the speed warning below |
 | `8node/` | coding · coding-plus-fast | orch + 7 workers (single- or two-family) |
 
 Plus the flat top-level: `single-family`, `colocated-two-models`, `hscc-live`.
+
+### 2026-09 generation — registry-sourced, single-node strong tier
+
+The DSV4 templates above decode at **9–14 tok/s**, and that is a property of
+the layout, not of tuning: `@atlas/deepseek-v4-flash-nvfp4-ep2` records
+"~15.5 tok/s (network/all-reduce bound over RoCE)" in its own metadata. A
+cross-node EP/TP span pays an all-reduce on **every decoded token**. The
+templates below keep the strong tier on a single node instead.
+
+These source recipes from the sparkrun **registries** (`@community/…`,
+`@official/…`, `@eugr/…`, `@atlas/…`) rather than local-fixed paths. That
+requires the registry-aware preflight in `recipe_cost.recipe_exists()` — a
+plain `Path.is_file()` check reports every `@reg/name` recipe as missing.
+
+| Dir | Template | Orchestrator | Workers | Notes |
+|-----|----------|--------------|---------|-------|
+| `4node/` | **balanced** | Nemotron-3-Super 120B-A12B NVFP4+MTP, 23.6 tok/s | 2× Qwen3.8-27B-FP8 + 1× North-Mini-Code NVFP4 | **recommended default** |
+| `4node/` | throughput | A3B-NVFP4, **116 tok/s** | 3× North-Mini-Code NVFP4 (~530 tok/s aggregate) | burst mode for atomic cards |
+| `4node/` | quality | Qwen3.8-Flash-Next NVFP4, SWE-bench Pro **62.5** | Qwen3.8-27B NVFP4 DFlash2 (tp=2) + fast | **atlas runtime unproven here** |
+| `4node/` | dual-orch | 2× Nemotron-3-Super 120B-A12B | 2× North-Mini-Code NVFP4 | one brain per project board |
+| `4node/` | review-heavy | Nemotron-3-Super 120B-A12B | 1 coder + 2× Nemotron-3-Nano (88–100 tok/s) | sized for `auto_review` |
+| `3node/` | balanced | Nemotron-3-Super 120B-A12B | 1 coder + 1 fast | degraded fleet / idle-autodown |
+| `2node/` | fast | A3B-NVFP4, 116 tok/s | 1× North-Mini-Code NVFP4 | minimum viable pair |
+
+**Container images are per-node local disk, not NAS — and none of these images
+are on the fleet yet.** Five of the seven templates run entirely on
+`ghcr.io/spark-arena/dgx-vllm-eugr-nightly:latest`, so they cost one pull per
+node. `4node/quality` additionally needs `ghcr.io/atlas-inf/atlas-gb10:latest`
+(pullable) and builds `vllm-node-b12x` locally via `build_args: --exp-b12x`.
+Watch disk: the gateway node was at **95% (44 GB free)** when these were written.
+
+**A recipe whose `container:` has no registry prefix and no `build_args` cannot
+be used at all** — sparkrun can neither pull nor build it. That is what ruled
+out the faster Qwen3.5-122B-A10B int4+MTP orchestrator (~50 tok/s, BFCL-V4 72.2,
+the best open-weight tool-caller measured); its only correctly-tuned recipe
+names `vllm-qwen35-v2:latest`, built by an external pipeline. Its weights are
+staged on the NAS, so if that image is ever built it is a one-line upgrade in
+four templates. Check `sparkrun show --no-vram -- <recipe> | grep Container:`
+before adopting any recipe.
+
+**Two constraints these encode, worth knowing before editing them:**
+
+1. **The orchestrator must batch.** The live `~/.hermes/config.yaml` points
+   *nine* consumers at `orchestrator-model` — the main chat plus
+   `kanban_decomposer`, `triage_specifier`, `curator`, `profile_describer`,
+   `title_generation`, `skills_hub`, `approval` and `mcp`. A recipe pinned to
+   `max_num_seqs: 1` (several atlas ones are, deliberately) serializes that
+   whole set and, on some, errors mid-decode at C>1.
+2. **A template cannot force `tp: 1`.** `_render_serve_cmd` emits `--tp` only
+   when `tp > 1`, so a recipe whose own default is `tensor_parallel: 2` will
+   still try to span two nodes no matter what the template says. Every
+   one-node-per-worker slot above uses a recipe whose own default is already 1.
+   Check with `sparkrun recipe show <name>` before substituting.
 
 A regression test (`tests/test_template_intent.py::test_all_shipped_templates_resolve_and_fit`)
 resolves every node-count template against its N-node cluster with real recipe
