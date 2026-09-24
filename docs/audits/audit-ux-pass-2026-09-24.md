@@ -98,5 +98,20 @@ that is roadmap milestone `profile-provisioning`, done separately. Do NOT touch 
 
 ------------------------------------------------------------
 ## Per-card results (filled as each lands)
-(append each card's report here: card id, branch, commits-ahead, suite numbers both
-interpreters, merged/pushed/deployed, command that produced each number)
+
+### RC1 t_1ca5c6e9 — RICH CLI hscc-project group A (project/sessions/link/map_sessions/digest) — DONE
+- branch wt/t_1ca5c6e9; commits-ahead of main before merge = 3
+  (`git rev-list --count main..wt/t_1ca5c6e9`)
+- merged YES (merge commit 447e6c8, main head 447e6c8b4aed..); pushed YES
+  (`git rev-list --count origin/main..main` = 0); deployed YES (install_payload exit 0)
+- suite: hermes venv 1271 passed / 1 warning; p313 1271 passed / 5 warnings
+  (1254 baseline -> 1271 = +17 no-ANSI tests) — same command run under each interpreter
+- --json byte-identical: `git diff main` combined zero json.dumps +/- lines;
+  e2e proof at docs/audits/t_1ca5c6e9_verify_e2e.py (list --json rc0 hasANSI:False
+  validJSON:True byte-identical:True)
+- key design: non-TTY Rich width default 80 -> content loss (collapsed leading column /
+  mid-phrase wrap) in pipes; fixed via _theme.make_console width=200 on non-terminal.
+- audit note: docs/audits/t_1ca5c6e9_audit.md
+- commits: 20edc8f (theme helper), d1b37ad (conversion), 2c70f47 (widen console + audit)
+
+### RC2 .. (pending)
