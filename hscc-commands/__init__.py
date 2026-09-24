@@ -12,6 +12,11 @@ try:
 except ImportError:  # direct import (tests) without package parent
     import cmdlib
 
+try:
+    from . import _theme
+except ImportError:  # direct import (tests) without package parent
+    import _theme
+
 
 _CONFIRM_WORDS = {"confirm", "yes", "y", "true", "1"}
 
@@ -681,7 +686,6 @@ def cmd_cluster_prune(raw_args):
 def cmd_template(raw_args):
     """List / preview / validate / apply cluster templates from chat.
     Usage: /template [list|status|validate <name>|preview <name>|apply <name> [confirm] [--force-recreate]]"""
-    import json as _json
     parts = (raw_args or "").split()
     sub = parts[0] if parts else "list"
     if sub == "apply":
@@ -702,7 +706,9 @@ def cmd_template(raw_args):
         return ("Usage: /template [list|status|validate <name>|preview <name>|"
                 "apply <name> [confirm] [--force-recreate]]")
     res = cmdlib.template_cli(argv)
-    return "📦 *HSCC template*\n```\n" + _json.dumps(res, indent=2, default=str)[:3000] + "\n```"
+    return ("📦 *HSCC template*\n```\n"
+            + _theme.render_json(res, max_chars=3000)
+            + "\n```")
 
 
 def cmd_workers_up(raw_args):
