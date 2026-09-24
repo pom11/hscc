@@ -29,6 +29,7 @@ import json
 import sys
 
 from hscc_daemon import autodown
+from hscc_daemon import cli_theme as theme
 
 VALID_SUBCOMMANDS = ("stale",)
 
@@ -92,7 +93,52 @@ def _error(msg, json_mode):
     return 1
 
 
-def _cmd_stale(rest, json_mode):
+def _strip_theme(args):
+    """Remove ``--theme <name>`` / ``--theme=<name>`` tokens from an argv slice.
+
+    ``--theme`` only selects the palette for the human view; it is not part of
+    the machine ``--json`` contract. Mirrors ``autodown_cli._strip_theme`` so
+    the kanban group honors the same flag via its own argv (hscc.py passes the
+    kanban argv through unstripped). Returns ``(cleaned, theme_name_or_None)``.
+    """
+    theme_name = None
+    cleaned = []
+    i = 0
+    n = len(args)
+    while i < n:
+        a = args[i]
+        if a == "--theme":
+            if i + 1 < n:
+                theme_name = args[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        if a.startswith("--theme="):
+            theme_name = a.split("=", 1)[1]
+            i += 1
+            continue
+        cleaned.append(a)
+        i += 1
+    return cleaned, theme_name
+
+
+def _console(theme_name=None, **kwargs):
+    """A themed Console for the kanban human view (theme auto-detects).
+
+    Applies the anti-collapse width convention: on a real TTY Rich uses the
+    actual terminal width; on a non-tty stdout (pipe / capture) the console is
+    fixed at width 200 so wide piped rows keep their content instead of
+    wrapping (no explicit ``width=`` wins otherwise).
+    """
+    if sys.stdout.isatty():
+        kwargs.pop("width", None)
+    else:
+        kwargs.setdefault("width", 200)
+    return theme.make_console(theme_name, **kwargs)
+
+
+def _cmd_stale(rest, json_mode, theme_name=None):
     """``hscc kanban stale`` — list or archive stale cards.
 
     With ``--archive <id>`` archives exactly ONE task and nothing else
@@ -122,7 +168,9 @@ def _cmd_stale(rest, json_mode):
         if json_mode:
             print(json.dumps({"archived": task_id, "board": label, "exit": 0}))
         else:
-            print(f"archived {task_id} (board '{label}')")
+            _console(theme_name).print(theme.make_status_panel(
+                f"archived {task_id} (board '{label}')",
+                status="ok", title="kanban"))
         return 0
 
     # Otherwise: list stale tasks.
@@ -143,14 +191,27 @@ def _cmd_stale(rest, json_mode):
             "older_than": older_than,
         }))
     else:
+        console = _console(theme_name)
         if not tasks and not result["errors"]:
-            print("no stale cards — no non-terminal task is older than "
-                  f"{older_than} day{'s' if older_than != 1 else ''}")
-        for t in tasks:
-            assignee = t["assignee"] or "-"
-            print(
-                f"{t['board']:<16} {t['id']:<14} {t['status']:<9} "
-                f"{assignee:<18} {t['age_days']:>4}d  {t['title']}")
+            console.print(theme.make_status_panel(
+                "no stale cards — no non-terminal task is older than "
+                f"{older_than} day{'s' if older_than != 1 else ''}",
+                status="ok", title="kanban"))
+            return 0
+        if tasks:
+            table = theme.make_table("stale cards")
+            table.add_column("board", no_wrap=True)
+            table.add_column("id", no_wrap=True)
+            table.add_column("status", no_wrap=True)
+            table.add_column("assignee", no_wrap=True)
+            table.add_column("age", justify="right", no_wrap=True)
+            table.add_column("title")
+            for t in tasks:
+                assignee = t["assignee"] or "-"
+                age = f"{t['age_days']}d"
+                table.add_row(
+                    t["board"], t["id"], t["status"], assignee, age, t["title"])
+            console.print(table)
         if result["errors"]:
             print("\nWarnings (boards not fully scanned):", file=sys.stderr)
             for e in result["errors"]:
@@ -166,22 +227,28 @@ def cmd_kanban(argv):
     case (api_cli.cmd_api, api_cli.py:275-284). Unknown subcommands exit
     non-zero.
 
-    ``--json`` (for scripting) is honored by every subcommand.
+    ``--json`` (for scripting) is honored by every subcommand. ``--theme``
+    selects the human palette (stripped before dispatch, like autodown_cli).
     """
     if not argv or argv[0] in ("--help", "-h"):
-        print(HELP_TEXT)
+        _console().print(HELP_TEXT)
         return 0
 
     json_mode = "--json" in argv
     # Strip --json so no subcommand has to re-filter it from its own rest.
     argv = [a for a in argv if a != "--json"]
+    # Strip --theme <name> / --theme=<name> too. hscc.py passes raw args[1:]
+    # through to cmd_kanban (it does not run _strip_theme_arg for this group),
+    # so --theme selection for the human palette is handled here.
+    argv, theme_name = _strip_theme(argv)
 
     sub = argv[0]
     rest = argv[1:]
 
     if sub == "stale":
-        return _cmd_stale(rest, json_mode)
+        return _cmd_stale(rest, json_mode, theme_name)
 
-    print(f"Error: unknown kanban subcommand: {sub}")
-    print(f"Valid subcommands: {', '.join(VALID_SUBCOMMANDS)}")
+    _console(theme_name).print(f"Error: unknown kanban subcommand: {sub}")
+    _console(theme_name).print(
+        f"Valid subcommands: {', '.join(VALID_SUBCOMMANDS)}")
     return 1

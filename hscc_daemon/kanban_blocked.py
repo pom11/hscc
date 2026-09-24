@@ -36,6 +36,7 @@ import json
 import sys
 
 from hscc_daemon import autodown
+from hscc_daemon import cli_theme as theme
 
 HELP_TEXT = """\
 HSCC kanban blocked — see WHY a card is blocked and recover it.
@@ -289,7 +290,52 @@ def _error(msg, json_mode):
     return 1
 
 
-def cmd_blocked(rest, json_mode):
+def _strip_theme(args):
+    """Remove ``--theme <name>`` / ``--theme=<name>`` tokens from an argv slice.
+
+    ``--theme`` only selects the palette for the human view; it is not part of
+    the machine ``--json`` contract. Mirrors ``autodown_cli._strip_theme`` so
+    the kanban group honors the same flag via its own argv (hscc.py passes the
+    kanban argv through unstripped). Returns ``(cleaned, theme_name_or_None)``.
+    """
+    theme_name = None
+    cleaned = []
+    i = 0
+    n = len(args)
+    while i < n:
+        a = args[i]
+        if a == "--theme":
+            if i + 1 < n:
+                theme_name = args[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        if a.startswith("--theme="):
+            theme_name = a.split("=", 1)[1]
+            i += 1
+            continue
+        cleaned.append(a)
+        i += 1
+    return cleaned, theme_name
+
+
+def _console(theme_name=None, **kwargs):
+    """A themed Console for the kanban human view (theme auto-detects).
+
+    Applies the anti-collapse width convention: on a real TTY Rich uses the
+    actual terminal width; on a non-tty stdout (pipe / capture) the console is
+    fixed at width 200 so wide piped rows keep their content instead of
+    wrapping (no explicit ``width=`` wins otherwise).
+    """
+    if sys.stdout.isatty():
+        kwargs.pop("width", None)
+    else:
+        kwargs.setdefault("width", 200)
+    return theme.make_console(theme_name, **kwargs)
+
+
+def cmd_blocked(rest, json_mode, theme_name=None):
     """``hscc kanban blocked`` — list blocked cards or recover one.
 
     With ``--recover <id>`` recovers exactly ONE blocked card to ready (never
@@ -334,7 +380,8 @@ def cmd_blocked(rest, json_mode):
             msg = f"recovered {task_id} (board '{label}') to ready"
             if reason:
                 msg += f" — reason: {reason}"
-            print(msg)
+            _console(theme_name).print(theme.make_status_panel(
+                msg, status="ok", title="kanban"))
         return 0
 
     # Otherwise: list blocked tasks.
@@ -348,21 +395,31 @@ def cmd_blocked(rest, json_mode):
             "errors": result["errors"],
         }))
     else:
+        console = _console(theme_name)
         if not tasks and not result["errors"]:
-            print("no blocked cards on any board")
-        for t in tasks:
-            assignee = t["assignee"] or "-"
-            age = f"{t['age_days']}d" if t["age_days"] is not None else "?d"
-            kind = t["block_kind"] or "-"
-            title = (t["title"] or "").strip()
-            print(
-                f"{t['board']:<16} {t['id']:<14} kind={kind:<12} "
-                f"{age:>4}  {title}"
-            )
-            print(f"{'':<16} {'':<14} why: {t['why']}")
-            for c in t["comments"]:
-                first = c.strip().replace("\n", " ")[:160]
-                print(f"{'':<16} {'':<14} comment: {first}")
+            console.print(theme.make_status_panel(
+                "no blocked cards on any board",
+                status="ok", title="kanban"))
+            return 0
+        if tasks:
+            table = theme.make_table("blocked cards")
+            table.add_column("board", no_wrap=True)
+            table.add_column("id", no_wrap=True)
+            table.add_column("kind", no_wrap=True)
+            table.add_column("age", justify="right", no_wrap=True)
+            table.add_column("why")
+            for t in tasks:
+                kind = t["block_kind"] or "-"
+                age = (f"{t['age_days']}d"
+                       if t["age_days"] is not None else "?d")
+                why = t["why"]
+                for c in t["comments"]:
+                    first = c.strip().replace("\n", " ")
+                    if len(first) > 160:
+                        first = first[:160] + "…"
+                    why += "\ncomment: " + first
+                table.add_row(t["board"], t["id"], kind, age, why)
+            console.print(table)
         if result["errors"]:
             print("\nWarnings (boards not fully scanned):", file=sys.stderr)
             for e in result["errors"]:
@@ -378,26 +435,36 @@ def cmd_kanban(argv):
     kanban`` verb has exactly ONE dispatcher, so ``hscc kanban stale`` keeps
     working regardless of merge order. ``--json`` is honored by every
     subcommand. With no subcommand (or ``--help``) prints this group's help and
-    exits 0, matching the other group verbs.
+    exits 0, matching the other group verbs. ``--theme`` selects the human
+    palette (stripped before dispatch, like autodown_cli).
     """
     if not argv or argv[0] in ("--help", "-h"):
-        print(HELP_TEXT)
+        _console().print(HELP_TEXT)
         return 0
 
     json_mode = "--json" in argv
     argv = [a for a in argv if a != "--json"]
+    # Strip --theme <name> / --theme=<name> too. hscc.py passes raw args[1:]
+    # through to cmd_kanban (it does not run _strip_theme_arg for this group),
+    # so --theme selection for the human palette is handled here.
+    argv, theme_name = _strip_theme(argv)
 
     sub = argv[0]
     rest = argv[1:]
 
     if sub == "blocked":
-        return cmd_blocked(rest, json_mode)
+        return cmd_blocked(rest, json_mode, theme_name)
 
     # Delegate `stale` (t_e751e652) when its module is present.
     if sub == "stale":
         try:
             from hscc_daemon import kanban_cli as _kcli
-            return _kcli.cmd_kanban(["stale", *rest])
+            delegated = ["stale", *rest]
+            if theme_name:
+                # Re-inject the palette so the delegated stale renders with the
+                # same theme the user asked for (kanban_cli.cmd_kanban strips it).
+                delegated.append(f"--theme={theme_name}")
+            return _kcli.cmd_kanban(delegated)
         except ImportError:
             return _error(
                 "stale is not available yet (card t_e751e652 not merged)",
