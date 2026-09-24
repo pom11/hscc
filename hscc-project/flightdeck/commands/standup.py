@@ -32,6 +32,7 @@ import yaml
 
 from ..core import deployment, git_state, kanban, registry, verify
 from . import legacy  # reuse legacy-cards' board-attribution rule (orphan boards)
+from ._theme import escape, make_console, panel
 
 DEFAULT_INTERVAL = 30  # seconds between watch frames
 
@@ -1213,7 +1214,9 @@ def cmd_standup(args: argparse.Namespace, registry_path: str) -> int:
     if getattr(args, "json", False):
         print(json.dumps(_render_json(data)))
     else:
-        print(render_digest(data))
+        # route the pre-rendered digest string through a themed panel; escape so
+        # the [board] / [x] literal markers render literally (byte content kept).
+        make_console().print(panel("standup", escape(render_digest(data))))
     return 0
 
 
