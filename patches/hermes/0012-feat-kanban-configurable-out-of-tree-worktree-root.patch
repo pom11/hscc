@@ -1,0 +1,158 @@
+From febbef720de0228c64d344279ff92a76d67be219 Mon Sep 17 00:00:00 2001
+From: pom11 <parsecoriginalmastercraft@gmail.com>
+Date: Thu, 24 Sep 2026 20:24:37 +0300
+Subject: [PATCH] feat(kanban): configurable out-of-tree worktree root for
+ compiler-root repos
+
+Make the dispatcher's worktree placement configurable so repos whose project
+root is itself a build/compiler root can keep their worktrees OUT of the tree.
+Until now the dispatcher hardcoded <repo>/.worktrees/<task-id>; for a repo like
+an AL project that is inside the compiler root and the compiler walks the
+half-finished branch code as part of the real app (.gitignore does not help:
+ignoring a path does not stop a compiler walking the filesystem, and AL has no
+exclude key).
+
+New config key under ~/.hermes/config.yaml:
+  kanban:
+    worktree:
+      out_of_tree_repos: [/abs/path/to/compiler-root-repo]
+      out_of_tree_root: ~/dev/.worktrees   # default when unset
+Worktrees for a listed repo land at <out_of_tree_root>/<repo-name>/<task-id>
+instead of <repo>/.worktrees/<task-id>. Unlisted repos keep the in-tree default,
+so behavior is unchanged for safe repos.
+---
+ hermes_cli/kanban_db_workspace.py             | 31 ++++++++-
+ .../test_kanban_worktree_isolation.py         | 68 +++++++++++++++++++
+ 2 files changed, 96 insertions(+), 3 deletions(-)
+
+diff --git a/hermes_cli/kanban_db_workspace.py b/hermes_cli/kanban_db_workspace.py
+index aa27c810a0..6d7ca69b27 100644
+--- a/hermes_cli/kanban_db_workspace.py
++++ b/hermes_cli/kanban_db_workspace.py
+@@ -411,9 +411,34 @@ def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> Non
+         )
+ 
+ 
++def _worktree_anchor(repo_root: Path) -> Path:
++    """Base directory under which a repo's linked worktrees are materialized.
++
++    Defaults to ``<repo_root>/.worktrees`` (in tree). Repos listed under
++    ``kanban.worktree.out_of_tree_repos`` in ~/.hermes/config.yaml have their root
++    treated as a build/compiler root; their worktrees are placed OUT of the tree under
++    ``kanban.worktree.out_of_tree_root/<repo-name>`` so a compiler or bundler cannot
++    walk half-finished branch code as part of the real app. ``.gitignore`` is not a
++    fix there (ignoring a path does not stop a compiler walking the filesystem) and
++    some toolchains have no exclude key (e.g. Microsoft AL), so the fix is placement.
++    """
++    from hermes_cli.config import load_config_readonly
++    cfg = ((load_config_readonly() or {}).get("kanban", {}) or {}).get("worktree") or {}
++    repos = [str(r).strip() for r in (cfg.get("out_of_tree_repos") or []) if str(r).strip()]
++    root = str(cfg.get("out_of_tree_root") or "").strip() or "~/dev/.worktrees"
++
++    def _norm(p: str) -> str:
++        return str(Path(p).expanduser().resolve(strict=False))
++
++    repo_key = _norm(str(repo_root))
++    if any(repo_key == _norm(r) for r in repos):
++        return Path(_norm(root)) / repo_root.name
++    return repo_root / ".worktrees"
++
++
+ def _anchored_worktree(repo_root: Path, task_id: str, branch_name: str) -> tuple[Path, str]:
+-    """Materialize the canonical ``<repo>/.worktrees/<task-id>`` worktree."""
+-    target = repo_root / ".worktrees" / task_id
++    """Materialize the canonical worktree for a task under the repo's anchor."""
++    target = _worktree_anchor(repo_root) / task_id
+     _ensure_git_worktree(repo_root, target, branch_name)
+     return target, branch_name
+ 
+@@ -468,7 +493,7 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
+         # unsafe under concurrency — so fall back to our own worktree.
+         fallback_root = _repo_root_for_worktree_target(requested.parent)
+         if fallback_root is not None:
+-            fallback = fallback_root / ".worktrees" / task.id
++            fallback = _worktree_anchor(fallback_root) / task.id
+             if fallback.resolve(strict=False) != requested_resolved:
+                 _ensure_git_worktree(fallback_root, fallback, branch_name)
+                 return fallback.resolve(strict=False), branch_name
+diff --git a/tests/hermes_cli/test_kanban_worktree_isolation.py b/tests/hermes_cli/test_kanban_worktree_isolation.py
+index 10a9ab1aff..b95951db7f 100644
+--- a/tests/hermes_cli/test_kanban_worktree_isolation.py
++++ b/tests/hermes_cli/test_kanban_worktree_isolation.py
+@@ -129,5 +129,73 @@ def test_resolve_worktree_falls_back_when_path_occupied(kanban_home, tmp_path):
+     assert head == "wt/sibling"
+ 
+ 
++def test_worktree_anchor_out_of_tree_for_registered_repo(kanban_home, tmp_path, monkeypatch):
++    """Repos listed under kanban.worktree.out_of_tree_repos get their worktrees
++    placed OUT of the tree (under out_of_tree_root/<repo-name>), so a compiler or
++    bundler rooted at the project root never walks branch code. Repos not listed
++    keep the in-tree ``<repo>/.worktrees`` default."""
++    repo = _make_repo(tmp_path)
++    out_root = tmp_path / "out-of-tree"
++
++    def _cfg(repos):
++        return {
++            "kanban": {
++                "worktree": {
++                    "out_of_tree_repos": repos,
++                    "out_of_tree_root": str(out_root),
++                }
++            }
++        }
++
++    monkeypatch.setattr(
++        "hermes_cli.config.load_config_readonly",
++        lambda: _cfg([str(repo)]),
++    )
++    # Registered repo → out of tree.
++    assert kbw._worktree_anchor(repo) == (out_root / repo.name).resolve()
++
++    monkeypatch.setattr(
++        "hermes_cli.config.load_config_readonly",
++        lambda: _cfg([]),
++    )
++    # Not registered → in-tree .worktrees default.
++    assert kbw._worktree_anchor(repo) == (repo / ".worktrees").resolve()
++
++
++def test_resolve_worktree_places_registered_repo_out_of_tree(kanban_home, tmp_path, monkeypatch):
++    """End-to-end: a worktree-kind task on an out-of-tree-registered repo is
++    materialized under ``<out_of_tree_root>/<repo-name>/<task-id>``, not inside
++    the project root."""
++    repo = _make_repo(tmp_path)
++    out_root = tmp_path / "out-of-tree"
++    monkeypatch.setattr(
++        "hermes_cli.config.load_config_readonly",
++        lambda: {
++            "kanban": {
++                "worktree": {
++                    "out_of_tree_repos": [str(repo)],
++                    "out_of_tree_root": str(out_root),
++                }
++            }
++        },
++    )
++
++    with kbc.connect() as conn:
++        tid = kb.create_task(
++            conn,
++            title="task on a compiler-root repo",
++            workspace_kind="worktree",
++            workspace_path=str(repo),  # anchor = repo root
++        )
++        task = kb.get_task(conn, tid)
++
++    workspace, branch = kbw._resolve_worktree_workspace(task)
++    assert workspace == (out_root / repo.name / tid).resolve()
++    assert branch == f"wt/{tid}"
++    # The project root itself must NOT contain the worktree.
++    assert not (repo / ".worktrees").exists()
++    assert (workspace / "README.md").exists()
++
++
+ 
+ 
+-- 
+2.54.0 (Apple Git-157)
+
