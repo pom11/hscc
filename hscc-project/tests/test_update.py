@@ -486,3 +486,62 @@ def _single(obj):
         yield obj
 
     return _iter
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted commands degrade to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI card (group C sub-a) mandated a NO-ANSI regression per converted
+# command: with stdout captured as a NON-tty (piped), the themed Console must
+# emit NO escape (\x1b) bytes. update has no --json path, so every render is
+# themed and must stay byte-clean on a pipe.
+
+import io as _io
+from contextlib import redirect_stdout as _redirect_stdout
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI found in piped update output: {out!r}"
+    assert "\x1b" not in out, f"ANSI found in piped update output: {out!r}"
+    return out
+
+
+class TestNoAnsiUpdate:
+    """`update` human view degrades to plain text on a non-tty stdout."""
+
+    def test_dry_run_update_available(self, tmp_path, monkeypatch):
+        fake = FakeRunner(installed_sha="a" * 40, upstream_sha="b" * 40,
+                          upstream_version="0.7.0")
+        (tmp_path / "VERSION").write_text("0.6.0\n", encoding="utf-8")
+        monkeypatch.setattr(
+            self_update, "installed_source",
+            lambda: {"mechanism": "editable", "source": str(tmp_path)},
+        )
+        out = _no_ansi(lambda: update_cmd.run(
+            _editable_args(tmp_path, run=fake), str(tmp_path / "registry.yaml")))
+        assert "installed  0.6.0" in out
+        assert "would update" in out
+
+    def test_up_to_date(self, tmp_path, monkeypatch):
+        fake = FakeRunner(installed_sha="s" * 40, upstream_sha="s" * 40)
+        (tmp_path / "VERSION").write_text("0.6.0\n", encoding="utf-8")
+        monkeypatch.setattr(
+            self_update, "installed_source",
+            lambda: {"mechanism": "editable", "source": str(tmp_path)},
+        )
+        out = _no_ansi(lambda: update_cmd.run(
+            _editable_args(tmp_path, run=fake), str(tmp_path / "registry.yaml")))
+        assert "already up to date" in out
+
+    def test_non_git(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            self_update, "installed_source",
+            lambda: {"mechanism": "non-git", "source": None},
+        )
+        out = _no_ansi(lambda: update_cmd.run(
+            _editable_args(tmp_path), str(tmp_path / "registry.yaml")))
+        assert "cannot self-update" in out

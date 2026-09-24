@@ -21,6 +21,7 @@ import sys
 
 from ..core import registry, verify
 from ..core.verify import FAIL, NO_VERIFY, PASS
+from ._theme import escape, make_console, panel, status_panel
 
 
 def build_subparser(sub: argparse._SubParsersAction) -> None:
@@ -54,12 +55,6 @@ def _fmt_duration(d: float) -> str:
     if d < 1:
         return f"{d * 1000:.0f}ms"
     return f"{d:.1f}s"
-
-
-def _render_error(error: str) -> None:
-    """Print a FAIL's hint indented, one line per non-blank line."""
-    for line in error.splitlines():
-        print(f"  {line}")
 
 
 def _cmd_single(args: argparse.Namespace, projects: list[registry.Project]) -> int:
@@ -105,15 +100,22 @@ def _cmd_single(args: argparse.Namespace, projects: list[registry.Project]) -> i
         return _single_exit(result.status)
 
     if result.status == NO_VERIFY:
-        print(f"{proj.name}: no verify configured")
+        make_console().print(status_panel(
+            f"{escape(proj.name)}: no verify configured",
+            status="ok", title="verify"))
         return 0
     if result.status == PASS:
-        print(f"{proj.name}: PASS ({_fmt_duration(result.duration_s)})")
+        make_console().print(status_panel(
+            f"{escape(proj.name)}: PASS ({_fmt_duration(result.duration_s)})",
+            status="ok", title="verify"))
         return 0
     # FAIL
-    print(f"{proj.name}: FAIL ({_fmt_duration(result.duration_s)})")
+    lines = [f"{escape(proj.name)}: FAIL ({_fmt_duration(result.duration_s)})"]
     if result.error:
-        _render_error(result.error)
+        for line in result.error.splitlines():
+            lines.append(f"  {escape(line)}")
+    make_console().print(status_panel(
+        "\n".join(lines), status="error", title="verify"))
     return 1
 
 
@@ -130,7 +132,7 @@ def _cmd_all(args: argparse.Namespace, projects: list[registry.Project]) -> int:
     passing. Any FAIL makes the command exit 1.
     """
     if not projects:
-        print("no projects in the registry.")
+        make_console().print(panel("verify", "no projects in the registry."))
         return 0
 
     outcomes: list[dict] = []
@@ -146,26 +148,32 @@ def _cmd_all(args: argparse.Namespace, projects: list[registry.Project]) -> int:
         return 1 if any(o["status"] == FAIL for o in outcomes) else 0
 
     passed = failed = no_verify = 0
+    rows = []
     for o in sorted(outcomes, key=lambda x: x["project"]):
         name = o["project"]
         status = o["status"]
         dur = o["duration_s"]
         if status == PASS:
             passed += 1
-            print(f"  {name:<24} PASS ({_fmt_duration(dur)})")
+            rows.append(f"  {escape(name):<24} PASS ({_fmt_duration(dur)})")
         elif status == FAIL:
             failed += 1
-            print(f"  {name:<24} FAIL ({_fmt_duration(dur)})")
+            rows.append(f"  {escape(name):<24} FAIL ({_fmt_duration(dur)})")
         else:
             no_verify += 1
-            print(f"  {name:<24} no verify configured")
+            rows.append(f"  {escape(name):<24} no verify configured")
 
     summary = f"{passed} passed, {failed} failed, {no_verify} no verify configured"
+    rows.append("")
     if failed:
         summary += "  -- some projects are FAILING"
-        print(summary)
+        rows.append(summary)
+        make_console().print(status_panel(
+            "\n".join(rows), status="error", title="verify --all"))
         return 1
-    print(summary)
+    rows.append(summary)
+    make_console().print(status_panel(
+        "\n".join(rows), status="ok", title="verify --all"))
     return 0
 
 
