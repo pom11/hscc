@@ -27,6 +27,7 @@ import os
 import select
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -35,6 +36,46 @@ import errno
 import shutil
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
+
+# Peer-guarded import of the shared Rich theme. When this module runs as part
+# of the hscc_daemon package the full cli_theme is used; if it is ever invoked
+# standalone (python3 hscc_daemon/event_driven.py <cmd> without the package on
+# sys.path) we fall back to a minimal theme built on `rich` directly so the
+# human CLI commands still render (unthemed) instead of crashing.
+try:
+    from hscc_daemon import cli_theme as theme
+except ImportError:  # pragma: no cover - standalone-script fallback
+
+    class _FallbackTheme:
+        """Minimal fallback so standalone invocation renders, not crashes."""
+
+        @staticmethod
+        def make_console(_theme_name=None, **kwargs):
+            from rich.console import Console
+            kwargs.setdefault("width", 200)
+            return Console(**kwargs)
+
+        @staticmethod
+        def make_status_panel(message, status="ok", *, title="status", **kwargs):
+            from rich.panel import Panel
+            return Panel(f"{status.upper()}  {message}", title=title, **kwargs)
+
+        @staticmethod
+        def make_table(title=None, **kwargs):
+            from rich.table import Table
+            kwargs.setdefault("expand", False)
+            return Table(title=title, **kwargs)
+
+    theme = _FallbackTheme()
+
+
+def _console(**kwargs):
+    """A themed Console for the human CLI views (theme auto-detects)."""
+    if sys.stdout.isatty():
+        kwargs.pop("width", None)
+    else:
+        kwargs.setdefault("width", 200)
+    return theme.make_console(None, **kwargs)
 
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -934,10 +975,12 @@ class EventDrivenDaemon:
 
 def cmd_install_event_driven() -> None:
     """CLI command: install event-driven mode with kqueue + launchd."""
-    print("Installing event-driven mode...")
-    print(f"  Config dir:  {HSCC_DIR}")
-    print(f"  State dir:   {STATE_DIR}")
-    print(f"  Plist dir:   {PLIST_DIR}")
+    console = _console()
+    console.print(theme.make_status_panel(
+        "Installing event-driven mode…", status="ok", title="event-driven"))
+    console.print(f"  Config dir:  {HSCC_DIR}")
+    console.print(f"  State dir:   {STATE_DIR}")
+    console.print(f"  Plist dir:   {PLIST_DIR}")
 
     # Create launchd dir
     os.makedirs(PLIST_DIR, exist_ok=True)
@@ -946,29 +989,51 @@ def cmd_install_event_driven() -> None:
     hscc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hscc.py")
     gen = LaunchdJobGenerator(hscc_script=hscc_path)
 
-    print("\n  Generating launchd jobs:")
+    console.print()
+    console.print("  Generating launchd jobs:")
+    table = theme.make_table()
+    table.add_column("", width=4)
+    table.add_column("stream", no_wrap=True)
+    table.add_column("schedule", no_wrap=True)
+    table.add_column("result")
     for stream, interval in PERIODIC_STREAMS.items():
         success, msg = gen.install_job(stream, interval)
-        status = "✓" if success else "✗"
-        print(f"    {status} {stream:<12s} every {interval:>3s}s  → {msg}")
+        mark = "[ok]✓[/ok]" if success else "[error]✗[/error]"
+        table.add_row(mark, stream, f"every {interval}s", msg)
+    console.print(table)
 
-    print("\n  Kqueue watchers will be started when daemon begins.")
-    print("  Run: python3 hscc.py start-daemon  (uses event-driven mode)")
-    print("  Or install normally: python3 hscc.py install")
+    console.print()
+    console.print("  Kqueue watchers will be started when daemon begins.")
+    console.print(
+        "  Run: [accent]python3 hscc.py start-daemon[/accent]  "
+        "(uses event-driven mode)")
+    console.print(
+        "  Or install normally: [accent]python3 hscc.py install[/accent]")
 
 
 def cmd_uninstall_event_driven() -> None:
     """CLI command: remove event-driven launchd jobs."""
-    print("Removing event-driven launchd jobs...")
+    console = _console()
+    console.print(theme.make_status_panel(
+        "Removing event-driven launchd jobs…", status="warn",
+        title="event-driven"))
     hscc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hscc.py")
     gen = LaunchdJobGenerator(hscc_script=hscc_path)
 
     results = gen.uninstall_all_periodic()
+    table = theme.make_table()
+    table.add_column("", width=4)
+    table.add_column("stream", no_wrap=True)
+    table.add_column("result")
     for stream, (ok, msg) in results.items():
-        status = "✓" if ok else "✗"
-        print(f"  {status} {stream:<12s} → {msg}")
+        mark = "[ok]✓[/ok]" if ok else "[error]✗[/error]"
+        table.add_row(mark, stream, msg)
+    console.print(table)
 
-    print("\nEvent-driven mode removed. Daemons will use fallback polling.")
+    console.print()
+    console.print(theme.make_status_panel(
+        "Event-driven mode removed. Daemons will use fallback polling.",
+        status="ok", title="event-driven"))
 
 
 def cmd_event_status() -> None:
@@ -976,42 +1041,50 @@ def cmd_event_status() -> None:
     hscc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hscc.py")
     gen = LaunchdJobGenerator(hscc_script=hscc_path)
     status = gen.status()
+    console = _console()
 
-    print("Event-Driven Mode Status")
-    print("=" * 60)
-
-    # Kqueue availability
+    # Kqueue availability — a green ok / red error status line.
     kqueue_available = hasattr(select, "kqueue")
-    print(f"  kqueue:         {'Available ✓' if kqueue_available else 'Unavailable ✗ (will use polling)'}")
+    kq_status = ("[ok]Available ✓[/ok]"
+                 if kqueue_available
+                 else "[error]Unavailable ✗ (will use polling)[/error]")
+    console.print(theme.make_status_panel(
+        f"kqueue: {kq_status}", status="ok", title="event-driven status"))
 
-    print()
-    print("  ── Launchd Periodic Jobs ─────────────────────")
-    print(f"  {'Stream':<12s} {'Interval':<10s} {'Exists':<8s} {'Loaded':<8s}")
-    print(f"  {'─'*12} {'─'*10} {'─'*8} {'─'*8}")
-
+    # Launchd periodic jobs — a themed Table.
+    console.print()
+    table = theme.make_table("launchd periodic jobs")
+    table.add_column("stream", no_wrap=True)
+    table.add_column("interval", no_wrap=True)
+    table.add_column("exists", no_wrap=True)
+    table.add_column("loaded", no_wrap=True)
     for stream in PERIODIC_STREAMS:
         info = status.get(stream, {})
-        print(f"  {stream:<12s} {info.get('interval', '?'):<10s} "
-              f"{'yes' if info.get('exists') else 'no':<8s} "
-              f"{'yes' if info.get('loaded') else 'no':<8s}")
+        table.add_row(
+            stream,
+            str(info.get("interval", "?")),
+            "[ok]yes[/ok]" if info.get("exists") else "no",
+            "[ok]yes[/ok]" if info.get("loaded") else "no",
+        )
+    console.print(table)
 
-    print()
-    print("  Kqueue Watchers:")
-    # Check if watchers are active by looking for log entries
+    # Kqueue watchers — active count from the daemon log (best-effort).
+    console.print()
+    console.print("  Kqueue Watchers:")
     try:
         with open(os.path.join(HSCC_DIR, "daemon.log")) as f:
             lines = f.readlines()
         kqueue_lines = [l for l in lines if "KqueueWatcher" in l]
         if kqueue_lines:
-            print(f"    Active watchers found in log ({len(kqueue_lines)} entries)")
+            console.print(
+                f"    Active watchers found in log ({len(kqueue_lines)} entries)")
             for line in kqueue_lines[-5:]:
-                print(f"    {line.strip()}")
+                console.print(f"    {line.strip()}")
         else:
-            print("    No active watchers (daemon not running or polling fallback)")
+            console.print(
+                "    No active watchers (daemon not running or polling fallback)")
     except (FileNotFoundError, IOError):
-        print("    No daemon log found")
-
-    print("=" * 60)
+        console.print("    No daemon log found")
 
 
 # ── Integration with hscc.py ────────────────────────────────────────────────
@@ -1460,16 +1533,16 @@ def run_tests() -> Tuple[int, int]:
 
 def main() -> None:
     """CLI entry point for event_driven.py standalone operations."""
+    console = _console()
     if len(sys.argv) < 2:
-        print("HSCC Event-Driven Module")
-        print("Usage: event_driven.py <command> [args]")
-        print()
-        print("Commands:")
-        print("  install     Install event-driven launchd jobs")
-        print("  uninstall   Remove event-driven launchd jobs")
-        print("  status      Show event-driven mode status")
-        print("  test        Run unit tests")
-        print("  help        Show this help message")
+        console.print("\n[title]HSCC Event-Driven Module[/title]\n")
+        console.print("Usage: event_driven.py <command> [args]\n")
+        console.print("Commands:")
+        console.print("  install     Install event-driven launchd jobs")
+        console.print("  uninstall   Remove event-driven launchd jobs")
+        console.print("  status      Show event-driven mode status")
+        console.print("  test        Run unit tests")
+        console.print("  help        Show this help message")
         sys.exit(0)
 
     cmd = sys.argv[1].lower()
@@ -1482,8 +1555,8 @@ def main() -> None:
     }
 
     if cmd not in commands:
-        print(f"Unknown command: {cmd}")
-        print(f"Available: {', '.join(commands.keys())}")
+        console.print(f"[error]Unknown command: {cmd}[/error]")
+        console.print(f"Available: {', '.join(commands.keys())}")
         sys.exit(1)
 
     try:
@@ -1491,10 +1564,9 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     except Exception as e:
-        print(f"Error: {e}")
+        console.print(f"[error]Error: {e}[/error]")
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    import sys
     main()
