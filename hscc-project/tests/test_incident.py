@@ -244,3 +244,48 @@ def _read_seeded(path):
             return fh.read()
     except (OSError, IOError, UnicodeDecodeError):
         return None
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted command degrades to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI card mandates a NO-ANSI regression per converted command: with
+# stdout captured as a NON-tty (piped), the themed Console must emit NO escape
+# (\x1b[) bytes. incident has no --json mode; the human entry render must stay
+# clean in a pipe.
+
+import io as _io
+from contextlib import redirect_stdout as _redirect_stdout
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestNoAnsiIncident:
+    """`incident`'s entry render degrades to plain on a non-tty stdout."""
+
+    def test_dry_run_render(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        args = _args(repo, apply=False, symptom="probe failed with [x] markup")
+        out = _no_ansi(lambda: cmd.cmd_incident(args, [_project(repo)]))
+        # The literal [x] must survive escaped, rendering as visible text.
+        assert "probe failed with [x] markup" in out
+        assert "**Lesson:**" in out
+        assert not _incidents_path(repo).exists(), "dry-run must not write"
+
+    def test_apply_render(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        args = _args(repo, apply=True)
+        out = _no_ansi(lambda: cmd.cmd_incident(args, [_project(repo)]))
+        assert "**Symptom:** probe reported" in out
+        assert _incidents_path(repo).exists(), "--apply must write"
+

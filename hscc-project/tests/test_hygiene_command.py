@@ -197,3 +197,71 @@ def test_archived_worktree_skipped_when_branch_unmerged(monkeypatch, capsys):
     rc = cmd.cmd_hygiene(_args(), [_project()])
     assert rc == 0
     assert "STALE WORKTREES (1)" not in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted command degrades to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI card mandates a NO-ANSI regression per converted command: with
+# stdout captured as a NON-tty (piped), the themed Console must emit NO escape
+# (\x1b[) bytes. --json stays byte-identical and raw (never routed through a
+# Console).
+
+import io as _io
+from contextlib import redirect_stdout as _redirect_stdout
+import json as _json
+
+
+def _no_ansi(fn, **kwargs):
+    buf = _io.StringIO()
+    with _redirect_stdout(buf):
+        fn(**kwargs)
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestNoAnsiHygiene:
+    """`hygiene`'s human views degrade to plain on a non-tty stdout."""
+
+    def _stub(self, monkeypatch):
+        monkeypatch.setattr(kanban, "list_cards", lambda **kw: [
+            _hcard("a", "MCP Server Core", created_at=100),
+            _hcard("b", "MCP Server Core", created_at=200),
+        ])
+        monkeypatch.setattr(cmd, "_git_facts_for_cards", lambda *a, **k: {})
+        monkeypatch.setattr(cmd, "_collect_worktrees", lambda *a, **k: [])
+        monkeypatch.setattr(cmd, "_worktree_safety_facts", lambda *a, **k: {})
+        monkeypatch.setattr(cmd, "_dir_size", lambda *a, **k: 0)
+
+    def test_plan_render(self, monkeypatch):
+        self._stub(monkeypatch)
+        out = _no_ansi(lambda: cmd.cmd_hygiene(
+            _args(), [_project()]))
+        assert "DUPLICATES (1)" in out
+        assert "MCP Server Core" in out
+        assert "keep" in out
+
+    def test_clean_status(self, monkeypatch):
+        monkeypatch.setattr(kanban, "list_cards", lambda **kw: [
+            _hcard("a", "MCP Server Core"),
+            _hcard("b", "Deploy PostgreSQL"),
+        ])
+        monkeypatch.setattr(cmd, "_git_facts_for_cards", lambda *a, **k: {})
+        monkeypatch.setattr(cmd, "_collect_worktrees", lambda *a, **k: [])
+        out = _no_ansi(lambda: cmd.cmd_hygiene(_args(), [_project()]))
+        assert "hygiene clean" in out
+
+    def test_json_byte_identical(self, monkeypatch):
+        self._stub(monkeypatch)
+        out = _no_ansi(lambda: cmd.cmd_hygiene(
+            _args(json=True), [_project()]))
+        # --json output must be EXACTLY json.dumps of its own parsed payload +
+        # the print() newline: standard compact separators, no wrapping, no
+        # ANSI — i.e. the raw print path, never a Console. (A Console would wrap
+        # to width=200 and re-format, breaking byte-equality.)
+        assert out == _json.dumps(_json.loads(out)) + "\n", "--json must be byte-identical to json.dumps"
+        payload = _json.loads(out)
+        assert set(payload) == {"duplicates", "triage", "stale_worktrees", "worktree_keeps"}
+
