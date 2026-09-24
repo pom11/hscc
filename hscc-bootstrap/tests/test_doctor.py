@@ -1027,3 +1027,41 @@ class TestDoctorCLI:
             assert result == 0
         finally:
             sys.stdout = old_stdout
+
+
+class TestDoctorNoAnsi:
+    """The themed human view (doctor --text) emits NO \x1b on a non-tty stdout,
+    while --json stays byte-identical. The RICH CLI card mandated a NO-ANSI
+    regression per converted command: piped output must stay clean (scripts /
+    daemons parse it) and --json must equal canonical dumps exactly.
+    """
+
+    def _capture(self, argv):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result = doctor.main(argv)
+        return result, buf.getvalue()
+
+    def test_human_view_is_plain_no_ansi(self, tmp_path, monkeypatch):
+        config_path = tmp_path / "config.yaml"
+        with open(config_path, "w") as f:
+            yaml.safe_dump({"plugins": {"enabled": []}}, f)
+        os.makedirs(os.path.join(str(tmp_path), "hermes-agent"), exist_ok=True)
+        result, out = self._capture(["--text"])
+        assert out, "expected doctor human output to be non-empty"
+        assert "\x1b" not in out, f"ANSI escape in piped output: {out!r}"
+        assert "python" in out  # the python check name survives the themed render
+
+    def test_json_stays_byte_identical(self, tmp_path, monkeypatch):
+        config_path = tmp_path / "config.yaml"
+        with open(config_path, "w") as f:
+            yaml.safe_dump({"plugins": {"enabled": []}}, f)
+        os.makedirs(os.path.join(str(tmp_path), "hermes-agent"), exist_ok=True)
+        result, out = self._capture(["--json"])
+        import json as _json
+        res = doctor.run_doctor()
+        assert out == _json.dumps(res, indent=2) + "\n", (
+            "--json must be byte-identical to canonical dumps")
+        assert "\x1b" not in out

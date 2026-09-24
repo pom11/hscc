@@ -30,6 +30,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import _theme
+
 def _expected_shebang(venv_python: Path) -> str:
     return f"#!{venv_python}"
 
@@ -144,7 +146,10 @@ if __name__ == "__main__":
     import json
     args = sys.argv[1:]
     if len(args) != 2:
-        print("usage: install_cli.py <venv-python> <hscc-cli-dir>", file=sys.stderr)
+        _theme.make_console(file=sys.stderr).print(_theme.panel(
+            "usage",
+            _theme.escape("install_cli.py <venv-python> <hscc-cli-dir>"),
+        ))
         sys.exit(2)
     result = install_cli(args[0], args[1])
     print(json.dumps(result, indent=2))
