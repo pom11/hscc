@@ -150,12 +150,12 @@ class TestNoAnsiTemplateCli:
 
     def test_json_byte_identical(self):
         # __main__ --json path is exercised as a real subprocess against THIS
-        # worktree's plugin dir (not the primary checkout) and must byte-equal
-        # the canonical raw dump.
+        # worktree's plugin dir and must byte-equal the canonical raw dump.
+        # Compute the plugin dir from THIS test file's own location (immune to
+        # sys.path ordering), exactly as hscc-cluster/tests/conftest.py does.
         import os
         import subprocess as _sp
-        plugin_dir = os.path.dirname(os.path.dirname(
-            os.path.abspath(cluster_template_cli.__file__)))
+        plugin_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         result = _sp.run(
             ["python", os.path.join(plugin_dir, "cluster_template_cli.py"),
              "list", "--json"],
