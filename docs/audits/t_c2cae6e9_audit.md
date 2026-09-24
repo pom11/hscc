@@ -27,6 +27,12 @@ Baseline on `main` was 1318 passed for hscc-project; +8 = the 8 new no-ANSI
 regression tests added in this card (metrics +2, release +2, sync +3,
 ingest +1).
 
+After merging the head of `main` (which had meanwhile gained sibling sub-c's
+tests from t_4a548958) back into this branch, the full hscc-project suite is
+again green: **1339 passed** under both interpreters (no conflicts; sub-c's
+files are a disjoint set from this card's four commands + their tests). E2E
+script still passes in the merged tree.
+
 ## What changed (source)
 
 Theming happens at the presentation call site (`cmd_*` / `_print_*`), NOT
