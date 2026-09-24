@@ -26,6 +26,7 @@ import os
 import sys
 
 from ..core import git_state, hygiene, kanban, registry
+from ._theme import escape, make_console, panel, status_panel
 
 # Boards are read across the whole host, not just those in the registry: an
 # orphan board is itself a hygiene signal, and duplicates/triage make sense on
@@ -208,8 +209,9 @@ def _render(plan: dict) -> list[str]:
     for group in dup:
         keeper = group["keep"]
         lines.append(
-            f"  [{keeper['board']}] {keeper['title']!r} — keep {keeper['id']}, "
-            f"archive {', '.join(c['id'] for c in group['archive'])}"
+            f"  [{escape(keeper['board'])}] {escape(repr(keeper['title'] or ''))} — "
+            f"keep {escape(keeper['id'])}, "
+            f"archive {escape(', '.join(c['id'] for c in group['archive']))}"
         )
     lines.append("")
 
@@ -223,8 +225,9 @@ def _render(plan: dict) -> list[str]:
         commits = rescue["commits_ahead"]
         summary = "work on branch" if work else "no work on branch"
         lines.append(
-            f"  [{card['board']}] {card['title']!r} ({card['id']}) "
-            f"branch={rescue['branch']} ({summary}, {commits} commits) — "
+            f"  [{escape(card['board'])}] {escape(repr(card['title'] or ''))} "
+            f"({escape(card['id'])}) "
+            f"branch={escape(rescue['branch'])} ({summary}, {commits} commits) — "
             f"archive + recreate preserving branch"
         )
     lines.append("")
@@ -237,13 +240,13 @@ def _render(plan: dict) -> list[str]:
     for s in stale:
         size_n = s.get("freed_bytes") or 0
         lines.append(
-            f"  [PRUNE] [{s['board']}] {s['worktree']} "
-            f"(branch {s['branch']}, frees {_human_bytes(size_n)})"
+            f"  [PRUNE] [{escape(s['board'])}] {escape(s['worktree'])} "
+            f"(branch {escape(s['branch'])}, frees {_human_bytes(size_n)})"
         )
     for k in keeps:
         reason = "; ".join(k.get("keep_reasons") or []) or "kept"
         lines.append(
-            f"  [KEEP]  [{k['board']}] {k['worktree']} — {reason}"
+            f"  [KEEP]  [{escape(k['board'])}] {escape(k['worktree'])} — {escape(reason)}"
         )
     total_freed = sum((s.get("freed_bytes") or 0) for s in stale)
     if stale:
@@ -376,10 +379,13 @@ def cmd_hygiene(args: argparse.Namespace, projects: list[registry.Project]) -> i
         print(json.dumps(_render_json(plan)))
     else:
         if n_issues == 0:
-            print("hygiene clean: no duplicate cards, no triage traps, no stale worktrees.")
+            make_console().print(status_panel(
+                "hygiene clean: no duplicate cards, no triage traps, no stale worktrees.",
+                status="ok", title="hygiene"))
             return 0
-        for line in _render(plan):
-            print(line)
+        # Line-looping human render: accumulate then print ONE themed panel.
+        body = "\n".join(_render(plan)).rstrip("\n")
+        make_console().print(panel("hygiene", body))
 
     if args.apply:
         # Perform the fixes through the injectable handles attached by run().
