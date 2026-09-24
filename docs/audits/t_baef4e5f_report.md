@@ -36,12 +36,22 @@ above. All 8 packages green.
 ## Merge / push / deploy status
 
 - **Branch:** `wt/t_baef4e5f`
-- **Commits ahead of main (mine):** 2 — `cb5e100` (feat roles _theme) + `af3f498`
-  (report skeleton). Plus a merge commit `1be989e` (main merged in, no conflicts;
-  sibling t_e67544b1 the hscc-cluster card was disjoint).
-- **Merge:** clean into `main` (disjoint from sibling hscc-cluster work).
-- **Push:** `git push origin main`.
-- **Deploy:** `python3 hscc-bootstrap/install_payload.py` from primary checkout.
+- **Commits ahead of main (mine, pre-merge):** 5 vs origin/main (2 source:
+  `cb5e100` feat roles _theme + `af3f498` report skeleton; 2 merge commits
+  bringing both generations of the sibling hscc-cluster card t_e67544b1 in;
+  1 report `56c4f8d`).
+- **Merge:** clean fast-forward `0c8c8b9..a04b5a3` into `main` (disjoint from
+  the sibling hscc-cluster work). **YES.**
+- **Push:** `git push origin main` → `0c8c8b9..a04b5a3 main -> main` on
+  github.com/pom11/hscc. **YES.**
+- **Deploy:** `python3 hscc-bootstrap/install_payload.py` from the primary
+  checkout `/Users/desac/dev/hscc` → all payload entries installed with
+  backups, `missing: []` (hscc-roles included). Verified in the deployed
+  runtime `~/.hermes/plugins/hscc-roles/`: `_theme.py` present, 13
+  `make_console` usages, only the 3 byte-identical `json.dumps` paths remain
+  raw, `hscc.py list` renders the themed table with 0 ANSI bytes when piped.
+  **YES (deployed).**
+- **Suite on merged main:** `786 passed, 1 skipped` under BOTH interpreters.
 
 ## What changed (source)
 
