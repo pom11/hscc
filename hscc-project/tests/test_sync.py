@@ -1062,3 +1062,84 @@ def test_render_shows_board_block_and_existing_cards_stay_wording():
     assert "BOARDS" in out
     assert "UNSET" in out
     assert "existing cards stay on their current board." in out
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — themed human view degrades to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI group C card mandated a NO-ANSI regression per converted
+# command: with stdout captured as a NON-tty StringIO, the themed Console must
+# emit NO escape (\x1b) bytes — scripts / daemons parse this output and a
+# single escaped byte in a pipe breaks a watcher. --json stays byte-identical:
+# cmd_sync's --json stdout is raw `print(_render_json(...))`, never boxed by a
+# themed Console.
+import io as _io
+import contextlib as _contextlib
+import json as _json
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _contextlib.redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+def _sync_args(reg, *, apply=False, json=False, create_boards=False,
+               ignore_topic=None, repos=None, topics=None, boards=None,
+               board_cards=None, client=None):
+    import argparse
+
+    # client defaults to a non-None sentinel so cmd_sync consults the injected
+    # discover_topics (Telegram removed; discovery otherwise returns nothing).
+    args = argparse.Namespace(
+        project_cmd="sync",
+        apply=apply,
+        json=json,
+        repos=repos or ["~/dev/hscc"],
+        _run=None,
+        _boards={"hscc": 0},
+        client=object(),
+        roots=None,
+        registry=reg,
+        create_boards=create_boards,
+        ignore_topic=ignore_topic,
+        _topics=None,
+        _kdb=None,
+    )
+    sync_cmd.discover_repos = lambda roots=None, _run=None: args.repos
+    sync_cmd.discover_boards = lambda: boards or ["hscc"]
+    sync_cmd.discover_topics = lambda _client=None: topics or [Topic(140, "HSCC cluster")]
+    return args
+
+
+class TestSyncNoAnsi:
+    """`sync`'s human proposal is plain on a non-tty stdout; --json stays
+    byte-identical (raw print, never boxed)."""
+
+    def test_dry_run_human_view_is_plain(self, tmp_path):
+        reg = str(tmp_path / "registry.yaml")
+        out = _no_ansi(lambda: sync_cmd.cmd_sync(_sync_args(reg, apply=False)))
+        assert "MATCHED" in out and "--apply" in out
+        # the proposal content survives theming
+        assert "HSCC cluster" in out or "hscc" in out
+
+    def test_apply_human_view_is_plain(self, tmp_path):
+        reg = str(tmp_path / "registry.yaml")
+        out = _no_ansi(lambda: sync_cmd.cmd_sync(_sync_args(reg, apply=True)))
+        assert "applied: wrote 'hscc'" in out
+
+    def test_json_stays_byte_identical(self, tmp_path):
+        reg = str(tmp_path / "registry.yaml")
+        out = _no_ansi(lambda: sync_cmd.cmd_sync(_sync_args(reg, apply=False, json=True)))
+        # --json stdout must be exactly the same bytes as raw _render_json —
+        # no box border, no ANSI. Rebuild the same report from the same inputs.
+        report = sync_cmd.run_sync(
+            repos=["~/dev/hscc"], topics=[Topic(140, "HSCC cluster")],
+            boards=["hscc"], projects=[], board_cards={"hscc": 0},
+        )
+        assert out == sync_cmd._render_json(report, {"hscc": 0}) + "\n"
+

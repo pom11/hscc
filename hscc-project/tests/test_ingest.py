@@ -874,3 +874,45 @@ def test_ask_inline_wins_over_card_dispatch_even_with_kdb(tmp_path, capsys):
     assert rc == 0
     assert len(calls) == 1
     assert kdb.created == []
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — themed human view degrades to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI group C card mandated a NO-ANSI regression per converted
+# command: with stdout captured as a NON-tty StringIO, the themed Console must
+# emit NO escape (\x1b) bytes — scripts / daemons parse this output and a
+# single escaped byte in a pipe breaks a watcher. ingest's PROPOSED ROADMAP
+# panel contains `- [x]` / `- [ ]` checklist brackets which must render
+# LITERALLY (escaped, never swallowed as Rich style tags). No --json route.
+import io as _io
+import contextlib as _contextlib
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _contextlib.redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestIngestNoAnsi:
+    """`ingest`'s PROPOSED ROADMAP panel is plain on a non-tty stdout, and the
+    `- [x]` / `- [ ]` checklist marks render literally (not swallowed as Rich
+    style tags)."""
+
+    def test_proposed_roadmap_is_plain_and_marks_literal(self, tmp_path):
+        args = _build_args(tmp_path, repo_files={"README.md": "# demo\nlocal readme"})
+        out = _no_ansi(lambda: ing.cmd_ingest(
+            args, [_project(repo=args._repo, topic=140)]))
+        assert "PROPOSED ROADMAP" in out
+        assert "auth-hardening" in out and "billing" in out
+        # checklist brackets survive escaping, render as literal `- [x]` / `- [ ]`
+        assert "- [x]" in out and "- [ ]" in out
+        # wrapper prose is NOT presented (only the clean extracted roadmap)
+        assert "Here is your roadmap proposal" not in out
+        assert "```" not in out
+
