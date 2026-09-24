@@ -273,3 +273,60 @@ def test_default_registry_path_still_groups_by_project(db_and_registry, tmp_path
     assert result.by_project != {"unmapped": result.sessions}, (
         "default registry_path lost every project mapping")
     assert any(p != "unmapped" for p in result.by_project)
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted command degrades to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI card mandates a NO-ANSI regression per converted command: with
+# stdout captured as a NON-tty (piped), the themed Console must emit NO escape
+# (\x1b[) bytes. --json stays byte-identical and raw (never routed through a
+# Console).
+
+import io as _io
+from contextlib import redirect_stdout as _redirect_stdout
+import json as _json
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestNoAnsiArchive:
+    """`archive-sessions` degrades to plain on a non-tty stdout; --json raw."""
+
+    def test_human(self, db_and_registry, tmp_path):
+        db, reg = db_and_registry
+        out = _no_ansi(lambda: archive_run(
+            _run_args(reg, out=str(tmp_path / "out"), db=db), reg))
+        assert "archived 4 session(s), 6 message(s)" in out
+        assert "hscc" in out and "ecofire-app" in out
+
+    def test_json_byte_identical(self, db_and_registry, tmp_path):
+        db, reg = db_and_registry
+        out_dir = str(tmp_path / "out")
+        out = _no_ansi(lambda: archive_run(
+            _run_args(reg, json=True, out=out_dir, db=db), reg))
+        # Re-run to build the canonical payload the command itself dumps (same
+        # out dir so index_path matches).
+        result = archive_sessions(out_dir=out_dir, db_path=db,
+                                  registry_path=reg)
+        canonical = _json.dumps({
+            "out_dir": out_dir,
+            "sessions": result.sessions,
+            "messages": result.messages,
+            "bytes_written": result.bytes_written,
+            "files": result.files,
+            "by_project": result.by_project,
+            "by_thread": result.by_thread,
+            "unmapped_threads": result.unmapped_threads,
+            "index": result.index_path,
+        }, indent=2) + "\n"
+        assert out == canonical, "--json output must be byte-identical"
+
