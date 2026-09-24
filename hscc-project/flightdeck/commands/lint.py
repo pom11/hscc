@@ -21,6 +21,7 @@ import os
 import sys
 
 from ..core import kanban, lint
+from ._theme import escape, make_console, panel
 
 
 def _read_line_counts(body: str, repo_root: str) -> dict[str, int]:
@@ -58,6 +59,7 @@ def cmd_lint(args: argparse.Namespace, cards: list[dict]) -> int:
         counts_fn = lambda body: _read_line_counts(body, repo_root)
     projects = getattr(args, "projects", None) or []
 
+    lines: list[str] = []
     advisory = 0
     for card in sorted(cards, key=lambda c: str(c.get("id") or "")):
         body = card.get("body") or ""
@@ -72,12 +74,13 @@ def cmd_lint(args: argparse.Namespace, cards: list[dict]) -> int:
             continue
         advisory += 1
         title = card.get("title") or "(untitled)"
-        print(f"[{card.get('id') or '?'}] {title}")
+        card_id = escape(f"[{card.get('id') or '?'}]")
+        lines.append(f"{card_id} {escape(title)}")
         for issue in issues:
-            print(f"    - {issue}")
+            lines.append(f"    - {escape(issue)}")
 
     if advisory == 0:
-        print("lint clean: every card has a VERIFY: line and an acceptance criterion.")
+        lines.append("lint clean: every card has a VERIFY: line and an acceptance criterion.")
 
     # CRITICAL: a card that would run in a repo's MAIN TREE. This is the gate —
     # reported first and loudly, and any occurrence makes the command exit
@@ -85,20 +88,24 @@ def cmd_lint(args: argparse.Namespace, cards: list[dict]) -> int:
     critical = kanban.main_tree_cards(cards, projects)
     if critical:
         word = "card" if len(critical) == 1 else "cards"
-        print(
-            f"\nCRITICAL: {len(critical)} {word} would run in a repo's MAIN TREE "
+        lines.append(
+            f"CRITICAL: {len(critical)} {word} would run in a repo's MAIN TREE "
             f"(workspace must be under <repo>/.worktrees/, not the repo root):"
         )
         for v in critical:
             proj = v.get("project") or "?"
-            print(
-                f"    [{v.get('id')}] {v.get('title')} — "
-                f"workspace {v.get('path')} (project {proj})"
+            crit_id = escape(f"[{str(v.get('id'))}]")
+            lines.append(
+                f"    {crit_id} {escape(v.get('title'))} — "
+                f"workspace {escape(str(v.get('path')) or '')} "
+                f"(project {escape(proj)})"
             )
+        make_console().print(panel("lint-cards", "\n".join(lines)))
         return 1
 
     if advisory:
-        print(f"\n{advisory} card(s) have advisory findings (non-fatal).")
+        lines.append(f"{advisory} card(s) have advisory findings (non-fatal).")
+    make_console().print(panel("lint-cards", "\n".join(lines)))
     return 0
 
 

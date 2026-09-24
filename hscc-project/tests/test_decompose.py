@@ -865,3 +865,72 @@ def _n15_default_args(home, repo_root, *, timeout=None, extra_attrs=None):
     if extra_attrs:
         kw.update(extra_attrs)
     return _ns(**kw)
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted command degrades to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI group C card mandated a NO-ANSI regression per converted
+# command: with stdout captured as a NON-tty StringIO, the themed Console must
+# emit NO escape (\x1b[) bytes — the daemon / scripts / iOS console parse this
+# output, and a single escaped byte in a pipe breaks a watcher. decompose has
+# no --json path, so only the human proposal view is pinned.
+import io as _io
+import contextlib as _contextlib
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _contextlib.redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestDecomposeNoAnsi:
+    """`decompose`'s human proposal view is plain on a non-tty stdout."""
+
+    def test_proposal_dry_run_is_plain(self, tmp_path, monkeypatch):
+        home = _seed(str(tmp_path / "tpl"))
+        repo_root = str(tmp_path / "repo")
+        os.makedirs(repo_root, exist_ok=True)
+        proposal = _proposal(
+            _card(1, refs=["foo.py:1:f"], depends_on=[]),
+            _card(2, refs=["bar.py:1:f"], depends_on=[1]),
+        )
+        args = _base_args(proposal, home=home, repo_root=repo_root, apply=False)
+        kb = FakeKB()
+        _stub_kb(kb, monkeypatch)
+
+        out = _no_ansi(lambda: dec.cmd_decompose(args, [_project()]))
+        assert "ACCEPTED CARDS" in out
+        assert "dry-run" in out
+        assert "DEPENDENCY EDGES" in out
+
+    def test_proposal_view_escapes_markup_in_body(self, tmp_path, monkeypatch):
+        """A title carrying Rich markup renders literally, not as a style tag."""
+        home = _seed(str(tmp_path / "tpl"))
+        repo_root = str(tmp_path / "repo")
+        os.makedirs(repo_root, exist_ok=True)
+        proposal = _proposal(_card(
+            1, title="do [bold]this[/bold]", refs=["foo.py:1:f"], depends_on=[]))
+        args = _base_args(proposal, home=home, repo_root=repo_root, apply=False)
+        kb = FakeKB()
+        _stub_kb(kb, monkeypatch)
+
+        out = _no_ansi(lambda: dec.cmd_decompose(args, [_project()]))
+        assert "[bold]this[/bold]" in out
+
+    def test_apply_success_is_plain(self, tmp_path, monkeypatch):
+        home = _seed(str(tmp_path / "tpl"))
+        repo_root = str(tmp_path / "repo")
+        os.makedirs(repo_root, exist_ok=True)
+        proposal = _proposal(_card(1, refs=["foo.py:1:f"], depends_on=[]))
+        args = _base_args(proposal, home=home, repo_root=repo_root, apply=True)
+        kb = FakeKB()
+        _stub_kb(kb, monkeypatch)
+
+        out = _no_ansi(lambda: dec.cmd_decompose(args, [_project()]))
+        assert "created card" in out
