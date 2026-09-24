@@ -46,6 +46,7 @@ import yaml
 
 from ..core import git_state, kanban, registry
 from . import review
+from ._theme import escape, make_console, panel
 
 # Interval between --watch frames. Mirrors standup's DEFAULT_INTERVAL.
 DEFAULT_INTERVAL = 30
@@ -761,8 +762,11 @@ def cmd_qa(args: argparse.Namespace) -> int:
     if json_out:
         print(json.dumps(_render_json(rows, unchecked)))
         return 0
-    for line in _render(rows, unchecked):
-        print(line)
+    # The one-shot human view: theme the whole rendered queue as one Panel.
+    # ``_render`` output (also used verbatim by --watch) is escaped for Rich so
+    # bracket-bearing ids/titles render literally, never as markup. Rich
+    # degrades to plain on a non-tty stdout (the --json path above is untouched).
+    make_console().print(panel("qa", escape("\n".join(_render(rows, unchecked)))))
     return 0
 
 

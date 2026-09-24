@@ -31,6 +31,7 @@ import argparse
 import sys
 
 from ..core import kanban, registry
+from ._theme import escape, make_console, panel, status_panel
 
 
 def _get_project(projects: list[registry.Project], project_name: str):
@@ -53,10 +54,13 @@ def cmd_send(args: argparse.Namespace, projects: list[registry.Project]) -> int:
             file=sys.stderr,
         )
         return 2
-    print(f"message send: no delivery target — Telegram has been removed.")
-    print(f"would post to {args.project or '<detected>'} (topic records kept in the "
-          f"registry but no outbound send exists).")
-    print(f"---\n{args.message}\n---")
+    target = args.project or "<detected>"
+    make_console().print(panel(
+        "message send",
+        f"message send: no delivery target — Telegram has been removed.\n"
+        f"would post to {escape(target)} (topic records kept in the "
+        f"registry but no outbound send exists).\n"
+        f"---\n{escape(args.message)}\n---"))
     return 0
 
 
@@ -65,10 +69,13 @@ def cmd_send(args: argparse.Namespace, projects: list[registry.Project]) -> int:
 # --------------------------------------------------------------------------- #
 
 def cmd_read(args: argparse.Namespace, projects: list[registry.Project]) -> int:
-    print(f"message read: no source — Telegram has been removed.")
-    print(f"topic records for {args.project or '<detected>'} are kept in the "
-          f"registry for historical import reads, but there is no live "
-          f"Telegram transport to read from.")
+    target = args.project or "<detected>"
+    make_console().print(panel(
+        "message read",
+        f"message read: no source — Telegram has been removed.\n"
+        f"topic records for {escape(target)} are kept in the "
+        f"registry for historical import reads, but there is no live "
+        f"Telegram transport to read from."))
     return 0
 
 
@@ -293,16 +300,17 @@ def cmd_dispatch(args: argparse.Namespace, projects: list[registry.Project]) -> 
     # and anchors a worktree), so it earns the gate. Telegram has been removed,
     # so there is no announce step.
     if not getattr(args, "apply", False):
-        print(f"dispatch (dry-run) project={args.project} board={board!r}:")
-        print(f"  card title: {args.task}")
+        plan_lines = [f"dispatch (dry-run) project={args.project} board={board!r}:"]
+        plan_lines.append(f"  card title: {escape(args.task)}")
         if assignee := getattr(args, "assignee", None):
-            print(f"  assignee  : {assignee}")
+            plan_lines.append(f"  assignee  : {escape(assignee)}")
         if body is not None:
-            print(f"  card body : {body}")
+            plan_lines.append(f"  card body : {escape(body)}")
         elif announcement != args.task:
-            print(f"  card body : {announcement}")
+            plan_lines.append(f"  card body : {escape(announcement)}")
         if dependents_notice:
-            print(f"  dependents: {dependents_notice}")
+            plan_lines.append(f"  dependents: {escape(dependents_notice)}")
+        make_console().print(panel("message dispatch — plan", "\n".join(plan_lines)))
         print("dry-run: pass --apply to create the card (Telegram removed, so there is nothing to announce).", file=sys.stderr)
         return 0
 
@@ -342,10 +350,10 @@ def cmd_dispatch(args: argparse.Namespace, projects: list[registry.Project]) -> 
 
     # Telegram (the outbound announce surface) has been removed, so dispatch
     # is complete once the card exists — nothing is announced.
-    print(
+    make_console().print(status_panel(
         f"card {card_id} created on board {board!r} "
-        "(Telegram removed — not announced)."
-    )
+        "(Telegram removed — not announced).",
+        status="ok", title="message dispatch"))
     return 0
 
 
@@ -357,14 +365,15 @@ def cmd_broadcast(args: argparse.Namespace, projects: list[registry.Project]) ->
     # Telegram (the outbound topic-delivery surface) has been removed, so a
     # broadcast cannot deliver to any project. The command is retained but
     # reports it has no delivery mechanism.
-    print("message broadcast: no delivery mechanism — Telegram has been removed.")
     if args.to:
         targets = [t.strip() for t in args.to.split(",") if t.strip()]
     else:
         targets = [p.name for p in projects]
+    lines = ["message broadcast: no delivery mechanism — Telegram has been removed."]
     for name in targets:
-        print(f"  would broadcast to {name} (not delivered — Telegram removed)")
-    print(f"---\n{args.message}\n---")
+        lines.append(f"  would broadcast to {escape(name)} (not delivered — Telegram removed)")
+    lines.append(f"---\n{escape(args.message)}\n---")
+    make_console().print(panel("message broadcast", "\n".join(lines)))
     return 0
 
 

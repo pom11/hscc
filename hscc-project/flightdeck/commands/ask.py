@@ -33,6 +33,7 @@ import sys
 
 from ..core import registry, templates
 from ..core.templates import UnfilledSlotError
+from ._theme import escape, make_console, panel
 
 
 def _get_project(projects: list[registry.Project], project_name: str):
@@ -105,10 +106,14 @@ def cmd_ask(args: argparse.Namespace, projects: list[registry.Project]) -> int:
 
     # Telegram (the only outbound topic-delivery surface for ask) has been
     # removed, so the rendered prompt is printed to stdout instead of sent to a
-    # topic. The template-manager subcommands below are unaffected.
-    print(rendered)
-    print(f"\n[ask] rendered {args.template!r} for {args.project} "
-          f"(no delivery target — Telegram removed).")
+    # topic. The template-manager subcommands below are unaffected. The rendered
+    # text is escaped for Rich so any brackets in the prompt render literally
+    # (never interpreted as markup), incl. the ``[ask]`` note line.
+    note = (f"[ask] rendered {args.template!r} for {args.project} "
+            f"(no delivery target — Telegram removed).")
+    make_console().print(panel(
+        "ask",
+        f"{escape(rendered)}\n\n{escape(note)}"))
     return 0
 
 
@@ -124,10 +129,12 @@ def cmd_template_list(args: argparse.Namespace, projects: list[registry.Project]
         print(json.dumps(names))
         return 0
     if not names:
-        print("No templates available.")
+        make_console().print(panel("ask templates", "[dim]No templates available.[/dim]"))
         return 0
+    # The bare list, one per line via the themed console. Rich degrades to
+    # plain on a non-tty stdout, so each name stays its own token.
     for n in names:
-        print(n)
+        make_console().print(escape(n))
     return 0
 
 
@@ -137,7 +144,10 @@ def cmd_template_show(args: argparse.Namespace, projects: list[registry.Project]
     except templates.UnknownTemplateError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    print(body)
+    # The template body is a bounded document; render it in a themed Panel so it
+    # reads as one block. Markup is escaped so template text containing brackets
+    # renders literally (never interpreted as styling).
+    make_console().print(panel(f"ask template: {args.name}", escape(body)))
     return 0
 
 
