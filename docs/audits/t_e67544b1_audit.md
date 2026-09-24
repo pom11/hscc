@@ -101,9 +101,9 @@ interpreters; see run below.
 - hscc-cluster dir alone (p313): 384 (+14 skipped) → **404 passed, 14 skipped**
   (+20; the 14 skips are pre-existing).
 - Both dir runs use the run_tests.sh `-m pytest` semantics.
-- Full 8-plugin suite via scripts/run_tests.sh: re-running under both
-  interpreters after a subprocess path-resolution fix (5d2d3e5). The first full
-  run had 7/8 dirs green; the only failure was a test subprocess path flake in
-  hscc-cluster, now fixed.
+- Full 8-plugin suite via scripts/run_tests.sh — **ALL GREEN under BOTH
+  interpreters** (hermes venv: hscc-bootstrap 256, hscc-commands 59, hscc-roles
+  101, hscc-cluster 422, hscc-project 1351, hscc_daemon 1123, sparkrun-hermes 8,
+  hscc-api 786+1skip; p313: identical, hscc-cluster 404+14skip, ALL GREEN).
 - Verify script (docs/audits/t_e67544b1_verify_e2e.py): ALL INVARIANT CHECKS
   PASSED under both interpreters.
