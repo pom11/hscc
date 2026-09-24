@@ -878,6 +878,10 @@ class TestDoctorFixNoopWhenFresh:
                     "reviewer": "reviewer"
                 },
                 "failure_limit": 3,
+                "worktree": {
+                    "out_of_tree_root": enable_plugins.OUT_OF_TREE_WORKTREE_ROOT,
+                    "out_of_tree_repos": list(enable_plugins.OUT_OF_TREE_WORKTREE_REPOS),
+                },
             },
             "delegation": {
                 "base_url": "http://localhost:4000/v1",
