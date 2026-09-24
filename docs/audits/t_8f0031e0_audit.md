@@ -98,10 +98,11 @@ database file` at `kdb.connect(...)`. That is the documented
 
 ## Deliverable / git state
 
-Branch `wt/t_8f0031e0`, 2 commits ahead of main before merge:
+Branch `wt/t_8f0031e0`, commits ahead of main before merge (conversion + regressions):
 - `401d029` flights(cli): theme daemon/daemon_install/start/update/init human output (Rich card 3a/21)
 - `72dcad0` flights(cli): no-ANSI + --json byte-identity regressions for daemon/daemon_install/start/update/init (Rich card 3a/21)
 
-Both must merge to main, push, then deploy via `python3 hscc-bootstrap/install_payload.py`.
+(plus this audit note and the p313 numbers commit, both under docs/audits/).
+All four must merge to main, push, then deploy via `python3 hscc-bootstrap/install_payload.py`.
 
 ## No AI attribution; no secrets; LAN host scrubbed (100.64.0.1 placeholder).
