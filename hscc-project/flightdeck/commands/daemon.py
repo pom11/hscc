@@ -42,6 +42,7 @@ from typing import Any, Callable, Optional
 
 from ..core import daemon as d
 from ..core import kanban, registry
+from ._theme import escape, make_console, panel, status_panel, table
 
 # --------------------------------------------------------------------------- #
 # Check streams — the flightdeck-specific read logic (generic loop in core)
@@ -454,17 +455,21 @@ def cmd_start(args: argparse.Namespace, registry_path: str) -> int:
     """Start the daemon in the background (fork), or report it already running."""
     pid = d.get_pid()
     if pid is not None:
-        print(f"Daemon already running (PID {pid})")
+        make_console().print(status_panel(
+            f"Daemon already running (PID {pid}).",
+            status="ok", title="daemon start"))
         return 0
 
-    print("Starting flightdeck daemon…")
+    make_console().print(panel("daemon start", "Starting flightdeck daemon…"))
     d.log("Daemon starting")
 
     child = os.fork()
     if child > 0:
         # Parent: save the child PID and return immediately.
         d.save_pid()
-        print(f"flightdeck daemon started (PID {child})")
+        make_console().print(status_panel(
+            f"flightdeck daemon started (PID {child}).",
+            status="ok", title="daemon start"))
         return 0
 
     # Child — detach into a session, respond to signals, become the daemon.
@@ -510,10 +515,12 @@ def cmd_stop(args: argparse.Namespace, registry_path: str) -> int:
     """Stop the running daemon (SIGTERM, escalate to SIGKILL after a wait)."""
     pid = d.get_pid()
     if pid is None:
-        print("Daemon is not running")
+        make_console().print(panel(
+            "daemon stop", "[dim]Daemon is not running.[/dim]"))
         d.write_stopped()
         return 0
-    print(f"Stopping flightdeck daemon (PID {pid})…")
+    make_console().print(panel(
+        "daemon stop", f"Stopping flightdeck daemon (PID {pid})…"))
     d.log("Daemon stop requested")
     try:
         os.kill(pid, signal.SIGTERM)
@@ -522,13 +529,18 @@ def cmd_stop(args: argparse.Namespace, registry_path: str) -> int:
             try:
                 os.kill(pid, 0)
             except OSError:
-                print(f"flightdeck daemon stopped (PID {pid})")
+                make_console().print(status_panel(
+                    f"flightdeck daemon stopped (PID {pid}).",
+                    status="ok", title="daemon stop"))
                 d.write_stopped()
                 return 0
         os.kill(pid, signal.SIGKILL)
-        print(f"flightdeck daemon force-killed (PID {pid})")
+        make_console().print(status_panel(
+            f"flightdeck daemon force-killed (PID {pid}).",
+            status="error", title="daemon stop"))
     except ProcessLookupError:
-        print("flightdeck daemon already stopped")
+        make_console().print(panel(
+            "daemon stop", "flightdeck daemon already stopped"))
     finally:
         d.write_stopped()
     return 0
@@ -550,30 +562,40 @@ def cmd_status(args: argparse.Namespace, registry_path: str) -> int:
     pid = d.get_pid()
     states = d.read_all_states()
 
-    print("=" * 60)
-    print("  flightdeck daemon status")
-    print("=" * 60)
+    lines = []
     if pid is not None:
-        print(f"  Status:    RUNNING (PID {pid})")
+        lines.append(f"Status:    RUNNING (PID {pid})")
     else:
         stale = os.path.exists(d.PID_FILE)
         if stale:
-            print("  Status:    STOPPED (stale PID file — cleared)")
+            lines.append("Status:    STOPPED (stale PID file — cleared)")
             d.write_stopped()
         else:
-            print("  Status:    STOPPED")
+            lines.append("Status:    STOPPED")
 
-    print()
     if not states:
-        print("  No check results yet")
+        lines.append("")
+        lines.append("No check results yet")
+        make_console().print(panel(
+            "flightdeck daemon status",
+            "\n".join(lines)))
     else:
-        print("  ── Check Streams ──────────────────────")
-        print(f"  {'Stream':<12s} {'':<5s} {'Last Check':<22s} Message")
-        print(f"  {'─'*12} {'─'*5} {'─'*22} {'─'*60}")
+        t = table("Check Streams")
+        t.add_column("Stream", no_wrap=True)
+        t.add_column("", width=5)
+        t.add_column("Last Check")
+        t.add_column("Message")
         for name in STREAM_NAMES:
-            print(_status_line(name, states.get(name)))
-    print()
-    print("=" * 60)
+            state = states.get(name)
+            ok = state.get("ok") if state else None
+            ok_str = "OK" if ok is True else ("FAIL" if ok is False else "—")
+            ts = str(state.get("timestamp") or "?")[:19] if state else "—"
+            msg = str(state.get("message") or "") if state else "-"
+            t.add_row(escape(name), ok_str, escape(ts), escape(msg))
+        make_console().print(panel(
+            "flightdeck daemon status",
+            "\n".join(lines)))
+        make_console().print(t)
     return 0
 
 
@@ -594,14 +616,16 @@ def cmd_check(args: argparse.Namespace, registry_path: str) -> int:
             )
             return 2
         result = _run_one_sync(stream, registry_path, args)
-        _print_result(stream, result)
+        make_console().print(panel(
+            "daemon check",
+            _print_result(stream, result)))
         return 0
 
     results: dict[str, dict] = {}
     for name in STREAM_NAMES:
         results[name] = _run_one_sync(name, registry_path, args)
-    for name in STREAM_NAMES:
-        _print_result(name, results[name])
+    lines = [_print_result(name, results[name]) for name in STREAM_NAMES]
+    make_console().print(panel("daemon check", "\n".join(lines)))
     return 0
 
 
@@ -639,10 +663,10 @@ def _run_one_sync(name: str, registry_path: str, args: argparse.Namespace) -> di
     return result
 
 
-def _print_result(name: str, result: dict) -> None:
+def _print_result(name: str, result: dict) -> str:
     ok = result.get("ok")
     status = "OK" if ok is True else ("FAIL" if ok is False else "—")
-    print(f"[{name}] {status} — {result.get('message')}")
+    return f"{escape(name)}: {status} — {escape(str(result.get('message')))}"
 
 
 def stream_watcher(stream: Optional[str], interval: int = 2) -> int:
@@ -692,10 +716,12 @@ def cmd_log(args: argparse.Namespace, registry_path: str) -> int:
     """Show the daemon's log file (tail)."""
     lines = d.get_daemon_log_tail(int(getattr(args, "lines", 50)))
     if not lines:
-        print("No daemon log entries yet.")
+        make_console().print(panel(
+            "daemon log", "[dim]No daemon log entries yet.[/dim]"))
         return 0
-    for line in lines:
-        print(line.rstrip())
+    make_console().print(panel(
+        "daemon log",
+        "\n".join(escape(line.rstrip()) for line in lines)))
     return 0
 
 
@@ -729,10 +755,12 @@ def cmd_notify(args: argparse.Namespace, registry_path: str) -> int:
     message = getattr(args, "message", None) or "flightdeck daemon notification"
     ts = d.now_iso()[:19]
     title = f"flightdeck {ts}"
-    print(f"Sending notification: {title}")
     ok = _osascript_notify(title, message)
-    print(f"  {'Sent' if ok else 'Failed (osascript unavailable)'}")
     d.log(f"notify: {'sent' if ok else 'failed'} — {message}")
+    status = "ok" if ok else "error"
+    msg = (f"Sent notification: {escape(title)} — {escape(message)}"
+           if ok else "Failed (osascript unavailable)")
+    make_console().print(status_panel(msg, status=status, title="daemon notify"))
     return 0 if ok else 1
 
 
