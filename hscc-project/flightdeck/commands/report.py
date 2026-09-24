@@ -59,6 +59,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ..core import git_state, kanban, registry, roadmap, verify
+from ._theme import escape, make_console, panel
 
 # The hard character cap for the full rendered summary. It was inherited from
 # Telegram's per-message limit; kept as a constant so the renderer still caps
@@ -657,12 +658,18 @@ def _report_one(
     )
 
     if not data["anything"]:
-        print(f"nothing to report for {project.name} since {_window_str(since_ts)}.")
+        make_console().print(panel(
+            "report",
+            f"[dim]nothing to report for {escape(project.name)} since "
+            f"{_window_str(since_ts)}.[/dim]"))
         return "nothing", 0
 
     summary = renderer(data)
     if not summary:
-        print(f"nothing to report for {project.name} since {_window_str(since_ts)}.")
+        make_console().print(panel(
+            "report",
+            f"[dim]nothing to report for {escape(project.name)} since "
+            f"{_window_str(since_ts)}.[/dim]"))
         return "nothing", 0
 
     if args.apply:
@@ -670,9 +677,11 @@ def _report_one(
         return ("posted" if rc == 0 else "error"), rc
 
     # Dry-run: print the summary and post nothing.
-    print(summary)
-    print()
-    print("[dry-run] summary not posted. pass --apply to send it to the project topic.")
+    make_console().print(panel(
+        "report",
+        f"{escape(summary)}\n\n"
+        f"[dim]\\[dry-run] summary not posted. pass --apply to send it to the "
+        f"project topic.[/dim]"))
     return "dry", 0
 
 
@@ -703,7 +712,10 @@ def cmd_report_all(args: argparse.Namespace, projects: list) -> int:
         if one_rc != 0:
             rc = one_rc
     action = "posted" if args.apply else "rendered for review (dry-run)"
-    print(f"report --all: {reported} project(s) {action}, {nothing} with nothing to report.")
+    make_console().print(panel(
+        "report --all",
+        f"[label]report --all: {reported} project(s) {escape(action)}, {nothing} "
+        f"with nothing to report.[/label]"))
     return rc
 
 
@@ -739,7 +751,10 @@ def cmd_backfill(
         if one_rc != 0:
             rc = one_rc
     action = "posted" if args.apply else "rendered for review (dry-run)"
-    print(f"report --backfill {duration}: {reported} project(s) {action}, {nothing} with nothing to report.")
+    make_console().print(panel(
+        "report --backfill",
+        f"[label]report --backfill {escape(duration)}: {reported} project(s) "
+        f"{escape(action)}, {nothing} with nothing to report.[/label]"))
     return rc
 
 
@@ -758,10 +773,11 @@ def _post(project: registry.Project, summary: str, args: argparse.Namespace) -> 
         milestones=_current_milestones(project),
         path=args.report_state,
     )
-    print(summary)
-    print()
-    print(f"[report] {project.name}: summary '{len(summary)} chars' — "
-          f"no delivery target (Telegram removed); timestamp recorded.")
+    note = (f"[report] {project.name}: summary '{len(summary)} chars' — "
+            f"no delivery target (Telegram removed); timestamp recorded.")
+    make_console().print(panel(
+        "report",
+        f"{escape(summary)}\n\n{escape(note)}"))
     return 0
 
 
