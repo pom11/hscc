@@ -12,6 +12,8 @@ import json
 import sys
 from pathlib import Path
 
+import _theme  # guarded themed render helper (peer cli_theme + neutral fallback)
+
 # Ensure plugin dir is on path for imports
 PLUGIN_DIR = Path(__file__).parent
 sys.path.insert(0, str(PLUGIN_DIR))
@@ -95,6 +97,77 @@ def cmd_cluster_template(args):
         }
 
 
+def _template_lines(result) -> list:
+    """Build the themed human-view lines for a template result dict.
+
+    ``escape`` is applied to every value-derived line so literal Rich markup in
+    template content / file paths renders literally; the generic fallback flattens
+    any other shape.
+    """
+    esc = _theme.escape
+    lines = []
+
+    # list
+    if isinstance(result, dict) and "templates" in result:
+        lines.append(f"[label]templates[/label]  {result.get('count', len(result['templates']))}")
+        for t in result["templates"]:
+            if isinstance(t, dict):
+                ver = t.get("version", "")
+                desc = t.get("description") or ""
+                lines.append(f"  {esc(str(t.get('name', '?')))}"
+                             + (f"  v{esc(str(ver))}" if ver not in (None, "") else "")
+                             + (f"  {esc(str(desc))}" if desc else ""))
+            else:
+                lines.append(f"  - {esc(str(t))}")
+        return lines
+
+    # status
+    if isinstance(result, dict) and "applied" in result:
+        lines.append(f"[label]applied[/label]  {esc(str(result.get('applied')) or '(none)')}")
+        if result.get("note"):
+            lines.append(f"  {esc(str(result['note']))}")
+        return lines
+
+    # generic flatten for preview / validate / apply / anything else
+    def _flatten(value, depth=0):
+        pad = "  " * depth
+        if isinstance(value, dict):
+            for k, v in value.items():
+                if isinstance(v, (dict, list)) and v:
+                    lines.append(f"{pad}{esc(str(k))}:")
+                    _flatten(v, depth + 1)
+                elif isinstance(v, list) and not v:
+                    lines.append(f"{pad}{esc(str(k))}: (none)")
+                else:
+                    lines.append(f"{pad}{esc(str(k))}: {esc(str(v))}")
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, (dict, list)):
+                    _flatten(item, depth + 1)
+                else:
+                    lines.append(f"{pad}- {esc(str(item))}")
+        else:
+            lines.append(f"{pad}{esc(str(value))}")
+    _flatten(result)
+    return lines
+
+
 if __name__ == "__main__":
-    result = cmd_cluster_template(sys.argv[1:])
-    print(json.dumps(result, indent=2, default=str))
+    args = sys.argv[1:]
+    as_json = "--json" in args
+    args = [a for a in args if a != "--json"]
+    result = cmd_cluster_template(args)
+    if as_json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        console = _theme.make_console()
+        title = (args[0] if args else "cluster-template")
+        err = result.get("error") if isinstance(result, dict) else None
+        if err is not None:
+            usage = result.get("usage") if isinstance(result, dict) else None
+            body = _theme.escape(str(err))
+            if usage:
+                body = f"{body}\n\nusage: {_theme.escape(str(usage))}"
+            console.print(_theme.status_panel(body, status="error", title=title))
+        else:
+            console.print(_theme.panel(title, "\n".join(_template_lines(result))))
