@@ -38,6 +38,7 @@ import time
 from typing import Callable, Optional
 
 from ..core import git_state, kanban, metrics, registry
+from ._theme import escape, make_console, panel
 from .report import _parse_duration
 
 # Default window when --since is not given: the last 24h.
@@ -331,8 +332,8 @@ def cmd_metrics(args: argparse.Namespace, projects: list[registry.Project]) -> i
 
         print(json.dumps(render_json(metrics_dict)))
     else:
-        for line in render(metrics_dict):
-            print(line)
+        make_console().print(panel(
+            "metrics", "\n".join(escape(line) for line in render(metrics_dict))))
     return 0
 
 
