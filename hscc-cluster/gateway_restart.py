@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
+import json
+
+import _theme  # guarded themed render helper (peer cli_theme + neutral fallback)
 
 
 def restart_gateway() -> dict:
@@ -70,6 +74,24 @@ def restart_gateway() -> dict:
         }
 
 
+def _emit_result(result, as_json: bool = False) -> None:
+    """Render a gateway-restart result: raw JSON with ``--json``, else themed.
+
+    The machine ``--json`` path stays ``json.dumps(result, indent=2,
+    default=str)`` byte-identical. The human path renders a themed status panel
+    coloured by ok/error (plain on non-TTY).
+    """
+    if as_json:
+        print(json.dumps(result, indent=2, default=str))
+        return
+    console = _theme.make_console()
+    ok = bool(result.get("success"))
+    note = _theme.escape(str(result.get("note", "")))
+    console.print(_theme.status_panel(
+        note or ("gateway restarted" if ok else "gateway restart failed"),
+        status="ok" if ok else "error", title="gateway restart"))
+
+
 if __name__ == "__main__":
     result = restart_gateway()
-    print(result)
+    _emit_result(result, as_json="--json" in sys.argv[1:])

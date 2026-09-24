@@ -20,6 +20,8 @@ import json
 import subprocess
 import os
 
+import _theme  # guarded themed render helper (peer cli_theme + neutral fallback)
+
 # ── Template subcommand ────────────────────────────────────────────────────
 
 def cmd_cluster_template():
@@ -380,6 +382,117 @@ COMMANDS = {
 }
 
 
+# ── Themed human rendering (back-compat standalone entry) ─────────────────
+
+def _emit_result(cmd: str, result, as_json: bool = False) -> None:
+    """Render a command result the way the standalone ``hscc-cluster`` entry.
+
+    When ``as_json`` is set (machine path — ``--json`` flag) the result is
+    dumped raw, BYTE-IDENTICAL to the pre-themed output (daemon / scripts / the
+    iOS console parse it). Otherwise a themed human view is rendered through the
+    shared ``_theme`` layer (guard: when ``hscc_daemon.cli_theme`` is absent the
+    ``_theme`` helper falls back to a plain Console, so output stays plain).
+    """
+    if as_json:
+        print(json.dumps(result, indent=2, default=str))
+        return
+    console = _theme.make_console()
+    emit_err = getattr(result, "error", None) if isinstance(result, dict) else None
+    if emit_err is not None:
+        body = _theme.escape(str(emit_err))
+        usage = result.get("usage") if isinstance(result, dict) else None
+        if usage:
+            body = f"{body}\n\nusage: {_theme.escape(str(usage))}"
+        console.print(_theme.status_panel(body, status="error", title=cmd))
+    else:
+        lines = _human_lines(cmd, result)
+        console.print(_theme.panel(cmd, "\n".join(lines)))
+
+
+def _human_lines(cmd: str, result) -> list:
+    """Build the themed human view lines for a command's result dict.
+
+    The standalone entry point is a back-compat wrapper around engine functions
+    that return dicts; the unified ``hscc`` CLI owns the full table renderers
+    (hscc_daemon/cluster_render.py). Here we keep a concise, readable themed
+    summary — enough to be useful on its own without duplicating that renderer.
+    ``escape`` is applied to every value-derived line so literal Rich markup in
+    content (e.g. a ``[PRUNE]``-like token) renders literally.
+    """
+    if not isinstance(result, dict):
+        return [_theme.escape(str(result))]
+    esc = _theme.escape
+    lines = []
+
+    if cmd in ("cluster-status",):
+        workloads = result.get("workloads") or []
+        lines.append(f"[label]workloads[/label]  {len(workloads)}")
+        for w in workloads:
+            lines.append(
+                f"  {esc(str(w.get('name', '?'))):<48} "
+                f"tp={esc(str(w.get('tp', '?')))} pp={esc(str(w.get('pp', '?')))} "
+                f"id={esc(str(w.get('container_id', '?')))}")
+        idle = result.get("idle_hosts") or []
+        total = result.get("total_hosts", 0)
+        lines.append(f"[label]total hosts[/label]  {total}")
+        lines.append(f"[label]idle hosts[/label]   {len(idle)}")
+        if idle:
+            lines.append("[dim]" + ", ".join(esc(str(h)) for h in idle) + "[/dim]")
+        return lines
+
+    if cmd in ("down", "up", "stop"):
+        ok = bool(result.get("success", result.get("ok")))
+        tag = "OK" if ok else "ERROR"
+        lines.append(f"[{'ok' if ok else 'error'}]{tag}[/]")
+        if result.get("command"):
+            cmdline = result["command"]
+            lines.append("[label]command[/label]  "
+                         + (esc(cmdline) if isinstance(cmdline, str)
+                            else " ".join(esc(str(x)) for x in cmdline)))
+        if result.get("dry_run"):
+            lines.append("[dim]--dry-run: nothing executed[/dim]")
+        for key in ("output", "error"):
+            if result.get(key):
+                lines.append(f"[label]{key}[/label]")
+                for sub in str(result[key]).split("\n"):
+                    lines.append(f"  {esc(sub)}")
+        for i, item in enumerate(result.get("issued") or [], 1):
+            lines.append(f"[dim]unit {i}[/dim]  "
+                         f"{'ok' if item.get('success') else 'error'}")
+        if result.get("units"):
+            lines.append(f"[label]units[/label]  {result['units']}")
+        return lines or ["[dim]command completed[/dim]"]
+
+    if cmd == "profile-status":
+        counts = result.get("counts") or {}
+        lines.append(f"[label]running tasks[/label]  "
+                     f"{result.get('total_running', sum(counts.values()))}")
+        for profile, n in sorted(counts.items()):
+            lines.append(f"  {esc(str(profile)):<24} {n}")
+        return lines
+
+    # Generic fallback: flatten nested dicts/lists into indented, escaped lines.
+    def _flatten(value, depth=0):
+        pad = "  " * depth
+        if isinstance(value, dict):
+            for k, v in value.items():
+                if isinstance(v, (dict, list)) and v:
+                    lines.append(f"{pad}{esc(str(k))}:")
+                    _flatten(v, depth + 1)
+                else:
+                    lines.append(f"{pad}{esc(str(k))}: {esc(str(v))}")
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, (dict, list)):
+                    _flatten(item, depth + 1)
+                else:
+                    lines.append(f"{pad}- {esc(str(item))}")
+        else:
+            lines.append(f"{pad}{esc(str(value))}")
+    _flatten(result)
+    return lines
+
+
 # ── Entry Point ───────────────────────────────────────────────────────────
 
 def main():
@@ -389,6 +502,7 @@ def main():
     print("note: `hscc-cluster <cmd>` is merged into the main CLI — "
           "use `hscc cluster <cmd>` / `hscc template <cmd>` / `hscc profiles`.",
           file=sys.stderr)
+    as_json = "--json" in sys.argv[1:]
     if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h", "help"):
         print("""
 Hermes Spark Cluster Control (HSCC)
@@ -434,9 +548,16 @@ Commands:
         else:
             result = fn()
 
-        print(json.dumps(result, indent=2, default=str))
+        _emit_result(cmd, result, as_json=as_json)
     except Exception as e:
-        print(json.dumps({"error": str(e)}))
+        # Exception path: the machine ``--json`` contract is a raw error JSON
+        # dump; otherwise a themed error panel (non-TTY stays plain).
+        if as_json:
+            print(json.dumps({"error": str(e)}))
+        else:
+            _theme.make_console().print(
+                _theme.status_panel(_theme.escape(str(e)),
+                                    status="error", title=cmd))
         sys.exit(1)
 
 
