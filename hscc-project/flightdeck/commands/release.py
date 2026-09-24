@@ -45,6 +45,7 @@ import sys
 
 from ..core import registry, release
 from ..core.release import DEFAULT_CHANGELOG
+from ._theme import escape, make_console, panel, status_panel
 
 # The ordered steps a real release performs. This command only PRINTS them.
 PLAN_STEPS = [
@@ -87,9 +88,13 @@ def _print_problems(problems: list[release.Problem], version: str) -> None:
 
 def _print_plan(project, version: str) -> None:
     """Print the ordered dry-run plan for the real release."""
-    print(f"release plan for {project.name} {version} (dry run — nothing executed):")
+    lines = [
+        f"release plan for {escape(project.name)} {escape(version)} "
+        "(dry run — nothing executed):"
+    ]
     for i, step in enumerate(PLAN_STEPS, 1):
-        print(f"  {i}. {step}")
+        lines.append(f"  {i}. {escape(step)}")
+    make_console().print(panel("release — plan", "\n".join(lines)))
 
 
 def _print_apply(project, completed: list[str], version: str,
@@ -101,15 +106,19 @@ def _print_apply(project, completed: list[str], version: str,
     version sources were kept in lockstep — the v0.2.0 incident was a package
     released against a stale VERSION/pyproject pair.
     """
+    lines: list[str] = []
     for step in completed:
-        print(f"  released step: {step}")
+        lines.append(f"  released step: {escape(step)}")
     version_file = project.version_file or "VERSION"
     if files_written:
-        names = ", ".join(files_written)
-        print(f"bumped {project.name} {version_file} to {version.lstrip('v')} "
-              f"(wrote {names})")
+        names = ", ".join(escape(f) for f in files_written)
+        lines.append(f"bumped {escape(project.name)} {version_file} to "
+                     f"{escape(version.lstrip('v'))} (wrote {names})")
     else:
-        print(f"bumped {project.name} {version_file} to {version.lstrip('v')}")
+        lines.append(f"bumped {escape(project.name)} {version_file} to "
+                     f"{escape(version.lstrip('v'))}")
+    make_console().print(status_panel(
+        "\n".join(lines), status="ok", title="release --apply"))
 
 
 def _print_verify(project, outcome: release.InstallOutcome) -> None:
@@ -139,10 +148,11 @@ def _print_verify(project, outcome: release.InstallOutcome) -> None:
         return
 
     if outcome.status == release.VERIFIED:
-        print(
-            f"verified: installed version {outcome.installed_version} matches "
-            f"released {outcome.released_version}"
-        )
+        make_console().print(status_panel(
+            f"verified: installed version "
+            f"{escape(outcome.installed_version or '')} matches "
+            f"released {escape(outcome.released_version)}",
+            status="ok", title="release — verify"))
         return
 
     # FAILED or UNVERIFIED — surface loudly on stderr, never as a clean success.

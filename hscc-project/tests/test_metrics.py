@@ -526,3 +526,66 @@ def test_metrics_command_reads_archived_cards():
     # The flip side: the metrics command's reader explicitly opts into archived
     # cards so it can compute over completed history (this is what fixes n=0).
     assert "include_archived=True" in _module_source(cmd)
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — themed human view degrades to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI group C card mandated a NO-ANSI regression per converted
+# command: with stdout captured as a NON-tty StringIO, the themed Console must
+# emit NO escape (\x1b) bytes — scripts / daemons parse this output and a
+# single escaped byte in a pipe breaks a watcher. --json stays byte-identical
+# to canonical json.dumps (the machine contract).
+import io as _io
+import contextlib as _contextlib
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _contextlib.redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+def _metrics_inputs():
+    from flightdeck.core.registry import Project
+    proj = Project(name="flightdeck", repo="/repo", board="flightdeck")
+    cards = [
+        _registry_card("c1", completed_at=2500),
+        _registry_card("c2", completed_at=2600),
+        _registry_card("c3", completed_at=2700),
+    ]
+    events = lambda cid: [ev("blocked", 2000)]
+    return proj, cards, events
+
+
+class TestMetricsNoAnsi:
+    """`metrics`'s human view is plain on a non-tty stdout; --json stays
+    byte-identical to canonical dumps."""
+
+    def test_human_view_is_plain(self):
+        proj, cards, events = _metrics_inputs()
+        out = _no_ansi(lambda: cmd.cmd_metrics(
+            _args(cards=cards, run=_OkRun(), events=events,
+                  now=lambda: 5000, since="4000s"), [proj]))
+        assert "metrics:" in out
+        assert "first-time-pass" in out and "n=3" in out
+        assert "100%" in out
+
+    def test_json_stays_byte_identical(self):
+        proj, cards, events = _metrics_inputs()
+        out = _no_ansi(lambda: cmd.cmd_metrics(
+            _args(cards=cards, run=_OkRun(), events=events,
+                  now=lambda: 5000, since="4000s", json=True), [proj]))
+        # Recompute the SAME metrics dict through the injectable gather, then
+        # render_json — the --json stdout must equal canonical dumps exactly
+        # (raw print, never boxed by a themed Console).
+        since_ts = cmd._resolve_since("4000s", lambda: 5000)
+        md = cmd.gather([proj], since_ts=since_ts, now=5000,
+                        _run=_OkRun(), _events=events, _cards=cards)
+        assert out == json.dumps(cmd.render_json(md)) + "\n"
+        assert "\x1b" not in out
+
