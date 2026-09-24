@@ -65,11 +65,33 @@ def make_console(_name: str | None = None, **kwargs) -> Console:
     colour-system itself, so on a non-TTY stdout this emits PLAIN text with no
     ANSI — the mandatory regression is that ``--json`` stays the only machine
     path and piped output stays clean.
+
+    Width: on a real TTY Rich uses the actual terminal width. For a non-tty
+    file (piped / captured) Rich would otherwise default to 80, which makes
+    flightdeck's genuinely wider rows — project repo paths, multi-column
+    project/session lists — word-wrap mid-phrase or collapse a Rich Table's
+    leading column to nothing. So when the resolved console is NOT a terminal
+    and no explicit ``width=`` was given, it is recreated at width 200: content
+    stays on one line / every column survives in a pipe, where preserving
+    content beats wrapping. An explicit ``width=`` always wins, the hscc_daemon
+    task tables (short, narrow columns) keep the daemon's default width — the
+    two CLI families have different data shapes, so they legitimately differ.
     """
+    kwargs.setdefault("width", 200)
     t = theme()
     if t is not None:
-        return t.make_console(_name, **kwargs)
-    return Console(**kwargs)
+        console = t.make_console(_name, **kwargs)
+    else:
+        console = Console(**kwargs)
+    if console.is_terminal:
+        # A real terminal: drop the fixed width so Rich uses the actual screen
+        # width (a hard 200 would overflow a narrower TTY).
+        widthless = {k: v for k, v in kwargs.items() if k != "width"}
+        if t is not None:
+            console = t.make_console(_name, **widthless)
+        else:
+            console = Console(**widthless)
+    return console
 
 
 def panel(title: str, renderable: str = "", **kwargs):
