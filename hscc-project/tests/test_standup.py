@@ -10,8 +10,6 @@ injected — no test touches a real board, repo, the network, or real time, and
 the suite stays fast.
 """
 
-import os
-import sys
 import time
 
 import pytest
@@ -319,6 +317,145 @@ def _state(verify_records, tmp_path):
 
 def _project_named(name, **kw):
     return registry.Project(name=name, repo=f"/repo-{name}", **kw)
+
+
+# --------------------------------------------------------------------------- #
+# Hermetic board — an in-memory fake of Hermes' kanban_db surface.
+# --------------------------------------------------------------------------- #
+# Every test must run with ZERO dependence on the operator's live ~/.hermes
+# state (that live-state reading is what made this suite flip on environment:
+# a Hermes update / sqlite lock / board state changed results from one run to
+# the next). ``flightdeck.standup.gather_data`` reads the board through two
+# seams — ``kanban.list_cards()`` and ``kanban.list_board_watermarks()`` — both
+# of which resolve the Hermes library via ``kanban._load_kanban_db()``. We make
+# both hermetic by default:
+#   * the autouse fixture below stubs ``list_board_watermarks`` to {} (exactly
+#     what an EMPTY host reads), so a test that doesn't assert on freshness
+#     never opens a real board;
+#   * the settled-card regression test injects ``_FakeKanbanDB`` through
+#     ``_load_kanban_db`` so the REAL ``list_cards`` (including its
+#     SETTLED_STATUSES filter) runs against an isolated in-memory board —
+#     never the Hermes runtime.
+
+# The marker the SETTLED_STATUSES filter keys on for the regression below;
+# assert the constant, not a literal, so a change to the real set is caught.
+_DONE_STATUS = "done"
+
+
+class _FakeRow:
+    """A conn row supporting both ``row["status"]`` and ``row[0]`` access."""
+
+    def __init__(self, mapping, order=None):
+        self._m = mapping
+        self._order = order or list(mapping)
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._m[self._order[key]]
+        return self._m[key]
+
+
+class _FakeRows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+class _FakeConn:
+    def __init__(self, db, board):
+        self._db = db
+        self._board = board
+
+    def execute(self, sql, params=()):
+        sql = sql.strip().upper()
+        if "WHERE ID = ?" in sql:  # sanity: SELECT status FROM tasks WHERE id = ?
+            tid = params[0]
+            task = self._db._boards[self._board].get(tid)
+            status = task.status if task else None
+            return _FakeRows([_FakeRow({"status": status})])
+        return _FakeRows([])  # watermark UNION — not asserted here
+
+    def close(self):
+        pass
+
+
+class _FakeTask:
+    def __init__(self, tid, title, status, assignee, workspace_kind,
+                 workspace_path, created_at=BEFORE, started_at=BEFORE):
+        self.id = tid
+        self.title = title
+        self.body = None
+        self.status = status
+        self.assignee = assignee
+        self.branch_name = None
+        self.priority = 0
+        self.created_at = created_at
+        self.started_at = started_at
+        self.completed_at = None
+        self.last_heartbeat_at = None
+        self.workspace_kind = workspace_kind
+        self.workspace_path = workspace_path
+
+
+class _FakeKanbanDB:
+    """Minimal in-memory stand-in for ``hermes_cli.kanban_db``.
+
+    Implements exactly the surface ``flightdeck.core.kanban`` and the
+    settled-card regression test call (``create_board``, ``connect``,
+    ``connect_closing``, ``list_boards``, ``create_task``, ``complete_task``,
+    ``list_tasks``). All state is per-instance memory: nothing is ever written
+    to or read from the operator's disk, so the test cannot touch live state.
+    """
+
+    def __init__(self):
+        self._boards = {}  # slug -> {tid: _FakeTask}
+
+    def create_board(self, slug, **kwargs):
+        self._boards.setdefault(str(slug), {})
+
+    def connect(self, *, board=None, **kwargs):
+        return _FakeConn(self, str(board))
+
+    def connect_closing(self, *, board=None, **kwargs):
+        return self.connect(board=board)
+
+    def list_boards(self):
+        return [{"slug": s, "name": s} for s in self._boards]
+
+    def list_tasks(self, conn, include_archived=False):
+        return list(self._boards[conn._board].values())
+
+    def create_task(self, conn, *, title, assignee, workspace_kind,
+                    workspace_path, board=None, **kwargs):
+        key = conn._board or str(board)
+        tasks = self._boards.setdefault(key, {})
+        tid = f"t_fake_{len(tasks) + 1}"
+        tasks[tid] = _FakeTask(
+            tid, title, "todo", assignee, workspace_kind, workspace_path
+        )
+        return tid
+
+    def complete_task(self, conn, tid):
+        self._boards[conn._board][tid].status = _DONE_STATUS
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_watermarks(monkeypatch):
+    """Never open a real board for the freshness watermark.
+
+    Most tests stub ``list_cards`` but none want a live-board watermark; the
+    few that DO assert on freshness override this with their own stub in the
+    test body, which runs after this autouse fixture and therefore wins. Without
+    this, ``gather_data`` falls through to ``kanban.list_board_watermarks`` ->
+    the real Hermes library and reads the operator's ACTUAL board — the
+    live-state read that made the suite flip on environment (the read-fence
+    ``sqlite3.OperationalError`` in the RC2 run; a non-empty board here would
+    change rendered ``data as of`` lines). ``{}`` is exactly what a host with
+    no live-card board reads, so it is a faithful, deterministic default.
+    """
+    monkeypatch.setattr(kanban, "list_board_watermarks", lambda **kw: {})
 
 
 def test_failing_lists_only_failed_projects(monkeypatch, tmp_path):
@@ -1437,21 +1574,19 @@ def test_standup_never_reports_settled_cards_as_running(tmp_path, monkeypatch):
     as ``running`` — so `flightdeck standup` reported a completed-but-not-
     archived card as still RUNNING.
 
-    Uses the REAL ``hermes_cli.kanban_db`` against a fully ISOLATED
-    ``HERMES_KANBAN_HOME`` (a tmp_path) so it never touches the operator's real
-    `~/.hermes` state. Skips cleanly on a host without a Hermes checkout.
+    Fully hermetic: it drives flightdeck's real ``kanban.list_cards`` (the code
+    whose SETTLED_STATUSES filter is the regression under test) against an
+    in-memory ``_FakeKanbanDB`` injected through ``kanban._load_kanban_db``, so
+    the filter runs exactly as it does in production but against an isolated
+    board. No dependence on the operator's live ``~/.hermes`` Hermes runtime or
+    board state — a clean checkout passes on any host, under either
+    interpreter, with no Hermes install required.
     """
-    if not os.path.isdir(os.path.expanduser("~/.hermes/hermes-agent")):
-        pytest.skip("no Hermes checkout at ~/.hermes/hermes-agent")
-    sys.path.insert(0, os.path.expanduser("~/.hermes/hermes-agent"))
-    real_kdb = pytest.importorskip("hermes_cli.kanban_db")
-
-    # Isolated board root — never the real ~/.hermes state.
-    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
-
-    # Route flightdeck's read seam at the REAL Hermes library, so the digest
-    # reads the isolated board on disk exactly as production does.
-    monkeypatch.setattr(kanban, "_load_kanban_db", lambda: real_kdb, raising=False)
+    # Route flightdeck's read seam at the in-memory fake, so the real
+    # ``list_cards`` (SETTLED_STATUSES filter included) runs against isolated
+    # state — never the Hermes runtime or the operator's board.
+    board = _FakeKanbanDB()
+    monkeypatch.setattr(kanban, "_load_kanban_db", lambda: board)
 
     # A real repo path the project will be attributed to (must exist on disk
     # for gather_data to treat the project as readable).
@@ -1460,10 +1595,10 @@ def test_standup_never_reports_settled_cards_as_running(tmp_path, monkeypatch):
 
     # Create a board + a task, then complete it (status -> done) but DO NOT
     # archive it. This is the exact state that used to be reported as RUNNING.
-    real_kdb.create_board("fdtest")
-    conn = real_kdb.connect(board="fdtest")
+    board.create_board("fdtest")
+    conn = board.connect(board="fdtest")
     try:
-        tid = real_kdb.create_task(
+        tid = board.create_task(
             conn,
             title="settled card",
             assignee="coder",
@@ -1471,19 +1606,19 @@ def test_standup_never_reports_settled_cards_as_running(tmp_path, monkeypatch):
             workspace_path=str(repo),
             board="fdtest",
         )
-        real_kdb.complete_task(conn, tid)
+        board.complete_task(conn, tid)
     finally:
         conn.close()
 
-    # Sanity: the card really is done on disk (the bug's premise).
-    conn = real_kdb.connect(board="fdtest")
+    # Sanity: the card really is done (the bug's premise).
+    conn = board.connect(board="fdtest")
     try:
         row = conn.execute(
             "SELECT status FROM tasks WHERE id = ?", (tid,)
         ).fetchone()
     finally:
         conn.close()
-    assert row["status"] == "done"
+    assert row["status"] == _DONE_STATUS
 
     # Registry mapping the project to the isolated board.
     reg = tmp_path / "registry.yaml"

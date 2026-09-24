@@ -63,6 +63,7 @@ from typing import Callable
 
 from ..core import kanban, registry, roadmap, templates
 from ..core.lint import referenced_modules
+from ._theme import escape, make_console, panel, status_panel
 
 # A ``.py`` reference with a concrete anchor: ``mod.py:123`` or ``mod.py:func``.
 _CONCRETE_REF_RE = re.compile(r"[A-Za-z0-9_./-]+\.py\s*:\s*[A-Za-z0-9_]+")
@@ -567,30 +568,34 @@ def cmd_decompose(args: argparse.Namespace, projects: list[registry.Project]) ->
     # ------------------------------------------------------------------ #
     # Print the proposal
     # ------------------------------------------------------------------ #
-    print(f"PROPOSAL: {goal_text}")
-    print(f"(project {args.project}, board {board}, {len(cards)} card(s))")
+    lines = [f"PROPOSAL: {escape(goal_text)}",
+             f"(project {escape(args.project)}, board {escape(str(board))}, {len(cards)} card(s))"]
     if accepted:
-        print("\nACCEPTED CARDS:")
+        lines.append("")
+        lines.append("ACCEPTED CARDS:")
         for card in accepted:
-            print(f"  {card.id}. {card.title}")
+            lines.append(f"  {card.id}. {escape(card.title)}")
             if card.assignee:
-                print(f"       assignee: {card.assignee}")
+                lines.append(f"       assignee: {escape(card.assignee)}")
             if card.depends_on:
-                print(f"       depends on: {_dep_labels(card.depends_on, cards)}")
+                lines.append(f"       depends on: {escape(_dep_labels(card.depends_on, cards))}")
             for ref in card.references:
-                print(f"       ref: {ref}")
+                lines.append(f"       ref: {escape(ref)}")
     if rejected:
-        print("\nREJECTED CARDS:")
+        lines.append("")
+        lines.append("REJECTED CARDS:")
         for card in rejected:
-            print(f"  {card.id}. {card.title}")
-            print(f"       REJECTED: {'; '.join(card.rejection_reasons)}")
+            lines.append(f"  {card.id}. {escape(card.title)}")
+            lines.append(f"       REJECTED: {escape('; '.join(card.rejection_reasons))}")
 
     # Dependency edges summary.
     edges = [(c.id, d) for c in accepted for d in c.depends_on if d in {a.id for a in accepted}]
     if edges:
-        print("\nDEPENDENCY EDGES:")
+        lines.append("")
+        lines.append("DEPENDENCY EDGES:")
         for (child, parent) in edges:
-            print(f"  {child} -> {parent}")
+            lines.append(f"  {child} -> {parent}")
+    make_console().print(panel("decompose proposal", "\n".join(lines)))
 
     if args.apply:
         created: list[str] = []
@@ -613,13 +618,19 @@ def cmd_decompose(args: argparse.Namespace, projects: list[registry.Project]) ->
                 )
                 continue
             created.append(new_id)
-            print(f"created card {new_id}: {card.title}")
+            make_console().print(status_panel(
+                f"created card {new_id}: {escape(card.title)}",
+                status="ok", title="decompose --apply"))
         if not created:
             print("error: --apply created nothing (all cards rejected or failed).", file=sys.stderr)
             return 3
-        print(f"created {len(created)} card(s) on board {board!r}.")
+        make_console().print(status_panel(
+            f"created {len(created)} card(s) on board {escape(repr(board))}.",
+            status="ok", title="decompose --apply"))
     else:
-        print("\ndry-run: nothing was created. pass --apply to create the ACCEPTED cards.")
+        make_console().print(status_panel(
+            "dry-run: nothing was created. pass --apply to create the ACCEPTED cards.",
+            status="ok", title="decompose"))
         if not accepted:
             print("no card passed the gate; nothing would be created.", file=sys.stderr)
 

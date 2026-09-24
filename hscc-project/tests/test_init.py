@@ -352,3 +352,46 @@ def test_next_steps_injectable_mcp_snippet(tmp_path, capsys):
     """The MCP registration string is a module constant (easy to update)."""
     assert "flightdeck-mcp" in init_cmd._MCP_REGISTRATION
     assert '"command"' in init_cmd._MCP_REGISTRATION
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted commands degrade to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI card (group C sub-a) mandated a NO-ANSI regression per converted
+# command: with stdout captured as a NON-tty (piped), the themed Console must
+# emit NO escape (\x1b) bytes. The `[ok]`/`[MISSING]` env marks must render
+# LITERALLY (not be swallowed as Rich markup).
+
+import io as _io
+from contextlib import redirect_stdout as _redirect_stdout
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI found in piped init output: {out!r}"
+    assert "\x1b" not in out, f"ANSI found in piped init output: {out!r}"
+    return out
+
+
+class TestNoAnsiInit:
+    """`init` human view degrades to plain text on a non-tty stdout."""
+
+    def test_dry_run(self, tmp_path):
+        home = tmp_path / "home"
+        out = _no_ansi(lambda: init_cmd.cmd_init(
+            _ns(home=str(home), apply=False)))
+        assert "would create" in out
+        assert "flightdeck initialized" not in out  # dry-run, not applied
+        assert "[ok]" in out
+
+    def test_apply(self, tmp_path):
+        home = tmp_path / "home"
+        out = _no_ansi(lambda: init_cmd.cmd_init(
+            _ns(home=str(home), apply=True,
+                _py_info=_FakeSysInfo((3, 13, 0)))))
+        assert "created" in out
+        assert "config.yaml" in out
+        assert "Python 3.13.0" in out

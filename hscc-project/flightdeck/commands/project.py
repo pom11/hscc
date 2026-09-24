@@ -603,11 +603,23 @@ def _seed_empty_orchestrator(
     # The target id: for a freshly-created session (no persisted id yet) we must
     # seed the REAL created id (``ensured["session"]``), not the name that
     # ``--continue`` happens to resolve by title — otherwise the message would
-    # land on an id hermes never continues. For an existing placeholder the
-    # resolved ``session`` IS the id.
-    seed_target = session
+    # land on an id hermes never continues.
+    #
+    # The registry's ``session:`` field holds a TITLE, not an id: the
+    # provisioning placeholder is ``id='seed-<name>'`` with ``title='<name>'``.
+    # Seeding that name handed ``seed_session_with_digest`` an id that does not
+    # exist, the write failed, and the operator landed in a blank session with
+    # the failure on stderr — observed live on ecofire-bc, which silently
+    # started with none of its 6 threads / 964 messages. Use the id of the row
+    # DISCOVERY already resolved, so the writer and the reader agree instead of
+    # deriving the target twice (the reader was fixed in 01b33a7; this path was
+    # missed).
+    seed_target = None
     if just_created and ensured and ensured.get("session"):
         seed_target = ensured["session"]
+    elif orch_row and orch_row.get("id"):
+        seed_target = orch_row["id"]
+    seed_target = seed_target or session
     seeded = project_lifecycle.seed_session_with_digest(
         seed_target, profile, digest_core.format_digest(digest),
         _session_db=args.session_db,
@@ -619,9 +631,24 @@ def _seed_empty_orchestrator(
             f"({len(digest_sessions)} thread{plural}, {digest_msgs} messages)[/ok]"
         )
     else:
+        # LOUD, not a stderr line that scrolls past as the chat opens. A silent
+        # degrade makes "this project has no history" indistinguishable from
+        # "its history was dropped", which is why the ecofire-bc case went
+        # unnoticed for a full working session.
+        plural = "" if len(digest_sessions) == 1 else "s"
+        make_console().print(
+            f"[warn]WARNING: could not seed session {seed_target!r} with the "
+            f"project digest (write failed).[/warn]"
+        )
+        make_console().print(
+            f"[warn]  {len(digest_sessions)} archived thread{plural} / "
+            f"{digest_msgs} messages are NOT in this session. Recover with: "
+            f"hscc project digest {name}[/warn]"
+        )
         print(
             f"could not seed session '{seed_target}' with the project digest "
-            f"(write failed) — continuing with a blank session",
+            f"(write failed) — continuing without "
+            f"{digest_msgs} messages of history",
             file=sys.stderr,
         )
     return 0

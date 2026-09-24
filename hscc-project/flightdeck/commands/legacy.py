@@ -32,6 +32,7 @@ from datetime import date
 from pathlib import Path
 
 from ..core import kanban, registry
+from ._theme import escape, make_console, panel, status_panel
 
 # Length of the body excerpt shown per card.
 BODY_EXCERPT_CHARS = 200
@@ -118,21 +119,21 @@ def _render_grouped(grouped: dict) -> list[str]:
         return ["no unmanaged cards — every card is on a registered board and attributed."]
     lines: list[str] = []
     for board, board_rows in grouped.items():
-        lines.append(f"BOARD: {board}  ({len(board_rows)} card(s))")
+        lines.append(f"BOARD: {escape(board)}  ({len(board_rows)} card(s))")
         lines.append("-" * 60)
         for row in board_rows:
-            lines.append(f"  id: {row['id'] or '?'}")
-            lines.append(f"  status: {row['status'] or '?'}")
-            lines.append(f"  title: {row['title']}")
+            lines.append(f"  id: {escape(str(row['id']) or '?')}")
+            lines.append(f"  status: {escape(str(row['status']) or '?')}")
+            lines.append(f"  title: {escape(row['title'])}")
             if row["workspace_path"]:
-                lines.append(f"  workspace: {row['workspace_path']}")
+                lines.append(f"  workspace: {escape(str(row['workspace_path']))}")
             if row["suggestion"]:
-                lines.append(f"  SUGGESTED TARGET PROJECT: {row['suggestion']}")
-                lines.append(f"    (workspace resolves to {row['suggestion']} though the card sits on board '{board}')")
+                lines.append(f"  SUGGESTED TARGET PROJECT: {escape(row['suggestion'])}")
+                lines.append(f"    (workspace resolves to {escape(row['suggestion'])} though the card sits on board '{escape(board)}')")
             else:
-                lines.append(f"  suggestion: (none — no workspace_path resolves to a registered project)")
+                lines.append("  suggestion: (none — no workspace_path resolves to a registered project)")
             if row["body_excerpt"]:
-                lines.append(f"  body: {row['body_excerpt']}")
+                lines.append(f"  body: {escape(row['body_excerpt'])}")
             lines.append("")
         lines.append("")
     return lines
@@ -188,8 +189,7 @@ def cmd_legacy_cards(args: argparse.Namespace) -> int:
     if json_out:
         print(json.dumps(_render_json(grouped)))
         return 0
-    for line in _render_grouped(grouped):
-        print(line)
+    make_console().print(panel("legacy-cards", "\n".join(_render_grouped(grouped))))
     return 0
 
 
@@ -242,14 +242,16 @@ def _build_migrated(card: dict) -> tuple[str, str]:
 
 def _print_plan(card: dict, board: str, new_title: str, new_body: str, project: str) -> None:
     """Print exactly what a migration WOULD do (dry-run path)."""
-    print(f"migrate card {card.get('id')} -> project {project!r} (board {board!r}):")
-    print(f"  CREATE on board {board!r}:")
-    print(f"    title: {new_title}")
+    lines = [f"migrate card {escape(str(card.get('id')))} -> project {escape(repr(project))} (board {escape(repr(board))}):"]
+    lines.append(f"  CREATE on board {escape(repr(board))}:")
+    lines.append(f"    title: {escape(new_title)}")
     if new_body:
-        first_line = new_body.splitlines()[0]
-        print(f"    body : {first_line}")
-        print(f"           {new_body.splitlines()[1] if len(new_body.splitlines()) > 1 else ''}")
-    print(f"  ARCHIVE original card {card.get('id')} with a note pointing at the new card (never deleted).")
+        split = new_body.splitlines()
+        first_line = split[0]
+        lines.append(f"    body : {escape(first_line)}")
+        lines.append(f"           {escape(split[1] if len(split) > 1 else '')}")
+    lines.append(f"  ARCHIVE original card {escape(str(card.get('id')))} with a note pointing at the new card (never deleted).")
+    make_console().print(panel("migrate-card — plan", "\n".join(lines)))
 
 
 def _archive_source(card: dict, new_id: str, *, _kdb) -> None:
@@ -388,10 +390,10 @@ def cmd_migrate_card(args: argparse.Namespace, projects: list[registry.Project])
         print("migration is PARTIAL — the copy exists but the original is untouched.", file=sys.stderr)
         return 1
 
-    print(
-        f"card {new_id} created on board {board!r}; original {card.get('id')} "
-        f"archived with a pointer to {new_id}.",
-    )
+    make_console().print(status_panel(
+        f"card {new_id} created on board {escape(repr(board))}; original "
+        f"{escape(str(card.get('id')))} archived with a pointer to {new_id}.",
+        status="ok", title="migrate-card"))
     return 0
 
 
