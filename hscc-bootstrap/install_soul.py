@@ -211,8 +211,16 @@ def install_personality(config_path, name="ops"):
 
     if not os.path.exists(config_path):
         return "no-config"
-    with open(config_path) as fh:
-        cfg = yaml.safe_load(fh) or {}
+    try:
+        with open(config_path) as fh:
+            cfg = yaml.safe_load(fh) or {}
+    except yaml.YAMLError:
+        # Malformed YAML is a "bad config" — the documented contract (below) is
+        # a no-op, so refuse to touch it further and DON'T crash the enclosing
+        # bootstrap step. install_soul.py __main__ writes SOUL.md before calling
+        # us; a crash here would leave SOUL updated but personality not, surfaced
+        # only as a generic warn in bootstrap.sh:253.
+        return "bad-config"
     if not isinstance(cfg, dict):
         return "bad-config"
 
