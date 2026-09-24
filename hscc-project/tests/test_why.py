@@ -433,3 +433,53 @@ def test_status_duration_falls_back_to_started_at_when_no_events():
         _kdb=_kdb([task]), _events=lambda cid: [],
     )
     assert s["status_duration_s"] == 1000
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted commands degrade to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI card mandates a NO-ANSI regression per converted command: with
+# stdout captured as a NON-tty (piped), the themed Console must emit NO escape
+# (\x1b[) bytes — the daemon / scripts / iOS console parse this output, and a
+# single escaped byte in a pipe breaks a watcher. `--json` additionally stays
+# byte-identical to the canonical json.dumps.
+
+import io as _io
+from contextlib import redirect_stdout as _redirect_stdout
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestNoAnsiWhy:
+    """`why`'s human view degrades to plain on a non-tty stdout."""
+
+    def test_human_view(self, monkeypatch):
+        story = _story()
+        monkeypatch.setattr(cmd, "gather", lambda *a, **k: story)
+        # A card title containing Rich markup must render literally (escaped).
+        story["title"] = "[critical] why command"
+        out = _no_ansi(lambda: cmd.cmd_why(_args(json=False), [_project()]))
+        assert "IDENTITY" in out
+        assert "VERDICT" in out
+        assert "AWAITING REVIEW" in out
+        assert "[critical] why command" in out  # literal bracket preserved
+
+    def test_json_byte_identical(self, monkeypatch):
+        story = _story()
+        monkeypatch.setattr(cmd, "gather", lambda *a, **k: story)
+        buf = _io.StringIO()
+        with _redirect_stdout(buf):
+            cmd.cmd_why(_args(json=True), [_project()])
+        got = buf.getvalue()
+        canonical = json.dumps(cmd.render_json(story)) + "\n"
+        assert got == canonical, "why --json must stay byte-identical"
+        assert "\x1b" not in got
+

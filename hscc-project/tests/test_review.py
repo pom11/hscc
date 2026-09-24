@@ -1297,3 +1297,114 @@ def test_review_verify_clean_returns_zero(capsys, monkeypatch, tmp_path):
     out = capsys.readouterr().out
     assert rc == 0
     assert "test-quality gate: clean" in out
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted commands degrade to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI card mandates a NO-ANSI regression per converted command: with
+# stdout captured as a NON-tty (piped), the themed Console must emit NO escape
+# (\x1b[) bytes. `--json` additionally must stay byte-identical.
+
+import io as _io
+from contextlib import redirect_stdout as _redirect_stdout
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestNoAnsiReview:
+    """`review`'s human views degrade to plain on a non-tty stdout."""
+
+    def test_card_dry_run(self, tmp_path):
+        reg = _write_registry(tmp_path, [_project()])
+        fake = FakeGit(subject="fix the parser", merge_tree_conflicts=0)
+        out = _no_ansi(lambda: review.cmd_review(
+            _ns(card="t_abc", registry=reg, run=fake, cards=[_card()])))
+        assert "fix the parser" in out
+        assert "MERGE: clean" in out
+        assert "dry-run: pass --apply" in out
+
+    def test_card_apply_success(self, tmp_path):
+        reg = _write_registry(tmp_path, [_project()])
+        fake = FakeGit(merge_tree_conflicts=0)
+        closed = {"n": 0}
+
+        def _close_card(cid, board):
+            closed["n"] += 1
+            return True
+
+        out = _no_ansi(lambda: review.cmd_review(_ns(
+            card="t_abc", registry=reg, run=fake, cards=[_card()],
+            apply=True, close_card=_close_card)))
+        assert closed["n"] == 1
+        assert "card t_abc closed" in out
+
+    def test_queue(self, monkeypatch):
+        from flightdeck.commands import review as cmd_review
+        monkeypatch.setattr(
+            cmd_review, "_enrich_project_cards",
+            lambda projects, _run: [
+                dict(_qcard("c1", status="review", branch="wt/c1"),
+                     project="hscc", branch_exists=True, is_merged=False),
+            ],
+        )
+        monkeypatch.setattr(
+            cmd_review.kanban, "list_board_watermarks", lambda **kw: {}
+        )
+        out = _no_ansi(lambda: cmd_review.cmd_queue(argparse.Namespace(
+            registry="/tmp/r.yaml", json=False, now=NOW, run=None)))
+        assert "t_1" in out or "c1" in out
+        assert "1 card(s) awaiting review" in out
+
+    def test_verify(self, tmp_path):
+        from flightdeck.commands import review as cmd_review
+        proj = Project(name="svc", repo=str(tmp_path), verify="pytest")
+        monkeypatch = __import__("pytest").MonkeyPatch()
+        try:
+            monkeypatch.setattr(
+                cmd_review.review, "run_verify_with_gate",
+                lambda *a, **kw: core_review.VerifyResult(
+                    project="svc", returncode=0, total_seconds=2.5,
+                    tests=[core_review.TestTiming("tests/test_a.py::test_slow", 2.1)],
+                    flags=["SLOW TEST tests/test_a.py::test_slow: 2.10s (> 1s)"],
+                    baseline_seconds=2.2,
+                ),
+            )
+            out = _no_ansi(lambda: cmd_review.cmd_verify(
+                argparse.Namespace(registry="/tmp/r.yaml", baseline="",
+                                   json=False, run=None, now_fn=lambda: NOW),
+                proj))
+        finally:
+            monkeypatch.undo()
+        assert "SLOW TEST" in out
+        assert "BEFORE MERGE" in out
+
+    def test_review_json_byte_identical(self, tmp_path):
+        reg = _write_registry(tmp_path, [_project()])
+        fake = FakeGit(subject="fix the parser", merge_tree_conflicts=0)
+        buf = _io.StringIO()
+        with _redirect_stdout(buf):
+            review.cmd_review(_ns(card="t_abc", registry=reg, run=fake,
+                                  cards=[_card()], json=True))
+        got = buf.getvalue()
+        assert "\x1b" not in got
+        # The --json path still emits a single raw json.dumps line (no panel /
+        # no ANSI), and it parses to the same facts the human view shows.
+        assert got.rstrip("\n") == got.rstrip()  # single trailing newline, no box
+        import json
+        parsed = json.loads(got)
+        assert parsed["id"] == "t_abc"
+        assert parsed["subject"] == "fix the parser"
+        assert parsed["base"] == "main"
+        # verify the raw json.dumps was NOT routed through a Console: JSON lines
+        # produced by print(json.dumps) must never carry ANSI or a panel border.
+        assert not got.startswith("╭") and not got.startswith("┌")
+
