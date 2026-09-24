@@ -57,4 +57,40 @@ with the merged CLI.
 
 ## Status
 
-PLANNED — not yet implemented.
+IMPLEMENTED — committed 927c1e4. Full 8-plugin suite running under both
+interpreters; see run below.
+
+## What changed (committed 927c1e4)
+
+- Added `hscc-cluster/_theme.py` — the shared themed render helper (guarded lazy
+  import of `hscc_daemon.cli_theme`, neutral `_FALLBACK_THEME`, `make_console`
+  anti-collapse at non-tty width `DEFAULT_NONTTY_WIDTH = 200` exported constant,
+  `panel` / `status_panel` / `table` / `escape`). Mirrors hscc-project
+  `flightdeck/commands/_theme.py`.
+- `hscc-cluster/hscc.py` — `main()` gained a `--json` flag; command results now
+  render a themed human view by default (`_emit_result` / `_human_lines`) and a
+  raw byte-identical `json.dumps(result, indent=2, default=str)` with `--json`.
+  Exception path: themed error panel, or raw `json.dumps({"error": str(e)})` with
+  `--json`.
+- `hscc-cluster/cluster_template_cli.py` `__main__` — `--json` flag; themed panel
+  human default (`_template_lines`), raw json with `--json`.
+- `hscc-cluster/cluster_template.py` `main()` — `--json` flag + `_emit_template`
+  themed panel; raw `json.dumps(result, indent=2)` with `--json` (byte-identical
+  to prior, incl. the older no-default=str shape).
+- `hscc-cluster/gateway_restart.py` `__main__` — extracted `_emit_result`; `--json`
+  raw json, human themed status panel. NOTE: pre-conversion `__main__` printed a
+  Python-repr dict (`print(result)`); the `--json` path now emits proper JSON.
+  No consumer (daemon/template-apply) parses that standalone output — it calls
+  `restart_gateway()` as a library — so this is a safe, strictly-improving format
+  change with no byte-identity consumer to preserve.
+- Deliberately NOT themed (sibling convention + invariant):
+  - `hscc.py` `_run_or_print` "Will run:" / "--dry-run" notices — dry-run/execution
+    notices stay plain (matching every prior card).
+  - `hscc.py` merged-CLI note (stderr), help, unknown-command + usage prints —
+    errors/help stay plain.
+  - Non-console json.dumps (NOT output): `sparkrun_bridge.py` remote script
+    template, `__init__.py` tool wire-format return, `workflow.py` f.write audit
+    trail.
+- Tests: new `hscc-cluster/tests/test_no_ansi.py` (20 regressions: no-ANSI per
+  converted command + `--json` byte-identity). Updated `test_cli.py` subprocess
+  to pass `--json` (default is now themed).
