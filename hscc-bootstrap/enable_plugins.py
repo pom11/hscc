@@ -145,6 +145,28 @@ DASHBOARD_PUBLIC_URL = os.environ.get(
 SINGLE_QUERY_MODES = {"approve", "deny"}
 SINGLE_QUERY_MODE = os.environ.get("HSCC_SINGLE_QUERY_MODE", "approve")
 
+# Worktree placement for build/compiler-root repos (hermes patch 0012). The
+# kanban dispatcher hardcodes <repo>/.worktrees/<task-id>, which lands INSIDE a
+# project whose root is itself a compiler root (Microsoft AL, and Flutter for
+# analyze/build). A compiler walks the whole tree, so half-finished branch code
+# in those dirs gets compiled as part of the real app — .gitignore does NOT help
+# (ignoring a path does not stop a compiler walking the filesystem). Repos listed
+# here keep their kanban worktrees OUT of the tree under
+# OUT_OF_TREE_WORKTREE_ROOT/<repo-name>/<task-id>. Env-overridable for a different
+# topology.
+OUT_OF_TREE_WORKTREE_ROOT = os.environ.get(
+    "HSCC_OUT_OF_TREE_WORKTREE_ROOT", "~/dev/.worktrees")
+OUT_OF_TREE_WORKTREE_REPOS = [
+    r.strip() for r in os.environ.get(
+        "HSCC_OUT_OF_TREE_WORKTREE_REPOS",
+        ",".join([
+            "/Users/desac/dev/EcoFire_customizations_bc",  # Microsoft AL root
+            "/Users/desac/dev/ecofire",                    # Flutter app
+            "/Users/desac/dev/efsdriver",                  # Flutter app
+        ]),
+    ).split(",") if r.strip()
+]
+
 
 def _is_int_like(v) -> bool:
     """True if ``v`` is a whole number stored as int, float (``6.0``), or a
@@ -259,6 +281,34 @@ def _ensure_kanban_routing(cfg):
     if not isinstance(cur, int) or cur < 1:
         k["failure_limit"] = REJECT_ESCALATE_LIMIT
         changed.append("failure_limit")
+    return changed
+
+
+def _ensure_worktree_placement(cfg):
+    """Register compiler-root repos so their kanban worktrees stay OUT of the tree.
+
+    The kanban dispatcher hardcodes ``<repo>/.worktrees/<task-id>``. For a repo
+    whose project root is itself a build/compiler root that path sits inside the
+    compiler's walk, and half-finished branch code gets compiled as part of the
+    real app (Microsoft AL has no exclude key; ``.gitignore`` does not stop a
+    compiler walking the filesystem). Listing such repos here makes the patched
+    dispatcher place their worktrees under ``<out_of_tree_root>/<repo-name>/<id>``
+    instead. Only FILLS the keys when ABSENT — an operator who set their own list
+    or root keeps it. Returns keys changed.
+    """
+    k = cfg.setdefault("kanban", {})
+    if not isinstance(k, dict):
+        return []
+    wt = k.setdefault("worktree", {})
+    if not isinstance(wt, dict):
+        return []
+    changed = []
+    if not (wt.get("out_of_tree_root") or "").strip():
+        wt["out_of_tree_root"] = OUT_OF_TREE_WORKTREE_ROOT
+        changed.append("worktree.out_of_tree_root")
+    if "out_of_tree_repos" not in wt:
+        wt["out_of_tree_repos"] = list(OUT_OF_TREE_WORKTREE_REPOS)
+        changed.append("worktree.out_of_tree_repos")
     return changed
 
 
@@ -753,7 +803,8 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
 
     Returns {"plugins": [...], "toolsets": [...], "kanban": [...], "delegation":
     [...], "compaction": [...], "fallback": [...], "bitwarden": [...],
-    "prompt_caching": [...], "dashboard": [...], "multiplex": [...], "hooks": [...]} of what
+    "prompt_caching": [...], "dashboard": [...], "multiplex": [...], "hooks": [...],
+    "worktree": [...]} of what
     changed. Writes (with one backup) only if something changed. No-op + no
     backup if already wired or if the config is missing/malformed.
 
@@ -772,7 +823,7 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
     empty = {"plugins": [], "toolsets": [], "kanban": [], "delegation": [],
              "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [],
              "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": [],
-             "approvals": []}
+             "approvals": [], "worktree": []}
     if not os.path.exists(config_path):
         return empty
     with open(config_path) as fh:
@@ -783,6 +834,7 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
     added_plugins = _ensure_plugins_enabled(cfg, plugins)
     added_toolsets = _ensure_toolsets(cfg, toolsets)
     changed_kanban = _ensure_kanban_routing(cfg)
+    changed_worktree = _ensure_worktree_placement(cfg)
     changed_delegation = _ensure_delegation(cfg)
     changed_compaction = _ensure_compaction(cfg)
     changed_text_aux = _ensure_text_auxiliaries(cfg)
@@ -801,10 +853,11 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
     # Install the hook script to disk (idempotent, backup-then-overwrite)
     hooks_file_result = _ensure_hooks_file(hooks_source)
 
-    if (added_plugins or added_toolsets or changed_kanban or changed_delegation
-            or changed_compaction or changed_text_aux or changed_fallback
-            or changed_bitwarden or changed_prompt_caching or changed_dashboard
-            or changed_multiplex or changed_hooks or changed_approvals):
+    if (added_plugins or added_toolsets or changed_kanban or changed_worktree
+            or changed_delegation or changed_compaction or changed_text_aux
+            or changed_fallback or changed_bitwarden or changed_prompt_caching
+            or changed_dashboard or changed_multiplex or changed_hooks
+            or changed_approvals):
         import shutil
         import time
         shutil.copy(config_path,
@@ -821,7 +874,8 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
             "dashboard": changed_dashboard,
             "multiplex": changed_multiplex,
             "hooks": changed_hooks,
-            "approvals": changed_approvals}
+            "approvals": changed_approvals,
+            "worktree": changed_worktree}
 
 
 if __name__ == "__main__":
