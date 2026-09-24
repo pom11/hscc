@@ -12,6 +12,13 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
 3. **Install: plugin files** — copies the plugin tree into `~/.hermes/plugins/`
    (backup-then-overwrite; `--no-backup` to overwrite in place). The repo is the
    source of truth; the runtime is a copy. Hard-stops on copy failure.
+3b. **Install: hscc CLI entry point** — installs `hscc-cli` INTO the Hermes venv
+   (`install_cli.py`) so the console script's shebang points at the Hermes venv
+   BY CONSTRUCTION. The `hscc` CLI reads `hermes_cli`/`hermes_state` (Hermes-venv
+   only) and needs the venv's Local Network (TCC) grant, so a p313 shebang
+   silently degrades `project chat/sessions` and `hscc check`. Idempotent:
+   verifies the shebang each run and force-repairs on drift; reports what it
+   changed. `--skip-cli` to opt out. Hard-stops on failure.
 4. **Install: skills / role profiles / ~/.hscc + serving.json**.
 5. **Install: hermes/sparkrun patches** — reapplies the curated upstream patches
    (`apply_patches.py`) so the kanban review + resume hooks land on official
@@ -36,6 +43,7 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
 | `doctor.py` | preflight checks |
 | `detect.py` | parse `sparkrun cluster list` |
 | `install_payload.py` | copy repo → runtime (backup/guard/exclude tests) |
+| `install_cli.py` | durable `hscc` CLI entry-point install (into Hermes venv) — shebang correct by construction, verify/repair on drift |
 | `enable_plugins.py` | idempotent config wiring |
 | `install_soul.py` | SOUL + ops personality (sentinel blocks) |
 | `serving_gen.py` | build serving.json from the detected cluster |
@@ -45,7 +53,7 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
 
 ## Flags
 `--yes` non-interactive · `--force` regenerate serving.json · `--no-backup` ·
-`--skip-skills|--skip-roles|--skip-daemon|--skip-patches`.
+`--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli`.
 
 ## Tests
 `tests/` — 258 tests incl. an end-to-end stage-sequence test and the daemon-restart helper tests. `python -m pytest tests/ -q`.

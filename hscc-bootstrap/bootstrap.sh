@@ -17,7 +17,7 @@ PYBIN="$HERMES_HOME/hermes-agent/venv/bin/python"
 [ -x "$PYBIN" ] || PYBIN="python3"
 
 ASSUME_YES=false; FORCE=false; NO_BACKUP=false
-SKIP_SKILLS=false; SKIP_ROLES=false; SKIP_DAEMON=false; SKIP_PATCHES=false
+SKIP_SKILLS=false; SKIP_ROLES=false; SKIP_DAEMON=false; SKIP_PATCHES=false; SKIP_CLI=false
 for a in "$@"; do case "$a" in
   --yes|-y) ASSUME_YES=true ;;
   --force) FORCE=true ;;
@@ -26,7 +26,8 @@ for a in "$@"; do case "$a" in
   --skip-roles) SKIP_ROLES=true ;;
   --skip-daemon) SKIP_DAEMON=true ;;
   --skip-patches) SKIP_PATCHES=true ;;
-  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches]"; exit 0 ;;
+  --skip-cli) SKIP_CLI=true ;;
+  --help|-h) echo "Usage: hscc-bootstrap [--yes] [--force] [--no-backup] [--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli]"; exit 0 ;;
   *) echo "Unknown option: $a" >&2; exit 1 ;;
 esac; done
 
@@ -116,6 +117,39 @@ else
     die "plugin copy FAILED — aborting (later stages depend on $PLUGINS being populated)"
   fi
 fi
+
+hdr "Install: hscc CLI entry point (into the Hermes venv)"
+# The `hscc` CLI reads the Hermes runtime from the SAME interpreter: the
+# project chat/sessions/ask verbs import `hermes_cli`/`hermes_state` (which live
+# ONLY in the Hermes venv), and `hscc check` needs the macOS Local Network (TCC)
+# grant the Hermes venv carries. Installing the console script into ANY other
+# interpreter (e.g. a bare conda p313) bakes a wrong shebang that silently
+# degrades those verbs (HermesRuntimeUnavailable / errno 65). We install
+# `hscc-cli` INTO the Hermes venv so pip/uv bakes the venv interpreter into the
+# shebang BY CONSTRUCTION, then verify it and force-repair on drift. Install_cli
+# is idempotent and REPORTS what it changed — no silent rewrites here. This is a
+# foundation step: a wrong-shebang CLI is exactly the silent degradation this
+# exists to prevent, so failure HARD-STOPS rather than degrading to a warning.
+if $SKIP_CLI; then warn "skipped"; else
+CLI_JSON=$("$PYBIN" "$BOOT_DIR/install_cli.py" "$PYBIN" "$REPO_ROOT/hscc-cli" 2>/dev/null)
+if [ -z "$CLI_JSON" ]; then
+  "$PYBIN" "$BOOT_DIR/install_cli.py" "$PYBIN" "$REPO_ROOT/hscc-cli" >&2
+  die "hscc CLI install FAILED — see output above"
+fi
+# Emit a single actionable line: <action>|<shebang> (or <action>|<error>).
+CLI_LINE=$(printf '%s' "$CLI_JSON" | "$PYBIN" -c "
+import sys, json
+d = json.load(sys.stdin)
+print(d.get('action','unknown') + '|' + (d.get('shebang') or d.get('error') or '?'))
+")
+CLI_ACTION="${CLI_LINE%%|*}"
+CLI_DETAIL="${CLI_LINE#*|}"
+case "$CLI_ACTION" in
+  installed) ok "hscc CLI installed into Hermes venv ($CLI_DETAIL)" ;;
+  verified)  ok "hscc CLI verified — shebang already on Hermes venv ($CLI_DETAIL)" ;;
+  repaired)  ok "hscc CLI shebang repaired → Hermes venv ($CLI_DETAIL)" ;;
+  *) echo "$CLI_JSON" >&2; die "hscc CLI install FAILED ($CLI_DETAIL) — a wrong-shebang CLI silently degrades project/chat/check" ;;
+esac
 
 hdr "Install: operator watchdog scripts"
 # Copy <repo>/scripts/hscc_*.sh into ~/.hermes/scripts/. Non-fatal: watchdogs
