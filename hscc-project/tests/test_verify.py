@@ -496,3 +496,98 @@ def test_discovery_loads_verify_module():
 
     mods = _discover_commands()
     assert "verify" in mods
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted command degrades to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI group C card mandated a NO-ANSI regression per converted
+# command: with stdout captured as a NON-tty StringIO, the themed Console must
+# emit NO escape (\x1b[) bytes — the daemon / scripts / iOS console parse this
+# output, and a single escaped byte in a pipe breaks a watcher. --json paths
+# stay byte-identical to canonical json.dumps (the machine contract).
+import io as _io
+import contextlib as _contextlib
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _contextlib.redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestVerifyNoAnsi:
+    """`verify`'s human view is plain on a non-tty stdout; --json stays
+    byte-identical to canonical dumps."""
+
+    def test_single_pass_view_is_plain(self, tmp_path):
+        reg = _write_registry(tmp_path, [{"name": "hscc", "repo": "~/dev/hscc", "verify": "true"}])
+        state = str(tmp_path / "state.yaml")
+        out = _no_ansi(lambda: verify_cmd.run(
+            _ns(project="hscc", registry=reg, state=state, run=_ok_run), reg))
+        assert "hscc: PASS" in out
+
+    def test_single_fail_view_is_plain(self, tmp_path):
+        reg = _write_registry(tmp_path, [{"name": "hscc", "repo": "~/dev/hscc", "verify": "true"}])
+        state = str(tmp_path / "state.yaml")
+        out = _no_ansi(lambda: verify_cmd.run(
+            _ns(project="hscc", registry=reg, state=state, run=_fail_run), reg))
+        assert "hscc: FAIL" in out
+        assert "boom: broken thing" in out
+
+    def test_all_view_is_plain(self, tmp_path):
+        rows = [
+            {"name": "good", "repo": "~/dev/good", "verify": "true"},
+            {"name": "broken", "repo": "~/dev/broken", "verify": "true"},
+            {"name": "plain", "repo": "~/dev/plain"},
+        ]
+        reg = _write_registry(tmp_path, rows)
+        state = str(tmp_path / "state.yaml")
+
+        def run(cmd, cwd):
+            return _Proc(1, "", "eh") if "broken" in cwd else _Proc(0, "", "")
+
+        out = _no_ansi(lambda: verify_cmd.run(
+            _ns(all=True, project=None, registry=reg, state=state, run=run), reg))
+        assert "good" in out and "PASS" in out
+        assert "broken" in out and "FAIL" in out
+        assert "no verify configured" in out
+        assert "1 passed, 1 failed, 1 no verify configured" in out
+
+    def test_single_json_stays_byte_identical(self, tmp_path, monkeypatch):
+        # Pin the perf_counter so the JSON duration is deterministic — the
+        # machine contract is byte-identical to canonical json.dumps.
+        seq = iter([1.0, 3.5])
+        monkeypatch.setattr(verify.time, "perf_counter", lambda: next(seq))
+        reg = _write_registry(tmp_path, [{"name": "hscc", "repo": "~/dev/hscc", "verify": "true"}])
+        state = str(tmp_path / "state.yaml")
+        out = _no_ansi(lambda: verify_cmd.run(
+            _ns(project="hscc", registry=reg, state=state, run=_ok_run, json=True), reg))
+        expected = json.dumps({
+            "project": "hscc",
+            "status": PASS,
+            "duration_s": 2.5,
+        }) + "\n"
+        assert out == expected
+
+    def test_all_json_stays_byte_identical(self, tmp_path, monkeypatch):
+        # One fixed clock: every run_verify measures 0.5s (1.0 -> 1.5).
+        seq = iter([1.0, 1.5, 1.0, 1.5, 1.0, 1.5, 1.0, 1.5])
+        monkeypatch.setattr(verify.time, "perf_counter", lambda: next(seq))
+        rows = [
+            {"name": "a", "repo": "~/dev/a", "verify": "true"},
+            {"name": "b", "repo": "~/dev/b", "verify": "true"},
+        ]
+        reg = _write_registry(tmp_path, rows)
+        state = str(tmp_path / "state.yaml")
+        out = _no_ansi(lambda: verify_cmd.run(
+            _ns(all=True, registry=reg, state=state, run=_ok_run, json=True), reg))
+        expected = json.dumps([
+            {"project": "a", "status": PASS, "duration_s": 0.5},
+            {"project": "b", "status": PASS, "duration_s": 0.5},
+        ]) + "\n"
+        assert out == expected

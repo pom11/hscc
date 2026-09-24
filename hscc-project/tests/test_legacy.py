@@ -488,3 +488,109 @@ def test_find_card_nonexistent_returns_none(tmp_path):
         archived_tasks_by_path={eco_db: [_Task("t_arch", "arch card")]},
     )
     assert kanban.find_card("t_nope", _kdb=kdb) is None
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted command degrades to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI group C card mandated a NO-ANSI regression per converted
+# command: with stdout captured as a NON-tty StringIO, the themed Console must
+# emit NO escape (\x1b[) bytes — the daemon / scripts / iOS console parse this
+# output, and a single escaped byte in a pipe breaks a watcher. --json paths
+# stay byte-identical to canonical json.dumps (the machine contract).
+import io as _io
+import contextlib as _contextlib
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _contextlib.redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestLegacyCardsNoAnsi:
+    """`legacy-cards`' human view is plain on a non-tty stdout; --json stays
+    byte-identical to canonical dumps."""
+
+    def _rows(self):
+        return [
+            _hcard("t_1", title="task one", board="orphan"),
+            _hcard("t_2", title="task two", board="orphan", body="a [styled] body"),
+        ]
+
+    def test_human_view_is_plain(self):
+        cards = self._rows()
+        out = _no_ansi(lambda: cmd.cmd_legacy_cards(_args(cards=cards)))
+        assert "BOARD: orphan" in out
+        assert "t_1" in out
+        assert "task one" in out
+
+    def test_human_view_escapes_markup_in_body(self):
+        """A literal '[styled]' in body text renders literally, not as a tag."""
+        cards = self._rows()
+        out = _no_ansi(lambda: cmd.cmd_legacy_cards(_args(cards=cards)))
+        assert "[styled]" in out
+
+    def test_empty_view_is_plain(self):
+        out = _no_ansi(lambda: cmd.cmd_legacy_cards(_args(cards=[])))
+        assert "no unmanaged cards" in out
+
+    def test_json_stays_byte_identical(self, monkeypatch):
+        cards = [_hcard("t_1", board="orphan"), _hcard("t_2", board="orphan")]
+        projects = [_project()]
+        # cmd_legacy_cards loads projects via registry.load_registry(args.registry)
+        # — pin it to the same list the expected is built from so both sides
+        # share the identical suggestion resolution (the --json machine path).
+        monkeypatch.setattr(
+            cmd.registry, "load_registry",
+            lambda path: projects)
+        rows = cmd._collect(cards, projects)
+        grouped = cmd._group_by_board(rows)
+        expected = json.dumps(cmd._render_json(grouped)) + "\n"
+        out = _no_ansi(lambda: cmd.cmd_legacy_cards(_args(cards=cards, json=True)))
+        assert out == expected
+
+
+class TestMigrateCardNoAnsi:
+    """`migrate-card`'s dry-run plan and success human views are plain."""
+
+    def _projs(self):
+        return [_project(name="flightdeck", board="fd", repo="/repo")]
+
+    def test_dry_run_plan_is_plain(self, monkeypatch):
+        monkeypatch.setattr(
+            cmd.kanban, "find_card",
+            lambda card_id, _kdb=None: _hcard("t_9", title="mig me", board="orphan"))
+        projs = self._projs()
+        out = _no_ansi(lambda: cmd.cmd_migrate_card(
+            _json_ns(card_id="t_9", to="flightdeck", apply=False), projs))
+        assert "migrate card t_9" in out
+        assert "CREATE on board" in out
+
+    def test_apply_success_is_plain(self, monkeypatch):
+        created = {"id": "t_new"}
+        monkeypatch.setattr(
+            cmd.kanban, "find_card",
+            lambda card_id, _kdb=None: _hcard("t_9", title="mig me", board="orphan"))
+        monkeypatch.setattr(
+            cmd.kanban, "create_task",
+            lambda *a, **k: "t_new")
+        monkeypatch.setattr(
+            cmd, "_archive_source", lambda card, new_id, **k: None)
+        projs = self._projs()
+        out = _no_ansi(lambda: cmd.cmd_migrate_card(
+            _json_ns(card_id="t_9", to="flightdeck", apply=True), projs))
+        assert "created on board" in out
+
+
+def _json_ns(**kw):
+    base = {
+        "registry": "/tmp/reg.yaml", "card_id": None, "to": None, "apply": False,
+        "kdb": None,
+    }
+    base.update(kw)
+    return argparse.Namespace(**base)
