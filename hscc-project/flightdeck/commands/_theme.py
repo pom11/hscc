@@ -33,10 +33,36 @@ from __future__ import annotations
 
 from rich.console import Console
 from rich.markup import escape
+from rich.theme import Theme
 
 # The hscc_daemon.cli_theme module, or None when the peer package is absent.
 _theme = None
 _theme_loaded = False
+
+# Fallback Theme used ONLY when hscc_daemon.cli_theme is unavailable (a
+# standalone flightdeck install, or any invocation where the repo root is not
+# on sys.path — e.g. `cd hscc-project && pytest`). It registers the SAME
+# semantic names as the real palette so every card's markup / ``border_style``
+# resolves, but maps them to intentionally NEUTRAL styles (no colour), so the
+# fallback stays genuinely unthemed while never crashing with MissingStyle.
+# Without this, any card that renders ``border_style="error"`` or ``[dim]`` /
+# ``[error]`` / ``[ok]`` / ``[label]`` markup dies on a plain Console because
+# 'error' etc. are not valid colour names. Bold is kept on the emphasis names
+# so output still reads structurally.
+_FALLBACK_THEME = Theme(
+    {
+        "accent": "bold",
+        "primary": "bold",
+        "title": "bold",
+        "dim": "",
+        "label": "bold",
+        "border": "",
+        "text": "",
+        "ok": "bold",
+        "warn": "bold",
+        "error": "bold",
+    }
+)
 
 
 def theme():
@@ -82,7 +108,7 @@ def make_console(_name: str | None = None, **kwargs) -> Console:
     if t is not None:
         console = t.make_console(_name, **kwargs)
     else:
-        console = Console(**kwargs)
+        console = Console(theme=_FALLBACK_THEME, **kwargs)
     if console.is_terminal:
         # A real terminal: drop the fixed width so Rich uses the actual screen
         # width (a hard 200 would overflow a narrower TTY).
@@ -90,7 +116,7 @@ def make_console(_name: str | None = None, **kwargs) -> Console:
         if t is not None:
             console = t.make_console(_name, **widthless)
         else:
-            console = Console(**widthless)
+            console = Console(theme=_FALLBACK_THEME, **widthless)
     return console
 
 
