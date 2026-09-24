@@ -82,4 +82,5 @@ confirms the panel/table bodies stay on whole lines in a pipe.
 
 ## Commits
 
-- (list final commit shas here after merge flow)
+- `0bd4bc9` flights(cli): theme message/ask/report/qa human output (Rich card 2/21)
+- `35ea0b0` flights(cli): no-ANSI + --json byte-identity regressions for message/ask/report/qa
