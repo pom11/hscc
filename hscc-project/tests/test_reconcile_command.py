@@ -252,3 +252,54 @@ def test_genuinely_merged_branch_is_still_closed(monkeypatch):
     rc = cmd.cmd_reconcile(_args(apply=True, run=run, kdb=kdb), [_project()])
     assert rc == 0
     assert kdb.closed == ["a"]
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted command degrades to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI card mandates a NO-ANSI regression per converted command: with
+# stdout captured as a NON-tty (piped), the themed Console must emit NO escape
+# (\x1b[) bytes. --json stays byte-identical and raw (never routed through a
+# Console).
+
+import io as _io
+from contextlib import redirect_stdout as _redirect_stdout
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestNoAnsiReconcile:
+    """`reconcile`'s human views degrade to plain on a non-tty stdout."""
+
+    def test_plan_render(self, monkeypatch):
+        monkeypatch.setattr(kanban, "list_cards", lambda **kw: [
+            _hcard("a", title="Landed work", status="review", branch="wt/a"),
+        ])
+        run = FakeRun(existing={"wt/a"}, merged={"wt/a"}, ahead=0, landed={"wt/a"})
+        out = _no_ansi(lambda: cmd.cmd_reconcile(_args(run=run), [_project()]))
+        assert "CLOSE (work landed) (1)" in out
+        assert "Landed work" in out
+        assert "a" in out
+
+    def test_json_byte_identical(self, monkeypatch):
+        monkeypatch.setattr(kanban, "list_cards", lambda **kw: [
+            _hcard("a", title="Landed", status="review", branch="wt/a"),
+        ])
+        run = FakeRun(existing={"wt/a"}, merged={"wt/a"}, ahead=0, landed={"wt/a"})
+        out = _no_ansi(lambda: cmd.cmd_reconcile(_args(json=True, run=run), [_project()]))
+        # --json must be EXACTLY json.dumps of its own parsed payload + the
+        # print() newline: raw print path (no wrapping to width, no ANSI,
+        # compact separators), never a Console.
+        assert out == json.dumps(json.loads(out)) + "\n", "--json must be byte-identical to json.dumps"
+        payload = json.loads(out)
+        assert set(payload) == {"close", "archive", "stale", "skipped"}
+        assert payload["close"][0]["card_id"] == "a"
+
