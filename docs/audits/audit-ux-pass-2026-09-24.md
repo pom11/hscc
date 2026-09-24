@@ -114,4 +114,20 @@ that is roadmap milestone `profile-provisioning`, done separately. Do NOT touch 
 - audit note: docs/audits/t_1ca5c6e9_audit.md
 - commits: 20edc8f (theme helper), d1b37ad (conversion), 2c70f47 (widen console + audit)
 
-### RC2 .. (pending)
+### RC2 t_b2d2c0ae — RICH CLI hscc-project group B (message/ask/report/qa) — DONE
+- branch wt/t_b2d2c0ae; commits-ahead of main before merge = 3 (0bd4bc9, 35ea0b0, a8ca754)
+  (`git rev-list --count main..wt/t_b2d2c0ae`)
+- merged YES (ff a151230..a8ca754); pushed YES (`git rev-list --count origin/main..main` = 0);
+  deployed YES (install_payload exit 0)
+- suite: hermes venv 1256 passed/30 failed; p313 1256 passed/30 failed; branch failure-set
+  == main byte-for-byte under both interpreters (diff empty)
+- 15 no-ANSI regression tests; --json byte-identical via docs/audits/t_b2d2c0ae_verify_e2e.py
+  (message send/read/dispatch/broadcast + ask list/show plain; ask list --json byte-identical)
+- ORCHESTRATOR FLAKE FINDING: the 30 "pre-existing" test_standup failures were TRANSIENT.
+  Independent run of test_standup.py on a clean detached worktree at a8ca754 =
+  59 passed / 0 failed. Real in worker's window, cleared since. test_standup reads live
+  ~/.hermes/hermes-agent + board -> live-state flaky. Follow-up card created to make it hermetic.
+- scope: only the 4 group-B command files + 4 test files + docs/audits. qa --watch left as-is
+  (live TTY re-render, not a rich target). [ask]/[dry-run]/[report] tags escaped for Rich.
+
+### RC3 .. (pending)
