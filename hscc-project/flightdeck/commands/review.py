@@ -61,6 +61,7 @@ import time
 
 from ..core import git_state, kanban, registry, review
 from ..core.review import BaselineStore
+from ._theme import escape, make_console, panel, status_panel
 
 # The base branch every card's work is reviewed against and merged into.
 DEFAULT_BASE = "main"
@@ -552,7 +553,7 @@ def cmd_review(args: argparse.Namespace) -> int:
                 )
             ))
             return 1
-        print(message)
+        make_console().print(panel("review", escape(message)))
         return 1
 
     facts = _branch_facts(repo, branch, base, _run)
@@ -568,9 +569,12 @@ def cmd_review(args: argparse.Namespace) -> int:
                 projects=projects, landing=False,
             )))
             return 0
-        for line in _render(card, project, branch, facts, verify_present, verify_text, projects):
-            print(line)
-        print("\ndry-run: pass --apply to merge the branch and close the card.")
+        lines = _render(card, project, branch, facts, verify_present, verify_text, projects)
+        lines.append("")
+        lines.append("dry-run: pass --apply to merge the branch and close the card.")
+        make_console().print(panel(
+            "review",
+            "\n".join(escape(ln) if ln else ln for ln in lines)))
         return 0
 
     # --apply: merge the branch AND close the card as ONE action.
@@ -586,11 +590,13 @@ def cmd_review(args: argparse.Namespace) -> int:
                 projects=projects, landing=False, apply_outcome=outcome,
             )))
             return 1
-        for line in _render(
+        lines = _render(
             card, project, branch, facts, verify_present, verify_text,
             projects, apply_outcome=outcome,
-        ):
-            print(line)
+        )
+        make_console().print(panel(
+            "review",
+            "\n".join(escape(ln) if ln else ln for ln in lines)))
         return 1
 
     # Close the card ONLY now that the merge has landed. A ``False`` return
@@ -612,13 +618,16 @@ def cmd_review(args: argparse.Namespace) -> int:
             projects=projects, landing=False, apply_outcome=outcome,
         )))
         return 0
-    for line in _render(
+    lines = _render(
         card, project, branch, facts, verify_present, verify_text,
         projects, apply_outcome=outcome,
-    ):
-        print(line)
+    )
+    make_console().print(panel(
+        "review",
+        "\n".join(escape(ln) if ln else ln for ln in lines)))
     if close_ok:
-        print(f"card {card_id} closed")
+        make_console().print(status_panel(
+            f"card {card_id} closed", status="ok", title="review"))
     else:
         print(
             f"warning: card {card_id} merged but could not be archived — "
@@ -710,18 +719,23 @@ def cmd_queue(args: argparse.Namespace) -> int:
         return 0
 
     if not rows:
-        print("review queue: no cards awaiting review.")
+        make_console().print(panel("review queue", "no cards awaiting review."))
         # A watermark still tells the operator how fresh the (empty) read is.
         _print_watermark(enriched, _run=args.run)
         return 0
 
+    lines = []
     for r in rows:
         age = _format_age(r["age_seconds"])
-        print(
+        lines.append(
             f"{r['project']:<20} {r['card_id']:<16} {r['branch']:<28} "
-            f"{age:>7}  {r['title']}"
+            f"{age:>7}  {escape(r['title'])}"
         )
-    print(f"\n{len(rows)} card(s) awaiting review.")
+    lines.append(f"")
+    lines.append(f"{len(rows)} card(s) awaiting review.")
+    make_console().print(panel(
+        "review queue",
+        "\n".join(escape(ln) if ln else ln for ln in lines)))
     _print_watermark(enriched, _run=args.run)
     return 0
 
@@ -743,14 +757,16 @@ def _print_watermark(enriched, *, _run=None) -> None:
     try:
         watermarks = kanban.list_board_watermarks(boards=boards)
     except kanban.KanbanError:
-        print("data as of <unknown>")
+        make_console().print(panel("review queue", "data as of <unknown>"))
         return
     watermark = kanban.freshness_watermark(boards, watermarks=watermarks or {})
     if not isinstance(watermark, (int, float)) or int(watermark) <= 0:
-        print("data as of <unknown>")
+        make_console().print(panel("review queue", "data as of <unknown>"))
         return
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(int(watermark)))
-    print(f"data as of {when} ({_format_age(int(time.time()) - int(watermark))} ago)")
+    make_console().print(panel(
+        "review queue",
+        f"data as of {when} ({_format_age(int(time.time()) - int(watermark))} ago)"))
 
 
 # --------------------------------------------------------------------------- #
@@ -803,15 +819,18 @@ def cmd_verify(args: argparse.Namespace, proj: registry.Project) -> int:
             if result.baseline_seconds is not None
             else "none"
         )
-        print(f"review {result.project}: verify {status}  suite {total}  baseline {base}")
+        lines = [f"review {result.project}: verify {status}  suite {total}  baseline {base}"]
         for t in result.tests:
-            print(f"    {t.duration:7.2f}s {t.name}")
+            lines.append(f"    {t.duration:7.2f}s {escape(t.name)}")
         if result.flags:
-            print("BEFORE MERGE:")
+            lines.append("BEFORE MERGE:")
             for flag in result.flags:
-                print(f"    [FLAG] {flag}")
+                lines.append(f"    [FLAG] {escape(flag)}")
         else:
-            print("test-quality gate: clean — no flags before merge.")
+            lines.append("test-quality gate: clean — no flags before merge.")
+        make_console().print(panel(
+            "review verify",
+            "\n".join(escape(ln) if ln else ln for ln in lines)))
 
     return 0 if result.ok and result.returncode == 0 else 1
 
