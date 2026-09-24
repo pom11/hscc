@@ -45,6 +45,7 @@ import sys
 from datetime import date
 
 from ..core import registry
+from ._theme import escape, make_console, panel
 
 # The entry each incident writes to under the project's repo.
 _INCIDENTS_RELPATH = os.path.join("docs", "INCIDENTS.md")
@@ -184,8 +185,11 @@ def cmd_incident(args: argparse.Namespace, projects: list[registry.Project]) -> 
         state = "append"
 
     # The rendered entry is ALWAYS shown, so the operator reviews exactly what
-    # --apply would write, even before choosing to write it.
-    print(entry)
+    # --apply would write, even before choosing to write it. Escape the whole
+    # block (Rich's markup only recognises `[`..`]`, so the markdown `##` /
+    # `**field:**` structure survives; any literal `[` in user text renders
+    # literally).
+    make_console().print(panel("incident", escape(entry)))
     if not args.apply:
         print(
             f"\ndry-run: would {state} {path}; pass --apply to write.",
