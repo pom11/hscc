@@ -44,6 +44,7 @@ import time
 from typing import Callable, Optional
 
 from ..core import git_state, kanban, registry
+from ._theme import escape, make_console, panel
 
 # A ``MILESTONE: <id>`` line links a card to a roadmap milestone (see start.py
 # and decompose.py — the tag is stamped into card bodies). Matches whole-line
@@ -378,8 +379,12 @@ def cmd_why(args: argparse.Namespace, projects: list[registry.Project]) -> int:
     if args.json:
         print(json.dumps(render_json(story)))
     else:
-        for line in render(story):
-            print(line)
+        lines = render(story)
+        # escape() each line so literal Rich markup in card titles, commit
+        # subjects, verdicts, or body-derived text renders literally.
+        make_console().print(panel(
+            "why",
+            "\n".join(escape(ln) if ln else ln for ln in lines)))
     return 0
 
 

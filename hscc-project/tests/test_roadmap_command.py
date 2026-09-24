@@ -487,3 +487,60 @@ def test_byte_identical_for_each_op(tmp_path):
             assert new_text.count(line) == 1, f"{op}: line lost/duplicated: {line!r}"
         if target:
             assert new_text.count("[x] Anulare tranzactie — direct ILE insert") == 1
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted commands degrade to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI card mandates a NO-ANSI regression per converted command: with
+# stdout captured as a NON-tty (piped), the themed Console must emit NO escape
+# (\x1b[) bytes — the daemon / scripts / iOS console parse this output. The
+# roadmap human views (show/progress/add/move/done/adopt) must all degrade to
+# plain on a pipe.
+
+import io as _io
+from contextlib import redirect_stdout as _redirect_stdout
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestNoAnsiRoadmap:
+    """`roadmap`'s human views degrade to plain on a non-tty stdout."""
+
+    def test_show(self, tmp_path):
+        _write(_roadmap(tmp_path), ROADMAP)
+        out = _no_ansi(lambda: cmd.cmd_show(_args(), [_project(tmp_path)]))
+        assert "[hscc]" in out
+        assert "Anulare tranzactie" in out
+
+    def test_add(self, tmp_path):
+        _write(_roadmap(tmp_path), ROADMAP)
+        out = _no_ansi(lambda: cmd.cmd_add(
+            _args(apply=True, item="Refactor cache layer"), [_project(tmp_path)]))
+        assert "added Refactor cache layer" in out
+
+    def test_move(self, tmp_path):
+        _write(_roadmap(tmp_path), ROADMAP)
+        out = _no_ansi(lambda: cmd.cmd_done(
+            _args(apply=True, item="Anulare tranzactie"), [_project(tmp_path)]))
+        assert "marked 'Anulare tranzactie' done" in out
+
+    def test_show_json_bytes(self, tmp_path):
+        _write(_roadmap(tmp_path), ROADMAP)
+        buf = _io.StringIO()
+        with _redirect_stdout(buf):
+            cmd.cmd_show(_args(json=True), [_project(tmp_path)])
+        got = buf.getvalue()
+        assert "\x1b" not in got
+        payload = json.loads(got)
+        assert payload["hscc"]["present"] is True
+        assert not got.startswith("╭") and not got.startswith("┌")
+
