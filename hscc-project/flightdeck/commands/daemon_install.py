@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 
 from ..core import daemon as d
+from ._theme import escape, make_console, panel, status_panel
 
 PLIST_LABEL = "com.flightdeck.daemon"
 
@@ -130,7 +131,9 @@ def _stop_running_daemon() -> None:
     """Stop any running daemon instance (shared by install/uninstall)."""
     pid = d.get_pid()
     if pid is not None:
-        print(f"  Stopping running daemon (PID {pid})")
+        make_console().print(panel(
+            "daemon install",
+            f"Stopping running daemon (PID {pid})"))
         try:
             os.kill(pid, signal.SIGTERM)
             time.sleep(2)
@@ -142,9 +145,13 @@ def _stop_running_daemon() -> None:
 def cmd_install(args: argparse.Namespace, registry_path: str) -> int:
     """Install the launchd auto-start service (requires ``--apply``)."""
     if not getattr(args, "apply", False):
-        print("dry-run: `flightdeck daemon install` would write a launchd plist")
-        print(f"  to {plist_file()} and `launchctl load` it (auto-start at login).")
-        print("  Pass --apply to perform the install.")
+        lines = [
+            f"dry-run: `flightdeck daemon install` would write a launchd plist "
+            f"to [label]{escape(plist_file())}[/label] and `launchctl load` it "
+            "(auto-start at login).",
+            "[label]Pass --apply to perform the install.[/label]",
+        ]
+        make_console().print(panel("daemon install — plan", "\n".join(lines)))
         return 0
     if sys.platform != "darwin":
         print(f"error: launchd install is macOS-only (this host: {sys.platform})")
@@ -154,20 +161,22 @@ def cmd_install(args: argparse.Namespace, registry_path: str) -> int:
     target = Path(plist_file())
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(generate_plist())
-    print(f"  Plist installed: {target}")
+    lines = [f"Plist installed: {escape(str(target))}"]
     try:
         cp = subprocess.run(
             ["launchctl", "load", str(target)],
             capture_output=True, text=True, timeout=10,
         )
         if cp.returncode == 0:
-            print("  Loaded into launchd")
+            lines.append("Loaded into launchd")
         else:
-            print(f"  launchctl load returned {cp.returncode}: {cp.stderr.strip()}")
+            lines.append(f"launchctl load returned {cp.returncode}: {escape(cp.stderr.strip())}")
     except (OSError, subprocess.SubprocessError) as exc:
-        print(f"  launchctl load failed: {exc}")
-    print("\n  flightdeck daemon is now managed by launchd (auto-start at login).")
-    print(f"  Check: launchctl list | grep {PLIST_LABEL}")
+        lines.append(f"launchctl load failed: {escape(str(exc))}")
+    lines.append("flightdeck daemon is now managed by launchd (auto-start at login).")
+    lines.append(f"Check: launchctl list | grep {escape(PLIST_LABEL)}")
+    make_console().print(status_panel(
+        "\n".join(lines), status="ok", title="daemon install"))
     return 0
 
 
@@ -176,7 +185,9 @@ def cmd_uninstall(args: argparse.Namespace, registry_path: str) -> int:
     _stop_running_daemon()
     target = Path(plist_file())
     if not target.exists():
-        print("  No plist found — nothing to remove")
+        make_console().print(panel(
+            "daemon uninstall",
+            "[dim]No plist found — nothing to remove.[/dim]"))
         return 0
     try:
         subprocess.run(
@@ -184,8 +195,12 @@ def cmd_uninstall(args: argparse.Namespace, registry_path: str) -> int:
             capture_output=True, text=True, timeout=10,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        print(f"  launchctl unload failed: {exc}")
+        print(f"  launchctl unload failed: {exc}", file=sys.stderr)
     target.unlink()
-    print(f"  Plist removed: {target}")
-    print("  flightdeck daemon uninstalled (no auto-start at login)")
+    lines = [
+        f"Plist removed: {escape(str(target))}",
+        "flightdeck daemon uninstalled (no auto-start at login)",
+    ]
+    make_console().print(status_panel(
+        "\n".join(lines), status="ok", title="daemon uninstall"))
     return 0

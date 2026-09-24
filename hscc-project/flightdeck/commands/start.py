@@ -37,6 +37,11 @@ board, git or the network.
     REPO: ~/dev/flightdeck
     CONTRACTS: docs/DESIGN.md, docs/FEATURES-2.md
     CLI WIRING: cli.py auto-discovers this module via build_subparser + run.
+
+Human plan output routes through the flightdeck themed Rich layer (``_theme``).
+The ``--json`` path stays BYTE-IDENTICAL: ``_print_json`` still
+``print(json.dumps(...))`` raw — never routed through a Console. Error paths
+stay plain ``print(..., file=sys.stderr)`` (deliberately not themed).
 """
 
 from __future__ import annotations
@@ -50,6 +55,7 @@ from typing import Callable, Optional
 import yaml
 
 from ..core import git_state, kanban, registry
+from ._theme import escape, make_console, panel
 
 # Hermes' own config, where the kanban concurrency knobs live. Overridable for
 # tests via the ``_read_config`` seam.
@@ -182,7 +188,7 @@ def select_milestone_cards(cards: list[dict], milestone: str) -> list[dict]:
 
     ``cards`` is any iterable of flightdeck card dicts (as produced by
     ``kanban.list_cards``). Order is preserved from the input. Never mutates
-    the input. A card is included exactly when ``milestone_tag(card["body"])``
+    the input. A card is included exactly when ``milestone_tag(card[\"body\"])``
     equals ``milestone``.
     """
     return [c for c in cards if milestone_tag(c.get("body")) == milestone]
@@ -277,7 +283,7 @@ def _assign(releasable: list[dict], per_profile_cap: int, total_cap: int) -> lis
 
     Round-robin across :data:`FLEET_PROFILES`. Release stops at ``total_cap``
     cards; no profile takes more than ``per_profile_cap``. Returns a NEW list
-    of ``{**card, "_assignee": profile}`` dicts in input order (the first
+    of ``{**card, \"_assignee\": profile}`` dicts in input order (the first
     ``total_cap`` entries that can be assigned). Cards beyond the total cap, or
     that cannot fit a profile without breaking its cap, are left unassigned.
     """
@@ -319,23 +325,28 @@ def _print_plan(
     per_profile_cap: int,
     remaining: int,
 ) -> None:
-    print(f"RELEASE PLAN for milestone {milestone!r} (fleet ceiling {total_cap}, "
-          f"max {per_profile_cap} per profile):")
+    lines = [f"RELEASE PLAN for milestone {escape(milestone)!r} (fleet ceiling "
+             f"{total_cap}, max {per_profile_cap} per profile):"]
     if not assigned and not held:
-        print("  no cards for this milestone.")
+        lines.append("  no cards for this milestone.")
+        make_console().print(panel("start", "\n".join(lines)))
         return
-    print("\nRELEASE ORDER:")
+    lines.append("")
+    lines.append("RELEASE ORDER:")
     for i, card in enumerate(assigned, 1):
-        print(f"  {i}. {_card_label(card)}  -> {card.get('_assignee')}")
+        lines.append(f"  {i}. {escape(_card_label(card))}  -> {escape(card.get('_assignee') or '?')}")
     if held:
-        print("\nHELD (dependency not merged):")
+        lines.append("")
+        lines.append("HELD (dependency not merged):")
         for card in held:
             holder = ", ".join(card.get("_holds") or [])
-            print(f"  {_card_label(card)}")
-            print(f"       held by: {holder}")
+            lines.append(f"  {escape(_card_label(card))}")
+            lines.append(f"       held by: {escape(holder)}")
     if remaining:
-        print(f"\n{remaining} card(s) not released (beyond the concurrency ceiling "
-              f"or no profile slot free).")
+        lines.append("")
+        lines.append(f"{remaining} card(s) not released (beyond the concurrency "
+                     f"ceiling or no profile slot free).")
+    make_console().print(panel("start — plan", "\n".join(lines)))
 
 
 def _print_json(*, milestone, assigned, held, total_cap, per_profile_cap, remaining) -> None:
@@ -369,7 +380,7 @@ def _print_json(*, milestone, assigned, held, total_cap, per_profile_cap, remain
 def _release(card: dict, *, _kdb=None) -> None:
     """Release one card to the fleet: assign it to its spread profile.
 
-    ``assign_task`` is Hermes' own "who is working this" mutation — setting the
+    ``assign_task`` is Hermes' own \"who is working this\" mutation — setting the
     assignee is what makes the dispatcher spawn the right fleet profile. Routes
     through the same kanban library as every board mutation in flightdeck.
     ``_kdb`` is injectable (tests pass a fake). Raises :class:`StartError` when

@@ -485,3 +485,47 @@ def test_critical_and_advisory_together_exit_nonzero(capsys):
     out = buf.getvalue()
     assert rc == 1
     assert "CRITICAL" in out
+
+
+# --------------------------------------------------------------------------- #
+# No-ANSI regression — converted command degrades to plain on a non-tty stdout
+# --------------------------------------------------------------------------- #
+# The RICH CLI group C card mandated a NO-ANSI regression per converted
+# command: with stdout captured as a NON-tty StringIO, the themed Console must
+# emit NO escape (\x1b[) bytes — the daemon / scripts / iOS console parse this
+# output, and a single escaped byte in a pipe breaks a watcher. lint-cards has
+# no --json path, so only the human view is pinned.
+import io as _io
+import contextlib as _contextlib
+
+
+def _no_ansi(fn):
+    buf = _io.StringIO()
+    with _contextlib.redirect_stdout(buf):
+        fn()
+    out = buf.getvalue()
+    assert "\x1b[" not in out, f"ANSI escape found in piped output: {out!r}"
+    assert "\x1b" not in out, f"ANSI escape found in piped output: {out!r}"
+    return out
+
+
+class TestLintNoAnsi:
+    """`lint-cards`' human view is plain on a non-tty stdout (no ANSI)."""
+
+    def test_advisory_view_is_plain(self):
+        bad = card(cid="t_x", body="nothing here")
+        out = _no_ansi(lambda: lint_cmd.cmd_lint(_ns(), [bad]))
+        # Content preserved: the card id and the advisory lines survive.
+        assert "t_x" in out
+        assert "VERIFY" in out
+        assert "acceptance" in out
+
+    def test_clean_view_is_plain(self):
+        out = _no_ansi(lambda: lint_cmd.cmd_lint(_ns(), [card(cid="c1")]))
+        assert "lint clean" in out
+
+    def test_critical_view_is_plain(self):
+        bad = _mcard("t_r1", REPO)
+        out = _no_ansi(lambda: lint_cmd.cmd_lint(_ns(projects=[_project()]), [bad]))
+        assert "CRITICAL" in out
+        assert "t_r1" in out
