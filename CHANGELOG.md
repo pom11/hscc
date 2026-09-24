@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Dispatcher worktree placement is now configurable per repo.** New
+  `kanban.worktree.out_of_tree_repos` + `kanban.worktree.out_of_tree_root` config
+  keys (captured as hermes patch 0012 in `patches/hermes/`) let repos whose project
+  root is itself a build/compiler root keep their kanban worktrees OUT of the tree.
+  Until now the dispatcher hardcoded `<repo>/.worktrees/<id>`; for an AL repo that
+  path sits inside the compiler root, and `.gitignore` does not stop the Microsoft AL
+  compiler walking it (it compiled 1,991 worktree .al files on top of the real app,
+  ~2487 files total, AL1021). Worktrees for a listed repo now land at
+  `~/dev/.worktrees/<repo-name>/<id>`; unlisted repos keep the in-tree default.
+
 ## [2.1.1] - 2026-09-24
 
 ### Fixed
