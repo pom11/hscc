@@ -206,7 +206,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "incident",
         help="append a dated lesson to docs/INCIDENTS.md (newest first)",
-        epilog='example: flightdeck incident "topic not mapped" --fix "ran topics bind" --apply',
+        epilog='example: flightdeck incident "board not linked" --fix "re-ran flightdeck project repair" --apply',
     )
     p.add_argument(
         "symptom",

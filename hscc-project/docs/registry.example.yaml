@@ -13,11 +13,11 @@
 #   name:       project key
 #   repo:       local git checkout path (REQUIRED; `~` is expanded)
 #   board:      Hermes kanban board slug
-#   topic:      Telegram topic id
-#   topic_name: expected Telegram topic NAME for the audit. When absent, the
-#               audit falls back to the project `name`. Set it when the topic's
-#               human title differs from the project key (e.g. topic "Project
-#               Alpha cluster" under project key `project-a`).
+#   topic:      legacy Telegram topic id (retained for historical/imported data
+#               only — Telegram is removed; nothing creates or verifies it, so
+#               it is reported as "unverifiable" by the doctor)
+#   topic_name: legacy expected Telegram topic NAME (likewise historical only;
+#               when absent the audit falls back to the project `name`)
 #   verify:     shell command that proves the project works (optional)
 #   roadmap:    ROADMAP.md path within the repo (optional)
 #   install_cmd: opaque install command run by `release --apply` AFTER the
@@ -29,7 +29,7 @@
 #   deployed_at_cmd:       shell command printing the unix timestamp of last deploy (optional)
 #
 # Placeholder names and paths below -- replace with your own project keys,
-# checkout paths, board slugs, and Telegram topic ids.
+# checkout paths, board slugs, and legacy topic ids.
 
 projects:
   - name: project-a
