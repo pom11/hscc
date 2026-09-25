@@ -58,7 +58,7 @@ Fix: factor out `_compact_models_url()` (mirrors `doctor._models_url`: preserve 
 
 - [x] hscc-bootstrap suite green (host interpreter): 264 passed in 405.66s
 - [x] hscc-bootstrap suite green (p313 interpreter): 264 passed in 406.10s
-- [ ] full `scripts/run_tests.sh` suite (host interpreter default)
+- [x] full `scripts/run_tests.sh` suite (host interpreter default): ALL GREEN — 8 packages, exit 0
 - [ ] full `scripts/run_tests.sh` suite (p313 via HSCC_TEST_PY)
 - [ ] merge to main + push
 - [ ] deploy (install_payload.py)
