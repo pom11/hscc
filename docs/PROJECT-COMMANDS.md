@@ -38,7 +38,7 @@ prefix changes.
 | `flightdeck report` | `hscc project report` |
 | `flightdeck metrics` | `hscc project metrics` |
 | `flightdeck daemon …` | `hscc project daemon …` |
-| `flightdeck doctor/why/monitor/hygiene/reconcile/lint-cards/legacy-cards/migrate-card/incident/ask/update/topics/init` | `hscc project <same>` |
+| `flightdeck doctor/why/monitor/hygiene/reconcile/lint-cards/legacy-cards/migrate-card/incident/ask/update/init` | `hscc project <same>` |
 | `flightdeck archive-sessions` | `hscc project archive-sessions` |
 
 ---
@@ -64,7 +64,8 @@ port; this note exists so a future reader doesn't mistake it for an oversight.
 
 The project-doctor command (`hscc project doctor`) is likewise distinct from
 any cluster-side health check — it self-checks the project registry, config,
-kanban, and Telegram daemon.
+and kanban. (Telegram was removed from the fleet; a `topic` id may still be
+recorded per project but is reported as unverifiable.)
 
 ---
 
