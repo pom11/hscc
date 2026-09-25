@@ -1,20 +1,42 @@
 # hscc-api
 
 The HSCC HTTP API — a pure-stdlib, bearer-token-authenticated, Tailscale-optional
-JSON API that exposes HSCC cluster state (and, in later phases, project/kanban
-dispatch) to external apps such as the private iOS companion app.
+JSON API that exposes HSCC cluster state, project/kanban dispatch, and operator
+surfaces (template, profiles, sessions, memory, logs, activity, orchestration)
+to external apps such as the private iOS companion app.
 
-This directory is **Phase A1**: the server skeleton, token auth, bind/config
-resolution, the JSON error contract, and the API's own liveness endpoint.
-No cluster/project/kanban endpoints yet (those are A2/A3/A4) and no `hscc api`
-CLI verb yet (that's A5).
+It runs in the background via the `hscc api` CLI verb, as its own process with
+its own PID + log files (`~/.hscc/api.pid`, `~/.hscc/api.log`) separate from the
+monitoring daemon.
+
+This started as **Phase A1** (server skeleton, token auth, bind/config
+resolution, the JSON error contract, and the API's own liveness endpoint) and
+has since grown the A2/A3/A4/C2+ route surface. The authoritative listing of
+every live endpoint is the route table itself: each `/v1/...` endpoint is a
+`(method, path_regex, handler)` tuple registered into `api_server.ROUTES`
+(the `routes_*.py` modules append to it at import). The families:
+
+| Area | Example endpoints |
+|---|---|
+| cluster | `/v1/cluster/status`, `/v1/cluster/up`, `/v1/cluster/down`, `/v1/cluster/stop` |
+| project + kanban (read) | `/v1/projects`, `/v1/cards`, `/v1/standup`, `/v1/review/queue`, `/v1/qa/queue`, `/v1/kanban/blocked`, `/v1/kanban/stale`, `/v1/kanban/running` |
+| actions (mutations, confirm-gated) | `POST /v1/cards`, `/v1/review/{id}/merge`, `/v1/template/apply`, `/v1/cards/{id}/comment`, `/v1/cards/{id}/block|close` |
+| orchestrator chat | `POST /v1/orchestrator/chat` (+ `/stop`, `/{id}` poll) |
+| template | `/v1/template/list`, `/v1/template/status`, `/v1/template/preview/{name}` |
+| profiles / sessions / memory | `/v1/profiles/*`, `/v1/profile/*`, `/v1/sessions`, `/v1/memory` (list/delete/edit) |
+| ops + observability | `/v1/verify`, `/v1/daemon/status`, `/v1/triggers`, `/v1/escalate`, `/v1/logs`, `/v1/daemon/history`, `/v1/activity/feed`, `/v1/cron/list`, `/v1/commands` |
+| session events | `/v1/projects/{name}/session/events` (history) + WebSocket `/v1/projects/{name}/session/ws` (live) |
+
+Phases: cluster read (A2), project/kanban read (A3), mutating confirm-gated
+actions (A4), the `hscc api` CLI verb (A5), conversational orchestrator chat
+(C2), and the full surface/observability routes shipped since.
 
 ## Layout
 
-- `api_server.py` — the whole A1 surface:
-  - `ThreadingHTTPServer` (`_ApiServer`) + `ApiHandler(BaseHTTPRequestHandler)`.
-  - `ROUTES` table — a list of `(method, path_regex, handler)` tuples. A2/A3/A4
-    register their endpoints by ADDING to this table; a handler is a plain
+- `api_server.py` — the server core:
+  - `ThreadingHTTPServer` (`_ApiServer`) + `ApiHandler(BaseHTTPRequestHandler)`,
+    `HTTP/1.1`, WebSocket-upgrade aware.
+  - `ROUTES` — the `(method, path_regex, handler)` table; a handler is a plain
     function `(server, ctx, query, body) -> (status, payload_dict)`.
   - `load_token()` / `token_valid()` — 0600 token file at `~/.hscc/api-token`,
     generated on first run, compared with `hmac.compare_digest`, fail-closed.
@@ -22,13 +44,26 @@ CLI verb yet (that's A5).
     resolution. Loopback by default; tailnet is opt-in; `0.0.0.0` is always
     refused.
   - `ApiError` + the `error_*` constructors — the unified JSON error shape.
-- `tests/` — hermetic unit tests (bind loopback port 0, never a fixed public port).
+- `routes_*.py` — one module per endpoint family (cluster, project, kanban,
+  actions, orchestrator, template, profiles, sessions, memory, logs, activity,
+  commands, cron, history, autodown, ops, bootstrap, ws…). Each registers its
+  routes into `ROUTES` at import.
+- `gateway_driver.py`, `session_event.py`, `ws_frame.py` — supporting modules.
+- `tests/` — hermetic unit tests (bind loopback port 0, never a fixed public
+  port); `tests_gateway/` — the gateway-driver tests.
 
-## Endpoints (A1)
+## CLI — `hscc api`
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/v1/ping` | The API's OWN liveness. (The fleet health check backed by `hscc verify` is `/v1/health` in A2, so the API's own liveness lives at `/v1/ping` to avoid the collision.) |
+```
+hscc api start [--tailscale] [--bind <ip>] [--port <n>] [--no-qr]  start in the background
+hscc api stop                                                      stop it
+hscc api status [--no-qr]                                          running/stopped + bound host:port
+```
+
+`start`/`status` print a scannable connection QR (suppressed by `--no-qr`).
+The token is **encoded into that QR**, so the QR must be treated like a
+password — never show it on a stream or screen-share. `start` also runs the
+repo-vs-installed payload-drift check and warns loudly on drift.
 
 ## Auth
 
@@ -43,7 +78,7 @@ value is never logged or echoed.
 ## Bind / config
 
 Precedence (lowest → highest): defaults → `~/.hscc/api.json` → explicit
-overrides passed to `create_server()`.
+overrides passed to `create_server()` / the CLI flags.
 
 - `bind`: `"loopback"` (default → `127.0.0.1`) | `"tailscale"` (resolve the
   tailnet IPv4; hard error if none found) | an explicit IP string.
@@ -68,7 +103,7 @@ Every error response is:
 | 401 | `unauthorized` | missing/wrong Bearer token |
 | 404 | `not_found` | unknown route / version |
 | 405 | `method_not_allowed` | valid path, wrong method |
-| 409 | `confirm_required` | mutating call without `confirm: true` (A4) |
+| 409 | `confirm_required` | mutating call without `confirm: true` |
 | 500 | `internal_error` | unhandled exception (traceback logged server-side only) |
 
 Errors never leak the token or a raw traceback. Request bodies over 1 MiB are
@@ -79,13 +114,10 @@ message pointing at `~/.hscc/api.log`.
 
 ```bash
 # From the hscc repo root:
-HSCC_TEST_PY=/Users/desac/miniconda3/envs/p313/bin/python scripts/run_tests.sh
+scripts/run_tests.sh
 ```
 
-The suite is hermetic: servers bind loopback port 0 (ephemeral), tokens are
-generated in `tmp_path` dirs, and no fixed public port or live tailnet is used.
-
-## Verify
-
-The repo's standard gate is `scripts/run_tests.sh` — ALL plugins must be green.
-`hscc-api` is added to that script's `DIRS=()` so this suite actually runs.
+(The suite is hermetic: servers bind loopback port 0 (ephemeral), tokens are
+generated in `tmp_path` dirs, and no fixed public port or live tailnet is used.)
+`hscc-api` is in `scripts/run_tests.sh`'s `DIRS=()`, so it runs with every other
+plugin in the repo's standard gate.
