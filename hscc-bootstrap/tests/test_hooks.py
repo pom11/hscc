@@ -171,6 +171,40 @@ def test_enable_returns_hooks_key(tmp_path):
     assert "hooks" in res
 
 
+def test_hooks_not_wired_when_script_uninstallable(tmp_path):
+    """If the hook script cannot be installed, hook commands must NOT be written
+    into config — wiring a reference to a script we could not install is a
+    dangling reference whose every runtime call silently fails. The failure must
+    be surfaced on `hooks_file` (installed: False), not silently swallowed."""
+    path = _write(tmp_path / "config.yaml", _minimal_cfg())  # no hooks section yet
+    res = enable_plugins.enable(path, hooks_source=str(tmp_path / "no-hooks"))
+    # No hook commands were wired (config has no dangling reference)...
+    assert res["hooks"] == []
+    # ...and the non-install is reported, not treated as success.
+    assert res.get("hooks_file", {}).get("installed") is False
+    out = yaml.safe_load(open(path))
+    assert "hooks" not in out or out["hooks"] == {}
+
+
+def test_hooks_wired_only_after_script_installed(tmp_path, monkeypatch):
+    """When the script install SUCCEEDS, hook commands are wired — the positive
+    counterpart proving the file-install gate is the actual trigger."""
+    hooks_src = tmp_path / "hooks_src"
+    hooks_src.mkdir()
+    (hooks_src / "cluster-guard.py").write_text("# from repo\n")
+    hooks_dst = tmp_path / "hooks_dst"
+    monkeypatch.setattr(enable_plugins, "HOOKS_DIR", str(hooks_dst))
+    monkeypatch.setattr(enable_plugins, "CLUSTER_GUARD_DST",
+                        str(hooks_dst / "cluster-guard.py"))
+
+    path = _write(tmp_path / "config.yaml", _minimal_cfg())  # no hooks section yet
+    res = enable_plugins.enable(path, hooks_source=str(hooks_src))
+    assert set(res["hooks"]) == {"pre_tool_call", "post_tool_call", "on_session_start"}
+    assert res["hooks_file"]["installed"] is True
+    out = yaml.safe_load(open(path))
+    assert out["hooks"]["pre_tool_call"][0]["command"].endswith("cluster-guard.py")
+
+
 def test_enable_hooks_noop_when_wired(tmp_path):
     """enable() does not re-add hooks when they're already wired."""
     cfg = _minimal_cfg()

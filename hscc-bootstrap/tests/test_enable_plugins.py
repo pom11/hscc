@@ -134,7 +134,10 @@ def test_fully_wired_is_noop(tmp_path):
     path = _write(tmp_path / "config.yaml", _fully_wired_cfg())
     before = open(path).read()
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": [], "approvals": [], "worktree": []}
+    # No config section changed (hooks already wired) — but the hook FILE
+    # install result is always surfaced on `hooks_file`.
+    assert all(v == [] for k, v in res.items() if k != "hooks_file")
+    assert "hooks_file" in res
     assert open(path).read() == before              # no rewrite, no backup churn
 
 
@@ -171,7 +174,8 @@ def test_routing_preserves_operator_choices(tmp_path):
     cfg["delegation"]["base_url"] = "http://my-proxy:9000/v1"
     path = _write(tmp_path / "config.yaml", cfg)
     res = enable_plugins.enable(path)
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": [], "approvals": [], "worktree": []}
+    assert all(v == [] for k, v in res.items() if k != "hooks_file")
+    assert "hooks_file" in res
     out = yaml.safe_load(open(path))
     assert out["kanban"]["default_assignee"] == "my-special-worker"
     assert out["kanban"]["max_in_progress"] == 99   # not lowered
@@ -566,6 +570,50 @@ def test_compaction_threshold_not_lowered(tmp_path, monkeypatch):
     path = _write(tmp_path / "config.yaml", cfg)
     enable_plugins.enable(path)
     assert yaml.safe_load(open(path))["compression"]["threshold"] == 0.95
+
+
+def test_compaction_threshold_tokens_high_preserved(tmp_path, monkeypatch):
+    """An operator's HIGH threshold_tokens (compact even more rarely) is
+    preserved, not lowered back to the cap. The old guard only preserved
+    values <= cap, so a deliberate high value got silently reverted to the
+    default — reverting the operator's choice AND forcing more compaction."""
+    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "")
+    cap, legacy = enable_plugins._compaction_cap()
+    cfg = _fully_wired_cfg()
+    cfg["compression"]["threshold_tokens"] = cap * 3  # well above cap
+    path = _write(tmp_path / "config.yaml", cfg)
+    enable_plugins.enable(path)
+    assert yaml.safe_load(open(path))["compression"]["threshold_tokens"] == cap * 3
+
+
+def test_compaction_threshold_tokens_legacy_low_still_raised(tmp_path, monkeypatch):
+    """A known-stale LEGACY low cap is still raised to the cap — the fix only
+    stops lowering deliberate HIGH values, it must not stop raising stale low
+    ones (the original purpose of the guard)."""
+    monkeypatch.setattr(enable_plugins, "COMPACT_URL", "")
+    cap, legacy = enable_plugins._compaction_cap()
+    stale = legacy[0]  # e.g. 100000
+    cfg = _fully_wired_cfg()
+    cfg["compression"]["threshold_tokens"] = stale
+    path = _write(tmp_path / "config.yaml", cfg)
+    res = enable_plugins.enable(path)
+    assert "threshold_tokens" in res["compaction"]
+    assert yaml.safe_load(open(path))["compression"]["threshold_tokens"] == cap
+
+
+def test_compact_models_url_preserves_v1_no_duplication():
+    """The compaction probe must hit ONLY ONE /v1. Compacting URL already ends
+    in /v1 (the default), so appending another /v1/models yielded
+    ``.../v1/v1/models`` — the probe always targeted a wrong path and could
+    never verify the model (spurious 404 warning even when served correctly)."""
+    assert enable_plugins._compact_models_url("http://10.0.0.1:8000/v1") == \
+        "http://10.0.0.1:8000/v1/models"
+    assert enable_plugins._compact_models_url("http://10.0.0.1:8000/v1/") == \
+        "http://10.0.0.1:8000/v1/models"
+    assert enable_plugins._compact_models_url("http://10.0.0.1:8000") == \
+        "http://10.0.0.1:8000/models"
+    assert enable_plugins._compact_models_url("") == ""
+    assert enable_plugins._compact_models_url("  ") == ""
 
 
 # ── dashboard ────────────────────────────────────────────────────────────────
