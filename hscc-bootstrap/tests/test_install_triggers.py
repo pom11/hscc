@@ -1,6 +1,8 @@
 """Tests for install_triggers — idempotent default trigger rule installer."""
 import json
 import os
+import builtins
+import shutil
 import sys
 import tempfile
 
@@ -180,6 +182,49 @@ def test_corrupt_existing_file_treated_as_empty(tmp_path):
 
     assert set(result["added"]) == set(DEFAULT_RULES)
     assert result["total"] == len(DEFAULT_RULES)
+
+
+# ── Unreadable existing file fails loud ───────────────────────────────
+
+
+def test_read_oserror_of_existing_fails_loud_without_touching_file(tmp_path, monkeypatch):
+    """An OSError on READ of an EXISTING triggers.json (permission denied /
+    transient I/O — an ENVIRONMENT fault, not proof the content is empty) must
+    NOT be treated as an empty file that gets all default rules silently
+    re-seeded over it.
+
+    Prior bug: a read OSError collapsed into the corrupt/empty branch, so the
+    function re-wrote the operator's file with every default rule and reported
+    ok=True — an environment fault rendered as a data fact. It backed the
+    unreadable file up to .bak, but still overwrote operator state we could not
+    even read. Now it fails loud (ok=False + error) and leaves the file and no
+    .bak untouched.
+    """
+    target = str(tmp_path / "triggers.json")
+    original = {"rules": [{"id": "custom-cpu-alert", "trigger_type": "notify"}]}
+    with open(target, "w") as f:
+        json.dump(original, f)
+
+    real_open = builtins.open
+    def read_only_permdenied(name, *a, **k):
+        if name == target:
+            raise PermissionError(13, "Permission denied")
+        return real_open(name, *a, **k)
+    monkeypatch.setattr("builtins.open", read_only_permdenied)
+    # Neutralise shutil.copy2 so a copy2 PermissionError does NOT mask the
+    # read failure under test — we specifically target the read-OSError branch
+    # (a transient read fault might not affect a later copy2 of the same file).
+    monkeypatch.setattr(shutil, "copy2", lambda *a, **k: None)
+
+    result = IT.install_triggers(triggers_path=target, defaults_path=_DEFAULTS_PATH)
+
+    assert result["ok"] is False
+    assert "error" in result and "Permission denied" in result["error"]
+    # Operator's file is left untouched, and no .bak is created (nothing written).
+    with real_open(target) as f:
+        assert json.load(f) == original
+    assert not os.path.exists(target + ".bak")
+
 
 
 # ── Backup on re-install ──────────────────────────────────────────────
