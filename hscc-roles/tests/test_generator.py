@@ -589,6 +589,121 @@ def test_project_orch_preserves_operator_threshold_tokens(tmp_path, monkeypatch)
     assert cfg2["compression"]["threshold_tokens"] == 40000
 
 
+# -- per-profile memory block (t_e287cfb6 / ROADMAP profile-provisioning item 1) --
+#
+# Bootstrap/generator never owned per-profile `memory:` — a regeneration
+# rewrote config.yaml WITHOUT the block, silently dropping a hand-set
+# memory_char_limit / provider back to Hermes' built-in default. These tests
+# pin the merge (operator-choices-survive): a fresh profile gets
+# memori_byodb + 4000, a second run is a no-op, and a hand-set value survives
+# regeneration. All hermetic — tmp_path + monkeypatched HERMES_HOME /
+# PROFILES_DIR, never ~/.hermes/profiles.
+
+def _mem_config(tmp_path, monkeypatch, spec):
+    """Generate a profile and return its config.yaml memory dict."""
+    return _gen_config(tmp_path, monkeypatch, spec)["memory"]
+
+
+def test_fresh_profile_gets_default_memory_block(tmp_path, monkeypatch):
+    """A brand-new worker profile is generated WITH a memory block:
+    provider=memori_byodb, memory_char_limit=4000, memory_enabled=true."""
+    mem = _mem_config(tmp_path, monkeypatch, {
+        "name": "coder", "identity": "You build.\n",
+        "preload_skills": [], "model_tier": "fast"})
+    assert mem["memory_enabled"] is True
+    assert mem["memory_char_limit"] == \
+        generator.PROFILE_MEMORY_CHAR_LIMIT == 4000
+    assert mem["provider"] == \
+        generator.PROFILE_MEMORY_PROVIDER == "memori_byodb"
+
+
+def test_every_profile_kind_gets_memory_block(tmp_path, monkeypatch):
+    """memory: is emitted for EVERY role kind — orchestrator, project-orch,
+    worker, strong-tier — not just the worker path."""
+    for spec in (
+        {"name": "orchestrator", "identity": "You orchestrate.\n",
+         "preload_skills": [], "model_tier": "strong"},
+        {"name": "ecofire-app-orch", "identity": "You orch.\n",
+         "preload_skills": [], "model_tier": "strong"},
+        {"name": "architect", "identity": "You design.\n",
+         "preload_skills": [], "model_tier": "strong"},
+        {"name": "coder", "identity": "You build.\n",
+         "preload_skills": [], "model_tier": "fast"},
+    ):
+        mem = _mem_config(tmp_path, monkeypatch, spec)
+        assert mem["memory_char_limit"] == \
+            generator.PROFILE_MEMORY_CHAR_LIMIT
+        assert mem["provider"] == generator.PROFILE_MEMORY_PROVIDER
+
+
+def test_regen_memory_is_idempotent_noop(tmp_path, monkeypatch):
+    """A SECOND generate_profile run is byte-identical (no-op): the emitted
+    memory block is stable, so changed does not flip on regeneration."""
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(generator.rolelib, "PROFILES_DIR",
+                        str(tmp_path / "profiles"))
+    changed_second = generator.generate_profile(spec, base_identity="BASE")
+    assert changed_second is False
+
+
+def test_hand_set_memory_char_limit_survives_regen(tmp_path, monkeypatch):
+    """THE operator property: a pre-set memory_char_limit: 6000 survives a
+    regeneration — the block keeps 6000, never reverting to the default."""
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    cfg = _gen_config(tmp_path, monkeypatch, spec)
+    pdir = os.path.join(str(tmp_path / "profiles" / "coder"))
+    current = yaml.safe_load(open(os.path.join(pdir, "config.yaml")))
+    current["memory"]["memory_char_limit"] = 6000
+    # Also let the operator set a user_char_limit — must be preserved verbatim.
+    current["memory"]["user_char_limit"] = 2000
+    with open(os.path.join(pdir, "config.yaml"), "w") as f:
+        yaml.safe_dump(current, f, sort_keys=False)
+    mem2 = _mem_config(tmp_path, monkeypatch, spec)
+    assert mem2["memory_char_limit"] == 6000          # hand-set survives
+    assert mem2["provider"] == "memori_byodb"         # default provider still filled
+    assert mem2["user_char_limit"] == 2000            # other key preserved verbatim
+
+
+def test_hand_set_provider_survives_regen(tmp_path, monkeypatch):
+    """A hand-set provider string (different from the default) survives a
+    regeneration — never force memori_byodb over an operator choice."""
+    spec = {"name": "coder", "identity": "You build.\n",
+            "preload_skills": [], "model_tier": "fast"}
+    _gen_config(tmp_path, monkeypatch, spec)
+    pdir = os.path.join(str(tmp_path / "profiles" / "coder"))
+    current = yaml.safe_load(open(os.path.join(pdir, "config.yaml")))
+    current["memory"]["provider"] = "operator-chosen-provider"
+    with open(os.path.join(pdir, "config.yaml"), "w") as f:
+        yaml.safe_dump(current, f, sort_keys=False)
+    mem2 = _mem_config(tmp_path, monkeypatch, spec)
+    assert mem2["provider"] == "operator-chosen-provider"
+    assert mem2["memory_char_limit"] == \
+        generator.PROFILE_MEMORY_CHAR_LIMIT
+
+
+def test_memory_block_preserves_lower_operator_limit_never_lowers(tmp_path, monkeypatch):
+    """A LOWER operator memory_char_limit (< 4000, e.g. 2500) is RAISED toward
+    the default but never lowered — the default is the floor. And a HIGH
+    operator value is never lowered. Both are operator-choices-survive."""
+    # Direct unit: 6000 stays 6000 (never lowered to 4000).
+    out = generator._memory_block({"memory_char_limit": 6000})
+    assert out["memory_char_limit"] == 6000
+    assert out["provider"] == "memori_byodb"
+    # Direct unit: a low operator value is raised to the floor.
+    out2 = generator._memory_block({"memory_char_limit": 2500})
+    assert out2["memory_char_limit"] == \
+        generator.PROFILE_MEMORY_CHAR_LIMIT
+    # Direct unit: an operator who disabled memory keeps it disabled.
+    out3 = generator._memory_block({"memory_enabled": False})
+    assert out3["memory_enabled"] is False
+    assert out3["memory_char_limit"] == \
+        generator.PROFILE_MEMORY_CHAR_LIMIT
+
+
 # -- cluster-wide `orchestrator` regression (t_1d7c9c34) --
 #
 # The v1.14.2 fix (t_f2c2dbb5) covered worker roles and <project>-orch profiles
