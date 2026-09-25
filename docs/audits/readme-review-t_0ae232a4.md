@@ -146,8 +146,10 @@ rewritten hscc-project README; fixing it directly supports this card.)
 
 ## Verification
 
-- `hscc-project` pytest suite: 1351 passed (no README/docs assertions
-  broken). Docs-only changes, no code touched.
+- Full 8-package suite (`scripts/run_tests.sh`, Hermes venv 3.11): ALL GREEN
+  — hscc-bootstrap 1136, hscc-commands, hscc-roles, hscc-cluster, hscc-project
+  1351, hscc_daemon, sparkrun-hermes 12, hscc-api 786+1skip. Docs-only changes
+  broke nothing.
 - Changed docs grepped: no real LAN/tailnet addresses, no operator repo
   paths in committed docs (samples use ~ and /... placeholders). No AI
   attribution added.
