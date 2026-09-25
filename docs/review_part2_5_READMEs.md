@@ -65,3 +65,52 @@ against health.py (HSCC_WORKER_AUTOHEAL_DEBOUNCE=3, force-recreate via
 auto-restarted, /cluster-restart registered in hscc-commands register()).
 Startup self-clean of .corrupt-*/.stale + .bak.* cap verified (daemon_ops.py:134).
 
+### scripts/README.md — LAN addresses scrubbed + `--deliver desktop` fix
+- All 4 documented watchdog scripts exist and RUN (verified): hscc_proxy_watchdog.sh
+  (silent = proxy healthy, exit 0), hscc_nas_watchdog.sh (reports the currently-down
+  NAS per design), hscc_worker_health.sh (reports 4 unreachable endpoints — cluster
+  autodowned), hscc_cluster_digest.sh (digest output). No syntax errors.
+- LAN-address scrub (REPO PUBLIC): README repeatedly repeated real fleet IPs
+  `.244/.246/.247/.248:8000`, `.249`, `.244`. Replaced with the documented
+  placeholder `100.64.0.1/.2/.3/.4` / `100.64.0.x` / "orchestrator head".
+  (The actual shell scripts still hardcode real 10.0.0.x IPs — those are the
+  live deployed probes; out of README scope. FLAGGED as follow-up.)
+- `--deliver desktop` = SILENT NO-OP (code-verified). `desktop` is not in
+  cron.scheduler_delivery._KNOWN_DELIVERY_PLATFORMS (telegram/discord/slack/
+  signal/matrix/mattermost/...), no plugin registers a cron_deliver_env_var for
+  it, so _resolve_single_delivery_target returns None → behaves exactly like
+  `--deliver local`. Verified empirically: _resolve_delivery_targets({'deliver':
+  'desktop'}) == [] (same as 'local'/'origin' for these script jobs). The CLI
+  ACCEPTS `--deliver desktop` at create time (tested: created+removed a paused
+  job) but it delivers NOWHERE.
+  FIX: removed `--deliver desktop` from the hscc-cluster-digest command (default
+  = output saved to job run history, visible via `hermes cron list`/`runs`), and
+  documented that a real delivery requires `--deliver <platform>` / `bot-chat`.
+  NOTE: escalate_watcher_run.py + the root README escalation line use the SAME
+  `--deliver desktop` convention (card t_d90de5b6 blessed it) → same silent
+  no-op. FLAG as follow-up (not in this card's README scope).
+- dep_pr_watcher section verified: .github/workflows/check-runtime-deps.yml exists,
+  hscc-bootstrap/runtime-versions.json exists, install_dep_watcher.sh exists with
+  `--uninstall` + daily 08:00 default (SCHEDULE="0 8 * * *"). Accurate.
+- hermes cron create syntax verified (`--name/--no-agent/--script/--deliver` + the
+  valid-target list from hermes_cli/subcommands/cron.py).
+
+### ios-app/README.md — port claims FIXED, LAN addr scrubbed
+- "Default port is 8788 (8787 is taken by another service)" FALSE: the API code
+  default is DEFAULT_PORT=8787 (hscc-api/api_server.py:44); this deployment
+  overrides to 8788 via ~/.hscc/api.json (bind=tailscale). "8787 taken by another
+  service" is inaccurate — 8787 is simply the code default. Fixed all 4 port
+  mentions to say: this deployment runs 8788 (override in ~/.hscc/api.json), code
+  default 8787, match the app to `hscc api status`.
+- Scrub: `gateway (`.244`)` → `gateway (the orchestrator head)` (real LAN
+  address). No other real addresses in ios README (100.x/100.x.y.z are generic
+  Tailscale placeholders, correct as-is).
+- `hscc api start --tailscale` verified real (api_cli.py:133-134); token at
+  ~/.hscc/api-token mode 0600 verified; 0.0.0.0 refused by design verified
+  (api_server.py:239-244); api status currently shows still running.
+- Endpoint claims (project/orchestrator chat/template/autodown/kanban/etc)
+  previously verified against live API (README's own End-to-end review, 2026-08-27);
+  hscc-api routes confirmed present by card t_8ac9e87c. No cross-cutting route
+  removal postdates that. No telegram references anywhere in ios README.
+
+
