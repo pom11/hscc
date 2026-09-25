@@ -385,9 +385,15 @@ def _ensure_compaction(cfg):
         # touches) keeps the old value and still governs.
         cap, legacy = _compaction_cap()
         cur_tok = comp.get("threshold_tokens")
+        # A value the operator deliberately set is preserved. The only values
+        # we RAISE to the cap are the known-stale legacy caps emitted by older
+        # generators (which fire compaction far too aggressively) — and a
+        # missing/non-numeric value. A HIGH threshold_tokens is an operator
+        # "compact even more rarely" choice and must be preserved, not lowered
+        # back to the cap (raising a low stale cap is the goal; lowering a
+        # deliberate high one would revert the operator's choice).
         operator_set = (isinstance(cur_tok, (int, float))
                         and not isinstance(cur_tok, bool)
-                        and cur_tok <= cap
                         and cur_tok not in legacy)
         if not operator_set and cur_tok != cap:
             comp["threshold_tokens"] = cap
@@ -665,10 +671,28 @@ def _ensure_dashboard(cfg):
     return changed
 
 
+def _compact_models_url(compact_url):
+    """Normalize a COMPACT_URL to its `/models` probe URL.
+
+    Mirrors doctor._models_url semantics: the version path is PRESERVED
+    (``http://host:port/v1`` -> ``http://host:port/v1/models``, never
+    ``/v1/v1/models``). A COMPACT_URL that already ends in ``/v1`` (the default
+    and the documented form) stays ``/v1/models``; a bare host gets
+    ``/models``. Returns "" for blank input.
+    """
+    url = (compact_url or "").strip().rstrip("/")
+    if not url:
+        return ""
+    if "/v1" in url:
+        head = url.split("/v1", 1)[0].rstrip("/")
+        return head + "/v1/models"
+    return url + "/models"
+
+
 def _probe_compaction_endpoint():
     """Sanity-probe the compaction endpoint at bootstrap.
 
-    Hit <COMPACT_URL>/v1/models and assert that COMPACT_MODEL is present.
+    Hit <COMPACT_URL>/models and assert that COMPACT_MODEL is present.
     Print a warning (non-fatal) if the model is missing so the user knows
     compression is silently dead (abort_on_summary_failure=False means workers
     limp on with degraded summaries).
@@ -683,7 +707,7 @@ def _probe_compaction_endpoint():
     if not COMPACT_URL:
         return True  # no aux endpoint configured — nothing to probe
 
-    models_url = COMPACT_URL.rstrip("/") + "/v1/models"
+    models_url = _compact_models_url(COMPACT_URL)
     try:
         req = urllib.request.Request(models_url)
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -798,14 +822,16 @@ def _ensure_hooks(cfg):
 
 
 def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
-           hooks_source=None):
+           hooks_source=None) -> dict:
     """Ensure HSCC plugins + toolsets + fleet routing + hooks are wired.
 
     Returns {"plugins": [...], "toolsets": [...], "kanban": [...], "delegation":
     [...], "compaction": [...], "fallback": [...], "bitwarden": [...],
     "prompt_caching": [...], "dashboard": [...], "multiplex": [...], "hooks": [...],
-    "worktree": [...]} of what
-    changed. Writes (with one backup) only if something changed. No-op + no
+    "worktree": [...], "hooks_file": {...}} of what
+    changed (plus, on ``hooks_file``, the cluster-guard script install status:
+    ``{"installed": bool, "backed_up": str|None, "reason": str?}``). Writes (with
+    one backup) only if something changed. No-op + no
     backup if already wired or if the config is missing/malformed.
 
     Args:
@@ -843,15 +869,31 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
     changed_prompt_caching = _ensure_prompt_caching(cfg)
     changed_dashboard = _ensure_dashboard(cfg)
     changed_multiplex = _ensure_multiplex(cfg)
-    changed_hooks = _ensure_hooks(cfg)
     changed_approvals = _ensure_approvals(cfg)
 
     # Sanity-probe the compaction endpoint (prints a warning to gateway logs
     # if the model is missing — non-fatal but alerts the operator).
     _probe_compaction_endpoint()
 
-    # Install the hook script to disk (idempotent, backup-then-overwrite)
+    # Install the hook script to disk FIRST (idempotent, backup-then-overwrite),
+    # and only then wire the config hook commands that invoke it. Wiring hook
+    # entries that reference a script we could not actually install would write
+    # a dangling reference — every hook call at runtime silently fails. So if
+    # the script is not installed, do NOT add new hook commands (existing
+    # already-wired entries are left intact) and warn instead of staying silent.
     hooks_file_result = _ensure_hooks_file(hooks_source)
+    if hooks_file_result.get("installed", False):
+        changed_hooks = _ensure_hooks(cfg)
+    else:
+        changed_hooks = []
+        print(
+            f"[WARN] HSCC could not install the cluster-guard hook script "
+            f"(source missing/unreadable: "
+            f"{hooks_file_result.get('reason', 'unknown')}) — hook commands "
+            f"NOT wired into config; cluster ops will not be capacity-gated "
+            f"or audited",
+            file=sys.stderr,
+        )
 
     if (added_plugins or added_toolsets or changed_kanban or changed_worktree
             or changed_delegation or changed_compaction or changed_text_aux
@@ -875,12 +917,19 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
             "multiplex": changed_multiplex,
             "hooks": changed_hooks,
             "approvals": changed_approvals,
-            "worktree": changed_worktree}
+            "worktree": changed_worktree,
+            "hooks_file": hooks_file_result}
 
 
 if __name__ == "__main__":
     path = os.path.expanduser("~/.hermes/config.yaml")
     res = enable(path)
-    parts = [f"{k}: {', '.join(v)}" for k, v in res.items() if v]
+    parts = [f"{k}: {', '.join(v)}" for k, v in res.items()
+             if v and isinstance(v, (list, tuple))]
+    # The hook-script install status is a dict, not a "changed" section; report
+    # it separately as a status line if it failed so it is never silent.
+    hf = res.get("hooks_file") or {}
+    if hf.get("installed") is False:
+        parts.append("hook script NOT installed")
     print(" | ".join(parts) if parts else "already wired (no changes)")
     sys.exit(0)

@@ -712,6 +712,11 @@ def run_doctor_fix(config_path: Optional[str] = None,
 
         # Build "was X -> set Y" report for each changed key
         for section, keys in result.items():
+            # `result` sections are lists of config key names; `hooks_file`
+            # (the hook-script install status dict) is surfaced alongside but
+            # is not a config section — skip it.
+            if not isinstance(keys, list):
+                continue
             for k in keys:
                 old_val = _get_nested(snapshot, section, k)
                 new_val = _get_nested(fixed_cfg, section, k)
