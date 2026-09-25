@@ -51,10 +51,18 @@ export HOME=/Users/desac
 HSCC_TEST_PY=<interp> bash scripts/run_tests.sh
 ```
 
-Package under change (hscc_daemon) verified under BOTH interpreters; full
-8-pkg suite pending.
+Full 8-package suite green under BOTH interpreters (serially, ~13 min each):
 
-| Interpreter | Path | hscc_daemon |
+| Interpreter | Path | Result |
 |---|---|---|
-| A (hermes venv) | `~/.hermes/hermes-agent/venv/bin/python` | **1136 passed** |
-| B (conda p313) | `/Users/desac/miniconda3/envs/p313/bin/python` | **1136 passed** |
+| A (hermes venv) | `~/.hermes/hermes-agent/venv/bin/python` | **ALL GREEN** (bootstrap 256, commands 69, roles 114, cluster 422, project 1351, **hscc_daemon 1136**, sparkrun-hermes 12, api 786 passed/1 skipped) |
+| B (conda p313) | `/Users/desac/miniconda3/envs/p313/bin/python` | **ALL GREEN** (bootstrap 256, commands 69, roles 114, cluster 404 + 14 skipped, project 1351, **hscc_daemon 1136**, sparkrun-hermes 12, api 786/1 skipped) |
+
+hscc_daemon (the package under change) alone: **1136 passed** under BOTH
+interpreters. This card adds 13 no-ANSI regression tests (4 kanban stale, 4
+kanban blocked, 5 event-driven CLI); the on-main baselines were already
+green, and the pre-existing kanban group suites covered routing.
+
+## Merge / push / deploy status
+
+(pending — completes after both suites confirmed green)
