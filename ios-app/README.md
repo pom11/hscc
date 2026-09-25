@@ -163,8 +163,10 @@ last-known data clearly marked stale with its age via `StaleBanner` — never a
 blank lie. `LoadState.offline`/`.stale`, `StateCache`, and `SnapshotStore` back
 this.
 
-No third-party dependencies. Sideload-friendly. **Default port is `8788`**
-(8787 is taken by another service on this host — don't change it in the app).
+No third-party dependencies. Sideload-friendly. **This deployment runs the API
+on port `8788`** (an override in `~/.hscc/api.json`), so the app must be set to
+match the port `hscc api status` reports. The code default is `8787`.
+
 
 ## End-to-end review: view → endpoint → model (verified against the live API)
 
@@ -278,8 +280,8 @@ The app implements the HSCC HTTP API contract in `docs/DESIGN-api.md` (see the
   a hardcoded `.green` / `.red`/`.secondary` appears in a few places as an
   accessibility convenience, but the palette lives in `Theme.swift`.
 - **`NodeTopologyView.swift` renders the two tensor-parallel pairs.** The
-  gateway (`.244`) heads the orchestrator pair; only each pair's head serves
-  HTTP. Each node's dot is coloured by live state (up / busy / warn / down /
+  gateway (the orchestrator head) heads the orchestrator pair; only each pair's
+  head serves HTTP. Each node's dot is coloured by live state (up / busy / warn / down /
   unknown).
 - **Monospaced type (`Font.hsccMono`) for machine values** (ids, ips, repo
   paths, counts, timestamps); **proportional type for human prose.** This is
@@ -423,7 +425,8 @@ will not match your setup — substitute your own tailnet IP:
   may work instead.)
 
 **In the app:** open the **Settings** screen and enter **host** (the Mac's
-`100.x` tailnet IP), **port** (`8788` by default on this deployment), and
+`100.x` tailnet IP), **port** (this deployment runs the API on `8788` — set it
+to match what `hscc api status` reports), and
 **token** (see below). Tap **Test connection** — it calls `GET /v1/ping`
 against those settings and reports success or a clear error.
 
@@ -440,9 +443,9 @@ hscc api status              # confirm it's running and see the bound host:port
 hscc api stop
 ```
 
-- The **default port is `8788`** on this deployment — **do not change this in
-  the app**; 8787 is taken by another service on this host. Set it in the app
-  to match.
+- This deployment runs the API on **port `8788`** (set in `~/.hscc/api.json`).
+  The code default is `8787`. Set the app's **port** to match what
+  `hscc api status` reports.
 - By default the API binds **loopback (`127.0.0.1`)** only. The
   `--tailscale` flag opts in to binding the tailnet IP, which is what makes it
   reachable from your phone. `0.0.0.0` / binding every interface is **refused
