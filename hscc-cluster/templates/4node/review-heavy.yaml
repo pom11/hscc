@@ -31,18 +31,18 @@ version: 3
 description: "4 nodes: Nemotron-3-Super 120B-A12B orchestrator + 1x Qwen3.8-27B-FP8 coder + 2x Nemotron-3-Nano NVFP4 reviewers (88-100 tok/s). Sized for auto_review load. cluster_size=4."
 
 orchestrator:
-  recipe: "@experimental/nemotron-3-super-nvfp4-mtp-1x-vllm"
+  recipe: "~/.sparkrun-local/recipes/local-fixed/nemotron-3-super-120b-a12b-nvfp4-mtp-vllm.yaml"
 
 families:
   - name: coding
     models:
-      - recipe: "@official/qwen3.8-27b-fp8-mtp-vllm"
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.8-27b-fp8-mtp-vllm.yaml"
     workers: 1
     proxy: true
 
   - name: review
     models:
-      - recipe: "@experimental/nemotron-3-nano-nvfp4-vllm"
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/nemotron-3-nano-30b-a3b-nvfp4-vllm.yaml"
     workers: remaining
     proxy: true
 

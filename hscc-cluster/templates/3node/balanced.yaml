@@ -22,18 +22,18 @@ version: 3
 description: "3 nodes: Nemotron-3-Super 120B-A12B NVFP4+MTP orchestrator + 1x Qwen3.8-27B-FP8 coding + 1x North-Mini-Code NVFP4 fast. cluster_size=3."
 
 orchestrator:
-  recipe: "@experimental/nemotron-3-super-nvfp4-mtp-1x-vllm"
+  recipe: "~/.sparkrun-local/recipes/local-fixed/nemotron-3-super-120b-a12b-nvfp4-mtp-vllm.yaml"
 
 families:
   - name: coding
     models:
-      - recipe: "@official/qwen3.8-27b-fp8-mtp-vllm"
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.8-27b-fp8-mtp-vllm.yaml"
     workers: 1
     proxy: true
 
   - name: fast
     models:
-      - recipe: "@community/north-mini-code-1.0-nvfp4-vllm-XanuNetworks"
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/north-mini-code-1.0-nvfp4-vllm.yaml"
     workers: remaining
     proxy: true
 
