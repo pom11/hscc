@@ -14,6 +14,7 @@ from logging.handlers import RotatingFileHandler
 
 
 PID_FILE = os.path.expanduser("~/.hscc/daemon.pid")
+HEARTBEAT_FILE = os.path.expanduser("~/.hscc/heartbeat")
 LOG_FILE = os.path.expanduser("~/.hscc/daemon.log")
 STATE_DIR = os.path.expanduser("~/.hscc/state")
 
@@ -32,6 +33,159 @@ PERIODIC_INTERVALS = {
     "nas": 900, "idle": 300, "workers": 60, "proxy": 60, "engine_wedge": 60,
     "dispatcher": 60,
 }
+
+
+# ── Durable liveness heartbeat ────────────────────────────────────────────
+# The daemon's ONLY durable liveness artifact besides the pid file is this
+# heartbeat file. The pid file is REMOVED on clean stop (write_stopped), so an
+# absent pid file is indistinguishable between "cleanly stopped" and
+# "unexpectedly crashed" — precisely the gap that let `hscc status` report
+# "RUNNING alive" while ~/.hscc/daemon.pid was gone. The heartbeat file is
+# NEVER deleted on stop: a clean stop simply stops advancing it, so a dead
+# daemon leaves a heartbeat that goes stale and is impossible to miss.
+HEARTBEAT_INTERVAL = 300   # touch cadence (s). Aligned with
+                           # PERIODIC_INTERVALS["heartbeat"] so the durable
+                           # signal tracks the daemon's own heartbeat-stream
+                           # cadence (single source of truth for "how often the
+                           # daemon supervises").
+# Staleness threshold: max(2x the cadence, a floor) — the daemon may miss up to
+# two consecutive touches (slow/iowait ticks) before the heartbeat is judged
+# stale, so we never cry wolf on a healthy-but-slow daemon. max(2*300, 120)=600s.
+HEARTBEAT_STALE_AFTER = max(2 * HEARTBEAT_INTERVAL, 120)
+
+
+def touch_heartbeat(heartbeat_file=None):
+    """Write the current UTC ISO timestamp to the liveness heartbeat file.
+
+    The daemon's own periodic supervision loop (``run_daemon_loop``) calls
+    this on each supervision cycle so the file advances while the daemon
+    lives. A clean stop never deletes it — it simply stops advancing.
+    ``heartbeat_file`` defaults to HEARTBEAT_FILE. Creates the parent
+    directory (~/.hscc) if needed. Never raises (a failed heartbeat write must
+    never take the daemon down — same guarantee as ``log()``). Returns the
+    ISO string written, or None on failure.
+    """
+    heartbeat_file = heartbeat_file or HEARTBEAT_FILE
+    ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    try:
+        parent = os.path.dirname(heartbeat_file) or "."
+        os.makedirs(parent, exist_ok=True)
+        with open(heartbeat_file, "w") as f:
+            f.write(ts + "\n")
+        return ts
+    except Exception:
+        return None
+
+
+def daemon_liveness(pid_file=None, heartbeat_file=None):
+    """Structured daemon liveness: pid-file pid + aliveness + heartbeat freshness.
+
+    The durable liveness signal that the status path (next card) consumes. It
+    reads BOTH the pid file and the heartbeat file — neither is trusted alone —
+    and returns structured state so the caller can distinguish every case:
+
+      state = "running-fresh"               pid alive + heartbeat present & fresh
+              "running-stale-heartbeat"     pid alive + heartbeat present but stale
+              "running-no-heartbeat"        pid alive but no heartbeat yet written
+              "pid-gone"                    pid file absent, or pid not alive
+
+    ``pid_file`` / ``heartbeat_file`` default to PID_FILE / HEARTBEAT_FILE.
+    Returns a dict:
+      pid               int|None — pid read from the pid file (None if absent/invalid)
+      pid_file_present  bool     — whether the pid file existed on disk
+      alive             bool     — whether that pid is a live process (os.kill(pid,0))
+      last_heartbeat    str|None — last heartbeat ISO timestamp (None if absent/unparseable)
+      heartbeat_present bool     — whether a heartbeat file existed and parsed
+      stale             bool     — whether the heartbeat is older than HEARTBEAT_STALE_AFTER
+      state             str      — one of the four labels above
+    """
+    pid_file = pid_file or PID_FILE
+    heartbeat_file = heartbeat_file or HEARTBEAT_FILE
+
+    # pid file → pid + aliveness
+    pid = None
+    pid_file_present = False
+    if os.path.exists(pid_file):
+        pid_file_present = True
+        try:
+            with open(pid_file) as f:
+                pid = int(f.read().strip())
+        except (ValueError, OSError):
+            pid = None
+
+    alive = False
+    if pid is not None:
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except OSError:
+            alive = False
+
+    # heartbeat file → fresh/stale
+    last_heartbeat = None
+    heartbeat_present = False
+    if os.path.exists(heartbeat_file):
+        try:
+            with open(heartbeat_file) as f:
+                raw = f.read().strip()
+            # Normalize so the stored value is always a clean ISO timestamp.
+            last_heartbeat = datetime.datetime.fromisoformat(raw).isoformat()
+            heartbeat_present = True
+        except (ValueError, OSError):
+            last_heartbeat = None
+            heartbeat_present = False
+
+    stale = False
+    if last_heartbeat is not None:
+        try:
+            ts = datetime.datetime.fromisoformat(last_heartbeat)
+            age = datetime.datetime.now(datetime.timezone.utc) - ts
+            stale = age.total_seconds() > HEARTBEAT_STALE_AFTER
+        except (ValueError, TypeError):
+            stale = True
+
+    if not alive:
+        state = "pid-gone"
+    elif heartbeat_present and not stale:
+        state = "running-fresh"
+    elif heartbeat_present and stale:
+        state = "running-stale-heartbeat"
+    else:
+        state = "running-no-heartbeat"
+
+    return {
+        "pid": pid,
+        "pid_file_present": pid_file_present,
+        "alive": alive,
+        "last_heartbeat": last_heartbeat,
+        "heartbeat_present": heartbeat_present,
+        "stale": stale,
+        "state": state,
+    }
+
+
+def run_heartbeat_loop(stop_event, interval=None):
+    """Durable-liveness heartbeat writer — the daemon's main loop body.
+
+    Calls ``touch_heartbeat()`` once per ``interval`` (default
+    HEARTBEAT_INTERVAL) until ``stop_event`` is set, sleeping 1s between
+    checks. It is the body of ``run_daemon_loop``'s main ``while`` loop (the
+    loop that runs the periodic supervisor), so it adds NO separate thread to
+    leak: it runs in the daemon's main thread right where the old empty wait
+    loop ran. On a clean stop it returns and the file simply stops advancing
+    (never deleted), leaving a heartbeat that goes stale and cannot be missed.
+
+    Extracted as a named function so the throttled-touch behaviour is directly
+    testable without booting the monolithic ``run_daemon_loop``.
+    """
+    interval = interval if interval is not None else HEARTBEAT_INTERVAL
+    last = 0.0
+    while not stop_event.is_set():
+        now = time.monotonic()
+        if now - last >= interval:
+            touch_heartbeat()
+            last = now
+        stop_event.wait(1)
 
 
 def get_pid(pid_file=None):
@@ -492,8 +646,15 @@ def run_daemon_loop():
 
     log("All threads started, daemon loop running (polling mode)")
 
-    while not stop_event.is_set():
-        stop_event.wait(1)
+    # Durable liveness heartbeat: run_heartbeat_loop is the main-loop body
+    # here — it touches ~/.hscc/heartbeat on each supervision cycle (throttled
+    # to HEARTBEAT_INTERVAL) in the SHARED main thread both entry points
+    # (cmd_start + cmd_start_daemon) reach, so the heartbeat is written exactly
+    # once per cadence by whichever main loop runs the periodic supervisor,
+    # with NO new thread to leak. On a clean stop the loop simply stops
+    # advancing it (never deleted): a dead daemon leaves a heartbeat that goes
+    # stale and cannot be missed.
+    run_heartbeat_loop(stop_event)
 
     log("Daemon loop stopped")
     write_stopped()
