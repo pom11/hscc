@@ -92,9 +92,9 @@ idle-wedge path and never make a real HTTP request to the test unit's
 
 Both directions verified by running the suite; `hscc_daemon/tests` is green
 under BOTH interpreters and the full multi-plugin suite is ALL GREEN under
-both.
+both — on the final merged tree (branch merged with current main).
 
-Interpreter 1 — ~/.hermes/hermes-agent/venv/bin/python:
+Interpreter 1 — ~/.hermes/hermes-agent/venv/bin/python (final merged tree):
 
   HSCC_TEST_PY=~/.hermes/hermes-agent/venv/bin/python scripts/run_tests.sh
     hscc-bootstrap  272 passed
@@ -102,14 +102,12 @@ Interpreter 1 — ~/.hermes/hermes-agent/venv/bin/python:
     hscc-roles      114 passed
     hscc-cluster    422 passed
     hscc-project    1351 passed
-    hscc_daemon     1144 passed
+    hscc_daemon     1157 passed
     sparkrun-hermes 12 passed
     hscc-api        786 passed, 1 skipped
     ALL GREEN (exit 0)
 
-  (hscc_daemon alone, same interpreter: 1144 passed in 48.76s)
-
-Interpreter 2 — /Users/desac/miniconda3/envs/p313/bin/python:
+Interpreter 2 — /Users/desac/miniconda3/envs/p313/bin/python (merged tree):
 
   HSCC_TEST_PY=/Users/desac/miniconda3/envs/p313/bin/python scripts/run_tests.sh
     hscc-bootstrap  272 passed
@@ -117,7 +115,7 @@ Interpreter 2 — /Users/desac/miniconda3/envs/p313/bin/python:
     hscc-roles      114 passed
     hscc-cluster    404 passed, 14 skipped
     hscc-project    1351 passed
-    hscc_daemon     1144 passed
+    hscc_daemon     1157 passed
     sparkrun-hermes 12 passed
     hscc-api        786 passed, 1 skipped
     ALL GREEN (exit 0)
@@ -129,5 +127,5 @@ fleet per the operator rule.
 ## Report requirements
 
 - branch: wt/wedge-load-aware
-- commits ahead of main pre-merge: 1 (920f4b6)
+- commits ahead of main pre-merge: 2 feature commits (920f4b6, 50d8b81) + merge of current main
 - merged/pushed/deployed: see final kanban handoff metadata.
