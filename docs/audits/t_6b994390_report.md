@@ -68,23 +68,40 @@ Mirrors the established sibling-group pattern (autodown_cli / kanban_cli):
 
 ## How ran
 
-Changed-package suite (hscc_daemon) under BOTH interpreters:
+Full 8-package suite green under BOTH interpreters (serially via
+`scripts/run_tests.sh`, one pytest process per dir for true plugin isolation):
 
 | Interpreter | Command | Result |
 |---|---|---|
-| A (hermes venv) | `~/.hermes/hermes-agent/venv/bin/python -m pytest hscc_daemon/tests/ -q` | **1149 passed** (1136 baseline + 13 new no-ANSI) |
-| B (conda p313) | `/Users/desac/miniconda3/envs/p313/bin/python -m pytest hscc_daemon/tests/ -q` | **1149 passed** |
+| A (hermes venv) | `HSCC_TEST_PY=~/.hermes/hermes-agent/venv/bin/python bash scripts/run_tests.sh` | **ALL GREEN** (bootstrap 272, commands 69, roles 114, cluster 422, project 1351, **hscc_daemon 1149**, sparkrun-hermes 12, api 786/1 skipped) |
+| B (conda p313) | `HSCC_TEST_PY=/Users/desac/miniconda3/envs/p313/bin/python bash scripts/run_tests.sh` | **ALL GREEN** (bootstrap 272, commands 69, roles 114, cluster 404 + 14 skipped, project 1351, **hscc_daemon 1149**, sparkrun-hermes 12, api 786/1 skipped) |
+
+hscc_daemon (the package under change) alone: **1149 passed** under BOTH
+interpreters (1136 baseline + 13 new no-ANSI tests). This card adds 13 no-ANSI
+regression tests (test_api_cli_no_ansi.py) and updates the TestApiRouting
+stubs in test_unified_cli.py to accept `theme_name`.
 
 ## Merge / push / deploy status
 
 - **Branch:** `wt/api-cli-theme`
-- **Commits ahead of main (mine, pre-merge):** 1 (`3ef304a` theme api_cli + no-ANSI tests).
-- **Merge:** (pending — see below)
-- **Push:** (pending)
-- **Deploy:** (pending)
-- **No gateway restart:** the change is CLI-only (`api_cli.py` is the lifecycle
-  wrapper for `hscc api start|stop|status`); it is not on the daemon's live
-  loop and does not touch the serving/health/state paths. No restart performed.
+- **Commits ahead of main (mine, pre-merge):** 3 (`918d9ed` theme api_cli +
+  no-ANSI tests, `ab069a7` report skeleton, `0dc138d` final report).
+- **Merge:** clean fast-forward of main through the primary checkout
+  `/Users/desac/dev/hscc` (main is pinned to that worktree, so the merge was
+  done there, not in the linked worktree). First rebased onto the moving local
+  main (`7d1d840`). Local main `7d1d840..0dc138d`. **YES.**
+- **Push:** `git push origin main` → `f4b2687..0dc138d main -> main` on
+  github.com/pom11/hscc. Verified origin/main == `0dc138d`. **YES.**
+- **Deploy:** `~/.hermes/hermes-agent/venv/bin/python hscc-bootstrap/install_payload.py`
+  from the primary checkout `/Users/desac/dev/hscc` → `missing: []`, hscc_daemon
+  installed with backups. Verified deployed
+  `/Users/desac/.hermes/plugins/hscc_daemon/api_cli.py` is byte-identical to
+  committed main. **YES (deployed).**
+- **No gateway restart:** the change is CLI-only (api_cli lifecycle wrapper);
+  it is not on the daemon's live loop, does not touch serving/health/state, and
+  `_serve`/`_sigterm_handler` still log to the api.log FILE unchanged. No
+  restart performed.
+- **Suite on merged main:** ALL GREEN under BOTH interpreters (figures above).
 
 ## Tests added
 
