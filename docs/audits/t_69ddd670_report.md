@@ -65,4 +65,65 @@ green, and the pre-existing kanban group suites covered routing.
 
 ## Merge / push / deploy status
 
-(pending — completes after both suites confirmed green)
+- **Branch:** `wt/t_69ddd670`
+- **Commits ahead of main (mine, pre-merge):** 4 (2 source: `26a5e1d` theme
+  kanban stale/blocked + `cadd4dd` theme event-driven views; 2 report commits:
+  `598c3cf` skeleton + `2f88ed7` final).
+- **Merge:** clean fast-forward `d2e3816..2f88ed7` into `main` (disjoint from
+  the sibling bootstrap-audit t_24b4a9ba which only touched hscc-bootstrap).
+  Rebased onto the moving main `d2e3816` first. **YES.**
+- **Push:** `git push origin main` → `d2e3816..2f88ed7 main -> main` on
+  github.com/pom11/hscc. **YES.**
+- **Deploy:** `~/.hermes/hermes-agent/venv/bin/python hscc-bootstrap/install_payload.py`
+  from the primary checkout `/Users/desac/dev/hscc` → all payload entries
+  installed with backups, `missing: []`. Verified deployed
+  `/Users/desac/.hermes/plugins/hscc_daemon/` kanban_cli / kanban_blocked /
+  event_driven are byte-identical to committed main. **YES (deployed).**
+- **No gateway restart:** changes are CLI-only (kanban stale/blocked +
+  event_driven install/uninstall/status). None are on the daemon's live loop;
+  the event streams and background logging are untouched. The running daemon
+  (`hscc api` pid) was left running and is healthy (logs + state normal) —
+  verified against the running daemon's logs, NOT by restarting. **No restart
+  performed.**
+- **Suite on merged main:** ALL GREEN under BOTH interpreters (figures above).
+
+## What changed (source)
+
+The theming pattern reuses `hscc_daemon.cli_theme` directly (the earlier epic's
+module): `theme.make_console / make_status_panel / make_table`, with the
+anti-collapse width convention (TTY → real width, non-tty → 200). Each human
+path emits NO ANSI on a non-tty, pinned by the new per-surface no-ANSI tests;
+every `--json` path stays a raw `json.dumps(...)` byte-identical.
+
+### hscc_daemon/kanban_cli.py — `hscc kanban stale`
+- Human list → Rich Table (board/id/status/assignee/age/title).
+- Archive-confirm + empty message → `make_status_panel` (status ok).
+- Help via console.print; `--json` paths raw; errors + warnings plain on
+  stderr. Added `_strip_theme` + `_console` (mirror autodown_cli), threaded
+  `theme_name` through `_cmd_stale`.
+
+### hscc_daemon/kanban_blocked.py — `hscc kanban blocked`
+- Human list → Rich Table (board/id/kind/age/why + folded comments).
+- Recover-confirm + empty message → `make_status_panel`.
+- Help via console.print; unknown-subcommand + errors stay plain on stderr;
+  `--json` raw. `_strip_theme` + `_console` added; stale delegation
+  re-injects `--theme` so the delegated list keeps the chosen palette.
+
+### hscc_daemon/event_driven.py — standalone CLI
+- install/uninstall/status human views → Rich panels/tables; `main()` help/
+  unknown/error via console.
+- Peer-guarded `from hscc_daemon import cli_theme` with a minimal
+  `_FallbackTheme` (rich Panel/Table/Console) so standalone-script runs
+  render instead of crashing.
+- Added module-level `import sys` (the file only imported it inside
+  `__main__`; the new `_console` needs it). `run_tests()` self-test harness
+  and the kqueue watcher callback stay plain (daemon / self-test output).
+
+## Tests added
+- `hscc_daemon/tests/test_kanban_cli_no_ansi.py` (4) — stale empty/with-tasks/
+  archive/help, assert no `\x1b[` on non-tty.
+- `hscc_daemon/tests/test_kanban_blocked_no_ansi.py` (4) — blocked empty/
+  with-tasks/recover/help.
+- `hscc_daemon/tests/test_event_driven_cli_no_ansi.py` (5) — install/uninstall/
+  status (with and without daemon.log)/help.
+
