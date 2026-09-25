@@ -11,6 +11,15 @@ On ``start`` we also run the payload-drift check (``verify.check_plugin_payload`
 so an API that will serve an installed (possibly stale) payload cannot start
 silently. Reference: docs/DESIGN-api.md §C (Operational shape, `hscc api` verb
 group).
+
+Human output routes through ``hscc_daemon.cli_theme`` (the shared Hermes
+palette) via ``_console``; on a non-tty stdout Rich degrades to PLAIN text with
+NO ANSI escape codes, so piped/scripted capture stays clean. There is no
+``--json`` machine path in this group (start/stop/status are operator verbs);
+the only byte-exact contract is the QR payload (``_build_qr_payload``), which
+is WIRE DATA encoded into the QR matrix — never themed. ``--theme <name>``
+selects the human palette and is stripped before dispatch (mirrors autodown_cli
+/ kanban_cli).
 """
 
 import os
@@ -19,6 +28,7 @@ import sys
 import time
 from pathlib import Path
 
+from hscc_daemon import cli_theme as theme
 from hscc_daemon import daemon_ops
 from hscc_daemon import qr_code
 from hscc_daemon import verify
@@ -46,6 +56,51 @@ The auth token lives at ~/.hscc/api-token and is ENCODED into the QR, so the
 QR must be treated like a password — do not show it on a stream or
 screen-share.
 '--no-qr' suppresses the scannable connection QR shown by start/status."""
+
+
+def _console(theme_name=None, **kwargs):
+    """A Rich console bound to the resolved theme, with the anti-collapse fix.
+
+    On a TTY the console uses the actual terminal width (no explicit ``width=``
+    wins otherwise); on a non-tty stdout (pipe / capture) it is fixed at 200 so
+    wide piped rows keep their content instead of wrapping. Mirrors kanban_cli.
+    """
+    if sys.stdout.isatty():
+        kwargs.pop("width", None)
+    else:
+        kwargs.setdefault("width", 200)
+    return theme.make_console(theme_name, **kwargs)
+
+
+def _strip_theme(args):
+    """Remove ``--theme <name>`` / ``--theme=<name>`` tokens from an argv slice.
+
+    ``--theme`` only selects the palette for the human view; it is not part of
+    the (non-existent) machine contract for this group. Mirrors
+    ``autodown_cli._strip_theme`` so the api group honors the same flag via its
+    own argv (hscc.py passes the api argv through unstripped). Returns
+    ``(cleaned, theme_name_or_None)``.
+    """
+    theme_name = None
+    cleaned = []
+    i = 0
+    n = len(args)
+    while i < n:
+        a = args[i]
+        if a == "--theme":
+            if i + 1 < n:
+                theme_name = args[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        if a.startswith("--theme="):
+            theme_name = a.split("=", 1)[1]
+            i += 1
+            continue
+        cleaned.append(a)
+        i += 1
+    return cleaned, theme_name
 
 
 def _resolve_api_dir() -> Path:
@@ -100,21 +155,30 @@ def _build_qr_payload(host, port, token) -> str:
     return '{"v":1,"host":"%s","port":%d,"token":"%s"}' % (host, port, token)
 
 
-def _print_api_qr(host, port, token, *, force_ascii=False):
+def _print_api_qr(host, port, token, *, force_ascii=False, theme_name=None):
     """Print the scannable connection-settings QR with a security warning.
 
     The warning is printed unconditionally (it accompanies the QR itself, not
     the flag state): whoever scans this QR is handed a live credential. When
     the bind is loopback-only we additionally warn that a phone cannot reach
     it. `--no-qr` suppresses this entire block at the call site.
+
+    Only the surrounding prose is themed; the QR matrix itself is fixed-width
+    block art rendered verbatim (theming it would break its alignment). The
+    QR payload (``_build_qr_payload``) is WIRE DATA for the iOS scanner and is
+    never altered. On a non-tty stdout Rich degrades to plain text — no ANSI.
     """
     payload = _build_qr_payload(host, port, token)
     matrix = qr_code.make_qr(payload.encode("utf-8"))
-    print("  Scan to connect: grants API access to this host.")
+    console = _console(theme_name)
+    console.print("  Scan to connect: grants API access to this host.")
     if _is_loopback(host):
-        print("  Warning: bound to loopback — a phone cannot reach this host.")
-    print(qr_code.render_text(matrix, force_ascii=force_ascii))
-    print()
+        console.print(
+            "  [warn]Warning:[/warn] bound to loopback — a phone cannot reach "
+            "this host."
+        )
+    console.print(qr_code.render_text(matrix, force_ascii=force_ascii))
+    console.print()
 
 
 def _parse_start_flags(argv):
@@ -195,7 +259,7 @@ def _sigterm_handler(signum, frame):
     os._exit(0)
 
 
-def _warn_payload_drift(repo_root=None, plugins_dir=None):
+def _warn_payload_drift(repo_root=None, plugins_dir=None, theme_name=None):
     """Run the payload-drift check and warn LOUDLY on drift, silently otherwise.
 
     Uses ``verify.check_plugin_payload`` — the SAME check already wired into
@@ -206,7 +270,8 @@ def _warn_payload_drift(repo_root=None, plugins_dir=None):
     naming the drifted plugins and the exact remedy.
 
     ``repo_root`` / ``plugins_dir`` are injectable for tests (defaults go to
-    the real repo root and ``~/.hermes/plugins``).
+    the real repo root and ``~/.hermes/plugins``). ``theme_name`` selects the
+    human palette for the warning banner.
     """
     try:
         res = verify.check_plugin_payload(
@@ -218,10 +283,12 @@ def _warn_payload_drift(repo_root=None, plugins_dir=None):
         # ok=None: no repo checkout -> nothing to diff, start normally.
         # ok=True:  installed payload matches the repo.
         return
-    print(
+    console = _console(theme_name)
+    console.print(
         "\n"
         "====================================================================\n"
-        "WARNING: the INSTALLED payload differs from this repo. `hscc api`\n"
+        "[warn]WARNING:[/warn] the INSTALLED payload differs from this repo. "
+        "`hscc api`\n"
         "serves ~/.hermes/plugins, NOT the repo — merging here did not deploy.\n"
         "\n"
         + "  " + (res.get("detail") or "installed payload differs from repo")
@@ -235,24 +302,26 @@ def _warn_payload_drift(repo_root=None, plugins_dir=None):
     )
 
 
-def _handle_start(argv):
+def _handle_start(argv, theme_name=None):
     """`hscc api start` — resolve bind/config + token, fork into background.
 
     Returns 0 on start (or already-running), non-zero on a fail-closed error
     (refused bind, empty/unreadable token, plugin missing).
     """
+    argv, theme_name_ = _strip_theme(argv)
+    theme_name = theme_name_ if theme_name_ is not None else theme_name
     api = _load_api_server()
     bind_override, port_override, no_qr = _parse_start_flags(argv)
 
     existing = daemon_ops.get_pid(API_PID_FILE)
     if existing:
-        print(f"HSCC API already running (PID {existing})")
+        _console(theme_name).print(f"HSCC API already running (PID {existing})")
         return 0
 
     # Surface installed-payload drift at the moment it matters: the API serves
     # the INSTALLED payload, so before we start it, check that payload against
     # the repo. Silent on ok=None (no repo) / ok=True (match); loud on drift.
-    _warn_payload_drift()
+    _warn_payload_drift(theme_name=theme_name)
 
     # Fail-closed BEFORE forking: resolve bind/port + validate/generate the
     # token. We never fork a child that would then fail on disk state we can
@@ -271,14 +340,17 @@ def _handle_start(argv):
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    print(f"Starting HSCC API on {config['host']}:{config['port']}...")
+    _console(theme_name).print(
+        f"Starting HSCC API on {config['host']}:{config['port']}..."
+    )
 
     # Print the scannable connection QR unless the user suppressed it. We do
     # this only after config+token are known to be valid, so the user gets a
     # useful QR of the endpoint they are about to start. The token in the QR
     # is the real live credential printed only to stdout, never logged.
     if not no_qr:
-        _print_api_qr(config["host"], config["port"], token_server)
+        _print_api_qr(config["host"], config["port"], token_server,
+                      theme_name=theme_name)
 
     daemon_ops.log(
         "HSCC API starting", log_file=API_LOG_FILE, pid_file=API_PID_FILE,
@@ -291,9 +363,9 @@ def _handle_start(argv):
         # Parent: record the child PID immediately (grandchild re-saves its own).
         try:
             daemon_ops.save_pid(API_PID_FILE)
-            print(f"HSCC API started (PID {pid})")
+            _console(theme_name).print(f"HSCC API started (PID {pid})")
         except Exception:
-            print(f"HSCC API started (child PID {pid})")
+            _console(theme_name).print(f"HSCC API started (child PID {pid})")
         return 0
 
     # Child — become a daemon, no controlling terminal.
@@ -311,15 +383,17 @@ def _handle_start(argv):
     os._exit(0)
 
 
-def _handle_stop(argv):
+def _handle_stop(argv, theme_name=None):
     """`hscc api stop` — read PID, SIGTERM, wait, remove PID file."""
+    argv, theme_name_ = _strip_theme(argv)
+    theme_name = theme_name_ if theme_name_ is not None else theme_name
     pid = daemon_ops.get_pid(API_PID_FILE)
     if not pid:
-        print("HSCC API is not running")
+        _console(theme_name).print("HSCC API is not running")
         daemon_ops.write_stopped(API_PID_FILE)
         return 0
 
-    print(f"Stopping HSCC API (PID {pid})...")
+    _console(theme_name).print(f"Stopping HSCC API (PID {pid})...")
     daemon_ops.log(
         "HSCC API stop requested", log_file=API_LOG_FILE, pid_file=API_PID_FILE,
     )
@@ -330,21 +404,21 @@ def _handle_stop(argv):
             try:
                 os.kill(pid, 0)
             except OSError:
-                print(f"HSCC API stopped (PID {pid})")
+                _console(theme_name).print(f"HSCC API stopped (PID {pid})")
                 return 0
         os.kill(pid, signal.SIGKILL)
-        print(f"HSCC API force-killed (PID {pid})")
+        _console(theme_name).print(f"HSCC API force-killed (PID {pid})")
     except ProcessLookupError:
-        print("HSCC API already stopped")
+        _console(theme_name).print("HSCC API already stopped")
     except Exception as exc:
-        print(f"Error stopping HSCC API: {exc}")
+        print(f"Error stopping HSCC API: {exc}", file=sys.stderr)
         return 1
     finally:
         daemon_ops.write_stopped(API_PID_FILE)
     return 0
 
 
-def _handle_status(argv):
+def _handle_status(argv, theme_name=None):
     """`hscc api status` — report running/stopped + the bound host:port.
 
     NEVER prints the auth token. Uses A1's resolve_config only to report the
@@ -352,6 +426,8 @@ def _handle_status(argv):
     Prints a scannable connection QR (suppressed by ``--no-qr``) when a token
     exists — if the token is missing/unreadable, says so and exits cleanly.
     """
+    argv, theme_name_ = _strip_theme(argv)
+    theme_name = theme_name_ if theme_name_ is not None else theme_name
     no_qr = _has_flag(argv, "--no-qr")
 
     api = None
@@ -371,14 +447,18 @@ def _handle_status(argv):
 
     pid = daemon_ops.get_pid(API_PID_FILE)
     if pid:
-        print(f"HSCC API is running (PID {pid})")
+        status, state_line = "ok", f"HSCC API is running (PID {pid})"
     elif os.path.exists(API_PID_FILE):
-        print("HSCC API status: stale PID file (not running)")
+        status, state_line = "warn", "stale PID file (not running)"
     else:
-        print("HSCC API status: not running")
+        status, state_line = "warn", "not running"
 
+    console = _console(theme_name)
+    rows = [state_line]
     if host is not None:
-        print(f"Listening:     {host}:{port}")
+        rows.append(f"Listening:     {host}:{port}")
+    console.print(theme.make_status_panel(
+        "\n".join(rows), status=status, title="api"))
 
     # The QR is only useful when there is an endpoint AND a valid token. If
     # the token is missing/unreadable, say so and exit cleanly (no QR). The
@@ -387,9 +467,9 @@ def _handle_status(argv):
         try:
             token = api.load_token()
         except RuntimeError as exc:
-            print(f"No connection QR: could not read auth token ({exc})")
+            console.print(f"No connection QR: could not read auth token ({exc})")
         else:
-            _print_api_qr(host, port, token)
+            _print_api_qr(host, port, token, theme_name=theme_name)
     return 0
 
 
@@ -398,21 +478,26 @@ def cmd_api(argv):
 
     With no subcommand (or ``--help``/``-h``) prints the group help and exits 0
     — matching how the other group verbs handle their no-subcommand/``--help``
-    case. Unknown subcommands exit non-zero.
+    case. Unknown subcommands exit non-zero. ``--theme`` selects the human
+    palette (stripped before dispatch, like autodown_cli / kanban_cli).
     """
     if not argv or argv[0] in ("--help", "-h"):
-        print(HELP_TEXT)
+        _console().print(HELP_TEXT)
         return 0
+
+    argv, theme_name = _strip_theme(argv)
 
     sub = argv[0]
     rest = argv[1:]
     if sub == "start":
-        return _handle_start(rest)
+        return _handle_start(rest, theme_name=theme_name)
     if sub == "stop":
-        return _handle_stop(rest)
+        return _handle_stop(rest, theme_name=theme_name)
     if sub == "status":
-        return _handle_status(rest)
+        return _handle_status(rest, theme_name=theme_name)
 
-    print(f"Error: unknown api subcommand: {sub}")
-    print(f"Valid subcommands: {', '.join(VALID_SUBCOMMANDS)}")
+    _console(theme_name).print(f"Error: unknown api subcommand: {sub}")
+    _console(theme_name).print(
+        f"Valid subcommands: {', '.join(VALID_SUBCOMMANDS)}"
+    )
     return 1
