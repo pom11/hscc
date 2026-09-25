@@ -289,6 +289,43 @@ def _read_max_in_progress():
         return None
 
 
+def _bind_spawnable_helpers(kanban_db):
+    """Bind the canonical spawnable predicates onto a real Hermes kanban lib.
+
+    ``has_spawnable_ready``/``has_spawnable_review`` live in
+    ``hermes_cli.kanban_db_dispatch``; ``hermes_cli.kanban_db`` only re-exports
+    them through a removal-scheduled compat shim whose stated date
+    (2026-09-14) has passed and which emits HermesPluginCompatWarning on every
+    ``hasattr`` / attribute access. Binding them into the module's ``__dict__``
+    (exactly as ``autodown._load_kanban_db_or_default`` does for ``connect`` /
+    ``connect_closing``) makes ``hasattr(kanban_db, ...)`` and
+    ``kanban_db.has_spawnable_*`` resolve from ``__dict__`` and never touch the
+    shim — so ``_board_snapshot`` keeps reusing the dispatcher's own notion of
+    spawnable, and the compat warnings stop. Idempotent and cheap: after the
+    first bind the names are already in ``__dict__`` and this is a no-op.
+
+    Three cases:
+      * old Hermes (pre-split): ``has_spawnable_ready`` is a NATIVE ``__dict__``
+        member (never a warning) — already present, left untouched.
+      * current Hermes (v2026.9.14): only reachable via the shim — bound here
+        from ``kanban_db_dispatch`` so ``__dict__`` holds the real callables.
+      * hermes_cli unreachable (test-only interpreter / no Hermes): nothing to
+        bind; ``_board_snapshot`` then falls back to the injected fake's own
+        methods, then the SQL predicate. This is NOT a silent narrowing — on
+        the same interpreter ``_load_kanban_db_or_default`` returns None and
+        the whole probe goes fail-safe ``unreachable``, never the SQL fallback
+        with a real board.
+    """
+    try:
+        from hermes_cli import kanban_db_dispatch
+    except Exception:  # noqa: BLE001 - no hermes_cli: nothing to bind
+        return kanban_db
+    for _n in ("has_spawnable_ready", "has_spawnable_review"):
+        if _n not in vars(kanban_db) and hasattr(kanban_db_dispatch, _n):
+            setattr(kanban_db, _n, getattr(kanban_db_dispatch, _n))
+    return kanban_db
+
+
 # ── In-memory detector state (lives for the daemon process) ────────────────
 # Mirrors ``_engine_wedge_units`` (health.py) / ``_recover_units`` (recover.py):
 # a daemon restart re-probes fresh, so in-memory streaks are correct to reset.
@@ -317,7 +354,15 @@ def _capture_kanban(kanban_db=None, max_in_progress=None,
     If the kanban lib cannot be reached at all, returns ``{"unreachable":...}``
     so the caller can decide (fail safe: write ok True, do NOT false-alarm).
     """
-    kanban_db = kanban_db or _load_kanban_db_or_default()
+    if kanban_db is None:
+        kanban_db = _load_kanban_db_or_default()
+        if kanban_db is not None:
+            # Production path: bind the canonical spawnable predicates onto the
+            # real Hermes lib so ``_board_snapshot``'s hasattr/attribute access
+            # resolves from ``__dict__`` (never the expired compat shim). Only
+            # done for the LOADED real lib — an injected test fake keeps its own
+            # methods untouched (its ``__dict__`` would shadow its class methods).
+            _bind_spawnable_helpers(kanban_db)
     if kanban_db is None:
         return {"unreachable": _kanban_unreachable_reason(),
                 "boards": [], "spawnable": [], "roomy_spawnable": [],
