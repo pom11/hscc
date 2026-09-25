@@ -156,12 +156,20 @@ rewritten hscc-project README; fixing it directly supports this card.)
 
 ## Merge / push / deploy (recorded per process)
 
-- branch wt/t_0ae232a4 based on main (clean);
-- commits on branch: 579ef26 (audit scaffold), 591d73c (README rewrites) + final
-  report commit (this file).
-- merged: `git merge --ff-only wt/t_0ae232a4` from primary checkout (main is
-  checked out in the primary, not this worktree).
-- pushed: `git push origin main`; then `git rev-list --count origin/main..main` = 0.
-- deployed: `python3 hscc-bootstrap/install_payload.py` exit 0; deployed copy
-  verified.
+- branch wt/t_0ae232a4 based on main (clean); rebased twice onto latest main
+  (main advanced 17 commits during the run: sibling README-review cards
+  t_6b51ef5b / t_8ac9e87c merged concurrently — no conflicts, docs-only).
+- commits on branch: 579ef26(1d8c320) audit scaffold, 591d73c(856b045) README
+  rewrites, 145ff8e(e49a437) audit report, c35f54a(b5d467d) full-suite ALL
+  GREEN record.
+- merged YES (fast-forward): `git merge --ff-only wt/t_0ae232a4` from primary
+  checkout (main is checked out in the primary, not this worktree);
+  3e9babd..b5d467d, main HEAD b5d467d.
+- pushed YES: `git push origin main` (3e9babd..b5d467d);
+  `git rev-list --count origin/main..main` = 0; origin/main == main == b5d467d.
+- deployed YES: `python3 hscc-bootstrap/install_payload.py` exit 0 (all 9
+  plugins + docs/assets backed up, missing=[]); deployed copy
+  ~/.hermes/plugins/hscc-project/README.md + docs/README.md carry the rewrite;
+  post-deploy `hscc project project list` + `hscc project review --queue`
+  still work.
 - change is docs-only (markdown); no code/test touched.
