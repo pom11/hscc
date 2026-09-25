@@ -175,30 +175,67 @@ def _status_for(state):
 
 
 def cmd_status():
-    """Show daemon status and last check results."""
-    from .daemon_ops import get_pid
+    """Show daemon status and last check results.
+
+    RUNNING is reported ONLY when the durable ``daemon_liveness()`` signal
+    confirms the daemon is genuinely alive: the pid file exists AND that pid
+    is a live process AND the heartbeat is fresh. If the pid is gone OR the
+    heartbeat is stale, we report NOT-RUNNING — never "RUNNING alive" — and
+    surface the unexpected-exit so the operator can see a dead daemon at a
+    glance rather than being told it is alive.
+    """
+    from .daemon_ops import daemon_liveness
     from .state import read_all_states
 
     console = _console()
 
-    pid = get_pid()
-    if pid:
-        try:
-            os.kill(pid, 0)
-            status, proc = "RUNNING", f"alive (PID {pid})"
-        except OSError:
-            status, proc = "STOPPED", "stale PID file"
-            pid = None
-    else:
-        status, proc = "STOPPED", ""
+    liv = daemon_liveness()
+    liv_state = liv["state"]
+
+    # Keep the panel line concise: panels clip a single long line at the
+    # terminal width, and the unexpected-exit/pid detail must NOT be lost to
+    # that clipping. We print the short status in the panel, then surface any
+    # dead/stale detail as its own distinct wrapped line below it.
+    detail = None
+    if liv_state == "running-fresh":
+        # Genuinely alive: pid present + alive + fresh heartbeat.
+        status, note = "RUNNING", f"alive (PID {liv['pid']})"
+    elif liv_state == "running-stale-heartbeat":
+        # Process present but the durable heartbeat stopped advancing — the
+        # operator's dead-daemon case. Surface it loudly, never "RUNNING".
+        status, note = "STOPPED", "stale heartbeat"
+        detail = (f"possible unexpected exit / stale heartbeat — Heartbeat "
+                  f"last advanced {liv['last_heartbeat']} (older than "
+                  f"HEARTBEAT_STALE_AFTER); PID {liv['pid']} still present but "
+                  "not supervised, treat as dead daemon.")
+    elif liv_state == "running-no-heartbeat":
+        # Pid alive but no heartbeat written yet — the pid file alone cannot
+        # durably confirm the daemon, so report NOT-RUNNING (errs safe).
+        status = "STOPPED"
+        note = f"pid alive but no durable heartbeat (PID {liv['pid']})"
+        detail = "The pid file exists but no heartbeat has ever been written — " \
+                 "cannot confirm the daemon is alive; treat as not running."
+    else:  # pid-gone
+        # pid file absent ⇒ clean stop; pid present but not alive ⇒ stale PID file.
+        if liv["pid_file_present"]:
+            status, note = "STOPPED", "stale PID file"
+            detail = (f"PID file names {liv['pid']} but that process is not "
+                      "alive — possible unexpected exit; pid file cleaned up.")
+        else:
+            status, note = "STOPPED", ""
 
     state_role = "ok" if status == "RUNNING" else "warn"
     console.print(
         make_status_panel(
-            f"HSCC Daemon Status — {status} {proc}".strip(),
+            f"HSCC Daemon Status — {status} {note}".strip(),
             status=state_role, title="status",
         )
     )
+    if detail:
+        # The operator's glance-line for a dead daemon: a distinct wrapped
+        # line that cannot be clipped like a single-line panel body.
+        console.print(f"[warn]  ! {detail}[/warn]")
+        console.print()
 
     states = read_all_states()
 
