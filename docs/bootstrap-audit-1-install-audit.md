@@ -38,6 +38,6 @@ Evidence:
 - [x] hscc-bootstrap suite green (p313 interpreter): 258 passed in 395.60s
 - [x] full `scripts/run_tests.sh` suite (host interpreter default): ALL GREEN — 8 packages, exit 0
 - [x] full `scripts/run_tests.sh` suite (p313 interpreter via HSCC_TEST_PY): ALL GREEN — 8 packages, exit 0
-- [ ] merge to main + push
-- [ ] deploy (install_payload.py)
+- [x] merge to main + push: merge commit `77b23b0` on `main`, pushed `5b799c9..77b23b0` to origin (github.com/pom11/hscc)
+- [x] deploy: `~/.hermes/hermes-agent/venv/bin/python hscc-bootstrap/install_payload.py` from primary checkout; verified deployed runtime carries both guards (`~/.hermes/plugins/hscc-bootstrap/apply_patches.py:56`, `install_soul.py:217`); tests dir excluded.
 
