@@ -81,3 +81,16 @@ REWRITE (new content drafted below in WORKSPACE file hscc-cli/README.md).
   the cluster down (no available worker nodes). Command is correct; this is an
   environmental/live-cluster limitation. Not a README change.
 - hscc-skills README out of scope (separate card).
+
+## Merge / push / deploy (recorded per process)
+- branch wt/t_d90de5b6 based on main; rebased onto latest main (da0960f).
+- commits-ahead-of-main before merge = 1 (f750d0b).
+  `git rev-list --count main..wt/t_d90de5b6` = 1.
+- merged YES: `git merge --ff-only wt/t_d90de5b6` from primary checkout
+  (main is checked out in the primary, not this worktree).
+- pushed YES: `git push origin main` (da0960f..f750d0b);
+  `git rev-list --count origin/main..main` = 0.
+- deployed YES: `python3 hscc-bootstrap/install_payload.py` exit 0;
+  deployed copy shows v2.1.1 badge; `hscc autodown status` still works post-deploy.
+- change is docs-only (markdown); no code/test touched.
+
