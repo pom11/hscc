@@ -125,3 +125,22 @@ def test_repair_failure_reported(runner):
 
     assert res["action"] == "failed"
     assert res["shebang"] == "#!/tmp/miniconda/envs/p313/bin/python3.13"
+
+
+# ── NO-ANSI regression (RICH CLI hscc-bootstrap card) ──────────────────────
+# install_cli's themed usage panel goes to STDERR (non-tty in a pipe). It must
+# emit NO \x1b — a literal escape byte on stderr would corrupt a piped parse /
+# log capture. Rich detects a non-terminal stderr and degrades to plain.
+
+def test_usage_panel_no_ansi():
+    import io
+    import _theme
+
+    buf = io.StringIO()
+    _theme.make_console(file=buf).print(_theme.panel(
+        "usage",
+        _theme.escape("install_cli.py <venv-python> <hscc-cli-dir>"),
+    ))
+    out = buf.getvalue()
+    assert "install_cli.py <venv-python> <hscc-cli-dir>" in out
+    assert "\x1b" not in out, f"ANSI escape in piped stderr: {out!r}"

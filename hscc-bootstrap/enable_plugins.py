@@ -33,6 +33,8 @@ serving layer is what resolves alias → concrete id.
 import os
 import sys
 
+import _theme
+
 HSCC_PLUGINS = ["hscc-cluster", "hscc-commands", "sparkrun-hermes"]
 
 # Cluster-guard hook — lives in hscc-bootstrap/hooks/cluster-guard.py in the
@@ -273,7 +275,10 @@ def _ensure_kanban_routing(cfg):
         }
         changed.append("auto_review")
     elif not isinstance(k.get("auto_review"), dict):
-        print(f"[WARN] HSCC could not wire kanban.auto_review: expected dict, got {type(k.get('auto_review')).__name__}", file=sys.stderr)
+        _theme.make_console(file=sys.stderr).print(
+            "[warn]" + _theme.escape(
+                f"[WARN] HSCC could not wire kanban.auto_review: expected "
+                f"dict, got {type(k.get('auto_review')).__name__}") + "[/warn]")
     # WS4: escalate after N consecutive rejects. Only FILL when absent/invalid —
     # a lower operator limit is deliberately STRICTER (escalates sooner), so it
     # must be preserved, not raised.
@@ -472,7 +477,10 @@ def _ensure_fallback(cfg):
     cur = cfg.get("fallback_providers")
     if cur is not None and not isinstance(cur, list):
         # Key present but wrong shape — preserve operator value and warn.
-        print(f"[WARN] HSCC could not wire fallback_providers: expected list, got {type(cur).__name__}", file=sys.stderr)
+        _theme.make_console(file=sys.stderr).print(
+            "[warn]" + _theme.escape(
+                f"[WARN] HSCC could not wire fallback_providers: expected "
+                f"list, got {type(cur).__name__}") + "[/warn]")
         return []
     if isinstance(cur, list) and cur:
         return []          # operator already has a chain — keep it
@@ -719,18 +727,20 @@ def _probe_compaction_endpoint():
         )
         if not present:
             # Log a warning-like message so it surfaces in gateway logs.
-            print(
-                f"[WARN] HSCC compaction model mismatch: endpoint {models_url} "
-                f"lists {len(listed)} model(s) — '{COMPACT_MODEL}' not found. "
-                f"Compression will fail with 404. Fix: set HSCC_COMPACT_MODEL "
-                f"or update the endpoint.",
-                file=sys.stderr,
-            )
+            _theme.make_console(file=sys.stderr).print(
+                "[warn]" + _theme.escape(
+                    f"[WARN] HSCC compaction model mismatch: endpoint "
+                    f"{models_url} lists {len(listed)} model(s) — "
+                    f"'{COMPACT_MODEL}' not found. Compression will fail "
+                    f"with 404. Fix: set HSCC_COMPACT_MODEL or update the "
+                    f"endpoint.") + "[/warn]")
         return present
     except Exception as exc:
         # Silent skip in tests (no live orch); only warn in real runs.
         if "pytest" not in sys.modules and "unittest" not in sys.modules:
-            print(f"[WARN] HSCC compaction probe failed: {exc}", file=sys.stderr)
+            _theme.make_console(file=sys.stderr).print(
+                "[warn]" + _theme.escape(
+                    f"[WARN] HSCC compaction probe failed: {exc}") + "[/warn]")
         return False
 
 
@@ -806,7 +816,10 @@ def _ensure_hooks(cfg):
             hooks[hook_type] = entries
         elif not isinstance(entries, list):
             # Key present but wrong shape — preserve operator value and warn.
-            print(f"[WARN] HSCC could not wire hooks.{hook_type}: expected list, got {type(entries).__name__}", file=sys.stderr)
+            _theme.make_console(file=sys.stderr).print(
+                "[warn]" + _theme.escape(
+                    f"[WARN] HSCC could not wire hooks.{hook_type}: expected "
+                    f"list, got {type(entries).__name__}") + "[/warn]")
             continue
 
         # Check if cluster-guard is already wired for this hook type
@@ -931,5 +944,6 @@ if __name__ == "__main__":
     hf = res.get("hooks_file") or {}
     if hf.get("installed") is False:
         parts.append("hook script NOT installed")
-    print(" | ".join(parts) if parts else "already wired (no changes)")
+    body = " | ".join(parts) if parts else "already wired (no changes)"
+    _theme.make_console().print(_theme.panel("bootstrap", _theme.escape(body)))
     sys.exit(0)
