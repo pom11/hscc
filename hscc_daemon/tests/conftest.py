@@ -120,6 +120,7 @@ def _isolate_hscc(tmp_path, monkeypatch):
             (trigger, "COOLDOWN_FILE", p("cooldowns.json")),
             # daemon_ops.py
             (daemon_ops, "PID_FILE", p("daemon.pid")),
+            (daemon_ops, "HEARTBEAT_FILE", p("heartbeat")),
             (daemon_ops, "LOG_FILE", p("daemon.log")),
             (daemon_ops, "STATE_DIR", p("state")),
             (daemon_ops, "HSCC_DIR", base),
