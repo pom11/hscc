@@ -56,7 +56,7 @@ Fix: factor out `_compact_models_url()` (mirrors `doctor._models_url`: preserve 
 
 ## Verification
 
-- [ ] hscc-bootstrap suite green (host interpreter)
+- [x] hscc-bootstrap suite green (host interpreter): 264 passed in 405.66s
 - [ ] hscc-bootstrap suite green (p313 interpreter)
 - [ ] full `scripts/run_tests.sh` suite (host interpreter default)
 - [ ] full `scripts/run_tests.sh` suite (p313 via HSCC_TEST_PY)
