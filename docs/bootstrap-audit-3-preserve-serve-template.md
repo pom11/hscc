@@ -90,4 +90,5 @@ Evidence:
 - [x] hscc-bootstrap suite green (p313 interpreter): 260 passed in 395.85s
 - [x] full `scripts/run_tests.sh` suite (host interpreter): ALL GREEN — bootstrap 260, commands 69, roles 114, cluster 422, project 1351, hscc_daemon 1136, sparkrun-hermes 12, api 786 (1 skipped)
 - [x] full `scripts/run_tests.sh` suite (p313 interpreter): ALL GREEN — bootstrap 260, commands 69, roles 114, cluster 404+14 skipped, project 1351, hscc_daemon 1136, sparkrun-hermes 12, api 786 (1 skipped)
-- [x] merge to main + push + deploy: pending after merging
+- [x] merge to main + push: merge commit `7b6ca67` on `main`, pushed `74535c5..7b6ca67` to origin (github.com/pom11/hscc)
+- [x] deploy: `~/.hermes/hermes-agent/venv/bin/python hscc-bootstrap/install_payload.py` from primary checkout — `missing: []`, all plugins installed with `.bak-20260925-050229` backups; verified deployed `~/.hermes/plugins/hscc-bootstrap/preserve_autodown.py` (+ its OSError guard) and `install_triggers.py` are byte-identical to committed `main`. Bootstrap payload changes need no daemon restart (CLI/installer logic only, not on the daemon's live loop).
