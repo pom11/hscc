@@ -56,6 +56,106 @@ class TestCmdStatus:
         assert "Check Streams" in output or "dgx" in output.lower() or "gateway" in output.lower()
 
 
+class TestCmdStatusLiveness:
+    """cmd_status() gates RUNNING on the durable daemon_liveness() signal:
+    pid present AND alive AND fresh heartbeat. It must NEVER report "RUNNING
+    alive" when the pid is gone or the heartbeat is stale.
+
+    Hermetic: we monkeypatch ``daemon_ops.daemon_liveness`` (the function
+    cmd_status imports at call time) to return curated state dicts matching the
+    real helper's keys, and pin PID_FILE/HEARTBEAT_FILE/STATE_DIR to tmp paths
+    — no real daemon, no os.kill against a live ~/.hscc.
+    """
+
+    @staticmethod
+    def _run(tmp_hfcc_dir, monkeypatch, liv):
+        from hscc_daemon import cli
+        from hscc_daemon import daemon_ops
+        from hscc_daemon import state as state_mod
+
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(exist_ok=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        monkeypatch.setattr(daemon_ops, "PID_FILE", str(tmp_hfcc_dir / "pid"))
+        monkeypatch.setattr(daemon_ops, "HEARTBEAT_FILE", str(tmp_hfcc_dir / "heartbeat"))
+        monkeypatch.setattr(daemon_ops, "daemon_liveness", lambda: liv)
+
+        f = io.StringIO()
+        with redirect_stdout(f):
+            cli.cmd_status()
+        return f.getvalue()
+
+    def _liv(self, state, pid=None, pid_file_present=True, alive=True,
+             last_heartbeat=None, heartbeat_present=True, stale=False):
+        return {
+            "pid": pid,
+            "pid_file_present": pid_file_present,
+            "alive": alive,
+            "last_heartbeat": last_heartbeat,
+            "heartbeat_present": heartbeat_present,
+            "stale": stale,
+            "state": state,
+        }
+
+    def test_pid_alive_fresh_heartbeat_reports_running(self, tmp_hfcc_dir, monkeypatch):
+        out = self._run(
+            tmp_hfcc_dir, monkeypatch,
+            self._liv("running-fresh", pid=4242, last_heartbeat="2026-09-25T15:00:00+00:00"),
+        )
+        assert "RUNNING" in out
+        assert "alive (PID 4242)" in out
+        # Regression: the healthy path still carries the exact "RUNNING alive" text.
+        assert "RUNNING alive (PID 4242)" in out
+
+    def test_pid_alive_stale_heartbeat_not_running(self, tmp_hfcc_dir, monkeypatch):
+        out = self._run(
+            tmp_hfcc_dir, monkeypatch,
+            self._liv("running-stale-heartbeat", pid=4242, stale=True,
+                      last_heartbeat="2026-09-25T01:00:00+00:00"),
+        )
+        assert "RUNNING alive" not in out
+        assert "STOPPED" in out
+        # The unexpected-exit note is surfaced on its own distinct line.
+        assert "possible unexpected exit / stale heartbeat" in out
+        # The last-heartbeat timestamp is present (line wraps, so assert the
+        # unbroken timestamp token, not a phrase spanning a wrap boundary).
+        assert "2026-09-25T01:00:00+00:00" in out
+        assert "4242" in out
+
+    def test_pid_present_process_gone_not_running(self, tmp_hfcc_dir, monkeypatch):
+        out = self._run(
+            tmp_hfcc_dir, monkeypatch,
+            self._liv("pid-gone", pid=4242, alive=False, heartbeat_present=False),
+        )
+        assert "RUNNING alive" not in out
+        assert "STOPPED" in out
+        assert "stale PID file" in out
+        assert "that process is not alive" in out
+
+    def test_pid_file_missing_clean_stop(self, tmp_hfcc_dir, monkeypatch):
+        out = self._run(
+            tmp_hfcc_dir, monkeypatch,
+            self._liv("pid-gone", pid=None, pid_file_present=False, alive=False,
+                      heartbeat_present=False),
+        )
+        assert "RUNNING alive" not in out
+        assert "STOPPED" in out
+        # Clean stop: no stale/unexpected-exit note, just the plain status.
+        assert "stale heartbeat" not in out
+        assert "stale PID file" not in out
+
+    def test_pid_alive_no_heartbeat_not_running(self, tmp_hfcc_dir, monkeypatch):
+        # Pid alive but no durable heartbeat written yet — the pid file alone
+        # cannot confirm the daemon, so status errs safe and reports NOT-running.
+        out = self._run(
+            tmp_hfcc_dir, monkeypatch,
+            self._liv("running-no-heartbeat", pid=4242, heartbeat_present=False),
+        )
+        assert "RUNNING alive" not in out
+        assert "STOPPED" in out
+        assert "no durable heartbeat" in out
+
+
 class TestCmdCheck:
     """cmd_check() runs a single check cycle."""
 
