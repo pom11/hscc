@@ -126,12 +126,15 @@ The old README was stale in two ways:
 - `python hscc-roles/hscc.py list` -> themed table of role specs, exit 0
 - `python hscc-roles/hscc.py` (usage) -> themed help showing all 7 commands
 - `hscc api` (help) -> shows start/stop/status + QR note, exit 0
+- `hscc api status --no-qr` -> "HSCC API is running (PID ...)" + the bound
+  host:port, exit 0 (read-only; start/stop are live side-effecting ops not run
+  during a docs review)
 - Tests (through the run_tests.sh harness env, i.e. `env -u HERMES_DELEGATED_CHILD_CONTEXT`):
   - hscc-commands 69 passed
   - hscc-roles 114 passed
   - hscc-cluster 422 passed
-  - hscc-api (running in background)
-  - hscc-bootstrap (running in background)
+  - hscc-api 786 passed, 1 skipped
+  - hscc-bootstrap 266 passed
 
 ## Changes made
 - hscc-api/README.md — rewritten (was severely stale / A1-only framing).
