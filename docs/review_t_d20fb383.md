@@ -59,9 +59,14 @@ or delete anything stale, verify commands by running.
 ## Changes made
 - sparkrun-hermes/README.md: replaced the false confirmation claim with the
   accurate guard description (must start with sparkrun; runs directly;
-  captures stdout/stderr).
+  captures stdout/stderr). Dropped the unenforced "(orchestrator-only)" qualifier.
+- docs/review_t_d20fb383.md: this report.
+- memori/ and memori_byodb/ READMEs: verified accurate, no changes.
 
 ## Verification
 - sparkrun-hermes tests pass: 12 passed.
 - memori/memori_byodb have no README-documented commands to run.
 - Cross-checked all claim evidence paths above.
+
+## Commit
+- 8c98207 docs(t_d20fb383): fix false 'confirm first' claim in sparkrun-hermes README
