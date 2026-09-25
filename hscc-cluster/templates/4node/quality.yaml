@@ -1,0 +1,88 @@
+# 4-node QUALITY — best judgement available on this hardware. Accept ~37 tok/s.
+#
+# USE THIS WHEN the work is hard: a design decision, a cross-file refactor, an
+# audit, an AL or Dart change where a wrong answer costs a deploy cycle. Do NOT
+# use it for a queue of small cards — `4node-throughput` exists for that.
+#
+# MEASURED, one GB10:
+#   orchestrator  Qwen3.8-Flash-Next NVFP4 (solo)  ~37 tok/s   SWE-bench Pro 62.5
+#   coding x2     Qwen3.8-27B-FP8 + MTP            ~21 tok/s   SWE-bench Pro 61.7
+#   fast   x1     North-Mini-Code-1.0 NVFP4        56.7 C1 / 178 agg C10
+#
+# Qwen3.8-Flash-Next is the #1 open-weight model on SWE-bench Pro (62.5, ahead
+# of GLM-5.2 at 62.1 and Qwen3.8-27B at 61.7). 125B total, 6B active, so the
+# quality is bought without the decode penalty a dense model of that class
+# would carry.
+#
+# ── TWO WARNINGS. READ BOTH BEFORE APPLYING. ────────────────────────────────
+#
+# 1. THE ORCHESTRATOR IS VRAM-TIGHT. `sparkrun recipe show` estimates 110.57 GB
+#    per-GPU and warns that weights (98.6 GB) exceed usable memory at 80%
+#    utilization. That estimate is CONSERVATIVE and wrong in a specific way:
+#    the eugr solo recipe sets VLLM_PLE_TABLE_MEMORY=disk, so the ~47.7 GB
+#    n-gram PLE table is read off NVMe by row and never made resident. Atlas
+#    measured the comparable NVIDIA pack at ~90.4 GB actual peak with ~27.8 GB
+#    free. It fits — but it is the tightest layout in this directory. Watch the
+#    first boot, and do not raise gpu_memory_utilization.
+#
+# 2. USE THE eugr SOLO RECIPE, NEVER `@atlas/qwen3.8-flash-next-nvfp4`, FOR
+#    THIS SLOT. The atlas recipe is pinned `max_num_seqs: 1` and its own
+#    metadata states a hard boundary: "SPECULATION IS C=1-ONLY ON THIS MODEL...
+#    with 2+ active sequences the batched verify declines and requests error
+#    mid-decode." The live ~/.hermes/config.yaml points NINE consumers at
+#    `orchestrator-model` (chat + kanban_decomposer, triage_specifier, curator,
+#    profile_describer, title_generation, skills_hub, approval, mcp). A C=1
+#    orchestrator would serialize all of them and error under load. The eugr
+#    solo recipe carries max_num_seqs: 8 and is the correct one here.
+#
+# ── NO ATLAS RUNTIME HERE, AND THAT WAS A DELIBERATE REVERSAL ───────────────
+# An earlier draft used `@atlas/qwen3.8-27b-nvfp4-dflash2` for the coding
+# family because it carries the best measured numbers for this checkpoint
+# (34 tok/s at gamma=8, 45.5 at gamma=16). Two of its declared properties make
+# it unusable in a worker family, and a template can override neither — see the
+# comment on that family below. It is documented there rather than silently
+# dropped, because the throughput it gives up is real.
+#
+# The one thing this template still builds locally is the orchestrator's
+# `vllm-node-b12x` image (eugr `build_args: --exp-b12x`), which sparkrun builds.
+name: 4node-quality
+version: 3
+description: "4 nodes: Qwen3.8-Flash-Next NVFP4 orchestrator (SWE-bench Pro 62.5, #1 open weight) + 2x Qwen3.8-27B-FP8 coding + North-Mini-Code fast. cluster_size=4."
+
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.8-flash-next-nvfp4-solo-vllm.yaml"
+
+families:
+  - name: coding
+    # Two single-node coders. (`workers:` counts NODES, not instances —
+    # resolve() computes `num_instances = len(avail) // max_tp` — but with a
+    # tp=1 recipe the two coincide: 2 nodes, 2 instances.)
+    #
+    # NOT `@atlas/qwen3.8-27b-nvfp4-dflash2`, despite it carrying the best
+    # measured numbers for this checkpoint (34 tok/s at gamma=8, 45.5 at
+    # gamma=16, vs ~21 here). Two of its properties make it wrong for a
+    # proxy-backed worker pool, and a template can override neither:
+    #   * `Nodes: 1 - 1` (max_nodes: 1) — a tp=2 span is impossible, so it
+    #     cannot be given two nodes as one bigger worker.
+    #   * `max_batch_size: 1` — single-stream by default. Its own metadata says
+    #     batched DFlash2 works but only if served with
+    #     `max_batch_size/max_num_seqs >= your concurrency`, which ModelIntent
+    #     has no field to set. Behind a load-balanced proxy it would serialize.
+    # Using it would also pull in the atlas runtime, unproven on this fleet.
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.8-27b-fp8-mtp-vllm.yaml"
+    workers: 2
+    proxy: true
+
+  - name: fast
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/north-mini-code-1.0-nvfp4-vllm.yaml"
+    workers: remaining
+    proxy: true
+
+routing:
+  delegation: family-coding
+  # Compaction to the fast family: the orchestrator is the scarce resource in
+  # this layout and is already fanning out to nine consumers, and the single
+  # coding worker is the throughput bottleneck. The fast node is the only slack.
+  compaction: family-fast

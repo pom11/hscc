@@ -1,0 +1,40 @@
+# 2-node FAST — minimum viable fleet, everything single-node and quick.
+#
+# USE THIS WHEN only two nodes are available: most of the fleet is down, the
+# cluster is being rebuilt, or you want a cheap always-on pair while the other
+# two nodes are free for experiments or a manual sparkrun session.
+#
+# MEASURED, one GB10:
+#   orchestrator  Qwen3.6-35B-A3B NVFP4, K=1 spec   116.5 tok/s   31.82 GB
+#   coding  x1    North-Mini-Code-1.0 NVFP4          56.7 C1 / 178 agg C10
+#
+# NO BIG ORCHESTRATOR HERE, DELIBERATELY. The 122B orchestrator used by the
+# 3- and 4-node templates costs 80.81 GB and ~50 tok/s. On two nodes there is
+# no worker pool to absorb the latency it adds, and every auxiliary task
+# (nine of them point at `orchestrator-model`) queues behind the same engine.
+# At this size, responsive beats smart.
+#
+# BOTH RECIPES ARE ALREADY STAGED OR SMALL. The orchestrator is the local-fixed
+# path — the recipe already on the gateway node, so no NAS pull. North-Mini-Code
+# NVFP4 is ~17 GB of weights. This template can be applied without waiting on
+# the 10G/SATA NAS, which is the point of having it.
+name: 2node-fast
+version: 3
+description: "2 nodes: Qwen3.6-35B-A3B NVFP4 orchestrator (116 tok/s) + 1x North-Mini-Code NVFP4 coding. Minimum viable fleet. cluster_size=2."
+
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+
+families:
+  - name: coding
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/north-mini-code-1.0-nvfp4-vllm.yaml"
+    workers: remaining
+    proxy: true
+
+routing:
+  delegation: family-coding
+  # Only two engines exist; compaction has to land on one of them. The
+  # orchestrator takes it because the single coding worker IS the throughput of
+  # this fleet and must not be interrupted by a large bursty compaction prompt.
+  compaction: orchestrator

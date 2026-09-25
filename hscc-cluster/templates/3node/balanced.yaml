@@ -1,0 +1,42 @@
+# 3-node BALANCED — the degraded-fleet layout.
+#
+# USE THIS WHEN one node is down, thermally throttled, or held for a manual
+# experiment. It keeps the strong orchestrator and one of each worker class
+# rather than dropping a whole tier.
+#
+# This also covers the idle-autodown case. Autodown is armed at 60 min and
+# frees .244/.246 while .247/.248 stay exempt — so a partially-down fleet is a
+# normal steady state here, not an incident, and it deserves a real template
+# instead of an improvised `apply --force-recreate`.
+#
+# MEASURED, one GB10:
+#   orchestrator  Nemotron-3-Super 120B-A12B NVFP4 + MTP    23.6 tok/s
+#   coding  x1    Qwen3.8-27B-FP8 + MTP        ~21 tok/s   60.75 GB  SWE-Pro 61.7
+#   fast    x1    North-Mini-Code-1.0 NVFP4    56.7 C1 / 178 agg C10  26.22 GB
+#
+# The orchestrator is NOT downgraded on a smaller fleet. Judgement is what a
+# three-node cluster is shortest of: with one coder, a bad decomposition costs
+# proportionally more than it does at four nodes. Spend the node on the brain.
+name: 3node-balanced
+version: 3
+description: "3 nodes: Nemotron-3-Super 120B-A12B NVFP4+MTP orchestrator + 1x Qwen3.8-27B-FP8 coding + 1x North-Mini-Code NVFP4 fast. cluster_size=3."
+
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/nemotron-3-super-120b-a12b-nvfp4-mtp-vllm.yaml"
+
+families:
+  - name: coding
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.8-27b-fp8-mtp-vllm.yaml"
+    workers: 1
+    proxy: true
+
+  - name: fast
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/north-mini-code-1.0-nvfp4-vllm.yaml"
+    workers: remaining
+    proxy: true
+
+routing:
+  delegation: family-coding
+  compaction: family-fast

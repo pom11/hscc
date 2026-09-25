@@ -123,3 +123,152 @@ class TestPlanPlacement:
         res = rc.plan_placement([{"recipe": "a"}], nodes,
                                 _coster=self._coster(costs))
         assert res["ok"] is True
+
+
+class TestRecipeExists:
+    """recipe_exists() must answer for BOTH recipe kinds: filesystem paths and
+    registry names (@reg/name). The filesystem-only check it replaced reported
+    every registry recipe as missing, which blocked template preflight for any
+    template sourcing from the community / eugr / atlas / official registries.
+    """
+
+    def setup_method(self):
+        rc._EXISTS_CACHE.clear()
+
+    def test_registry_name_resolved_via_sparkrun(self):
+        calls = []
+
+        def fake_show(recipe):
+            calls.append(recipe)
+            return SHOW_FIXTURE
+
+        assert rc.recipe_exists("@community/north-mini-code-1.0-nvfp4-vllm-XanuNetworks",
+                                _runner=fake_show) is True
+        assert calls == ["@community/north-mini-code-1.0-nvfp4-vllm-XanuNetworks"]
+
+    def test_registry_name_missing_when_sparkrun_returns_nothing(self):
+        assert rc.recipe_exists("@community/does-not-exist", _runner=lambda r: "") is False
+
+    def test_existing_file_needs_no_subprocess(self, tmp_path):
+        p = tmp_path / "r.yaml"
+        p.write_text("model: x\n")
+
+        def boom(recipe):
+            raise AssertionError("must not shell out for an on-disk path")
+
+        assert rc.recipe_exists(str(p), _runner=boom) is True
+
+    def test_path_shaped_but_absent_is_missing_without_subprocess(self):
+        def boom(recipe):
+            raise AssertionError("must not shell out for a path-shaped token")
+
+        assert rc.recipe_exists("~/nope/missing.yaml", _runner=boom) is False
+        assert rc.recipe_exists("/nope/missing.yaml", _runner=boom) is False
+
+    def test_empty_token_is_missing(self):
+        assert rc.recipe_exists("", _runner=lambda r: SHOW_FIXTURE) is False
+
+    def test_answer_is_cached_per_token(self):
+        calls = []
+
+        def fake_show(recipe):
+            calls.append(recipe)
+            return SHOW_FIXTURE
+
+        rc.recipe_exists("@eugr/some-recipe", _runner=fake_show)
+        rc.recipe_exists("@eugr/some-recipe", _runner=fake_show)
+        assert len(calls) == 1
+
+
+class TestRegistryRecipesPassBothValidationLayers:
+    """A @registry/name recipe must satisfy BOTH existence checks.
+
+    There are two, and they had to be fixed separately:
+      * cluster_template._structural_validate   -> offline, layer 1
+      * cluster_template.validate_resolved_plan -> resolved plan, pre-apply
+    Both defaulted to Path.is_file(), so a template sourcing recipes from the
+    sparkrun registries failed with "recipe not found" even though
+    `sparkrun show -- @reg/name` resolves them. Fixing only one leaves the
+    template rejected by the other — which is exactly what happened first time
+    round: the pytest suite went green while the real CLI still refused.
+    """
+
+    def setup_method(self):
+        rc._EXISTS_CACHE.clear()
+
+    def _raw(self, orch_recipe):
+        return {
+            "name": "t", "version": 3,
+            "orchestrator": {"recipe": orch_recipe},
+            "families": [{"name": "coding",
+                          "models": [{"recipe": "@official/some-coder"}],
+                          "workers": "remaining", "proxy": True}],
+        }
+
+    def test_structural_layer_accepts_registry_recipe(self, monkeypatch):
+        import cluster_template as ct
+        import template_intent as ti
+
+        monkeypatch.setattr(rc, "_run_show_norvam", lambda recipe: SHOW_FIXTURE)
+        raw = self._raw("@community/some-orch")
+        errors, _warnings = ct._structural_validate(raw, ti.ClusterTemplate.from_dict(raw))
+        assert [e for e in errors if "recipe not found" in e] == []
+
+    def test_structural_layer_still_rejects_a_missing_path(self, monkeypatch):
+        import cluster_template as ct
+        import template_intent as ti
+
+        monkeypatch.setattr(rc, "_run_show_norvam", lambda recipe: SHOW_FIXTURE)
+        raw = self._raw("~/definitely/not/here.yaml")
+        errors, _warnings = ct._structural_validate(raw, ti.ClusterTemplate.from_dict(raw))
+        assert any("recipe not found: ~/definitely/not/here.yaml" in e for e in errors)
+
+
+class TestGpuMemoryUtilizationIntent:
+    """`gpu_memory_utilization` on a model — the knob co-location needs.
+
+    Without it, two units sharing a node each inherit their recipe's own
+    fraction (written assuming the unit owns the GPU), so two recipes at 0.8
+    request 160% of one card and the second refuses to start. A VRAM-sum check
+    does not catch that: the weights fit, the reservation does not.
+    """
+
+    def test_absent_means_recipe_default(self):
+        import template_intent as ti
+        m = ti.ModelIntent.from_dict({"recipe": "r.yaml"})
+        assert m.gpu_memory_utilization is None
+        assert "gpu_memory_utilization" not in m.to_dict()
+
+    def test_parsed_and_round_trips(self):
+        import template_intent as ti
+        m = ti.ModelIntent.from_dict({"recipe": "r.yaml",
+                                      "gpu_memory_utilization": 0.45})
+        assert m.gpu_memory_utilization == 0.45
+        assert m.to_dict()["gpu_memory_utilization"] == 0.45
+
+    def test_rejects_out_of_range(self):
+        import template_intent as ti
+        for bad in (0, -0.1, 1.5):
+            try:
+                ti.ModelIntent.from_dict({"recipe": "r.yaml",
+                                          "gpu_memory_utilization": bad})
+            except ti.TemplateIntentError as e:
+                assert "gpu_memory_utilization" in str(e)
+            else:
+                raise AssertionError("expected rejection for %r" % (bad,))
+
+    def test_rejects_non_numeric(self):
+        import template_intent as ti
+        try:
+            ti.ModelIntent.from_dict({"recipe": "r.yaml",
+                                      "gpu_memory_utilization": "lots"})
+        except ti.TemplateIntentError as e:
+            assert "must be a number" in str(e)
+        else:
+            raise AssertionError("expected rejection")
+
+    def test_is_a_known_model_key(self):
+        # Unknown keys are a hard structural error (typo protection), so the
+        # new key has to be registered or every template using it is rejected.
+        import cluster_template as ct
+        assert "gpu_memory_utilization" in ct._KNOWN_MODEL_KEYS
