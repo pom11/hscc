@@ -33,7 +33,7 @@ orchestrator:
 families:
   - name: coding
     models:
-      - recipe: "@community/north-mini-code-1.0-nvfp4-vllm-XanuNetworks"
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/north-mini-code-1.0-nvfp4-vllm.yaml"
     workers: remaining
     proxy: true
 
