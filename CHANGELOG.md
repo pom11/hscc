@@ -5,7 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.2.0] - 2026-09-25
+
+### Added
+- **Rich CLI across every package** (full audit + UX pass). The shared
+  `hscc_daemon/cli_theme.py` theme (Hermes gold palette, `--theme` support) now
+  covers every human-facing surface that previously emitted raw
+  `json.dumps`/`print(`: `hscc-project` (~509 sites), `hscc-bootstrap`,
+  `hscc-cluster` (no-ANSI tests), `hscc-roles`, `hscc-commands`,
+  `sparkrun-hermes`, and `hscc-DAEMON`'s residual sites. Invariants hold
+  throughout: `--json` output stays **byte-identical** (the daemon, `scripts/`
+  and the iOS console parse it), non-TTY output falls back to PLAIN (no ANSI),
+  and each converted command ships a no-ANSI regression test.
+- **`hscc_daemon/api_cli.py` themed.** Its 28 raw stdout prints now render
+  through `cli_theme` (ok/error/warn labels, `make_status_panel`, `--theme`);
+  the QR payload remains iOS wire byte-identical. 0 raw stdout human prints
+  remain; 13 no-ANSI tests added.
+- **Dispatcher worktree placement is now configurable per repo.** New
+  `kanban.worktree.out_of_tree_repos` + `kanban.worktree.out_of_tree_root` config
+  keys (hermes patch 0012 in `patches/hermes/`) let repos whose project root is
+  itself a build/compiler root keep their kanban worktrees OUT of the tree.
+  Worktrees for a listed repo land at `~/dev/.worktrees/<repo-name>/<id>`;
+  unlisted repos keep the in-tree `<repo>/.worktrees/<id>` default. (The
+  Microsoft AL compiler walked the in-tree worktrees and compiled ~1,991 extra
+  .al files into the app — 2,487 total, AL1021.)
 
 ### Fixed
 - **`--deliver desktop` was a silent no-op** for the cron watchdogs. Hermes'
@@ -16,18 +39,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   it: escalation and dep-bump alerts were silently dropped. The watchers now
   notify directly via `hscc_daemon.desktop.send_desktop_notification()` (native
   macOS desktop notification), and the installers no longer pass
-  `--deliver desktop`. Docs updated accordingly.
+  `--deliver desktop`. Also fixed desktop.py osascript quoting (silent error
+  -2741) so the native notifier actually fires; e2e verified.
+- **Engine-wedge check declared a BUSY unit wedged** (probe was not
+  load-aware). A unit returning 200-with-zero-tokens while its vLLM `/metrics`
+  shows it actively serving other requests was misreported "wedged" and killed.
+  The verdict is now load-aware — `busy` (saturated-but-healthy) is NOT `wedged`
+  — using the vLLM `/metrics` busy-signal with a per-unit throughput fallback.
+  Both-direction regression tests added (200-zero-tokens-not-serving and
+  actually-stalled both still report correctly).
+- **`dispatcher_wedge.py` used an expired `hermes_cli.kanban_db` compat shim.**
+  `has_spawnable_ready`/`has_spawnable_review` were imported from a module whose
+  stated removal date (2026-09-14) had passed, guarded by a silent `hasattr`
+  fall-through — meaning when the shim is finally dropped the dispatcher would
+  NOT crash but silently narrow dispatch eligibility, looking like "the board
+  just stopped dispatching" with no error. `_bind_spawnable_helpers` now binds
+  the helpers from `hermes_cli.kanban_db_dispatch` into the module `__dict__` so
+  the check resolves to a real callable and never touches the shim. Repo pins
+  Hermes v2026.9.14; no legacy fallback needed. 3 regression tests prove
+  eligibility is not silently narrowed when the legacy attribute is absent.
+  Every `hscc start` previously logged two `HermesPluginCompatWarning` lines;
+  now zero.
+- **Bootstrap silent-failure audit** (Part 3 correctness pass):
+  - `apply_patches` faulted (missing-dir) instead of reporting cleanly.
+  - `install_personality` YAML write was a silent no-op.
+  - `detect` / `doctor` / `enable_plugins` / `ensure_review_feature` hardened.
+  - `preserve_autodown` / `serving_gen` / `suggest_template` corrected.
+- **Telegram-remnant scrub** across `hscc-project` config/registry examples and
+  CLI help (deprecated telegram wiring removed from shipped docs/examples).
 
 ### Changed
-- **Dispatcher worktree placement is now configurable per repo.** New
-  `kanban.worktree.out_of_tree_repos` + `kanban.worktree.out_of_tree_root` config
-  keys (captured as hermes patch 0012 in `patches/hermes/`) let repos whose project
-  root is itself a build/compiler root keep their kanban worktrees OUT of the tree.
-  Until now the dispatcher hardcoded `<repo>/.worktrees/<id>`; for an AL repo that
-  path sits inside the compiler root, and `.gitignore` does not stop the Microsoft AL
-  compiler walking it (it compiled 1,991 worktree .al files on top of the real app,
-  ~2487 files total, AL1021). Worktrees for a listed repo now land at
-  `~/dev/.worktrees/<repo-name>/<id>`; unlisted repos keep the in-tree default.
+- **READMEs rewritten for the modular Rich CLI reality** (Part 2 review, all
+  verified by running): root + `hscc-cli` + `install`; `memori`/`memori_byodb`/
+  `sparkrun-hermes`; `docs`/`skills`/`project`; `bootstrap`/`cluster`/`roles`/
+  `api`/`commands`; `daemon`/`scripts`/`ios-app`/`templates`/`install`.
+
+### Notes
+- **hscc-api carries no CLI.** Its 6 `json.dumps` sites are iOS/bridge wire
+  bytes that must stay byte-identical; converting them to Rich would corrupt
+  the API. Documented (no action taken) in
+  `docs/audits/hscc-api-no-cli-t_8899bca2.md`.
+- Full test suites green on all packages under **both** interpreters
+  (`.hermes/hermes-agent/venv` and `miniconda3/envs/p313`).
 
 ## [2.1.1] - 2026-09-24
 
