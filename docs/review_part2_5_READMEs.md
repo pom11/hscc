@@ -125,5 +125,44 @@ Startup self-clean of .corrupt-*/.stale + .bak.* cap verified (daemon_ops.py:134
   `hscc project --help` (exit 0). No change.
 - docs/README.md — simple accurate index, no commands/telegram. No change.
 
+## Verification / Commands run
+- `hscc help` — themed, v2.1.1, exit 0
+- `hscc status` — themed status panel + stream table (dgx/gateway/local/heartbeat/
+  nas/watchdog/triggers/engine_wedge/dispatcher), exit 0
+- `hscc check all` — themed, exit 0
+- `hscc api status` — API running (PID …), Listening tailnet_ip:8788
+- `hscc project --help`, `hscc-skills/hscc.py status`, `hscc-template`-era
+  daemon README commands — all run clean
+- Watchdog scripts run: hscc_proxy_watchdog.sh (silent/exit 0),
+  hscc_nas_watchdog.sh, hscc_worker_health.sh, hscc_cluster_digest.sh (report
+  the currently-autodowned cluster per design, no syntax errors)
+- `hermes cron create --deliver desktop` accepted at create time but
+  `_resolve_delivery_targets` returns [] (silent no-op — see scripts finding).
+- Full harness scripts/run_tests.sh with `env -u HERMES_DELEGATED_CHILD_CONTEXT`:
+  ALL GREEN — bootstrap ✓ commands ✓ roles ✓ cluster ✓ project ✓ hscc_daemon ✓
+  sparkrun-hermes ✓ api ✓ (opens with 786 passed + 1 skipped).
+
+## Merge / push / deploy
+- branch wt/t_6b51ef5b based on main (66e1bec); main had NOT advanced past the
+  branch point → could fast-forward, but used --no-ff per convention.
+- commits-ahead-of-main = 3 (6809d02, e317398, 71c9c60).
+- merged YES: `git merge --no-ff wt/t_6b51ef5b` from primary checkout -> 3252d6d
+  (clean; only the 3 READMEs + docs/review). Was on main at base → ff possible.
+- pushed YES: `git push origin main` (66e1bec..3252d6d); origin/main == main ==
+  3252d6d verified.
+- deployed YES: `python3 hscc-bootstrap/install_payload.py --no-backup` (from
+  primary, now at merged main) exit 0; verified ~/.hermes/plugins/hscc_daemon/
+  README.md carries new merged-CLI content and the old config.json/handlers/
+  daemon.py stale claims are gone. scripts/ and ios-app/ READMEs are repo-source
+  docs (ios-app) / not runtime-deployed (scripts), they ship with the push.
+- post-deploy: `hscc api status` still running (PID unchanged); `hscc status`
+  works (daemon STOPPED — pre-existing operator state, not changed by this card).
+
+## Follow-ups created
+- t_1c1bf5f1 — "Fix --deliver desktop silent no-op" (devops-engineer): the
+  whole fleet's escalation/digest "desktop" delivery silently drops (verified).
+- OBSERVATION (not a task): scripts/*.sh hardcode real LAN IPs in this PUBLIC
+  repo; scrubbing would break the live probes — surfaced for operator decision.
+
 
 
