@@ -55,12 +55,12 @@ version: 3
 description: "4 nodes: Nemotron-3-Super 120B-A12B NVFP4+MTP orchestrator (1 node, 23.6 tok/s) + 2x Qwen3.8-27B-FP8 coding + 1x North-Mini-Code NVFP4 fast. cluster_size=4."
 
 orchestrator:
-  recipe: "@experimental/nemotron-3-super-nvfp4-mtp-1x-vllm"
+  recipe: "~/.sparkrun-local/recipes/local-fixed/nemotron-3-super-120b-a12b-nvfp4-mtp-vllm.yaml"
 
 families:
   - name: coding
     models:
-      - recipe: "@official/qwen3.8-27b-fp8-mtp-vllm"
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.8-27b-fp8-mtp-vllm.yaml"
     workers: 2
     proxy: true
 
@@ -70,7 +70,7 @@ families:
     # Terminal-Bench v2 36.0. NVFP4 matches FP8 on HumanEval (90.2 each), so
     # the 4-bit pack costs nothing in quality and buys 1.4-1.7x throughput.
     models:
-      - recipe: "@community/north-mini-code-1.0-nvfp4-vllm-XanuNetworks"
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/north-mini-code-1.0-nvfp4-vllm.yaml"
     workers: remaining
     proxy: true
 

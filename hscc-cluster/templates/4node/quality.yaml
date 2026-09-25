@@ -50,7 +50,7 @@ version: 3
 description: "4 nodes: Qwen3.8-Flash-Next NVFP4 orchestrator (SWE-bench Pro 62.5, #1 open weight) + 2x Qwen3.8-27B-FP8 coding + North-Mini-Code fast. cluster_size=4."
 
 orchestrator:
-  recipe: "@eugr/qwen3.8-flash-next-nvfp4-solo"
+  recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.8-flash-next-nvfp4-solo-vllm.yaml"
 
 families:
   - name: coding
@@ -70,13 +70,13 @@ families:
     #     has no field to set. Behind a load-balanced proxy it would serialize.
     # Using it would also pull in the atlas runtime, unproven on this fleet.
     models:
-      - recipe: "@official/qwen3.8-27b-fp8-mtp-vllm"
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.8-27b-fp8-mtp-vllm.yaml"
     workers: 2
     proxy: true
 
   - name: fast
     models:
-      - recipe: "@community/north-mini-code-1.0-nvfp4-vllm-XanuNetworks"
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/north-mini-code-1.0-nvfp4-vllm.yaml"
     workers: remaining
     proxy: true
 

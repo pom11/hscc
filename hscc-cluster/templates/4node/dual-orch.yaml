@@ -35,20 +35,20 @@ version: 3
 description: "4 nodes: TWO Nemotron-3-Super 120B-A12B NVFP4 orchestrators (one per project board) + 2x North-Mini-Code NVFP4 coding. cluster_size=4."
 
 orchestrator:
-  recipe: "@experimental/nemotron-3-super-nvfp4-mtp-1x-vllm"
+  recipe: "~/.sparkrun-local/recipes/local-fixed/nemotron-3-super-120b-a12b-nvfp4-mtp-vllm.yaml"
 
 families:
   - name: orch2
     # Second orchestrator. proxy: true gives it a stable endpoint that survives
     # the node moving; point the second Hermes profile at `family-orch2`.
     models:
-      - recipe: "@experimental/nemotron-3-super-nvfp4-mtp-1x-vllm"
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/nemotron-3-super-120b-a12b-nvfp4-mtp-vllm.yaml"
     workers: 1
     proxy: true
 
   - name: coding
     models:
-      - recipe: "@community/north-mini-code-1.0-nvfp4-vllm-XanuNetworks"
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/north-mini-code-1.0-nvfp4-vllm.yaml"
     workers: remaining
     proxy: true
 

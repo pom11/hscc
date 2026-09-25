@@ -178,10 +178,19 @@ the layout, not of tuning: `@atlas/deepseek-v4-flash-nvfp4-ep2` records
 cross-node EP/TP span pays an all-reduce on **every decoded token**. The
 templates below keep the strong tier on a single node instead.
 
-These source recipes from the sparkrun **registries** (`@community/…`,
-`@official/…`, `@eugr/…`, `@atlas/…`) rather than local-fixed paths. That
-requires the registry-aware preflight in `recipe_cost.recipe_exists()` — a
-plain `Path.is_file()` check reports every `@reg/name` recipe as missing.
+The recipes behind these came from the sparkrun **registries** (`@community/…`,
+`@official/…`, `@eugr/…`) but are **pinned into `local-fixed/`**, and the
+templates reference the pinned paths. A `sparkrun registry update` can change or
+remove an upstream recipe underneath a running fleet, silently altering serve
+flags; a pin means what the fleet runs changes only when someone edits it here on
+purpose. Each pinned file carries its origin, source path and pin date in a
+header — diff against the origin to re-sync deliberately, and put local fixes in
+the pin, never in the registry copy.
+
+`recipe_cost.recipe_exists()` still matters: it makes `@reg/name` tokens
+resolvable at preflight (a plain `Path.is_file()` reports every one as missing),
+so a template *can* reference a registry recipe directly when that is what you
+want — it is just not how these seven are wired.
 
 | Dir | Template | Orchestrator | Workers | Notes |
 |-----|----------|--------------|---------|-------|
