@@ -85,12 +85,45 @@ class LocalLLMAugmentation:
         if memories:
             ctx.data["memories"] = memories
 
-            # Schedule DB writes (same as cloud)
-            from memori.memory.augmentation.augmentations.memori._augmentation import AdvancedAugmentation
-            aug = AdvancedAugmentation()
-            await aug._schedule_entity_writes(ctx, driver, memories)
-            await aug._schedule_process_writes(ctx, driver, memories)
-            await aug._schedule_conversation_writes(ctx, memories)
+            # Persist captured facts + conversation directly via the driver.
+            #
+            # The SDK's AdvancedAugmentation._schedule_* helpers are a poor fit
+            # here: _schedule_entity_writes takes a `Memories` object (not the
+            # list of plain dicts `_parse_response` returns) and, more
+            # importantly, none of the helpers ever create the conversation or
+            # message rows — and the payload's `conversation_id` is a session
+            # *string*, not the numeric conversation row id those helpers
+            # expect. So we bypass them and write the rows ourselves. This is
+            # what makes capture actually land rows in memori_conversation /
+            # memori_conversation_message / memori_entity_fact.
+            fact_texts = [m["content"] for m in memories]
+
+            # 1. Ensure the entity exists (idempotent by external_id).
+            entity_id = driver.entity.create(ctx.payload.entity_id)
+
+            # 2. Create/reuse the conversation for this session and write its
+            #    messages. conversation.create returns the numeric row id.
+            conversation_id = None
+            session_id = ctx.payload.conversation_id
+            if session_id:
+                conversation_id = driver.conversation.create(session_id, 30)
+                if conversation_id:
+                    for msg in ctx.payload.conversation_messages or []:
+                        m_role = getattr(msg, "role", None)
+                        m_content = getattr(msg, "content", None)
+                        if m_role and m_content:
+                            driver.conversation.message.create(
+                                conversation_id,
+                                m_role,
+                                getattr(msg, "type", "text") or "text",
+                                m_content,
+                            )
+
+            # 3. Write entity facts, linked to the conversation via mentions.
+            if entity_id and fact_texts and conversation_id:
+                driver.entity_fact.create(
+                    entity_id, fact_texts, None, conversation_id
+                )
 
             logger.info(f"Local augmentation extracted {len(memories)} facts")
 
