@@ -147,6 +147,21 @@ SESSION_COMPACTION_THRESHOLD_TOKENS = int(
 # old value forever and the raise above would reach only NEW profiles.
 _LEGACY_COMPACTION_CAPS = (100000,)
 
+# Desired per-profile memory char limit (ROADMAP profile-provisioning item 1).
+# The SINGLE source of truth for the `memory.memory_char_limit` default — the
+# generator raises a lower value toward it but never lowers a higher hand-set
+# one, and this one constant is what every code path (and any consumer that
+# imports it, mirroring SESSION_COMPACTION_THRESHOLD_TOKENS) reads. Env-overridable
+# so a deployment can target a different ceiling without editing code.
+PROFILE_MEMORY_CHAR_LIMIT = int(
+    os.environ.get("HSCC_MEMORY_CHAR_LIMIT", "4000"))
+
+# The per-profile memory provider default (ROADMAP profile-provisioning item 1).
+# Only applied when the profile has NO existing provider — an operator's own
+# provider string always survives a regeneration.
+PROFILE_MEMORY_PROVIDER = os.environ.get(
+    "HSCC_MEMORY_PROVIDER", "memori_byodb")
+
 
 def _compression_block(existing=None):
     """Build the ``compression`` block for a generated profile, MERGED over an
@@ -206,6 +221,63 @@ def _read_existing_config(pdir):
     comp = data.get("compression") if isinstance(data.get("compression"), dict) else None
     aux = data.get("auxiliary") if isinstance(data.get("auxiliary"), dict) else None
     return comp, aux
+
+
+def _read_existing_memory(pdir):
+    """Read the profile's on-disk `memory:` block, if any.
+
+    Mirrors ``_read_existing_config``: never touches anything but the given
+    profile dir; a missing/unreadable file or an absent/malformed ``memory:``
+    key yields ``None`` so the caller starts from the generated default.
+    """
+    path = os.path.join(pdir, "config.yaml")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except (yaml.YAMLError, OSError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    mem = data.get("memory")
+    return mem if isinstance(mem, dict) else None
+
+
+def _memory_block(existing=None):
+    """Build the ``memory`` block for a generated profile, MERGED over an
+    existing block so operator values survive a regeneration.
+
+    Mirrors ``_compression_block`` (operator-choices-survive): the generator
+    never clobbers a hand-set value, it only fills what is absent or too low.
+
+      * ``memory_enabled`` is set to ``True`` only when absent/empty (None or
+        empty string) — an operator who explicitly disabled memory (set it to
+        ``False``) keeps it disabled.
+      * ``memory_char_limit`` is RAISED toward PROFILE_MEMORY_CHAR_LIMIT but
+        never lowered: a higher hand-set value (e.g. 6000) survives intact, and
+        a non-integer value is replaced by the default. Only valid ints higher
+        than or equal to the default are preserved.
+      * ``provider`` is kept when it is a non-empty real string — an operator's
+        own provider choice is never overwritten with the default; it is only
+        set to PROFILE_MEMORY_PROVIDER when absent/empty.
+      * every OTHER key in an existing memory block (e.g. ``user_char_limit``)
+        is preserved verbatim (the old generator replaced the whole block and
+        dropped them).
+
+    Returns a fresh dict; ``existing`` is never mutated.
+    """
+    mem = dict(existing) if isinstance(existing, dict) else {}
+    if mem.get("memory_enabled") is None or mem.get("memory_enabled") == "":
+        mem["memory_enabled"] = True
+    cur_limit = mem.get("memory_char_limit")
+    if (not isinstance(cur_limit, int) or isinstance(cur_limit, bool)
+            or cur_limit < PROFILE_MEMORY_CHAR_LIMIT):
+        mem["memory_char_limit"] = PROFILE_MEMORY_CHAR_LIMIT
+    cur_provider = mem.get("provider")
+    if not (isinstance(cur_provider, str) and cur_provider.strip()):
+        mem["provider"] = PROFILE_MEMORY_PROVIDER
+    return mem
 
 
 def _read_existing_toolsets(pdir):
@@ -419,6 +491,15 @@ def generate_profile(spec, base_identity):
     # survive (see _compression_block). Fresh profiles yield None and start
     # from the generated defaults.
     existing_compression, _existing_aux = _read_existing_config(pdir)
+    # Every generated profile carries a `memory:` block (ROADMAP
+    # profile-provisioning item 1). The desired block is MERGED over any
+    # existing on-disk one (see _memory_block) so a hand-set value survives a
+    # regeneration — the "second run does not revert a hand-set value"
+    # property. Before this, the generator never emitted a memory key, so a
+    # regen rewrote config.yaml without the block and every profile silently
+    # fell back to Hermes' built-in memory at its smaller default.
+    existing_memory = _read_existing_memory(pdir)
+    config["memory"] = _memory_block(existing_memory)
     # Worker roles serve from the load-balanced worker proxy so their work runs
     # on worker GPUs, not the orchestrator. The orchestrator role keeps the root
     # config (its own gateway-node model) and is never repointed; per-project
