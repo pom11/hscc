@@ -487,6 +487,88 @@ class TestRecoverySafety:
         assert r["restart_ok"] is False
 
 
+class TestSpawnableResolutionNotSilentlyNarrowed:
+    """The spawnable check resolves to a REAL callable, and removing the
+    expired legacy attribute does NOT silently narrow dispatch eligibility.
+
+    ``hermes_cli.kanban_db`` re-exports ``has_spawnable_ready`` /
+    ``has_spawnable_review`` through a PEP 562 ``__getattr__`` compat shim whose
+    stated removal date (2026-09-14) has passed and which warns on EVERY access.
+    ``_bind_spawnable_helpers`` binds the canonical ``kanban_db_dispatch``
+    callables into ``__dict__`` so ``_board_snapshot``'s ``hasattr``/attribute
+    access resolves from ``__dict__`` — the dispatcher's own notion of
+    spawnable, never a silent fall-through to a narrower default.
+
+    This test imports the real module but asserts only on the BINDING MECHANISM
+    (monkeypatched, no live board/profile state): binding yields the real
+    callable, and deleting the legacy attribute then re-binding STILL finds it.
+    """
+
+    def test_binds_real_callables_from_kanban_db_dispatch(self):
+        """Binding installs the ACTUAL kanban_db_dispatch callables, not stubs."""
+        pytest.importorskip("hermes_cli.kanban_db_dispatch")
+        from hermes_cli import kanban_db_dispatch
+        kb = FakeKanban({"default": [READY] * 2})
+        dw._bind_spawnable_helpers(kb)
+        ready = vars(kb).get("has_spawnable_ready")
+        review = vars(kb).get("has_spawnable_review")
+        assert callable(ready), "has_spawnable_ready must resolve to a callable"
+        assert callable(review), "has_spawnable_review must resolve to a callable"
+        assert ready is kanban_db_dispatch.has_spawnable_ready
+        assert review is kanban_db_dispatch.has_spawnable_review
+
+    def test_legacy_attr_absent_still_finds_function(self):
+        """Absent legacy attr must NOT narrow eligibility: binding still finds
+        and installs the real kanban_db_dispatch callable.
+
+        On the real module the legacy names are a PEP 562 ``__getattr__`` shim
+        — they are not real ``__dict__`` entries, so ``delattr`` cannot remove
+        them (``hasattr`` resolves via the shim, ``delattr`` finds nothing).
+        The faithful "shim dropped" stand-in is a fake object with NO spawnable
+        methods at all (a minimal stub). ``_bind_spawnable_helpers`` must still
+        resolve the canonical ``kanban_db_dispatch`` callables onto it, proving
+        eligibility is not silently narrowed to a narrower default.
+        """
+        pytest.importorskip("hermes_cli.kanban_db_dispatch")
+        from hermes_cli import kanban_db_dispatch
+        # Minimal stub: a real Hermes-shaped lib with NO spawnable helpers, as
+        # if the compat shim had been dropped entirely. Plain object, no
+        # inherited spawnable methods (matches ``_board_snapshot``'s "minimal
+        # injected stub without them" case).
+        class NoSpawnableFake:
+            def __init__(self, boards):
+                self._inner = FakeKanban(boards)
+            def list_boards(self):
+                return self._inner.list_boards()
+            def connect_closing(self, board=None):
+                return self._inner.connect_closing(board)
+        kb = NoSpawnableFake({"default": [READY] * 2})
+        assert not hasattr(kb, "has_spawnable_ready"), "stand-in must lack the helper"
+        dw._bind_spawnable_helpers(kb)
+        bound = vars(kb)
+        assert bound.get("has_spawnable_ready") is kanban_db_dispatch.has_spawnable_ready
+        assert bound.get("has_spawnable_review") is kanban_db_dispatch.has_spawnable_review
+        # The detector path: the bound real callables are used (hasattr resolves
+        # from __dict__), so work is still spawnable; n=1 + room -> a genuine
+        # stall is declared, NOT silently narrowed away.
+        ok, stream = _run_detect({"default": [READY] * 2}, cap=4, n=1)
+        assert ok is False
+        assert stream["ok"] is False
+        assert stream["roomy_spawnable"] == ["default"]
+
+    def test_hasattr_resolves_from_dict_no_compat_warning(self):
+        """After binding, ``_board_snapshot``'s hasattr resolves from __dict__,
+        so the expired compat shim is never consulted (no warning, no narrowing)."""
+        pytest.importorskip("hermes_cli.kanban_db_dispatch")
+        kb = FakeKanban({"default": [READY] * 2})
+        dw._bind_spawnable_helpers(kb)
+        # Bound names sit in __dict__ -> hasattr resolves the REAL callable.
+        assert "has_spawnable_ready" in vars(kb)
+        assert "has_spawnable_review" in vars(kb)
+        assert callable(kb.has_spawnable_ready)
+        assert callable(kb.has_spawnable_review)
+
+
 # ---------------------------------------------------------------------------
 # OPERATOR-STATE HERMETICITY (proof: "tests must not touch live operator state")
 # ---------------------------------------------------------------------------
