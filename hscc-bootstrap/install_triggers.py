@@ -5,8 +5,12 @@ directory) and merges them into ~/.hscc/triggers.json, only adding rules
 whose id is not already present. Existing operator rules and any operator
 edits to default-rule ids are fully preserved.
 
-Best-effort: never raises. Creates ~/.hscc if missing. Swallows I/O and
-JSON parse errors and returns what was actually done.
+Best-effort: never raises. Creates ~/.hscc if missing. A missing or corrupt
+existing file is treated as empty (fails open; the original is backed up), but
+an UNREADABLE existing file (permission/transient I/O — an environment fault,
+not proof the content is bad) fails loud (ok=False + error) rather than
+silently re-seeding defaults over operator state. Returns what was actually
+done.
 """
 import json
 import os
@@ -69,8 +73,19 @@ def install_triggers(
         existing_rules = data.get("rules", [])
     except FileNotFoundError:
         pass  # will create from scratch
-    except (json.JSONDecodeError, OSError):
-        existing_rules = []  # best-effort: treat corrupt as empty
+    except json.JSONDecodeError:
+        existing_rules = []  # genuinely corrupt content — fail open (re-add
+        # defaults; the original is .bak'd below and alert coverage is kept).
+    except OSError as e:
+        # Existing file PRESENT but UNREADABLE (permission / transient I/O) —
+        # an ENVIRONMENT fault, not proof the content is empty. We must NOT
+        # silently re-seed every default rule over operator state we could not
+        # even read, then report a green success. Fail loud and leave the file
+        # untouched so bootstrap warns (a transient read fault should not
+        # rewrite operator state).
+        result["ok"] = False
+        result["error"] = f"could not read existing triggers {triggers_path}: {e}"
+        return result
 
     # --- Build id set of existing rules ---
     existing_ids = {r.get("id") for r in existing_rules if isinstance(r, dict)}
