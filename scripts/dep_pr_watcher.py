@@ -128,9 +128,24 @@ def ensure_cards(prs, *, _kb=None):
     return created
 
 
+def _deliver(body):
+    """Send the card-creation notice as a native desktop notification.
+
+    hermes cron ``--deliver desktop`` resolves to no target (silent no-op), so
+    the poller notifies directly. Best-effort — never raise into the cron run.
+    """
+    try:
+        # hscc_daemon.desktop is importable when this script runs from the
+        # installed HSCC plugin set; fall back to a plain print otherwise.
+        from hscc_daemon import desktop
+
+        desktop.send_desktop_notification("HSCC dep-check", body)
+    except Exception:
+        pass
+
+
 def main():
-    # Silent when idle: under Hermes cron --no-agent mode, empty stdout means no
-    # delivery, so a routine "nothing to do" run stays quiet. Only speak up when
+    # Silent when idle: an idle run sends no notification. Only speak up when
     # a card is (or already was) created for a pending dep-bump PR.
     prs = list_review_prs()
     if not prs:
@@ -139,7 +154,9 @@ def main():
     lines = [f"🔁 HSCC dep-check: PR #{num} → kanban card {tid}"
              for num, tid in created]
     if lines:
-        print("\n".join(lines))
+        body = "\n".join(lines)
+        print(body)  # run-history record (hermes cron runs)
+        _deliver(body)  # the notification that reaches the operator
     return 0
 
 
