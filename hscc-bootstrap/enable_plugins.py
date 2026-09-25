@@ -671,10 +671,28 @@ def _ensure_dashboard(cfg):
     return changed
 
 
+def _compact_models_url(compact_url):
+    """Normalize a COMPACT_URL to its `/models` probe URL.
+
+    Mirrors doctor._models_url semantics: the version path is PRESERVED
+    (``http://host:port/v1`` -> ``http://host:port/v1/models``, never
+    ``/v1/v1/models``). A COMPACT_URL that already ends in ``/v1`` (the default
+    and the documented form) stays ``/v1/models``; a bare host gets
+    ``/models``. Returns "" for blank input.
+    """
+    url = (compact_url or "").strip().rstrip("/")
+    if not url:
+        return ""
+    if "/v1" in url:
+        head = url.split("/v1", 1)[0].rstrip("/")
+        return head + "/v1/models"
+    return url + "/models"
+
+
 def _probe_compaction_endpoint():
     """Sanity-probe the compaction endpoint at bootstrap.
 
-    Hit <COMPACT_URL>/v1/models and assert that COMPACT_MODEL is present.
+    Hit <COMPACT_URL>/models and assert that COMPACT_MODEL is present.
     Print a warning (non-fatal) if the model is missing so the user knows
     compression is silently dead (abort_on_summary_failure=False means workers
     limp on with degraded summaries).
@@ -689,7 +707,7 @@ def _probe_compaction_endpoint():
     if not COMPACT_URL:
         return True  # no aux endpoint configured — nothing to probe
 
-    models_url = COMPACT_URL.rstrip("/") + "/v1/models"
+    models_url = _compact_models_url(COMPACT_URL)
     try:
         req = urllib.request.Request(models_url)
         with urllib.request.urlopen(req, timeout=5) as resp:
