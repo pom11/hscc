@@ -1597,6 +1597,25 @@ ENGINE_WEDGE_THRESHOLD = int(os.environ.get("HSCC_ENGINE_WEDGE_THRESHOLD", "2"))
 # is actually generating, not just returning the HTTP handshake). Deliberately
 # small so a healthy unit returns within the short timeout.
 ENGINE_WEDGE_MAX_TOKENS = int(os.environ.get("HSCC_ENGINE_WEDGE_MAX_TOKENS", "40"))
+# Wall-clock budget for the /metrics busy-signal check (GET + parse). Must stay
+# MUCH smaller than ENGINE_WEDGE_TIMEOUT (default 10s) so a loaded unit whose
+# probe already burns the full 10s is not made worse by an additional slow
+# metrics fetch. Best-effort: if /metrics cannot answer within this window we
+# treat the signal as unavailable and fall back to the per-unit
+# throughput-derived bound (scope-2 path).
+ENGINE_WEDGE_BUSY_CHECK_TIMEOUT = int(
+    os.environ.get("HSCC_ENGINE_WEDGE_BUSY_CHECK_TIMEOUT", "2"))
+# How many recent successful probe round-trips each unit retains to derive its
+# own per-unit probe bound (scope-2 fallback when no /metrics busy signal is
+# reachable). Small window: throughput varies over minutes; we only want the
+# recent norm, not a multi-hour average.
+_ENGINE_WEDGE_LATENCY_WINDOW = 16
+# Multiplier over a unit's own median successful probe latency used to derive
+# its per-unit probe bound in the no-busy-signal fallback. 3x the observed
+# median: a healthy unit that usually streams in <1s still gets caught fast if
+# it wedges (bound stays ~10s), while a unit that routinely takes ~8s under
+# load gets ~24s of headroom instead of a flat 10s.
+_ENGINE_WEDGE_TIMEOUT_MULTIPLIER = 3.0
 
 # In-memory per-unit wedge state, keyed by unit id. Lives only for the lifetime
 # of this daemon process: ``first_seen`` (first tick we probed the unit),
@@ -1615,6 +1634,57 @@ def _engine_wedge_unit_key(u):
         return uid
     nodes = u.get("nodes") or []
     return f"{nodes[0] if nodes else '?'}:{u.get('port') or '?'}"
+
+
+def _unit_busy(node, port):
+    """Busy signal for a unit via its vLLM /metrics endpoint.
+
+    A probe that answers HTTP 200 with ZERO tokens is ambiguous: the engine
+    may be wedged (idle, never generating) or merely BUSY (saturated serving
+    other requests, so OUR probe waits in the queue past the flat bound).
+    vLLM exposes ``num_requests_running`` / ``num_requests_waiting`` on
+    /metrics — the real busy signal. Reuses ``throughput.fetch_node_metrics``
+    so we use the SAME Prometheus parser the G/T/E streams and ``verify``
+    already trust — no second, divergent /metrics implementation.
+
+    Returns:
+        True  — engine demonstrably serving other requests
+                (num_requests_running + num_requests_waiting > 0)
+        False — /metrics reachable but idle (both are zero)
+        None  — /metrics unreachable/absent ⇒ no busy signal available
+    """
+    from . import throughput
+    m = throughput.fetch_node_metrics(
+        "http://%s:%s/metrics" % (node, port),
+        timeout=ENGINE_WEDGE_BUSY_CHECK_TIMEOUT)
+    if m is None:
+        return None
+    return (int(m.get("running") or 0) + int(m.get("waiting") or 0)) > 0
+
+
+def _unit_probe_timeout(st):
+    """Per-unit probe bound derived from the unit's OWN observed throughput.
+
+    Scope-2 fallback: when no /metrics busy signal is reachable we cannot tell
+    \"busy-but-slow\" from \"wedged\" under a flat wall-clock bound, so we bound
+    the probe with a per-unit value derived from the unit's own observed
+    successful probe latencies instead of the flat ``ENGINE_WEDGE_TIMEOUT``:
+
+        bound = max(ENGINE_WEDGE_TIMEOUT, 3 x median(recent successful latencies))
+
+    A unit whose healthy history is fast keeps a TIGHT bound (a genuine wedge
+    is still caught quickly); a unit that historically runs hot under load
+    gets headroom proportional to its own observed throughput. Never below
+    ``ENGINE_WEDGE_TIMEOUT`` — this does NOT raise the global default and does
+    NOT weaken the idle-wedge detection; it only widens the bound for units
+    that have demonstrated they need it.
+    """
+    lats = st.get("latencies") or []
+    if not lats:
+        return float(ENGINE_WEDGE_TIMEOUT)
+    median = float(sorted(lats)[len(lats) // 2])
+    return max(float(ENGINE_WEDGE_TIMEOUT),
+               _ENGINE_WEDGE_TIMEOUT_MULTIPLIER * median)
 
 
 def _read_sse_content_until(resp, stop_event, out_box):
@@ -1766,6 +1836,16 @@ def check_engine_wedge():
         not a wedge candidate.
       * never alert on a single slow response => consecutive-failure debounce
         (``ENGINE_WEDGE_THRESHOLD``).
+      * LOAD-AWARE verdict: a probe that answers 200 with ZERO tokens is
+        ambiguous. Before counting a wedge failure we consult the unit's vLLM
+        /metrics (num_requests_running / num_requests_waiting) — the real busy
+        signal. A unit demonstrably serving other requests is reported
+        "busy" (a saturated-but-healthy engine), NOT a wedge. A 200-with-zero-
+        tokens probe while /metrics is IDLE remains the genuine wedge
+        signature and is still caught. When /metrics is unreachable (no busy
+        signal), we fall back to a per-unit probe bound derived from that
+        unit's own observed successful throughput (``_unit_probe_timeout``)
+        rather than the flat ``ENGINE_WEDGE_TIMEOUT``.
 
     Alerting is hung on the existing trigger-engine path: ``ok: False`` makes
     trigger_engine() emit a ``state.engine_wedge.degraded`` pseudo-event that
@@ -1802,7 +1882,7 @@ def check_engine_wedge():
         return True
 
     now_wall = time.time()
-    wedged, loading, down, ok_units = [], [], [], []
+    wedged, loading, down, ok_units, busy = [], [], [], [], []
 
     for u in units:
         nodes = [n for n in (u.get("nodes") or []) if n]
@@ -1814,7 +1894,7 @@ def check_engine_wedge():
 
         st = _engine_wedge_units.setdefault(key, {
             "first_seen": now_wall, "consecutive_failures": 0,
-            "last_success": 0.0,
+            "last_success": 0.0, "latencies": [],
         })
 
         # A unit we've only just met may still be loading weights (minutes);
@@ -1825,8 +1905,21 @@ def check_engine_wedge():
                             "status": "loading"})
             continue
 
-        probe = _probe_unit_generation(node, port)
+        # Per-unit probe bound: the flat ENGINE_WEDGE_TIMEOUT unless the unit
+        # has demonstrated (via its own observed successful throughput) that
+        # it needs more headroom and no /metrics busy signal is reachable
+        # (scope-2 fallback — see _unit_probe_timeout).
+        probe_timeout = _unit_probe_timeout(st)
+        _probe_start = time.monotonic()
+        probe = _probe_unit_generation(node, port, timeout=probe_timeout)
+        _probe_elapsed = time.monotonic() - _probe_start
+
         if probe["ok"]:
+            # Observed successful probe latency feeds the per-unit bound.
+            lats = st.setdefault("latencies", [])
+            lats.append(_probe_elapsed)
+            if len(lats) > _ENGINE_WEDGE_LATENCY_WINDOW:
+                del lats[:-_ENGINE_WEDGE_LATENCY_WINDOW]
             st["consecutive_failures"] = 0
             st["last_success"] = now_wall
             ok_units.append({"unit": label, "node": node, "port": port,
@@ -1834,6 +1927,62 @@ def check_engine_wedge():
             continue
 
         if probe["error"] == "wedged":
+            # A 200-with-zero-tokens probe is ambiguous: the engine may be
+            # wedged (idle) or merely BUSY (saturated serving other requests,
+            # so OUR probe waits in queue past the bound). Consult the unit's
+            # vLLM /metrics for a REAL busy signal before counting a failure.
+            busy_signal = _unit_busy(node, port)
+            if busy_signal:
+                # Demonstrably serving other requests → a loaded-but-healthy
+                # engine, NOT a wedge. Report "busy" (positive liveness
+                # evidence) and do NOT count a wedge failure. Reset the
+                # streak: a busy unit is genuinely healthy.
+                st["consecutive_failures"] = 0
+                st["last_success"] = now_wall
+                busy.append({"unit": label, "node": node, "port": port,
+                             "status": "busy",
+                             "message": "answered 200 with zero tokens but "
+                                        "vLLM /metrics shows it serving other "
+                                        "requests"})
+                continue
+            if busy_signal is None:
+                # No /metrics busy signal reachable. Fall back to a per-unit
+                # bound derived from THIS unit's own observed throughput
+                # (already applied as probe_timeout above) instead of the flat
+                # ENGINE_WEDGE_TIMEOUT. Count toward the streak so a genuinely
+                # wedged unit is still caught; the note says which bound was
+                # used so the report is honest about the degraded mode.
+                st["consecutive_failures"] += 1
+                checking = {"unit": label, "node": node, "port": port,
+                            "status": "checking",
+                            "consecutive_failures": st["consecutive_failures"],
+                            "note": "no /metrics busy signal — probe bound "
+                                    "%ss (per-unit)" % round(probe_timeout, 1)}
+                if st["consecutive_failures"] >= ENGINE_WEDGE_THRESHOLD:
+                    # Even without a busy signal, the per-unit bound was
+                    # derived from the unit's own throughput; crossing the
+                    # debounced threshold means it stalled that bound too.
+                    # It is genuinely wedged (200-with-zero-tokens beyond its
+                    # own observed norm).
+                    stalled_s = (now_wall - st["last_success"]) if st["last_success"] else None
+                    wedged.append({
+                        "unit": label, "node": node, "port": port,
+                        "status": "wedged",
+                        "message": "HTTP 200 but no generated tokens within "
+                                   "%ss (per-unit bound, no /metrics busy "
+                                   "signal)" % round(probe_timeout, 1),
+                        "last_success": st["last_success"] or None,
+                        "stalled_for_s": round(stalled_s) if stalled_s else None})
+                else:
+                    # Debouncing: one (or a few) slow/empty responses is not
+                    # yet a declared wedge — report transparently.
+                    loading.append(checking)
+                continue
+
+            # busy_signal is False: /metrics reachable AND idle, but the unit
+            # answered 200 with ZERO tokens within the bound. THIS is the
+            # genuine wedge signature — "answered 200 with ZERO tokens while
+            # idle" — and the existing detection is preserved unchanged.
             st["consecutive_failures"] += 1
             if st["consecutive_failures"] >= ENGINE_WEDGE_THRESHOLD:
                 stalled_s = (now_wall - st["last_success"]) if st["last_success"] else None
@@ -1862,6 +2011,8 @@ def check_engine_wedge():
 
     ok = not wedged
     msg_parts = [f"{len(ok_units)}/{len(units)} streaming ok"]
+    if busy:
+        msg_parts.append(f"{len(busy)} busy (loaded, not wedged)")
     if loading:
         msg_parts.append(f"{len(loading)} loading/checking")
     if down:
@@ -1873,7 +2024,7 @@ def check_engine_wedge():
 
     write_state(ENGINE_WEDGE_STREAM, {
         "ok": ok, "units": len(units), "ok_units": ok_units,
-        "wedged": wedged, "loading": loading, "down": down,
+        "wedged": wedged, "loading": loading, "down": down, "busy": busy,
         "last_check": now_iso(), "message": ", ".join(msg_parts),
     })
     log(f"Engine-wedge check: {', '.join(msg_parts)}")
