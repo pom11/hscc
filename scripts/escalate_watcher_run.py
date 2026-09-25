@@ -2,9 +2,12 @@
 """Escalate repeatedly-failing kanban tasks, and alert the human when the
 strong tier also fails.
 
-Run on the gateway via Hermes native cron (``--no-agent --deliver desktop``):
-the script's stdout is delivered verbatim via desktop notification, so an
-empty run stays silent and only real escalations produce a message.
+Run on the gateway via Hermes native cron (``--no-agent``). Alerts are sent
+directly as native desktop notifications through ``hscc_daemon.desktop.
+send_desktop_notification()`` (NOT via ``--deliver desktop`` — hermes cron
+silently resolves that to no target). The script prints to stdout only as a
+run-history record; the notification is what actually reaches the operator.
+An idle run sends nothing, so only real escalations notify.
 
 For each task with ``consecutive_failures >= fail_limit``
 (``hscc_daemon.escalate.decide_escalation``):
@@ -77,14 +80,33 @@ def _save_notified(notified):
         pass
 
 
+def _deliver(body):
+    """Send the alert as a native desktop notification.
+
+    hermes cron ``--deliver desktop`` resolves to no target (silent no-op,
+    verified in cron/scheduler_delivery.py), so the watcher notifies directly.
+    Best-effort — never raise into the cron run.
+    """
+    try:
+        from hscc_daemon import desktop
+
+        desktop.send_desktop_notification(
+            "HSCC escalation", body, priority="critical",
+            app_id="com.hermes.hscc_daemon",
+        )
+    except Exception:
+        pass
+
+
 def main():
     from hscc_daemon import escalate_watcher
 
     notified = _load_notified()
     before = set(notified)
 
-    # Drive the human alert off stdout (desktop delivery), not the notifier:
-    # the returned actions + the before/after dedup diff decide what we print.
+    # Drive the human alert via a native desktop notification (not --deliver
+    # desktop): the returned actions + the before/after dedup diff decide what
+    # we notify.
     actions = escalate_watcher.scan_and_escalate(
         fail_limit=FAIL_LIMIT,
         strong_profile=STRONG_PROFILE,
@@ -118,7 +140,9 @@ def main():
             )
 
     if lines:
-        print("\n".join(lines))
+        body = "\n".join(lines)
+        print(body)  # run-history record (hermes cron runs)
+        _deliver(body)  # the notification that reaches the operator
     return 0
 
 

@@ -1088,12 +1088,15 @@ class TestApiRouting:
         # Stub the handlers so nothing actually binds/starts a server;
         # each records which handler ran and with what argv.
         called = []
-        monkeypatch.setattr(api_cli_mod, "_handle_start",
-                            lambda argv=[]: called.append(("start", argv)) or 0)
-        monkeypatch.setattr(api_cli_mod, "_handle_stop",
-                            lambda argv=[]: called.append(("stop", argv)) or 0)
-        monkeypatch.setattr(api_cli_mod, "_handle_status",
-                            lambda argv=[]: called.append(("status", argv)) or 0)
+        monkeypatch.setattr(
+            api_cli_mod, "_handle_start",
+            lambda argv=[], theme_name=None: called.append(("start", argv)) or 0)
+        monkeypatch.setattr(
+            api_cli_mod, "_handle_stop",
+            lambda argv=[], theme_name=None: called.append(("stop", argv)) or 0)
+        monkeypatch.setattr(
+            api_cli_mod, "_handle_status",
+            lambda argv=[], theme_name=None: called.append(("status", argv)) or 0)
 
         from hscc_daemon import hscc as hscc_mod
         monkeypatch.setattr(sys, "argv", ["hscc", "api", *subcmd])

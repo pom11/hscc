@@ -20,9 +20,11 @@ def _notify_macos(title, body, priority="normal"):
         return False
     title_esc = title.replace('"', '\\"')
     body_esc = body.replace('"', '\\"')
-    simple_script = (
-        f'display notification \\"{body_esc}\\" with title \\"{title_esc}\\"'
-    )
+    # List-form subprocess (no shell), so the AppleScript is passed verbatim:
+    # plain double quotes delimit the literals. Do NOT backslash-escape the
+    # outer quotes — osascript would reject the literal \\" (syntax error -2741)
+    # and the notification would silently fall back to the JSON file.
+    simple_script = f'display notification "{body_esc}" with title "{title_esc}"'
     try:
         result = subprocess.run(
             ["osascript", "-e", simple_script],

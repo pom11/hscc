@@ -247,7 +247,7 @@ Saying *"do it autonomously"* flips it on: the orchestrator writes a best-judgme
 
 ### Failure escalation
 
-A Hermes-cron watcher (`scripts/escalate_watcher_run.py`) runs every 15 minutes and reassigns repeatedly-failing tasks to the strong model tier. When even the strong tier fails, it posts a human-attention alert to your desktop (via the cron job's `--deliver desktop` notification) — deduped so a stuck task is not re-announced every tick, and silent when nothing is stuck. This is an opt-in *acting* automation; the `hscc escalate` CLI command provides a dry-run view of what would be escalated.
+A Hermes-cron watcher (`scripts/escalate_watcher_run.py`) runs every 15 minutes and reassigns repeatedly-failing tasks to the strong model tier. When even the strong tier fails, it posts a human-attention alert as a **native desktop notification** — sent directly by the script via `hscc_daemon.desktop.send_desktop_notification()` (Hermes' `--deliver desktop` is not a valid delivery target and is silently dropped, so the script notifies on its own) — deduped so a stuck task is not re-announced every tick, and silent when nothing is stuck. This is an opt-in *acting* automation; the `hscc escalate` CLI command provides a dry-run view of what would be escalated.
 
 A daily, human-gated dependency-update loop keeps the cluster's Hermes and sparkrun runtime dependencies current via automated PRs and kanban verification cards.
 

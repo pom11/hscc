@@ -153,17 +153,28 @@ that is roadmap milestone `profile-provisioning`, done separately. Do NOT touch 
 - dispatcher fanned out sub-c (t_4a548958, run 724) while sub-b finalized → group-C now running approx-parallel;
   each is a correctly-scoped atomic card landing cleanly on main (not a pile), but not strict serial.
 
-### SESSION HANDOFF — as of 4d44eb3 (epic in progress, orchestrator context budget exhausted — next session resumes here)
-Landed & on main (all pushed, origin/main==main): RC1 (447e6c8), RC2 (a8ca754), flake-fix (39fb82d+93558fa),
-sub-a (68e680a), sub-b (9b956d8), sub-c (9d3c30b), sub-d (e490e40). t_2bcbe6f9 (operator's CLI-interpreter card)
-also landed (7464d2e). === GROUP C (RICH CLI hscc-project) IS COMPLETE — all 5 sub-cards on main ===
-IN FLIGHT: sub-d card t_c2cae6e9 still 'running' (run 728, merging-finished finalizing); sub-e t_1b206473 RUNNING
-(run 729, archive/hygiene/incident/reconcile). After sub-e lands, Part-1 hscc-project is fully converted.
-NEXT for Part 1 (RC4..RC10, one card each): hscc_daemon (190 raw, partly themed), hscc-bootstrap (26), hscc-cluster
-(21), hscc-roles (17), hscc-api (6), hscc-commands (1), sparkrun-hermes (1). Then Part 2 (READMEs, 8-10 cards) +
-Part 3 (bootstrap, 3 cards) — NOT started. QUEUED BLOCKED: t_8306890e (dispatcher worktree-placement fix) — unblock
-AFTER Rich CLI Part-1 cards land. Deployment: install_payload re-run after each merge (worker does it).
-CONCERN: multiple workers leaving the PRIMARY checkout dirty (test_why.py earlier, now t_2bcbe6f9's install_cli.py/
-bootstrap.sh/README/test_install_cli.py/audit doc, all UNSTAGED). Sub-c fixed its own (moved into its scratch, landed
-via merge). These dirty PRIMARY files are NOT mine and I do not clean them per operator rule — flag to operator and
-route the owning worker to move them into their worktree/scratch. Watch this recurring.
+### SESSION HANDOFF — UPDATED 2026-09-25: EPIC COMPLETE (all 3 parts on main)
+The 3-part Rich CLI audit + UX pass epic is DONE. Every card queued by the orchestrator has landed on main,
+merged, pushed, and deployed (install_payload, gateway never restarted). Full accounting below.
+
+PART 1 — RICH CLI (all packages themed, no-ANSI + --json byte-identical invariants met):
+- RC1 t_1ca5c6e9 -> 447e6c8; RC2 t_b2d2c0ae -> a8ca754; flake-fix t_d5780187 -> 39fb82d+93558fa
+- Group C (hscc-project 509 sites): sub-a t_8f0031e0 -> 68e680a, sub-b t_d7a8d1f3 -> 9b956d8, sub-c t_4a548958 -> 9d3c30b, sub-d t_c2cae6e9 -> e490e40(+be7626c), sub-e t_1b206473 -> d574b10/f640968/04bb16e. GROUP C COMPLETE.
+- hscc-bootstrap t_fdaa575b -> a67de36; hscc-cluster t_e67544b1 -> cf9330f (20 no-ANSI tests, ALL GREEN both interpreters: hermes venv 422, p313 404+14skip); hscc-roles t_baef4e5f -> cb5e100; hscc-commands t_eaef219a -> b3df3ac; sparkrun-hermes t_28d1653c -> 686603c; hscc_daemon residual t_69ddd670 -> cadd4dd+26a5e1d.
+- hscc-api t_8899bca2 -> closed DIAGNOSED-NOT-ACTIONABLE: hscc-api has no CLI (no __main__/argparse); its 6 json.dumps are iOS/bridge wire bytes that MUST stay byte-identical. Deliverable = docs/audits/hscc-api-no-cli-t_8899bca2.md (e038f77). Real work re-scoped by operator to t_6b994390 (hscc_daemon/api_cli.py, 28 raw prints) — running.
+
+PART 2 — README review (all landed, verify-by-running):
+- t_d90de5b6 (root+hscc-cli+install) -> f750d0b; t_d20fb383 (memori/memori_byodb/sparkrun-hermes) -> 2eb8f75; t_0ae232a4 (docs/skills/project) -> 856b045; t_8ac9e87c (bootstrap/cluster/roles/api/commands) -> 0c6ddf3; t_6b51ef5b (daemon/scripts/ios/templates/install) -> 3252d6d.
+
+PART 3 — bootstrap correctness + silent-failure audit (all landed):
+- t_24b4a9ba (1/3: install_payload/scripts/soul/apply_patches) -> 77b23b0. FOUND: apply_patches missing-dir fault + install_personality YAML no-op (silent) — fixed.
+- t_ef341cfe (2/3: detect/doctor/enable_plugins/ensure_review_feature) -> 09a9405.
+- t_2fdff7bd (3/3: preserve_autodown/serving_gen/suggest_template + remainder) -> 7b6ca67.
+- (memory:/auxiliary.compression OUT OF SCOPE — roadmap profile-provisioning.)
+
+NON-EPIC CARDS ALSO LANDED: t_8306890e (dispatcher worktree placement, unblocked + landed -> 2cc6d15; follow-on t_3db321fa reviewed/approved), t_d4ba2eff (telegram remnants scrub -> 018493c).
+FOLLOW-ON ACTIVE CARDS — TRACKED TO DONE (2026-09-25, orchestrator "fix everything till all cards done" directive):
+- t_6b994390 (hscc_daemon/api_cli.py — 28 raw stdout prints -> cli_theme, QR payload iOS wire byte-identical, 13 no-ANSI tests, suite ALL GREEN both interpreters, merged 918d9ed + report 2b951b2, pushed, DEPLOYED) -> DONE.
+- t_1c1bf5f1 (--deliver desktop silent no-op — watchers notify via send_desktop_notification directly, desktop.py osascript quoting fix, commited 7d1d840, e2e verified native notifier fires; crash-looped runs 752-758 then completed run 760) -> DONE.
+- REMAINING RUNNING: t_cc8879e0 (engine-wedge load-aware verdict: BUSY != wedged, committed 920f4b6 — in suite/merge), t_8c729895 (dispatcher_wedge kanban_db shim => kanban_db_dispatch, newly dispatched run 764).
+PRIMARY DIRT resolved: t_1c1bf5f1's tracked dirt (CHANGELOG/README/desktop.py/scripts) was committed+merged by that worker into main (7d1d840). Only UNTRACKED scratch artifacts remain in primary: docs/audits/t_8306890e_review.md, scripts/hscc_deliver_test.py, scripts/hscc_e2e_delivery_test.py, verify_fix.py — test leftovers, NOT mine to clean.
