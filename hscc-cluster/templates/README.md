@@ -54,6 +54,36 @@ they hardcode a specific cluster — a template that names nodes fails structura
 validation the moment those nodes are repurposed. The **shipped templates
 deliberately omit `nodes:`** and stay portable, resolved purely from intent.
 
+### `gpu_memory_utilization:` (per model — optional)
+
+A fraction in `(0, 1]`, passed to sparkrun as `--gpu-mem`. Omitted means the
+**recipe's own default wins**, which is what every unit that owns its node
+wants — so existing templates are unaffected.
+
+**This is what makes co-location work.** A recipe's `gpu_memory_utilization` is
+a fraction of the *whole card*, written assuming the unit owns the GPU. Two
+co-located units each inheriting `0.8` request **160%** of one Spark, and the
+second engine refuses to start. The VRAM check does not catch it and cannot:
+it sums weights + KV, which is a different question from how much each engine
+*reserves*. Both shipped colocation templates were broken this way until the
+key existed.
+
+Sizing rule — check **both** halves:
+
+- each unit's share of the card must exceed its `sparkrun show` per-GPU total;
+- the sum across co-located units should stay at or below ~`0.8`.
+
+A GB10's memory is unified, so the remainder is not slack to reclaim — squeezing
+it is what takes a node off the network under load.
+
+```yaml
+models:
+  - recipe: "…/qwen3.6-35b-a3b-fp8-vllm.yaml"   # 44.89 GB per-GPU total
+    gpu_memory_utilization: 0.4                 # 48.4 GB of a 121 GB card
+  - recipe: "…/qwen3.6-35b-a3b-fp8-vllm.yaml"
+    gpu_memory_utilization: 0.4                 # sum 0.8, ~24 GB host headroom
+```
+
 ### `allow_colocation:` (per unit — optional, default `false`)
 
 When two units name the same node, apply **blocks** (naming both units) unless
@@ -216,6 +246,14 @@ A recipe declaring `Nodes: 1 - 1` cannot take `tp: 2` at all, and one declaring
 no field to raise either. Both ruled out the otherwise-fastest coder recipe for
 `4node/quality`; its header records what that cost.
 
+**Model weights are not distributed by sparkrun on this cluster.** `cache_dir`
+is a shared NFS export (`/mnt/nas`) populated out-of-band, so the cluster config
+sets `distribution.model.enabled: false`. A model that is not already staged
+fails at launch rather than triggering a surprise multi-GB pull mid-provision.
+Stage with `HF_HUB_CACHE=/mnt/nas/hub HF_XET_HIGH_PERFORMANCE=1 hf download <repo>`
+on any node. Container **images** are still distributed normally — those are
+per-node local disk.
+
 **A recipe whose `container:` has no registry prefix and no `build_args` cannot
 be used at all** — sparkrun can neither pull nor build it. That is what ruled
 out the faster Qwen3.5-122B-A10B int4+MTP orchestrator (~50 tok/s, BFCL-V4 72.2,
@@ -233,11 +271,13 @@ before adopting any recipe.
    `title_generation`, `skills_hub`, `approval` and `mcp`. A recipe pinned to
    `max_num_seqs: 1` (several atlas ones are, deliberately) serializes that
    whole set and, on some, errors mid-decode at C>1.
-2. **A template cannot force `tp: 1`.** `_render_serve_cmd` emits `--tp` only
-   when `tp > 1`, so a recipe whose own default is `tensor_parallel: 2` will
-   still try to span two nodes no matter what the template says. Every
-   one-node-per-worker slot above uses a recipe whose own default is already 1.
-   Check with `sparkrun recipe show <name>` before substituting.
+2. **A template's `tp:` is authoritative — but only since this change.**
+   `_render_serve_cmd` used to emit `--tp` only when `tp > 1`, so a recipe whose
+   own default was `tensor_parallel: 2` silently tried to span two nodes no
+   matter what the template said. `--tp` is now always emitted, including
+   `tp: 1`, and drift comparison normalizes a missing `--tp` to 1 so units
+   provisioned before the change are not recreated. The slots above still use
+   tp=1-by-default recipes, which is one less thing to reason about.
 
 A regression test (`tests/test_template_intent.py::test_all_shipped_templates_resolve_and_fit`)
 resolves every node-count template against its N-node cluster with real recipe
