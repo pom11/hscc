@@ -9,6 +9,7 @@ down the whole fleet. Bootstrap (and this helper) must:
 """
 import json
 import os
+import builtins
 import subprocess
 import sys
 
@@ -169,6 +170,44 @@ def test_corrupt_existing_rewritten_disabled_not_enabled(tmp_path):
     data = _read(target)
     assert data["enabled"] is False
     assert data["idle_minutes"] == 10
+
+
+# ── Unreadable existing file fails loud (never destroys operator state) ─
+
+
+def test_read_oserror_fails_loud_without_touching_file(tmp_path, monkeypatch):
+    """A read OSError (permission denied / transient I/O — an ENVIRONMENT
+    fault, not proof the content is bad) must NOT be treated as a reason to
+    seed a fresh config over the operator's existing autodown.json.
+
+    Prior bug: an OSError on read collapsed into the corrupt/absent branch,
+    which overwrote the operator's real `enabled: true` config with the
+    DISABLED default and reported success (`action=seeded, ok=True`) — an
+    environment fault rendered as a data fact, destroying an operator safety
+    decision behind a green checkmark. Now it must fail loud (ok=False +
+    error) and leave the file byte-identical.
+    """
+    target = _path(tmp_path)
+    original = {"enabled": True, "idle_minutes": 60}
+    with open(target, "w") as f:
+        json.dump(original, f)
+
+    real_open = builtins.open
+    def read_only_permdenied(name, *a, **k):
+        if name == target:
+            raise PermissionError(13, "Permission denied")
+        return real_open(name, *a, **k)
+    monkeypatch.setattr("builtins.open", read_only_permdenied)
+
+    result = PA.ensure_autodown(autodown_path=target)
+
+    assert result["ok"] is False
+    assert "error" in result and "Permission denied" in result["error"]
+    assert result["action"] == "error"
+    # Operator's file is untouched (the config is preserved verbatim).
+    # Read back via the REAL open (the mock denies reads of `target`).
+    with real_open(target) as f:
+        assert json.load(f) == original
 
 
 # ── __main__ prints valid JSON ────────────────────────────────────────
