@@ -65,14 +65,31 @@ def ensure_autodown(autodown_path=None):
         exists = isinstance(existing, dict) and bool(existing)
     except FileNotFoundError:
         exists = False  # fresh install — seed
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError:
         # Present but corrupt: we cannot read the operator's `enabled`/
         # `idle_minutes`, so there is nothing to preserve verbatim. Fail
         # CLOSED and rewrite a DISABLED default (§8 "config corrupt"): a
         # corrupt config must never be treated as a reason to ENABLE autodown
         # or to leave it in an ambiguous re-arm-able state. We never flip it
-        # ON — only ever OFF.
+        # ON — only ever OFF. (Genuine content corruption, distinguishable
+        # from a transport fault below.)
         exists = False
+    except OSError as e:
+        # Present but UNREADABLE (permission denied / transient I/O) — an
+        # ENVIRONMENT fault, not proof the content is bad. We cannot see the
+        # operator's `enabled`/`idle_minutes`, and unlike JSON corruption we
+        # have NO evidence the values are recoverable-class garbage: the file
+        # may be perfectly valid and simply temporarily unreadable. So we must
+        # NOT overwrite it (that would destroy an operator decision we could
+        # not even read, and report a green "seeded") — fail loud and leave the
+        # file untouched so bootstrap warns.
+        return {
+            "action": "error",
+            "enabled": None,
+            "idle_minutes": None,
+            "ok": False,
+            "error": f"could not read {autodown_path}: {e}",
+        }
 
     if exists:
         # Keep every existing value untouched; add only missing schema keys.
