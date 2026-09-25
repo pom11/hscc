@@ -101,13 +101,60 @@ guarantee intact for the new file.
 
 ## Verification
 
-See the task completion metadata for the branch, merge SHA, exact commands and
-per-interpreter counts. Both interpreters:
-`~/.hermes/hermes-agent/venv/bin/python` and
-`/Users/desac/miniconda3/envs/p313/bin/python`.
+Branch: `wt/t_1c4e8160` → merged to `main` as `7d69a1d`
+(merge commit, pushed: `492f16b..7d69a1d main -> main`).
+Deployed with `python3 hscc-bootstrap/install_payload.py` (merge SHA installed
+into `~/.hermes/plugins`). Note: main has since advanced (a concurrent
+sibling task `t_57e5b3f7` merged and its own `install_payload` run briefly
+reverted the runtime copy of `daemon_ops.py`; re-deployed from current main,
+which still contains this change via merge history — verified the installed
+plugin carries the heartbeat code again).
 
-Execution demo (deployed daemon): on restart the heartbeat file is created
-immediately (first supervision cycle touch) and advances every
-`HEARTBEAT_INTERVAL` while running; `daemon_liveness()` reports
-`running-fresh` while the daemon lives and `running-stale-heartbeat` when the
-heartbeat stops advancing past the threshold.
+Full suite green under BOTH interpreters via `scripts/run_tests.sh` (one
+pytest process per plugin dir, true isolation):
+
+`~/.hermes/hermes-agent/venv/bin/python` (Python 3.11):
+- hscc-bootstrap 272, hscc-commands 69, hscc-roles 126, hscc-cluster 422,
+  hscc-project 1351, hscc_daemon 1172, sparkrun-hermes 12, hscc-api 786
+  (1 skipped). **ALL GREEN** (exit 0).
+
+`/Users/desac/miniconda3/envs/p313/bin/python` (Python 3.13):
+- hscc-bootstrap 272, hscc-commands 69, hscc-roles 126, hscc-cluster 404
+  (14 skipped), hscc-project 1351, hscc_daemon 1169 (3 skipped),
+  sparkrun-hermes 12, hscc-api 786 (1 skipped). **ALL GREEN** (exit 0).
+
+Direct daemon-test runs: `test_daemon_ops.py` 47 passed (hermes venv), daemon
+dir 1169 passed (p313).
+
+### Execution demo (live daemon, deployed code)
+
+Using the real `~/.hscc/heartbeat` and `daemon_liveness()` from the installed
+plugin (script at /tmp/hb_liveness_demo.py):
+
+1. **Baseline (daemon stopped, no heartbeat):** `daemon_liveness()` →
+   `{"pid": null, "alive": false, "heartbeat_present": false, "state":
+   "pid-gone"}`.
+
+2. **Start daemon** (`hscc start`, detached): pid file written, heartbeat
+   written on the first supervision-cycle touch
+   (`2026-09-25T15:34:53.034326+00:00`); `daemon_liveness()` →
+   `{"pid": 93073, "alive": true, "stale": false, "state": "running-fresh"}`.
+
+3. **Heartbeat ADVANCES while running** — sampled the real file through one
+   full cadence:
+   `15:34:53.034326+00:00` → `15:39:53.701737+00:00` (exactly one
+   `HEARTBEAT_INTERVAL` = 300s later). `daemon_liveness()` continued to report
+   `running-fresh`.
+
+4. **Stale when the heartbeat stops** (function-level, real live pid
+   87080 + a heartbeat older than the threshold):
+   `{"pid": 87080, "alive": true, "last_heartbeat": "…-05s",
+   "stale": true, "state": "running-stale-heartbeat"}` — the exact
+   `running-stale-heartbeat` case the status path sees for a wedged-but-alive
+   daemon. Also observed on the real file: after the previous daemon stopped
+   advancing, the heartbeat aged past `HEARTBEAT_STALE_AFTER` and reported
+   `stale: true`.
+
+The daemon restarted with this change (expected and permitted; gateway NOT
+touched). It is currently running (pid 93073) with a live, advancing
+heartbeat and reports `running-fresh`.
