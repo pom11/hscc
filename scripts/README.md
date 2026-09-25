@@ -7,9 +7,9 @@ Pure shell scripts (no LLM) that monitor the HSCC cluster + Mac dispatcher host.
 | Script | Purpose |
 |---|---|
 | `hscc_proxy_watchdog.sh` | Probe `localhost:4000` (sparkrun LiteLLM proxy). If unreachable, restart via `sparkrun proxy start --cluster hscc --port 4000`. Covers the stale-PID regression where the proxy dies and sparkrun doesn't auto-restart it. |
-| `hscc_worker_health.sh` | Probe all 4 vLLM endpoints (`.244/.246/.247/.248:8000`). Verifies each serves the expected model id; reports unreachable hosts and model-id mismatches. |
-| `hscc_cluster_digest.sh` | Periodic summary: container count per host, endpoint health, proxy state, per-job uptime. Designed to be delivered to a chat via Hermes `--deliver` (e.g. desktop notification). |
-| `hscc_nas_watchdog.sh` | NAS health: ping QNAP `.249`, check Mac `/Volumes/NAS` mount listability. Falls back to project docs for remediation. |
+| `hscc_worker_health.sh` | Probe all 4 vLLM endpoints (`100.64.0.1/.2/.3/.4:8000`). Verifies each serves the expected model id; reports unreachable hosts and model-id mismatches. |
+| `hscc_cluster_digest.sh` | Periodic summary: container count per host, endpoint health, proxy state, per-job uptime. Output is saved to the job's run history (`hermes cron list`); set `--deliver` to a real gateway target to push it to a channel. |
+| `hscc_nas_watchdog.sh` | NAS health: ping the QNAP NAS (`100.64.0.x`), check Mac `/Volumes/NAS` mount listability. Falls back to project docs for remediation. |
 
 ## Install
 
@@ -43,8 +43,13 @@ hermes cron create 'every 5m'   --name 'hscc-proxy-watchdog'  --no-agent --scrip
 hermes cron create 'every 10m'  --name 'hscc-worker-health'   --no-agent --script hscc_worker_health.sh
 hermes cron create 'every 4h'   --name 'hscc-nas-watchdog'    --no-agent --script hscc_nas_watchdog.sh
 
-# Cluster digest — delivered via desktop notification.
-hermes cron create 'every 2h'   --name 'hscc-cluster-digest'  --no-agent --script hscc_cluster_digest.sh --deliver desktop
+# Cluster digest — a periodic summary; its stdout is saved to the job's run
+# history (visible in `hermes cron list` / `hermes cron runs`). For the digest
+# to be pushed to a live channel, set --deliver to a real target (e.g.
+# `bot-chat` to inject into a local profile's Bot Chat, or a gateway platform
+# home channel like `--deliver discord`). There is no "desktop" delivery
+# target — `--deliver desktop` is accepted but silently delivers nowhere.
+hermes cron create 'every 2h'   --name 'hscc-cluster-digest'  --no-agent --script hscc_cluster_digest.sh
 ```
 
 Verify with `hermes cron list`.
@@ -55,7 +60,7 @@ Each script is self-contained shell + hardcoded host IPs / model ids. Cluster to
 
 ## Why `--no-agent`
 
-These are pure probes; no semantic interpretation needed. Routing through the LLM would burn orchestrator tokens (currently Qwen3.6-35B-A3B-NVFP4 on `.244`) every tick for no added value. Operator slash commands like `/cluster` and `/orch-restart` remain agent-mediated since they're interactive and need confirmation flows.
+These are pure probes; no semantic interpretation needed. Routing through the LLM would burn orchestrator tokens (currently Qwen3.6-35B-A3B-NVFP4 on the orchestrator head) every tick for no added value. Operator slash commands like `/cluster` and `/orch-restart` remain agent-mediated since they're interactive and need confirmation flows.
 
 ## Runtime-dependency update loop
 
