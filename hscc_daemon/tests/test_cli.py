@@ -369,6 +369,82 @@ class TestCmdLog:
         assert "test message" in output
 
 
+class TestCmdStartPidOwnership:
+    """cmd_start() writes ~/.hscc/daemon.pid ONCE, in the grandchild only.
+
+    Regression for the stale-pid class of bug (root cause documented on the
+    card): cmd_start double-forked and called save_pid() in BOTH the first
+    child and the grandchild, so the pid file was a race between a
+    short-lived intermediate process and the long-lived serving daemon, and
+    whichever won could point at an already-exited pid. Emulate the fork chain
+    with a scripted cli.os.fork so no real process is needed.
+    """
+
+    def _fork_seq(self, monkeypatch, cli, results):
+        """Patch cli.os.fork to yield ``results`` in order (one per call)."""
+        it = iter(results)
+        monkeypatch.setattr(cli.os, "fork", lambda: next(it))
+
+    def _patch_syscalls(self, monkeypatch, cli):
+        """Neutralize the child-branch syscalls so no real fork/exec happens."""
+        monkeypatch.setattr(cli.os, "setsid", lambda: None)
+        monkeypatch.setattr(cli.os, "chdir", lambda *a, **k: None)
+        monkeypatch.setattr(cli.os, "_exit", lambda code: None)
+
+    def test_parent_branch_does_NOT_save_pid(self, tmp_hfcc_dir, monkeypatch):
+        from hscc_daemon import cli
+        from hscc_daemon import daemon_ops
+        from hscc_daemon import state as state_mod
+
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(tmp_hfcc_dir / "state"))
+        monkeypatch.setattr(daemon_ops, "PID_FILE", str(tmp_hfcc_dir / "pid"))
+        monkeypatch.setattr(daemon_ops, "get_pid", lambda: None)
+
+        saved = []
+        monkeypatch.setattr(daemon_ops, "save_pid",
+                            lambda: saved.append(True))
+
+        # First fork returns a parent-side pid -> cmd_start prints "started"
+        # and returns; the grandchild branch is never reached.
+        self._fork_seq(monkeypatch, cli, [12345])
+        f = io.StringIO()
+        with redirect_stdout(f):
+            cli.cmd_start()
+        # The parent MUST NOT write the pid file (the grandchild owns it).
+        assert saved == [], "cmd_start parent branch must not call save_pid()"
+
+    def test_grandchild_writes_pid_once_and_runs(self, tmp_hfcc_dir, monkeypatch):
+        from hscc_daemon import cli
+        from hscc_daemon import daemon_ops
+        from hscc_daemon import state as state_mod
+
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(tmp_hfcc_dir / "state"))
+        monkeypatch.setattr(daemon_ops, "PID_FILE", str(tmp_hfcc_dir / "pid"))
+        monkeypatch.setattr(daemon_ops, "get_pid", lambda: None)
+        monkeypatch.setattr(daemon_ops, "write_stopped", lambda: None)
+
+        self._patch_syscalls(monkeypatch, cli)
+
+        loop_called = []
+        monkeypatch.setattr(daemon_ops, "run_daemon_loop",
+                            lambda: loop_called.append(True))
+
+        saved = []
+        def _save():
+            saved.append(True)
+        monkeypatch.setattr(daemon_ops, "save_pid", _save)
+
+        # First fork -> child (0); second fork -> grandchild (0). So the
+        # parent branch (save_pid) is skipped, the first child exits, and the
+        # grandchild writes the pid exactly once then runs the loop.
+        self._fork_seq(monkeypatch, cli, [0, 0])
+        cli.cmd_start()
+
+        assert saved == [True], (
+            "grandchild must call save_pid() exactly once, got %r" % saved)
+        assert len(loop_called) == 1, "grandchild must run the daemon loop"
+
+
 class TestCmdStartDaemon:
     """cmd_start_daemon() runs the daemon loop (service-supervised mode)."""
 

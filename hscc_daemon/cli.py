@@ -58,7 +58,6 @@ def cmd_start():
     pid = os.fork()
     if pid > 0:
         try:
-            save_pid()
             console.print(
                 make_status_panel(
                     f"hscc_daemon started (PID {pid})",
@@ -86,7 +85,15 @@ def cmd_start():
     if pid2 > 0:
         os._exit(0)
 
-    # Grandchild — write PID and run
+    # Grandchild — write the PID exactly ONCE here, after the final fork, so
+    # ~/.hscc/daemon.pid reflects the ONE process that actually serves (the
+    # grandchild). The parent branch above does NOT save_pid(): writing it
+    # there too makes the file a race between the short-lived first child and
+    # the long-lived grandchild, and whichever wins may point at the wrong
+    # (already-exited) process — the stale-pid class of bug that made
+    # `hscc status` / `hscc stop` trust a dead pid. The grandchild is the
+    # single owner, matching cmd_start_daemon (the launchd path), so start,
+    # stop, status and launchd agree on one ownership model.
     save_pid()
 
     try:
