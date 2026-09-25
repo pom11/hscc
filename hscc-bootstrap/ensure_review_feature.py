@@ -44,22 +44,30 @@ def _git(args, cwd, timeout=60):
         return False, "", str(e)
 
 
-def _feature_present(hermes_dir):
-    """True if the runtime's kanban tools already expose the review tool."""
+def _feature_state(hermes_dir):
+    """Return 'present', 'absent', or 'unreadable' for the review marker.
+
+    'present' — kanban_tools.py read and contains the marker.
+    'absent'  — kanban_tools.py read and does NOT contain the marker.
+    'unreadable' — the marker file could not be read (missing/renamed/
+        permission fault). Returning 'present' here would claim the feature is
+        installed when we never actually looked — a failure to look is not a
+        data fact — so it is surfaced as a distinct non-ok status instead of
+        silently skipping the install.
+    """
     tool_file = os.path.join(hermes_dir, "tools", "kanban_tools.py")
     try:
         with open(tool_file, "r") as f:
-            return _MARKER in f.read()
+            return "present" if _MARKER in f.read() else "absent"
     except OSError:
-        # Can't read it — treat as present so we never touch an unexpected tree.
-        return True
+        return "unreadable"
 
 
 def ensure_review_feature(hermes_dir=None, remote=None, branch=None):
     """Ensure the kanban review feature is present in the Hermes runtime.
 
     Returns a dict: {status, ok, [detail]}. status is one of:
-      already_present | applied | not_git | dirty | fetch_failed |
+      already_present | applied | unreadable | not_git | dirty | fetch_failed |
       conflict | missing_ref | skipped_missing | invalid_config
     """
     hermes_dir = hermes_dir or HERMES_DIR
@@ -76,8 +84,18 @@ def ensure_review_feature(hermes_dir=None, remote=None, branch=None):
     if not os.path.isdir(hermes_dir):
         return {"status": "skipped_missing", "ok": True}
 
-    if _feature_present(hermes_dir):
+    state = _feature_state(hermes_dir)
+    if state == "present":
         return {"status": "already_present", "ok": True}
+    if state == "unreadable":
+        # We could not even look for the marker — an environment fault (file
+        # missing/renamed/permission), NOT a fact that the feature is present.
+        # Report it so bootstrap warns instead of believing the feature is
+        # installed (previously this silently returned already_present: ok).
+        return {"status": "unreadable", "ok": False,
+                "detail": "cannot read tools/kanban_tools.py in the runtime; "
+                          "cannot verify the review feature — refusing to "
+                          "claim it is present"}
 
     if not os.path.isdir(os.path.join(hermes_dir, ".git")):
         return {"status": "not_git", "ok": False,
