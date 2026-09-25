@@ -156,4 +156,23 @@ The old README was stale in two ways:
   changes cannot affect test behaviour. Use the harness.
 
 ## Merge / push / deploy
-- TBD
+- branch wt/t_8ac9e87c based on main; main had NOT advanced past branch point
+  (merge-base = my parent commit 1c18a34) → could fast-forward, but used
+  `git merge --no-ff` to record the merge (per process convention).
+- commits-ahead-of-main before merge = 7 (94e8c86, 02430b6, 6698e22, 71cac77,
+  33b6bd4, 7fd99eb + scaffold 5e1385a).
+- merged YES: `git merge --no-ff wt/t_8ac9e87c` from primary checkout ->
+  0c6ddf3 (clean, no conflict; only the 5 package READMEs + docs/review).
+- pushed YES: `git push origin main` (1c18a34..0c6ddf3); origin/main == main
+  == 0c6ddf3 verified.
+- deployed YES: `python3 hscc-bootstrap/install_payload.py --no-backup` (from
+  primary, now at merged main) exit 0; verified deployment of ~/.hermes/plugins
+  READMEs for all 5 packages reflect the new content (hscc-api 6292 bytes new
+  A1-gone content; hscc-cluster 5024; hscc-commands 2926; hscc-roles 3503;
+  hscc-bootstrap "266 tests").
+- change is docs-only (markdown). All five per-package suites pass under the
+  standard harness (`env -u HERMES_DELEGATED_CHILD_CONTEXT`, matching
+  scripts/run_tests.sh): bootstrap 266, commands 69, roles 114, cluster 422,
+  api 786 passed + 1 skipped.
+- no_lan_addresses: confirmed (git diff grep of added lines for 10.x/192.168.x/100.x
+  found none). No tokens/secrets in the diff.
