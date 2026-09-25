@@ -257,8 +257,9 @@ public-repo rule. Redacted any api_key/secret values. No AI attribution.
 
 ## 11. Delivery
 - Branch: wt/t_17dc00ee -> merged to main.
-- Merge SHA: 6431207 (merge commit "Merge wt/t_17dc00ee: t_17dc00ee signal-15 investigation — engine-wedge->SIGTERM RULED OUT").
-- Pushed to origin/main: 33b5b7e..6431207.
+- Merge SHAs on main: 6431207 (report merge) then a86072e (finalise delivery
+  note); final main HEAD a86072e.
+- Pushed to origin/main: 33b5b7e..a86072e.
 - Follow-up card opened: t_d733f7c8 (pid-file race / stale status).
 - `install_payload.py` run for consistency (no-op for docs-only) per operator
   rules — see delivery note below.
