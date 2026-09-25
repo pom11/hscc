@@ -3,7 +3,8 @@
 Status: DONE (merged to main + pushed + deployed)
 Date: 2026-09-25
 Branch: wt/t_e287cfb6 -> main
-Merge SHA: (see below)
+Merge SHA: 92950e5 (main); branch commits 0920af6 (feat) + 1c0a93a (docs)
+Deployed: yes — `python3 hscc-bootstrap/install_payload.py` (hscc-roles installed, missing=[])
 
 ## Problem
 
