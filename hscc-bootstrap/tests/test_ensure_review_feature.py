@@ -39,6 +39,28 @@ def test_not_git_reports(tmp_path):
     assert res["status"] == "not_git" and res["ok"] is False
 
 
+def test_unreadable_marker_is_not_claimed_present(tmp_path, monkeypatch):
+    """If tools/kanban_tools.py can't be READ (missing/renamed/permission), we
+    must NOT report already_present — we never looked. Previously the read
+    error was swallowed and returned already_present:ok True, an environment
+    fault rendered as a fact about the data. It must surface as a distinct
+    non-ok status so bootstrap warns instead of silently skipping the
+    install."""
+    hermes = tmp_path / "hermes-agent"
+    hermes.mkdir()
+    # create a tools/ file we then make unreadable (or omit entirely)
+    (hermes / "tools").mkdir(parents=True)
+    # Simulate an unreadable marker file via monkeypatched _feature_state -> but
+    # exercise the REAL read path: no kanban_tools.py at all -> OSError.
+    called = []
+    monkeypatch.setattr(erf, "_git",
+                        lambda *a, **k: called.append(a) or (True, "", ""))
+    res = erf.ensure_review_feature(hermes_dir=str(hermes))
+    assert res["status"] == "unreadable" and res["ok"] is False
+    assert called == []  # never touched git
+    assert "kanban_tools.py" in res.get("detail", "")
+
+
 def test_dirty_repo_refuses(tmp_path, monkeypatch):
     hermes = _make_runtime(tmp_path, marker=False)
     # status --porcelain returns uncommitted changes

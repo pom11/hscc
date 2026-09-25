@@ -385,9 +385,15 @@ def _ensure_compaction(cfg):
         # touches) keeps the old value and still governs.
         cap, legacy = _compaction_cap()
         cur_tok = comp.get("threshold_tokens")
+        # A value the operator deliberately set is preserved. The only values
+        # we RAISE to the cap are the known-stale legacy caps emitted by older
+        # generators (which fire compaction far too aggressively) — and a
+        # missing/non-numeric value. A HIGH threshold_tokens is an operator
+        # "compact even more rarely" choice and must be preserved, not lowered
+        # back to the cap (raising a low stale cap is the goal; lowering a
+        # deliberate high one would revert the operator's choice).
         operator_set = (isinstance(cur_tok, (int, float))
                         and not isinstance(cur_tok, bool)
-                        and cur_tok <= cap
                         and cur_tok not in legacy)
         if not operator_set and cur_tok != cap:
             comp["threshold_tokens"] = cap
@@ -798,14 +804,16 @@ def _ensure_hooks(cfg):
 
 
 def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
-           hooks_source=None):
+           hooks_source=None) -> dict:
     """Ensure HSCC plugins + toolsets + fleet routing + hooks are wired.
 
     Returns {"plugins": [...], "toolsets": [...], "kanban": [...], "delegation":
     [...], "compaction": [...], "fallback": [...], "bitwarden": [...],
     "prompt_caching": [...], "dashboard": [...], "multiplex": [...], "hooks": [...],
-    "worktree": [...]} of what
-    changed. Writes (with one backup) only if something changed. No-op + no
+    "worktree": [...], "hooks_file": {...}} of what
+    changed (plus, on ``hooks_file``, the cluster-guard script install status:
+    ``{"installed": bool, "backed_up": str|None, "reason": str?}``). Writes (with
+    one backup) only if something changed. No-op + no
     backup if already wired or if the config is missing/malformed.
 
     Args:
@@ -843,15 +851,31 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
     changed_prompt_caching = _ensure_prompt_caching(cfg)
     changed_dashboard = _ensure_dashboard(cfg)
     changed_multiplex = _ensure_multiplex(cfg)
-    changed_hooks = _ensure_hooks(cfg)
     changed_approvals = _ensure_approvals(cfg)
 
     # Sanity-probe the compaction endpoint (prints a warning to gateway logs
     # if the model is missing — non-fatal but alerts the operator).
     _probe_compaction_endpoint()
 
-    # Install the hook script to disk (idempotent, backup-then-overwrite)
+    # Install the hook script to disk FIRST (idempotent, backup-then-overwrite),
+    # and only then wire the config hook commands that invoke it. Wiring hook
+    # entries that reference a script we could not actually install would write
+    # a dangling reference — every hook call at runtime silently fails. So if
+    # the script is not installed, do NOT add new hook commands (existing
+    # already-wired entries are left intact) and warn instead of staying silent.
     hooks_file_result = _ensure_hooks_file(hooks_source)
+    if hooks_file_result.get("installed", False):
+        changed_hooks = _ensure_hooks(cfg)
+    else:
+        changed_hooks = []
+        print(
+            f"[WARN] HSCC could not install the cluster-guard hook script "
+            f"(source missing/unreadable: "
+            f"{hooks_file_result.get('reason', 'unknown')}) — hook commands "
+            f"NOT wired into config; cluster ops will not be capacity-gated "
+            f"or audited",
+            file=sys.stderr,
+        )
 
     if (added_plugins or added_toolsets or changed_kanban or changed_worktree
             or changed_delegation or changed_compaction or changed_text_aux
@@ -875,7 +899,8 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
             "multiplex": changed_multiplex,
             "hooks": changed_hooks,
             "approvals": changed_approvals,
-            "worktree": changed_worktree}
+            "worktree": changed_worktree,
+            "hooks_file": hooks_file_result}
 
 
 if __name__ == "__main__":
