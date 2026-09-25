@@ -1,53 +1,16 @@
 # Flightdeck configuration -- example / seed copy.
 #
-# This file is a reference you can copy to ~/.flightdeck/config.yaml so
-# flightdeck can reach YOUR Telegram group. It is NOT written to ~/.flightdeck
-# by anything in this repo; configuring the operator's own group is an
-# operator action. Copy it with:
+# This file is a reference you can copy to ~/.flightdeck/config.yaml. It is NOT
+# written to ~/.flightdeck by anything in this repo; seeding it is an operator
+# action (or the result of `flightdeck init --apply`). Copy it with:
 #
 #     cp docs/config.example.yaml ~/.flightdeck/config.yaml
 #
-# This config file is small and SEPARATE from registry.yaml -- it holds
-# connection-level settings (which private Telegram group to use, and which
-# MCP daemon to talk to), never the project registry.
+# The Telegram surface has been removed from flightdeck: the telegram group /
+# topic settings and the MCP daemon URL that used to serve it were dropped, so
+# this config no longer holds any connection-level settings. The file is a
+# retained placeholder — flightdeck reads it only to keep the ~/.flightdeck
+# home predictable; nothing in the code consumes settings from it today.
 #
-# Precedence (highest wins):
-#   - environment variable FLIGHTDECK_TELEGRAM_ENABLED   overrides telegram.enabled
-#   - environment variable FLIGHTDECK_TELEGRAM_GROUP_ID overrides telegram.group_id
-#   - environment variable FLIGHTDECK_MCP_URL             overrides telegram.mcp_url
-#   - otherwise the values below are used; mcp_url falls back to the localhost
-#     default, group_id has NO default and must be set for any Telegram command.
-
-telegram:
-  # The single fleet-wide switch. `false` = Telegram is disabled everywhere:
-  # every flightdeck/HSCC command still works fully, but skips Telegram (no
-  # topic is created on `project new`, no announcement is posted). Set to
-  # `true` to re-enable all Telegram surfaces.
-  #
-  # The code default when this key is ABSENT is `true` (enabled), so an
-  # operator upgrading from a pre-switch build keeps working unchanged. A
-  # FRESH install is seeded with `enabled: false` by the installers (HSCC
-  # bootstrap / `flightdeck init`) via this example — never by a code default
-  # of disabled, which would silently break every existing install on upgrade.
-  enabled: false
-
-  # The Telegram FORUM/GROUP id flightdeck reads and writes topics against.
-  # REQUIRED for every Telegram command (topics, message, ask, ingest, sync,
-  # report, decompose). When absent, Telegram commands fail with a clear
-  # message telling you to set this key. There is intentionally NO default --
-  # a baked-in id would publish a private group in source.
-  #
-  # How to find your group id:
-  #   - On Telegram Desktop, a private group's link looks like
-  #     https://t.me/+abc123... To get the numeric id, add the group to a bot
-  #     such as @userinfobot or @getidsbot, which replies with the chat id
-  #     (a private group id is usually a large negative number, e.g. -100...).
-  #   - Your own private group id lives in ~/.hermes-tg/mcp_server.py as the
-  #     `group` the daemon already targets -- reusing it keeps flightdeck on
-  #     the same single-writer session.
-  group_id: -1001234567890
-
-  # The shared MCP daemon URL (the single-writer Telegram client). Defaults to
-  # the localhost binding, which leaks nothing. Override only if the daemon
-  # runs elsewhere (e.g. a remote host or a non-default port).
-  # mcp_url: http://127.0.0.1:8787/mcp
+# This is deliberately separate from registry.yaml, which holds the project
+# registry (see docs/registry.example.yaml).
