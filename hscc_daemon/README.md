@@ -1,83 +1,124 @@
 # HSCC Monitoring Daemon
 
-Continuous monitoring daemon for the DGX Spark cluster. Runs a 60s cycle of health checks. **Workers** are auto-healed: each keep-alive serving unit is health-checked per (node, port) — so co-located multi-model nodes are supervised independently — and a crashed one is relaunched with its own recipe + port. If a worker unit stays DOWN across `HSCC_WORKER_AUTOHEAL_DEBOUNCE` consecutive checks (default 3 ≈ 90s), the watchdog escalates to a **force-recreate** of that unit by re-applying the currently applied template (`template apply <applied> --confirm --force-recreate`) — this heals a unit whose container is "Up" in docker but whose vLLM never answers (a plain `--ensure` relaunch no-ops on it), debounced and cooldown-guarded so it never fights a slow load or spins. An **orchestrator** wedge is NOT auto-restarted (too disruptive): the daemon logs the alert while the active fallback keeps the gateway answering, and a human runs `/cluster-restart` (which re-applies the active template). On startup it also self-cleans dead `~/.hscc` cruft (`.corrupt`/`.stale` + uncapped `.bak`).
+Continuous monitoring daemon for the DGX Spark cluster, installed as the
+Hermes plugin `hscc_daemon`. It runs a set of periodic **health streams** and
+auto-heals a crashed **worker** vLLM unit. An **orchestrator** wedge is NOT
+auto-restarted (too disruptive): the daemon logs the alert while the active
+fallback keeps the gateway answering, and a human runs `/cluster-restart`
+(which re-applies the active template). On startup it also self-cleans dead
+`~/.hscc` cruft (`.corrupt-*` snapshots / `.stale` flags + caps each
+`<file>.bak.*` group at the newest 5).
+
+## Architecture (the real modules)
+
+The daemon was modularised out of the old monolithic `hscc.py`. The CLI entry
+point is `hscc_daemon.hscc.main()`; every `hscc` command is its own process
+that dispatches into one of the modules below. The human-facing `hscc` CLI
+output is rendered through `cli_theme.py` (Rich, Hermes-default palette);
+machine `--json` output stays byte-identical.
+
+| Module | Responsibility |
+|--------|----------------|
+| `hscc.py` | CLI entry, dispatch, help, cluster/template/profiles/project/api/autodown/kanban groups |
+| `cli.py` | Daemon lifecycle commands: start/stop/status/check/watch/triggers/notify/log |
+| `cli_theme.py` | Rich theme foundation (single palette source for every `hscc` render) |
+| `health.py` | Check functions: dgx, gateway, local, heartbeat, nas, idle, workers, engine_wedge + worker auto-heal |
+| `serving.py` | Cluster topology (`cluster.json` / `serving.json`) resolution |
+| `lifecycle.py` | Agent reconciliation, vLLM auto-restart, pipeline watchdog |
+| `trigger.py` | Trigger engine (rule evaluation, cooldowns, event firing) |
+| `daemon_ops.py` | Daemon life-cycle: PID/log/rotation, stream watcher, main loop, startup cleanup |
+| `state.py` | Thread-safe state dir reads/writes |
+| `install.py` | Service management (launchd on macOS, systemd on Linux) |
+| `desktop.py` | macOS desktop notifications + event emitter |
+| `dispatcher_wedge.py` | Dispatcher-wedge watchdog |
+| `verify.py` / `cluster_render.py` | `hscc verify` smoke-test / cluster+template human renderers |
 
 ## Installation
 
-The daemon lives in `~/.hermes/plugins/hscc_daemon/`. No dependencies beyond Python 3.9 stdlib.
+The daemon ships in the `hscc_daemon/` package (installed to
+`~/.hermes/plugins/hscc_daemon/` by bootstrap / `install_payload.py`). It
+depends on **Rich** (for the themed CLI) plus the Python standard library —
+install it into the same Python environment as the `hscc` CLI. The daemon
+entry point is `hscc_daemon.hscc.main` (also usable as `python -m hscc_daemon`).
 
-## Configuration
+## State files (`~/.hscc`)
 
-Create `~/.hscc/daemon/config.json`:
+The daemon keeps its runtime state under `~/.hscc`:
 
-```json
-{
-  "poll_interval_sec": 60,
-  "handlers": {
-    "vllm": {"url": "http://localhost:8000/health"},
-    "gateway": {"url": "http://localhost:18789/health"},
-    "container": {"id": "hscc-orchestrator"},
-    "nas": {"host": "nas.local", "path": "/", "key_path": null}
-  }
-}
-```
+| File / dir | Purpose |
+|------------|---------|
+| `~/.hscc/daemon.pid` | PID file (present while running) |
+| `~/.hscc/daemon.log` | Rolled/rotating daemon log |
+| `~/.hscc/state/<stream>.json` | One JSON file per health stream, overwritten each check (dgx, gateway, local, heartbeat, nas, watchdog, triggers, engine_wedge, dispatcher, idle, proxy, workers) |
 
-## Commands
+There is no `~/.hscc/daemon/config.json` in the modular daemon — health checks
+are configured by the daemon code + environment variables (e.g.
+`HSCC_WORKER_AUTOHEAL_DEBOUNCE`, `HSCC_WORKER_AUTOHEAL_COOLDOWN_MINUTES`,
+`HSCC_WORKER_AUTOHEAL_LOAD_GRACE`), not by a per-handler JSON config.
+
+## Commands (`hscc`, the merged CLI)
 
 | Command | Description |
 |---------|-------------|
-| `hscc_daemon start` | Start daemon in foreground |
-| `hscc_daemon start --dry-run` | Run checks without executing actions |
-| `hscc_daemon stop` | Graceful shutdown (sends SIGTERM) |
-| `hscc_daemon status` | Show latest health report |
-| `hscc_daemon alerts` | List pending alerts |
-| `hscc_daemon check` | Run self-diagnostic |
+| `hscc start` | Start the daemon in the background (forks; PID in `~/.hscc/daemon.pid`) |
+| `hscc stop` | Graceful shutdown (SIGTERM; waits up to ~10s, then SIGKILL) |
+| `hscc status` | Daemon status + last result of every health stream |
+| `hscc check [stream\|all]` | Run one check cycle now (does NOT persist state) |
+| `hscc watch [stream]` | Live-tail check results |
+| `hscc triggers` | Show trigger-engine rules + recent firings |
+| `hscc notify <msg>` | Send a manual macOS notification |
+| `hscc install` / `hscc uninstall` | Install / remove the launchd (macOS) or systemd (Linux) service |
+| `hscc plist` | Print the launchd plist (no install) |
 
-## Health Status Categories
+Also read-only health/monitoring verbs: `verify`, `stats [days]`,
+`throughput`, `autoscale`, `escalate`, and groups `cluster`, `template`,
+`profiles`, `project`, `api`, `autodown`, `kanban`.
 
-| Status | Meaning | Action |
-|--------|---------|--------|
-| `healthy` | Explicit success | No action |
-| `unhealthy` | Explicit failure | Worker: auto-relaunch (per node:port). Orchestrator: alert + fallback (human runs `/cluster-restart`). |
-| `unknown` | Timeout / connection refused | Warn only (no restart) |
+`start`/`stop`/`status` are safe to run from a terminal. `start` is idempotent
+(no-op if already running). Service-supervised runs use `start-daemon` (runs
+the loop in the foreground so launchd/systemd supervises the right process);
+`start` would fork a child and exit, which launchd would mistrack.
 
-## File Layout
+## Health status model
 
-```
-~/.hermes/plugins/hscc_daemon/
-├── daemon.py          # Core loop, escalator, CLI
-├── README.md          # This file
-├── tests/
-│   └── test_daemon.py # Unit + integration tests
-└── handlers/
-    ├── __init__.py
-    ├── base.py        # AbstractHandler + timeout runner
-    ├── vllm.py        # vLLM HTTP health (:8000)
-    ├── container.py   # Docker container lifecycle
-    ├── gateway.py     # Hermes gateway HTTP (:18789)
-    └── nas.py         # NAS disk space via SSH
+Each stream's `~/.hscc/state/<stream>.json` carries an `ok` / `blocked` field,
+derived by `status` into:
 
-~/.hscc/daemon/
-├── config.json        # User configuration
-├── status.json        # Latest cycle report (overwritten each cycle)
-├── alerts.jsonl       # Persistent alert log (appended)
-└── daemon.pid         # PID file (present when running)
-```
+| Display | Meaning |
+|---------|---------|
+| OK | Stream healthy |
+| FAIL | Explicit failure |
+| BLOCKED | Watchdog/trigger blocked (needs attention) |
+| — (never) | Stream has no state on disk yet |
+
+Worker vLLM units are supervised per (node, port). A crashed worker is
+relaunched; a unit that stays DOWN across `HSCC_WORKER_AUTOHEAL_DEBOUNCE`
+consecutive checks (default 3) — beyond its load-grace window and out of
+cooldown — is **force-recreated** by re-applying the currently applied template
+(`template apply <applied> --confirm --force-recreate`), which heals a unit
+whose container is "Up" in docker but whose vLLM never answers (a plain relaunch
+no-ops on it). Debounced and cooldown-guarded so it never fights a slow load.
+The orchestrator is not auto-restarted — see the intro.
 
 ## Safety Guarantees
 
-1. **Max 1 restart per cycle** — prevents restart loops
-2. **10s timeout per handler** — no blocking on slow checks
-3. **unknown ≠ unhealthy** — timeouts don't trigger restarts
-4. **Alert rate-limited** — max 5 alerts per 60s
-5. **Handler exceptions caught** — one handler crash doesn't kill the daemon
-6. **Graceful shutdown** — current cycle finishes before exit
+1. **Max 1 restart per cycle** — prevents restart loops.
+2. **Timeout per handler** — no blocking on slow checks.
+3. **Debounced auto-heal** — a unit must stay down across
+   `HSCC_WORKER_AUTOHEAL_DEBOUNCE` consecutive checks before force-recreate.
+4. **Cooldown-guarded** — `HSCC_WORKER_AUTOHEAL_COOLDOWN_MINUTES` (default 10)
+   between force-recreates.
+5. **Handler exceptions caught** — one check crash doesn't kill the daemon.
+6. **Graceful shutdown** — current cycle finishes before exit.
+7. **Ad-hoc `hscc check` never writes shared state** — a manual failure must
+   not masquerade as a fleet failure in `hscc status`.
 
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
-| `config.json not found` | Create it with defaults + your values |
-| `docker: not found` | Ensure docker CLI is in PATH |
-| `SSH to NAS fails` | Check host, SSH key, and network |
-| `Daemon won't start` | Run `hscc_daemon check` for self-diagnostic |
+| `hscc status` shows STOPPED | Run `hscc start` (or `hscc install` for launchd) |
+| `hscc` says unknown command | Use the real verbs: `start stop status check watch triggers notify install uninstall plist log verify stats throughput autoscale escalate` + groups `cluster template profiles project api autodown kanban` |
+| `hscc` not on PATH | It is installed in the Hermes venv (`~/.hermes/hermes-agent/venv/bin/hscc`) |
+| Daemon log missing | `hscc status` uses `~/.hscc/state/*.json`; `hscc log` tails `~/.hscc/daemon.log` |
+| `deps not met` error | The daemon needs **Rich** in its Python env (`pip install rich` in the Hermes venv) |
