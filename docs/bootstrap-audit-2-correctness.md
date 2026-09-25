@@ -60,5 +60,5 @@ Fix: factor out `_compact_models_url()` (mirrors `doctor._models_url`: preserve 
 - [x] hscc-bootstrap suite green (p313 interpreter): 264 passed in 406.10s
 - [x] full `scripts/run_tests.sh` suite (host interpreter default): ALL GREEN — 8 packages, exit 0
 - [x] full `scripts/run_tests.sh` suite (p313 via HSCC_TEST_PY): ALL GREEN — 8 packages, exit 0
-- [ ] merge to main + push
-- [ ] deploy (install_payload.py)
+- [x] merge to main + push: merge commit `09a9405` on `main`, pushed `f973622..09a9405` to origin (github.com/pom11/hscc)
+- [x] deploy: `~/.hermes/hermes-agent/venv/bin/python hscc-bootstrap/install_payload.py` from primary checkout; verified deployed runtime carries all 4 fixes (`~/.hermes/plugins/hscc-bootstrap/ensure_review_feature.py` has `_feature_state`/`unreadable`, `enable_plugins.py` has `_compact_models_url`/`hooks_file`, `doctor.py` has the `isinstance(keys, list)` guard); tests dir excluded.
