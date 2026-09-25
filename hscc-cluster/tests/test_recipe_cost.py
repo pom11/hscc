@@ -222,3 +222,53 @@ class TestRegistryRecipesPassBothValidationLayers:
         raw = self._raw("~/definitely/not/here.yaml")
         errors, _warnings = ct._structural_validate(raw, ti.ClusterTemplate.from_dict(raw))
         assert any("recipe not found: ~/definitely/not/here.yaml" in e for e in errors)
+
+
+class TestGpuMemoryUtilizationIntent:
+    """`gpu_memory_utilization` on a model — the knob co-location needs.
+
+    Without it, two units sharing a node each inherit their recipe's own
+    fraction (written assuming the unit owns the GPU), so two recipes at 0.8
+    request 160% of one card and the second refuses to start. A VRAM-sum check
+    does not catch that: the weights fit, the reservation does not.
+    """
+
+    def test_absent_means_recipe_default(self):
+        import template_intent as ti
+        m = ti.ModelIntent.from_dict({"recipe": "r.yaml"})
+        assert m.gpu_memory_utilization is None
+        assert "gpu_memory_utilization" not in m.to_dict()
+
+    def test_parsed_and_round_trips(self):
+        import template_intent as ti
+        m = ti.ModelIntent.from_dict({"recipe": "r.yaml",
+                                      "gpu_memory_utilization": 0.45})
+        assert m.gpu_memory_utilization == 0.45
+        assert m.to_dict()["gpu_memory_utilization"] == 0.45
+
+    def test_rejects_out_of_range(self):
+        import template_intent as ti
+        for bad in (0, -0.1, 1.5):
+            try:
+                ti.ModelIntent.from_dict({"recipe": "r.yaml",
+                                          "gpu_memory_utilization": bad})
+            except ti.TemplateIntentError as e:
+                assert "gpu_memory_utilization" in str(e)
+            else:
+                raise AssertionError("expected rejection for %r" % (bad,))
+
+    def test_rejects_non_numeric(self):
+        import template_intent as ti
+        try:
+            ti.ModelIntent.from_dict({"recipe": "r.yaml",
+                                      "gpu_memory_utilization": "lots"})
+        except ti.TemplateIntentError as e:
+            assert "must be a number" in str(e)
+        else:
+            raise AssertionError("expected rejection")
+
+    def test_is_a_known_model_key(self):
+        # Unknown keys are a hard structural error (typo protection), so the
+        # new key has to be registered or every template using it is rejected.
+        import cluster_template as ct
+        assert "gpu_memory_utilization" in ct._KNOWN_MODEL_KEYS
