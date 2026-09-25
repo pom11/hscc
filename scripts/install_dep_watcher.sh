@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Wire the dependency-bump watcher into Hermes' native cron. Installs the
 # poller under ~/.hermes/scripts/ and registers a daily Hermes cron job that
-# runs it (--no-agent: the script IS the job, stdout delivered verbatim). The
-# poller turns dep-bump PRs (opened by the check-runtime-deps GitHub Action,
-# labelled needs-cluster-check with the owner as reviewer) into kanban
-# verification cards. Idempotent: re-running refreshes the job.
+# runs it (--no-agent: the script IS the job). The poller turns dep-bump PRs
+# (opened by the check-runtime-deps GitHub Action, labelled needs-cluster-check
+# with the owner as reviewer) into kanban verification cards; the poller itself
+# sends a native desktop notification when it creates a card — hermes
+# `--deliver desktop` is a silent no-op. Idempotent: re-running refreshes the
+# job.
 #
 # Usage:  scripts/install_dep_watcher.sh [--uninstall]
 set -euo pipefail
@@ -28,10 +30,12 @@ mkdir -p "$HERMES_SCRIPTS"
 cp "$SCRIPT_DIR/dep_pr_watcher.py" "$HERMES_SCRIPTS/dep_pr_watcher.py"
 
 # Idempotent: drop any existing job of this name, then (re)create it.
+# No --deliver: hermes `--deliver desktop` is a silent no-op; the poller sends
+# its own native desktop notification on card creation.
 "$HERMES_BIN" cron remove "$JOB" 2>/dev/null || true
 "$HERMES_BIN" cron create "$SCHEDULE" \
   --no-agent --script dep_pr_watcher.py \
-  --name "$JOB" --deliver desktop
+  --name "$JOB"
 
 echo "installed Hermes cron job '$JOB' (schedule: $SCHEDULE)"
 echo "inspect:  $HERMES_BIN cron list"
