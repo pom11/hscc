@@ -19,10 +19,11 @@ hscc-cluster isn't covered above and install/templates already handled; confirm 
 
 ## Status
 
-- [ ] hscc_daemon/README.md — verified
-- [ ] scripts/README.md — verified
-- [ ] ios-app/README.md — verified
-- [ ] merge to main + push
+- [x] hscc_daemon/README.md — verified + REWRITTEN (commit 6809d02)
+- [x] scripts/README.md — verified + LAN scrub + --deliver desktop fix (commit e317398)
+- [x] ios-app/README.md — verified + port fix + LAN scrub (commit e317398)
+- [x] hscc-skills / hscc-project / docs READMEs — verified, no change
+- [ ] merge to main + push + deploy
 
 ## Findings
 
@@ -112,5 +113,17 @@ Startup self-clean of .corrupt-*/.stale + .bak.* cap verified (daemon_ops.py:134
   previously verified against live API (README's own End-to-end review, 2026-08-27);
   hscc-api routes confirmed present by card t_8ac9e87c. No cross-cutting route
   removal postdates that. No telegram references anywhere in ios README.
+
+### Remaining "of the 18" candidates — verified, no change
+- hscc-skills/README.md — ACCURATE. install/install-skills/status/uninstall all
+  exist (hscc.py:450-453), source walkup to <repo>/install/hscc-skills matches
+  (hscc.py:46). Ran `hscc-skills/hscc.py status` (exit 0). No change.
+- hscc-project/README.md — telegram references are TRUE for flightdeck: the
+  telegram-removal commit f91924c deliberately did NOT touch hscc-project/,
+  so flightdeck retains its OWN Telegram MCP daemon (separate from the removed
+  HSCC telegram). Banner correct (reached via `hscc project …`); verified
+  `hscc project --help` (exit 0). No change.
+- docs/README.md — simple accurate index, no commands/telegram. No change.
+
 
 
