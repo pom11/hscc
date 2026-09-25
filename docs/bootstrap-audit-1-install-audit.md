@@ -37,7 +37,7 @@ Evidence:
 - [x] hscc-bootstrap suite green (host interpreter): 258 passed in 395.65s
 - [x] hscc-bootstrap suite green (p313 interpreter): 258 passed in 395.60s
 - [x] full `scripts/run_tests.sh` suite (host interpreter default): ALL GREEN — 8 packages, exit 0
-- [ ] full `scripts/run_tests.sh` suite (p313 interpreter via HSCC_TEST_PY)
+- [x] full `scripts/run_tests.sh` suite (p313 interpreter via HSCC_TEST_PY): ALL GREEN — 8 packages, exit 0
 - [ ] merge to main + push
 - [ ] deploy (install_payload.py)
 
