@@ -1,0 +1,664 @@
+signal-15 lines (0-indexed):
+117915 [2026-09-21T08:12:26.498866+00:00] [ INFO] Received signal 15, stopping...
+136996 [2026-09-21T21:14:19.333664+00:00] [ INFO] Received signal 15, stopping...
+153587 [2026-09-22T08:42:10.553468+00:00] [ INFO] Received signal 15, stopping...
+161929 [2026-09-23T16:32:33.958770+00:00] [ INFO] Received signal 15, stopping...
+181695 [2026-09-24T10:42:19.311491+00:00] [ INFO] Received signal 15, stopping...
+182011 [2026-09-25T06:42:59.024565+00:00] [ INFO] Received signal 15, stopping...
+182331 [2026-09-25T06:55:41.909013+00:00] [ INFO] Received signal 15, stopping...
+182383 [2026-09-25T08:49:10.477547+00:00] [ INFO] Received signal 15, stopping...
+182427 [2026-09-25T09:09:09.939114+00:00] [ INFO] Received signal 15, stopping...
+183011 [2026-09-25T09:22:42.885912+00:00] [ INFO] Received signal 15, stopping...
+186384 [2026-09-25T10:35:11.706687+00:00] [ INFO] Received signal 15, stopping...
+192378 [2026-09-25T12:36:51.190085+00:00] [ INFO] Received signal 15, stopping...
+total 12
+
+====================================================================================================
+
+#### signal-15 at line 117915 -> [2026-09-21T08:12:26.498866+00:00] [ INFO] Received signal 15, stopping...
+--- context BEFORE (last 25 lines) ---
+117890 [2026-09-21T08:11:31.239344+00:00] [ INFO] Dispatcher-wedge check: OK — total_running=0, spawnable=[], roomy=[]
+117891 [2026-09-21T08:11:39.250975+00:00] [ INFO] Running gateway check
+117892 [2026-09-21T08:11:39.364250+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+117893 [2026-09-21T08:11:44.902047+00:00] [ INFO] Running engine-wedge check
+117894 [2026-09-21T08:11:45.191566+00:00] [ INFO] Engine-wedge check: 2/2 streaming ok
+117895 [2026-09-21T08:11:47.537144+00:00] [ INFO] Running PipelineWatchdog
+117896 [2026-09-21T08:11:47.537497+00:00] [ INFO] Running DGX check
+117897 [2026-09-21T08:11:49.392278+00:00] [ INFO] DGX check complete: ok=True
+117898 [2026-09-21T08:11:49.392669+00:00] [ INFO] Running gateway check
+117899 [2026-09-21T08:11:49.478288+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+117900 [2026-09-21T08:11:49.479861+00:00] [ INFO] Watchdog: pipeline healthy
+117901 [2026-09-21T08:11:52.815196+00:00] [ INFO] Running DGX check
+117902 [2026-09-21T08:11:54.577518+00:00] [ INFO] DGX check complete: ok=True
+117903 [2026-09-21T08:11:58.284600+00:00] [ INFO] Running idle monitor check
+117904 [2026-09-21T08:11:58.285862+00:00] [ INFO] Idle monitor: 7 idle, 0 with heartbeat
+117905 [2026-09-21T08:12:08.504190+00:00] [ INFO] Running workers check
+117906 [2026-09-21T08:12:08.509231+00:00] [ INFO] Workers check: 2/2 online
+117907 [2026-09-21T08:12:10.804621+00:00] [ INFO] Running proxy check
+117908 [2026-09-21T08:12:19.626935+00:00] [ INFO] Running PipelineWatchdog
+117909 [2026-09-21T08:12:19.630329+00:00] [ INFO] Running DGX check
+117910 [2026-09-21T08:12:21.092653+00:00] [ INFO] DGX check complete: ok=True
+117911 [2026-09-21T08:12:21.092811+00:00] [ INFO] Running gateway check
+117912 [2026-09-21T08:12:21.139193+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+117913 [2026-09-21T08:12:21.140398+00:00] [ INFO] Watchdog: pipeline healthy
+117914 [2026-09-21T08:12:26.498314+00:00] [ INFO] Daemon stop requested
+--- context AFTER (first 25 lines) ---
+117916 [2026-09-21T08:12:26.499442+00:00] [ INFO] Daemon loop stopped
+117917 [2026-09-21T08:13:34.927409+00:00] [ INFO] start-daemon invoked (service-supervised mode)
+117918 [2026-09-21T08:13:34.943841+00:00] [ INFO] Daemon loop started
+117919 [2026-09-21T08:13:34.971229+00:00] [ INFO] Started dgx check thread (interval=60s)
+117920 [2026-09-21T08:13:34.971406+00:00] [ INFO] Running DGX check
+117921 [2026-09-21T08:13:34.972035+00:00] [ INFO] Started gateway check thread (interval=60s)
+117922 [2026-09-21T08:13:34.972075+00:00] [ INFO] Running gateway check
+117923 [2026-09-21T08:13:34.975489+00:00] [ INFO] Running local services check
+117924 [2026-09-21T08:13:34.975618+00:00] [ INFO] Started local check thread (interval=60s)
+117925 [2026-09-21T08:13:34.979532+00:00] [ INFO] Running heartbeat check
+117926 [2026-09-21T08:13:34.983070+00:00] [ INFO] Started heartbeat check thread (interval=300s)
+117927 [2026-09-21T08:13:34.987403+00:00] [ INFO] Running NAS check
+117928 [2026-09-21T08:13:34.989803+00:00] [ INFO] Started nas check thread (interval=900s)
+117929 [2026-09-21T08:13:34.990986+00:00] [ INFO] Started idle check thread (interval=300s)
+117930 [2026-09-21T08:13:34.992216+00:00] [ INFO] Running idle monitor check
+117931 [2026-09-21T08:13:34.992547+00:00] [ INFO] Idle monitor: 7 idle, 0 with heartbeat
+117932 [2026-09-21T08:13:34.992716+00:00] [ INFO] Started workers check thread (interval=60s)
+117933 [2026-09-21T08:13:34.992772+00:00] [ INFO] Running workers check
+117934 [2026-09-21T08:13:35.000316+00:00] [ INFO] Started proxy check thread (interval=60s)
+117935 [2026-09-21T08:13:35.000556+00:00] [ INFO] Running proxy check
+117936 [2026-09-21T08:13:35.019993+00:00] [ INFO] Started engine_wedge check thread (interval=60s)
+117937 [2026-09-21T08:13:35.020563+00:00] [ INFO] Running engine-wedge check
+117938 [2026-09-21T08:13:35.031053+00:00] [ INFO] Started dispatcher check thread (interval=60s)
+117939 [2026-09-21T08:13:35.032969+00:00] [ INFO] Started autodown thread (interval=30s)
+117940 [2026-09-21T08:13:35.033626+00:00] [ INFO] Started engine-wedge recovery thread (interval=60s)
+
+#### signal-15 at line 136996 -> [2026-09-21T21:14:19.333664+00:00] [ INFO] Received signal 15, stopping...
+--- context BEFORE (last 25 lines) ---
+136971 [2026-09-21T21:13:28.829118+00:00] [ INFO] Watchdog: pipeline healthy
+136972 [2026-09-21T21:13:45.989108+00:00] [ INFO] Running NAS check
+136973 [2026-09-21T21:13:46.173682+00:00] [ INFO] NAS check: ok=True /Volumes/NAS is an NFS mount
+136974 [2026-09-21T21:13:56.872245+00:00] [ INFO] Dispatcher-wedge check: OK — total_running=1, spawnable=[], roomy=[]
+136975 [2026-09-21T21:13:58.265889+00:00] [ INFO] Running engine-wedge check
+136976 [2026-09-21T21:13:58.879090+00:00] [ INFO] Running proxy check
+136977 [2026-09-21T21:13:59.010021+00:00] [ INFO] Engine-wedge check: 2/2 streaming ok
+136978 [2026-09-21T21:13:59.010332+00:00] [ INFO] Running PipelineWatchdog
+136979 [2026-09-21T21:13:59.010506+00:00] [ INFO] Running DGX check
+136980 [2026-09-21T21:13:59.530964+00:00] [ INFO] Running workers check
+136981 [2026-09-21T21:13:59.542567+00:00] [ INFO] Workers check: 2/2 online
+136982 [2026-09-21T21:14:00.975249+00:00] [ INFO] DGX check complete: ok=True
+136983 [2026-09-21T21:14:00.976381+00:00] [ INFO] Running gateway check
+136984 [2026-09-21T21:14:01.077106+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+136985 [2026-09-21T21:14:01.079269+00:00] [ INFO] Watchdog: pipeline healthy
+136986 [2026-09-21T21:14:03.311707+00:00] [ INFO] Running idle monitor check
+136987 [2026-09-21T21:14:03.314078+00:00] [ INFO] Idle monitor: 7 idle, 0 with heartbeat
+136988 [2026-09-21T21:14:06.937402+00:00] [ INFO] Running DGX check
+136989 [2026-09-21T21:14:08.147564+00:00] [ INFO] Running local services check
+136990 [2026-09-21T21:14:09.544632+00:00] [ INFO] DGX check complete: ok=True
+136991 [2026-09-21T21:14:10.148116+00:00] [ INFO] Local check: ok=True, message=informational: docker, ollama, hscc_daemon not available
+136992 [2026-09-21T21:14:17.233067+00:00] [ INFO] Running heartbeat check
+136993 [2026-09-21T21:14:17.304512+00:00] [ INFO] Heartbeat: fleet={'total': 7, 'idle': 7, 'working': 0, 'failed': 0, 'enabled': 7, 'disabled': 0}
+136994 [2026-09-21T21:14:18.488643+00:00] [ INFO] Running gateway check
+136995 [2026-09-21T21:14:18.595401+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+--- context AFTER (first 25 lines) ---
+136997 [2026-09-21T21:14:19.334008+00:00] [ INFO] Daemon loop stopped
+136998 [2026-09-21T21:14:19.595950+00:00] [ INFO] start-daemon invoked (service-supervised mode)
+136999 [2026-09-21T21:14:19.607579+00:00] [ INFO] Daemon loop started
+137000 [2026-09-21T21:14:19.633165+00:00] [ INFO] Running DGX check
+137001 [2026-09-21T21:14:19.633313+00:00] [ INFO] Started dgx check thread (interval=60s)
+137002 [2026-09-21T21:14:19.640534+00:00] [ INFO] Started gateway check thread (interval=60s)
+137003 [2026-09-21T21:14:19.641022+00:00] [ INFO] Running gateway check
+137004 [2026-09-21T21:14:19.642268+00:00] [ INFO] Started local check thread (interval=60s)
+137005 [2026-09-21T21:14:19.642473+00:00] [ INFO] Running local services check
+137006 [2026-09-21T21:14:19.643564+00:00] [ INFO] Running heartbeat check
+137007 [2026-09-21T21:14:19.650740+00:00] [ INFO] Started heartbeat check thread (interval=300s)
+137008 [2026-09-21T21:14:19.662355+00:00] [ INFO] Started nas check thread (interval=900s)
+137009 [2026-09-21T21:14:19.664640+00:00] [ INFO] Running NAS check
+137010 [2026-09-21T21:14:19.665414+00:00] [ INFO] Started idle check thread (interval=300s)
+137011 [2026-09-21T21:14:19.672478+00:00] [ INFO] Running workers check
+137012 [2026-09-21T21:14:19.676966+00:00] [ INFO] Running idle monitor check
+137013 [2026-09-21T21:14:19.677933+00:00] [ INFO] Started workers check thread (interval=60s)
+137014 [2026-09-21T21:14:19.678772+00:00] [ INFO] Idle monitor: 7 idle, 0 with heartbeat
+137015 [2026-09-21T21:14:19.691435+00:00] [ INFO] Started proxy check thread (interval=60s)
+137016 [2026-09-21T21:14:19.707656+00:00] [ INFO] Running proxy check
+137017 [2026-09-21T21:14:19.708447+00:00] [ INFO] Running engine-wedge check
+137018 [2026-09-21T21:14:19.711809+00:00] [ INFO] Started engine_wedge check thread (interval=60s)
+137019 [2026-09-21T21:14:19.716195+00:00] [ INFO] Started dispatcher check thread (interval=60s)
+137020 [2026-09-21T21:14:19.723380+00:00] [ INFO] Started autodown thread (interval=30s)
+137021 [2026-09-21T21:14:19.728634+00:00] [ INFO] Engine-wedge check: 0/2 streaming ok, 2 loading/checking
+
+#### signal-15 at line 153587 -> [2026-09-22T08:42:10.553468+00:00] [ INFO] Received signal 15, stopping...
+--- context BEFORE (last 25 lines) ---
+153562 [2026-09-22T08:41:24.529658+00:00] [ INFO] Running DGX check
+153563 [2026-09-22T08:41:26.477493+00:00] [ INFO] DGX check complete: ok=True
+153564 [2026-09-22T08:41:26.477881+00:00] [ INFO] Running gateway check
+153565 [2026-09-22T08:41:26.575908+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+153566 [2026-09-22T08:41:26.577686+00:00] [ INFO] Watchdog: pipeline healthy
+153567 [2026-09-22T08:41:29.855338+00:00] [ INFO] Running workers check
+153568 [2026-09-22T08:41:29.866392+00:00] [ INFO] Workers check: 2/2 online
+153569 [2026-09-22T08:41:30.837720+00:00] [ INFO] Running proxy check
+153570 [2026-09-22T08:41:38.276318+00:00] [ INFO] Notification saved to file (no native notifier available): HSCC: inference engine wedged
+153571 [2026-09-22T08:41:42.487774+00:00] [ INFO] Running gateway check
+153572 [2026-09-22T08:41:42.621948+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+153573 [2026-09-22T08:41:44.268814+00:00] [ INFO] Running local services check
+153574 [2026-09-22T08:41:45.986242+00:00] [ INFO] Local check: ok=True, message=informational: docker, ollama, hscc_daemon not available
+153575 [2026-09-22T08:41:54.097474+00:00] [ INFO] Notification saved to file (no native notifier available): HSCC: inference engine wedged
+153576 [2026-09-22T08:41:56.776303+00:00] [ INFO] Running PipelineWatchdog
+153577 [2026-09-22T08:41:56.777394+00:00] [ INFO] Running DGX check
+153578 [2026-09-22T08:41:58.637962+00:00] [ INFO] DGX check complete: ok=True
+153579 [2026-09-22T08:41:58.638588+00:00] [ INFO] Running gateway check
+153580 [2026-09-22T08:41:58.743460+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+153581 [2026-09-22T08:41:58.745886+00:00] [ INFO] Watchdog: pipeline healthy
+153582 [2026-09-22T08:42:01.096520+00:00] [ INFO] Running DGX check
+153583 [2026-09-22T08:42:03.785302+00:00] [ INFO] DGX check complete: ok=True
+153584 [2026-09-22T08:42:09.127197+00:00] [ INFO] Running engine-wedge check
+153585 [2026-09-22T08:42:09.515391+00:00] [ INFO] Engine-wedge check: 2/2 streaming ok
+153586 [2026-09-22T08:42:09.925298+00:00] [ INFO] Notification saved to file (no native notifier available): HSCC: inference engine wedged
+--- context AFTER (first 25 lines) ---
+153588 [2026-09-22T08:42:10.554287+00:00] [ INFO] Daemon loop stopped
+153589 [2026-09-22T08:47:04.083429+00:00] [ INFO] Running DGX check
+153590 [2026-09-22T08:47:05.262863+00:00] [ INFO] DGX check complete: ok=True
+153591 [2026-09-22T08:47:05.263266+00:00] [ INFO] Running gateway check
+153592 [2026-09-22T08:47:05.290846+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+153593 [2026-09-22T08:47:05.291094+00:00] [ INFO] Running local services check
+153594 [2026-09-22T08:47:05.566291+00:00] [ INFO] Local check: ok=True, message=informational: docker, ollama, hscc_daemon not available
+153595 [2026-09-22T08:47:05.566669+00:00] [ INFO] Running heartbeat check
+153596 [2026-09-22T08:47:05.583229+00:00] [ INFO] Heartbeat: fleet={'total': 7, 'idle': 7, 'working': 0, 'failed': 0, 'enabled': 7, 'disabled': 0}
+153597 [2026-09-22T08:47:05.583542+00:00] [ INFO] Running NAS check
+153598 [2026-09-22T08:47:05.607650+00:00] [ INFO] NAS check: ok=True /Volumes/NAS is an NFS mount
+153599 [2026-09-22T08:51:53.155808+00:00] [ INFO] Running DGX check
+153600 [2026-09-22T08:51:54.363220+00:00] [ INFO] DGX check complete: ok=True
+153601 [2026-09-22T10:41:24.537322+00:00] [ WARN] Autodown PR/CI interlock unevaluable: PR/CI source unreachable — treating as active (fail-safe)
+153602 [2026-09-23T10:50:15.637981+00:00] [ INFO] start-daemon invoked (service-supervised mode)
+153603 [2026-09-23T10:50:15.656598+00:00] [ INFO] Daemon loop started
+153604 [2026-09-23T10:50:15.680245+00:00] [ INFO] Running DGX check
+153605 [2026-09-23T10:50:15.680372+00:00] [ INFO] Started dgx check thread (interval=60s)
+153606 [2026-09-23T10:50:15.681042+00:00] [ INFO] Running gateway check
+153607 [2026-09-23T10:50:15.681232+00:00] [ INFO] Started gateway check thread (interval=60s)
+153608 [2026-09-23T10:50:15.691544+00:00] [ INFO] Running local services check
+153609 [2026-09-23T10:50:15.697444+00:00] [ INFO] Started local check thread (interval=60s)
+153610 [2026-09-23T10:50:15.700659+00:00] [ INFO] Started heartbeat check thread (interval=300s)
+153611 [2026-09-23T10:50:15.701267+00:00] [ INFO] Running heartbeat check
+153612 [2026-09-23T10:50:15.702188+00:00] [ INFO] Started nas check thread (interval=900s)
+
+#### signal-15 at line 161929 -> [2026-09-23T16:32:33.958770+00:00] [ INFO] Received signal 15, stopping...
+--- context BEFORE (last 25 lines) ---
+161904 [2026-09-23T16:31:15.034807+00:00] [ INFO] Workers check: 2/2 online
+161905 [2026-09-23T16:31:36.873131+00:00] [ INFO] Running PipelineWatchdog
+161906 [2026-09-23T16:31:36.874201+00:00] [ INFO] Running DGX check
+161907 [2026-09-23T16:31:38.805853+00:00] [ INFO] DGX check complete: ok=True
+161908 [2026-09-23T16:31:38.806432+00:00] [ INFO] Running gateway check
+161909 [2026-09-23T16:31:38.912283+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+161910 [2026-09-23T16:31:38.915441+00:00] [ INFO] Watchdog: pipeline healthy
+161911 [2026-09-23T16:31:40.310061+00:00] [ INFO] Dispatcher-wedge check: OK — total_running=0, spawnable=[], roomy=[]
+161912 [2026-09-23T16:31:43.500106+00:00] [ INFO] Running local services check
+161913 [2026-09-23T16:31:45.127802+00:00] [ INFO] Local check: ok=True, message=informational: docker, ollama, hscc_daemon not available
+161914 [2026-09-23T16:31:50.753973+00:00] [ INFO] Running gateway check
+161915 [2026-09-23T16:31:50.861666+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+161916 [2026-09-23T16:31:56.414981+00:00] [ INFO] Running engine-wedge check
+161917 [2026-09-23T16:31:56.814986+00:00] [ INFO] Engine-wedge check: 2/2 streaming ok
+161918 [2026-09-23T16:32:05.228923+00:00] [ INFO] Running DGX check
+161919 [2026-09-23T16:32:07.599724+00:00] [ INFO] DGX check complete: ok=True
+161920 [2026-09-23T16:32:09.110971+00:00] [ INFO] Running PipelineWatchdog
+161921 [2026-09-23T16:32:09.111968+00:00] [ INFO] Running DGX check
+161922 [2026-09-23T16:32:11.226149+00:00] [ INFO] DGX check complete: ok=True
+161923 [2026-09-23T16:32:11.227457+00:00] [ INFO] Running gateway check
+161924 [2026-09-23T16:32:11.362299+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+161925 [2026-09-23T16:32:11.363918+00:00] [ INFO] Watchdog: pipeline healthy
+161926 [2026-09-23T16:32:14.027948+00:00] [ INFO] Running proxy check
+161927 [2026-09-23T16:32:15.174063+00:00] [ INFO] Running workers check
+161928 [2026-09-23T16:32:15.180217+00:00] [ INFO] Workers check: 2/2 online
+--- context AFTER (first 25 lines) ---
+161930 [2026-09-23T16:32:33.959325+00:00] [ INFO] Daemon loop stopped
+161931 [2026-09-23T17:49:22.421930+00:00] [ INFO] Running DGX check
+161932 [2026-09-23T17:49:24.108208+00:00] [ INFO] DGX check complete: ok=True
+161933 [2026-09-23T17:49:24.221949+00:00] [ INFO] Running DGX check
+161934 [2026-09-23T17:49:25.371887+00:00] [ INFO] DGX check complete: ok=False
+161935 [2026-09-23T21:08:11.753749+00:00] [ INFO] start-daemon invoked (service-supervised mode)
+161936 [2026-09-23T21:08:11.776426+00:00] [ INFO] Daemon loop started
+161937 [2026-09-23T21:08:11.804922+00:00] [ INFO] Running DGX check
+161938 [2026-09-23T21:08:11.805065+00:00] [ INFO] Started dgx check thread (interval=60s)
+161939 [2026-09-23T21:08:11.805830+00:00] [ INFO] Running gateway check
+161940 [2026-09-23T21:08:11.805907+00:00] [ INFO] Started gateway check thread (interval=60s)
+161941 [2026-09-23T21:08:11.818672+00:00] [ INFO] Started local check thread (interval=60s)
+161942 [2026-09-23T21:08:11.819092+00:00] [ INFO] Running local services check
+161943 [2026-09-23T21:08:11.819836+00:00] [ INFO] Running heartbeat check
+161944 [2026-09-23T21:08:11.819919+00:00] [ INFO] Started heartbeat check thread (interval=300s)
+161945 [2026-09-23T21:08:11.825744+00:00] [ INFO] Started nas check thread (interval=900s)
+161946 [2026-09-23T21:08:11.826436+00:00] [ INFO] Running NAS check
+161947 [2026-09-23T21:08:11.827671+00:00] [ INFO] Started idle check thread (interval=300s)
+161948 [2026-09-23T21:08:11.828193+00:00] [ INFO] Running idle monitor check
+161949 [2026-09-23T21:08:11.829966+00:00] [ INFO] Running workers check
+161950 [2026-09-23T21:08:11.831276+00:00] [ INFO] Started workers check thread (interval=60s)
+161951 [2026-09-23T21:08:11.832621+00:00] [ INFO] Idle monitor: 7 idle, 0 with heartbeat
+161952 [2026-09-23T21:08:11.835802+00:00] [ INFO] Running proxy check
+161953 [2026-09-23T21:08:11.837841+00:00] [ INFO] Started proxy check thread (interval=60s)
+161954 [2026-09-23T21:08:11.845467+00:00] [ INFO] Running engine-wedge check
+
+#### signal-15 at line 181695 -> [2026-09-24T10:42:19.311491+00:00] [ INFO] Received signal 15, stopping...
+--- context BEFORE (last 25 lines) ---
+181670 [2026-09-24T10:41:21.690116+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+181671 [2026-09-24T10:41:21.692354+00:00] [ INFO] Watchdog: pipeline healthy
+181672 [2026-09-24T10:41:24.655476+00:00] [ INFO] Notification saved to file (no native notifier available): HSCC: inference engine wedged
+181673 [2026-09-24T10:41:28.800132+00:00] [ INFO] Engine-wedge recovery: unit 'family-reasoning-DeepSeek-V4-Flash-0731-247-8000' streak=6 — resolved container_id=None
+181674 [2026-09-24T10:41:28.801077+00:00] [ INFO] Engine-wedge recovery: unit 'family-reasoning-DeepSeek-V4-Flash-0731-247-8000' — no container_id resolved; no stop issued (fail-safe)
+181675 [2026-09-24T10:41:40.439545+00:00] [ INFO] Notification saved to file (no native notifier available): HSCC: inference engine wedged
+181676 [2026-09-24T10:41:43.798028+00:00] [ INFO] Running proxy check
+181677 [2026-09-24T10:41:45.206614+00:00] [ INFO] Running local services check
+181678 [2026-09-24T10:41:45.253258+00:00] [ INFO] Running workers check
+181679 [2026-09-24T10:41:45.263574+00:00] [ INFO] Workers check: 2/2 online
+181680 [2026-09-24T10:41:46.835782+00:00] [ INFO] Local check: ok=True, message=informational: docker, ollama, hscc_daemon not available
+181681 [2026-09-24T10:41:51.889548+00:00] [ INFO] Running PipelineWatchdog
+181682 [2026-09-24T10:41:51.891093+00:00] [ INFO] Running DGX check
+181683 [2026-09-24T10:41:52.501793+00:00] [ INFO] Running DGX check
+181684 [2026-09-24T10:41:54.334467+00:00] [ INFO] DGX check complete: ok=True
+181685 [2026-09-24T10:41:54.335053+00:00] [ INFO] Running gateway check
+181686 [2026-09-24T10:41:54.449325+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+181687 [2026-09-24T10:41:54.452988+00:00] [ INFO] Watchdog: pipeline healthy
+181688 [2026-09-24T10:41:54.644259+00:00] [ INFO] DGX check complete: ok=True
+181689 [2026-09-24T10:41:56.220874+00:00] [ INFO] Notification saved to file (no native notifier available): HSCC: inference engine wedged
+181690 [2026-09-24T10:41:59.837998+00:00] [ INFO] Running engine-wedge check
+181691 [2026-09-24T10:42:10.574015+00:00] [ INFO] Dispatcher-wedge check: OK — total_running=3, spawnable=['hscc'], roomy=[]
+181692 [2026-09-24T10:42:11.959766+00:00] [ INFO] Notification saved to file (no native notifier available): HSCC: inference engine wedged
+181693 [2026-09-24T10:42:16.864071+00:00] [ INFO] Running gateway check
+181694 [2026-09-24T10:42:16.966571+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+--- context AFTER (first 25 lines) ---
+181696 [2026-09-24T10:42:19.312019+00:00] [ INFO] Daemon loop stopped
+181697 [2026-09-24T13:26:15.119748+00:00] [ INFO] Running DGX check
+181698 [2026-09-24T13:26:16.293947+00:00] [ INFO] DGX check complete: ok=True
+181699 [2026-09-24T17:10:16.936233+00:00] [ INFO] Running DGX check
+181700 [2026-09-24T17:10:18.089972+00:00] [ INFO] DGX check complete: ok=True
+181701 [2026-09-24T17:10:50.672891+00:00] [ INFO] Running DGX check
+181702 [2026-09-24T17:10:51.822534+00:00] [ INFO] DGX check complete: ok=True
+181703 [2026-09-25T04:12:24.514447+00:00] [ INFO] Running DGX check
+181704 [2026-09-25T04:12:25.740680+00:00] [ INFO] DGX check complete: ok=False
+181705 [2026-09-25T04:12:25.741360+00:00] [ INFO] Running gateway check
+181706 [2026-09-25T04:12:25.818745+00:00] [ INFO] Gateway check: ok=False (job=True vllm=False mux=True) all 40 multiplex profile(s) served
+181707 [2026-09-25T04:12:25.819092+00:00] [ INFO] Running local services check
+181708 [2026-09-25T04:12:26.298512+00:00] [ INFO] Local check: ok=True, message=informational: ollama, hscc_daemon not available
+181709 [2026-09-25T04:12:26.298939+00:00] [ INFO] Running heartbeat check
+181710 [2026-09-25T04:12:26.319516+00:00] [ INFO] Heartbeat: fleet={'total': 7, 'idle': 7, 'working': 0, 'failed': 0, 'enabled': 7, 'disabled': 0}
+181711 [2026-09-25T04:12:26.319951+00:00] [ INFO] Running NAS check
+181712 [2026-09-25T04:12:26.340443+00:00] [ INFO] NAS check: ok=True /Volumes/NAS is an NFS mount
+181713 [2026-09-25T04:12:26.340734+00:00] [ INFO] Running PipelineWatchdog
+181714 [2026-09-25T04:12:26.340821+00:00] [ INFO] Running DGX check
+181715 [2026-09-25T04:12:27.530583+00:00] [ INFO] DGX check complete: ok=False
+181716 [2026-09-25T04:12:27.530698+00:00] [ INFO] Running gateway check
+181717 [2026-09-25T04:12:27.581596+00:00] [ INFO] Gateway check: ok=False (job=True vllm=False mux=True) all 40 multiplex profile(s) served
+181718 [2026-09-25T04:12:27.581714+00:00] [ INFO] Watchdog: attempting vLLM auto-restart via sparkrun
+181719 [2026-09-25T04:12:27.581746+00:00] [ INFO] Restarting vLLM via sparkrun...
+181720 [2026-09-25T04:12:27.726616+00:00] [ WARN] vLLM stop failed: Error: Must specify TARGET or --all.
+
+#### signal-15 at line 182011 -> [2026-09-25T06:42:59.024565+00:00] [ INFO] Received signal 15, stopping...
+--- context BEFORE (last 25 lines) ---
+181986 [2026-09-25T06:42:04.221498+00:00] [ INFO] Running PipelineWatchdog
+181987 [2026-09-25T06:42:04.222491+00:00] [ INFO] Running DGX check
+181988 [2026-09-25T06:42:05.397588+00:00] [ INFO] DGX check complete: ok=True
+181989 [2026-09-25T06:42:05.397695+00:00] [ INFO] Running gateway check
+181990 [2026-09-25T06:42:05.422155+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+181991 [2026-09-25T06:42:05.422638+00:00] [ INFO] Watchdog: pipeline healthy
+181992 [2026-09-25T06:42:21.097945+00:00] [ INFO] Running proxy check
+181993 [2026-09-25T06:42:21.518601+00:00] [ INFO] Running gateway check
+181994 [2026-09-25T06:42:21.573278+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+181995 [2026-09-25T06:42:21.583792+00:00] [ INFO] Dispatcher-wedge check: OK — total_running=2, spawnable=[], roomy=[]
+181996 [2026-09-25T06:42:22.766373+00:00] [ INFO] Running workers check
+181997 [2026-09-25T06:42:22.776982+00:00] [ INFO] Workers check: 2/2 online
+181998 [2026-09-25T06:42:24.666023+00:00] [ INFO] Running local services check
+181999 [2026-09-25T06:42:25.088796+00:00] [ INFO] Local check: ok=True, message=informational: ollama, hscc_daemon not available
+182000 [2026-09-25T06:42:31.261814+00:00] [ INFO] Running DGX check
+182001 [2026-09-25T06:42:32.433456+00:00] [ INFO] DGX check complete: ok=True
+182002 [2026-09-25T06:42:35.430211+00:00] [ INFO] Running PipelineWatchdog
+182003 [2026-09-25T06:42:35.431158+00:00] [ INFO] Running DGX check
+182004 [2026-09-25T06:42:36.591699+00:00] [ INFO] DGX check complete: ok=True
+182005 [2026-09-25T06:42:36.591804+00:00] [ INFO] Running gateway check
+182006 [2026-09-25T06:42:36.616609+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+182007 [2026-09-25T06:42:36.617040+00:00] [ INFO] Watchdog: pipeline healthy
+182008 [2026-09-25T06:42:42.935840+00:00] [ INFO] Running engine-wedge check
+182009 [2026-09-25T06:42:53.086364+00:00] [ERROR] Engine-wedge check: WEDGED unit(s) detected: family-reasoning-DeepSeek-V4-Flash-0731-247-8000
+182010 [2026-09-25T06:42:53.090550+00:00] [ INFO] Engine-wedge check: 1/2 streaming ok, WEDGED: family-reasoning-DeepSeek-V4-Flash-0731-247-8000
+--- context AFTER (first 25 lines) ---
+182012 [2026-09-25T06:42:59.024842+00:00] [ INFO] Daemon loop stopped
+182013 [2026-09-25T06:44:15.420626+00:00] [ INFO] Daemon starting
+182014 [2026-09-25T06:44:15.424842+00:00] [ INFO] Daemon loop started
+182015 [2026-09-25T06:44:15.426578+00:00] [ INFO] Started dgx check thread (interval=60s)
+182016 [2026-09-25T06:44:15.426619+00:00] [ INFO] Running DGX check
+182017 [2026-09-25T06:44:15.426735+00:00] [ INFO] Started gateway check thread (interval=60s)
+182018 [2026-09-25T06:44:15.426759+00:00] [ INFO] Running gateway check
+182019 [2026-09-25T06:44:15.429395+00:00] [ INFO] Started local check thread (interval=60s)
+182020 [2026-09-25T06:44:15.429685+00:00] [ INFO] Running local services check
+182021 [2026-09-25T06:44:15.429875+00:00] [ INFO] Running heartbeat check
+182022 [2026-09-25T06:44:15.429960+00:00] [ INFO] Started heartbeat check thread (interval=300s)
+182023 [2026-09-25T06:44:15.431577+00:00] [ INFO] Running NAS check
+182024 [2026-09-25T06:44:15.431630+00:00] [ INFO] Started nas check thread (interval=900s)
+182025 [2026-09-25T06:44:15.431974+00:00] [ INFO] Running idle monitor check
+182026 [2026-09-25T06:44:15.432008+00:00] [ INFO] Started idle check thread (interval=300s)
+182027 [2026-09-25T06:44:15.432904+00:00] [ INFO] Idle monitor: 7 idle, 0 with heartbeat
+182028 [2026-09-25T06:44:15.435293+00:00] [ INFO] Running workers check
+182029 [2026-09-25T06:44:15.435618+00:00] [ INFO] Started workers check thread (interval=60s)
+182030 [2026-09-25T06:44:15.436056+00:00] [ INFO] Started proxy check thread (interval=60s)
+182031 [2026-09-25T06:44:15.436397+00:00] [ INFO] Running proxy check
+182032 [2026-09-25T06:44:15.436664+00:00] [ INFO] Running engine-wedge check
+182033 [2026-09-25T06:44:15.436694+00:00] [ INFO] Started engine_wedge check thread (interval=60s)
+182034 [2026-09-25T06:44:15.437204+00:00] [ INFO] Started dispatcher check thread (interval=60s)
+182035 [2026-09-25T06:44:15.437562+00:00] [ INFO] Started autodown thread (interval=30s)
+182036 [2026-09-25T06:44:15.437941+00:00] [ INFO] Started engine-wedge recovery thread (interval=60s)
+
+#### signal-15 at line 182331 -> [2026-09-25T06:55:41.909013+00:00] [ INFO] Received signal 15, stopping...
+--- context BEFORE (last 25 lines) ---
+182306 [2026-09-25T06:54:39.814415+00:00] [ INFO] Running DGX check
+182307 [2026-09-25T06:54:40.982354+00:00] [ INFO] DGX check complete: ok=True
+182308 [2026-09-25T06:54:40.982437+00:00] [ INFO] Running gateway check
+182309 [2026-09-25T06:54:41.003555+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+182310 [2026-09-25T06:54:41.004049+00:00] [ INFO] Watchdog: pipeline healthy
+182311 [2026-09-25T06:55:06.716450+00:00] [ INFO] Running engine-wedge check
+182312 [2026-09-25T06:55:11.061707+00:00] [ INFO] Running PipelineWatchdog
+182313 [2026-09-25T06:55:11.062599+00:00] [ INFO] Running DGX check
+182314 [2026-09-25T06:55:12.262146+00:00] [ INFO] DGX check complete: ok=True
+182315 [2026-09-25T06:55:12.262253+00:00] [ INFO] Running gateway check
+182316 [2026-09-25T06:55:12.285401+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+182317 [2026-09-25T06:55:12.285853+00:00] [ INFO] Watchdog: pipeline healthy
+182318 [2026-09-25T06:55:15.628174+00:00] [ INFO] Running proxy check
+182319 [2026-09-25T06:55:15.632798+00:00] [ INFO] Running workers check
+182320 [2026-09-25T06:55:15.642121+00:00] [ INFO] Workers check: 2/2 online
+182321 [2026-09-25T06:55:16.073493+00:00] [ INFO] Running gateway check
+182322 [2026-09-25T06:55:16.126013+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+182323 [2026-09-25T06:55:16.135379+00:00] [ INFO] Dispatcher-wedge check: OK — total_running=3, spawnable=['hscc'], roomy=[]
+182324 [2026-09-25T06:55:19.846287+00:00] [ INFO] Running local services check
+182325 [2026-09-25T06:55:20.214504+00:00] [ INFO] Local check: ok=True, message=informational: ollama, hscc_daemon not available
+182326 [2026-09-25T06:55:26.780124+00:00] [ERROR] Engine-wedge check: WEDGED unit(s) detected: family-reasoning-DeepSeek-V4-Flash-0731-247-8000
+182327 [2026-09-25T06:55:26.780536+00:00] [ INFO] Engine-wedge check: 0/2 streaming ok, 1 loading/checking, WEDGED: family-reasoning-DeepSeek-V4-Flash-0731-247-8000
+182328 [2026-09-25T06:55:28.493762+00:00] [ INFO] Running DGX check
+182329 [2026-09-25T06:55:29.605034+00:00] [ INFO] DGX check complete: ok=True
+182330 [2026-09-25T06:55:32.328808+00:00] [ INFO] macOS notification sent: HSCC: inference engine wedged
+--- context AFTER (first 25 lines) ---
+182332 [2026-09-25T06:55:41.909772+00:00] [ INFO] Daemon loop stopped
+182333 [2026-09-25T07:57:34.664585+00:00] [ INFO] macOS notification sent: HSCC deliver-fix
+182334 [2026-09-25T08:48:30.221683+00:00] [ INFO] Daemon starting
+182335 [2026-09-25T08:48:30.228466+00:00] [ INFO] Daemon loop started
+182336 [2026-09-25T08:48:30.233827+00:00] [ INFO] Started dgx check thread (interval=60s)
+182337 [2026-09-25T08:48:30.233894+00:00] [ INFO] Running DGX check
+182338 [2026-09-25T08:48:30.233963+00:00] [ INFO] Running gateway check
+182339 [2026-09-25T08:48:30.233981+00:00] [ INFO] Started gateway check thread (interval=60s)
+182340 [2026-09-25T08:48:30.235088+00:00] [ INFO] Running local services check
+182341 [2026-09-25T08:48:30.235147+00:00] [ INFO] Started local check thread (interval=60s)
+182342 [2026-09-25T08:48:30.236631+00:00] [ INFO] Running heartbeat check
+182343 [2026-09-25T08:48:30.236774+00:00] [ INFO] Started heartbeat check thread (interval=300s)
+182344 [2026-09-25T08:48:30.237168+00:00] [ INFO] Running NAS check
+182345 [2026-09-25T08:48:30.237512+00:00] [ INFO] Started nas check thread (interval=900s)
+182346 [2026-09-25T08:48:30.237777+00:00] [ INFO] Running idle monitor check
+182347 [2026-09-25T08:48:30.237806+00:00] [ INFO] Started idle check thread (interval=300s)
+182348 [2026-09-25T08:48:30.238079+00:00] [ INFO] Running workers check
+182349 [2026-09-25T08:48:30.238110+00:00] [ INFO] Started workers check thread (interval=60s)
+182350 [2026-09-25T08:48:30.238238+00:00] [ INFO] Idle monitor: 7 idle, 0 with heartbeat
+182351 [2026-09-25T08:48:30.238507+00:00] [ INFO] Started proxy check thread (interval=60s)
+182352 [2026-09-25T08:48:30.240684+00:00] [ INFO] Running proxy check
+182353 [2026-09-25T08:48:30.241606+00:00] [ INFO] Running engine-wedge check
+182354 [2026-09-25T08:48:30.242040+00:00] [ INFO] Started engine_wedge check thread (interval=60s)
+182355 [2026-09-25T08:48:30.242339+00:00] [ INFO] Started dispatcher check thread (interval=60s)
+182356 [2026-09-25T08:48:30.242981+00:00] [ INFO] Started autodown thread (interval=30s)
+
+#### signal-15 at line 182383 -> [2026-09-25T08:49:10.477547+00:00] [ INFO] Received signal 15, stopping...
+--- context BEFORE (last 25 lines) ---
+182358 [2026-09-25T08:48:30.244028+00:00] [ INFO] Started dispatcher-wedge recovery thread (interval=60s)
+182359 [2026-09-25T08:48:30.244348+00:00] [ INFO] Engine-wedge check: 0/2 streaming ok, 2 loading/checking
+182360 [2026-09-25T08:48:30.244451+00:00] [ INFO] Running PipelineWatchdog
+182361 [2026-09-25T08:48:30.244500+00:00] [ INFO] Started watchdog thread (interval=30s)
+182362 [2026-09-25T08:48:30.248423+00:00] [ INFO] Running DGX check
+182363 [2026-09-25T08:48:30.248737+00:00] [ INFO] Started trigger engine thread (interval=15s)
+182364 [2026-09-25T08:48:30.250224+00:00] [ INFO] All threads started, daemon loop running (polling mode)
+182365 [2026-09-25T08:48:30.259937+00:00] [ INFO] Workers check: 2/2 online
+182366 [2026-09-25T08:48:30.262011+00:00] [ INFO] Heartbeat: fleet={'total': 7, 'idle': 7, 'working': 0, 'failed': 0, 'enabled': 7, 'disabled': 0}
+182367 [2026-09-25T08:48:30.263219+00:00] [ INFO] NAS check: ok=True /Volumes/NAS is an NFS mount
+182368 [2026-09-25T08:48:30.285392+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+182369 [2026-09-25T08:48:30.322590+00:00] [ INFO] Dispatcher-wedge check: OK — total_running=2, spawnable=[], roomy=[]
+182370 [2026-09-25T08:48:30.657613+00:00] [ INFO] Local check: ok=True, message=informational: ollama, hscc_daemon not available
+182371 [2026-09-25T08:48:31.632375+00:00] [ INFO] DGX check complete: ok=True
+182372 [2026-09-25T08:48:31.632462+00:00] [ INFO] Running gateway check
+182373 [2026-09-25T08:48:31.633293+00:00] [ INFO] DGX check complete: ok=True
+182374 [2026-09-25T08:48:31.654875+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+182375 [2026-09-25T08:48:31.656171+00:00] [ INFO] Watchdog: pipeline healthy
+182376 [2026-09-25T08:49:01.803253+00:00] [ INFO] Running PipelineWatchdog
+182377 [2026-09-25T08:49:01.803406+00:00] [ INFO] Running DGX check
+182378 [2026-09-25T08:49:02.873043+00:00] [ INFO] DGX check complete: ok=True
+182379 [2026-09-25T08:49:02.873132+00:00] [ INFO] Running gateway check
+182380 [2026-09-25T08:49:02.892843+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+182381 [2026-09-25T08:49:02.893315+00:00] [ INFO] Watchdog: pipeline healthy
+182382 [2026-09-25T08:49:10.477209+00:00] [ INFO] Daemon stop requested
+--- context AFTER (first 25 lines) ---
+182384 [2026-09-25T08:49:10.477674+00:00] [ INFO] Daemon loop stopped
+182385 [2026-09-25T09:09:00.632654+00:00] [ INFO] Daemon starting
+182386 [2026-09-25T09:09:00.640114+00:00] [ INFO] Daemon loop started
+182387 [2026-09-25T09:09:00.645590+00:00] [ INFO] Started dgx check thread (interval=60s)
+182388 [2026-09-25T09:09:00.645661+00:00] [ INFO] Running DGX check
+182389 [2026-09-25T09:09:00.645763+00:00] [ INFO] Running gateway check
+182390 [2026-09-25T09:09:00.645781+00:00] [ INFO] Started gateway check thread (interval=60s)
+182391 [2026-09-25T09:09:00.647644+00:00] [ INFO] Running local services check
+182392 [2026-09-25T09:09:00.647711+00:00] [ INFO] Started local check thread (interval=60s)
+182393 [2026-09-25T09:09:00.648589+00:00] [ INFO] Running heartbeat check
+182394 [2026-09-25T09:09:00.648844+00:00] [ INFO] Started heartbeat check thread (interval=300s)
+182395 [2026-09-25T09:09:00.649057+00:00] [ INFO] Running NAS check
+182396 [2026-09-25T09:09:00.649076+00:00] [ INFO] Started nas check thread (interval=900s)
+182397 [2026-09-25T09:09:00.649675+00:00] [ INFO] Started idle check thread (interval=300s)
+182398 [2026-09-25T09:09:00.649764+00:00] [ INFO] Running idle monitor check
+182399 [2026-09-25T09:09:00.649837+00:00] [ INFO] Running workers check
+182400 [2026-09-25T09:09:00.649862+00:00] [ INFO] Started workers check thread (interval=60s)
+182401 [2026-09-25T09:09:00.650015+00:00] [ INFO] Idle monitor: 7 idle, 0 with heartbeat
+182402 [2026-09-25T09:09:00.650329+00:00] [ INFO] Running proxy check
+182403 [2026-09-25T09:09:00.650470+00:00] [ INFO] Started proxy check thread (interval=60s)
+182404 [2026-09-25T09:09:00.653789+00:00] [ INFO] Running engine-wedge check
+182405 [2026-09-25T09:09:00.653875+00:00] [ INFO] Started engine_wedge check thread (interval=60s)
+182406 [2026-09-25T09:09:00.654302+00:00] [ INFO] Started dispatcher check thread (interval=60s)
+182407 [2026-09-25T09:09:00.654482+00:00] [ INFO] Started autodown thread (interval=30s)
+182408 [2026-09-25T09:09:00.654848+00:00] [ INFO] Started engine-wedge recovery thread (interval=60s)
+
+#### signal-15 at line 182427 -> [2026-09-25T09:09:09.939114+00:00] [ INFO] Received signal 15, stopping...
+--- context BEFORE (last 25 lines) ---
+182402 [2026-09-25T09:09:00.650329+00:00] [ INFO] Running proxy check
+182403 [2026-09-25T09:09:00.650470+00:00] [ INFO] Started proxy check thread (interval=60s)
+182404 [2026-09-25T09:09:00.653789+00:00] [ INFO] Running engine-wedge check
+182405 [2026-09-25T09:09:00.653875+00:00] [ INFO] Started engine_wedge check thread (interval=60s)
+182406 [2026-09-25T09:09:00.654302+00:00] [ INFO] Started dispatcher check thread (interval=60s)
+182407 [2026-09-25T09:09:00.654482+00:00] [ INFO] Started autodown thread (interval=30s)
+182408 [2026-09-25T09:09:00.654848+00:00] [ INFO] Started engine-wedge recovery thread (interval=60s)
+182409 [2026-09-25T09:09:00.655161+00:00] [ INFO] Started dispatcher-wedge recovery thread (interval=60s)
+182410 [2026-09-25T09:09:00.655760+00:00] [ INFO] Running PipelineWatchdog
+182411 [2026-09-25T09:09:00.655806+00:00] [ INFO] Started watchdog thread (interval=30s)
+182412 [2026-09-25T09:09:00.657827+00:00] [ INFO] Engine-wedge check: 0/2 streaming ok, 2 loading/checking
+182413 [2026-09-25T09:09:00.659101+00:00] [ INFO] Running DGX check
+182414 [2026-09-25T09:09:00.660288+00:00] [ INFO] Started trigger engine thread (interval=15s)
+182415 [2026-09-25T09:09:00.663046+00:00] [ INFO] All threads started, daemon loop running (polling mode)
+182416 [2026-09-25T09:09:00.666224+00:00] [ INFO] NAS check: ok=True /Volumes/NAS is an NFS mount
+182417 [2026-09-25T09:09:00.670033+00:00] [ INFO] Heartbeat: fleet={'total': 7, 'idle': 7, 'working': 0, 'failed': 0, 'enabled': 7, 'disabled': 0}
+182418 [2026-09-25T09:09:00.670573+00:00] [ INFO] Workers check: 2/2 online
+182419 [2026-09-25T09:09:00.699010+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+182420 [2026-09-25T09:09:00.739078+00:00] [ INFO] Dispatcher-wedge check: OK — total_running=2, spawnable=[], roomy=[]
+182421 [2026-09-25T09:09:00.989467+00:00] [ INFO] Local check: ok=True, message=informational: ollama not available
+182422 [2026-09-25T09:09:01.755079+00:00] [ INFO] DGX check complete: ok=True
+182423 [2026-09-25T09:09:01.755132+00:00] [ INFO] DGX check complete: ok=True
+182424 [2026-09-25T09:09:01.755224+00:00] [ INFO] Running gateway check
+182425 [2026-09-25T09:09:01.774546+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+182426 [2026-09-25T09:09:01.774901+00:00] [ INFO] Watchdog: pipeline healthy
+--- context AFTER (first 25 lines) ---
+182428 [2026-09-25T09:09:09.940133+00:00] [ INFO] Daemon loop stopped
+182429 [2026-09-25T09:10:52.210967+00:00] [ INFO] Daemon starting
+182430 [2026-09-25T09:10:52.218494+00:00] [ INFO] Daemon loop started
+182431 [2026-09-25T09:10:52.223660+00:00] [ INFO] Started dgx check thread (interval=60s)
+182432 [2026-09-25T09:10:52.223709+00:00] [ INFO] Running DGX check
+182433 [2026-09-25T09:10:52.223815+00:00] [ INFO] Running gateway check
+182434 [2026-09-25T09:10:52.223830+00:00] [ INFO] Started gateway check thread (interval=60s)
+182435 [2026-09-25T09:10:52.225001+00:00] [ INFO] Running local services check
+182436 [2026-09-25T09:10:52.225704+00:00] [ INFO] Started local check thread (interval=60s)
+182437 [2026-09-25T09:10:52.227054+00:00] [ INFO] Started heartbeat check thread (interval=300s)
+182438 [2026-09-25T09:10:52.227225+00:00] [ INFO] Running heartbeat check
+182439 [2026-09-25T09:10:52.227320+00:00] [ INFO] Running NAS check
+182440 [2026-09-25T09:10:52.227353+00:00] [ INFO] Started nas check thread (interval=900s)
+182441 [2026-09-25T09:10:52.227730+00:00] [ INFO] Running idle monitor check
+182442 [2026-09-25T09:10:52.227782+00:00] [ INFO] Started idle check thread (interval=300s)
+182443 [2026-09-25T09:10:52.227949+00:00] [ INFO] Idle monitor: 7 idle, 0 with heartbeat
+182444 [2026-09-25T09:10:52.228138+00:00] [ INFO] Running workers check
+182445 [2026-09-25T09:10:52.228255+00:00] [ INFO] Started workers check thread (interval=60s)
+182446 [2026-09-25T09:10:52.230892+00:00] [ INFO] Running proxy check
+182447 [2026-09-25T09:10:52.230991+00:00] [ INFO] Started proxy check thread (interval=60s)
+182448 [2026-09-25T09:10:52.231311+00:00] [ INFO] Running engine-wedge check
+182449 [2026-09-25T09:10:52.231435+00:00] [ INFO] Started engine_wedge check thread (interval=60s)
+182450 [2026-09-25T09:10:52.231855+00:00] [ INFO] Started dispatcher check thread (interval=60s)
+182451 [2026-09-25T09:10:52.232233+00:00] [ INFO] Started autodown thread (interval=30s)
+182452 [2026-09-25T09:10:52.234883+00:00] [ INFO] Started engine-wedge recovery thread (interval=60s)
+
+#### signal-15 at line 183011 -> [2026-09-25T09:22:42.885912+00:00] [ INFO] Received signal 15, stopping...
+--- context BEFORE (last 25 lines) ---
+182986 [2026-09-25T09:21:56.819065+00:00] [ INFO] Running local services check
+182987 [2026-09-25T09:21:57.126568+00:00] [ INFO] Local check: ok=True, message=informational: ollama, hscc_daemon not available
+182988 [2026-09-25T09:21:57.742472+00:00] [ INFO] DGX check complete: ok=True
+182989 [2026-09-25T09:21:58.170669+00:00] [ INFO] Running engine-wedge check
+182990 [2026-09-25T09:21:58.539703+00:00] [ INFO] Engine-wedge check: 2/2 streaming ok
+182991 [2026-09-25T09:22:06.318850+00:00] [ INFO] Running DGX check
+182992 [2026-09-25T09:22:07.561099+00:00] [ INFO] DGX check complete: ok=True
+182993 [2026-09-25T09:22:09.086931+00:00] [ INFO] Running PipelineWatchdog
+182994 [2026-09-25T09:22:09.088387+00:00] [ INFO] Running DGX check
+182995 [2026-09-25T09:22:10.301509+00:00] [ INFO] DGX check complete: ok=True
+182996 [2026-09-25T09:22:10.301599+00:00] [ INFO] Running gateway check
+182997 [2026-09-25T09:22:10.323862+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+182998 [2026-09-25T09:22:10.324432+00:00] [ INFO] Watchdog: pipeline healthy
+182999 [2026-09-25T09:22:21.406471+00:00] [ INFO] Running PipelineWatchdog
+183000 [2026-09-25T09:22:21.406639+00:00] [ INFO] Running DGX check
+183001 [2026-09-25T09:22:22.387337+00:00] [ INFO] DGX check complete: ok=True
+183002 [2026-09-25T09:22:22.387406+00:00] [ INFO] Running gateway check
+183003 [2026-09-25T09:22:22.404703+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+183004 [2026-09-25T09:22:22.405161+00:00] [ INFO] Watchdog: pipeline healthy
+183005 [2026-09-25T09:22:40.471431+00:00] [ INFO] Running PipelineWatchdog
+183006 [2026-09-25T09:22:40.472728+00:00] [ INFO] Running DGX check
+183007 [2026-09-25T09:22:41.606465+00:00] [ INFO] DGX check complete: ok=True
+183008 [2026-09-25T09:22:41.606554+00:00] [ INFO] Running gateway check
+183009 [2026-09-25T09:22:41.626898+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+183010 [2026-09-25T09:22:41.627423+00:00] [ INFO] Watchdog: pipeline healthy
+--- context AFTER (first 25 lines) ---
+183012 [2026-09-25T09:22:42.886849+00:00] [ INFO] Daemon loop stopped
+183013 [2026-09-25T09:22:52.553446+00:00] [ INFO] Running PipelineWatchdog
+183014 [2026-09-25T09:22:52.553635+00:00] [ INFO] Running DGX check
+183015 [2026-09-25T09:22:53.466839+00:00] [ INFO] Running proxy check
+183016 [2026-09-25T09:22:53.487028+00:00] [ INFO] Running workers check
+183017 [2026-09-25T09:22:53.494135+00:00] [ INFO] Workers check: 2/2 online
+183018 [2026-09-25T09:22:53.668203+00:00] [ INFO] DGX check complete: ok=True
+183019 [2026-09-25T09:22:53.668270+00:00] [ INFO] Running gateway check
+183020 [2026-09-25T09:22:53.692429+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+183021 [2026-09-25T09:22:53.693017+00:00] [ INFO] Watchdog: pipeline healthy
+183022 [2026-09-25T09:22:53.894714+00:00] [ INFO] Running gateway check
+183023 [2026-09-25T09:22:53.951359+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+183024 [2026-09-25T09:22:53.956127+00:00] [ INFO] Dispatcher-wedge check: OK — total_running=1, spawnable=[], roomy=[]
+183025 [2026-09-25T09:22:57.268142+00:00] [ INFO] Running local services check
+183026 [2026-09-25T09:22:57.610767+00:00] [ INFO] Local check: ok=True, message=informational: ollama not available
+183027 [2026-09-25T09:22:58.686488+00:00] [ INFO] Running engine-wedge check
+183028 [2026-09-25T09:22:59.004581+00:00] [ INFO] Engine-wedge check: 2/2 streaming ok
+183029 [2026-09-25T09:23:07.702548+00:00] [ INFO] Running DGX check
+183030 [2026-09-25T09:23:08.711721+00:00] [ INFO] DGX check complete: ok=True
+183031 [2026-09-25T09:23:23.842822+00:00] [ INFO] Running PipelineWatchdog
+183032 [2026-09-25T09:23:23.843840+00:00] [ INFO] Running DGX check
+183033 [2026-09-25T09:23:24.949773+00:00] [ INFO] DGX check complete: ok=True
+183034 [2026-09-25T09:23:24.949868+00:00] [ INFO] Running gateway check
+183035 [2026-09-25T09:23:24.972216+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+183036 [2026-09-25T09:23:24.972695+00:00] [ INFO] Watchdog: pipeline healthy
+
+#### signal-15 at line 186384 -> [2026-09-25T10:35:11.706687+00:00] [ INFO] Received signal 15, stopping...
+--- context BEFORE (last 25 lines) ---
+186359 [2026-09-25T10:34:45.898296+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+186360 [2026-09-25T10:34:45.898839+00:00] [ INFO] Watchdog: pipeline healthy
+186361 [2026-09-25T10:34:56.113342+00:00] [ INFO] Running idle monitor check
+186362 [2026-09-25T10:34:56.114313+00:00] [ INFO] Idle monitor: 7 idle, 0 with heartbeat
+186363 [2026-09-25T10:34:56.599361+00:00] [ INFO] Running heartbeat check
+186364 [2026-09-25T10:34:56.657898+00:00] [ INFO] Heartbeat: fleet={'total': 7, 'idle': 7, 'working': 0, 'failed': 0, 'enabled': 7, 'disabled': 0}
+186365 [2026-09-25T10:35:01.116935+00:00] [ INFO] Running PipelineWatchdog
+186366 [2026-09-25T10:35:01.117584+00:00] [ INFO] Running DGX check
+186367 [2026-09-25T10:35:01.713547+00:00] [ INFO] Running workers check
+186368 [2026-09-25T10:35:01.723829+00:00] [ INFO] Workers check: 2/2 online
+186369 [2026-09-25T10:35:01.794209+00:00] [ INFO] Running proxy check
+186370 [2026-09-25T10:35:01.853565+00:00] [ INFO] Running proxy check
+186371 [2026-09-25T10:35:01.863182+00:00] [ INFO] Running workers check
+186372 [2026-09-25T10:35:01.867131+00:00] [ INFO] Workers check: 2/2 online
+186373 [2026-09-25T10:35:02.336475+00:00] [ INFO] DGX check complete: ok=True
+186374 [2026-09-25T10:35:02.336538+00:00] [ INFO] Running gateway check
+186375 [2026-09-25T10:35:02.359225+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+186376 [2026-09-25T10:35:02.359746+00:00] [ INFO] Watchdog: pipeline healthy
+186377 [2026-09-25T10:35:04.414173+00:00] [ INFO] Running gateway check
+186378 [2026-09-25T10:35:04.473568+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+186379 [2026-09-25T10:35:04.479624+00:00] [ INFO] Dispatcher-wedge check: OK — total_running=0, spawnable=[], roomy=[]
+186380 [2026-09-25T10:35:04.979860+00:00] [ INFO] Dispatcher-wedge check: OK — total_running=0, spawnable=[], roomy=[]
+186381 [2026-09-25T10:35:05.568376+00:00] [ INFO] Running gateway check
+186382 [2026-09-25T10:35:05.621509+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+186383 [2026-09-25T10:35:11.706355+00:00] [ INFO] Daemon stop requested
+--- context AFTER (first 25 lines) ---
+186385 [2026-09-25T10:35:11.706937+00:00] [ INFO] Daemon loop stopped
+186386 [2026-09-25T10:35:14.847123+00:00] [ INFO] Daemon starting
+186387 [2026-09-25T10:35:14.855596+00:00] [ INFO] Daemon loop started
+186388 [2026-09-25T10:35:14.862298+00:00] [ INFO] Started dgx check thread (interval=60s)
+186389 [2026-09-25T10:35:14.862335+00:00] [ INFO] Running DGX check
+186390 [2026-09-25T10:35:14.862472+00:00] [ INFO] Started gateway check thread (interval=60s)
+186391 [2026-09-25T10:35:14.862496+00:00] [ INFO] Running gateway check
+186392 [2026-09-25T10:35:14.862661+00:00] [ INFO] Running local services check
+186393 [2026-09-25T10:35:14.862677+00:00] [ INFO] Started local check thread (interval=60s)
+186394 [2026-09-25T10:35:14.865922+00:00] [ INFO] Started heartbeat check thread (interval=300s)
+186395 [2026-09-25T10:35:14.866051+00:00] [ INFO] Running heartbeat check
+186396 [2026-09-25T10:35:14.866369+00:00] [ INFO] Started nas check thread (interval=900s)
+186397 [2026-09-25T10:35:14.866420+00:00] [ INFO] Running NAS check
+186398 [2026-09-25T10:35:14.866707+00:00] [ INFO] Running idle monitor check
+186399 [2026-09-25T10:35:14.866771+00:00] [ INFO] Started idle check thread (interval=300s)
+186400 [2026-09-25T10:35:14.867048+00:00] [ INFO] Running workers check
+186401 [2026-09-25T10:35:14.867131+00:00] [ INFO] Idle monitor: 7 idle, 0 with heartbeat
+186402 [2026-09-25T10:35:14.867159+00:00] [ INFO] Started workers check thread (interval=60s)
+186403 [2026-09-25T10:35:14.867566+00:00] [ INFO] Started proxy check thread (interval=60s)
+186404 [2026-09-25T10:35:14.869065+00:00] [ INFO] Running proxy check
+186405 [2026-09-25T10:35:14.869339+00:00] [ INFO] Running engine-wedge check
+186406 [2026-09-25T10:35:14.869649+00:00] [ INFO] Started engine_wedge check thread (interval=60s)
+186407 [2026-09-25T10:35:14.872288+00:00] [ INFO] Started dispatcher check thread (interval=60s)
+186408 [2026-09-25T10:35:14.872500+00:00] [ INFO] Started autodown thread (interval=30s)
+186409 [2026-09-25T10:35:14.873467+00:00] [ INFO] Started engine-wedge recovery thread (interval=60s)
+
+#### signal-15 at line 192378 -> [2026-09-25T12:36:51.190085+00:00] [ INFO] Received signal 15, stopping...
+--- context BEFORE (last 25 lines) ---
+192353 [2026-09-25T12:36:21.811969+00:00] [ INFO] Running gateway check
+192354 [2026-09-25T12:36:21.835863+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+192355 [2026-09-25T12:36:21.836392+00:00] [ INFO] Watchdog: pipeline healthy
+192356 [2026-09-25T12:36:21.880956+00:00] [ INFO] Running gateway check
+192357 [2026-09-25T12:36:21.939578+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+192358 [2026-09-25T12:36:21.952216+00:00] [ INFO] Dispatcher-wedge check: genuine stall CLEARED (work drained / boards at capacity) — stream back to OK
+192359 [2026-09-25T12:36:21.952562+00:00] [ INFO] Dispatcher-wedge check: OK — total_running=2, spawnable=['hscc'], roomy=['hscc']
+192360 [2026-09-25T12:36:23.949846+00:00] [ INFO] Running engine-wedge check
+192361 [2026-09-25T12:36:25.100576+00:00] [ INFO] Dispatcher-wedge check: genuine stall CLEARED (work drained / boards at capacity) — stream back to OK
+192362 [2026-09-25T12:36:25.100903+00:00] [ INFO] Dispatcher-wedge check: OK — total_running=2, spawnable=['hscc'], roomy=['hscc']
+192363 [2026-09-25T12:36:26.422217+00:00] [ INFO] Running local services check
+192364 [2026-09-25T12:36:26.758655+00:00] [ INFO] Local check: ok=True, message=informational: ollama, hscc_daemon not available
+192365 [2026-09-25T12:36:27.257039+00:00] [ INFO] Running gateway check
+192366 [2026-09-25T12:36:27.291021+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+192367 [2026-09-25T12:36:33.295490+00:00] [ INFO] Running engine-wedge check
+192368 [2026-09-25T12:36:33.589352+00:00] [ INFO] Engine-wedge check: 2/2 streaming ok
+192369 [2026-09-25T12:36:33.957207+00:00] [ INFO] Engine-wedge check: 2/2 streaming ok
+192370 [2026-09-25T12:36:35.379204+00:00] [ INFO] Running PipelineWatchdog
+192371 [2026-09-25T12:36:35.379754+00:00] [ INFO] Running DGX check
+192372 [2026-09-25T12:36:36.498849+00:00] [ INFO] DGX check complete: ok=True
+192373 [2026-09-25T12:36:36.498923+00:00] [ INFO] Running gateway check
+192374 [2026-09-25T12:36:36.517809+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+192375 [2026-09-25T12:36:36.518366+00:00] [ INFO] Watchdog: pipeline healthy
+192376 [2026-09-25T12:36:42.425435+00:00] [ INFO] Running DGX check
+192377 [2026-09-25T12:36:43.914623+00:00] [ INFO] DGX check complete: ok=True
+--- context AFTER (first 25 lines) ---
+192379 [2026-09-25T12:36:51.190751+00:00] [ INFO] Daemon loop stopped
+192380 [2026-09-25T12:36:51.980867+00:00] [ INFO] Running PipelineWatchdog
+192381 [2026-09-25T12:36:51.981156+00:00] [ INFO] Running DGX check
+192382 [2026-09-25T12:36:53.112233+00:00] [ INFO] DGX check complete: ok=True
+192383 [2026-09-25T12:36:53.112345+00:00] [ INFO] Running gateway check
+192384 [2026-09-25T12:36:53.134820+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+192385 [2026-09-25T12:36:53.135297+00:00] [ INFO] Watchdog: pipeline healthy
+192386 [2026-09-25T12:37:18.313899+00:00] [ INFO] Running proxy check
+192387 [2026-09-25T12:37:18.547289+00:00] [ INFO] Running workers check
+192388 [2026-09-25T12:37:18.550610+00:00] [ INFO] Workers check: 2/2 online
+192389 [2026-09-25T12:37:23.284803+00:00] [ INFO] Running PipelineWatchdog
+192390 [2026-09-25T12:37:23.284952+00:00] [ INFO] Running DGX check
+192391 [2026-09-25T12:37:24.282274+00:00] [ INFO] DGX check complete: ok=True
+192392 [2026-09-25T12:37:24.282527+00:00] [ INFO] Running gateway check
+192393 [2026-09-25T12:37:24.300780+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+192394 [2026-09-25T12:37:24.301199+00:00] [ INFO] Watchdog: pipeline healthy
+192395 [2026-09-25T12:37:25.234433+00:00] [ INFO] Dispatcher-wedge check: OK — total_running=2, spawnable=['hscc'], roomy=['hscc']
+192396 [2026-09-25T12:37:26.902227+00:00] [ INFO] Running local services check
+192397 [2026-09-25T12:37:27.440205+00:00] [ INFO] Running gateway check
+192398 [2026-09-25T12:37:27.442608+00:00] [ INFO] Local check: ok=True, message=informational: ollama not available
+192399 [2026-09-25T12:37:27.461346+00:00] [ INFO] Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served
+192400 [2026-09-25T12:37:34.101391+00:00] [ INFO] Running engine-wedge check
+192401 [2026-09-25T12:37:44.064947+00:00] [ INFO] Running DGX check
+192402 [2026-09-25T12:37:44.265683+00:00] [ INFO] Engine-wedge check: 1/2 streaming ok, 1 busy (loaded, not wedged)
+192403 [2026-09-25T12:37:45.339627+00:00] [ INFO] DGX check complete: ok=True
