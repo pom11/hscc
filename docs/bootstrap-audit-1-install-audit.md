@@ -34,9 +34,10 @@ Evidence:
 - [x] F2 fix: `install_soul.install_personality` catches `yaml.YAMLError` and returns `"bad-config"` (no write, no crash) — matches the "No-op on ... bad config" docstring. Regression test `test_personality_malformed_yaml_noops_not_crashes` in `tests/test_install_soul.py`.
 
 ## Verification
-- [ ] hscc-bootstrap suite green (host interpreter)
-- [ ] hscc-bootstrap suite green (p313 interpreter)
-- [ ] full `scripts/run_tests.sh` suite both interpreters
+- [x] hscc-bootstrap suite green (host interpreter): 258 passed in 395.65s
+- [x] hscc-bootstrap suite green (p313 interpreter): 258 passed in 395.60s
+- [x] full `scripts/run_tests.sh` suite (host interpreter default): ALL GREEN — 8 packages, exit 0
+- [ ] full `scripts/run_tests.sh` suite (p313 interpreter via HSCC_TEST_PY)
 - [ ] merge to main + push
 - [ ] deploy (install_payload.py)
 
