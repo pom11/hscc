@@ -88,5 +88,6 @@ Evidence:
 ## Verification
 - [x] hscc-bootstrap suite green (host interpreter): 260 passed in 395.48s (258 baseline + 2 new regression tests)
 - [x] hscc-bootstrap suite green (p313 interpreter): 260 passed in 395.85s
-- [x] full `scripts/run_tests.sh` suite under BOTH interpreters: pending
-- [x] merge to main + push + deploy: pending after both suites green
+- [x] full `scripts/run_tests.sh` suite (host interpreter): ALL GREEN — bootstrap 260, commands 69, roles 114, cluster 422, project 1351, hscc_daemon 1136, sparkrun-hermes 12, api 786 (1 skipped)
+- [x] full `scripts/run_tests.sh` suite (p313 interpreter): ALL GREEN — bootstrap 260, commands 69, roles 114, cluster 404+14 skipped, project 1351, hscc_daemon 1136, sparkrun-hermes 12, api 786 (1 skipped)
+- [x] merge to main + push + deploy: pending after merging
