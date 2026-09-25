@@ -173,5 +173,8 @@ PART 3 — bootstrap correctness + silent-failure audit (all landed):
 - (memory:/auxiliary.compression OUT OF SCOPE — roadmap profile-provisioning.)
 
 NON-EPIC CARDS ALSO LANDED: t_8306890e (dispatcher worktree placement, unblocked + landed -> 2cc6d15; follow-on t_3db321fa reviewed/approved), t_d4ba2eff (telegram remnants scrub -> 018493c).
-STILL RUNNING (NOT part of this epic — operator/new bug cards): t_6b994390 (hscc_daemon/api_cli.py re-scope), t_cc8879e0 (engine-wedge probe not load-aware — BUSY unit declared wedged), t_1c1bf5f1 (--deliver desktop silent no-op).
-PRIMARY DIRT observed 2026-09-25 (NOT cleanable by orchestrator per rule — operator's cards): CHANGELOG.md, README.md, hscc_daemon/desktop.py, scripts/dep_pr_watcher.py, scripts/escalate_watcher_run.py, scripts/install_dep_watcher.sh, scripts/install_escalate_watcher.sh (t_1c1bf5f1 --deliver territory), untracked docs/audits/t_8306890e_review.md + scripts/hscc_deliver_test.py + verify_fix.py. HANDED TO OPERATOR — not mine.
+FOLLOW-ON ACTIVE CARDS — TRACKED TO DONE (2026-09-25, orchestrator "fix everything till all cards done" directive):
+- t_6b994390 (hscc_daemon/api_cli.py — 28 raw stdout prints -> cli_theme, QR payload iOS wire byte-identical, 13 no-ANSI tests, suite ALL GREEN both interpreters, merged 918d9ed + report 2b951b2, pushed, DEPLOYED) -> DONE.
+- t_1c1bf5f1 (--deliver desktop silent no-op — watchers notify via send_desktop_notification directly, desktop.py osascript quoting fix, commited 7d1d840, e2e verified native notifier fires; crash-looped runs 752-758 then completed run 760) -> DONE.
+- REMAINING RUNNING: t_cc8879e0 (engine-wedge load-aware verdict: BUSY != wedged, committed 920f4b6 — in suite/merge), t_8c729895 (dispatcher_wedge kanban_db shim => kanban_db_dispatch, newly dispatched run 764).
+PRIMARY DIRT resolved: t_1c1bf5f1's tracked dirt (CHANGELOG/README/desktop.py/scripts) was committed+merged by that worker into main (7d1d840). Only UNTRACKED scratch artifacts remain in primary: docs/audits/t_8306890e_review.md, scripts/hscc_deliver_test.py, scripts/hscc_e2e_delivery_test.py, verify_fix.py — test leftovers, NOT mine to clean.
