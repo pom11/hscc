@@ -13,7 +13,7 @@ Submodules:
   cli         — CLI commands and main entry point
 """
 
-__version__ = "2026.06.09.2"
+__version__ = "2.2.0"
 __all__ = ["serving", "state", "util", "health", "lifecycle", "trigger", "desktop", "daemon_ops", "install", "cli"]
 
 # Re-export log so modules can use 'from . import log'
