@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **`--deliver desktop` was a silent no-op** for the cron watchdogs. Hermes'
+  cron engine does not know `desktop` as a delivery target (it is not in
+  `cron/scheduler_delivery.py _KNOWN_DELIVERY_PLATFORMS`), so the
+  `hscc-escalate-watcher` and `hscc-dep-watcher` jobs — registered with
+  `--deliver desktop` — saved their output to run history but never delivered
+  it: escalation and dep-bump alerts were silently dropped. The watchers now
+  notify directly via `hscc_daemon.desktop.send_desktop_notification()` (native
+  macOS desktop notification), and the installers no longer pass
+  `--deliver desktop`. Docs updated accordingly.
+
 ### Changed
 - **Dispatcher worktree placement is now configurable per repo.** New
   `kanban.worktree.out_of_tree_repos` + `kanban.worktree.out_of_tree_root` config
