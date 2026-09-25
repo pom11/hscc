@@ -8,7 +8,7 @@ module is presentation + argparse + the mutating-command ``--apply`` gate per
 the DESIGN ("Mutating without --apply is refused with the plan printed").
 
 Commands:
-    new     <name>  wire repo + topic + board + roadmap + registry (idempotent)
+    new     <name>  wire repo + board + roadmap + registry (idempotent)
     list            name, repo, board, topic, health (read-only)
     remove  <name>  registry entry only — NEVER deletes the repo or the topic
     repair  <name>  same as re-running `new` on an existing (possibly partial)
@@ -1036,7 +1036,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        epilog="example: flightdeck project list")
     subsub = p.add_subparsers(dest="project_cmd", metavar="PROJECT_CMD")
 
-    sp = subsub.add_parser("new", help="wire repo + topic + board + roadmap + registry",
+    sp = subsub.add_parser("new", help="wire repo + board + roadmap + registry",
                            epilog="example: flightdeck project new flightdeck --github")
     sp.add_argument("name", help="project name (also the repo dir basename and board slug)")
     sp.add_argument("--repo", help="repo path (default ~/dev/<name>)")
@@ -1087,7 +1087,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("name", nargs="?", default=None,
                     help="project name (default: detect from the current directory)")
     sp.add_argument("--resume", dest="resume_id", metavar="SESSION_ID", default=None,
-                    help="resume a SPECIFIC session by id (a telegram session for this project, on the DEFAULT profile, or the orchestrator session) instead of attaching to the orchestrator thread")
+                    help="resume a SPECIFIC session by id (a legacy telegram session for this project, on the DEFAULT profile, or the orchestrator session) instead of attaching to the orchestrator thread")
     sp.add_argument("--archive-dir", dest="archive_dir", default=None,
                     help=argparse.SUPPRESS)  # hidden seam for seed tests
     sp.add_argument("--mapping-path", dest="mapping_path", default=None,
@@ -1096,7 +1096,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                     help="trailing args passed through to hermes (after --), e.g. '-- --resume <id>'")
     sp.set_defaults(func=cmd_chat)
 
-    sp = subsub.add_parser("sessions", help="list every session belonging to a project (orchestrator + telegram), newest first",
+    sp = subsub.add_parser("sessions", help="list every session belonging to a project (orchestrator + legacy telegram threads), newest first",
                            epilog="example: flightdeck project sessions flightdeck   (resolves registry topic -> sessions.thread_id on the DEFAULT profile; read-only)")
     sp.add_argument("name", help="project name in the registry")
     sp.set_defaults(func=cmd_sessions)
