@@ -1,8 +1,8 @@
 # Audit / fix report — t_cc8879e0: Engine-wedge check declares a BUSY unit wedged
 
 Date: 2026-09-25
-Branch: wt/wedge-load-aware
-Commit: 920f4b6
+Branch: wt/wedge-load-aware (merged to main as ec842e8)
+Commit: 920f4b6 (branch feature tip); final main ec842e8
 Scope: hscc_daemon/health.py (+ hscc_daemon/tests/test_engine_wedge.py)
 
 ## Problem
