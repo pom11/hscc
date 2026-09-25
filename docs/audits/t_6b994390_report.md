@@ -52,7 +52,8 @@ the QR matrix, never themed.
 
 **Raw-site count:** 28 raw `print(` on main (per task body) → **0 raw stdout
 human `print(` remaining**; 7 raw `print(` remain, ALL to `file=sys.stderr`
-(error/warning diagnostics, deliberately raw).
+(error/warning diagnostics, deliberately raw — a warn line on stderr uses no
+markup, so it never leaks ANSI to a piped consumer anyway).
 
 ## Process
 
