@@ -70,3 +70,18 @@ or delete anything stale, verify commands by running.
 
 ## Commit
 - 8c98207 docs(t_d20fb383): fix false 'confirm first' claim in sparkrun-hermes README
+- 43d9745 docs(t_d20fb383): record commit + no-change verdict for memori READMEs
+
+## Merge / push / deploy (recorded per process)
+- branch wt/t_d20fb383 based on main; main had advanced 2 commits (t_d90de5b6)
+  past the branch point, so a real merge commit (not fast-forward).
+- commits-ahead-of-main before merge = 2 (8c98207, 43d9745).
+- merged YES: `git merge --no-ff wt/t_d20fb383` from primary checkout -> 2eb8f75
+  (clean, no conflict; only sparkrun-hermes/README.md + docs/review_t_d20fb383.md).
+- pushed YES: `git push origin main` (db2fd27..2eb8f75);
+  checked `git log` shows 2eb8f75 on main.
+- deployed YES: `python3 hscc-bootstrap/install_payload.py --no-backup` exit 0
+  (installed 19 items incl. sparkrun-hermes/memori/memori_byodb);
+  deployed ~/.hermes/plugins/sparkrun-hermes/README.md confirmed corrected.
+- change is docs-only (markdown); no code/test touched. sparkrun-hermes tests
+  still pass (12 passed).
