@@ -924,6 +924,12 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
 if __name__ == "__main__":
     path = os.path.expanduser("~/.hermes/config.yaml")
     res = enable(path)
-    parts = [f"{k}: {', '.join(v)}" for k, v in res.items() if v]
+    parts = [f"{k}: {', '.join(v)}" for k, v in res.items()
+             if v and isinstance(v, (list, tuple))]
+    # The hook-script install status is a dict, not a "changed" section; report
+    # it separately as a status line if it failed so it is never silent.
+    hf = res.get("hooks_file") or {}
+    if hf.get("installed") is False:
+        parts.append("hook script NOT installed")
     print(" | ".join(parts) if parts else "already wired (no changes)")
     sys.exit(0)
