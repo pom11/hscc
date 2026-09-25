@@ -39,7 +39,11 @@ serving.json/models.json/config.yaml + proxies + provision`. Transactional:
 snapshots state to `~/.hscc/rollback/<ts>/` and **auto-rolls-back** on a failed
 apply. Records the active template in `~/.hscc/applied_template.json`.
 
-CLI: `hscc.py cluster-template <list|status|validate|preview|apply> [name] [--confirm]`.
+CLI (merged into the main `hscc` CLI — this plugin's commands are reached as
+`hscc cluster <sub>` / `hscc template <sub>` / `hscc profiles`; the plugin also
+exposes the same engine as a library that the merged CLI imports):
+- `hscc template <list|status|validate|preview|apply> [name] [--confirm]`
+- `hscc cluster <status|hosts|monitor|jobs|info|stop|down|up>`
 
 ## Work-flows — `workflow.py`
 The idempotent-resume probe (`probe_task_state`) + the `kanban_task_claimed` hook

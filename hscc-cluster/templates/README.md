@@ -125,9 +125,9 @@ routing:                                       # optional, whole block
   instead of depending on resolver health.
 
 ```
-hscc-cluster cluster-template validate 4node-dual-dsv4
-hscc-cluster cluster-template validate 4node-dual-dsv4 --structural-only  # offline / CI
-hscc-cluster cluster-template validate 4node-dual-dsv4 --json             # machine-readable
+hscc template validate 4node-dual-dsv4
+hscc template validate 4node-dual-dsv4 --structural-only  # offline / CI
+hscc template validate 4node-dual-dsv4 --json             # machine-readable
 ```
 
 `--structural-only` skips layer 2 — usable when the cluster is down or in CI.
@@ -176,10 +176,10 @@ costs — so a template that can't fit fails the suite.
 ## Use
 
 ```
-hscc-cluster cluster-template list
-hscc-cluster cluster-template validate 4node-coding
-hscc-cluster cluster-template preview  4node-coding
-hscc-cluster cluster-template apply    4node-coding --confirm
+hscc template list
+hscc template validate 4node-coding
+hscc template preview  4node-coding
+hscc template apply    4node-coding --confirm
 ```
 
 or the `/template` slash command. Templates resolve by their `name:` field or
