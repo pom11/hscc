@@ -378,6 +378,177 @@ class TestWriteStopped:
         daemon_ops.write_stopped()  # should not raise
 
 
+class TestTouchHeartbeat:
+    """touch_heartbeat() writes a parseable UTC ISO timestamp to HEARTBEAT_FILE
+    and updates it on successive calls."""
+
+    def test_writes_parseable_iso_and_advances(self, tmp_hfcc_dir, monkeypatch):
+        import datetime
+        from hscc_daemon import daemon_ops
+        hb = tmp_hfcc_dir / "heartbeat"
+        monkeypatch.setattr(daemon_ops, "HEARTBEAT_FILE", str(hb))
+
+        first = daemon_ops.touch_heartbeat()
+        assert first is not None, "touch_heartbeat returned None"
+        ts1 = datetime.datetime.fromisoformat(first)
+        assert ts1.tzinfo is not None
+
+        # A successive call writes a NEW (>=) timestamp — the file advances.
+        second = daemon_ops.touch_heartbeat()
+        ts2 = datetime.datetime.fromisoformat(second)
+        assert ts2 >= ts1
+        # And the on-disk content matches what was reported + parses.
+        disk = (tmp_hfcc_dir / "heartbeat").read_text().strip()
+        assert datetime.datetime.fromisoformat(disk).tzinfo is not None
+
+    def test_creates_parent_dir(self, tmp_hfcc_dir, monkeypatch):
+        from hscc_daemon import daemon_ops
+        target = tmp_hfcc_dir / "nested" / "heartbeat"
+        monkeypatch.setattr(daemon_ops, "HEARTBEAT_FILE", str(target))
+        daemon_ops.touch_heartbeat()  # must not raise
+        assert target.exists()
+
+    def test_never_raises_on_bad_path(self, tmp_hfcc_dir, monkeypatch):
+        from hscc_daemon import daemon_ops
+        # Simulate a failure by making the target a directory that cannot be
+        # opened as a file — the daemon must not die because a heartbeat write
+        # failed (same guarantee as log()).
+        d = tmp_hfcc_dir / "adir"
+        d.mkdir()
+        monkeypatch.setattr(daemon_ops, "HEARTBEAT_FILE", str(d))
+        assert daemon_ops.touch_heartbeat() is None
+
+
+class TestRunHeartbeatLoop:
+    """run_heartbeat_loop() (the daemon's main-loop body) advances the
+    heartbeat while running and stops advancing when the loop exits."""
+
+    def test_advances_while_running_stops_on_exit(self, tmp_hfcc_dir, monkeypatch):
+        from hscc_daemon import daemon_ops
+        hb = tmp_hfcc_dir / "heartbeat"
+        monkeypatch.setattr(daemon_ops, "HEARTBEAT_FILE", str(hb))
+
+        stop_event = threading.Event()
+        t = threading.Thread(
+            target=daemon_ops.run_heartbeat_loop,
+            args=(stop_event,),
+            kwargs={"interval": 0.01},
+            daemon=True,
+        )
+        t.start()
+        # Let it run a while — the heartbeat must be written and re-advance.
+        time.sleep(0.06)
+        assert hb.exists(), "heartbeat not written while loop running"
+        content_while_running = hb.read_text().strip()
+        assert content_while_running, "heartbeat file empty while running"
+
+        # Stop the loop: it exits, and the file freezes (no longer advances).
+        stop_event.set()
+        t.join(timeout=5)
+        assert not t.is_alive(), "heartbeat loop did not exit on stop"
+        frozen = hb.read_text().strip()
+        time.sleep(0.05)
+        assert hb.read_text().strip() == frozen, (
+            "heartbeat kept advancing after the loop exited")
+
+    def test_staleness_floor_constant(self):
+        """HEARTBEAT_STALE_AFTER is derived from the constant, not hardcoded:
+        max(2x cadence, 120 floor). Changing the cadence changes staleness."""
+        from hscc_daemon import daemon_ops
+        assert daemon_ops.HEARTBEAT_INTERVAL == 300
+        assert daemon_ops.HEARTBEAT_STALE_AFTER == max(
+            2 * daemon_ops.HEARTBEAT_INTERVAL, 120)
+        assert daemon_ops.HEARTBEAT_STALE_AFTER == 600
+
+
+class TestDaemonLiveness:
+    """daemon_liveness() combines pid-file pid + aliveness + heartbeat
+    freshness into one structured answer."""
+
+    def _liveness(self, monkeypatch, tmp_hfcc_dir, pid_content=None,
+                  heartbeat_content=None):
+        """Point PID_FILE + HEARTBEAT_FILE at tmp files with given content."""
+        from hscc_daemon import daemon_ops
+        pid_file = tmp_hfcc_dir / "daemon.pid"
+        hb_file = tmp_hfcc_dir / "heartbeat"
+        if pid_content is not None:
+            pid_file.write_text(str(pid_content))
+        if heartbeat_content is not None:
+            hb_file.write_text(str(heartbeat_content))
+        monkeypatch.setattr(daemon_ops, "PID_FILE", str(pid_file))
+        monkeypatch.setattr(daemon_ops, "HEARTBEAT_FILE", str(hb_file))
+        return daemon_ops.daemon_liveness()
+
+    def test_pid_file_missing(self, monkeypatch, tmp_hfcc_dir):
+        liv = self._liveness(monkeypatch, tmp_hfcc_dir)
+        assert liv["pid"] is None
+        assert liv["pid_file_present"] is False
+        assert liv["alive"] is False
+        assert liv["state"] == "pid-gone"
+
+    def test_pid_present_process_gone(self, monkeypatch, tmp_hfcc_dir):
+        liv = self._liveness(monkeypatch, tmp_hfcc_dir, pid_content=99999)
+        assert liv["pid"] == 99999
+        assert liv["pid_file_present"] is True
+        assert liv["alive"] is False
+        assert liv["state"] == "pid-gone"
+
+    def test_pid_alive_no_heartbeat(self, monkeypatch, tmp_hfcc_dir):
+        liv = self._liveness(monkeypatch, tmp_hfcc_dir, pid_content=os.getpid())
+        assert liv["alive"] is True
+        assert liv["last_heartbeat"] is None
+        assert liv["heartbeat_present"] is False
+        assert liv["stale"] is False   # no heartbeat ⇒ not stale, just absent
+        assert liv["state"] == "running-no-heartbeat"
+
+    def test_pid_alive_heartbeat_fresh(self, monkeypatch, tmp_hfcc_dir):
+        import datetime
+        from hscc_daemon import daemon_ops
+        fresh = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        liv = self._liveness(monkeypatch, tmp_hfcc_dir, pid_content=os.getpid(),
+                             heartbeat_content=fresh)
+        assert liv["alive"] is True
+        assert liv["heartbeat_present"] is True
+        assert liv["stale"] is False
+        assert liv["state"] == "running-fresh"
+
+    def test_pid_alive_heartbeat_stale(self, monkeypatch, tmp_hfcc_dir):
+        import datetime
+        from hscc_daemon import daemon_ops
+        # Older than the threshold (derived from the constant, not hardcoded).
+        old = (datetime.datetime.now(datetime.timezone.utc)
+               - datetime.timedelta(
+                   seconds=daemon_ops.HEARTBEAT_STALE_AFTER + 5)).isoformat()
+        liv = self._liveness(monkeypatch, tmp_hfcc_dir, pid_content=os.getpid(),
+                             heartbeat_content=old)
+        assert liv["alive"] is True
+        assert liv["heartbeat_present"] is True
+        assert liv["stale"] is True
+        assert liv["state"] == "running-stale-heartbeat"
+
+    def test_just_within_threshold_not_stale(self, monkeypatch, tmp_hfcc_dir):
+        import datetime
+        from hscc_daemon import daemon_ops
+        # Just inside the threshold (healthy-but-slow slip) — NOT stale, so we
+        # never cry wolf. Boundary computed from the constant.
+        age = daemon_ops.HEARTBEAT_STALE_AFTER - 10
+        recent = (datetime.datetime.now(datetime.timezone.utc)
+                  - datetime.timedelta(seconds=age)).isoformat()
+        liv = self._liveness(monkeypatch, tmp_hfcc_dir, pid_content=os.getpid(),
+                             heartbeat_content=recent)
+        assert liv["stale"] is False
+        assert liv["state"] == "running-fresh"
+
+    def test_corrupt_heartbeat_treated_absent_not_alive(self, monkeypatch,
+                                                        tmp_hfcc_dir):
+        liv = self._liveness(monkeypatch, tmp_hfcc_dir, pid_content=os.getpid(),
+                             heartbeat_content="not-a-timestamp")
+        assert liv["heartbeat_present"] is False
+        assert liv["last_heartbeat"] is None
+        assert liv["stale"] is False
+        assert liv["state"] == "running-no-heartbeat"
+
+
 class TestLog:
     """log() writes timestamped log lines."""
 
