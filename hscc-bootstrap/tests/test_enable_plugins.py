@@ -601,6 +601,21 @@ def test_compaction_threshold_tokens_legacy_low_still_raised(tmp_path, monkeypat
     assert yaml.safe_load(open(path))["compression"]["threshold_tokens"] == cap
 
 
+def test_compact_models_url_preserves_v1_no_duplication():
+    """The compaction probe must hit ONLY ONE /v1. Compacting URL already ends
+    in /v1 (the default), so appending another /v1/models yielded
+    ``.../v1/v1/models`` — the probe always targeted a wrong path and could
+    never verify the model (spurious 404 warning even when served correctly)."""
+    assert enable_plugins._compact_models_url("http://10.0.0.1:8000/v1") == \
+        "http://10.0.0.1:8000/v1/models"
+    assert enable_plugins._compact_models_url("http://10.0.0.1:8000/v1/") == \
+        "http://10.0.0.1:8000/v1/models"
+    assert enable_plugins._compact_models_url("http://10.0.0.1:8000") == \
+        "http://10.0.0.1:8000/models"
+    assert enable_plugins._compact_models_url("") == ""
+    assert enable_plugins._compact_models_url("  ") == ""
+
+
 # ── dashboard ────────────────────────────────────────────────────────────────
 
 def test_dashboard_public_url_filled_on_fresh(tmp_path, monkeypatch):
