@@ -128,4 +128,17 @@ fleet per the operator rule.
 
 - branch: wt/wedge-load-aware
 - commits ahead of main pre-merge: 2 feature commits (920f4b6, 50d8b81) + merge of current main
-- merged/pushed/deployed: see final kanban handoff metadata.
+- merged/pushed/deployed: yes/yes/yes (details in final kanban handoff metadata).
+
+## Deploy + runtime notes
+
+- `python3 hscc-bootstrap/install_payload.py` exit 0; deployed
+  `~/.hermes/plugins/hscc_daemon/health.py` is byte-identical (md5
+  ec8a074ab43422ae7d9ad330f891131b) to the merged repo copy.
+- The daemon is CURRENTLY STOPPED (pre-existing from the original incident's
+  SIGTERM — the task noted "nothing restarted it"). The fix is deployed and
+  takes effect on the next daemon start. Per operator rules no gateway was
+  restarted and no serving unit was stopped/started/probed live; verification
+  was entirely in-process.
+- The original incident's SIGTERM is NOT assumed to be caused by the wedge
+  path — flagged for separate investigation if it recurs.
