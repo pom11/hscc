@@ -38,6 +38,8 @@ import sys
 from dataclasses import dataclass, asdict
 from typing import List, Optional
 
+import _theme
+
 
 @dataclass
 class Check:
@@ -791,31 +793,44 @@ def main(argv=None) -> int:
         print(json.dumps(res, indent=2))
         return 0 if res["ok"] else 1
 
+    # Human view — themed Rich (make_console degrades to plain on a non-tty).
+    _console = _theme.make_console()
+    lines: list[str] = []
     for c in res["checks"]:
         mark = "✓" if c["ok"] else ("✗" if c["fatal"] else "○")
         line = f"  {mark} {c['name']}: {c['detail']}"
         if not c["ok"] and c["fix"]:
             line += f"\n      → {c['fix']}"
-        print(line)
+        lines.append(line)
 
     # Print fixes if we ran in --fix mode
     if fix_mode and res.get("fixes_applied"):
-        print(f"\n  🛠 Applied fixes:")
+        lines.append("")
+        lines.append("  🛠 Applied fixes:")
         for fix_line in res["fixes_applied"]:
-            print(f"    {fix_line}")
+            lines.append(f"    {fix_line}")
 
     # Print safety-gate refusals LOUDLY (Card D): entries we deliberately did
     # NOT convert because the endpoint did not serve the alias or was
     # unreachable. These need operator attention before re-running --fix.
     if fix_mode and res.get("alias_conversion_refused"):
-        print("\n  ⚠ ALIAS MIGRATION SKIPPED (safety gate):")
+        lines.append("")
+        lines.append("  ⚠ ALIAS MIGRATION SKIPPED (safety gate):")
         for line in res["alias_conversion_refused"]:
-            print(f"    {line}")
+            lines.append(f"    {line}")
+
+    _console.print(_theme.panel("doctor", "\n".join(
+        _theme.escape(line) for line in lines)))
 
     if not res["ok"]:
-        print(f"\n  ✗ preflight FAILED: {', '.join(res['fatal_failures'])}")
+        _console.print(_theme.panel(
+            "preflight",
+            "[error]" + _theme.escape(
+                "✗ FAILED: " + ", ".join(res['fatal_failures'])) + "[/error]",
+        ))
         return 1
-    print("\n  ✓ preflight OK")
+    _console.print(_theme.panel(
+        "preflight", "[ok]" + _theme.escape("✓ OK") + "[/ok]"))
     return 0
 
 

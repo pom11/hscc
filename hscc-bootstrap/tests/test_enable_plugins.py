@@ -1058,3 +1058,40 @@ def test_ensure_fallback_preserves_non_list_value(tmp_path):
     res = enable_plugins.enable(path)
     out = yaml.safe_load(open(path))
     assert out["fallback_providers"] == "some-string"
+
+
+# ── NO-ANSI regression (RICH CLI hscc-bootstrap card) ──────────────────────
+# The themed __main__ summary AND the [WARN] stderr lines must emit NO \x1b on
+# a non-tty stream — the same render paths the script uses in production. Rich
+# detects a non-terminal stdout/stderr and degrades to plain; a literal escape
+# byte would trip this. (Standard "assert the constant, not a literal": we
+# assert the absence of the escape byte itself.)
+
+def test_main_summary_no_ansi():
+    import contextlib
+    import io
+    import _theme
+
+    parts = ["kanban: auto_review, failure_limit",
+             "hooks: pre_tool_call, post_tool_call"]
+    body = " | ".join(parts)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _theme.make_console().print(_theme.panel("bootstrap", _theme.escape(body)))
+    out = buf.getvalue()
+    assert "kanban: auto_review" in out
+    assert "\x1b" not in out, f"ANSI escape in piped output: {out!r}"
+
+
+def test_warn_stderr_no_ansi():
+    """Themed [WARN] lines (stderr) must emit no ANSI on a non-tty stderr."""
+    import io
+    import _theme
+
+    buf = io.StringIO()
+    _theme.make_console(file=buf).print(
+        "[warn]" + _theme.escape(
+            "[WARN] HSCC compaction probe failed: boom") + "[/warn]")
+    out = buf.getvalue()
+    assert "HSCC compaction probe failed: boom" in out
+    assert "\x1b" not in out, f"ANSI escape in piped stderr: {out!r}"
