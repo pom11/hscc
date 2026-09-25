@@ -10,8 +10,11 @@ cluster control** — only the orchestrator can change cluster shape.
 hscc.py generate            # build all profiles from specs → ~/.hermes/profiles/
 hscc.py create <name> "…"   # author a new role on demand
 hscc.py list                # roles + whether a profile exists
+hscc.py validate            # validate every role spec (load + required fields)
 hscc.py autonomy [on|off]   # the ~/.hscc/autonomy master flag
 hscc.py orch <project|general>  # ensure a project's orchestrator profile exists
+hscc.py orch-all [--registry P] # ensure an orchestrator for EVERY registry
+                                # project + the `general` catch-all (idempotent, bulk)
 ```
 
 ## Per-project orchestrators (`orchestrators.py`)
@@ -42,8 +45,9 @@ Two importable entry points (C2 / the HSCC API will import these):
   profile's SOUL states its project, repo path, and board from the registry,
   and carries the kanban + delegation toolsets an orchestrator needs.
 
-Provision one with `hscc.py orch <project>`; provisioning all 13 at once is a
-separate step kept out of this plugin.
+Provision one with `hscc.py orch <project>`; provision the whole registry at
+once with `hscc.py orch-all` (every project in `~/.flightdeck/registry.yaml`
+plus the `general` catch-all). Bootstrap calls `orch-all` during install.
 
 ## Roster (`roles/`)
 A full org: orchestrator, architect, coder, **reviewer**, qa; backend/frontend/

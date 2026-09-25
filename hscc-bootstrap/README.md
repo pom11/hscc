@@ -56,4 +56,4 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
 `--skip-skills|--skip-roles|--skip-daemon|--skip-patches|--skip-cli`.
 
 ## Tests
-`tests/` — 258 tests incl. an end-to-end stage-sequence test and the daemon-restart helper tests. `python -m pytest tests/ -q`.
+`tests/` — 266 tests incl. an end-to-end stage-sequence test and the daemon-restart helper tests. `python -m pytest tests/ -q`.
