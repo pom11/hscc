@@ -86,3 +86,14 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 
 ## Board summary (this tick)
 - 3 running, 4 ready, 0 blocked, 0 todo. Board NOT empty ⇒ phases remain, no new dispatch required (ready cards flow as slots free). All Phase 1 ios groups either landed or in flight; Phase 2/4 not yet started (depend on Phase 1 landing first).
+
+## Heartbeat tick 21:05 (cron hscc-orch-goal-heartbeat a0abe2b7848b)
+- Since last tick (20:47, 2156712): NO new product code merged to main. Only ledger docs (dec011d, 2156712) landed. Latest product landings remain chat-composer @ 89384bf, fleet-monitoring @ befe217/2273498.
+- CURRENT STATE (epoch 1790445903, 18:04 UTC): 3 running, 4 ready, 0 blocked, 0 todo. All 3 workers ALIVE + heartbeating every ~60s:
+  - t_e2856bfe [api-history] backend — run 790 (3rd attempt; 788/789 crashed), pid 79367 alive, running since 19:52 (~1h10m). Longest-lived worker — good sign.
+  - t_3c5149fd [detail-error-views] ios — run 794 (1st attempt), pid 84929 alive, ~30m. Healthy.
+  - t_1bfe8908 [settings-profile] ios — run 796 (4th attempt; 792 protocol / 793 pid-not-alive / 795 protocol all crashed), pid 92498 alive, spawned 21:02. Just started.
+- settings-profile ESCALATED: now on its 4th attempt — matching the escalation note in 2156712. This is the goal-doc §0 stall signature recurring despite memori+fallback fixes. Not data-losing (dispatcher rescues), but burning capacity on re-runs.
+- Dispatch gating verified: max_in_progress=3 (FULL — 3 running), ios-engineer per-profile cap 2 (FULL — t_3c5149fd + t_1bfe8908). 4 ready cards (t_c14a427c, t_b578972f, t_a2c8e456, t_791d1a75, all ios-engineer) auto-dispatch as ios slots free. NO manual dispatch — caps are non-negotiable (goal-doc §6).
+- No blocked cards. No orphaned states. Board not empty ⇒ no new dispatch required this tick.
+- Phase 2 (theme/UX) + Phase 4 (decode drift) remain NOT started — correctly gated behind Phase 1 completing. Phase 3 cron card t_a2c8e456 ready, gated on ios slot.
