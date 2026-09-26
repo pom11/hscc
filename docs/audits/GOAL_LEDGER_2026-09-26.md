@@ -187,3 +187,10 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - DAEMON LIVENESS: pid 15843 ALIVE (kill -0 verified this tick). GATEWAY pid 69773 alive; NOT restarted.
 - No junk cards, no blocked cards, no orphaned states. Single heartbeat cron intact (a0abe2b7848b).
 - Phase 4 (decode drift) still gated; Phase 2 prioritized ahead per §7. Phase 2 underway (t_b89d9029 committed product code), Phase 3 underway (t_a2c8e456 mid-edit). Progress nominal.
+
+## Heartbeat review tick ~00:25 (verified against board+git; hotspot flagged)
+- Verified tick 00:23 report: origin/main @ 377346b (ledger pushed), 3 running (t_a2c8e456/806, t_b89d9029/807, t_10a687c4/808), 4 ready, all clean of addresses.
+- t_10a687c4 (dispatcher protocol-violation bound) ALREADY SELF-MERGED to main @ c47fc15 (its 6532a84 test committed + merged before the 00:23 ledger) — the tick’s "not merged, watch to rescue" framing was stale on that half; no action needed (merge done, worker did it itself per §6).
+- t_b89d9029 (Phase 2 theme) work committed on its branch, tip now 4e43e7f (worker rebased/amended from 9a4ee43 mid-flight); NOT merged to main — correct, worker alive, do-not-race watch holds.
+- HOTSPOT FLAGGED: untracked ios-app/Sources/HSCC/Views/CronView.swift in the PRIMARY main checkout (never committed anywhere; not in t_a2c8e456’s worktree, which has the supporting changes). Commented on t_a2c8e456 (comment 781) telling the worker to move it into its worktree per §6. Not deleted (worker mid-edit). NEXT TICK: verify CronView.swift reconciled into worktree and primary clean.
+- No other action this tick.
