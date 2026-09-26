@@ -6,12 +6,11 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 
 ## Phase 0 — Self-health (COMPLETE)
 
-### 0a memori capture — RESOLVED (card t_9e8732b8 DONE, landed)
-- NEWEST literal `date_created` when filed = `2026-06-13 02:50:29`. Card t_9e8732b8 root-caused + FIXED it.
-- Worker root cause: t_57e5b3f7 fix deployed ONLY to ~/.hermes/plugins (root home); profiles load provider from their OWN $HERMES_HOME/plugins (hscc-orch still had OLD 8942-byte buggy file). PLUS _load_config reads <hermes_home>/memori_byodb.json (profile-scoped, missing) → initialize() raised → provider never activated.
-- Fix: _load_config falls back to shared default home; install_payload_profiles() propagates payload to every profile's plugins dir (53416b9, merge 5cdd547, pushed, deployed).
-- VERIFIED by execution: hermetic capture turn lands conversation/message/fact rows (date_created 2026-09-26) in scratch DB, idempotent. Tests green both interpreters (memori 9, install_payload 15, hscc-bootstrap 274).
-- => memori NOW CAPTURES. Contract §0a/§0c.3 resolved.
+### 0a memori capture — CODE FIXED + DEPLOYED + WRITE-PATH PROVEN; LIVE INTERACTIVE CAPTURE PENDING SESSION RESTART (NOT "fully resolved")
+- NEWEST literal when filed = `2026-06-13 02:50:29`. Card t_9e8732b8 fixed + landed (53416b9, merge 5cdd547) — code correct, verified hermetic by worker (scratch DB rows dated 2026-09-26, idempotent).
+- RE-VERIFIED 2026-09-26 ~21:17 per operator correction. Measure: deployed file at ~/.hermes/profiles/hscc-orch/plugins/memori_byodb/local_augmentation.py = 10703 bytes == main (fixed). Fresh process with HERMES_HOME=hscc-orch activates provider memori_byodb. Live DB count=8 NEWEST date_created = 2026-09-26 18:13:05.
+- The 2 new rows (id 7,8 @ 18:13:05) are a CRON run ("running as a scheduled cron job … Heartbeat tick report") NOT an interactive session. This PROVES the write path works end-to-end when a process uses the fixed plugin (that cron ran under default home which had the fix).
+- DETERMINATION BY EXECUTION: **no second cause in code.** The fix works and is deployed. Interactive profile sessions (this orchestrator + workers spawned before the 19:10 profile-dir deploy) loaded the OLD plugin at startup and have NOT restarted, so they still do not capture. Interactive capture resumes as sessions restart. Since I cannot restart running sessions or the gateway (forbidden), this is recorded as needing natural session-cycling to take effect. NOT "fully resolved" — correct phrase is "fix in place, live interactive capture pending restart."
 
 ### 0b archive dead cards — DONE
 - t_b0e3d750 (memori fix) superseded by t_57e5b3f7 @ 47e3ab2 → ARCHIVED
