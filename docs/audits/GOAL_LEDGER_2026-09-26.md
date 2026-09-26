@@ -211,3 +211,16 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - GATEWAY: pid 69773 alive, running since Mon, NOT restarted (verified earlier this tick) — isolated worker deploys only. Good.
 - No junk cards, no blocked cards, no orphaned states. Single heartbeat cron verified intact (a0abe2b7848b).
 - Ledger commit this tick.
+
+## Heartbeat tick 02:03 (cron hscc-orch-goal-heartbeat a0abe2b7848b, 2026-09-27)
+- SINCE LAST TICK (01:14): **Phase 3 cron roster LANDED + self-merged + pushed.** t_a2c8e456 (Phase 3, run 806) COMPLETED ~01:14-01:15 (1790462062) — merged to main @ **bafdf30** (containing 3418876), pushed to origin/main, install_payload.py exit 0. This resolves the prior tick's "3418876 NOT yet ancestor — watch to confirm merge" item cleanly: the worker did the merge/push itself per §6, AND reconciled the flagged CronView.swift hotspot into its worktree (primary checkout clean). Verified: origin/main == main @ bafdf30 (0/0, `git rev-list --left-right --count main...origin/main`). Worker self-reported: build_check full compile clean 0 warn (4 targets), model_decode_check 56/56 (incl. new cron_list.json REAL live-capture fixture), check_theme + check_sources clean, pytest ALL GREEN under BOTH interpreters. **PHASE 3 NOW COMPLETE** (deliverable was the cron surface + the prioritisation note — both landed).
+- CURRENT STATE (02:03 EEST / 23:03 UTC): **2 running, 2 ready, 0 blocked, 0 todo.**
+  - t_04e16e60 [Phase 2 detail-template] run 810, pid 57075 alive, heartbeating every ~60s since 01:16 (~45m). Mid-flight, healthy.
+  - t_320a8332 [Phase 2 cluster-control] run 811, pid 61637 alive, etime 30m, heartbeating. Worktree has uncommitted theme edits (ClusterView/FleetView) + docs/audits/t_320a8332_theme_sweep.md — actively producing, normal for live worker.
+  - READY (2, both ios-engineer): t_791d1a75 (send-retry, priority 0), **t_ca133e7d (Phase 4 decode-drift, just filed, priority 50)**. GATED: ios-engineer per-profile cap 2 (FULL). Auto-dispatch as ios slots free.
+- **DISPATCH THIS TICK: Phase 4 card t_ca133e7d FILED + READY** (the cron prompt's "if the board is empty and phases remain, dispatch next cards now" — board not empty but Phase 4 was the only ungated phase and needed queuing so the ios lane stays fed behind the 2 running Phase 2 cards + t_791d1a75). Caps NOT raised (max_in_progress=3, max_in_progress_per_profile=2 — non-negotiable §6); ready cards auto-flow as slots free. Nothing manually dispatched (both ios slots full).
+- PHASE STATUS: **Phase 1 = 100% closed.** **Phase 2 = 2/4 landed** (project-sessions 4e43e7f, chat f104a49), **2/4 running** (detail-template, cluster-control). **Phase 3 = COMPLETE** (cron bafdf30). **Phase 4 = FILED, ready** (t_ca133e7d). Final report pending Phase 2 + Phase 4 completion.
+- DAEMON: still STOPPED — graceful `Received signal 15` @ 2026-09-26T22:09:24Z (01:09 EEST), no daemon.pid now. NOT restarting (could race an intentional op; not this heartbeat's charter). iOS cards don't need it. STILL OPEN for operator: confirm it restarts and returns to health.
+- GATEWAY: alive, not restarted this cycle (isolated worker deploys only).
+- No junk cards, no blocked/orphaned states. Single heartbeat cron verified intact (a0abe2b7848b, next run 02:37).
+- Ledger commit this tick.
