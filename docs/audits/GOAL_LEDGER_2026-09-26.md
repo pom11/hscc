@@ -172,3 +172,18 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - DAEMON LIVENESS: pid 15843 ALIVE. GATEWAY pid 69773 alive (running since Mon, NOT restarted — isolated worker deploys only).
 - No junk card this tick (board lists show only real cards; t_b40fddfb stayed archived). No blocked/orphaned states.
 - **Phase 1 disposition completeness now 100% on main; Phase 4 (decode drift) still gated behind completion of Phase 1's work products** (now that Phase 1 fully landed, Phase 4 cards can be filed when ios slots free ~ Phase 2 is prioritized ahead of it per §7 priority order).
+
+## Heartbeat tick 00:23 (cron hscc-orch-goal-heartbeat a0abe2b7848b) — Phase 2 product code committed (on branch, NOT merged yet)
+- **NO new product code MERGED to origin/main since 23:38.** origin/main == main @ 8b2e371 (0 ahead/behind, verified `git rev-list --left-right --count main...origin/main`). No landing happened between the 23:38 tick and now.
+- **TWO new commits are LIVE ON BRANCHES but NOT yet on origin/main** (both workers still alive + heartbeating → these are mid-flight, not yet stranded; verified worker pids 29138/33019/28724 all alive in `ps`):
+  - `9a4ee43` on `wt/t_b89d9029` (t_b89d9029 Phase 2 [project-sessions]): **real product code** — routes ActivityFeedView/CreateCardSheet/ProjectsView/SessionsView through Theme tokens + docs/audits/t_b89d9029_theme_sweep.md. 5 files, +83/−56. Address-scrub CLEAN.
+  - `6532a84` on `wt/t_10a687c4` (t_10a687c4 dispatcher bug): **regression test** hscc-cluster/tests/test_protocol_violation_bound.py + _pvb_sim.py + protocol-violation-budget doc (286 insertions). Address-scrub CLEAN. This pins the fix live in running hermes (_PROTOCOL_VIOLATION_FAILURE_LIMIT=3). NOT merged.
+- **t_10a687c4 [dispatcher rc=0 bug] is now on its 3rd attempt (run 808)** — run 798 crashed (pid 4002 not alive), run 805 protocol-violated (itself the exact bug class). Run 808 has committed the regression test 6532a84 and is heartbeating through 00:23. Work being produced; merge not yet done.
+- **CURRENT STATE (00:23 EEST / 21:23 UTC): 3 running, 4 ready, 0 todo, 0 blocked.**
+  - Running: t_a2c8e456 (Phase 3 cron, run 806, pid 28724, worktree has 4 modified files + untracked cron fixture — mid-edit, active), t_b89d9029 (Phase 2 project-sessions, run 807, pid 29138, committed 9a4ee43, clean worktree), t_10a687c4 (dispatcher, run 808, pid 33019, committed 6532a84).
+  - READY (4, all ios-engineer): t_dacdbc4a, t_04e16e60, t_320a8332 (Phase 2 x3) + t_791d1a75 (send-retry). GATED: max_in_progress=3 (FULL) + ios-engineer per-profile cap 2 (FULL).
+- **DISPATCH THIS TICK: NONE.** Board NOT empty (3 running, caps FULL). Phase 2/3 card(s) actively producing code on branches; ready cards auto-flow as ios slots free. Caps non-negotiable (§6).
+- **WATCH / anti-pattern alert:** both 9a4ee43 and 6532a84 are committed but NOT merged to origin/main — the exact stranded-work signature the goal-doc calls out. Workers are alive so not yet stranded, but if either crashes (t_10a687c4 has a 2/2 crash history this cycle), rescue the branch next tick: merge to main + push. Do NOT merge out from under a live worker now.
+- DAEMON LIVENESS: pid 15843 ALIVE (kill -0 verified this tick). GATEWAY pid 69773 alive; NOT restarted.
+- No junk cards, no blocked cards, no orphaned states. Single heartbeat cron intact (a0abe2b7848b).
+- Phase 4 (decode drift) still gated; Phase 2 prioritized ahead per §7. Phase 2 underway (t_b89d9029 committed product code), Phase 3 underway (t_a2c8e456 mid-edit). Progress nominal.
