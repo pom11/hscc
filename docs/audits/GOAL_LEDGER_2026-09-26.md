@@ -48,7 +48,11 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 
 ## Phase 2 — iOS theme + UI/UX polish
 
-## Phase 3 — Missing surfaces (API first, then iOS) — /v1/cron + iOS cron view priority
+## Phase 3 — Missing surfaces (API first, then iOS) — PLAN + CRON CARD FILED
+- Re-verified: /v1/cron/list AND /v1/why/{card_id} ALREADY exposed server-side (routes_cron.py, routes_project.py:1073) — iOS refs 0. So the gap is iOS-SURFACE only, not API. /v1/logs and /v1/daemon/history also exposed (0 iOS refs; iOS views coming via Phase 1 branches logs + history).
+- Prioritisation note committed: docs/audits/GAP_PRIORITISATION_2026-09-26.md (cron=top, why=high, daemon start/stop=confirm-gated, check/notify=route+surface, long-tail CLI=deliberately CLI-only, install/uninstall/plist=never remote).
+- Card filed: t_a2c8e456 [ios] iOS cron roster view consuming existing GET /v1/cron/list (route exists, 0 iOS refs) — READY.
+- daemon start/stop confirm-gated surface overlaps Phase 1 serving-control branch (t_c14a427c).
 
 ## Phase 4 — Decode-drift recheck
 
@@ -60,3 +64,4 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - [FILED] t_b6ec32d6 provision-check PROFILES_DIR path bug (double-nest reads defaults) — READY backend-engineer
 - [FIXED-profile] general-orch + flightdeck-orch config gaps patched (memory/aux + cluster toolsets) — verified via load_config
 - [FILED] Phase 1 x7: t_3832283d, t_d331843e, t_1bfe8908, t_3c5149fd, t_c14a427c, t_e2856bfe, t_b578972f (40 unmerged branches grouped by area)
+- [FILED] Phase 3: t_a2c8e456 iOS cron roster view (route /v1/cron/list already exists — surface only)
