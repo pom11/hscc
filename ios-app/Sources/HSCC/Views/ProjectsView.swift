@@ -402,7 +402,7 @@ struct ProjectOverviewView: View {
                 .padding(.vertical, 6)
             }
 
-            HStack(spacing: 16) {
+            HStack(spacing: Theme.Spacing.lg.rawValue) {
                 statPill("Running", value: running, color: Theme.Semantic.warn)
                 statPill("Ready", value: ready, color: Theme.Semantic.ok)
                 Spacer()
@@ -823,7 +823,7 @@ struct ProjectBoardView: View {
 
     @ViewBuilder
     private func cardRow(_ card: Card) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm.rawValue) {
             HSStatusDot(statusColor(card.displayStatus))
             VStack(alignment: .leading, spacing: 3) {
                 Text(card.displayTitle)
