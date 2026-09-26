@@ -71,3 +71,17 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - [FIXED-profile] general-orch + flightdeck-orch config gaps patched (memory/aux + cluster toolsets) — verified via load_config
 - [FILED] Phase 1 x7: t_3832283d, t_d331843e, t_1bfe8908, t_3c5149fd, t_c14a427c, t_e2856bfe, t_b578972f (40 unmerged branches grouped by area)
 - [FILED] Phase 3: t_a2c8e456 iOS cron roster view (route /v1/cron/list already exists — surface only)
+
+## Phase 1 status (updated 2026-09-26 ~20:25, heartbeat tick)
+- [LANDED] t_d331843e [chat-composer] — MERGED @ 89384bf (Merge wt/t_d331843e), pushed, deployed. Disposition: 7 SUPERSEDED, 1 LEAVE (chat-retry WIP). Ledger update @ 96c6539.
+- [RUNNING] t_3832283d [fleet-monitoring] ios-engineer — run 791 (2nd attempt; run 786 = protocol-violation crash). Heartbeating normally.
+- [RUNNING] t_1bfe8908 [settings-profile] ios-engineer — run 792 (1st attempt). Heartbeating normally.
+- [RUNNING] t_e2856bfe [api-history] backend-engineer — run 790 (3rd attempt; runs 788+789 = protocol-violation crashes). Heartbeating normally.
+  - VERIFIED on main while it runs: routes_history.py = GET /v1/daemon/history (aa543b7, first on main) + ios SelfHealHistory view (44a60e7) ALREADY on main ⇒ correct disposition for audit/history-t_b5ce7935 is likely SUPERSEDED (route+view already shipped), worker should prove by grep. report-only branches (boardhygiene/searchview/health-fix) STALE → working notes being preserved to docs/audits/preserved_branches/ (untracked, safe).
+- [READY, queued] t_3c5149fd [detail-error-views], t_c14a427c [serving-alerts-widget], t_b578972f [approvals-autodown], t_a2c8e456 [Phase 3 iOS cron] — all ios-engineer. GATED by max_in_progress=3 (currently full: 3 running) + ios-engineer per-profile cap 2 (full). Auto-dispatch as ios slots free. No manual dispatch needed.
+
+## Protocol-violation watch (recurring freeze pattern — operator attention)
+- 3 of the Phase 1 cards hit "worker exited cleanly (rc=0) without kanban_complete/block — protocol violation" this cycle: t_3832283d (1x), t_e2856bfe (2x). Dispatcher re-queues each; next run rescues the work. This is the goal-doc §0 stall signature persisting even after memori+fallback fixes — merit root-cause beyond config (possible local-fallback/link loss at the worker). First flagged @ 96c6539. Work IS being rescued (chat-composer landed; history route on main), so not data-losing — but capacity burns on re-runs.
+
+## Board summary (this tick)
+- 3 running, 4 ready, 0 blocked, 0 todo. Board NOT empty ⇒ phases remain, no new dispatch required (ready cards flow as slots free). All Phase 1 ios groups either landed or in flight; Phase 2/4 not yet started (depend on Phase 1 landing first).
