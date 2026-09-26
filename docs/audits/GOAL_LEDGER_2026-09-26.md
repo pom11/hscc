@@ -133,3 +133,9 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - DAEMON LIVENESS: ~/.hscc/daemon.pid = 15843, `kill -0` ALIVE (verified this tick).
 - DISPATCH THIS TICK: NONE — caps FULL (3 running), nothing manually dispatched, no new cards filed (Phase 2/3 already filed by sibling instance; issue not IDLE — ready queue deep). Deliberately NOT duplicating the sibling's 22:01 actions.
 - ACTION NEEDED (operator): delete one of the duplicate cron jobs. Everything else is healthy and self-driving.
+
+## Heartbeat tick 22:11 (single cron restored — duplicate REMOVED)
+- **RESOLVED the duplicate-clock finding (from 22:05 tick):** `hermes cron remove bb40a25b36c8` executed — the duplicate row is DELETED. Verified: `cronjob_manage list` now shows exactly ONE job, `a0abe2b7848b` (enabled, schedule every 35m, last_status ok, next run 22:46). Single heartbeat restored, matching goal-doc §0d (create ONE).
+- Reason for removing bb40a25b36c8 (not the original): a0abe2b7848b is the ORIGINAL job (created Phase 0d, referenced throughout this ledger), has the full firing history, and is the one bound to this orchestrator session via `--deliver bot-chat:hscc-orch`. bb40a25b36c8 was the accidental parallel row (last_run_at=null — never fired). Removing the never-fired duplicate restores the intended single-cron state.
+- NOTE/correction to the 22:05 finding's mapping: bb40a25b36c8 had last_run_at=null (never actually fired); the 22:01 tick + Phase 2 filings came from a0abe2b7848b's session (run 6e2f5d4f / its sibling run). Net conclusion unchanged — there WERE two jobs; now there is one.
+- No other board/git changes this tick. Still 3 running (t_3c5149fd, t_b578972f, t_10a687c4), 6 ready. Ledger commit this tick.
