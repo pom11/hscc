@@ -479,6 +479,16 @@ struct HSCCClient {
         try await get("/v1/daemon/status", as: DaemonStatusResponse.self)
     }
 
+    /// GET /v1/cron/list — the scheduled-job roster (active AND paused).
+    ///
+    /// Read-only (no `confirm`). Returns every Hermes cron job with schedule,
+    /// next/last run, and last outcome so the operator can see what's scheduled
+    /// from the phone. `jobs` may be absent when the store is unreadable (the
+    /// backend degrades to a 200 with only a `speak` summary).
+    func cronList() async throws -> CronListResponse {
+        try await get("/v1/cron/list", as: CronListResponse.self)
+    }
+
     /// GET /v1/triggers — trigger rules + last run + recent events.
     func triggers() async throws -> TriggersResponse {
         try await get("/v1/triggers", as: TriggersResponse.self)
