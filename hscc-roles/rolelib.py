@@ -6,7 +6,32 @@ import yaml
 _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 ROLES_DIR = os.path.join(_PLUGIN_DIR, "roles")
 BASE_IDENTITY_PATH = os.path.join(_PLUGIN_DIR, "base-identity.md")
-HERMES_HOME = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes"))
+
+
+def _hermes_root(home):
+    """Resolve the hermes ROOT directory from an ambient HERMES_HOME.
+
+    Hermes sets HERMES_HOME to the PROFILE dir (e.g. ~/.hermes/profiles/<name>)
+    whenever it runs under that profile. So the hermes root (and hence the
+    profiles root, its `profiles/` sibling) is NOT generically $HERMES_HOME:
+    when HERMES_HOME's parent is a directory named `profiles`, HERMES_HOME is
+    itself a profile dir and the root is the grandparent. Otherwise HERMES_HOME
+    is already the root. Robust to both run modes (hermes root vs profile dir).
+    """
+    home = os.path.expanduser(home) if home else ""
+    if not home:
+        return home
+    parent = os.path.dirname(home)
+    if parent and os.path.basename(parent) == "profiles":
+        return os.path.dirname(parent)
+    return home
+
+
+# HERMES_HOME is the hermes ROOT, independent of whether the ambient env points
+# at the root or at a profile dir. PROFILES_DIR is that root's `profiles/`
+# sibling — the REAL profiles root (~/.hermes/profiles), never
+# <profile-dir>/profiles (the double-nest bug this resolves).
+HERMES_HOME = _hermes_root(os.environ.get("HERMES_HOME", "~/.hermes"))
 PROFILES_DIR = os.path.join(HERMES_HOME, "profiles")
 
 # Full Hermes capability MINUS cluster control. Cluster ops (hscc-cluster) stay
