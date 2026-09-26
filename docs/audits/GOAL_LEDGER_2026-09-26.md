@@ -34,8 +34,17 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - Job id: a0abe2b7848b. Schedule every 35m, repeat ∞, next run 19:26 (+03).
 - PROVEN: `hermes cron list | grep -i heartbeat` → `Name:      hscc-orch-goal-heartbeat`, `Deliver:   bot-chat:hscc-orch` (accepted, not rejected). `hermes cron runs a0abe2b7848b` → run e301f584(cf running, source=direct, 18:51:39). Does NOT use --deliver desktop (silent no-op). Residual risk of local fallback (0c): if the whole fleet is down, local fallback can't help — external tier is operator's call.
 
-## Phase 1 — Branch reconciliation (40 unmerged audit/* branches) — NEXT
-- Pending: enumerate all 42 audit/* branches, decide LAND/SUPERSEDED/STALE with evidence.
+## Phase 1 — Branch reconciliation (40 unmerged audit/* branches) — CARDS FILED, RUNNING
+- All 42 local audit/* branches enumerated (40 unmerged + 2 MERGED: slashpreview-t_8ba85648, templates-t_18aefdb7). 40 unmerged grouped into 7 area cards (workers decide LAND/SUPERSEDED/STALE with evidence, merge LANDs to main themselves):
+  - t_3832283d [ios] fleet-monitoring: fleetview, fleetmonitor, opsview, nodetopology, banner, logs
+  - t_d331843e [ios] chat-composer: chatreadability, slashpalette, slashpreview-26c, voiceinput, offline-queue, chat-retry(WIP), chat-stop(docs), chat-attachments(docs)
+  - t_1bfe8908 [ios] settings-profile: settingsview(@State race), settings-multi-cluster, profileeditor, memorypicker, a11y
+  - t_3c5149fd [ios] detail-error-views: errorcopy, empty-states, activityfeed, sessions, sessionhistory, templatedetail, deeplinks, deeplink-harness, liveactivity-rehydration
+  - t_c14a427c [ios] serving-alerts-widget: servingcontrol(CONFIRM-GATED), notify-operator, widget, show-worker-diffs(cb93+178cb), memoryview
+  - t_e2856bfe [backend] api-history + report-only: history(daemon-history route), health-fix(superseded), boardhygiene(report), searchview(report)
+  - t_b578972f [ios] approvals-autodown: approvals(VO labels), autodownview(gate controls)
+- 2 branches ALREADY MERGED (ahead=0, no action): slashpreview-t_8ba85648, templates-t_18aefdb7
+- Every local audit/* branch mapped to a card or confirmed merged — none dropped.
 
 ## Phase 2 — iOS theme + UI/UX polish
 
@@ -50,3 +59,4 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - [FILED] t_9e8732b8 memori capture still NOT landing (newest 2026-06-13 02:50:29) — RUNNING on backend-engineer, root cause confirmed (deploy+config gap to profile dirs)
 - [FILED] t_b6ec32d6 provision-check PROFILES_DIR path bug (double-nest reads defaults) — READY backend-engineer
 - [FIXED-profile] general-orch + flightdeck-orch config gaps patched (memory/aux + cluster toolsets) — verified via load_config
+- [FILED] Phase 1 x7: t_3832283d, t_d331843e, t_1bfe8908, t_3c5149fd, t_c14a427c, t_e2856bfe, t_b578972f (40 unmerged branches grouped by area)
