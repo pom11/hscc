@@ -224,3 +224,16 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - GATEWAY: alive, not restarted this cycle (isolated worker deploys only).
 - No junk cards, no blocked/orphaned states. Single heartbeat cron verified intact (a0abe2b7848b, next run 02:37).
 - Ledger commit this tick.
+
+## Heartbeat tick 02:48 (cron hscc-orch-goal-heartbeat a0abe2b7848b, 2026-09-27)
+- SINCE LAST TICK (02:03): **Phase 2 detail-template LANDED.** t_04e16e60 (Phase 2, run 810) COMPLETED — product code 0867034 (route detail/template surfaces through Theme tokens) + audit doc e81701e, merged + pushed. origin/main == main @ e81701e (0/0 verified). Worker self-merged per §6. **PHASE 2 now 3/4 landed** (project-sessions 4e43e7f, chat f104a49, detail-template 0867034).
+- CURRENT STATE (02:48 EEST / 23:48 UTC): **2 running, 1 ready, 0 blocked, 0 todo.**
+  - t_320a8332 [Phase 2 cluster-control] run 811, pid 61637 alive (started 01:34), worktree 0 ahead on branch (mid-edit, uncommitted theme edits ClusterView/FleetView + theme_sweep doc). Healthy, heartbeating.
+  - t_ca133e7d [Phase 4 decode-drift] run 812, pid 72862 alive (started 02:20), no commits yet. Phase 4 now RUNNING (filed 02:03 tick, auto-dispatched when ios slot freed as t_04e16e60 completed).
+  - READY (1, ios-engineer): t_791d1a75 (send-retry, priority 0). GATED: ios-engineer per-profile cap 2 (FULL — t_320a8332 + t_ca133e7d). Auto-dispatch as ios slot frees.
+- DISPATCH THIS TICK: **NONE** — board NOT empty (2 running), ios-engineer cap 2 FULL. Phase 2's last card (t_320a8332 cluster-control) in flight + Phase 4 running. Ready card auto-flows. Caps non-negotiable (§6).
+- PHASE STATUS: **Phase 1 = 100% closed.** **Phase 2 = 3/4 landed** (project-sessions, chat, detail-template), **1/4 running** (cluster-control). **Phase 3 = COMPLETE** (cron bafdf30). **Phase 4 = RUNNING** (t_ca133e7d). Final report pending Phase 2 last card + Phase 4 completion.
+- DAEMON: **STILL STOPPED** (graceful `Received signal 15` @ 2026-09-26T22:09:24Z = 01:09 EEST, no daemon.pid). Not restarting (not this heartbeat's charter; could race intentional op). STILL OPEN for operator: confirm it returns to health.
+- GATEWAY: alive, not restarted this cycle.
+- Single heartbeat cron verified intact (only 1 row, next run 03:22). No junk cards, no blocked/orphaned states.
+- Ledger commit this tick.
