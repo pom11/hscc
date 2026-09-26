@@ -21,7 +21,7 @@ Baseline verified by execution BEFORE edits: `check_theme.sh` CLEAN,
 
 ## Sweep table (violation -> fix -> commit sha)
 
-Commit: <SHA> (see git log)
+Commit: f104a49 (see git log)
 
 ### StreamingChatView.swift
 | Violation (file:line → old) | Theme token |
