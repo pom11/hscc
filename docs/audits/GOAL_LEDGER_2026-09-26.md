@@ -48,7 +48,10 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - PROGRESS:
   - [LANDED] chat-composer (t_d331843e) @ 89384bf: 7/8 branches SUPERSEDED (features already on main byte-identical), 1 LEAVE (chat-retry WIP t_3ae70b8c → follow-on card t_791d1a75 filed by worker: restore failed send text to composer). iOS worker completed cleanly.
   - [LANDED] fleet-monitoring (t_3832283d) @ befe217/2273498: all 6 branches SUPERSEDED (code already on main via re-commits; evidence in docs/audits/phase1-fleet-monitoring-reconciliation.md). Run 786 crashed (protocol violation), run 791 re-verified + completed.
-  - [RUNNING] settings-profile (t_1bfe8908) run 795, detail-error-views (t_3c5149fd) run 794, api-history (t_e2856bfe) run 790.
+  - [RUNNING] detail-error-views (t_3c5149fd) run 794, serving-alerts-widget (t_c14a427c) run 797, dispatcher bug card (t_10a687c4) run 798.
+  - [DONE] settings-profile (t_1bfe8908) — disposition CHERRY-PICKED-TO-MAIN (verified: work already on main via re-commits 9a7da3b/a77d952/dcaedd6; worktree clean, 0 commits ahead). Stopped the 4-run retry loop per operator.
+  - [DONE] api-history (t_e2856bfe) — all 4 branches SUPERSEDED/STALE; worker's preserved-audit-reports work was stranded on branch (kept protocol-violating) → operator directed merge, merged aac90ca (632 lines, docs/audits/preserved_branches/).
+  - [RUNNING] t_10a687c4 dispatcher rc=0-without-complete bug — filed (per operator diagnosis: rc=0 no terminal kanban call must be surfaced as COMPLETED-BUT-UNREPORTED, enforce failure_limit 3; max-retries not being enforced — t_1bfe8908 reached 4th run).
   - OBSERVATION: recurring protocol_violation / worker crash — ios/backend workers doing long reconciliation then exiting rc=0 WITHOUT kanban_complete (marked crashed, auto re-queued) OR worker pid dying ("pid not alive"). Dispatcher self-heals (fleet-monitoring re-ran + completed; chat-composer completed first try). BUT it is NOT isolated: 7 cards, 4 involving re-runs; api-history (t_e2856bfe) crashed twice (788,789) now 35+ min on 3rd run 790 (still alive); settings-profile (t_1bfe8908) crashed twice (792 protocol, 793 pid-not-alive) now on 3rd run 795 (alive). Likely the worker-model .247 endpoint / worker-session lifecycle. NOT LOSING WORK (dispatcher retries), but burning time. OPEN ITEM for operator: if this persists overnight, investigate worker-session termination (model server stability) rather than assume one-off.
 - READY: t_c14a427c, t_b578972f, t_a2c8e456, t_791d1a75 (ios) + api-history lane.
 
@@ -72,6 +75,9 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - [FIXED-profile] general-orch + flightdeck-orch config gaps patched (memory/aux + cluster toolsets) — verified via load_config
 - [FILED] Phase 1 x7: t_3832283d, t_d331843e, t_1bfe8908, t_3c5149fd, t_c14a427c, t_e2856bfe, t_b578972f (40 unmerged branches grouped by area)
 - [FILED] Phase 3: t_a2c8e456 iOS cron roster view (route /v1/cron/list already exists — surface only)
+- [DONE] t_1bfe8908 settings-profile — CHERRY-PICKED-TO-MAIN (stopped 4-run retry loop)
+- [DONE] t_e2856bfe api-history — merged aac90ca (preserved audit reports, 4 branches SUPERSEDED/STALE)
+- [FILED] t_10a687c4 dispatcher rc=0-without-complete bug (surface completed-unreported, enforce failure_limit) — RUNNING backend-engineer
 
 ## Phase 1 status (updated 2026-09-26 ~20:25, heartbeat tick)
 - [LANDED] t_d331843e [chat-composer] — MERGED @ 89384bf (Merge wt/t_d331843e), pushed, deployed. Disposition: 7 SUPERSEDED, 1 LEAVE (chat-retry WIP). Ledger update @ 96c6539.
