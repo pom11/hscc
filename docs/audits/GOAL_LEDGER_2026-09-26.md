@@ -154,3 +154,8 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - DAEMON LIVENESS: pid 15843, ALIVE (verified). GATEWAY up (pid 69773, running since Mon, NOT restarted during 22:12 event — so the crash was workers-only, gateway survived).
 - OPERATOR-ESCALATE (material new items): (1) fleet-wide simultaneous worker death @22:12:31 — systemic, root-cause worker-session/model layer; (2) junk card t_b40fddfb ("pvb", assignee `worker`, :mock claimer) — dispatcher-test leakage into real board, archive it; (3) single cron restored last tick (a0abe2b7848b remains the only one).
 - No blocked cards. No orphaned states. Ledger commit this tick.
+
+## Heartbeat tick 22:50 (actions taken on the 22:48 tick's escalations)
+- **RESOLVED escalation #2 (junk card):** `hermes kanban --board hscc archive t_b40fddfb` executed — the dispatcher-test-leak card (title "pvb", body NULL, assignee `worker`=no real profile, claimer `Razvans-Mac-Studio.local:mock` = test harness) is now **ARCHIVED** and off the active board. Verified status=archived via kanban_show. No runtime effect (unknown assignee + priority 0 meant it never dispatched) — clean-up only.
+- **Escalation #1 (fleet-wide worker death @22:12:31) — still OPEN for operator:** no root-cause fix landed this tick; the systemic worker-session/model-layer question remains. Corroborating evidence for t_10a687c4 was strong (junk card `gave_up` showed `effective_limit:3, limit_source:dispatcher, protocol_violations:3, protocol_violation_limit:3` — live hermes already enforces protocol-violation failure_limit=3, the exact fix that card is investigating).
+- Single heartbeat cron verified intact (a0abe2b7848b only). No board/git change beyond the archive. Ledger commit this tick.
