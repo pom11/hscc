@@ -165,6 +165,8 @@ targets:
       - path: Sources/HSCC/Views/SlashCommandPreview.swift
       - path: Sources/HSCC/Views/ActivityFeedView.swift
       - path: Sources/HSCC/Views/MemoryView.swift
+      # Phase 3 cron roster (t_a2c8e456): read-only GET /v1/cron/list surface.
+      - path: Sources/HSCC/Views/CronView.swift
       - path: Sources/HSCC/Views/CreateCardSheet.swift
       # Per-card read-only diff (t_cb93feee): a card's changed files + hunks,
       # paged, from GET /v1/review/{card_id}/diff.

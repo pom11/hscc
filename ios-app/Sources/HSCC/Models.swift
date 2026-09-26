@@ -1492,6 +1492,47 @@ struct MemoryMutationResponse: Decodable, Speakable {
     let speak: String
 }
 
+// MARK: - Cron roster (Phase 3 — GET /v1/cron/list)
+
+/// One scheduled cron job from GET /v1/cron/list (the read-only roster).
+///
+/// Maps 1:1 onto the backend contract (routes_cron.py `handle_cron_list` /
+/// `hscc_daemon.autodown.list_all_cron_jobs`, verified against a live capture
+/// 2026-09-27): `{ id, name, schedule_display, enabled, state, next_run_at,
+/// last_run_at, last_status, last_error }`.
+///
+/// `enabled` is the boolean gate that colours the roster; `state` is the
+/// string (`scheduled` | `paused`). `last_status` is the last run's outcome
+/// (`ok` / `error` / …); `last_error` carries the reason when it failed.
+/// All timestamp/outcome strings are kept as-is (display may reformat or fall
+/// back to the raw form — never parse-and-fail). Fields are optional so a
+/// sparse job record (or a future added field) never blanks the row.
+struct CronJob: Decodable, Identifiable {
+    let id: String
+    let name: String?
+    let schedule_display: String?
+    let enabled: Bool?
+    let state: String?
+    let next_run_at: String?
+    let last_run_at: String?
+    let last_status: String?
+    let last_error: String?
+
+    /// True when the job is currently enabled and thus will fire on schedule.
+    var isActive: Bool { enabled == true }
+}
+
+/// GET /v1/cron/list — the scheduled-job roster envelope.
+///
+/// VERIFIED live shape (captured 2026-09-27): `{ jobs: [...], speak }`. Each
+/// job maps to `CronJob` above. `jobs` is kept optional so a body with only a
+/// `speak` summary (the degraded unreadable-store case the backend returns as
+/// a 200 with no list) decodes without blanking the roster.
+struct CronListResponse: Decodable, Speakable {
+    let jobs: [CronJob]?
+    let speak: String
+}
+
 // MARK: - Logs (t_2eda26a6)
 
 /// One log line returned by GET /v1/logs (bounded tail).
