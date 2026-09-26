@@ -6,13 +6,12 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 
 ## Phase 0 — Self-health (COMPLETE)
 
-### 0a memori capture measurement — DONE, NOT capturing
-- DB: single shared `/Users/desac/.hermes/memori_byodb.db`
-- Command: `sqlite3 ~/.hermes/memori_byodb.db "SELECT id,role,datetime(date_created),content FROM memori_conversation_message ORDER BY date_created DESC LIMIT 10;"`
-- NEWEST literal `date_created` = `2026-06-13 02:50:29` (id 5,6). Rows newer than 2026-06-13 date literal = 6, but ALL are on 2026-06-13 (ids 1-6, Twitter autosave cron). ZERO rows from any later date, incl. today 2026-09-26.
-- Fix deployed: installed local_augmentation.py IDENTICAL to origin/main (t_57e5b3f7/47e3ab2) at default home. But profile dirs still have OLD buggy version (worker's finding).
-- => memori configured + fix at root home but profile dirs never got it -> captures NOTHING. Card filed.
-- STATUS: CARD t_9e8732b8 RUNNING on backend-engineer (pid 43437, since 18:17). Worker CONFIRMED root cause (deploy+config gap to profile dirs) and is writing the fix. Do NOT re-dispatch.
+### 0a memori capture — RESOLVED (card t_9e8732b8 DONE, landed)
+- NEWEST literal `date_created` when filed = `2026-06-13 02:50:29`. Card t_9e8732b8 root-caused + FIXED it.
+- Worker root cause: t_57e5b3f7 fix deployed ONLY to ~/.hermes/plugins (root home); profiles load provider from their OWN $HERMES_HOME/plugins (hscc-orch still had OLD 8942-byte buggy file). PLUS _load_config reads <hermes_home>/memori_byodb.json (profile-scoped, missing) → initialize() raised → provider never activated.
+- Fix: _load_config falls back to shared default home; install_payload_profiles() propagates payload to every profile's plugins dir (53416b9, merge 5cdd547, pushed, deployed).
+- VERIFIED by execution: hermetic capture turn lands conversation/message/fact rows (date_created 2026-09-26) in scratch DB, idempotent. Tests green both interpreters (memori 9, install_payload 15, hscc-bootstrap 274).
+- => memori NOW CAPTURES. Contract §0a/§0c.3 resolved.
 
 ### 0b archive dead cards — DONE
 - t_b0e3d750 (memori fix) superseded by t_57e5b3f7 @ 47e3ab2 → ARCHIVED
@@ -60,7 +59,7 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - GOAL_REPORT_2026-09-26.md (write+commit at end of run)
 
 ## Card log
-- [FILED] t_9e8732b8 memori capture still NOT landing (newest 2026-06-13 02:50:29) — RUNNING on backend-engineer, root cause confirmed (deploy+config gap to profile dirs)
+- [DONE] t_9e8732b8 memori capture fixed + landed (53416b9, merge 5cdd547, pushed, deployed) — memori NOW CAPTURES
 - [FILED] t_b6ec32d6 provision-check PROFILES_DIR path bug (double-nest reads defaults) — READY backend-engineer
 - [FIXED-profile] general-orch + flightdeck-orch config gaps patched (memory/aux + cluster toolsets) — verified via load_config
 - [FILED] Phase 1 x7: t_3832283d, t_d331843e, t_1bfe8908, t_3c5149fd, t_c14a427c, t_e2856bfe, t_b578972f (40 unmerged branches grouped by area)
