@@ -68,6 +68,7 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 ## Card log
 - [DONE] t_9e8732b8 memori capture fixed + landed (53416b9, merge 5cdd547, pushed, deployed) — memori NOW CAPTURES
 - [DONE] t_b6ec32d6 provision-check PROFILES_DIR bug FIXED (522a714, merge dbd61da) — verified by execution, reports real values now
+- [DONE] t_e2856bfe [api-history Phase 1] disposition committed — all 4 SUPERSEDED/STALE, 2 branches deleted (health-fix, boardhygiene), 0 LAND merges
 - [FIXED-profile] general-orch + flightdeck-orch config gaps patched (memory/aux + cluster toolsets) — verified via load_config
 - [FILED] Phase 1 x7: t_3832283d, t_d331843e, t_1bfe8908, t_3c5149fd, t_c14a427c, t_e2856bfe, t_b578972f (40 unmerged branches grouped by area)
 - [FILED] Phase 3: t_a2c8e456 iOS cron roster view (route /v1/cron/list already exists — surface only)
@@ -76,8 +77,7 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - [LANDED] t_d331843e [chat-composer] — MERGED @ 89384bf (Merge wt/t_d331843e), pushed, deployed. Disposition: 7 SUPERSEDED, 1 LEAVE (chat-retry WIP). Ledger update @ 96c6539.
 - [RUNNING] t_3832283d [fleet-monitoring] ios-engineer — run 791 (2nd attempt; run 786 = protocol-violation crash). Heartbeating normally.
 - [RUNNING] t_1bfe8908 [settings-profile] ios-engineer — run 792 (1st attempt). Heartbeating normally.
-- [RUNNING] t_e2856bfe [api-history] backend-engineer — run 790 (3rd attempt; runs 788+789 = protocol-violation crashes). Heartbeating normally.
-  - VERIFIED on main while it runs: routes_history.py = GET /v1/daemon/history (aa543b7, first on main) + ios SelfHealHistory view (44a60e7) ALREADY on main ⇒ correct disposition for audit/history-t_b5ce7935 is likely SUPERSEDED (route+view already shipped), worker should prove by grep. report-only branches (boardhygiene/searchview/health-fix) STALE → working notes being preserved to docs/audits/preserved_branches/ (untracked, safe).
+- [LANDED] t_e2856bfe [api-history] backend-engineer — disposition committed. All 4 branches SUPERSEDED/STALE: history route+view already on main (byte-identical blobs, grep-proven); health-fix/boardhygiene/searchview report-only. health-fix + boardhygiene branches DELETED (reports preserved byte-identical to docs/audits/preserved_branches/); history + searchview LEFT INTACT. Evidence in docs/audits/phase1-api-history-disposition-t_e2856bfe.md. (Run 790 was 3rd attempt; runs 788+789 = protocol-violation crashes — work rescued here.)
 - [READY, queued] t_3c5149fd [detail-error-views], t_c14a427c [serving-alerts-widget], t_b578972f [approvals-autodown], t_a2c8e456 [Phase 3 iOS cron] — all ios-engineer. GATED by max_in_progress=3 (currently full: 3 running) + ios-engineer per-profile cap 2 (full). Auto-dispatch as ios slots free. No manual dispatch needed.
 
 ## Protocol-violation watch (recurring freeze pattern — operator attention)
