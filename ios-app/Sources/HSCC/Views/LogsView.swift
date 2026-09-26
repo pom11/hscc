@@ -46,13 +46,12 @@ struct LogsView: View {
 
     private func content(_ client: HSCCClient) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
                 sourcePicker
 
                 switch state {
                 case .loading:
-                    logPlaceholder("Fetching \(source.label.lowercased()) log…")
-                        .overlay { ProgressView() }
+                    HSLoading("Fetching \(source.label.lowercased()) log…")
                 case .failed(let message):
                     HSErrorLabel(message: message, retry: { Task { await load(client) } })
                 case .stale(let entries, let ageMessage):
@@ -65,7 +64,7 @@ struct LogsView: View {
                     logBody(entries)
                 default:
                     // idle: nothing loaded yet — let .task trigger the first load.
-                    ProgressView().frame(maxWidth: .infinity, minHeight: 200)
+                    HSLoading()
                 }
             }
             .padding()
@@ -82,7 +81,7 @@ struct LogsView: View {
     // MARK: - Source picker
 
     private var sourcePicker: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
             Picker("Log source", selection: $source) {
                 ForEach(LogSource.allCases) { s in
                     Text(s.label).tag(s)
@@ -117,11 +116,11 @@ struct LogsView: View {
                 }
             }
             .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
                     .fill(Theme.Semantic.surfaceRaised)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
                     .strokeBorder(Theme.Semantic.onSurface.opacity(0.08), lineWidth: 1)
             )
             footer
@@ -133,13 +132,6 @@ struct LogsView: View {
             .font(.caption2)
             .foregroundColor(Theme.Semantic.onSurfaceMuted)
             .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func logPlaceholder(_ text: String) -> some View {
-        Text(text)
-            .font(.callout)
-            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-            .frame(maxWidth: .infinity, minHeight: 200)
     }
 
     // MARK: - Load
@@ -171,17 +163,17 @@ private struct LogRow: View {
     let entry: LogEntry
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
             if let level = entry.level, !level.isEmpty {
                 Text(level)
                     .font(.caption2.weight(.bold))
                     .foregroundColor(tint)
                     .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
+                    .padding(.vertical, Theme.Spacing.xxs.rawValue)
                     .background(tint.opacity(0.14))
                     .clipShape(Capsule())
             }
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
                 if let ts = entry.timestamp, !ts.isEmpty {
                     Text(ts)
                         .font(.caption2.monospaced())
@@ -195,7 +187,7 @@ private struct LogRow: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 10)
+        .padding(.horizontal, Theme.Spacing.md.rawValue)
         .padding(.vertical, 6)
     }
 

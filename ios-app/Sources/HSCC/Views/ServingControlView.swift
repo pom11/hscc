@@ -36,7 +36,7 @@ struct ServingControlView: View {
         NavigationStack {
             ScrollView {
                 if let client {
-                    VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
                         header(client: client)
                         unitsSection(client: client)
                         noteSection
@@ -103,8 +103,7 @@ struct ServingControlView: View {
         switch status {
         case .loading, .idle:
             HSSectionCard(title: "Serving Units", systemImage: "cpu") {
-                ProgressView()
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                HSLoading()
             }
         case .failed(let message):
             HSSectionCard(title: "Serving Units", systemImage: "cpu") {
@@ -112,7 +111,7 @@ struct ServingControlView: View {
             }
         case .stale(let state, let ageMessage):
             HSSectionCard(title: "Serving Units", systemImage: "cpu") {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
                     StaleBanner(age: ageMessage,
                                 reason: "Can't reach the cluster right now.") {
                         Task { await loadStatus() }
@@ -131,14 +130,14 @@ struct ServingControlView: View {
     @ViewBuilder
     private func unitsBody(client: HSCCClient, state: ClusterStatusResponse) -> some View {
         if state.workloads.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
                 HSEmptyLabel(message: "No serving units running right now.")
                 Text("A unit that is down does not appear here. `cluster up` (in Fleet Control) starts the whole serving fleet — orchestrator and workers — so a stopped unit only comes back through a fleet-up.")
                     .font(.caption)
                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
             }
         } else {
-            VStack(spacing: 12) {
+            VStack(spacing: Theme.Spacing.md.rawValue) {
                 ForEach(state.workloads) { unit in
                     unitCard(client: client, unit: unit)
                 }
@@ -150,14 +149,14 @@ struct ServingControlView: View {
     /// then Stop / Restart, both confirm-gated.
     @ViewBuilder
     private func unitCard(client: HSCCClient, unit: ClusterWorkload) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
             // What this unit serves — the name is the model it hosts.
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
                 Text(unit.name)
                     .font(.headline)
                     .foregroundColor(Theme.Semantic.onSurface)
                     .textSelection(.enabled)
-                HStack(spacing: 12) {
+                HStack(spacing: Theme.Spacing.md.rawValue) {
                     Label(parallelismLabel(unit), systemImage: "square.grid.3x3")
                     if let cid = unit.container_id, cid != "?" {
                         Label(cid, systemImage: "shippingbox")
@@ -172,7 +171,7 @@ struct ServingControlView: View {
             // there is nothing to stop or restart (it comes back with a fleet
             // up in Fleet Control).
             if let cid = unit.container_id, cid != "?" {
-                HStack(spacing: 12) {
+                HStack(spacing: Theme.Spacing.md.rawValue) {
                     MutationButton(
                         title: "Stop",
                         systemImage: "stop.circle",
@@ -210,10 +209,10 @@ struct ServingControlView: View {
                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
             }
         }
-        .padding(12)
+        .padding(Theme.Spacing.md.rawValue)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
                 .fill(Theme.Semantic.surfaceRaised)
         )
     }

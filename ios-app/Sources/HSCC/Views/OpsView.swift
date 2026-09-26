@@ -23,7 +23,7 @@ struct OpsView: View {
         NavigationStack {
             ScrollView {
                 if let client {
-                    VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
                         verifySection
                         daemonSection
                         triggersSection(client: client)
@@ -107,11 +107,11 @@ struct OpsView: View {
             HSSectionCard(title: "Verify", systemImage: "checkmark.seal") {
                 switch verify {
                 case .loading:
-                    ProgressView()
+                    HSLoading()
                 case .failed(let message):
                     errorLabel(message, retry: { Task { await loadVerify(client) } })
                 case .stale(let state, let ageMessage):
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
                         StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
                             Task { await loadVerify(client) }
                         }
@@ -128,7 +128,7 @@ struct OpsView: View {
 
     @ViewBuilder
     private func verifyBody(_ state: VerifyResponse) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
             Label(state.speak, systemImage: state.ok ? "checkmark.seal.fill" : "xmark.seal.fill")
                 .font(.subheadline)
                 .foregroundColor(state.ok ? Theme.Semantic.ok : Theme.Semantic.bad)
@@ -136,10 +136,10 @@ struct OpsView: View {
                 emptyLabel("No checks reported.")
             } else {
                 ForEach(state.checks) { check in
-                    HStack(alignment: .top, spacing: 8) {
+                    HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
                         Image(systemName: HealthCheckIndicator.icon(check.ok))
                             .foregroundColor(HealthCheckIndicator.tint(check.ok))
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
                             Text(check.name)
                                 .font(.body)
                             if let detail = check.detail, !detail.isEmpty {
@@ -162,11 +162,11 @@ struct OpsView: View {
         HSSectionCard(title: "Daemon", systemImage: "server.rack") {
             switch daemon {
             case .loading:
-                ProgressView()
+                HSLoading()
             case .failed(let message):
                 errorLabel(message, retry: { Task { if let c = client { await loadDaemon(c) } } })
             case .loaded(let state):
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
                     Label(state.speak, systemImage: state.daemon_running == true ? "checkmark.seal.fill" : "xmark.seal.fill")
                         .font(.subheadline)
                         .foregroundColor(state.daemon_running == true ? Theme.Semantic.ok : Theme.Semantic.bad)
@@ -177,10 +177,10 @@ struct OpsView: View {
                         Divider()
                         let sorted = streams.sorted { $0.key < $1.key }
                         ForEach(sorted, id: \.key) { name, stream in
-                            HStack(alignment: .top, spacing: 8) {
+                            HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
                                 Image(systemName: stream.ok == true ? "checkmark.circle.fill" : "xmark.circle.fill")
                                     .foregroundColor(stream.ok == true ? Theme.Semantic.ok : Theme.Semantic.bad)
-                                VStack(alignment: .leading, spacing: 2) {
+                                VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
                                     Text(name)
                                         .font(.body)
                                     if let msg = stream.message, !msg.isEmpty {
@@ -208,11 +208,11 @@ struct OpsView: View {
         HSSectionCard(title: "Triggers", systemImage: "bolt") {
             switch triggers {
             case .loading:
-                ProgressView()
+                HSLoading()
             case .failed(let message):
                 errorLabel(message, retry: { Task { await loadTriggers(client) } })
             case .loaded(let state):
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
                     Text(state.speak)
                         .font(.subheadline)
                         .italic()
@@ -227,7 +227,7 @@ struct OpsView: View {
                         emptyLabel("No trigger rules configured.")
                     } else {
                         ForEach(rules) { rule in
-                            VStack(alignment: .leading, spacing: 2) {
+                            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
                                 Text(rule.id)
                                     .font(.body.weight(.medium))
                                 if let title = rule.trigger_params?.title, !title.isEmpty {
@@ -247,7 +247,7 @@ struct OpsView: View {
                                 }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.vertical, 2)
+                            .padding(.vertical, Theme.Spacing.xxs.rawValue)
                         }
                     }
                     // Operator action: force a trigger-engine run now instead
@@ -280,7 +280,7 @@ struct OpsView: View {
         HSSectionCard(title: "Escalations", systemImage: "arrow.up.right.circle") {
             switch escalations {
             case .loading:
-                ProgressView()
+                HSLoading()
             case .failed(let message):
                 errorLabel(message, retry: { Task { await loadEscalations(client) } })
             case .loaded(let state):
@@ -326,11 +326,11 @@ struct OpsView: View {
         HSSectionCard(title: "Profiles", systemImage: "person.3") {
             switch profiles {
             case .loading:
-                ProgressView()
+                HSLoading()
             case .failed(let message):
                 errorLabel(message, retry: { Task { if let c = client { await loadProfiles(c) } } })
             case .loaded(let state):
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
                     Text(state.speak)
                         .font(.subheadline)
                         .italic()

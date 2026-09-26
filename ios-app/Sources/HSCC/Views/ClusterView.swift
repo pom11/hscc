@@ -40,12 +40,12 @@ struct ClusterView: View {
                 // would draw over the nav bar (t_4889e978).
                 ConnectionBanner()
                 if let client {
-                    VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
                         topologyStrip
                         hubLinks(client: client)
                     }
                     .padding(.horizontal)
-                    .padding(.top, 8)
+                    .padding(.top, Theme.Spacing.sm.rawValue)
                     .padding(.bottom)
                 } else {
                     notConfiguredView
@@ -110,11 +110,10 @@ struct ClusterView: View {
     /// telemetry the API doesn't ship.
     private var topologyStrip: some View {
         let pairs = topologyPairs()
-        return VStack(alignment: .leading, spacing: 10) {
+        return VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
             switch status {
             case .loading where status.value == nil:
-                ProgressView()
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                HSLoading()
             case .stale(let state, let ageMessage):
                 NodeTopologyView(pairs: pairs)
                 StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
@@ -135,7 +134,7 @@ struct ClusterView: View {
 
     /// The one-line fleet status beneath the strip: hosts up / workloads running.
     private func fleetStatusLine(_ state: ClusterStatusResponse) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: Theme.Spacing.sm.rawValue) {
             Text(state.speak)
                 .font(.caption)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
@@ -185,7 +184,7 @@ struct ClusterView: View {
     // MARK: - Hub navigation rows
 
     private func hubLinks(client: HSCCClient) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
             approvalsRow(client)
             hubRow("Health & Ops", systemImage: "stethoscope",
                    subtitle: "verify, daemon, triggers, escalations, profiles") {
@@ -246,12 +245,12 @@ struct ClusterView: View {
         NavigationLink {
             ApprovalsView(client: client)
         } label: {
-            HStack(spacing: 12) {
+            HStack(spacing: Theme.Spacing.md.rawValue) {
                 Image(systemName: "checkmark.seal")
                     .font(.title3)
                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     .frame(width: 28)
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
                     Text("Approvals")
                         .font(.headline)
                         .foregroundColor(Theme.Semantic.onSurface)
@@ -267,7 +266,7 @@ struct ClusterView: View {
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
                     .fill(approvalTint)
             )
         }
@@ -305,12 +304,12 @@ struct ClusterView: View {
         NavigationLink {
             destination()
         } label: {
-            HStack(spacing: 12) {
+            HStack(spacing: Theme.Spacing.md.rawValue) {
                 Image(systemName: systemImage)
                     .font(.title3)
                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     .frame(width: 28)
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
                     Text(title)
                         .font(.headline)
                         .foregroundColor(Theme.Semantic.onSurface)
@@ -326,7 +325,7 @@ struct ClusterView: View {
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
                     .fill(Theme.Semantic.surfaceRaised)
             )
         }

@@ -36,7 +36,7 @@ struct AutodownView: View {
         NavigationStack {
             ScrollView {
                 if let client {
-                    VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
                         statusSection
                         controlSection(client: client)
                         cronSection
@@ -99,14 +99,14 @@ struct AutodownView: View {
     private var statusSection: some View {
         switch status {
         case .loading:
-            HSSectionCard(title: "Status", systemImage: "timer") { ProgressView() }
+            HSSectionCard(title: "Status", systemImage: "timer") { HSLoading() }
         case .failed(let message):
             HSSectionCard(title: "Status", systemImage: "timer") {
                 errorLabel(message, retry: { Task { await loadStatus() } })
             }
         case .stale(let state, let ageMessage):
             HSSectionCard(title: "Status", systemImage: "timer") {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
                     StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
                         Task { await loadStatus() }
                     }
@@ -124,7 +124,7 @@ struct AutodownView: View {
 
     @ViewBuilder
     private func statusBody(_ state: AutodownStatusResponse) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
             if waking, let wakeMessage {
                 wakingBanner(wakeMessage)
             }
@@ -163,9 +163,9 @@ struct AutodownView: View {
     /// A distinct banner shown while a wake is in progress and we're polling
     /// the API for the outcome (wake can take ~9 minutes — never block the UI).
     private func wakingBanner(_ message: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
             ProgressView()
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
                 Text("Waking the fleet…")
                     .font(.subheadline.weight(.semibold))
                 Text(message)
@@ -174,8 +174,8 @@ struct AutodownView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .padding(Theme.Spacing.md.rawValue)
+        .background(RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous)
             .fill(Theme.Semantic.surfaceElevated))
     }
 
@@ -309,7 +309,7 @@ struct AutodownView: View {
             let model = state.active_cron_model ?? []
             if !cpuOnly.isEmpty || !model.isEmpty {
                 HSSectionCard(title: "Active cron jobs", systemImage: "calendar") {
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
                         if !model.isEmpty {
                             Label("Model-requiring jobs block autodown: \(model.joined(separator: ", "))",
                                   systemImage: "exclamationmark.triangle.fill")
