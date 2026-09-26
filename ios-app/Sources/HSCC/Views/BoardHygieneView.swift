@@ -40,7 +40,7 @@ struct BoardHygieneView: View {
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal)
-                .padding(.vertical, 8)
+                .padding(.vertical, Theme.Spacing.sm.rawValue)
 
                 if let client {
                     switch selected {
@@ -118,7 +118,7 @@ struct BoardHygieneView: View {
 
     @ViewBuilder
     private func blockedRow(_ card: BlockedCard, client: HSCCClient) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
             Text(card.displayTitle)
                 .font(.body)
             HSMetaLine([card.board, card.assignee,

@@ -36,10 +36,10 @@ struct NodeTopologyView: View {
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
         .padding(.horizontal)
-        .padding(.vertical, 12)
+        .padding(.vertical, Theme.Spacing.md.rawValue)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
                 .fill(Theme.Semantic.surfaceRaised)
         )
         .accessibilityElement(children: .combine)
@@ -62,7 +62,7 @@ struct NodeTopologyView: View {
 
     /// A single node: a coloured dot with its ip label beside it.
     private func nodeDot(_ node: TopologyNode) -> some View {
-        HStack(spacing: 4) {
+        HStack(spacing: Theme.Spacing.xs.rawValue) {
             Circle()
                 .fill(node.state.color)
                 .frame(width: 8, height: 8)

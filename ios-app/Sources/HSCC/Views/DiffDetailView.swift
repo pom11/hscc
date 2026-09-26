@@ -50,7 +50,7 @@ struct DiffDetailView: View {
                         if isLoading && files.isEmpty == false {
                             ProgressView("Loading more…")
                                 .frame(maxWidth: .infinity)
-                                .padding(.vertical, 12)
+                                .padding(.vertical, Theme.Spacing.md.rawValue)
                         }
                         footer
                         // Load the next page lazily when this sentinel scrolls
@@ -71,7 +71,7 @@ struct DiffDetailView: View {
 
     /// One line of context about the diff as a whole (project · branch · files).
     private var headerBlock: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
             if !speak.isEmpty {
                 Text(speak)
                     .font(.footnote)
@@ -84,8 +84,8 @@ struct DiffDetailView: View {
                     .foregroundColor(Theme.Semantic.warn)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, Theme.Spacing.md.rawValue)
+        .padding(.vertical, Theme.Spacing.sm.rawValue)
     }
 
     /// A collapsible per-file block: header (path + status) toggles the hunk body.
@@ -103,7 +103,7 @@ struct DiffDetailView: View {
                     }
                 }
             } label: {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm.rawValue) {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
                         .font(.caption2)
                         .foregroundColor(Theme.Semantic.onSurfaceMuted)
@@ -117,8 +117,8 @@ struct DiffDetailView: View {
                 }
             }
             .buttonStyle(.plain)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.horizontal, Theme.Spacing.md.rawValue)
+            .padding(.vertical, Theme.Spacing.sm.rawValue)
 
             if expanded {
                 Divider()
@@ -126,7 +126,7 @@ struct DiffDetailView: View {
             }
         }
         .background(Theme.Semantic.surfaceRaised)
-        .padding(.vertical, 2)
+        .padding(.vertical, Theme.Spacing.xxs.rawValue)
     }
 
     /// The `A`/`M`/`D` chip with the file's +/- line counts.
@@ -154,7 +154,7 @@ struct DiffDetailView: View {
                     Text(header)
                         .font(.hsccMono(11, weight: .semibold))
                         .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                        .padding(.vertical, 2)
+                        .padding(.vertical, Theme.Spacing.xxs.rawValue)
                 }
                 ForEach(hunk.lines ?? []) { line in
                     diffLineRow(line)
@@ -162,8 +162,8 @@ struct DiffDetailView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 2)
+        .padding(.horizontal, Theme.Spacing.sm.rawValue)
+        .padding(.vertical, Theme.Spacing.xxs.rawValue)
         .background(
             // Very light tint so added/deleted blocks read as bands, not noise.
             Color.clear
@@ -206,7 +206,7 @@ struct DiffDetailView: View {
     @ViewBuilder
     private var footer: some View {
         if truncated || hasMore {
-            HStack(spacing: 4) {
+            HStack(spacing: Theme.Spacing.xs.rawValue) {
                 Image(systemName: "info.circle")
                 Text(truncated
                      ? "Some files were truncated by the server line cap."
@@ -215,7 +215,7 @@ struct DiffDetailView: View {
             .font(.footnote)
             .foregroundColor(Theme.Semantic.onSurfaceMuted)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
+            .padding(Theme.Spacing.md.rawValue)
         }
     }
 

@@ -60,7 +60,7 @@ struct TemplateDetailView: View {
                 if phase.isReloading {
                     reloadingSection
                 } else {
-                    VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
                         if phase.isReloadComplete {
                             reloadCompletionBanner
                         }
@@ -204,9 +204,9 @@ struct TemplateDetailView: View {
                 .font(.headline)
             switch preview {
             case .loading:
-                ProgressView()
+                HSLoading("Loading…")
             case .failed(let message):
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
                     errorLabel(message, retry: { Task { await loadPreview() } })
                 }
             case .loaded(let state):
@@ -218,7 +218,7 @@ struct TemplateDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
                 .fill(Theme.Semantic.surfaceRaised)
         )
     }
@@ -236,7 +236,7 @@ struct TemplateDetailView: View {
             // reassurance the operator needs before a destructive apply.
             serveDeltaSection(delta)
             if !changes.isEmpty {
-                Divider().padding(.vertical, 4)
+                Divider().padding(.vertical, Theme.Spacing.xs.rawValue)
                 Text("Config changes")
                     .font(.subheadline.weight(.semibold))
                 ForEach(changes) { change in
@@ -244,7 +244,7 @@ struct TemplateDetailView: View {
                 }
             }
             if !routing.isEmpty {
-                Divider().padding(.vertical, 4)
+                Divider().padding(.vertical, Theme.Spacing.xs.rawValue)
                 Text("Workload routing")
                     .font(.subheadline.weight(.semibold))
                 ForEach(routing) { route in
@@ -270,7 +270,7 @@ struct TemplateDetailView: View {
                 }
             }
             if !routing.isEmpty {
-                if !changes.isEmpty { Divider().padding(.vertical, 4) }
+                if !changes.isEmpty { Divider().padding(.vertical, Theme.Spacing.xs.rawValue) }
                 Text("Workload routing")
                     .font(.subheadline.weight(.semibold))
                 ForEach(routing) { route in
@@ -335,7 +335,7 @@ struct TemplateDetailView: View {
             Text(kind)
                 .font(.caption2.weight(.bold))
                 .foregroundColor(color)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
                 Text(unit.model ?? unit.role ?? "")
                     .font(.caption.weight(.semibold))
                     .foregroundColor(Theme.Semantic.onSurface)
@@ -348,13 +348,13 @@ struct TemplateDetailView: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 2)
+        .padding(.vertical, Theme.Spacing.xxs.rawValue)
         .accessibilityElement(children: .combine)
     }
 
     /// A move row: model relocates/rescales from → to (nodes, maybe port/tp/pp).
     private func moveRow(_ move: TemplateServeMove) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
             HStack(spacing: 6) {
                 Text("MOVE")
                     .font(.caption2.weight(.bold))
@@ -375,13 +375,13 @@ struct TemplateDetailView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 2)
+        .padding(.vertical, Theme.Spacing.xxs.rawValue)
         .accessibilityElement(children: .combine)
     }
 
     /// Chip row of every node where an action happens.
     private func nodeChips(_ nodes: [String]) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
             Text("Affected nodes")
                 .font(.caption2)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
@@ -390,7 +390,7 @@ struct TemplateDetailView: View {
                     Text(node)
                         .font(.hsccMono(11))
                         .foregroundColor(Theme.Semantic.onSurface)
-                        .padding(.horizontal, 8)
+                        .padding(.horizontal, Theme.Spacing.sm.rawValue)
                         .padding(.vertical, 3)
                         .background(
                             Capsule().fill(Theme.Semantic.surfaceElevated)
@@ -398,11 +398,11 @@ struct TemplateDetailView: View {
                 }
             }
         }
-        .padding(.top, 4)
+        .padding(.top, Theme.Spacing.xs.rawValue)
     }
 
     private func changeRow(_ change: TemplateChange) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
             HStack(spacing: 6) {
                 Text(change.action?.uppercased() ?? "CHANGE")
                     .font(.caption2.weight(.bold))
@@ -421,17 +421,17 @@ struct TemplateDetailView: View {
                     Text(line)
                         .font(.caption2)
                         .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                        .padding(.leading, 8)
+                        .padding(.leading, Theme.Spacing.sm.rawValue)
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 2)
+        .padding(.vertical, Theme.Spacing.xxs.rawValue)
         .accessibilityElement(children: .combine)
     }
 
     private func routingRow(_ route: TemplateRouting) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
             HStack(spacing: 6) {
                 Text(route.consumer ?? "")
                     .font(.caption.weight(.semibold))
@@ -450,7 +450,7 @@ struct TemplateDetailView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 2)
+        .padding(.vertical, Theme.Spacing.xxs.rawValue)
         .accessibilityElement(children: .combine)
     }
 
@@ -488,7 +488,7 @@ struct TemplateDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
                 .fill(Theme.Semantic.surfaceRaised)
         )
     }
@@ -497,7 +497,7 @@ struct TemplateDetailView: View {
 
     /// Shown in place while the fleet is reloading after a successful apply.
     private var reloadingSection: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: Theme.Spacing.lg.rawValue) {
             ProgressView()
                 .controlSize(.large)
                 .padding(.top, 40)
@@ -550,7 +550,7 @@ struct TemplateDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
                 .fill(Theme.Semantic.surfaceRaised)
         )
     }
@@ -573,8 +573,8 @@ private struct ApplyConfirmSheet: View {
 
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 16) {
-                VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
                     Label("Apply \(templateName)?", systemImage: "arrow.down.circle.fill")
                         .font(.headline)
                     Text("Applying this template **stops and restarts every serving unit** and takes **several minutes**. During that time the fleet **cannot serve requests**.")
@@ -585,7 +585,7 @@ private struct ApplyConfirmSheet: View {
 
                 // force_recreate — explained, not a bare toggle.
                 Toggle(isOn: $forceRecreate) {
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
                         Text("Force recreate")
                             .font(.body)
                         Text("Re-applies changed serve flags. Use when only settings changed and the current layout is already what you want.")
