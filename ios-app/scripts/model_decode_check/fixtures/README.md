@@ -42,9 +42,17 @@ fresh capture and diff the key structure.
 
 ## Coverage
 
-45 fixtures cover every decodable response model in Models.swift +
+46 fixtures cover every decodable response model in Models.swift +
 SharedModels.swift that has a decode check wired into `main.swift`
-(verified 45/45 `c.check` rows + 1 approvals classification = 46 green).
+(verified 46/46 `c.check` rows + 2 assertion blocks = 48 green).
+
+`cron_list.json` is the Phase 3 scheduled-job roster (`GET /v1/cron/list`,
+added 2026-09-27). It is a faithful 11-job capture of the REAL live response
+(2 enabled/active, 9 paused), sanitized only at the value level — no secrets,
+no IPs (the roster never contains host addresses). See `routes_cron.py`
+`handle_cron_list` / `hscc_daemon.autodown.list_all_cron_jobs` for the shape.
+The `main.swift` block additionally asserts the active/paused classification
+via `CronJob.isActive` and that every nullable field tolerates null.
 
 The 17 mutation/detail fixtures added 2026-08-30 (`dispatch_card`, `merge_card`,
 `template_apply`, `stop_cluster`, `recover_card`, `session_retire`,

@@ -1,0 +1,126 @@
+{
+    "jobs": [
+        {
+            "id": "c67ce27a1f36",
+            "name": "X feed — timeline + news",
+            "schedule_display": "45 5 */2 * *",
+            "enabled": false,
+            "state": "paused",
+            "next_run_at": "2026-06-19T05:45:00+03:00",
+            "last_run_at": "2026-06-17T05:45:41.203100+03:00",
+            "last_status": "ok",
+            "last_error": null
+        },
+        {
+            "id": "ecf80737af3e",
+            "name": "Autosave X Feed → Local Memory",
+            "schedule_display": "45 5 */2 * *",
+            "enabled": false,
+            "state": "paused",
+            "next_run_at": "2026-06-19T05:45:00+03:00",
+            "last_run_at": "2026-06-17T05:47:57.166835+03:00",
+            "last_status": "ok",
+            "last_error": null
+        },
+        {
+            "id": "a208246b4056",
+            "name": "Sparkrun recipe registry sync",
+            "schedule_display": "0 9 * * *",
+            "enabled": false,
+            "state": "paused",
+            "next_run_at": "2026-06-21T09:00:00+03:00",
+            "last_run_at": "2026-06-20T09:02:19.542529+03:00",
+            "last_status": "ok",
+            "last_error": null
+        },
+        {
+            "id": "d5354ee96f26",
+            "name": "sparkrun-issue-176-monitor",
+            "schedule_display": "every 240m",
+            "enabled": false,
+            "state": "paused",
+            "next_run_at": "2026-06-20T18:37:03.639846+03:00",
+            "last_run_at": "2026-06-20T14:37:03.639846+03:00",
+            "last_status": "ok",
+            "last_error": null
+        },
+        {
+            "id": "42fa8a0b8c0c",
+            "name": "hscc-proxy-watchdog",
+            "schedule_display": "every 5m",
+            "enabled": false,
+            "state": "paused",
+            "next_run_at": "2026-06-20T15:16:02.284632+03:00",
+            "last_run_at": "2026-06-20T15:11:02.284632+03:00",
+            "last_status": "ok",
+            "last_error": null
+        },
+        {
+            "id": "a6482a6afa80",
+            "name": "hscc-worker-health",
+            "schedule_display": "every 10m",
+            "enabled": false,
+            "state": "paused",
+            "next_run_at": "2026-06-20T15:20:58.544655+03:00",
+            "last_run_at": "2026-06-20T15:10:58.544655+03:00",
+            "last_status": "ok",
+            "last_error": null
+        },
+        {
+            "id": "9eb8d088706c",
+            "name": "hscc-cluster-digest",
+            "schedule_display": "every 120m",
+            "enabled": false,
+            "state": "paused",
+            "next_run_at": "2026-06-20T15:29:47.178326+03:00",
+            "last_run_at": "2026-06-20T13:29:47.178326+03:00",
+            "last_status": "ok",
+            "last_error": null
+        },
+        {
+            "id": "06c8e22d00f1",
+            "name": "hscc-nas-watchdog",
+            "schedule_display": "every 240m",
+            "enabled": false,
+            "state": "paused",
+            "next_run_at": "2026-06-20T15:28:31.905314+03:00",
+            "last_run_at": "2026-06-20T11:28:31.905314+03:00",
+            "last_status": "ok",
+            "last_error": null
+        },
+        {
+            "id": "646a0428aea0",
+            "name": "hscc-cluster-pulse",
+            "schedule_display": "every 30m",
+            "enabled": false,
+            "state": "paused",
+            "next_run_at": "2026-06-20T15:34:00.938573+03:00",
+            "last_run_at": "2026-06-20T15:04:00.938573+03:00",
+            "last_status": "ok",
+            "last_error": null
+        },
+        {
+            "id": "bdf1af7e169e",
+            "name": "hscc-dep-watcher",
+            "schedule_display": "0 8 * * *",
+            "enabled": true,
+            "state": "scheduled",
+            "next_run_at": "2026-09-27T08:00:00+03:00",
+            "last_run_at": "2026-09-26T08:00:45.971049+03:00",
+            "last_status": "ok",
+            "last_error": null
+        },
+        {
+            "id": "6407ea32e1dd",
+            "name": "hscc-escalate-watcher",
+            "schedule_display": "*/15 * * * *",
+            "enabled": true,
+            "state": "scheduled",
+            "next_run_at": "2026-09-27T00:15:00+03:00",
+            "last_run_at": "2026-09-27T00:00:22.326526+03:00",
+            "last_status": "ok",
+            "last_error": null
+        }
+    ],
+    "speak": "11 scheduled jobs (2 active, 9 paused)."
+}
