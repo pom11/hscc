@@ -87,6 +87,37 @@ c.check(AutodownStatusResponse.self, "autodown_status.json", "AutodownStatusResp
 c.check(SessionsListResponse.self, "v1_sessions.json", "SessionsListResponse")
 c.check(ActivityFeedResponse.self, "v1_activity_feed.json", "ActivityFeedResponse")
 
+// ---- Phase 3 cron roster (t_a2c8e456) — decode the schedule-jobs roster
+// against the REAL wire model and assert the contract the view relies on:
+// jobs decode (with every nullable field), the `speak` summary surfaces, and
+// the roster maps active/paused correctly via `isActive`. ---- 
+c.check(CronListResponse.self, "cron_list.json", "CronListResponse")
+do {
+    let roster = try JSONDecoder().decode(
+        CronListResponse.self,
+        from: try Data(contentsOf: URL(fileURLWithPath: fixtureDir + "/cron_list.json")))
+    // The REAL capture is 11 jobs, 2 of them enabled/active (hscc-dep-watcher
+    // + hscc-escalate-watcher), all last_status ok with null last_error.
+    var ok = roster.jobs?.count == 11
+    ok = ok && roster.speak == "11 scheduled jobs (2 active, 9 paused)."
+    // active vs paused classification matches the enabled/state contract.
+    ok = ok && (roster.jobs ?? []).filter(\.isActive).count == 2
+    ok = ok && (roster.jobs ?? []).first(where: { $0.name == "hscc-dep-watcher" })?.isActive == true
+    ok = ok && (roster.jobs ?? []).first(where: { $0.name == "sparkrun-issue-176-monitor" })?.isActive == false
+    // every nullable field is allowed to be absent/nil without a decode throw.
+    ok = ok && (roster.jobs ?? []).allSatisfy { $0.last_error == nil }
+    if ok {
+        c.passed += 1
+        print("OK   cron_list.json  →  cron roster contract (11 jobs, 2 active, speak decode)")
+    } else {
+        c.failures.append(("cron_list.json", "cron roster contract", "assertion failed"))
+        print("FAIL cron_list.json → cron roster contract")
+    }
+} catch {
+    c.failures.append(("cron_list.json", "cron roster contract", "\(error)"))
+    print("FAIL cron_list.json → cron roster contract: \(error)")
+}
+
 // ---- Watchdog & self-heal history (t_b5ce7935) — decode the timeline against
 // the REAL wire model and assert the enum/kinds contract the view relies on:
 // known kinds decode to their case, an unknown future kind decodes to nil
