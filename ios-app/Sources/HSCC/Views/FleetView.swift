@@ -21,7 +21,7 @@ struct FleetView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
                 healthSection
                 throughputSection
                 statsSection
@@ -102,7 +102,7 @@ struct FleetView: View {
         HSSectionCard(title: "Health", systemImage: "stethoscope") {
             switch health {
             case .loading:
-                ProgressView()
+                HSLoading()
             case .failed(let message):
                 errorLabel(message, retry: { Task { await loadHealth() } })
             case .stale(let state, let age):
@@ -120,7 +120,7 @@ struct FleetView: View {
 
     @ViewBuilder
     private func healthBody(_ state: HealthResponse) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
             Label(state.speak, systemImage: state.ok ? "checkmark.seal.fill" : "xmark.seal.fill")
                 .font(.subheadline)
                 .foregroundColor(state.ok ? Theme.Semantic.ok : Theme.Semantic.bad)
@@ -128,10 +128,10 @@ struct FleetView: View {
                 emptyLabel("No health checks reported.")
             } else {
                 ForEach(state.checks) { check in
-                    HStack(alignment: .top, spacing: 8) {
+                    HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
                         Image(systemName: HealthCheckIndicator.icon(check.ok))
                             .foregroundColor(HealthCheckIndicator.tint(check.ok))
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
                             Text(check.name)
                                 .font(.body)
                             if let detail = check.detail, !detail.isEmpty {
@@ -154,7 +154,7 @@ struct FleetView: View {
         HSSectionCard(title: "Throughput", systemImage: "speedometer") {
             switch throughput {
             case .loading:
-                ProgressView()
+                HSLoading()
             case .failed(let message):
                 errorLabel(message, retry: { Task { await loadThroughput() } })
             case .stale(let state, let age):
@@ -172,14 +172,14 @@ struct FleetView: View {
 
     @ViewBuilder
     private func throughputBody(_ state: FleetThroughputResponse) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
             Text(state.speak)
                 .font(.subheadline)
                 .italic()
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
 
             if let fleet = state.fleet {
-                HStack(spacing: 10) {
+                HStack(spacing: Theme.Spacing.md.rawValue) {
                     statBadge(value: "\(fleet.nodes_ok ?? 0)/\(fleet.nodes_total ?? 0)",
                               label: "nodes ok",
                               color: (fleet.nodes_ok ?? 0) >= (fleet.nodes_total ?? 1) ? Theme.Semantic.ok : Theme.Semantic.warn)
@@ -188,7 +188,7 @@ struct FleetView: View {
                     statBadge(value: fmt(fleet.generation_tokens), label: "generation",
                               color: Theme.Semantic.onSurfaceMuted)
                 }
-                HStack(spacing: 10) {
+                HStack(spacing: Theme.Spacing.md.rawValue) {
                     statBadge(value: fmt(fleet.running), label: "running",
                               color: Theme.Semantic.onSurface)
                     statBadge(value: fmt(fleet.waiting), label: "waiting",
@@ -207,7 +207,7 @@ struct FleetView: View {
         HSSectionCard(title: "Stats", systemImage: "chart.bar") {
             switch stats {
             case .loading:
-                ProgressView()
+                HSLoading()
             case .failed(let message):
                 errorLabel(message, retry: { Task { await loadStats() } })
             case .stale(let state, let age):
@@ -225,7 +225,7 @@ struct FleetView: View {
 
     @ViewBuilder
     private func statsBody(_ state: FleetStatsResponse) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
             Text(state.speak)
                 .font(.subheadline)
                 .italic()
@@ -236,7 +236,7 @@ struct FleetView: View {
                           color: Theme.Semantic.onSurface)
 
                 if let byProfile = completions.by_profile, !byProfile.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
                         Text("By profile").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
                         ForEach(byProfile.sorted { $0.value > $1.value }, id: \.key) { key, value in
                             row(key, value: "\(value)")
@@ -245,7 +245,7 @@ struct FleetView: View {
                 }
 
                 if let byDay = completions.by_day, !byDay.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
                         Text("By day").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
                         let maxValue = byDay.values.max() ?? 1
                         ForEach(byDay.keys.sorted(), id: \.self) { date in
@@ -272,7 +272,7 @@ struct FleetView: View {
             if let activity = state.activity,
                !(activity.top_tools?.isEmpty ?? true) ||
                !(activity.tool_calls_by_profile?.isEmpty ?? true) {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
                     Text("Activity").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
                     if let tools = activity.top_tools, !tools.isEmpty {
                         ForEach(tools.compactMap(Self.parseToolPair), id: \.0) { name, count in
@@ -296,7 +296,7 @@ struct FleetView: View {
         HSSectionCard(title: "Streams", systemImage: "point.3.connected.trianglepath.dotted") {
             switch streams {
             case .loading:
-                ProgressView()
+                HSLoading()
             case .failed(let message):
                 errorLabel(message, retry: { Task { await loadStreams() } })
             case .stale(let state, let age):
@@ -314,7 +314,7 @@ struct FleetView: View {
 
     @ViewBuilder
     private func streamsBody(_ state: FleetStreamsResponse) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
             Text(state.speak)
                 .font(.subheadline)
                 .italic()
@@ -324,10 +324,10 @@ struct FleetView: View {
             } else {
                 let sorted = state.streams.sorted { $0.key < $1.key }
                 ForEach(sorted, id: \.key) { name, stream in
-                    HStack(spacing: 8) {
+                    HStack(spacing: Theme.Spacing.sm.rawValue) {
                         Image(systemName: stream.ok == true ? "checkmark.circle.fill" : "xmark.circle.fill")
                             .foregroundColor(stream.ok == true ? Theme.Semantic.ok : Theme.Semantic.bad)
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
                             Text(name)
                                 .font(.body)
                             if let message = stream.message, !message.isEmpty {
@@ -356,7 +356,7 @@ struct FleetView: View {
         HSSectionCard(title: "Autoscale", systemImage: "arrow.up.arrow.down.circle") {
             switch autoscale {
             case .loading:
-                ProgressView()
+                HSLoading()
             case .failed(let message):
                 errorLabel(message, retry: { Task { await loadAutoscale() } })
             case .stale(let state, let age):
@@ -391,7 +391,7 @@ struct FleetView: View {
 
 
     private func statBadge(value: String, label: String, color: Color) -> some View {
-        VStack(spacing: 2) {
+        VStack(spacing: Theme.Spacing.xxs.rawValue) {
             Text(value)
                 .font(.title3.bold())
                 .foregroundColor(color)
@@ -400,9 +400,9 @@ struct FleetView: View {
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
+        .padding(.vertical, Theme.Spacing.sm.rawValue)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous)
                 .fill(Theme.Semantic.surfaceElevated)
         )
     }
