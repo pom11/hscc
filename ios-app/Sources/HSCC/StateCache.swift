@@ -103,6 +103,7 @@ enum EndpointPath {
     static let clusterStatus = "/v1/cluster/status"
     static let verify = "/v1/verify"
     static let autodownStatus = "/v1/autodown/status"
+    static let cronList = "/v1/cron/list"
     static let cards = "/v1/cards"
     static let templateList = "/v1/template/list"
     static let templateStatus = "/v1/template/status"
