@@ -19,7 +19,7 @@ Baseline verified by execution BEFORE edits:
 
 ## Sweep table (violation -> fix -> theme token)
 
-Commit: <filled at commit> (see git log)
+Commit: 0867034 (see git log)
 
 ### DiffDetailView.swift
 | Violation (file:line → old) | Theme token |
