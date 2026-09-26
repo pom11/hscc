@@ -169,6 +169,49 @@ def test_default_payload_ships_hscc_api():
     assert "hscc_daemon" in install_payload.DEFAULT_PAYLOAD
 
 
+def test_install_propagates_to_named_profile_plugin_dirs(tmp_path):
+    """Regression (t_9e8732b8): memori_byodb fix deployed only to the root
+    ~/.hermes/plugins never reached the profiles that actually load it
+    ($HERMES_HOME/plugins per profile). install_payload_profiles must copy into
+    every named profile's plugins dir too."""
+    repo = _make_repo(tmp_path)
+    root = tmp_path / "hermes"
+    plugins = root / "plugins"
+    # Two profiles with a plugins dir; one named profile with no plugins dir
+    # (must be skipped, not error).
+    for name in ("hscc-orch", "backend-engineer"):
+        (root / "profiles" / name / "plugins").mkdir(parents=True)
+    (root / "profiles" / "no-plugins").mkdir(parents=True)
+
+    res = install_payload.install_payload_profiles(
+        repo, plugins, ["hscc-cluster", "README.md"], ts="A")
+
+    # Root home installed.
+    assert res["skipped"] is False
+    assert (plugins / "hscc-cluster" / "__init__.py").is_file()
+    # Both profile plugin dirs got a copy.
+    assert (root / "profiles" / "hscc-orch" / "plugins" / "hscc-cluster" / "__init__.py").is_file()
+    assert (root / "profiles" / "backend-engineer" / "plugins" / "hscc-cluster" / "__init__.py").is_file()
+    # Two profile summaries, both installed.
+    assert len(res["profiles"]) == 2
+    assert all(p["skipped"] is False for p in res["profiles"])
+    # The profile with no plugins dir was skipped (not an error).
+    assert not (root / "profiles" / "no-plugins" / "plugins").exists()
+
+
+def test_named_profile_plugins_dirs_noop_when_plugins_already_profile_scoped(tmp_path):
+    """When the target plugins_dir is itself a profile-scoped plugins dir
+    (~/.hermes/profiles/<name>/plugins), no profile fan-out is derived — you
+    cannot install into your own siblings from inside a profile."""
+    repo = _make_repo(tmp_path)
+    root = tmp_path / "hermes"
+    profile_plugins = root / "profiles" / "hscc-orch" / "plugins"
+    profile_plugins.mkdir(parents=True)
+
+    dirs = install_payload._named_profile_plugins_dirs(profile_plugins)
+    assert dirs == []
+
+
 def test_run_tests_sh_covers_every_tested_payload_package():
     """Every deployable python package in DEFAULT_PAYLOAD that ships a tests/
     dir must appear in scripts/run_tests.sh DIRS. This is the drift guard for
