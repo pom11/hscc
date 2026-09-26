@@ -255,23 +255,35 @@ Use `memori_byodb_feedback` when recall is irrelevant or missing important conte
         return params
 
 
+_DEFAULT_HOME = Path.home() / ".hermes"
+
+
 def _load_config(hermes_home: str | Path | None = None) -> MemoriConfig | None:
     if hermes_home is None:
-        hermes_home = Path.home() / ".hermes"
+        hermes_home = _DEFAULT_HOME
     else:
         hermes_home = Path(hermes_home)
-    path = hermes_home / "memori_byodb.json"
-    if not path.exists():
-        return None
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
 
-    config = MemoriConfig.from_dict(raw)
-    if not config.entity_id:
-        return None
-    return config
+    # The Memori BYODB store is SHARED across Hermes profiles: one global
+    # config file and one DB (dbPath defaults to ~/.hermes/memori_byodb.db).
+    # A profile-scoped home (~/.hermes/profiles/<name>) has no
+    # ``memori_byodb.json`` of its own, so fall back to the default home's
+    # shared config when the given home has none. Without this fallback,
+    # ``initialize()`` raises for every profile-scoped home and the provider
+    # never activates (the 2026-06-13 capture cutoff).
+    for candidate in (hermes_home, _DEFAULT_HOME):
+        path = candidate / "memori_byodb.json"
+        if not path.exists():
+            continue
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        config = MemoriConfig.from_dict(raw)
+        if config.entity_id:
+            return config
+    return None
 
 
 def _content_text(value: Any) -> str:

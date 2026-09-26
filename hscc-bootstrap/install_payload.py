@@ -113,6 +113,65 @@ def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None):
     }
 
 
+def _named_profile_plugins_dirs(plugins_dir):
+    """Plugin dirs of every existing named profile under the same home as
+    ``plugins_dir`` (``<root>/profiles/<name>/plugins``).
+
+    Each Hermes profile loads its plugins and memory provider from its OWN
+    ``$HERMES_HOME/plugins`` (``get_hermes_home()/plugins``), NOT the root
+    ``~/.hermes/plugins``. So a payload installed only into the root home never
+    reaches the running profile sessions — the exact failure that kept the
+    memori_byodb fix (t_57e5b3f7) from ever taking effect for the orchestrator
+    profile, which still ran the OLD buggy ``local_augmentation.py``.
+
+    Returns [] when ``plugins_dir`` is itself profile-scoped (already inside a
+    ``<root>/profiles/<name>``) or when no profiles exist, so the call is a
+    no-op in those cases.
+    """
+    plugins_dir = Path(plugins_dir).expanduser().resolve()
+    if plugins_dir.name != "plugins":
+        return []  # not a root layout — cannot derive a profiles sibling
+    profiles_dir = plugins_dir.parent / "profiles"
+    if not profiles_dir.is_dir():
+        return []
+    out = []
+    try:
+        for child in sorted(profiles_dir.iterdir()):
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            pdir = child / "plugins"
+            if pdir.is_dir():
+                out.append(pdir)
+    except OSError:
+        return []
+    return out
+
+
+def install_payload_profiles(
+    repo_root, plugins_dir, payload, *, backup=True, ts=None
+):
+    """Install ``payload`` into the root home AND every named profile's plugin
+    dir under the same home, so the runtime code is current for every profile
+    that loads it. Returns the primary summary with a ``profiles`` child list
+    (one summary per profile plugin dir; a failing profile is recorded, not
+    fatal).
+    """
+    primary = install_payload(repo_root, plugins_dir, payload, backup=backup, ts=ts)
+    profile_results = []
+    for p_dir in _named_profile_plugins_dirs(plugins_dir):
+        try:
+            profile_results.append(
+                install_payload(repo_root, p_dir, payload, backup=backup, ts=ts)
+            )
+        except Exception as exc:  # a bad profile must never sink the whole deploy
+            profile_results.append(
+                {"plugins_dir": str(p_dir),
+                 "error": f"{type(exc).__name__}: {exc}"}
+            )
+    primary["profiles"] = profile_results
+    return primary
+
+
 # Default payload: everything the runtime needs (scope B — full sibling layout
 # so install/ walk-ups and SCRIPT_DIR resolution keep working).
 DEFAULT_PAYLOAD = [
@@ -142,6 +201,6 @@ if __name__ == "__main__":
     plugins_dir = os.environ.get("PLUGINS") or os.path.expanduser("~/.hermes/plugins")
     no_backup = "--no-backup" in sys.argv
 
-    result = install_payload(repo_root, plugins_dir, DEFAULT_PAYLOAD,
-                             backup=not no_backup)
+    result = install_payload_profiles(repo_root, plugins_dir, DEFAULT_PAYLOAD,
+                                      backup=not no_backup)
     print(json.dumps(result, indent=2))
