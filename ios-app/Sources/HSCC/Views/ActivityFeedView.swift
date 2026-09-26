@@ -24,7 +24,7 @@ struct ActivityFeedView: View {
     var body: some View {
         ScrollView {
             if let client {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
                     listSection(client)
                 }
                 .padding()
@@ -44,20 +44,7 @@ struct ActivityFeedView: View {
     // MARK: - Not configured
 
     private var notConfiguredView: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "waveform.path.ecg")
-                .font(.system(size: 44))
-                .foregroundColor(.secondary)
-            Text("Connect to your cluster")
-                .font(.headline)
-            Text("Set the host, port, and token in Settings to watch the live feed.")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 60)
-        .padding(.horizontal)
+        HSConnectGate(systemImage: "waveform.path.ecg", verb: "to watch the live feed")
     }
 
     // MARK: - Load
@@ -80,17 +67,16 @@ struct ActivityFeedView: View {
     // MARK: - List
 
     private func listSection(_ client: HSCCClient) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
             Label("Cluster Activity", systemImage: "waveform.path.ecg")
                 .font(.headline)
             switch feed {
             case .loading:
-                ProgressView()
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                HSLoading("Loading…")
             case .failed(let message):
                 errorLabel(message, retry: { Task { await load(client) } })
             case .stale(let state, let ageMessage):
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
                     StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
                         Task { await load(client) }
                     }
@@ -105,17 +91,17 @@ struct ActivityFeedView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
                 .fill(Theme.Semantic.surfaceRaised)
         )
     }
 
     private func feedBody(_ client: HSCCClient, _ state: ActivityFeedResponse) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
             Text(state.speak)
                 .font(.subheadline)
                 .italic()
-                .foregroundColor(.secondary)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
             let items = state.entries ?? []
             if items.isEmpty {
                 emptyLabel("No agents running right now.")
@@ -135,7 +121,7 @@ struct ActivityFeedView: View {
             ActivityTraceView(entry: entry)
         } label: {
             VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
+                HStack(spacing: Theme.Spacing.sm.rawValue) {
                     kindBadge(entry)
                     Text(entry.profile ?? "unknown profile")
                         .font(.headline)
@@ -226,7 +212,7 @@ struct ActivityTraceView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
                 header
                 traceCard("Tool", value: entry.isRunning ? "—" : (entry.tool ?? "—"))
                 traceCard("Profile", value: entry.profile ?? "—")
@@ -266,7 +252,7 @@ struct ActivityTraceView: View {
     }
 
     private func traceCard(_ label: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
             Text(label)
                 .font(.caption)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
@@ -278,7 +264,7 @@ struct ActivityTraceView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
                 .fill(Theme.Semantic.surfaceRaised)
         )
     }
