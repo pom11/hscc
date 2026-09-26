@@ -100,6 +100,7 @@ fetch "$BASE/v1/activity/feed?limit=50"              v1_activity_feed           
 fetch "$BASE/v1/fleet/stats?days=7"                  v1_fleet_stats             "/v1/fleet/stats?days=7"
 fetch "$BASE/v1/template/list"                       v1_template_list           "/v1/template/list"
 fetch "$BASE/v1/template/status"                     v1_template_status         "/v1/template/status"
+fetch "$BASE/v1/cron/list"                           v1_cron_list               "/v1/cron/list"
 
 # --------------------------------------------------------------------------- #
 # Pass 1: parameterized routes — resolve {param} from the pass-0 captures
