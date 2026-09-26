@@ -24,14 +24,16 @@ commits of both branches were docs-only (report + disposition).
 ## Relocations (this reconciliation)
 
 Per process rule "Relocate stray AUDIT_*.md at repo root to docs/audits/", the
-two branch reports NOT on main were relocated into `docs/audits/`:
+approvals branch report NOT on main was relocated into `docs/audits/`:
 
 - `ios-app/AUDIT_APPROVALS_t_48bbf99b.md` → `docs/audits/AUDIT_APPROVALS_t_48bbf99b.md`
   (full 7-question screen audit of ApprovalsView + the a11y fix)
-- `REPORT_t_9b678f46.md` → `docs/audits/REPORT_t_9b678f46.md`
-  (full AutodownView screen audit + the gate-controls fix)
 
-Both reports were scrubbed for real addresses before commit (none present).
+The autodown branch's own report (`REPORT_t_9b678f46.md`, the AutodownView
+screen audit + gate-controls fix) is intentionally NOT copied into
+`docs/audits/`: the repo ignores `REPORT_*.md` there (`.gitignore:39`), and the
+full report is preserved on its branch `audit/autodownview-t_9b678f46` (not
+deleted). Both reports were scrubbed for real addresses (none present).
 
 ## Commands used (verification by execution)
 
