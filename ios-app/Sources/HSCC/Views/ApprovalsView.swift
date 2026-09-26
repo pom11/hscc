@@ -46,37 +46,18 @@ struct ApprovalsView: View {
     }
 
     private var notConfiguredView: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "checkmark.seal")
-                .font(.system(size: 44))
-                .foregroundColor(.secondary)
-            Text("Connect to your cluster")
-                .font(.headline)
-            Text("Set the host, port, and token in Settings to review approvals.")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 60)
-        .padding(.horizontal)
+        HSConnectGate(systemImage: "checkmark.seal", verb: "to review approvals")
     }
 
     @ViewBuilder
     private func content(_ client: HSCCClient) -> some View {
         switch approvals {
         case .idle:
-            ProgressView("Loading…").task { await loadApprovals(client) }
+            HSLoading("Loading…").task { await loadApprovals(client) }
         case .loading:
-            ProgressView("Loading…")
+            HSLoading("Loading…")
         case .failed(let message):
-            ContentUnavailableView {
-                Label("Couldn't load approvals", systemImage: "exclamationmark.triangle")
-            } description: {
-                Text(message)
-            } actions: {
-                Button("Try again") { Task { await loadApprovals(client) } }
-            }
+            HSError("Couldn't load approvals", message: message, retry: { Task { await loadApprovals(client) } })
         case .stale(let response, let ageMessage):
             approvalsList(response, client: client, staleMessage: ageMessage)
         case .loaded(let response):
@@ -130,13 +111,13 @@ struct ApprovalsView: View {
                 .font(.body.weight(.semibold))
             HStack(spacing: 6) {
                 if let assignee = card.assignee, !assignee.isEmpty {
-                    Text(assignee).font(.caption).foregroundColor(.secondary)
+                    Text(assignee).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
                 if let board = card.board, !board.isEmpty {
-                    Text(board).font(.caption).foregroundColor(.secondary)
+                    Text(board).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
                 if let age = card.age_days {
-                    Text("\(age)d").font(.caption).foregroundColor(.secondary)
+                    Text("\(age)d").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
                 Spacer()
                 Label(approvalKindLabel(card.block_kind), systemImage: "hand.raised.fill")
@@ -146,7 +127,7 @@ struct ApprovalsView: View {
             // A human-readable why (the reason the worker blocked), when the
             // server recorded one.
             if let why = card.why, !why.isEmpty, why != "kind=\(card.block_kind ?? "")" {
-                Text(why).font(.caption).foregroundColor(.secondary)
+                Text(why).font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
             }
             // The actual comments carry the worker's request / context.
             if let comments = card.comments, !comments.isEmpty {
@@ -154,10 +135,10 @@ struct ApprovalsView: View {
                     Text(comment)
                         .font(.caption)
                         .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                        .padding(8)
+                        .padding(Theme.Spacing.sm.rawValue)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous)
                                 .fill(Theme.Semantic.surfaceElevated)
                         )
                 }
