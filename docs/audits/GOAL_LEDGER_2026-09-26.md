@@ -118,3 +118,18 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - Phase 1 measure: all 7 group cards' work on main except approvals-autodown (in flight). 40-branch disposition: essentially all SUPERSEDED/STALE (work integrated via re-commits; branches now proven duplicates) + a few LAND/Cherry-pick (api-history preserved reports aac90ca). Remaining audit/* branches LEFT INTACT per goal-doc §6 'when in doubt leave it' — several still exist on disk (fleetview, servingcontrol, templates flagged merged; others remain as worktree refs). Disposition evidence per group in docs/audits/phase1-*.md.
 - Protocol-violation watch: t_1bfe8908 (settings-profile) done via cherry-pick after 4 runs; t_e2856bfe (api-history) rescued on 3rd run. The dispatcher bug card t_10a687c4 is actively investigating the root cause (may already be fixed in live hermes). Data NOT being lost (dispatcher rescues each crash).
 - Phase 2 now FILED (4 cards) and queued. Phase 4 (decode drift) remains correctly gated behind Phase 1 fully landing (t_b578972f). The ready queue is now deep enough that the board will stay occupied for hours without further action.
+
+## Heartbeat tick 22:05 (duplicate cron — see CRITICAL finding below)
+- **CRITICAL / NEW: the heartbeat cron is DUPLICATED — two active jobs, both named `hscc-orch-goal-heartbeat`, both firing ~35m, producing OVERLAPPING orchestrator sessions that independently read the goal, file cards, and update this ledger.**
+  - `a0abe2b7848b` — next run 22:25, current run `6e2f5d4f` (builtin, started 21:50). [THIS session = run 6e2f5d4f]
+  - `bb40a25b36c8` — next run 22:32, current run `df1c9dfb` (builtin, started 21:57). [Wrote the 22:01 tick 2f4c92008 + filed Phase 2 cards 21:40]
+  - `hermes cron list` shows BOTH rows active. The goal-doc §0d said create ONE; a second `hermes cron create` (same --name) added a parallel row instead of replacing. **NET RISK: two orchestrators both controlling the same board → duplicate card-filing, divergent ledger commits, double-dispatch (mitigated only by shared caps).** RECOMMENDATION for operator: delete one of the two jobs (`hermes cron remove <id>`). This tick's report should carry this finding — it is the material new thing since 22:01.
+- NO NEW LANDINGS since 22:01 tick: origin/main still @ 2f4c92008 (0 ahead, verified). No worker completed in the ~2min between the 22:01 sibling tick and this one.
+- CURRENT STATE (22:05 EEST / 19:05 UTC): 3 running, 6 ready, 0 blocked, 0 todo — UNCHANGED from 22:01.
+  - t_3c5149fd [detail-error-views] run 794 — disposition pushed @ 93036e2; worker heartbeating through 22:00+, finalizing. Work landed.
+  - t_b578972f [approvals-autodown] run 799 (pid 7588) — last Phase 1 card, heartbeating cleanly, no crash.
+  - t_10a687c4 [dispatcher rc=0 bug] run 798 — backend probing whether fix already in live hermes-agent.
+- READY (6, all ios-engineer): t_b89d9029, t_a2c8e456(Phase3 cron), t_dacdbc4a, t_04e16e60, t_320a8332 (Phase 2 x4), t_791d1a75. Auto-dispatch as ios slots free.
+- DAEMON LIVENESS: ~/.hscc/daemon.pid = 15843, `kill -0` ALIVE (verified this tick).
+- DISPATCH THIS TICK: NONE — caps FULL (3 running), nothing manually dispatched, no new cards filed (Phase 2/3 already filed by sibling instance; issue not IDLE — ready queue deep). Deliberately NOT duplicating the sibling's 22:01 actions.
+- ACTION NEEDED (operator): delete one of the duplicate cron jobs. Everything else is healthy and self-driving.
