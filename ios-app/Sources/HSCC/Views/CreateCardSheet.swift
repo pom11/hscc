@@ -56,7 +56,7 @@ struct CreateCardSheet: View {
                             if assignee.isEmpty {
                                 Text("None").foregroundColor(Theme.Semantic.onSurfaceMuted)
                             } else {
-                                Text(assignee).foregroundColor(.primary)
+                                Text(assignee).foregroundColor(Theme.Semantic.onSurface)
                             }
                             Image(systemName: "chevron.right").font(.caption)
                                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
