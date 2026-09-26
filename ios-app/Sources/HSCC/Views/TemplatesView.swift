@@ -26,12 +26,12 @@ struct TemplatesView: View {
     var body: some View {
         ScrollView {
             if let client {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
                     appliedCard
                     librarySection(client: client)
                 }
                 .padding(.horizontal)
-                .padding(.top, 8)
+                .padding(.top, Theme.Spacing.sm.rawValue)
                 .padding(.bottom)
             } else {
                 notConfiguredView
@@ -106,7 +106,7 @@ struct TemplatesView: View {
                 .font(.headline)
             switch status {
             case .loading:
-                ProgressView()
+                HSLoading("Loading…")
             case .failed(let message):
                 errorLabel(message, retry: { Task { await refreshStatus() } })
             case .stale(let state, let ageMessage):
@@ -125,7 +125,7 @@ struct TemplatesView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
                 .fill(Theme.Semantic.surfaceRaised)
         )
     }
@@ -196,18 +196,18 @@ struct TemplatesView: View {
 
     @ViewBuilder
     private func librarySection(client: HSCCClient) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
             Text("Library")
                 .font(.title3.weight(.semibold))
             switch list {
             case .loading:
-                ProgressView()
+                HSLoading("Loading…")
             case .failed(let message):
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
                     errorLabel(message, retry: { Task { await loadList(client) } })
                 }
             case .stale(let state, let ageMessage):
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
                     StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
                         Task { await loadList(client) }
                     }
@@ -219,7 +219,7 @@ struct TemplatesView: View {
                 }
             case .loaded(let state):
                 if state.templates.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
                         emptyLabel("No templates are available right now.")
                         Text("Add template definitions to the cluster to see them here.")
                             .font(.caption)
@@ -253,7 +253,7 @@ struct TemplatesView: View {
     private func groupSection(_ group: String,
                               members: [ClusterTemplate],
                               appliedName: String?) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
             Text(groupHeaderLabel(group))
                 .font(.subheadline.weight(.semibold))
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
@@ -271,9 +271,9 @@ struct TemplatesView: View {
             selected = template
             showDetail = true
         } label: {
-            HStack(alignment: .top, spacing: 12) {
+            HStack(alignment: .top, spacing: Theme.Spacing.md.rawValue) {
                 VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 8) {
+                    HStack(spacing: Theme.Spacing.sm.rawValue) {
                         Text(template.name)
                             .font(.body.weight(.semibold))
                             .foregroundColor(Theme.Semantic.onSurface)
@@ -298,12 +298,12 @@ struct TemplatesView: View {
                 Image(systemName: "chevron.right")
                     .font(.caption)
                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    .padding(.top, 4)
+                    .padding(.top, Theme.Spacing.xs.rawValue)
             }
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
                     .fill(Theme.Semantic.surfaceRaised)
             )
         }
@@ -356,7 +356,7 @@ private struct AppliedBadge: View {
             .font(.caption2.weight(.bold))
             .foregroundColor(Theme.Semantic.surface)
             .padding(.horizontal, 6)
-            .padding(.vertical, 2)
+            .padding(.vertical, Theme.Spacing.xxs.rawValue)
             .background(
                 Capsule().fill(Theme.Semantic.ok)
             )
