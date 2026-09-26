@@ -110,7 +110,7 @@ private struct ChatBody: View {
             // The persistent prompt→reply transcript.
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(spacing: 12) {
+                    LazyVStack(spacing: Theme.Spacing.md.rawValue) {
                         if store.transcript.isEmpty {
                             emptyState
                         } else {
@@ -122,7 +122,7 @@ private struct ChatBody: View {
                         }
                     }
                     .padding(.horizontal)
-                    .padding(.vertical, 8)
+                    .padding(.vertical, Theme.Spacing.sm.rawValue)
                 }
                 .onChange(of: store.transcript.count) {
                     if !store.transcript.isEmpty {
@@ -135,13 +135,13 @@ private struct ChatBody: View {
 
             inFlightFooter
                 .padding(.horizontal)
-                .padding(.bottom, 4)
+                .padding(.bottom, Theme.Spacing.xs.rawValue)
 
             Divider()
 
             composer
                 .padding(.horizontal)
-                .padding(.vertical, 8)
+                .padding(.vertical, Theme.Spacing.sm.rawValue)
         }
         .onAppear {
             // Wire the unread-badge center (the environmentObject isn't
@@ -201,7 +201,7 @@ private struct ChatBody: View {
     // MARK: - Empty / fleet states
 
     private var emptyState: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: Theme.Spacing.sm.rawValue) {
             Image(systemName: "bubble.left.and.bubble.right")
                 .font(.largeTitle)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
@@ -212,8 +212,8 @@ private struct ChatBody: View {
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 .multilineTextAlignment(.center)
         }
-        .padding(.top, 48)
-        .padding(.horizontal, 24)
+        .padding(.top, Theme.Spacing.page.rawValue)
+        .padding(.horizontal, Theme.Spacing.xl.rawValue)
     }
 
     /// A plain readiness banner when the fleet is down or waking — requirement
@@ -222,14 +222,14 @@ private struct ChatBody: View {
     private var fleetBanner: some View {
         if let fleetState {
             let (text, color) = fleetBannerContent(fleetState)
-            HStack(spacing: 8) {
+            HStack(spacing: Theme.Spacing.sm.rawValue) {
                 Image(systemName: "zzz")
                 Text(text)
                     .font(.footnote)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.horizontal)
-            .padding(.vertical, 8)
+            .padding(.vertical, Theme.Spacing.sm.rawValue)
             .background(color.opacity(0.12))
         }
     }
@@ -256,7 +256,7 @@ private struct ChatBody: View {
         if let inFlight = store.inFlight {
             TimelineView(.periodic(from: inFlight.startedAt, by: 1)) { context in
                 let elapsed = Int(context.date.timeIntervalSince(inFlight.startedAt))
-                HStack(spacing: 8) {
+                HStack(spacing: Theme.Spacing.sm.rawValue) {
                     Label {
                         Text(footerText(elapsed: elapsed, profile: answeringProfile ?? inFlight.profile))
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -298,7 +298,7 @@ private struct ChatBody: View {
     // MARK: - Composer (draft + confirm-gated send)
 
     private var composer: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: Theme.Spacing.sm.rawValue) {
             // Slash-command palette: opens at a "/" command position, listing
             // the server-sourced commands with one-line descriptions, filtering
             // as you type. Selecting one inserts it into the draft.
@@ -306,7 +306,7 @@ private struct ChatBody: View {
 
             offlineQueueChip
 
-            HStack(alignment: .bottom, spacing: 8) {
+            HStack(alignment: .bottom, spacing: Theme.Spacing.sm.rawValue) {
                 TextField("Ask the \(project) orchestrator…", text: $store.draft, axis: .vertical)
                     .lineLimit(1...4)
                     .textFieldStyle(.roundedBorder)
@@ -386,7 +386,7 @@ private struct ChatBody: View {
             .font(.caption)
             .foregroundColor(Theme.Semantic.warn)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 4)
+            .padding(.horizontal, Theme.Spacing.xs.rawValue)
             .accessibilityLabel(
                 "\(n) message(s) queued and waiting to send when the connection returns"
             )
@@ -784,7 +784,7 @@ private struct ChatBubble: View {
                     .foregroundColor(.white)  // theme-allow: white on fixed accent, readable in both appearances
             case .reply:
                 bubble
-                    .background(Color(.secondarySystemBackground))
+                    .background(Theme.Semantic.surfaceRaised)
                 Spacer(minLength: 48)
             case .failure:
                 bubble
@@ -814,12 +814,12 @@ private struct ChatBubble: View {
                 Spacer(minLength: 48)
                 bubble
                     .background(Theme.Semantic.warn.opacity(0.14))
-                    .foregroundColor(.primary)
+                    .foregroundColor(Theme.Semantic.onSurface)
                     .overlay(alignment: .bottomLeading) {
                         Text("Will send when connected")
                             .font(.caption2)
                             .foregroundColor(Theme.Semantic.warn)
-                            .padding(.leading, 2)
+                            .padding(.leading, Theme.Spacing.xxs.rawValue)
                     }
             }
         }
@@ -831,8 +831,8 @@ private struct ChatBubble: View {
         } label: {
             Label("Retry", systemImage: "arrow.clockwise")
                 .font(.caption2.weight(.semibold))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
+                .padding(.horizontal, Theme.Spacing.sm.rawValue)
+                .padding(.vertical, Theme.Spacing.xs.rawValue)
                 .background(Color.red)  // theme-allow: fault-red Retry, fixed hue
                 .foregroundColor(.white)  // theme-allow: white on that fixed red
                 .clipShape(Capsule())
@@ -841,7 +841,7 @@ private struct ChatBubble: View {
     }
 
     private var bubble: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
             Text(label)
                 .font(.caption2)
                 .fontWeight(.semibold)
@@ -858,8 +858,8 @@ private struct ChatBubble: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(10)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(Theme.Spacing.md.rawValue)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous))
     }
 
     private var label: String {
