@@ -26,10 +26,10 @@ struct TemplateTopologyView: View {
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
         .padding(.horizontal)
-        .padding(.vertical, 12)
+        .padding(.vertical, Theme.Spacing.md.rawValue)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
                 .fill(Theme.Semantic.surfaceRaised)
         )
         .accessibilityElement(children: .combine)
