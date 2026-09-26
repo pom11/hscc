@@ -60,10 +60,10 @@ struct StreamingChatView: View {
                         if store.rows.isEmpty {
                             if case .failed = store.phase {
                                 failedState
-                                    .padding(.top, 64)
+                                    .padding(.top, Theme.Spacing.page.rawValue)
                             } else {
                                 emptyState
-                                    .padding(.top, 64)
+                                    .padding(.top, Theme.Spacing.page.rawValue)
                             }
                         } else {
                             ForEach(store.rows) { row in
@@ -227,7 +227,7 @@ struct StreamingChatView: View {
                 .font(.footnote)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 24)
+                .padding(.horizontal, Theme.Spacing.xl.rawValue)
         }
     }
 
@@ -247,13 +247,13 @@ struct StreamingChatView: View {
                     .font(.footnote)
                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal, 24)
+                    .padding(.horizontal, Theme.Spacing.xl.rawValue)
             }
             Text("Check Settings → Host, Port, and Token, then pull to reconnect.")
                 .font(.footnote)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 24)
+                .padding(.horizontal, Theme.Spacing.xl.rawValue)
         }
     }
 
