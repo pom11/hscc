@@ -18,8 +18,9 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - t_d733f7c8 (pid handle) superseded by t_8334f251 @ 1037b22 → ARCHIVED
 - CLI: `hermes kanban archive t_b0e3d750 t_d733f7c8` (only archive path; no kanban_* archive tool)
 
-### 0c profile + 14-profiles audit — DONE (all 14 now uniformly provisioned)
-- provision-check CLI bug (PROFILES_DIR = join(HERMES_HOME,"profiles") with ambient HERMES_HOME=profile-dir → double-nested, reads defaults): RE-VERIFIED 2026-09-26, filed as card t_b6ec32d6. Direct load_config() is the trusted verifier.
+### 0c profile + 14-profiles audit — DONE + TOOL FIXED (all 14 uniformly provisioned + provision-check works)
+- provision-check CLI bug (PROFILES_DIR = join(HERMES_HOME,"profiles") with ambient HERMES_HOME=profile-dir → double-nested, reads defaults): RE-VERIFIED, filed card t_b6ec32d6, now LANDED + verified by execution.
+- PROVISION-CHECK VERIFIED (2026-09-26, after t_b6ec32d6 landed): `provision-check --profile hscc-orch --json` now reports config=/Users/desac/.hermes/profiles/hscc-orch/config.yaml (correct, not double-nested), memory_provider=memori_byodb, memory_char_limit=4000, threshold_tokens=200000, summarization_base_url=worker-node — all discrepancy:false. Tool no longer lies. Commit 522a714, merge dbd61da.
 - Own profile hscc-orch: fallback_model ACTIVE (verified once via load_config: provider custom, model worker-model, base_url http://100.64.0.1:8000/v1 — a DIFFERENT physical unit than primary .244). Backup config.yaml.bak-20260926-1. Do NOT write another fallback_model key.
 - 14-profile audit (via load_config with HERMES_HOME, table below) found 2 real gaps:
   - general-orch: NO memory.provider (ran default), limit 2200 (not 4000), NO worker-node aux compaction -> FIXED (added memory + auxiliary.compression blocks matching healthy pattern). Re-verified: memori_byodb/4000/.247:8000.
@@ -32,6 +33,7 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - Created via CLI (ONE command): `hermes cron create "35m" "<re-read+report+dispatch prompt>" --name hscc-orch-goal-heartbeat --deliver bot-chat:hscc-orch`
 - Job id: a0abe2b7848b. Schedule every 35m, repeat ∞, next run 19:26 (+03).
 - PROVEN: `hermes cron list | grep -i heartbeat` → `Name:      hscc-orch-goal-heartbeat`, `Deliver:   bot-chat:hscc-orch` (accepted, not rejected). `hermes cron runs a0abe2b7848b` → run e301f584(cf running, source=direct, 18:51:39). Does NOT use --deliver desktop (silent no-op). Residual risk of local fallback (0c): if the whole fleet is down, local fallback can't help — external tier is operator's call.
+- CAVEAT (19:38 run): bot-chat delivery to 'hscc-orch' timed out after 600s (delivery_failed). Value of the cron is RE-ENTRY (which works — it poked this session for the next tick); delivery is best-effort. Note for operator: cron.bot_chat_delivery_timeout_seconds could be raised if this recurs.
 
 ## Phase 1 — Branch reconciliation (40 unmerged audit/* branches) — CARDS FILED, RUNNING
 - All 42 local audit/* branches enumerated (40 unmerged + 2 MERGED: slashpreview-t_8ba85648, templates-t_18aefdb7). 40 unmerged grouped into 7 area cards (workers decide LAND/SUPERSEDED/STALE with evidence, merge LANDs to main themselves):
@@ -60,7 +62,7 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 
 ## Card log
 - [DONE] t_9e8732b8 memori capture fixed + landed (53416b9, merge 5cdd547, pushed, deployed) — memori NOW CAPTURES
-- [FILED] t_b6ec32d6 provision-check PROFILES_DIR path bug (double-nest reads defaults) — READY backend-engineer
+- [DONE] t_b6ec32d6 provision-check PROFILES_DIR bug FIXED (522a714, merge dbd61da) — verified by execution, reports real values now
 - [FIXED-profile] general-orch + flightdeck-orch config gaps patched (memory/aux + cluster toolsets) — verified via load_config
 - [FILED] Phase 1 x7: t_3832283d, t_d331843e, t_1bfe8908, t_3c5149fd, t_c14a427c, t_e2856bfe, t_b578972f (40 unmerged branches grouped by area)
 - [FILED] Phase 3: t_a2c8e456 iOS cron roster view (route /v1/cron/list already exists — surface only)
