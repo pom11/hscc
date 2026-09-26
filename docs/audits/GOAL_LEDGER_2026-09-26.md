@@ -46,6 +46,11 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
   - t_b578972f [ios] approvals-autodown: approvals(VO labels), autodownview(gate controls)
 - 2 branches ALREADY MERGED (ahead=0, no action): slashpreview-t_8ba85648, templates-t_18aefdb7
 - Every local audit/* branch mapped to a card or confirmed merged — none dropped.
+- PROGRESS:
+  - [LANDED] chat-composer (t_d331843e) @ 89384bf: 7/8 branches SUPERSEDED (features already on main byte-identical), 1 LEAVE (chat-retry WIP t_3ae70b8c → follow-on card t_791d1a75 filed by worker: restore failed send text to composer). iOS worker completed cleanly.
+  - [RUNNING] fleet-monitoring (t_3832283d) run 791, settings-profile (t_1bfe8908) run 792, api-history (t_e2856bfe) run 790.
+  - OBSERVATION: recurring protocol_violation — ios/backend workers doing long reconciliation then exiting rc=0 WITHOUT kanban_complete → marked crashed + auto re-queued (fleet-monitoring 786→791, api-history 788→789→790). Work not lost (dispatcher self-heals, chat-composer proves completion), but 80-min runs get re-done. Watch: if a card hits 3+ violated attempts, split it or investigate worker termination.
+- READY: t_3c5149fd, t_c14a427c, t_b578972f, t_a2c8e456 (ios) + t_e2856bfe lane.
 
 ## Phase 2 — iOS theme + UI/UX polish
 
