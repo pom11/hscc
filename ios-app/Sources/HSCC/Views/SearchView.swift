@@ -100,7 +100,7 @@ struct SearchView: View {
             if let stale = staleBanner() {
                 Section { stale }
             }
-            HStack(spacing: 10) {
+            HStack(spacing: Theme.Spacing.md.rawValue) {
                 ProgressView()
                 Text("Searching…")
                     .font(.subheadline)
@@ -233,7 +233,7 @@ struct SearchView: View {
 
     @ViewBuilder
     private func cardRow(_ card: Card) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm.rawValue) {
             Circle()
                 .fill(statusColor(card.displayStatus))
                 .frame(width: 10, height: 10)

@@ -36,7 +36,7 @@ struct MemoryView: View {
     var body: some View {
         ScrollView {
             if let client {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
                     profileField(client)
                     listSection(client)
                 }
@@ -76,26 +76,13 @@ struct MemoryView: View {
     // MARK: - Not configured
 
     private var notConfiguredView: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "brain")
-                .font(.system(size: 44))
-                .foregroundColor(.secondary)
-            Text("Connect to your cluster")
-                .font(.headline)
-            Text("Set the host, port, and token in Settings to inspect memories.")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 60)
-        .padding(.horizontal)
+        HSConnectGate(systemImage: "brain", verb: "to inspect memories")
     }
 
     // MARK: - Profile picker
 
     private func profileField(_ client: HSCCClient) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
             Label("Profile", systemImage: "person.crop.circle")
                 .font(.headline)
             // A tappable control (not a text field) that shows which profile is
@@ -107,20 +94,20 @@ struct MemoryView: View {
                 HStack {
                     Text(trimmedProfile.isEmpty ? "Choose a profile…" : trimmedProfile)
                         .font(.body)
-                        .foregroundColor(trimmedProfile.isEmpty ? .secondary : .primary)
+                        .foregroundColor(trimmedProfile.isEmpty ? Theme.Semantic.onSurfaceMuted : Theme.Semantic.onSurface)
                     Spacer()
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
-                .padding(10)
+                .padding(Theme.Spacing.md.rawValue)
                 .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous)
                         .fill(Theme.Semantic.surface)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous)
+                        .stroke(Theme.Semantic.onSurface.opacity(0.3), lineWidth: 1)
                 )
             }
             .buttonStyle(.plain)
@@ -130,7 +117,7 @@ struct MemoryView: View {
             case .failed(let message):
                 // We couldn't fetch the roster — the profile field degrades to a
                 // retry-able error instead of silently showing an empty picker.
-                HStack(spacing: 8) {
+                HStack(spacing: Theme.Spacing.sm.rawValue) {
                     Label(message, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
                         .foregroundColor(Theme.Semantic.bad)
@@ -146,12 +133,12 @@ struct MemoryView: View {
             }
             Text("The Hermes profile whose memories you want to inspect and correct. Picker shows every profile the cluster serves.")
                 .font(.caption)
-                .foregroundColor(.secondary)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
                 .fill(Theme.Semantic.surfaceRaised)
         )
     }
@@ -195,17 +182,16 @@ struct MemoryView: View {
     // MARK: - List
 
     private func listSection(_ client: HSCCClient) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
             Label("Memories", systemImage: "brain")
                 .font(.headline)
             switch list {
             case .loading:
-                ProgressView()
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                HSLoading()
             case .failed(let message):
                 errorLabel(message, retry: { Task { await load(client) } })
             case .stale(let state, let ageMessage):
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
                     StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
                         Task { await load(client) }
                     }
@@ -220,17 +206,17 @@ struct MemoryView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
                 .fill(Theme.Semantic.surfaceRaised)
         )
     }
 
     private func memoryBody(_ client: HSCCClient, _ state: MemoryListResponse) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
             Text(state.speak)
                 .font(.subheadline)
                 .italic()
-                .foregroundColor(.secondary)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
             let items = state.memories ?? []
             if items.isEmpty {
                 emptyLabel("This profile holds no memories.")
@@ -247,7 +233,7 @@ struct MemoryView: View {
 
     private func memoryRow(_ client: HSCCClient, _ item: MemoryItem) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
+            HStack(spacing: Theme.Spacing.sm.rawValue) {
                 Text(item.title ?? "(untitled)")
                     .font(.headline)
                 Spacer()
@@ -260,7 +246,7 @@ struct MemoryView: View {
                 .foregroundColor(Theme.Semantic.onSurface)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            HStack(spacing: 12) {
+            HStack(spacing: Theme.Spacing.md.rawValue) {
                 // Opening the editor does NOTHING destructive — it only arms
                 // `editingItem`, which presents the sheet. The actual rewrite is
                 // confirm-gated inside the sheet.
@@ -290,7 +276,7 @@ struct MemoryView: View {
         Text(text)
             .font(.caption2.bold())
             .padding(.horizontal, 6)
-            .padding(.vertical, 2)
+            .padding(.vertical, Theme.Spacing.xxs.rawValue)
             .background(Capsule().fill(Color.accentColor.opacity(0.18)))
             .foregroundColor(Color.accentColor)
     }
@@ -351,10 +337,9 @@ struct ProfilePickerSheet: View {
             Group {
                 switch options {
                 case .loading:
-                    ProgressView("Loading profiles…")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    HSLoading("Loading profiles…")
                 case .failed(let message):
-                    VStack(spacing: 12) {
+                    VStack(spacing: Theme.Spacing.md.rawValue) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 36))
                             .foregroundColor(Theme.Semantic.bad)
@@ -362,11 +347,11 @@ struct ProfilePickerSheet: View {
                             .font(.headline)
                         Text(message)
                             .font(.subheadline)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
                             .multilineTextAlignment(.center)
                         Text("Close and pull to refresh to retry.")
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     }
                     .padding()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -400,20 +385,20 @@ struct ProfilePickerSheet: View {
             dismiss()
             Task { await onPick() }
         } label: {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: Theme.Spacing.md.rawValue) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
                     Text(p.name)
                         .font(.body)
-                        .foregroundColor(.primary)
+                        .foregroundColor(Theme.Semantic.onSurface)
                     if let desc = p.description, !desc.isEmpty {
                         Text(desc)
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
                             .lineLimit(1)
                     } else if let model = p.model, !model.isEmpty {
                         Text(model)
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
                             .lineLimit(1)
                     }
                 }
@@ -427,9 +412,9 @@ struct ProfilePickerSheet: View {
                     Text("default")
                         .font(.caption2.bold())
                         .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.secondary.opacity(0.15)))
-                        .foregroundColor(.secondary)
+                        .padding(.vertical, Theme.Spacing.xxs.rawValue)
+                        .background(Capsule().fill(Theme.Semantic.onSurface.opacity(0.15)))
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
             }
             .contentShape(Rectangle())
@@ -459,7 +444,7 @@ struct MemoryEditSheet: View {
 
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
                 Text("Editing a memory in \(item.sourceLabel)")
                     .font(.subheadline)
                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
@@ -467,10 +452,10 @@ struct MemoryEditSheet: View {
                 TextEditor(text: $draft)
                     .font(.body)
                     .scrollContentBackground(.hidden)
-                    .padding(8)
+                    .padding(Theme.Spacing.sm.rawValue)
                     .frame(maxWidth: .infinity, minHeight: 200, maxHeight: .infinity)
                     .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous)
                             .fill(Theme.Semantic.surface)
                     )
 

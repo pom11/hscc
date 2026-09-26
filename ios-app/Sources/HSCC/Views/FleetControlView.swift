@@ -24,7 +24,7 @@ struct FleetControlView: View {
         NavigationStack {
             ScrollView {
                 if let client {
-                    VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
                         appliedSection
                         clusterActionsSection(client: client)
                     }
@@ -70,11 +70,11 @@ struct FleetControlView: View {
         HSSectionCard(title: "Applied Template", systemImage: "checkmark.rectangle.stack") {
             switch status {
             case .loading:
-                ProgressView()
+                HSLoading()
             case .failed(let message):
                 errorLabel(message, retry: { Task { await loadStatus() } })
             case .stale(let state, let ageMessage):
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
                     StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
                         Task { await loadStatus() }
                     }
@@ -91,7 +91,7 @@ struct FleetControlView: View {
     /// The rendered body for a successfully-loaded (or stale last-known) status.
     @ViewBuilder
     private func statusBody(_ state: TemplateStatusResponse) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
             Text(state.speak)
                 .font(.subheadline)
                 .italic()
@@ -128,7 +128,7 @@ struct FleetControlView: View {
     @ViewBuilder
     private func clusterActionsSection(client: HSCCClient) -> some View {
         HSSectionCard(title: "Cluster", systemImage: "power") {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
                 Text("Bring the serving fleet up, or stop ALL workloads fleet-wide.")
                     .font(.subheadline)
                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
