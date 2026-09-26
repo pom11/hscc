@@ -48,9 +48,10 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - Every local audit/* branch mapped to a card or confirmed merged — none dropped.
 - PROGRESS:
   - [LANDED] chat-composer (t_d331843e) @ 89384bf: 7/8 branches SUPERSEDED (features already on main byte-identical), 1 LEAVE (chat-retry WIP t_3ae70b8c → follow-on card t_791d1a75 filed by worker: restore failed send text to composer). iOS worker completed cleanly.
-  - [RUNNING] fleet-monitoring (t_3832283d) run 791, settings-profile (t_1bfe8908) run 792, api-history (t_e2856bfe) run 790.
-  - OBSERVATION: recurring protocol_violation — ios/backend workers doing long reconciliation then exiting rc=0 WITHOUT kanban_complete → marked crashed + auto re-queued (fleet-monitoring 786→791, api-history 788→789→790). Work not lost (dispatcher self-heals, chat-composer proves completion), but 80-min runs get re-done. Watch: if a card hits 3+ violated attempts, split it or investigate worker termination.
-- READY: t_3c5149fd, t_c14a427c, t_b578972f, t_a2c8e456 (ios) + t_e2856bfe lane.
+  - [LANDED] fleet-monitoring (t_3832283d) @ befe217/2273498: all 6 branches SUPERSEDED (code already on main via re-commits; evidence in docs/audits/phase1-fleet-monitoring-reconciliation.md). Run 786 crashed (protocol violation), run 791 re-verified + completed.
+  - [RUNNING] settings-profile (t_1bfe8908) run 793, detail-error-views (t_3c5149fd) run 794, api-history (t_e2856bfe) run 790.
+  - OBSERVATION: recurring protocol_violation — ios/backend workers doing long reconciliation then exiting rc=0 WITHOUT kanban_complete → marked crashed + auto re-queued. Dispatcher self-heals (re-queued runs re-verify + complete cleanly). But 80-min runs get re-done once. Watch: if a card hits 3+ violated attempts, split it or investigate worker termination.
+- READY: t_c14a427c, t_b578972f, t_a2c8e456, t_791d1a75 (ios) + api-history lane.
 
 ## Phase 2 — iOS theme + UI/UX polish
 
