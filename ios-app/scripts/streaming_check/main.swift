@@ -304,6 +304,45 @@ do {
           && messageText(t.rows[0]) == "from another device")
 }
 
+// ---- 15. Failed send: the phantom optimistic row is removed, text restored ---
+// When the WS accept fails, nothing reached the cluster, so there is no echo to
+// adopt the optimistic row. Keeping it would leave a message the server never
+// got; removeLocalUserMessage drops exactly that row (the store then restores
+// the composer text so the operator can retry instead of retyping).
+do {
+    var t = StreamingTranscript()
+    let id = t.addLocalUserMessage("fix the typo")
+    check("local row exists before removal", t.rows.count == 1)
+    let removed = t.removeLocalUserMessage(rowID: id)
+    check("removeLocalUserMessage reports it removed the row", removed == true)
+    check("phantom row is gone after failed send", t.rows.count == 0,
+          "got \(t.rows.count) rows")
+
+    // A later genuine echo of the same text (e.g. the operator re-sent it, or
+    // another device) is a fresh, legitimate delivery and renders as a new row
+    // — removal does not suppress future genuine traffic.
+    let lateEcho = try decode("""
+    [{"seq":9,"type":"message","ts":"t","payload":{"role":"user","delta":"fix the typo","done":true}}]
+    """)
+    for e in lateEcho { t.fold(e) }
+    check("a later genuine echo of the text renders as a fresh row", t.rows.count == 1,
+          "got \(t.rows.count) rows")
+
+    // But if an echo ALREADY adopted the row (the message DID reach the
+    // server), removeLocalUserMessage is a no-op — we never yank a delivered
+    // message out of the transcript.
+    var t2 = StreamingTranscript()
+    let id2 = t2.addLocalUserMessage("delivered")
+    let deliv = try decode("""
+    [{"seq":1,"type":"message","ts":"t","payload":{"role":"user","delta":"delivered","done":true}}]
+    """)
+    for e in deliv { t2.fold(e) }
+    check("echo adopted the row (1 row, re-anchored)", t2.rows.count == 1 && t2.rows[0].id != id2)
+    let removed2 = t2.removeLocalUserMessage(rowID: id2)
+    check("remove is a no-op once the echo adopted it", removed2 == false && t2.rows.count == 1,
+          "removed=\(removed2) rows=\(t2.rows.count)")
+}
+
 print("")
 if failures == 0 {
     print("streaming_check: ALL PASSED")
