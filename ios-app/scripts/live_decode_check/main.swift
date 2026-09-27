@@ -180,10 +180,14 @@ c.decode(TemplateListResponse.self,     "v1_template_list.json",       "Template
 c.decode(TemplateStatusResponse.self,   "v1_template_status.json",     "TemplateStatusResponse")
 c.decode(TemplatePreviewResponse.self,  "v1_template_preview.json",    "TemplatePreviewResponse")
 c.decode(SessionsListResponse.self,     "v1_sessions.json",            "SessionsListResponse")
+// Phase 4 (t_ca133e7d): previously-uncovered wire families now in the live set.
+c.decode(CommandsResponse.self,         "v1_commands.json",            "CommandsResponse")
+c.decode(ProfileListResponse.self,      "v1_profiles_list.json",       "ProfileListResponse")
+c.decode(LogsResponse.self,             "v1_logs_daemon.json",         "LogsResponse (bare [LogEntry])")
 
 // ---- Summary + exit code ---------------------------------------------------
 print("")
-let total = 33
+let total = 36
 print("LIVE DECODE: \(c.decodes)/\(total) decoded, \(c.populated)/\(total) populated")
 if !c.decodeFailures.isEmpty {
     print("DECODE FAILURES (\(c.decodeFailures.count)):")
