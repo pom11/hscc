@@ -57,6 +57,9 @@ def route_map():
         "v1_template_status.json": "template_status.json",
         "v1_template_preview.json": "template_preview_hscc-live.json",
         "v1_sessions.json": "v1_sessions.json",
+        "v1_commands.json": "commands.json",
+        "v1_profiles_list.json": "profiles_list.json",
+        "v1_logs_daemon.json": "logs_daemon.json",
     }
 
 
