@@ -1,0 +1,66 @@
+# 4-node REVIEW-HEAVY — sized for what the board actually queues on.
+#
+# THE OBSERVATION THIS TEMPLATE IS BUILT ON: live ~/.hermes/config.yaml has
+# `kanban.auto_review` enabled with seven review_roles (worker, coder,
+# backend-engineer, frontend-engineer, ml-engineer, data-engineer,
+# devops-engineer) all routed to a single `reviewer`. Every coder card that
+# lands spawns a reviewer card. Effective board volume is therefore ~2x the
+# cards you file, and the reviewers — not the coders — are what backs up.
+#
+# Every other template in this directory sizes the CODING family and treats
+# review as an afterthought. This one inverts that: one strong coder, two fast
+# reviewers, so review never becomes the queue.
+#
+# MEASURED, one GB10:
+#   orchestrator  Nemotron-3-Super 120B-A12B NVFP4 + MTP    23.6 tok/s
+#   coding  x1    Qwen3.8-27B-FP8 + MTP        ~21 tok/s   60.75 GB  SWE-Pro 61.7
+#   review  x2    Nemotron-3-Nano 30B-A3B NVFP4  88-100 tok/s  24.51 GB
+#
+# WHY NEMOTRON-3-NANO FOR REVIEW: review is a read-heavy, verdict-shaped task —
+# long prompt in, short structured answer out. It rewards prefill and decode
+# speed far more than deep reasoning, and 88-100 tok/s on a 3B-active MoE is
+# the right shape. It is also a plain vLLM recipe with tensor_parallel: 1, so
+# it needs no runtime this fleet has not already proven.
+#
+# WHY ONE CODER IS ENOUGH HERE: kanban `max_in_progress_per_profile: 2` caps a
+# single profile at two in-flight cards anyway. A second coder only helps when
+# two DIFFERENT coder profiles are active — if that is your situation, use
+# `4node-balanced` instead.
+name: 4node-review-heavy
+version: 3
+description: "4 nodes: Nemotron-3-Super 120B-A12B orchestrator + 1x Qwen3.8-27B-FP8 coder + 2x Nemotron-3-Nano NVFP4 reviewers (88-100 tok/s). Sized for auto_review load. cluster_size=4."
+
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/nemotron-3-super-120b-a12b-nvfp4-mtp-vllm.yaml"
+
+families:
+  - name: coding
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.8-27b-fp8-mtp-vllm.yaml"
+    workers: 1
+    proxy: true
+
+  - name: review
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/nemotron-3-nano-30b-a3b-nvfp4-vllm.yaml"
+    workers: remaining
+    proxy: true
+
+routing:
+  delegation: family-coding
+
+  # Compaction on the review pool. It is the cheapest large-prompt capacity in
+  # this layout and the one that is idle between review bursts. Live config
+  # currently pins auxiliary.compression at a hardcoded coding worker's
+  # address, which is the worst of the three options when there is only one
+  # coder.
+  compaction: family-review
+
+  # The eight TEXT auxiliaries (kanban_decomposer, triage_specifier,
+  # profile_describer, curator, title_generation, skills_hub, approval, mcp)
+  # move OFF the orchestrator here. This is the one template that sets this
+  # key: with a single coder the orchestrator's nine-way fan-out is the
+  # bottleneck, and these eight tasks are short, structured, and exactly what
+  # the fast review pool is good at. `vision` and `web_extract` are never
+  # included — they need capability-specific providers.
+  auxiliaries: family-review

@@ -945,8 +945,16 @@ class TestProvisionMultiNodeSpan:
         fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[unit])
         return ti.ResolvedPlan(template="t", orchestrator=orch, families=[fam])
 
-    def test_tp1_unit_no_tp_flag(self, monkeypatch, tmp_path):
-        """A tp=1 unit produces ONE sparkrun call with single host, NO --tp flag."""
+    def test_tp1_unit_single_host_and_explicit_tp1(self, monkeypatch, tmp_path):
+        """A tp=1 unit produces ONE sparkrun call with a single host and `--tp 1`.
+
+        `--tp` used to be omitted at tp=1, which let the RECIPE's own
+        `tensor_parallel` default win — so a template could not pin a
+        tp=2-by-default recipe to one node and it silently tried to span two.
+        The flag is now always explicit; drift comparison normalizes a missing
+        `--tp` to 1 so pre-existing units are not recreated (see
+        tests/test_serve_cmd_render.py).
+        """
         import subprocess
         from unittest.mock import MagicMock
 
@@ -967,7 +975,7 @@ class TestProvisionMultiNodeSpan:
         assert "--hosts" in worker_call
         hosts_idx = worker_call.index("--hosts")
         assert worker_call[hosts_idx + 1] == "10.0.0.2"
-        assert "--tp" not in worker_call
+        assert worker_call[worker_call.index("--tp") + 1] == "1"
 
     def test_tp2_unit_one_call_comma_hosts_and_tp(self, monkeypatch, tmp_path):
         """A tp=2 unit spanning 2 nodes produces ONE sparkrun call with
