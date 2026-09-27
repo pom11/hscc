@@ -5,6 +5,68 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.3.0] - 2026-09-27
+
+### Added
+- **7 registry-sourced cluster templates (single-node strong tier)** replacing the
+  9-14 tok/s cross-node DSV4 layouts: `2node-fast`, `3node-balanced`,
+  `4node-balanced`, `4node-quality`, `4node-review-heavy`, `4node-throughput`,
+  `4node-dual-orch`. Templates are now **authoritative for `tp`** and carry
+  per-model `gpu_memory_utilization`; recipe preflight is registry-aware. Three
+  previously-unapplicable templates were fixed.
+- **Per-profile `memory:` block is emitted AND preserved by the generator**
+  (roadmap milestone `profile-provisioning`). A `bootstrap` run no longer reverts
+  hand-set per-profile memory settings. New `hscc-roles provision-check` CLI
+  reports each profile's EFFECTIVE memory/compaction resolution — note profile
+  configs do NOT inherit `~/.hermes/config.yaml`, so this resolves via
+  `HERMES_HOME=<profile> load_config()` rather than reading the flat file.
+- **iOS cron roster view** consuming the existing `GET /v1/cron/list`, which had
+  zero client references before this.
+
+### Fixed
+- **memori_byodb never wrote anything.** Local augmentation passed a `list` where
+  the SDK expects `Memories`, so conversation/message/fact rows were silently
+  dropped — nothing was captured between 2026-06-13 and 2026-09-26. Rows are now
+  written directly via the driver, config resolution is profile-scoped, and the
+  package is registered in `run_tests.sh` so the drift guard covers it.
+- **`hscc status` could report RUNNING for a dead daemon.** Status now gates on a
+  durable liveness signal (pid alive AND a fresh heartbeat) instead of trusting
+  the pid file, and `daemon.pid` is written ONCE in the grandchild rather than by
+  the first child. This is what made the next item diagnosable at all.
+- **The test suite gracefully stopped the operator's live daemon on every run.**
+  `install.py` keeps its own module-level `HSCC_DIR`/`PID_FILE`;
+  `TestNoAnsiInstall` patched the plist/systemd paths but not `PID_FILE`, and both
+  `cmd_install` and `cmd_uninstall` call `_stop_running_daemon()`, which reads
+  `PID_FILE` and SIGTERMs that pid. Observed 19 times over two days and
+  misattributed to the engine-wedge check, to a "fleet-wide worker death", and to
+  `hscc start` vs launchd — none of which were the cause. It stayed down because
+  the stop is graceful: the daemon exits 0 and the plist's
+  `KeepAlive/SuccessfulExit=false` correctly declines to revive a clean exit.
+  The tests now isolate `PID_FILE` and patch `os.kill` to raise, so a regression
+  fails loudly instead of signalling a real process.
+- **`rc=0` without a terminal kanban call was retried as a crash.** A worker that
+  finished its work and exited cleanly without `kanban_complete`/`kanban_block`
+  was indistinguishable from a crash, so the dispatcher re-ran the card — three
+  wasted worker-runs per card, and at one point two live workers in the same
+  worktree. Now bounded and surfaced, with a regression test.
+- **`hscc-roles` resolved `PROFILES_DIR` to a double-nested path** instead of the
+  Hermes root profiles dir.
+
+### Changed
+- iOS: all view groups now route through the shared `Theme` tokens
+  (project/session, chat, detail/template, cluster/control surfaces), and three
+  previously-uncovered wire families (`commands`, `profiles-list`, `logs`) are
+  pinned by the decode harness (62/62).
+- 40 stranded `audit/*` branches were reconciled and dispositioned
+  (SUPERSEDED/STALE) with evidence; audit reports that would have been lost were
+  preserved into `docs/audits/preserved_branches/` first.
+
+### Known issues
+- The iOS changes in this release were verified per-card but **never compiled as a
+  whole**; no end-to-end iOS build was run before tagging.
+- `skills.preload` is unchanged fleet-wide (two planning skills, nothing about
+  finishing) — a deliberate operator decision, not an oversight.
+
 ## [2.2.0] - 2026-09-25
 
 ### Added
