@@ -184,6 +184,26 @@ class TestNoAnsiInstall:
                             tmp_path / "systemd")
         monkeypatch.setattr(install_mod, "SYSTEMD_UNIT_FILE",
                             tmp_path / "systemd" / "com.hermes.hscc_daemon.service")
+        # install.py holds its OWN module-level HSCC_DIR/PID_FILE — patching
+        # daemon_ops.PID_FILE (what _patch_state_dir does) does NOT cover it.
+        # Both cmd_install and cmd_uninstall call _stop_running_daemon(), which
+        # reads PID_FILE and SIGTERMs that pid. Unpatched, that killed the
+        # OPERATOR'S live daemon on every suite run (19 occurrences observed
+        # before this was found; the daemon exits 0, so launchd's
+        # KeepAlive/SuccessfulExit=false correctly declined to revive it and it
+        # stayed down for hours). Point it at tmp so the read misses.
+        monkeypatch.setattr(install_mod, "HSCC_DIR", str(tmp_path / "hscc"))
+        monkeypatch.setattr(install_mod, "PID_FILE",
+                            str(tmp_path / "hscc" / "daemon.pid"))
+        # Self-guard: with PID_FILE pointing at a nonexistent tmp path,
+        # _stop_running_daemon() must take the FileNotFoundError branch and
+        # never signal anything. If a future change makes it reach os.kill,
+        # fail loudly here instead of silently killing a real process.
+        def _no_kill(pid, sig):
+            raise AssertionError(
+                f"install/uninstall tried to signal pid {pid} (sig {sig}) — "
+                "PID_FILE is not isolated; this would kill a live daemon")
+        monkeypatch.setattr(install_mod.os, "kill", _no_kill)
 
     def test_install_launchd(self, monkeypatch, tmp_path, fake_subprocess):
         self._patch_install_paths(monkeypatch, tmp_path)
