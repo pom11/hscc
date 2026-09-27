@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional, List, Dict
 
@@ -57,6 +58,10 @@ def parse_show(text: str, recipe: str = "") -> RecipeCost:
 # small mtime-keyed cache so repeated planning is cheap
 _CACHE: Dict[str, tuple] = {}
 
+# existence answers for non-path (registry) tokens; a registry recipe does not
+# have an mtime to key on, and preflight asks about the same handful repeatedly.
+_EXISTS_CACHE: Dict[str, bool] = {}
+
 
 def recipe_cost(recipe: str, *, _runner=None) -> RecipeCost:
     """Return the parsed cost for a recipe (by name or path). Best-effort:
@@ -94,6 +99,65 @@ def _run_show(recipe: str) -> str:
         return r.stdout if r.returncode == 0 else ""
     except (subprocess.SubprocessError, FileNotFoundError, OSError):
         return ""
+
+
+def _run_show_norvam(recipe: str) -> str:
+    """`sparkrun show --no-vram` — resolution only, no VRAM estimation.
+
+    Existence does not need the VRAM block, and skipping it matters: the VRAM
+    estimator performs HuggingFace Hub metadata lookups, which are slow and
+    require the network. `_structural_validate` documents itself as OFFLINE, so
+    its existence check must not reach the internet — `--no-vram` keeps the
+    probe to sparkrun's local registry cache.
+    """
+    if not _RECIPE_RE.match(recipe or ""):
+        return ""  # invalid/suspicious recipe token — don't shell out
+    try:
+        r = subprocess.run([SPARKRUN, "show", "--no-vram", "--", recipe],
+                           capture_output=True, text=True, timeout=30)
+        return r.stdout if r.returncode == 0 else ""
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return ""
+
+
+def recipe_exists(recipe: str, *, _runner=None) -> bool:
+    """True when `recipe` names something sparkrun can actually serve.
+
+    A recipe token is a filesystem path (``~/…``, ``/…``, ``./…``) OR a registry
+    name (``@reg/name``, or a bare name resolved across enabled registries). A
+    plain ``Path.is_file()`` check answers only the first kind and reports every
+    registry recipe as missing — which is why this exists: templates that source
+    from the community/eugr/atlas/official registries are otherwise rejected at
+    preflight even though `sparkrun show` resolves them fine.
+
+    Path-shaped tokens are answered from the filesystem (no subprocess). Anything
+    else is probed with `sparkrun show`, whose output is cached by
+    ``recipe_cost``'s own cache via ``_run_show``. Fail-safe direction is
+    deliberate: an unreachable/broken sparkrun makes this return False, so
+    preflight refuses rather than proposing a layout it cannot launch.
+    """
+    if not recipe:
+        return False
+    # Registry tokens start with '@' and are never filesystem paths.
+    if not recipe.startswith("@"):
+        # Path check via pathlib, matching the original is_file() behaviour this
+        # replaced (tests monkeypatch Path.is_file).
+        if Path(os.path.expanduser(recipe)).is_file():
+            return True
+        # Path- or filename-shaped and not on disk: genuinely missing. Don't
+        # burn a subprocess asking sparkrun about it. Only an extension-less
+        # bare token can still be a registry name worth probing.
+        if (recipe.startswith(("~", "/", "./", "../"))
+                or "/" in recipe
+                or recipe.endswith((".yaml", ".yml"))):
+            return False
+    cached = _EXISTS_CACHE.get(recipe)
+    if cached is not None:
+        return cached
+    runner = _runner or _run_show_norvam
+    ok = bool((runner(recipe) or "").strip())
+    _EXISTS_CACHE[recipe] = ok
+    return ok
 
 
 # ── placement ───────────────────────────────────────────────────────────────

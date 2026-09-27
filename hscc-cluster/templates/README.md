@@ -54,6 +54,36 @@ they hardcode a specific cluster — a template that names nodes fails structura
 validation the moment those nodes are repurposed. The **shipped templates
 deliberately omit `nodes:`** and stay portable, resolved purely from intent.
 
+### `gpu_memory_utilization:` (per model — optional)
+
+A fraction in `(0, 1]`, passed to sparkrun as `--gpu-mem`. Omitted means the
+**recipe's own default wins**, which is what every unit that owns its node
+wants — so existing templates are unaffected.
+
+**This is what makes co-location work.** A recipe's `gpu_memory_utilization` is
+a fraction of the *whole card*, written assuming the unit owns the GPU. Two
+co-located units each inheriting `0.8` request **160%** of one Spark, and the
+second engine refuses to start. The VRAM check does not catch it and cannot:
+it sums weights + KV, which is a different question from how much each engine
+*reserves*. Both shipped colocation templates were broken this way until the
+key existed.
+
+Sizing rule — check **both** halves:
+
+- each unit's share of the card must exceed its `sparkrun show` per-GPU total;
+- the sum across co-located units should stay at or below ~`0.8`.
+
+A GB10's memory is unified, so the remainder is not slack to reclaim — squeezing
+it is what takes a node off the network under load.
+
+```yaml
+models:
+  - recipe: "…/qwen3.6-35b-a3b-fp8-vllm.yaml"   # 44.89 GB per-GPU total
+    gpu_memory_utilization: 0.4                 # 48.4 GB of a 121 GB card
+  - recipe: "…/qwen3.6-35b-a3b-fp8-vllm.yaml"
+    gpu_memory_utilization: 0.4                 # sum 0.8, ~24 GB host headroom
+```
+
 ### `allow_colocation:` (per unit — optional, default `false`)
 
 When two units name the same node, apply **blocks** (naming both units) unless
@@ -162,12 +192,92 @@ nemotron-550b **64 GB (tp=4, needs 4 nodes)**.
 | `1node/` | orchestrator-only | orch only, no workers |
 | `2node/` | coding | orch + 1× 27B-FP8 |
 | `3node/` | coding | orch + 2× 27B-FP8 |
-| `4node/` | **coding** | orch + 3× 27B-FP8 — **the live setup** |
+| `4node/` | coding | orch + 3× 27B-FP8 |
 | `4node/` | coding-plus-fast | coding (2× 27B) + fast (1× A3B-FP8), separate proxies |
 | `4node/` | colocated-dual | 3 workers each running **2× A3B-FP8** (89.8 GB/GPU) |
+| `4node/` | deepseek-v4-orchestrator · dsv4-plus-coding · dual-dsv4 | DSV4 spans — see the speed warning below |
 | `8node/` | coding · coding-plus-fast | orch + 7 workers (single- or two-family) |
 
 Plus the flat top-level: `single-family`, `colocated-two-models`, `hscc-live`.
+
+### 2026-09 generation — registry-sourced, single-node strong tier
+
+The DSV4 templates above decode at **9–14 tok/s**, and that is a property of
+the layout, not of tuning: `@atlas/deepseek-v4-flash-nvfp4-ep2` records
+"~15.5 tok/s (network/all-reduce bound over RoCE)" in its own metadata. A
+cross-node EP/TP span pays an all-reduce on **every decoded token**. The
+templates below keep the strong tier on a single node instead.
+
+The recipes behind these came from the sparkrun **registries** (`@community/…`,
+`@official/…`, `@eugr/…`) but are **pinned into `local-fixed/`**, and the
+templates reference the pinned paths. A `sparkrun registry update` can change or
+remove an upstream recipe underneath a running fleet, silently altering serve
+flags; a pin means what the fleet runs changes only when someone edits it here on
+purpose. Each pinned file carries its origin, source path and pin date in a
+header — diff against the origin to re-sync deliberately, and put local fixes in
+the pin, never in the registry copy.
+
+`recipe_cost.recipe_exists()` still matters: it makes `@reg/name` tokens
+resolvable at preflight (a plain `Path.is_file()` reports every one as missing),
+so a template *can* reference a registry recipe directly when that is what you
+want — it is just not how these seven are wired.
+
+| Dir | Template | Orchestrator | Workers | Notes |
+|-----|----------|--------------|---------|-------|
+| `4node/` | **balanced** | Nemotron-3-Super 120B-A12B NVFP4+MTP, 23.6 tok/s | 2× Qwen3.8-27B-FP8 + 1× North-Mini-Code NVFP4 | **recommended default** |
+| `4node/` | throughput | A3B-NVFP4, **116 tok/s** | 3× North-Mini-Code NVFP4 (~530 tok/s aggregate) | burst mode for atomic cards |
+| `4node/` | quality | Qwen3.8-Flash-Next NVFP4, SWE-bench Pro **62.5** | 2× Qwen3.8-27B-FP8 + 1× North-Mini-Code NVFP4 | tightest VRAM of the seven |
+| `4node/` | dual-orch | 2× Nemotron-3-Super 120B-A12B | 2× North-Mini-Code NVFP4 | one brain per project board |
+| `4node/` | review-heavy | Nemotron-3-Super 120B-A12B | 1 coder + 2× Nemotron-3-Nano (88–100 tok/s) | sized for `auto_review` |
+| `3node/` | balanced | Nemotron-3-Super 120B-A12B | 1 coder + 1 fast | degraded fleet / idle-autodown |
+| `2node/` | fast | A3B-NVFP4, 116 tok/s | 1× North-Mini-Code NVFP4 | minimum viable pair |
+
+**Container images are per-node local disk, not NAS — and none of these images
+are on the fleet yet.** All seven templates run on
+`ghcr.io/spark-arena/dgx-vllm-eugr-nightly:latest`, so they cost one pull per
+node; `4node/quality` additionally builds `vllm-node-b12x` locally for its
+orchestrator via the eugr recipe's `build_args: --exp-b12x`. No template uses
+the atlas runtime. Watch disk: the gateway node was at **95% (44 GB free)** when
+these were written.
+
+**Check `max_nodes` and `max_batch_size` before putting a recipe in a family.**
+A recipe declaring `Nodes: 1 - 1` cannot take `tp: 2` at all, and one declaring
+`max_batch_size: 1` serializes behind a load-balanced proxy — `ModelIntent` has
+no field to raise either. Both ruled out the otherwise-fastest coder recipe for
+`4node/quality`; its header records what that cost.
+
+**Model weights are not distributed by sparkrun on this cluster.** `cache_dir`
+is a shared NFS export (`/mnt/nas`) populated out-of-band, so the cluster config
+sets `distribution.model.enabled: false`. A model that is not already staged
+fails at launch rather than triggering a surprise multi-GB pull mid-provision.
+Stage with `HF_HUB_CACHE=/mnt/nas/hub HF_XET_HIGH_PERFORMANCE=1 hf download <repo>`
+on any node. Container **images** are still distributed normally — those are
+per-node local disk.
+
+**A recipe whose `container:` has no registry prefix and no `build_args` cannot
+be used at all** — sparkrun can neither pull nor build it. That is what ruled
+out the faster Qwen3.5-122B-A10B int4+MTP orchestrator (~50 tok/s, BFCL-V4 72.2,
+the best open-weight tool-caller measured); its only correctly-tuned recipe
+names `vllm-qwen35-v2:latest`, built by an external pipeline. Its weights are
+staged on the NAS, so if that image is ever built it is a one-line upgrade in
+four templates. Check `sparkrun show --no-vram -- <recipe> | grep Container:`
+before adopting any recipe.
+
+**Two constraints these encode, worth knowing before editing them:**
+
+1. **The orchestrator must batch.** The live `~/.hermes/config.yaml` points
+   *nine* consumers at `orchestrator-model` — the main chat plus
+   `kanban_decomposer`, `triage_specifier`, `curator`, `profile_describer`,
+   `title_generation`, `skills_hub`, `approval` and `mcp`. A recipe pinned to
+   `max_num_seqs: 1` (several atlas ones are, deliberately) serializes that
+   whole set and, on some, errors mid-decode at C>1.
+2. **A template's `tp:` is authoritative — but only since this change.**
+   `_render_serve_cmd` used to emit `--tp` only when `tp > 1`, so a recipe whose
+   own default was `tensor_parallel: 2` silently tried to span two nodes no
+   matter what the template said. `--tp` is now always emitted, including
+   `tp: 1`, and drift comparison normalizes a missing `--tp` to 1 so units
+   provisioned before the change are not recreated. The slots above still use
+   tp=1-by-default recipes, which is one less thing to reason about.
 
 A regression test (`tests/test_template_intent.py::test_all_shipped_templates_resolve_and_fit`)
 resolves every node-count template against its N-node cluster with real recipe

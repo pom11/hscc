@@ -1,23 +1,43 @@
 # Two models co-located on EACH worker (the "2 models on one Spark" case).
 # Both models in the family run on every selected worker, on distinct vLLM ports
-# (8000, 8001), behind one proxy. At apply, resolve() checks via `sparkrun show`
-# that their combined per-GPU VRAM fits each worker; it refuses otherwise.
+# (8000, 8001), behind one proxy.
 #
-# Topology-free (v2): no IPs, no ports — resolved live. Pick two recipes whose
-# combined per-GPU total fits one Spark (~110 GB usable). Both must be tp=1
-# (a tp>1 model needs the node to itself).
+# Topology-free: no IPs, no ports — resolved live, so this works on a 2-node or
+# a 40-node cluster unchanged.
+#
+# ── CO-LOCATION HAS TWO SIZING CONSTRAINTS, NOT ONE ─────────────────────────
+# 1. The models' combined per-GPU total must fit the card. `resolve()` checks
+#    this via `sparkrun show` and refuses otherwise.
+# 2. Each unit's `gpu_memory_utilization` is a fraction of the WHOLE card, and
+#    a recipe's own default assumes the unit owns the GPU. Two recipes at 0.8
+#    request 160% of one Spark and the second engine refuses to start. Nothing
+#    checks this for you, because summing weights answers a different question
+#    than how much each engine reserves.
+#
+# So pin the fraction per model, as below: each unit's share must exceed its own
+# per-GPU total, and the sum must stay at or below ~0.8 — a GB10's memory is
+# unified, and squeezing the remainder is what takes a node off the network.
+#
+# This example pairs two A3B-FP8 (44.89 GB each, measured). 0.4 gives each
+# 48.4 GB of the 121 GB card and leaves ~24 GB of host headroom.
+#
+# It deliberately does NOT pair two 27B-FP8: at 60.75 GB each they need 121.5 GB
+# together, which does not fit a 121 GB card at any fraction. That was this
+# file's previous content and it could never have started.
 
 name: colocated-two-models
-version: 2
+version: 3
 description: "One family, two co-located models per worker on distinct ports behind one proxy."
 
 orchestrator:
-  recipe: "qwen3.6-35b-a3b-nvfp4-vllm"
+  recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
 
 families:
   - name: dual
     models:
-      - recipe: "qwen3.6-27b-fp8-vllm"
-      - recipe: "qwen3.6-27b-fp8-vllm"
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-fp8-vllm.yaml"
+        gpu_memory_utilization: 0.4
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-fp8-vllm.yaml"
+        gpu_memory_utilization: 0.4
     workers: all
     proxy: true

@@ -325,7 +325,8 @@ def _unit_alias(u: Any, plan: Any) -> str:
 
 
 def _render_serve_cmd(cluster: str, hosts_arg: str, port: int, recipe: str,
-                      alias: str, tp: int, model: str = "") -> List[str]:
+                      alias: str, tp: int, model: str = "",
+                      gpu_mem: Optional[float] = None) -> List[str]:
     """Canonical serve argv for a wanted unit — the exact argv that gets run.
 
     This is the SINGLE source of truth shared by both (a) recording at
@@ -339,31 +340,63 @@ def _render_serve_cmd(cluster: str, hosts_arg: str, port: int, recipe: str,
            "--cluster", cluster, "--hosts", hosts_arg,
            "--port", str(port), "--no-follow", "--ensure"]
     cmd.extend(["--served-model-name", f"{concrete} {alias}"])
-    if tp > 1:
-        cmd.extend(["--tp", str(tp)])
+    # ALWAYS emit --tp, including tp=1. Omitting it let the RECIPE's own
+    # `tensor_parallel` default win, so a template could not pin a
+    # tp=2-by-default recipe down to a single node — it silently tried to span
+    # two. Being explicit makes the template the authority.
+    #
+    # This is safe against spurious drift only because comparison is
+    # normalized: `_serve_cmd_flags` defaults a missing --tp to "1", so a unit
+    # recorded before this change still compares equal and is NOT recreated.
+    cmd.extend(["--tp", str(tp)])
+    # Only when the template says so — omitted means the recipe's own default
+    # wins, which is the long-standing behaviour and what every unit that does
+    # not co-locate wants.
+    if gpu_mem is not None:
+        cmd.extend(["--gpu-mem", str(gpu_mem)])
     return cmd
+
+
+def _serve_cmd_flags(cmd: List[str]) -> dict:
+    """Flag/value map of a rendered serve command, NORMALIZED for comparison.
+
+    Normalization exists so that a purely cosmetic change to how a command is
+    rendered never reads as fleet drift. Currently: a missing ``--tp`` means
+    ``--tp 1``, because commands recorded before tp became explicit omit it
+    while an equivalent command rendered today includes it.
+    """
+    out: dict = {}
+    i = 0
+    while i < len(cmd):
+        tok = cmd[i]
+        if tok.startswith("--"):
+            if i + 1 < len(cmd) and not cmd[i + 1].startswith("--"):
+                out[tok] = cmd[i + 1]
+                i += 2
+            else:
+                out[tok] = True
+                i += 1
+        else:
+            out.setdefault("positional", []).append(tok)
+            i += 1
+    out.setdefault("--tp", "1")
+    return out
+
+
+def serve_cmds_equivalent(old_cmd: List[str], new_cmd: List[str]) -> bool:
+    """True when two rendered serve commands mean the same launch.
+
+    Used instead of ``==`` for drift detection: a recorded command and a
+    freshly rendered one can differ token-for-token while being identical in
+    effect (see :func:`_serve_cmd_flags`).
+    """
+    return _serve_cmd_flags(old_cmd) == _serve_cmd_flags(new_cmd)
 
 
 def _diff_serve_cmds(old_cmd: List[str], new_cmd: List[str]) -> str:
     """Human-readable description of WHAT changed between two rendered serve
-    commands (flag: old -> new), or '' when they are identical."""
-    def flag_map(cmd: List[str]) -> dict:
-        out: dict = {}
-        i = 0
-        while i < len(cmd):
-            tok = cmd[i]
-            if tok.startswith("--"):
-                if i + 1 < len(cmd) and not cmd[i + 1].startswith("--"):
-                    out[tok] = cmd[i + 1]
-                    i += 2
-                else:
-                    out[tok] = True
-                    i += 1
-            else:
-                out.setdefault("positional", []).append(tok)
-                i += 1
-        return out
-    om, nm = flag_map(old_cmd), flag_map(new_cmd)
+    commands (flag: old -> new), or '' when they are equivalent."""
+    om, nm = _serve_cmd_flags(old_cmd), _serve_cmd_flags(new_cmd)
     if om == nm:
         return ""
     changes = [f"{k}: {om.get(k)!r} -> {nm.get(k)!r}"
@@ -517,13 +550,15 @@ def _provision_models(plan: Any, cluster: str = "hscc",
             #   * differs        → REAL drift: name the unit AND what changed.
             #   * no record      → pre-upgrade unit: fall back to conservative
             #     "drift not checked", never a false "command drift" claim.
-            rendered = _render_serve_cmd(cluster, hosts_arg, port, recipe,
-                                         alias, tp, getattr(unit, "model", ""))
+            rendered = _render_serve_cmd(
+                cluster, hosts_arg, port, recipe, alias, tp,
+                getattr(unit, "model", ""),
+                getattr(unit, "gpu_memory_utilization", None))
             rec = serving_records.get(unit_id)
             rec_cmd = (rec or {}).get("serve_cmd")
             if rec_cmd is None:
                 drift_unchecked.append(f"{hosts_arg}:{port}:{recipe.split('/')[-1]}")
-            elif rec_cmd != rendered:
+            elif not serve_cmds_equivalent(rec_cmd, rendered):
                 diff = _diff_serve_cmds(rec_cmd, rendered)
                 drift_real.append(f"{hosts_arg}:{port}:{recipe.split('/')[-1]}" +
                                   (f" ({diff})" if diff else ""))
@@ -552,8 +587,10 @@ def _provision_models(plan: Any, cluster: str = "hscc",
             # rendered command on every path, so the space reaches vLLM's
             # nargs='+' `--served-model-name` as SEPARATE argv tokens and both
             # names register.
-            cmd = _render_serve_cmd(cluster, hosts_arg, port, recipe, alias, tp,
-                                    getattr(unit, "model", ""))
+            cmd = _render_serve_cmd(
+                cluster, hosts_arg, port, recipe, alias, tp,
+                getattr(unit, "model", ""),
+                getattr(unit, "gpu_memory_utilization", None))
             r = subprocess.run(cmd, capture_output=True, text=True,
                                timeout=PROVISION_TIMEOUT_S)
             if r.returncode == 0:
@@ -883,8 +920,17 @@ def validate_resolved_plan(plan: Any) -> List[str]:
     """
     errors: List[str] = []
 
+    try:
+        from . import recipe_cost as _rc
+    except ImportError:
+        import recipe_cost as _rc
+
     def _recipe_missing(recipe: str) -> bool:
-        return not Path(os.path.expanduser(recipe)).is_file()
+        # Registry-aware: a recipe may be a filesystem path OR a registry name
+        # (@reg/name). A bare is_file() check reported every registry recipe as
+        # missing, which blocked any template sourcing from the community /
+        # eugr / atlas / official registries.
+        return not _rc.recipe_exists(recipe)
 
     if _recipe_missing(plan.orchestrator.recipe):
         errors.append(f"orchestrator recipe not found: {plan.orchestrator.recipe}")
@@ -1135,7 +1181,7 @@ RECOGNISED_VERSIONS = (2, 3)
 # (spec: "unknown keys rejected"). Kept in sync with template_intent schema.
 _KNOWN_TOP_KEYS = {"name", "version", "description", "orchestrator", "families",
                    "routing"}
-_KNOWN_MODEL_KEYS = {"recipe", "tp", "pp", "nodes"}
+_KNOWN_MODEL_KEYS = {"recipe", "tp", "pp", "nodes", "gpu_memory_utilization"}
 _KNOWN_FAMILY_KEYS = {"name", "models", "workers", "proxy", "nodes",
                       "allow_colocation"}
 
@@ -1166,7 +1212,10 @@ def _structural_validate(raw: dict, tpl: Any,
                          cluster_ips: Optional[List[str]] = None,
                          recipe_exists: Optional[Any] = None) -> Tuple[List[str], List[str]]:
     """Layer 1 — structural validation. Offline: uses only the static
-    cluster.json node list, never discovery/resolver/live state. Returns
+    cluster.json node list, never discovery/resolver/live state. (Recipe
+    existence for a ``@reg/name`` token is resolved by ``sparkrun show
+    --no-vram``, which reads sparkrun's LOCAL registry cache — no live cluster
+    state and no network.) Returns
     ``(errors, warnings)``. Every error names the offending unit and value so a
     reviewer can fix the template without re-deriving which key is wrong.
 
@@ -1220,10 +1269,19 @@ def _structural_validate(raw: dict, tpl: Any,
                             errors.append(
                                 f"{label} model {j}: unknown key '{k}'")
 
-    # ── recipe paths exist on disk ────────────────────────────────────────
+    # ── recipes resolve (filesystem path OR @reg/name) ────────────────────
+    try:
+        from . import recipe_cost as _rc_mod
+    except ImportError:
+        import recipe_cost as _rc_mod
+
     def _recipe_ok(recipe: str, label: str) -> None:
+        # Default is registry-aware: a recipe may be a filesystem path OR a
+        # registry name (@reg/name). The previous is_file() default reported
+        # every registry recipe as missing. Injected `recipe_exists` still wins,
+        # so tests keep full control.
         exists = (recipe_exists(recipe) if recipe_exists is not None
-                  else Path(os.path.expanduser(recipe)).is_file())
+                  else _rc_mod.recipe_exists(recipe))
         if not exists:
             errors.append(f"{label} recipe not found: {recipe}")
 

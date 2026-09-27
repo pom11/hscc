@@ -1,0 +1,93 @@
+# 4-node BALANCED — the recommended replacement for `hscc-live`.
+#
+# WHY THIS EXISTS: the DeepSeek-V4 layouts decode at 9-14 tok/s, and that is
+# not a tuning problem. `@atlas/deepseek-v4-flash-nvfp4-ep2` says so in its own
+# metadata: "Validated decode ~15.5 tok/s (network/all-reduce bound over RoCE)".
+# A cross-node EP/TP span pays an all-reduce over CX7 on EVERY decoded token.
+# The fix is not a better DSV4 recipe — it is a single-node strong tier.
+#
+# MEASURED, one GB10 (source: recipe metadata / spark-arena leaderboard):
+#   orchestrator  Nemotron-3-Super 120B-A12B NVFP4 + MTP nst=3   23.6 tok/s
+#   coding x2     Qwen3.8-27B-FP8 + MTP       ~21 tok/s              60.75 GB
+#   fast   x1     North-Mini-Code-1.0 NVFP4   56.7 C1 / 178 agg C10  26.22 GB
+#
+# ORCHESTRATOR CHOICE IS ABOUT JUDGEMENT, NOT SPEED — but it is bounded by what
+# can actually launch. Nemotron-3-Super is a 120B-A12B hybrid Mamba-2/MoE on ONE
+# node, measured 23.6 +/- 1.7 tok/s at N=5 on a single GB10 with receipts
+# published. That is still ~2x the DSV4 orchestrator it replaces, on half the
+# nodes.
+#
+# WHY NOT Qwen3.5-122B-A10B int4+MTP, WHICH IS FASTER (~50 tok/s) AND THE BEST
+# OPEN-WEIGHT TOOL-CALLER MEASURED (BFCL-V4 72.2 vs GPT-5 mini 55.5): the only
+# correctly-tuned recipe for it,
+# `@community/qwen3.5-122b-a10b-int4fp8-mtp-vllm-Taremimi7710`, declares
+# `container: vllm-qwen35-v2:latest` — no registry prefix and no `build_args`,
+# so sparkrun can neither pull nor build it. It comes from an external
+# hand-built pipeline (albond/DGX_Spark_Qwen3.5-122B-A10B-AR-INT4 V2.3) and is
+# present on no node in this fleet. Its weights ARE staged on the NAS
+# (Intel/Qwen3.5-122B-A10B-int4-AutoRound), so if that image is ever built,
+# swapping this one line is a straight upgrade.
+#
+# Do NOT "fix" that by pointing at `@experimental/qwen3.5-122b-a10b-int4-autoround-vllm`,
+# which has a pullable container: it sets `gpu_memory_utilization: 0.7`, and the
+# real footprint of that checkpoint is ~81 GB, leaving ~4 GB for KV — it will
+# not boot. A template cannot override that knob (ModelIntent has no field for
+# it), which is why the recipe's OWN defaults have to be right.
+#
+# ONE IMAGE FOR THE WHOLE FLEET: every recipe in this template ships in
+# ghcr.io/spark-arena/dgx-vllm-eugr-nightly:latest. That is one pull per node
+# rather than three, which matters — no node in this fleet has that image yet
+# and the gateway's boot disk is 95% full.
+#
+# IT ALSO HAS TO BATCH. The live ~/.hermes/config.yaml points NINE consumers at
+# `orchestrator-model`: the main chat plus kanban_decomposer, triage_specifier,
+# curator, profile_describer, title_generation, skills_hub, approval and mcp.
+# Any recipe pinned to `max_num_seqs: 1` (several atlas ones are) will serialize
+# that whole set. Check the recipe before swapping this slot.
+#
+# EVERY RECIPE HERE DEFAULTS TO tensor_parallel: 1, AND THAT IS LOAD-BEARING.
+# `_render_serve_cmd` (hscc-cluster/cluster_template.py) emits `--tp` only when
+# tp > 1, so a template CANNOT pin a tp=2-by-default recipe down to one node —
+# it will silently try to span two. Before substituting any recipe here, run
+# `sparkrun recipe show <name>` and confirm its own tensor_parallel default is 1.
+name: 4node-balanced
+version: 3
+description: "4 nodes: Nemotron-3-Super 120B-A12B NVFP4+MTP orchestrator (1 node, 23.6 tok/s) + 2x Qwen3.8-27B-FP8 coding + 1x North-Mini-Code NVFP4 fast. cluster_size=4."
+
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/nemotron-3-super-120b-a12b-nvfp4-mtp-vllm.yaml"
+
+families:
+  - name: coding
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.8-27b-fp8-mtp-vllm.yaml"
+    workers: 2
+    proxy: true
+
+  - name: fast
+    # North-Mini-Code 1.0 (Cohere, Apache-2.0): 30B total / 3B active, purpose
+    # -built for agentic coding and terminal work — SWE-bench Verified 67.6,
+    # Terminal-Bench v2 36.0. NVFP4 matches FP8 on HumanEval (90.2 each), so
+    # the 4-bit pack costs nothing in quality and buys 1.4-1.7x throughput.
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/north-mini-code-1.0-nvfp4-vllm.yaml"
+    workers: remaining
+    proxy: true
+
+routing:
+  # Delegated subagents are the bulk of fleet traffic and belong on the worker
+  # pool. Stated explicitly because the opposite drift happened in production:
+  # delegation silently pointed at the orchestrator and every subagent burned
+  # gateway GPU. See docs/DESIGN-template-explicit-placement.md.
+  delegation: family-coding
+
+  # Compaction goes to the FAST family, not the orchestrator and not a coder.
+  # Live config currently pins auxiliary.compression at a hardcoded CODING
+  # worker's address, so every compaction run competes with real card
+  # throughput. The orchestrator is no better a home: it already fans out to
+  # nine consumers (see header). The fast family is cheap, idle between bursts,
+  # and compaction is exactly the large-bursty-prompt shape it absorbs well.
+  compaction: family-fast
+
+  # `auxiliaries:` DELIBERATELY OMITTED — omission means do-not-touch, so the
+  # eight text auxiliaries keep whatever ~/.hermes/config.yaml already says.
