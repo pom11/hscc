@@ -51,6 +51,15 @@ class ModelIntent:
     # nodes[0] is the span primary (exposes the endpoint); the rest are tp peers
     # — consistent with serving_unit_scoreboard() and ops.pick_node.
     nodes: Optional[List[str]] = None
+    # v3: per-unit GPU memory fraction, passed to sparkrun as --gpu-mem.
+    # None = not specified → the recipe's own default wins (previous behaviour).
+    #
+    # This exists for CO-LOCATION. Two units sharing a node each inherit their
+    # recipe's own gpu_memory_utilization, and those are written assuming the
+    # unit owns the GPU — so two recipes at 0.8 ask for 160% of one card and the
+    # second fails to start. VRAM-sum checks do not catch it, because the sum of
+    # the WEIGHTS fits; it is the reservation fraction that does not.
+    gpu_memory_utilization: Optional[float] = None
 
     @staticmethod
     def from_dict(d: Union[str, dict]) -> "ModelIntent":
@@ -61,7 +70,8 @@ class ModelIntent:
         return ModelIntent(
             recipe=d["recipe"], tp=int(d.get("tp", 1)),
             pp=int(d.get("pp", 1)),
-            nodes=_nodes_from(d))
+            nodes=_nodes_from(d),
+            gpu_memory_utilization=_gpu_mem_from(d))
 
     def to_dict(self) -> dict:
         """Canonical round-trip form. Omits default/absent v3 keys so a v2
@@ -73,7 +83,30 @@ class ModelIntent:
             out["pp"] = self.pp
         if self.nodes is not None:
             out["nodes"] = list(self.nodes)
+        if self.gpu_memory_utilization is not None:
+            out["gpu_memory_utilization"] = self.gpu_memory_utilization
         return out
+
+
+def _gpu_mem_from(d: dict) -> Optional[float]:
+    """Extract ``gpu_memory_utilization``. Absent → None (recipe default wins).
+
+    Validated here rather than at apply: a fraction outside (0, 1] is always a
+    template bug, and catching it in parsing means `validate` reports it offline
+    instead of the fleet refusing mid-provision.
+    """
+    raw = d.get("gpu_memory_utilization")
+    if raw is None:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        raise TemplateIntentError(
+            f"gpu_memory_utilization must be a number, got {raw!r}")
+    if not (0.0 < val <= 1.0):
+        raise TemplateIntentError(
+            f"gpu_memory_utilization must be in (0, 1], got {val}")
+    return val
 
 
 def _nodes_from(d: dict) -> Optional[List[str]]:
@@ -202,7 +235,8 @@ class ResolvedUnit:
     """A resolved deployment unit — may span multiple nodes when tp > 1."""
 
     def __init__(self, role: str, family: Optional[str], recipe: str,
-                 model: str, nodes: List[str], port: int, tp: int, pp: int):
+                 model: str, nodes: List[str], port: int, tp: int, pp: int,
+                 gpu_memory_utilization: Optional[float] = None):
         self.role = role
         self.family = family
         self.recipe = recipe
@@ -211,6 +245,8 @@ class ResolvedUnit:
         self.port = port
         self.tp = tp
         self.pp = pp
+        # None = not specified by the template → recipe default wins.
+        self.gpu_memory_utilization = gpu_memory_utilization
 
     @property
     def node(self) -> str:
@@ -329,7 +365,8 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
     orchestrator = ResolvedUnit(
         role="orchestrator", family=None, recipe=tpl.orchestrator.recipe,
         model=orch_model, nodes=orch_span, port=8000,
-        tp=orch_tp, pp=tpl.orchestrator.pp)
+        tp=orch_tp, pp=tpl.orchestrator.pp,
+        gpu_memory_utilization=tpl.orchestrator.gpu_memory_utilization)
 
     claimed: set = set(orch_span[1:])  # workers claimed by orchestrator span
     if applied_explicit:
@@ -364,7 +401,8 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
                 units.append(ResolvedUnit(
                     role="worker", family=fam.name, recipe=m.recipe,
                     model=_model_name(m.recipe), nodes=list(explicit),
-                    port=8000 + i, tp=m.tp, pp=m.pp))
+                    port=8000 + i, tp=m.tp, pp=m.pp,
+                    gpu_memory_utilization=m.gpu_memory_utilization))
             for ip in explicit:
                 claimed.add(ip)
             resolved_families.append(ResolvedFamily(
@@ -429,7 +467,8 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
                     units.append(ResolvedUnit(
                         role="worker", family=fam.name, recipe=m.recipe,
                         model=_model_name(m.recipe), nodes=span, port=8000 + i,
-                        tp=m.tp, pp=m.pp))
+                        tp=m.tp, pp=m.pp,
+                        gpu_memory_utilization=m.gpu_memory_utilization))
                 for node_ip in span:
                     claimed.add(node_ip)
         else:
@@ -452,7 +491,8 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
                     units.append(ResolvedUnit(
                         role="worker", family=fam.name, recipe=m.recipe,
                         model=_model_name(m.recipe), nodes=[ip], port=8000 + i,
-                        tp=m.tp, pp=m.pp))
+                        tp=m.tp, pp=m.pp,
+                        gpu_memory_utilization=m.gpu_memory_utilization))
                 claimed.add(ip)
 
         resolved_families.append(ResolvedFamily(

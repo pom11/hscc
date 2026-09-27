@@ -1,14 +1,39 @@
-# 4-node co-location demo: each of 3 workers runs TWO models on distinct ports
-# (A3B-FP8 44.89 + A3B-FP8 44.89 = 89.8 GB/GPU — fits one Spark, verified via sparkrun show).
+# 4-node co-location: each of 3 workers runs TWO models on distinct ports.
+#
+# ── THIS TEMPLATE COULD NOT START BEFORE v3 ─────────────────────────────────
+# The VRAM sum was right and the layout still failed. Both units inherited the
+# recipe's own `gpu_memory_utilization: 0.8`, and that fraction is of the WHOLE
+# card — it is written assuming the unit owns the GPU. Two of them asked for
+# 160% of one Spark, so the second engine refused to start.
+#
+# `sparkrun show` did not catch it and could not: it sums WEIGHTS + KV
+# (44.89 + 44.89 = 89.8 GB, comfortably inside the card), which says nothing
+# about how much each engine RESERVES. Those are different questions, and only
+# the first one was ever being asked.
+#
+# The fix is the v3 per-model `gpu_memory_utilization` key below. Each unit is
+# pinned to 0.4 — 48.4 GB of the 121 GB card, which covers its measured 44.89 GB
+# — summing to 0.8 and leaving ~24 GB of host headroom. That headroom is not
+# slack to reclaim: a GB10's memory is unified, so squeezing it is what takes
+# the node off the network under load.
+#
+# SIZING RULE FOR CO-LOCATION: give each unit a fraction whose share of the card
+# exceeds its `sparkrun show` per-GPU total, and keep the sum at or below ~0.8.
+# Check both halves — the per-unit fit AND the sum.
 name: 4node-colocated-dual
-version: 2
-description: "4 nodes: orchestrator + 3 workers EACH co-locating 2× A3B-FP8 (ports 8000/8001). cluster_size=4."
+version: 3
+description: "4 nodes: orchestrator + 3 workers EACH co-locating 2x A3B-FP8 (ports 8000/8001, 0.4 GPU each). cluster_size=4."
+
 orchestrator:
   recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-nvfp4-vllm.yaml"
+
 families:
   - name: dual
     models:
+      # 0.4 x 121 GB = 48.4 GB each, against a measured 44.89 GB per-GPU total.
       - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-fp8-vllm.yaml"
+        gpu_memory_utilization: 0.4
       - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.6-35b-a3b-fp8-vllm.yaml"
+        gpu_memory_utilization: 0.4
     workers: all
     proxy: true
