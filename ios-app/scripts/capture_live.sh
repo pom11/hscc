@@ -102,6 +102,12 @@ fetch "$BASE/v1/template/list"                       v1_template_list           
 fetch "$BASE/v1/template/status"                     v1_template_status         "/v1/template/status"
 fetch "$BASE/v1/cron/list"                           v1_cron_list               "/v1/cron/list"
 
+# Phase 4 (t_ca133e7d): the three previously-uncovered wire families — commands,
+# profiles/list, and the bounded log tail. Added so every live capture pins them.
+fetch "$BASE/v1/commands"                            v1_commands                "/v1/commands"
+fetch "$BASE/v1/profiles/list"                       v1_profiles_list           "/v1/profiles/list"
+fetch "$BASE/v1/logs?source=daemon&limit=50"         v1_logs_daemon             "/v1/logs?source=daemon&limit=50"
+
 # --------------------------------------------------------------------------- #
 # Pass 1: parameterized routes — resolve {param} from the pass-0 captures
 # --------------------------------------------------------------------------- #
