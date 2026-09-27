@@ -1,0 +1,40 @@
+{
+    "commands": [
+        {
+            "name": "cluster",
+            "description": "Show HSCC cluster status (orchestrator + workers, live health).",
+            "takes_args": false
+        },
+        {
+            "name": "status",
+            "description": "Rich HSCC dashboard: topology, free-VRAM, proxy, daemon, template.",
+            "takes_args": false
+        },
+        {
+            "name": "orch-restart",
+            "description": "Restart the orchestrator vLLM (confirm-first).",
+            "takes_args": true
+        },
+        {
+            "name": "cluster-restart",
+            "description": "Recover the cluster by re-applying the active template (confirm-first).",
+            "takes_args": true
+        },
+        {
+            "name": "cluster-reboot",
+            "description": "Reboot all nodes (workers parallel, orchestrator last) \u2014 confirm-first.",
+            "takes_args": true
+        },
+        {
+            "name": "cluster-down",
+            "description": "Stop all vLLM units cluster-wide (hosts stay up) \u2014 confirm-first.",
+            "takes_args": true
+        },
+        {
+            "name": "workers-up",
+            "description": "Bring up down keepalive workers only (non-destructive, no confirm).",
+            "takes_args": false
+        }
+    ],
+    "speak": "12 slash commands available."
+}

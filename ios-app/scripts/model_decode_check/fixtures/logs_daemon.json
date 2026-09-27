@@ -1,0 +1,38 @@
+[
+    {
+        "timestamp": "2026-09-26T22:07:35.844928+00:00",
+        "level": "INFO",
+        "source": "daemon",
+        "line": "Running PipelineWatchdog"
+    },
+    {
+        "timestamp": "2026-09-26T22:07:37.031535+00:00",
+        "level": "INFO",
+        "source": "daemon",
+        "line": "Gateway check: ok=True (job=True vllm=True mux=True) all 40 multiplex profile(s) served"
+    },
+    {
+        "timestamp": "2026-09-26T22:08:02.993860+00:00",
+        "level": "ERROR",
+        "source": "daemon",
+        "line": "Dispatcher-wedge check: GENUINE STALL detected \u2014 spawnable=['hscc'], roomy=['hscc'], total_running=2"
+    },
+    {
+        "timestamp": "2026-09-26T22:08:07.180507+00:00",
+        "level": "INFO",
+        "source": "daemon",
+        "line": "Running engine-wedge check"
+    },
+    {
+        "timestamp": "2026-09-26T22:08:14.728001+00:00",
+        "level": "INFO",
+        "source": "daemon",
+        "line": "Workers check: 2/2 online"
+    },
+    {
+        "timestamp": "2026-09-26T22:09:24.417338+00:00",
+        "level": "INFO",
+        "source": "daemon",
+        "line": "Received signal 15, stopping..."
+    }
+]

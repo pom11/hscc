@@ -1,0 +1,54 @@
+{
+    "profiles": [
+        {
+            "name": "default",
+            "is_default": true,
+            "gateway_running": true,
+            "model": "orchestrator-model",
+            "provider": "custom",
+            "skill_count": 103,
+            "description": "",
+            "description_auto": false,
+            "distribution_name": null,
+            "distribution_version": null
+        },
+        {
+            "name": "backend-engineer",
+            "is_default": false,
+            "gateway_running": true,
+            "model": "worker-model",
+            "provider": "custom",
+            "skill_count": 114,
+            "description": "Claim tasks that involve server-side services, APIs, data models, business logic, and performance optimization.",
+            "description_auto": false,
+            "distribution_name": null,
+            "distribution_version": null
+        },
+        {
+            "name": "reviewer",
+            "is_default": false,
+            "gateway_running": false,
+            "model": "worker-model",
+            "provider": "custom",
+            "skill_count": 61,
+            "description": "Review completed work and route verified outcomes. Do NOT claim implementation work.",
+            "description_auto": false,
+            "distribution_name": null,
+            "distribution_version": null
+        },
+        {
+            "name": "ios-engineer",
+            "is_default": false,
+            "gateway_running": true,
+            "model": "worker-model",
+            "provider": "custom",
+            "skill_count": 89,
+            "description": "Build and iterate on the iOS app that controls the HSCC cluster over the HSCC HTTP API.",
+            "description_auto": true,
+            "distribution_name": null,
+            "distribution_version": null
+        }
+    ],
+    "count": 4,
+    "speak": "4 profiles total."
+}

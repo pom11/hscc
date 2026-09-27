@@ -42,9 +42,11 @@ fresh capture and diff the key structure.
 
 ## Coverage
 
-46 fixtures cover every decodable response model in Models.swift +
-SharedModels.swift that has a decode check wired into `main.swift`
-(verified 46/46 `c.check` rows + 2 assertion blocks = 48 green).
+The committed fixtures cover every decodable response model in Models.swift +
+SharedModels.swift that has a decode check wired into `main.swift`, plus every
+response type surfaced by the live capture (`live_decode_check`). Current green:
+62/62 committed fixtures + 36/36 live routes (see Phase 4 additions below for
+the count reconciliation).
 
 `cron_list.json` is the Phase 3 scheduled-job roster (`GET /v1/cron/list`,
 added 2026-09-27). It is a faithful 11-job capture of the REAL live response
@@ -81,6 +83,31 @@ bucket (`{ speak, payload? }`) by design and needs no fixture.
 `v1_sessions.json` is the sessions-manager list (`GET /v1/sessions?profile=...`),
 captured against routes_sessions.py: one healthy session and one bloated one
 (positive compaction-failure evidence), value-sanitized, shape-faithful.
+
+## Phase 4 additions (t_ca133e7d, 2026-09-27)
+
+Three previously-uncovered wire families were captured LIVE from the running
+API and committed as shape-faithful sanitizations, closing the last decode gaps:
+
+- `commands.json` — `GET /v1/commands` → `CommandsResponse` (`SlashCommand`).
+  Verbatim live capture of the server-driven slash-command catalog; a subset of
+  the commands retained, `speak` kept as served.
+- `profiles_list.json` — `GET /v1/profiles/list` → `ProfileListResponse`
+  (`ProfileSummary`). Real full-roster shape (10 keys incl. the tolerated-unknown
+  `description_auto` and always-null `distribution_name`/`distribution_version`),
+  trimmed to 4 representative profiles; values generalized, names kept clean
+  (they are public role slugs), `count`/`speak` updated to the trimmed size.
+- `logs_daemon.json` — `GET /v1/logs?source=daemon&limit=N` → `LogsResponse`
+  (bare `[LogEntry]`, each row `{timestamp, level, source, line}`). Live daemon
+  tail trimmed to 6 representative lines covering both INFO and ERROR levels;
+  no IPs/paths/tokens present in the source, none introduced.
+
+`capture_live.sh`, `live_decode_check/main.swift` and
+`compare_fixtures_live.py` were extended so every live capture now includes
+these three routes and both decode-axis harnesses (committed fixtures +
+live-population) guard them. Coverage: 62/62 committed fixtures decode
+(= 56 before Phase 4 + 3 new `c.check` rows + 3 new contract assertions) and
+36/36 live routes decode populated.
 
 ## Running the check
 
