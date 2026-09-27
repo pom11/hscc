@@ -28,8 +28,10 @@ writes. Skipped under interpreters where ``hermes_cli`` isn't installed.
 """
 
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -49,17 +51,25 @@ def test_clean_rc0_without_terminal_call_is_bounded():
     env.pop("HERMES_DELEGATED_CHILD_CONTEXT", None)
     # workaround the payload guard (PVB_STRIPPED=1 proves the marker was stripped).
     env["PVB_STRIPPED"] = "1"
-    if not env.get("HERMES_HOME"):
-        # Give connect()/init a disposable home even when the suite env lacks one.
-        env["HERMES_HOME"] = str(Path(__file__).resolve().parent / "_pvb_tmp_home")
+    # Give connect()/init a disposable home even when the suite env lacks one.
+    # Use a self-cleaning system temp dir OUTSIDE the repo (goal-doc §6), so the
+    # fake home is auto-removed after the test and never dirties the working tree.
+    tmp_home = None
+    try:
+        if not env.get("HERMES_HOME"):
+            tmp_home = tempfile.mkdtemp(prefix="pvb_home_")
+            env["HERMES_HOME"] = tmp_home
 
-    proc = subprocess.run(
-        [sys.executable, str(_PVB_SIM)],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
+        proc = subprocess.run(
+            [sys.executable, str(_PVB_SIM)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    finally:
+        if tmp_home is not None:
+            shutil.rmtree(tmp_home, ignore_errors=True)
     out = proc.stdout or ""
     err = proc.stderr or ""
     assert proc.returncode == 0, (
