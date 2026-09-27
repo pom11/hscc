@@ -2,7 +2,7 @@
 
 Contract: /Users/desac/Desktop/HSCC_ORCH_GOAL_2026-09-26.md
 Baseline: HSCC 2.2.0, main == origin/main @ 1037b22, board only 2 dead (blocked) cards.
-Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change to hscc-orch config is OUTSIDE the repo (profile config, not tracked).
+Current main: 5a4c3f0 (all four phases landed; final report + ledger in docs/audits/). Baseline was 1037b22.
 
 ## Phase 0 — Self-health (COMPLETE)
 
@@ -237,3 +237,17 @@ Current main: 1037b22 (+ ledger commits f1a217c, b7427a3). Fallback-model change
 - GATEWAY: alive, not restarted this cycle.
 - Single heartbeat cron verified intact (only 1 row, next run 03:22). No junk cards, no blocked/orphaned states.
 - Ledger commit this tick.
+
+## Heartbeat tick 03:33 (cron hscc-orch-goal-heartbeat a0abe2b7848b, 2026-09-27) — ALL PHASES LANDED
+- **THE GOAL IS COMPLETE — all four phases landed on origin/main, pushed, working tree clean.** main == origin/main == **5a4c3f0** (0/0 verified `git rev-list --left-right --count main...origin/main`; `git status --short` empty).
+- SINCE LAST TICK (02:48 @ dae7935) — two landings:
+  - **Phase 2 final card t_320a8332 [cluster-control] LANDED @ b7975f4** (+ audit doc ae099d4) — routes all 10 control surfaces through Theme. **PHASE 2 = 4/4 DONE.**
+  - **Phase 4 t_ca133e7d [decode-drift] MERGED @ 5a4c3f0** (merge of wt/t_ca133e7d containing f3cd1f6, 03:24 EEST): pins 3 previously-uncovered wire families (commands /v1/commands, profiles-list /v1/profiles/list, logs /v1/logs) with real-capture fixtures, harness 56/56→62/62, audit doc t_ca133e7d_decode_drift.md. **PHASE 4 = COMPLETE** (LAST phase).
+  - t_791d1a75 [send-retry] also DONE (committed 4de394b) — the chat-retry WIP follow-on from Phase 1.
+- **IN FLIGHT (close-out only):** t_ca133e7d worker run 812 still `running` but has ALREADY merged + pushed its own branch to main (5a4c3f0); finalizing kanban_complete — no dispatch needed, work is landed regardless. Worktree t_ca133e7d clean (0 uncommitted).
+- **BLOCKED: none.** No blocked cards, no orphaned states, no junk cards, nothing left to run.
+- **DISPATCH THIS TICK: NONE — warranted?** Task prompt says "if the board is empty and phases remain, dispatch next cards". Phases do NOT remain (all 4 landed). Board is not empty (t_ca133e7d running its close-out). → No dispatch. The run reached its natural terminal state.
+- **FINAL REPORT WRITTEN THIS TICK:** docs/audits/GOAL_REPORT_2026-09-26.md (full §8 content: per-phase landing SHAs, 40-branch disposition pointers, memori newest timestamp 2026-09-26 18:13:05, profile audit table, freeze-cause, open items, suite). Address-scanned — clean.
+- **OPERATOR OPEN ITEMS (unchanged, must acknowledge):** (1) daemon STILL STOPPED since 01:09 (graceful signal-15, no pid file) — confirm `hscc start` or intended stop; (2) fleet-wide worker-death @22:12 systemic question; (3) skills.preload fleet-wide change not made.
+- **PHASE STATUS FINAL: Phase 0 DONE, Phase 1 = 100% closed (7/7), Phase 2 = 4/4 DONE, Phase 3 = COMPLETE (bafdf30), Phase 4 = COMPLETE (5a4c3f0).**
+- Final report + this ledger tick committed this tick.
