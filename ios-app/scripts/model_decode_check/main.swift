@@ -87,6 +87,14 @@ c.check(AutodownStatusResponse.self, "autodown_status.json", "AutodownStatusResp
 c.check(SessionsListResponse.self, "v1_sessions.json", "SessionsListResponse")
 c.check(ActivityFeedResponse.self, "v1_activity_feed.json", "ActivityFeedResponse")
 
+// ---- Phase 4 (t_ca133e7d) — previously-uncovered wire families, captured
+// LIVE from the running API 2026-09-27 and sanitized value-only. These close
+// the three remaining decode gaps so no Codable response model is left without
+// a contract-pinning fixture.
+c.check(CommandsResponse.self, "commands.json", "CommandsResponse")
+c.check(ProfileListResponse.self, "profiles_list.json", "ProfileListResponse")
+c.check(LogsResponse.self, "logs_daemon.json", "LogsResponse (bare [LogEntry])")
+
 // ---- Phase 3 cron roster (t_a2c8e456) — decode the schedule-jobs roster
 // against the REAL wire model and assert the contract the view relies on:
 // jobs decode (with every nullable field), the `speak` summary surfaces, and
@@ -216,6 +224,82 @@ c.check(ClusterUpResponse.self, "cluster_up.json", "ClusterUpResponse")
 c.check(ClusterDownResponse.self, "cluster_down.json", "ClusterDownResponse")
 c.check(OrchestratorChatJobResponse.self, "orchestrator_chat.json", "OrchestratorChatJobResponse")
 c.check(OrchestratorChatJobStatus.self, "orchestrator_chat_status.json", "OrchestratorChatJobStatus")
+
+// ---- Phase 4 (t_ca133e7d) — contract assertions for the newly-pinned
+// families. Each guards a decode/classification invariant the views rely on,
+// not just bare shape.
+do {
+    // Commands: every slash command carries name/takes_args, and the palette
+    // needs both a no-args command and an args-taking command to render.
+    let cmds = try JSONDecoder().decode(
+        CommandsResponse.self,
+        from: try Data(contentsOf: URL(fileURLWithPath: fixtureDir + "/commands.json")))
+    var ok = !cmds.commands.isEmpty
+    ok = ok && cmds.speak == "12 slash commands available."
+    ok = ok && cmds.commands.contains { $0.name == "cluster" && $0.takesArgs == false }
+    ok = ok && cmds.commands.contains { $0.name == "cluster-restart" && $0.takesArgs == true }
+    // every command must carry its description (the palette shows it under the name).
+    ok = ok && cmds.commands.allSatisfy { !($0.description.isEmpty) }
+    if ok {
+        c.passed += 1
+        print("OK   commands.json  →  slash-command catalog (name/description/takes_args decode, args + no-args present)")
+    } else {
+        c.failures.append(("commands.json", "commands contract", "assertion failed"))
+        print("FAIL commands.json → commands contract")
+    }
+} catch {
+    c.failures.append(("commands.json", "commands contract", "\(error)"))
+    print("FAIL commands.json → commands contract: \(error)")
+}
+
+do {
+    // Profile roster: the full list shape tolerates the extra distribution_*
+    // keys the live wire carries (Decodable ignores unknowns), the required
+    // `name` decodes, and count/speak agree — so the memory picker never blanks.
+    let roster = try JSONDecoder().decode(
+        ProfileListResponse.self,
+        from: try Data(contentsOf: URL(fileURLWithPath: fixtureDir + "/profiles_list.json")))
+    var ok = (roster.profiles ?? []).count == 4
+    ok = ok && roster.count == 4
+    ok = ok && !roster.speak.isEmpty
+    ok = ok && (roster.profiles ?? []).contains { $0.name == "default" && $0.is_default == true }
+    // the model ignores the extra keys but must still present every declared field.
+    ok = ok && (roster.profiles ?? []).allSatisfy { !($0.name.isEmpty) }
+    ok = ok && (roster.profiles ?? []).allSatisfy { $0.skill_count != nil }
+    if ok {
+        c.passed += 1
+        print("OK   profiles_list.json  →  profile roster (name/is_default/skill_count decode, extra distribution_* keys tolerated)")
+    } else {
+        c.failures.append(("profiles_list.json", "profile roster contract", "assertion failed"))
+        print("FAIL profiles_list.json → profile roster contract")
+    }
+} catch {
+    c.failures.append(("profiles_list.json", "profile roster contract", "\(error)"))
+    print("FAIL profiles_list.json → profile roster contract: \(error)")
+}
+
+do {
+    // Logs: the bare array decodes each row with all four keys; INFO and ERROR
+    // levels both present; source is the selector bucket the view filters by.
+    let logs = try JSONDecoder().decode(
+        LogsResponse.self,
+        from: try Data(contentsOf: URL(fileURLWithPath: fixtureDir + "/logs_daemon.json")))
+    var ok = logs.count == 6
+    ok = ok && logs.allSatisfy { $0.timestamp != nil && $0.level != nil && $0.source != nil && $0.line != nil }
+    ok = ok && logs.contains { $0.level == "ERROR" }
+    ok = ok && logs.contains { $0.level == "INFO" }
+    ok = ok && logs.allSatisfy { $0.source == "daemon" }
+    if ok {
+        c.passed += 1
+        print("OK   logs_daemon.json  →  log tail (bare [LogEntry], 4 keys/row, INFO+ERROR, source filter preserved)")
+    } else {
+        c.failures.append(("logs_daemon.json", "logs contract", "assertion failed"))
+        print("FAIL logs_daemon.json → logs contract")
+    }
+} catch {
+    c.failures.append(("logs_daemon.json", "logs contract", "\(error)"))
+    print("FAIL logs_daemon.json → logs contract: \(error)")
+}
 
 // ---- Approvals classification (t_9a5cfc3b) — the SAME `isPendingApproval`
 // logic the on-screen inbox, the badge poller, and the Siri intent use, asserted
