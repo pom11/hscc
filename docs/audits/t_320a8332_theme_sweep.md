@@ -86,3 +86,25 @@ tool write TWO backslash bytes into the file, corrupting Swift `\(interp)` and
 `\.keypath` (compile errors / "never used" warnings). Verified via `od -c` and
 bit confirmed by build_check. This contradicts an earlier note that attributed
 double-escaping only to write_file.
+
+## Completion sweep table (file -> violations fixed -> sha)
+
+Merged to origin/main @ b7975f4 (Phase 2 cluster-control). Pushed to origin,
+install_payload.py exit 0, remote branch wt/t_320a8332 deleted (matches
+convention).
+
+| File | Violations fixed | Result |
+|------|------------------|--------|
+| ClusterView | ProgressView(116)->HSLoading; cornerRadius 12x2->card; spacing 16/10/8/2->tokens; pad .top 8->sm | clean |
+| FleetView | ProgressView x5->HSLoading; cornerRadius 10->badge; pad .vertical 8->sm; spacing 16/10/8/4/2->tokens | 2 prims (cornerRadius 4 pill, spacing 6) |
+| FleetControlView | ProgressView(73)->HSLoading; spacing 16/8/12->tokens | clean |
+| OpsView | ProgressView x5->HSLoading; pad .vertical 2->xxs; spacing 16/10/8/2->tokens | 2 prims (spacing 6) |
+| LogsView | ProgressView x2->HSLoading (dead logPlaceholder removed); cornerRadius 12x2->card; pad h10->md,v2->xxs; spacing 16/8/2->tokens | 3 prims (spacing 0, ha6, va6) |
+| MemoryView | notConfiguredView->HSConnectGate; .secondary/.primary->tokens; cornerRadius 12/10->card/badge; pad 10/8/v2->tokens; spacing 16/10/8/2->tokens | 3 prims (spacing 6, ha6 x2, glyph 36) |
+| ApprovalsView | notConfiguredView->HSConnectGate; raw ContentUnavailableView->HSError; .secondary->tokens; ProgressView x2->HSLoading; pad 8->sm; cornerRadius 8->badge | 2 prims (spacing 6) |
+| AutodownView | cornerRadius 10->badge; pad 10->md; spacing 16/12/8/2->tokens; section ProgressView->HSLoading | 2 prims (inline wake spinner, spacing 14) |
+| ServingControlView | ProgressView(106)->HSLoading; cornerRadius 12->card; pad 12->md; spacing 16/12/10/8/4->tokens | clean |
+| SearchView | spacing 10->md, 8->sm | 3 prims (inline search spinner, spacing 6/3) |
+
+check_theme.sh CLEAN; build_check.sh 0 errors 0 warnings (all 4 targets). No
+change to confirm-gating or control behaviour (card atomic).
