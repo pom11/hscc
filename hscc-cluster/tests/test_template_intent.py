@@ -568,9 +568,13 @@ def test_v2_templates_parse_byte_identical_to_golden():
             continue
         parsed[name] = ti.ClusterTemplate.from_dict(data).to_dict()
 
-    assert set(parsed) == set(golden), \
-        f"template set changed vs golden: missing={set(golden)-set(parsed)} " \
-        f"extra={set(parsed)-set(golden)}"
+    # The guard is that every template IN the golden snapshot still parses
+    # byte-identically — NOT that the template directory is frozen. Adding a
+    # template is a normal change and must not fail this test; REMOVING or
+    # RENAMING one still does, which is the regression that matters.
+    assert set(golden) <= set(parsed), \
+        f"template(s) in golden snapshot disappeared or were renamed: " \
+        f"missing={set(golden)-set(parsed)}"
     for name in golden:
         assert parsed[name] == golden[name], \
             f"template '{name}' parsed output differs from pre-v3 golden"
