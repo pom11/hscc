@@ -17,6 +17,7 @@ reads, routes_actions.py A4 for mutations):
 Backing (libraries, never CLI text-parsing):
   * ``GET  /v1/verify``       -> ``hscc_daemon.verify.run_all()``
   * ``GET  /v1/daemon/status``-> ``daemon_ops.get_pid()`` + ``state.read_all_states()``
+  * ``GET  /v1/daemon/host``  -> local platform/psutil host metrics (daemon host's OWN machine)
   * ``GET  /v1/triggers``     -> ``trigger.load_triggers()`` + ``state.read_state('triggers')`` + recent events
   * ``GET  /v1/escalate``     -> ``escalate_watcher.scan_and_escalate`` (read-only: no-op reassign/notify)
   * ``GET  /v1/profiles``     -> ``cluster_engine.cmd_profile_status()``
@@ -63,6 +64,138 @@ def _backing_daemon_status():
         "pid": pid,
         "state": "running" if (pid and alive) else "stopped",
         "streams": streams,
+    }
+
+
+def _gb(n):
+    """Bytes -> GiB as float (rounded to 1 decimal)."""
+    return round(n / (1024 ** 3), 1)
+
+
+def _backing_daemon_host():
+    """Assemble the DAEMON HOST machine's own metrics.
+
+    The API server runs ON the daemon host (the operator's Mac, remote from
+    the DGX cluster), so 'local' is correct — we do NOT route through
+    sparkrun. psutil is imported lazily (never at module top level) so this
+    module still imports on interpreters without psutil (tests monkeypatch
+    this function and never trigger the import).
+    """
+    import os
+    import platform
+    import socket
+    import time
+
+    from hscc_daemon import daemon_ops
+
+    _platform = {"Darwin": "macOS", "Linux": "Linux", "Windows": "Windows"}.get(
+        platform.system(), platform.system()
+    )
+
+    try:
+        import psutil
+    except Exception:
+        psutil = None
+
+    if psutil is not None:
+        boot = psutil.boot_time()
+        uptime = max(0.0, time.time() - boot)
+        try:
+            cpu_percent = psutil.cpu_percent(interval=None)
+        except Exception:
+            cpu_percent = 0.0
+        vm = psutil.virtual_memory()
+        du = psutil.disk_usage("/")
+        try:
+            processes = len(psutil.pids())
+        except Exception:
+            processes = 0
+        cpu_count = psutil.cpu_count() or 0
+    else:
+        # Minimal stdlib fallback so the route never hard-fails without
+        # psutil — honest lower-fidelity values, still the right shape.
+        uptime = 0.0
+        try:
+            with open("/proc/uptime") as f:
+                uptime = float(f.read().split()[0])
+        except Exception:
+            try:
+                import subprocess
+                out = subprocess.run(
+                    ["sysctl", "-n", "kern.boottime"], capture_output=True,
+                    text=True, timeout=3,
+                ).stdout
+                import re
+                m = re.search(r"sec = (\d+)", out)
+                if m:
+                    uptime = max(0.0, time.time() - int(m.group(1)))
+            except Exception:
+                uptime = 0.0
+        cpu_percent = 0.0
+        try:
+            cpu_count = os.cpu_count() or 0
+        except Exception:
+            cpu_count = 0
+        try:
+            import shutil
+            import types
+            total, used, _ = shutil.disk_usage("/")
+            vm = types.SimpleNamespace(
+                total=total, used=used,
+                percent=round(used / total * 100, 1) if total else 0.0,
+            )
+            du = types.SimpleNamespace(
+                total=total, used=used,
+                percent=round(used / total * 100, 1) if total else 0.0,
+            )
+        except Exception:
+            import types
+            vm = types.SimpleNamespace(total=0, used=0, percent=0.0)
+            du = types.SimpleNamespace(total=0, used=0, percent=0.0)
+        try:
+            processes = len(os.listdir("/proc")) if os.path.isdir("/proc") else 0
+        except Exception:
+            processes = 0
+
+    try:
+        load_avg = [round(x, 1) for x in os.getloadavg()]
+    except (OSError, AttributeError):
+        load_avg = []
+
+    daemon_pid = daemon_ops.get_pid()
+    daemon_running = bool(daemon_pid)
+    daemon_uptime = 0
+    if daemon_running and psutil is not None:
+        try:
+            daemon_uptime = max(
+                0, int(time.time() - psutil.Process(daemon_pid).create_time())
+            )
+        except Exception:
+            daemon_uptime = 0
+
+    return {
+        "hostname": socket.gethostname(),
+        "platform": _platform,
+        "arch": platform.machine(),
+        "uptime_seconds": int(uptime),
+        "cpu": {
+            "count": cpu_count,
+            "percent": round(cpu_percent, 1),
+            "load_avg": load_avg,
+        },
+        "memory": {
+            "total_gb": _gb(vm.total),
+            "used_gb": _gb(vm.used),
+            "percent": round(vm.percent, 1),
+        },
+        "disk": {
+            "total_gb": _gb(du.total),
+            "used_gb": _gb(du.used),
+            "percent": round(du.percent, 1),
+        },
+        "processes": processes,
+        "daemon_running": daemon_running,
+        "daemon_uptime_seconds": daemon_uptime,
     }
 
 
@@ -190,6 +323,26 @@ def _speak_daemon_status(data: dict) -> str:
     return "Daemon is stopped."
 
 
+def _speak_daemon_host(data: dict) -> str:
+    """§B: host uptime + CPU% + RAM% summary line for the monitor widget."""
+    cpu = data.get("cpu") or {}
+    mem = data.get("memory") or {}
+    up = int(data.get("uptime_seconds") or 0)
+    days, rem = divmod(up, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins = rem // 60
+    if days:
+        up_s = f"{days}d {hours}h"
+    elif hours:
+        up_s = f"{hours}h {mins}m"
+    else:
+        up_s = f"{mins}m"
+    host = data.get("hostname") or "host"
+    return (f"{host} up {up_s}, "
+            f"{cpu.get('percent', 0.0):g}% CPU, "
+            f"{mem.get('percent', 0.0):g}% RAM.")
+
+
 def _speak_triggers(data: dict) -> str:
     """§B: "{n} trigger rules configured." + firing note."""
     rules = data.get("rules") or []
@@ -262,6 +415,23 @@ def handle_daemon_status(server, ctx, query, body):
     if not isinstance(data, dict):
         return 200, {"speak": "Daemon status unavailable."}
     return 200, {**data, "speak": _speak_daemon_status(data)}
+
+
+def handle_daemon_host(server, ctx, query, body):
+    """GET /v1/daemon/host — the daemon host machine's OWN metrics.
+
+    Read-only. Returns CPU/memory/disk/uptime of the machine running the HSCC
+    daemon (the operator's Mac, remote from the DGX cluster) — NOT the cluster
+    node metrics that /v1/cluster/* return. The iOS MonitorWidget decodes
+    exactly this shape.
+    """
+    try:
+        data = _backing_daemon_host()
+    except Exception:
+        return 200, {"speak": "Daemon host metrics unavailable."}
+    if not isinstance(data, dict):
+        return 200, {"speak": "Daemon host metrics unavailable."}
+    return 200, {**data, "speak": _speak_daemon_host(data)}
 
 
 def handle_triggers(server, ctx, query, body):
@@ -393,6 +563,7 @@ def handle_cluster_down(server, ctx, query, body):
 
 ROUTES.append(("GET", re.compile(r"^/v1/verify$"), handle_verify))
 ROUTES.append(("GET", re.compile(r"^/v1/daemon/status$"), handle_daemon_status))
+ROUTES.append(("GET", re.compile(r"^/v1/daemon/host$"), handle_daemon_host))
 ROUTES.append(("GET", re.compile(r"^/v1/triggers$"), handle_triggers))
 ROUTES.append(("POST", re.compile(r"^/v1/triggers/run$"), handle_triggers_run))
 ROUTES.append(("GET", re.compile(r"^/v1/escalate$"), handle_escalate))
