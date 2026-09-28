@@ -4,3 +4,4 @@
 
 PyYAML>=6.0
 rich>=13,<16
+psutil>=5.9
