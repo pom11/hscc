@@ -244,6 +244,134 @@ enum AppGroup {
     static let snapRunningKey = "hscc.snap.running"
     static let snapQueueKey = "hscc.snap.queue"
     static let snapBlockedKey = "hscc.snap.blocked"
+    // Widgets & Live Activities shared settings (t_dea36c48): one JSON blob
+    // keyed by surface kind, read by every widget / Live Activity extension.
+    static let widgetSettingsKey = "hscc.widgetSettings"
+}
+
+// ---------------------------------------------------------------------------
+// Widgets & Live Activities shared settings (t_dea36c48)
+// ---------------------------------------------------------------------------
+//
+// The single source of truth every widget + Live Activity reads: \"when active,
+// refresh rate, what to show\". Stored as ONE JSON blob in the EXISTING App
+// Group suite (same defaults the cluster settings use), so the app writes it
+// in Settings and each extension reads the identical store — mirroring exactly
+// how APIConfig + clusters already flow to the extensions.
+//
+// There is deliberately NO per-surface bespoke settings: extensions look up
+// their one entry by `WidgetSurfaceKind`. A surface with NO stored entry
+// defaults to on (backward compatible — the Cluster widget predates this and
+// must keep rendering exactly as it does today until the operator edits it).
+
+/// The four surfaces the operator controls. The raw values are the registry
+/// keys stored in the App Group — stable identifiers, not display names.
+enum WidgetSurfaceKind: String, CaseIterable, Codable {
+    /// The existing Home Screen cluster widget (state / topology / models /
+    /// board work).
+    case widgetCluster = "widget.cluster"
+    /// The new monitor widget (sibling card t_6d545375).
+    case widgetMonitor = "widget.monitor"
+    /// The existing fleet-wake Live Activity.
+    case liveActivityWake = "liveActivity.wake"
+    /// The new monitor Live Activity (sibling card t_03d318cd).
+    case liveActivityMonitor = "liveActivity.monitor"
+}
+
+/// One surface's settings: enabled, refresh cadence, and which content
+/// sections it renders. Plain Codable struct (AppleScript-agnostic).
+struct WidgetSurfaceSettings: Codable, Equatable {
+    /// Whether the surface is shown/enabled at all.
+    var isActive: Bool
+    /// Widget timeline cadence / Live Activity push cadence, in minutes.
+    var refreshMinutes: Int
+    /// Which content sections the surface renders (set membership, bounded).
+    var showSections: Set<String>
+}
+
+/// The full registry: one entry per surface kind. Stored as one JSON blob.
+struct AppGroupWidgetSettings: Codable, Equatable {
+    var surfaces: [WidgetSurfaceKind: WidgetSurfaceSettings]
+
+    /// The key used to store/read this blob in the App Group suite.
+    static let storageKey = AppGroup.widgetSettingsKey
+
+    /// Read the registry from the shared App-Group suite, or nil when absent /
+    /// corrupt. The app and every extension read the SAME blob via this.
+    ///
+    /// No `.standard` fallback on purpose (matching `APIConfig`): an extension
+    /// that cannot open the shared suite must read nil and behave honestly
+    /// (default on / default cadence) rather than fabricate a store the app
+    /// never wrote.
+    static func load() -> AppGroupWidgetSettings? {
+        guard let data = UserDefaults(suiteName: AppGroup.suiteName)?.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode(AppGroupWidgetSettings.self, from: data) else {
+            return nil
+        }
+        return decoded
+    }
+
+    /// The settings for one surface, defaulting to ON when the store is absent
+    /// or the surface has no entry yet (backward compatible — a surface that
+    /// predates this store must keep working unchanged). Widgets default to a
+    /// 5-minute cadence; Live Activities (push-fed) default to 15 minutes.
+    func setting(for kind: WidgetSurfaceKind) -> WidgetSurfaceSettings {
+        guard let s = surfaces[kind] else {
+            return WidgetSurfaceSettings(isActive: true,
+                                         refreshMinutes: kind.isLiveActivity ? 15 : 5,
+                                         showSections: Set(kind.availableSections))
+        }
+        // Bound the set to the surface's known sections so a stale/foreign
+        // identifier can never leak into the UI (\"bounded set sizes\").
+        // refreshMinutes 0 = Off (surface shown but no scheduled refresh) is
+        // preserved; only negatives are clamped to 1 so a corrupt blob cannot
+        // schedule an instant refresh loop.
+        return WidgetSurfaceSettings(isActive: s.isActive,
+                                     refreshMinutes: max(0, s.refreshMinutes),
+                                     showSections: s.showSections.intersection(Set(kind.availableSections)))
+    }
+
+    /// The full defaults (all on, 5/15-min cadence, all sections), used to
+    /// seed a brand-new store before the operator edits anything.
+    static func defaults() -> AppGroupWidgetSettings {
+        AppGroupWidgetSettings(surfaces: Dictionary(
+            uniqueKeysWithValues: WidgetSurfaceKind.allCases.map { ($0, WidgetSurfaceSettings(
+                isActive: true,
+                refreshMinutes: $0.isLiveActivity ? 15 : 5,
+                showSections: Set($0.availableSections))) }
+        ))
+    }
+}
+
+extension WidgetSurfaceKind {
+    /// True for the push-fed Live Activity surfaces (15-min default cadence).
+    /// Widgets are self-fetching (5-min default).
+    var isLiveActivity: Bool {
+        switch self {
+        case .widgetCluster, .widgetMonitor: return false
+        case .liveActivityWake, .liveActivityMonitor: return true
+        }
+    }
+
+    /// The content sections this surface can render — the vocabulary the
+    /// settings UI offers and the sibling cards' rendering consumes.
+    ///
+    /// Canonical section identifiers (stable, do not rename once shipped):
+    ///   - "state"     — the headline state line (serving/waking/down…)
+    ///   - "topology"  — the topology pairs/pods
+    ///   - "models"    — model count / workloads
+    ///   - "board"     — board work (running / queue / blocked cards)
+    ///   - "nodes"     — per-node cluster monitor metrics (CPU/RAM/GPU)
+    ///   - "host"      — daemon-host machine data (the machine HSCC runs on)
+    ///   - "timing"    — wake timing / elapsed (Live Activities)
+    var availableSections: Set<String> {
+        switch self {
+        case .widgetCluster:    return ["state", "topology", "models", "board"]
+        case .widgetMonitor:    return ["state", "nodes", "host"]
+        case .liveActivityWake: return ["state", "topology", "timing"]
+        case .liveActivityMonitor: return ["state", "nodes", "host"]
+        }
+    }
 }
 
 /// A lightweight read of the token from the SHARED Keychain access group.

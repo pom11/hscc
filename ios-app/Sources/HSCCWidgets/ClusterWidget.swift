@@ -30,6 +30,10 @@ struct ClusterEntry: TimelineEntry {
     let queueDepth: Int?
     /// Blocked cards needing attention — the failure indicator.
     let blockedCards: Int?
+    /// True when the operator paused this surface in Settings (t_dea36c48).
+    /// The widget still exists (a widget can't be removed programmatically) but
+    /// renders an honest \"paused in Settings\" state instead of live data.
+    let paused: Bool
 
     static let unconfigured = ClusterEntry(date: .now,
                                            state: .unknown,
@@ -40,7 +44,22 @@ struct ClusterEntry: TimelineEntry {
                                            configured: false,
                                            runningCards: nil,
                                            queueDepth: nil,
-                                           blockedCards: nil)
+                                           blockedCards: nil,
+                                           paused: false)
+
+    static func paused(_ date: Date = .now) -> ClusterEntry {
+        ClusterEntry(date: date,
+                     state: .unknown,
+                     pairs: [],
+                     modelCount: nil,
+                     idleMinutesRemaining: nil,
+                     lastKnownAgeMinutes: nil,
+                     configured: true,
+                     runningCards: nil,
+                     queueDepth: nil,
+                     blockedCards: nil,
+                     paused: true)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -58,7 +77,8 @@ struct ClusterTimelineProvider: TimelineProvider {
                      configured: true,
                      runningCards: 2,
                      queueDepth: 4,
-                     blockedCards: 1)
+                     blockedCards: 1,
+                     paused: false)
     }
 
     func getSnapshot(in context: Context, completion: @escaping (ClusterEntry) -> Void) {
@@ -70,9 +90,17 @@ struct ClusterTimelineProvider: TimelineProvider {
     func getTimeline(in context: Context, completion: @escaping (Timeline<ClusterEntry>) -> Void) {
         Task {
             let entry = await fetchEntry()
-            // State changes are minutes-scale, not seconds — refresh every 5
+            // State changes are minutes-scale, not seconds — refresh on the
+            // operator's configured cadence (t_dea36c48), defaulting to 5
             // minutes. Widgets get a limited refresh budget; do not poll harder.
-            let next = Calendar.current.date(byAdding: .minute, value: 5, to: .now) ?? .now.addingTimeInterval(300)
+            let refresh = AppGroupWidgetSettings.load()?.setting(for: .widgetCluster).refreshMinutes ?? 5
+            // 0 = Off: no scheduled refresh. Let the OS refresh at its own
+            // discretion rather than scheduling an instant tight loop.
+            guard refresh > 0 else {
+                completion(Timeline(entries: [entry], policy: .atEnd))
+                return
+            }
+            let next = Calendar.current.date(byAdding: .minute, value: refresh, to: .now) ?? .now.addingTimeInterval(300)
             completion(Timeline(entries: [entry], policy: .after(next)))
         }
     }
@@ -82,6 +110,16 @@ struct ClusterTimelineProvider: TimelineProvider {
     /// Fetch the live entry. Always returns a usable entry — unreachable and
     /// unconfigured are first-class states, never a blank widget.
     private func fetchEntry() async -> ClusterEntry {
+        // Honor the shared \"Active\" toggle (t_dea36c48). Default ON when the
+        // store or this surface's entry is absent, so the widget keeps
+        // rendering exactly as it did before the settings existed. When the
+        // operator explicitly pauses it, render an honest paused state rather
+        // than live data (the widget cannot remove itself programmatically).
+        let widgetSettings = AppGroupWidgetSettings.load()
+        if let surface = widgetSettings?.setting(for: .widgetCluster), !surface.isActive {
+            return .paused()
+        }
+
         let config = APIConfig.load()
         guard config != nil else {
             // Not configured → the widget's ONE job is to invite setup. Always
@@ -121,7 +159,8 @@ struct ClusterTimelineProvider: TimelineProvider {
                                     configured: true,
                                     runningCards: work.running,
                                     queueDepth: work.queueDepth,
-                                    blockedCards: work.blocked)
+                                    blockedCards: work.blocked,
+                                    paused: false)
             }
             return ClusterEntry(date: .now,
                                 state: .unreachable,
@@ -132,7 +171,8 @@ struct ClusterTimelineProvider: TimelineProvider {
                                 configured: true,
                                 runningCards: nil,
                                 queueDepth: nil,
-                                blockedCards: nil)
+                                blockedCards: nil,
+                                paused: false)
         }
 
         let clusterState = Self.resolveState(autodownState: auto.state)
@@ -162,7 +202,8 @@ struct ClusterTimelineProvider: TimelineProvider {
                             configured: true,
                             runningCards: runningCards,
                             queueDepth: queueDepth,
-                            blockedCards: blockedCards)
+                            blockedCards: blockedCards,
+                            paused: false)
     }
 
     // MARK: - State + topology derivation (honest)

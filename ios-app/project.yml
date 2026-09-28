@@ -124,6 +124,7 @@ targets:
       - path: Sources/HSCC/APIError.swift
       - path: Sources/HSCC/KeychainStore.swift
       - path: Sources/HSCC/SettingsStore.swift
+      - path: Sources/HSCC/WidgetSettingsStore.swift
       - path: Sources/HSCC/SetupQRCode.swift
       - path: Sources/HSCC/LiveActivityManager.swift
       - path: Sources/HSCC/Views/SettingsView.swift
