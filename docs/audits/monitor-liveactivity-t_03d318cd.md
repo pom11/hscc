@@ -50,3 +50,21 @@ NOTE: per-node sample values are STRINGS ("42.5") -> decoder must parse to Doubl
 3. App-side MonitorActivityDriver (poll + update + BGAppRefresh) + sweep on launch + end on settings off.
 4. project.yml new target + all four targets in scheme.
 5. Verify: build_check.sh, headless decode/render harness, install_payload, merge to main.
+
+## VERIFICATION (running)
+- build_check.sh: all 5 targets 0 err / 0 warn (commit 8bf5560).
+- check_sources: 86 Swift files in sync. check_theme: CLEAN.
+- monitor_activity_check harness PASSES against LIVE API (2026-09-28):
+  4 nodes decoded (.244/.246/.247/.248) with CPU/RAM/GPU + daemon-host
+  (macOS arm64, CPU/RAM/Disk %, daemonRunning=true). Hostname scrubbed here.
+- Reused app's existing ClusterMonitorResponse/NodeSample from Models.swift
+  (already present); added only DaemonHostResponse (new route) + typed
+  monitorSnapshot()/daemonHost() client methods in a HSCCClient extension.
+- MonitorActivityAttributes protocol-stripped in harness only (macOS can't
+  declare ActivityAttributes); committed source keeps the conformance.
+
+## Honest limits
+- No physical device attached; sim render blocked (revoked cert) per t_b6a8c450.
+  On-device compile+link verified via build_check; xcodebuild device build next.
+- BGAppRefresh background execution is OS-scheduled and can't be exercised from
+  a headless host — implemented + registered; documented as best-effort.
