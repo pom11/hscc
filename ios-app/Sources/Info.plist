@@ -29,6 +29,10 @@
 	<string>HSCC uses the camera only to scan the setup QR code from `hscc api status`, so you do not have to type a tailnet address and a 43-character token by hand.</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.hscc.ios.monitor.backgroundRefresh</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>
