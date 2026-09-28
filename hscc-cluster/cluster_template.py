@@ -523,6 +523,22 @@ def _provision_models(plan: Any, cluster: str = "hscc",
         want_model = _extract_model_name(recipe)
         want_span = list(nodes)
         hosts_arg = ",".join(nodes)
+        # INVARIANT: tp must not exceed the span. A tp=N unit pinned to fewer
+        # than N hosts can NEVER start — vLLM rejects it at argument validation
+        # ("World size (N) is larger than the number of available GPUs (1) in
+        # this node"), so the container crash-loops forever while holding VRAM
+        # and a restart slot on a node that is usually a tp PEER of a healthy
+        # unit. Observed twice: an auto-heal force-recreate-via-template-apply
+        # after a power outage left a solo tp=2 orphan on .244 alongside the
+        # real orchestrator span. Refuse the launch instead of spawning a
+        # container that is guaranteed to fail.
+        if isinstance(tp, int) and tp > len(want_span):
+            result["failed"].append(
+                {"node": hosts_arg, "port": port, "recipe": recipe,
+                 "error": (f"refused: tp={tp} exceeds span of {len(want_span)} "
+                           f"host(s) ({hosts_arg or 'none'}) — vLLM would reject "
+                           "this at startup and the container would crash-loop")})
+            continue
         # Was this unit already running the SAME recipe (so --ensure will skip it)?
         already_running_same = any(
             running_recipes.get(n) and _extract_model_name(running_recipes[n]) == want_model
