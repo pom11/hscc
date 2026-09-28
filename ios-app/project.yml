@@ -285,6 +285,8 @@ targets:
       - path: Sources/HSCCWidgets/HSCCWidgetsBundle.swift
       - path: Sources/HSCCWidgets/ClusterWidget.swift
       - path: Sources/HSCCWidgets/ClusterWidgetViews.swift
+      - path: Sources/HSCCWidgets/MonitorWidget.swift
+      - path: Sources/HSCCWidgets/MonitorViews.swift
       # Shared source files compiled into every target.
       - path: Sources/Shared/SharedModels.swift
       - path: Sources/Shared/ExtensionClient.swift
