@@ -2802,3 +2802,71 @@ class TestApplyRecreateFlag:
         assert captured["recreate"] is True
 
 
+
+
+# ── tp-exceeds-span guard: never spawn a container that cannot start ────────
+
+class TestTpExceedsSpanRefused:
+    """A tp=N unit pinned to fewer than N hosts can never start: vLLM rejects it
+    at argument validation ("World size (N) is larger than the number of
+    available GPUs (1) in this node") and the container crash-loops forever
+    while holding VRAM on a node that is usually a tp PEER of a healthy unit.
+
+    Seen live twice — most recently when a power outage took a family worker
+    down, auto-heal retried 3x then escalated to force-recreate-via-template-
+    apply, and the apply left a solo tp=2 orphan on .244 next to the real
+    orchestrator span. Provision must REFUSE such a unit, not launch it.
+    """
+
+    def _run(self, monkeypatch, tmp_path, *, unit_nodes, tp):
+        import subprocess
+        from unittest.mock import MagicMock
+        calls = []
+
+        def mock_run(argv, **kw):
+            calls.append(argv)
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        monkeypatch.setattr(cluster_template, "SERVING_JSON",
+                            tmp_path / "serving.json")
+        orch = ti.ResolvedUnit("orchestrator", None, "~/recipes/orch.yaml",
+                               "orch", ["10.0.0.1"], 8000, 1, 1)
+        unit = ti.ResolvedUnit("worker", "coding", "~/recipes/deepseek.yaml",
+                               "deepseek", list(unit_nodes), 8000, tp, 1)
+        fam = ti.ResolvedFamily(name="coding", proxy_port=4000, units=[unit])
+        plan = ti.ResolvedPlan(template="test", orchestrator=orch, families=[fam])
+        result = cluster_template._provision_models(plan, do_launch=True)
+        runs = [c for c in calls
+                if c[0] == "sparkrun" and c[1] == "run" and "deepseek.yaml" in c[2]]
+        return runs, result
+
+    def test_tp2_on_one_host_is_refused_and_not_launched(self, monkeypatch, tmp_path):
+        runs, result = self._run(monkeypatch, tmp_path,
+                                 unit_nodes=("10.0.0.2",), tp=2)
+        # the doomed unit must NOT be launched
+        assert runs == []
+        failures = [f for f in result["failed"]
+                    if "deepseek.yaml" in str(f.get("recipe"))]
+        assert len(failures) == 1
+        err = failures[0]["error"]
+        assert "refused" in err
+        assert "tp=2" in err
+        assert "span of 1" in err
+
+    def test_tp_equal_to_span_still_launches(self, monkeypatch, tmp_path):
+        """The guard must not over-reach: tp == host count is the normal
+        multi-node case and must still be provisioned."""
+        runs, result = self._run(monkeypatch, tmp_path,
+                                 unit_nodes=("10.0.0.2", "10.0.0.3"), tp=2)
+        assert len(runs) == 1
+        assert "--tp" in runs[0] and "2" in runs[0]
+        assert [f for f in result["failed"]
+                if "deepseek.yaml" in str(f.get("recipe"))] == []
+
+    def test_tp1_single_host_unaffected(self, monkeypatch, tmp_path):
+        runs, result = self._run(monkeypatch, tmp_path,
+                                 unit_nodes=("10.0.0.2",), tp=1)
+        assert len(runs) == 1
+        assert [f for f in result["failed"]
+                if "deepseek.yaml" in str(f.get("recipe"))] == []
