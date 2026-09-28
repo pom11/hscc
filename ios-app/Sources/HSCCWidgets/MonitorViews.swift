@@ -263,7 +263,7 @@ struct MediumNodeCell: View {
 
 /// A slim daemon-host strip for the medium widget: hostname + CPU/RAM/DISK bars.
 struct HostStrip: View {
-    let host: DaemonHostResponse
+    let host: MonitorDaemonHost
     var dimmed = false
 
     var body: some View {
@@ -391,7 +391,7 @@ struct LargeNodeRow: View {
 
 /// The full daemon-host block for the large widget: hostname line + gauges.
 struct HostBlock: View {
-    let host: DaemonHostResponse
+    let host: MonitorDaemonHost
     var dimmed = false
 
     var body: some View {

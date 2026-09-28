@@ -56,7 +56,7 @@ struct MonitorEntry: TimelineEntry {
     /// The per-node cluster monitor snapshot (CPU/RAM/GPU per host).
     let nodes: [MonitorNode]
     /// The daemon-host machine data (the machine HSCC runs on).
-    let daemonHost: DaemonHostResponse?
+    let daemonHost: MonitorDaemonHost?
     /// The configured refresh cadence in minutes (0 = Off: no scheduled refresh).
     let refreshMinutes: Int
     /// The content sections this surface renders (from Shared settings). A
@@ -157,7 +157,7 @@ struct MonitorTimelineProvider: TimelineProvider {
         // parallel. Each is independent and best-effort — a failure degrades
         // only its own section, never the whole widget.
         async let monitorTask = client.get("/v1/cluster/monitor", as: MonitorResponse.self)
-        async let hostTask = client.get("/v1/daemon/host", as: DaemonHostResponse.self)
+        async let hostTask = client.get("/v1/daemon/host", as: MonitorDaemonHost.self)
         let (monitor, daemonHost) = await (monitorTask, hostTask)
 
         // Determine what actually reached us.
@@ -233,12 +233,12 @@ struct MonitorTimelineProvider: TimelineProvider {
             gpu_mem_used_pct: "58"), used_slots: 1, free_slots: 1),
     ]
 
-    static let sampleDaemonHost = DaemonHostResponse(
+    static let sampleDaemonHost = MonitorDaemonHost(
         hostname: "hscc-mac", platform: "macOS", arch: "arm64",
         uptime_seconds: 86400,
-        cpu: DaemonHostCPU(count: 14, percent: 11.0, load_avg: []),
-        memory: DaemonHostMemory(total_gb: 36, used_gb: 18, percent: 50),
-        disk: DaemonHostDisk(total_gb: 456, used_gb: 320, percent: 70),
+        cpu: MonitorDaemonCPU(count: 14, percent: 11.0, load_avg: []),
+        memory: MonitorDaemonMemory(total_gb: 36, used_gb: 18, percent: 50),
+        disk: MonitorDaemonDisk(total_gb: 456, used_gb: 320, percent: 70),
         processes: 812, daemon_running: true, daemon_uptime_seconds: 3600,
         speak: "Daemon host: macOS arm64 (hscc-mac)")
 }
