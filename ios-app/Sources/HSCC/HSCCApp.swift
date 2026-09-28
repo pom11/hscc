@@ -17,6 +17,7 @@ struct HSCCApp: App {
     /// Requests notification authorization once at launch so the foreground
     /// NotificationCoordinator can present needs-operator banners (t_0454eb56).
     @UIApplicationDelegateAdaptor(NotificationsAppDelegate.self) private var appDelegate
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var settings = SettingsStore()
     /// Shared Widgets & Live Activities settings (t_dea36c48) — exposed to the
     /// Settings UI as an EnvironmentObject so it can read/write the App-Group
@@ -49,6 +50,24 @@ struct HSCCApp: App {
                 .environmentObject(unread)
                 .environmentObject(replyWatcher)
                 .environmentObject(router)
+        }
+        // HSCC Monitor Live Activity (t_03d318cd). Scene phase drives the
+        // foreground poll loop (active → poll; background → stop the tight loop
+        // + schedule a BGAppRefresh). The one-time launch hooks (task
+        // registration + orphan sweep) run in `NotificationsAppDelegate`
+        // `didFinishLaunching` — a Scene has no `.task`, and the delegate is
+        // the correct launch seam.
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .active:
+                // Re-hydrate leftover orphans + resume the foreground poll loop.
+                MonitorActivityDriver.sweepLeftoverMonitors()
+                MonitorActivityDriver.shared.sceneDidBecomeActive()
+            case .background, .inactive:
+                MonitorActivityDriver.shared.sceneDidEnterBackground()
+            @unknown default:
+                break
+            }
         }
     }
 }
