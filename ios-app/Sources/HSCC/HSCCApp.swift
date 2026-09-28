@@ -18,6 +18,10 @@ struct HSCCApp: App {
     /// NotificationCoordinator can present needs-operator banners (t_0454eb56).
     @UIApplicationDelegateAdaptor(NotificationsAppDelegate.self) private var appDelegate
     @StateObject private var settings = SettingsStore()
+    /// Shared Widgets & Live Activities settings (t_dea36c48) — exposed to the
+    /// Settings UI as an EnvironmentObject so it can read/write the App-Group
+    /// store that every widget/Live Activity extension reads read-only.
+    @StateObject private var widgetSettings = WidgetSettingsStore()
     @StateObject private var unread: ProjectUnreadCenter
     @StateObject private var replyWatcher: StreamReplyWatcher
     /// Deep-link router (t_136762f3): the single entry point for `hscc://`
@@ -41,6 +45,7 @@ struct HSCCApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(settings)
+                .environmentObject(widgetSettings)
                 .environmentObject(unread)
                 .environmentObject(replyWatcher)
                 .environmentObject(router)
