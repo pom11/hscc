@@ -162,6 +162,165 @@ struct StaleCardLite: Decodable {
     let title: String?
 }
 
+// ---------------------------------------------------------------------------
+// Monitor widget models (t_6d545375): /v1/cluster/monitor + /v1/daemon/host
+// ---------------------------------------------------------------------------
+//
+// NAMING NOTE: the app's own decoder for /v1/cluster/monitor
+// (`ClusterMonitorResponse` / `NodeSample`) lives in Sources/HSCC/Models.swift
+// — the app target compiles BOTH Models.swift AND this file, so reusing those
+// names here is an invalid redeclaration. Following the `Lite` precedent above
+// (kanban decoders), this file carries the widget target's OWN minimal
+// decoders under the `Monitor` prefix. The app currently renders no monitor
+// UI, so the two never both decode the same payload in the same target.
+
+/// GET /v1/cluster/monitor — the `hscc cluster monitor` snapshot.
+///
+/// `handle_cluster_monitor` wraps the sparkrun payload:
+///   { "success": true, "output": "<string>", "json": { "timestamp": Double,
+///     "hosts": [ { "host": "<ip>", "error": null, "sample": { ... },
+///                  "used_slots": 1, "free_slots": 0 } ] }, "speak": "..." }
+/// When the cluster is unreachable the route degrades to `{ "speak": "fleet
+/// monitor unavailable" }` — no `json` — so `json` is optional here. Every
+/// numeric field inside `sample` arrives as a STRING, often `""` when a metric
+/// is unreadable on that node; parsed defensively via `MonitorSample`'s
+/// computed `Double?` accessors (a bad/empty string yields nil, never a
+/// decode failure that blanks the whole route).
+struct MonitorResponse: Codable, Speakable {
+    /// The nested per-node payload. Absent when the route degraded.
+    let json: MonitorPayload?
+    let speak: String
+
+    /// Computed passthrough so the widget reads the node list directly.
+    var nodes: [MonitorNode] { json?.hosts ?? [] }
+}
+
+/// The nested `json` payload of /v1/cluster/monitor.
+struct MonitorPayload: Codable {
+    let timestamp: Double?
+    let hosts: [MonitorNode]
+}
+
+/// One node's entry. `error` is non-null when the node could not be sampled;
+/// `sample` is then absent.
+struct MonitorNode: Codable, Identifiable {
+    /// The node's address as reported by the API (e.g. a LAN IP).
+    let host: String
+    let error: String?
+    let sample: MonitorSample?
+    let used_slots: Int?
+    let free_slots: Int?
+
+    var id: String { host }
+}
+
+/// The per-node `sample` dict — all numeric metrics are STRINGS (may be empty
+/// `""` when a metric is unreadable). Parsed via the computed `Double?`
+/// accessors.
+struct MonitorSample: Codable {
+    let hostname: String?
+    let uptime_sec: String?
+    let cpu_usage_pct: String?
+    let mem_used_pct: String?
+    let mem_total_mb: String?
+    let mem_used_mb: String?
+    let gpu_name: String?
+    let gpu_util_pct: String?
+    let gpu_mem_used_pct: String?
+
+    // MARK: Parsed numeric accessors (nil when unreadable/empty)
+
+    var uptimeSeconds: Double? { Self.num(uptime_sec) }
+    var cpuUsagePct: Double? { Self.num(cpu_usage_pct) }
+    var memUsedPct: Double? { Self.num(mem_used_pct) }
+    var memTotalMB: Double? { Self.num(mem_total_mb) }
+    var memUsedMB: Double? { Self.num(mem_used_mb) }
+    var gpuUtilPct: Double? { Self.num(gpu_util_pct) }
+    var gpuMemUsedPct: Double? { Self.num(gpu_mem_used_pct) }
+
+    /// A human uptime ("2d 11h") from `uptime_sec`, or nil when unreadable.
+    var uptimeText: String? {
+        guard let s = uptimeSeconds, s >= 0 else { return nil }
+        let total = Int(s)
+        let days = total / 86400
+        let hours = (total % 86400) / 3600
+        if days > 0 { return "\(days)d \(hours)h" }
+        let mins = (total % 3600) / 60
+        if hours > 0 { return "\(hours)h \(mins)m" }
+        return "\(mins)m"
+    }
+
+    /// Parse a numeric STRING ('2.84', '77.0', '0') to Double, or nil.
+    private static func num(_ raw: String?) -> Double? {
+        guard let raw, !raw.isEmpty else { return nil }
+        return Double(raw)
+    }
+}
+
+/// GET /v1/daemon/host — the machine HSCC runs on (the operator's Mac when the
+/// Mac is remote from the DGX cluster). The API server runs on the daemon host,
+/// so this is `platform`/`psutil`-local to it (see hscc-api/routes_ops.py
+/// `_backing_daemon_host`).
+///
+/// Verified live shape (200, macOS arm64):
+///   { "hostname": String, "platform": "macOS", "arch": "arm64",
+///     "uptime_seconds": Int, "cpu": { "count", "percent", "load_avg": [] },
+///     "memory": { "total_gb", "used_gb", "percent" },
+///     "disk": { "total_gb", "used_gb", "percent" },
+///     "processes": Int, "daemon_running": Bool,
+///     "daemon_uptime_seconds": Int, "speak": "..." }
+struct DaemonHostResponse: Codable, Speakable {
+    let hostname: String?
+    let platform: String?
+    let arch: String?
+    let uptime_seconds: Int?
+    let cpu: DaemonHostCPU?
+    let memory: DaemonHostMemory?
+    let disk: DaemonHostDisk?
+    let processes: Int?
+    let daemon_running: Bool?
+    let daemon_uptime_seconds: Int?
+    let speak: String
+
+    var cpuPercent: Double? { cpu?.percent }
+    var cpuCount: Int? { cpu?.count }
+    var memUsedGB: Double? { memory?.used_gb }
+    var memTotalGB: Double? { memory?.total_gb }
+    var memPercent: Double? { memory?.percent }
+    var diskUsedGB: Double? { disk?.used_gb }
+    var diskTotalGB: Double? { disk?.total_gb }
+    var diskPercent: Double? { disk?.percent }
+
+    /// A human uptime ("2d 11h") from `uptime_seconds`, or nil.
+    var uptimeText: String? {
+        guard let s = uptime_seconds, s >= 0 else { return nil }
+        let d = s / 86400
+        let h = (s % 86400) / 3600
+        if d > 0 { return "\(d)d \(h)h" }
+        let m = (s % 3600) / 60
+        if h > 0 { return "\(h)h \(m)m" }
+        return "\(m)m"
+    }
+}
+
+struct DaemonHostCPU: Codable {
+    let count: Int?
+    let percent: Double?
+    let load_avg: [Double]?
+}
+
+struct DaemonHostMemory: Codable {
+    let total_gb: Double?
+    let used_gb: Double?
+    let percent: Double?
+}
+
+struct DaemonHostDisk: Codable {
+    let total_gb: Double?
+    let used_gb: Double?
+    let percent: Double?
+}
+
 /// A saved cluster the operator can connect to: a named host/port/token set.
 ///
 /// The app holds a LIST of these (SettingsStore) so an operator can keep
@@ -614,5 +773,51 @@ enum SnapshotStore {
                   let state = TopologyNode.NodeState(rawValue: String(stateRaw)) else { return nil }
             return TopologyNode(label: String(label), state: state)
         }.compactMap { $0 }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Last-known MONITOR snapshot (t_6d545375)
+// ---------------------------------------------------------------------------
+
+/// Persists the last-known-good Monitor widget payload in the App Group suite
+/// so a later unreachable window can show yesterday's real node metrics +
+/// daemon-host machine data with its age — never a blank widget (mirrors
+/// `SnapshotStore`). The monitor's node samples and daemon-host data are richer
+/// than the topology `SnapshotStore` carries, so they live in their own blob.
+enum MonitorSnapshotStore {
+    private static var suite: UserDefaults? { UserDefaults(suiteName: AppGroup.suiteName) }
+    static let storageKey = "hscc.monitor.snapshot"
+
+    struct Snapshot: Codable {
+        /// When this snapshot was recorded (epoch seconds).
+        let date: Double
+        /// The per-node monitor snapshot, if one had been fetched.
+        let nodes: [MonitorNode]
+        /// The daemon-host machine data, if it had been fetched.
+        let daemonHost: DaemonHostResponse?
+    }
+
+    /// Save the last-known-good monitor payload. Optional-tolerant: if neither
+    /// source ever returned data, nothing meaningful is persisted.
+    static func save(nodes: [MonitorNode], daemonHost: DaemonHostResponse?) {
+        guard let d = suite, !nodes.isEmpty || daemonHost != nil else { return }
+        let snap = Snapshot(date: Date().timeIntervalSince1970, nodes: nodes, daemonHost: daemonHost)
+        if let data = try? JSONEncoder().encode(snap) {
+            d.set(data, forKey: storageKey)
+        }
+    }
+
+    /// Load the last-known monitor snapshot, or nil if none was ever recorded.
+    static func load() -> Snapshot? {
+        guard let data = UserDefaults(suiteName: AppGroup.suiteName)?.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode(Snapshot.self, from: data) else { return nil }
+        return decoded
+    }
+
+    /// Age of the last-known monitor snapshot in minutes, or nil.
+    static func ageMinutes() -> Int? {
+        guard let s = load() else { return nil }
+        return Int(Date().timeIntervalSince1970 - s.date) / 60
     }
 }
