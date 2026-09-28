@@ -633,3 +633,19 @@ CRON ROOT-CAUSE (resolves operator's repeated "heartbeat = 0"): the heartbeat cr
 - Added t_b6276d5f as parent of monitor widget t_6d545375 + monitor LA t_03d318cd so they stay gated on the REAL route (fake-done t_1e7c2fe4 would have let them promote prematurely).
 - CURRENT RUNNING (3, at cap): t_b6276d5f (backend REDO 825), t_b6a8c450 (ios no-data 821, alive since start ~36m), t_dea36c48 (settings 824). t_6d545375 + t_03d318cd todo, properly parent-gated.
 - LESSON: kanban_complete on a card whose deliverable is absent is a contract failure; the orchestrator must VERIFY "merged to main + deployed" on the actual repo, not trust the worker's summary string.
+
+## Heartbeat tick 18:56 (cron hscc-orch-goal-heartbeat a0abe2b7848b, 2026-09-28) — Widgets workstream in flight; original goal still terminal
+- ORIGINAL 24h GOAL (2026-09-26): at terminal state since 09-27 03:33 — all 4 phases complete (0 DONE, 1 = 100% closed 7/7, 2 = 4/4, 3 = COMPLETE bafdf30, 4 = COMPLETE 5a4c3f0). No phases remain → nothing to dispatch for the goal itself.
+- CURRENT ACTIVE WORK = the WIDGETS & LIVE ACTIVITIES WORKSTREAM (operator request 09-28 ~18:20), a separate ongoing effort with its own card set.
+- SINCE LAST TICK (18:40 workstream monitor): NO new product code merged to main. origin/main == main @ 2f7a282 (0/0 verified `git rev-list --left-right --count main...origin/main`; `git status --short` clean). The only commit is last tick's ledger append (9fb0554 lineage). Workers are mid-flight (alive, heartbeating), not yet landing.
+- BOARD (verified per-status kanban_list): **3 running, 0 ready, 0 blocked, 2 todo.** NO junk cards.
+  - t_b6276d5f [backend REDO /v1/daemon/host] run 825, pid 84475 (started 18:41) — the critical REDO. `grep daemon/host hscc-api/` on main = STILL EMPTY → worker mid-building, NOT yet done (correctly not yet complete; watching for the real merge+deploy+curl). Most important item — verifies last tick's done-but-false catch is being properly redone.
+  - t_b6a8c450 [ios no-data fix] run 821, pid 78045 (started 18:13) — extension data-path diagnosis, foundation.
+  - t_dea36c48 [ios settings] run 824, pid 83120 (started 18:37).
+  - t_6d545375 + t_03d318cd [monitor widget + LA] STILL todo, correctly parent-gated on [t_1e7c2fe4, t_b6276d5f, t_b6a8c450, t_dea36c48] — will auto-promote when the real route REDO lands.
+- WORKSTREAM GATING CORRECT: monitor cards gated on t_b6276d5f (the REAL route) not on the fake-done t_1e7c2fe4 — last tick's re-gating holds.
+- DISPATCH: NONE. Board NOT empty (3 running at max_in_progress=3, ios cap full with 2 ios workers). Workstream cards flow as slots free; monitor cards parent-gated. No phase dispatch warranted (original goal complete).
+- DAEMON: ALIVE — pid 49968 (kill -0 verified). daemon.log healthy (DGX ok=True, gateway ok=True all 40 multiplex profiles served, engine-wedge 2/2 streaming, workers check 2/2 online, Dispatcher-wedge OK total_running=3 @ 15:55Z = 18:55 EEST).
+- HEARTBEAT CRON: confirmed ACTIVE + SINGLE (a0abe2b7848b, name hscc-orch-goal-heartbeat, next run 19:28 EEST — the root-caused PAUSED issue stays resolved; do NOT create duplicates).
+- WATCH: t_b6276d5f must produce a REAL merge of a daemon/host route + install_payload + live curl before completing (it's the REDO of the done-but-false t_1e7c2fe4). Next tick verify grep daemon/host on main + route live.
+- Ledger append this tick; after commit verify main...origin/main is 0/0 (per 14:00 discipline).
