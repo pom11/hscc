@@ -36,7 +36,7 @@ TEMPLATE = os.path.join(HERE, "template.swift")
 # Sources/HSCC/Models.swift so they can't be shared).
 STRUCTS = [
     "MonitorResponse", "MonitorPayload", "MonitorNode", "MonitorSample",
-    "DaemonHostResponse", "DaemonHostCPU", "DaemonHostMemory", "DaemonHostDisk",
+    "MonitorDaemonHost", "MonitorDaemonCPU", "MonitorDaemonMemory", "MonitorDaemonDisk",
 ]
 
 

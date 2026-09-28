@@ -19,7 +19,7 @@ func load<T: Decodable>(_ name: String, as type: T.Type) -> T? {
 }
 
 let monitor = load("monitor.json", as: MonitorResponse.self)
-let host = load("daemon_host.json", as: DaemonHostResponse.self)
+let host = load("daemon_host.json", as: MonitorDaemonHost.self)
 
 print("== Monitor response decode ==")
 if let monitor {

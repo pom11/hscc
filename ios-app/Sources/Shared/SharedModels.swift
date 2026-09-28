@@ -269,14 +269,20 @@ struct MonitorSample: Codable {
 ///     "disk": { "total_gb", "used_gb", "percent" },
 ///     "processes": Int, "daemon_running": Bool,
 ///     "daemon_uptime_seconds": Int, "speak": "..." }
-struct DaemonHostResponse: Codable, Speakable {
+///
+/// NAMING: the sibling monitor Live Activity card (t_03d318cd) declared a
+/// `DaemonHostResponse` in Sources/HSCC/ (app target) which is ALSO compiled
+/// into this file, so the exact name collides. The widget's own wire struct
+/// uses the `Monitor` prefix (widget-local, per the Lite precedent) to live
+/// beside it without a duplicate-redeclaration.
+struct MonitorDaemonHost: Codable, Speakable {
     let hostname: String?
     let platform: String?
     let arch: String?
     let uptime_seconds: Int?
-    let cpu: DaemonHostCPU?
-    let memory: DaemonHostMemory?
-    let disk: DaemonHostDisk?
+    let cpu: MonitorDaemonCPU?
+    let memory: MonitorDaemonMemory?
+    let disk: MonitorDaemonDisk?
     let processes: Int?
     let daemon_running: Bool?
     let daemon_uptime_seconds: Int?
@@ -303,19 +309,19 @@ struct DaemonHostResponse: Codable, Speakable {
     }
 }
 
-struct DaemonHostCPU: Codable {
+struct MonitorDaemonCPU: Codable {
     let count: Int?
     let percent: Double?
     let load_avg: [Double]?
 }
 
-struct DaemonHostMemory: Codable {
+struct MonitorDaemonMemory: Codable {
     let total_gb: Double?
     let used_gb: Double?
     let percent: Double?
 }
 
-struct DaemonHostDisk: Codable {
+struct MonitorDaemonDisk: Codable {
     let total_gb: Double?
     let used_gb: Double?
     let percent: Double?
@@ -795,12 +801,12 @@ enum MonitorSnapshotStore {
         /// The per-node monitor snapshot, if one had been fetched.
         let nodes: [MonitorNode]
         /// The daemon-host machine data, if it had been fetched.
-        let daemonHost: DaemonHostResponse?
+        let daemonHost: MonitorDaemonHost?
     }
 
     /// Save the last-known-good monitor payload. Optional-tolerant: if neither
     /// source ever returned data, nothing meaningful is persisted.
-    static func save(nodes: [MonitorNode], daemonHost: DaemonHostResponse?) {
+    static func save(nodes: [MonitorNode], daemonHost: MonitorDaemonHost?) {
         guard let d = suite, !nodes.isEmpty || daemonHost != nil else { return }
         let snap = Snapshot(date: Date().timeIntervalSince1970, nodes: nodes, daemonHost: daemonHost)
         if let data = try? JSONEncoder().encode(snap) {
