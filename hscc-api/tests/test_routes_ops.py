@@ -48,6 +48,18 @@ def fakes(monkeypatch):
             "state": "running",
             "streams": {"dgx": {"ok": True, "timestamp": "t", "stream": "dgx"}},
         },
+        "daemon_host": lambda: {
+            "hostname": "host",
+            "platform": "macOS",
+            "arch": "arm64",
+            "uptime_seconds": 123456,
+            "cpu": {"count": 10, "percent": 42.5, "load_avg": [3.1, 2.8, 2.4]},
+            "memory": {"total_gb": 64.0, "used_gb": 30.2, "percent": 47.2},
+            "disk": {"total_gb": 931.5, "used_gb": 400.1, "percent": 43.0},
+            "processes": 312,
+            "daemon_running": True,
+            "daemon_uptime_seconds": 84511,
+        },
         "triggers": lambda: {
             "rules": [{"id": "r1", "trigger_type": "notify", "enabled": True}],
             "last_run": {"actions_fired": 1},
@@ -186,6 +198,44 @@ def test_daemon_status_200(running, token):
 def test_daemon_status_auth_401(running):
     status, payload = _req(running, None, "/v1/daemon/status")
     assert status == 401
+
+
+# --------------------------------------------------------------------------- #
+# GET /v1/daemon/host
+# --------------------------------------------------------------------------- #
+
+def test_daemon_host_200(running, token):
+    status, payload = _req(running, token, "/v1/daemon/host")
+    assert status == 200
+    assert payload["hostname"] == "host"
+    assert payload["platform"] == "macOS"
+    assert payload["arch"] == "arm64"
+    assert payload["uptime_seconds"] == 123456
+    assert payload["cpu"] == {"count": 10, "percent": 42.5,
+                              "load_avg": [3.1, 2.8, 2.4]}
+    assert payload["memory"] == {"total_gb": 64.0, "used_gb": 30.2,
+                                 "percent": 47.2}
+    assert payload["disk"] == {"total_gb": 931.5, "used_gb": 400.1,
+                               "percent": 43.0}
+    assert payload["processes"] == 312
+    assert payload["daemon_running"] is True
+    assert payload["daemon_uptime_seconds"] == 84511
+    assert payload["speak"]
+
+
+def test_daemon_host_auth_401(running):
+    status, payload = _req(running, None, "/v1/daemon/host")
+    assert status == 401
+
+
+def test_daemon_host_backing_failure_graceful(running, token, fakes, monkeypatch):
+    # A backing failure must never 5xx — the route degrades to a speak-only
+    # 200 so the widget shows "unavailable" rather than an error.
+    _install(monkeypatch, {"daemon_host": lambda: (_ for _ in ()).throw(
+        RuntimeError("boom"))})
+    status, payload = _req(running, token, "/v1/daemon/host")
+    assert status == 200
+    assert payload["speak"] == "Daemon host metrics unavailable."
 
 
 # --------------------------------------------------------------------------- #
