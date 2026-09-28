@@ -605,3 +605,25 @@ Current main: 5a4c3f0 (all four phases landed; final report + ledger in docs/aud
 - DAEMON: **ALIVE** — pid 49968 (kill -0 verified this tick). daemon.log healthy (gateway check ok=True all 40 multiplex profiles served, Watchdog pipeline healthy @ 06:10Z = 09:10 EEST). Resolved in 2.3.0 (test-suite SIGTERM, 2342a57).
 - Single heartbeat cron intact (a0abe2b7848b, one row, next run 09:44 EEST). No junk cards, no blocked/orphaned states.
 - This tick: ledger append only — no new cards, no dispatch. After commit, verify main...origin/main is 0/0 (per 14:00 discipline note).
+
+## WIDGETS & LIVE ACTIVITIES WORKSTREAM (operator request 2026-09-28 ~18:20)
+Operator: widgets + Live Activities exist but SHOW WITHOUT DATA. Wants them fully data-backed, with per-surface in-app settings (when active / refresh rate / what to show), "the best ever" imaginative rendering, AND a widget showing `hscc cluster monitor` output + the machine data of where HSCC runs (the daemon host, possible a different machine). Decided via ops-Q&A, all three confirmed:
+- SEQUENCING: fit alongside whatever else on free lanes (API route card on backend lane now; iOS cards queue behind phase-1 ios).
+- MONITOR SURFACE: BOTH a self-fetching widget AND a push-fed Live Activity (operator explicitly chose push arch).
+- API: YES add GET /v1/daemon/host (route BEFORE iOS view).
+
+AUDIT FINDINGS (verified on main):
+- /v1/cluster/monitor EXISTS + live (routes_cluster.py handle_cluster_monitor → _backing_cluster_monitor → eng.cmd_monitor() runs `sparkrun cluster monitor --simple --json` under timeout 3, returns {success, output, json (per-node CPU/RAM/GPU), error}). This is the `hscc cluster monitor` the widget needs. Route already in api_server.py chain (routes_cluster imported at 501+).
+- /v1/daemon/status exists but returns ONLY pid/daemon_running/streams — NOT host machine metrics. NO route returns daemon-HOST machine data today → GAP filed.
+- /v1/cluster/status + /v1/autodown/status + /v1/kanban/{running,blocked,stale} all exist and the existing ClusterWidget already consumes them via ExtensionClient (read-only GET, App Group config + shared Keychain). "Show but no data" = data-path/config/reachability issue for TODO.
+- Widgets: ios-app/Sources/HSCCWidgets/{ClusterWidget.swift,ClusterWidgetViews.swift}. Live Activity: {HSCCLiveActivity/HSCCLiveActivity.swift (rendering), HSCC/LiveActivityManager.swift (app-side push for the WAKE activity)}. ExtensionClient shared at Sources/Shared/ExtensionClient.swift.
+
+CARDS FILED (all worktree):
+- t_1e7c2fe4 [B1, backend-engineer, prio 65]: ADD GET /v1/daemon/host (hostname/OS/arch/CPU/RAM/disk/uptime/processes/daemon_running). No parent. Decodable shape baked into card. Starts on free backend lane.
+- t_b6a8c450 [I1, ios-engineer, prio 64]: FIX "widgets show but no data" — diagnose + fix extension data path, Cluster widget live. No parent. FOUNDATION; inspect t_d64ea494 (App Group) first.
+- t_dea36c48 [I3, ios-engineer, prio 63]: SHARED SETTINGS infra — AppGroupWidgetSettings store + SettingsView "Widgets & Live Activities" section (active/refresh/content per surface: widget.cluster, widget.monitor, liveActivity.wake, liveActivity.monitor). parent [t_1e7c2fe4].
+- t_6d545375 [I2, ios-engineer, prio 62]: MONITOR WIDGET — render /v1/cluster/monitor + /v1/daemon/host, medium+large, Theme, settings-driven. parents [t_1e7c2fe4, t_b6a8c450, t_dea36c48].
+- t_03d318cd [I4, ios-engineer, prio 61]: MONITOR LIVE ACTIVITY — app poll + BGAppRefresh pushes monitor + host data to new MonitorActivityAttributes (DI + Lock Screen), settings-driven. parents [t_1e7c2fe4, t_b6a8c450, t_dea36c48].
+DESIGN OWNED (workers must not re-choose): settings model = AppGroup-backed store, one registry keyed by surface; refresh presets 5/15/30/60 (WidgetKit honors ≥~5min); LAs push-only (data from app poll/BGAppRefresh). Colors per Theme ok/warn/bad.
+
+CRON ROOT-CAUSE (resolves operator's repeated "heartbeat = 0"): the heartbeat cron was NOT lost — it was PAUSED (jobs.json state=paused, enabled=false, paused_at 2026-09-28T09:13:54). `hermes cron list` only lists ACTIVE jobs, so a paused job reads as "no scheduled jobs" / grep=0. My earlier bb40a25b36c8 create this session did NOT persist (store was reverted to single a0abe2b7848b when it was paused 09:13). REAL FIX = `hermes cron resume a0abe2b7848b` (NOT create) → DONE + proven (list count 1, next run 18:53). LESSON: when heartbeat reads 0, check `jobs.json state` for paused before concluding lost. Why it paused at 09:13:54 is under investigation (catch_up/limit likely) — do not create duplicates.
