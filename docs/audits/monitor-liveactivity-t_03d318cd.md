@@ -57,6 +57,11 @@ NOTE: per-node sample values are STRINGS ("42.5") -> decoder must parse to Doubl
 - monitor_activity_check harness PASSES against LIVE API (2026-09-28):
   4 nodes decoded (.244/.246/.247/.248) with CPU/RAM/GPU + daemon-host
   (macOS arm64, CPU/RAM/Disk %, daemonRunning=true). Hostname scrubbed here.
+- DEVICE-TARGET BUILD: xcodebuild Release generic/platform=iOS
+  CODE_SIGNING_ALLOWED=NO → **BUILD SUCCEEDED**. All 5 targets compile+link+
+  embed+validate. HSCCLiveActivityMonitor.appex embedded in HSCC.app/PlugIns
+  (bundle com.hscc.ios.liveactivity.monitor, display "HSCC Monitor", arm64
+  executable, 1265 symbols — monitor Swift linked).
 - Reused app's existing ClusterMonitorResponse/NodeSample from Models.swift
   (already present); added only DaemonHostResponse (new route) + typed
   monitorSnapshot()/daemonHost() client methods in a HSCCClient extension.
