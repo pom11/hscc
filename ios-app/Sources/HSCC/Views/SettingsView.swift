@@ -14,6 +14,10 @@ import SwiftUI
 /// `hscc api status`/`hscc api start`.
 struct SettingsView: View {
     @EnvironmentObject private var settings: SettingsStore
+    /// The shared Widgets & Live Activities settings store (t_dea36c48):
+    /// read/write in the section below, read-only by the widget/Live Activity
+    /// extensions via the App Group.
+    @EnvironmentObject private var widgetSettings: WidgetSettingsStore
 
     // Local editing state seeded from the store.
     @State private var hostField: String = ""
@@ -178,6 +182,14 @@ struct SettingsView: View {
                     } else {
                         Text("Get a banner when the daemon reports something needing you: a card in the review queue, a failed or blocked card, or the cluster going unreachable.")
                     }
+                }
+
+                Section {
+                    widgetsAndLiveActivitiesRows
+                } header: {
+                    Text("Widgets & Live Activities")
+                } footer: {
+                    Text("Shared settings every widget and Live Activity reads. Each surface can be turned on or off, set its refresh rate, and choose which content to show. The OS does not reliably honor widget refresh rates below about 5 minutes.")
                 }
 
                 Section {
@@ -427,6 +439,55 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - Widgets & Live Activities
+
+    /// One row per surface: an inline Active toggle + a link to the surface's
+    /// sub-editor (refresh rate + content selection). Reuses the generic
+    /// `WidgetSurfaceEditor` for every surface — no bespoke per-surface editors.
+    @ViewBuilder
+    private var widgetsAndLiveActivitiesRows: some View {
+        ForEach(WidgetSurfaceKind.allCases, id: \.self) { kind in
+            let surface = widgetSettings.setting(for: kind)
+            NavigationLink {
+                WidgetSurfaceEditor(kind: kind, store: widgetSettings)
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: surfaceIcon(kind))
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        .frame(width: 24)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(surfaceName(kind))
+                            .foregroundColor(Theme.Semantic.onSurface)
+                        Text("\(surface.refreshMinutes) min refresh")
+                            .font(.caption)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    }
+                    Spacer()
+                    // Inline Active toggle — the operator's single most common
+                    // action; the sub-editor has the same toggle for context.
+                    Toggle("", isOn: Binding(
+                        get: { surface.isActive },
+                        set: { widgetSettings.setActive($0, for: kind) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                }
+            }
+            .accessibilityLabel("\(surfaceName(kind)) settings")
+            .accessibilityHint("Toggle active or open refresh and content settings")
+        }
+    }
+
+    /// SF Symbol for a surface's list row.
+    private func surfaceIcon(_ kind: WidgetSurfaceKind) -> String {
+        kind.displayIcon
+    }
+
+    /// Display name for a surface.
+    private func surfaceName(_ kind: WidgetSurfaceKind) -> String {
+        kind.displayName
+    }
+
     // MARK: - QR scan
 
     /// Handle a raw scanned payload: decode + validate it, then either move to
@@ -464,5 +525,146 @@ struct SettingsView: View {
         tokenField = code.token
         save()
         await testConnection()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Generic per-surface editor (t_dea36c48)
+// ---------------------------------------------------------------------------
+//
+// ONE reusable editor for every surface — the "Widgets & Live Activities"
+// sub-editor for a single surface: Active toggle, refresh-rate picker, and
+// content-selection toggles. All four surfaces use this same component; only
+// the surface-kind metadata (name/icon/sections) differs, and that lives in
+// the display mapping below. No bespoke per-surface editors.
+
+/// Presets offered for refresh cadence. `nil` = Off (surface not refreshed).
+/// WidgetKit does not reliably honor rates below ~5 minutes, noted in the UI.
+private let refreshPresets: [(label: String, minutes: Int?)] = [
+    ("Off", nil),
+    ("5 min", 5),
+    ("15 min", 15),
+    ("30 min", 30),
+    ("60 min", 60),
+]
+
+/// The shared editor reused by all four surfaces. Reads/writes the store via
+/// the `WidgetSettingsStore` (app-side ObservableObject backed by the App
+/// Group), which the enclosing sub-editor owns.
+struct WidgetSurfaceEditor: View {
+    let kind: WidgetSurfaceKind
+    let store: WidgetSettingsStore
+
+    var body: some View {
+        let surface = store.setting(for: kind)
+        Form {
+            Section {
+                Toggle("Active", isOn: Binding(
+                    get: { surface.isActive },
+                    set: { store.setActive($0, for: kind) }
+                ))
+            } footer: {
+                Text("Whether this surface is shown at all. Turn it off to hide it without removing it from the Home Screen / Lock Screen.")
+            }
+
+            Section {
+                Picker("Refresh", selection: Binding(
+                    get: { surface.refreshMinutes },
+                    set: { store.setRefreshMinutes($0, for: kind) }
+                )) {
+                    ForEach(refreshPresets, id: \.label) { preset in
+                        if let minutes = preset.minutes {
+                            Text(preset.label).tag(minutes)
+                        } else {
+                            Text("Off").tag(0)
+                        }
+                    }
+                }
+            } header: {
+                Text("Refresh Rate")
+            } footer: {
+                Text(kind.isLiveActivity
+                    ? "How often the app pushes an update while the Live Activity is active. Live Activities cannot fetch on their own — this is the app's push cadence."
+                    : "How often the widget refreshes its timeline. The OS does not reliably honor widget refresh rates below about 5 minutes.")
+            }
+
+            Section {
+                ForEach(sectionRows(kind), id: \.self) { section in
+                    Toggle(sectionLabel(section), isOn: Binding(
+                        get: { surface.showSections.contains(section) },
+                        set: { _ in store.toggleSection(section, for: kind) }
+                    ))
+                }
+            } header: {
+                Text("Show Content")
+            } footer: {
+                Text("Choose which sections this surface renders. Sections you turn off are hidden from its layout.")
+            }
+        }
+        .navigationTitle(surfaceName(kind))
+    }
+
+    // MARK: - Display metadata
+
+    /// The ordered sections this surface offers, in a stable display order.
+    private func sectionRows(_ kind: WidgetSurfaceKind) -> [String] {
+        // Stable order matching the canonical vocabulary; NOT set iteration
+        // order (unordered).
+        let ordered: [String] = ["state", "topology", "models", "board", "nodes", "host", "timing"]
+        return ordered.filter { kind.availableSections.contains($0) }
+    }
+
+    private func surfaceName(_ kind: WidgetSurfaceKind) -> String {
+        kind.displayName
+    }
+
+    private func sectionLabel(_ id: String) -> String {
+        WidgetSurfaceKind.displaySectionLabel(id)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared display metadata for surfaces + sections
+// ---------------------------------------------------------------------------
+//
+// UI-only presentation (name, SF Symbol icon, human section labels) for the
+// settings screen. Kept separate from the data model in SharedModels.swift so
+// the shared model carries NO UI concerns, while the app (which renders the
+// editor) has one set of display facts both `SettingsView` rows and the generic
+// `WidgetSurfaceEditor` reference — no duplicated switch statements.
+
+extension WidgetSurfaceKind {
+    /// Display name shown in the settings rows and editor titles.
+    var displayName: String {
+        switch self {
+        case .widgetCluster: return "Cluster Widget"
+        case .widgetMonitor: return "Monitor Widget"
+        case .liveActivityWake: return "Wake Live Activity"
+        case .liveActivityMonitor: return "Monitor Live Activity"
+        }
+    }
+
+    /// SF Symbol for the settings row.
+    var displayIcon: String {
+        switch self {
+        case .widgetCluster: return "square.grid.2x2"
+        case .widgetMonitor: return "gauge"
+        case .liveActivityWake: return "bolt"
+        case .liveActivityMonitor: return "waveform.path.ecg"
+        }
+    }
+
+    /// Human label for a canonical section identifier (\"nodes\" → \"Node metrics\").
+    static func displaySectionLabel(_ id: String) -> String {
+        switch id {
+        case "state": return "State"
+        case "topology": return "Topology"
+        case "models": return "Models"
+        case "board": return "Board work"
+        case "nodes": return "Node metrics"
+        case "host": return "Host machine"
+        case "timing": return "Timing"
+        default: return id
+        }
     }
 }
