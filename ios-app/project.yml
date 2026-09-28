@@ -74,6 +74,7 @@ schemes:
         HSCCWidgets: [run, archive]
         HSCCLiveActivity: [run, archive]
         HSCCLiveActivitySession: [run, archive]
+        HSCCLiveActivityMonitor: [run, archive]
     run:
       config: Debug
       # The extensions are embedded in the app; running the app runs them in
@@ -127,6 +128,7 @@ targets:
       - path: Sources/HSCC/WidgetSettingsStore.swift
       - path: Sources/HSCC/SetupQRCode.swift
       - path: Sources/HSCC/LiveActivityManager.swift
+      - path: Sources/HSCC/MonitorActivityDriver.swift
       - path: Sources/HSCC/Views/SettingsView.swift
       - path: Sources/HSCC/Views/QRScannerView.swift
       - path: Sources/HSCC/Views/Theme.swift
@@ -181,6 +183,7 @@ targets:
       - path: Sources/HSCC/Intents/ProjectIntents.swift
       # Shared cross-target sources (compiled into all three bundles).
       - path: Sources/Shared/SharedModels.swift
+      - path: Sources/Shared/MonitorActivity.swift
       - path: Sources/Shared/ExtensionClient.swift
       - path: Sources/Shared/WakingActivity.swift
       - path: Sources/Shared/SessionActivity.swift
@@ -197,6 +200,8 @@ targets:
       - target: HSCCLiveActivity
         embed: true
       - target: HSCCLiveActivitySession
+        embed: true
+      - target: HSCCLiveActivityMonitor
         embed: true
     settings:
       base:
@@ -245,6 +250,12 @@ targets:
         # ActivityKit refuses to start any Live Activity without this key —
         # Activity.request throws and areActivitiesEnabled reports false.
         NSSupportsLiveActivities: true
+        # Background refresh (t_03d318cd): the monitor Live Activity is fed by
+        # the app, and when backgrounded it uses BGAppRefreshTask to push data
+        # on a best-effort OS schedule. iOS only allows scheduling task
+        # identifiers listed under BGTaskSchedulerPermittedIdentifiers.
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.hscc.ios.monitor.backgroundRefresh
         # The camera is used ONLY to scan the setup QR code from `hscc api
         # status`. Without this key iOS kills the app the instant the scanner
         # opens — which is the first thing an operator does.
@@ -413,6 +424,56 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_ENTITLEMENTS: Sources/HSCCLiveActivitySession.entitlements
+        SKIP_INSTALL: YES
+    dependencies:
+      - sdk: WidgetKit.framework
+      - sdk: ActivityKit.framework
+
+  # Monitor Live Activity (ActivityKit) — the NEW "HSCC Monitor" Live Activity
+  # (t_03d318cd). Live Activities are PUSH-ONLY: the app (`MonitorActivityDriver`)
+  # polls GET /v1/cluster/monitor + GET /v1/daemon/host on the settings cadence
+  # and pushes updates; this extension renders the ActivityConfiguration for
+  # `MonitorActivityAttributes`.
+  #
+  # SEPARATE target from HSCCLiveActivity / HSCCLiveActivitySession: a widget
+  # extension body can only contain ONE ActivityConfiguration, so each Live
+  # Activity attribute type gets its own extension target.
+  HSCCLiveActivityMonitor:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Sources/HSCCLiveActivityMonitor/MonitorLiveActivity.swift
+      # Shared source files compiled into every target.
+      - path: Sources/Shared/SharedModels.swift
+      - path: Sources/Shared/MonitorActivity.swift
+      # Theme tokens shared with the app (design-system, no raw hex here).
+      - path: Sources/HSCC/Views/Theme.swift
+    entitlements:
+      path: Sources/HSCCLiveActivityMonitor.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.hscc.ios
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)group.com.hscc.ios
+    info:
+      path: Sources/HSCCLiveActivityMonitor/Info.plist
+      properties:
+        # A display name so the monitor Live Activity / Lock Screen surfaces a
+        # friendly label instead of the raw target identifier "HSCCLiveActivityMonitor".
+        CFBundleDisplayName: HSCC Monitor
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios.liveactivity.monitor
+        # Per-TARGET, not just project-level (see sibling targets).
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: Sources/HSCCLiveActivityMonitor.entitlements
         SKIP_INSTALL: YES
     dependencies:
       - sdk: WidgetKit.framework

@@ -21,6 +21,14 @@ final class NotificationsAppDelegate: NSObject, UIApplicationDelegate {
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         Task { @MainActor in
             await NotificationCoordinator.shared.requestAuthorization()
+            // HSCC Monitor Live Activity (t_03d318cd): register the
+            // background-refresh task, run the orphan sweep, and kick off the
+            // foreground poll loop at launch. All idempotent — safe on every
+            // launch. (A Scene has no `.task` mutation seam, so the delegate's
+            // didFinishLaunching is where these one-time hooks live.)
+            MonitorActivityDriver.registerBackgroundTasks()
+            MonitorActivityDriver.sweepLeftoverMonitors()
+            MonitorActivityDriver.shared.sceneDidBecomeActive()
         }
         return true
     }
