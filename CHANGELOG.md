@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.3.1] - 2026-09-28
+
+### Fixed
+- **`template apply` could spawn a container that can never start.**
+  `_provision_models` rendered the serve command from a unit's `tp` and its host
+  span independently, so a `tp=N` unit pinned to fewer than N hosts was launched
+  anyway. vLLM rejects it at argument validation (`World size (2) is larger than
+  the number of available GPUs (1) in this node`), so it never serves a request
+  and crash-loops indefinitely — holding VRAM and a restart slot on a node that
+  is typically a **tp peer of a healthy span**, which makes it look like a
+  legitimate extra job in `sparkrun status`.
+
+  Reproduced end-to-end after a power outage: the outage took the
+  `family-reasoning` worker down, auto-heal retried three times, then escalated
+  to *force-recreate via template apply*, and that apply left a solo `tp=2`
+  orphan on the orchestrator's peer node. Second occurrence — the first was
+  reaped by hand a day earlier and returned.
+
+  Apply now refuses such a unit up front and records it in `result["failed"]`
+  naming both the `tp` and the span, instead of launching it. The guard is
+  deliberately narrow: `tp == span` (the normal multi-node case) and `tp == 1`
+  are untouched, both pinned by tests.
+
+### Notes
+- The auto-heal escalation itself is **unchanged**: after three failed retries it
+  still force-recreates via template apply. This release stops that path
+  producing an unstartable orphan; it does not change when auto-heal fires.
+- Carried over from 2.3.0 and still true: the iOS changes were verified per-card
+  but never compiled as a whole, and `skills.preload` is unchanged fleet-wide.
+
 ## [2.3.0] - 2026-09-27
 
 ### Added
