@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.4.0] - 2026-09-29
+
+### Changed
+- **Runtime dependency bump, verified end-to-end** (hermes-agent
+  v2026.9.14/v0.21.5 -> v2026.9.24/v0.21.5 @ 88dcabb9, sparkrun v0.3.9 ->
+  v0.3.10 @ b444da8). All 8 carried hermes patches re-based clean onto the new
+  release, all 9 test suites pass, and the daemon now runs on the new runtime.
+  `runtime-versions.json` on main pins the new versions.
+
+### Fixed
+- **iOS launch crash: 'No launch handler registered'.** `BGTaskScheduler` requires
+  `register(forTaskWithIdentifier:using:)` to be called synchronously during
+  launch; the previous code registered the launch handler lazily/after submit, so
+  a background launch could fire with no handler and crash at startup. The app now
+  registers synchronously before any task submission (af0ff97).
+
+### Added
+- **Dependency-update loop hardened.** The `check-runtime-deps.yml` Action now
+  opens a *fresh* bump PR when the prior bump is merged/closed (previously it kept
+  editing merged PRs forever); a new Hermes dep-watcher cron turns each open bump
+  PR into a kanban verification card so runtime bumps are verified before they
+  land.
+
 ## [2.3.1] - 2026-09-28
 
 ### Fixed
