@@ -61,10 +61,15 @@ jobs:
             2>/dev/null || true
 
           TITLE="chore(deps): runtime bump — ${SUMMARY}"
-          # Create the PR if none is open for this branch; otherwise the
+          # Create a PR if none is OPEN for this branch; otherwise the
           # force-push already updated the diff — just refresh title/body/label.
-          if gh pr view "$BRANCH" --json number >/dev/null 2>&1; then
-            gh pr edit "$BRANCH" --title "$TITLE" \
+          # Only an OPEN PR is edited: `gh pr view` also returns a MERGED/CLOSED
+          # PR, which used to make this step edit the already-merged PR #19
+          # forever instead of ever opening a fresh one. Resolve via the same
+          # tested code path as the unit tests (see .github/scripts/tests).
+          PR_NUM=$(python3 .github/scripts/check_runtime_deps.py --find-open-pr)
+          if [ -n "$PR_NUM" ]; then
+            gh pr edit "$PR_NUM" --title "$TITLE" \
               --body-file "$BODY_FILE" --add-label needs-cluster-check \
               --add-reviewer "$REVIEWER" || true
           else
