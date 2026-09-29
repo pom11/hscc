@@ -11,6 +11,10 @@ Outputs (to $GITHUB_OUTPUT when set, else stdout):
   branch=deps/runtime-bump
 A PR body is written to the path in $DEP_PR_BODY_FILE (default: pr_body.md).
 
+CLI mode:
+  --find-open-pr   Print the OPEN PR number for the bump branch (or nothing).
+                   Used by the workflow's edit-vs-create step.
+
 Exit code 0 when no deps need updating. Exits 1 when a dep's latest release
 tag could not be fetched — a persistent API failure should fail the workflow,
 not slip by silently.
@@ -18,6 +22,7 @@ not slip by silently.
 
 import json
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -75,6 +80,45 @@ def _emit(key, value):
             f.write(line + "\n")
     else:
         print(line)
+
+
+def find_open_pr(branch=BRANCH):
+    """Return the number of the OPEN PR for ``branch``, else None.
+
+    ``gh pr view`` returns a PR even once it is MERGED or CLOSED, which is the
+    bug this guards against: the old workflow would force-push the branch and
+    ``gh pr edit`` the already-merged PR #19 forever, never opening a fresh one.
+    We therefore only "edit" when the found PR's state is exactly "OPEN";
+    any other state (MERGED, CLOSED) or absence means a new PR must be created.
+
+    Best-effort: any gh/parse failure yields None so a transient error does not
+    wedge the daily run — the caller falls through to ``gh pr create``.
+    """
+    try:
+        out = subprocess.run(
+            ["gh", "pr", "view", branch, "--json", "number,state"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if out.returncode != 0:
+            return None
+        data = json.loads(out.stdout or "{}")
+        if data.get("state") == "OPEN":
+            return data.get("number")
+        return None
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return None
+
+
+def cli_find_open_pr():
+    """--find-open-pr entrypoint: print the OPEN PR number (or nothing).
+
+    Lets the workflow step resolve edit-vs-create via the same tested code path
+    that the unit tests exercise, instead of a bespoke shell one-liner.
+    """
+    num = find_open_pr()
+    if num is not None:
+        print(num)
+    return 0
 
 
 def main():
@@ -155,4 +199,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--find-open-pr" in sys.argv[1:]:
+        sys.exit(cli_find_open_pr())
     sys.exit(main())
