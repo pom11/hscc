@@ -141,6 +141,16 @@ final class MonitorActivityDriver {
     /// Whether the foreground poll loop is running.
     private var pollTask: Task<Void, Never>?
 
+    /// Whether the BGTaskScheduler launch handler has been registered.
+    /// BGTaskScheduler requires `register(forTaskWithIdentifier:)` to complete
+    /// BEFORE any `submit()` for that identifier — a submit that races ahead of
+    /// registration throws the fatal `NSInternalInconsistencyException` ("No
+    /// launch handler registered") and terminates the app. `registerBackgroundTasks()`
+    /// sets this synchronously (it is called from `didFinishLaunching` before
+    /// the scene can activate); `scheduleBackgroundRefresh()` gates on it so a
+    /// submit can NEVER precede registration regardless of call site.
+    private static var registered = false
+
     private init() {}
 
     // MARK: - App lifecycle hooks
@@ -149,6 +159,14 @@ final class MonitorActivityDriver {
     /// to call every launch. BGTaskScheduler itself is best-effort — the OS
     /// decides when (or if) the task actually runs, so this is advice, not a
     /// guarantee.
+    ///
+    /// The `register(forTaskWithIdentifier:)` CALL (which installs the launch
+    /// handler) is synchronous and returns as soon as the handler is registered;
+    /// the handler *body* runs later on a detached MainActor Task — that
+    /// deferral is fine, only the registration call itself must be synchronous
+    /// (which this is, and `didFinishLaunching` calls it before the scene can
+    /// submit). `registered` flips synchronously so submit is safe from that
+    /// point on.
     static func registerBackgroundTasks() {
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: backgroundRefreshIdentifier,
@@ -162,11 +180,24 @@ final class MonitorActivityDriver {
                 task.setTaskCompleted(success: true)
             }
         }
+        // Registration is complete once register() returns — the handler
+        // closure runs later, but the launch handler itself is now installed,
+        // so submits are safe.
+        registered = true
     }
 
     /// Schedule the next best-effort background refresh. Only submits when the
     /// surface is active; called from launch + after each background push.
+    ///
+    /// Gates on `registered`: if the launch handler isn't installed yet, a
+    /// `submit()` would throw the fatal NSInternalInconsistencyException (the
+    /// very crash this fix addresses), so we skip the submit rather than race
+    /// it. The handler is registered synchronously in `didFinishLaunching`
+    /// (before the scene activates), so by the time any scene-phase submit can
+    /// fire the flag is already set — this guard is a belt-and-suspenders
+    /// guarantee against ordering regressions at ANY call site.
     func scheduleBackgroundRefresh() {
+        guard Self.registered else { return }
         guard setting().isActive else { return }
         let minutes = max(1, setting().refreshMinutes)
         let request = BGAppRefreshTaskRequest(identifier: Self.backgroundRefreshIdentifier)
