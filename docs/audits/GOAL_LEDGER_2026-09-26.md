@@ -1317,3 +1317,21 @@ CRON ROOT-CAUSE (resolves operator's repeated "heartbeat = 0"): the heartbeat cr
 - HEARTBEAT CRON: ACTIVE + SINGLE (a0abe2b7848b only, name hscc-orch-goal-heartbeat). Do NOT create duplicates.
 - WATCH (next tick): (1) verify card 2 t_f731de64 merges 73cae13/e1fbe33 to origin/main with a real merge sha (NOT worker self-report); (2) both suites green under both interpreters; (3) then t_59cc6714 auto-promotes to architect e2e verify.
 - This tick: ledger append only. No new cards, no dispatch. After commit, verify main...origin/main 0/0 (14:00 discipline).
+
+## Heartbeat tick ~18:15 (cron hscc-orch-goal-heartbeat a0abe2b7848b, 2026-09-30) — ORCHESTRATOR STRAND-RESCUE: card 2 MERGED @ 22a3c11
+- ORIGINAL 24h GOAL (2026-09-26): terminal since 09-27 03:33 (all 4 phases complete). Active work = the **project-session-continuity** workstream (operator seed ~11:00, backend-only, iOS PAUSED per design Approach 1). Chain: t_fd031303 (DONE, f9bceb4) → t_f731de64 → t_59cc6714 (architect).
+- **KEY ACTION THIS TICK — STRAND-RESCUE of card 2 t_f731de64 [gateway backfill + pinned PTY]:** after 3 consecutive crashed runs (860 = model repetition-loop exit 1; 861 = protocol-violation rc=0-without-terminal-call; 862 = protocol-violation rc=0-without-terminal-call, running 2293s then dying), the card sat READY with its 73cae13/e1fbe33 committed work NEVER merged to main. That is the goal-doc §6 stranded-work anti-pattern. The card's own protocol-violation error explicitly invites the orchestrator to "verify it and report via kanban_complete." **I verified the branch work by execution and rescued it:**
+  - Reviewed the diff — real, substantial, matches design §3.1/3.2/3.3 (gateway_driver.py +344, test_gateway_backfill.py +448): full-history backfill idempotent on (session_id + store high-water mark), PTY pinned to the named session via ?resume=&profile=.
+  - Tests on branch: test_gateway_driver.py + test_gateway_backfill.py = **18 passed, 8 skipped** (skips = documented no-hermes-runtime interpreter); backfill module 2 passed 7 skipped.
+  - Merged --no-ff wt/t_f731de64 into main, pushed → **origin/main @ 22a3c11**, verified 0/0, address-scrub clean.
+  - Full hscc-api suite on merged main: **806 passed, 7 skipped** (p313, 3:57).
+  - Removed stray untracked live-probe scratch (hscc-api/tests_gateway/probe_04_two_way_relay.py) from the worktree — not referenced, not in primary.
+  - Completed card via kanban_complete (run 863) with merge sha + evidence. **Card 2 DONE.**
+- **CARD 3 t_59cc6714 [integration + e2e live verify, architect] AUTO-PROMOTED to READY** (both parents done: t_fd031303 + t_f731de64). workspace = primary checkout (acceptable — it's a verify card). Awaiting a global dispatch slot.
+- **BOARD (verified per-status): 0 running, 1 ready (t_59cc6714), 0 todo, 0 blocked.** Chain now: card1 done (f9bceb4) + card2 done (22a3c11) + card3 ready. When the architect card is claimed and completes, the session-continuity workstream is fully landed.
+- **DISPATCH: NONE warranted by ME.** The chain is self-driving; card 3 auto-promoted and will be claimed by the dispatcher when a global slot frees. Caps non-negotiable (§6) — I must NOT manually dispatch past caps. Nothing else to seed (original goal terminal).
+- DAEMON: **ALIVE** — pid 36748 (kill -0 verified this tick). GATEWAY: pid 64740 (the claimer, alive). VERSION=2.4.0. HERMES v0.21.5 (2026.9.24). SPARKRUN 0.3.10. Resolved 2.3.0 (test-suite SIGTERM, 2342a57).
+- HEARTBEAT CRON: ACTIVE + SINGLE (a0abe2b7848b only). Do NOT create duplicates.
+- WATCH (next tick): (1) t_59cc6714 gets claimed (architect e2e verify) + completes → workstream fully landed; (2) if card 3 also hits the recurring protocol-violation pattern, verify by execution + rescue same way.
+- WIDER PATTERN: the session-continuity backend cards keep crashing rc=0-without-terminal-call (card 1 t_fd031303 landed on 1st run; card 2 needed 3 crashes + orchestrator rescue). The recurring worker-stability signature (model-loop + protocol-violation) is systemic, not per-card — flagged in prior ticks, still unresolved at the model/worker layer. Worth operator attention alongside the workstream itself.
+- This tick: strand-rescue (merge+push+complete) + ledger append. After commit, verify main...origin/main 0/0 (14:00 discipline).
