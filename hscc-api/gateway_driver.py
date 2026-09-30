@@ -99,6 +99,9 @@ class GatewayConfig:
         tls: bool = False,
         project: str = "hscc",
         channel: Optional[str] = None,
+        session_id: Optional[str] = None,
+        profile: Optional[str] = None,
+        registry_path: Optional[str] = None,
     ) -> None:
         self.host = host
         self.port = int(port)
@@ -106,6 +109,17 @@ class GatewayConfig:
         self.tls = bool(tls)
         self.project = project
         self.channel = channel or secrets.token_urlsafe(16)
+        # Registry path the driver resolves the named session through
+        # (§3.1/§3.2). Optional; deployment supplies it so resolution targets
+        # the project registry, exactly like routes_session/routes_ws do.
+        self.registry_path = registry_path
+        # §3.1 same-session pinning: the project's NAMED Hermes session id and
+        # its owning profile. Optional so a config can be built without them
+        # (the driver resolves them on start when absent); when present they
+        # pin the /api/pty to that exact named session so an app message lands
+        # in the SAME conversation the CLI continues (§3.3).
+        self.session_id = session_id
+        self.profile = profile
 
     @property
     def base_url(self) -> str:
@@ -115,6 +129,32 @@ class GatewayConfig:
     def ws_path(self, path: str) -> str:
         """Relative WS request-target (path + query) for the given api path."""
         return f"{path}?token={self.token}&channel={self.channel}"
+
+    def pty_path(self, session_id: Optional[str] = None,
+                 profile: Optional[str] = None) -> str:
+        """WS request-target for /api/pty, pinned to the named session (§3.3).
+
+        The live PTY spawns a fresh chat unless it is told which session to
+        resume (``?resume=<session_id>`` -> ``HERMES_TUI_RESUME``) and which
+        profile to scope under (``?profile=<profile>`` -> ``HERMES_HOME``) —
+        see ``hermes_cli.web_server_chat._resolve_chat_argv``. Passing our
+        resolved project identity here is what makes an APP message reach the
+        SAME named session the CLI continues, instead of a throwaway fresh
+        session. Falls back to just token+channel when neither is known.
+        """
+        override_sid = session_id or self.session_id
+        override_prof = profile or self.profile
+        path = self.ws_path("/api/pty")
+        parts = []
+        if override_prof:
+            from urllib.parse import quote
+            parts.append(f"profile={quote(override_prof)}")
+        if override_sid:
+            from urllib.parse import quote
+            parts.append(f"resume={quote(override_sid)}")
+        if parts:
+            path += "&" + "&".join(parts)
+        return path
 
     def ws_url(self, path: str) -> str:
         """Absolute ws(s) URL (scheme + host + path + query)."""
@@ -531,6 +571,224 @@ def _as_float(value: Any) -> Optional[float]:
 
 
 # --------------------------------------------------------------------------- #
+# Full-history backfill (design §3.2): seed the store from the named session's
+# REAL history in state.db, so the iOS app shows the whole conversation up
+# front instead of only events accumulated since the bridge connected.
+#
+# The store is keyed by project name (the same key routes_session's history
+# endpoint and routes_ws's relay use via ``ensure_session``), and the message
+# source is the ACTUAL named Hermes session resolved through the same-session
+# pinning primitive (routes_orchestrator.resolve_named_session_id, §3.1):
+# ``<project>-orch`` profile's state.db, session titled ``<project>``.
+# --------------------------------------------------------------------------- #
+
+# Backfill high-water mark, keyed by project. Backfill is idempotent on
+# (session id + store high-water mark) — the design's literal key — so a
+# reconnect that has NOT advanced the store does not re-append the same
+# history and seq stays contiguous. On a genuinely new session id (rotation)
+# or an advanced store, backfill runs again.
+_BACKFILL_HW: dict[str, dict] = {}
+_BACKFILL_LOCK = threading.Lock()
+
+
+def reset_backfill_state() -> None:
+    """Drop the backfill high-water marks (test isolation only)."""
+    global _BACKFILL_HW
+    with _BACKFILL_LOCK:
+        _BACKFILL_HW = {}
+
+
+def _content_to_text(content: Any) -> str:
+    """Best-effort text of a stored message ``content`` column.
+
+    Most content is a plain str; a multimodal user message may be a list of
+    {type,text} blocks (e.g. an image + caption). Flatten the text blocks for
+    the store frame; anything non-textual degrades to a bounded repr.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+        if parts:
+            return "\n".join(parts)
+        return "[image/content]"
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _epoch_to_iso(ts: Any) -> Optional[str]:
+    """Best-effort epoch-seconds -> ISO-8601 UTC, or None when invalid.
+
+    ``state.db`` messages carry a numeric ``timestamp`` (epoch seconds);
+    the store's ``ts`` is ISO-8601. History frames should preserve the original
+    message time so iOS renders real times, but a malformed timestamp
+    degrades to None -> the store stamps wall clock (still valid).
+    """
+    try:
+        f = float(ts)
+    except (TypeError, ValueError):
+        return None
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(f))
+
+
+def _tool_call_from_history(msg: dict) -> ToolCallPayload:
+    """Translate a ``role==\"tool\"`` message row into a tool_call frame.
+
+    The named session's stored tool message carries the completed tool's
+    identity (``tool_call_id``, ``tool_name``, ``content`` = its result). We
+    emit a single ``status=\"finish\"`` frame (we only have the completed
+    outcome, not the pre-call start). Best-effort: any missing field degrades
+    to an empty string so the frame shape stays decodable — never crashes a
+    backfill over one malformed row.
+    """
+    call_id = str(msg.get("tool_call_id") or "")
+    name = str(msg.get("tool_name") or "tool")
+    args = {}
+    # The stored tool_calls column often carries the call's input arguments
+    # ({name, arguments/input, id, ...}). Surface the first call's input as
+    # the args preview when available.
+    tc = msg.get("tool_calls")
+    if isinstance(tc, list) and tc and isinstance(tc[0], dict):
+        inp = tc[0].get("input", tc[0].get("arguments"))
+        if isinstance(inp, dict):
+            args = inp
+        elif isinstance(inp, str) and inp:
+            from json import loads
+            try:
+                parsed = loads(inp)
+            except (ValueError, TypeError):
+                parsed = None
+            if isinstance(parsed, dict):
+                args = parsed
+    return ToolCallPayload(
+        call_id=call_id,
+        name=name,
+        status="finish",
+        args=args,
+        result=_content_to_text(msg.get("content")),
+    )
+
+
+def _translate_history_to_store(store, messages: list) -> int:
+    """Translate a session's stored messages into store frames; returns count.
+
+    One ``role=\"user\"`` / ``role=\"assistant\"`` message -> a single
+    ``message`` frame with the full text and ``done=True`` (the terminal
+    frame the live feed would have emitted — a complete turn is a finalised
+    row). A ``role=\"tool\"`` message -> one ``tool_call status=\"finish\"``
+    frame; ``role=\"system\"`` -> one ``system`` frame. Each frame keeps the
+    original message timestamp so the iOS transcript shows real times, and
+    seq is assigned sequentially by the store, so backfilled history and the
+    live feed share ONE contiguous seq space (the reconnect contract).
+    """
+    count = 0
+    for m in messages:
+        if not isinstance(m, dict) or not m.get("role"):
+            continue   # a malformed row should never abort the backfill
+        ts = _epoch_to_iso(m.get("timestamp"))
+        role = m.get("role")
+        if role in ("user", "assistant"):
+            store.append(TYPE_MESSAGE, MessagePayload(
+                role=role, delta=_content_to_text(m.get("content")), done=True),
+                ts=ts)
+            count += 1
+        elif role == "tool":
+            store.append(TYPE_TOOL_CALL, _tool_call_from_history(m), ts=ts)
+            count += 1
+        elif role == "system":
+            store.append(TYPE_SYSTEM, SystemPayload(
+                kind="session_history",
+                details={"text": _content_to_text(m.get("content"))}),
+                ts=ts)
+            count += 1
+    return count
+
+
+def backfill_named_session(project: str, registry_path: Optional[str] = None) -> dict:
+    """Backfill a project's SessionEventStore from its named session's history.
+
+    The §3.2 primitive: resolve the project's named Hermes session id via the
+    same-session pinning resolver, read its FULL message history from the
+    owning `<project>-orch` profile's state.db, and translate it into store
+    frames (translated like the live feed, so history and live share one
+    contract + one seq space).
+
+    IDEMPOTENT (design §3.2): keyed on (session id + store high-water mark).
+    When the project has already been backfilled to the CURRENT store
+    high-water for the SAME session id, this is a no-op — no duplicate frames,
+    seq stays contiguous. A reconnect that hasn't advanced the store therefore
+    does not duplicate; a rotation to a new session id or an advanced store
+    runs again.
+
+    FAIL-SAFE (design §4): any failure here is reported, never raised — the
+    caller (GatewayDriver.start) must "log + continue live, don't drop the
+    live stream". The return dict ``skipped`` names each early-return reason
+    so the caller can log it honestly.
+
+    Returns ``{"project", "backfilled", "session"|None, "skipped"|None}``.
+    """
+    from routes_orchestrator import (
+        _open_profile_session_db,
+        resolve_named_session_id,
+    )
+
+    store = get_store(project)
+    try:
+        profile, _title, session_id = resolve_named_session_id(
+            project, registry_path=registry_path)
+    except Exception as exc:  # noqa: BLE001 — fail-safe, never raise
+        log.warning("gateway: backfill %s failed to resolve session: %r",
+                    project, exc)
+        return {"project": project, "backfilled": 0, "session": None,
+                "skipped": "resolve_failed"}
+    if session_id is None:
+        # The project has not started a named session yet — nothing to backfill.
+        return {"project": project, "backfilled": 0, "session": None,
+                "skipped": "no_session"}
+
+    # Idempotency check: same session id + store high-water unchanged => the
+    # history is already seeded to the current head; a reconnect must not dup.
+    with _BACKFILL_LOCK:
+        rec = _BACKFILL_HW.get(project)
+    if rec is not None and rec.get("session_id") == session_id \
+            and rec.get("store_next_seq") == store.next_seq:
+        return {"project": project, "backfilled": 0, "session": session_id,
+                "skipped": "already_backfilled"}
+
+    db = _open_profile_session_db(profile, read_only=True)
+    if db is None:
+        # Unreachable opener: the resolver already reported no-session, so we
+        # simply skip — nothing to backfill (the honest no-session result).
+        log.warning("gateway: backfill %s: state.db for %s unreachable",
+                    project, profile)
+        return {"project": project, "backfilled": 0, "session": session_id,
+                "skipped": "no_session"}
+    try:
+        messages = db.get_messages(session_id)
+        count = _translate_history_to_store(store, messages)
+        with _BACKFILL_LOCK:
+            _BACKFILL_HW[project] = {
+                "session_id": session_id,
+                "store_next_seq": store.next_seq,
+            }
+        return {"project": project, "backfilled": count, "session": session_id}
+    except Exception as exc:  # noqa: BLE001 — fail-safe: never break connect
+        log.warning("gateway: backfill %s failed (live continues): %r",
+                    project, exc)
+        return {"project": project, "backfilled": 0, "session": session_id,
+                "skipped": "backfill_failed"}
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------- #
 # The driver: an in-process background coordinator owning the two upstream
 # WebSocket connections and their reader threads.
 # --------------------------------------------------------------------------- #
@@ -558,17 +816,94 @@ class GatewayDriver:
         self._alive = False
         self._relay_hook = None
         self._interrupt_hook = None
+        # §3.1 same-session pinning — the project's resolved NAMED Hermes
+        # session id + owning profile. Populated by :meth:`_resolve_named_session`
+        # on start (or taken straight from the config when supplied); the
+        # /api/pty is pinned to this session so app messages land in it (§3.3).
+        self._session_id: Optional[str] = config.session_id
+        self._session_profile: Optional[str] = config.profile
 
     # -- lifecycle ---------------------------------------------------------- #
 
+    def _resolve_named_session(self) -> None:
+        """Resolve the project's named Hermes session (same-session pinning, §3.1).
+
+        Sets :attr:`_session_id` / :attr:`_session_profile` from the project's
+        ACTUAL named session in state.db (via ``resolve_named_session_id``) when
+        the config did not already supply them, so both the PTY pinning (§3.3)
+        and the backfill (§3.2) agree with the CLI chat path on which session a
+        project is. Best-effort: any failure leaves them ``None`` (the driver
+        still connects — backfill is skipped and the PTY spawns a fresh session,
+        which is the pre-existing behavior, not a regression).
+        """
+        if self._session_id is not None and self._session_profile is not None:
+            return   # already pinned via config
+        try:
+            from routes_orchestrator import resolve_named_session_id
+            profile, _title, session_id = resolve_named_session_id(
+                self.config.project,
+                registry_path=getattr(self.config, "registry_path", None))
+            if self._session_profile is None:
+                self._session_profile = profile
+            if self._session_id is None:
+                self._session_id = session_id
+            if self._session_id:
+                log.info("gateway: %s pinned to named session %s (profile %s)",
+                         self.config.project, self._session_id,
+                         self._session_profile)
+        except Exception as exc:  # noqa: BLE001 — best-effort, never raise
+            log.warning("gateway: could not resolve named session for %s: %r",
+                        self.config.project, exc)
+
+    def _backfill(self) -> None:
+        """Backfill the store from the named session's history (§3.2).
+
+        Log-only on failure (and after ``_resolve_named_session`` this can
+        itself fail via the resolve step): a backfill that fails must NEVER
+        drop the live stream (design §4). ``backfill_named_session`` is
+        idempotent, so calling it on every start is safe — a reconnect with an
+        unchanged store/high-water is a no-op.
+        """
+        try:
+            result = backfill_named_session(
+                self.config.project,
+                registry_path=getattr(self.config, "registry_path", None))
+        except Exception as exc:  # noqa: BLE001 — never break start()
+            log.warning("gateway: backfill %s raised (live continues): %r",
+                        self.config.project, exc)
+            return
+        skipped = result.get("skipped")
+        if skipped:
+            log.debug("gateway: backfill %s skipped (%s)",
+                      self.config.project, skipped)
+        else:
+            log.info("gateway: backfilled %s with %d history frames for session %s",
+                     self.config.project, result.get("backfilled", 0),
+                     result.get("session"))
+
     def start(self) -> None:
         """Connect both upstream sockets and start the reader threads.
+
+        Order matters (the session-continuity contract, design §3.2/§3.3):
+
+          1. Resolve the project's NAMED Hermes session (§3.1) so we know which
+             session this project is and can pin / backfill it;
+          2. Backfill the store from that session's history (§3.2) BEFORE the
+             live feed opens, so iOS shows the whole conversation immediately;
+          3. Open /api/pty pinned to that named session (§3.3) + /api/events;
+          4. Start the live reader threads.
+
+        The backfill is log-only: a failure (e.g. state.db locked) logs and
+        continues — it must never drop the live stream (design §4); a later
+        reconnect retries it (idempotent).
 
         Raises ConnectionError if either upstream connection cannot be
         established (e.g. the gateway is down or the token is rejected).
         """
         if self._alive:
             return
+        self._resolve_named_session()
+        self._backfill()
         pty, events = self._connect_upstreams()
         self._pty = pty
         self._events = events
@@ -616,12 +951,19 @@ class GatewayDriver:
     def _connect_upstreams(self) -> tuple:
         """Open the /api/pty and /api/events connections (no-op gateway probe).
 
+        Read :meth:`start` for the ordering contract. The /api/pty path is
+        PINNED to the project's named session (``?profile=<profile>&resume=
+        <session_id>``, §3.3) so an app message lands in the SAME conversation
+        the CLI continues; /api/events stays plain token+channel (the feed is
+        per-channel; the pty publishes this project's session to it).
+
         Separated from :meth:`start` so tests can inject fake transport
         clients. Returns ``(pty, events)`` both connected. On failure the
         partially-opened pty is closed and :class:`ConnectionError` raised.
         """
         pty = _WSClient(self.config.host, self.config.port,
-                        self.config.ws_path(self._PTY_PATH))
+                        self.config.pty_path(self._session_id,
+                                             self._session_profile))
         events = _WSClient(self.config.host, self.config.port,
                            self.config.ws_path(self._EVENTS_PATH))
         pty.connect()
