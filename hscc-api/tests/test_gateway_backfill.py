@@ -33,6 +33,27 @@ import gateway_driver as gd
 from session_event import get_store, reset_stores
 from gateway_driver import GatewayConfig, GatewayDriver, backfill_named_session
 
+# ``hermes_state`` ships only with the hermes-agent runtime (the hermes venv).
+# The alternate p313 interpreter (scripts/run_tests.sh HSCC_TEST_PY=conda p313)
+# lacks it, so tests that build a real SessionDB state.db must SKIP there —
+# same honest-optional pattern as test_gateway_driver's corpus skip — while
+# running fully under the hermes venv. (The parent's test_session_resolver has
+# the identical dependency; this is a documented env gap, not a regression.)
+try:
+    from hermes_state import SessionDB as _SessionDB  # noqa: F401
+    _HAS_HERMES_STATE = True
+except Exception:
+    _HAS_HERMES_STATE = False
+
+
+@pytest.fixture
+def hs_state():
+    """Skip the whole state-db-backed test when hermes_state is unavailable."""
+    if not _HAS_HERMES_STATE:
+        pytest.skip("hermes_state not importable on this interpreter "
+                    "(needs the hermes-agent runtime / hermes venv)")
+    yield
+
 
 # --------------------------------------------------------------------------- #
 # Helpers: build a real temp registry + a real temp SessionDB state.db with a
@@ -139,7 +160,7 @@ def _known_history():
 # Acceptance 1 — backfill seeds the FULL history into the store
 # --------------------------------------------------------------------------- #
 
-def test_backfill_seeds_full_history(tmp_path, monkeypatch):
+def test_backfill_seeds_full_history(tmp_path, monkeypatch, hs_state):
     """Connecting a project backfills the store from the named session's real
     history in state.db → store contains the whole conversation immediately,
     before any live event."""
@@ -190,7 +211,8 @@ def test_backfill_seeds_full_history(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_backfill_is_idempotent_same_session_same_highwater(tmp_path,
-                                                            monkeypatch):
+                                                            monkeypatch,
+                                                            hs_state):
     """Re-backfilling the SAME session to the SAME store high-water (a
     reconnect with an unchanged store) is a no-op — no duplicate frames, seq
     stays contiguous."""
@@ -219,7 +241,7 @@ def test_backfill_is_idempotent_same_session_same_highwater(tmp_path,
     assert store.next_seq == 5
 
 
-def test_backfill_reruns_when_store_advanced(tmp_path, monkeypatch):
+def test_backfill_reruns_when_store_advanced(tmp_path, monkeypatch, hs_state):
     """A reconnect AFTER the store advanced (new live frames since the last
     backfill) is NOT the unchanged-high-water skip — it reruns and appends the
     full history. (This is the retry pathway; in production a reconnect usually
@@ -250,7 +272,7 @@ def test_backfill_reruns_when_store_advanced(tmp_path, monkeypatch):
 # Acceptance 4 (unit half) — backfill failure logs + continues, never breaks
 # --------------------------------------------------------------------------- #
 
-def test_backfill_no_session_skips_cleanly(tmp_path, monkeypatch):
+def test_backfill_no_session_skips_cleanly(tmp_path, monkeypatch, hs_state):
     """A registered project with no named session yet is a clean no-op
     (nothing to backfill), never an error, never a fake id."""
     reg = _write_registry(tmp_path, [
@@ -266,7 +288,8 @@ def test_backfill_no_session_skips_cleanly(tmp_path, monkeypatch):
     assert result["skipped"] == "no_session"
 
 
-def test_backfill_state_db_unreachable_is_fail_safe(tmp_path, monkeypatch):
+def test_backfill_state_db_unreachable_is_fail_safe(tmp_path, monkeypatch,
+                                                    hs_state):
     """An unreachable state.db (opener returns None) reports skipped, does not
     raise, and does not touch the store."""
     reg = _write_registry(tmp_path, [
@@ -287,7 +310,8 @@ def test_backfill_state_db_unreachable_is_fail_safe(tmp_path, monkeypatch):
 
 
 def test_backfill_read_failure_continues_and_retries_after(tmp_path,
-                                                           monkeypatch):
+                                                           monkeypatch,
+                                                           hs_state):
     """A backfill that FAILS mid-read (get_messages raises) is caught, reported
     as skipped, and — critically — does NOT break the live feed: the store is
     still writable for live frames. The next (re)connect retries + succeeds."""
@@ -355,7 +379,8 @@ def test_backfill_unknown_project_never_raises(tmp_path):
 # pinned to the named session (§3.1/§3.3)
 # --------------------------------------------------------------------------- #
 
-def test_start_resolves_and_backfills_before_live(tmp_path, monkeypatch):
+def test_start_resolves_and_backfills_before_live(tmp_path, monkeypatch,
+                                                  hs_state):
     """start() resolves the project's named session + backfills the store first,
     and the /api/pty path is pinned to that session (resume+profile) so an app
     message reaches the SAME named session the CLI continues (§3.3)."""
