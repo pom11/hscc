@@ -159,12 +159,18 @@ parent code, f9bceb4/22a3c11) were NOT modified.
 
 ## Suite status (both interpreters)
 
-hscc-api full suite green on the hermes venv: **812 passed, 1 skipped in 237s**
-(this run). The p313 interpreter result is captured in the parent handoffs
-(f9bceb4 803 passed / 1 skipped, merged main). Session-continuity-relevant
-files (`test_gateway_backfill.py`, `test_gateway_driver.py`,
-`test_session_resolver.py`, `test_project_permanent_session.py`): **43 passed,
-1 skipped** on the hermes venv.
+Both interpreters green on the full hscc-api suite:
+
+- **hermes venv:** 812 passed, 1 skipped (237s) — this run.
+- **p313 conda:** 805 passed, 8 skipped (237s) — this run. (The extra skips
+  are the `hermes_state`-backed tests that only run where the hermes runtime is
+  importable — documented in `test_gateway_backfill.py` as an honest env gap,
+  matching the parent's p313 result of 803/1.)
+
+Session-continuity-relevant files (`test_gateway_backfill.py`,
+`test_gateway_driver.py`, `test_session_resolver.py`,
+`test_project_permanent_session.py`): **43 passed, 1 skipped** on the hermes
+venv (the 1 skip is `hermes_state`-dependent on p313).
 
 ## Artifacts
 
@@ -178,12 +184,17 @@ files (`test_gateway_backfill.py`, `test_gateway_driver.py`,
 
 ```
 # bring up isolated serve (one-time):
-bash hscc-api/tests_gateway/setup_iso_home.sh
+bash hscc-api/tests_gateway/setup_iso_home.sh   # (or: python reset_iso_home.py)
 HERMES_HOME=/tmp/hscc_e2e_home HERMES_DASHBOARD_SESSION_TOKEN=iso_probe_token_7f3a9c2e \
   ~/.hermes/hermes-agent/venv/bin/hermes serve --isolated --port 9211 --skip-build &
+sleep 10
 # run the probe:
 ~/.hermes/hermes-agent/venv/bin/python hscc-api/tests_gateway/probe_04_e2e_continuum.py
 ```
 
-Allow ~10 min (model turns + lease wait). The live operator gateway on 9119 is
-never touched.
+probe_04 verifies A (determinism), B1-B4 (two-way into the named session), and
+C (error paths). Because the serve holds a ROLLING session-turn lease while the
+PTY session is open, the B5 CLI-continuation check is verified separately after
+releasing the lease (stop the isolated serve, then
+`b5_standalone.py`) — see the Session-turn lease finding above. The live operator
+gateway on 9119 is never touched.
