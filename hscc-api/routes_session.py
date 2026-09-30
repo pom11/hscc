@@ -66,6 +66,79 @@ def _speak_history(data: dict, project: str) -> str:
     return f"{n} {noun} in {project}."
 
 
+def _speak_resolve_session(data: dict) -> str:
+    """§B: name the project's session, honestly distinguishing no-session."""
+    project = data.get("project") or "project"
+    if data.get("has_session"):
+        return (f"{project} is pinned to named session "
+                f"{data.get('session')} on profile {data.get('profile')}.")
+    return f"{project} has not started a named session yet."
+
+
+def handle_resolve_session(server, ctx, query, body):
+    """GET /v1/projects/{name}/session — the project's NAMED Hermes session id.
+
+    The "same-session pinning" read (design
+    docs/design/2026-09-30-project-session-continuity.md §3.1): resolve a
+    registered project to the ACTUAL session id of its named Hermes
+    conversation in the owning ``<project>-orch`` profile's state.db, through
+    the same seam the CLI chat path uses for ``--continue``. Both the CLI chat
+    path and the WS-relay path (and the follow-on gateway driver, t_f731de64)
+    resolve the project's session via :func:`resolve_named_session_id`, so
+    they always agree on which session a project is.
+
+    Read-only — no ``confirm`` required, bearer auth only.
+
+    Response (200)::
+
+        { "project": "<name>", "profile": "<name>-orch",
+          "session": "<real session id>|null",
+          "has_session": true|false,
+          "speak": "..." }
+
+      * ``has_session: true`` -> ``session`` is the project's REAL named
+        Hermes session id in state.db.
+      * ``has_session: false`` -> the project has not started a named session
+        yet (honest "no session", not a fake id).
+
+    Unknown project -> 404 ``not_found``, matching every other
+    ``/v1/projects/{name}`` endpoint.
+    """
+    name = query.get("name")
+    if name is None or not str(name).strip():
+        raise ApiError(400, "bad_request", "missing project name")
+
+    # Canonicalize the project so unknown names 404 like every other
+    # /v1/projects/{name} endpoint (the flightdeck registry is the source of
+    # truth for which names exist).
+    try:
+        _registry.get_project(name, path=_registry_path(ctx))
+    except _registry.ProjectNotFoundError:
+        raise ApiError(
+            404, "not_found", f"no project named {name!r}",
+            f"Project {name} was not found.",
+        )
+
+    # Route through the shared same-session pinning primitive (lazy import —
+    # routes_orchestrator imports this module's sibling routes_project at load,
+    # so importing it here eagerly is avoided the same way routes_project
+    # lazily imports ``_session_health`` from it). UnknownProjectError /
+    # OrchestratorError propagate to the dispatcher's clean 404/400 handlers.
+    from routes_orchestrator import resolve_named_session_id
+    profile, title, session_id = resolve_named_session_id(
+        name, registry_path=_registry_path(ctx))
+
+    payload = {
+        "project": name,
+        "profile": profile,
+        "session_title": title,
+        "session": session_id,
+        "has_session": session_id is not None,
+    }
+    payload["speak"] = _speak_resolve_session(payload)
+    return 200, payload
+
+
 def handle_session_events(server, ctx, query, body):
     """GET /v1/projects/{name}/session/events — page the project's chat log."""
     name = query.get("name")
@@ -135,4 +208,9 @@ ROUTES.append((
     "GET",
     re.compile(r"^/v1/projects/(?P<name>[^/]+)/session/events$"),
     handle_session_events,
+))
+ROUTES.append((
+    "GET",
+    re.compile(r"^/v1/projects/(?P<name>[^/]+)/session$"),
+    handle_resolve_session,
 ))
