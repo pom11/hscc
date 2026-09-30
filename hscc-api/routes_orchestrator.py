@@ -629,6 +629,68 @@ def _open_profile_session_db(profile: str, read_only: bool = False):
         return None
 
 
+# --------------------------------------------------------------------------- #
+# Same-session pinning (design §3.1): project -> its NAMED Hermes session id
+# --------------------------------------------------------------------------- #
+
+def resolve_named_session_id(project, registry_path=None):
+    """Map a registered HSCC project -> its NAMED Hermes session id.
+
+    This is the "same-session pinning" primitive (design
+    docs/design/2026-09-30-project-session-continuity.md §3.1): it resolves a
+    project to the ACTUAL session id of its named Hermes conversation so the
+    CLI chat path, the WS-relay path, and (in the follow-on card t_f731de64)
+    the gateway driver all agree on which session a project is. Identity is
+    ``<project>-orch`` profile hosting a session titled ``<project>`` (the
+    ``--continue <session>`` target), resolved through the SAME state.db seam
+    ``_open_profile_session_db`` already provides — we read the session id by
+    title exactly the way ``hermes chat --continue <title>`` resolves it.
+
+    Returns a 3-tuple ``(profile, session_title, session_id)``:
+
+      * ``profile`` — the project's orchestrator profile (``<project>-orch``);
+      * ``session_title`` — the named-session TITLE this project owns
+        (``<project>`` by default; the registry may have persisted another —
+        ``resolve_orchestrator``'s ``session`` is the ``--continue`` arg);
+      * ``session_id`` — the ACTUAL session id in that profile's state.db, or
+        ``None`` when the project's named session row does NOT exist yet
+        (the honest "no session" result — never a fake id, never a crash).
+
+    Raises (the caller maps these to HTTP):
+      * :class:`UnknownProjectError` — the project is neither a registry
+        project nor the ``general`` sentinel. The handler maps this to
+        ``404 not_found``, matching every other ``/v1/projects/{name}``
+        endpoint.
+      * :class:`OrchestratorError` — a registry project that cannot resolve to
+        an orchestrator (e.g. no board); the handler maps it to 400.
+    """
+    resolved = resolve_orchestrator(project, path=registry_path)
+    profile = resolved["profile"]
+    title = resolved["session"]
+    try:
+        db = _open_profile_session_db(profile, read_only=True)
+    except Exception:
+        # The opener itself failed (unreadable/locked state.db, unresolvable
+        # profile). For resolution this is the honest "no session yet" case —
+        # nothing to continue, nothing to fake.
+        return profile, title, None
+    if db is None:
+        # The profile / its state.db is not reachable — for resolution this is
+        # the honest "no session yet" case (nothing to continue, nothing to
+        # fake), consistent with every other fail-safe in this module.
+        return profile, title, None
+    try:
+        session_id = db.resolve_session_by_title(title)
+    except Exception:
+        # A read failure on the sessions table is NOT a session id — report
+        # "no session" honestly rather than guessing (defaulting to project
+        # name would be a fake id; that is what this function must never do).
+        session_id = None
+    finally:
+        db.close()
+    return profile, title, session_id
+
+
 def _ensure_compaction_threshold(profile: str) -> dict:
     """ENSURE the profile's ``compression.threshold_tokens`` makes native
     compaction fire EARLY (the PRIMARY context-health mechanism, t_a8e9b7ff).
