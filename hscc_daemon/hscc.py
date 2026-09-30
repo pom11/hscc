@@ -962,6 +962,12 @@ def main():
         theme.make_console().print(_get_help_text())
         sys.exit(0)
 
+    # --version / -v -> print the version banner (e.g. "hscc 2.4.0") and exit
+    # 0, before any other dispatch. Same source of truth as the banner.
+    if args[0] in ("--version", "-v"):
+        print(f"hscc {_get_version()}")
+        sys.exit(0)
+
     cmd = args[0]
 
     # 'help' subcommand
