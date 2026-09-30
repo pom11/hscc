@@ -5,6 +5,7 @@ and that existing daemon dispatch is preserved.
 """
 import io
 import json
+import re
 import sys
 import pytest
 from contextlib import redirect_stdout, redirect_stderr
@@ -59,6 +60,43 @@ class TestFullHelp:
     def test_help_contains_advanced_footer(self, monkeypatch):
         output = self._run_help([], monkeypatch)
         assert "hscc help advanced" in output
+
+
+class TestVersionFlag:
+    """`hscc --version` / `hscc -v` prints the version banner and exits 0."""
+
+    def _run_version(self, args, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["hscc", *args])
+        from hscc_daemon import hscc as hscc_mod
+
+        out = io.StringIO()
+        with redirect_stdout(out), pytest.raises(SystemExit) as exc:
+            hscc_mod.main()
+        assert exc.value.code == 0
+        return out.getvalue()
+
+    def test_version_flag(self, monkeypatch):
+        output = self._run_version(["--version"], monkeypatch)
+        # A version token, not a pinned literal — survives release bumps.
+        assert output.startswith("hscc ")
+        assert re.search(r"\d+\.\d+\.\d+", output)
+
+    def test_version_flag_short(self, monkeypatch):
+        output = self._run_version(["-v"], monkeypatch)
+        assert output.strip().startswith("hscc ")
+
+    def test_version_equals_help_version(self, monkeypatch):
+        version_output = self._run_version(["--version"], monkeypatch)
+        # The version flag surfaces exactly the help banner's version token.
+        help_out = io.StringIO()
+        monkeypatch.setattr(sys, "argv", ["hscc"])
+        from hscc_daemon import hscc as hscc_mod
+        with redirect_stdout(help_out), pytest.raises(SystemExit):
+            hscc_mod.main()
+        help_match = re.search(r"v(\d+\.\d+\.\d+)", help_out.getvalue())
+        flag_match = re.search(r"(\d+\.\d+\.\d+)", version_output)
+        assert help_match and flag_match
+        assert help_match.group(1) == flag_match.group(1)
 
 
 class TestPerCommandHelp:
