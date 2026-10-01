@@ -108,16 +108,32 @@ def _probe_tcp(host: str, port: int, timeout: float = 1.0) -> bool:
 
 
 def _serve_env(env) -> dict:
-    """Env for the spawned serve: inherit parent, add the session token.
+    """Env for the spawned serve: inherit parent, add the session token and
+    force a LOOPBACK-only public URL.
 
-    The token is the one secret a driver needs to reach ``/api/pty`` and
-    ``/api/events``. It is minted here (or reused across drivers for the same
-    serve) and passed ONLY via the subprocess env + the in-memory module state
-    — never logged, never written to disk.
+    Two reasons both matter — confirmed empirically against the real operator
+    home (which declares ``dashboard.public_url: http://192.168.88.244:3000``):
+
+      * the session token: the one secret a driver needs to reach ``/api/pty``
+        and ``/api/events`` (minted here, passed ONLY via subprocess env +
+        in-memory module state — never logged, never written to disk);
+      * ``HERMES_DASHBOARD_PUBLIC_URL=http://127.0.0.1:1``: the operator's
+        REAL public_url makes the serve engage the TICKET-ONLY auth gate even
+        on a loopback bind, which REJECTS the driver's legacy ``?token=``
+        auth (the GatewayDriver only supports it — proven on the isolated
+        probe, absent on the live deploy). Overriding the public_url to a
+        loopback host keeps ``auth_required=False`` so the ``?token=`` path is
+        accepted, while the serve itself stays bound to 127.0.0.1 with no
+        wider network surface. It still runs on the REAL default home
+        (``HERMES_HOME`` is not changed) so it resolves the project's real
+        profile (``~/.hermes/profiles/<name>``) and its real sessions.
     """
     e = dict(env)
     if _serve_token:
         e["HERMES_DASHBOARD_SESSION_TOKEN"] = _serve_token
+    # Loopback public URL -> non-gated serve (driver's ?token= auth accepted).
+    # If the operator already set a loopback URL we leave it; else force ours.
+    e.setdefault("HERMES_DASHBOARD_PUBLIC_URL", "http://127.0.0.1:1")
     return e
 
 
