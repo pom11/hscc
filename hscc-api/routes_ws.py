@@ -352,6 +352,15 @@ def handle_session_ws(server, ctx, query, handler):
             f"Project {name} was not found.",
         )
 
+    # t_29e033a4: opening a project's live stream is the MOUNT trigger — lazily
+    # mount a GatewayDriver so this project's store gets backfilled from its
+    # named session history (design §3.2) and live events flow in (§3.3). Gated
+    # on the supervised serve sidecar being up; INERT in hermetic tests (no
+    # serve), so the WS route behaves exactly as before. Fail-safe: a failed
+    # mount never breaks the stream.
+    from gateway_bridge import ensure_mounted
+    ensure_mounted(name, _registry_path(ctx))
+
     # Resume cursor: the seq the client has already rendered. Optional; when
     # absent, replay everything still retained in the store.
     after = 0
