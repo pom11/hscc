@@ -130,6 +130,22 @@ def _load_api_server():
     return api_server
 
 
+def _load_gateway_bridge():
+    """Import the hscc-api ```gateway_bridge`` module (optionally).
+
+    Returns the module, or ``None`` when it cannot be imported — so the live
+    serve-sidecar wiring fails safe: a missing/new plugin never stops the API
+    from serving. ``_load_api_server`` has already put the hscc-api dir on
+    sys.path; we reuse that.
+    """
+    _load_api_server()  # ensure the hscc-api dir is on sys.path
+    try:
+        import gateway_bridge  # noqa: F401
+    except ImportError:
+        return None
+    return gateway_bridge
+
+
 def _has_flag(argv, name):
     """True if ``name`` appears in ``argv`` (a bare boolean flag)."""
     return name in argv
@@ -238,6 +254,27 @@ def _serve(api, bind_override, port_override):
         f"HSCC API listening on {addr['host']}:{addr['port']}",
         log_file=API_LOG_FILE, pid_file=API_PID_FILE,
     )
+    # t_29e033a4: own the live ``hermes serve`` sidecar as a supervised child
+    # of the API process so the session-continuity bridge actually delivers:
+    # the app can live-view the operator's project session because a driver
+    # can connect to this serve. Best-effort — if the serve cannot boot, the
+    # API still runs (the WS relay's REST fallback stays authoritative) and we
+    # log why. The serve is killed when the API exits (finally below).
+    try:
+        _bridge = _load_gateway_bridge()
+        if _bridge is not None:
+            port = _bridge_default_serve_port(server)
+            if not _bridge.start_serve(port=port):
+                daemon_ops.log(
+                    "HSCC API: live gateway sidecar NOT started (bridge "
+                    "inert; WS relay REST fallback stays authoritative)",
+                    log_file=API_LOG_FILE, pid_file=API_PID_FILE,
+                )
+    except Exception as exc:  # never let a sidecar failure stop the API
+        daemon_ops.log(
+            f"HSCC API: gateway sidecar startup skipped ({exc})",
+            log_file=API_LOG_FILE, pid_file=API_PID_FILE,
+        )
     try:
         server.serve_forever()
     except Exception as exc:
@@ -246,7 +283,37 @@ def _serve(api, bind_override, port_override):
             log_file=API_LOG_FILE, pid_file=API_PID_FILE,
         )
     finally:
+        # Tear down the sidecar (drivers release their turn leases, then the
+        # serve process is terminated). Best-effort, never blocks shutdown.
+        try:
+            _bridge2 = _load_gateway_bridge()
+            if _bridge2 is not None:
+                _bridge2.shutdown()
+        except Exception:
+            pass
         daemon_ops.write_stopped(API_PID_FILE)
+
+
+def _bridge_default_serve_port(server) -> int:
+    """Resolve the serve-sidecar port for the live API.
+
+    Uses the documented default 9119 unless ``~/.hscc/api.json`` pins a
+    ``gateway.serve_port`` (a forward-compatible override; the config is read
+    through the server's own ctx so it cannot diverge from how the API itself
+    resolved its config). Fails safe to 9119 on any error.
+    """
+    import os
+    try:
+        cfg_path = os.path.expanduser("~/.hscc/api.json")
+        import json as _json
+        if os.path.exists(cfg_path):
+            raw = _json.loads(open(cfg_path).read())
+            sp = (raw or {}).get("gateway", {}).get("serve_port")
+            if isinstance(sp, int) and 0 < sp < 65536:
+                return sp
+    except Exception:
+        pass
+    return 9119
 
 
 def _sigterm_handler(signum, frame):
