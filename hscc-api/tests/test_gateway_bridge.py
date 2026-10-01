@@ -140,6 +140,23 @@ def test_start_serve_success_sets_up_and_token(monkeypatch):
     # The token is injected into the serve env.
     env = bridge._serve_env({})
     assert env.get("HERMES_DASHBOARD_SESSION_TOKEN") == bridge._serve_token_value()
+    # A public_url override to a LOOPBACK host is forced into the serve env so
+    # the real operator home's non-loopback dashboard.public_url does NOT gate
+    # the serve (gated serves reject the driver's legacy ?token= auth with 403
+    # — proven live on t_29e033a4). Loopback keeps it a pure bridge with no
+    # wider network surface.
+    assert env.get("HERMES_DASHBOARD_PUBLIC_URL") == "http://127.0.0.1:1"
+
+
+def test_serve_env_forces_loopback_public_url():
+    """A missing or non-loopback dashboard URL is overridden to the loopback
+    sentinel (so the serve is NOT ticket-gated and the driver's ?token= auth
+    is accepted); an explicitly-loopback URL is left as-is."""
+    assert bridge._serve_env({}).get("HERMES_DASHBOARD_PUBLIC_URL") \
+        == "http://127.0.0.1:1"
+    assert bridge._serve_env(
+        {"HERMES_DASHBOARD_PUBLIC_URL": "http://127.0.0.1:3000"}
+    ).get("HERMES_DASHBOARD_PUBLIC_URL") == "http://127.0.0.1:3000"
 
 
 # --------------------------------------------------------------------------- #
