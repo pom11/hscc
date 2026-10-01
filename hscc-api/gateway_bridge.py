@@ -112,7 +112,7 @@ def _serve_env(env) -> dict:
     force a LOOPBACK-only public URL.
 
     Two reasons both matter — confirmed empirically against the real operator
-    home (which declares ``dashboard.public_url: http://10.0.0.244:3000``):
+    home (which declares ``dashboard.public_url: http://10.0.0.x:3000``):
 
       * the session token: the one secret a driver needs to reach ``/api/pty``
         and ``/api/events`` (minted here, passed ONLY via subprocess env +
