@@ -156,6 +156,14 @@ def handle_session_events(server, ctx, query, body):
             f"Project {name} was not found.",
         )
 
+    # t_29e033a4: viewing a project's history is also a MOUNT trigger — lazily
+    # mount a GatewayDriver (gated on the serve sidecar being up; inert in
+    # tests) so this project's store is backfilled from its named session
+    # history and the app sees the REAL conversation, not an empty store.
+    # Fail-safe: a failed/no-op mount never breaks the history read.
+    from gateway_bridge import ensure_mounted
+    ensure_mounted(name, _registry_path(ctx))
+
     # Resolve the project's PERMANENT session id (idempotent, deterministic):
     # the same id the chat relay (routes_ws._default_relay) invokes, so history
     # and the live relay read/write the SAME session for a project. Persisting
