@@ -77,6 +77,24 @@ from session_event import (  # noqa: E402
 log = logging.getLogger("hscc-api.gateway")
 
 
+def _is_tui_turn_lease(holder: str) -> bool:
+    """True when a ``session_turn_leases`` holder is a TUI-platform lease.
+
+    The serve's durable turn-lease holder is
+    ``pid=<pid>:turn=<turn id>:platform=<platform>``
+    (hermes ``agent/turn_facade_lease.py``). We only ever release a lease the
+    serve holds on OUR pinned session — the TUI surface this driver owns — so
+    we must not release a lease from any other surface. Extract the last
+    ``:platform=`` value and match the ``tui`` prefix (defensive against a
+    future ``platform=tui:<sub>``; never matches telegram / desktop / cli, etc.).
+    """
+    marker = ":platform="
+    idx = holder.rfind(marker)
+    if idx < 0:
+        return False
+    return holder[idx + len(marker):].startswith("tui")
+
+
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
@@ -1072,12 +1090,84 @@ class GatewayDriver:
 
     # -- teardown ----------------------------------------------------------- #
 
+    def _release_turn_lease(self) -> None:
+        """Release the serve's durable session-turn lease on our pinned session.
+
+        While this driver holds a PTY open on the project's named session, the
+        upstream ``hermes serve`` keeps a ROLLING durable turn-lease row in the
+        profile's ``session_turn_leases`` table (holder
+        ``pid=<serve pid>:turn=<turn id>:platform=tui``). If we did nothing, an
+        immediate ``hermes chat --continue <project>`` on the operator's CLI
+        would be refused SESSION_NOT_OWNED ("this chat is open in another
+        Hermes window") until the serve restarted or released. On stop() we
+        clear that row so the handoff is immediate.
+
+        Reuses the SAME state.db seam as the backfill (``_open_profile_session_db``,
+        §3.2) — no second transport to the fleet — and releases through hermes'
+        own first-class primitive (``SessionDB.release_session_turn_lease``),
+        which re-derives the conversation key on the write connection and is
+        identity-checked + idempotent.
+
+        SAFETY / SCOPING: only a ``platform=tui`` lease on OUR conversation
+        (the lineage key of ``self._session_id``) is released. A lease from any
+        other surface on this conversation is left untouched, as are all other
+        conversations. ``release_session_turn_lease`` re-checks the holder at
+        delete time, so even a takeover that lands between our read and the
+        delete is a safe no-op (we never delete another process's lease).
+
+        Best-effort and idempotent by construction: no pinned session, no row,
+        an already-released / non-TUI lease, an unreachable profile DB, or any
+        exception here is a clean no-op that never raises from stop().
+        """
+        session_id = self._session_id
+        profile = self._session_profile
+        if not session_id or not profile:
+            return
+        try:
+            from routes_orchestrator import _open_profile_session_db
+            db = _open_profile_session_db(profile, read_only=False)
+        except Exception:  # noqa: BLE001 — best-effort, never break stop()
+            return
+        if db is None:
+            return
+        try:
+            # hermes' own key derivation (compression-parent walk to the
+            # conversation/lineage root) — the row the serve's acquire used.
+            key = db._session_turn_lease_key(session_id)
+            row = db._read_one(
+                "SELECT holder FROM session_turn_leases WHERE conversation_id = ?",
+                (key,))
+            holder = row[0] if row is not None else None
+            if holder and _is_tui_turn_lease(holder):
+                # First-class, identity-checked, idempotent release; a no-op if
+                # the holder already changed or the row is gone.
+                db.release_session_turn_lease(session_id, holder)
+                log.info("gateway: released TUI turn lease on session %s "
+                         "(project %s, profile %s)",
+                         session_id, self.config.project, profile)
+            elif holder:
+                log.debug("gateway: not releasing %s turn lease on %s (not a "
+                          "TUI holder: %r)", self.config.project, session_id, holder)
+        except Exception as exc:  # noqa: BLE001 — never break stop()
+            log.warning("gateway: failed to release turn lease on %s: %r",
+                        session_id, exc)
+        finally:
+            try:
+                db.close()
+            except Exception:  # noqa: BLE001
+                pass
+
     def stop(self) -> None:
-        """Close both upstream sockets and stop the reader threads."""
+        """Close both upstream sockets, stop the reader threads, and release the
+        pinned session's turn lease for an immediate CLI handoff."""
         if not self._alive:
             return
         self._alive = False
         self._stop_evt.set()
+        # Release the serve's durable turn lease on our pinned session so the
+        # operator's CLI `--continue` succeeds immediately (t_4bcfd5cf).
+        # Idempotent + best-effort; must never raise.
+        self._release_turn_lease()
         # Restore the default (no-op) WS relay hook for our project.
         if self._relay_hook is not None:
             import routes_ws as _routes_ws
