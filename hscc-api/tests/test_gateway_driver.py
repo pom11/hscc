@@ -410,3 +410,187 @@ def test_interrupt_fails_when_not_connected():
     drv = GatewayDriver(cfg)
     assert drv.interrupt() is False
 
+
+# --------------------------------------------------------------------------- #
+# t_4bcfd5cf — stop() releases the serve's session-turn lease (immediate CLI
+# handoff). Hermetic: _open_profile_session_db is redirected through monkeypatch
+# at a fake SessionDB, so no test touches the operator's real profile tree or
+# hermes serve (the same seam test_gateway_backfill.py uses).
+# --------------------------------------------------------------------------- #
+
+class _FakeLeaseDB:
+    """A minimal SessionDB stand-in recording lease-release behaviour.
+
+    Mirrors the real SessionDB surface the driver touches: the conversation-key
+    derivation, the holder read, the identity-checked release, and close().
+    ``holder`` is what ``_read_one`` returns for the conversation; ``None``
+    means no lease row (the idle / already-stopped case).
+    """
+
+    def __init__(self, holder=None):
+        self.holder = holder
+        self.releases = []      # (session_id, holder) pairs passed to release
+        self.reads = []         # (sql, params) pairs passed to _read_one
+        self.closed = False
+        self.keyed = None       # session_id passed to _session_turn_lease_key
+
+    def _session_turn_lease_key(self, session_id):
+        self.keyed = session_id
+        return f"conv-{session_id}"
+
+    def _read_one(self, sql, params):
+        self.reads.append((sql, params))
+        if self.holder is None:
+            return None
+        return (self.holder,)
+
+    def release_session_turn_lease(self, session_id, holder):
+        self.releases.append((session_id, holder))
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def tui_driver():
+    """A stopped-from-alive GatewayDriver pinned to a named session/profile.
+
+    ``_alive=True`` selects the ``stop()`` teardown path; the config supplies
+    session_id + profile so releasing targets the pinned conversation. No real
+    sockets / threads are involved (the driver was never started)."""
+    cfg = GatewayConfig(host="127.0.0.1", port=1, token="t", project="hscc",
+                        session_id="sess-123", profile="hscc-orch")
+    drv = GatewayDriver(cfg)
+    drv._alive = True
+    return drv
+
+
+def _redirect_profile_db(monkeypatch, fake):
+    """Point ``_open_profile_session_db`` at *fake*; return the recorded opener
+    calls (list of ``read_only`` values) so tests can assert write-mode use."""
+    import routes_orchestrator as ro
+    calls = []
+
+    def _open(profile, read_only=False):
+        calls.append(read_only)
+        return fake
+    monkeypatch.setattr(ro, "_open_profile_session_db", _open)
+    return calls
+
+
+def test_is_tui_turn_lease():
+    """The holder matcher only admits TUI-platform turn leases."""
+    assert gd._is_tui_turn_lease("pid=999:turn=t-1:platform=tui") is True
+    assert gd._is_tui_turn_lease("pid=1:turn=x:platform=tui") is True
+    # A TUI-platform lease with a future sub-qualifier still matches.
+    assert gd._is_tui_turn_lease("pid=2:turn=y:platform=tui:relay") is True
+    # Other surfaces — never released.
+    assert gd._is_tui_turn_lease("pid=3:turn=z:platform=telegram") is False
+    assert gd._is_tui_turn_lease("pid=4:turn=w:platform=desktop") is False
+    assert gd._is_tui_turn_lease("pid=5:turn=v:platform=cli") is False
+    # Malformed / missing platform field is not a TUI lease.
+    assert gd._is_tui_turn_lease("pid=6") is False
+    assert gd._is_tui_turn_lease("") is False
+    assert gd._is_tui_turn_lease("pid=7:platform=") is False
+
+
+def test_stop_releases_tui_turn_lease(monkeypatch, tui_driver):
+    """stop() releases the serve's TUI turn lease on the pinned session via the
+    first-class primitive, then closes the DB."""
+    fake = _FakeLeaseDB(holder="pid=999:turn=t-1:platform=tui")
+    calls = _redirect_profile_db(monkeypatch, fake)
+
+    tui_driver.stop()
+
+    # The opener was used once, in WRITE mode (the delete needs a writable db).
+    assert calls == [False]
+    # The release reached hermes' primitive with the exact discovered holder.
+    assert fake.releases == [("sess-123", "pid=999:turn=t-1:platform=tui")]
+    # The key derivation + holder read went through the same session.
+    assert fake.keyed == "sess-123"
+    assert fake.reads[0][1] == ("conv-sess-123",)
+    # The db is closed so no handle leaks.
+    assert fake.closed is True
+
+
+def test_stop_with_no_lease_is_clean_noop(monkeypatch, tui_driver):
+    """stop() with no turn-lease row is a no-op — no release, no error."""
+    fake = _FakeLeaseDB(holder=None)
+    calls = _redirect_profile_db(monkeypatch, fake)
+
+    tui_driver.stop()
+
+    assert calls == [False]
+    assert fake.releases == []
+    assert fake.closed is True
+
+
+def test_stop_does_not_release_non_tui_lease(monkeypatch, tui_driver):
+    """A lease from another surface (e.g. telegram) on the SAME conversation is
+    never released — release is scoped to TUI-platform leases only."""
+    fake = _FakeLeaseDB(holder="pid=111:turn=tg-9:platform=telegram")
+    calls = _redirect_profile_db(monkeypatch, fake)
+
+    tui_driver.stop()
+
+    assert calls == [False]
+    assert fake.releases == []
+    assert fake.closed is True
+
+
+def test_stop_already_stopped_does_not_open_db(monkeypatch):
+    """stop() on an already-stopped driver (not alive) returns before touching
+    the state.db — no opener call, no release."""
+    cfg = GatewayConfig(host="127.0.0.1", port=1, token="t", project="hscc",
+                        session_id="sess-123", profile="hscc-orch")
+    drv = GatewayDriver(cfg)
+    drv._alive = False  # not started / already stopped
+    fake = _FakeLeaseDB(holder="pid=999:turn=t-1:platform=tui")
+    calls = _redirect_profile_db(monkeypatch, fake)
+
+    drv.stop()
+
+    assert calls == []
+    assert fake.releases == []
+    assert fake.closed is False
+
+
+def test_stop_without_pinned_session_does_not_open_db(monkeypatch):
+    """stop() with no pinned session/profile skips release without opening the
+    db (a driver that never resolved its named session)."""
+    cfg = GatewayConfig(host="127.0.0.1", port=1, token="t", project="hscc")
+    drv = GatewayDriver(cfg)
+    drv._alive = True
+    fake = _FakeLeaseDB(holder="pid=999:turn=t-1:platform=tui")
+    calls = _redirect_profile_db(monkeypatch, fake)
+
+    drv.stop()
+
+    assert calls == []
+    assert fake.releases == []
+
+
+def test_stop_unreachable_db_is_clean_noop(monkeypatch, tui_driver):
+    """stop() with an unreachable profile DB (opener returns None) is a clean
+    no-op — never raises."""
+    import routes_orchestrator as ro
+    monkeypatch.setattr(ro, "_open_profile_session_db",
+                        lambda profile, read_only=False: None)
+
+    tui_driver.stop()  # must not raise
+
+
+def test_stop_release_exception_is_swallowed(monkeypatch, tui_driver):
+    """An exception inside the release path never propagates out of stop() —
+    the driver always stops cleanly (best-effort contract)."""
+    class _ExplodingDB(_FakeLeaseDB):
+        def _session_turn_lease_key(self, session_id):
+            raise RuntimeError("boom")
+
+    fake = _ExplodingDB(holder="pid=999:turn=t-1:platform=tui")
+    calls = _redirect_profile_db(monkeypatch, fake)
+
+    tui_driver.stop()  # must not raise
+    assert calls == [False]
+
+
