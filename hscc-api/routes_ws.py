@@ -53,9 +53,11 @@ from session_event import (  # noqa: E402
     TYPE_ERROR,
     TYPE_HELLO,
     TYPE_MESSAGE,
+    TYPE_SYSTEM,
     ErrorPayload,
     HelloPayload,
     MessagePayload,
+    SystemPayload,
     get_store,
 )
 import ws_frame  # noqa: E402
@@ -128,12 +130,41 @@ def _handle_client_send(sock: socket.socket, project: str, payload: dict) -> Non
             "payload": {"code": "bad_send", "message": "send requires non-empty text"},
         }))
         return
+    text = text.strip()
     get_store(project).append(
-        TYPE_MESSAGE, MessagePayload(role="user", delta=text.strip(), done=True))
+        TYPE_MESSAGE, MessagePayload(role="user", delta=text, done=True))
+
+    # t_f109e7ea: honest state, not a silent ack. Before claiming the turn we
+    # check whether the project's named session is owned by the operator's
+    # interactive CLI REPL. Hermes refuses any other driver (SESSION_NOT_OWNED,
+    # 4090) before a turn can run, so in that state the message is received
+    # but CANNOT drive a reply — we tell the operator plainly instead of
+    # pretending "working" and then going quiet (the exact complaint this card
+    # fixes). The notice still surfaces the message WAS received (echo above).
+    import routes_orchestrator as _ro
+    busy_owner = _ro.detect_active_cli_owner(project, _ro._registry_path(None))
+    if busy_owner is not None:
+        get_store(project).append(
+            TYPE_SYSTEM, SystemPayload(
+                kind="session_busy",
+                details={"surface": "cli",
+                         "message": ("Received. The interactive CLI is open on "
+                                     "this session, so a reply is not being "
+                                     "generated here. Resume in the CLI to "
+                                     "continue the conversation 1:1.")}))
+        return  # do not relay into a session whose turn another surface drives
+
+    # t_f109e7ea: the "orchestrator is working" indicator — emitted immediately
+    # so the app always sees the turn start, before the (possibly minutes-long)
+    # reply streams in. The assistant reply (streamed deltas + done) follows via
+    # the attached driver (serve) or the REST job fallback.
+    get_store(project).append(
+        TYPE_SYSTEM, SystemPayload(kind="working", details={"text": text}))
+
     # Increment 3: forward to the attached hermes serve gateway (if any). The
     # hook defaults to a no-op when no GatewayDriver is running, so the WS
     # endpoint stays decoupled and hermetically testable (test_ws_route).
-    relay_user_message(project, text.strip())
+    relay_user_message(project, text)
 
 
 def _default_relay(project: str, text: str) -> bool:
