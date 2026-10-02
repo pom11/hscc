@@ -691,6 +691,67 @@ def resolve_named_session_id(project, registry_path=None):
     return profile, title, session_id
 
 
+def _active_session_cli_owner(profile: str, session_id: str):
+    """Read hermes' active-session registry for a CLI owner of ``session_id``.
+
+    Reads hermes' own first-class registry snapshot (``<profile>/runtime/
+    active_sessions.json``) via its public ``active_session_registry_snapshot``
+    API — never our own bookkeeping and never a write. ``profile`` must already
+    be normalized + exist (the caller checks). Returns the matching registry
+    entry dict, or ``None``; raises on a real read failure (the caller's
+    fail-safe catches it).
+    """
+    from hermes_cli import profiles as profiles_mod
+    from hermes_cli.active_sessions import active_session_registry_snapshot
+    home = profiles_mod.get_profile_dir(profile)
+    leases = active_session_registry_snapshot(home, strict=False)
+    for entry in leases:
+        if entry.get("session_id") == session_id and \
+                (entry.get("surface") or "").lower() == "cli":
+            return entry
+    return None
+
+
+def detect_active_cli_owner(project, registry_path=None):
+    """Return the interactive-CLI lease entry owning ``project``'s session, if any.
+
+    t_f109e7ea: the app→session direction silently fails when the operator's
+    interactive CLI REPL holds the project's named session. Hermes enforces
+    ONE active driver per session (active-session registry,
+    ``<profile>/runtime/active_sessions.json``) and refuses every other driver
+    with SESSION_NOT_OWNED (4090) BEFORE admission — so neither the serve PTY
+    nor a headless ``-Q`` chat can drive a reply, and the app message never
+    reaches state.db (invisible to the operator's CLI ``--continue``).
+
+    We detect that state here so the WS relay can surface an HONEST notice
+    instead of a silent ack. This reads hermes' own first-class registry
+    snapshot (``_active_session_cli_owner``) for the project's named-session
+    owner — the same read-only, hermes-owned seam ``_open_profile_session_db``
+    / ``resolve_named_session_id`` already use — never our own bookkeeping and
+    never a write.
+
+    Returns the registry entry dict when a LIVE ``surface="cli"`` owner holds
+    the session, else ``None``. Fail-safe: any resolution/read failure returns
+    ``None`` (``None`` means \"not provably CLI-owned\", so the relay still
+    attempts the turn rather than assuming a blockage).
+    """
+    try:
+        from hermes_cli import profiles as profiles_mod
+        profile, _title, session_id = resolve_named_session_id(
+            project, registry_path=registry_path)
+        if not session_id:
+            return None
+        canon = profiles_mod.normalize_profile_name(profile)
+        if not profiles_mod.profile_exists(canon):
+            return None
+    except Exception:  # noqa: BLE001 — fail-safe: never break the send path
+        return None
+    try:
+        return _active_session_cli_owner(canon, session_id)
+    except Exception:  # noqa: BLE001 — fail-safe: never break the send path
+        return None
+
+
 def _ensure_compaction_threshold(profile: str) -> dict:
     """ENSURE the profile's ``compression.threshold_tokens`` makes native
     compaction fire EARLY (the PRIMARY context-health mechanism, t_a8e9b7ff).
