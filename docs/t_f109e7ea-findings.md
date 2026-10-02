@@ -1,7 +1,9 @@
 # t_f109e7ea — App→CLI two-way: working/reasoning indicator + 1:1 session surfacing
 
 ## Status
-In progress. Root cause confirmed; design in this doc.
+Implementation complete + unit-tested. Suite green under both interpreters.
+Pending: merge-own-branch-to-main, install_payload deploy, honest upstream
+constraint flagged at completion.
 
 ## Root cause (verified against hermes-agent source by delegation)
 The app→session direction fails to drive a reply for ONE confirmed reason:
