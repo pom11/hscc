@@ -47,6 +47,12 @@ def fakes(monkeypatch):
     monkeypatch.setattr(routes_ws, "_registry", fake_registry)
     monkeypatch.setattr(
         routes_ws, "_registry_path", lambda ctx: "/tmp/fake-registry.yaml")
+    # t_f109e7ea: the send path checks for an active CLI owner via
+    # routes_orchestrator. Stub it to its benign default so WS tests stay
+    # deterministic and never read the real operator registry on the host.
+    import routes_orchestrator as _ro
+    monkeypatch.setattr(
+        _ro, "detect_active_cli_owner", lambda project, registry_path=None: None)
     return {"_registry": fake_registry}
 
 
