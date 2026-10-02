@@ -98,6 +98,12 @@ def _install_backing(monkeypatch, invoke):
     monkeypatch.setattr(ro, "_registry_path", lambda ctx: "/dev/null")
     monkeypatch.setattr(ro, "_backing_resolve", _fake_backing_resolve)
     monkeypatch.setattr(ro, "_backing_invoke", _fake_backing_invoke)
+    # t_f109e7ea: the WS send path checks for an active CLI owner before
+    # relaying. Stub it HERE to its benign default (no CLI owner) so the relay
+    # tests exercise the relay outcome deterministically and never read the
+    # real operator registry on the host. The dedicated detector tests control
+    # it explicitly.
+    monkeypatch.setattr(ro, "detect_active_cli_owner", lambda project, registry_path=None: None)
     # The relay persists/resolves the session via routes_ws's registry
     # (ensure_session). Fake it so NO test writes to the real ~/.flightdeck
     # registry. Idempotent default = project name.
