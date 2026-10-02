@@ -1,9 +1,10 @@
 # t_f109e7ea — App→CLI two-way: working/reasoning indicator + 1:1 session surfacing
 
 ## Status
-Implementation complete + unit-tested. Suite green under both interpreters.
-Pending: merge-own-branch-to-main, install_payload deploy, honest upstream
-constraint flagged at completion.
+Implementation complete + unit-tested + proven on installed runtime code.
+Suite green under both interpreters. Merged to origin/main (8c89c3e),
+deployed via install_payload, API restarted (PID 27659, serve sidecar on
+9119). Upstream constraint flagged to operator at completion.
 
 ## Root cause (verified against hermes-agent source by delegation)
 The app→session direction fails to drive a reply for ONE confirmed reason:
