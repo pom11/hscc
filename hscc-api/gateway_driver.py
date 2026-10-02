@@ -56,7 +56,7 @@ import struct
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 # The repo's server-side framing (used for the shared opcode constants + the
 # handshake accept computation; the client path re-implements masking/decode).
@@ -430,6 +430,12 @@ class FrameTranslator:
         self._store = store
         self._in_assistant = False      # an assistant message turn is open
         self._msg_buf: list[str] = []   # pending assistant text (unused with streaming)
+        # t_93f1ba4d: optional callback fired when an assistant turn is closed
+        # (the messages of that serve-driven turn are now persisted in
+        # state.db). The driver uses it to advance the shared store-tail
+        # watermark so the disk poller does not re-translate those messages as
+        # duplicates. Only used with live translation, never in backfill.
+        self.on_turn_closed: Optional[Callable[[], None]] = None
 
     # -- helpers ------------------------------------------------------------ #
 
@@ -541,6 +547,14 @@ class FrameTranslator:
                 TYPE_MESSAGE,
                 MessagePayload(role="assistant", delta="", done=True),
             )
+            # t_93f1ba4d: a serve-driven turn's messages are now persisted in
+            # state.db; tell the driver to claim them in the store-tail
+            # watermark so the disk poller does not translate them twice.
+            if self.on_turn_closed is not None:
+                try:
+                    self.on_turn_closed()
+                except Exception:  # noqa: BLE001 — a sync failure must not
+                    pass            # break the translation/append path
 
     def flush(self) -> None:
         """Close any in-flight assistant message (call on driver stop/teardown)."""
@@ -614,6 +628,63 @@ def reset_backfill_state() -> None:
     global _BACKFILL_HW
     with _BACKFILL_LOCK:
         _BACKFILL_HW = {}
+
+
+# --------------------------------------------------------------------------- #
+# Live store-tail watermark (t_93f1ba4d).
+#
+# The live feed's OTHER half: while ``/api/events`` fans out ONLY the serve's
+# own pty activity (chat_ws.py:622-654 — a pure /api/pub fan-out), the operator
+# drives the same named session in a SEPARATE CLI REPL whose frames go straight
+# to the shared state.db and NEVER reach the serve fan-out. The per-project
+# store therefore freezes at the mount-time backfill watermark.
+#
+# To make the app reflect CLI-driven frames 1:1 (the operator's hard
+# requirement), the driver ALSO runs a store-tail poller that reads the
+# session's ON-DISK messages table for NEW rows (id > watermark) and translates
+# them exactly like the backfill/FrameTranslator does. The watermark below is
+# the merge point shared by BOTH the disk poller and the native events loop so
+# they never double-translate the same underlying message:
+#
+#   * the store-tail poller advances it as it translates disk rows;
+#   * the events loop, after finalizing a NATIVE serve-driven turn (whose
+#     messages were written to state.db by the serve), advances it to the
+#     session's current max message id — "claiming" those messages so the disk
+#     poller does not re-translate them as duplicates.
+#
+# Keyed by project (the same key the store uses), so each project's tail is
+# independent. The value is the highest state.db message ``id`` already
+# translated into that project's store.
+# --------------------------------------------------------------------------- #
+_TAIL_HW: dict[str, int] = {}
+_TAIL_LOCK = threading.Lock()
+
+# Poll cadence for the CLI-driven store-tail poller (t_93f1ba4d). 2s is
+# snappy enough for the app to feel live while cheap (a COUNT-based read every
+# 2s per mounted project is trivial; the event store's own high-water gate the
+# acceptance check relies on). Tunable for tests.
+_TAIL_POLL_INTERVAL_S = 2.0
+
+
+def reset_tail_state() -> None:
+    """Drop the store-tail watermarks (test isolation only)."""
+    global _TAIL_HW
+    with _TAIL_LOCK:
+        _TAIL_HW = {}
+
+
+def _tail_watermark(project: str) -> int:
+    """The highest on-disk message id already translated for ``project``."""
+    with _TAIL_LOCK:
+        return _TAIL_HW.get(project, 0)
+
+
+def _mark_tail_seen(project: str, msg_id: int) -> None:
+    """Advance ``project``'s tail watermark to at least ``msg_id`` (monotonic)."""
+    with _TAIL_LOCK:
+        cur = _TAIL_HW.get(project, 0)
+        if msg_id > cur:
+            _TAIL_HW[project] = msg_id
 
 
 def _content_to_text(content: Any) -> str:
@@ -793,6 +864,11 @@ def backfill_named_session(project: str, registry_path: Optional[str] = None) ->
                 "session_id": session_id,
                 "store_next_seq": store.next_seq,
             }
+        # Seed the store-tail watermark to the last message id backfilled, so
+        # the live tail poller (t_93f1ba4d) only ever picks up messages AFTER
+        # this history — it must not re-translate the whole transcript it just
+        # seeded (that would duplicate every frame).
+        _mark_tail_seen(project, _max_message_id(messages))
         return {"project": project, "backfilled": count, "session": session_id}
     except Exception as exc:  # noqa: BLE001 — fail-safe: never break connect
         log.warning("gateway: backfill %s failed (live continues): %r",
@@ -805,6 +881,99 @@ def backfill_named_session(project: str, registry_path: Optional[str] = None) ->
         except Exception:
             pass
 
+
+def _max_message_id(messages: list) -> int:
+    """Highest ``id`` among a list of session message dicts (0 when none)."""
+    highest = 0
+    for m in messages:
+        if isinstance(m, dict):
+            try:
+                mid = int(m.get("id") or 0)
+            except (TypeError, ValueError):
+                mid = 0
+            if mid > highest:
+                highest = mid
+    return highest
+
+
+def tail_named_session(project: str, registry_path: Optional[str] = None,
+                       after_id: Optional[int] = None) -> dict:
+    """Poll the project's named session on-disk frames and translate NEW ones.
+
+    THE §3.3 live source for externally-written (CLI-driven) frames. While the
+    driver's ``/api/events`` feed captures only the serve's OWN pty activity,
+    the operator's CLI REPL writes its frames directly to the shared state.db —
+    the same source the backfill reads. This function tails that table: it
+    resolves the project's named session (same-session pinning, §3.1), reads
+    ONLY the messages with ``id > <watermark>`` (the shared watermark that
+    backfill seeds and the native events loop advances too), and translates
+    them into the store exactly like the backfill does. So whatever the CLI
+    writes appears in the store — and the app — as it happens, without
+    duplicating messages the native serve feed already put there.
+
+    ``after_id`` overrides the shared watermark cursor (used by isolated tests
+    to drive a deterministic sequence); production passes ``None`` and the
+    shared watermark is authoritative.
+
+    Idempotent + thread-safe by the shared watermark: the tail only ever
+    translates rows with ``id`` strictly above the current watermark, and
+    advances it atomically. Two pollers (or the events loop's syncer) calling
+    concurrently cannot double-translate.
+
+    FAIL-SAFE (design §4, mirroring the backfill): any failure here is
+    reported, never raised — the caller's live loop must never drop on a
+    transient DB lock. Returns ``skipped`` naming the early-return reason.
+
+    Returns {"project", "tail_appended", "session"|None, "skipped"|None,
+    "high_water"}.
+    """
+    from routes_orchestrator import (
+        _open_profile_session_db,
+        resolve_named_session_id,
+    )
+
+    store = get_store(project)
+    try:
+        profile, _title, session_id = resolve_named_session_id(
+            project, registry_path=registry_path)
+    except Exception as exc:  # noqa: BLE001 — fail-safe, never raise
+        log.debug("gateway: store-tail %s failed to resolve session: %r",
+                  project, exc)
+        return {"project": project, "tail_appended": 0, "session": None,
+                "skipped": "resolve_failed", "high_water": _tail_watermark(project)}
+    if session_id is None:
+        # The project has not started a named session — nothing to tail.
+        return {"project": project, "tail_appended": 0, "session": None,
+                "skipped": "no_session", "high_water": _tail_watermark(project)}
+
+    db = _open_profile_session_db(profile, read_only=True)
+    if db is None:
+        return {"project": project, "tail_appended": 0, "session": session_id,
+                "skipped": "no_session", "high_water": _tail_watermark(project)}
+    try:
+        cursor = after_id if after_id is not None else _tail_watermark(project)
+        new_messages = db.get_messages(session_id, after_id=cursor)
+        # Defensive: only translate rows strictly above the cursor (get_messages
+        # already applies ``id > after_id`` in SQL, but belt-and-suspenders
+        # against a cursor that raced backwards).
+        new_messages = [m for m in new_messages
+                        if isinstance(m, dict) and m.get("id", 0) > cursor]
+        count = _translate_history_to_store(store, new_messages)
+        if new_messages:
+            _mark_tail_seen(project, _max_message_id(new_messages))
+        return {"project": project, "tail_appended": count,
+                "session": session_id,
+                "high_water": _tail_watermark(project)}
+    except Exception as exc:  # noqa: BLE001 — fail-safe: never break the loop
+        log.warning("gateway: store-tail %s failed (live continues): %r",
+                    project, exc)
+        return {"project": project, "tail_appended": 0, "session": session_id,
+                "skipped": "tail_failed", "high_water": _tail_watermark(project)}
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 
 # --------------------------------------------------------------------------- #
 # The driver: an in-process background coordinator owning the two upstream
@@ -927,6 +1096,10 @@ class GatewayDriver:
         self._events = events
         self._stop_evt.clear()
         self._alive = True
+        # t_93f1ba4d: wire the events-loop's turn-complete callback so that
+        # serve-driven turns it translates are claimed in the shared store-tail
+        # watermark — preventing the disk poller from re-translating them.
+        self._translator.on_turn_closed = self._sync_tail_watermark
 
         # Install the WS-relay hook so operator sends reach this driver. The
         # hook narrows to this driver's project; other projects (with their own
@@ -962,9 +1135,17 @@ class GatewayDriver:
         pty_thread = threading.Thread(
             target=self._run_pty_loop, name="gateway-pty",
             daemon=True)
-        self._threads = [ev_thread, pty_thread]
+        # t_93f1ba4d: the store-tail poller — the live source for CLI-driven
+        # frames the /api/events fan-out never sees (the operator's SEPARATE
+        # CLI REPL writes them straight to state.db). It does NOT need the
+        # upstream sockets; it tails the session's on-disk message rows.
+        tail_thread = threading.Thread(
+            target=self._run_store_tail_loop, name="gateway-store-tail",
+            daemon=True)
+        self._threads = [ev_thread, pty_thread, tail_thread]
         ev_thread.start()
         pty_thread.start()
+        tail_thread.start()
 
     def _connect_upstreams(self) -> tuple:
         """Open the /api/pty and /api/events connections (no-op gateway probe).
@@ -991,6 +1172,75 @@ class GatewayDriver:
             pty.close()
             raise
         return pty, events
+
+    def _run_store_tail_loop(self) -> None:
+        """Poll the session's on-disk frames, translating NEW CLI-driven ones.
+
+        t_93f1ba4d: the live source for externally-written frames. The
+        ``/api/events`` feed fans out ONLY the serve's own pty activity, so
+        frames the operator's SEPARATE CLI REPL writes straight to state.db
+        would otherwise freeze the store at the mount-time backfill watermark.
+        This loop re-reads the session's message table every
+        :data:`_TAIL_POLL_INTERVAL_S` seconds and appends any NEW rows (id >
+        the shared store-tail watermark) to the store, translated exactly like
+        the backfill. ``tail_named_session`` is itself fail-safe (never raises)
+        and thread-safe (the watermark makes it idempotent), so a transient DB
+        lock is a logged skip, never a crash.
+        """
+        # Idle before the first poll so backfill (which seeds the watermark
+        # with the full history) always runs first — the poll must start from
+        # AFTER the seeded history, never re-translate it.
+        self._sleep_interruptible(_TAIL_POLL_INTERVAL_S)
+        while not self._stop_evt.is_set():
+            try:
+                tail_named_session(
+                    self.config.project,
+                    registry_path=getattr(self.config, "registry_path", None))
+            except Exception as exc:  # noqa: BLE001 — belt-and-suspenders
+                log.debug("gateway: store-tail loop %s raised: %r",
+                          self.config.project, exc)
+            self._sleep_interruptible(_TAIL_POLL_INTERVAL_S)
+
+    def _sleep_interruptible(self, seconds: float) -> None:
+        """Sleep, returning early on ``_stop_evt`` so stop() is prompt."""
+        end = time.monotonic() + seconds
+        while time.monotonic() < end and not self._stop_evt.is_set():
+            time.sleep(0.1)
+
+    def _sync_tail_watermark(self) -> None:
+        """Advance the store-tail watermark to the session's current on-disk
+        max message id.
+
+        t_93f1ba4d dedup half: after the native ``/api/events`` feed has
+        translated a serve-driven turn to ``done``, that turn's messages are
+        persisted in state.db (the serve's own dispatcher wrote them). By
+        advancing the shared watermark to the session's current max id we
+        ``claim`` those messages so the store-tail poller does not re-translate
+        them — it only picks up rows the native feed never saw (genuinely
+        CLI-driven frames). Best-effort + fail-safe: a transient DB read that
+        fails is a clean no-op (the next poll re-syncs).
+        """
+        sid, prof = self._session_id, self._session_profile
+        project = self.config.project
+        if not sid or not prof:
+            return
+        try:
+            from routes_orchestrator import _open_profile_session_db
+            db = _open_profile_session_db(prof, read_only=True)
+            if db is None:
+                return
+            try:
+                latest = db.get_messages(sid, latest=True, limit=1)
+                if latest:
+                    _mark_tail_seen(
+                        project, _max_message_id(latest))
+            finally:
+                try:
+                    db.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as exc:  # noqa: BLE001 — never break the events loop
+            log.debug("gateway: store-tail sync %s failed: %r", project, exc)
 
     def _run_events_loop(self) -> None:
         """Read /api/events and translate each notification into the store.
