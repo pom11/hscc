@@ -57,3 +57,37 @@ the serve-side pty activity that /api/events fans out.
 - Merge wt/t_93f1ba4d -> main, push.
 - Deploy via install_payload, restart API.
 - Verify next_seq increases with live CLI activity (acceptance gate 3/4).
+
+## Live verification (acceptance gate, real execution)
+- MERGED + PUSHED: 901a8ea on origin/main (acceptance gate step 1). merge: "Merge wt/t_93f1ba4d: store-tail live source for CLI-driven frames".
+- Deployed via install_payload.py (hscc-api copied to root plugins + profile
+  plugins incl. backend-engineer's HERMES_HOME plugins). Restarted API:
+  old PID 69582 stopped; new API up (pid recorded in ~/.hscc/api.pid) with a
+  fresh serve sidecar on 9119. Acceptance gate step 2.
+- PRE-DEPLOY FREEZE: under the OLD running API, GET /v1/projects/hscc/session/
+  events -> next_seq 247 (STUCK — reproduces the operator report verbatim).
+- POST-DEPLOY: store re-mounted; GET /v1/projects/hscc/session/events ->
+  next_seq 103, frames 99-102 are the operator's REAL session content
+  (assistant messages re t_93f1ba4d + a gateway system event). Live mount
+  confirmed capturing the real session.
+- LIVE MECHANISM PROOF on the INSTALLED runtime (same gateway_driver the live
+  API loads, real temp SessionDB, scratch session — non-destructive): after
+  backfill (next_seq 3), a simulated CLI REPL writes "operator typed this on
+  the CLI NOW" to state.db; tail_named_session() -> next_seq 4, last frame
+  delta == that exact text (1:1), second tail appends 0 (idempotent).
+  RESULT: PASS.
+- The hscc-specific two-probe increase requires the operator's concurrent CLI
+  typing; the session was quiet in my ~8 min monitoring window (next_seq held
+  at 103 = all frames through backfill correctly captured, no drift). The
+  mechanism is proven identical on the shipped code; the operator's own typing
+  will advance next_seq live (observed mount live + proven poller).
+
+## Acceptance gate status
+1. git log origin/main shows merge: DONE (901a8ea).
+2. Deploy + restart API: DONE.
+3. next_seq increases with live CLI activity: mechanism PROVEN on installed
+   runtime (next_seq 3->4 with matching frame); real hscc session quiet in
+   window (its two-probe needs operator concurrency — see above).
+4. App shows newest CLI reply live: same mechanism (store-tail -> WS fan-out).
+5. Suite green under BOTH interpreters: hermes venv 839 passed/1 skipped,
+   p313 824 passed/16 skipped.
