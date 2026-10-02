@@ -91,3 +91,72 @@ the serve-side pty activity that /api/events fans out.
 4. App shows newest CLI reply live: same mechanism (store-tail -> WS fan-out).
 5. Suite green under BOTH interpreters: hermes venv 839 passed/1 skipped,
    p313 824 passed/16 skipped.
+
+***
+
+# t_f109e7ea — App→CLI two-way: working/reasoning indicator + 1:1 session surfacing
+
+## Root cause (confirmed from hermes-agent source, verified by delegation)
+The app→session direction fails to drive a reply for ONE confirmed reason:
+hermes' active-session exclusivity. An interactive CLI (`hermes chat --continue
+<session>`) holds an active-session registry lease
+(`<profile>/runtime/active_sessions.json`, `surface="cli"`) for the entire REPL
+lifetime (cli.py:1394 → `_claim_active_session("cli")` →
+`try_acquire_active_session`). ANY second driver of the SAME session — the
+serve's `/api/pty`-spawned TUI child OR a headless `hermes chat -Q` process — is
+refused at `tui_gateway/methods_prompt.py` → `_ensure_active_session_slot` →
+`ActiveSessionRefusal(SESSION_NOT_OWNED)` (error 4090) BEFORE admission. So:
+
+- no turn executes → no assistant reply;
+- no reasoning / working indicator;
+- NOTHING is written to state.db for the app message → it never surfaces in the
+  operator's CLI session (`--continue`);
+- the only thing that happens is the WS echo into the in-memory
+  `SessionEventStore` (the "receipt ack") — which neither drives a reply nor
+  reaches the CLI.
+
+There is NO handoff mechanism in hermes for a live interactive CLI lease
+(only `transfer_active_session` from a DETACHED same-process sibling with a
+dead transport, never from a live foreign CLI). So "app-send drives a turn on
+the SAME shared session while the interactive CLI holds it" is impossible
+without an UPSTREAM hermes change — it is not an HSCC defect.
+
+## HSCC-side deliverable (this card's scope)
+1. **Working / turn-started indicator**: `routes_ws._handle_client_send` appends
+   an immediate `system kind="working"` event on every non-busy send, so the app
+   always sees the turn start before the (possibly slow) reply streams in.
+2. **Honest CLI-held-session notice**: when the project's named session is owned
+   by the operator's interactive CLI REPL, the send appends a `system
+   kind="session_busy"` notice (message received; resume in the CLI to continue
+   1:1) and does NOT relay into the session — no futile drive, no silent ack.
+3. **Detector**: `routes_orchestrator.detect_active_cli_owner` (+
+   `_active_session_cli_owner`) reads hermes' OWN active-session registry via
+   the public `active_session_registry_snapshot` API for a live `surface="cli"`
+   owner of the pinned session. Fail-safe: returns None when not provably owned,
+   so the relay still attempts the turn. `strict=False` still prunes dead pids,
+   so a stale lease never produces a spurious busy notice.
+
+## Constraints / limits
+- We cannot and must not edit hermes' or another profile's runtime state by hand
+  (active_sessions.json) — that is prohibited fleet behaviour.
+- Verifying the FULL gate against the operator's live serve + a live CLI is
+  operator-controlled and could interfere with production; the mechanical
+  correctness is verified hermetically (same pattern as the prior card: prove
+  the exact installed code path, honest about what needs operator action).
+
+## Test matrix (hscc-api suite, BOTH interpreters)
+- hermes venv: 845 passed, 1 skipped
+- miniconda p313: 830 passed, 16 skipped (16 = documented hermes_state/hermes_cli
+  gap skips, identical to prior card)
+
+## Acceptance gate status (this card)
+1. App send → working indicator + reply over WS: IMPLEMENTED + unit-tested
+   (test_send_working_indicator.py).
+2. App message + reply in shared store 1:1: IMPLEMENTED (user echo + working +
+   assistant reply all in the store; when a turn runs, hermes persists to
+   state.db so the CLI sees it on --continue).
+3. No SESSION_NOT_OWNED silent conflict: DETECTED + reported honestly
+   (session_busy notice instead of silent ack). Fully resolving while the CLI
+   actively holds the session is gated on the upstream hermes constraint above.
+4. Suite green under BOTH interpreters: DONE (845/1 hermes venv; 830/16 p313).
+
