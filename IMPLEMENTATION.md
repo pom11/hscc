@@ -35,3 +35,25 @@ the serve-side pty activity that /api/events fans out.
 
 ## Findings so far
 - (to be filled)
+
+## Findings (implementation)
+- Fix implemented in hscc-api/gateway_driver.py (committed 8405d0d):
+  * tail_named_session() — polls the session's on-disk messages table for NEW
+    rows (id > shared watermark) and translates them exactly like the backfill.
+  * Shared per-project store-tail watermark, seeded by backfill and updated by
+    BOTH the disk poller and the native events loop, so serve-driven turns the
+    native feed translates are never duplicated by the disk poller.
+  * New gateway-store-tail thread per mounted GatewayDriver (2s poll).
+- +8 new tests in hscc-api/tests/test_gateway_store_tail.py.
+- Suite green under BOTH interpreters:
+  * hermes venv: 839 passed, 1 skipped
+  * miniconda p313: 824 passed, 16 skipped (store-tail tests skip — the
+    documented hermes_state env gap, same as backfill tests)
+- PRE-DEPLOY BASELINE (live API, old code): GET /v1/projects/hscc/session/events
+  -> next_seq 247 (STUCK, matches operator's report). Confirmed under the
+  OLD running API before my fix is deployed.
+
+## Next steps
+- Merge wt/t_93f1ba4d -> main, push.
+- Deploy via install_payload, restart API.
+- Verify next_seq increases with live CLI activity (acceptance gate 3/4).
