@@ -51,6 +51,40 @@ enum StreamPhase: Equatable {
     var isLive: Bool { self == .connected || self == .reconnecting }
 }
 
+/// The state of the LATEST orchestrated turn (t_7cc2e7d5), surfaced so the
+/// app does more than render a passive row: it shows a working/thinking
+/// indicator while a reply is generated, and a prominent "waiting for
+/// approval on your computer" banner while a consented session handoff is
+/// outstanding (the operator must approve on their machine before the app can
+/// drive this session 1:1).
+enum TurnState: Equatable {
+    /// No turn in flight.
+    case idle
+    /// A reply is being generated — show a "working…" indicator.
+    case working
+    /// A consented session handoff is outstanding — the operator must approve
+    /// on the computer that holds the session before this app drives the turn.
+    case awaitingApproval
+
+    /// Derive the turn state from one decoded server event (pure, headless-
+    /// testable — the same function the store folds over live frames).
+    ///
+    /// Only ``system`` kinds move the needle (the WS relay emits
+    /// ``working`` / ``handoff_pending`` / ``session_busy``); every other event
+    /// leaves the current state untouched.
+    static func derive(from event: SessionEvent, current: TurnState) -> TurnState {
+        guard case .system(let p) = event.payload else {
+            return current
+        }
+        switch p.kind {
+        case "working":       return .working
+        case "handoff_pending": return .awaitingApproval
+        case "session_busy":  return .idle
+        default:              return current
+        }
+    }
+}
+
 /// Convenience alias — the store exposes `phase` as a `ConnectionPhase`.
 typealias ConnectionPhase = StreamPhase
 
@@ -79,6 +113,9 @@ final class StreamingChatStore: ObservableObject {
     @Published var draft: String = ""
     /// A one-off error surfaced by the latest send (shown, then cleared).
     @Published var sendError: String?
+    /// The latest turn state (t_7cc2e7d5) — drives the working / awaiting-
+    /// approval banner above the transcript.
+    @Published private(set) var turnState: TurnState = .idle
 
     // Aggregation + reconnect guard.
     private var transcript = StreamingTranscript()
@@ -134,6 +171,7 @@ final class StreamingChatStore: ObservableObject {
         rows = []
         cursor = SessionStreamCursor(lastSequence: 0)
         expandedToolIDs = []
+        turnState = .idle
         await seedFromHistory()
         openSocket()
     }
@@ -151,6 +189,21 @@ final class StreamingChatStore: ObservableObject {
     /// so a backgrounded app keeps the operator's in-progress message).
     func persistDraft() {
         UserDefaults.standard.set(draft, forKey: Self.keyPrefix + project + ".draft")
+    }
+
+    /// Fold the server's turn-state signal into :attr:`turnState` (t_7cc2e7d5).
+    ///
+    /// The WS relay emits ``system kind=working`` when a turn starts, and a
+    /// supervisor may emit ``system kind=handoff_pending`` while a consented
+    /// session handoff is outstanding. Turning those into a stored state (not
+    /// just a passive row) lets the view show a working/awaiting-approval
+    /// banner. ``session_busy`` / an assistant reply close the working state
+    /// back to idle.
+    private func updateTurnState(for event: SessionEvent) {
+        // Single source of truth: the pure mapping lives on TurnState.derive
+        // (headless-tested in t_7cc2e7d5) so the banner logic never drifts
+        // from what the harness proves.
+        turnState = TurnState.derive(from: event, current: turnState)
     }
 
     // MARK: - History seed
@@ -310,6 +363,7 @@ final class StreamingChatStore: ObservableObject {
         case .accept:
             transcript.fold(event)
             rows = transcript.rows
+            updateTurnState(for: event)
             // Tell the shared watermark this seq is now accounted for (seen
             // live) so the background poll never re-badges it.
             onEvent?(event.seq)
