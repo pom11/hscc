@@ -232,7 +232,7 @@ def _handle_busy_send(project: str, text: str) -> None:
         if not started:
             _append_busy_notice(project)
 
-    coordinator = _build_coordinator(profile, session_id)
+    coordinator = coordinator_factory(profile, session_id)
 
     def _run():
         try:
