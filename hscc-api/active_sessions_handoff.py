@@ -212,7 +212,9 @@ class HandoffCoordinator:
         sid = session_id or self.session_id
         timeout = self.grant_timeout if timeout is None else timeout
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        first = True
+        while first or time.monotonic() < deadline:
+            first = False
             for entry in self._snapshot(registry_home):
                 if str(entry.get("session_id") or "") != sid:
                     continue
