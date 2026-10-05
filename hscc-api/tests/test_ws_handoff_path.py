@@ -65,7 +65,7 @@ class _FakeCoordinator:
         return "/profiles/orch"
 
     def orchestrate(self, text, *, drive, on_pending, on_denied,
-                    session_id, registry_home=None):
+                    on_working=None, session_id, registry_home=None):
         self.orchestrate_calls.append(
             {"text": text, "session_id": session_id, "registry_home": registry_home})
         if self._exc is not None:
@@ -78,6 +78,8 @@ class _FakeCoordinator:
                     "message": "Timed out waiting for the owner to approve."}
         if self._result == "driven":
             on_pending()
+            if on_working is not None:
+                on_working()
             drive()
             return {"outcome": "completed"}
         if self._result == "denied":
@@ -156,8 +158,14 @@ def test_busy_send_drives_turn_when_consented(monkeypatch):
         lambda project, text: (relayed.update({"project": project, "text": text})
                                or True))
     routes_ws._handle_busy_send("hscc", "drive me")
-    _wait_for("hscc", lambda evs: "handoff_pending" in _system_kinds("hscc"))
+    _wait_for("hscc", lambda evs: "working" in _system_kinds("hscc"))
     assert "handoff_pending" in _system_kinds("hscc")
+    # Once the owner consents, the turn drives AND emits a `working` frame so
+    # the app flips away from the awaiting-approval banner while it streams.
+    assert "working" in _system_kinds("hscc"), (
+        "the driven handoff turn must emit a working frame: %r" % (
+            _system_kinds("hscc"),))
+    assert "session_busy" not in _system_kinds("hscc")
     assert relayed == {"project": "hscc", "text": "drive me"}, (
         "turn was not driven after consent: %r" % (relayed,))
 
