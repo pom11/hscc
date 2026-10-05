@@ -246,10 +246,23 @@ if $SKIP_PATCHES; then warn "skipped"; else
 fi
 
 hdr "Install: enable HSCC plugins + toolsets"
-# Seed the general plugin/toolset wiring in ~/.flightdeck/config.yaml
+# Seed the general plugin/toolset wiring in $HERMES_HOME/config.yaml
 # (plugins.enabled, toolsets, kanban, delegation, compaction, fallback
-# provider). Call enable_plugins.py without any extra env.
-WIRED=$("$PYBIN" "$BOOT_DIR/enable_plugins.py" 2>/dev/null) && ok "config wired ($WIRED)" || warn "plugin/toolset enable reported issues"
+# provider). enable_plugins.py reads HERMES_HOME itself.
+#
+# It is a deliberate NO-OP when config.yaml does not exist yet — Hermes owns
+# that file and creates it on first run — so it reports "NOT WIRED" instead of
+# exiting non-zero. Treat that as a warning, not success: reporting
+# "✓ config wired" for a fresh machine where nothing was wired is exactly the
+# silent gap this step exists to close.
+if WIRED=$("$PYBIN" "$BOOT_DIR/enable_plugins.py" 2>/dev/null); then
+  case "$WIRED" in
+    *"NOT WIRED"*) warn "$WIRED" ;;
+    *)             ok "config wired ($WIRED)" ;;
+  esac
+else
+  warn "plugin/toolset enable reported issues"
+fi
 
 hdr "Install: agent instructions (SOUL + ops personality)"
 INSTR=$("$PYBIN" "$BOOT_DIR/install_soul.py" 2>/dev/null) && ok "$INSTR" || warn "SOUL/personality update reported issues"
