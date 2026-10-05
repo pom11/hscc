@@ -113,13 +113,19 @@ def running(tmp_path, fakes):
 
 @pytest.fixture(autouse=True)
 def _clear_jobs():
-    """Start each test with an empty job store.
+    """Start (and end) each test with an empty job store.
 
     ``_jobs`` is a module-global (the server is long-lived in production, so the
     store intentionally persists across connections there). Here we clear it
-    before every test so assertions like ``not routes_orchestrator._jobs`` and
-    per-test job ids are deterministic regardless of run order.
+    before AND after every test so assertions like ``not routes_orchestrator._jobs``
+    and per-test job ids are deterministic regardless of run order — and so no
+    test leaves a queued/running ``"hscc"`` job behind that a LATER FILE's test
+    (e.g. test_ws_relay_not_noop's ``stop`` no-op check) would mistake for an
+    in-flight turn. Covering teardown closes that cross-file leak (t_7cc2e7d5).
     """
+    with routes_orchestrator._jobs_lock:
+        routes_orchestrator._jobs.clear()
+    yield
     with routes_orchestrator._jobs_lock:
         routes_orchestrator._jobs.clear()
 

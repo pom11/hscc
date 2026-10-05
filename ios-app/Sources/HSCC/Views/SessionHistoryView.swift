@@ -445,6 +445,9 @@ private struct EventRow: View {
         case "compaction": return "session compacted"
         case "session_rotated": return "session rotated"
         case "gateway": return "gateway"
+        case "working": return "working…"
+        case "handoff_pending": return "waiting for approval on your computer"
+        case "session_busy": return "session busy"
         default: return "system · \(kind)"
         }
     }
