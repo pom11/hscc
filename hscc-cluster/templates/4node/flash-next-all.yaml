@@ -1,0 +1,110 @@
+# 4-node ALL-FLASH-NEXT — the same model on every node, 262k context everywhere.
+#
+# USE THIS WHEN you want one uniform fleet: identical quality and identical
+# context from whichever node answers, orchestrator or worker. There is no
+# fast/slow tier here and no model-choice decision to get wrong — every unit is
+# Qwen3.8-Flash-Next NVFP4 at max_model_len 262144.
+#
+# Qwen3.8-Flash-Next is the #1 open-weight model on SWE-bench Pro (62.5, ahead
+# of GLM-5.2 at 62.1 and Qwen3.8-27B at 61.7). 125B total / 6B active, ~37 tok/s
+# on one GB10. Four of them is ~150 tok/s aggregate at identical quality.
+#
+# PLACEMENT IS DELIBERATELY UNPINNED. No `nodes:` block: every unit runs the
+# same recipe, so which node ends up the orchestrator is arbitrary and the
+# resolver may place them anywhere. Pinning would add a constraint that buys
+# nothing and breaks if a node is down.
+#
+# ── THE MODEL MUST BE ON LOCAL NVMe. MEASURED, DO NOT SKIP. ─────────────────
+# The eugr solo recipe sets VLLM_PLE_TABLE_MEMORY=disk: the ~47.7 GB n-gram PLE
+# table is never made resident and is read off disk BY ROW, per token. Measured
+# on this fleet 2026-10-05, reading that table over the NAS NFS export:
+#
+#     random 4 KiB read   5.72 ms   (0.7 MiB/s)     <- the per-token PLE case
+#     random 64 KiB read  7.74 ms   (8.1 MiB/s)
+#     sequential        224 MiB/s                   <- fine, but irrelevant here
+#
+# At ~6 ms per PLE row lookup the model is unusable regardless of GPU speed. The
+# NAS is a STAGING source only. Containers already mount the LOCAL cache
+# (/home/spark/.cache/huggingface -> /cache/huggingface, HF_HUB_CACHE=
+# /cache/huggingface/hub) because `distribution.model.enabled: false` makes
+# sparkrun fall back to the default local path — so all this template needs is
+# the model present locally on all four nodes:
+#
+#   ssh <node> 'rsync -a \
+#     /mnt/nas/hub/models--local-inference-lab--Qwen3.8-Flash-Next-NVFP4 \
+#     ~/.cache/huggingface/hub/'
+#
+# 98.6 GiB per node. Pull it once on a 10G node, then fan out over the CX7 100G
+# fabric rather than pulling four times from the NAS: as of 2026-10-05 the
+# management links are NOT uniform — two nodes negotiated 10G, one 1G, and one
+# only 100 Mb. Measured on this fleet: NAS -> 10G node 512 MB/s, node -> node
+# over CX7 ~1.1 GB/s, NAS -> the 100 Mb node ~12 MB/s (>2 hours for one copy).
+# That link mismatch is a cabling fault worth fixing, not a hardware property.
+# Note CX7 fan-out needs node-to-node SSH trust, which is NOT installed between
+# every pair; where it is missing, pull from the NAS on the 10G nodes instead.
+#
+# ── VRAM IS TIGHT. DO NOT RAISE gpu_memory_utilization. ─────────────────────
+# `sparkrun recipe show` estimates 110.57 GB per GPU and warns that weights
+# (98.6 GB) exceed usable memory at 80% utilization. That estimate is
+# CONSERVATIVE in a specific way: with the PLE table on disk only ~51 GB of
+# weights are resident, and the fp8 KV cache costs ~12 GiB at the full 262k
+# (48 layers, 2 KV heads, 256 head_dim, and most layers are linear_attention).
+# It fits with room to spare — but the estimator's warning is expected, is not
+# a reason to turn the knob up, and the first boot is still worth watching.
+#
+# The recipe needs no override for the 262k requirement: it already ships
+# max_model_len: 262144 with --kv-cache-dtype fp8.
+#
+# This template builds the `vllm-node-b12x` image on every node (eugr
+# build_args: --exp-b12x), which sparkrun handles. First apply is slower.
+name: 4node-flash-next-all
+version: 3
+
+# ROLE-AGNOSTIC POOL. Every unit here runs the same recipe, so the
+# orchestrator/worker split HSCC's shape implies is meaningless — any node can
+# do any work. `uniform_pool` makes that real:
+#
+#   * every unit advertises BOTH `orchestrator-model` AND `worker-model`, so
+#     each alias load-balances across ALL FOUR units and nothing cares which
+#     node is nominally the orchestrator;
+#   * every unit gets a DISTINCT port (8000..8003).
+#
+# The distinct ports are REQUIRED, not cosmetic. sparkrun's proxy discovery
+# dedupes endpoints by (model set, port) with NO host
+# (proxy/discovery.py:_deduplicate_by_identity — it exists to collapse one
+# server reachable via both management and ConnectX-7 IPs). Without this flag
+# all tp=1 replicas land on :8000, the three workers look like ONE server, and
+# only the last one registers — measured exactly that: 3 workers up, 1 in the
+# proxy, 2 idle. Verify after applying with `sparkrun proxy status`: expect
+# four backends per alias, not one.
+uniform_pool: true
+description: "4 nodes: Qwen3.8-Flash-Next NVFP4 on every node at 262k context (SWE-bench Pro 62.5). Uniform fleet - 1 orchestrator + 3-node load-balanced pool, same model everywhere. cluster_size=4."
+
+orchestrator:
+  recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.8-flash-next-nvfp4-solo-vllm.yaml"
+
+families:
+  - name: coding
+    # Named `coding` rather than something new on purpose: 15 of the existing
+    # templates use that name, so the dispatch and assignee machinery is already
+    # exercised against it. `workers: remaining` takes every node the
+    # orchestrator did not claim (3 here); with a tp=1 recipe nodes and
+    # instances coincide, so that is 3 instances behind one proxy.
+    models:
+      - recipe: "~/.sparkrun-local/recipes/local-fixed/qwen3.8-flash-next-nvfp4-solo-vllm.yaml"
+    workers: remaining
+    proxy: true
+
+routing:
+  # Every consumer points at the pool. Operator intent was "orchestrator and
+  # workers both reach all of them"; since all four units are the same model at
+  # the same context, the only real question is load placement, and the
+  # orchestrator node is already the one fanning out to Hermes' chat and
+  # decomposition consumers. Sending delegation, compaction AND auxiliaries to
+  # the 3-node pool keeps that node for its own work.
+  #
+  # Note the omission rule: a consumer absent from this block is never written,
+  # so all three are stated explicitly rather than relying on defaults.
+  delegation: family-coding
+  compaction: family-coding
+  auxiliaries: family-coding
