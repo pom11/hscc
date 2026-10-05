@@ -41,13 +41,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Verified
 - `hscc-bootstrap/tests/test_doctor.py`: 69 -> **72** cases, green with
-  `HERMES_HOME` exported to a profile dir.
+  `HERMES_HOME` exported to a profile dir. Negative control: against main's
+  unfixed `doctor.py`, the new leak guards and resolution tests fail 7/7 —
+  they catch the defect rather than tolerating it.
 - Full suite `scripts/run_tests.sh` **ALL GREEN** (9/9 packages) twice on py3.11
   and twice on py3.13, each from a worker-like env with `HERMES_HOME` pointed at
-  a profile dir. Operator profile `config.yaml` md5 unchanged by the runs.
+  a profile dir, plus a confirmation pair after rebasing onto main.
 - `docs/audits/doctor-hermes-home-t_267f9d88.md` — root cause, the design
   verdict (a profile-scoped `HERMES_HOME` is legitimate, so the CHECK was wrong,
-  not only the tests), and the evidence.
+  not only the tests), the evidence, and the live-state attribution: main's
+  unfixed `TestDoctorCLI` had already rewritten the worker profile's
+  `config.yaml` and accumulated `cluster-guard.py.bak-*` drops before this fix
+  existed. Cleanup of those inert `.bak` files is a separate follow-up.
 
 ## [2.5.4] - 2026-10-05
 
