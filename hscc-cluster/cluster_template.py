@@ -1057,8 +1057,13 @@ def apply_template(template_name: str, confirm: bool = False,
             sys.path.insert(0, _pkg_dir)
         # Step 1: Write serving.json (from the resolved plan)
         serving = _ti().to_serving_json(plan)
+        # Carry forward recorded serve commands; see _carry_serve_cmds for why
+        # dropping them made every subsequent apply warn and report failure.
+        carried = _carry_serve_cmds(serving)
         write_json(SERVING_JSON, serving, backup=True)
-        result["steps"].append({"step": "serving.json", "status": "ok", "units": len(serving["units"])})
+        result["steps"].append({"step": "serving.json", "status": "ok",
+                                "units": len(serving["units"]),
+                                "serve_cmds_carried": carried})
 
         # Step 2: Write models.json
         models = _build_models_json(plan)
@@ -1538,6 +1543,45 @@ def _build_proxy_config(resolved_family) -> dict:
     }
 
 
+def _carry_serve_cmds(serving: dict) -> int:
+    """Carry recorded ``serve_cmd`` values across a serving.json rewrite.
+
+    ``to_serving_json`` rebuilds units from the plan and carries no
+    ``serve_cmd``, so Step 1 overwrote every recorded command. Provision only
+    re-stamps units it ACTUALLY (re)launched, and under ``--ensure`` an
+    already-running unit is skipped — so after a single no-op apply every
+    record was gone, drift could never be checked again, and every later apply
+    reported "no previously recorded serve command", returned success=False,
+    and therefore never updated applied_template.json. That stale record is
+    what let auto-heal act on the PREVIOUS template.
+
+    Preserving by unit id is the conservative choice: if a unit's flags really
+    did change, the carried value differs from the freshly rendered one and the
+    drift check reports real drift — which is its job — instead of silently
+    degrading to "not checked".
+
+    Returns how many records were carried.
+    """
+    try:
+        prev = read_json(SERVING_JSON) or {}
+    except Exception:
+        return 0
+    recorded = {u.get("id"): u.get("serve_cmd")
+                for u in (prev.get("units") or [])
+                if isinstance(u, dict) and u.get("id") and u.get("serve_cmd")}
+    if not recorded:
+        return 0
+    carried = 0
+    for u in (serving.get("units") or []):
+        if not isinstance(u, dict) or u.get("serve_cmd"):
+            continue
+        sc = recorded.get(u.get("id"))
+        if sc:
+            u["serve_cmd"] = sc
+            carried += 1
+    return carried
+
+
 def _update_hermes_config(config: dict, plan: Any, *, _http_get=None) -> dict:
     """Update Hermes config.yaml providers from a resolved plan.
 
@@ -1556,9 +1600,22 @@ def _update_hermes_config(config: dict, plan: Any, *, _http_get=None) -> dict:
     o = plan.orchestrator
     orch_url = f"http://{o.node}:{o.port}/v1"
 
+    # Under a uniform_pool template EVERY unit advertises the orchestrator
+    # alias, so pinning chat to the one nominal orchestrator node wastes the
+    # pool and leaves chat with no redundancy: that node dying takes chat with
+    # it even though N-1 identical units are healthy. Point it at the family
+    # proxy instead, which load-balances the same alias across all of them.
+    # Non-uniform templates keep the pinned orchestrator endpoint exactly as
+    # before — the role split is real there.
+    chat_url = orch_url
+    if getattr(plan, "uniform_pool", False):
+        _fam = _owned_worker_family(plan)
+        if _fam is not None:
+            chat_url = f"http://localhost:{_fam.proxy_port}/v1"
+
     # ── Top-level model block ────────────────────────────────────────
     model_cfg = config.setdefault("model", {})
-    model_cfg["base_url"] = orch_url
+    model_cfg["base_url"] = chat_url
     # Preserve existing provider; default to "custom" if absent
     if "provider" not in model_cfg:
         model_cfg["provider"] = "custom"
@@ -1568,7 +1625,7 @@ def _update_hermes_config(config: dict, plan: Any, *, _http_get=None) -> dict:
     # the orchestrator endpoint advertises it, else the single concrete id it
     # serves, else leave model.default untouched — never write an id the
     # endpoint cannot resolve.
-    status, served = _probe_served_models(orch_url, _http_get=_http_get)
+    status, served = _probe_served_models(chat_url, _http_get=_http_get)
     resolved = _resolve_worker_model_id(
         _unit_alias(o, plan), served if status == "ok" else [])
     if resolved is not None:
@@ -1596,6 +1653,19 @@ def _update_hermes_config(config: dict, plan: Any, *, _http_get=None) -> dict:
             "model": {"default": f"localhost:{fam.proxy_port}"},
             "base_url": f"http://localhost:{fam.proxy_port}/v1",
         }
+
+    # Drop `family-*` providers this plan does NOT define. by_name is seeded
+    # from the existing list and only ever added to, so switching templates
+    # left the previous template's families behind forever (observed: a stale
+    # `family-reasoning` surviving the move to a `family-coding` template).
+    # Scoped to the `family-` prefix on purpose: those entries are ours to own,
+    # while `custom` and any operator-defined provider are not.
+    wanted = {f"family-{fam.name}" for fam in plan.families
+              if fam.proxy_port is not None}
+    for stale in [n for n in by_name
+                  if n.startswith("family-") and n not in wanted]:
+        by_name.pop(stale)
+
     config["providers"] = list(by_name.values())
     return config
 
