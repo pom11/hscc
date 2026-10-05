@@ -1113,6 +1113,9 @@ def apply_template(template_name: str, confirm: bool = False,
             "model_id": wm["model_id"],
             "config_changed": wm["config_changed"],
             "profiles_changed": wm["profiles_changed"],
+            # Surfaced so the apply report states how many ORCH-role profiles
+            # were re-aimed at the pool; without it the work was invisible.
+            "orch_profiles_changed": wm.get("orch_profiles_changed", 0),
         })
 
         # Step 5b: Apply the template's routing: block (T3). Resolves each
@@ -1882,8 +1885,44 @@ def _set_worker_model_in_profile(config: dict, model_id: str, port: int) -> dict
         return config
     if not _is_worker_proxy_url(model_cfg.get("base_url"), port):
         return config
+    # Never clobber an ORCHESTRATOR-role profile. Matching on base_url alone was
+    # safe only while orchestrator profiles pointed at a node: under
+    # uniform_pool they are re-aimed at this very proxy, so a URL-only test
+    # suddenly matched all 15 of them and rewrote model.default to the worker
+    # alias — erasing the orchestrator role's intent and leaving
+    # _set_orchestrator_profile_to_pool (which selects on that alias) unable to
+    # repair them. Key on INTENT, not just on where the profile points today.
+    if model_cfg.get("default") == "orchestrator-model":
+        return config
     if model_cfg.get("default") != model_id:
         model_cfg["default"] = model_id
+    return config
+
+
+def _set_orchestrator_profile_to_pool(config: dict, pool_url: str,
+                                      alias: str = "orchestrator-model") -> dict:
+    """Re-aim an ORCHESTRATOR-role profile at the pool. ``uniform_pool`` only.
+
+    ``_set_worker_model_in_profile`` deliberately leaves orchestrator-facing
+    profiles alone, and under a normal template that is correct: the
+    orchestrator really is one pinned node. Under ``uniform_pool`` it is not —
+    every unit advertises the orchestrator alias, so leaving every ``*-orch``
+    profile pinned sends ALL orchestrator work to one GPU while N-1 identical
+    units idle, and takes every orchestrator down with that single node.
+
+    Profiles are selected by INTENT (``model.default`` is the orchestrator
+    alias) rather than by their current URL, so a profile left pointing at a
+    stale or dead endpoint is repaired too — e.g. one found aimed at
+    ``127.0.0.1:8000``, where nothing serves. Worker-facing profiles and
+    profiles with no model block are untouched. Idempotent.
+    """
+    model_cfg = config.get("model")
+    if not isinstance(model_cfg, dict):
+        return config
+    if model_cfg.get("default") != alias:
+        return config
+    if model_cfg.get("base_url") != pool_url:
+        model_cfg["base_url"] = pool_url
     return config
 
 
@@ -1966,6 +2005,15 @@ def _update_worker_model_ids(plan: Any, *, profiles_dir: Optional[Path] = None,
             lambda d, port=WORKER_PROXY_PORT: _set_worker_model_in_profile(d, model_id, port))
         if changed:
             result["profiles_changed"] += 1
+        # Under uniform_pool the orchestrator role is the POOL, so orch-role
+        # profiles get re-aimed too (see _set_orchestrator_profile_to_pool).
+        if getattr(plan, "uniform_pool", False):
+            _, och = atomic_yaml_update(
+                pfile,
+                lambda d, u=proxy_url: _set_orchestrator_profile_to_pool(d, u))
+            if och:
+                result["orch_profiles_changed"] = \
+                    result.get("orch_profiles_changed", 0) + 1
     return result
 
 

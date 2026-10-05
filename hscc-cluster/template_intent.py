@@ -616,4 +616,11 @@ def to_serving_json(plan: ResolvedPlan) -> dict:
                 "pp": u.pp,
                 "family": fam.name,
             })
-    return {"version": 2, "units": units}
+    out = {"version": 2, "units": units}
+    # Record the pool shape so downstream consumers that only read serving.json
+    # (hscc-roles' profile generator, bootstrap) can tell a role-agnostic pool
+    # from a pinned orchestrator WITHOUT re-reading the template. Omitted when
+    # false so a non-uniform plan's serving.json stays byte-identical to before.
+    if plan.uniform_pool:
+        out["uniform_pool"] = True
+    return out
