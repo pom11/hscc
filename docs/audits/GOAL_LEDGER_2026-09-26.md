@@ -2874,3 +2874,15 @@ CRON ROOT-CAUSE (resolves operator's repeated "heartbeat = 0"): the heartbeat cr
 - HEARTBEAT CRON: ACTIVE + SINGLE (grep count 1). Do NOT create more.
 - OPERATOR-ESCALATE (unchanged): consume-handoff card merged + code-complete, but full live 1:1 acceptance still waits on the upstream seam deploy (t_ff4b986e domain, feat/session-ownership-handoff @ 77f046f089, operator-held SAFE HOLD). Coordinator degrades safely to session_busy — no regression.
 - After commit, verify main...origin/main 0/0 (14:00 discipline).
+
+## Heartbeat tick 17:58 (cron hscc-orch-goal-heartbeat a0abe2b7848b, 2026-10-05) — terminal no-op confirm; fleet watch: persistent engine-wedge on .248 unit
+
+- Since last tick (17:18 @ b9cdef3 tick commit f964897): **NO new commits, NO new work.** `git log f964897..HEAD` empty; HEAD == main == origin/main == **f964897** (0/0 verified `git rev-list --left-right --count main...origin/main` after `git fetch`; `git status --short` clean). Latest product code remains operator's 2.5.1 (05893c5/946df17); latest goal-owned product code remains consume-handoff cf76249 + hygiene ec8a4ef.
+- BOARD (hscc): **completely empty of active work** — 0 running, 0 ready, 0 blocked, 0 todo, 0 triage, 0 review (kanban_list per active status, all six verified this tick). No junk cards, no orphaned states.
+- DISPATCH: NONE warranted. Cron condition ("board empty **and phases remain**") unmet — **no phases remain** (Phase 0 DONE, 1 = 100% closed 7/7, 2 = 4/4, 3 COMPLETE bafdf30, 4 COMPLETE 5a4c3f0; post-goal consume-handoff cf76249; hygiene ec8a4ef; operator releases 2.5.0/2.5.1 operator-owned). Confirmation-only until operator seeds new work.
+- **FLEET WATCH (NEW, operator-owned domain):** daemon engine-wedge check reporting **WEDGED unit `family-coding-Qwen3.8-Flash-Next-NVFP4-248-8003` persistently since ≥14:16Z through 14:58Z (~45 min, still active at this tick)**; pattern "2/4 streaming ok, 1 loading/checking, WEDGED: ...248" (occasionally 3/4 ok). Daemon fired the macOS notification "HSCC: inference engine wedged". Fleet degraded-but-serving on the other nodes. NOT touching (fleet control is operator/sparkrun domain; auto-heal is the daemon's concern). OPEN for operator: inspect the .248 vLLM unit post flash-next relaunch.
+- DAEMON: **ALIVE** — pid 20907 (kill -0 verified), pid file mtime 14:12 EEST, log fresh @ 14:58Z = 17:58 EEST (see wedge note above for the one active ERROR).
+- LITELLM PROXY: healthy — localhost:4000/v1/models returns worker-model + orchestrator-model + local-inference-lab/Qwen3.8-Flash-Next-NVFP4. Dispatch path UP.
+- HEARTBEAT CRON: ACTIVE + SINGLE (grep count 1). Do NOT create more.
+- OPERATOR-ESCALATE (unchanged): consume-handoff card merged + code-complete, but full live 1:1 acceptance still waits on the upstream seam deploy (t_ff4b986e domain, feat/session-ownership-handoff @ 77f046f089, operator-held SAFE HOLD). Coordinator degrades safely to session_busy — no regression. NEW this tick: .248 engine-wedge above.
+- After commit, verify main...origin/main 0/0 (14:00 discipline).
