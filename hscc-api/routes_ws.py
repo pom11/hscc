@@ -223,6 +223,13 @@ def _handle_busy_send(project: str, text: str) -> None:
             kind="session_busy",
             details={"surface": "cli", "message": message}))
 
+    def _on_working():
+        # The handoff's lease transferred and the turn is now driving: emit the
+        # same "orchestrator is working" frame as the non-busy path so the app
+        # flips away from the awaiting-approval banner while the reply streams.
+        get_store(project).append(
+            TYPE_SYSTEM, SystemPayload(kind="working", details={"text": text}))
+
     def _work():
         # Drive the turn through the same hook a non-busy send uses (the
         # attached serve driver, or the REST job fallback). Returns True once
@@ -239,6 +246,7 @@ def _handle_busy_send(project: str, text: str) -> None:
             coordinator.orchestrate(
                 text, drive=_work,
                 on_pending=_on_pending, on_denied=_on_denied,
+                on_working=_on_working,
                 session_id=session_id,
                 registry_home=coordinator.registry_home())
         except HandoffError:
