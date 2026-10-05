@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.5.2] - 2026-10-05
+
+### Fixed
+- **Orchestrator work was pinned to one node under `uniform_pool`.** All 15
+  orchestrator-role profiles pointed at the orchestrator node, so every
+  `*-orch` profile sent its work to a single GPU while N-1 identical units
+  idled — and one was aimed at `127.0.0.1:8000`, where nothing serves.
+  `uniform_pool` had fixed the cluster layer but never reached the profiles,
+  because two separate paths decide where a profile points. Both now follow the
+  pool, driven by one recorded fact:
+  - `serving.json` records `uniform_pool` (omitted when false, so a pinned
+    plan's file stays byte-identical). It is the only thing hscc-roles and
+    bootstrap read — they never see the template — so without it
+    `hscc-roles generate` re-pinned every orch profile on the next run and
+    undid apply's work.
+  - `template apply` re-aims orch-role profiles at the family proxy, selecting
+    on INTENT (`model.default` is the orchestrator alias) rather than current
+    URL, so a profile left on a stale or dead endpoint is repaired too.
+  - `hscc-roles generate`, and therefore bootstrap, resolves the strong tier to
+    the proxy when serving.json says the pool is uniform.
+- **The worker-profile rewrite hijacked orchestrator profiles.**
+  `_set_worker_model_in_profile` selected purely on `base_url`, which was safe
+  only while orch profiles pointed at a node. Once re-aimed at the proxy, the
+  URL test matched all 15 and rewrote their `model.default` to the worker alias
+  — erasing the orchestrator role's intent and leaving the repair function
+  (which selects on that alias) unable to fix them. It now keys on intent.
+  Observed live as 39 profiles collapsing to `worker-model`.
+- **`hscc-roles` strong-tier test depended on the operator's machine.** It read
+  a module constant computed at import from the live `serving.json`, which on a
+  pooled fleet legitimately equals the worker proxy, so the assertion passed or
+  failed depending on whose machine ran the suite. Now hermetic, and the
+  "never the proxy" guard is scoped to a pinned orchestrator where it holds.
+
+### Changed
+- The apply report surfaces `orch_profiles_changed`; without it the re-aiming
+  was invisible.
+
+### Verified
+- Full suite: **4388 passed, 0 failed** across 10 packages.
+- Live: 24 worker + 15 orchestrator profiles all on the proxy; two consecutive
+  applies idempotent (`success=True`, 0 changes); 8 `orchestrator-model`
+  requests distributed +0/+2/+5/+3 across the four nodes.
+
 ## [2.5.1] - 2026-10-05
 
 ### Fixed
