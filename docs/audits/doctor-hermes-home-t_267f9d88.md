@@ -106,3 +106,47 @@ env -u HSCC_DIR HERMES_HOME=$SCR/root/profiles/p1 \
   fatal, `main()` exits 1. **Not** weakened to always-pass.
 - guard: a checksum of the ambient/real config file around a `--fix` CLI run so
   the suite can never again write live operator state and stay green.
+
+## Second defect found while proving the first (worse than the red suite)
+
+`TestDoctorCLI::test_main_json_output` ran `main(["--json","--fix"])`, and
+`main()` built `config_path` from **ambient** `HERMES_HOME` — the test's
+`tmp_path/config.yaml` was never opened. Measured on pristine `origin/main`
+with `HERMES_HOME` at a throwaway profile dir: the 2-key config there came back
+**fully HSCC-wired (113 lines)**. Under a dispatched worker that file is the
+operator's live profile config; the write looked benign only because the live
+config was already wired, which made it idempotent. `enable()` additionally
+dropped `config.yaml.bak-<ts>` and — via module-level constants
+`HOOKS_DIR`/`CLUSTER_GUARD_DST` captured at import time from ambient
+`HERMES_HOME` — copied `cluster-guard.py` (+`.bak`) into the real hooks dir.
+
+The hermetic fixtures cover all three surfaces (env tuple, config path, hook
+constants); `test_ambient_home_does_not_leak_into_the_callers_home` and
+`test_fix_mode_leaves_other_homes_untouched` pin them by checksum.
+
+## Design note: why the `~/.hermes` fallback is safe
+
+`hermes_root_from_home` tries `<home>` → profiles-grandparent → `~/.hermes`.
+The last candidate means a machine whose `HERMES_HOME` points somewhere with no
+install can still pass via the default-location install. That is deliberate:
+the alternative is the false fatal this card removes. It is not silent — the
+check's `detail` names the resolved install and, when it differs, says
+`(hermes root resolved from profile home ...)`. A wrong-but-passing answer is
+therefore readable in `doctor --json` output.
+
+## Verification (executed, not asserted)
+
+Targeted (both interpreters, `HERMES_HOME=$HOME/.hermes/profiles/<profile>`):
+15/15 passed on py3.11 venv and on miniconda p313.
+`tests/test_doctor.py` whole file: **72 passed** on py3.11 under the worker env
+(69 before this card).
+
+Full suite `scripts/run_tests.sh` from a worker env (`HERMES_HOME` exported to
+a profile dir), this branch:
+* py3.11 run 1: 9/9 dirs green — **ALL GREEN** (log `full-py311-run1.log`).
+* py3.11 run 2 + p313 run 1: in parallel (host contention with t_163fa09f).
+* p313 run 2 follows; results recorded in the completion metadata.
+
+Live-state check after the hermetic runs: operator profile `config.yaml` md5
+unchanged, and no new files under the real `~/.hermes/hooks` or
+`~/.hermes/profiles/<profile>/hooks`.
