@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.5.3] - 2026-10-05
+
+### Fixed
+- **The installer was syntactically broken and aborted mid-install.**
+  `bootstrap.sh` did not parse: the `--skip-cli` guard was written as
+  `if $SKIP_CLI; then warn "skipped"; else` with no closing `fi`, so bash
+  failed with "unexpected end of file". Because bash parses the whole file
+  before executing any of it, the installer died AFTER copying plugin files and
+  BEFORE the CLI, watchdog, skills, roles, orchestrator, state, patches,
+  plugin-wiring, SOUL, trigger and daemon steps; `--help` was broken too. This
+  shipped broken in 2.5.0, 2.5.1 and 2.5.2 — a fresh install could not
+  complete, and the Python suite stayed green the whole time because nothing
+  executed the shell entry points.
+
+### Added
+- **Shell entry points are now parse-checked.** Every git-tracked `.sh` (49
+  scripts) is validated with `bash -n`, and `bootstrap.sh --help` is really
+  executed — `bash -n` alone would pass a script whose flag parsing exits
+  non-zero. Tracked files rather than a recursive glob, which also walks
+  `.worktrees/` and would fail on old commits instead of on shipped code.
+
+### Verified
+- Full suite: **4439 passed, 0 failed** across 10 packages.
+- The real installer run end to end: every step completed, daemon restarted,
+  and nothing operator-owned was clobbered — kanban caps preserved at 3/2/2,
+  `model.base_url` and `agent.reasoning_overrides` preserved, `serving.json`
+  left on the four Flash-Next units. The regenerated role profiles came out
+  POOLED (39 on `:4000`) instead of re-pinned, which proves the 2.5.2 bootstrap
+  fix through bootstrap itself.
+- Live after install: 4/4 units serving, 12 proxy backends (4 per alias), both
+  aliases answering with reasoning engaged, and 10 requests distributed
+  +2/+2/+3/+3 across the four nodes.
+
 ## [2.5.2] - 2026-10-05
 
 ### Fixed
