@@ -60,6 +60,17 @@ def _pin_home(monkeypatch, home, hermes_home=None):
     for var in _HOME_ENV:
         if var not in ("HERMES_HOME", "HSCC_DIR", "HERMES_SCRIPTS"):
             monkeypatch.delenv(var, raising=False)
+
+    # enable_plugins resolves its hook target at IMPORT time from ambient
+    # HERMES_HOME (module constants), so a `--fix` run would copy
+    # cluster-guard.py — plus a timestamped .bak — into the real home no matter
+    # which config it was pointed at. Redirect all three constants at the tree.
+    hooks_dir = hermes / "hooks"
+    monkeypatch.setattr(enable_plugins, "HOOKS_DIR", str(hooks_dir))
+    monkeypatch.setattr(enable_plugins, "CLUSTER_GUARD_DST",
+                        str(hooks_dir / "cluster-guard.py"))
+    monkeypatch.setattr(enable_plugins, "CLUSTER_GUARD_COMMAND",
+                        f"python3 {hooks_dir / 'cluster-guard.py'}")
     return hermes
 
 
@@ -220,7 +231,7 @@ class TestDoctorCLIHermetic:
         no matter what the caller wanted — measured: a 2-key config came back fully
         HSCC-wired (113 lines). This pins the contract by checksum.
         """
-        bystander = hermetic_env["home"] / "other" / "config.yaml"
+        bystander = hermetic_env.parent / "other" / "config.yaml"
         bystander.parent.mkdir(parents=True)
         with open(bystander, "w") as fh:
             yaml.safe_dump({"plugins": {"enabled": []}}, fh)
@@ -1300,38 +1311,72 @@ class TestDoctorFixDriftDetected:
 
 
 class TestDoctorCLI:
-    def test_main_json_output(self, tmp_path, monkeypatch):
-        config_path = tmp_path / "config.yaml"
-        cfg = {"plugins": {"enabled": []}, "toolsets": ["hermes-cli"]}
-        with open(config_path, "w") as f:
+    """The CLI surface — each case declares --home.
+
+    These two cases are what broke the full suite in a worker env, but the
+    reported symptom (`assert result == 0`) was the least of it: `main()` derived
+    config_path from ambient HERMES_HOME, so `--fix` here read and REWROTE
+    whatever config.yaml the surrounding process pointed at — on a dispatched
+    worker that is the operator's live profile config (measured: a 2-key config
+    came back fully HSCC-wired), and the test's own tmp_path/config.yaml was
+    never opened. Declaring --home makes the case test what it claims.
+    """
+
+    def _home(self, tmp_path, monkeypatch, cfg):
+        hermes = _pin_home(monkeypatch, tmp_path / "clihome")
+        (hermes / "hermes-agent").mkdir(exist_ok=True)
+        with open(hermes / "config.yaml", "w") as f:
             yaml.safe_dump(cfg, f)
-        os.makedirs(os.path.join(str(tmp_path), "hermes-agent"), exist_ok=True)
-        result = doctor.main(["--json", "--fix"])
-        assert result == 0
+        monkeypatch.setattr(doctor, "_run_cluster_list", lambda: _FAKE_CLUSTER)
+        monkeypatch.setattr(shutil, "which",
+                            lambda n: "/usr/local/bin/sparkrun" if n == "sparkrun" else None)
+        return hermes
+
+    def test_main_json_output(self, tmp_path, monkeypatch):
+        home = self._home(tmp_path, monkeypatch,
+                          {"plugins": {"enabled": []}, "toolsets": ["hermes-cli"]})
+        assert doctor.main(["--json", "--fix", "--home", str(home)]) == 0
 
     def test_main_text_output(self, tmp_path, monkeypatch):
-        config_path = tmp_path / "config.yaml"
-        cfg = {"plugins": {"enabled": []}}
-        with open(config_path, "w") as f:
-            yaml.safe_dump(cfg, f)
-        os.makedirs(os.path.join(str(tmp_path), "hermes-agent"), exist_ok=True)
+        home = self._home(tmp_path, monkeypatch, {"plugins": {"enabled": []}})
         old_stdout = sys.stdout
         try:
             sys.stdout = StringIO()
-            result = doctor.main(["--text"])
+            result = doctor.main(["--text", "--home", str(home)])
             output = sys.stdout.getvalue()
             assert "python" in output
             assert result == 0
         finally:
             sys.stdout = old_stdout
 
+    def test_json_output_is_parsable_and_reports_every_check(self, tmp_path, monkeypatch):
+        home = self._home(tmp_path, monkeypatch, {"plugins": {"enabled": []}})
+        rc, out = _capture_main(["--json", "--home", str(home)])
+        assert rc == 0, out
+        payload = json.loads(out)
+        names = {c["name"] for c in payload["checks"]}
+        assert {"python", "pyyaml", "sparkrun", "hermes"} <= names
+
 
 class TestDoctorNoAnsi:
-    """The themed human view (doctor --text) emits NO \x1b on a non-tty stdout,
+    """The themed human view (doctor --text) emits NO \\x1b on a non-tty stdout,
     while --json stays byte-identical. The RICH CLI card mandated a NO-ANSI
     regression per converted command: piped output must stay clean (scripts /
     daemons parse it) and --json must equal canonical dumps exactly.
+
+    Both views run against a declared --home and a stubbed cluster runner, so the
+    byte-identity comparison compares the RENDER, not two different live probes.
     """
+
+    def _home(self, tmp_path, monkeypatch):
+        hermes = _pin_home(monkeypatch, tmp_path / "ansihome")
+        (hermes / "hermes-agent").mkdir(exist_ok=True)
+        with open(hermes / "config.yaml", "w") as f:
+            yaml.safe_dump({"plugins": {"enabled": []}}, f)
+        monkeypatch.setattr(doctor, "_run_cluster_list", lambda: _FAKE_CLUSTER)
+        monkeypatch.setattr(shutil, "which",
+                            lambda n: "/usr/local/bin/sparkrun" if n == "sparkrun" else None)
+        return hermes
 
     def _capture(self, argv):
         import contextlib
@@ -1342,23 +1387,17 @@ class TestDoctorNoAnsi:
         return result, buf.getvalue()
 
     def test_human_view_is_plain_no_ansi(self, tmp_path, monkeypatch):
-        config_path = tmp_path / "config.yaml"
-        with open(config_path, "w") as f:
-            yaml.safe_dump({"plugins": {"enabled": []}}, f)
-        os.makedirs(os.path.join(str(tmp_path), "hermes-agent"), exist_ok=True)
-        result, out = self._capture(["--text"])
+        home = self._home(tmp_path, monkeypatch)
+        result, out = self._capture(["--text", "--home", str(home)])
         assert out, "expected doctor human output to be non-empty"
         assert "\x1b" not in out, f"ANSI escape in piped output: {out!r}"
         assert "python" in out  # the python check name survives the themed render
 
     def test_json_stays_byte_identical(self, tmp_path, monkeypatch):
-        config_path = tmp_path / "config.yaml"
-        with open(config_path, "w") as f:
-            yaml.safe_dump({"plugins": {"enabled": []}}, f)
-        os.makedirs(os.path.join(str(tmp_path), "hermes-agent"), exist_ok=True)
-        result, out = self._capture(["--json"])
+        home = self._home(tmp_path, monkeypatch)
+        result, out = self._capture(["--json", "--home", str(home)])
         import json as _json
-        res = doctor.run_doctor()
+        res = doctor.run_doctor(str(home))
         assert out == _json.dumps(res, indent=2) + "\n", (
             "--json must be byte-identical to canonical dumps")
         assert "\x1b" not in out
