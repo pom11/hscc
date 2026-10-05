@@ -137,22 +137,19 @@ def _handle_client_send(sock: socket.socket, project: str, payload: dict) -> Non
     # t_f109e7ea: honest state, not a silent ack. Before claiming the turn we
     # check whether the project's named session is owned by the operator's
     # interactive CLI REPL. Hermes refuses any other driver (SESSION_NOT_OWNED,
-    # 4090) before a turn can run, so in that state the message is received
-    # but CANNOT drive a reply — we tell the operator plainly instead of
-    # pretending "working" and then going quiet (the exact complaint this card
-    # fixes). The notice still surfaces the message WAS received (echo above).
+    # 4090) before a turn can run.
+    #
+    # t_7cc2e7d5: if a CLI owner holds the session, do NOT simply give up with
+    # a "session busy" notice — drive the CONSENTED handoff seam so the app can
+    # genuinely take the turn. The operator approves on their computer ("Allow
+    # for one turn / Deny"), the lease transfers, we drive the reply, then hand
+    # the session back. ``session_busy`` remains the fallback for "no seam on
+    # this hermes / owner denied / no live owner to ask".
     import routes_orchestrator as _ro
     busy_owner = _ro.detect_active_cli_owner(project, _ro._registry_path(None))
     if busy_owner is not None:
-        get_store(project).append(
-            TYPE_SYSTEM, SystemPayload(
-                kind="session_busy",
-                details={"surface": "cli",
-                         "message": ("Received. The interactive CLI is open on "
-                                     "this session, so a reply is not being "
-                                     "generated here. Resume in the CLI to "
-                                     "continue the conversation 1:1.")}))
-        return  # do not relay into a session whose turn another surface drives
+        _handle_busy_send(project, text)
+        return  # consumers already drove the handoff or surfaced a notice
 
     # t_f109e7ea: the "orchestrator is working" indicator — emitted immediately
     # so the app always sees the turn start, before the (possibly minutes-long)
@@ -165,6 +162,131 @@ def _handle_client_send(sock: socket.socket, project: str, payload: dict) -> Non
     # hook defaults to a no-op when no GatewayDriver is running, so the WS
     # endpoint stays decoupled and hermetically testable (test_ws_route).
     relay_user_message(project, text)
+
+
+def _handle_busy_send(project: str, text: str) -> None:
+    """Drive a consented session handoff when a CLI owner holds the session (t_7cc2e7d5).
+
+    Called from :func:`_handle_client_send` when ``detect_active_cli_owner`` finds
+    the operator's interactive CLI holds the project's named session — the state
+    where a plain relay would be refused SESSION_NOT_OWNED. Instead of merely
+    surfacing a "session busy" notice, we drive the upstream CONSENTED handoff:
+
+      1. request the handoff (controller ``hscc-app``) on the project's
+         named-session profile registry;
+      2. if the seam is absent on this hermes (pre-deploy) → fall back to the
+         existing ``session_busy`` notice (NO regression);
+      3. if the request lands pending → emit a ``handoff_pending`` system frame
+         ("waiting for approval on your computer") so the app shows the ask is
+         outstanding, then run the rest on a background thread so the WS socket
+         is never blocked by the consent poll;
+      4. when the operator approves, complete the handoff (take the lease),
+         drive the reply via ``relay_user_message`` (the existing serve/PTY
+         path), and release the lease on turn end so the operator's CLI regains
+         the session.
+
+    ``session_busy`` remains the fallback it always was: seam absent, owner
+    denied, or no live owner to ask. The message is always at least echoed
+    (the user line above) — it is never silently dropped.
+
+    Runs entirely on a background thread (like ``_default_relay``), so the WS
+    socket keeps serving while the consent poll blocks. Thread-safety: the
+    store append is thread-safe (``_default_relay._work`` already appends from
+    a background thread), so emitting the pending/denied frames from here is
+    fine.
+    """
+    import routes_orchestrator as _ro
+    from active_sessions_handoff import HandoffError
+
+    # Resolve the project's named session + owning profile (the CLI owner's
+    # registry lives under that profile home). Fail-safe: any resolution
+    # failure falls back to the same busy notice as before.
+    try:
+        profile, _title, session_id = _ro.resolve_named_session_id(
+            project, registry_path=_ro._registry_path(None))
+    except Exception:  # noqa: BLE001 — fail-safe
+        profile = session_id = None
+    if not session_id or not profile:
+        _append_busy_notice(project)
+        return
+
+    def _on_pending():
+        get_store(project).append(TYPE_SYSTEM, SystemPayload(
+            kind="handoff_pending",
+            details={"surface": "cli",
+                     "message": ("Waiting for approval on your computer — "
+                                 "the interactive CLI is open on this session. "
+                                 "Approve the handoff there to continue here.")}))
+
+    def _on_denied(message: str):
+        get_store(project).append(TYPE_SYSTEM, SystemPayload(
+            kind="session_busy",
+            details={"surface": "cli", "message": message}))
+
+    def _on_working():
+        # The handoff's lease transferred and the turn is now driving: emit the
+        # same "orchestrator is working" frame as the non-busy path so the app
+        # flips away from the awaiting-approval banner while the reply streams.
+        get_store(project).append(
+            TYPE_SYSTEM, SystemPayload(kind="working", details={"text": text}))
+
+    def _work():
+        # Drive the turn through the same hook a non-busy send uses (the
+        # attached serve driver, or the REST job fallback). Returns True once
+        # the relay was started; the reply streams into the store and folds
+        # back 1:1.
+        started = relay_user_message(project, text)
+        if not started:
+            _append_busy_notice(project)
+
+    coordinator = coordinator_factory(profile, session_id)
+
+    def _run():
+        try:
+            coordinator.orchestrate(
+                text, drive=_work,
+                on_pending=_on_pending, on_denied=_on_denied,
+                on_working=_on_working,
+                session_id=session_id,
+                registry_home=coordinator.registry_home())
+        except HandoffError:
+            # Only ``request`` raises (with SEAM_UNAVAILABLE when the running
+            # hermes lacks the seam, or another refusal when there is no live
+            # owner to ask). In every case we keep the pre-existing behavior:
+            # the operator is told the session is busy, never left guessing.
+            _append_busy_notice(project)
+
+    threading.Thread(target=_run, name="ws-handoff-%s" % project,
+                     daemon=True).start()
+
+
+def _append_busy_notice(project: str) -> None:
+    """Append the legacy "session busy" system frame to a project's store."""
+    get_store(project).append(
+        TYPE_SYSTEM, SystemPayload(
+            kind="session_busy",
+            details={"surface": "cli",
+                     "message": ("Received. The interactive CLI is open on "
+                                 "this session, so a reply is not being "
+                                 "generated here. Resume in the CLI to "
+                                 "continue the conversation 1:1.")}))
+
+
+def _build_coordinator(profile: str, session_id: str):
+    """Build a coordinator bound to a project's profile session.
+
+    This is a small seam so tests can install a fake coordinator (via
+    :data:`coordinator_factory`) without importing the real one / touching the
+    real operator registry. Default builds the real coordinator, which lazily
+    detects seam availability at call time.
+    """
+    from active_sessions_handoff import HandoffCoordinator
+    return HandoffCoordinator(profile=profile, session_id=session_id)
+
+
+# Installable by tests so the busy-send handoff path is hermetically exercisable
+# without a real (or live) hermes seam. Default: :func:`_build_coordinator`.
+coordinator_factory = _build_coordinator
 
 
 def _default_relay(project: str, text: str) -> bool:
