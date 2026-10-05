@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **`doctor` false-failed on every dispatched worker (profile-scoped
+  `HERMES_HOME`).** Hermes sets `HERMES_HOME` to the *profile* dir
+  (`<root>/profiles/<name>`) whenever it runs under a named profile — its normal
+  run mode, per upstream `hermes_constants.get_hermes_home()` /
+  `get_default_hermes_root()`. The `hermes` check joined that path with
+  `hermes-agent` and reported a fatal "missing" install, because the checkout
+  lives at the root. Result: `doctor` (and therefore `bootstrap.sh` preflight)
+  was unusable on exactly the hosts that run it most — `hscc-bootstrap`'s two
+  `TestDoctorCLI` cases failed in every worker env while staying green on a
+  machine whose `HERMES_HOME` happened to hold the install. `hermes_root_from_home()`
+  now resolves the install as home → profiles-grandparent → `~/.hermes`, the same
+  rule `hscc-roles/rolelib.py` uses, and the check stays **fatal** when no
+  candidate carries `hermes-agent`. Resolved paths name themselves in `detail`
+  (with `hermes root resolved from profile home ...`) so a wrong-but-passing
+  answer stays readable.
+- **`doctor --fix` wrote the operator's live config from a test.** `main()` built
+  `config_path` from ambient `HERMES_HOME`, so a caller that intended some other
+  home still read and rewrote `$HERMES_HOME/config.yaml`. Measured on clean
+  `origin/main` with `HERMES_HOME` at a throwaway profile dir: a 2-key config came
+  back fully HSCC-wired (113 lines). Under a worker that file is the live profile
+  config; it looked benign only because that config was already wired, so the
+  write was idempotent. `main()` takes `--home PATH` and feeds ONE home to both
+  the config path and the checks. `enable_plugins`' hook target
+  (`HOOKS_DIR`/`CLUSTER_GUARD_DST`) is a module constant captured at import time
+  from ambient `HERMES_HOME`, which also dropped `cluster-guard.py` (+`.bak`) into
+  the real hooks dir regardless of target; the doctor fixtures redirect it.
+- **`run_doctor()` reached the live fleet config from unit tests.** It threaded
+  the injected cluster runner into `_sparkrun_cluster_ok` but called `_nas_ok()`
+  bare, so every call shelled out to a real `sparkrun cluster list` (15s) against
+  the operator's cluster config. The runner now reaches the NAS check too.
+
+### Verified
+- `hscc-bootstrap/tests/test_doctor.py`: 69 -> **72** cases, green with
+  `HERMES_HOME` exported to a profile dir.
+- Full suite `scripts/run_tests.sh` **ALL GREEN** (9/9 packages) twice on py3.11
+  and twice on py3.13, each from a worker-like env with `HERMES_HOME` pointed at
+  a profile dir. Operator profile `config.yaml` md5 unchanged by the runs.
+- `docs/audits/doctor-hermes-home-t_267f9d88.md` — root cause, the design
+  verdict (a profile-scoped `HERMES_HOME` is legitimate, so the CHECK was wrong,
+  not only the tests), and the evidence.
+
 ## [2.5.4] - 2026-10-05
 
 ### Fixed
