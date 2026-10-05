@@ -90,13 +90,81 @@ def _sparkrun_cluster_ok(_runner=None) -> Check:
     return Check("sparkrun cluster", True, detail="configured")
 
 
+def hermes_root_from_home(hermes_home) -> Optional[str]:
+    """Hermes ROOT for a home that may be PROFILE-scoped; None if no install.
+
+    Hermes sets ``HERMES_HOME`` to the *profile* dir
+    (``<root>/profiles/<name>``) whenever it runs under a profile — that is its
+    normal run mode, not a misconfiguration (upstream
+    ``hermes_constants.get_hermes_home`` resolves config/SOUL/skills relative to
+    that profile dir, while ``get_default_hermes_root`` strips the
+    ``profiles/<name>`` tail for root-level ops). So a profile-scoped home is
+    legitimate and must be tolerated.
+
+    Returns the root when ``<candidate>/hermes-agent`` exists, trying in order:
+    the home itself, then the grandparent of a ``<root>/profiles/<name>`` path,
+    then the platform default ``~/.hermes``. Returns None when none of them
+    carries an install — i.e. Hermes really is absent. Same
+    "parent dir is named ``profiles``" rule ``hscc-roles/rolelib.py`` already
+    uses, so the fleet resolves homes consistently.
+    """
+    candidates: List[str] = []
+
+    def _push(path):
+        if not path:
+            return
+        path = os.path.expanduser(str(path))
+        if path not in candidates:
+            candidates.append(path)
+
+    _push(hermes_home)
+    home = os.path.expanduser(str(hermes_home)) if hermes_home else ""
+    if home:
+        parent = os.path.dirname(home)
+        if parent and os.path.basename(parent) == "profiles":
+            _push(os.path.dirname(parent))
+    _push(os.path.join(os.path.expanduser("~"), ".hermes"))
+
+    for cand in candidates:
+        if os.path.isdir(os.path.join(cand, "hermes-agent")):
+            return cand
+    return None
+
+
+def hermes_install_dir(hermes_home=None) -> str:
+    """Path of the ``hermes-agent`` checkout for an optionally profile-scoped home.
+
+    Falls back to the first candidate path when Hermes is absent, so callers can
+    report an honest "missing" detail naming where it was looked for.
+    """
+    root = hermes_root_from_home(hermes_home)
+    if root:
+        return os.path.join(root, "hermes-agent")
+    home = hermes_home or os.environ.get("HERMES_HOME") \
+        or os.path.join(os.path.expanduser("~"), ".hermes")
+    return os.path.join(os.path.expanduser(str(home)), "hermes-agent")
+
+
 def _hermes_ok(hermes_home: str) -> Check:
-    agent = os.path.join(hermes_home, "hermes-agent")
-    if not os.path.isdir(agent):
-        return Check("hermes", False, detail=f"{agent} missing",
+    """Hermes install check — fatal, and honest in BOTH directions.
+
+    A profile-scoped ``HERMES_HOME`` must NOT be reported as a missing install
+    (the checkout lives at the root, so the old code false-failed every worker
+    run, which sets HERMES_HOME to a profile dir), but a machine with no
+    ``hermes-agent`` anywhere still has to fail fatally.
+    """
+    root = hermes_root_from_home(hermes_home)
+    if root is None:
+        missing = os.path.join(os.path.expanduser(str(hermes_home)),
+                               "hermes-agent") if hermes_home \
+            else "~/.hermes/hermes-agent"
+        return Check("hermes", False, detail=f"{missing} missing",
                      fix="Install Hermes (expected at ~/.hermes/hermes-agent).",
                      fatal=True)
-    return Check("hermes", True, detail=agent)
+    agent = os.path.join(root, "hermes-agent")
+    detail = agent if root == os.path.expanduser(str(hermes_home)) \
+        else f"{agent} (hermes root resolved from profile home {hermes_home})"
+    return Check("hermes", True, detail=detail)
 
 
 def _disk_ok(path: str, min_gb: float = 5.0) -> Check:
@@ -111,12 +179,17 @@ def _disk_ok(path: str, min_gb: float = 5.0) -> Check:
         return Check("disk space", False, detail=str(e), fatal=False)
 
 
-def _nas_ok(_runner=None) -> Check:
+def _nas_ok(_runner=None, _cluster_raw=None) -> Check:
     """NAS reachability (non-fatal — NAS is optional but recommended for weight
     staging). Uses the sparkrun cluster's cache_dir + a ping to the NAS host if
-    discoverable."""
-    runner = _runner or _detect_nas
-    nas = runner()
+    discoverable.
+
+    ``_runner`` supplies the NAS identifier directly (legacy injection point).
+    ``_cluster_raw`` supplies the raw `sparkrun cluster list` JSON instead, so a
+    caller that already injects the cluster runner can stop that subprocess
+    reaching the live fleet config — see ``run_doctor``.
+    """
+    nas = _runner() if _runner else _detect_nas(_cluster_raw)
     if not nas:
         return Check("nas", True, detail="none configured (optional)", fatal=False)
     # nas may be a mount path (cache_dir) and/or an ip; just report it — a deep
@@ -125,9 +198,13 @@ def _nas_ok(_runner=None) -> Check:
     return Check("nas", True, detail=str(nas), fatal=False)
 
 
-def _detect_nas():
-    """Best-effort NAS identifier from the sparkrun cluster (cache_dir)."""
-    raw = _run_cluster_list()
+def _detect_nas(_cluster_raw=None):
+    """Best-effort NAS identifier from the sparkrun cluster (cache_dir).
+
+    ``_cluster_raw`` is an injectable stand-in for `sparkrun cluster list`
+    (returns the raw JSON string) so tests do not shell out to the live fleet.
+    """
+    raw = (_cluster_raw or _run_cluster_list)()
     if not raw:
         return None
     try:
@@ -388,7 +465,10 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         _sparkrun_ok(),
         _sparkrun_cluster_ok(_cluster_runner),
         _hermes_ok(home),
-        _nas_ok(),
+        # _nas_ok also shells out to `sparkrun cluster list`, so the injected
+        # runner has to reach it too — otherwise every run_doctor() call in the
+        # suite pays a real 15s subprocess against the live cluster config.
+        _nas_ok(_cluster_runner),
         _disk_ok(os.path.expanduser("~")),
         _gateway_running(),
         # Models-served is non-fatal (warning): drift to fix, not a reason to
@@ -780,18 +860,34 @@ def _get_nested(cfg: dict, section: str, key: str):
         return None
 
 
+def _home_from_argv(argv) -> str:
+    """``--home PATH`` wins over ambient HERMES_HOME.
+
+    One explicit home is then threaded into *both* the config path and the
+    hermes check, so the two can never disagree and a caller (or a test) is not
+    at the mercy of whatever HERMES_HOME the surrounding process happens to
+    carry. Without this, `main(["--fix"])` reads and WRITES
+    $HERMES_HOME/config.yaml no matter what the caller intended.
+    """
+    for i, tok in enumerate(argv):
+        if tok == "--home" and i + 1 < len(argv):
+            return argv[i + 1]
+        if tok.startswith("--home="):
+            return tok.split("=", 1)[1]
+    return os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+
+
 def main(argv=None) -> int:
     import json
     argv = argv if argv is not None else sys.argv[1:]
     fix_mode = "--fix" in argv
-    config_path = os.path.join(
-        os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"),
-        "config.yaml")
+    home = _home_from_argv(argv)
+    config_path = os.path.join(os.path.expanduser(home), "config.yaml")
 
     if fix_mode:
-        res = run_doctor_fix(config_path=config_path)
+        res = run_doctor_fix(config_path=config_path, hermes_home=home)
     else:
-        res = run_doctor()
+        res = run_doctor(home)
 
     if "--json" in argv:
         print(json.dumps(res, indent=2))
