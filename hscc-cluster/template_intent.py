@@ -174,6 +174,19 @@ class ClusterTemplate:
     # v3: consumer -> unit name (e.g. {"delegation": "family-reasoning"}).
     # None = whole block absent = "do not touch" any routing config at apply.
     routing: Optional[Dict[str, str]] = None
+    # v3: treat N identical replicas as ONE role-agnostic pool.
+    #
+    # HSCC's shape is orchestrator + families, and a unit's alias follows that
+    # role (`orchestrator-model` vs `worker-model`). When every unit runs the
+    # SAME recipe that split is meaningless: any node can do any work. With
+    # uniform_pool:
+    #   * every unit gets a DISTINCT port, and
+    #   * every unit advertises BOTH aliases,
+    # so `orchestrator-model` and `worker-model` each load-balance across all
+    # N units and no request cares which node is nominally the orchestrator.
+    #
+    # Default False: omission preserves the role-split behaviour exactly.
+    uniform_pool: bool = False
 
     @staticmethod
     def from_dict(d: dict) -> "ClusterTemplate":
@@ -193,6 +206,8 @@ class ClusterTemplate:
         if version < 3:
             if "routing" in d:
                 legacy.append("routing")
+            if "uniform_pool" in d:
+                legacy.append("uniform_pool")
             for fam in (d.get("families") or []):
                 if isinstance(fam, dict) and "nodes" in fam:
                     legacy.append(f"families.{fam.get('name','?')}.nodes")
@@ -213,6 +228,7 @@ class ClusterTemplate:
             version=version,
             description=d.get("description", ""),
             routing=routing,
+            uniform_pool=bool(d.get("uniform_pool", False)),
         )
 
     def to_dict(self) -> dict:
@@ -226,6 +242,8 @@ class ClusterTemplate:
             out["families"] = [f.to_dict() for f in self.families]
         if self.routing is not None:
             out["routing"] = dict(self.routing)
+        if self.uniform_pool:
+            out["uniform_pool"] = True
         return out
 
 
@@ -271,6 +289,9 @@ class ResolvedPlan:
     template: str
     orchestrator: ResolvedUnit
     families: List[ResolvedFamily]
+    # Mirrors ClusterTemplate.uniform_pool so the apply path can see it without
+    # re-reading the template.
+    uniform_pool: bool = False
 
     @property
     def all_units(self) -> List[ResolvedUnit]:
@@ -501,8 +522,29 @@ def resolve(tpl: ClusterTemplate, topology: Any, *, _coster=None,
         if fam.proxy:
             proxy_port += 1
 
-    return ResolvedPlan(template=tpl.name, orchestrator=orchestrator,
-                        families=resolved_families)
+    plan = ResolvedPlan(template=tpl.name, orchestrator=orchestrator,
+                        families=resolved_families,
+                        uniform_pool=tpl.uniform_pool)
+
+    if tpl.uniform_pool:
+        # DISTINCT port per unit, assigned here rather than in the three
+        # placement branches above (explicit-nodes / tp>1 span / tp==1
+        # replication) so they all get it and none can drift.
+        #
+        # Why it is REQUIRED, not cosmetic: sparkrun's proxy discovery dedupes
+        # endpoints by ``(frozenset(actual_models), port)`` with NO host
+        # (proxy/discovery.py:_deduplicate_by_identity — it targets one server
+        # reachable via both management and ConnectX-7 IPs). N replicas that
+        # advertise the same model names on the same port therefore collapse
+        # into ONE registered backend, and only the last one ever gets traffic.
+        # Observed exactly that: 3 workers on :8000, only one in the proxy.
+        #
+        # The per-model ``8000 + i`` scheme elsewhere indexes MODELS in a
+        # family, so tp=1 replicas of a single model all landed on 8000.
+        for n, u in enumerate(plan.all_units):
+            u.port = 8000 + n
+
+    return plan
 
 
 def validate_resolved(plan: ResolvedPlan) -> List[str]:

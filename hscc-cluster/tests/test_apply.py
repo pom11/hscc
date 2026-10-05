@@ -2870,3 +2870,106 @@ class TestTpExceedsSpanRefused:
         assert len(runs) == 1
         assert [f for f in result["failed"]
                 if "deepseek.yaml" in str(f.get("recipe"))] == []
+
+
+class TestUniformPool:
+    """`uniform_pool: true` — N identical replicas as one role-agnostic pool.
+
+    Two properties are load-bearing and both were bugs before this existed:
+      * DISTINCT ports per unit. sparkrun's proxy dedupes endpoints by
+        (model set, port) with NO host, so same-port replicas collapse into one
+        registered backend and only the last one ever gets traffic.
+      * BOTH aliases on every unit, so `orchestrator-model` and `worker-model`
+        each resolve to every unit in the pool.
+    """
+
+    def _d(self, workers=3, uniform=True, recipe="same.yaml",
+           worker_recipe=None, version=3):
+        d = {
+            "name": "t-uniform", "version": version,
+            "orchestrator": {"recipe": recipe},
+            "families": [{
+                "name": "coding",
+                "models": [{"recipe": worker_recipe or recipe}],
+                "workers": workers, "proxy": True,
+            }],
+        }
+        if uniform:
+            d["uniform_pool"] = True
+        return d
+
+    def _plan(self, d, nodes=3):
+        return ti.resolve(ti.ClusterTemplate.from_dict(d), _topo(nodes),
+                          _coster=_coster(per_gpu=30))
+
+    # ── schema ───────────────────────────────────────────────────────────
+    def test_parses_and_round_trips(self):
+        t = ti.ClusterTemplate.from_dict(self._d())
+        assert t.uniform_pool is True
+        assert t.to_dict()["uniform_pool"] is True
+
+    def test_absent_defaults_false_and_is_omitted_from_round_trip(self):
+        t = ti.ClusterTemplate.from_dict(self._d(uniform=False))
+        assert t.uniform_pool is False
+        assert "uniform_pool" not in t.to_dict()
+
+    def test_rejected_on_v2(self):
+        with pytest.raises(ti.TemplateIntentError) as e:
+            ti.ClusterTemplate.from_dict(self._d(version=2))
+        assert "uniform_pool" in str(e.value)
+
+    # ── ports ────────────────────────────────────────────────────────────
+    def test_every_unit_gets_a_distinct_port(self):
+        plan = self._plan(self._d(workers=3), nodes=3)
+        ports = [u.port for u in plan.all_units]
+        assert len(set(ports)) == len(ports), f"ports collide: {ports}"
+        assert ports[0] == 8000
+        assert sorted(ports) == list(range(8000, 8000 + len(ports)))
+
+    def test_without_the_flag_replicas_still_share_one_port(self):
+        # Pins pre-existing behaviour: omission must change nothing.
+        plan = self._plan(self._d(workers=3, uniform=False), nodes=3)
+        worker_ports = [u.port for f in plan.families for u in f.units]
+        assert len(worker_ports) > 1
+        assert len(set(worker_ports)) == 1
+
+    def test_plan_carries_the_flag(self):
+        assert self._plan(self._d()).uniform_pool is True
+        assert self._plan(self._d(uniform=False)).uniform_pool is False
+
+    # ── aliases ──────────────────────────────────────────────────────────
+    def test_both_aliases_advertised_on_every_unit(self):
+        plan = self._plan(self._d())
+        for u in plan.all_units:
+            names = cluster_template._unit_serve_names(u, plan)
+            assert "worker-model" in names, names
+            assert "orchestrator-model" in names, names
+
+    def test_role_split_preserved_without_the_flag(self):
+        plan = self._plan(self._d(uniform=False))
+        assert cluster_template._unit_serve_names(
+            plan.orchestrator, plan) == "orchestrator-model"
+        for f in plan.families:
+            for u in f.units:
+                assert cluster_template._unit_serve_names(u, plan) == "worker-model"
+
+    def test_routing_alias_stays_single_valued(self):
+        # Routing must keep resolving ONE name, or the probe-before-write gate
+        # would try to confirm a space-joined id no endpoint advertises.
+        plan = self._plan(self._d())
+        assert cluster_template._unit_alias(
+            plan.orchestrator, plan) == "orchestrator-model"
+        for f in plan.families:
+            for u in f.units:
+                assert cluster_template._unit_alias(u, plan) == "worker-model"
+
+    # ── the serve command actually carries both names ────────────────────
+    def test_serve_cmd_registers_concrete_plus_both_aliases(self):
+        plan = self._plan(self._d())
+        u = plan.orchestrator
+        cmd = cluster_template._render_serve_cmd(
+            "hscc", u.nodes[0], u.port, u.recipe,
+            cluster_template._unit_serve_names(u, plan), u.tp, u.model)
+        i = cmd.index("--served-model-name")
+        names = cmd[i + 1].split()
+        assert "worker-model" in names and "orchestrator-model" in names, names
