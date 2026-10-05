@@ -2712,3 +2712,11 @@ CRON ROOT-CAUSE (resolves operator's repeated "heartbeat = 0"): the heartbeat cr
 - HEARTBEAT CRON: ACTIVE + SINGLE (a0abe2b7848b one row, grep this tick). Do NOT create more.
 - OPERATOR-ESCALATE (unchanged): t_ff4b986e upstream handoff seam review/merge (github.com/pom11/hermes-agent feat/session-ownership-handoff @ 77f046f089) by org maintainer, then live deploy (orchestrator holds SAFE HOLD) — t_7cc2e7d5's full live 1:1 acceptance gate waits on this deploy. Grid residue optional. Everything else green.
 - After commit, verify main...origin/main 0/0 (14:00 discipline).
+
+## Heartbeat tick 03:56 — 2026-10-05 (LANDING)
+
+- **LANDED (hscc-orch stranded-work rescue):** review-approved consume-handoff branch merged to main as merge commit **cf76249** (no-ff "Merge wt/t_7cc2e7d5"), pushed; verified `7b2a71d` reachable from origin/main, main==origin/main 0/0, tree clean. The 13-file / +1646/-16 diff (HandoffCoordinator + WS wiring + hermetic 26/26 both interpreters + iOS TurnState + working-frame fix) was grep-clean of real addresses/secrets before push.
+- **Why the merge was needed:** reviewer run 915 APPROVED round 2 (03:33) and closed the card to done, but the merge to hscc main was never performed — the card's DELIVERABLES explicitly required "merged to hscc main". Completed the §6 stranded-disposition rescue exactly as the 03:48 tick anticipated.
+- **Review lifecycle (the loop fix payoff):** distinct reviewer caught a REAL working-frame defect (app stuck .awaitingApproval) that 5 implementer self-verification runs (904-908) had all missed; implementer fixed it (7b2a71d on_working callback); reviewer re-verified 26/26 both interpreters + probe + iOS and APPROVED. The review-reclaim loop is fully resolved.
+- **Acceptance caveat (unchanged, honest):** full live 1:1 gate needs upstream seam deploy (t_ff4b986e domain, operator-held SAFE HOLD); coordinator degrades safely to session_busy, no regression.
+- COMMIT: cf76249, pushed origin/main 0/0 verified.
