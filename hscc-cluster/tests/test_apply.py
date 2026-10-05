@@ -2973,3 +2973,119 @@ class TestUniformPool:
         i = cmd.index("--served-model-name")
         names = cmd[i + 1].split()
         assert "worker-model" in names and "orchestrator-model" in names, names
+
+
+class TestUniformPoolChatEndpointAndProviderPruning:
+    """`_update_hermes_config`: chat follows the pool, stale families are pruned."""
+
+    def _plan(self, uniform, fam_name="coding"):
+        d = {
+            "name": "t", "version": 3,
+            "orchestrator": {"recipe": "same.yaml"},
+            "families": [{"name": fam_name, "models": [{"recipe": "same.yaml"}],
+                          "workers": 2, "proxy": True}],
+        }
+        if uniform:
+            d["uniform_pool"] = True
+        return ti.resolve(ti.ClusterTemplate.from_dict(d), _topo(2),
+                          _coster=_coster(per_gpu=30))
+
+    @staticmethod
+    def _probe_ok(url, api_key=None):
+        # _http_get's contract is (url, api_key=None) -> raw body STRING.
+        # Every endpoint advertises both aliases — what uniform_pool produces.
+        return json.dumps({"data": [
+            {"id": "concrete/model"},
+            {"id": "worker-model"},
+            {"id": "orchestrator-model"},
+        ]})
+
+    def test_uniform_pool_points_chat_at_the_proxy(self):
+        plan = self._plan(uniform=True)
+        cfg = cluster_template._update_hermes_config(
+            {}, plan, _http_get=self._probe_ok)
+        assert cfg["model"]["base_url"] == "http://localhost:4000/v1", \
+            cfg["model"]["base_url"]
+
+    def test_non_uniform_keeps_the_pinned_orchestrator_endpoint(self):
+        plan = self._plan(uniform=False)
+        cfg = cluster_template._update_hermes_config(
+            {}, plan, _http_get=self._probe_ok)
+        o = plan.orchestrator
+        assert cfg["model"]["base_url"] == f"http://{o.node}:{o.port}/v1"
+
+    def test_chat_model_alias_still_written(self):
+        plan = self._plan(uniform=True)
+        cfg = cluster_template._update_hermes_config(
+            {}, plan, _http_get=self._probe_ok)
+        assert cfg["model"]["default"] == "orchestrator-model"
+
+    def test_stale_family_provider_is_pruned(self):
+        plan = self._plan(uniform=True, fam_name="coding")
+        start = {"providers": [
+            {"name": "custom", "base_url": "http://old/v1"},
+            {"name": "family-reasoning", "base_url": "http://localhost:4000/v1"},
+            {"name": "openai", "base_url": "https://api.openai.com/v1"},
+        ]}
+        cfg = cluster_template._update_hermes_config(
+            start, plan, _http_get=self._probe_ok)
+        names = {p["name"] for p in cfg["providers"]}
+        assert "family-reasoning" not in names, names   # stale, pruned
+        assert "family-coding" in names                 # current, present
+        assert "custom" in names                        # ours, rewritten
+        assert "openai" in names, "operator-defined provider must survive"
+
+
+class TestServeCmdCarriedAcrossRewrite:
+    """`serve_cmd` records must survive a serving.json rewrite.
+
+    Step 1 rebuilds serving.json from the plan (no serve_cmd), and provision
+    only re-stamps units it actually (re)launched — under `--ensure` an
+    already-running unit is skipped. So without carrying, ONE no-op apply wiped
+    every record, drift became permanently uncheckable, and every later apply
+    warned and returned success=False, which stopped applied_template.json
+    from updating.
+    """
+
+    def _prev(self, tmp_path, units):
+        p = tmp_path / "serving.json"
+        p.write_text(json.dumps({"version": 2, "units": units}))
+        return p
+
+    def test_carries_recorded_commands(self, monkeypatch, tmp_path):
+        prev = self._prev(tmp_path, [
+            {"id": "orch", "serve_cmd": ["sparkrun", "run", "a.yaml"]},
+            {"id": "w1", "serve_cmd": ["sparkrun", "run", "b.yaml"]},
+        ])
+        monkeypatch.setattr(cluster_template, "SERVING_JSON", prev)
+        fresh = {"version": 2, "units": [{"id": "orch"}, {"id": "w1"}]}
+        assert cluster_template._carry_serve_cmds(fresh) == 2
+        assert fresh["units"][0]["serve_cmd"] == ["sparkrun", "run", "a.yaml"]
+        assert fresh["units"][1]["serve_cmd"] == ["sparkrun", "run", "b.yaml"]
+
+    def test_unknown_unit_is_left_alone(self, monkeypatch, tmp_path):
+        prev = self._prev(tmp_path, [{"id": "orch", "serve_cmd": ["x"]}])
+        monkeypatch.setattr(cluster_template, "SERVING_JSON", prev)
+        fresh = {"version": 2, "units": [{"id": "orch"}, {"id": "brand-new"}]}
+        assert cluster_template._carry_serve_cmds(fresh) == 1
+        assert "serve_cmd" not in fresh["units"][1]
+
+    def test_does_not_clobber_a_fresh_record(self, monkeypatch, tmp_path):
+        prev = self._prev(tmp_path, [{"id": "orch", "serve_cmd": ["old"]}])
+        monkeypatch.setattr(cluster_template, "SERVING_JSON", prev)
+        fresh = {"version": 2, "units": [{"id": "orch", "serve_cmd": ["new"]}]}
+        assert cluster_template._carry_serve_cmds(fresh) == 0
+        assert fresh["units"][0]["serve_cmd"] == ["new"]
+
+    def test_missing_or_unreadable_previous_file_is_harmless(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cluster_template, "SERVING_JSON",
+                            tmp_path / "does-not-exist.json")
+        fresh = {"version": 2, "units": [{"id": "orch"}]}
+        assert cluster_template._carry_serve_cmds(fresh) == 0
+        assert "serve_cmd" not in fresh["units"][0]
+
+    def test_records_without_serve_cmd_are_ignored(self, monkeypatch, tmp_path):
+        prev = self._prev(tmp_path, [{"id": "orch"}, {"id": "w1", "serve_cmd": None}])
+        monkeypatch.setattr(cluster_template, "SERVING_JSON", prev)
+        fresh = {"version": 2, "units": [{"id": "orch"}, {"id": "w1"}]}
+        assert cluster_template._carry_serve_cmds(fresh) == 0
