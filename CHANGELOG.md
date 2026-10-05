@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.5.1] - 2026-10-05
+
+### Fixed
+- **Chat was pinned to the orchestrator node under `uniform_pool`.**
+  `_update_hermes_config` always wrote `model.base_url` as the orchestrator's
+  own endpoint. Under a uniform pool every unit advertises the orchestrator
+  alias, so pinning wasted the pool *and* left chat with no redundancy — the
+  nominal orchestrator dying took chat with it while N-1 identical units stayed
+  healthy. Chat now points at the family proxy, and the probe-before-write gate
+  probes the endpoint actually written. Non-uniform templates keep the pinned
+  endpoint, where the role split is real.
+- **Stale `family-*` providers were never removed.** The providers list is
+  seeded from the existing config and only ever added to, so a previous
+  template's families lingered forever (observed: a `family-reasoning` entry
+  surviving the move to a `family-coding` template). Pruned to the families the
+  current plan defines; `custom` and operator-defined providers are untouched.
+- **`serve_cmd` records were destroyed on every apply, which made every apply
+  report failure.** Step 1 rebuilds serving.json from the plan and carries no
+  `serve_cmd`, while provision only re-stamps units it ACTUALLY (re)launched —
+  under `--ensure` an already-running unit is skipped. One no-op apply therefore
+  wiped every record, drift became permanently uncheckable, and each later apply
+  warned "no previously recorded serve command" and returned `success=False`.
+  Since the applied-template record is only written on success, it then never
+  updated — and that stale record is what let auto-heal act on the PREVIOUS
+  template and start a stray container. Records are now carried across the
+  rewrite; apply returns `success=True` on an unchanged fleet and self-updates
+  `applied_template.json`.
+
+### Verified
+- Full suite: **4374 passed, 0 failed** across 10 packages.
+- Live: `model.base_url` -> `http://localhost:4000/v1`, providers reduced to
+  `custom` + `family-coding`, apply returns `success=True` with
+  `serve_cmds_carried=4`, and `applied_template.json` updated by apply itself.
+
 ## [2.5.0] - 2026-10-05
 
 ### Added
