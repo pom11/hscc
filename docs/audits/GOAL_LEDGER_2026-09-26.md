@@ -2841,3 +2841,15 @@ CRON ROOT-CAUSE (resolves operator's repeated "heartbeat = 0"): the heartbeat cr
 - HEARTBEAT CRON: ACTIVE + SINGLE (a0abe2b7848b, one row). Do NOT create more.
 - OPERATOR-ESCALATE (unchanged): consume-handoff card merged + code-complete, but full live 1:1 acceptance still waits on the upstream seam deploy (t_ff4b986e domain, feat/session-ownership-handoff @ 77f046f089, operator-held SAFE HOLD). Coordinator degrades safely to session_busy — no regression.
 - After commit, verify main...origin/main 0/0 (14:00 discipline).
+
+## Heartbeat tick 16:02 (cron hscc-orch-goal-heartbeat a0abe2b7848b, 2026-10-05) — operator landed 2.5.1; goal terminal, board empty
+
+- Since last tick (15:19 @ adfecbf): **TWO new commits to origin/main, BOTH operator-authored (pom11) @ 15:48 EEST — HSCC 2.5.1 RELEASED.** `05893c5` fix(cluster): chat follows the pool under uniform_pool (points chat at family proxy + probe-before-write gates the endpoint actually written), stale `family-*` providers pruned to the current plan (scoped to family- prefix; custom/operator providers untouched), `serve_cmd` records survive the serving.json rewrite (stops false apply-failure + stale applied_template.json). `946df17` release: 2.5.1 (CHANGELOG notes full suite **4374 passed, 0 failed**). All out of goal scope — recorded, no action.
+- **Operator's mid-edit flag RESOLVED:** the ` M cluster_template.py` / ` M tests/test_apply.py` diff flagged at 14:45/15:19 landed via 05893c5. Working tree now **completely clean** (`git status --short` empty — first fully-clean primary checkout since the flash-next template work started).
+- HEAD == main == origin/main == **946df17** (0/0 verified `git rev-list --left-right --count main...origin/main` after `git fetch`).
+- BOARD (hscc): **completely empty of active work** — 0 running, 0 ready, 0 blocked, 0 todo, 0 triage, 0 review (kanban_list per active status, all verified this tick). No goal/worker activity since hygiene ec8a4ef; latest goal-owned product code remains consume-handoff cf76249 + hygiene ec8a4ef.
+- DISPATCH: NONE warranted. Cron condition ("board empty **and phases remain**") unmet — **no phases remain** (Phase 0 DONE, 1 = 100% closed 7/7, 2 = 4/4, 3 COMPLETE bafdf30, 4 COMPLETE 5a4c3f0; post-goal consume-handoff cf76249; hygiene ec8a4ef). Confirmation-only until operator seeds new work.
+- DAEMON: **ALIVE** — pid 20907 (kill -0 verified), daemon.log fresh @ 13:00:36Z = 16:00 EEST (DGX ok=True, gateway ok=True all 41 multiplex profiles served, Watchdog pipeline healthy, local services check running). Fleet steady post flash-next relaunch + 2.5.1.
+- HEARTBEAT CRON: ACTIVE + SINGLE (a0abe2b7848b, grep count 1). Do NOT create more.
+- OPERATOR-ESCALATE (unchanged): consume-handoff card merged + code-complete, but full live 1:1 acceptance still waits on the upstream seam deploy (t_ff4b986e domain, feat/session-ownership-handoff @ 77f046f089, operator-held SAFE HOLD). Coordinator degrades safely to session_busy — no regression.
+- After commit, verify main...origin/main 0/0 (14:00 discipline).
