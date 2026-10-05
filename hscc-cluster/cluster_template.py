@@ -324,6 +324,26 @@ def _unit_alias(u: Any, plan: Any) -> str:
     return "orchestrator-model" if u is plan.orchestrator else "worker-model"
 
 
+def _unit_serve_names(u: Any, plan: Any) -> str:
+    """Alias token(s) this unit advertises via ``--served-model-name``.
+
+    Normally the unit's single role alias (``_unit_alias``). Under a
+    ``uniform_pool`` template every unit runs the SAME recipe and must be able
+    to serve either role, so it advertises BOTH aliases. Space-separated for
+    the same reason the concrete+alias pair is: sparkrun bash-executes the
+    rendered command, so spaces arrive as separate argv tokens for vLLM's
+    ``nargs='+'`` ``--served-model-name`` and every name registers.
+
+    Routing deliberately still resolves ONE name (``_unit_alias``) — that name
+    now resolves to every unit in the pool, which is the whole point. Keeping
+    routing single-valued means the probe-before-write gate keeps working
+    unchanged.
+    """
+    if getattr(plan, "uniform_pool", False):
+        return "worker-model orchestrator-model"
+    return _unit_alias(u, plan)
+
+
 def _render_serve_cmd(cluster: str, hosts_arg: str, port: int, recipe: str,
                       alias: str, tp: int, model: str = "",
                       gpu_mem: Optional[float] = None) -> List[str]:
@@ -466,7 +486,7 @@ def _provision_models(plan: Any, cluster: str = "hscc",
     # model literally named "<concrete>,<alias>" → both concrete and alias 404.
     want = []
     for u in [plan.orchestrator] + [unit for fam in plan.families for unit in fam.units]:
-        alias = _unit_alias(u, plan)
+        alias = _unit_serve_names(u, plan)
         want.append((u, u.nodes, u.port, u.recipe, u.tp, alias,
                      _serving_unit_id(u, u is plan.orchestrator)))
     # Every node in every span is "in use" — don't stop a node that is part of a
@@ -1196,7 +1216,7 @@ RECOGNISED_VERSIONS = (2, 3)
 # Known keys per level. Anything else is a typo and a hard structural error
 # (spec: "unknown keys rejected"). Kept in sync with template_intent schema.
 _KNOWN_TOP_KEYS = {"name", "version", "description", "orchestrator", "families",
-                   "routing"}
+                   "routing", "uniform_pool"}
 _KNOWN_MODEL_KEYS = {"recipe", "tp", "pp", "nodes", "gpu_memory_utilization"}
 _KNOWN_FAMILY_KEYS = {"name", "models", "workers", "proxy", "nodes",
                       "allow_colocation"}
@@ -1284,6 +1304,26 @@ def _structural_validate(raw: dict, tpl: Any,
                         if k not in _KNOWN_MODEL_KEYS:
                             errors.append(
                                 f"{label} model {j}: unknown key '{k}'")
+
+    # ── uniform_pool means uniform: one recipe everywhere ─────────────────
+    # The flag makes every unit advertise BOTH aliases, so a request for
+    # `orchestrator-model` may land on any unit. If the units were different
+    # recipes, the same alias would silently resolve to different MODELS
+    # depending on which backend the proxy picked — a correctness bug, not a
+    # performance one. Refuse it here rather than serve a lottery.
+    if tpl.uniform_pool:
+        recipes = {tpl.orchestrator.recipe}
+        for fam in tpl.families:
+            for m in fam.models:
+                recipes.add(m.recipe)
+        if len(recipes) > 1:
+            errors.append(
+                "uniform_pool: every unit must use the SAME recipe (found "
+                + ", ".join(sorted(r.split("/")[-1] for r in recipes))
+                + ") — otherwise one alias resolves to different models "
+                  "depending on which backend the proxy picks")
+        if tpl.version < 3:
+            errors.append("uniform_pool requires version: 3")
 
     # ── recipes resolve (filesystem path OR @reg/name) ────────────────────
     try:
