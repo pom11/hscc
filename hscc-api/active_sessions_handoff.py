@@ -275,6 +275,7 @@ class HandoffCoordinator:
         drive: Callable[[], Any],
         on_pending: Optional[Callable[[], None]] = None,
         on_denied: Optional[Callable[[str], None]] = None,
+        on_working: Optional[Callable[[], None]] = None,
         session_id: Optional[str] = None,
         registry_home: Optional[Path] = None,
     ) -> dict:
@@ -289,14 +290,17 @@ class HandoffCoordinator:
              nonce. ``on_denied`` is called on timeout/denial so the caller can
              surface a denied notice (default no-op).
           3. complete → take the lease.
-          4. call ``drive()`` (the turn) — the reply streams via the existing
-             store / driver path and folds back 1:1.
+          4. call ``on_working`` (emits the working indicator so the app
+             flips away from the awaiting-approval banner) then ``drive()``
+             (the turn) — the reply streams via the existing store / driver
+             path and folds back 1:1.
           5. release → hand the session back to the operator's CLI.
 
         Returns a status dict ``{"outcome": "completed"|"pending_emitted"|"denied"}``.
 
-        ``on_pending``/``on_denied`` are injected so the WS caller appends the
-        system frames and tests assert them — the coordinator itself is pure.
+        ``on_pending``/``on_denied``/``on_working`` are injected so the WS
+        caller appends the system frames and tests assert them — the
+        coordinator itself is pure.
         """
         outcome: Optional[dict] = None
         try:
@@ -353,6 +357,8 @@ class HandoffCoordinator:
                 on_denied(exc.message)
             return outcome
         try:
+            if on_working is not None:
+                on_working()
             drive()
             return {"outcome": "completed"}
         finally:

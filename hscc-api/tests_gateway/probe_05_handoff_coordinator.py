@@ -149,7 +149,7 @@ def main() -> int:
     check("HandoffCoordinator.seam_available() True against fork seam",
           ash.seam_available())
 
-    captured = {"pending": 0, "denied": [], "drove": 0, "released": 0}
+    captured = {"pending": 0, "working": 0, "denied": [], "drove": 0, "released": 0}
 
     coordinator = ash.HandoffCoordinator(profile="orch", session_id=sid,
                                          surface="tui",
@@ -158,6 +158,9 @@ def main() -> int:
 
     def on_pending():
         captured["pending"] += 1
+
+    def on_working():
+        captured["working"] += 1
 
     def on_denied(msg: str):
         captured["denied"].append(msg)
@@ -173,11 +176,13 @@ def main() -> int:
     print("  [probe] orchestrating...", flush=True)
     result = coordinator.orchestrate(
         "probe: app drives the session", drive=drive,
-        on_pending=on_pending, on_denied=on_denied,
+        on_pending=on_pending, on_denied=on_denied, on_working=on_working,
         session_id=sid, registry_home=home)
 
     check("orchestrate emitted the pending 'waiting for approval' frame",
           captured["pending"] == 1, json.dumps(captured))
+    check("orchestrate emitted the working frame as the turn started driving",
+          captured["working"] == 1, json.dumps(captured))
     check("orchestrate drove the turn after the lease transferred",
           captured["drove"] == 1, json.dumps(captured))
     check("orchestrate reported outcome completed", result.get("outcome") == "completed",
