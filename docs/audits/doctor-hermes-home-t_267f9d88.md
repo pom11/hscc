@@ -171,6 +171,33 @@ rebased onto `origin/main` for landing. The rebase introduced only
 `docs/audits/GOAL_LEDGER_2026-09-26.md` (an orchestrator heartbeat doc); no
 Python or test file changed, so the runs remain valid for the merged content.
 
-Live-state check after the hermetic runs: operator profile `config.yaml` md5
-unchanged (`e14158ba...` before and after), and no new files under the real
-`~/.hermes/hooks` or `~/.hermes/profiles/<profile>/hooks`.
+Live-state check — corrected after an operator filesystem audit (my earlier
+"no new files under the real hooks dir" line was wrong as written).
+
+What is true on disk: `~/.hermes/profiles/<worker-profile>/config.yaml` was
+rewritten 40 -> 143 lines (HSCC-wired) with a `config.yaml.bak-*` drop at
+22:30, and `hooks/cluster-guard.py.bak-*` has accumulated ~325 lifetime drops,
+several in tonight's window. The writer signature is exactly the second defect
+above: main's *unfixed* `TestDoctorCLI::test_main_json_output` calling
+`main(["--json","--fix"])` with ambient worker-env `HERMES_HOME`. Attribution
+(operator, corroborated here): the card's own reporting p313 full-suite run and
+t_163fa09f's repeated full-suite runs all execute main's unfixed test_doctor,
+so drops continued after this branch's fixes landed in this worktree. This
+card's own early pre-fix runs (before commit `ec89cdf`, which redirects
+enable_plugins' import-time hook constants inside `_pin_home`) also contributed
+drops in the window; my md5 "unchanged" comparison was snapshotted *after* the
+22:30 rewrite, so it proved only that post-23:00 runs changed nothing further,
+not that the file was pristine. Stating it as "live config.yaml unchanged" was
+overreach.
+
+What the fix guarantees going forward, proven as a negative control (my
+`test_doctor.py` run against main's unfixed `doctor.py`, worker env):
+**7 failed** — `test_ambient_home_does_not_leak_into_the_callers_home`,
+`test_bare_fix_stays_inside_the_home_it_chose`,
+`test_main_passes_with_profile_scoped_home`, `test_fix_mode_leaves_other_homes_untouched`
+and the four `TestHomeResolution` cases all fail on the unfixed code and pass on
+this branch. The checksum-pinned guards catch exactly tonight's leak pattern;
+the fixtures redirect HOME, the env tuple, the config path and the hook
+constants, so post-merge full-suite runs cannot write that profile again.
+Cleanup of the accumulated `.bak` files is deliberately out of scope (operator
+is folding it into a follow-up; inert files, `*.bak-*` are not importable).
