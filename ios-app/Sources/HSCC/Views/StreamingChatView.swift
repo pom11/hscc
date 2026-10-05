@@ -54,6 +54,15 @@ struct StreamingChatView: View {
                 .padding(.horizontal)
                 .padding(.top, Theme.Spacing.sm.rawValue)
 
+            // t_7cc2e7d5: the turn-state banner — "working…" while a reply is
+            // generated, and the prominent "waiting for approval on your
+            // computer" ask while a consented session handoff is outstanding.
+            if store.turnState != .idle {
+                turnStateBanner
+                    .padding(.horizontal)
+                    .padding(.top, Theme.Spacing.xs.rawValue)
+            }
+
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: Theme.Spacing.md.rawValue) {
@@ -181,6 +190,45 @@ struct StreamingChatView: View {
             return ("Reconnecting… resuming from latest, no gap.", Theme.Semantic.warn, "arrow.clockwise")
         case .failed(let reason):
             return (reason, Theme.Semantic.bad, "exclamationmark.triangle")
+        }
+    }
+
+    // MARK: - Turn-state banner (t_7cc2e7d5)
+
+    /// The turn-state banner: a prominent "working…" / "waiting for approval
+    /// on your computer" strip driven by :attr:`StreamingChatStore.turnState`.
+    /// The working spinner and the awaiting-approval ask both use the amber
+    /// warning tone so they read as in-progress/attention-worthy, never a
+    /// settled fact.
+    private var turnStateBanner: some View {
+        let (text, color, icon) = turnBannerContent(store.turnState)
+        return HStack(spacing: Theme.Spacing.sm.rawValue) {
+            if store.turnState == .working {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Image(systemName: icon)
+                    .font(.caption)
+            }
+            Text(text)
+                .font(.caption.weight(.semibold))
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, Theme.Spacing.sm.rawValue)
+        .padding(.vertical, Theme.Spacing.xs.rawValue)
+        .background(color.opacity(0.15))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous))
+    }
+
+    private func turnBannerContent(_ state: TurnState) -> (String, Color, String) {
+        switch state {
+        case .idle:
+            return ("", Theme.Semantic.neutral, "")
+        case .working:
+            return ("Working — generating a reply…", Theme.Semantic.warn, "ellipsis")
+        case .awaitingApproval:
+            return ("Waiting for approval on your computer — approve the handoff there to continue this session from your phone.",
+                    Theme.Semantic.warn, "hand.raised")
         }
     }
 
@@ -719,6 +767,9 @@ private struct SystemRow: View {
         case "escalation": return "arrow.up.forward.square"
         case "compaction": return "arrow.down.left.and.arrow.up.right"
         case "session_rotated": return "arrow.triangle.2.circlepath"
+        case "working": return "ellipsis"                    // turn in progress
+        case "handoff_pending": return "hand.raised"          // awaiting approval (t_7cc2e7d5)
+        case "session_busy": return "lock.fill"               // session busy (fallback)
         default: return "gearshape"
         }
     }
