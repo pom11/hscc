@@ -186,19 +186,31 @@ def test_model_tier_fast_uses_worker_proxy(tmp_path, monkeypatch):
 
 
 def test_model_tier_strong_uses_orch_endpoint(tmp_path, monkeypatch):
-    """Strong-tier roles use the orchestrator endpoint."""
+    """Strong-tier roles use the orchestrator endpoint, not the worker proxy.
+
+    Scoped to a PINNED orchestrator deliberately. Under `uniform_pool` the
+    strong tier IS the worker proxy by design — every unit serves the
+    orchestrator alias — so the "never the proxy" guard only holds here, and
+    the pooled case is covered by
+    ``test_live_orchestrator_endpoint_uses_pool_when_uniform``.
+
+    ``STRONG_URL`` is pinned explicitly rather than read from the module
+    constant, which is computed at import from the OPERATOR's live
+    serving.json: on a pooled fleet that constant legitimately equals the
+    proxy, so the old assertion failed depending on whose machine ran the
+    suite. The scrub guard that this test originally carried now lives in the
+    two ``_live_orchestrator_endpoint`` tests, which assert the derivation from
+    serving.json directly instead of comparing two values the scrub rewrote
+    together.
+    """
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setattr(generator.rolelib, "PROFILES_DIR", str(tmp_path / "profiles"))
+    monkeypatch.setattr(generator, "STRONG_URL", "http://10.9.9.7:8123/v1")
     spec = {"name": "architect", "identity": "You design.\n",
             "preload_skills": [], "model_tier": "strong"}
     generator.generate_profile(spec, base_identity="BASE")
     with open(os.path.join(str(tmp_path / "profiles" / "architect"), "config.yaml")) as f:
         cfg = yaml.safe_load(f)
-    # Assert the CONTRACT, not an address: strong tier routes to the
-    # orchestrator endpoint and never to the worker proxy. Hardcoding a host
-    # here is what hid the real bug — a repo-wide address scrub rewrote the
-    # generator's default AND this expectation together, so the suite stayed
-    # green while every generated orchestrator profile pointed at a dead host.
     assert cfg["model"]["base_url"] == generator.STRONG_URL
     assert cfg["model"]["base_url"] != generator.WORKER_PROXY_BASE_URL
     assert cfg["model"]["default"] == "orchestrator-model"
@@ -812,3 +824,55 @@ def test_every_hscc_owned_worker_profile_has_role_spec():
         "HSCC-owned worker profile(s) with no role spec (`hscc-roles generate` "
         "will skip them): " + ", ".join(missing)
     )
+
+
+def test_live_orchestrator_endpoint_uses_pool_when_uniform(tmp_path, monkeypatch):
+    """A uniform pool serves the orchestrator alias from EVERY unit, so the
+    strong tier must address the worker proxy, not one node.
+
+    Without this, `hscc-roles generate` (and therefore bootstrap) re-pins every
+    *-orch profile to the orchestrator node on the next run, undoing what
+    `template apply` did — all orchestrator work on one GPU while the rest idle,
+    and every orchestrator profile dies with that single node.
+    """
+    serving = tmp_path / "serving.json"
+    serving.write_text(json.dumps({
+        "version": 2,
+        "uniform_pool": True,
+        "units": [
+            {"id": "orch", "role": "orchestrator", "nodes": ["10.9.9.7"], "port": 8000},
+            {"id": "w1", "role": "worker", "nodes": ["10.9.9.8"], "port": 8001},
+        ],
+    }))
+    monkeypatch.setattr(os.path, "expanduser",
+                        lambda p: str(serving) if p.endswith("serving.json") else p)
+    assert generator._live_orchestrator_endpoint() == generator.WORKER_PROXY_BASE_URL
+
+
+def test_live_orchestrator_endpoint_still_pins_when_not_uniform(tmp_path, monkeypatch):
+    """Omission preserves the pinned behaviour exactly — the role split is real
+    on a non-uniform plan, where the orchestrator is one node."""
+    serving = tmp_path / "serving.json"
+    serving.write_text(json.dumps({
+        "version": 2,
+        "units": [
+            {"id": "orch", "role": "orchestrator", "nodes": ["10.9.9.7"], "port": 8123},
+            {"id": "w1", "role": "worker", "nodes": ["10.9.9.8"], "port": 8000},
+        ],
+    }))
+    monkeypatch.setattr(os.path, "expanduser",
+                        lambda p: str(serving) if p.endswith("serving.json") else p)
+    assert generator._live_orchestrator_endpoint() == "http://10.9.9.7:8123/v1"
+
+
+def test_live_orchestrator_endpoint_uniform_false_is_pinned(tmp_path, monkeypatch):
+    """An explicit `uniform_pool: false` is not a pool."""
+    serving = tmp_path / "serving.json"
+    serving.write_text(json.dumps({
+        "version": 2, "uniform_pool": False,
+        "units": [{"id": "orch", "role": "orchestrator",
+                   "nodes": ["10.9.9.7"], "port": 8123}],
+    }))
+    monkeypatch.setattr(os.path, "expanduser",
+                        lambda p: str(serving) if p.endswith("serving.json") else p)
+    assert generator._live_orchestrator_endpoint() == "http://10.9.9.7:8123/v1"

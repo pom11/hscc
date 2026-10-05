@@ -3089,3 +3089,113 @@ class TestServeCmdCarriedAcrossRewrite:
         monkeypatch.setattr(cluster_template, "SERVING_JSON", prev)
         fresh = {"version": 2, "units": [{"id": "orch"}, {"id": "w1"}]}
         assert cluster_template._carry_serve_cmds(fresh) == 0
+
+
+class TestServingJsonRecordsPoolShape:
+    """serving.json carries `uniform_pool` so downstream consumers can see it.
+
+    hscc-roles' profile generator and bootstrap only read serving.json — they
+    never see the template. Without this flag they re-derive the orchestrator
+    endpoint as the orchestrator unit's own node and re-pin every *-orch
+    profile on the next `generate`, undoing what apply did.
+    """
+
+    def _plan(self, uniform):
+        d = {"name": "t", "version": 3,
+             "orchestrator": {"recipe": "same.yaml"},
+             "families": [{"name": "coding", "models": [{"recipe": "same.yaml"}],
+                           "workers": 2, "proxy": True}]}
+        if uniform:
+            d["uniform_pool"] = True
+        return ti.resolve(ti.ClusterTemplate.from_dict(d), _topo(2),
+                          _coster=_coster(per_gpu=30))
+
+    def test_uniform_plan_records_the_flag(self):
+        sj = ti.to_serving_json(self._plan(uniform=True))
+        assert sj.get("uniform_pool") is True
+
+    def test_non_uniform_omits_it_entirely(self):
+        # Byte-compatibility: a pinned plan's serving.json must look as before.
+        sj = ti.to_serving_json(self._plan(uniform=False))
+        assert "uniform_pool" not in sj
+        assert sorted(sj.keys()) == ["units", "version"]
+
+    def test_units_are_unaffected(self):
+        a = ti.to_serving_json(self._plan(uniform=False))["units"]
+        b = ti.to_serving_json(self._plan(uniform=True))["units"]
+        assert [u["role"] for u in a] == [u["role"] for u in b]
+
+
+class TestOrchestratorProfilePooling:
+    """`_set_orchestrator_profile_to_pool` — uniform_pool re-aims orch profiles."""
+
+    POOL = "http://localhost:4000/v1"
+
+    def test_pinned_orch_profile_is_repointed(self):
+        cfg = {"model": {"default": "orchestrator-model",
+                         "base_url": "http://10.0.0.1:8000/v1"}}
+        out = cluster_template._set_orchestrator_profile_to_pool(cfg, self.POOL)
+        assert out["model"]["base_url"] == self.POOL
+        assert out["model"]["default"] == "orchestrator-model"
+
+    def test_dead_endpoint_profile_is_repaired(self):
+        # The live fleet had one aimed at 127.0.0.1:8000, where nothing serves.
+        cfg = {"model": {"default": "orchestrator-model",
+                         "base_url": "http://127.0.0.1:8000/v1"}}
+        out = cluster_template._set_orchestrator_profile_to_pool(cfg, self.POOL)
+        assert out["model"]["base_url"] == self.POOL
+
+    def test_worker_profile_untouched(self):
+        cfg = {"model": {"default": "worker-model", "base_url": self.POOL}}
+        before = json.dumps(cfg, sort_keys=True)
+        out = cluster_template._set_orchestrator_profile_to_pool(cfg, self.POOL)
+        assert json.dumps(out, sort_keys=True) == before
+
+    def test_profile_without_model_block_untouched(self):
+        for cfg in ({}, {"model": None}, {"model": "nonsense"}):
+            out = cluster_template._set_orchestrator_profile_to_pool(dict(cfg), self.POOL)
+            assert out.get("model") == cfg.get("model")
+
+    def test_idempotent(self):
+        cfg = {"model": {"default": "orchestrator-model", "base_url": self.POOL}}
+        out = cluster_template._set_orchestrator_profile_to_pool(cfg, self.POOL)
+        assert out["model"]["base_url"] == self.POOL
+
+
+class TestWorkerRewriteRespectsOrchestratorIntent:
+    """The worker-profile rewrite must not hijack orchestrator-role profiles.
+
+    Regression. `_set_worker_model_in_profile` selected purely on base_url, which
+    was safe only while orchestrator profiles pointed at a NODE. Once
+    `uniform_pool` re-aimed them at the worker proxy, the URL test matched all
+    15 of them and rewrote model.default to the worker alias — erasing the
+    orchestrator role's intent and leaving `_set_orchestrator_profile_to_pool`
+    (which selects on that alias) unable to repair them. Observed live: 39
+    profiles collapsed to `worker-model`.
+    """
+
+    POOL_PORT = 4000
+    POOL = "http://localhost:4000/v1"
+
+    def test_orchestrator_profile_on_the_pool_keeps_its_alias(self):
+        cfg = {"model": {"default": "orchestrator-model", "base_url": self.POOL}}
+        out = cluster_template._set_worker_model_in_profile(
+            cfg, "worker-model", self.POOL_PORT)
+        assert out["model"]["default"] == "orchestrator-model"
+
+    def test_worker_profile_on_the_pool_is_still_rewritten(self):
+        cfg = {"model": {"default": "stale-id", "base_url": self.POOL}}
+        out = cluster_template._set_worker_model_in_profile(
+            cfg, "worker-model", self.POOL_PORT)
+        assert out["model"]["default"] == "worker-model"
+
+    def test_the_two_passes_together_are_stable(self):
+        """worker pass then orch pass, twice: must converge, not flip-flop."""
+        cfg = {"model": {"default": "orchestrator-model",
+                         "base_url": "http://10.0.0.1:8000/v1"}}
+        for _ in range(2):
+            cluster_template._set_worker_model_in_profile(
+                cfg, "worker-model", self.POOL_PORT)
+            cluster_template._set_orchestrator_profile_to_pool(cfg, self.POOL)
+        assert cfg["model"]["default"] == "orchestrator-model"
+        assert cfg["model"]["base_url"] == self.POOL

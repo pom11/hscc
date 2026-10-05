@@ -58,6 +58,15 @@ def _live_orchestrator_endpoint():
         with open(os.path.expanduser("~/.hscc/serving.json")) as fh:
             data = json.load(fh)
         units = data if isinstance(data, list) else data.get("units", [])
+        # A uniform pool serves the orchestrator alias from EVERY unit behind
+        # the worker proxy, so the strong tier must address the PROXY, not one
+        # node. Pinning it there would send all orchestrator work to a single
+        # GPU while N-1 identical units idle, and would take every orchestrator
+        # profile down with that one node. Apply re-aims existing profiles; this
+        # is what makes `hscc-roles generate` (and therefore bootstrap) agree,
+        # instead of re-pinning them on the next run.
+        if isinstance(data, dict) and data.get("uniform_pool"):
+            return WORKER_PROXY_BASE_URL
         for unit in units:
             if unit.get("role") == "orchestrator":
                 nodes = unit.get("nodes") or []
@@ -68,10 +77,15 @@ def _live_orchestrator_endpoint():
     return None
 
 
-# Strong-tier roles (model_tier: strong) route to the orchestrator GPU directly.
-# Only architect + orchestrator use strong by default — .244 already runs
-# orchestration + worker-compaction, so saturating it would hurt the whole fleet.
-# Reviewers, coders, and QA stay on the fast worker proxy (:4000).
+# Strong-tier roles (model_tier: strong) route to the orchestrator endpoint.
+# Only architect + orchestrator use strong by default: under a PINNED
+# orchestrator that node already runs orchestration + worker-compaction, so
+# saturating it would hurt the whole fleet. Reviewers, coders, and QA stay on
+# the fast worker proxy (:4000).
+#
+# Under a uniform_pool plan there is no single node to saturate — every unit
+# serves the orchestrator alias — so _live_orchestrator_endpoint() returns the
+# proxy and the strong tier load-balances with everything else.
 STRONG_URL = (os.environ.get("HSCC_STRONG_URL")
               or _live_orchestrator_endpoint()
               or "http://127.0.0.1:8000/v1")
