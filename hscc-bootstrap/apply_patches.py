@@ -98,7 +98,8 @@ def main(argv=None) -> int:
     import json
     if args.check and not args.target:
         # check all sets against their conventional locations
-        targets = {"hermes": Path(os.path.expanduser("~/.hermes/hermes-agent")),
+        _hh = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+        targets = {"hermes": Path(_hh) / "hermes-agent",
                    "sparkrun": Path(os.path.expanduser("~/sparkrun"))}
         out = {}
         for name, tgt in targets.items():

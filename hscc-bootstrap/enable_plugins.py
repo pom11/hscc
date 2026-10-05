@@ -39,7 +39,10 @@ HSCC_PLUGINS = ["hscc-cluster", "hscc-commands", "sparkrun-hermes"]
 
 # Cluster-guard hook — lives in hscc-bootstrap/hooks/cluster-guard.py in the
 # repo; installed to ~/.hermes/hooks/cluster-guard.py at bootstrap time.
-HOOKS_DIR = os.path.expanduser("~/.hermes/hooks")
+# HERMES_HOME-aware: bootstrap.sh exports it, and an install into an
+# alternate home must not reach back into the operator's live ~/.hermes.
+HOOKS_DIR = os.path.join(
+    os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"), "hooks")
 CLUSTER_GUARD_DST = os.path.join(HOOKS_DIR, "cluster-guard.py")
 CLUSTER_GUARD_COMMAND = f"python3 {CLUSTER_GUARD_DST}"
 # Toolsets the orchestrator needs:
@@ -864,7 +867,14 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
              "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": [],
              "approvals": [], "worktree": []}
     if not os.path.exists(config_path):
-        return empty
+        # NOT the same as "already wired". A fresh install has no config.yaml
+        # yet (Hermes owns that file and creates it on first run), so wiring
+        # genuinely did not happen. Returning the bare `empty` dict made the
+        # caller report "already wired (no changes)" — success for a step that
+        # did nothing, on exactly the fresh-install path bootstrap exists for.
+        out = dict(empty)
+        out["config_missing"] = config_path
+        return out
     with open(config_path) as fh:
         cfg = yaml.safe_load(fh) or {}
     if not isinstance(cfg, dict):
@@ -935,8 +945,11 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
 
 
 if __name__ == "__main__":
-    path = os.path.expanduser("~/.hermes/config.yaml")
+    path = os.path.join(
+        os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"),
+        "config.yaml")
     res = enable(path)
+    missing = res.get("config_missing")
     parts = [f"{k}: {', '.join(v)}" for k, v in res.items()
              if v and isinstance(v, (list, tuple))]
     # The hook-script install status is a dict, not a "changed" section; report
@@ -944,6 +957,16 @@ if __name__ == "__main__":
     hf = res.get("hooks_file") or {}
     if hf.get("installed") is False:
         parts.append("hook script NOT installed")
-    body = " | ".join(parts) if parts else "already wired (no changes)"
-    _theme.make_console().print(_theme.panel("bootstrap", _theme.escape(body)))
+    if missing:
+        body = (f"NOT WIRED: no config.yaml at {missing} — Hermes creates it on "
+                "first run; start Hermes once, then re-run bootstrap")
+    else:
+        body = " | ".join(parts) if parts else "already wired (no changes)"
+    # bootstrap.sh CAPTURES this stdout and embeds it in its own status line, so
+    # a Rich panel here ended up pasted into that line as box-drawing noise.
+    # Panel only for a human at a TTY; a plain line when captured.
+    if sys.stdout.isatty():
+        _theme.make_console().print(_theme.panel("bootstrap", _theme.escape(body)))
+    else:
+        print(body)
     sys.exit(0)

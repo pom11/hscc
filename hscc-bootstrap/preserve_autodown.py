@@ -54,7 +54,9 @@ def ensure_autodown(autodown_path=None):
         success, False + ``error`` if an OSError occurred).
     """
     if autodown_path is None:
-        autodown_path = os.path.expanduser("~/.hscc/autodown.json")
+        autodown_path = os.path.join(
+            os.environ.get("HSCC_DIR") or os.path.expanduser("~/.hscc"),
+            "autodown.json")
 
     # --- Branch on whether operator state already exists ---
     exists = False
