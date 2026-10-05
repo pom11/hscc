@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.5.4] - 2026-10-05
+
+### Fixed
+- **Bootstrap helpers ignored `HERMES_HOME`/`HSCC_DIR` and used live state.**
+  Nine helpers hardcoded `~/.hermes` / `~/.hscc`, so an install aimed at
+  another home silently read and wrote the operator's own configuration.
+  Measured in a throwaway run: `preserve_autodown.py` read the LIVE
+  autodown.json and reported "existing config preserved" using live values
+  while the new home got none; `install_triggers.py` wrote the LIVE
+  triggers.json ("added 0" because the live file already had them);
+  `enable_plugins.py` wired the LIVE config.yaml — which only looked harmless
+  because that config was already wired, so idempotency masked a write into
+  live state. All now resolve from the environment with the hardcoded path as
+  fallback, the pattern `install_payload.py` already used.
+- **A fresh machine was told "config wired" when nothing was wired.** `enable()`
+  returned a bare "nothing changed" dict when `config.yaml` does not exist yet.
+  The no-op itself is correct — Hermes owns that file and creates it on first
+  run — but it now reports `config_missing`, and bootstrap prints a warning
+  naming the path and the fix instead of a tick.
+- **Status lines were polluted by Rich panels.** bootstrap.sh embeds a helper's
+  stdout in its own status line, so panels printed by `enable_plugins` and
+  `install_soul` arrived as box-drawing characters pasted mid-sentence. They
+  print a plain line when captured and keep the panel for a TTY.
+
+### Added
+- **A real isolated install test.** `test_bootstrap_isolated.py` runs the
+  actual installer into a temporary `HERMES_HOME`/`HSCC_DIR` and asserts it
+  completes, the payload is self-contained, re-running is idempotent, a fresh
+  home reports NOT WIRED rather than success, status lines carry no panel art,
+  and — by checksum — that the live `config.yaml` and `triggers.json` are
+  untouched. Plus a static guard that fails on any helper hardcoding a home
+  path, catching the class of bug before it can run. `HOME` is deliberately not
+  faked: preflight discovers sparkrun's cluster config under the real home, so
+  a fake HOME fails the doctor and the installer never runs.
+
+### Verified
+- Full suite: **4445 passed, 0 failed** across 10 packages (hscc-bootstrap
+  274 -> 331). The bootstrap package now takes ~7 minutes, because these tests
+  run the real installer repeatedly.
+
 ## [2.5.3] - 2026-10-05
 
 ### Fixed
