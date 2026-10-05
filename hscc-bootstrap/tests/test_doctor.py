@@ -1,5 +1,6 @@
 """Tests for the HSCC doctor script (doctor.py)."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -9,10 +10,333 @@ import tempfile
 from io import StringIO
 from unittest.mock import patch
 
+import pytest
 import yaml
 
 import doctor
 import enable_plugins
+
+
+# ---------------------------------------------------------------------------
+# Hermetic home isolation (t_267f9d88)
+#
+# doctor resolves HERMES_HOME from the *ambient* environment, and a dispatched
+# worker carries HERMES_HOME=<root>/profiles/<name>. Before these fixtures the
+# doctor CLI tests inherited whatever the surrounding process had, so
+# TestDoctorCLI::test_main_json_output / ::test_main_text_output passed on a
+# machine whose HERMES_HOME happened to hold hermes-agent and failed in every
+# worker (the reported suite breakage). Worse: main() derived config_path from
+# ambient HERMES_HOME, so those two `--fix` cases read — and, through
+# run_doctor_fix -> enable_plugins.enable(), WROTE — the operator's live
+# config.yaml instead of their own tmp_path.
+#
+# Every doctor test below runs against a private HOME/HERMES_HOME and a stubbed
+# sparkrun, so real config, real hooks and the real fleet config under $HOME are
+# all unreachable by construction.
+# ---------------------------------------------------------------------------
+
+# Sibling env the home-resolution chain reads. Anything left ambient is a hole.
+_HOME_ENV = ("HERMES_HOME", "HSCC_DIR", "HERMES_SCRIPTS", "HSCC_PROFILES_DIR",
+             "HSCC_HERMES_FORK_REMOTE", "HSCC_REVIEW_FEATURE_BRANCH")
+
+# A minimal, cluster-configured sparkrun response so no test has to shell out to
+# the real `sparkrun cluster list` (which reads the operator's cluster config).
+_FAKE_CLUSTER = '[{"name": "test-cluster", "default": true, "hosts": ["10.0.0.1"], "cache_dir": "/mnt/nas/cache"}]'
+
+
+def _pin_home(monkeypatch, home, hermes_home=None):
+    """Point HOME + every Hermes/HSCC home var at a private tree.
+
+    ``hermes_home`` overrides what HERMES_HOME is set to, so a test can run with
+    HERMES_HOME at a profile dir (``<root>/profiles/<name>``) while HOME still
+    points at the throwaway tree.
+    """
+    hermes = home / ".hermes"
+    hermes.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home or hermes))
+    monkeypatch.setenv("HSCC_DIR", str(home / ".hscc"))
+    monkeypatch.setenv("HERMES_SCRIPTS", str(hermes / "scripts"))
+    for var in _HOME_ENV:
+        if var not in ("HERMES_HOME", "HSCC_DIR", "HERMES_SCRIPTS"):
+            monkeypatch.delenv(var, raising=False)
+
+    # enable_plugins resolves its hook target at IMPORT time from ambient
+    # HERMES_HOME (module constants), so a `--fix` run would copy
+    # cluster-guard.py — plus a timestamped .bak — into the real home no matter
+    # which config it was pointed at. Redirect all three constants at the tree.
+    hooks_dir = hermes / "hooks"
+    monkeypatch.setattr(enable_plugins, "HOOKS_DIR", str(hooks_dir))
+    monkeypatch.setattr(enable_plugins, "CLUSTER_GUARD_DST",
+                        str(hooks_dir / "cluster-guard.py"))
+    monkeypatch.setattr(enable_plugins, "CLUSTER_GUARD_COMMAND",
+                        f"python3 {hooks_dir / 'cluster-guard.py'}")
+    return hermes
+
+
+@pytest.fixture
+def fake_home(tmp_path, monkeypatch):
+    """Private HOME/HERMES_HOME tree (no hermes-agent unless the test adds one).
+
+    Deliberately does NOT create hermes-agent: a test must opt into an install,
+    so none can pass by inheriting the real ~/.hermes/hermes-agent.
+    """
+    home = tmp_path / "fakehome"
+    hermes = _pin_home(monkeypatch, home)
+    return {"home": home, "hermes": hermes}
+
+
+@pytest.fixture
+def hermetic_env(fake_home, monkeypatch):
+    """fake_home + a stubbed sparkrun, so doctor's fatal checks can pass offline.
+
+    Yields the doctor-home (== $HERMES_HOME) with an installed hermes-agent and a
+    bare config.yaml already in place.
+    """
+    hermes = fake_home["hermes"]
+    (hermes / "hermes-agent").mkdir()
+    with open(hermes / "config.yaml", "w") as fh:
+        yaml.safe_dump({"plugins": {"enabled": []}, "toolsets": ["hermes-cli"]}, fh)
+    monkeypatch.setattr(doctor, "_run_cluster_list", lambda: _FAKE_CLUSTER)
+    monkeypatch.setattr(shutil, "which",
+                        lambda name: "/usr/local/bin/sparkrun" if name == "sparkrun" else None)
+    return hermes
+
+
+def _md5(path):
+    p = str(path)
+    return (hashlib.md5(open(p, "rb").read()).hexdigest()
+            if os.path.isfile(p) else None)
+
+
+def _capture_main(argv):
+    old_stdout = sys.stdout
+    try:
+        sys.stdout = StringIO()
+        rc = doctor.main(argv)
+        return rc, sys.stdout.getvalue()
+    finally:
+        sys.stdout = old_stdout
+
+
+class TestHomeResolution:
+    """A profile-scoped HERMES_HOME is Hermes' NORMAL run mode, not a broken
+    install. Upstream hermes_constants.get_config_path() resolves config.yaml
+    under the profile dir, while get_default_hermes_root() strips the
+    `profiles/<name>` tail for root-level ops — the checkout lives at the ROOT.
+    So the `hermes` check has to find it there; see
+    docs/audits/doctor-hermes-home-t_267f9d88.md.
+    """
+
+    def test_resolves_root_from_profile_home(self, tmp_path, monkeypatch):
+        # <root>/hermes-agent present, HERMES_HOME = <root>/profiles/<name>
+        root = tmp_path / ".hermes"
+        (root / "hermes-agent").mkdir(parents=True)
+        profile = root / "profiles" / "backend-engineer"
+        profile.mkdir(parents=True)
+        _pin_home(monkeypatch, tmp_path)
+        assert doctor.hermes_root_from_home(str(profile)) == str(root)
+        check = doctor._hermes_ok(str(profile))
+        assert check.ok is True
+        # Names the resolved install AND says it came from a profile home.
+        assert check.detail.startswith(str(root / "hermes-agent"))
+        assert "profile home" in check.detail
+
+    def test_plain_home_still_resolves_to_itself(self, tmp_path, monkeypatch):
+        root = tmp_path / ".hermes"
+        (root / "hermes-agent").mkdir(parents=True)
+        _pin_home(monkeypatch, tmp_path)
+        assert doctor.hermes_root_from_home(str(root)) == str(root)
+
+    def test_falls_back_to_default_home(self, tmp_path, monkeypatch):
+        # HERMES_HOME points somewhere odd, install only at ~/.hermes
+        (tmp_path / ".hermes" / "hermes-agent").mkdir(parents=True)
+        _pin_home(monkeypatch, tmp_path)
+        assert doctor.hermes_root_from_home(str(tmp_path / "elsewhere")) \
+            == str(tmp_path / ".hermes")
+
+    def test_returns_none_when_truly_absent(self, tmp_path, monkeypatch):
+        _pin_home(monkeypatch, tmp_path)
+        assert doctor.hermes_root_from_home(str(tmp_path / "nowhere")) is None
+
+
+class TestHermesCheck:
+    def test_passes(self, tmp_path):
+        hm = tmp_path / "hermes"
+        hm.mkdir()
+        (hm / "hermes-agent").mkdir()
+        check = doctor._hermes_ok(str(hm))
+        assert check.ok is True
+
+    def test_fails_when_missing(self, tmp_path, monkeypatch):
+        # HOME pinned into tmp so "missing" is genuinely missing here — not a
+        # case of the real ~/.hermes install quietly satisfying the check.
+        fake_home = tmp_path / "fakehome"
+        _pin_home(monkeypatch, fake_home)
+        hm = tmp_path / "hermes"
+        hm.mkdir()
+        check = doctor._hermes_ok(str(hm))
+        assert check.ok is False
+        assert check.fatal is True
+        assert "missing" in check.detail
+
+    def test_profile_home_without_any_install_is_an_honest_fatal(
+            self, tmp_path, monkeypatch):
+        """Honest in BOTH directions: tolerating a profile home must not turn the
+        check into a no-op. No hermes-agent anywhere -> still a fatal."""
+        root = tmp_path / ".hermes"
+        profile = root / "profiles" / "worker"
+        profile.mkdir(parents=True)
+        _pin_home(monkeypatch, tmp_path)
+        check = doctor._hermes_ok(str(profile))
+        assert check.ok is False
+        assert check.fatal is True
+        assert str(profile / "hermes-agent") in check.detail
+
+
+class TestDoctorCLIHermetic:
+    """The regression the card asked for: doctor must pass with HERMES_HOME set
+    to a profile dir whose hermes-agent is absent-but-installed-globally, and
+    `--fix` must never touch a config outside the chosen home.
+    """
+
+    def test_main_passes_with_profile_scoped_home(self, tmp_path, monkeypatch):
+        root = tmp_path / ".hermes"
+        (root / "hermes-agent").mkdir(parents=True)
+        profile = root / "profiles" / "backend-engineer"
+        profile.mkdir(parents=True)
+        with open(profile / "config.yaml", "w") as fh:
+            yaml.safe_dump({"plugins": {"enabled": []},
+                            "toolsets": ["hermes-cli"]}, fh)
+        # The worker run mode exactly: HERMES_HOME IS the profile dir.
+        _pin_home(monkeypatch, tmp_path, hermes_home=profile)
+        monkeypatch.setattr(doctor, "_run_cluster_list", lambda: _FAKE_CLUSTER)
+        monkeypatch.setattr(shutil, "which",
+                            lambda n: "/usr/local/bin/sparkrun" if n == "sparkrun" else None)
+
+        rc, out = _capture_main(["--json"])
+        assert rc == 0, out
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        hermes = next(c for c in payload["checks"] if c["name"] == "hermes")
+        assert hermes["ok"] is True
+        # It resolved OUT of the profile dir, and says so rather than lying.
+        assert hermes["detail"].startswith(str(root / "hermes-agent"))
+        assert "profile home" in hermes["detail"]
+
+    def test_fix_mode_leaves_other_homes_untouched(self, hermetic_env, monkeypatch):
+        """A --fix run must not write any config outside the home it was given.
+
+        Before the fix, `main(["--fix"])` read AND rewrote $HERMES_HOME/config.yaml
+        no matter what the caller wanted — measured: a 2-key config came back fully
+        HSCC-wired (113 lines). This pins the contract by checksum.
+        """
+        bystander = hermetic_env.parent / "other" / "config.yaml"
+        bystander.parent.mkdir(parents=True)
+        with open(bystander, "w") as fh:
+            yaml.safe_dump({"plugins": {"enabled": []}}, fh)
+        before = _md5(bystander)
+        rc, out = _capture_main(["--json", "--fix", "--home",
+                                 str(hermetic_env)])
+        assert rc == 0, out
+        assert _md5(bystander) == before, "--fix wrote a config outside its home"
+        # The home it WAS given got wired, so the fix itself still works.
+        cfg = yaml.safe_load(open(hermetic_env / "config.yaml"))
+        assert "hscc-cluster" in cfg["plugins"]["enabled"]
+
+    def test_honest_fatal_when_hermes_really_absent(self, tmp_path, monkeypatch):
+        """Not weakened to always-pass: empty HOME with no install anywhere ->
+        the check stays fatal and `main` exits 1."""
+        home = tmp_path / "emptyhome"
+        _pin_home(monkeypatch, home)
+        monkeypatch.setattr(doctor, "_run_cluster_list", lambda: _FAKE_CLUSTER)
+        monkeypatch.setattr(shutil, "which",
+                            lambda n: "/usr/local/bin/sparkrun" if n == "sparkrun" else None)
+        rc, out = _capture_main(["--json"])
+        assert rc == 1, out
+        payload = json.loads(out)
+        assert payload["ok"] is False
+        assert "hermes" in payload["fatal_failures"]
+
+
+class TestDoctorCLINoLeak:
+    """Guard against the class of bug, not just this instance: doctor's --fix
+    derives its config path from the chosen home, and must never read or write a
+    config belonging to a DIFFERENT home. Before the fix `main(["--fix"])` used
+    ambient HERMES_HOME for the config path while the test supplied its own home
+    for everything else — measured: a 2-key config under HERMES_HOME came back
+    fully HSCC-wired (113 lines) from a test whose tmp_path config was never
+    read. Pinned by checksum so it fails loudly if reintroduced.
+    """
+
+    def test_ambient_home_does_not_leak_into_the_callers_home(
+            self, tmp_path, monkeypatch):
+        """HERMES_HOME = another profile's dir; caller uses --home tmp.
+
+        The ambient config must survive byte-identical and the caller's config
+        must be the one that gets wired.
+        """
+        # Another profile's home, present on the machine but NOT the target.
+        other_root = tmp_path / ".hermes"
+        (other_root / "hermes-agent").mkdir(parents=True)
+        other_profile = other_root / "profiles" / "other-worker"
+        other_profile.mkdir(parents=True)
+        other_cfg = other_profile / "config.yaml"
+        with open(other_cfg, "w") as fh:
+            yaml.safe_dump({"plugins": {"enabled": []},
+                            "toolsets": ["hermes-cli"]}, fh)
+
+        # The caller's own home.
+        home = tmp_path / "callhome"
+        target = home / ".hermes"
+        target.mkdir(parents=True)
+        (target / "hermes-agent").mkdir()
+        target_cfg = target / "config.yaml"
+        with open(target_cfg, "w") as fh:
+            yaml.safe_dump({"plugins": {"enabled": []},
+                            "toolsets": ["hermes-cli"]}, fh)
+
+        _pin_home(monkeypatch, tmp_path, hermes_home=other_profile)
+        monkeypatch.setattr(doctor, "_run_cluster_list", lambda: _FAKE_CLUSTER)
+        monkeypatch.setattr(shutil, "which",
+                            lambda n: "/usr/local/bin/sparkrun" if n == "sparkrun" else None)
+
+        before_other = _md5(other_cfg)
+        rc, out = _capture_main(["--json", "--fix", "--home", str(target)])
+        assert rc == 0, out
+        assert _md5(other_cfg) == before_other, \
+            "--fix read/wrote the AMBIENT HERMES_HOME config, not --home's"
+        cfg = yaml.safe_load(open(target_cfg))
+        assert "hscc-cluster" in cfg["plugins"]["enabled"]
+
+    def test_bare_fix_stays_inside_the_home_it_chose(self, tmp_path, monkeypatch):
+        """A bare --fix (no --home) uses ambient HERMES_HOME by design; assert
+        it touches nothing else under HOME."""
+        root = tmp_path / ".hermes"
+        (root / "hermes-agent").mkdir(parents=True)
+        profile = root / "profiles" / "worker"
+        profile.mkdir(parents=True)
+        cfg = profile / "config.yaml"
+        with open(cfg, "w") as fh:
+            yaml.safe_dump({"plugins": {"enabled": []},
+                            "toolsets": ["hermes-cli"]}, fh)
+        bystander = tmp_path / "elsewhere" / "config.yaml"
+        bystander.parent.mkdir(parents=True)
+        with open(bystander, "w") as fh:
+            yaml.safe_dump({"plugins": {"enabled": []}}, fh)
+
+        _pin_home(monkeypatch, tmp_path, hermes_home=profile)
+        monkeypatch.setattr(doctor, "_run_cluster_list", lambda: _FAKE_CLUSTER)
+        monkeypatch.setattr(shutil, "which",
+                            lambda n: "/usr/local/bin/sparkrun" if n == "sparkrun" else None)
+
+        before_bystander = _md5(bystander)
+        rc, out = _capture_main(["--json", "--fix"])
+        assert rc == 0, out
+        assert _md5(bystander) == before_bystander, \
+            "--fix wrote a config outside the home it resolved"
+        wired = yaml.safe_load(open(cfg))
+        assert "hscc-cluster" in wired["plugins"]["enabled"]
 
 
 def _fake_http(served_names):
@@ -85,22 +409,6 @@ class TestSparkrunCheck:
             check = doctor._sparkrun_ok()
         assert check.ok is False
         assert "not on PATH" in check.detail
-
-
-class TestHermesCheck:
-    def test_passes(self, tmp_path):
-        hm = tmp_path / "hermes"
-        hm.mkdir()
-        (hm / "hermes-agent").mkdir()
-        check = doctor._hermes_ok(str(hm))
-        assert check.ok is True
-
-    def test_fails_when_missing(self, tmp_path):
-        hm = tmp_path / "hermes"
-        hm.mkdir()
-        check = doctor._hermes_ok(str(hm))
-        assert check.ok is False
-        assert check.fatal is True
 
 
 class TestGatewayCheck:
@@ -1003,38 +1311,72 @@ class TestDoctorFixDriftDetected:
 
 
 class TestDoctorCLI:
-    def test_main_json_output(self, tmp_path, monkeypatch):
-        config_path = tmp_path / "config.yaml"
-        cfg = {"plugins": {"enabled": []}, "toolsets": ["hermes-cli"]}
-        with open(config_path, "w") as f:
+    """The CLI surface — each case declares --home.
+
+    These two cases are what broke the full suite in a worker env, but the
+    reported symptom (`assert result == 0`) was the least of it: `main()` derived
+    config_path from ambient HERMES_HOME, so `--fix` here read and REWROTE
+    whatever config.yaml the surrounding process pointed at — on a dispatched
+    worker that is the operator's live profile config (measured: a 2-key config
+    came back fully HSCC-wired), and the test's own tmp_path/config.yaml was
+    never opened. Declaring --home makes the case test what it claims.
+    """
+
+    def _home(self, tmp_path, monkeypatch, cfg):
+        hermes = _pin_home(monkeypatch, tmp_path / "clihome")
+        (hermes / "hermes-agent").mkdir(exist_ok=True)
+        with open(hermes / "config.yaml", "w") as f:
             yaml.safe_dump(cfg, f)
-        os.makedirs(os.path.join(str(tmp_path), "hermes-agent"), exist_ok=True)
-        result = doctor.main(["--json", "--fix"])
-        assert result == 0
+        monkeypatch.setattr(doctor, "_run_cluster_list", lambda: _FAKE_CLUSTER)
+        monkeypatch.setattr(shutil, "which",
+                            lambda n: "/usr/local/bin/sparkrun" if n == "sparkrun" else None)
+        return hermes
+
+    def test_main_json_output(self, tmp_path, monkeypatch):
+        home = self._home(tmp_path, monkeypatch,
+                          {"plugins": {"enabled": []}, "toolsets": ["hermes-cli"]})
+        assert doctor.main(["--json", "--fix", "--home", str(home)]) == 0
 
     def test_main_text_output(self, tmp_path, monkeypatch):
-        config_path = tmp_path / "config.yaml"
-        cfg = {"plugins": {"enabled": []}}
-        with open(config_path, "w") as f:
-            yaml.safe_dump(cfg, f)
-        os.makedirs(os.path.join(str(tmp_path), "hermes-agent"), exist_ok=True)
+        home = self._home(tmp_path, monkeypatch, {"plugins": {"enabled": []}})
         old_stdout = sys.stdout
         try:
             sys.stdout = StringIO()
-            result = doctor.main(["--text"])
+            result = doctor.main(["--text", "--home", str(home)])
             output = sys.stdout.getvalue()
             assert "python" in output
             assert result == 0
         finally:
             sys.stdout = old_stdout
 
+    def test_json_output_is_parsable_and_reports_every_check(self, tmp_path, monkeypatch):
+        home = self._home(tmp_path, monkeypatch, {"plugins": {"enabled": []}})
+        rc, out = _capture_main(["--json", "--home", str(home)])
+        assert rc == 0, out
+        payload = json.loads(out)
+        names = {c["name"] for c in payload["checks"]}
+        assert {"python", "pyyaml", "sparkrun", "hermes"} <= names
+
 
 class TestDoctorNoAnsi:
-    """The themed human view (doctor --text) emits NO \x1b on a non-tty stdout,
+    """The themed human view (doctor --text) emits NO \\x1b on a non-tty stdout,
     while --json stays byte-identical. The RICH CLI card mandated a NO-ANSI
     regression per converted command: piped output must stay clean (scripts /
     daemons parse it) and --json must equal canonical dumps exactly.
+
+    Both views run against a declared --home and a stubbed cluster runner, so the
+    byte-identity comparison compares the RENDER, not two different live probes.
     """
+
+    def _home(self, tmp_path, monkeypatch):
+        hermes = _pin_home(monkeypatch, tmp_path / "ansihome")
+        (hermes / "hermes-agent").mkdir(exist_ok=True)
+        with open(hermes / "config.yaml", "w") as f:
+            yaml.safe_dump({"plugins": {"enabled": []}}, f)
+        monkeypatch.setattr(doctor, "_run_cluster_list", lambda: _FAKE_CLUSTER)
+        monkeypatch.setattr(shutil, "which",
+                            lambda n: "/usr/local/bin/sparkrun" if n == "sparkrun" else None)
+        return hermes
 
     def _capture(self, argv):
         import contextlib
@@ -1045,23 +1387,17 @@ class TestDoctorNoAnsi:
         return result, buf.getvalue()
 
     def test_human_view_is_plain_no_ansi(self, tmp_path, monkeypatch):
-        config_path = tmp_path / "config.yaml"
-        with open(config_path, "w") as f:
-            yaml.safe_dump({"plugins": {"enabled": []}}, f)
-        os.makedirs(os.path.join(str(tmp_path), "hermes-agent"), exist_ok=True)
-        result, out = self._capture(["--text"])
+        home = self._home(tmp_path, monkeypatch)
+        result, out = self._capture(["--text", "--home", str(home)])
         assert out, "expected doctor human output to be non-empty"
         assert "\x1b" not in out, f"ANSI escape in piped output: {out!r}"
         assert "python" in out  # the python check name survives the themed render
 
     def test_json_stays_byte_identical(self, tmp_path, monkeypatch):
-        config_path = tmp_path / "config.yaml"
-        with open(config_path, "w") as f:
-            yaml.safe_dump({"plugins": {"enabled": []}}, f)
-        os.makedirs(os.path.join(str(tmp_path), "hermes-agent"), exist_ok=True)
-        result, out = self._capture(["--json"])
+        home = self._home(tmp_path, monkeypatch)
+        result, out = self._capture(["--json", "--home", str(home)])
         import json as _json
-        res = doctor.run_doctor()
+        res = doctor.run_doctor(str(home))
         assert out == _json.dumps(res, indent=2) + "\n", (
             "--json must be byte-identical to canonical dumps")
         assert "\x1b" not in out
