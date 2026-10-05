@@ -2934,3 +2934,17 @@ CRON ROOT-CAUSE (resolves operator's repeated "heartbeat = 0"): the heartbeat cr
 - HEARTBEAT CRON: ACTIVE + SINGLE (grep count 1). Do NOT create more.
 - OPERATOR-ESCALATE (unchanged): consume-handoff card merged + code-complete, but full live 1:1 acceptance still waits on the upstream seam deploy (t_ff4b986e domain, feat/session-ownership-handoff @ 77f046f089, operator-held SAFE HOLD). Coordinator degrades safely to session_busy — no regression.
 - After commit, verify main...origin/main 0/0 (14:00 discipline).
+
+## Heartbeat tick 22:07 (cron hscc-orch-goal-heartbeat a0abe2b7848b, 2026-10-05) — operator landed 2.5.4; goal terminal, board empty
+
+- Since last tick (21:19 @ b11fd43 tick commit 506dd4c): **TWO new commits to origin/main, operator-authored (pom11) — HSCC 2.5.4 RELEASED.** `c45577a` fix(bootstrap): helpers honour HERMES_HOME/HSCC_DIR + new isolated install test (hscc-bootstrap/tests/test_bootstrap_isolated.py, 159 lines; 10 files +259/−22 — absorbs the hscc-bootstrap +9 files/+100/−22 mid-edit the 21:19 tick flagged, INCLUDING its "new untracked test_bootstrap_isolated.py"); `2c6878d` release: 2.5.4 (VERSION 2.5.4). Out of goal scope — recorded, no action.
+- **Operator mid-edit flag RESOLVED:** `git status --short` completely clean.
+- HEAD == main == origin/main == **2c6878d** (0/0 verified `git rev-list --left-right --count main...origin/main` after `git fetch`). Latest product code = operator's 2.5.4; latest goal-owned product code remains consume-handoff cf76249 + hygiene ec8a4ef.
+- LANDED SINCE LAST TICK: none (goal-owned). IN FLIGHT: none. BLOCKED: none.
+- BOARD (hscc): **completely empty of active work** — 0 running, 0 ready, 0 blocked, 0 todo, 0 triage, 0 review (kanban_list per active status, all six verified this tick). The 2 live worker processes on the host are `ecofire-bc-engineer` (t_cc632e84, t_8185389d) — a DIFFERENT project's board; boundary rules: not touched, not this board's work.
+- DISPATCH: NONE warranted. Cron condition ("board empty **and phases remain**") unmet — **no phases remain** (Phase 0 DONE, 1 = 100% closed 7/7, 2 = 4/4, 3 COMPLETE bafdf30, 4 COMPLETE 5a4c3f0; post-goal consume-handoff cf76249; hygiene ec8a4ef; operator releases 2.5.0–2.5.4 operator-owned). Confirmation-only until operator seeds new work.
+- DAEMON: **ALIVE** — pid 24940 (kill -0 verified), daemon.log fresh @ 19:09Z = 22:09 EEST (gateway ok=True all 41 multiplex profiles served, Watchdog pipeline healthy, Workers check 3/3 online). No engine-wedge recurrence.
+- LITELLM PROXY: healthy — localhost:4000/v1/models returns worker-model + orchestrator-model + local-inference-lab/Qwen3.8-Flash-Next-NVFP4. Dispatch path UP.
+- HEARTBEAT CRON: ACTIVE + SINGLE (grep count 1). Do NOT create more.
+- OPERATOR-ESCALATE (unchanged): consume-handoff card merged + code-complete, but full live 1:1 acceptance still waits on the upstream seam deploy (t_ff4b986e domain, feat/session-ownership-handoff @ 77f046f089, operator-held SAFE HOLD). Coordinator degrades safely to session_busy — no regression.
+- After commit, verify main...origin/main 0/0 (14:00 discipline).
