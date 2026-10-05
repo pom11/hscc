@@ -267,6 +267,60 @@ def test_orchestrate_full_cycle_when_consent_already_granted():
     assert fake.complete_calls == 1
 
 
+def test_orchestrate_calls_on_working_when_turn_starts():
+    """Once the owner consents and the lease transfers, ``on_working`` fires
+    right before ``drive()`` — so the app flips away from the awaiting-approval
+    banner while the orchestrated turn runs (acceptance bullet)."""
+    lease = _StubLease()
+    # Request returns granted=True (owner already consented in an earlier
+    # round-trip) so the ask is moot and it goes straight to drive.
+    fake = _FakePrimitives(
+        request_result={"granted": True},
+        complete_lease=lease,
+        snapshot=[_reg_entry(handoff={
+            "controller": "hscc-app", "granted": True, "nonce": "nn-1",
+            "requested_at": 1000.0})])
+    c = _coordinator(fake, grant_timeout=0.05)
+    order = []
+
+    def on_pending():
+        order.append("pending")
+
+    def on_working():
+        order.append("working")
+
+    def drive():
+        order.append("drive")
+
+    result = c.orchestrate("hello", drive=drive,
+                           on_pending=on_pending, on_working=on_working,
+                           registry_home=None)
+    assert result["outcome"] == "completed"
+    # working must fire immediately before drive (and after complete) so the
+    # indicator is live for the whole orchestrated turn.
+    assert "working" in order, "on_working never fired on the driven path"
+    assert order.index("working") == order.index("drive") - 1, order
+
+
+def test_orchestrate_denied_never_calls_on_working():
+    """A denied/timeout path must NOT emit a working frame (nothing drove)."""
+    fake = _FakePrimitives(
+        request_result={"granted": False},
+        snapshot=[_reg_entry(handoff={
+            "controller": "hscc-app", "granted": False, "nonce": None,
+            "requested_at": 1000.0})])
+    c = _coordinator(fake, grant_timeout=0.05)
+    worked = []
+
+    def on_working():
+        worked.append(True)
+
+    result = c.orchestrate("hello", drive=lambda: None, on_working=on_working,
+                           registry_home=None)
+    assert result["outcome"] == "denied"
+    assert worked == [], "on_working must not fire when the turn never drove"
+
+
 def test_orchestrate_denied_when_owner_times_out():
     """Owner never consents: the coordinator surfaces a denied notice and does
     NOT drive the turn or hold a lease."""
