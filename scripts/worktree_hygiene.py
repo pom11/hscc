@@ -43,21 +43,27 @@ def classify():
     for line in git("worktree", "list", "--porcelain").splitlines():
         if not line.strip():
             if cur.get("worktree"):
-                worktrees[cur["worktree"]] = (cur.get("branch", ""), cur)
+                b = cur.get("branch", "")
+                if b.startswith("refs/heads/"):
+                    b = b[len("refs/heads/"):]
+                worktrees[cur["worktree"]] = (b, cur)
             cur = {}
         elif " " in line:
             k, v = line.split(" ", 1)
             cur[k] = v
     if cur.get("worktree"):
-        worktrees[cur["worktree"]] = (cur.get("branch", ""), cur)
+        b = cur.get("branch", "")
+        if b.startswith("refs/heads/"):
+            b = b[len("refs/heads/"):]
+        worktrees[cur["worktree"]] = (b, cur)
 
     results: dict = {"worktrees": [], "branches_only": []}
 
     wt_branches = [
-        l.strip()[2:] if l.startswith("* ") else l.strip()
-        for l in git("branch", "--list", PREFIX + "*").splitlines()
+        line.split("refs/heads/", 1)[1]
+        for line in git("branch", "--list", PREFIX + "*", "--format=%(refname)").splitlines()
+        if "refs/heads/" in line
     ]
-    wt_branches = [b for b in wt_branches if b]
 
     # branch -> worktree path
     by_branch = {b: p for p, (b, _) in worktrees.items() if b}
