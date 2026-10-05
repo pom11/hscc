@@ -138,15 +138,39 @@ therefore readable in `doctor --json` output.
 
 Targeted (both interpreters, `HERMES_HOME=$HOME/.hermes/profiles/<profile>`):
 15/15 passed on py3.11 venv and on miniconda p313.
-`tests/test_doctor.py` whole file: **72 passed** on py3.11 under the worker env
-(69 before this card).
+`tests/test_doctor.py` whole file: **72 passed** on both interpreters under the
+worker env (69 before this card). Independently reproduced red→green by the
+orchestrator: `origin/main 59788b5` → 2 failed vs this branch → 2 passed, p313.
 
-Full suite `scripts/run_tests.sh` from a worker env (`HERMES_HOME` exported to
-a profile dir), this branch:
-* py3.11 run 1: 9/9 dirs green — **ALL GREEN** (log `full-py311-run1.log`).
-* py3.11 run 2 + p313 run 1: in parallel (host contention with t_163fa09f).
-* p313 run 2 follows; results recorded in the completion metadata.
+Real-CLI smoke (not just pytest), `doctor.py --json` with `HERMES_HOME` at a
+profile dir → `hermes ok=True`, detail
+`~/.hermes/hermes-agent (hermes root resolved from profile home ...)`, overall
+`ok=True`. Same CLI with `HOME` + `HERMES_HOME` pointed at an empty tree (no
+install anywhere) → `hermes ok=False, fatal=True`, process **exit code 1**. The
+check is honest in both directions at the real entry point.
+
+Full suite `scripts/run_tests.sh`, every run with `HERMES_HOME` exported to a
+profile dir (the regression guard) and `HOME` left real so preflight can find
+sparkrun's cluster config — 9/9 packages, **ALL GREEN, 4/4 runs**:
+
+| # | interpreter | result |
+|---|-------------|--------|
+| 1 | hermes venv py3.11 | ALL GREEN (`full-py311-run1.log`) |
+| 2 | hermes venv py3.11 | ALL GREEN (`full-py311-run2.log`) |
+| 3 | miniconda p313 (py3.13) | ALL GREEN (`full-p313-run1.log`) |
+| 4 | miniconda p313 (py3.13) | ALL GREEN, EXIT=0 (`full-p313-run2.log`) |
+
+Per-package counts (p313 run 1): hscc-bootstrap 342, hscc-commands 69,
+hscc-roles 135, hscc-cluster 460 (15 skipped), hscc-project 1351, hscc_daemon
+1179 (3 skipped), sparkrun-hermes 12, hscc-api 856 (16 skipped), memori_byodb 9.
+Runs 2 and 4 ran concurrently with t_163fa09f's suites on this host; wall time
+was longer, results were not.
+
+Note on ordering: runs 1-4 were taken at branch tip `344d023`, which was then
+rebased onto `origin/main` for landing. The rebase introduced only
+`docs/audits/GOAL_LEDGER_2026-09-26.md` (an orchestrator heartbeat doc); no
+Python or test file changed, so the runs remain valid for the merged content.
 
 Live-state check after the hermetic runs: operator profile `config.yaml` md5
-unchanged, and no new files under the real `~/.hermes/hooks` or
-`~/.hermes/profiles/<profile>/hooks`.
+unchanged (`e14158ba...` before and after), and no new files under the real
+`~/.hermes/hooks` or `~/.hermes/profiles/<profile>/hooks`.
