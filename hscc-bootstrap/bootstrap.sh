@@ -150,6 +150,7 @@ case "$CLI_ACTION" in
   repaired)  ok "hscc CLI shebang repaired → Hermes venv ($CLI_DETAIL)" ;;
   *) echo "$CLI_JSON" >&2; die "hscc CLI install FAILED ($CLI_DETAIL) — a wrong-shebang CLI silently degrades project/chat/check" ;;
 esac
+fi
 
 hdr "Install: operator watchdog scripts"
 # Copy <repo>/scripts/hscc_*.sh into ~/.hermes/scripts/. Non-fatal: watchdogs
