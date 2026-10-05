@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.5.0] - 2026-10-05
+
+### Added
+- **`uniform_pool`: N identical replicas as one role-agnostic pool** (new v3
+  template key). HSCC's shape is orchestrator + families and a unit's alias
+  follows that role, but when every unit runs the SAME recipe the split is
+  meaningless — any node can do any work. With the flag, every unit gets a
+  DISTINCT port and advertises BOTH `orchestrator-model` and `worker-model`, so
+  each alias load-balances across every unit. Routing still resolves a single
+  name, so the probe-before-write gate is untouched. Validation refuses mixed
+  recipes (one alias must not resolve to different models depending on which
+  backend the proxy picks) and refuses the key below version 3. **Omission
+  changes nothing** — the role-split behaviour is preserved exactly.
+
+  The distinct ports are required, not cosmetic: sparkrun's proxy discovery
+  dedupes endpoints by `(model set, port)` with **no host**
+  (`proxy/discovery.py:_deduplicate_by_identity`, which exists to collapse one
+  server reachable via both management and ConnectX-7 IPs). Without them,
+  `tp=1` replicas all land on `:8000`, N workers look like ONE server, and only
+  the last registers. Observed live as 3 workers up, 1 in the proxy, 2 idle.
+- **`4node-flash-next-all` template** — 4x Qwen3.8-Flash-Next NVFP4 at 262k
+  context, one per node, using `uniform_pool`. Documents two measured hard
+  requirements: the model must sit on local NVMe (the PLE table is read by row
+  per token; over NFS a random 4 KiB read measured 5.72 ms, which is unusable
+  for serving while 224 MiB/s sequential is fine for staging), and the
+  container needs `seccomp=unconfined` because the PLE disk offloader uses
+  io_uring, which Docker's builtin seccomp profile denies even though the host
+  kernel allows it.
+- **Session-ownership handoff** — HSCC-side consented handoff coordinator and
+  WS wiring, so the app can drive the operator's named session with consent;
+  iOS surfaces handoff-pending / working turn states.
+- **Session continuity** — app->send working indicator, CLI-held-session
+  notice, and a store-tail live source for CLI-driven frames.
+- **Gateway driver** — live `GatewayDriver` mount + serve sidecar wired into
+  the API, full-history backfill, same-session pinned PTY, and a
+  project -> named-Hermes-session pinning resolver.
+- **`hscc --version` / `-v`.**
+
+### Fixed
+- **Test isolation: the process-global chat-job registry leaked between
+  tests.** `routes_orchestrator._jobs` outlives any one test and
+  `_in_flight_job(project)` scans it to decide whether a WS `stop` frame had
+  anything to stop, so a test leaving a queued/running job behind made a later
+  test's "nothing in flight" assertion fail. It only showed up when the whole
+  directory ran — the configuration CI uses — and the existing autouse
+  filesystem isolation could not catch an in-memory leak. hscc-api: 871 passed
+  + 1 failed -> 872 passed.
+- **Handoff: a working frame is now emitted when the consented turn starts
+  driving.**
+- **Gateway: loopback `public_url` is forced on serve** so driver `?token=`
+  auth is accepted.
+- **Chat: the operator's own message shows instantly, and the relay is
+  guarded.**
+
+### Changed
+- **Worktree hygiene tooling** — a read-only worktree/branch classifier plus a
+  guarded prune executor; first run removed 33 worktrees and 34 `wt/*` branches
+  and kept 301.
+
+### Verified
+- Full suite green across all 10 packages: **4365 passed, 0 failed**.
+- `uniform_pool` verified on the live 4-node fleet: every unit advertises its
+  concrete id plus both aliases, `sparkrun proxy status` lists four backends
+  for `worker-model` **and** four for `orchestrator-model`, and 8 proxy
+  requests distributed +3/+1/+1/+3 across the four nodes (measured from each
+  node's `vllm:request_success_total`, not inferred).
+
 ## [2.4.0] - 2026-09-29
 
 ### Changed
