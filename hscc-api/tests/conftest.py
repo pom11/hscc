@@ -15,6 +15,37 @@ import pytest  # noqa: E402
 import api_server  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _isolate_chat_jobs():
+    """Clear the process-global chat-job registry around every test.
+
+    ``routes_orchestrator._jobs`` is a module-level dict that outlives any one
+    test, and ``_in_flight_job(project)`` scans it to decide whether a WS
+    ``stop`` frame had anything to stop. A test that leaves a queued/running
+    job behind therefore makes a LATER test's "nothing in flight" assertion
+    fail — which is exactly why
+    ``test_ws_relay_not_noop.py::test_stop_kind_with_nothing_in_flight_is_noop``
+    passed when its file ran alone and failed when the whole directory ran.
+
+    ``_isolate_hscc`` below cannot catch this: that leak is in memory, not on
+    disk. Cleared both before and after, so the registry is empty no matter
+    whether the previous test cleaned up or blew up mid-way.
+    """
+    import routes_orchestrator as _ro
+
+    def _clear():
+        try:
+            with _ro._jobs_lock:
+                _ro._jobs.clear()
+        except Exception:
+            # Never let isolation bookkeeping fail a test run.
+            pass
+
+    _clear()
+    yield
+    _clear()
+
+
 @pytest.fixture
 def hscc_dir(tmp_path):
     """A fresh, isolated ~/.hscc stand-in for each test."""
