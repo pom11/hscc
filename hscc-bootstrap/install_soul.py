@@ -256,9 +256,11 @@ if __name__ == "__main__":
     home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
     soul = install_soul(os.path.join(home, "SOUL.md"))
     pers = install_personality(os.path.join(home, "config.yaml"))
-    _theme.make_console().print(_theme.panel(
-        "bootstrap",
-        _theme.escape(
-            f"SOUL.md: {soul} | ops personality: {pers}"),
-    ))
+    body = f"SOUL.md: {soul} | ops personality: {pers}"
+    # bootstrap.sh captures this stdout into its own status line; a Rich panel
+    # there became box-drawing noise pasted mid-sentence. TTY gets the panel.
+    if sys.stdout.isatty():
+        _theme.make_console().print(_theme.panel("bootstrap", _theme.escape(body)))
+    else:
+        print(body)
     sys.exit(0)

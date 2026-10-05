@@ -259,7 +259,8 @@ def _check_models_served(hermes_home=None, *, _http_get=None) -> Check:
     import json
     from urllib.error import HTTPError
 
-    home = hermes_home or os.path.expanduser("~/.hermes")
+    home = (hermes_home or os.environ.get("HERMES_HOME")
+            or os.path.expanduser("~/.hermes"))
     config_path = os.path.join(home, "config.yaml")
 
     try:
@@ -379,7 +380,8 @@ def _run_cluster_list() -> str:
 
 def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
                _http_get=None) -> dict:
-    home = hermes_home or os.path.expanduser("~/.hermes")
+    home = (hermes_home or os.environ.get("HERMES_HOME")
+            or os.path.expanduser("~/.hermes"))
     checks: List[Check] = [
         _python_ok(),
         _pyyaml_ok(),
@@ -782,7 +784,9 @@ def main(argv=None) -> int:
     import json
     argv = argv if argv is not None else sys.argv[1:]
     fix_mode = "--fix" in argv
-    config_path = os.path.expanduser("~/.hermes/config.yaml")
+    config_path = os.path.join(
+        os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"),
+        "config.yaml")
 
     if fix_mode:
         res = run_doctor_fix(config_path=config_path)

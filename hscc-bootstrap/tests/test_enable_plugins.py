@@ -142,8 +142,37 @@ def test_fully_wired_is_noop(tmp_path):
 
 
 def test_missing_config_noop(tmp_path):
-    res = enable_plugins.enable(str(tmp_path / "nope.yaml"))
-    assert res == {"plugins": [], "toolsets": [], "kanban": [], "delegation": [], "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [], "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": [], "approvals": [], "worktree": []}
+    """A missing config.yaml changes nothing — and now SAYS which path it was.
+
+    The no-op is deliberate: Hermes owns config.yaml and creates it on first
+    run, so bootstrap must not invent one. But returning a bare "nothing
+    changed" dict made the installer report "config wired / already wired (no
+    changes)" on a fresh machine where nothing had been wired at all. The
+    result therefore carries `config_missing` so the caller can tell
+    "nothing to do" apart from "nothing was done".
+    """
+    missing = tmp_path / "nope.yaml"
+    res = enable_plugins.enable(str(missing))
+
+    # Still a no-op: every change list empty, and no file conjured into place.
+    changed = {k: v for k, v in res.items() if isinstance(v, (list, tuple))}
+    assert changed == {"plugins": [], "toolsets": [], "kanban": [],
+                       "delegation": [], "compaction": [], "text_aux": [],
+                       "fallback": [], "bitwarden": [], "prompt_caching": [],
+                       "dashboard": [], "multiplex": [], "hooks": [],
+                       "approvals": [], "worktree": []}
+    assert not missing.exists(), "enable() must not create config.yaml"
+
+    # ...but the absence is reported, not silently swallowed.
+    assert res.get("config_missing") == str(missing)
+
+
+def test_present_config_does_not_report_missing(tmp_path):
+    """The marker appears ONLY when the config is genuinely absent."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("plugins:\n  enabled: []\n")
+    res = enable_plugins.enable(str(cfg))
+    assert "config_missing" not in res
 
 
 # ── fleet routing (kanban + delegation) ──────────────────────────────────────

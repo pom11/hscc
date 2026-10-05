@@ -41,7 +41,9 @@ def install_triggers(
         ``ok`` is False).
     """
     if triggers_path is None:
-        triggers_path = os.path.expanduser("~/.hscc/triggers.json")
+        triggers_path = os.path.join(
+            os.environ.get("HSCC_DIR") or os.path.expanduser("~/.hscc"),
+            "triggers.json")
     if defaults_path is None:
         defaults_path = os.path.join(_this_dir(), "triggers.default.json")
 

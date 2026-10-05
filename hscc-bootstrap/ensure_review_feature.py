@@ -21,7 +21,9 @@ import re
 import subprocess
 
 
-HERMES_DIR = os.path.expanduser("~/.hermes/hermes-agent")
+HERMES_DIR = os.path.join(
+    os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"),
+    "hermes-agent")
 FORK_REMOTE = os.environ.get("HSCC_HERMES_FORK_REMOTE", "fork")
 FEATURE_BRANCH = os.environ.get(
     "HSCC_REVIEW_FEATURE_BRANCH", "feat/kanban-submit-review")
