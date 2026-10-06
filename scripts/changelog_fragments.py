@@ -373,6 +373,57 @@ def release(version: str, fragments_dir: Path = FRAGMENTS_DIR,
     return len(entries)
 
 
+def rescue_entries(base_text: str, branch_text: str, task: str,
+                   fragments_dir: Path = FRAGMENTS_DIR):
+    """Land-step helper for a branch that still hand-edited CHANGELOG.md.
+
+    In-flight cards written before this scheme add their bullets directly to
+    CHANGELOG.md's ``[Unreleased]`` block, so they collide once with the pointer
+    block. This makes that one-time collision mechanical rather than a hand
+    merge: compare the ``[Unreleased]`` block on the branch against the same
+    block at the merge base (reusing the *tested* entry splitter rather than
+    parsing a diff), take the entries the branch added, and write them into
+    ``changelog.d/<task>.md``. The landing step then drops the CHANGELOG.md
+    hunk and keeps the fragment.
+
+    Returns (path, n_entries). Raises FragmentError when the branch adds no
+    entry lines, so a landing step can never silently swallow an entry.
+    """
+    # imported here to avoid a module-import cycle (the migrator imports us)
+    from migrate_changelog_fragments import split_entries  # noqa: WPS433
+
+    if not TASK_ID_RE.match(task):
+        raise FragmentError(f"task id {task!r} must look like t_<8 hex>")
+
+    def block_entries(text):
+        _, block, _ = split_changelog(text or "")
+        if block is None:
+            return []
+        return [(k, [l.rstrip() for l in lines])
+                for k, lines, _ in split_entries(block.split("\n")[1:])]
+
+    base_entries = block_entries(base_text)
+    branch_entries = block_entries(branch_text)
+    base_set = {tuple(lines) for _, lines in base_entries}
+    added = [(k, lines) for k, lines in branch_entries
+             if tuple(lines) not in base_set]
+    if not added:
+        raise FragmentError(
+            "the branch adds no [Unreleased] entry lines — nothing to rescue; "
+            "if it genuinely has no changelog entry, merge without a fragment")
+
+    chunks = ["\n".join([f"kind: {k or 'Fixed'}", f"task: {task}", ""] + lines)
+              for k, lines in added]
+    fragments_dir.mkdir(parents=True, exist_ok=True)
+    path = fragments_dir / f"{task}.md"
+    text = "\n---\n".join(chunks) + "\n"
+    if path.exists():
+        text = path.read_text(encoding="utf-8").rstrip("\n") + "\n---\n" + text
+    path.write_text(text, encoding="utf-8")
+    load_entries(fragments_dir)  # validate what we just wrote
+    return path, len(added)
+
+
 def add_entry(task: str, kind: str, body: str, fragments_dir: Path = FRAGMENTS_DIR):
     """Append one entry to the card's fragment file, creating it if needed."""
     if not TASK_ID_RE.match(task):
@@ -411,14 +462,18 @@ def main(argv=None) -> int:
     ap.add_argument("command",
         nargs="?",
         default="check",
-        choices=["check", "sync", "render", "add", "list", "release"],
-        help="check (default) / sync / render / add / list / release",
+        choices=["check", "sync", "render", "add", "list", "release", "rescue"],
+        help="check (default) / sync / render / add / list / release / rescue",
     )
     ap.add_argument("--version", help="version for `release` (e.g. 2.5.5)")
     ap.add_argument("--date", help="release date override (YYYY-MM-DD)")
-    ap.add_argument("--task", help="task id for `add` (e.g. t_95f1d6e1)")
+    ap.add_argument("--task", help="task id for `add`/`rescue` (e.g. t_95f1d6e1)")
     ap.add_argument("--kind", help="section for `add` (Fixed, Verified, …)")
     ap.add_argument("--body", help="entry body for `add` (else read stdin)")
+    ap.add_argument("--base", help="for `rescue`: base rev (default: merge-base "
+                                   "of --branch with HEAD)")
+    ap.add_argument("--branch", help="for `rescue`: branch ref whose CHANGELOG.md "
+                                     "hand-edits become a fragment")
     ap.add_argument("--changelog", default=str(CHANGELOG))
     ap.add_argument("--fragments-dir", default=str(FRAGMENTS_DIR))
     ap.add_argument("--no-marker", action="store_true",
@@ -457,6 +512,42 @@ def main(argv=None) -> int:
             print(f"cannot add entry: {exc}", file=sys.stderr)
             return 2
         print(f"wrote {_display(path)}")
+        return 0
+
+    if ns.command == "rescue":
+        if not ns.task or not ns.branch:
+            print("rescue requires --task and --branch", file=sys.stderr)
+            return 2
+        import subprocess as _sp
+
+        def blob(rev):
+            r = _sp.run(["git", "show", f"{rev}:CHANGELOG.md"],
+                        cwd=str(REPO_ROOT), capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"cannot read CHANGELOG.md at {rev}: {r.stderr.strip()}",
+                      file=sys.stderr)
+                raise SystemExit(2)
+            return r.stdout
+
+        base_ref = ns.base
+        if not base_ref:
+            r = _sp.run(["git", "merge-base", "HEAD", ns.branch],
+                        cwd=str(REPO_ROOT), capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"no merge-base with {ns.branch}: {r.stderr.strip()}",
+                      file=sys.stderr)
+                return 2
+            base_ref = r.stdout.strip()
+        try:
+            path, n = rescue_entries(blob(base_ref), blob(ns.branch), ns.task,
+                                     fragments_dir=frag_dir)
+        except FragmentError as exc:
+            print(f"cannot rescue: {exc}", file=sys.stderr)
+            return 2
+        print(f"rescued {n} entr{'y' if n == 1 else 'ies'} from {ns.branch} "
+              f"into {_display(path)}\n"
+              f"next: drop the CHANGELOG.md hunk from the merge "
+              f"(git checkout HEAD -- CHANGELOG.md) and commit the fragment.")
         return 0
 
     block = render_block(entries, fragments_dir=frag_dir, marker=marker)
