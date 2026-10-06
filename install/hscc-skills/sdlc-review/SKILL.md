@@ -13,7 +13,11 @@ gate — approve only work that is correct, tested, and matches the spec.
 
 1. **Diff is sound.** Read the actual diff (`git -C <worktree> diff <base>...HEAD`
    or `git log -p`). Look for correctness bugs, missed edge cases, silent
-   failures, and anything that does not belong.
+   failures, and anything that does not belong. Changelog check: a worker's
+   diff must add `changelog.d/<task-id>.md` and must NOT touch `CHANGELOG.md`
+   (its `[Unreleased]` block is generated — see `changelog.d/README.md`). A
+   `CHANGELOG.md` hunk in a worker diff, or a fragment not named after the task
+   id, is a REJECT; `python3 scripts/changelog_fragments.py check` proves it.
 2. **Tests are green.** Run the task's tests. If the task body names a test
    command, run exactly that. Otherwise run the project's test suite for the
    changed area. Do not trust the worker's claim — run them yourself.
