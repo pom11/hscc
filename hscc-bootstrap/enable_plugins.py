@@ -757,6 +757,20 @@ def _probe_compaction_endpoint():
         return False
 
 
+def _hooks_dst():
+    """Resolve the cluster-guard destination *at call time*.
+
+    ``CLUSTER_GUARD_DST`` is bound at import from ``HERMES_HOME`` (correct for
+    bootstrap, which exports it). But a test run with ``HERMES_HOME`` exported —
+    which is exactly how the worker-env suites are invoked — would otherwise
+    have every ``enable()`` call that forgot to patch write a real backup into
+    the live profile's ``hooks/``. Reading the module attribute here keeps
+    ``monkeypatch.setattr(enable_plugins, "CLUSTER_GUARD_DST", ...)``
+    authoritative while making the leak impossible to reintroduce silently.
+    """
+    return CLUSTER_GUARD_DST
+
+
 def _ensure_hooks_file(hooks_source):
     """Copy cluster-guard.py from the repo's hooks/ dir to ~/.hermes/hooks/.
 
@@ -772,7 +786,7 @@ def _ensure_hooks_file(hooks_source):
     if not src.is_file():
         return {"installed": False, "reason": "source cluster-guard.py not found"}
 
-    dst = Path(CLUSTER_GUARD_DST)
+    dst = Path(_hooks_dst())
     dst.parent.mkdir(parents=True, exist_ok=True)
 
     backed_up = None

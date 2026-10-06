@@ -316,6 +316,53 @@ def test_select_victims_negative_keep_keeps_nothing(tmp_path):
     assert len(backup_util.select_victims([str(a)], keep=-5)) == 1
 
 
+# ── max_age_s: the sweep's 7-day floor on top of the keep window ────────────
+
+def test_age_floor_spares_young_backups_beyond_keep(tmp_path):
+    """Card rule: prune stale baks older than 7 days, keep newest N as safety.
+    Beyond the keep window, a YOUNG backup must survive the sweep."""
+    now = 1_760_000_000.0
+    day = 86400.0
+    members = []
+    for d in range(1, 13):                      # 12 backups, 1..12 days old
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now - d * day))
+        members.append(_touch(tmp_path / f"c.bak-{stamp}", "x\n"))
+    victims = backup_util.select_victims(members, keep=3,
+                                         max_age_s=7 * day, now=now)
+    # newest 3 spared by the keep window; of the rest only the >7d ones go
+    assert len(victims) == 12 - 3 - 4           # days 4..7 (4 files) also spared
+    ages = sorted(now - backup_util._backup_epoch(v) for v in victims)
+    assert all(a > 7 * day for a in ages)
+
+
+def test_writers_have_no_age_floor_hard_keep_n(tmp_path):
+    """backup_file must bound the pile HARD: 20 fresh same-day writes leave
+    exactly keep-N even though none is 7 days old."""
+    src = _touch(tmp_path / "cluster-guard.py", "live\n")
+    for i in range(20):
+        backup_util.backup_file(src, keep=3,
+                                stamp=f"20261006-{10 + i // 60:02d}{i % 60:02d}00")
+    assert len(list(tmp_path.glob("cluster-guard.py.bak-*"))) == 3
+
+
+def test_backup_epoch_prefers_stamp_over_mtime(tmp_path):
+    # stamp says January, mtime says "just now" — the stamp is write time
+    p = _touch(tmp_path / "c.bak-20260101-000000", "x\n", mtime=time.time())
+    epoch = backup_util._backup_epoch(p)
+    expected = time.mktime(time.strptime("20260101-000000", "%Y%m%d-%H%M%S"))
+    assert abs(epoch - expected) < 2
+
+
+def test_backup_epoch_falls_back_to_mtime_for_labels(tmp_path):
+    p = _touch(tmp_path / "c.bak-bookmark", "x\n", mtime=1_234_567_890)
+    assert backup_util._backup_epoch(p) == 1_234_567_890
+
+
+def test_backup_epoch_bad_stamp_falls_back_not_crashes(tmp_path):
+    p = _touch(tmp_path / "c.bak-20261399-999999", "x\n", mtime=999.0)  # impossible
+    assert backup_util._backup_epoch(p) == 999.0
+
+
 def test_unstamped_names_order_by_mtime(tmp_path):
     old = _touch(tmp_path / "c.bak-label-a", "a\n", mtime=1_000_000_000)
     new = _touch(tmp_path / "c.bak-label-b", "b\n", mtime=2_000_000_000)
@@ -456,12 +503,14 @@ def _fake_home(tmp_path):
     return home
 
 
-def test_cli_dry_run_removes_nothing(tmp_path, capsys):
+def test_cli_bare_invocation_deletes_nothing(tmp_path, capsys):
+    """THE safety pin (t_9462260b review): a bare `backup_util.py --home ...`
+    must NOT prune. Deleting requires --apply, or the tool is one typo away
+    from destroying the operator's whole rollback history."""
     home = _fake_home(tmp_path)
-    monkey_argv = ["backup_util.py", "--home", str(home), "--dry-run"]
     import sys
     old = sys.argv
-    sys.argv = monkey_argv
+    sys.argv = ["backup_util.py", "--home", str(home), "--keep", "1"]
     try:
         assert backup_util._main() == 0
     finally:
@@ -469,17 +518,36 @@ def test_cli_dry_run_removes_nothing(tmp_path, capsys):
     out = capsys.readouterr().out
     assert '"dry_run": true' in out
     assert len(list((home / "hooks").glob("*.bak-*"))) == 5
+    assert len(list((home / "profiles" / "worker" / "hooks").glob("*.bak-*"))) == 5
+    assert len(list((home / "plugins-backups").glob("*.bak-*"))) == 6
+    assert (home / "config.yaml").exists()
 
 
-def test_cli_prunes_home_and_profiles(tmp_path, capsys):
+def test_cli_dry_run_flag_is_accepted_and_stays_read_only(tmp_path, capsys):
     home = _fake_home(tmp_path)
     import sys
     old = sys.argv
-    sys.argv = ["backup_util.py", "--home", str(home), "--keep", "2"]
+    sys.argv = ["backup_util.py", "--home", str(home), "--dry-run"]
     try:
         assert backup_util._main() == 0
     finally:
         sys.argv = old
+    assert '"dry_run": true' in capsys.readouterr().out
+    assert len(list((home / "hooks").glob("*.bak-*"))) == 5
+
+
+def test_cli_dry_run_removes_nothing(tmp_path, capsys):
+    home = _fake_home(tmp_path)
+    assert backup_util._main(["--home", str(home), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert '"dry_run": true' in out
+    assert len(list((home / "hooks").glob("*.bak-*"))) == 5
+
+
+def test_cli_prunes_home_and_profiles(tmp_path, capsys):
+    home = _fake_home(tmp_path)
+    assert backup_util._main(
+        ["--home", str(home), "--keep", "2", "--apply"]) == 0
     assert len(list((home / "hooks").glob("*.bak-*"))) == 2
     assert len(list((home / "profiles" / "worker" / "hooks").glob("*.bak-*"))) == 2
     # plugins-backups: 5 stamped collapse to 2, the labelled bookmark survives
@@ -499,14 +567,8 @@ def test_cli_prunes_home_and_profiles(tmp_path, capsys):
 
 def test_cli_include_labeled_prunes_bookmarks(tmp_path, capsys):
     home = _fake_home(tmp_path)
-    import sys
-    old = sys.argv
-    sys.argv = ["backup_util.py", "--home", str(home), "--keep", "0",
-                "--include-labeled"]
-    try:
-        assert backup_util._main() == 0
-    finally:
-        sys.argv = old
+    assert backup_util._main(["--home", str(home), "--keep", "0",
+                              "--include-labeled", "--apply"]) == 0
     assert not list((home / "plugins-backups").glob("*.bak-*"))
     assert not list(home.glob("config.yaml.bak-*"))
     assert not list((home / "hooks").glob("*.bak-*"))
@@ -518,26 +580,14 @@ def test_cli_include_labeled_prunes_bookmarks(tmp_path, capsys):
 def test_cli_profile_scoped_home_walks_up_to_root(tmp_path, capsys, monkeypatch):
     home = _fake_home(tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(home / "profiles" / "worker"))
-    import sys
-    old = sys.argv
-    sys.argv = ["backup_util.py", "--keep", "1"]
-    try:
-        assert backup_util._main() == 0
-    finally:
-        sys.argv = old
+    assert backup_util._main(["--keep", "1", "--apply"]) == 0
     assert len(list((home / "hooks").glob("*.bak-*"))) == 1
     assert len(list((home / "profiles" / "worker" / "hooks").glob("*.bak-*"))) == 1
 
 
 def test_cli_no_profiles_skips_profile_homes(tmp_path, capsys):
     home = _fake_home(tmp_path)
-    import sys
-    old = sys.argv
-    sys.argv = ["backup_util.py", "--home", str(home), "--keep", "1",
-                "--no-profiles"]
-    try:
-        assert backup_util._main() == 0
-    finally:
-        sys.argv = old
+    assert backup_util._main(["--home", str(home), "--keep", "1",
+                              "--no-profiles", "--apply"]) == 0
     assert len(list((home / "hooks").glob("*.bak-*"))) == 1
     assert len(list((home / "profiles" / "worker" / "hooks").glob("*.bak-*"))) == 5
