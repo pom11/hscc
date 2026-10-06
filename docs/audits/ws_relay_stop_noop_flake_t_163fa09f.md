@@ -98,15 +98,23 @@ Therefore `_clear()` cannot fix it: **clearing a dict cannot fix a leak whose
 writer is an unjoined thread.** t_7cc2e7d5's partial fix (clear before *and*
 after) reduced the window and, correctly, did not close it.
 
-### F2 — why "p313 only" and "full suite only"
+### F2 — why it looked "p313 only", and what I could NOT prove
 
 Nothing about the race is 3.13-specific: it needs (a) a preceding test that
 spawns a relay/handoff thread and (b) a straggler whose `_new_job` lands after
 the next setup clear. (a) only exists in a full-directory run — in isolation the
 file's own tests all join/wait their relays, hence "passes 6/6 alone". (b) is
 GIL/scheduler timing, so an interpreter switch changes the *odds*, not the
-possibility. Runs on p313 are slower per test (239 s for the dir) and the log
-confirms the ~240 ms straggler window, which is why it surfaced there.
+possibility.
+
+I did **not** manage to explain the p313-specific reporting rate, and I am not
+going to invent a reason: measured `hscc-api` full-directory wall time is
+essentially identical on the two interpreters (241.7 s on p313 vs 241.3 s on
+py3.11 in the verification runs), so "p313 is slower, hence more races" is NOT
+supported by my own data. What is established is the mechanism (F1), that it is
+interpreter-independent in principle, and that it is closed by construction
+rather than by narrowing a timing window. The reproduction the reviewers saw was
+on p313; the negative controls above fire on either interpreter.
 
 ### F3 — the unguarded seam list (all process-global relay/job state)
 
@@ -226,5 +234,42 @@ Same 5-test file, external plugins disabling one layer at a time:
 
 ## Verification
 
-_(counts filled from the run logs below)_
+Deliverable (4): FULL suite green on BOTH interpreters, run twice, with ZERO
+tolerated failures — the t_267f9d88 doctor baseline being green since it merged
+at d4ea539 (this branch is rebased onto it). Run through `scripts/flake_hunt.sh`,
+which additionally hashes live operator state before and after every run.
+
+| interpreter | run | result | total passed | hscc-api |
+|---|---|---|---|---|
+| p313 (3.13.12) | 1 | ALL GREEN, rc=0 | 4418 | 861 passed, 16 skipped |
+| p313 (3.13.12) | 2 | ALL GREEN, rc=0 | 4418 | 861 passed, 16 skipped |
+| py3.11 (hermes venv 3.11.16) | 1 | ALL GREEN, rc=0 | 4455 | 876 passed, 1 skipped |
+| py3.11 (hermes venv 3.11.16) | 2 | ALL GREEN, rc=0 | 4455 | 876 passed, 1 skipped |
+
+All 9 plugin directories ✓ in every run (`hscc-bootstrap`, `hscc-commands`,
+`hscc-roles`, `hscc-cluster`, `hscc-project`, `hscc_daemon`, `sparkrun-hermes`,
+`hscc-api`, `memori_byodb`). `flake_hunt` reported `failed=0 leak=none` for all
+four: no live-state leak, and the target test passed in every full-suite run.
+
+The `hscc-api` count is 5 higher than the pre-fix baseline (856 observed on
+p313 before this branch, log `/tmp/p313_full1.log`) because
+`tests/test_ws_stop_noop_isolation.py` adds 5 tests. No pre-existing test was
+weakened, skipped, or removed; the 16 skips on p313 and 1 on py3.11 are the same
+pre-existing conditional skips as on main.
+
+Targeted evidence, in place:
+
+- target test in isolation, 6/6: `test_ws_relay_not_noop.py`
+- isolation file standalone: 5 passed
+- negative controls (see Mutation matrix above + `scripts/audits/ws_relay_mut_*.py`)
+
+### Note on one unrelated test observed during the run
+
+`test_send_working_indicator.py::test_detector_matches_only_live_cli_surface`
+fails when that file is run as a small standalone subset (it needs a side effect
+from another module's import). Verified **pre-existing on main**: reproduced
+identically on a clean detached worktree at d4ea539, which does not contain any
+of this card's changes. Passes in the full-suite invocation above. Not touched
+here — out of scope, and noted so the next reader does not attribute it to this
+diff.
 
