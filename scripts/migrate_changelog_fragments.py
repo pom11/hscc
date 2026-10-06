@@ -220,23 +220,9 @@ def main(argv=None) -> int:
 
     # CHANGELOG.md keeps its structure; the [Unreleased] body is replaced by a
     # pointer so the generated block is not duplicated in two places. The
-    # fragments are the record; `sync` re-materialises them for the release.
-    pointer = "\n".join([
-        cf.UNRELEASED_HEADING,
-        "",
-        cf.GENERATED_MARKER,
-        "",
-        "_Entries now live in [`changelog.d/`](changelog.d/) — one "
-        "`<task-id>.md` per kanban card. Run `python3 "
-        "scripts/changelog_fragments.py sync` to materialise them here "
-        "(the release step does; see [changelog.d/README.md]"
-        "(changelog.d/README.md))._",
-    ])
-    new_text = cf.assemble(preamble, pointer, postamble)
-    tmp = changelog.with_name(changelog.name + ".tmp-migrate")
-    tmp.write_text(new_text, encoding="utf-8")
-    import os
-    os.replace(tmp, changelog)
+    # fragments are the record; `release` materialises them at cut time.
+    new_text = cf.assemble(preamble, cf.pointer_block(), postamble)
+    cf._atomic_write(changelog, new_text, ".tmp-migrate")
     print(f"\nwrote {len(by_task)} fragment files + CHANGELOG.md pointer block")
     return 0
 
