@@ -131,8 +131,74 @@ carded separately as t_267f9d88. Not touched here.
 
 ## Fix
 
-_(append)_
+Design decision (mine, recorded because two workers could have decided it
+differently): **the store owns its own guards.** The worker registry, the
+generation counter and the drain all live in `routes_orchestrator` — next to
+`_jobs`, `_new_job` and `_in_flight_job` — not in `routes_ws`. Reason: the REST
+job worker (spawned by `handle_orchestrator_chat`) writes the same store and is
+the same class of leak; putting the registry in `routes_ws` would leave it
+unguarded and split one invariant across two modules. `routes_ws` keeps two
+thin pass-throughs (`_spawn_worker`, `drain_workers`) purely to avoid an import
+cycle, since `routes_orchestrator` defers into `routes_ws` lazily.
+
+Three cooperating pieces, in the only order that works (quiesce BEFORE clear):
+
+1. **`spawn_tracked_worker` (routes_orchestrator).** Every turn worker — the
+   REST `_run_job` worker, `ws-relay-<project>`, `ws-handoff-<project>` — is
+   registered in `_workers` until it exits, carries its own retire event, and
+   **inherits the job generation of its spawner** (HTTP handler threads and test
+   bodies are untracked and always write into the live generation).
+2. **`drain_workers` (routes_orchestrator).** Signal then wait: set each live
+   worker's retire event (one that has not begun its work returns without
+   touching the backing, the profile `state.db`, the store or the transcript),
+   cancel every live job through the *production* stop path (`cancel_job` →
+   `cancel_evt` + terminate the retained Popen) so a worker already blocked in
+   `_backing_invoke` unwinds promptly, then join with a bounded, multi-pass loop
+   (a handoff worker spawns a relay worker, so one pass is not enough).
+3. **`advance_job_generation` + `_StaleJobGeneration` (routes_orchestrator).**
+   The backstop for a worker whose join timed out: `_new_job` refuses a write
+   from a thread born in a retired epoch. `_default_relay` catches that
+   exception and returns **silently** — appending `relay_failed` to the store
+   would have traded one cross-test leak for another (a store the *next* test
+   owns).
+
+`tests/conftest.py::_isolate_chat_jobs` now performs, per boundary:
+`drain → clear → reset_stores → advance generation (stamping the test body)`.
+The clear is explicitly demoted in its own docstring to "a mop, not the
+defence": **a setup-side clear cannot be the primary defence**, because the
+writer can post after any clear.
+
+Inert in production, by design and by pin: the server never advances the
+generation (stays 0, every worker inherits 0, every write accepted) and no
+request path calls the drain (joining a turn worker from a request path would
+block the socket loop on a live turn).
+`test_server_path_never_advances_the_generation` scans the shipped modules and
+fails if either mechanism ever gets wired into server code.
+
+### Why not the alternatives
+
+- **Clear harder / clear later** (t_7cc2e7d5's direction): cannot work — F1
+  shows the write landing after every clear. Kept only as the mop.
+- **`join` inside `_default_relay`**: would make the WS send path synchronous
+  and destroy the "socket keeps serving" property the docstrings protect.
+- **Epoch only, no drain**: a straggler blocked in a real `hermes chat` for
+  minutes keeps mutating the transcript and the profile DB; the epoch only stops
+  the *job store* write. The drain is what actually stops the work.
+- **`pytest-xdist` / `-p no:randomized` ordering pin**: treats the symptom, and
+  ordering alone demonstrably does not reproduce or prevent a few-ms race.
+
+### Mutation-tested (each layer proven load-bearing)
+
+Same 5-test file, external plugins disabling one layer at a time:
+
+| mutation | result |
+|---|---|
+| `_calling_job_generation → None` (guard disabled) | `test_retired_worker_cannot_register_a_job` **FAILS** |
+| `drain_workers → no-op` (join disabled) | `test_boundary_drain_joins_a_slow_relay_worker` **FAILS** |
+| both disabled (pre-fix emulation) | pair test **FAILS** (straggler's `late reply` lands in the next store) |
+| neither (committed state) | 11 passed (incl. the 6 original relay tests) |
 
 ## Verification
 
-_(append: interpreter, command, pass counts, run #1/#2)_
+_(counts filled from the run logs below)_
+
