@@ -201,6 +201,19 @@ varies, and the deployed skill dir under `~/.hermes/plugins` cannot link to it).
 - Modify files outside `$HERMES_KANBAN_WORKSPACE` unless the task body says to.
 - Create follow-up tasks assigned to yourself — assign to the right specialist.
 - Complete a task you didn't actually finish. Block it instead.
+- **Kill a test suite by name pattern.** `pkill -f "run_tests.sh"`, `pkill -f pytest`,
+  or any name-based sweep against a generic suite script is forbidden: it matches by
+  argv substring and kills **every other card's concurrent suite legs on the same
+  host**, not just yours. On 2026-10-06 one worker's `pkill -f "run_tests.sh"` aborted
+  two concurrent full-suite legs (a third rc=143 abort that day came from a
+  harness-mediated `process.kill`) and the whole board spent a day chasing a
+  phantom "reaper".
+  To stop your OWN run: kill the recorded background job via the harness `process`
+  tool (per-pid; it stamps `termination_source` so forensics can name the issuer), or
+  `kill <pid>` on the specific pid from `pgrep -fl "<your full worktree path>"`. If a
+  suite log ends `rc=143` with a `RECEIVED SIGTERM` note, an external kill happened —
+  that is not a test failure; find the sender (session DB `tool_calls LIKE '%pkill%'`,
+  process-results `termination_source`) before re-running or escalating.
 
 ## Pitfalls
 

@@ -23,6 +23,14 @@ PY="${HSCC_TEST_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 DIRS=(hscc-bootstrap hscc-commands hscc-roles hscc-cluster hscc-project hscc_daemon sparkrun-hermes hscc-api memori_byodb)
 
 # ━━━ SIGTERM forensics (t_6bb29d46) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# RULE: NEVER stop a suite with a name-based sweep — `pkill -f "run_tests.sh"`,
+# `pkill -f pytest`, or any pattern-kill of a generic script name. It matches
+# by argv substring and kills OTHER CARDS' concurrent suite legs on this host,
+# not just yours (two legs died this way on 2026-10-06; a third rc=143 abort
+# that day was a harness-mediated process.kill). To stop your own
+# run: the harness process tool's per-pid kill on the recorded background job,
+# or `kill <pid>` on the pid from `pgrep -fl "<your full worktree path>"`.
+#
 # Three rc=143 "mystery reaper" aborts on 2026-10-06 turned out to be KILLS
 # BY THE RUNNING AGENTS THEMSELVES (a `pkill -f "run_tests.sh"` issued to
 # restart their own legs, and process.kill of a gate leg). A bare rc=143 at
