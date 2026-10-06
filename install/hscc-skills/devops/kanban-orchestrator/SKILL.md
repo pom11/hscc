@@ -116,6 +116,13 @@ t4 = kanban_create(
 
 `parents=[...]` gates promotion — children stay in `todo` until every parent reaches `done`, then auto-promote to `ready`. No manual coordination needed; the dispatcher and dependency engine handle it.
 
+**Card-body boilerplate (HSCC repo):** every card body that ships a code or
+docs change should carry one line: `Changelog: add changelog.d/<task-id>.md —
+NEVER edit CHANGELOG.md (its [Unreleased] block is generated; see
+changelog.d/README.md).` This keeps the no-touch rule in front of every worker
+at authoring time, which is what prevents the old Unreleased/Fixed merge
+collisions from coming back.
+
 If the task graph has dependencies, create the parent cards first, capture their returned ids, and include those ids in the child card's `parents` list during the child `kanban_create` call. Avoid creating all cards in parallel and linking them afterward; that creates a window where the dispatcher can claim a child before its inputs exist.
 
 ### Step 4 — Complete your own task
