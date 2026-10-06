@@ -3373,3 +3373,10 @@ CRON ROOT-CAUSE (resolves operator's repeated "heartbeat = 0"): the heartbeat cr
 - OPERATOR-ESCALATE (unchanged): consume-handoff cf76249 merged + code-complete; full live 1:1 acceptance waits on the upstream seam deploy (`feat/session-ownership-handoff` @ 77f046f089, operator SAFE HOLD). Coordinator degrades safely to `session_busy`.
 - NOTE: `execute_code` remains BLOCKED in this cron profile's mode; all measurement via `terminal` + `git`/`ps`/`curl`/scratch scripts-by-path.
 - After commit, verify main...origin/main 0/0 (14:00 discipline) — verified 0/0 above.
+
+### Tick — 2026-10-06 ~17:20 EEST (orch; independent confirmation of the 17:05 ancestry-sweep tick)
+
+- **All 5 stranded-residue landings CONFIRMED by execution:** `2cab9fa` (t_791d1a75 send-retry — the real product code: `removeLocalUserMessage` now grep-hits StreamingTranscript.swift + StreamingChatStore.swift + streaming_check on origin/main), `9a12972` + `19eddd5` (disposition/status docs), `2fae5a0` (phase1-settings-profile disposition doc + GOAL_REPORT correction) — all four merge SHAs are ancestors of origin/main; disposition docs present on main by ls-tree. **Phase 1 disposition trail genuinely complete 7/7 on main.** main @ `3134680` 0/0 clean; board 0 running / 0 queued by my own census.
+- iOS build/streaming_check verification was done by the sibling heartbeat session pre-merge (isolated worktree, ALL PASSED + 0 err/0 warn) — noted as its evidence, not re-run here.
+- **Repo-growth watch quantified independently:** 309 wt/* branch refs + 250 worktrees (.git 33 MB; worktree payload ~2.2 GB per tick). t_ad5dd538 tooling says 12 removable now — incremental, not urgent. **No prune card filed**: cadence-level decision belongs to the operator (offer stands from the tick).
+- Operator-held items (final state of the epic): (1) `feat/session-ownership-handoff` @ `77f046f089` seam deploy (SAFE HOLD) — sole open functional item, gating consume-handoff live 1:1; (2) `hscc-final-supervisor` cron deletion is operator's word (currently paused, idle). Fleet healthy: daemon 24940, proxy up, heartbeat cron single.
