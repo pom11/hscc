@@ -3524,3 +3524,10 @@ CRON ROOT-CAUSE (resolves operator's repeated "heartbeat = 0"): the heartbeat cr
 - OPERATOR-ESCALATE (unchanged): consume-handoff cf76249 merged + code-complete; full live 1:1 acceptance waits on the upstream seam deploy (`feat/session-ownership-handoff` @ `77f046f089`, operator SAFE HOLD). Coordinator degrades safely to `session_busy`.
 - NOTE: `execute_code` remains BLOCKED in this cron profile's mode; all measurement this tick via `terminal` + `git`/`ps`/`curl`/`hermes` CLI.
 - After commit, verify main...origin/main 0/0 (14:00 discipline).
+
+### Tick — 2026-10-07 ~01:50 EEST (orch; CORRECTION to the 01:35 tick's "new observation")
+
+- 01:35 tick otherwise verified (ledger `51b6da8` on origin, 0/0 clean, daemon 1d05h, board 0 running via sanctioned census, no new landings, VERSION 2.5.4).
+- **CORRECTED: the claimed "engine-wedge read 2/2 through every Oct-6 tick and now 4/4 = undocumented topology doubling" is FALSE.** Primary source `~/.hscc/daemon.log` (the LIVE daemon log — note `~/Library/Logs/hscc_daemon.log` is stale since Oct-5 20:10 and contains no wedge lines at all): the wedge denominator flipped 2→4 exactly at **2026-10-05 07:06–07:07 UTC (10:06–10:07 EEST)** — the flash-next fleet bring-up window already documented in the ledger (4/4 DGX nodes on flash-next-solo). Zero `/2` readings exist after 2026-10-05 07:05 UTC (7,677 `/2` lines in the log are all pre-Oct-5; `/4` lines accumulate 381+708+652 since). My own Oct-6 ledger records at 06:35/08:20 EEST already read 3/4 and 4/4. Nothing changed Oct-6/07 — no unrecorded topology event, no card needed for check coverage.
+- Operational lesson recorded: supervision ticks must read the live log path `~/.hscc/daemon.log` (pid 24940's open file), not the stale `~/Library/Logs/hscc_daemon.log`; the stale file is what produced the phantom "first time seeing 4/4".
+- Operator items unchanged: seam deploy `feat/session-ownership-handoff` @ `77f046f089` (SAFE HOLD); `hscc-final-supervisor` cron delete-or-pause; optional scheduled prune card.
