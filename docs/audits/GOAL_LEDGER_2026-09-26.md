@@ -3190,3 +3190,10 @@ CRON ROOT-CAUSE (resolves operator's repeated "heartbeat = 0"): the heartbeat cr
 - **WATCH carried to next tick:** (1) t_946: conftest increment committed → its stamped suite legs BOTH interpreters (must re-run post-merge since main moved under it) → `kanban_request_review` → my gate = hscc-bootstrap suite both interpreters at ITS merge commit + hermetic check (no live `~/.hermes/hooks` writes) + real pile census drops after one `--apply` pass. (2) t_6bb: WIP-commit nudge if the audit doc stays untracked; its repro child must be sleep/loop not a suite. (3) t_6bb landing may explain + retire the rc=143 re-runs that cost ~1h each today. (4) HYGIENE-SUPERVISOR (f568ed163281) still NOT retirable — t_946 open.
 - OPERATOR-ESCALATE (unchanged): consume-handoff cf76249 merged + code-complete; full live 1:1 acceptance waits on the upstream seam deploy (`feat/session-ownership-handoff` @ 77f046f089, operator SAFE HOLD). Coordinator degrades safely to `session_busy` — no regression.
 - After commit, verify main...origin/main 0/0 (14:00 discipline).
+
+### Tick — 2026-10-06 ~08:35 EEST (orch; processing 08:20 heartbeat tick)
+
+- Tick verified accurate: main @ ledger `0d315e1` 0/0 (latest product merge `7864796`); t_163fa09f closed out `done` at 07:28 via reviewer's own run (no cron-side completion). Board 2 running / 0 queued, backend lane cap-full.
+- **t_9462260b** running (pid 82253, 5h02m), 8 ahead on `29d5e97`+ (main-merge in place), stamped 396/396 legs banked per supervisor. Awaiting review request → landing gate.
+- **t_6bb29d46** (rc=143 root-cause, my card) watch condition TRIGGERED: 45 min in, 0 commits, audit doc untracked (mtime 07:42) → **WIP-checkpoint nudge posted (comment 951)** — same pattern that stranded work before. Worker alive (pid 86863, 45m).
+- Infra healthy: daemon 24940, proxy up, heartbeat cron single. Operator item unchanged: t_ff4b986e seam deploy (SAFE HOLD).
