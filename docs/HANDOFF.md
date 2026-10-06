@@ -49,6 +49,19 @@ runtime**. Compile-green proves almost nothing here.
    `session_activity_check`, `first_run_check`, `reconnect_check`, `check_theme`.
 5. Python: `HSCC_TEST_PY=/Users/desac/miniconda3/envs/p313/bin/python bash scripts/run_tests.sh`
    — **run it backgrounded**, the Bash tool caps at 10 minutes.
+   — **NEVER stop or restart a suite with a name-based sweep.** Commands like
+   `pkill -f "run_tests.sh"` or `pkill -f pytest` match by script name and kill
+   **every card's concurrent suite legs on this host**, not just yours — this
+   exact mistake aborted two full-suite legs on 2026-10-06 (a third rc=143 abort
+   that day was a harness-mediated `process.kill`, not a sweep) and was read
+   board-wide as a mystery "reaper". To stop **your own** run: use the harness
+   `process` tool's kill on the recorded background job (it stamps
+   `termination_source`, so forensics can name the issuer), or `kill <pid>` on
+   the specific pid you find with `pgrep -fl "<your full worktree path>"`.
+   Name-based kills of generic suite names are cross-session sabotage, not
+   hygiene. A suite log that ends `rc=143` with a `RECEIVED SIGTERM` note is an
+   external kill self-attributed by the guard in `run_tests.sh` — that is NOT a
+   test failure; check who sent the signal before re-running or filing anything.
 6. Leak-check COMMITTED blobs before pushing, never the working tree:
    `for f in $(git diff origin/main..dev --name-only); do git show dev:"$f" | grep -qE '100\.115\.[0-9]+\.[0-9]+|192\.168\.88\.[0-9]+' && echo LEAK: $f; done`
 7. Confirm `git rev-parse --abbrev-ref HEAD` is `dev` before any git write — a
