@@ -98,14 +98,43 @@ def _sort_key(path):
     return (1, m.group(1), mtime) if m else (0, "", mtime)
 
 
-def select_victims(paths, keep):
+def _backup_epoch(path):
+    """When a backup was WRITTEN: its name stamp if machine-stamped, else mtime.
+
+    mtime is the wrong clock for age on this fleet: writers use ``copy2``, which
+    stamps the backup with the SOURCE's mtime, so a backup of a June checkout
+    looks four months old the day it is made. The name stamp is write time.
+    """
+    m = _STAMP_RE.search(os.path.basename(str(path)))
+    if m:
+        try:
+            return time.mktime(time.strptime(m.group(1), "%Y%m%d-%H%M%S"))
+        except (ValueError, OverflowError):
+            pass  # impossible-looking stamp (e.g. month 13) -> fall back
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
+def select_victims(paths, keep, max_age_s=None, now=None):
     """Which members of ONE family fall outside the newest ``keep``.
 
     Pure over resolved paths; ordering is ``_sort_key``'s. ``keep`` is clamped
     at 0 — a negative slice from the end would silently keep everything.
+
+    ``max_age_s`` adds an age floor *on top of* the keep window: the newest
+    ``keep`` are always spared, and beyond them only backups older than
+    ``max_age_s`` seconds go. Writers pass None (hard retain limit); a
+    one-time hygiene sweep passes the card's "older than 7 days" rule so it
+    does not shred a family's recent history.
     """
     keep = max(0, int(keep))
-    return sorted(paths, key=_sort_key, reverse=True)[keep:]
+    ordered = sorted(paths, key=_sort_key, reverse=True)[keep:]
+    if max_age_s is None:
+        return ordered
+    now = time.time() if now is None else now
+    return [p for p in ordered if (now - _backup_epoch(p)) > max_age_s]
 
 
 def _family_members(directory, stem):
@@ -118,7 +147,7 @@ def _family_members(directory, stem):
     return [os.path.join(directory, n) for n in names if n.startswith(prefix)]
 
 
-def prune_backups(path, keep=BACKUP_KEEP, stamped_only=True):
+def prune_backups(path, keep=BACKUP_KEEP, stamped_only=True, max_age_s=None):
     """Keep only the newest ``keep`` ``<path>.bak-*`` siblings; delete older.
 
     Best-effort and never raises — pruning is hygiene, and a hygiene failure
@@ -127,7 +156,8 @@ def prune_backups(path, keep=BACKUP_KEEP, stamped_only=True):
     default only *machine-stamped* names are candidates: an operator-labelled
     bookmark (``config.yaml.bak-pre-alias-migration-121850``) is a deliberate
     act and must not be collateral of a re-install (pass
-    ``stamped_only=False`` to sweep those too).
+    ``stamped_only=False`` to sweep those too). ``max_age_s`` additionally
+    spares anything younger than that (see ``select_victims``).
     """
     path = str(path)
     directory = os.path.dirname(path) or "."
@@ -137,7 +167,7 @@ def prune_backups(path, keep=BACKUP_KEEP, stamped_only=True):
         members = [m for m in members
                    if _STAMP_RE.search(os.path.basename(m))]
     removed = 0
-    for victim in select_victims(members, keep):
+    for victim in select_victims(members, keep, max_age_s=max_age_s):
         try:
             os.remove(victim)
             removed += 1
@@ -213,7 +243,8 @@ def backup_path_for(src, stamp=None):
     return f"{src}{BACKUP_INFIX}{stamp or _stamp()}"
 
 
-def prune_backup_dir(directory, keep=BACKUP_KEEP, stamped_only=True):
+def prune_backup_dir(directory, keep=BACKUP_KEEP, stamped_only=True,
+                     max_age_s=None):
     """Cap every ``<stem>`` family inside ``directory`` at ``keep`` backups.
 
     For piles the writers did not create next to a live file: directories
@@ -223,6 +254,8 @@ def prune_backup_dir(directory, keep=BACKUP_KEEP, stamped_only=True):
 
     Default hygiene only removes machine-stamped names — operator-labelled
     bookmarks survive unless ``stamped_only=False`` is passed explicitly.
+    ``max_age_s`` additionally spares anything younger than that (see
+    ``select_victims``).
 
     Returns ``(removed, families)``. Best-effort; never raises.
     """
@@ -249,7 +282,7 @@ def prune_backup_dir(directory, keep=BACKUP_KEEP, stamped_only=True):
 
     removed = 0
     for members in groups.values():
-        for victim in select_victims(members, keep):
+        for victim in select_victims(members, keep, max_age_s=max_age_s):
             try:
                 if os.path.isdir(victim) and not os.path.islink(victim):
                     shutil.rmtree(victim, ignore_errors=True)
@@ -297,7 +330,8 @@ def _group_backups(names, stamped_only):
 
 
 def sweep_home(home=None, keep=BACKUP_KEEP, dry_run=False,
-               include_labeled=False, profiles=True):
+               include_labeled=False, profiles=True,
+               max_age_days=7.0):
     """Prune every HSCC backup family under a Hermes root (and its profiles).
 
     Touches only ``.bak-`` family names inside ``_SWEEP_SUBDIRS`` and the
@@ -305,8 +339,14 @@ def sweep_home(home=None, keep=BACKUP_KEEP, dry_run=False,
     isn't a backup, so operator content can't be collateral. Operator-labelled
     backups (no machine stamp) survive unless ``include_labeled=True``.
 
-    ``dry_run`` counts from names only (no stat), so it stays cheap on a
-    27k-entry pile. Returns a summary dict.
+    Two limits, matching the t_9462260b rule: the newest ``keep`` per family
+    are always spared, and beyond them only backups older than
+    ``max_age_days`` go. Age is the NAME STAMP when present (see
+    ``_backup_epoch``) — mtime is the source's clock, not the write's.
+    ``max_age_days=None`` disables the age floor (hard keep-N only).
+
+    ``dry_run`` counts from names only (no stat beyond stamp parsing), so it
+    stays cheap on a 27k-entry pile. Returns a summary dict.
     """
     home = _hermes_root(home or os.environ.get("HERMES_HOME")
                         or os.path.expanduser("~/.hermes"))
@@ -321,6 +361,7 @@ def sweep_home(home=None, keep=BACKUP_KEEP, dry_run=False,
         except OSError:
             pass
 
+    max_age_s = None if max_age_days is None else max_age_days * 86400
     stamped_only = not include_labeled
     report = []
     for h in homes:
@@ -334,13 +375,17 @@ def sweep_home(home=None, keep=BACKUP_KEEP, dry_run=False,
                 continue
             groups = _group_backups(names, stamped_only)
             if dry_run:
-                n = sum(max(0, len(v) - keep) for v in groups.values())
-                if n:
-                    report.append({"dir": d, "would_remove": n,
+                victims = [v for members in groups.values()
+                           for v in select_victims(
+                               [os.path.join(d, n) for n in members],
+                               keep, max_age_s=max_age_s)]
+                if victims:
+                    report.append({"dir": d, "would_remove": len(victims),
                                    "families": len(groups)})
                 continue
             removed, fams = prune_backup_dir(d, keep=keep,
-                                             stamped_only=stamped_only)
+                                             stamped_only=stamped_only,
+                                             max_age_s=max_age_s)
             if removed:
                 report.append({"dir": d, "removed": removed, "families": fams})
         if not os.path.isdir(h):
@@ -350,13 +395,13 @@ def sweep_home(home=None, keep=BACKUP_KEEP, dry_run=False,
             members = _family_members(h, fname)
             members = [m for m in members
                        if not stamped_only or _STAMP_RE.search(os.path.basename(m))]
+            victims = select_victims(members, keep, max_age_s=max_age_s)
             if dry_run:
-                n = len(select_victims(members, keep))
-                if n:
-                    report.append({"file": target, "would_remove": n})
+                if victims:
+                    report.append({"file": target, "would_remove": len(victims)})
                 continue
             removed = 0
-            for victim in select_victims(members, keep):
+            for victim in victims:
                 try:
                     os.remove(victim)
                     removed += 1
@@ -364,7 +409,8 @@ def sweep_home(home=None, keep=BACKUP_KEEP, dry_run=False,
                     pass
             if removed:
                 report.append({"file": target, "removed": removed})
-    return {"home": home, "keep": keep, "dry_run": dry_run, "pruned": report}
+    return {"home": home, "keep": keep, "max_age_days": max_age_days,
+            "dry_run": dry_run, "pruned": report}
 
 
 def _main(argv=None):
@@ -385,7 +431,10 @@ def _main(argv=None):
                     help="Hermes root to sweep (default: HERMES_HOME; a "
                          "profile-scoped value walks up to the root)")
     ap.add_argument("--keep", type=int, default=BACKUP_KEEP,
-                    help=f"newest backups kept per family (default {BACKUP_KEEP})")
+                    help=f"newest backups always kept per family (default {BACKUP_KEEP})")
+    ap.add_argument("--max-age-days", type=float, default=7,
+                    help="only remove backups older than this (default 7; "
+                         "0 or negative = no age floor)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-profiles", action="store_true",
                     help="sweep only the root home, skip <home>/profiles/*")
@@ -394,9 +443,11 @@ def _main(argv=None):
                          "the machine .bak-YYYYMMDD-HHMMSS stamp)")
     args = ap.parse_args(argv)
 
+    max_age_days = args.max_age_days if args.max_age_days > 0 else None
     result = sweep_home(args.home, keep=args.keep, dry_run=args.dry_run,
                         include_labeled=args.include_labeled,
-                        profiles=not args.no_profiles)
+                        profiles=not args.no_profiles,
+                        max_age_days=max_age_days)
     print(json.dumps(result, indent=2))
     return 0
 
