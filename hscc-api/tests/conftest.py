@@ -16,6 +16,61 @@ import pytest  # noqa: E402
 import api_server  # noqa: E402
 
 
+# Seconds one boundary drain may spend signalling + joining turn workers.
+_DRAIN_TIMEOUT_S = 2.0
+
+
+def isolation_boundary(stamp=False):
+    """Run one test-boundary over the process-global chat-job state.
+
+    THE canonical boundary: the autouse fixture below calls it at every setup
+    and teardown, and the regression tests import it so they exercise the
+    boundary the suite actually runs (a copy could drift from the real thing and
+    then prove nothing).
+
+    Order is the fix and must not be reordered (t_163fa09f):
+      1. DRAIN — signal every live turn worker (retire event + cancel its job
+         through the real stop path) and JOIN it, so any write it was going to
+         make has already happened before the store is emptied;
+      2. CLEAR the job store — a mop for terminal leftovers, not the defence;
+      3. RESET the event stores (process-global relay state too);
+      4. ADVANCE the job generation; when ``stamp`` is set, also stamp the
+         CALLING thread with the new epoch, so workers the test spawns inherit
+         it and may register, while any straggler born before the boundary is
+         rejected at ``_new_job`` even if the join above timed out (defence in
+         depth).
+
+    Returns the names of workers the drain could not join (empty in the normal
+    case) so callers can assert on them.
+    """
+    import threading
+
+    import routes_orchestrator as _ro
+    import session_event
+
+    try:
+        stragglers = _ro.drain_workers(timeout=_DRAIN_TIMEOUT_S)
+    except Exception:
+        # Never let isolation bookkeeping fail a test run.
+        stragglers = []
+    try:
+        with _ro._jobs_lock:
+            _ro._jobs.clear()
+    except Exception:
+        pass
+    try:
+        session_event.reset_stores()
+    except Exception:
+        pass
+    try:
+        gen = _ro.advance_job_generation()
+        if stamp:
+            setattr(threading.current_thread(), "_hscc_job_generation", gen)
+    except Exception:
+        pass
+    return stragglers
+
+
 @pytest.fixture(autouse=True)
 def _isolate_chat_jobs():
     """Quiesce ALL process-global chat-job state around every test.
@@ -31,64 +86,16 @@ def _isolate_chat_jobs():
     clearing before AND after — could not work: clearing a dict cannot stop an
     unjoined thread from writing it again afterwards.
 
-    The airtight version, in the only order that works:
-      1. DRAIN — signal every live turn worker (retire event + cancel its job
-         through the real stop path) and JOIN it, so any write it was going to
-         make has already happened before the store is emptied;
-      2. CLEAR the job store (a mop for terminal leftovers, not the defence);
-      3. advance the job GENERATION, stamping the test body with the new epoch:
-         workers the test spawns inherit it and may register, while any
-         straggler born before the boundary is rejected at ``_new_job`` even if
-         the join above timed out (defence in depth, t_163fa09f).
+    The boundary (see :func:`isolation_boundary`) drains the writers BEFORE it
+    clears, and retires the epoch so late writes are rejected outright.
     """
-    import routes_orchestrator as _ro
-    import routes_ws as _ws
-
-    def _drain():
-        try:
-            return _ws.drain_workers(timeout=_DRAIN_TIMEOUT_S)
-        except Exception:
-            # Never let isolation bookkeeping fail a test run.
-            return []
-
-    def _clear():
-        try:
-            with _ro._jobs_lock:
-                _ro._jobs.clear()
-        except Exception:
-            pass
-
-    def _reset_stores():
-        try:
-            import session_event
-            session_event.reset_stores()
-        except Exception:
-            pass
-
-    _drain()
-    _clear()
-    _reset_stores()
-    # Stamp the test body with the live epoch: relay/handoff workers it spawns
-    # inherit this generation and are accepted; pre-existing stragglers are not.
-    try:
-        gen = _ro.advance_job_generation()
-        setattr(threading.current_thread(), "_hscc_job_generation", gen)
-    except Exception:
-        pass
+    isolation_boundary(stamp=True)   # test body runs stamped with the live epoch
     yield
-    # Order is the fix: quiesce the writer FIRST, then mop the store, then
-    # retire the epoch so late writes from this test's workers are rejected.
-    _drain()
-    _clear()
-    _reset_stores()
-    try:
-        _ro.advance_job_generation()
-        setattr(threading.current_thread(), "_hscc_job_generation", None)
-    except Exception:
-        pass
-
-
-_DRAIN_TIMEOUT_S = 2.0
+    isolation_boundary()             # drain + clear + retire this test's epoch
+    # Un-stamp the (reused, process-wide) main thread so nothing outside a test
+    # body can ever carry a stale epoch into a later _new_job call.
+    import threading
+    setattr(threading.current_thread(), "_hscc_job_generation", None)
 
 
 @pytest.fixture
