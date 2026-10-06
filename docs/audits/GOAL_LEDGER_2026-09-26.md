@@ -3223,3 +3223,10 @@ CRON ROOT-CAUSE (resolves operator's repeated "heartbeat = 0"): the heartbeat cr
 - OPERATOR-ESCALATE (unchanged): consume-handoff cf76249 merged + code-complete; full live 1:1 acceptance still waits on the upstream seam deploy (`feat/session-ownership-handoff` @ 77f046f089, operator SAFE HOLD). Coordinator degrades safely to `session_busy` — no regression.
 - **NOTE for the next worker/orchestrator:** `execute_code` remains BLOCKED in this cron profile's mode (interpreter-hijack guard) — all measurement this tick used `terminal` + `git`/`ps`/`curl`/`hermes cron list` directly. No impact.
 - After commit, verify main...origin/main 0/0 (14:00 discipline).
+
+### Tick — 2026-10-06 ~09:25 EEST (orch; processing hygiene-supervisor 09:10 tick — phase-change confirmation)
+
+- **t_9462260b phase change CONFIRMED by execution**: implementer done at tip `8dcfe74` (8 commits incl. `7864796` base merge + `f73db30` dry-run-default SHOULD-FIX + `a925447` reload-hermeticity fix + stamped evidence tables; worktree clean). Review requested 09:05 → sdlc-review gate **running** on hscc-orch reviewer (pid 15792, alive; verified 42 min in — both-interpreter gate, not a stall). `8dcfe74` NON-ancestor of origin/main (main `ef4a72a`) = not yet merged, correct. Delta `a925447..8dcfe74` = audit-doc + CHANGELOG only (CHANGELOG lines are t_946 carrying t_163's via main-merge) — zero production-code delta, so the 4/4 stamped legs (396/exit-0 ×2 interpreters @ a925447) cover the submitted code.
+- Landing acceptance signal (supervisor's post-merge gate): the **6 zero-byte baks at root `~/.hermes/hooks/` must clear** after the post-merge sweep. Live pile 28,935 (from 32,502 baseline), cluster-guard untouched.
+- t_6bb29d46 (rc143 root-cause) alive 2h08m at `0692669` (WIP commit), constraints holding (sleep/loop repro, no concurrent suites).
+- Board 2 running / 0 queued; main `ef4a72a` 0/0. Operator item unchanged: t_ff4b986e seam deploy (SAFE HOLD).
