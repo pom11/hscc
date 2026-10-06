@@ -198,6 +198,32 @@ Same 5-test file, external plugins disabling one layer at a time:
 | both disabled (pre-fix emulation) | pair test **FAILS** (straggler's `late reply` lands in the next store) |
 | neither (committed state) | 11 passed (incl. the 6 original relay tests) |
 
+## Edge cases and safety arguments
+
+- **`_StaleJobGeneration` silence is provably server-unreachable, not
+  best-effort.** The only caller of `advance_job_generation` in the whole tree
+  is `tests/conftest.isolation_boundary` (and the two isolation tests'
+  boundaries), and `test_server_path_never_advances_the_generation` scans every
+  shipped `hscc-api/*.py` and fails if server code ever calls it. Since the
+  generation is a module-level int that nothing else mutates, in the server it
+  is a constant 0; `_new_job`'s guard requires `born != _job_generation`, and
+  every worker inherits the live generation, so the raise is unreachable in
+  production and the silent return in `_default_relay` cannot swallow a real
+  operator error. The silence exists purely so a rejected *test straggler* does
+  not append `relay_failed` into the next test's store.
+- **The drain's cancel pass uses the production stop path**, not a bespoke kill:
+  `cancel_job` sets `cancel_evt` and terminates the retained Popen exactly as a
+  `{kind:"stop"}` frame or `POST .../stop` would, so the drain exercises (and
+  cannot silently break) the code the operator's stop button relies on.
+- **Bounded by construction.** `drain_workers` makes at most `_DRAIN_PASSES` (4)
+  passes against one absolute deadline; the fixture budget is 2 s. A hung worker
+  is reported, never waited on forever — and it is already inert for the store
+  via the epoch, so the flake cannot return even in that corner.
+- **`_workers` cannot grow.** Every tracked thread discards itself in a
+  `finally`; `test_tracked_worker_registry_does_not_leak_threads` pins it.
+- **Daemon semantics unchanged.** `spawn_tracked_worker` still passes
+  `daemon=True`, so nothing about interpreter shutdown changed.
+
 ## Verification
 
 _(counts filled from the run logs below)_
