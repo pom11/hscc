@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (per-pid kill) and reproduces the incident shape (incident-style `pkill -f`
   through `zsh -lic` + `timeout`) with sleep stubs only — it never runs pytest,
   so it is safe alongside a timing-sensitive suite on the same host.
+- **Worker-facing guidance now bans name-based suite kills.** The rule against
+  `pkill -f "run_tests.sh"` / `pkill -f pytest` (name sweeps reap *other cards'*
+  concurrent legs) is now enforced guidance in docs/HANDOFF.md step 5, the
+  kanban-worker skill's Do-NOT list, and the `scripts/run_tests.sh` header —
+  stop your own run per-pid via the process tool instead (t_bd5a2ff0).
 - **`doctor` false-failed on every dispatched worker (profile-scoped
   `HERMES_HOME`).** Hermes sets `HERMES_HOME` to the *profile* dir
   (`<root>/profiles/<name>`) whenever it runs under a named profile — its normal
