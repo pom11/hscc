@@ -416,9 +416,11 @@ def sweep_home(home=None, keep=BACKUP_KEEP, dry_run=False,
 def _main(argv=None):
     """CLI: prune the HSCC backup families under one Hermes home.
 
-    Read-only by default (``--dry-run`` reports what would go) — point it at
-    the live home deliberately; nothing here runs as a side effect of an
-    install, because pruning the operator's history is an explicit act.
+    DRY-RUN BY DEFAULT. A bare invocation reports what *would* go and removes
+    nothing; deleting requires an explicit ``--apply``. That default is the
+    point: with no flag this tool would otherwise prune tens of thousands of
+    the operator's rollback copies on a typo, and nothing here runs as a side
+    effect of an install either — pruning history is an explicit act.
     """
     import argparse
     import json
@@ -426,7 +428,8 @@ def _main(argv=None):
 
     argv = sys.argv[1:] if argv is None else argv
     ap = argparse.ArgumentParser(
-        description="Prune HSCC .bak-<stamp> families under one Hermes home.")
+        description="Prune HSCC .bak-<stamp> families under one Hermes home. "
+                    "Dry-run unless --apply is given.")
     ap.add_argument("--home", default=None,
                     help="Hermes root to sweep (default: HERMES_HOME; a "
                          "profile-scoped value walks up to the root)")
@@ -435,7 +438,11 @@ def _main(argv=None):
     ap.add_argument("--max-age-days", type=float, default=7,
                     help="only remove backups older than this (default 7; "
                          "0 or negative = no age floor)")
-    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--apply", action="store_true",
+                    help="actually delete. Without it this is read-only.")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="explicit no-op kept for readability/pipeline safety "
+                         "(the default already is dry-run)")
     ap.add_argument("--no-profiles", action="store_true",
                     help="sweep only the root home, skip <home>/profiles/*")
     ap.add_argument("--include-labeled", action="store_true",
@@ -444,7 +451,7 @@ def _main(argv=None):
     args = ap.parse_args(argv)
 
     max_age_days = args.max_age_days if args.max_age_days > 0 else None
-    result = sweep_home(args.home, keep=args.keep, dry_run=args.dry_run,
+    result = sweep_home(args.home, keep=args.keep, dry_run=not args.apply,
                         include_labeled=args.include_labeled,
                         profiles=not args.no_profiles,
                         max_age_days=max_age_days)
