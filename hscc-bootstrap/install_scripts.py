@@ -19,6 +19,13 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+try:
+    import backup_util
+except ImportError:  # pragma: no cover - import-path robustness only
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import backup_util
+
 
 def install_scripts(repo_root, scripts_dir, *, backup=True, ts=None):
     """Copy ``<repo_root>/scripts/hscc_*.sh`` into ``scripts_dir``.
@@ -52,9 +59,11 @@ def install_scripts(repo_root, scripts_dir, *, backup=True, ts=None):
         dst = scripts_dir / src.name
         if dst.exists():
             if backup:
-                bak = scripts_dir / f"{src.name}.bak-{stamp}"
-                shutil.copy2(dst, bak)
-                backed_up.append(bak.name)
+                # Atomic snapshot + retain-limited (t_9462260b): the pile here
+                # reached 63 backups per watchdog script because nothing pruned.
+                bak = backup_util.backup_file(dst, stamp=stamp)
+                if bak:
+                    backed_up.append(os.path.basename(bak))
         shutil.copy2(src, dst)
         os.chmod(dst, 0o755 if src.suffix == ".sh" else 0o700)
         installed.append(src.name)
