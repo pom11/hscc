@@ -3197,3 +3197,9 @@ CRON ROOT-CAUSE (resolves operator's repeated "heartbeat = 0"): the heartbeat cr
 - **t_9462260b** running (pid 82253, 5h02m), 8 ahead on `29d5e97`+ (main-merge in place), stamped 396/396 legs banked per supervisor. Awaiting review request → landing gate.
 - **t_6bb29d46** (rc=143 root-cause, my card) watch condition TRIGGERED: 45 min in, 0 commits, audit doc untracked (mtime 07:42) → **WIP-checkpoint nudge posted (comment 951)** — same pattern that stranded work before. Worker alive (pid 86863, 45m).
 - Infra healthy: daemon 24940, proxy up, heartbeat cron single. Operator item unchanged: t_ff4b986e seam deploy (SAFE HOLD).
+
+### Tick — 2026-10-06 ~08:45 EEST (orch; processing hygiene-supervisor tick ~08:30)
+
+- **t_9462260b — one gate step from landing.** Real hermeticity hole found+fixed by worker at `a925447` (importlib.reload in test_enable_plugins re-bound HOOKS_DIR/CLUSTER_GUARD_DST from exported HERMES_HOME, defeating the import-time conftest redirect; fix = teardown fixture re-applies redirect). Evidence re-based at that tip: 396/exit-0 both interpreters stamped `a925447364`, live-state snapshots identical (profile hooks 3→3, root 27,119, cluster-guard md5 stable). Supersedes 29d5e97 pair; 4/4 stamped green at tip; clean worktree; base only docs-behind origin — no rebase needed. Path: review request → merge → supervisor's both-interpreter gate at merge commit + .bak census (6 empty root-hooks baks must clear).
+- **t_6bb29d46 WIP nudge EFFECTIVE**: comment 951 → commit `0692669` "rc143 investigation — timeline + candidates so far" at 08:34 (3 min later), worktree clean. Worker alive 1h05m.
+- Workers alive by ps (82253 5h23m; 86863 1h05m). Board 2 running / 0 queued. main @ `b431d31` pre-tick 0/0. Hygiene cron correctly not retired. Operator item unchanged: t_ff4b986e seam deploy (SAFE HOLD).
