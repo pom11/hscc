@@ -220,6 +220,51 @@ def test_add_rejects_empty_body(frags):
         cf.add_entry("t_bbbbbbbb", "Fixed", "   \n", fragments_dir=frags)
 
 
+# ------------------------------------------------ rescue (legacy branch landing)
+
+LEGACY_CHANGELOG = (
+    "# Changelog\n\n## [Unreleased]\n\n### Fixed\n"
+    "- **old entry.** already on main\n"
+    "- **old entry two.** also already on main\n\n"
+    "### Verified\n- old evidence\n\n"
+    "## [1.0.0] - 2026-01-01\n\n### Fixed\n- previous release\n"
+)
+
+
+def test_rescue_extracts_legacy_branch_entries(frags):
+    """A pre-scheme branch hand-edited CHANGELOG.md; rescue moves its added
+    entries into a task-named fragment, kinds inferred from the section."""
+    branch = LEGACY_CHANGELOG.replace(
+        "- **old entry two.** also already on main\n",
+        "- **old entry two.** also already on main\n"
+        "- **new bug from the branch.**\n  continuation prose\n")
+    branch = branch.replace(
+        "### Verified\n- old evidence\n",
+        "### Verified\n- old evidence\n- suite green on both interpreters\n")
+    path, n = cf.rescue_entries(LEGACY_CHANGELOG, branch, "t_abcd1234",
+                                fragments_dir=frags)
+    assert n == 2 and path.name == "t_abcd1234.md"
+    entries = cf.load_entries(frags)
+    assert [(e.kind, e.task) for e in entries] == [("Fixed", "t_abcd1234"),
+                                                   ("Verified", "t_abcd1234")]
+    assert entries[0].body == ["- **new bug from the branch.**",
+                               "  continuation prose"]
+
+
+def test_rescue_noop_when_branch_adds_nothing(frags):
+    with pytest.raises(cf.FragmentError):
+        cf.rescue_entries(LEGACY_CHANGELOG, LEGACY_CHANGELOG, "t_abcd1234",
+                          fragments_dir=frags)
+    assert list(frags.glob("t_*.md")) == []
+
+
+def test_rescue_rejects_non_task_id(frags):
+    branch = LEGACY_CHANGELOG.replace("### Fixed\n", "### Fixed\n- new\n")
+    with pytest.raises(cf.FragmentError):
+        cf.rescue_entries(LEGACY_CHANGELOG, branch, "whatever",
+                          fragments_dir=frags)
+
+
 # ---------------------------------------------------------------- release
 
 def test_release_moves_fragments_into_version_section(frags, changelog):
