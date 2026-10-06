@@ -136,6 +136,26 @@ through the transition.
   boilerplate line, so the rule is present at authoring time.
 - `docs/README.md` — where the changelog lives, and how to add to it.
 
+**Incident during this card, recorded because it is the same class of failure:**
+the fuzzy patcher reported `success` (with unified diffs!) for the two
+`install/hscc-skills/**` edits, and the files were silently unchanged on disk.
+The card's own diffstat caught it — three doc files were missing from the
+committed diff. The edits were re-applied through
+`scripts/audits/apply_changelog_skill_docs_t_95f1d6e1.py`, which asserts every
+edit on disk before and after writing, and kept as the receipt. A doc rule that
+silently does not exist is exactly the failure mode this card exists to
+prevent.
+
+## Release drill (throwaway clone of the landed branch)
+
+`release --version 9.9.9-drill` on a fresh clone: produced
+`## [9.9.9-drill] - 2026-10-06` with `### Fixed` before `### Verified`, all
+18 bullet-lines, the four fragments moved to `changelog.d/archive/9.9.9-drill/`,
+the `[Unreleased]` pointer restored, `check` green afterward, and the clone's
+`scripts/tests` **31 passed / exit 0**. The follow-up `sync` from the now-empty
+working set was a clean no-op. Confirms add → check → release → archive
+end-to-end, not just the authoring path.
+
 ## Follow-up (not done here, deliberately)
 
 The repo has no tracked release-procedure doc (release steps currently live in
