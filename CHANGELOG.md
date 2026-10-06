@@ -129,11 +129,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `config.yaml` and accumulated `cluster-guard.py.bak-*` drops before this fix
   existed. Cleanup of those inert `.bak` files is a separate follow-up.
 - `hscc-bootstrap/tests/test_backup_util.py`: **50** new hermetic cases
-  (all `tmp_path`-scoped, zero reach to a real home), green on py3.13 with
-  `HERMES_HOME` exported at the live profile. Combined legs green at each
-  increment: 93 passed (backup_util + payload + soul + triggers + scripts),
-  **220 passed** (enable_plugins + hooks + backup_util + doctor) with live
-  `~/.hermes/hooks` at 27,122 entries before *and* after — zero drift.
+  (all `tmp_path`-scoped, zero reach to a real home). Landing legs at tip
+  `a925447` (tree contains landed sibling `7864796`), worker env with
+  `HERMES_HOME` exported at the live profile, logs stamped with
+  `git rev-parse HEAD`: full `hscc-bootstrap/tests` = **396 passed / exit 0 on
+  BOTH interpreters** (hermes venv py3.11 + p313). Hermetic proof: identical
+  live-state snapshots before/after both whole-suite runs — profile `hooks/`
+  `.bak-*` 3→3, root `hooks/` 27,119 unchanged, `cluster-guard.py` md5
+  unchanged, real pile total 32,502 unchanged. The first redirect attempt did
+  NOT survive `importlib.reload` (5 reload sites in `test_enable_plugins`
+  re-bind the module constants from `HERMES_HOME`, and keep-3 pruning was
+  self-cleaning the evidence — count pinned at 3 while writes landed live);
+  the autouse teardown re-apply closes it, confirmed zero new writes across
+  the whole reload-heavy file.
 - The prune was measured against a **`cp -Rp` copy of the real pile**, never the
   live dir: `hooks/` 27,122 → 2,132 entries (24,990 removed in 1.66 s; 318 MB →
   36 MB), 2,122 survivors being the backups inside the 7-day floor plus the
