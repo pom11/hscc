@@ -78,8 +78,10 @@ the hscc-orch reviewer run for t_163fa09f (session_key field in that JSON):
 started 06:59:31, finished 07:00:53. This matches the reviewer's own t_163fa09f
 comment: "I first launched both legs concurrently — my own anti-perturbation rule for
 this card — killed the py311 leg at rc=143 and re-ran it after p313 finished". Same
-clear pattern at 07:36:59 for a t_9462260b gate leg (`proc_ef3f0286fb45.json`, exit
--15, `process.kill`, hscc-orch-side verify session). Harness-mediated kills set
+clear pattern at 07:36:59 for a t_9462260b verify leg (`proc_ef3f0286fb45.json`, exit
+-15, `process.kill`; recorded in the BACKEND-ENGINEER profile's process-results — the
+leg ran as a background job of the t_9462260b implementer session with
+`HERMES_HOME=<backend-engineer>`). Harness-mediated kills set
 `termination_source`; the 03:38 pair has it empty — different mechanism, and both
 explained.
 
