@@ -89,10 +89,10 @@ POINTER_LINES = [
     "",
     GENERATED_MARKER,
     "",
-    "_Entries now live in [`changelog.d/`](changelog.d/) — one `<task-id>.md` "
-    "per kanban card. Run `python3 scripts/changelog_fragments.py sync` to "
-    "materialise them here (the release step does; see "
-    "[changelog.d/README.md](changelog.d/README.md))._",
+    "_Entries now live in `changelog.d/` (in the source repo) — one "
+    "`<task-id>.md` per kanban card. Run `python3 "
+    "scripts/changelog_fragments.py sync` to materialise them here "
+    "(the release step does; see `changelog.d/README.md`)._",
 ]
 
 
