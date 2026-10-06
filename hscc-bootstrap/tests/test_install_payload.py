@@ -146,6 +146,56 @@ def test_sweep_relocates_planted_bak_out_of_plugins_dir(tmp_path):
     assert "hscc-cluster" in res["installed"]
 
 
+def test_reinstalls_are_retain_limited_in_plugins_backups(tmp_path):
+    """t_9462260b: plugins-backups/ grew to 3,385 dirs because nothing ever
+    pruned them. Five machine-stamped reinstalls must leave keep-N (3), and
+    the survivors must be the NEWEST stamps (name-stamp order, not mtime)."""
+    repo = _make_repo(tmp_path)
+    plugins = tmp_path / "plugins"
+    stamps = [f"2026010{i}-000000" for i in range(1, 6)]
+    for ts in stamps:
+        install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts=ts)
+
+    backups = tmp_path / "plugins-backups"
+    left = sorted(p.name for p in backups.glob("hscc-cluster.bak-*"))
+    assert left == ["hscc-cluster.bak-20260103-000000",
+                    "hscc-cluster.bak-20260104-000000",
+                    "hscc-cluster.bak-20260105-000000"]
+    assert (plugins / "hscc-cluster" / "__init__.py").read_text() == "x=1\n"
+
+
+def test_retain_limit_spares_operator_labelled_plugin_backups(tmp_path):
+    """A human bookmark in plugins-backups (no machine stamp) must survive the
+    retain sweep even when it outnumbers the keep window."""
+    repo = _make_repo(tmp_path)
+    plugins = tmp_path / "plugins"
+    backups = tmp_path / "plugins-backups"
+    backups.mkdir()
+    bookmark = backups / "hscc-cluster.bak-pre-v2-migration"
+    bookmark.mkdir()
+    (bookmark / "__init__.py").write_text("historic\n")
+
+    for ts in (f"2026010{i}-000000" for i in range(1, 6)):
+        install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts=ts)
+
+    assert (bookmark / "__init__.py").read_text() == "historic\n"
+    assert len(list(backups.glob("hscc-cluster.bak-2026*"))) == 3
+
+
+def test_non_machine_stamps_are_never_pruned(tmp_path):
+    """Existing suites pass ts='A'/'B'/'C'. Those are not machine stamps, so
+    the sweep must leave them alone — otherwise this change would silently
+    break every caller that uses short test stamps."""
+    repo = _make_repo(tmp_path)
+    plugins = tmp_path / "plugins"
+    for ts in ("A", "B", "C", "D", "E", "F"):
+        install_payload.install_payload(repo, plugins, ["hscc-cluster"], ts=ts)
+    backups = tmp_path / "plugins-backups"
+    # 6 installs -> 5 backups (the first has nothing to back up); all 5 kept.
+    assert sorted(p.name for p in backups.glob("hscc-cluster.bak-*")) == [
+        f"hscc-cluster.bak-{t}" for t in "BCDEF"]
+
+
 def test_default_payload_ships_version_marker():
     """The runtime version marker must be shipped so ~/.hermes/plugins/VERSION
     tracks releases instead of going stale."""
