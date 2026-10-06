@@ -22,9 +22,33 @@ PY="${HSCC_TEST_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 
 DIRS=(hscc-bootstrap hscc-commands hscc-roles hscc-cluster hscc-project hscc_daemon sparkrun-hermes hscc-api memori_byodb)
 
+# ━━━ SIGTERM forensics (t_6bb29d46) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Three rc=143 "mystery reaper" aborts on 2026-10-06 turned out to be KILLS
+# BY THE RUNNING AGENTS THEMSELVES (a `pkill -f "run_tests.sh"` issued to
+# restart their own legs, and process.kill of a gate leg). A bare rc=143 at
+# the end of a log reads like an unexplained reaper; this trap makes the log
+# itself state it was killed, when, and mid-which-suite — so rc=143 can never
+# be mistaken for a test failure again. A POSIX shell cannot learn the
+# sender's PID from the signal; the killer's identity is recoverable from
+# the session DB tool_calls / process-results termination_source (see
+# docs/audits/rc143-suite-reaper-t_6bb29d46.md for the forensics recipe).
+CURRENT_SUITE="(startup)"
+on_sigterm() {
+  echo
+  echo "!! run_tests.sh RECEIVED SIGTERM at $(date '+%Y-%m-%d %H:%M:%S') — elapsed ${SECONDS}s, during suite: $CURRENT_SUITE"
+  echo "   pid=$$ ppid=$PPID; parent: $(ps -o pid=,ppid=,command= -p "$PPID" 2>/dev/null | tr -s ' ')"
+  echo "   This is an EXTERNAL KILL (shell rc=143), NOT a test failure."
+  echo "   Prime suspect: an agent command 'pkill -f run_tests.sh' or a process.kill of"
+  echo "   this suite's process — check the issuing session's transcript before believing"
+  echo "   any 'reaper' theory (docs/audits/rc143-suite-reaper-t_6bb29d46.md)."
+  exit 143
+}
+trap on_sigterm TERM
+
 rc=0
 declare -a summary
 for d in "${DIRS[@]}"; do
+  CURRENT_SUITE="$d"
   echo "━━━ $d ━━━"
   # Run each suite OUTSIDE the delegated-child execution context so a kanban
   # dispatcher worker invoking this script gets an isolated, non-read-only
