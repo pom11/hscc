@@ -118,32 +118,66 @@ def test_prune_keeps_newest_n(tmp_path):
     src = _touch(tmp_path / "config.yaml", "live\n")
     base = 1_700_000_000
     for i in range(7):
-        _touch(tmp_path / f"config.yaml.bak-{i:04d}", f"b{i}\n",
+        _touch(tmp_path / f"config.yaml.bak-202601{i:02}-000000", f"b{i}\n",
                mtime=base + i)
     removed = backup_util.prune_backups(src, keep=3)
     assert removed == 4
     left = sorted(p.name for p in tmp_path.glob("config.yaml.bak-*"))
-    assert left == ["config.yaml.bak-0004", "config.yaml.bak-0005",
-                    "config.yaml.bak-0006"]
+    assert left == ["config.yaml.bak-20260104-000000",
+                    "config.yaml.bak-20260105-000000",
+                    "config.yaml.bak-20260106-000000"]
     assert src.exists()  # the live file is never a prune candidate
 
 
 def test_prune_ignores_other_families(tmp_path):
     src = _touch(tmp_path / "config.yaml", "live\n")
-    other = _touch(tmp_path / "SOUL.md.bak-0001", "s\n")
-    _touch(tmp_path / "config.yaml.bak-0001", "a\n")
-    _touch(tmp_path / "config.yaml.bak-0002", "b\n")
+    other = _touch(tmp_path / "SOUL.md.bak-20260101-000000", "s\n")
+    _touch(tmp_path / "config.yaml.bak-20260101-000000", "a\n")
+    _touch(tmp_path / "config.yaml.bak-20260102-000000", "b\n")
     backup_util.prune_backups(src, keep=1)
     assert other.exists()
-    assert (tmp_path / "config.yaml.bak-0002").exists()
-    assert not (tmp_path / "config.yaml.bak-0001").exists()
+    assert (tmp_path / "config.yaml.bak-20260102-000000").exists()
+    assert not (tmp_path / "config.yaml.bak-20260101-000000").exists()
+
+
+def test_prune_leaves_operator_labelled_bookmark_by_default(tmp_path):
+    """A re-install's retain sweep must not delete a human bookmark."""
+    src = _touch(tmp_path / "config.yaml", "live\n")
+    base = 1_700_000_000
+    bookmark = _touch(tmp_path / "config.yaml.bak-pre-alias-migration-121850",
+                      "precious\n", mtime=base + 999)  # NEWEST by mtime
+    for i in range(5):
+        _touch(tmp_path / f"config.yaml.bak-2026010{i}-000000", "s\n",
+               mtime=base + i)
+    removed = backup_util.prune_backups(src, keep=2)
+    assert removed == 3                      # only the stamped ones
+    assert bookmark.read_text() == "precious\n"
+    assert len(list(p for p in tmp_path.glob("config.yaml.bak-2026*"))) == 2
+
+
+def test_prune_ignores_unstamped_names_by_default(tmp_path):
+    """ts='A' style names (what the test suites pass) are not hygiene targets."""
+    src = _touch(tmp_path / "config.yaml", "live\n")
+    for t in "ABCDE":
+        _touch(tmp_path / f"config.yaml.bak-{t}", "x\n")
+    assert backup_util.prune_backups(src, keep=2) == 0
+    assert len(list(tmp_path.glob("config.yaml.bak-*"))) == 5
+
+
+def test_prune_stamped_only_false_sweeps_unstamped(tmp_path):
+    src = _touch(tmp_path / "config.yaml", "live\n")
+    base = 1_700_000_000
+    for i, t in enumerate("ABC"):
+        _touch(tmp_path / f"config.yaml.bak-{t}", "x\n", mtime=base + i)
+    assert backup_util.prune_backups(src, keep=1, stamped_only=False) == 2
+    assert (tmp_path / "config.yaml.bak-C").exists()
 
 
 def test_prune_is_noop_when_under_keep(tmp_path):
     src = _touch(tmp_path / "config.yaml", "live\n")
-    _touch(tmp_path / "config.yaml.bak-0001", "a\n")
+    _touch(tmp_path / "config.yaml.bak-20260101-000000", "a\n")
     assert backup_util.prune_backups(src, keep=3) == 0
-    assert (tmp_path / "config.yaml.bak-0001").exists()
+    assert (tmp_path / "config.yaml.bak-20260101-000000").exists()
 
 
 def test_prune_survives_missing_dir(tmp_path):
@@ -153,17 +187,17 @@ def test_prune_survives_missing_dir(tmp_path):
 def test_prune_tolerates_vanished_file(tmp_path, monkeypatch):
     src = _touch(tmp_path / "config.yaml", "live\n")
     for i in range(5):
-        _touch(tmp_path / f"config.yaml.bak-{i}", f"b{i}\n")
+        _touch(tmp_path / f"config.yaml.bak-2026010{i}-000000", f"b{i}\n")
     real_remove = os.remove
 
     def flaky(path):
-        if path.endswith("config.yaml.bak-2"):
+        if path.endswith("config.yaml.bak-20260102-000000"):
             raise OSError("busy")
         real_remove(path)
 
     monkeypatch.setattr(backup_util.os, "remove", flaky)
     backup_util.prune_backups(src, keep=1)          # must not raise
-    assert (tmp_path / "config.yaml.bak-2").exists()
+    assert (tmp_path / "config.yaml.bak-20260102-000000").exists()
 
 
 # ── backup_file does its own pruning ────────────────────────────────────────
@@ -172,13 +206,12 @@ def test_backup_file_prunes_family_after_write(tmp_path):
     src = _touch(tmp_path / "cluster-guard.py", "live\n")
     base = 1_700_000_000
     for i in range(6):
-        _touch(tmp_path / f"cluster-guard.py.bak-old{i}", f"o{i}\n",
+        _touch(tmp_path / f"cluster-guard.py.bak-2026010{i}-000000", f"o{i}\n",
                mtime=base + i)
-    bak = backup_util.backup_file(src, keep=3, stamp="9999")
-    os.utime(bak, (base + 100, base + 100))         # the new bak is newest
+    bak = backup_util.backup_file(src, keep=3, stamp="20260201-000000")
     left = sorted(p.name for p in tmp_path.glob("cluster-guard.py.bak-*"))
     assert len(left) == 3
-    assert "cluster-guard.py.bak-9999" in left
+    assert "cluster-guard.py.bak-20260201-000000" in left
 
 
 def test_backup_file_honours_env_keep(monkeypatch, tmp_path):
@@ -190,10 +223,11 @@ def test_backup_file_honours_env_keep(monkeypatch, tmp_path):
         src = _touch(tmp_path / "config.yaml", "live\n")
         base = 1_700_000_000
         for i in range(4):
-            _touch(tmp_path / f"config.yaml.bak-o{i}", "o\n", mtime=base + i)
-        bak = backup_util.backup_file(src, stamp="z")
-        os.utime(bak, (base + 99, base + 99))
-        assert len(list(tmp_path.glob("config.yaml.bak-*"))) == 1
+            _touch(tmp_path / f"config.yaml.bak-2026010{i}-000000", "o\n",
+                   mtime=base + i)
+        backup_util.backup_file(src, stamp="20260201-000000")
+        left = sorted(p.name for p in tmp_path.glob("config.yaml.bak-*"))
+        assert left == ["config.yaml.bak-20260201-000000"]
     finally:
         monkeypatch.delenv("HSCC_BACKUP_KEEP")
         importlib.reload(backup_util)
@@ -205,7 +239,7 @@ def test_prune_backup_dir_caps_every_family(tmp_path):
     base = 1_700_000_000
     for fam in ("hscc-cluster", "hscc_daemon"):
         for i in range(6):
-            d = tmp_path / f"{fam}.bak-{i:04d}"
+            d = tmp_path / f"{fam}.bak-2026010{i}-000000"
             d.mkdir()
             (d / "__init__.py").write_text(f"{fam}{i}\n")
             os.utime(d, (base + i, base + i))
@@ -215,14 +249,15 @@ def test_prune_backup_dir_caps_every_family(tmp_path):
     assert (tmp_path / "operator-notes.txt").exists()
     for fam in ("hscc-cluster", "hscc_daemon"):
         left = sorted(p.name for p in tmp_path.glob(f"{fam}.bak-*"))
-        assert len(left) == 3
+        assert left == [f"{fam}.bak-2026010{i}-000000" for i in (3, 4, 5)]
         assert (tmp_path / left[-1] / "__init__.py").read_text().startswith(fam)
 
 
 def test_prune_backup_dir_mixed_files_and_dirs(tmp_path):
     base = 1_700_000_000
     for i in range(5):
-        _touch(tmp_path / f"requirements.txt.bak-{i:04d}", "r\n", mtime=base + i)
+        _touch(tmp_path / f"requirements.txt.bak-2026010{i}-000000", "r\n",
+               mtime=base + i)
     removed, _ = backup_util.prune_backup_dir(tmp_path, keep=2)
     assert removed == 3
     assert len(list(tmp_path.glob("requirements.txt.bak-*"))) == 2
@@ -241,11 +276,134 @@ def test_prune_backup_dir_ignores_non_backup_names(tmp_path):
 
 
 def test_prune_backup_dir_keep_zero(tmp_path):
-    _touch(tmp_path / "a.bak-1", "x\n")
-    _touch(tmp_path / "a.bak-2", "x\n")
+    _touch(tmp_path / "a.bak-20260101-000000", "x\n")
+    _touch(tmp_path / "a.bak-20260102-000000", "x\n")
     removed, _ = backup_util.prune_backup_dir(tmp_path, keep=0)
     assert removed == 2
     assert not list(tmp_path.glob("*.bak-*"))
+
+
+# ── age order is the NAME STAMP, not mtime ──────────────────────────────────
+
+def test_fresh_backup_of_old_mtime_file_is_never_pruned_first(tmp_path):
+    """copy2 preserves the SOURCE mtime. A backup of a file whose checkout is
+    days old would sort older than yesterday's backup by mtime — the pruner
+    would then delete the copy that just saved the current state. The name
+    stamp is the writer's own word on ordering and must win."""
+    src = _touch(tmp_path / "cluster-guard.py", "# current\n")
+    old = time.time() - 40 * 86400
+    os.utime(src, (old, old))
+
+    # yesterday's backup, with a NEW mtime (a copy/move refreshed it)
+    _touch(tmp_path / "cluster-guard.py.bak-20261005-120000", "# yesterday\n")
+    os.utime(tmp_path / "cluster-guard.py.bak-20261005-120000",
+             (time.time(), time.time()))
+
+    bak = backup_util.backup_file(src, keep=1, stamp="20261006-120000")
+    assert Path(bak).read_text() == "# current\n"          # newest kept
+    assert (tmp_path / "cluster-guard.py.bak-20261005-120000").exists() is False
+
+
+def test_select_victims_prefers_stamp_over_mtime(tmp_path):
+    a = _touch(tmp_path / "c.bak-20260101-000000", "a\n", mtime=1_000_000_000)
+    b = _touch(tmp_path / "c.bak-20260102-000000", "b\n", mtime=946_684_800)
+    victims = backup_util.select_victims([str(a), str(b)], keep=1)
+    assert [Path(v).name for v in victims] == ["c.bak-20260101-000000"]
+
+
+def test_select_victims_negative_keep_keeps_nothing(tmp_path):
+    a = _touch(tmp_path / "c.bak-20260101-000000", "a\n")
+    assert len(backup_util.select_victims([str(a)], keep=-5)) == 1
+
+
+def test_unstamped_names_order_by_mtime(tmp_path):
+    old = _touch(tmp_path / "c.bak-label-a", "a\n", mtime=1_000_000_000)
+    new = _touch(tmp_path / "c.bak-label-b", "b\n", mtime=2_000_000_000)
+    victims = backup_util.select_victims([str(old), str(new)], keep=1)
+    assert [Path(v).name for v in victims] == ["c.bak-label-a"]
+
+
+def test_stamped_outranks_unstamped_in_same_family(tmp_path):
+    """Mixed family (a human bookmark + machine stamps): the machine stamp
+    sorts above an unstamed name so a stale bookmark can't evict a real
+    backup — and vice versa the bookmark is never treated as 'newest'."""
+    stamp = _touch(tmp_path / "c.bak-20260101-000000", "s\n",
+                   mtime=1_000_000_000)
+    label = _touch(tmp_path / "c.bak-bookmark", "l\n", mtime=2_000_000_000)
+    victims = backup_util.select_victims([str(stamp), str(label)], keep=1)
+    assert [Path(v).name for v in victims] == ["c.bak-bookmark"]
+
+
+# ── prune_backup_dir: labelled bookmarks ────────────────────────────────────
+
+def test_prune_backup_dir_stamped_only_spares_labels(tmp_path):
+    base = 1_700_000_000
+    for i in range(5):
+        _touch(tmp_path / f"c.bak-2026010{i}-00000{i}", "s\n", mtime=base + i)
+    bookmark = _touch(tmp_path / "c.bak-pre-panic-fix-20260617", "keep\n",
+                      mtime=base - 100)
+    removed, fams = backup_util.prune_backup_dir(tmp_path, keep=2,
+                                                stamped_only=True)
+    assert removed == 3
+    assert bookmark.exists()
+    assert len(list(p for p in tmp_path.glob("c.bak-*")
+                    if backup_util._STAMP_RE.search(p.name))) == 2
+
+
+def test_prune_backup_dir_without_stamped_only_removes_labels(tmp_path):
+    base = 1_700_000_000
+    for i in range(3):
+        _touch(tmp_path / f"c.bak-2026010{i}-00000{i}", "s\n", mtime=base + i)
+    bookmark = _touch(tmp_path / "c.bak-pre-panic-fix", "x\n", mtime=base - 100)
+    removed, _ = backup_util.prune_backup_dir(tmp_path, keep=2,
+                                             stamped_only=False)
+    # 4 members, keep 2 newest (stamped rank above the unstamped bookmark)
+    assert removed == 2
+    assert not bookmark.exists()
+    assert len(list(tmp_path.glob("c.bak-*"))) == 2
+
+
+def test_prune_backup_dir_dangling_symlink_is_skipped(tmp_path):
+    (tmp_path / "c.bak-20260101-000000").symlink_to(tmp_path / "nowhere")
+    _touch(tmp_path / "c.bak-20260102-000000", "ok\n")
+    removed, _ = backup_util.prune_backup_dir(tmp_path, keep=1)
+    assert removed == 0                      # dangling entry is not counted
+    assert (tmp_path / "c.bak-20260102-000000").exists()
+
+
+# ── atomic_copy (fixed-name backups) ────────────────────────────────────────
+
+def test_atomic_copy_never_leaves_empty_dest_on_failure(tmp_path, monkeypatch):
+    src = _touch(tmp_path / "triggers.json", '{"rules": []}\n')
+    dest = tmp_path / "triggers.json.bak"
+    dest.write_text("PREVIOUS REAL BACKUP\n")   # a fixed-name .bak already there
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(backup_util.shutil, "copy2", boom)
+    with pytest.raises(OSError):
+        backup_util.atomic_copy(src, dest)
+    # the existing backup survives intact — no truncation, no empty file
+    assert dest.read_text() == "PREVIOUS REAL BACKUP\n"
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_atomic_copy_replaces_fixed_name_atomically(tmp_path):
+    src = _touch(tmp_path / "triggers.json", '{"rules": [1]}\n')
+    dest = tmp_path / "triggers.json.bak"
+    dest.write_text("OLD\n")
+    assert backup_util.atomic_copy(src, dest) == str(dest)
+    assert dest.read_text() == '{"rules": [1]}\n'
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_atomic_copy_preserves_mode(tmp_path):
+    src = _touch(tmp_path / "cluster-guard.py", "# hook\n")
+    os.chmod(src, 0o700)
+    dest = tmp_path / "cluster-guard.py.bak"
+    backup_util.atomic_copy(src, dest)
+    assert dest.stat().st_mode & 0o777 == 0o700
 
 
 # ── the pile the card measured: 27k hooks baks ──────────────────────────────
@@ -256,7 +414,7 @@ def test_27k_hook_pile_prunes_to_keep(tmp_path):
     live = _touch(tmp_path / "cluster-guard.py", "# live hook\n")
     base = 1_700_000_000
     for i in range(2000):          # 2000 stands in for the measured 27,119
-        _touch(tmp_path / f"cluster-guard.py.bak-2026{i:08d}", "old\n",
+        _touch(tmp_path / f"cluster-guard.py.bak-20260101-{i:06d}", "old\n",
                mtime=base + i)
     removed = backup_util.prune_backups(live, keep=3)
     assert removed == 1997
@@ -273,16 +431,28 @@ def _fake_home(tmp_path):
     _touch(hooks / "cluster-guard.py", "# live\n")
     base = 1_700_000_000
     for i in range(5):
-        _touch(hooks / f"cluster-guard.py.bak-{i:04d}", "o\n", mtime=base + i)
+        _touch(hooks / f"cluster-guard.py.bak-2026010{i}-00000{i}", "o\n",
+               mtime=base + i)
     prof = home / "profiles" / "worker" / "hooks"
     prof.mkdir(parents=True)
     _touch(prof / "cluster-guard.py", "# live\n")
     for i in range(5):
-        _touch(prof / f"cluster-guard.py.bak-{i:04d}", "o\n", mtime=base + i)
+        _touch(prof / f"cluster-guard.py.bak-2026010{i}-00000{i}", "o\n",
+               mtime=base + i)
     bdir = home / "plugins-backups"
     bdir.mkdir()
     for i in range(5):
-        _touch(bdir / f"hscc-cluster.bak-{i:04d}.txt", "o\n", mtime=base + i)
+        _touch(bdir / f"hscc-cluster.bak-2026010{i}-00000{i}.txt", "o\n",
+               mtime=base + i)
+    # operator-labelled bookmark: must SURVIVE a default sweep
+    _touch(bdir / "hscc-cluster.bak-pre-alias-migration-121850.txt", "keep\n",
+           mtime=base - 100)
+    # root config family incl. one labelled bookmark
+    _touch(home / "config.yaml", "live\n")
+    for i in range(5):
+        _touch(home / f"config.yaml.bak-2026010{i}-10000{i}", "c\n",
+               mtime=base + i)
+    _touch(home / "config.yaml.bak-pre-panic-fix", "keep\n", mtime=base - 50)
     return home
 
 
@@ -312,8 +482,37 @@ def test_cli_prunes_home_and_profiles(tmp_path, capsys):
         sys.argv = old
     assert len(list((home / "hooks").glob("*.bak-*"))) == 2
     assert len(list((home / "profiles" / "worker" / "hooks").glob("*.bak-*"))) == 2
-    assert len(list((home / "plugins-backups").glob("*.bak-*"))) == 2
+    # plugins-backups: 5 stamped collapse to 2, the labelled bookmark survives
+    stamped = [p for p in (home / "plugins-backups").glob("*.bak-*")
+               if backup_util._STAMP_RE.search(p.name)]
+    assert len(stamped) == 2
+    assert (home / "plugins-backups"
+            / "hscc-cluster.bak-pre-alias-migration-121850.txt").exists()
+    # root config family: 5 stamped -> 2, labelled bookmark survives, live kept
+    cfg_stamped = [p for p in home.glob("config.yaml.bak-*")
+                   if backup_util._STAMP_RE.search(p.name)]
+    assert len(cfg_stamped) == 2
+    assert (home / "config.yaml.bak-pre-panic-fix").exists()
+    assert (home / "config.yaml").read_text() == "live\n"
     assert (home / "hooks" / "cluster-guard.py").read_text() == "# live\n"
+
+
+def test_cli_include_labeled_prunes_bookmarks(tmp_path, capsys):
+    home = _fake_home(tmp_path)
+    import sys
+    old = sys.argv
+    sys.argv = ["backup_util.py", "--home", str(home), "--keep", "0",
+                "--include-labeled"]
+    try:
+        assert backup_util._main() == 0
+    finally:
+        sys.argv = old
+    assert not list((home / "plugins-backups").glob("*.bak-*"))
+    assert not list(home.glob("config.yaml.bak-*"))
+    assert not list((home / "hooks").glob("*.bak-*"))
+    # live files untouched
+    assert (home / "config.yaml").exists()
+    assert (home / "hooks" / "cluster-guard.py").exists()
 
 
 def test_cli_profile_scoped_home_walks_up_to_root(tmp_path, capsys, monkeypatch):
