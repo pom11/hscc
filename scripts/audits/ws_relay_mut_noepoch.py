@@ -5,7 +5,7 @@ Proves the guard is load-bearing rather than decorative. With it disabled,
 lands) and, when combined with the drain mutation, the whole isolation file goes
 red. Run from the hscc-api dir:
 
-  PYTHONPATH=<repo-root>:<hscc-api-dir> \\
+  PYTHONPATH=<repo>/scripts/audits:<repo>/hscc-api \\
     python -m pytest -q tests/test_ws_stop_noop_isolation.py -p ws_relay_mut_noepoch
 """
 def pytest_configure(config):
