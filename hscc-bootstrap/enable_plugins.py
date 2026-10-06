@@ -55,6 +55,11 @@ HOOKS_DIR = os.path.join(
     os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"), "hooks")
 CLUSTER_GUARD_DST = os.path.join(HOOKS_DIR, "cluster-guard.py")
 CLUSTER_GUARD_COMMAND = f"python3 {CLUSTER_GUARD_DST}"
+# Set by tests/conftest.py to the throwaway dir it redirects the two paths
+# above into. None in production — see _hooks_dst() for why the redirection
+# exists (the suites run with HERMES_HOME exported at the operator's live
+# profile, and these paths are bound from it at import time).
+_CLUSTER_GUARD_SANDBOX = None
 # Toolsets the orchestrator needs:
 #   hscc-cluster — cluster ops (orchestrator-only)
 #   sparkrun     — sparkrun_exec passthrough
