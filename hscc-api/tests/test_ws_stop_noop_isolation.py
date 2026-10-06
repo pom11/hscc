@@ -208,6 +208,9 @@ def test_boundary_drain_joins_a_slow_relay_worker(monkeypatch):
     # after the clear if the boundary did not join.
     release.set()
     stragglers = _run_boundary()
+    # Loud, not fixture-mediated: the boundary is called DIRECTLY here, so a
+    # broken/absent drain fails this assertion instead of being swallowed by the
+    # fixture's bookkeeping try/except.
     assert stragglers == [], "drain left stragglers: %r" % (stragglers,)
     assert not ro.live_workers(), "worker outlived the boundary drain"
 
@@ -246,7 +249,15 @@ def test_polluter_then_stop_noop_pair_is_isolated(monkeypatch):
     assert ro.live_workers(), "polluter did not leave a live relay worker"
 
     # ---- boundary (what conftest does between tests), gate STILL held
-    _run_boundary()
+    stragglers = _run_boundary()
+    # The straggler is DELIBERATELY un-joinable here (blocked inside its
+    # resolve, like a real `hermes chat` subprocess), so the drain must REPORT it
+    # rather than pretend it quiesced — that is what the epoch guard is for.
+    # Asserted directly, so the fixture's broad except:pass cannot hide a drain
+    # that stopped detecting live workers.
+    assert stragglers, (
+        "drain did not even detect the blocked straggler — it has silently "
+        "stopped tracking workers: %r" % (stragglers,))
 
     # ---- target: the stop-no-op assertion runs while the straggler is blocked
     ack = _stop_ack(monkeypatch, "hscc")
