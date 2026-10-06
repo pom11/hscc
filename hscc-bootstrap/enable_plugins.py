@@ -35,6 +35,16 @@ import sys
 
 import _theme
 
+# Sibling module in hscc-bootstrap/. Installed runtimes get the whole directory
+# (install_payload's DEFAULT_PAYLOAD ships hscc-bootstrap), so this import
+# resolves in both the repo and the runtime dir; the sys.path fallback covers a
+# caller that imported this file by absolute path without its dir on the path.
+try:
+    import backup_util
+except ImportError:  # pragma: no cover - import-path robustness only
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import backup_util
+
 HSCC_PLUGINS = ["hscc-cluster", "hscc-commands", "sparkrun-hermes"]
 
 # Cluster-guard hook — lives in hscc-bootstrap/hooks/cluster-guard.py in the
@@ -45,6 +55,11 @@ HOOKS_DIR = os.path.join(
     os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"), "hooks")
 CLUSTER_GUARD_DST = os.path.join(HOOKS_DIR, "cluster-guard.py")
 CLUSTER_GUARD_COMMAND = f"python3 {CLUSTER_GUARD_DST}"
+# Set by tests/conftest.py to the throwaway dir it redirects the two paths
+# above into. None in production — see _hooks_dst() for why the redirection
+# exists (the suites run with HERMES_HOME exported at the operator's live
+# profile, and these paths are bound from it at import time).
+_CLUSTER_GUARD_SANDBOX = None
 # Toolsets the orchestrator needs:
 #   hscc-cluster — cluster ops (orchestrator-only)
 #   sparkrun     — sparkrun_exec passthrough
@@ -747,6 +762,20 @@ def _probe_compaction_endpoint():
         return False
 
 
+def _hooks_dst():
+    """Resolve the cluster-guard destination *at call time*.
+
+    ``CLUSTER_GUARD_DST`` is bound at import from ``HERMES_HOME`` (correct for
+    bootstrap, which exports it). But a test run with ``HERMES_HOME`` exported —
+    which is exactly how the worker-env suites are invoked — would otherwise
+    have every ``enable()`` call that forgot to patch write a real backup into
+    the live profile's ``hooks/``. Reading the module attribute here keeps
+    ``monkeypatch.setattr(enable_plugins, "CLUSTER_GUARD_DST", ...)``
+    authoritative while making the leak impossible to reintroduce silently.
+    """
+    return CLUSTER_GUARD_DST
+
+
 def _ensure_hooks_file(hooks_source):
     """Copy cluster-guard.py from the repo's hooks/ dir to ~/.hermes/hooks/.
 
@@ -756,22 +785,23 @@ def _ensure_hooks_file(hooks_source):
     Returns {"installed": True/False, "backed_up": str|None}.
     """
     import shutil
-    from datetime import datetime
     from pathlib import Path
 
     src = Path(hooks_source) / "cluster-guard.py"
     if not src.is_file():
         return {"installed": False, "reason": "source cluster-guard.py not found"}
 
-    dst = Path(CLUSTER_GUARD_DST)
+    dst = Path(_hooks_dst())
     dst.parent.mkdir(parents=True, exist_ok=True)
 
     backed_up = None
     if dst.exists():
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        bak = dst.parent / f"{dst.name}.bak-{stamp}"
-        shutil.copy2(dst, bak)
-        backed_up = str(bak)
+        # Atomic snapshot + retain-limited (t_9462260b): the old
+        # `shutil.copy2(dst, bak)` truncated the backup path before streaming,
+        # so an interrupted run left a zero-byte .bak where the rollback point
+        # should have been — and nothing ever pruned them, which is how the
+        # hooks dir reached 27k files.
+        backed_up = backup_util.backup_file(dst)  # str path, or None
 
     shutil.copy2(src, dst)
     os.chmod(dst, 0o755)
@@ -923,10 +953,10 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
             or changed_fallback or changed_bitwarden or changed_prompt_caching
             or changed_dashboard or changed_multiplex or changed_hooks
             or changed_approvals):
-        import shutil
-        import time
-        shutil.copy(config_path,
-                    f"{config_path}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+        # Atomic + retain-limited (t_9462260b). The old shutil.copy truncated
+        # the .bak path before streaming it, so an interrupted run could zero
+        # the operator's only rollback copy of a live profile config.
+        backup_util.backup_file(config_path)
         with open(config_path, "w") as fh:
             yaml.safe_dump(cfg, fh, sort_keys=False, default_flow_style=False)
 
