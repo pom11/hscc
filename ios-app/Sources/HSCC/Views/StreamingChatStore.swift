@@ -440,6 +440,14 @@ final class StreamingChatStore: ObservableObject {
     /// orchestrator session processes it and streams typed events back over the
     /// same socket, which the transcript folds as they arrive. Only available
     /// while connected; otherwise surface why.
+    ///
+    /// Send is NEVER a dead end:
+    ///   * Not connected — the text stays in the composer and this surfaces why,
+    ///     so the operator just presses send again to retry.
+    ///   * The WS accept fails after we optimistically showed the row — the
+    ///     phantom row is removed (nothing reached the cluster, so there is no
+    ///     echo to adopt it) and the TEXT IS RESTORED to the composer, so the
+    ///     operator can fix and retry instead of retyping from memory.
     func send(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -447,7 +455,7 @@ final class StreamingChatStore: ObservableObject {
         // linger above the composer after a later attempt succeeded.
         sendError = nil
         guard let wsTask else {
-            sendError = "Not connected yet — the stream is still opening. Try again."
+            sendError = "Not connected yet — the stream is still opening. Your message is kept below — press send to retry."
             return
         }
         // Show the operator's own line IMMEDIATELY, before the socket round trip.
@@ -456,19 +464,44 @@ final class StreamingChatStore: ObservableObject {
         // is wrong the operator would otherwise stare at a composer that
         // cleared with nothing to show for it. The transcript folds by seq, so
         // the echo that follows is idempotent and does not duplicate this row.
-        transcript.addLocalUserMessage(trimmed)
+        let localRowID = transcript.addLocalUserMessage(trimmed)
         rows = transcript.rows
 
         let payload: [String: String] = ["kind": "send", "text": trimmed]
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
               let frame = String(data: data, encoding: .utf8) else {
-            sendError = "Couldn't encode your message."
+            // Even an encode failure must not lose the operator's words: drop
+            // the phantom row (nothing was sent, so no echo will adopt it) and
+            // restore the text to the composer so it can be edited + retried.
+            transcript.removeLocalUserMessage(rowID: localRowID)
+            rows = transcript.rows
+            draft = trimmed
+            persistDraft()
+            sendError = "Couldn't encode your message. It's been kept below — press send to retry."
             return
         }
         wsTask.send(.string(frame)) { [weak self] error in
             Task { @MainActor in
-                if let error {
-                    self?.sendError = "Send failed: \(error.localizedDescription)"
+                guard let self, let error else { return }
+                // The send did NOT reach the cluster (or the socket failed
+                // before the accept callback). Never a dead end:
+                //   * drop the phantom optimistic row (the cluster never got
+                //     it, so no echo will adopt it — leaving it would show a
+                //     message the server doesn't have);
+                //   * put the text back in the composer so it is not lost and
+                //     can be edited + retried.
+                // If the row is already gone (an echo adopted it), the message
+                // actually DID reach the cluster — do NOT re-draft or remove.
+                let removed = self.transcript.removeLocalUserMessage(rowID: localRowID)
+                self.rows = self.transcript.rows
+                if removed {
+                    self.draft = trimmed
+                    self.persistDraft()
+                    self.sendError = "Send failed: \(error.localizedDescription). Your message is kept below — press send to retry."
+                } else {
+                    // Delivered despite the hiccup (baseline ack error but the
+                    // echo landed) — a soft note, no lost text.
+                    self.sendError = "Your message went through, but there was a delivery hiccup: \(error.localizedDescription)"
                 }
             }
         }
