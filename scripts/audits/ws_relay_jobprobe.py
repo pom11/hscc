@@ -1,11 +1,13 @@
-"""PROBE (t_163fa09f) — TEMPORARY instrumentation. Not part of the fix; delete.
+"""Evidence harness for the t_163fa09f stop-no-op flake (keep; not imported).
 
-Logs every create / scan / clear of the process-global chat-job store together
-with the thread that did it and the test that was executing, so the ordering
-that makes test_stop_kind_with_nothing_in_flight_is_noop fail can be read off
-the log instead of guessed.
+Reproduces the PROOF side of the fix: logs every create / scan / clear of the
+process-global chat-job store together with the thread that did it and the test
+that was executing, so the ordering behind the flake can be read off the log
+instead of guessed. This is what captured the leak quoted in
+docs/audits/ws_relay_stop_noop_flake_t_163fa09f.md (F1).
 
-Enable:  PYTHONPATH=<hscc-api> pytest -p jobprobe ...  with HSCC_JOB_PROBE=<file>
+Enable:  PYTHONPATH=<hscc-api>:<dir-of-this-file> pytest -p ws_relay_jobprobe ...
+         with HSCC_JOB_PROBE=<output-file>
 """
 import os
 import sys

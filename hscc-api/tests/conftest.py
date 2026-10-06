@@ -7,6 +7,7 @@ hyphenated and not an importable package name).
 
 import os
 import sys
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -17,33 +18,77 @@ import api_server  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _isolate_chat_jobs():
-    """Clear the process-global chat-job registry around every test.
+    """Quiesce ALL process-global chat-job state around every test.
 
     ``routes_orchestrator._jobs`` is a module-level dict that outlives any one
     test, and ``_in_flight_job(project)`` scans it to decide whether a WS
-    ``stop`` frame had anything to stop. A test that leaves a queued/running
-    job behind therefore makes a LATER test's "nothing in flight" assertion
-    fail — which is exactly why
+    ``stop`` frame had anything to stop. Historically
     ``test_ws_relay_not_noop.py::test_stop_kind_with_nothing_in_flight_is_noop``
-    passed when its file ran alone and failed when the whole directory ran.
+    passed alone and failed in full-directory runs because an EARLIER test's
+    relay worker thread registered a live ``hscc`` job AFTER this fixture had
+    cleared the store (instrumented proof:
+    docs/audits/ws_relay_stop_noop_flake_t_163fa09f.md). The t_7cc2e7d5 fix —
+    clearing before AND after — could not work: clearing a dict cannot stop an
+    unjoined thread from writing it again afterwards.
 
-    ``_isolate_hscc`` below cannot catch this: that leak is in memory, not on
-    disk. Cleared both before and after, so the registry is empty no matter
-    whether the previous test cleaned up or blew up mid-way.
+    The airtight version, in the only order that works:
+      1. DRAIN — signal every live turn worker (retire event + cancel its job
+         through the real stop path) and JOIN it, so any write it was going to
+         make has already happened before the store is emptied;
+      2. CLEAR the job store (a mop for terminal leftovers, not the defence);
+      3. advance the job GENERATION, stamping the test body with the new epoch:
+         workers the test spawns inherit it and may register, while any
+         straggler born before the boundary is rejected at ``_new_job`` even if
+         the join above timed out (defence in depth, t_163fa09f).
     """
     import routes_orchestrator as _ro
+    import routes_ws as _ws
+
+    def _drain():
+        try:
+            return _ws.drain_workers(timeout=_DRAIN_TIMEOUT_S)
+        except Exception:
+            # Never let isolation bookkeeping fail a test run.
+            return []
 
     def _clear():
         try:
             with _ro._jobs_lock:
                 _ro._jobs.clear()
         except Exception:
-            # Never let isolation bookkeeping fail a test run.
             pass
 
+    def _reset_stores():
+        try:
+            import session_event
+            session_event.reset_stores()
+        except Exception:
+            pass
+
+    _drain()
     _clear()
+    _reset_stores()
+    # Stamp the test body with the live epoch: relay/handoff workers it spawns
+    # inherit this generation and are accepted; pre-existing stragglers are not.
+    try:
+        gen = _ro.advance_job_generation()
+        setattr(threading.current_thread(), "_hscc_job_generation", gen)
+    except Exception:
+        pass
     yield
+    # Order is the fix: quiesce the writer FIRST, then mop the store, then
+    # retire the epoch so late writes from this test's workers are rejected.
+    _drain()
     _clear()
+    _reset_stores()
+    try:
+        _ro.advance_job_generation()
+        setattr(threading.current_thread(), "_hscc_job_generation", None)
+    except Exception:
+        pass
+
+
+_DRAIN_TIMEOUT_S = 2.0
 
 
 @pytest.fixture

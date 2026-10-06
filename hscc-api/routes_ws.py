@@ -82,6 +82,36 @@ _POLL_INTERVAL = 0.5
 
 
 # --------------------------------------------------------------------------- #
+# Turn worker threads (relay + handoff)
+# --------------------------------------------------------------------------- #
+# ``_default_relay`` and ``_handle_busy_send`` each spawn a daemon thread per
+# turn, and that thread is what registers the turn's ``_ChatJob`` via
+# ``routes_orchestrator._new_job`` — late, after resolving the backing and the
+# session. Those stragglers are the root cause of the stop-no-op collection-order
+# flake (t_163fa09f); see the block comment in routes_orchestrator for the full
+# story. The registry of live workers, the generation each was born in and the
+# drain all live with the store they protect (routes_orchestrator); these two
+# thin wrappers only keep this module's call sites free of an import cycle
+# (routes_orchestrator defers to routes_ws, so we must not import it at top).
+
+def _spawn_worker(target, name: str) -> threading.Thread:
+    """Start a tracked daemon worker thread for one relay/handoff turn."""
+    import routes_orchestrator as _ro
+    return _ro.spawn_tracked_worker(target, name)
+
+
+def drain_workers(timeout: float = 5.0) -> "list[str]":
+    """Signal + join every in-flight turn worker; return straggler names.
+
+    Callers that are about to reset process-global job state must drain FIRST:
+    making the writer quiesce before clearing the store is the fix; clearing
+    harder afterwards is not (t_163fa09f).
+    """
+    import routes_orchestrator as _ro
+    return _ro.drain_workers(timeout=timeout)
+
+
+# --------------------------------------------------------------------------- #
 # Session framing over the raw socket
 # --------------------------------------------------------------------------- #
 
@@ -242,6 +272,15 @@ def _handle_busy_send(project: str, text: str) -> None:
     coordinator = coordinator_factory(profile, session_id)
 
     def _run():
+        # A retired turn must not orchestrate anything (t_163fa09f): the
+        # handoff's drive() would reach the module-global relay hook, which by
+        # now may be the DEFAULT relay (the test's fake was reverted with its
+        # monkeypatch) — the exact path that spawned the flake's straggler.
+        import routes_orchestrator as _ro_check
+        try:
+            _ro_check._check_turn_live()
+        except _ro_check._TurnRetired:
+            return
         try:
             coordinator.orchestrate(
                 text, drive=_work,
@@ -256,8 +295,7 @@ def _handle_busy_send(project: str, text: str) -> None:
             # the operator is told the session is busy, never left guessing.
             _append_busy_notice(project)
 
-    threading.Thread(target=_run, name="ws-handoff-%s" % project,
-                     daemon=True).start()
+    _spawn_worker(_run, "ws-handoff-%s" % project)
 
 
 def _append_busy_notice(project: str) -> None:
@@ -314,6 +352,15 @@ def _default_relay(project: str, text: str) -> bool:
     Returns True if the relay was started.
     """
     def _work():
+        # Quiesce contract (t_163fa09f): if the drain retired this turn, or the
+        # epoch was retired while we were resolving, write NOTHING — no job, no
+        # transcript event. A straggler that appends "relay_failed" to the next
+        # test's store would trade one cross-test leak for another.
+        import routes_orchestrator as _ro_check
+        try:
+            _ro_check._check_turn_live()
+        except _ro_check._TurnRetired:
+            return
         try:
             import routes_orchestrator as _ro
             resolved = _ro._backing_resolve(project, _ro._registry_path(None))
@@ -335,6 +382,11 @@ def _default_relay(project: str, text: str) -> bool:
             # existing session untouched — and fail-safe: on a genuine failure
             # it propagates here (surfaced below as ``relay_failed``, never a
             # silent no-op) or lets the downstream job fail honestly.
+            # Second liveness checkpoint (t_163fa09f): everything ABOVE this
+            # line is read-only, everything BELOW it has side effects — a
+            # session row in a live profile's state.db and the job registration.
+            # A retired turn must bail here, not two statements later.
+            _ro._check_turn_live()
             _ro._ensure_session_exists(resolved["profile"], session_id)
             # Run as a cancellable job so a ``stop`` frame can find + interrupt
             # this turn by project (_in_flight_job), and so _backing_invoke gets
@@ -360,6 +412,13 @@ def _default_relay(project: str, text: str) -> bool:
                     code=d["error"].get("code", "orchestrator_error"),
                     message=d["error"].get("speak", "The orchestrator call "
                                                       "failed.")))
+        except _ro_check._StaleJobGeneration:
+            # The isolation epoch was retired while we were resolving (the
+            # race-guard backstop, t_163fa09f). Nothing was registered and
+            # nothing will be read, so stay silent: appending relay_failed here
+            # would leak an event into a store the NEXT test owns — trading one
+            # cross-test leak for another.
+            return
         except Exception as exc:  # noqa: BLE001 - surface, never swallow
             # Tell the operator in the transcript rather than failing silently:
             # a dropped message with no explanation is exactly the bug this
@@ -368,7 +427,7 @@ def _default_relay(project: str, text: str) -> bool:
                 code="relay_failed",
                 message="Could not reach the orchestrator: %s" % exc))
 
-    threading.Thread(target=_work, name="ws-relay-%s" % project, daemon=True).start()
+    _spawn_worker(_work, "ws-relay-%s" % project)
     return True
 
 
