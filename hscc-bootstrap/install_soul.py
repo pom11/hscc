@@ -16,11 +16,15 @@ Single source of truth: ``HSCC_SOUL_BLOCK`` below is reused for both SOUL.md and
 the ops personality, so they can never drift.
 """
 import os
-import shutil
 import sys
-import time
 
 import _theme
+
+try:
+    import backup_util
+except ImportError:  # pragma: no cover - import-path robustness only
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import backup_util
 
 BEGIN = "<!-- HSCC:BEGIN (managed by hscc-bootstrap — edit above/below, not inside) -->"
 END = "<!-- HSCC:END -->"
@@ -173,7 +177,14 @@ def _replace_header(text, header):
 
 
 def _backup(path):
-    shutil.copy(path, f"{path}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+    """Atomic snapshot of ``path`` as ``<name>.bak-<stamp>`` + retain limit.
+
+    t_9462260b: the old ``shutil.copy(path, f"{path}.bak-{ts}")`` truncated the
+    backup name before streaming it (an interrupted run zeroed the rollback
+    point) and never pruned — the root home kept 5 SOUL.md.bak-* plus 26
+    config.yaml.bak-*.
+    """
+    return backup_util.backup_file(path)
 
 
 def install_soul(soul_path):
