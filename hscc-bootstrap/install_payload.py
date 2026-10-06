@@ -15,6 +15,13 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+try:
+    import backup_util
+except ImportError:  # pragma: no cover - import-path robustness only
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import backup_util
+
 # Never ship these into the runtime dir.
 _EXCLUDE = {"__pycache__", ".pytest_cache", "tests", ".git"}
 
@@ -94,6 +101,10 @@ def install_payload(repo_root, plugins_dir, payload, *, backup=True, ts=None):
                 bak = bak_dir / f"{name}.bak-{stamp}"
                 shutil.move(str(dst), str(bak))
                 backed_up.append(bak.name)
+                # Retain-limit the pile this stage creates (t_9462260b):
+                # plugins-backups/ grew to 3,385 entries / 1.2 GB here.
+                # Default stamped_only keeps operator-labelled bookmarks alive.
+                backup_util.prune_backup_dir(bak_dir)
             elif dst.is_dir() and not dst.is_symlink():
                 shutil.rmtree(dst)
             else:

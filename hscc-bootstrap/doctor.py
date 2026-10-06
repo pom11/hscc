@@ -39,6 +39,7 @@ from dataclasses import dataclass, asdict
 from typing import List, Optional
 
 import _theme
+import backup_util
 
 
 @dataclass
@@ -737,12 +738,15 @@ def _walk_path(cfg, path):
 
 
 def _write_yaml(config_path, cfg):
-    """Backup + write ``cfg`` to ``config_path`` (mirror enable_plugins)."""
-    import shutil
-    import time
+    """Backup + write ``cfg`` to ``config_path`` (mirror enable_plugins).
+
+    Uses the shared backup helper so doctor's backups are atomic (never a
+    truncated ``.bak``) and retain-limited like every other HSCC writer
+    (t_9462260b) — the old ``shutil.copy`` here is what left 26
+    ``config.yaml.bak-*`` plus a zero-byte rollback point behind.
+    """
     import yaml
-    shutil.copy(config_path,
-                f"{config_path}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+    backup_util.backup_file(config_path)
     with open(config_path, "w") as fh:
         yaml.safe_dump(cfg, fh, sort_keys=False, default_flow_style=False)
 
