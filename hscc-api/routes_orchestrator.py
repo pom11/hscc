@@ -1288,6 +1288,198 @@ _jobs_lock = threading.Lock()
 _jobs = {}                       # job_id -> _ChatJob
 _job_ids = itertools.count(1)
 
+# --------------------------------------------------------------------------- #
+# Job-store generation + tracked turn workers (t_163fa09f)
+# --------------------------------------------------------------------------- #
+# ``_jobs`` is process-global, and a chat job can be registered by a *turn
+# worker thread* rather than by the thread that owns the request: the REST
+# handler spawns a ``_run_job`` worker, and ``routes_ws`` spawns a relay worker
+# (and a handoff worker, which in turn spawns a relay worker). Those workers
+# register LATE — ``_default_relay`` only reaches ``_new_job`` after resolving
+# the backing, the registry session and the Hermes session row — so the write
+# can land long after the thing that started the turn has moved on.
+#
+# Concretely this made ``test_ws_relay_not_noop.
+# test_stop_kind_with_nothing_in_flight_is_noop`` fail on full-suite runs: a
+# straggler from an earlier test wrote a live ``project="hscc"`` job into the
+# store AFTER the isolation fixture had cleared it, so ``_in_flight_job("hscc")``
+# found "something in flight" and the ``stop`` frame acked ``stopped: True``
+# (instrumented proof in docs/audits/ws_relay_stop_noop_flake_t_163fa09f.md).
+# Clearing the store cannot fix a leak whose writer is an unjoined thread, so
+# this module owns the two things that can: the set of threads allowed to write
+# it, and the epoch those threads were born in.
+#
+# In the SERVER both mechanisms are inert: the generation is never advanced
+# (stays 0, every worker inherits 0, every write accepted) and nothing calls
+# :func:`drain_workers`. They exist to make the invariant testable — and
+# ``drain_workers`` is also what a clean shutdown should call so no turn is
+# mid-write when the process exits.
+_job_generation = 0
+_job_generation_lock = threading.Lock()
+
+# Tracked turn workers: every thread this module (or routes_ws) spawns to run a
+# turn. Registered until it exits, so :func:`drain_workers` can signal + join it.
+_workers_lock = threading.Lock()
+_workers: "set[threading.Thread]" = set()
+
+# How many signal+join passes :func:`drain_workers` makes before giving up. A
+# handoff worker spawns a relay worker mid-drain, so one pass can discover new
+# threads; the extra passes cover that without risking an unbounded wait.
+_DRAIN_PASSES = 4
+
+
+class _StaleJobGeneration(Exception):
+    """A turn worker tried to register a job belonging to a finished epoch.
+
+    Raised by :func:`_new_job` when the calling thread carries a generation
+    older than :data:`_job_generation`. Only reachable from tracked turn workers
+    whose epoch has been retired (i.e. between tests, during isolation
+    teardown) — never in the server, where the generation is constant.
+    """
+
+
+class _TurnRetired(Exception):
+    """The turn's worker was retired before it began (see :func:`drain_workers`).
+
+    Raised by :func:`_check_turn_live` at the top of a worker whose retire event
+    the drain has set, so the worker unwinds without touching the backing, the
+    session rows or the job store.
+    """
+
+
+def advance_job_generation() -> int:
+    """Retire the current job generation and return the new one.
+
+    Afterwards a worker born in an earlier generation can no longer register a
+    job (see :class:`_StaleJobGeneration`), so a straggler that outlived its
+    turn cannot leave a phantom live job behind. Called by the test-isolation
+    fixture at every test boundary; NOT called by the server.
+    """
+    global _job_generation
+    with _job_generation_lock:
+        _job_generation += 1
+        return _job_generation
+
+
+def _calling_job_generation():
+    """The generation the CURRENT thread was born in, or None if untracked.
+
+    ``None`` means "this thread was not created as a turn worker" — an HTTP
+    handler thread serving a POST, the test body itself, a REPL — and such a
+    thread always writes into the live generation. Tracked workers carry the
+    generation they inherited on the thread object (set by
+    :func:`spawn_tracked_worker`).
+    """
+    return getattr(threading.current_thread(), "_hscc_job_generation", None)
+
+
+def spawn_tracked_worker(target, name: str) -> threading.Thread:
+    """Start a daemon worker thread that runs ONE turn, and track it.
+
+    Same semantics as ``threading.Thread(..., daemon=True).start()``, plus the
+    two pieces of bookkeeping the isolation drain needs:
+
+      * the thread is registered in ``_workers`` until it exits, and carries its
+        own retire event, so :func:`drain_workers` can signal it and join it;
+      * it inherits the job generation from its spawner (or the live generation
+        when the spawner is itself untracked, e.g. an HTTP handler thread). The
+        generation is the backstop that makes a straggler whose join timed out
+        unable to re-pollute the store.
+
+    ``target`` should call :func:`_check_turn_live` first thing so a retired
+    turn does no work at all.
+    """
+    parent = threading.current_thread()
+    generation = getattr(parent, "_hscc_job_generation", None)
+    if generation is None:
+        generation = _job_generation
+    retire = threading.Event()
+
+    def _run():
+        try:
+            target()
+        finally:
+            with _workers_lock:
+                _workers.discard(threading.current_thread())
+
+    t = threading.Thread(target=_run, name=name, daemon=True)
+    setattr(t, "_hscc_job_generation", generation)  # noqa: B010 — no such slot
+    setattr(t, "_hscc_retire", retire)              # noqa: B010
+    with _workers_lock:
+        _workers.add(t)
+    t.start()
+    return t
+
+
+def _check_turn_live() -> None:
+    """Raise :class:`_TurnRetired` if this worker's turn has been retired.
+
+    A worker calls this once at the top of its body. In the server the retire
+    event is never set, so this is a cheap no-op.
+    """
+    retire = getattr(threading.current_thread(), "_hscc_retire", None)
+    if retire is not None and retire.is_set():
+        raise _TurnRetired("turn retired before it started")
+
+
+def live_workers() -> "list[threading.Thread]":
+    """Snapshot of the currently-running tracked turn workers."""
+    with _workers_lock:
+        return [t for t in _workers if t.is_alive()]
+
+
+def drain_workers(timeout: float = 5.0) -> "list[str]":
+    """Signal + join every in-flight turn worker; return straggler names.
+
+    Ordering is the whole point (t_163fa09f): the caller must drain BEFORE it
+    clears the job store, so that whatever a straggler was going to write has
+    already been written — and cancelled — by the time the store is emptied.
+    Clearing afterwards is a mop, not the defence.
+
+    Per pass, three cooperating actions:
+      1. set every live worker's retire event, so one that has not started its
+         work yet returns without touching the backing at all;
+      2. cancel every live job — the production stop path (sets ``cancel_evt``
+         + terminates the retained Popen), so a worker already blocked inside
+         ``_backing_invoke`` unwinds promptly instead of waiting out a turn
+         nobody is listening to any more;
+      3. join each tracked worker with a bounded timeout.
+
+    Repeats while new workers keep appearing (a handoff worker spawns a relay
+    worker), up to :data:`_DRAIN_PASSES`. Returns the names of threads that
+    refused to exit; the stale-generation guard has already made those inert, so
+    callers may log and move on. Never raises.
+    """
+    stragglers: "list[str]" = []
+    deadline = time.monotonic() + timeout
+    for _pass in range(_DRAIN_PASSES):
+        workers = live_workers()
+        if not workers:
+            return []
+        # 1. SIGNAL — retire workers that have not begun.
+        for t in workers:
+            retire = getattr(t, "_hscc_retire", None)
+            if retire is not None:
+                retire.set()
+        # 2. SIGNAL — cancel live jobs so blocked workers unwind fast.
+        try:
+            with _jobs_lock:
+                jobs = list(_jobs.values())
+            for job in jobs:
+                if job.finished_at is None:
+                    cancel_job(job, "drained (test isolation / shutdown)")
+        except Exception:  # noqa: BLE001 — a drain must never raise
+            pass
+        # 3. WAIT — join what is still alive.
+        remaining = deadline - time.monotonic()
+        for t in workers:
+            t.join(timeout=max(0.0, remaining))
+        stragglers = [t.name for t in live_workers()]
+        if not stragglers:
+            return []
+    return stragglers
+
+
 # How long a TERMINAL job (done / timeout / unavailable / error) is retained
 # after it finished before it becomes eligible for eviction. The whole value of
 # the job API is that a job outlives its submitting connection and can be
@@ -1412,6 +1604,17 @@ def _new_job(project, profile, session, prompt, timeout=_DEFAULT_TIMEOUT,
     """
     with _jobs_lock:
         _reap_jobs()
+        # Stale-epoch guard (t_163fa09f): a turn worker born before the last
+        # generation advance is a straggler from a turn that has already been
+        # retired, so its write must not land — that phantom live job is what
+        # made the WS stop-no-op test order-dependent. An untracked thread
+        # (generation None: an HTTP handler, a test body) always writes, and in
+        # the server the generation never advances, so this never fires there.
+        born = _calling_job_generation()
+        if born is not None and born != _job_generation:
+            raise _StaleJobGeneration(
+                "turn worker from generation %r registered a job after "
+                "generation %r was retired" % (born, _job_generation))
         job_id = f"chat-{next(_job_ids)}"
         job = _ChatJob(job_id, project, profile, session, prompt, timeout=timeout,
                        notice=notice, image_data=image_data,
@@ -1479,7 +1682,17 @@ def _run_job(job: _ChatJob):
     Runs in a daemon thread spawned by ``handle_orchestrator_chat``. Any
     transport failure maps to a terminal job error state with a clean
     code+message — never a raw exception, never a leaked detail.
+
+    A worker whose turn was retired before it began (isolation drain,
+    t_163fa09f) lands the job cancelled and returns without touching the
+    backing at all — see :func:`_check_turn_live`. Handled ahead of the generic
+    failure mapping so a retired turn is never reported to a client as an error.
     """
+    try:
+        _check_turn_live()
+    except _TurnRetired:
+        _finish_cancelled(job, "chat turn retired before it started")
+        return
     with job.lock:
         job.status = "running"
     try:
@@ -1796,8 +2009,8 @@ def handle_orchestrator_chat(server, ctx, query, body):
                    notice=busy_notice,
                    image_data=(image[0] if image else None),
                    image_mime=(image[1] if image else None))
-    worker = threading.Thread(target=_run_job, args=(job,), daemon=True)
-    worker.start()
+    worker = spawn_tracked_worker(
+        lambda: _run_job(job), "chat-job-%s" % job.job_id)
 
     payload = {
         "job_id": job.job_id,

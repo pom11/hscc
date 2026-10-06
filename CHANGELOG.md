@@ -38,6 +38,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the injected cluster runner into `_sparkrun_cluster_ok` but called `_nas_ok()`
   bare, so every call shelled out to a real `sparkrun cluster list` (15s) against
   the operator's cluster config. The runner now reaches the NAS check too.
+- **The WS stop-no-op test was collection-order flaky on the full suite
+  (`test_ws_relay_not_noop.py::test_stop_kind_with_nothing_in_flight_is_noop`).**
+  Not a stop-path bug: `routes_ws` spawns `ws-relay-<project>` /
+  `ws-handoff-<project>` daemon threads per turn, and that worker thread — not
+  the test — registers the turn's `_ChatJob`, and only after resolving the
+  backing, the registry session and the Hermes session row. So the write could
+  land *after* the isolation fixture had cleared `routes_orchestrator._jobs`,
+  leaving a live `project="hscc"` job that `_in_flight_job` reported as an
+  in-flight turn; the `stop` frame then acked `stopped: True` and the test
+  failed. Captured on an instrumented p313 full run: `chat-31` registered 4 ms
+  after its owner's teardown clear and still running 3 tests later. This is why
+  t_7cc2e7d5's clear-before-*and*-after could not fix it — **clearing a dict
+  cannot stop an unjoined thread from writing it again**. `routes_orchestrator`
+  now owns its writers: `spawn_tracked_worker` registers every turn worker
+  (REST job worker + both WS workers) and stamps it with the job generation it
+  inherits from its spawner; `drain_workers` signals (retire event +
+  `cancel_job`, the production stop path) and joins them; and
+  `advance_job_generation`/`_StaleJobGeneration` refuse a late write from a
+  retired epoch, which `_default_relay` swallows silently so it cannot leak a
+  `relay_failed` event into the next test's store either.
+  `tests/conftest.py::isolation_boundary` performs one
+  drain → clear → reset → advance per boundary and is consumed by both the
+  autouse fixture and the regression tests, so they exercise the same code.
+  Both mechanisms are inert in the server (generation stays 0, nothing drains),
+  pinned by `test_server_path_never_advances_the_generation`.
 
 ### Verified
 - `hscc-bootstrap/tests/test_doctor.py`: 69 -> **72** cases, green with
