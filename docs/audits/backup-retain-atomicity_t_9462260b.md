@@ -209,23 +209,35 @@ age floor and outside keep-3.
 | `test_enable_plugins` + `test_hooks` | `6e28e1a` | p313 | 100 passed |
 | backup_util + payload + soul + triggers + scripts | `dac6605` | p313 | 93 passed |
 | `test_backup_util.py` | `9f70cdd` | p313 | 48 passed |
-| enable_plugins + hooks + backup_util + doctor, `HERMES_HOME` exported at live profile | `9f70cdd` | p313 | **220 passed in 418 s** |
+| enable_plugins + hooks + backup_util + doctor | `9f70cdd` | p313 | 220 passed in 418 s |
+| **full `hscc-bootstrap/tests` (396)** | `29d5e97` (merge of 7864796) | p311 (hermes venv) | 396 passed, exit 0 |
+| **full `hscc-bootstrap/tests` (396)** | `29d5e97` | p313 | 396 passed, exit 0 |
+| `test_enable_plugins` + `test_backup_util` (reload-leak proof) | `a925447` | p313 | 137 passed, live profile hooks 3→3 newest stamp unchanged |
+| **full `hscc-bootstrap/tests` (396) — LANDING TIP** | `a925447` | p311 (hermes venv) | **396 passed, exit 0** (08:23→08:30) |
+| **full `hscc-bootstrap/tests` (396) — LANDING TIP** | `a925447` | p313 | **396 passed, exit 0** (08:30→08:38) |
 
-Live-state guard around that last leg: `~/.hermes/hooks` entry count **27,122
-before and after** (zero drift), `cluster-guard.py` md5 `f394d6a7…` unchanged.
-Note the *profile* hooks dir did churn during that window — attribution in F4:
-the operator's own gate suite (`hscc-bootstrap/tests` from `orch_gate_7864796`,
-which lacks the conftest fix) was running concurrently at ~1 backup / 5 s. That
-process is external to this card and is why landing this fix matters.
+All legs run in the worker env with `HERMES_HOME` exported at the live profile
+(`/Users/desac/.hermes/profiles/backend-engineer`), from a clean checkout, and
+are stamped in `cache/scratch/t_9462260b/gate_<leg>_<sha>.log` with
+`git rev-parse HEAD` + a contains-7864796 ancestry check. The `a925447` pair
+supersedes the `29d5e97` pair (that tip predates the reload-surviving redirect).
 
-### Not yet run (do before/at merge)
+Live-state guard, `a925447` legs (the hermetic claim in its strongest form —
+identical snapshots before **and after** both whole-suite runs): profile
+`hooks/` `.bak-*` 3 → 3, root `hooks/` 27,119 unchanged, `cluster-guard.py` md5
+`f394d6a7…` unchanged, real `.bak-*` total 32,502 unchanged. The `29d5e97` p311
+leg still showed the 197 → 3 churn because it predated the reload fix — F4
+explains why an import-time-only redirect let writes land after the first
+`importlib.reload`.
 
-- `hscc-bootstrap/tests` on the **hermes venv (py3.11)** interpreter — the
-  landing gate, run from a clean checkout of the merge commit in the worker env
-  with `HERMES_HOME` exported.
-- Full-repo suite (not just bootstrap) on both interpreters.
+### Not yet run (gate at merge commit, operator-side)
+
+- Full-repo suite (hscc-bootstrap **and** hscc-api) on both interpreters from an
+  isolated detached worktree at the merge commit.
 - The live-dir sweep itself: deferred to post-merge by the operator, and gated on
-  no sibling suite writing to the live dirs while it runs.
+  no sibling suite writing to the live dirs while it runs. The 6 root
+  August/September empty baks are expected to clear with it (baseline census
+  32,502).
 
 ## Commits
 
@@ -236,3 +248,6 @@ process is external to this card and is why landing this fix matters.
 | `dac6605` | stamp-ordered pruning + `atomic_copy`; wire soul / triggers / payload |
 | `9f70cdd` | 7-day age floor on the sweep; stamp-parsed backup age |
 | `f73db30` | CLI dry-run unless `--apply`; conftest redirects hooks writes |
+| `38d4bd3` | audit doc + CHANGELOG; pins for the hooks guard |
+| `29d5e97` | merge origin/main (sibling `7864796`); CHANGELOG keep-both |
+| `a925447` | hooks redirect survives `importlib.reload` (autouse teardown) |
