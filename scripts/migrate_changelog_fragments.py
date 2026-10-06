@@ -57,22 +57,53 @@ def blame_authors(start: int, end: int):
     return sha_for_line
 
 
-def branch_for_sha(sha: str):
-    """Pick the wt/t_* branch that carries this sha; None if not attributable."""
+def landing_task(sha: str, base_ref: str = "HEAD"):
+    """Which kanban card's landing merge brought `sha` into the mainline.
+
+    Walks the first-parent chain of `base_ref` and finds the *earliest* merge
+    whose subject names a task id and which carries `sha` via a side parent
+    (i.e. `sha` is not already an ancestor of that merge's first parent). That
+    merge's subject — "merge: <title> (t_xxxxxxxx)" — is the card that authored
+    the entry, which is exactly the fragment owner.
+
+    Falls back to "a wt/t_<id> branch contains this sha" and finally to None
+    (the caller then files the entry under `pre-migration`).
+    """
+    chain = sh("git", "rev-list", "--first-parent", base_ref).split()
+    merges = []
+    for c in chain[:400]:
+        parents = sh("git", "rev-list", "--parents", "-n", "1", c).split()[1:]
+        if len(parents) < 2:
+            continue
+        subject = sh("git", "log", "-1", "--format=%s", c).strip()
+        m = re.search(r"(t_[0-9a-f]{6,})", subject)
+        if m:
+            merges.append((c, parents, m.group(1)))
+    # earliest merge (closest to the entry) that admitted the sha from a side line
+    for c, parents, task in reversed(merges):
+        if _is_ancestor(sha, c) and not any(_is_ancestor(sha, p) for p in parents[:1]):
+            return task
+    # fallback: a worker branch named for a card still carries it
     refs = sh("git", "branch", "--all", "--contains", sha)
-    best = None
+    best_key, best_task = None, None
     for ref in refs.split("\n"):
         ref = ref.strip().lstrip("* ").strip()
         if not ref or ref == "HEAD" or " -> " in ref:
             continue
         ref = ref.replace("refs/heads/", "").replace("remotes/origin/", "")
         m = re.search(r"(t_[0-9a-f]{6,})$", ref)
-        if m:
-            # prefer local branches over remote, shorter names over decorated
-            cand = (0 if ref.startswith("remotes/") else 1, len(ref), ref)
-            if best is None or cand[:2] > best[:2]:
-                best = (cand[:2], m.group(1))
-    return best[1] if best else None
+        if not m:
+            continue
+        key = (0 if ref.startswith("remotes/") else 1, len(ref))
+        if best_key is None or key > best_key:
+            best_key, best_task = key, m.group(1)
+    return best_task
+
+
+def _is_ancestor(sha: str, ref: str) -> bool:
+    r = subprocess.run(["git", "merge-base", "--is-ancestor", sha, ref],
+                       cwd=REPO_ROOT, capture_output=True, text=True)
+    return r.returncode == 0
 
 
 def split_entries(block_lines):
@@ -87,8 +118,13 @@ def split_entries(block_lines):
     cur_start = None
     for idx, line in enumerate(block_lines):
         if line.startswith("### "):
+            # flush the pending entry BEFORE switching kind, otherwise the last
+            # entry of each section is silently dropped (found by the
+            # losslessness check below — it is the reason it exists).
+            if cur is not None:
+                out.append((kind, cur, cur_start))
+                cur, cur_start = None, None
             kind = line[4:].strip()
-            cur = None
             continue
         if re.match(r"^## \[", line):
             break
@@ -135,7 +171,7 @@ def main(argv=None) -> int:
         # `entries` was built from block_lines[1:], so absolute 1-indexed line
         # of block_lines[0] ('## [Unreleased]') is `start`.
         sha = sha_for_line.get(start + 1 + first)
-        task = branch_for_sha(sha) if sha else None
+        task = landing_task(sha) if sha else None
         key = task or "pre-migration"
         if not task:
             unmapped.append((kind, lines[0][:70], (sha or "")[:8]))
