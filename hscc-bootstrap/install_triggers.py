@@ -14,8 +14,13 @@ done.
 """
 import json
 import os
-import shutil
 import sys
+
+try:
+    import backup_util
+except ImportError:  # pragma: no cover - import-path robustness only
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import backup_util
 
 
 def _this_dir():
@@ -110,9 +115,13 @@ def install_triggers(
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
 
-        # Backup existing file (if present)
+        # Backup existing file (if present). Atomic: the old shutil.copy2
+        # opened <path>.bak with O_TRUNC, so an interrupted run left a
+        # zero-byte .bak that read like a valid restore point (t_9462260b).
+        # Fixed name -> nothing to retain-limit, but the temp+replace path
+        # means a failed copy leaves the PREVIOUS .bak intact.
         if os.path.exists(triggers_path):
-            shutil.copy2(triggers_path, triggers_path + ".bak")
+            backup_util.atomic_copy(triggers_path, triggers_path + ".bak")
 
         tmp = triggers_path + ".tmp"
         with open(tmp, "w") as f:
