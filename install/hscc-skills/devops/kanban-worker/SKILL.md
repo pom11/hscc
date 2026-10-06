@@ -164,6 +164,37 @@ You can configure the gateway to receive cross-profile Kanban task notifications
 - `notification_sources: ['default', 'zilor-ppt']` or `"default,zilor-ppt"` restricts subscriptions to specified profiles.
 - Omitting the key keeps the default behavior (profile isolation).
 
+## Changelog entries (never edit `CHANGELOG.md`)
+
+`CHANGELOG.md` is **not** an authoring surface in this repo — its
+`[Unreleased]` section is a generated view of the `changelog.d/` directory. A
+worker that edits it re-creates a serial merge conflict: two cards landing in
+the same window both prepend into the same `### Fixed` / `### Verified` hunk,
+and every such collision cost a manual keep-both merge commit (confirmed twice:
+`t_163fa09f` @ `7864796`, `t_9462260b` @ merge `29d5e97`).
+
+The rule:
+
+- Add **one file per card**, named after your task id:
+  `changelog.d/<your-task-id>.md`. Two cards can never name the same file, so
+  the diffs are disjoint and always merge.
+- Format: a `kind:` header (`Added`/`Changed`/`Deprecated`/`Removed`/`Fixed`/
+  `Security`, or HSCC's `Verified` for landing evidence), an optional `task:` /
+  `order:` header, then the entry body **verbatim** — keep the leading `- `.
+  Multiple entries in one file are separated by a line containing exactly `---`.
+- Or let the tool write it: `python3 scripts/changelog_fragments.py add
+  --task <id> --kind Fixed --body "- **…** prose…"`.
+- Verify with `python3 scripts/changelog_fragments.py check` (also asserts the
+  committed `[Unreleased]` block was not hand-edited). A fragment named
+  anything but a task id fails the check — a shared name like `misc.md` would
+  reintroduce the collision.
+- `CHANGELOG.md` in your diff is a review finding. The release step
+  (`… changelog_fragments.py release --version X`) is what writes it.
+
+Full format, ordering and release details: `changelog.d/README.md` at the repo
+root — locate it with `git rev-parse --show-toplevel` (worktree nesting depth
+varies, and the deployed skill dir under `~/.hermes/plugins` cannot link to it).
+
 ## Do NOT
 
 - Call `delegate_task` as a substitute for `kanban_create`. `delegate_task` is for short reasoning subtasks inside YOUR run; `kanban_create` is for cross-agent handoffs that outlive one API loop.
