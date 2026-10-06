@@ -100,10 +100,31 @@ writer constants into a throwaway dir before any test imports the writers, and
 `test_writers_never_reach_the_exported_hermes_home` +
 `test_hooks_destination_is_not_under_a_live_home` pin it.
 
+An **import-time redirect alone is not enough**, and the reason is worth
+recording because it is easy to get wrong twice: `test_enable_plugins.py` calls
+`importlib.reload(ep)` in five places (to re-read model aliases from a clean
+env). `reload` **re-executes the module body**, so it re-binds
+`HOOKS_DIR`/`CLUSTER_GUARD_DST` straight from the exported `HERMES_HOME` and
+silently wipes any import-time patch. Measured with only the import-time
+redirect: backups kept appearing mid-suite at 5 s intervals for every `enable()`
+case *after the first reload*, with the count pinned at 3 — i.e. my own new
+keep-3 pruning was tidying the leak as it happened, which is exactly the kind
+of self-cleaning evidence that hides a defect. Fixed with an autouse teardown
+fixture that re-applies the redirect after each test (teardown, not setup, so
+the reload tests' own assertions on model constants complete first). Confirmed:
+`test_enable_plugins` + `test_backup_util` = **137 passed** with the live profile
+`hooks/` at 3 `.bak-*` before and after *and the newest stamp unchanged* — zero
+new writes across the whole reload-heavy file.
+
 Note for whoever runs the gate: a checkout that predates this conftest (e.g. the
 t_163fa09f gate worktree) still leaks while its suites run. Live `cluster-guard.py`
 md5 was verified unchanged (`f394d6a7`) across every run in this card, so the leak
-created noise in the pile, not damage to live state.
+created noise in the pile, not damage to live state. Same caution for the
+`suite-as-writer` classes still open elsewhere: `install_triggers.py` and
+`preserve_autodown.py` bind `HSCC_DIR` from `os.path.expanduser("~/.hscc")`, and
+`test_install_triggers.py` reloads that module too — those two tests patch `HOME`
+so they land in `tmp_path`, but the pattern is the one to check first if `~/.hscc`
+ever grows backups during a run.
 
 ## Design
 
