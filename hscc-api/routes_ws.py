@@ -100,17 +100,6 @@ def _spawn_worker(target, name: str) -> threading.Thread:
     return _ro.spawn_tracked_worker(target, name)
 
 
-def drain_workers(timeout: float = 5.0) -> "list[str]":
-    """Signal + join every in-flight turn worker; return straggler names.
-
-    Callers that are about to reset process-global job state must drain FIRST:
-    making the writer quiesce before clearing the store is the fix; clearing
-    harder afterwards is not (t_163fa09f).
-    """
-    import routes_orchestrator as _ro
-    return _ro.drain_workers(timeout=timeout)
-
-
 # --------------------------------------------------------------------------- #
 # Session framing over the raw socket
 # --------------------------------------------------------------------------- #

@@ -95,21 +95,15 @@ def _install_backing(monkeypatch, invoke, resolve_gate=None):
     return ro
 
 
-def _run_boundary(timeout=2.0):
-    """Perform one test-boundary the way conftest._isolate_chat_jobs does.
+def _run_boundary():
+    """Perform one test-boundary using THE canonical harness from conftest.
 
-    Drain (signal + join) FIRST, then clear the store, then retire the epoch and
-    re-stamp the calling thread with it — the order that makes the clear
-    meaningful. Repeating the harness here (rather than relying on collection
-    order) is what makes the regression deterministic.
+    Deliberately the same function the autouse fixture runs, not a copy: a copy
+    could drift from the real boundary and then the regression would prove
+    nothing about the suite.
     """
-    stragglers = routes_ws.drain_workers(timeout=timeout)
-    with ro._jobs_lock:
-        ro._jobs.clear()
-    reset_stores()
-    gen = ro.advance_job_generation()
-    setattr(threading.current_thread(), "_hscc_job_generation", gen)
-    return stragglers
+    from conftest import isolation_boundary
+    return isolation_boundary(stamp=True)
 
 
 def _stop_ack(monkeypatch, project="hscc"):
@@ -315,9 +309,9 @@ def test_server_path_never_advances_the_generation():
     chats could be refused or turns cut short. This test makes that refactor
     fail loudly instead of shipping.
 
-    Checked statically over the shipped modules: the only occurrences allowed
-    are the definitions themselves, the routes_ws pass-through wrapper, and the
-    log/message strings.
+    Checked statically over the shipped modules: the only occurrence allowed is
+    the definition itself (the conftest harness lives under tests/, which this
+    scan deliberately does not cover — it targets SERVER code).
     """
     import pathlib
     import re
@@ -330,10 +324,8 @@ def test_server_path_never_advances_the_generation():
             if not call_re.search(line):
                 continue
             stripped = line.strip()
-            if stripped.startswith(("def ", "cpdef ")):
+            if stripped.startswith("def "):
                 continue                       # the definition itself
-            if stripped.startswith("return _ro.drain_workers"):
-                continue                       # routes_ws pass-through wrapper
             offenders.append("%s:%d %s" % (path.name, lineno, stripped))
     assert not offenders, (
         "server code must never advance the job epoch or drain turn workers "
