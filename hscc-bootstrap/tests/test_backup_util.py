@@ -591,3 +591,49 @@ def test_cli_no_profiles_skips_profile_homes(tmp_path, capsys):
                               "--no-profiles", "--apply"]) == 0
     assert len(list((home / "hooks").glob("*.bak-*"))) == 1
     assert len(list((home / "profiles" / "worker" / "hooks").glob("*.bak-*"))) == 5
+
+
+# ── writer-site hermeticity (t_9462260b) ─────────────────────────────────────
+# The suites run in the worker env, which exports HERMES_HOME at the live
+# profile. enable_plugins binds HOOKS_DIR/CLUSTER_GUARD_DST from it *at import*,
+# so before tests/conftest.py redirected them, every test_enable_plugins case
+# that called enable() without patching wrote a real backup into the operator's
+# hooks/ — measured at 1 backup per ~5 s of suite runtime. These two tests are
+# the regression pin: they fail loudly if that redirection ever stops applying.
+
+def _repo_hooks_dir():
+    here = os.path.dirname(os.path.abspath(__file__))   # .../hscc-bootstrap/tests
+    return os.path.join(os.path.dirname(here), "hooks")  # .../hscc-bootstrap/hooks
+
+
+def test_hooks_destination_is_not_under_a_live_home():
+    """conftest must have moved the cluster-guard destination off real state."""
+    import enable_plugins
+    dst = enable_plugins.CLUSTER_GUARD_DST
+    real_home = os.path.expanduser("~/.hermes")
+    assert not dst.startswith(real_home + os.sep), (
+        f"CLUSTER_GUARD_DST points into the real home: {dst}")
+    sandbox = enable_plugins.__dict__["_CLUSTER_GUARD_SANDBOX"]
+    assert dst.startswith(sandbox), f"CLUSTER_GUARD_DST escaped the sandbox: {dst}"
+
+
+def test_writers_never_reach_the_exported_hermes_home(tmp_path, monkeypatch):
+    """Even with HERMES_HOME exported at a 'live' dir, the suite's writer path
+    must not create or modify anything there."""
+    live = tmp_path / "live-profile"
+    live_hooks = live / "hooks"
+    live_hooks.mkdir(parents=True)
+    live_guard = live_hooks / "cluster-guard.py"
+    live_guard.write_text("OPERATOR STATE\n")
+
+    monkeypatch.setenv("HERMES_HOME", str(live))
+    import enable_plugins
+    res = enable_plugins._ensure_hooks_file(_repo_hooks_dir())
+
+    assert res["installed"] is True
+    # live dir byte-for-byte untouched, and no backup was taken *there*
+    assert live_guard.read_text() == "OPERATOR STATE\n"
+    assert list(live_hooks.glob("*.bak-*")) == []
+    # the write landed in the throwaway sandbox instead
+    assert enable_plugins.CLUSTER_GUARD_DST.startswith(
+        enable_plugins._CLUSTER_GUARD_SANDBOX)
