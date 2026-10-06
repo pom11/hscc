@@ -7,6 +7,7 @@ hyphenated and not an importable package name).
 
 import os
 import sys
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -15,35 +16,86 @@ import pytest  # noqa: E402
 import api_server  # noqa: E402
 
 
+# Seconds one boundary drain may spend signalling + joining turn workers.
+_DRAIN_TIMEOUT_S = 2.0
+
+
+def isolation_boundary(stamp=False):
+    """Run one test-boundary over the process-global chat-job state.
+
+    THE canonical boundary: the autouse fixture below calls it at every setup
+    and teardown, and the regression tests import it so they exercise the
+    boundary the suite actually runs (a copy could drift from the real thing and
+    then prove nothing).
+
+    Order is the fix and must not be reordered (t_163fa09f):
+      1. DRAIN — signal every live turn worker (retire event + cancel its job
+         through the real stop path) and JOIN it, so any write it was going to
+         make has already happened before the store is emptied;
+      2. CLEAR the job store — a mop for terminal leftovers, not the defence;
+      3. RESET the event stores (process-global relay state too);
+      4. ADVANCE the job generation; when ``stamp`` is set, also stamp the
+         CALLING thread with the new epoch, so workers the test spawns inherit
+         it and may register, while any straggler born before the boundary is
+         rejected at ``_new_job`` even if the join above timed out (defence in
+         depth).
+
+    Returns the names of workers the drain could not join (empty in the normal
+    case) so callers can assert on them.
+    """
+    import threading
+
+    import routes_orchestrator as _ro
+    import session_event
+
+    try:
+        stragglers = _ro.drain_workers(timeout=_DRAIN_TIMEOUT_S)
+    except Exception:
+        # Never let isolation bookkeeping fail a test run.
+        stragglers = []
+    try:
+        with _ro._jobs_lock:
+            _ro._jobs.clear()
+    except Exception:
+        pass
+    try:
+        session_event.reset_stores()
+    except Exception:
+        pass
+    try:
+        gen = _ro.advance_job_generation()
+        if stamp:
+            setattr(threading.current_thread(), "_hscc_job_generation", gen)
+    except Exception:
+        pass
+    return stragglers
+
+
 @pytest.fixture(autouse=True)
 def _isolate_chat_jobs():
-    """Clear the process-global chat-job registry around every test.
+    """Quiesce ALL process-global chat-job state around every test.
 
     ``routes_orchestrator._jobs`` is a module-level dict that outlives any one
     test, and ``_in_flight_job(project)`` scans it to decide whether a WS
-    ``stop`` frame had anything to stop. A test that leaves a queued/running
-    job behind therefore makes a LATER test's "nothing in flight" assertion
-    fail — which is exactly why
+    ``stop`` frame had anything to stop. Historically
     ``test_ws_relay_not_noop.py::test_stop_kind_with_nothing_in_flight_is_noop``
-    passed when its file ran alone and failed when the whole directory ran.
+    passed alone and failed in full-directory runs because an EARLIER test's
+    relay worker thread registered a live ``hscc`` job AFTER this fixture had
+    cleared the store (instrumented proof:
+    docs/audits/ws_relay_stop_noop_flake_t_163fa09f.md). The t_7cc2e7d5 fix —
+    clearing before AND after — could not work: clearing a dict cannot stop an
+    unjoined thread from writing it again afterwards.
 
-    ``_isolate_hscc`` below cannot catch this: that leak is in memory, not on
-    disk. Cleared both before and after, so the registry is empty no matter
-    whether the previous test cleaned up or blew up mid-way.
+    The boundary (see :func:`isolation_boundary`) drains the writers BEFORE it
+    clears, and retires the epoch so late writes are rejected outright.
     """
-    import routes_orchestrator as _ro
-
-    def _clear():
-        try:
-            with _ro._jobs_lock:
-                _ro._jobs.clear()
-        except Exception:
-            # Never let isolation bookkeeping fail a test run.
-            pass
-
-    _clear()
+    isolation_boundary(stamp=True)   # test body runs stamped with the live epoch
     yield
-    _clear()
+    isolation_boundary()             # drain + clear + retire this test's epoch
+    # Un-stamp the (reused, process-wide) main thread so nothing outside a test
+    # body can ever carry a stale epoch into a later _new_job call.
+    import threading
+    setattr(threading.current_thread(), "_hscc_job_generation", None)
 
 
 @pytest.fixture
