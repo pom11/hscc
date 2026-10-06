@@ -121,19 +121,17 @@ def backup_file(src, keep=BACKUP_KEEP, stamp=None, dest=None):
     """
     src = str(src)
     if dest is None:
-        try:
-            st = os.stat(src)
-        except OSError:
+        if not os.path.exists(src):
             return None
-        if not os.path.isfile(src):
-            # A payload backup target can be a directory tree; copytree keeps it.
-            dest_src = src.rstrip("/") or src
-            dest = f"{dest_src}{BACKUP_INFIX}{stamp or _stamp()}"
-            if os.path.isdir(src):
-                shutil.copytree(src, dest, symlinks=False)
-                return dest
-        dest = f"{src}{BACKUP_INFIX}{stamp or _stamp()}"
+        dest = f"{src.rstrip('/') or src}{BACKUP_INFIX}{stamp or _stamp()}"
     dest = str(dest)
+
+    if os.path.isdir(src) and not os.path.islink(src):
+        # Payload backups are directory trees; a copytree to a fresh name is
+        # already all-or-nothing (nothing carries the final name until it lands).
+        shutil.copytree(src, dest, symlinks=False)
+        prune_backups(src, keep=keep)
+        return dest
 
     tmp = _tmp_name(dest)
     try:

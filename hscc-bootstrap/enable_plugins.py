@@ -35,6 +35,16 @@ import sys
 
 import _theme
 
+# Sibling module in hscc-bootstrap/. Installed runtimes get the whole directory
+# (install_payload's DEFAULT_PAYLOAD ships hscc-bootstrap), so this import
+# resolves in both the repo and the runtime dir; the sys.path fallback covers a
+# caller that imported this file by absolute path without its dir on the path.
+try:
+    import backup_util
+except ImportError:  # pragma: no cover - import-path robustness only
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import backup_util
+
 HSCC_PLUGINS = ["hscc-cluster", "hscc-commands", "sparkrun-hermes"]
 
 # Cluster-guard hook — lives in hscc-bootstrap/hooks/cluster-guard.py in the
@@ -756,7 +766,6 @@ def _ensure_hooks_file(hooks_source):
     Returns {"installed": True/False, "backed_up": str|None}.
     """
     import shutil
-    from datetime import datetime
     from pathlib import Path
 
     src = Path(hooks_source) / "cluster-guard.py"
@@ -768,10 +777,12 @@ def _ensure_hooks_file(hooks_source):
 
     backed_up = None
     if dst.exists():
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        bak = dst.parent / f"{dst.name}.bak-{stamp}"
-        shutil.copy2(dst, bak)
-        backed_up = str(bak)
+        # Atomic snapshot + retain-limited (t_9462260b): the old
+        # `shutil.copy2(dst, bak)` truncated the backup path before streaming,
+        # so an interrupted run left a zero-byte .bak where the rollback point
+        # should have been — and nothing ever pruned them, which is how the
+        # hooks dir reached 27k files.
+        backed_up = backup_util.backup_file(dst)  # str path, or None
 
     shutil.copy2(src, dst)
     os.chmod(dst, 0o755)
@@ -923,10 +934,10 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
             or changed_fallback or changed_bitwarden or changed_prompt_caching
             or changed_dashboard or changed_multiplex or changed_hooks
             or changed_approvals):
-        import shutil
-        import time
-        shutil.copy(config_path,
-                    f"{config_path}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+        # Atomic + retain-limited (t_9462260b). The old shutil.copy truncated
+        # the .bak path before streaming it, so an interrupted run could zero
+        # the operator's only rollback copy of a live profile config.
+        backup_util.backup_file(config_path)
         with open(config_path, "w") as fh:
             yaml.safe_dump(cfg, fh, sort_keys=False, default_flow_style=False)
 
