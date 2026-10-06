@@ -60,8 +60,11 @@ Group cards (all DONE, work on main):
 - t_b578972f [approvals-autodown] — 2 branches SUPERSEDED; disposition docs merged @ 1d7d4fd.
 
 40-branch disposition by LAND/SUPERSEDED/STALE is captured per-group in
-`docs/audits/phase1-<group>-*.md` (all 7 committed on origin/main). Branches not proven
-stale/superseded were LEFT INTACT per goal-doc §6.
+`docs/audits/phase1-<group>-*.md`. Correction (2026-10-06): the fleet-monitoring doc was
+found stranded on its branch (befe217/2273498) and the settings-profile doc was never
+written; both gaps closed by orchestrator rescues (fleet-monitoring merged @ 9a12972,
+settings-profile disposition written @ this commit) — all 7 now on origin/main. Branches
+not proven stale/superseded were LEFT INTACT per goal-doc §6.
 
 ### Phase 2 — iOS theme + UI/UX polish (COMPLETE — 4/4 cards)
 Theme system (Theme.swift) existed; the sweep routed every view through it. 4 cards:
