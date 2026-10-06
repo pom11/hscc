@@ -234,28 +234,48 @@ Same 5-test file, external plugins disabling one layer at a time:
 
 ## Verification
 
-Deliverable (4): FULL suite green on BOTH interpreters, run twice, with ZERO
-tolerated failures — the t_267f9d88 doctor baseline being green since it merged
-at d4ea539 (this branch is rebased onto it). Run through `scripts/flake_hunt.sh`,
-which additionally hashes live operator state before and after every run.
+Two evidence tiers are recorded deliberately. An unattributed green is worth
+nothing on this card: the isolation machinery itself was refactored mid-card
+(`e598e50` moved 119 lines of `tests/conftest.py`), so logs written before that
+tip describe code that no longer exists.
 
-| interpreter | run | result | total passed | hscc-api |
-|---|---|---|---|---|
-| p313 (3.13.12) | 1 | ALL GREEN, rc=0 | 4418 | 861 passed, 16 skipped |
-| p313 (3.13.12) | 2 | ALL GREEN, rc=0 | 4418 | 861 passed, 16 skipped |
-| py3.11 (hermes venv 3.11.16) | 1 | ALL GREEN, rc=0 | 4455 | 876 passed, 1 skipped |
-| py3.11 (hermes venv 3.11.16) | 2 | ALL GREEN, rc=0 | 4455 | 876 passed, 1 skipped |
+### Interim (pre-refactor, `8d06fee`-era code)
 
-All 9 plugin directories ✓ in every run (`hscc-bootstrap`, `hscc-commands`,
-`hscc-roles`, `hscc-cluster`, `hscc-project`, `hscc_daemon`, `sparkrun-hermes`,
-`hscc-api`, `memori_byodb`). `flake_hunt` reported `failed=0 leak=none` for all
-four: no live-state leak, and the target test passed in every full-suite run.
+`scripts/flake_hunt.sh`, 2 runs per interpreter: p313 4418 passed/0 failed x2,
+py3.11 4455/0 x2, all directories ✓, `leak=none` — logs `/tmp/flake_p313/`,
+`/tmp/flake_py311/`. Plus targeted pairs (isolation + relay file) 11 passed x6
+repeats on each interpreter. This evidence covers the drain+epoch behaviour but
+predates the canonical-boundary refactor, so it is NOT deliverable (4) for the
+submitted tip.
 
-The `hscc-api` count is 5 higher than the pre-fix baseline (856 observed on
-p313 before this branch, log `/tmp/p313_full1.log`) because
-`tests/test_ws_stop_noop_isolation.py` adds 5 tests. No pre-existing test was
-weakened, skipped, or removed; the 16 skips on p313 and 1 on py3.11 are the same
-pre-existing conditional skips as on main.
+### Final (deliverable 4 — at the submitted tip, commit-stamped)
+
+`scripts/audits/ws_relay_final_verify.sh` runs `scripts/run_tests.sh`
+SEQUENTIALLY (a concurrent suite perturbs exactly the thread timing under test)
+with `HERMES_HOME` at a profile dir (worker env), and stamps every log with
+`rev-parse HEAD`, dirty-file count, interpreter and pytest version.
+
+| interpreter | run | commit | result |
+|---|---|---|---|
+| p313 3.13.12 | 1 | `82a8cc0` (dirty_files 0) | ALL GREEN rc=0 — 8838 passed / 0 failed, target-file failures 0 |
+| p313 3.13.12 | 2 | `82a8cc0` (dirty_files 0) | ALL GREEN rc=0 — 8838 passed / 0 failed, target-file failures 0 |
+| py3.11 3.11.16 | 1 | `82a8cc0` (dirty_files 0) | ALL GREEN rc=0 — 8912 passed / 0 failed, target-file failures 0 |
+| py3.11 3.11.16 | 2 | `82a8cc0` (dirty_files 0) | ALL GREEN rc=0 — 8912 passed / 0 failed, target-file failures 0 |
+
+Chain exit `FINAL_VERIFY_CHAIN_DONE rc=0`; logs `/tmp/verify_p313/p313_run{1,2}.log`,
+`/tmp/verify_py311/py311_run{1,2}.log`. Per suite (identical across runs):
+hscc-bootstrap 343, hscc-commands 69, hscc-roles 135, hscc-cluster 460+15s (p313)
+/ 479 (py3.11), hscc-project 1351, hscc_daemon 1179+3s / 1182, sparkrun-hermes 12,
+**hscc-api 861 passed 16 skipped (p313) / 876 passed 1 skipped (py3.11)**,
+memori_byodb 9. The `target-file failures: 0` line counts FAILED lines matching
+`test_ws_relay_not_noop|test_ws_stop_noop_isolation`. (This flake is probabilistic
+— the flaky window eluded even the pre-fix harness runs — so what these runs
+establish is that the fix regresses nothing on the full suite at this tip, while
+deliverable (1)'s determinism is carried by the mutation-controlled regression
+tests above, not by sampling a probabilistic race.)
+
+The commit that fills in this table is docs-only (this file); production code was
+verified exactly at `82a8cc0`.
 
 Targeted evidence, in place:
 
