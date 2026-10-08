@@ -11,6 +11,277 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.5.5] - 2026-10-08
+
+### Fixed
+- **`hscc cluster up` collapsed a `uniform_pool` fleet back to single-role
+  aliases.** The wake path builds its own `sparkrun run` argv
+  (`hscc_daemon/serving.py:_unit_run_cmd`) rather than reusing the template's
+  recorded `serve_cmd`, and that builder predated `uniform_pool`: it derived
+  the alias from the unit's role, so a fleet up advertised
+  `orchestrator-model` on the orchestrator node only and `worker-model`
+  everywhere else. Measured on the live 4-node Flash-Next pool: after a
+  `cluster up`, `/v1/models` returned `[NVFP4, orchestrator-model]` on the
+  head node and `[NVFP4, worker-model]` on the other three, so orchestrator
+  work could only land on one node. `autodown.autoup()` and
+  `health.check_workers` share the builder, so an idle wake or a single gentle
+  relaunch re-collapsed the pool silently. `fleet_up_plan`/`keepalive_units`
+  now stamp the fleet-level flag onto every unit entry (`is_uniform_pool()`)
+  and `_served_model_name()` advertises both aliases under a pool, mirroring
+  `cluster_template._unit_serve_names` on the apply path.
+- **The wake path omitted `--tp` for single-node units, diverging from the
+  applied template's intent hash.** `cluster_template._render_serve_cmd` always
+  emits `--tp` (`--tp 1` included, deliberately, so a template can pin a
+  tp=2-by-default recipe to one node), but `_unit_run_cmd` emitted it only for
+  `tp > 1`. sparkrun folds `--served-model-name` and `--tp` into the intent
+  hash it turns into a `cluster_id`, so every tp=1 unit had a different hash on
+  the two paths — the duplicate-workload footgun (`t_e1ff0e8e`) that the
+  builder's own docstring warns about, reintroduced for tp=1. `--tp` is now
+  always emitted.
+- **Drift between the apply path and the wake path was silent.**
+  `_serve_cmd_mismatch()` compared only recipe, `--hosts` and `--port`, so a
+  recorded `serve_cmd` whose alias or tp disagreed with the derived command
+  passed unnoticed — which is how both bugs above stayed invisible. It now also
+  compares `--served-model-name` and `--tp` recorded-vs-derived, so this class
+  of divergence is reported instead of quietly recreating units with the wrong
+  aliases.
+- **The WS stop-no-op test was collection-order flaky on the full suite
+  (`test_ws_relay_not_noop.py::test_stop_kind_with_nothing_in_flight_is_noop`).**
+  Not a stop-path bug: `routes_ws` spawns `ws-relay-<project>` /
+  `ws-handoff-<project>` daemon threads per turn, and that worker thread — not
+  the test — registers the turn's `_ChatJob`, and only after resolving the
+  backing, the registry session and the Hermes session row. So the write could
+  land *after* the isolation fixture had cleared `routes_orchestrator._jobs`,
+  leaving a live `project="hscc"` job that `_in_flight_job` reported as an
+  in-flight turn; the `stop` frame then acked `stopped: True` and the test
+  failed. Captured on an instrumented p313 full run: `chat-31` registered 4 ms
+  after its owner's teardown clear and still running 3 tests later. This is why
+  t_7cc2e7d5's clear-before-*and*-after could not fix it — **clearing a dict
+  cannot stop an unjoined thread from writing it again**. `routes_orchestrator`
+  now owns its writers: `spawn_tracked_worker` registers every turn worker
+  (REST job worker + both WS workers) and stamps it with the job generation it
+  inherits from its spawner; `drain_workers` signals (retire event +
+  `cancel_job`, the production stop path) and joins them; and
+  `advance_job_generation`/`_StaleJobGeneration` refuse a late write from a
+  retired epoch, which `_default_relay` swallows silently so it cannot leak a
+  `relay_failed` event into the next test's store either.
+  `tests/conftest.py::isolation_boundary` performs one
+  drain → clear → reset → advance per boundary and is consumed by both the
+  autouse fixture and the regression tests, so they exercise the same code.
+  Both mechanisms are inert in the server (generation stays 0, nothing drains),
+  pinned by `test_server_path_never_advances_the_generation`.
+- **`doctor` false-failed on every dispatched worker (profile-scoped
+  `HERMES_HOME`).** Hermes sets `HERMES_HOME` to the *profile* dir
+  (`<root>/profiles/<name>`) whenever it runs under a named profile — its normal
+  run mode, per upstream `hermes_constants.get_hermes_home()` /
+  `get_default_hermes_root()`. The `hermes` check joined that path with
+  `hermes-agent` and reported a fatal "missing" install, because the checkout
+  lives at the root. Result: `doctor` (and therefore `bootstrap.sh` preflight)
+  was unusable on exactly the hosts that run it most — `hscc-bootstrap`'s two
+  `TestDoctorCLI` cases failed in every worker env while staying green on a
+  machine whose `HERMES_HOME` happened to hold the install. `hermes_root_from_home()`
+  now resolves the install as home → profiles-grandparent → `~/.hermes`, the same
+  rule `hscc-roles/rolelib.py` uses, and the check stays **fatal** when no
+  candidate carries `hermes-agent`. Resolved paths name themselves in `detail`
+  (with `hermes root resolved from profile home ...`) so a wrong-but-passing
+  answer stays readable.
+- **`doctor --fix` wrote the operator's live config from a test.** `main()` built
+  `config_path` from ambient `HERMES_HOME`, so a caller that intended some other
+  home still read and rewrote `$HERMES_HOME/config.yaml`. Measured on clean
+  `origin/main` with `HERMES_HOME` at a throwaway profile dir: a 2-key config came
+  back fully HSCC-wired (113 lines). Under a worker that file is the live profile
+  config; it looked benign only because that config was already wired, so the
+  write was idempotent. `main()` takes `--home PATH` and feeds ONE home to both
+  the config path and the checks. `enable_plugins`' hook target
+  (`HOOKS_DIR`/`CLUSTER_GUARD_DST`) is a module constant captured at import time
+  from ambient `HERMES_HOME`, which also dropped `cluster-guard.py` (+`.bak`) into
+  the real hooks dir regardless of target; the doctor fixtures redirect it.
+- **`run_doctor()` reached the live fleet config from unit tests.** It threaded
+  the injected cluster runner into `_sparkrun_cluster_ok` but called `_nas_ok()`
+  bare, so every call shelled out to a real `sparkrun cluster list` (15s) against
+  the operator's cluster config. The runner now reaches the NAS check too.
+- **Suite runs now self-attribute an external SIGTERM (rc=143).** Three
+  full-suite legs were aborted on 2026-10-06 and read board-wide as a mystery
+  "reaper"; forensics (docs/audits/rc143-suite-reaper-t_6bb29d46.md) proved every
+  one was an agent-issued kill — `pkill -f "run_tests.sh"` typed by a worker into
+  its own terminal tool to restart its legs, plus one harness `process.kill`.
+  `scripts/run_tests.sh` now traps SIGTERM and writes into the log itself: kill
+  time, elapsed, suite in flight, pid/ppid/parent command, and "EXTERNAL KILL,
+  NOT a test failure". `scripts/audits/rc143_guard_selftest.sh` proves the trap
+  (per-pid kill) and reproduces the incident shape (incident-style `pkill -f`
+  through `zsh -lic` + `timeout`) with sleep stubs only — it never runs pytest,
+  so it is safe alongside a timing-sensitive suite on the same host.
+- **Streaming chat send-retry restored (late land of t_791d1a75).** A failed
+  WS send is no longer a dead end: the phantom optimistic row is dropped and
+  the text returns to the composer for edit + retry; if the echo already
+  adopted the row the message is treated as delivered (no double-insert).
+  Guarded by streaming_check test 15. The card closed 2026-09-27 but its
+  branch never reached main — caught by the done-status x ancestry check.
+- **Backup writes could truncate the backup, and nothing ever pruned them.** The
+  follow-up t_267f9d88 deferred. Every bootstrap/doctor writer created its
+  `dst.bak-<ts>` by opening/copying **into the final name**, so an interrupt
+  between open and close left a zero-byte or partial file *at the rollback path*
+  — the read path cannot tell that from a real backup, so a rollback restores an
+  empty config or guard. Measured blast radius: **6 zero-byte
+  `cluster-guard.py.bak-*` at the root `~/.hermes/hooks/`, stamped August and
+  September** (i.e. in production installs, months before and independent of the
+  t_267 test window), plus 9 more from that window under the worker profile. And
+  with no retention limit anywhere in the bootstrap path, the pile reached
+  **32,502 `.bak-*` files / 1.5 GB** — `~/.hermes/hooks/` alone held 27,119
+  backups of one live 8,387-byte file. Fixed with one sink,
+  `hscc-bootstrap/backup_util.py`: `copy2` to a hidden `.…bak-<stamp>.tmp`
+  sibling → `fsync` → `os.replace` (a half-write can never occupy a retained
+  backup name), then retain-limit the family to `BACKUP_KEEP=3`. Backup failures
+  propagate (a caller about to overwrite operator state must know); pruning never
+  raises (hygiene can't fail an install). `enable_plugins`, `doctor`,
+  `install_scripts`, `install_soul`, `install_triggers` and `install_payload` all
+  route through it; `install_triggers`' fixed-name `.bak` now goes through
+  `atomic_copy` so it is no longer truncatable either.
+  **Ordering is by the NAME STAMP, not mtime, and that is load-bearing:**
+  `shutil.copy2` preserves the *source* mtime, so an mtime-sorted prune would rank
+  a fresh backup below one taken days ago and delete the newest first. The same
+  fact breaks auditing — `find … -name '*.bak-*' -newermt …` returns **0** against
+  this pile while 12 freshly-named backups sit in the dir, so any age query must
+  parse the stamp.
+  Deviation from the card body, deliberate: the writers apply a hard keep-N cap
+  with **no age criterion** (the 7-day floor lives on the one-shot `sweep_home`/
+  CLI), because a cap bounds growth regardless of write cadence while an age gate
+  is cadence-dependent — measured at one backup per 5 s, an age gate still admits
+  ~10k files per family per week. Cost stated plainly: under `--keep 3` a sweep
+  deletes the 4th-newest backup even if it is 60 s old (byte-identical to the 3
+  kept). Operator-labelled bookmarks (`*.bak-before-relay-fix`) are never removed
+  by hygiene — `stamped_only=True` default; only `--include-labeled` opts in.
+- **`backup_util.py`'s CLI deleted by default while its docstring said it did
+  not.** `dry_run` defaulted to `False`, so a bare `python
+  hscc-bootstrap/backup_util.py` walked to the real `~/.hermes` and pruned ~30k
+  rollback points with no prompt — the opposite of what the text above it promised
+  a reader about to run it. Now `dry_run = not args.apply`: a bare invocation
+  reports and removes nothing; deleting takes an explicit `--apply`.
+- **The bootstrap suites were themselves a backup writer.** `enable_plugins`
+  binds `HOOKS_DIR`/`CLUSTER_GUARD_DST` from `HERMES_HOME` at **import** time —
+  correct for bootstrap, which exports it — but the suites run in the worker env
+  where that variable points at the *live profile*, and 85 of 87
+  `test_enable_plugins` cases call `enable()` without patching those names. Each
+  wrote a real `.bak-<ts>` into the operator's `hooks/` (measured: 1 per ~5 s of
+  suite runtime, 9 of them zero-byte before the atomicity fix). `tests/conftest.py`
+  now redirects the three writer constants into a throwaway dir before any test
+  imports the writers (tests that patch their own destination still win), and two
+  new cases pin it.
+- **`CHANGELOG.md`'s `[Unreleased]` section was a serial merge-conflict point
+  for concurrent cards.** Every card prepended its bullet into the same
+  `### Fixed` / `### Verified` hunk, so two cards landing in the same window
+  collided on the same lines no matter how unrelated their code was —
+  confirmed by two landed merges (`t_163fa09f` @ `7864796`; `t_9462260b`
+  resolved the same hunk at merge `29d5e97` and landed @ `f7f15d3`). Each
+  collision cost a manual keep-both merge commit on the landing branch, and
+  every future sibling pair would pay it again. Fixed by making entry
+  authorship per-card: a card writes only `changelog.d/<its-task-id>.md`, two
+  cards can never name the same file, so their diffs are disjoint by
+  construction and `[Unreleased]` becomes a generated view. `CHANGELOG.md` now
+  leaves worker diffs entirely — the committed block is a pointer, and the
+  release step (`scripts/changelog_fragments.py release --version X`)
+  materialises the fragments into a version section and archives them.
+  The ordering rule is deterministic (kinds in Keep-a-Changelog order with
+  HSCC's `Verified` last; entries by task id, then in-file order), so
+  materialising is byte-identical regardless of the order fragments merged in.
+  `check` accepts only the pointer or exactly what `sync` would write, and fails
+  on a fragment whose name is not a task id — `misc.md` would re-create the
+  very collision this removes.
+- **Worker-facing guidance now bans name-based suite kills.** The rule against
+  `pkill -f "run_tests.sh"` / `pkill -f pytest` (name sweeps reap *other cards'*
+  concurrent legs) is now enforced guidance in docs/HANDOFF.md step 5, the
+  kanban-worker skill's Do-NOT list, and the `scripts/run_tests.sh` header —
+  stop your own run per-pid via the process tool instead (t_bd5a2ff0).
+
+### Verified
+- `hscc-bootstrap/tests/test_doctor.py`: 69 -> **72** cases, green with
+  `HERMES_HOME` exported to a profile dir. Negative control: against main's
+  unfixed `doctor.py`, the new leak guards and resolution tests fail 7/7 —
+  they catch the defect rather than tolerating it.
+- Full suite `scripts/run_tests.sh` **ALL GREEN** (9/9 packages) twice on py3.11
+  and twice on py3.13, each from a worker-like env with `HERMES_HOME` pointed at
+  a profile dir, plus a confirmation pair after rebasing onto main.
+- `docs/audits/doctor-hermes-home-t_267f9d88.md` — root cause, the design
+  verdict (a profile-scoped `HERMES_HOME` is legitimate, so the CHECK was wrong,
+  not only the tests), the evidence, and the live-state attribution: main's
+  unfixed `TestDoctorCLI` had already rewritten the worker profile's
+  `config.yaml` and accumulated `cluster-guard.py.bak-*` drops before this fix
+  existed. Cleanup of those inert `.bak` files is a separate follow-up.
+- `hscc-bootstrap/tests/test_backup_util.py`: **50** new hermetic cases
+  (all `tmp_path`-scoped, zero reach to a real home). Landing legs at tip
+  `a925447` (tree contains landed sibling `7864796`), worker env with
+  `HERMES_HOME` exported at the live profile, logs stamped with
+  `git rev-parse HEAD`: full `hscc-bootstrap/tests` = **396 passed / exit 0 on
+  BOTH interpreters** (hermes venv py3.11 + p313). Hermetic proof: identical
+  live-state snapshots before/after both whole-suite runs — profile `hooks/`
+  `.bak-*` 3→3, root `hooks/` 27,119 unchanged, `cluster-guard.py` md5
+  unchanged, real pile total 32,502 unchanged. The first redirect attempt did
+  NOT survive `importlib.reload` (5 reload sites in `test_enable_plugins`
+  re-bind the module constants from `HERMES_HOME`, and keep-3 pruning was
+  self-cleaning the evidence — count pinned at 3 while writes landed live);
+  the autouse teardown re-apply closes it, confirmed zero new writes across
+  the whole reload-heavy file.
+- The prune was measured against a **`cp -Rp` copy of the real pile**, never the
+  live dir: `hooks/` 27,122 → 2,132 entries (24,990 removed in 1.66 s; 318 MB →
+  36 MB), 2,122 survivors being the backups inside the 7-day floor plus the
+  keep-3; the copy's live `cluster-guard.py` stayed byte-identical. This is the
+  deferred cleanup follow-up from the entry above — the sweep clears the 6 root
+  August/September empties among the rest. Post-merge the operator re-runs it
+  against the live dirs once no sibling suite is writing there.
+- `docs/audits/backup-retain-atomicity_t_9462260b.md` — measured pile census,
+  the corrected empty-backup blast radius, the stamp-vs-mtime audit trap, the
+  keep-N-vs-7-day deviation with its justification, and the suite/sweep evidence
+  table stamped per commit.
+- `scripts/tests/test_changelog_fragments.py`: **26** new cases (plus the
+  existing `test_dep_pr_watcher.py`, `scripts/tests` = **31 passed / exit 0 on
+  BOTH interpreters**, hermes venv py3.11 + p313, run with
+  `env -u HERMES_DELEGATED_CHILD_CONTEXT`). Includes the card's required merge
+  proof as a pytest **and its negative control**:
+  `test_two_concurrent_cards_merge_without_conflict` (two cards, one base, both
+  add a Fixed entry → `git merge` rc 0 twice, `--diff-filter=U` empty) and
+  `test_old_single_file_scheme_conflicts` (the same experiment under the old
+  rule must conflict — without it the first test would only prove that git
+  merges disjoint files).
+- The merge proof was also run against the **real repo**, not only tmp
+  fixtures: two throwaway branches from one base, merged into a scratch branch
+  — zero conflicts, both fragments assembled, `check` green; all proof refs
+  deleted and `git worktree prune`d afterwards, tree clean.
+- **Migration losslessness: 13 entries / 143 entry lines preserved.** The
+  migrator refuses to write unless every non-blank `[Unreleased]` line lands in
+  exactly one fragment, and the independent round-trip re-assembly matches the
+  pre-migration blob `32c35ec` line-for-line (143 = 143, `identical=True`).
+  Attribution came from the first-parent landing merges, not guesswork:
+  `t_267f9d88` ×6, `t_9462260b` ×6, `t_163fa09f` ×1. The safety check earned
+  its existence immediately — the migrator's first cut silently dropped the
+  last entry of each section and the check named the lost line before anything
+  was written (fixed @ `24c0d27`).
+- `docs/audits/changelog-decomposition_t_95f1d6e1.md` — why option (a) was
+  chosen over (b) deterministic-headers and (c) supervisor-authored (with the
+  positional-conflict argument that rules (b) out), the execution evidence
+  above, and the honest transition cost: in-flight `wt/*` branches still edit
+  `CHANGELOG.md` and will conflict **once**, which
+  `changelog_fragments.py rescue --task … --branch …` makes mechanical.
+- End-to-end **release drill on a throwaway clone** of the landed branch:
+  `release --version 9.9.9-drill` produced a `## [9.9.9-drill] - 2026-10-06`
+  section with `### Fixed` before `### Verified` and all 18 bullet-lines, the
+  four fragments moved to `changelog.d/archive/9.9.9-drill/`, the
+  `[Unreleased]` pointer restored, `check` green afterward, and the fresh
+  clone's `scripts/tests` = **31 passed / exit 0**. A follow-up `sync` from the
+  now-empty working set was a clean no-op. Confirms the full
+  add→check→release→archive lifecycle, not just the authoring path.
+- All four live units' derived wake commands are now byte-identical to the
+  `serve_cmd` the template apply recorded in `~/.hscc/serving.json`
+  (compared per unit, 4/4 match; they differed on `--served-model-name` and
+  `--tp` before).
+- `hscc_daemon/tests/test_serving_extra.py`: +7 cases
+  (`TestUniformPoolWakePath`) covering both aliases under a pool, single-role
+  aliases preserved without the flag, the flag riding on `keepalive_units`
+  entries for the relaunch path, `--tp` always emitted, and the new drift
+  canary. The `keepalive_units` exact-key-set contract test was updated for
+  the added key.
+- Full suite `scripts/run_tests.sh` **ALL GREEN** (9/9 packages):
+  **4517 passed, 0 failed**.
+
 ## [2.5.4] - 2026-10-05
 
 ### Fixed
