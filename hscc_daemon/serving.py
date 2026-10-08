@@ -200,6 +200,7 @@ def keepalive_units(serving):
     whenever the unit does not carry them (env-derived nodes, tp<=1).
     """
     out = []
+    pool = is_uniform_pool(serving)
     default_port = serving_port(serving) if isinstance(serving, dict) else VLLM_PORT
     seen = set()
     if isinstance(serving, dict):
@@ -221,7 +222,8 @@ def keepalive_units(serving):
                             "nodes": unit_nodes or [node],
                             "tp": tp,
                             "model": u.get("model"),
-                            "role": u.get("role")})
+                            "role": u.get("role"),
+                            "uniform_pool": pool})
     for node in _env_keepalive_nodes():
         key = (node, default_port)
         if key not in seen:
@@ -244,6 +246,20 @@ def fleet_down_cmd():
     down (orchestrator AND keepalive workers) — the whole point of the feature.
     """
     return ["sparkrun", "stop", "--all", "--cluster", HSCC_CLUSTER]
+
+
+def is_uniform_pool(serving):
+    """True when serving.json declares a ``uniform_pool`` fleet.
+
+    Mirrors ``template_intent.ResolvedPlan.uniform_pool`` (written to
+    serving.json by the template apply). Under a uniform pool every unit runs
+    the SAME recipe and must serve EITHER role, so role-derived single aliases
+    are wrong on the wake path. Top-level key, not per-unit: the flag describes
+    the fleet.
+    """
+    if not isinstance(serving, dict):
+        return False
+    return bool(serving.get("uniform_pool"))
 
 
 def _role_alias(role):
@@ -288,6 +304,13 @@ def _served_model_name(u):
     concrete = _concrete_model(u)
     if not concrete:
         return None
+    # Under a uniform pool the unit advertises BOTH aliases, exactly as
+    # cluster_template._unit_serve_names renders them on the apply path — the
+    # two builders MUST agree or sparkrun derives a different intent hash for
+    # the same logical unit (see _unit_run_cmd). The flag is stamped onto each
+    # entry by fleet_up_plan/keepalive_units from serving.json's top level.
+    if u.get("uniform_pool"):
+        return f"{concrete} worker-model orchestrator-model"
     return f"{concrete} {_role_alias(u.get('role'))}"
 
 
@@ -332,6 +355,17 @@ def _serve_cmd_mismatch(u, cmd):
         sc_port = _flag_after(sc, "--port", "")
         if sc_port and sc_port != port:
             return f"serve_cmd --port {sc_port!r} != unit port {port!r}"
+    # The flags sparkrun folds into its INTENT HASH beyond recipe/hosts/port.
+    # The apply path (cluster_template._render_serve_cmd) records them in
+    # serve_cmd; this module derives them independently for the wake path. If
+    # the two ever disagree, --ensure derives a different cluster_id and
+    # recreates (or duplicates) the unit with the WRONG served aliases — the
+    # uniform_pool collapse. Compared here so that drift is loud, not silent.
+    for flag in ("--served-model-name", "--tp"):
+        want = _flag_after(cmd, flag)
+        got = _flag_after(sc, flag)
+        if want is not None and got is not None and got != want:
+            return f"serve_cmd {flag} {got!r} != derived {want!r}"
     return ""
 
 
@@ -364,9 +398,12 @@ def _unit_run_cmd(unit):
     smn = _served_model_name(unit)
     if smn:
         cmd.extend(["--served-model-name", smn])
+    # ALWAYS emit --tp, tp=1 included, because cluster_template._render_serve_cmd
+    # does. Omitting it for tp=1 made this builder's argv differ from the
+    # applied template's for every single-node unit, which is precisely the
+    # intent-hash divergence the docstring above warns about.
     tp = unit.get("tp")
-    if tp is not None and int(tp) > 1:
-        cmd.extend(["--tp", str(int(tp))])
+    cmd.extend(["--tp", str(int(tp)) if tp is not None else "1"])
     return cmd
 
 
@@ -397,6 +434,7 @@ def fleet_up_plan(serving=None):
         serving = load_serving()
     if not isinstance(serving, dict):
         return []
+    pool = is_uniform_pool(serving)
     orch = []
     workers = []
     for u in (serving.get("units", []) or []):
@@ -414,7 +452,7 @@ def fleet_up_plan(serving=None):
                          "nodes": nodes, "port": port, "unit_id": unit_id,
                          "recipe": recipe, "keepalive": False,
                          "model": u.get("model"), "serve_cmd": u.get("serve_cmd"),
-                         "tp": u.get("tp")})
+                         "tp": u.get("tp"), "uniform_pool": pool})
         elif role == "worker":
             # BOTH keepalive and non-keepalive workers come up on fleet-up.
             recipe = u.get("recipe") or VLLM_RECIPE
@@ -425,7 +463,7 @@ def fleet_up_plan(serving=None):
                             "keepalive": bool(u.get("keepalive")),
                             "model": u.get("model"),
                             "serve_cmd": u.get("serve_cmd"),
-                            "tp": u.get("tp")})
+                            "tp": u.get("tp"), "uniform_pool": pool})
     workers.sort(key=lambda e: e["unit_id"])
     plan = orch + workers
     cmds = []
