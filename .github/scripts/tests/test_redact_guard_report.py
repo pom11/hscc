@@ -135,6 +135,20 @@ def test_workflow_is_advisory_by_default_and_opt_in_blocking():
         "a guard that cannot run must not be demoted to advisory"
 
 
+def test_guard_cannot_run_is_reported_before_the_redactor():
+    """A checkout missing scripts/address_guard.py also breaks the redactor.
+
+    Measured on real CI (probe/failclosed-9a4b7687): with the redactor branch
+    first, that checkout reported "redactor could not load the pattern" — true
+    but misleading, since the missing file is the guard's. rc=2 must be checked
+    first so the annotation names the component that is actually absent.
+    """
+    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    run = doc["jobs"]["guard"]["steps"][-1]["run"]
+    assert run.index('"$rc" -eq 2') < run.index('"$redact_rc" -ne 0'), \
+        "rc=2 must be diagnosed before the redactor's own failure"
+
+
 def test_workflow_needs_no_network_beyond_checkout():
     """Acceptance: nothing in the job may reach the network."""
     doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
