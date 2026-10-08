@@ -15,13 +15,23 @@ when the suite runs, and a docs-only commit never runs the suite. The hook is th
 commit-time trigger the guard was always missing.
 
 Idempotent and cheap: writes ``core.hooksPath`` only when it differs from the
-target, and only fixes the exec bit when it is missing.
+target, and only fixes the exec bit when it is missing. It arms a checkout ONLY
+when both halves — ``.githooks/pre-commit`` and ``scripts/address_guard.py`` —
+are present *in that checkout*: the config is shared across worktrees, so arming
+it where the files are absent would advertise protection that does not exist
+(measured by the operator during this card's review — see ``posture()``).
+
+``posture()`` / ``install_hooks.py --check`` is the per-checkout status readout
+(``armed`` / ``unarmed`` / ``armed-but-absent`` / ``not-a-repo``), because the
+config value alone cannot tell you whether the hook git will run here actually
+exists and is executable.
 
 Scope note: ``core.hooksPath`` is written to the repo's COMMON config, so every
-linked worktree (including the kanban dispatcher's ``.worktrees/`` checkouts)
-inherits the hook without a per-worktree step. The plugin tree copied into
-``~/.hermes/plugins`` is NOT a git checkout, so an install pointed there reports
-``skipped`` rather than failing — the guard belongs to the repository.
+linked worktree of a checkout that HAS the files (including the kanban
+dispatcher's ``.worktrees/`` checkouts) is armed by one install. The plugin tree
+copied into ``~/.hermes/plugins`` is NOT a git checkout, so an install pointed
+there reports ``skipped`` rather than failing — the guard belongs to the
+repository.
 """
 
 import json
@@ -33,6 +43,9 @@ from pathlib import Path
 HOOKS_DIR_NAME = ".githooks"
 HOOKS_PATH_VALUE = HOOKS_DIR_NAME  # relative -> resolved per worktree by git
 PRE_COMMIT = "pre-commit"
+# The hook is plumbing; it is USELESS without this script, and it fails closed
+# when the script is missing. Both must be present in the checkout being armed.
+GUARD_REL = "scripts/address_guard.py"
 EXEC_MODE = 0o755
 
 DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -102,15 +115,26 @@ def install_hooks(repo_root=None, *, dry_run=False):
     hook = hooks_dir / PRE_COMMIT
     result.update(toplevel=str(top), hooks_dir=str(hooks_dir), hook=str(hook))
 
-    if not hook.is_file():
-        # Either an old revision that predates the committed hooks, or the hooks
-        # were removed. Nothing to point at — say so instead of configuring a
-        # path whose hook does not exist (git would then silently find nothing).
+    # Arm only when BOTH halves exist in THIS checkout. The hook is plumbing and
+    # fails closed without the detector, so arming a path whose hook is absent (or
+    # whose guard script is absent) would advertise protection that is not there.
+    # Measured consequence of getting this wrong (operator, t_ec2c2f95 review):
+    # core.hooksPath is relative and lives in the COMMON config, so arming it from
+    # one checkout makes every worktree *report itself armed* while the ones that
+    # lack the files silently find no hook and commit normally — fail-open exactly
+    # where it matters. See posture() for the honest per-checkout readout.
+    guard = top / GUARD_REL
+    missing = [p for p, ok in ((hook, hook.is_file()), (guard, guard.is_file())) if not ok]
+    if missing:
         result.update(
             action="skipped",
-            reason=f"no committed hook at {HOOKS_DIR_NAME}/{PRE_COMMIT} in {top}",
+            guard_present=guard.is_file(),
+            reason="not arming: missing in this checkout — "
+            + ", ".join(str(m.relative_to(top)) for m in missing),
         )
         return result
+    result["guard_present"] = True
+
 
     # The exec bit survives `git checkout` only because the blob is mode 100755;
     # a file copied into place by another tool may land non-executable, and git
@@ -158,11 +182,73 @@ def install_hooks(repo_root=None, *, dry_run=False):
     return result
 
 
+def posture(repo_root=None):
+    """Honest per-checkout readout of the guard — what ``hscc check --repo`` shows.
+
+    ``core.hooksPath`` lives in the COMMON config and is RELATIVE, so the config
+    value alone lies: a worktree whose checkout lacks ``.githooks/pre-commit`` (or
+    ``scripts/address_guard.py``) resolves nothing and silently commits. The only
+    truthful question is per-checkout: does the hook git will actually run here
+    EXIST and is it EXECUTABLE. This answers that, independently of the config.
+
+    ``state`` is one of:
+      ``armed``            — config set AND the hook + detector exist and run here
+      ``unarmed``          — config unset; commit-time guard not active (run bootstrap)
+      ``armed-but-absent`` — config set but this checkout has no runnable hook:
+                             FAIL-OPEN, and the config advertises protection. This
+                             is the mismatch the operator flagged (t_ec2c2f95 review).
+      ``not-a-repo``       — no git top-level here.
+    """
+    repo_root = Path(repo_root or DEFAULT_REPO_ROOT).expanduser().resolve()
+    top = _toplevel(repo_root)
+    if top is None:
+        return {"state": "not-a-repo", "toplevel": None, "core_hooks_path": None,
+                "hook_present": False, "hook_executable": False,
+                "guard_present": False, "detail": f"no git top-level: {repo_root}"}
+
+    hooks_path = current_hooks_path(top)
+    hook = top / HOOKS_DIR_NAME / PRE_COMMIT
+    guard = top / GUARD_REL
+    hook_present, guard_present = hook.is_file(), guard.is_file()
+    hook_executable = hook_present and bool(hook.stat().st_mode & 0o111)
+    armed = hooks_path == HOOKS_PATH_VALUE
+    runnable = hook_present and hook_executable and guard_present
+
+    if not armed and not runnable:
+        state = "unarmed"
+    elif armed and runnable:
+        state = "armed"
+    else:
+        state = "armed-but-absent"
+
+    bits = []
+    if not hook_present:
+        bits.append(f"{HOOKS_DIR_NAME}/{PRE_COMMIT} absent")
+    elif not hook_executable:
+        bits.append(f"{HOOKS_DIR_NAME}/{PRE_COMMIT} not executable (git ignores it)")
+    if not guard_present:
+        bits.append(f"{GUARD_REL} absent")
+    return {
+        "state": state,
+        "toplevel": str(top),
+        "core_hooks_path": hooks_path,
+        "hook_present": hook_present,
+        "hook_executable": hook_executable,
+        "guard_present": guard_present,
+        "detail": "; ".join(bits) if bits else "hook present, executable, detector present",
+    }
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     dry_run = "--dry-run" in argv
-    args = [a for a in argv if a != "--dry-run"]
+    check_only = "--check" in argv
+    args = [a for a in argv if a not in ("--dry-run", "--check")]
     repo_root = args[0] if args else None
+    if check_only:
+        p = posture(repo_root)
+        print(json.dumps(p))
+        return 0 if p["state"] == "armed" else 1
     res = install_hooks(repo_root, dry_run=dry_run)
     print(json.dumps(res))
     return 0 if res["action"] in ("installed", "verified") else 1

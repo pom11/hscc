@@ -22,14 +22,20 @@ kind: Added
 task: t_ec2c2f95
 
 - **`.githooks/` + `hscc-bootstrap/install_hooks.py`** — hooks can now ship with
-  the repository. Plain `.git/hooks` is not cloned, so it cannot be a mechanism;
+  the repository. Plain `.git/hooks` is not cloned, so it cannot be the mechanism;
   the committed `.githooks/pre-commit` plus `core.hooksPath .githooks` is.
   `install_hooks.py` is a new bootstrap stage (3c) and is idempotent: `verified`
   with zero writes on re-run, repairs a missing exec bit (git silently ignores a
-  non-executable hook), and reports `skipped` — never a faked success — for a
-  non-checkout runtime dir or a revision without the committed hooks. It writes
-  `core.hooksPath` to the **COMMON** git config, so the dispatcher's worker
-  worktrees inherit the guard from ONE install, including worktrees created
-  outside the repo directory. Stdlib-only, one `git diff` plus one
-  `git cat-file --batch`: ~0.13 s over the repo's 1070 tracked files, because a
-  slow leak check gets bypassed with `--no-verify`.
+  non-executable hook). It arms a checkout **only when both halves — the hook and
+  `scripts/address_guard.py` — exist in that checkout**: `core.hooksPath` lives in
+  the COMMON config and is relative, so writing it from a partial checkout would
+  make every sibling worktree report itself armed while it silently finds no hook
+  (measured live during this card's review; `posture()` / `install_hooks.py
+  --check` reports the truth per checkout: `armed` / `unarmed` / `armed-but-absent`
+  / `not-a-repo`). Reports `skipped` — never a faked success — for a non-checkout
+  runtime dir or an incomplete revision. When complete, the COMMON-config write
+  means every linked worktree — the dispatcher's worker worktrees included, even
+  ones created outside the repo directory — is armed by ONE install. Stdlib-only,
+  one `git diff` plus one `git cat-file --batch`: measured **0.133 s** over the
+  repo's 1070 tracked files (13.3 MB), because a slow leak check gets bypassed
+  with `--no-verify`.
