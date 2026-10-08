@@ -178,6 +178,26 @@ job is ~10 s; racing it buys nothing.
   block stays allowed and `10.x` / `172.16.x` stay out of scope, exactly as
   shipped by the parent. The CI job inherits the detector's scope, by design.
 
+## 8b. Gate hygiene: how I produced a false failure
+
+The first full-suite leg ran from the live task worktree while I was still
+editing it, and reported `✗ hscc_daemon` —
+`test_no_real_operator_address_in_tracked_files` flagged
+`docs/audits/ci-backstop-address-guard-t_9a4b7687.md:68`. That was a *correct
+verdict about the wrong checkout*: the leg was stamped `commit: 7a7b5241`, but
+`scan_tracked` reads files from **disk**, and the audit doc still carried a
+literal address in a code sample at that moment (scrubbed two commits later). A
+real failure, not a flake, and entirely self-inflicted.
+
+The repo rule already covers this — full-suite verification belongs in a **clean
+detached worktree at the target commit** — and I broke it by launching the gate
+before the branch was finished. The re-run is stamped with `commit`,
+`dirty_files: 0`, interpreter and worktree path so the claim is auditable. Two
+lessons worth keeping:
+
+* never start the suite from a worktree that is still being edited;
+* the CI backstop's guard test catches *my own* prose leaks, which is the point.
+
 ## 9. Files
 
 | File | Purpose |
