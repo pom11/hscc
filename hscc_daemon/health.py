@@ -167,7 +167,7 @@ def _sparkrun_cli():
 
 
 def _sparkrun_exec_argv(argv):
-    """Swap a logical ``["sparkrun", …]`` argv[0] for the absolute CLI path.
+    """Swap a bare ``sparkrun`` argv[0] for the absolute CLI path.
 
     The single execution chokepoint for every sparkrun shell-out/Popen in the
     daemon health/relaunch paths. Command BUILDERS keep expressing the logical
@@ -271,7 +271,7 @@ def _sparkrun_workloads_textparse():
     empty fleet; that fail-open was the whole bug (t_b543e530). The logical
     argv is resolved to the absolute CLI by ``util.run_cmd`` at exec time.
     """
-    spark_result = run_cmd(["sparkrun", "status"], timeout=10)
+    spark_result = run_cmd(sparkrun_bin.argv("status"), timeout=10)
     if not spark_result.get("ok"):
         return [], False
     workloads = []
@@ -565,8 +565,9 @@ def check_proxy():
         return True
 
     log(f"Worker proxy down on :{PROXY_PORT} — relaunching", "WARN")
-    r = run_cmd(["sparkrun", "proxy", "start", "--cluster", serving.HSCC_CLUSTER,
-                 "--hosts", ",".join(nodes), "--port", str(PROXY_PORT)], timeout=90)
+    r = run_cmd(sparkrun_bin.argv("proxy", "start", "--cluster", serving.HSCC_CLUSTER,
+                                  "--hosts", ",".join(nodes), "--port", str(PROXY_PORT)),
+                timeout=90)
     ok = r.get("ok", False)
     proxy_data = {"ok": ok, "port": PROXY_PORT, "relaunched": True,
                   "last_check": now_iso(),
@@ -633,7 +634,7 @@ def check_local():
     # Node.js / npm
     node_r = run_cmd(["node", "--version"], timeout=3)
     npm_r = run_cmd(["npm", "--version"], timeout=3)
-    spark_r = run_cmd(["sparkrun", "--version"], timeout=3)
+    spark_r = run_cmd(sparkrun_bin.argv("--version"), timeout=3)
     tools = {
         "node": {"version": node_r.get("output", "").strip()} if node_r.get("ok") else {},
         "npm": {"version": npm_r.get("output", "").strip()} if npm_r.get("ok") else {},
@@ -1593,8 +1594,8 @@ def check_workers():
         # re-provisioned group binds :port. --hosts <span> scopes the stop to the
         # span (not --all), so an unrelated co-located sibling on another port
         # survives.
-        stop_result = run_cmd(["sparkrun", "stop", recipe, "--hosts", ",".join(span)],
-                              timeout=60)
+        stop_result = run_cmd(sparkrun_bin.argv(
+            "stop", recipe, "--hosts", ",".join(span)), timeout=60)
         if not stop_result.get("ok"):
             log(f"sparkrun stop for {label} failed: {stop_result.get('output', '')}", "WARN")
         # Record relaunch time before launching so we do not thrash even if
