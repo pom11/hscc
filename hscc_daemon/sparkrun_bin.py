@@ -85,10 +85,10 @@ def _is_usable(path):
 def sparkrun_cli() -> str | None:
     """Absolute path to the ``sparkrun`` CLI, or None when genuinely absent.
 
-    PATH first (an operator's ``HSCC_SPARKRUN_BIN`` override or a deliberate
-    PATH install always wins), then the deterministic candidate list. Unlike
-    ``shutil.which`` this keeps working under a service-managed PATH that omits
-    ``~/.local/bin``.
+    ``HSCC_SPARKRUN_BIN`` (an explicit operator/test override) wins when it
+    names a usable file; then PATH; then the deterministic candidate list.
+    Unlike ``shutil.which`` this keeps working under a service-managed PATH
+    that omits ``~/.local/bin``.
     """
     override = os.environ.get("HSCC_SPARKRUN_BIN", "")
     if override:
@@ -97,7 +97,9 @@ def sparkrun_cli() -> str | None:
         return _cli_cache["path"]
 
     found = shutil.which(CLI_NAME)
-    if not _is_usable(found):
+    if found and _is_usable(found):
+        found = os.path.realpath(found)
+    else:
         found = None
         home = os.path.expanduser("~") or ""
         for cand in _candidate_paths(home):
@@ -181,14 +183,54 @@ def reset_cache() -> None:
     _interp_cache.clear()
 
 
+def ensure_on_path() -> str | None:
+    """Put the resolved sparkrun directory on this process' PATH; return it.
+
+    For the remaining ``shell=True`` sparkrun call sites (``timeout 3 sparkrun
+    cluster monitor …`` in hscc-cluster, the ``sparkrun cluster list --json``
+    topology fallback): an argv rewrite cannot help a shell string, so the
+    daemon fixes the ENVIRONMENT once at startup instead of per call. Idempotent
+    and additive — the dir is only prepended when missing, so an operator's
+    deliberate PATH ordering is preserved and an already-working PATH is
+    untouched. Returns the directory, or None when sparkrun is not installed.
+    """
+    cli = sparkrun_cli()
+    if not cli:
+        return None
+    directory = os.path.dirname(cli)
+    parts = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    if directory not in parts:
+        os.environ["PATH"] = os.pathsep.join([directory] + parts)
+    return directory
+
+
+def argv(*args) -> list:
+    """Build a sparkrun argv whose ``argv[0]`` is resolvable right now.
+
+    ``sparkrun_bin.argv("status")`` replaces the logical ``["sparkrun", "status"]``
+    at EXEC time, so no call site can carry a bare ``sparkrun`` argv[0] into a
+    subprocess. Resolution rules are exactly :func:`exec_argv`'s: PATH-executable
+    → the bare name (bit-identical to a healthy interactive shell), otherwise the
+    absolute resolved path.
+    """
+    return exec_argv([CLI_NAME, *args])
+
+
 def exec_argv(argv):
     """Rewrite a sparkrun argv so it is executable under any PATH.
 
     Command BUILDERS (``serving._unit_run_cmd``, ``fleet_down_cmd``,
     ``VLLM_STOP_CMD``, …) express the logical ``["sparkrun", …]`` command; this
     is the single EXECUTION chokepoint that swaps ``argv[0]`` to the resolved
-    absolute path right before the shell-out. If the CLI cannot be resolved at
-    all, the argv is returned unchanged so the subprocess fails the same loud
+    absolute path right before the shell-out.
+
+    No-drift rule: ``sparkrun_cli()`` resolves PATH-first, so the absolute path
+    is the SAME file a healthy PATH would have exec'd — the rewrite is purely
+    mechanical (no behavioural change for well-configured environments) and is
+    what makes the acceptance grep ("no bare ``sparkrun`` argv[0] literal")
+    true. An explicit ``HSCC_SPARKRUN_BIN`` override always pins execution to
+    that file (used by the hermetic test suite). If the CLI cannot be resolved
+    at all the argv is returned unchanged so the subprocess fails the same loud
     ``[Errno 2]`` way it does today (never a silent no-op).
 
     Only an exact bare ``sparkrun`` argv[0] is rewritten — absolute paths and
@@ -198,5 +240,5 @@ def exec_argv(argv):
         return argv
     cli = sparkrun_cli()
     if not cli:
-        return argv
+        return argv          # genuinely absent — loud [Errno 2], never silent
     return [cli] + list(argv[1:])

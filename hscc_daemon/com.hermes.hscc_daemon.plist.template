@@ -37,7 +37,14 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>__HOME__/.hermes/hermes-agent/venv/bin:/opt/homebrew/bin:__HOME__/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- t_b543e530: __HOME__/.local/bin is where the sparkrun CLI lives.
+             A plist PATH that omits it made every sparkrun shell-out under
+             launchd die with [Errno 2] (fleet status + worker auto-heal). The
+             daemon now also resolves sparkrun PATH-independently, but the
+             service environment must still be able to SEE the CLI for the
+             shell=True call sites. Keep this list in step with
+             install._daemon_path_env(). -->
+        <string>__HOME__/.hermes/hermes-agent/venv/bin:__HOME__/.local/bin:/opt/homebrew/bin:__HOME__/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>HOME</key>
         <string>__HOME__</string>
         <key>PYTHONPATH</key>
