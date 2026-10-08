@@ -396,3 +396,65 @@ class TestTriggerEngine:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestNasDownMetric:
+    """The `nas_down` metric, and the default rule that fires on it.
+
+    Before this there was NO metric that could read the nas check, so no rule
+    could alert on a lost share. The 2026-10-08 NAS reboot left all five
+    clients unmounted and `nas.json` ok=False for ~2h with nobody notified:
+    detection worked, the actor was missing.
+    """
+
+    def _state_dir(self, tmp_hfcc_dir, monkeypatch):
+        from hscc_daemon import state as state_mod
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(exist_ok=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        return state_dir
+
+    def _rule(self):
+        return {"condition": {"metric": "nas_down", "op": "==",
+                              "value": "True"}}
+
+    def test_fires_when_nas_check_failing(self, tmp_hfcc_dir, monkeypatch):
+        from hscc_daemon import trigger
+        state_dir = self._state_dir(tmp_hfcc_dir, monkeypatch)
+        (state_dir / "nas.json").write_text(json.dumps({
+            "ok": False,
+            "details": {"message": "/Volumes/NAS exists but is not an NFS "
+                                   "mount (export/mount lost)"}}))
+        assert trigger.evaluate_trigger(
+            self._rule(), {"event_type": "state.nas.degraded"}) is True
+
+    def test_silent_when_nas_healthy(self, tmp_hfcc_dir, monkeypatch):
+        from hscc_daemon import trigger
+        state_dir = self._state_dir(tmp_hfcc_dir, monkeypatch)
+        (state_dir / "nas.json").write_text(json.dumps({"ok": True}))
+        assert trigger.evaluate_trigger(
+            self._rule(), {"event_type": "heartbeat"}) is False
+
+    def test_absent_state_does_not_alert(self, tmp_hfcc_dir, monkeypatch):
+        """A daemon that has not run the nas check yet must not alert — same
+        fail-open shape as failed_dgx, so a fresh start is quiet."""
+        from hscc_daemon import trigger
+        self._state_dir(tmp_hfcc_dir, monkeypatch)
+        assert trigger.evaluate_trigger(
+            self._rule(), {"event_type": "heartbeat"}) is False
+
+    def test_default_rules_ship_a_nas_rule(self):
+        """The metric is useless without a rule that uses it, and bootstrap
+        only ever ADDS missing default ids — so the rule has to be in the
+        shipped defaults to reach an existing install."""
+        import os
+        import json as _json
+        here = os.path.dirname(os.path.abspath(__file__))
+        defaults = os.path.join(
+            here, "..", "..", "hscc-bootstrap", "triggers.default.json")
+        rules = _json.load(open(os.path.normpath(defaults)))["rules"]
+        nas = [r for r in rules if r["id"] == "nas-down"]
+        assert len(nas) == 1, [r["id"] for r in rules]
+        assert nas[0]["condition"]["metric"] == "nas_down"
+        assert nas[0]["condition"]["value"] is True
+        assert nas[0]["trigger_type"] == "notify"
