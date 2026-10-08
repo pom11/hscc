@@ -241,6 +241,114 @@ def test_the_real_repo_passes_the_job_leg():
     assert rc == 0, printed
 
 
+# ── the job's decision logic, executed verbatim ──────────────────────────────
+#
+# The leak branches (rc=1) cannot be exercised on real CI by pushing a leak,
+# because pushing a real-shaped address is the very leak this repo forbids. So
+# we take the step's shell script OUT of the YAML and run it verbatim against a
+# stub guard, in every decision state. The redactor is the real one, and the
+# script is the one shipping — this is the workflow's logic under test, not a
+# copy of it.
+
+def _step_script():
+    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    return doc["jobs"]["guard"]["steps"][-1]["run"]
+
+
+def _run_step(tmp_path, guard_rc, report, enforce):
+    """Run the workflow's real step script with a stubbed guard verdict.
+
+    The stub prints REPORT (read from a file — the step calls the guard with
+    ``--tracked`` and no report argument) on stderr and exits GUARD_RC, standing
+    in for the real guard's verdict without needing a real address on disk.
+    """
+    work = tmp_path / "job"
+    (work / "scripts").mkdir(parents=True)
+    (work / ".github" / "scripts").mkdir(parents=True)
+    (tmp_path / "report.txt").write_text(report, encoding="utf-8")
+    # The real redactor resolves the guard relative to itself, so this stub is
+    # the one it loads — one checkout, one pattern, as in CI.
+    shutil.copy2(REDACTOR, work / ".github" / "scripts" / "redact_guard_report.py")
+    (work / "scripts" / "address_guard.py").write_text(
+        # Dual-mode on purpose: the redactor IMPORTS this module for its pattern,
+        # while the step runs it as a CLI. Import the real guard for FORBIDDEN so
+        # the redactor still sees the repo's one and only regex; emit the canned
+        # verdict only when invoked as a program.
+        "import importlib.util, pathlib, sys\n"
+        f"_s = importlib.util.spec_from_file_location('_real_guard', r'{GUARD}')\n"
+        "_m = importlib.util.module_from_spec(_s); _s.loader.exec_module(_m)\n"
+        "FORBIDDEN = _m.FORBIDDEN\n"
+        "if __name__ == '__main__':\n"
+        "    sys.stderr.write(pathlib.Path(sys.argv[2]).read_text())\n"
+        f"    sys.exit({guard_rc})\n",
+        encoding="utf-8",
+    )
+    script = work / "step.sh"
+    step = _step_script().replace(
+        "scripts/address_guard.py --tracked",
+        f"scripts/address_guard.py --tracked {tmp_path / 'report.txt'}",
+    )
+    script.write_text(step, encoding="utf-8")
+    env = dict(os.environ, RUNNER_TEMP=str(tmp_path), ENFORCE=enforce)
+    proc = subprocess.run(["bash", str(script)], capture_output=True, cwd=work, env=env)
+    return proc.returncode, proc.stdout.decode() + proc.stderr.decode()
+
+
+def test_step_advisory_leak_is_green_but_warns(tmp_path):
+    """Option (a): a leak is surfaced, and nothing blocks."""
+    rc, out = _run_step(tmp_path, 1, f"  docs/x.md:3: {REAL_LAN}\n", "")
+    assert rc == 0, out
+    assert "::warning::" in out, out
+    assert "docs/x.md:3" in out
+    assert REAL_LAN not in out
+
+
+def test_step_enforced_leak_is_red(tmp_path):
+    """Option (b)/(c): with ADDRESS_GUARD_ENFORCE=true the same leak fails."""
+    rc, out = _run_step(tmp_path, 1, f"  docs/x.md:3: {REAL_LAN}\n", "true")
+    assert rc == 1, out
+    assert "::error::" in out
+    assert "docs/x.md:3" in out
+    assert REAL_LAN not in out
+
+
+def test_step_fails_closed_when_guard_cannot_run(tmp_path):
+    """rc=2 must be red even in advisory mode — never a silent pass."""
+    rc, out = _run_step(tmp_path, 2, "address_guard: CANNOT RUN — no git\n", "")
+    assert rc == 2, out
+    assert "::error::" in out
+    assert "advisory" not in out.lower() or "could not run" in out
+
+
+def test_step_names_the_guard_not_the_redactor_when_the_guard_is_absent(tmp_path):
+    """The real CI probe (probe/failclosed-9a4b7687) reported exit 3 here.
+
+    A checkout without scripts/address_guard.py breaks the redactor too, so the
+    redactor's message came first and blamed the wrong file. The rc=2 diagnosis
+    must win.
+    """
+    work = tmp_path / "job"
+    (work / "scripts").mkdir(parents=True)
+    (work / ".github" / "scripts").mkdir(parents=True)
+    shutil.copy2(REDACTOR, work / ".github" / "scripts" / "redact_guard_report.py")
+    # No scripts/address_guard.py at all: the guard cannot run AND the redactor
+    # cannot load its pattern, exactly the probe's state.
+    script = work / "step.sh"
+    script.write_text(_step_script(), encoding="utf-8")
+    env = dict(os.environ, RUNNER_TEMP=str(tmp_path), ENFORCE="")
+    proc = subprocess.run(["bash", str(script)], capture_output=True, cwd=work, env=env)
+    out = proc.stdout.decode() + proc.stderr.decode()
+    assert proc.returncode == 2, out
+    assert "address_guard could not run" in out, out
+    assert "redactor" not in out, out
+
+
+def test_step_clean_tree_is_green(tmp_path):
+    rc, out = _run_step(tmp_path, 0, "", "")
+    assert rc == 0, out
+    assert "::warning::" not in out and "::error::" not in out
+
+
 def test_redactor_fails_closed_if_pattern_cannot_load(tmp_path):
     """No unredacted text may reach the log on our account.
 
