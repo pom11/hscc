@@ -171,6 +171,49 @@ def test_arming_from_one_worktree_does_not_advertise_protection_elsewhere(tmp_pa
     assert install_hooks.posture(repo)["state"] == "armed"
 
 
+def test_posture_four_states_are_disjoint_and_config_decides_armedness(tmp_path):
+    """Each state means exactly one thing — found wiring `hscc check --repo`
+    (t_5abdb13d follow-up of this card).
+
+    The FIRST version classified `unarmed` as `not armed and not runnable`,
+    which put a FRESH CLONE (both halves present, config unset) into
+    `armed-but-absent`. That is wrong in the dangerous direction: a fresh clone
+    advertises nothing, so the fail-open name belongs only to the case where
+    the COMMON config DOES advertise protection. `armed-but-absent` is the one
+    state the operator keys cron/scripts on — every false alarm there erodes
+    the real one. Only the config arms the guard, so only the config may claim
+    (or deny) that it is armed.
+    """
+    # armed: config set + runnable here.
+    armed = _make_repo(tmp_path / "armed")
+    assert install_hooks.install_hooks(armed)["action"] == "installed"
+    p = install_hooks.posture(armed)
+    assert p["state"] == "armed" and p["core_hooks_path"] == ".githooks", p
+
+    # unarmed: BOTH halves present but the config is unset (fresh clone). The
+    # files being there is not protection — git will not run them.
+    fresh = _make_repo(tmp_path / "fresh")
+    p = install_hooks.posture(fresh)
+    assert p["state"] == "unarmed", p
+    assert p["core_hooks_path"] is None, p
+    assert p["hook_present"] and p["guard_present"], p
+    assert "core.hooksPath unset" in p["detail"], p
+
+    # armed-but-absent: config advertises, checkout delivers nothing runnable
+    # (the shared-config scenario the operator flagged; also the 0644 hook —
+    # git silently ignores a non-executable hook, so 'present' is not 'runs').
+    gap = _make_repo(tmp_path / "gap")
+    os.chmod(gap / ".githooks" / "pre-commit", 0o644)
+    assert _git(gap, "config", "core.hooksPath", install_hooks.HOOKS_PATH_VALUE).returncode == 0
+    p = install_hooks.posture(gap)
+    assert p["state"] == "armed-but-absent", p
+    assert p["hook_present"] is True and p["hook_executable"] is False, p
+
+    # not-a-repo.
+    p = install_hooks.posture(tmp_path / "nope")
+    assert p["state"] == "not-a-repo" and p["toplevel"] is None, p
+
+
 def test_default_repo_root_is_the_work_repo():
     """`python3 hscc-bootstrap/install_hooks.py` from anywhere must mean THIS repo."""
     assert install_hooks.DEFAULT_REPO_ROOT == REPO
