@@ -214,14 +214,22 @@ def posture(repo_root=None):
     armed = hooks_path == HOOKS_PATH_VALUE
     runnable = hook_present and hook_executable and guard_present
 
-    if not armed and not runnable:
+    # The config is the ONLY thing that arms the guard, so it decides the state
+    # first. (Fix found while wiring `hscc check --repo` — t_5abdb13d. The
+    # original `not armed and not runnable` test put a FRESH CLONE — files
+    # present, config unset, nothing advertised — into `armed-but-absent`, the
+    # fail-open alarm state. Both exit non-zero so nothing caught it, but it
+    # trained the operator to disbelieve exactly the state worth alarming on.)
+    if not armed:
         state = "unarmed"
-    elif armed and runnable:
+    elif runnable:
         state = "armed"
     else:
         state = "armed-but-absent"
 
     bits = []
+    if not armed:
+        bits.append("core.hooksPath unset")
     if not hook_present:
         bits.append(f"{HOOKS_DIR_NAME}/{PRE_COMMIT} absent")
     elif not hook_executable:
