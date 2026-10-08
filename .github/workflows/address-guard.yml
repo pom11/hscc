@@ -1,0 +1,91 @@
+name: address-guard
+
+# Server-side backstop for the commit-time address guard (t_ec2c2f95).
+#
+# A local pre-commit hook has gaps that cannot be closed locally — see
+# docs/audits/commit-time-address-guard-t_ec2c2f95.md section 6: `git commit
+# --no-verify` skips it, `git apply --cached` / `git stash pop` / `format-patch`
+# write blobs without running it, and `core.hooksPath` is local machine state so
+# a clone that never ran bootstrap has no hook at all. This job evaluates the
+# COMMITTED tree on the runner, where none of those bypasses apply.
+#
+# Detection is the SAME module the hook and the pytest gate use
+# (scripts/address_guard.py) — never a second regex.
+#
+# Enforcement is a repository variable, not an edit to this file, so the
+# advisory-vs-blocking decision stays an operator setting:
+#
+#   Settings -> Secrets and variables -> Actions -> Repository variables
+#     ADDRESS_GUARD_ENFORCE unset or "false"  -> advisory: a leak is a warning
+#         annotation and the job stays green (nothing blocks, you still see it)
+#     ADDRESS_GUARD_ENFORCE=true              -> the job goes RED on a real address
+#     (a guard that CANNOT RUN fails either way — never a silent pass)
+#
+# Red alone does not stop a merge. To make it block, require this check
+# ("address-guard / guard") in branch protection — for PRs only (option b), or
+# also enforced on pushes to main (option c):
+#
+#   gh api -X PUT repos/$GITHUB_REPOSITORY/branches/main/protection/required_status_checks \
+#     -f strict=true -f contexts[]=guard
+#
+# Start advisory: a red check on main from a ledger tick whose emitter scrub
+# (t_56dda2c8) has not landed yet would be noise, not signal.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: address-guard-${{ github.ref }}
+  # Keep this false once the job is made a required check: a CANCELLED check
+  # counts against branch protection, and at ~13 s the job is not worth racing.
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # --tracked scans every file git tracks in the checked-out commit (measured
+      # ~0.13 s over ~1070 files). stdlib only, no network, exit 0 clean / 1 leak
+      # / 2 cannot-run. The offender report goes to stderr, so both streams are
+      # captured to files and the real exit code is preserved.
+      - name: Scan committed tree for real operator addresses
+        # The exit code is decided here rather than by continue-on-error, so a
+        # guard that cannot run (rc=2) fails even in advisory mode: a silent pass
+        # is exactly how the 2026-10-08 leak survived. Advisory mode reports the
+        # leak as a warning annotation and still exits 0.
+        env:
+          ENFORCE: ${{ vars.ADDRESS_GUARD_ENFORCE }}
+        run: |
+          set +e
+          python3 scripts/address_guard.py --tracked \
+            >"${RUNNER_TEMP}/guard.out" 2>"${RUNNER_TEMP}/guard.err"
+          rc=$?
+          cat "${RUNNER_TEMP}/guard.out"
+          # This repo is PUBLIC and a job log is public too, so the matched
+          # address must not be echoed — the backstop would itself publish the
+          # leak. Keep the file:line, drop the value.
+          python3 .github/scripts/redact_guard_report.py <"${RUNNER_TEMP}/guard.err"
+          redact_rc=$?
+          set -e
+          if [ "$redact_rc" -ne 0 ]; then
+            echo "::error::redactor could not load the guard pattern; refusing to print an unredacted report"
+            exit 3
+          fi
+          if [ "$rc" -eq 2 ]; then
+            echo "::error::address_guard could not run — failing closed even in advisory mode"
+            exit 2
+          fi
+          if [ "$rc" -ne 0 ]; then
+            if [ "${ENFORCE:-}" = "true" ]; then
+              echo "::error::real operator address in the committed tree — see the file:line list above"
+              exit "$rc"
+            fi
+            echo "::warning::real operator address in the committed tree (advisory: ADDRESS_GUARD_ENFORCE is not 'true') — see the file:line list above"
+          fi
+          exit 0
