@@ -154,6 +154,38 @@ def _isolate_hscc(tmp_path, monkeypatch):
         monkeypatch.setattr(mod, attr, val, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_sparkrun_resolution(tmp_path, monkeypatch):
+    """Pin sparkrun resolution so no test can reach the operator's real CLI.
+
+    t_b543e530 made the daemon resolve ``sparkrun`` from the FILESYSTEM (PATH,
+    then a candidate list) instead of only PATH — so an unpinned test would
+    resolve the developer machine's real ``~/.local/bin/sparkrun``, and any test
+    asserting on the resolved argv would pass here and fail on a host without
+    sparkrun. Default EVERY test to a per-test fake CLI (an ``exit 0`` shell
+    script named ``sparkrun``) via the ``HSCC_SPARKRUN_BIN`` override, which is
+    also hermetic by construction: no test ever execs the real CLI, the real
+    venv python, or the fleet.
+
+    A test that wants a different environment simply re-points the override:
+    a path that does not exist == "sparkrun is not installed anywhere"
+    (the degraded shape), or its own script whose shebang names the
+    interpreter it wants. Always call ``sparkrun_bin.reset_cache()`` after
+    changing the override — resolution is cached per process.
+    """
+    from hscc_daemon import sparkrun_bin
+
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir(parents=True, exist_ok=True)
+    fake_cli = fake_bin / "sparkrun"
+    fake_cli.write_text("#!/bin/sh\nexit 0\n")
+    fake_cli.chmod(0o755)
+    monkeypatch.setenv("HSCC_SPARKRUN_BIN", str(fake_cli))
+    sparkrun_bin.reset_cache()
+    yield str(fake_cli)
+    sparkrun_bin.reset_cache()
+
+
 class _SubprocessResult:
     """Fake subprocess.CompletedProcess for controlling command output."""
 
