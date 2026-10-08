@@ -164,3 +164,9 @@ Counts verified with `pytest --collect-only` on this branch, not by counting lin
    commit.
 4. **History rewrite decision** (operator): the addresses are still in the pushed
    history of the leaking commit; `524024a4` only fixed the working tree.
+5. **Make guard status observable.** `hscc check` / `doctor.py` could report
+   whether the checkout they run in has the guard armed (`core.hooksPath` set +
+   hook executable), so "the guard is silently inactive on this machine" becomes a
+   status line instead of an assumption. Deliberately not added here: `doctor.py`
+   runs against `~/.hscc`/Hermes state, not against an arbitrary repo, so the
+   right home for it is `hscc check --repo <path>` and that needs a decision.
