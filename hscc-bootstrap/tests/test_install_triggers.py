@@ -13,8 +13,10 @@ if _PLUGIN_DIR not in sys.path:
 import install_triggers as IT
 
 
+# Hardcoded on purpose: this list IS the contract. Shipping a new default rule
+# must be a deliberate edit here, not something a stray fragment can smuggle in.
 DEFAULT_RULES = ["orch-dgx-down", "vllm-down", "watchdog-blocked",
-                 "engine-wedge-detected"]
+                 "engine-wedge-detected", "nas-down"]
 
 # Path to the default rules file (shipped alongside install_triggers.py)
 _DEFAULTS_PATH = os.path.join(_PLUGIN_DIR, "triggers.default.json")
@@ -94,8 +96,7 @@ def test_operator_rules_preserved(tmp_path):
 
     # Only missing defaults added; orch-dgx-down was already present (operator-edited)
     assert "orch-dgx-down" not in result["added"]
-    assert set(result["added"]) <= {"vllm-down", "watchdog-blocked",
-                                    "engine-wedge-detected"}
+    assert set(result["added"]) <= set(DEFAULT_RULES) - {"orch-dgx-down"}
     assert result["total"] == 2 + len(set(result["added"]))
 
     with open(target) as f:

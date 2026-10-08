@@ -77,11 +77,13 @@ class MemoriBYODBClient:
         self._last_assistant_content: str = ""
         self._last_session_id: str = ""
 
-        # Local augmentation LLM: explicit arg > env > localhost default.
+        # Local augmentation LLM: explicit arg > env > localhost default. The
+        # default is the proxy on :4000 (balances across every serving unit),
+        # not a node's :8000 — see local_augmentation.DEFAULT_API_URL.
         self._api_url = api_url or os.environ.get(
-            "HSCC_MEMORI_AUGMENT_URL", "http://localhost:8000/v1/chat/completions")
+            "HSCC_MEMORI_AUGMENT_URL", "http://localhost:4000/v1/chat/completions")
         self._model = model or os.environ.get(
-            "HSCC_MEMORI_AUGMENT_MODEL", "local-model")
+            "HSCC_MEMORI_AUGMENT_MODEL", "worker-model")
 
         # Initialize Memori BYODB
         try:

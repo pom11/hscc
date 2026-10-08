@@ -78,6 +78,15 @@ def evaluate_trigger(rule, event):
     elif metric == "watchdog_blocked":
         state = read_state("watchdog")
         event_value = state.get("blocked", False) if state else False
+    elif metric == "nas_down":
+        # The nas check writes ok=False the moment the share stops being a real
+        # mount. Without this metric there was no rule that could fire on it, so
+        # a lost NAS was recorded and never surfaced: the 2026-10-08 NAS reboot
+        # left all five clients unmounted and nas.json ok=False for ~2h with
+        # nobody alerted. Mirrors failed_dgx (absent state => not down, so a
+        # daemon that has not run the check yet does not alert).
+        state = read_state("nas")
+        event_value = not state.get("ok", True) if state else False
     elif metric.startswith("state."):
         stream = metric[6:]
         state = read_state(stream)

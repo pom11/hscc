@@ -51,6 +51,19 @@
         "title": "HSCC: inference engine wedged",
         "body": "A serving unit answered HTTP 200 but streamed no generated tokens \u2014 the engine is wedged (answering but not generating), not merely down."
       }
+    },
+    {
+      "id": "nas-down",
+      "trigger_type": "notify",
+      "condition": {
+        "metric": "nas_down",
+        "op": "==",
+        "value": true
+      },
+      "trigger_params": {
+        "title": "HSCC: NAS mount lost",
+        "body": "The NAS share is no longer a real mount. Weight staging and anything reading the share will fail. Check the NAS uptime first: if it rebooted, the export is fine and only the clients need remounting."
+      }
     }
   ]
 }
