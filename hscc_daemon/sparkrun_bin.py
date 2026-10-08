@@ -209,9 +209,10 @@ def argv(*args) -> list:
 
     ``sparkrun_bin.argv("status")`` replaces the logical ``["sparkrun", "status"]``
     at EXEC time, so no call site can carry a bare ``sparkrun`` argv[0] into a
-    subprocess. Resolution rules are exactly :func:`exec_argv`'s: PATH-executable
-    → the bare name (bit-identical to a healthy interactive shell), otherwise the
-    absolute resolved path.
+    subprocess. Resolution rules are exactly :func:`exec_argv`'s: PATH-first, so
+    the absolute path is the SAME file a healthy PATH would have exec'd (realpath
+    — bit-identical behaviour), and the deterministic candidate list covers the
+    service-supervised PATH that omits ``~/.local/bin``.
     """
     return exec_argv([CLI_NAME, *args])
 
