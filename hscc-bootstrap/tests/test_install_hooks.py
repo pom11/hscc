@@ -127,6 +127,34 @@ def test_default_repo_root_is_the_work_repo():
     assert install_hooks.DEFAULT_REPO_ROOT == REPO
 
 
+# ── bootstrap.sh wiring (static, same style as test_orch_all_wiring.py) ──────
+# bootstrap.sh is bash; the wiring that matters is that the stage EXISTS, runs
+# the installer against $REPO_ROOT, and cannot be silently dropped.
+
+def test_bootstrap_wires_the_hooks_stage():
+    src = (REPO / "hscc-bootstrap" / "bootstrap.sh").read_text(encoding="utf-8")
+    assert 'install_hooks.py' in src, "bootstrap must install the committed git hooks"
+    stage = src.split('hdr "Install: git hooks', 1)
+    assert len(stage) == 2, "the hooks stage must have its own hdr (visible in the install log)"
+    body = stage[1].split('hdr "', 1)[0]
+    assert '"$BOOT_DIR/install_hooks.py" "$REPO_ROOT"' in body, \
+        "the installer must run against $REPO_ROOT (the checkout), not the runtime plugin dir"
+    assert "installed)" in body and "verified)" in body and "skipped)" in body, \
+        "all three installer actions must be reported, never swallowed"
+    # A silent stage is as bad as a missing one: the warn lines are the signal
+    # that the commit-time guard is INACTIVE on this machine.
+    assert "INACTIVE" in body or "not armed" in body
+
+
+def test_committed_hook_is_mode_100755_in_git():
+    """A hook committed as 100644 is silently ignored by git on every clone."""
+    proc = subprocess.run(["git", "-C", str(REPO), "ls-files", "-s", ".githooks/pre-commit"],
+                          capture_output=True, text=True)
+    assert proc.stdout.startswith("100755"), (
+        "the committed hook must carry the exec bit in the tree, got: " + proc.stdout.strip()
+    )
+
+
 # ── the point of it all: the hook actually fires, incl. in worker worktrees ──
 
 def _repo_with_real_guard(tmp_path, leaky_line):
