@@ -2,8 +2,14 @@
 cluster orchestrator) instead of a cloud API — keeps memory fully offline.
 
 Endpoint + model are read from the environment so no host/topology is baked in:
-  HSCC_MEMORI_AUGMENT_URL   chat-completions URL (default: localhost:8000)
-  HSCC_MEMORI_AUGMENT_MODEL model name served at that URL
+  HSCC_MEMORI_AUGMENT_URL   chat-completions URL (default: the local proxy on
+                            :4000, which load-balances across every serving
+                            unit — NOT a single node's :8000, which pins
+                            augmentation to one GPU and breaks outright when
+                            autodown frees that node)
+  HSCC_MEMORI_AUGMENT_MODEL model name served at that URL (default:
+                            worker-model, the role alias every serving unit
+                            advertises)
 """
 
 from __future__ import annotations
@@ -20,9 +26,14 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 # Generic, env-overridable defaults — point at whatever local LLM you serve.
+# The proxy (:4000), not a node's own vLLM port (:8000): the proxy fronts every
+# serving unit, so augmentation balances and survives any single node going
+# away. `worker-model` over `local-model` because the role alias is actually
+# advertised by the fleet — `local-model` was served by nothing, so the default
+# only ever worked when the env overrode it.
 DEFAULT_API_URL = os.environ.get(
-    "HSCC_MEMORI_AUGMENT_URL", "http://localhost:8000/v1/chat/completions")
-DEFAULT_MODEL = os.environ.get("HSCC_MEMORI_AUGMENT_MODEL", "local-model")
+    "HSCC_MEMORI_AUGMENT_URL", "http://localhost:4000/v1/chat/completions")
+DEFAULT_MODEL = os.environ.get("HSCC_MEMORI_AUGMENT_MODEL", "worker-model")
 
 
 @dataclass
