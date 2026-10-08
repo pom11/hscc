@@ -418,6 +418,34 @@ class TestServiceEnvironmentDeclaration:
         path = install._daemon_path_env("/Users/example")
         assert "/Users/example/.local/bin" in path
 
+    def test_install_rendered_plist_and_systemd_unit_include_local_bin(self):
+        """Pin the RENDERED service definitions, not just the helper — the
+        plist PATH string is a static template ({PATH_ENV} substitution), and
+        a fresh install through install.py must never reproduce the broken
+        environment (t_b543e530, operator requirement 2)."""
+        from hscc_daemon import install
+        home = os.path.expanduser("~")
+        plist = install.generate_plist()
+        assert f"{home}/.local/bin" in plist
+        unit = install.generate_systemd_unit()
+        assert f"Environment=PATH={home}/.local/bin" in unit or \
+            f"{home}/.local/bin" in unit
+
+    def test_flightdeck_daemon_install_path_env_includes_local_bin(self):
+        """flightdeck's daemon_install is the other plist emitter — same belt.
+        Resolved as a sibling of the hscc_daemon package dir, which holds in
+        both the repo layout (<root>/hscc_daemon + <root>/hscc-project) and
+        the deployed layout (~/.hermes/plugins/*)."""
+        import hscc_daemon
+        plugins_dir = os.path.dirname(os.path.dirname(
+            os.path.abspath(hscc_daemon.__file__)))
+        src = os.path.join(plugins_dir, "hscc-project", "flightdeck",
+                           "commands", "daemon_install.py")
+        text = open(src).read()
+        assert 'os.path.join(home, ".local/bin")' in text, (
+            "flightdeck daemon_install._path_env lost ~/.local/bin — a fresh "
+            "flightdeck-installed daemon would reproduce t_b543e530")
+
     def test_daemon_launchd_template_includes_local_bin(self):
         """The template that generated the live plist — this was the actual
         regression: it omitted ~/.local/bin while install.py included it."""
