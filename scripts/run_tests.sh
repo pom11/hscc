@@ -20,7 +20,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="${HSCC_TEST_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 [ -x "$PY" ] || PY="python3"
 
-DIRS=(hscc-bootstrap hscc-commands hscc-roles hscc-cluster hscc-project hscc_daemon sparkrun-hermes hscc-api memori_byodb)
+DIRS=(hscc-bootstrap hscc-commands hscc-roles hscc-cluster hscc-project hscc_daemon sparkrun-hermes hscc-api memori_byodb .github/scripts)
 
 # ━━━ SIGTERM forensics (t_6bb29d46) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # RULE: NEVER stop a suite with a name-based sweep — `pkill -f "run_tests.sh"`,
