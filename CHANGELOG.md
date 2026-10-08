@@ -11,6 +11,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.5.7] - 2026-10-08
+
+### Fixed
+- **Daemon could not resolve `sparkrun` after a service-supervised restart.**
+  A launchd-started daemon gets a service PATH that omits `~/.local/bin`,
+  where the `sparkrun` CLI actually lives, so `shutil.which("sparkrun")`
+  returned None: the structured cluster-status query was skipped on every DGX
+  tick (230 WARNs in one day), the auto-heal `sparkrun stop`/relaunch died
+  with `[Errno 2] No such file or directory: 'sparkrun'` (a dropped worker
+  could not be relaunched), and the DGX check still logged `ok=True` on an
+  empty workload list — an empty read indistinguishable from a healthy empty
+  fleet, the v1.15.0 local-`docker ps` failure class again. New
+  `hscc_daemon/sparkrun_bin.py` resolves the CLI and its venv interpreter from
+  the filesystem (PATH first, then a deterministic candidate list including
+  `~/.local/bin/sparkrun` and the sparkrun venv bin dirs; interpreter read from
+  the shebang with venv-sibling resolution for the `/usr/bin/env` form), and
+  every daemon sparkrun exec site now builds its argv through
+  `sparkrun_bin.argv()`, so no bare `sparkrun` argv[0] survives in the
+  health/relaunch paths. Resolution is PATH-first, so a healthy environment
+  execs the same file it did before — the rewrite is mechanical.
+- **Fleet-visibility outage now surfaces instead of failing open.** When BOTH
+  the structured query and the legacy `sparkrun status` shell-out are dead,
+  `_sparkrun_workloads()` returns `(workloads, degraded)` and `check_dgx`
+  publishes `ok=False` with `fleet_visibility: "degraded"` and a named
+  FLEET VISIBILITY DEGRADED message (never excused as "intentional" — the
+  fleet state is genuinely unknown). The returned verdict stays the serving
+  verdict (ssh + vLLM), so a status-polling outage cannot drive the
+  watchdog into restart/breaker cycles against a healthy vLLM.
+- **Supervised-daemon PATH now declares `~/.local/bin`.** The launchd plist
+  template (the emitter of the live plist, rendered by `launchd-setup.sh`)
+  emits `__HOME__/.local/bin`, matching `install._daemon_path_env()` and
+  flightdeck's `_path_env()`; the daemon additionally prepends the resolved
+  sparkrun dir to its own PATH at startup (`sparkrun_bin.ensure_on_path()`) so
+  the remaining `shell=True` sparkrun call sites can exec it too.
+- **Every shipped trigger rule fired a notification on EVERY 15 s trigger-loop
+  cycle while the bad state persisted.** None of the five rules in
+  `triggers.default.json` declared `cooldown_seconds`, and the engine only
+  suppresses re-fires when `cooldown_seconds > 0` — so any state-based rule
+  re-notified once per loop tick for as long as the stream stayed `ok: False`.
+  The NAS lost-mount alert (`9e41728`, released in 2.5.6) made it visible: the
+  mount went away at the 14:13 reboot and macOS got 178 "HSCC: NAS mount lost"
+  notifications in 11 minutes, still climbing. Event-driven rules hid the same
+  hole because a real event appears in the tail once. The fix has two layers:
+  (1) the shipped defaults now carry a cooldown per rule — `nas-down` and
+  `watchdog-blocked` 3600 s, `orch-dgx-down`, `vllm-down` and
+  `engine-wedge-detected` 1800 s — so the floor lives in the default, not only
+  in the engine;
+  (2) a floor in `trigger.py` itself, for rules that **never declared** a
+  cooldown: a match that reflects a persisting state — a
+  `state.<stream>.degraded` pseudo-event, or a metric the engine answers by
+  reading a stream file (`failed_dgx`, `vllm_down`, `watchdog_blocked`,
+  `nas_down`, `state.*`) — is re-notified at most once per
+  `STATE_NOTIFY_FLOOR_SECONDS` (30 min) per rule. A discrete event match is
+  never suppressed, so the floor cannot drop a genuine one-off alert, and it
+  stamps the cooldown file only for the fires the suppression actually
+  consults. An explicit `cooldown_seconds: 0` stays the operator's deliberate
+  "notify every cycle" and is honoured; an absent or unparseable value gets the
+  floor, so a typo in hand-edited `triggers.json` cannot re-open the storm.
+  For EXISTING installs, note the bootstrap semantics: it only ever ADDS
+  missing rule ids, so new defaults CANNOT retro-fit `cooldown_seconds` into a
+  live `~/.hscc/triggers.json` that already carries those ids — which is
+  exactly why layer (2) lives in the engine: upgrading the daemon alone
+  dampens a live file that still has no cooldowns. An operator who wants the
+  shipped 1 h NAS cadence before then adds `"cooldown_seconds": 3600` to the
+  `nas-down` rule in `~/.hscc/triggers.json`; no daemon restart is needed, the
+  file is re-read every cycle.
+
+### Verified
+- `hscc_daemon/tests/test_sparkrun_resolution.py`: 28 new cases reproducing
+  the live launchd environment (sanitized PATH from the `ps eww` measurement,
+  fake HOME, no live fleet calls) — venv-python resolution, `/usr/bin/env`
+  sibling-first shebang, `exec_argv` rewrite + pass-through rules,
+  `util.run_cmd` routing, end-to-end `check_workers` stop/relaunch argv
+  absoluteness, double-failure → degraded-not-ok, and PATH emission pinned
+  across ALL four service-environment generators (install.py `_daemon_path_env`
+  + RENDERED plist/systemd unit, flightdeck `daemon_install._path_env`,
+  launchd plist template) plus startup `ensure_on_path`.
+- `hscc_daemon/tests/conftest.py`: autouse hermetic pin
+  (`HSCC_SPARKRUN_BIN` fake CLI + resolver cache reset) — no test can shell
+  out to the operator's real `sparkrun`.
+- Rebased onto origin/main (post-2.5.6) with zero conflicts; `git diff
+  origin/main -- hscc_daemon/trigger.py scripts/hscc_nas_watchdog.sh
+  memori_byodb/` empty (nas_down metric, NAS watchdog rewrite, memori
+  augment defaults all preserved).
+- Full suite green under BOTH interpreters on the rebased tip
+  (`~/.hermes/hermes-agent/venv/bin/python` and
+  `/Users/desac/miniconda3/envs/p313/bin/python`): all 9 plugin dirs ✓
+  (hscc_daemon 1220 passed incl. 28 new; hscc-bootstrap 397; totals per
+  scripts/run_tests.sh summary, EXIT=0 both legs).
+- Two PRE-EXISTING environmental failures that blocked the both-interpreter
+  gate were fixed in the same branch (see commit "fix(hygiene)"): the public
+  repo's address guard tripped on the live LAN host quoted in main's own
+  ledger ticks (scrubbed to the documented 10.0.0.x placeholder), and
+  doctor's byte-identity test compared two renders containing an unstubbed
+  live `pgrep` gateway probe (now pinned, as the class docstring intended).
+- `hscc_daemon/tests/test_trigger.py`: +**6** cases in
+  `TestStateNotifyFloor` — a persistent `state.nas.degraded` notifies ONCE
+  across three loop cycles when the rule declares a cooldown; the same rule
+  with the key STRIPPED notifies once under the engine floor; a typo'd
+  `"cooldown_seconds": "1h"` is floored too; the negative control — an
+  explicit `cooldown_seconds: 0` — still fires every cycle, so operator intent
+  is preserved; a rule on a real event line is never floored; and `nas
+  ok:True` stays silent in every cycle (the floor cannot manufacture alerts).
+  `hscc-bootstrap/tests/test_install_triggers.py`: +**3** cases — the
+  `DEFAULT_COOLDOWNS` contract (hardcoded id → seconds; every shipped rule must
+  match and be > 0), a fresh install carries those cooldowns into
+  `triggers.json`, and a **pinned limitation** asserting the ADD-only
+  semantics: re-running the installer cannot retro-fit a cooldown into a live
+  `triggers.json` whose rules already lack one (the engine floor is the layer
+  that reaches existing installs — fix it there, never by mutating operator
+  rules).
+- Both new contract sets are MUTATION-verified, not merely green: zeroing
+  `STATE_NOTIFY_FLOOR_SECONDS` fails exactly the 2 floor cases, and dropping
+  `nas-down`'s cooldown from the shipped defaults fails exactly the 2
+  contract/install cases.
+- `scripts/run_tests.sh` at the submitted code tip `27ba6f6` (the fragment
+  commit that follows this one changes documentation only), both interpreters,
+  each exit 0 / ALL GREEN across all 9 dirs: hermes venv **3.11.16** —
+  `hscc_daemon` 1198 passed, `hscc-api` 876 passed/1 skipped; conda
+  **p313** 3.13.7 — `hscc_daemon` 1195 passed/3 skipped, `hscc-api` 861
+  passed/16 skipped (interpreter-split differs only by documented skip
+  reasons). `scripts/changelog_fragments.py check` OK.
 ## [2.5.6] - 2026-10-08
 
 ### Fixed
