@@ -94,14 +94,16 @@ def _is_state_signal(rule, target):
     """True when a (rule, target) match reflects a PERSISTING STATE rather than
     a discrete event.
 
-    Either the target is a degraded-state pseudo-event the engine re-derives
-    from live stream files on EVERY tick, or the rule's metric is one
-    ``evaluate_trigger`` answers by reading a stream-state file — in which case
-    the same bad state also matches ordinary event lines, so the target's
-    provenance alone cannot tell us which kind of match this is.
+    Either the target is one of the ``state.<stream>.degraded`` entries the
+    engine re-derives from live stream files on EVERY tick (nothing else ever
+    emits that event_type, so the name alone identifies it — an operator rule
+    matching on it, like the shipped ``engine-wedge-detected``, is matched
+    against a persisting condition either way), or the rule's metric is one
+    ``evaluate_trigger`` answers by reading a stream-state file, in which case
+    the same bad state matches again on every tick regardless of which target
+    produced the match.
     """
-    if target.get("_source_event") is False and str(
-            target.get("event_type", "")).startswith("state."):
+    if str(target.get("event_type", "")).startswith("state."):
         return True
     metric = (rule.get("condition") or {}).get("metric", "")
     return metric in _STATE_METRICS or metric.startswith("state.")
