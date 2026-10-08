@@ -15,6 +15,26 @@ EVENTS_FILE = os.path.expanduser("~/.hscc/events.jsonl")
 TRIGGERS_FILE = os.path.expanduser("~/.hscc/triggers.json")
 COOLDOWN_FILE = os.path.expanduser("~/.hscc/cooldowns.json")
 
+# Repeat-suppression applied to a rule that NEVER declared a cooldown_seconds,
+# for matches that reflect a persisting STATE rather than a discrete event.
+# The trigger loop runs every 15s (daemon_ops.run_trigger_loop) and a state
+# check stays ok:False for as long as the fault lasts, so a rule with no
+# cooldown re-notified once per tick: the 2026-10-08 lost NAS mount fired 178
+# macOS notifications in 11 minutes. Shipped defaults now carry cooldowns
+# (hscc-bootstrap/triggers.default.json), but bootstrap only ever ADDS missing
+# rule ids — it cannot retro-fit a cooldown into a live triggers.json that
+# already has them — so this floor is what actually dampens an existing
+# install. Explicit `cooldown_seconds: 0` remains the operator's deliberate
+# "notify every cycle" and is honoured; only an absent/unparseable value falls
+# back to the floor, so a typo cannot re-open the storm. Only STATE-derived
+# matches are floored (see _is_state_signal): a discrete event is never lost.
+STATE_NOTIFY_FLOOR_SECONDS = 1800
+
+# Metrics that evaluate_trigger() answers by reading a stream-state file
+# instead of the event in hand: every tick the bad state matches again, so a
+# match on one is a STATE signal, not an event.
+_STATE_METRICS = ("failed_dgx", "vllm_down", "watchdog_blocked", "nas_down")
+
 
 def load_triggers():
     """Load trigger rules from triggers.json."""
@@ -51,6 +71,40 @@ def read_events_tail(limit=100):
         return [l.strip() for l in lines[-limit:] if l.strip()]
     except (FileNotFoundError, IOError):
         return []
+
+
+def _effective_cooldown(rule):
+    """Declared ``cooldown_seconds`` as an int, or None when not declared.
+
+    ``None`` means the key is absent, ``null``, or holds something that is not
+    a number — the case the state-notify floor exists for. An explicit
+    ``0`` parses to ``0`` and stays ``0``: that is an operator's deliberate
+    "notify every cycle", not an omission.
+    """
+    raw = rule.get("cooldown_seconds")
+    if raw is None:
+        return None
+    try:
+        return max(0, int(float(raw)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_state_signal(rule, target):
+    """True when a (rule, target) match reflects a PERSISTING STATE rather than
+    a discrete event.
+
+    Either the target is a degraded-state pseudo-event the engine re-derives
+    from live stream files on EVERY tick, or the rule's metric is one
+    ``evaluate_trigger`` answers by reading a stream-state file — in which case
+    the same bad state also matches ordinary event lines, so the target's
+    provenance alone cannot tell us which kind of match this is.
+    """
+    if target.get("_source_event") is False and str(
+            target.get("event_type", "")).startswith("state."):
+        return True
+    metric = (rule.get("condition") or {}).get("metric", "")
+    return metric in _STATE_METRICS or metric.startswith("state.")
 
 
 def evaluate_trigger(rule, event):
@@ -242,7 +296,12 @@ def trigger_engine(check_dgx_fn=None, check_gateway_fn=None,
             continue
 
         rule_id = rule.get("id", "")
-        cooldown = rule.get("cooldown_seconds", 0)
+        declared = _effective_cooldown(rule)
+        # `declared is None` == the rule never set cooldown_seconds. Such a
+        # rule still gets the state-notify floor, but ONLY for state-derived
+        # matches (see _is_state_signal), so a discrete event is never lost.
+        floor = STATE_NOTIFY_FLOOR_SECONDS if declared is None else 0
+        cooldown = declared if declared is not None else 0
         now = time.time()
 
         # Check cooldown
@@ -253,17 +312,28 @@ def trigger_engine(check_dgx_fn=None, check_gateway_fn=None,
 
         # Evaluate against each target
         for target in targets:
-            if evaluate_trigger(rule, target):
-                fire_trigger_action(
-                    rule, target,
-                    watchdog_block_fn=watchdog_block_fn,
-                    restart_vllm_fn=restart_vllm_fn,
-                )
-                if cooldown > 0:
-                    cooldowns[rule_id] = now
-                    save_cooldowns(cooldowns)
-                actions_fired += 1
-                break  # one match per rule per cycle
+            if not evaluate_trigger(rule, target):
+                continue
+            state_repeat = _is_state_signal(rule, target)
+            if floor and state_repeat:
+                last_fired = cooldowns.get(rule_id)
+                if last_fired is not None and now - last_fired < floor:
+                    continue  # repeat of a persisting state — keep looking:
+                    # a genuine (non-state) match must still fire
+            fire_trigger_action(
+                rule, target,
+                watchdog_block_fn=watchdog_block_fn,
+                restart_vllm_fn=restart_vllm_fn,
+            )
+            # Timestamp what the suppression logic consults, and only that: a
+            # discrete event fire must not later silence a degradation alert
+            # through the floor, and a rule with an explicit 0 has nothing to
+            # consult, so leave cooldowns.json alone (pre-fix behaviour).
+            if cooldown > 0 or (floor and state_repeat):
+                cooldowns[rule_id] = now
+                save_cooldowns(cooldowns)
+            actions_fired += 1
+            break  # one match per rule per cycle
 
     write_state("triggers", {
         "ok": True,
