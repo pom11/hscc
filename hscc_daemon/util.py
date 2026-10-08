@@ -18,7 +18,24 @@ def run_cmd(args, timeout=30, as_json=False, shell=False):
     — autodown's failure reason was empty for exactly this reason); a separate
     ``stderr`` field is also kept for structured access. ``as_json`` parses
     stdout as JSON instead.
+
+    sparkrun argvs are made PATH-independent here (t_b543e530): a logical
+    ``["sparkrun", ...]`` argv gets argv[0] swapped to the resolved ABSOLUTE CLI
+    path just before the exec, because a launchd-supervised daemon PATH omits
+    ``~/.local/bin`` and a bare ``sparkrun`` then dies with ``[Errno 2] No such
+    file or directory`` — which is how the auto-heal stop/relaunch path and the
+    ``sparkrun status`` fallback were dead for a day while every DGX check still
+    logged ok=True. Command BUILDERS keep emitting the logical command (stable
+    for tests and grep); resolution happens at this single execution point, so
+    every non-shell sparkrun shell-out in the daemon package inherits the fix.
+    When sparkrun cannot be resolved anywhere the argv passes through unchanged
+    and the subprocess fails loudly the way it does today — never a silent
+    no-op. ``shell=True`` strings are not rewritten (the argv rewrite would be
+    a string-inspection game; those callers are informational paths).
     """
+    if not shell:
+        from . import sparkrun_bin
+        args = sparkrun_bin.exec_argv(args)
     try:
         result = subprocess.run(
             args, capture_output=True, text=True, timeout=timeout, shell=shell
