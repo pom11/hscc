@@ -198,7 +198,37 @@ lessons worth keeping:
 * never start the suite from a worktree that is still being edited;
 * the CI backstop's guard test catches *my own* prose leaks, which is the point.
 
-## 9. Files
+## 9. Reading logs safely — measured, and deliberately carded not shipped here
+
+The guard's report format carries the value, so any surface that publishes the
+report publishes the leak. Severity, measured rather than assumed:
+
+* **The shipped `address-guard` job's logs are clean.** Its step redirects both
+  streams to files and echoes only redacted output. Measured on run
+  `37845289259` (157 lines): scanning the raw `gh run view --log` dump with the
+  guard's own detector returned **0 hits**.
+* **The one leak that actually happened was a local suite log**, not CI: a
+  full-suite leg during this card echoed `docs/audits/…:68: <live LAN host>` into
+  a workspace file that was nearly attached to the card. Caught by scanning the
+  log with the detector before attaching; the file was then scrubbed in place.
+  All four gate logs in this card's workspace scan clean.
+
+So the residual gap is procedural, not an open hole in the shipped path: nobody
+has a sanctioned way to read a CI log, and no rule says "scan a log before you
+paste, attach, or comment it". A raw `gh run view --log` on a job that ran the
+guard *without* stream redirection (a manual dispatch, an ad-hoc step in another
+workflow, any pre-existing run) would print the address into scrollback.
+
+A `ci_log.sh` wrapper (600-mode temp dump, print only redacted bytes, keep-with-
+warning behind `--keep`) plus the file-argument mode the redactor needs and one
+written rule is ~50 lines plus tests — but it is **not this card's scope**, so it
+is **`t_914b8db5`** (devops-engineer, child of this card) with the acceptance
+criteria and the fake-`gh` test design written out. Whoever builds it: do not
+send `gh`'s stderr to `/dev/null` — those bytes cannot be proven to be non-job
+content, so they need the same redaction, and swallowing them also hides real
+`gh` errors.
+
+## 11. Files
 
 | File | Purpose |
 |---|---|
