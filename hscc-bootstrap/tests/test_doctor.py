@@ -1376,6 +1376,16 @@ class TestDoctorNoAnsi:
         monkeypatch.setattr(doctor, "_run_cluster_list", lambda: _FAKE_CLUSTER)
         monkeypatch.setattr(shutil, "which",
                             lambda n: "/usr/local/bin/sparkrun" if n == "sparkrun" else None)
+        # The gateway check shells out to `pgrep` — a LIVE probe. This class
+        # calls run_doctor twice (once through main --json, once directly) and
+        # compares the two renders byte-for-byte, so an unstubbed live probe
+        # that flips state between the calls (e.g. under concurrent suite load)
+        # makes the comparison fail on ENVIRONMENT drift, not on a render bug.
+        # Pin it deterministic so the assertion compares the render only.
+        monkeypatch.setattr(
+            doctor, "_gateway_running",
+            lambda: doctor.Check("gateway", True, detail="running",
+                                 fix="Start it after bootstrap.", fatal=False))
         return hermes
 
     def _capture(self, argv):
