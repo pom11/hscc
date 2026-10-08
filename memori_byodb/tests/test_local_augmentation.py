@@ -211,3 +211,46 @@ def test_process_noop_without_conversation_messages():
     assert driver.entity_creates == []
     assert driver.conversation_creates == []
     assert driver.fact_creates == []
+
+
+class TestAugmentEndpointDefaults:
+    """Augmentation defaults must target the proxy, not a single node.
+
+    The live gateway pinned `HSCC_MEMORI_AUGMENT_URL` at one node's own vLLM
+    port, which sends every augmentation call to one GPU and fails outright
+    when autodown frees that node. The proxy on :4000 fronts every serving
+    unit, so it balances and survives any single node going away. The model
+    default matters too: `local-model` was advertised by nothing, so the
+    default only ever worked when the environment overrode it.
+    """
+
+    def test_default_url_is_the_proxy_not_a_node_port(self):
+        import importlib
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {}, clear=True):
+            mod = importlib.reload(
+                importlib.import_module("memori_byodb.local_augmentation"))
+            assert mod.DEFAULT_API_URL == \
+                "http://localhost:4000/v1/chat/completions"
+            assert ":8000" not in mod.DEFAULT_API_URL
+            assert mod.DEFAULT_MODEL == "worker-model"
+
+    def test_env_still_wins(self):
+        import importlib
+        import os
+        from unittest import mock
+        with mock.patch.dict(
+                os.environ,
+                {"HSCC_MEMORI_AUGMENT_URL": "http://example.invalid/v1/chat/completions",
+                 "HSCC_MEMORI_AUGMENT_MODEL": "some-other-model"},
+                clear=True):
+            mod = importlib.reload(
+                importlib.import_module("memori_byodb.local_augmentation"))
+            assert mod.DEFAULT_API_URL == \
+                "http://example.invalid/v1/chat/completions"
+            assert mod.DEFAULT_MODEL == "some-other-model"
+        # Leave the module in its env-free default shape for other tests.
+        with mock.patch.dict(os.environ, {}, clear=True):
+            importlib.reload(
+                importlib.import_module("memori_byodb.local_augmentation"))
