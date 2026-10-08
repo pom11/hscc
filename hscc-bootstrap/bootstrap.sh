@@ -165,6 +165,31 @@ else
   warn "watchdog script copy reported issues — see scripts/README.md for manual install"
 fi
 
+hdr "Install: git hooks (public-repo address guard)"
+# Real operator LAN/tailnet addresses have reached tracked files TWICE on this
+# PUBLIC repo — most recently a ledger tick with a verbatim `mount_nfs` command
+# that reached origin/main on a docs-only commit. The pytest gate could see that
+# leak but never ran for it, so the same detector now also runs at COMMIT time
+# from the committed .githooks/pre-commit.
+#
+# A committed .githooks directory does nothing until core.hooksPath points at it
+# (plain .git/hooks is not cloned, so it cannot be the mechanism). install_hooks.py
+# sets it idempotently and writes to the COMMON git config, so every linked
+# worktree — including the dispatcher's worker worktrees — inherits the hook from
+# ONE install. Non-fatal: a machine whose repo is not a git checkout (or an older
+# revision without the committed hooks) reports skipped and still installs.
+if HK_JSON=$("$PYBIN" "$BOOT_DIR/install_hooks.py" "$REPO_ROOT" 2>/dev/null); then
+  HK_ACTION=$("$PYBIN" -c "import sys,json;print(json.loads(sys.argv[2])['action'])" _ "$HK_JSON" 2>/dev/null || echo unknown)
+  case "$HK_ACTION" in
+    installed) ok "address-guard hook armed (core.hooksPath=.githooks)" ;;
+    verified)  ok "address-guard hook already armed (core.hooksPath=.githooks)" ;;
+    skipped)   warn "git hooks not armed: $(printf '%s' "$HK_JSON" | "$PYBIN" -c 'import sys,json;print(json.load(sys.stdin).get("reason") or "?")' 2>/dev/null || echo '?')" ;;
+    *)         warn "git hooks not armed ($HK_ACTION) — real addresses can reach a commit; run install_hooks.py manually" ;;
+  esac
+else
+  warn "git hooks install failed — the commit-time address guard is INACTIVE; run: $PYBIN $BOOT_DIR/install_hooks.py"
+fi
+
 hdr "Install: skills"
 if $SKIP_SKILLS; then warn "skipped"; else
   "$PYBIN" "$PLUGINS/hscc-skills/hscc.py" install-skills >/dev/null 2>&1 && ok "skills installed" || warn "skills install reported issues"
