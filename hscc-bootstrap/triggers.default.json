@@ -3,6 +3,7 @@
     {
       "id": "orch-dgx-down",
       "trigger_type": "notify",
+      "cooldown_seconds": 1800,
       "condition": {
         "metric": "failed_dgx",
         "op": "==",
@@ -16,6 +17,7 @@
     {
       "id": "vllm-down",
       "trigger_type": "notify",
+      "cooldown_seconds": 1800,
       "condition": {
         "metric": "vllm_down",
         "op": "==",
@@ -29,6 +31,7 @@
     {
       "id": "watchdog-blocked",
       "trigger_type": "notify",
+      "cooldown_seconds": 3600,
       "condition": {
         "metric": "watchdog_blocked",
         "op": "==",
@@ -42,6 +45,7 @@
     {
       "id": "engine-wedge-detected",
       "trigger_type": "notify",
+      "cooldown_seconds": 1800,
       "condition": {
         "metric": "event_type",
         "op": "==",
@@ -55,6 +59,7 @@
     {
       "id": "nas-down",
       "trigger_type": "notify",
+      "cooldown_seconds": 3600,
       "condition": {
         "metric": "nas_down",
         "op": "==",
