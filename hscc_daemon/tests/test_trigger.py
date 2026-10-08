@@ -398,6 +398,156 @@ if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
 
+class TestStateNotifyFloor:
+    """A rule that never declared `cooldown_seconds` must not re-notify a
+    PERSISTING degraded state on every 15 s loop tick.
+
+    The 2026-10-08 lost NAS mount fired 178 macOS notifications in 11 minutes
+    because no shipped rule set a cooldown and the engine only suppressed
+    re-fires when `cooldown_seconds > 0`. Two layers now stop that: the shipped
+    defaults carry cooldowns, and the engine has a floor for rules that declare
+    none. These exercise the engine layer against a persistent state.
+    """
+
+    LOOP_TICKS = 3  # three consecutive trigger-loop cycles
+
+    def _env(self, tmp_hfcc_dir, monkeypatch, nas_ok=False):
+        """Wire the engine to tmp paths with `nas` degraded, notifications
+        captured. Returns (trigger_module, list_of_notification_titles)."""
+        from hscc_daemon import trigger
+        from hscc_daemon import state as state_mod
+        state_dir = tmp_hfcc_dir / "state"
+        state_dir.mkdir(exist_ok=True)
+        monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
+        (state_dir / "nas.json").write_text(json.dumps(
+            {"ok": nas_ok,
+             "details": {"message": "/Volumes/NAS is not an NFS mount"}}))
+
+        monkeypatch.setattr(trigger, "TRIGGERS_FILE",
+                            str(tmp_hfcc_dir / "triggers.json"))
+        monkeypatch.setattr(trigger, "COOLDOWN_FILE",
+                            str(tmp_hfcc_dir / "cooldowns.json"))
+        monkeypatch.setattr(trigger, "EVENTS_FILE",
+                            str(tmp_hfcc_dir / "events.jsonl"))
+        (tmp_hfcc_dir / "events.jsonl").write_text("")
+
+        sent = []
+        monkeypatch.setattr(
+            trigger, "send_macos_notification",
+            lambda title, body, priority="normal": sent.append(title))
+        monkeypatch.setattr(trigger, "emit_event", lambda *a, **kw: None)
+        return trigger, sent
+
+    def _write_rules(self, trigger_mod, tmp_hfcc_dir, rules):
+        (tmp_hfcc_dir / "triggers.json").write_text(
+            json.dumps({"rules": rules}))
+
+    def _nas_rule(self, **extra):
+        rule = {
+            "id": "nas-down",
+            "trigger_type": "notify",
+            "condition": {"metric": "nas_down", "op": "==", "value": True},
+            "trigger_params": {"title": "HSCC: NAS mount lost",
+                               "body": "mount lost"},
+        }
+        rule.update(extra)
+        return rule
+
+    def test_declared_cooldown_suppresses_repeats(self, tmp_hfcc_dir,
+                                                  monkeypatch):
+        """The card's headline case: a persistent degraded state notifies ONCE
+        across several loop cycles when the rule declares a cooldown."""
+        trigger, sent = self._env(tmp_hfcc_dir, monkeypatch)
+        self._write_rules(trigger, tmp_hfcc_dir,
+                          [self._nas_rule(cooldown_seconds=3600)])
+
+        for _ in range(self.LOOP_TICKS):
+            assert trigger.trigger_engine() is True
+
+        assert sent == ["HSCC: NAS mount lost"], (
+            f"expected exactly one notify across {self.LOOP_TICKS} cycles, "
+            f"got {len(sent)}")
+
+    def test_missing_cooldown_falls_back_to_floor(self, tmp_hfcc_dir,
+                                                 monkeypatch):
+        """The layer that actually fixes EXISTING installs: bootstrap only ever
+        ADDS missing rule ids, so a live triggers.json keeps its cooldown-less
+        rules — the engine floor is what dampens them."""
+        trigger, sent = self._env(tmp_hfcc_dir, monkeypatch)
+        self._write_rules(trigger, tmp_hfcc_dir, [self._nas_rule()])
+        assert "cooldown_seconds" not in self._nas_rule()
+
+        for _ in range(self.LOOP_TICKS):
+            assert trigger.trigger_engine() is True
+
+        assert sent == ["HSCC: NAS mount lost"], (
+            f"a rule with no cooldown_seconds must be floored, got "
+            f"{len(sent)} notifies")
+
+    def test_unparseable_cooldown_gets_floor_too(self, tmp_hfcc_dir,
+                                                 monkeypatch):
+        """A typo (`"cooldown_seconds": "1h"`) must not re-open the storm — an
+        unreadable value is treated as undeclared, i.e. floored."""
+        trigger, sent = self._env(tmp_hfcc_dir, monkeypatch)
+        self._write_rules(trigger, tmp_hfcc_dir,
+                          [self._nas_rule(cooldown_seconds="1h")])
+
+        for _ in range(self.LOOP_TICKS):
+            assert trigger.trigger_engine() is True
+
+        assert sent == ["HSCC: NAS mount lost"]
+
+    def test_explicit_zero_is_operator_intent_and_still_spams(self,
+                                                             tmp_hfcc_dir,
+                                                             monkeypatch):
+        """Negative control: `cooldown_seconds: 0` is a deliberate "notify every
+        cycle", NOT an omission. The floor must not silently override it."""
+        trigger, sent = self._env(tmp_hfcc_dir, monkeypatch)
+        self._write_rules(trigger, tmp_hfcc_dir,
+                          [self._nas_rule(cooldown_seconds=0)])
+
+        for _ in range(self.LOOP_TICKS):
+            assert trigger.trigger_engine() is True
+
+        assert len(sent) == self.LOOP_TICKS
+
+    def test_discrete_event_fire_is_never_suppressed(self, tmp_hfcc_dir,
+                                                     monkeypatch):
+        """The floor covers PERSISTING STATES only. Suppressing a match on a
+        real event line could drop a genuine one-off alert, so an event rule
+        with no cooldown keeps firing — which is precisely why the shipped
+        defaults must carry cooldowns (layer 1, asserted in
+        hscc-bootstrap/tests/test_install_triggers.py)."""
+        trigger, sent = self._env(tmp_hfcc_dir, monkeypatch)
+        (tmp_hfcc_dir / "events.jsonl").write_text(json.dumps(
+            {"event_type": "backup.failed", "severity": "warning"}) + "\n")
+        self._write_rules(trigger, tmp_hfcc_dir, [{
+            "id": "backup-failed",
+            "trigger_type": "notify",
+            "condition": {"metric": "event_type", "op": "==",
+                          "value": "backup.failed"},
+            "trigger_params": {"title": "HSCC: backup failed",
+                               "body": "backup did not run"},
+        }])
+
+        for _ in range(self.LOOP_TICKS):
+            assert trigger.trigger_engine() is True
+
+        assert len(sent) == self.LOOP_TICKS, (
+            "a discrete event match must not be floored")
+
+    def test_healthy_state_stays_silent(self, tmp_hfcc_dir, monkeypatch):
+        """The floor must not manufacture alerts: with nas ok:True nothing
+        fires at all, in any cycle."""
+        trigger, sent = self._env(tmp_hfcc_dir, monkeypatch, nas_ok=True)
+        self._write_rules(trigger, tmp_hfcc_dir, [self._nas_rule()])
+
+        for _ in range(self.LOOP_TICKS):
+            assert trigger.trigger_engine() is True
+
+        assert sent == []
+
+
 class TestNasDownMetric:
     """The `nas_down` metric, and the default rule that fires on it.
 

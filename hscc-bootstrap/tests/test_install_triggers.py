@@ -18,6 +18,20 @@ import install_triggers as IT
 DEFAULT_RULES = ["orch-dgx-down", "vllm-down", "watchdog-blocked",
                  "engine-wedge-detected", "nas-down"]
 
+# id -> cooldown_seconds, also hardcoded because it IS the contract. Every
+# state-based rule matches again on EVERY 15 s trigger-loop tick while the bad
+# state persists, so a shipped rule without a cooldown re-notifies ~4x/min:
+# the 2026-10-08 lost NAS mount fired 178 macOS notifications in 11 minutes.
+# A rule with no cooldown here can only ship by deliberately editing this map,
+# and the > 0 assertion below refuses 0 anyway.
+DEFAULT_COOLDOWNS = {
+    "orch-dgx-down": 1800,
+    "vllm-down": 1800,
+    "watchdog-blocked": 3600,
+    "engine-wedge-detected": 1800,
+    "nas-down": 3600,
+}
+
 # Path to the default rules file (shipped alongside install_triggers.py)
 _DEFAULTS_PATH = os.path.join(_PLUGIN_DIR, "triggers.default.json")
 
@@ -128,6 +142,78 @@ def test_default_rules_have_required_schema():
         params = rule["trigger_params"]
         assert "title" in params, f"rule {rule['id']} trigger_params missing title"
         assert "body" in params, f"rule {rule['id']} trigger_params missing body"
+
+
+def test_default_rules_all_declare_a_cooldown():
+    """Contract: every shipped rule declares the cooldown in DEFAULT_COOLDOWNS,
+    and every cooldown is > 0.
+
+    The engine only suppresses re-fires when cooldown_seconds > 0, and the
+    trigger loop ticks every ~15 s, so a shipped state-based rule WITHOUT a
+    cooldown notifies once per tick for as long as the bad state persists
+    (2026-10-08: 178 NAS notifications in 11 minutes). The cooldown floor has
+    to live in the shipped default, not only in the engine — see
+    hscc_daemon/tests/test_trigger.py::TestStateNotifyFloor for the engine
+    layer that covers hand-authored rules.
+    """
+    defaults = _load_defaults()
+    by_id = {r["id"]: r for r in defaults["rules"]}
+    assert set(by_id) == set(DEFAULT_COOLDOWNS), (
+        "DEFAULT_COOLDOWNS and the shipped rules have drifted — add the new "
+        "rule to the contract map with an explicit cooldown")
+    for rid, expected in DEFAULT_COOLDOWNS.items():
+        rule = by_id[rid]
+        cd = rule.get("cooldown_seconds")
+        assert isinstance(cd, int) and cd > 0, (
+            f"rule {rid} must declare a positive cooldown_seconds, got {cd!r}")
+        assert cd == expected, (
+            f"rule {rid} cooldown {cd} != contract {expected}; change "
+            f"DEFAULT_COOLDOWNS deliberately if this is intended")
+
+
+def test_fresh_install_carries_the_cooldowns_into_triggers_json(tmp_path):
+    """The contract must survive the install, not just exist in the source
+    file: a fresh triggers.json gets each rule WITH its cooldown intact."""
+    target = str(tmp_path / "triggers.json")
+    IT.install_triggers(triggers_path=target, defaults_path=_DEFAULTS_PATH)
+
+    with open(target) as f:
+        rules = json.load(f)["rules"]
+    by_id = {r["id"]: r for r in rules}
+    for rid, expected in DEFAULT_COOLDOWNS.items():
+        assert by_id[rid].get("cooldown_seconds") == expected
+
+
+def test_add_only_semantics_cannot_fix_a_live_cooldown(tmp_path):
+    """PINNED LIMITATION, deliberately asserted rather than discovered:
+    bootstrap only ever ADDS missing rule ids, so re-running the installer can
+    NEVER retro-fit cooldown_seconds into an EXISTING triggers.json whose
+    rules lack one — the operator's rule object is preserved untouched.
+
+    That is why the repeat-suppression floor lives in the trigger ENGINE
+    (hscc_daemon/trigger.py STATE_NOTIFY_FLOOR_SECONDS): it is the only layer
+    that reaches a live install whose file already has the rule ids. If anyone
+    "fixes" this test by making the installer overwrite or patch rules, they
+    have broken operator-state preservation — fix it in the engine instead.
+    """
+    target = str(tmp_path / "triggers.json")
+    live = {  # a pre-2.5.7 install: the ids exist, none has a cooldown
+        "rules": [{"id": rid, "trigger_type": "notify",
+                   "condition": {"metric": "m", "op": "==", "value": True},
+                   "trigger_params": {"title": "t", "body": "b"}}
+                  for rid in DEFAULT_RULES]
+    }
+    with open(target, "w") as f:
+        json.dump(live, f)
+
+    result = IT.install_triggers(triggers_path=target, defaults_path=_DEFAULTS_PATH)
+
+    assert result["added"] == []  # nothing missing -> nothing touched
+    with open(target) as f:
+        rules = json.load(f)["rules"]
+    assert all("cooldown_seconds" not in r for r in rules), (
+        "installer must not mutate operator rules — the engine floor covers "
+        "this case instead")
 
 
 # ── Missing defaults file ─────────────────────────────────────────────
