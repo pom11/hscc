@@ -1,0 +1,64 @@
+#!/bin/sh
+# Block a real operator address from ever reaching a commit in this PUBLIC repo.
+#
+# Why a hook and not only the pytest gate: the guard in scripts/address_guard.py
+# is sound, but before this hook its only trigger was `pytest` — and a docs-only
+# commit (a ledger tick, an audit note) never runs the suite. That is exactly how
+# the 2026-10-08 leak reached origin/main: a verbatim `mount_nfs` command with the
+# real NAS host and subnet, committed by the orchestrator's ledger tick. The same
+# class of leak has now happened twice after a scrub.
+#
+# Mechanism: `.githooks` is COMMITTED and `core.hooksPath` points at it, because
+# plain `.git/hooks` is not cloned and cannot be installed by a fresh checkout.
+# `hscc-bootstrap/install_hooks.py` sets `core.hooksPath .githooks` (idempotent),
+# and it writes to the COMMON config, so every linked worktree inherits it — the
+# dispatcher's worker worktrees are covered without any per-worktree step.
+#
+# Detection lives in scripts/address_guard.py ONLY (shared with
+# hscc_daemon/tests/test_no_real_addresses_committed.py). This file is plumbing:
+# find the repo, pick an interpreter, pass --staged. Keep it that way — a second
+# regex here is a second chance to get it wrong.
+#
+# Fast and dependency-free by design: stdlib python, one `git diff` and ONE
+# `git cat-file --batch` for the whole staged set (measured well under 0.5 s on a
+# ~1000-file repo). A slow leak check gets bypassed with --no-verify.
+set -u
+
+# Hooks run with cwd at the worktree root, but resolve the top-level explicitly so
+# a commit made from a subdirectory is covered too.
+TOP=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "pre-commit (address guard): cannot resolve the git top-level — commit blocked." >&2
+  exit 1
+}
+GUARD="$TOP/scripts/address_guard.py"
+[ -f "$GUARD" ] || {
+  echo "pre-commit (address guard): $GUARD is missing — the guard cannot run, commit blocked." >&2
+  echo "  Restore it (git checkout -- scripts/address_guard.py); do NOT bypass with --no-verify." >&2
+  exit 1
+}
+
+# Same interpreter preference as bootstrap: the Hermes venv python if present
+# (it is guaranteed on a fleet machine), otherwise whatever python3 is on PATH.
+# The guard is stdlib-only, so the choice does not matter for correctness.
+PY="${HSCC_ADDRESS_GUARD_PY:-}"
+if [ -z "$PY" ]; then
+  for c in "$HOME/.hermes/hermes-agent/venv/bin/python" python3 python; do
+    if [ -n "$c" ] && command -v "$c" >/dev/null 2>&1; then PY="$c"; break; fi
+  done
+fi
+[ -n "$PY" ] || {
+  echo "pre-commit (address guard): no python interpreter found — the guard cannot run, commit blocked." >&2
+  exit 1
+}
+
+# --staged reads the INDEX (staged blobs), never the working tree: the 2026-08-30
+# audit's pre-push check grepped the working tree, which had already been scrubbed
+# while the committed blob still carried the address.
+"$PY" "$GUARD" --staged --repo "$TOP"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "" >&2
+  echo "pre-commit (address guard): BLOCKED (guard exit $rc)." >&2
+  exit "$rc"
+fi
+exit 0
