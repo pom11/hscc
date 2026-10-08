@@ -115,8 +115,13 @@ class TestKeepaliveUnits:
         # `model`, so it is carried as None (no --served-model-name on relaunch).
         assert all(u["model"] is None for u in units)
         assert all(u["role"] == "worker" for u in units)
+        # uniform_pool is carried too: health.check_workers relaunches from
+        # these entries via _unit_run_cmd, which needs the fleet-level flag to
+        # derive BOTH aliases for a uniform pool (else a gentle relaunch
+        # collapses the pool one node at a time). False when absent/not a pool.
+        assert all(u["uniform_pool"] is False for u in units)
         assert all(set(u.keys()) == {"node", "port", "recipe", "id", "nodes",
-                                     "tp", "model", "role"}
+                                     "tp", "model", "role", "uniform_pool"}
                    for u in units)
 
     def test_dedupes_dup_nodes_same_unit(self, monkeypatch):
@@ -591,3 +596,104 @@ class TestServeCmdMismatchRefused:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestUniformPoolWakePath:
+    """A ``uniform_pool`` fleet wakes with BOTH aliases on EVERY unit.
+
+    The apply path (``cluster_template._render_serve_cmd`` /
+    ``_unit_serve_names``) advertises ``worker-model orchestrator-model`` on
+    every unit of a uniform pool, because each node runs the same recipe and
+    must be able to take either role. The wake path
+    (``serving._unit_run_cmd``, used by ``hscc cluster up``,
+    ``autodown.autoup()`` and ``health.check_workers``) derives the command
+    independently, and before this it derived the ROLE alias only — so a fleet
+    up collapsed the pool back to orchestrator-on-one-node and never recovered.
+
+    sparkrun folds ``--served-model-name`` and ``--tp`` into the intent hash it
+    turns into a ``cluster_id``, so divergence between the two builders does
+    not error: ``--ensure`` recreates the unit with the wrong aliases.
+    """
+
+    def _serving(self, uniform_pool):
+        s = {
+            "version": 3,
+            "units": [
+                {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.244"],
+                 "port": 8000, "recipe": "/abs/recipes/flash.yaml",
+                 "model": "lab/Flash-NVFP4", "tp": 1},
+                {"id": "wk1", "role": "worker", "nodes": ["10.0.0.246"],
+                 "port": 8001, "recipe": "/abs/recipes/flash.yaml",
+                 "model": "lab/Flash-NVFP4", "tp": 1, "keepalive": True},
+            ],
+        }
+        if uniform_pool:
+            s["uniform_pool"] = True
+        return s
+
+    def _smn(self, cmd):
+        from hscc_daemon import serving
+        return serving._flag_after(cmd, "--served-model-name")
+
+    def test_pool_units_advertise_both_aliases(self):
+        from hscc_daemon import serving
+        plan = serving.fleet_up_plan(self._serving(True))
+        assert len(plan) == 2
+        for e in plan:
+            assert self._smn(e["cmd"]) == \
+                "lab/Flash-NVFP4 worker-model orchestrator-model"
+
+    def test_non_pool_keeps_single_role_alias(self):
+        """Without the flag, role-derived aliases are unchanged (no regression
+        for every non-uniform template)."""
+        from hscc_daemon import serving
+        plan = serving.fleet_up_plan(self._serving(False))
+        by_kind = {e["kind"]: e for e in plan}
+        assert self._smn(by_kind["orchestrator"]["cmd"]) == \
+            "lab/Flash-NVFP4 orchestrator-model"
+        assert self._smn(by_kind["worker"]["cmd"]) == \
+            "lab/Flash-NVFP4 worker-model"
+
+    def test_keepalive_units_carry_the_flag(self):
+        """``health.check_workers`` relaunches from ``keepalive_units`` entries,
+        so the flag must ride on those too or a gentle relaunch collapses the
+        pool one node at a time."""
+        from hscc_daemon import serving
+        units = serving.keepalive_units(self._serving(True))
+        assert units and all(u.get("uniform_pool") for u in units)
+        for u in units:
+            u = dict(u, nodes=u["nodes"], recipe="/abs/recipes/flash.yaml")
+            assert self._smn(serving._unit_run_cmd(u)) == \
+                "lab/Flash-NVFP4 worker-model orchestrator-model"
+
+    def test_tp_always_emitted_even_for_tp1(self):
+        """``cluster_template._render_serve_cmd`` ALWAYS emits --tp; omitting it
+        for tp=1 gave every single-node unit a different intent hash on the two
+        paths."""
+        from hscc_daemon import serving
+        for e in serving.fleet_up_plan(self._serving(True)):
+            assert serving._flag_after(e["cmd"], "--tp") == "1"
+
+    def test_is_uniform_pool_reads_top_level(self):
+        from hscc_daemon import serving
+        assert serving.is_uniform_pool(self._serving(True)) is True
+        assert serving.is_uniform_pool(self._serving(False)) is False
+        assert serving.is_uniform_pool(None) is False
+        assert serving.is_uniform_pool({}) is False
+
+    def test_alias_drift_between_paths_is_surfaced(self):
+        """The canary: a recorded serve_cmd whose alias/tp disagrees with the
+        derived command is reported, so this class of drift can never again be
+        silent."""
+        from hscc_daemon import serving
+        u = {"id": "wk1", "role": "worker", "nodes": ["10.0.0.246"],
+             "port": 8001, "recipe": "/abs/recipes/flash.yaml",
+             "model": "lab/Flash-NVFP4", "tp": 1, "uniform_pool": True}
+        derived = serving._unit_run_cmd(u)
+        stale = list(derived)
+        stale[stale.index("--served-model-name") + 1] = \
+            "lab/Flash-NVFP4 worker-model"
+        assert "--served-model-name" in serving._serve_cmd_mismatch(
+            dict(u, serve_cmd=stale), derived)
+        assert serving._serve_cmd_mismatch(
+            dict(u, serve_cmd=derived), derived) == ""
