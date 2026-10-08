@@ -23,6 +23,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[2]
 
 # scripts/ is not an importable package (repo dirs here deploy standalone); put
@@ -88,10 +90,24 @@ def test_hook_delegates_detection_instead_of_reimplementing_it():
 
 
 def test_hooks_path_is_configured():
-    """A committed hook dir does nothing unless core.hooksPath points at it."""
+    """A committed hook dir does nothing unless core.hooksPath points at it.
+
+    An UNSET value is a skip, not a failure: ``core.hooksPath`` is machine state
+    that bootstrap (or ``install_hooks.py``) writes, so a fresh clone that has
+    not been bootstrapped has nothing wrong with its *contents*. A WRONG value is
+    a hard failure — that is the signature of a bypass (e.g. pointing at
+    ``.git/hooks`` so the guard is never found), which is exactly what must not
+    pass quietly on the fleet's own checkouts.
+    """
     got = subprocess.run(["git", "-C", str(REPO), "config", "--get", "core.hooksPath"],
                          capture_output=True, text=True)
-    assert got.stdout.strip() == ".githooks", (
-        "core.hooksPath is not '.githooks' — run: "
-        "python3 hscc-bootstrap/install_hooks.py (bootstrap does this automatically)"
+    value = got.stdout.strip()
+    if not value:
+        pytest.skip(
+            "commit-time address guard is NOT ARMED on this checkout — run "
+            "`python3 hscc-bootstrap/install_hooks.py` (bootstrap does it automatically)"
+        )
+    assert value == ".githooks", (
+        f"core.hooksPath is {value!r}, not '.githooks' — the committed guard would "
+        "never run. Fix: python3 hscc-bootstrap/install_hooks.py"
     )
