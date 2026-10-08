@@ -73,13 +73,16 @@ jobs:
           python3 .github/scripts/redact_guard_report.py <"${RUNNER_TEMP}/guard.err"
           redact_rc=$?
           set -e
-          if [ "$redact_rc" -ne 0 ]; then
-            echo "::error::redactor could not load the guard pattern; refusing to print an unredacted report"
-            exit 3
-          fi
+          # rc=2 first: a checkout missing scripts/address_guard.py breaks the
+          # redactor too, and blaming the redactor would send the reader to the
+          # wrong file. (Measured on real CI by probe/failclosed-9a4b7687.)
           if [ "$rc" -eq 2 ]; then
             echo "::error::address_guard could not run — failing closed even in advisory mode"
             exit 2
+          fi
+          if [ "$redact_rc" -ne 0 ]; then
+            echo "::error::redactor could not load the guard pattern; refusing to print an unredacted report"
+            exit 3
           fi
           if [ "$rc" -ne 0 ]; then
             if [ "${ENFORCE:-}" = "true" ]; then
