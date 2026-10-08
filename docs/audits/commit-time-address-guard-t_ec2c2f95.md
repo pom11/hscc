@@ -149,6 +149,22 @@ Counts verified with `pytest --collect-only` on this branch, not by counting lin
 - A worktree on an older revision (no `.githooks` yet) finds no hook and commits
   normally — which is the pre-card status quo, not a regression, and is why
   arming the config early is safe.
+- **Post-merge, a ledger tick that pastes raw command output WILL fail to commit**
+  until the addresses are scrubbed. That is the point of the card, but it is a
+  visible change for the `hscc-orch-goal-heartbeat` cron: the tick's `git commit`
+  exits non-zero and prints the offending `file:line`. The recovery is the text
+  the hook prints (replace with `10.0.0.x` / `100.64.0.1`), not `--no-verify`. The
+  durable fix is upstream of the commit — see follow-up 3.
+
+## 6b. Operator-visible side effects of this branch
+
+- `hscc-bootstrap/install_hooks.py` writes `core.hooksPath=.githooks` to the
+  **common** git config of the repo it is pointed at. Running it during this
+  card's verification set that key in the operator's primary checkout
+  (`~/dev/hscc`), which is inherited by every linked worktree. It is
+  **inert until this branch merges** — main has no `.githooks`, and git commits
+  normally when the configured hook does not exist (measured, §4). Undo with
+  `git -C ~/dev/hscc config --unset core.hooksPath`; bootstrap re-arms it.
 
 ## 7. Follow-ups worth carding (not done here)
 
