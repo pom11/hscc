@@ -297,6 +297,8 @@ def _get_help_text():
     health = _section("Health & monitoring", [
         "check [stream]       Run one check cycle now (default: all)",
         "                       streams: dgx gateway local heartbeat nas watchdog triggers",
+        "check --repo <path>  Commit-time address-guard posture for that checkout",
+        "                       (default cwd; --json; exit 0 only when 'armed')",
         "watch [stream]       Live-tail check results",
         "triggers             Show trigger-engine rules and recent firings",
         "verify               Run a full compatibility/health smoke-test of the cluster",
@@ -374,7 +376,7 @@ COMMAND_HELP = {
     "uninstall": "Remove the service and stop the daemon",
     "plist": "Print the launchd plist (no install)",
     "log": "Show the daemon log output",
-    "check": "Run one check cycle now. Usage: hscc check [stream]\n  streams: dgx gateway local heartbeat nas watchdog triggers",
+    "check": "Run one check cycle now. Usage: hscc check [stream]\n  streams: dgx gateway local heartbeat nas watchdog triggers\n  hscc check --repo <path> [--json]   address-guard posture for that checkout\n          (default: cwd's top-level). Calls posture() from hscc-bootstrap/\n          install_hooks.py — single implementation, nothing recomputed here.\n          States: armed | unarmed | armed-but-absent (config advertises\n          protection, this checkout resolves no runnable hook = FAIL-OPEN) |\n          not-a-repo. Exit 0 only for 'armed', non-zero otherwise.",
     "watch": "Live-tail check results. Usage: hscc watch [stream]",
     "triggers": "Show trigger-engine rules and recent firings",
     "notify": "Send a desktop notification. Usage: hscc notify <message>",
@@ -1063,7 +1065,9 @@ def main():
         cmd_status()
     elif cmd_lower == "check":
         from hscc_daemon.cli import cmd_check
-        cmd_check(args[1] if len(args) > 1 else None)
+        # Forward EVERYTHING after `check`: cmd_check separates the optional
+        # stream positional from the `--repo`/`--json` flags (t_5abdb13d).
+        cmd_check(*args[1:])
     elif cmd_lower == "watch":
         from hscc_daemon.cli import cmd_watch
         cmd_watch(args[1] if len(args) > 1 else None)

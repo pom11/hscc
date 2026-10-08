@@ -12,8 +12,10 @@ decorates the human path, and Rich's Console auto-degrades to plain text (no
 ANSI) when stdout is not a tty, which the no-ANSI regression test pins.
 """
 
+import json
 import os
 import signal
+import sys
 import time
 
 from .cli_theme import make_console, make_panel, make_status_panel, make_table
@@ -294,19 +296,123 @@ def cmd_status():
         ))
 
 
-def cmd_check(stream=None):
-    """Run a single check cycle.
+def _extract_repo_flag(argv):
+    """Pull ``--repo <path>`` / ``--repo=<path>`` and ``--json`` out of argv.
+
+    Returns ``(repo_or_None, has_repo_flag, json_mode, rest)``. ``--repo`` with
+    no value is an error the caller surfaces — silently defaulting to cwd would
+    hide a typo in the one command whose whole point is the posture HERE.
+    """
+    repo = None
+    has_repo = False
+    json_mode = False
+    rest = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--json":
+            json_mode = True
+            i += 1
+            continue
+        if a == "--repo":
+            has_repo = True
+            if i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+                repo = argv[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        if a.startswith("--repo="):
+            has_repo = True
+            repo = a.split("=", 1)[1]
+            i += 1
+            continue
+        rest.append(a)
+        i += 1
+    return repo, has_repo, json_mode, rest
+
+
+def cmd_check(stream=None, *rest):
+    """Run a single check cycle — or, with ``--repo``, the address-guard posture.
 
     Ad-hoc (from the terminal): prints the result only and NEVER writes the
     shared stream-state files the daemon owns. If a CLI-side check fails where
     the daemon succeeds (TCC, off-LAN laptop, a transient blip), `hscc status`
     must keep reporting what the daemon observes — a manual failure must not
     masquerade as a fleet failure.
+
+    ``hscc check --repo <path>`` (t_5abdb13d): reports the commit-time address
+    guard's TRUE posture for that checkout by calling ``posture()`` from the
+    shipped ``hscc-bootstrap/install_hooks.py`` (via :mod:`hscc_daemon.guard_posture`
+    — no logic duplicated here). Default path is the cwd's checkout. Exit code
+    is 0 only for ``armed``; ``unarmed``, ``armed-but-absent`` (the fail-open
+    line the operator asked to see: config advertises protection, this checkout
+    resolves no runnable hook) and ``not-a-repo`` are all non-zero so
+    scripts/cron can key off it. ``--json`` carries the posture dict verbatim.
     """
     from .state import persist_disabled
 
+    argv = ([stream] if stream is not None else []) + [a for a in rest]
+    repo, has_repo, json_mode, leftover = _extract_repo_flag(argv)
+    if has_repo:
+        with persist_disabled():
+            return _cmd_check_repo(repo, json_mode, leftover)
+
     with persist_disabled():
         return _cmd_check_impl(stream)
+
+
+def _cmd_check_repo(repo, json_mode, leftover):
+    """Render the guard posture for one checkout; exits per the state contract.
+
+    Kept inside persist_disabled() by the caller: this path must not touch the
+    daemon's stream state any more than the other ad-hoc check paths do.
+    """
+    from . import guard_posture
+
+    console = _console()
+    if leftover:
+        # A stream name alongside --repo is ambiguous — refusing beats
+        # quietly dropping one of the two intents.
+        console.print(f"[error]check --repo does not take a stream "
+                      f"(got: {' '.join(leftover)})[/error]")
+        sys.exit(2)
+    try:
+        p = guard_posture.posture(repo)
+    except guard_posture.GuardSourceError as exc:
+        # Fail closed: a status line that cannot SEE the guard must not
+        # advertise that it can. Non-zero, loudly.
+        if json_mode:
+            print(json.dumps({"state": "error", "detail": str(exc),
+                              "repo": repo or os.getcwd()}))
+        else:
+            console.print(f"[error]guard posture UNVERIFIED — {exc}[/error]")
+            console.print("[dim]next step: run hscc-bootstrap/bootstrap.sh "
+                          "(installs hscc-bootstrap/) so the single-implementation "
+                          "posture() is available[/dim]")
+        sys.exit(1)
+
+    if json_mode:
+        # Machine contract: the dict EXACTLY as posture() produced it —
+        # plain print, never Rich (same rule as `hscc verify --json`).
+        print(json.dumps(p))
+    else:
+        role = guard_posture.status_role_for(p.get("state"))
+        table = make_table(f"address-guard posture — {p.get('toplevel') or repo or os.getcwd()}")
+        table.add_column("field", no_wrap=True)
+        table.add_column("value")
+        table.add_row("state", f"[{role}]{p.get('state')}[/]")
+        table.add_row("core.hooksPath", str(p.get("core_hooks_path")))
+        table.add_row("hook present", "yes" if p.get("hook_present") else "no")
+        table.add_row("hook executable", "yes" if p.get("hook_executable") else "no")
+        table.add_row("detector present", "yes" if p.get("guard_present") else "no")
+        table.add_row("detail", str(p.get("detail")))
+        console.print(table)
+        hint = guard_posture.next_step_for(p)
+        if hint:
+            # Keep the exact "next step: <hint>" substring (automation greps it).
+            console.print(f"[dim]next step: {hint}[/dim]")
+    sys.exit(guard_posture.exit_code_for(p))
 
 
 def _cmd_check_impl(stream=None):
