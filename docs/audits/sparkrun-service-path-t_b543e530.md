@@ -20,9 +20,14 @@ The plist that produced that PATH is the live
 verbatim from `hscc_daemon/com.hermes.hscc_daemon.plist.template` by
 `launchd-setup.sh` (sed over `__HOME__`/`__PYBIN__`) — the template's PATH
 string matched the live plist entry-for-entry. `install.py::_daemon_path_env`
-and flightdeck's `daemon_install._path_env` already emitted `~/.local/bin`;
-the template did not. That mismatch is why a machine could be correct under
-one install path and broken under the other.
+and flightdeck's `daemon_install._path_env` already emitted `~/.local/bin`
+(verified on origin/main at claim time and in the deployed
+`~/.hermes/plugins/hscc_daemon/install.py`); the *template* — the emitter the
+operator's live plist actually came from — did not. That mismatch is why a
+machine could be correct under one install path and broken under the other.
+All four PATH emitters (install.py `_daemon_path_env` + its rendered
+plist/systemd unit, flightdeck `_path_env`, the launchd template) are now
+pinned by `TestServiceEnvironmentDeclaration`.
 
 ## What changed
 
