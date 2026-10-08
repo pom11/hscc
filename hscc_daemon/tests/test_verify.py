@@ -474,7 +474,7 @@ class TestCheckDaemonStreamsIntentional:
                             lambda *a, **k: {"ok": False, "output": ""})
         monkeypatch.setattr(health, "http_check",
                             lambda *a, **k: {"ok": False})
-        monkeypatch.setattr(health, "_sparkrun_workloads", lambda: [])
+        monkeypatch.setattr(health, "_sparkrun_workloads", lambda: ([], False))
         monkeypatch.setattr(health.serving, "PRIMARY_NODE", "10.0.0.2")
         monkeypatch.setattr(health.serving, "VLLM_HEALTH_URL",
                             "http://10.0.0.2/health")

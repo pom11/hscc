@@ -12,6 +12,7 @@ import threading
 from pathlib import Path
 
 from . import serving
+from . import sparkrun_bin
 from .daemon_ops import log
 from .state import now_iso, write_state
 from .util import run_cmd, ssh_cmd, http_check
@@ -139,23 +140,43 @@ _SPARKRUN_STATUS_SCRIPT = (
 def _sparkrun_venv_python():
     """Return the python interpreter that owns the `sparkrun` CLI.
 
-    Resolved from the `sparkrun` executable's shebang (``#!/path/to/python``)
-    so we reuse sparkrun's own venv — where the sparkrun package and its
-    transitive deps actually live. Returns None if `sparkrun` is not on PATH.
+    Thin delegate to :func:`hscc_daemon.sparkrun_bin.sparkrun_venv_python` —
+    PATH-INDEPENDENT resolution of the CLI (PATH first, then a deterministic
+    candidate list including ``~/.local/bin/sparkrun``) plus the shebang read,
+    so a launchd-supervised daemon whose service PATH omits ``~/.local/bin``
+    still reaches sparkrun's own venv. The old implementation was a bare
+    ``shutil.which("sparkrun")``, which returned None under exactly that
+    service PATH and silently killed the structured status path AND every
+    worker-relaunch shell-out (t_b543e530, live 2026-10-08). Kept as a seam so
+    tests monkeypatch one name.
     """
-    sparkrun_bin = shutil.which("sparkrun")
-    if not sparkrun_bin:
-        return None
-    try:
-        with open(sparkrun_bin, "rb") as f:
-            first = f.readline().decode("utf-8", "replace").strip()
-        if first.startswith("#!"):
-            interp = first[2:].strip()
-            if interp and (shutil.which(interp) is not None or os.path.exists(interp)):
-                return interp
-    except OSError:
-        pass
-    return None
+    return sparkrun_bin.sparkrun_venv_python()
+
+
+def _sparkrun_cli():
+    """Absolute path to the ``sparkrun`` CLI (never the bare name).
+
+    Thin delegate to :func:`hscc_daemon.sparkrun_bin.sparkrun_cli` (PATH first,
+    then a deterministic candidate list). Every shell-out to sparkrun in this
+    module must route through :func:`_sparkrun_exec_argv` so a
+    service-supervised PATH (no ``~/.local/bin``) cannot produce
+    ``[Errno 2] No such file or directory: 'sparkrun'`` on the recovery path.
+    Returns None only when sparkrun is genuinely not installed anywhere.
+    """
+    return sparkrun_bin.sparkrun_cli()
+
+
+def _sparkrun_exec_argv(argv):
+    """Swap a bare ``sparkrun`` argv[0] for the absolute CLI path.
+
+    The single execution chokepoint for every sparkrun shell-out/Popen in the
+    daemon health/relaunch paths. Command BUILDERS keep expressing the logical
+    command (bare ``sparkrun`` — grep-stable, test-stable); this resolves it at
+    EXEC time. When the CLI cannot be resolved at all the argv passes through
+    unchanged and the subprocess raises the loud ``[Errno 2]`` it raises today
+    — never a silent no-op (t_b543e530).
+    """
+    return sparkrun_bin.exec_argv(argv)
 
 
 def _sparkrun_workloads():
@@ -164,20 +185,24 @@ def _sparkrun_workloads():
     Replaces the former `sparkrun status` shell-out + `Job:` text-parsing in
     the DGX check, which was fragile to any cosmetic change in sparkrun's
     human-readable output. Instead we invoke sparkrun's own structured
-    ``query_cluster_status`` API — run under sparkrun's own venv python
-    (resolved from the `sparkrun` binary shebang, see ``_SPARKRUN_STATUS_SCRIPT``)
-    so it is reachable at daemon runtime — and read its JSON ``to_dict()``
-    output.
+    ``api.status``/``classify_cluster_status`` API — run under sparkrun's own
+    venv python (resolved from the `sparkrun` binary shebang, see
+    ``_SPARKRUN_STATUS_SCRIPT``) so it is reachable at daemon runtime — and read
+    its JSON ``to_dict()`` output.
 
     We map ``ClusterStatusResult.to_dict()``'s ``groups`` (cluster members
     with job metadata) + ``solo_entries`` onto the SAME shape the old
     text-parsing produced — ``[{"name": ..., "container": ...}]`` — so nothing
     downstream that reads ``results["workloads"]`` needs to change.
 
-    Defensive fallback: if the structured query is unreachable (no sparkrun CLI,
-    unresolvable interpreter, query failure), fall back to the legacy shell-out
-    text-parse path rather than reporting an empty workload list. Any other
-    failure returns [] — the check degrades gracefully instead of crashing.
+    Returns ``(workloads, degraded)``. ``degraded`` is the anti-fail-open
+    signal (t_b543e530): True ONLY when BOTH status paths are unavailable —
+    sparkrun's venv python could not be resolved (or the structured query
+    raised) AND the legacy `sparkrun status` shell-out failed (CLI missing
+    from a service PATH is the real-world case). An empty workload list then
+    means "we could not look", which is NOT the same fact as "the fleet is
+    empty", and the DGX check must publish it as a degraded state instead of
+    logging a plain ok=True.
     """
     venv_py = _sparkrun_venv_python()
     if venv_py:
@@ -185,17 +210,25 @@ def _sparkrun_workloads():
             res = run_cmd([venv_py, "-c", _SPARKRUN_STATUS_SCRIPT], timeout=25)
             if res.get("ok") and res.get("output"):
                 data = json.loads(res["output"])
-                return _workloads_from_cluster_status(data)
+                return _workloads_from_cluster_status(data), False
         except (ValueError, TypeError, json.JSONDecodeError) as e:
             log(f"sparkrun cluster-status JSON parse failed ({e})", "WARN")
         except Exception as e:
             log(f"sparkrun cluster-status query failed ({e})", "WARN")
 
-    # Last resort: legacy `sparkrun status` text-parse (only if the structured
-    # path is unavailable — e.g. sparkrun not on PATH at all).
+    # Legacy `sparkrun status` text-parse, only when the structured path is
+    # unavailable. The argv is logical (`sparkrun status`) and resolved to the
+    # absolute CLI at execution time by _sparkrun_exec_argv inside
+    # _sparkrun_workloads_textparse.
     log("structured sparkrun status unavailable — falling back to "
         f"`sparkrun status` text-parse (venv_py={venv_py!r})", "WARN")
-    return _sparkrun_workloads_textparse()
+    workloads, cli_ok = _sparkrun_workloads_textparse()
+    if not cli_ok:
+        log("FLEET VISIBILITY LOST: sparkrun structured status AND the "
+            "`sparkrun status` shell-out are both unavailable — the workload "
+            "list below is UNKNOWN, not empty. Auto-heal relaunch cannot "
+            "reach the sparkrun CLI either.", "WARN")
+    return workloads, not cli_ok
 
 
 def _workloads_from_cluster_status(data):
@@ -228,13 +261,19 @@ def _sparkrun_workloads_textparse():
     """Legacy fallback: shell out to `sparkrun status` and text-parse.
 
     Only reached when the structured cluster-status query is unreachable
-    (no `sparkrun` CLI on PATH to resolve its venv python) or fails. Keeps
+    (no `sparkrun` CLI anywhere to resolve its venv python) or fails. Keeps
     workload detection working in such degraded environments at the cost of
     the old text-parsing fragility.
+
+    Returns ``(workloads, cli_ok)`` where ``cli_ok`` is False when the shell-out
+    itself failed (CLI unresolvable / non-zero exit). The old code returned a
+    bare ``[]`` in that case — which the DGX check then reported as a healthy
+    empty fleet; that fail-open was the whole bug (t_b543e530). The logical
+    argv is resolved to the absolute CLI by ``util.run_cmd`` at exec time.
     """
-    spark_result = run_cmd(["sparkrun", "status"], timeout=10)
+    spark_result = run_cmd(sparkrun_bin.argv("status"), timeout=10)
     if not spark_result.get("ok"):
-        return []
+        return [], False
     workloads = []
     for line in spark_result["output"].split("\n"):
         line = line.strip()
@@ -246,7 +285,7 @@ def _sparkrun_workloads_textparse():
                 if p.startswith("[") and p.endswith("]"):
                     container = p.strip("[]")
             workloads.append({"name": name, "container": container})
-    return workloads
+    return workloads, True
 
 
 def check_dgx():
@@ -285,19 +324,42 @@ def check_dgx():
         results["gpu_count"] = 0
         results["gpus"] = []
     
-    # 3. Sparkrun workloads
-    workloads = _sparkrun_workloads()
+    # 3. Sparkrun workloads — with the fail-open CLOSED (t_b543e530). When
+    # BOTH status paths are dead (venv python unresolvable AND the legacy
+    # shell-out failed) the workload list is UNKNOWN, not empty: the dgx
+    # stream must read DEGRADED (ok=False + WARN log line, which trigger.py
+    # turns into a state.dgx.degraded pseudo-event and `hscc verify` shows
+    # RED) instead of the old silent ok=True + [].
+    workloads, degraded = _sparkrun_workloads()
     results["workloads"] = workloads
     results["workload_count"] = len(workloads)
+    results["fleet_visibility"] = "degraded" if degraded else "ok"
     
     # 4. vLLM health
     health = http_check(serving.VLLM_HEALTH_URL, timeout=5)
     results["vllm_health"] = health
     results["vllm_healthy"] = health.get("ok", False)
     
-    ok = results["ssh_reachable"] and results["vllm_healthy"]
-    state_entry = {"ok": ok, "details": results}
-    if not ok and _intentional_window():
+    # Two honest verdicts, deliberately kept apart:
+    #   serving_ok — can the serving layer be reached (ssh + vLLM). This is
+    #     what we RETURN, so the watchdog's restart/breaker semantics are
+    #     unchanged: a sparkrun *status-polling* outage must never trigger a
+    #     stop/run cycle against a healthy vLLM.
+    #   publish_ok — is the DGX CHECK healthy (serving ok AND we can actually
+    #     see the fleet). This is what the STREAM says. An empty workload list
+    #     we could not verify is not a healthy read, so the stream goes RED
+    #     with a named degraded message and is deliberately NOT excused as
+    #     "intentional" — we do not know the fleet state, so we must not
+    #     claim it is down by design.
+    serving_ok = results["ssh_reachable"] and results["vllm_healthy"]
+    publish_ok = serving_ok and not degraded
+    state_entry = {"ok": publish_ok, "details": results}
+    if not publish_ok and degraded:
+        state_entry["message"] = (
+            "FLEET VISIBILITY DEGRADED — sparkrun status unavailable "
+            "(structured query + `sparkrun status` shell-out both failed); "
+            "workload list UNKNOWN, auto-heal relaunch cannot reach sparkrun")
+    elif not publish_ok and _intentional_window():
         # The serving layer is in an intentional-autodown window — either
         # down by design (model stopped IS why vLLM is unreachable) or waking
         # (model still loading, vLLM not answering yet). Both are expected
@@ -306,8 +368,10 @@ def check_dgx():
         state_entry["intentional"] = "autodown"
         state_entry["message"] = "intentional autodown — serving layer down by design"
     write_state("dgx", state_entry)
-    log(f"DGX check complete: ok={ok}")
-    return ok
+    log(f"DGX check complete: ok={serving_ok}"
+        + (" — stream DEGRADED: fleet visibility lost (sparkrun unreachable)"
+           if degraded else ""))
+    return serving_ok
 
 
 def _gateway_job_alive():
@@ -501,8 +565,9 @@ def check_proxy():
         return True
 
     log(f"Worker proxy down on :{PROXY_PORT} — relaunching", "WARN")
-    r = run_cmd(["sparkrun", "proxy", "start", "--cluster", serving.HSCC_CLUSTER,
-                 "--hosts", ",".join(nodes), "--port", str(PROXY_PORT)], timeout=90)
+    r = run_cmd(sparkrun_bin.argv("proxy", "start", "--cluster", serving.HSCC_CLUSTER,
+                                  "--hosts", ",".join(nodes), "--port", str(PROXY_PORT)),
+                timeout=90)
     ok = r.get("ok", False)
     proxy_data = {"ok": ok, "port": PROXY_PORT, "relaunched": True,
                   "last_check": now_iso(),
@@ -569,7 +634,7 @@ def check_local():
     # Node.js / npm
     node_r = run_cmd(["node", "--version"], timeout=3)
     npm_r = run_cmd(["npm", "--version"], timeout=3)
-    spark_r = run_cmd(["sparkrun", "--version"], timeout=3)
+    spark_r = run_cmd(sparkrun_bin.argv("--version"), timeout=3)
     tools = {
         "node": {"version": node_r.get("output", "").strip()} if node_r.get("ok") else {},
         "npm": {"version": npm_r.get("output", "").strip()} if npm_r.get("ok") else {},
@@ -1529,8 +1594,8 @@ def check_workers():
         # re-provisioned group binds :port. --hosts <span> scopes the stop to the
         # span (not --all), so an unrelated co-located sibling on another port
         # survives.
-        stop_result = run_cmd(["sparkrun", "stop", recipe, "--hosts", ",".join(span)],
-                              timeout=60)
+        stop_result = run_cmd(sparkrun_bin.argv(
+            "stop", recipe, "--hosts", ",".join(span)), timeout=60)
         if not stop_result.get("ok"):
             log(f"sparkrun stop for {label} failed: {stop_result.get('output', '')}", "WARN")
         # Record relaunch time before launching so we do not thrash even if
@@ -1541,7 +1606,7 @@ def check_workers():
         try:
             with open(log_path, "a") as log_file:
                 subprocess.Popen(
-                    relaunch_cmd,
+                    _sparkrun_exec_argv(relaunch_cmd),
                     stdout=log_file, stderr=log_file,
                     start_new_session=True,
                 )

@@ -238,7 +238,8 @@ class TestCheckWorkers:
 
         # Deliberately-down unit NOT relaunched — no stop, no Popen run.
         assert popen_calls == []
-        assert not any(a[:2] == ["sparkrun", "stop"] for a in ran)
+        assert not any(os.path.basename(a[0]) == "sparkrun" and
+                       a[1:2] == ["stop"] for a in ran)
         # The check reports ok (it is correctly doing nothing, not failing).
         assert ok is True
 
@@ -294,12 +295,20 @@ class TestCheckWorkers:
         # With ok = not down, and relaunched workers not in down, this should be True
         # because the worker goes into relaunched list (not down)
         ok = health.check_workers()
-        # stop via run_cmd still fires
-        assert any(t == "run_cmd" and a[:2] == ["sparkrun", "stop"] for t, a in ran)
+        # stop via run_cmd still fires (argv[0] is the resolved absolute
+        # sparkrun CLI, so match on basename + subcommand)
+        assert any(t == "run_cmd" and os.path.basename(a[0]) == "sparkrun"
+                   and a[1:2] == ["stop"] for t, a in ran)
         # Popen called for sparkrun run (detached)
         assert len(popen_calls) == 1
         popen_args = popen_calls[0][0][0]
-        assert popen_args[:2] == ["sparkrun", "run"]
+        # t_b543e530: the detached relaunch MUST be executable under a service
+        # PATH without ~/.local/bin — argv[0] is the resolved ABSOLUTE sparkrun
+        # path (basename stays "sparkrun"), never the bare name.
+        import os as _os
+        assert _os.path.basename(popen_args[0]) == "sparkrun"
+        assert _os.path.isabs(popen_args[0])
+        assert popen_args[1] == "run"
         assert "10.0.0.2" in popen_args
         assert any("27b" in str(x) for x in popen_args)
         # Popen kwargs: detached + log file
@@ -360,10 +369,18 @@ class TestCheckWorkers:
             assert "--served-model-name" in relaunch
             assert (relaunch[relaunch.index("--served-model-name") + 1]
                     == "W worker-model")
-            # Byte-identical to fleet_up_plan's command for the same unit, so
-            # sparkrun derives the SAME cluster_id and --ensure re-issues the
-            # declared workload instead of duplicating it (t_e1ff0e8e).
-            assert relaunch == wk
+            # Identical to fleet_up_plan's command for the same unit from the
+            # recipe onwards, so sparkrun derives the SAME cluster_id and
+            # --ensure re-issues the declared workload instead of duplicating
+            # it (t_e1ff0e8e). argv[0] is deliberately NOT compared verbatim:
+            # the relaunch resolves sparkrun to an ABSOLUTE path at exec time
+            # (t_b543e530 — a service PATH without ~/.local/bin cannot exec the
+            # bare name) while fleet_up_plan emits the logical command. Same
+            # program, same intent-hash inputs.
+            import os as _os
+            assert _os.path.basename(relaunch[0]) == wk[0]
+            assert _os.path.isabs(relaunch[0])
+            assert relaunch[1:] == wk[1:]
 
     def test_grace_window_skips_relaunch(self, tmp_hfcc_dir, monkeypatch):
         import time as _time
@@ -425,7 +442,8 @@ class TestCheckWorkers:
         assert any("b.yaml" in str(x) for x in popen_args)
         assert "8001" in popen_args
         # stop targeted b's recipe, not --all (sibling a survives)
-        stop_cmds = [a for a in ran if a[:2] == ["sparkrun", "stop"]]
+        stop_cmds = [a for a in ran
+                     if os.path.basename(a[0]) == "sparkrun" and a[1:2] == ["stop"]]
         assert all("--all" not in a for a in stop_cmds)
         assert not any("a.yaml" in str(x) for x in popen_args)
 
@@ -718,7 +736,11 @@ class TestCheckWorkers:
         # exactly ONE sparkrun run (one GROUP relaunch, not one per node / not a solo)
         assert len(popen_calls) == 1
         cmd = popen_calls[0][0]   # first positional arg to Popen = the argv list
-        assert cmd[0] == "sparkrun" and cmd[1] == "run"
+        # t_b543e530: resolved to an absolute sparkrun path at exec time (the
+        # conftest pins a hermetic fake CLI), never the bare name.
+        import os as _os
+        assert _os.path.basename(cmd[0]) == "sparkrun" and _os.path.isabs(cmd[0])
+        assert cmd[1] == "run"
         # the full span is in --hosts (comma-joined head,peer)
         i = cmd.index("--hosts")
         assert cmd[i + 1] == "10.0.0.2,10.0.0.3"
@@ -731,7 +753,8 @@ class TestCheckWorkers:
         assert state["relaunched"] != []          # the group relaunch logs a relaunch
         # requirement #3: the stop also targets the FULL span (hosts .2,.3), so
         # no two workloads are ever left bound to the same host:port.
-        stop_cmds = [a for a in ran if a[:2] == ["sparkrun", "stop"]]
+        stop_cmds = [a for a in ran
+                     if os.path.basename(a[0]) == "sparkrun" and a[1:2] == ["stop"]]
         assert any(a[a.index("--hosts") + 1] == "10.0.0.2,10.0.0.3" for a in stop_cmds)
 
     def test_genuinely_down_primary_still_relaunched(self, tmp_hfcc_dir, monkeypatch):
@@ -1249,7 +1272,10 @@ class TestCheckProxy:
                             lambda args, **k: ran.append(args) or {"ok": True})
         assert health.check_proxy() is True
         cmd = ran[0]
-        assert cmd[:3] == ["sparkrun", "proxy", "start"]
+        # argv[0] is the resolved absolute sparkrun CLI (t_b543e530) — match on
+        # basename + subcommands, not the literal bare name.
+        assert os.path.basename(cmd[0]) == "sparkrun"
+        assert cmd[1:3] == ["proxy", "start"]
         assert "10.0.0.2,10.0.0.3" in cmd
 
 
@@ -1503,7 +1529,7 @@ class TestCheckLocal:
                 return {"ok": True, "output": "v18.0.0"}
             elif args[0] == "npm":
                 return {"ok": True, "output": "9.0.0"}
-            elif args[0] == "sparkrun":
+            elif os.path.basename(args[0]) == "sparkrun":
                 return {"ok": False, "output": ""}
             return {"ok": False, "output": ""}
         monkeypatch.setattr(health, "run_cmd", fake_run_cmd)
