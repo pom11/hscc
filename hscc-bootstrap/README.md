@@ -19,6 +19,14 @@ turns an official Hermes + sparkrun machine into a fully-wired HSCC node.
    silently degrades `project chat/sessions` and `hscc check`. Idempotent:
    verifies the shebang each run and force-repairs on drift; reports what it
    changed. `--skip-cli` to opt out. Hard-stops on failure.
+3c. **Install: git hooks (public-repo address guard)** — `install_hooks.py`
+   points `core.hooksPath` at the repo's committed `.githooks/` so the address
+   guard runs at **commit time**, not only under pytest (plain `.git/hooks` is
+   not cloned, so it cannot be the mechanism). Writes to the COMMON git config,
+   so every linked worktree — the dispatcher's worker worktrees included — is
+   armed by ONE install. Idempotent (`verified` on re-run; repairs a missing exec
+   bit; `skipped`, never faked, for a non-checkout or a hookless revision).
+   Non-fatal: a skipped/failed stage warns that the guard is INACTIVE.
 4. **Install: skills / role profiles / ~/.hscc + serving.json**.
 5. **Install: hermes/sparkrun patches** — reapplies the curated upstream patches
    (`apply_patches.py`) so the kanban review + resume hooks land on official

@@ -54,6 +54,39 @@ hermes cron create 'every 2h'   --name 'hscc-cluster-digest'  --no-agent --scrip
 
 Verify with `hermes cron list`.
 
+## Address guard (`address_guard.py`) — runs on every commit
+
+`address_guard.py` is the repo's **single** implementation of "does this content
+carry a real operator LAN or tailnet address". This is a PUBLIC repo, and real
+addresses have reached tracked files twice — most recently a ledger tick that
+recorded a verbatim `mount_nfs` command and reached `origin/main` on a **docs-only
+commit**. The pytest gate could see that leak but never ran for it, so the same
+detector now also runs at commit time.
+
+| caller | scope | what it reads |
+|---|---|---|
+| `.githooks/pre-commit` | `--staged` | the **index** (staged blobs) |
+| `hscc_daemon/tests/test_no_real_addresses_committed.py` | `scan_tracked()` | every tracked file on disk |
+
+Both import the same module — there is no second regex to drift. `.githooks` is
+committed and `core.hooksPath` points at it (plain `.git/hooks` is not cloned, so
+it cannot be the mechanism); `hscc-bootstrap/install_hooks.py` sets it, into the
+COMMON git config, so every linked worktree is armed by one install.
+
+Placeholders are the documented convention and are allowed: `10.0.0.x` for a LAN
+node, `100.64.0.1` for a tailnet host (`100.64.0.0/24` is the sanctioned fixture
+block). A blocked commit prints the offending `file:line` and both placeholders.
+
+```bash
+python3 scripts/address_guard.py --staged            # what the hook checks
+python3 scripts/address_guard.py --tracked           # whole tracked tree
+```
+
+Exit codes: `0` clean, `1` real address found, `2` the guard could not run (the
+hook treats `2` as a block too — a guard that cannot run must not wave a commit
+through). Do not `git commit --no-verify` past it on a docs file: that is exactly
+how the 2026-10-08 leak shipped.
+
 ## Customization
 
 Each script is self-contained shell + hardcoded host IPs / model ids. Cluster topology assumptions live at the top of each script — edit there if your cluster differs.
