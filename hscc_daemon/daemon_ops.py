@@ -501,6 +501,23 @@ def run_daemon_loop():
     from .lifecycle import pipeline_watchdog, restart_vllm, load_watchdog_block
     from . import recover
     from .state import now_iso, write_state
+    from . import sparkrun_bin
+
+    # Service-supervised PATHs (launchd/systemd) routinely omit ~/.local/bin,
+    # where the sparkrun CLI actually lives (t_b543e530). argv-based calls are
+    # already PATH-independent (util.run_cmd resolves sparkrun_bin.exec_argv);
+    # this covers the handful of shell=True sparkrun call sites an argv rewrite
+    # cannot reach. Additive + idempotent — an already-working PATH is not
+    # reordered. Loud when sparkrun is nowhere to be found, so a daemon that
+    # starts blind says so at boot instead of failing open for a day.
+    _spark_dir = sparkrun_bin.ensure_on_path()
+    if _spark_dir:
+        log(f"sparkrun CLI resolved: {_spark_dir}/sparkrun")
+    else:
+        log("sparkrun CLI NOT RESOLVED at daemon start (no PATH entry, no "
+            "candidate path) — fleet status will report DEGRADED and worker "
+            "auto-heal cannot relaunch; install sparkrun or fix the service "
+            "PATH", "ERROR")
 
     ensure_state_dir()
     log("Daemon loop started")
