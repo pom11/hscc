@@ -11,6 +11,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.5.6] - 2026-10-08
+
+### Fixed
+- **A lost NAS mount was detected but never surfaced.** The daemon's `nas`
+  check writes `ok:false` the moment the share stops being a real mount, but no
+  trigger metric could read that stream, so no rule could alert on it. When the
+  NAS rebooted on 2026-10-08 all five clients lost their mounts and `nas.json`
+  sat `ok:false` for roughly two hours with nobody notified — detection worked,
+  the actor was missing. Adds a `nas_down` metric (same fail-open shape as
+  `failed_dgx`: absent state does not alert, so a fresh daemon is quiet) and
+  ships a `nas-down` default rule, whose body points at the right first step —
+  check the NAS uptime, because a reboot means the export is fine and only the
+  clients need remounting.
+- **`hscc_nas_watchdog.sh` could never have fired correctly.** It was installed
+  to `~/.hermes/scripts/` but never scheduled, and it still carried
+  `NAS_HOST="10.0.0.249"` — a placeholder left behind by the public-repo address
+  scrub — so its reachability probe targeted a host that does not exist. It also
+  used `ping -W 2`, which is **milliseconds** on macOS (seconds only on Linux),
+  making that probe a ~2ms timeout that would fail against a healthy NAS. The
+  host now comes from `HSCC_NAS_HOST` with no address baked into this public
+  repo, and is **skipped** rather than reported as a failure when unset; the
+  probe uses the portable `-c 1 -t 2` form.
+- **The mount probe trusted a directory that exists.** It checked `[ -d ]` and
+  then listed a subdirectory, but an unmounted mountpoint is still a listable
+  empty directory (and `df` on it reports the local boot disk — how a 12-day
+  outage went unnoticed in Aug 2026). It now requires a real entry in the mount
+  table *and* a readable payload, which separates "not mounted at all" from a
+  dead NFS handle that still lists while every read fails, and exits non-zero so
+  it is usable from a scheduler.
+- **Memory augmentation was pinned to a single node.**
+  `HSCC_MEMORI_AUGMENT_URL` defaulted to `localhost:8000` — one node's own vLLM
+  port — so every augmentation call hit one GPU and would fail outright when
+  autodown frees that node. It now defaults to the proxy on `:4000`, which
+  fronts every serving unit, so the work balances and survives any single node
+  going away. The model default moves from `local-model`, which no unit ever
+  advertised, to `worker-model`, the role alias every serving unit does — the
+  old default only worked when the environment overrode it.
+
+### Verified
+- `hscc_daemon/tests/test_trigger.py`: +4 cases (`TestNasDownMetric`) — fires on
+  a failing nas check, silent when healthy, quiet when the state file is absent,
+  and the shipped defaults really do carry a `nas-down` rule (bootstrap only
+  ever ADDS missing ids, so a metric without a shipped rule would never reach an
+  existing install).
+- `memori_byodb/tests/test_local_augmentation.py`: +2 cases asserting the
+  default endpoint is the proxy and not any `:8000`, and that the environment
+  still wins over the default.
+- `hscc-bootstrap/tests/test_install_triggers.py`: the hardcoded
+  `DEFAULT_RULES` contract updated for the new rule (5 assertions across the
+  file keyed off it, which is the tripwire working as intended).
+- The rewritten watchdog was run against the real, genuinely-unmounted
+  `/Volumes/NAS` and reported exactly that, with the reachability probe clean
+  once `HSCC_NAS_HOST` was supplied.
+- Full suite `scripts/run_tests.sh` **ALL GREEN** (9/9 packages):
+  **4523 passed, 0 failed**.
+
 ## [2.5.5] - 2026-10-08
 
 ### Fixed
