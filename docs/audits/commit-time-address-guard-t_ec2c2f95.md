@@ -146,9 +146,11 @@ Counts verified with `pytest --collect-only` on this branch, not by counting lin
   a hard failure, since that is the bypass signature. Bootstrap arms it.
 - `git push --no-verify` / `git push --force` can publish already-existing dirty
   history. Out of scope: history rewrite is the operator's call.
-- A worktree on an older revision (no `.githooks` yet) finds no hook and commits
-  normally — which is the pre-card status quo, not a regression, and is why
-  arming the config early is safe.
+- A worktree whose checkout lacks the files — an older revision, or any checkout
+  made before this branch merges — finds no hook and commits normally. That is the
+  pre-card status quo, **not** a regression, but see §6c: it is NOT "safe", because
+  the shared config advertises protection that is not there. `install_hooks.py`
+  will not arm such a checkout (see §6c), and `posture()` names the state.
 - **Post-merge, a ledger tick that pastes raw command output WILL fail to commit**
   until the addresses are scrubbed. That is the point of the card, but it is a
   visible change for the `hscc-orch-goal-heartbeat` cron: the tick's `git commit`
@@ -160,11 +162,50 @@ Counts verified with `pytest --collect-only` on this branch, not by counting lin
 
 - `hscc-bootstrap/install_hooks.py` writes `core.hooksPath=.githooks` to the
   **common** git config of the repo it is pointed at. Running it during this
-  card's verification set that key in the operator's primary checkout
-  (`~/dev/hscc`), which is inherited by every linked worktree. It is
-  **inert until this branch merges** — main has no `.githooks`, and git commits
-  normally when the configured hook does not exist (measured, §4). Undo with
-  `git -C ~/dev/hscc config --unset core.hooksPath`; bootstrap re-arms it.
+  card's verification (before the both-halves rule below existed) set that key in
+  the operator's primary checkout (`~/dev/hscc`), where it is inherited by every
+  linked worktree. Measured consequence: the config claims the guard is armed repo
+  -wide while the primary (on main, no `.githooks`) resolves no hook and commits
+  normally — armed-but-inert, and every pre-merge worktree silently shares that
+  false advertisement. **Reverted at the end of this run**:
+  `git -C ~/dev/hscc config --unset core.hooksPath` (the fixed installer would
+  report `skipped` for that checkout anyway). Bootstrap arms it post-merge, from
+  a checkout where it is true.
+
+## 6c. The shared-config false-arming flaw (found by the operator mid-review, fixed in-branch)
+
+Measured at ~21:45 during review: the first version of `install_hooks.py` armed
+`core.hooksPath` whenever `.githooks/pre-commit` existed *in the checkout it was
+run from* — and wrote it to the **common** config, which every worktree shares and
+which resolves **relative** to each worktree. So arming from one complete checkout
+made every sibling worktree *report itself protected* while the ones lacking the
+files resolved nothing and committed normally. Effective posture: fail-open exactly
+where the guard matters (the primary on main, every pre-merge worktree), fail-closed
+only in the odd case of a checkout with the hook but not the detector script.
+
+Two fixes, both now in the branch:
+
+1. **`install_hooks.py` arms a checkout only when BOTH halves —
+   `.githooks/pre-commit` AND `scripts/address_guard.py` — are present in that
+   checkout** (`action=skipped`, `guard_present=false`, reason names the missing
+   path). A partial checkout can no longer arm the shared config.
+   (`git config --worktree` was measured as the finer tool and rejected: it needs
+   `extensions.worktreeConfig` enabled repo-wide — invasive, and it changes what
+   `--local` means for every other worktree. Not worth it here.)
+2. **`posture()` / `install_hooks.py --check`** answers the only question that is
+   true per checkout — does the hook git will actually run HERE exist, is it
+   executable, and is the detector beside it — and says `armed` / `unarmed` /
+   **`armed-but-absent`** (config set, no runnable hook here: FAIL-OPEN) /
+   `not-a-repo`. This is the explicit mismatch report the operator asked for; the
+   card's follow-up (hscc `check --repo`) now has a ready-made function to call.
+
+Residual, stated plainly: a worktree checked out at a PRE-merge revision still has
+no hook even after bootstrap arms the common config — it resolves nothing and
+commits normally. Nothing can fix that from the config side (the files simply are
+not there); it disappears per-worktree as each rebases onto post-merge main, and
+until then `posture()` names it instead of lying. Encoded as
+`test_arming_from_one_worktree_does_not_advertise_protection_elsewhere` and
+`test_installer_refuses_to_arm_when_the_detector_is_absent`.
 
 ## 7. Follow-ups worth carding (not done here)
 

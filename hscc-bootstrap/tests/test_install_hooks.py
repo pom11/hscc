@@ -33,14 +33,20 @@ def _git(repo, *args):
     return subprocess.run(GIT + ["-C", str(repo), *args], capture_output=True, text=True)
 
 
-def _make_repo(tmp_path, *, with_hook=True):
+def _make_repo(tmp_path, *, with_hook=True, with_guard=True):
+    """Throwaway repo. Both halves must be present for install_hooks to arm it."""
     repo = tmp_path / "checkout"
     (repo / ".githooks").mkdir(parents=True)
+    (repo / "scripts").mkdir()
     hook = repo / ".githooks" / "pre-commit"
     hook.write_bytes(HOOK_BODY)
     os.chmod(hook, 0o755 if with_hook else 0o644)
     if not with_hook:
         hook.unlink()
+    guard = repo / "scripts" / "address_guard.py"
+    guard.write_text("# stub detector\n", encoding="utf-8")
+    if not with_guard:
+        guard.unlink()
     (repo / "README.md").write_text("# x\n", encoding="utf-8")
     assert _git(repo, "init", "-q", "-b", "main").returncode == 0
     _git(repo, "add", "-A")
@@ -118,8 +124,51 @@ def test_repo_without_a_committed_hook_is_skipped(tmp_path):
     repo = _make_repo(tmp_path, with_hook=False)
     res = install_hooks.install_hooks(repo)
     assert res["action"] == "skipped", res
-    assert "no committed hook" in res["reason"]
+    assert "missing in this checkout" in res["reason"]
     assert install_hooks.current_hooks_path(repo) is None
+
+
+def test_installer_refuses_to_arm_when_the_detector_is_absent(tmp_path):
+    """The operator-flagged shape: hook present, scripts/address_guard.py not.
+
+    The hook FAILS CLOSED without the detector, so arming here would either block
+    every commit on that checkout or (worse, on an older hook revision) advertise
+    protection that is not there. Arm only when both halves are present HERE.
+    """
+    repo = _make_repo(tmp_path, with_guard=False)   # hook present, detector absent
+    res = install_hooks.install_hooks(repo)
+    assert res["action"] == "skipped", res
+    assert res["guard_present"] is False
+    assert install_hooks.current_hooks_path(repo) is None, "must NOT arm a half-present checkout"
+
+
+def test_arming_from_one_worktree_does_not_advertise_protection_elsewhere(tmp_path):
+    """The measured t_ec2c2f95 review finding, encoded as a test.
+
+    core.hooksPath is relative and lives in the COMMON config, so a value written
+    from worktree A makes worktree B *report itself armed* while B resolves no
+    hook and commits normally. install_hooks must not write that value from a
+    checkout that has the files unless the checkout is complete, and posture()
+    must call B's state what it is: armed-but-absent (fail-open).
+    """
+    repo, _ = _repo_with_real_guard(tmp_path, "x")
+    wt = tmp_path / "outside" / "wt-premerge"
+    assert _git(repo, "worktree", "add", "-q", "-b", "premerge", str(wt)).returncode == 0
+    # Simulate a worktree on a PRE-merge revision: strip the guard files from it.
+    shutil.rmtree(wt / ".githooks")
+    (wt / "scripts" / "address_guard.py").unlink()
+
+    assert install_hooks.install_hooks(wt)["action"] == "skipped", \
+        "a checkout without the files must not arm the shared config"
+
+    # Arming from the complete checkout is legitimate and covers this worktree once
+    # the files exist there; before that, posture() must not claim 'armed'.
+    assert install_hooks.install_hooks(repo)["action"] == "installed"
+    p = install_hooks.posture(wt)
+    assert p["state"] == "armed-but-absent", p
+    assert p["core_hooks_path"] == ".githooks", p
+    assert p["hook_present"] is False and p["guard_present"] is False, p
+    assert install_hooks.posture(repo)["state"] == "armed"
 
 
 def test_default_repo_root_is_the_work_repo():
@@ -160,7 +209,6 @@ def test_committed_hook_is_mode_100755_in_git():
 def _repo_with_real_guard(tmp_path, leaky_line):
     """A throwaway repo carrying the REAL hook + detector, guard installed."""
     repo = _make_repo(tmp_path)
-    (repo / "scripts").mkdir()
     shutil.copy2(REPO / "scripts" / "address_guard.py", repo / "scripts" / "address_guard.py")
     shutil.copy2(REPO / ".githooks" / "pre-commit", repo / ".githooks" / "pre-commit")
     os.chmod(repo / ".githooks" / "pre-commit", 0o755)
