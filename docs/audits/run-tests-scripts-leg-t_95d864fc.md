@@ -6,11 +6,11 @@ Base: `main` @ fb15d97b.
 ## Status
 
 - [x] Reproduced the gap at main tip
-- [ ] Fix applied (mechanism: see "Mechanism" — decision recorded before measuring)
-- [ ] Baseline per-leg counts (py3.11.16, main tip, pre-change)
-- [ ] Post-change full suite (py3.11.16) — 10 legs
-- [ ] Post-change full suite (p313 3.13.12) — 10 legs
-- [ ] Changelog fragment
+- [x] Fix applied — `scripts` joins `DIRS` (mechanism decision recorded below)
+- [x] Baseline per-leg counts on BOTH interpreters (clean detached worktrees)
+- [x] Post-change full suite (py3.11.16) — 10 legs, ALL GREEN
+- [x] Post-change full suite (p313 3.13.12) — 10 legs, ALL GREEN
+- [x] Changelog fragment (via `scripts/changelog_fragments.py add`, never CHANGELOG.md)
 
 ## The gap, reproduced at main tip (fb15d97b)
 
@@ -77,4 +77,72 @@ repo, and the leg runs in its own process, so it cannot perturb the other legs:
 
 ## Evidence
 
-Append the measured logs here as they land.
+### Gate #1 — base fb15d97b / tip b32954c (superseded when main moved mid-gate)
+
+4 sequential legs, each log stamped commit + `dirty_files: 0` + interpreter
+(logs: `profiles/backend-engineer/cache/scratch/t_95d864fc-logs/`). Baseline
+worktree clean-detached at fb15d97b. ALL GREEN rc=0 on all four legs; summary
+blocks show 9 legs (baseline) vs 10 legs (post-change) with `✓ scripts`. The 9
+pre-existing legs were count-for-count identical between baseline and
+post-change on each interpreter; the new leg was `scripts` = 56 passed (1.32 s,
+both interpreters). This gate is superseded — not discarded — by gate #2 below,
+because t_a98c009f + t_5abdb13d landed on main (`4216df50`) while it ran and
+repo policy stamps the gate at the SHA that gets merged.
+
+### Gate #2 — base 4216df50 / tip f5e0358f (the stamp for this card)
+
+Baseline: clean detached worktree at `4216df50`, `dirty_files: 0`. Post: this
+branch at `f5e0358f` (rebased 1:1 onto 4216df50), `dirty_files: 0`, frozen
+while legs ran. Sequential legs, each stamped (logs: `.../t_95d864fc-logs2/`).
+
+| leg | commit | dirty | interpreter | legs | result |
+|---|---|---|---|---|---|
+| base2-311 | 4216df50 | 0 | 3.11.16 | 9 | ALL GREEN rc=0 |
+| base2-313 | 4216df50 | 0 | 3.13.12 | 9 | ALL GREEN rc=0 |
+| post2-311 | f5e0358f | 0 | 3.11.16 | 10 | ALL GREEN rc=0 |
+| post2-313 | f5e0358f | 0 | 3.13.12 | 10 | ALL GREEN rc=0 |
+
+Per-leg pass/skip counts — the 9 pre-existing legs are identical baseline→post
+on each interpreter; only the new leg appears:
+
+- py3.11.16: bootstrap 416 · commands 69 · roles 135 · cluster 479 · project
+  1351 · daemon 1259 · sparkrun-hermes 12 · api 876+1skip · memori_byodb 11 ·
+  **scripts 97 passed in 3.23 s** (post only)
+- py3.13.12: bootstrap 416 · commands 69 · roles 135 · cluster 460+15skip ·
+  project 1351 · daemon 1256+3skip · sparkrun-hermes 12 · api 861+16skip ·
+  memori_byodb 11 · **scripts 97 passed in 3.00 s** (post only)
+
+The `scripts` leg went 56 → 97 between the gates because t_a98c009f's
+`test_ledger_scrub.py` (41 cases) landed on main — i.e. the scrubber suite is
+now under the canonical runner too, which was half the point of this card.
+
+Standalone check (no new coupling): `pytest -q scripts/tests` → 97 passed in
+2.89 s (3.11) / 2.81 s (3.13). `changelog_fragments.py check` rc=0;
+`address_guard.py --tracked` exit 0; `CHANGELOG.md` untouched; every commit on
+this branch passed the armed pre-commit hook (`core.hooksPath=.githooks`).
+
+### Final re-stamp at the frozen post-docs tip
+
+The evidence commit that adds this section changes no collected test path
+(changelog fragment + this file), so the tree under test is otherwise
+identical — but policy is policy: both post legs are re-run at the final tip
+and stamped before completion. Result appended below.
+
+## Reviewer observation carried from t_a98c009f (measured, not acted on)
+
+`ledger_scrub.py` FILE mode replaces the named path via `mkstemp`+`os.replace`,
+so on a **symlink** it swaps the link for a regular file and leaves the target
+untouched (`sed -i` semantics). Re-measured on this branch: `git ls-files -s`
+shows **0 tracked symlinks repo-wide** and `find docs/audits -type l` returns
+**0**. The commit-time guard still backstops anything reaching git. No exposure
+today; no action, per the card.
+
+## Sequencing note (recorded for the landing step)
+
+Orchestrator ruling (comment on this card, 03:55): this card owns the `scripts`
+token on the `DIRS=(...)` line; t_9a4b7687 owns `.github/scripts`;
+t_69a1c9f2's remaining scope after this lands is only the drift-guard
+widening. Landing order t_9a4b7687 → this card → t_69a1c9f2. Note: this branch
+is ff-able onto main **right now** (merge-base = branch ancestor, zero overlap
+with pending main commits); if t_9a4b7687 lands first instead, its DIRS rewrite
+touches the same single line — trivial 3-way merge, but worth expecting.
