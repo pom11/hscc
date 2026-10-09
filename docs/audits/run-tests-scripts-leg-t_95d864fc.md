@@ -123,10 +123,12 @@ this branch passed the armed pre-commit hook (`core.hooksPath=.githooks`).
 
 ### Final re-stamp at the frozen post-docs tip
 
-The evidence commit that adds this section changes no collected test path
-(changelog fragment + this file), so the tree under test is otherwise
-identical — but policy is policy: both post legs are re-run at the final tip
-and stamped before completion. Result appended below.
+The evidence commits change no collected test path (changelog fragment + this
+file), so the tree under test is otherwise identical — but policy is policy:
+both post legs are re-run on a clean detached worktree at the final tip and
+stamped before completion. The results live in the card's completion metadata
+and comment (appending them to this file would move the tip again — chicken
+and egg), citing this commit as `stamp_for`.
 
 ## Reviewer observation carried from t_a98c009f (measured, not acted on)
 
@@ -142,7 +144,8 @@ today; no action, per the card.
 Orchestrator ruling (comment on this card, 03:55): this card owns the `scripts`
 token on the `DIRS=(...)` line; t_9a4b7687 owns `.github/scripts`;
 t_69a1c9f2's remaining scope after this lands is only the drift-guard
-widening. Landing order t_9a4b7687 → this card → t_69a1c9f2. Note: this branch
-is ff-able onto main **right now** (merge-base = branch ancestor, zero overlap
-with pending main commits); if t_9a4b7687 lands first instead, its DIRS rewrite
-touches the same single line — trivial 3-way merge, but worth expecting.
+widening. Landing order t_9a4b7687 → this card → t_69a1c9f2. Note: pending
+main commits since my base (4216df50) are docs-only (GOAL_LEDGER), so this
+branch merges cleanly onto current main; if t_9a4b7687 lands first, its DIRS
+rewrite touches the same single line — trivial 3-way merge, but worth
+expecting.
