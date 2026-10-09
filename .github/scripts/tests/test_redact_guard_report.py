@@ -145,8 +145,10 @@ def test_guard_cannot_run_is_reported_before_the_redactor():
     """
     doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     run = doc["jobs"]["guard"]["steps"][-1]["run"]
-    assert run.index('"$rc" -eq 2') < run.index('"$redact_rc" -ne 0'), \
+    assert run.index('"$rc" -eq 2') < run.index('"$redact_out_rc" -ne 0'), \
         "rc=2 must be diagnosed before the redactor's own failure"
+    # both captured streams are gated, so neither can slip past the diagnosis
+    assert '"$redact_err_rc" -ne 0' in run
 
 
 def test_workflow_needs_no_network_beyond_checkout():
@@ -255,12 +257,15 @@ def _step_script():
     return doc["jobs"]["guard"]["steps"][-1]["run"]
 
 
-def _run_step(tmp_path, guard_rc, report, enforce):
+def _run_step(tmp_path, guard_rc, report, enforce, guard_source=None):
     """Run the workflow's real step script with a stubbed guard verdict.
 
     The stub prints REPORT (read from a file — the step calls the guard with
     ``--tracked`` and no report argument) on stderr and exits GUARD_RC, standing
     in for the real guard's verdict without needing a real address on disk.
+
+    GUARD_SOURCE replaces the dual-mode stub entirely — for the broken-guard
+    and warning-emitting inputs the fail-closed tests drive.
     """
     work = tmp_path / "job"
     (work / "scripts").mkdir(parents=True)
@@ -269,20 +274,21 @@ def _run_step(tmp_path, guard_rc, report, enforce):
     # The real redactor resolves the guard relative to itself, so this stub is
     # the one it loads — one checkout, one pattern, as in CI.
     shutil.copy2(REDACTOR, work / ".github" / "scripts" / "redact_guard_report.py")
-    (work / "scripts" / "address_guard.py").write_text(
-        # Dual-mode on purpose: the redactor IMPORTS this module for its pattern,
-        # while the step runs it as a CLI. Import the real guard for FORBIDDEN so
-        # the redactor still sees the repo's one and only regex; emit the canned
-        # verdict only when invoked as a program.
-        "import importlib.util, pathlib, sys\n"
-        f"_s = importlib.util.spec_from_file_location('_real_guard', r'{GUARD}')\n"
-        "_m = importlib.util.module_from_spec(_s); _s.loader.exec_module(_m)\n"
-        "FORBIDDEN = _m.FORBIDDEN\n"
-        "if __name__ == '__main__':\n"
-        "    sys.stderr.write(pathlib.Path(sys.argv[2]).read_text())\n"
-        f"    sys.exit({guard_rc})\n",
-        encoding="utf-8",
-    )
+    if guard_source is None:
+        guard_source = (
+            # Dual-mode on purpose: the redactor IMPORTS this module for its pattern,
+            # while the step runs it as a CLI. Import the real guard for FORBIDDEN so
+            # the redactor still sees the repo's one and only regex; emit the canned
+            # verdict only when invoked as a program.
+            "import importlib.util, pathlib, sys\n"
+            f"_s = importlib.util.spec_from_file_location('_real_guard', r'{GUARD}')\n"
+            "_m = importlib.util.module_from_spec(_s); _s.loader.exec_module(_m)\n"
+            "FORBIDDEN = _m.FORBIDDEN\n"
+            "if __name__ == '__main__':\n"
+            "    sys.stderr.write(pathlib.Path(sys.argv[2]).read_text())\n"
+            f"    sys.exit({guard_rc})\n"
+        )
+    (work / "scripts" / "address_guard.py").write_text(guard_source, encoding="utf-8")
     script = work / "step.sh"
     step = _step_script().replace(
         "scripts/address_guard.py --tracked",
@@ -369,3 +375,203 @@ def test_redactor_fails_closed_if_pattern_cannot_load(tmp_path):
     assert REAL_LAN not in proc.stdout.decode()
     assert REAL_LAN not in proc.stderr.decode()
     assert b"CANNOT LOAD PATTERN" in proc.stderr
+
+
+# ── the fail-closed path must not itself publish (review round 1) ───────────
+#
+# "Exit non-zero" is not the guarantee. A failure path also WRITES TEXT to the
+# log, and both channels found in review wrote guard-derived text: the
+# load-failure message interpolated ``str(exc)``, and importing the guard lets
+# Python's warning renderer print the guard's SOURCE LINE. Both are pinned here
+# with the address assembled at runtime, exactly as the repo's guard requires.
+
+def _stub_raising_with_address(addr):
+    """A guard that blows up at import, quoting an address in the message."""
+    return f"raise ValueError('boom at {addr}')\n"
+
+
+def _stub_functional_with_address_in_source(addr):
+    """A guard that WORKS — right pattern, right rc — but carries an address
+    inside a non-raw literal containing an invalid escape.
+
+    One missing ``r`` prefix. Python compiles this at import time on every CI
+    run (checkouts have no __pycache__) and, on 3.12+, renders an
+    invalid-escape SyntaxWarning by DEFAULT — and the renderer's job is to
+    print the offending source line, which is where the address lives.
+    """
+    return "\n".join([
+        "import importlib.util, pathlib, sys",
+        f"_s = importlib.util.spec_from_file_location('_real', r'{GUARD}')",
+        "_m = importlib.util.module_from_spec(_s); _s.loader.exec_module(_m)",
+        "FORBIDDEN = _m.FORBIDDEN",
+        f'NOTE = "live tailnet peer seen as {addr} matched by \\d{{1,3}} octets"',
+        "if __name__ == '__main__':",
+        "    sys.stderr.write(pathlib.Path(sys.argv[2]).read_text())",
+        "    sys.exit(1)",
+    ]) + "\n"
+
+
+def _stub_nonpattern_forbidden(addr):
+    """FORBIDDEN as a plain string: the old code died with a raw traceback."""
+    return f"import re\nFORBIDDEN = re.compile(r'{addr}').pattern\n"
+
+
+def _stub_prints_at_import(addr):
+    """A functional guard that also chatters on stdout/stderr at import time.
+
+    Keeps the repo's real FORBIDDEN so the report is still redacted — the point
+    is that the NOISE is discarded, not that detection stops working.
+    """
+    return "\n".join([
+        "import importlib.util, sys",
+        f"_s = importlib.util.spec_from_file_location('_real', r'{GUARD}')",
+        "_m = importlib.util.module_from_spec(_s); _s.loader.exec_module(_m)",
+        "FORBIDDEN = _m.FORBIDDEN",
+        f"print('scanning {addr}', file=sys.stderr)",
+        f"print('also on stdout {addr}')",
+    ]) + "\n"
+
+
+def _redactor_alone(stub_src, tmp_path, stdin_text=None, bare=False):
+    """Run the real redactor CLI against a checkout carrying STUB_SRC.
+
+    bare=True runs it as plain ``python3`` with NO -W/-E flags, which pins the
+    REDACTOR's own silencing rather than the interpreter flags the step happens
+    to pass. The step uses the flagged form; both must be safe.
+    """
+    work = tmp_path / "alone"
+    (work / "scripts").mkdir(parents=True)
+    (work / ".github" / "scripts").mkdir(parents=True)
+    shutil.copy2(REDACTOR, work / ".github" / "scripts" / "redact_guard_report.py")
+    (work / "scripts" / "address_guard.py").write_text(stub_src, encoding="utf-8")
+    argv = [sys.executable] + (["-W", "ignore", "-E"] if not bare else [])
+    proc = subprocess.run(
+        argv + [str(work / ".github" / "scripts" / "redact_guard_report.py")],
+        input=(stdin_text or f"  docs/x.md:1: {REAL_LAN}\n").encode(),
+        capture_output=True, cwd=work,
+    )
+    return proc.returncode, proc.stdout.decode() + proc.stderr.decode()
+
+
+def test_load_failure_names_nothing_but_the_exception_type(tmp_path):
+    """str(exc) is the first channel: an import error can quote the address."""
+    addr = REAL_LAN
+    rc, out = _redactor_alone(_stub_raising_with_address(addr), tmp_path)
+    assert rc == 3, out
+    assert addr not in out, f"the diagnostic published the address:\n{out}"
+    assert "CANNOT LOAD PATTERN" in out, out
+    assert "ValueError" in out, "the reader still needs to know what failed"
+    assert "boom at" not in out, out
+
+
+def test_guard_raising_at_import_does_not_publish_through_the_step(tmp_path):
+    """Channel 1 driven verbatim through the shipping step script.
+
+    A guard module that raises on import cannot run, so nothing usable can come
+    of it: the step must fail closed (redactor refuses -> exit 3) and must not
+    quote the exception message, which here carries the address.
+    """
+    rc, out = _run_step(
+        tmp_path, 1, f"  docs/x.md:3: {REAL_LAN}\n", "",
+        guard_source=_stub_raising_with_address(REAL_LAN),
+    )
+    assert rc == 3, f"a guard that cannot import must fail the job:\n{out}"
+    assert REAL_LAN not in out, f"the step's output published the address:\n{out}"
+    assert "boom at" not in out, out
+    assert "CANNOT LOAD PATTERN [ValueError]" in out, out
+
+
+def test_guard_with_address_in_source_never_reaches_the_log(tmp_path):
+    """THE worst case (review probe7): a functional guard, an ADVISORY green
+    job, and a real-shaped host inside a non-raw literal with an invalid escape.
+
+    Before the fix this published the guard's own source line to the PUBLIC log
+    on every run while the check reported success.
+    """
+    rc, out = _run_step(
+        tmp_path, 1, f"  docs/x.md:3: {REAL_LAN}\n", "",
+        guard_source=_stub_functional_with_address_in_source(REAL_TAILNET),
+    )
+    assert rc == 0, f"advisory posture with a functional guard must be green:\n{out}"
+    assert REAL_TAILNET not in out, f"job log carries the guard's source line:\n{out}"
+    assert REAL_LAN not in out, out
+    # and the check must still be doing its job, not just quiet
+    assert "docs/x.md:3" in out, out
+    assert "***" in out, out
+
+
+def test_nonpattern_forbidden_fails_closed_without_traceback(tmp_path):
+    rc, out = _redactor_alone(_stub_nonpattern_forbidden(REAL_LAN), tmp_path)
+    assert rc == 3, out
+    assert "Traceback" not in out, f"raw traceback would reach the log:\n{out}"
+    assert REAL_LAN not in out, out
+
+
+def test_import_time_noise_is_discarded_not_forwarded(tmp_path):
+    rc, out = _redactor_alone(_stub_prints_at_import(REAL_TAILNET), tmp_path)
+    assert rc == 0, out
+    assert REAL_TAILNET not in out, f"import-time print reached the log:\n{out}"
+    assert "***" in out, "the report itself must still be redacted"
+
+
+def test_warning_channel_closed_by_the_redactor_itself(tmp_path):
+    """Same input, NO -W/-E on the interpreter.
+
+    The step passes `-W ignore -E`, which alone would suppress the warning — so
+    a test that only used the flagged form would pass even if load_pattern()'s
+    own catch_warnings() were removed. This is the layer proof: plain python3,
+    and the value must still never appear.
+    """
+    rc, out = _redactor_alone(
+        _stub_functional_with_address_in_source(REAL_TAILNET), tmp_path, bare=True)
+    assert rc == 0, out
+    assert REAL_TAILNET not in out, f"guard source line reached the log:\n{out}"
+    assert "WARNING" not in out.upper(), out
+    assert "***" in out, out
+
+
+def test_guard_stdout_also_goes_through_the_redactor(tmp_path):
+    """The step used to `cat` guard.out raw; the guard writes values to stderr
+    today, so pin the stdout channel shut rather than trusting that."""
+    work = tmp_path / "job"
+    (work / "scripts").mkdir(parents=True)
+    (work / ".github" / "scripts").mkdir(parents=True)
+    (tmp_path / "report.txt").write_text("", encoding="utf-8")
+    shutil.copy2(REDACTOR, work / ".github" / "scripts" / "redact_guard_report.py")
+    (work / "scripts" / "address_guard.py").write_text(
+        "import importlib.util, pathlib, sys\n"
+        f"_s = importlib.util.spec_from_file_location('_real', r'{GUARD}')\n"
+        "_m = importlib.util.module_from_spec(_s); _s.loader.exec_module(_m)\n"
+        "FORBIDDEN = _m.FORBIDDEN\n"
+        "if __name__ == '__main__':\n"
+        f"    print('value leaked on stdout: {REAL_LAN}')\n"
+        "    sys.stderr.write(pathlib.Path(sys.argv[2]).read_text())\n"
+        "    sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    script = work / "step.sh"
+    script.write_text(
+        _step_script().replace(
+            "scripts/address_guard.py --tracked",
+            f"scripts/address_guard.py --tracked {tmp_path / 'report.txt'}"),
+        encoding="utf-8")
+    env = dict(os.environ, RUNNER_TEMP=str(tmp_path), ENFORCE="")
+    proc = subprocess.run(["bash", str(script)], capture_output=True, cwd=work, env=env)
+    out = proc.stdout.decode() + proc.stderr.decode()
+    assert proc.returncode == 0, out          # advisory leak
+    assert REAL_LAN not in out, f"stdout channel leaked:\n{out}"
+    assert "value leaked on stdout" in out, "position kept, value dropped"
+
+
+@pytest.mark.parametrize("value,expect_red", [
+    ("true", True), ("True", True), ("TRUE", True), ("1", True), ("yes", True),
+    ("", False), ("false", False), ("False", False), ("0", False), ("no", False),
+    ("maybe", False),
+])
+def test_enforce_variable_cannot_fail_open_on_capitalisation(tmp_path, value, expect_red):
+    """A variable named ENFORCE may only loosen the job explicitly (review)."""
+    rc, out = _run_step(tmp_path, 1, f"  docs/x.md:3: {REAL_LAN}\n", value)
+    assert (rc == 1) is expect_red, f"ENFORCE={value!r} -> rc={rc}\n{out}"
+    assert ("::error::" in out) is expect_red, out
+    assert ("::warning::" in out) is (not expect_red), out
+    assert REAL_LAN not in out
