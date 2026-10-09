@@ -31,6 +31,77 @@ compiled from, so the address is *inside* the blob in exactly the form a text
 scan cannot see, and `.gitignore` is irrelevant once the blob is tracked: a
 fresh clone or a CI checkout gets what was committed.
 
+## 1b. The operator's probe, and where my reproduction differs
+
+The orchestrator ran the pre-rewrite leak blob —
+`hscc-provision/__pycache__/hscc.cpython-313.pyc` as committed in `0f165f7c`,
+46762 bytes — through both detectors and reported:
+
+* a plain `192\.168\.88\.\d{1,3}` over the bytes: **finds** a live-LAN address;
+* `address_guard.FORBIDDEN`: **0 matches**, even decoding the blob as text.
+
+I reproduced it independently against the same object (probe scripts in the task
+scratch dir; they print counts and byte-context classes only, never values).
+**Point 1 reproduces exactly.** Point 2 does not, on my machine: I get **1 match**
+from `FORBIDDEN` over the decoded blob, from a source-compiled import *and* a
+normal import (so this is not t_38fd345f's `__pycache__` shadowing vector — I
+checked `__file__`, `__cached__`, and pattern identity between the two loads).
+In that object the address sits between `\x0e` and `\x05` — both non-word bytes,
+so both `\b` boundaries hold and the match stands. I could not make the shipped
+pattern miss *that* blob. The probe did not state its interpreter; I did not
+chase the difference further because **the card does not depend on it** — see
+the next paragraph, and note that if the operator's 0-match result is right on
+their machine, it only strengthens what follows, it cannot weaken it.
+
+What *does* reproduce — and is the finding that decides the policy — is the
+stronger version: **a freshly compiled `.pyc` of leaking source defeats the
+shipping detector entirely.** Compile `NAS = <real-shaped address>` with
+`py_compile` and the naive regex finds the address in the decoded bytes while
+`FORBIDDEN` finds **0**. The mechanism is the *trailing* boundary, measured
+rather than assumed: in that blob the character before the address is U+000E
+(non-word, leading `\b` holds) and the character after is `N` — the first letter
+of the next interned name, which marshal writes with no delimiter — so the
+trailing `\b` fails. Relaxing only the leading boundary still matches 0; relaxing
+only the trailing one restores 1. Meaning: **FORBIDDEN's `\b` assume the address
+is delimited the way text delimits it, and undelimited binary framing breaks
+that assumption.** Extract-and-scan would inherit exactly this blind spot. A
+synthetic context table for the same boundary logic (address spliced after
+various single bytes, decoded as text):
+
+| byte immediately before the address | naive regex | shipping FORBIDDEN |
+|---|---|---|
+| `\x00` (opcode framing) | 1 | 1 |
+| `\x0e` (non-word) | 1 | 1 |
+| ASCII digit `5` (word char) | 1 | **0** |
+| ASCII letter `z` (word char) | 1 | **0** |
+| `\n` (line-anchored, i.e. ordinary text) | 1 | 1 |
+
+This is the card's requirement-3 question answered with a number instead of an
+argument: extract-and-scan **inherits the text detector's blind spot**, and the
+card's own suggested mutant — "a NUL-bearing blob" — is matched by the *current*
+pattern and therefore proves nothing. So:
+
+* `test_a_genuine_compiled_pyc_defeats_the_text_detector_so_refusal_is_required`
+  (`scripts/tests`) compiles real source at runtime via `py_compile` and pins all
+  three facts: the naive scan sees the address in the blob, `FORBIDDEN` does
+  *not*, and the name-based refusal refuses it anyway. It carries a hair-trigger
+  on the second assertion — if a future `FORBIDDEN` ever matches a compiled blob,
+  that is precisely the moment extract-and-scan becomes arguable again, and the
+  test says so rather than letting the reasoning rot silently.
+* `test_a_genuinely_compiled_pyc_is_blocked_by_the_hook` (`hscc_daemon/tests`)
+  does the same through a real `git add -f` + `git commit`.
+
+The consequence for §3 is that the refusal is not merely *cheaper* than
+extract-and-scan, it is *strictly stronger*: for the exact blob class the card
+names, scanning the bytes is not a fallback, it is blind.
+
+A corollary the follow-up card should own: this is a **detector-side** finding,
+not only a binary-side one. Any text file that ends up with a word character
+immediately after an address — a minified JSON blob, a CSV column, a compacted
+log line — slips past the trailing `\b` the same way. Changing the boundary is a
+change to the single source of truth and to every pin built on it, which is
+bigger than this card's scope; carding it rather than absorbing it.
+
 ## 2. Measured, not assumed
 
 Against `origin/main` at `3c20990c` (2.5.8), from a clean worktree:
@@ -155,6 +226,11 @@ warning that `--no-verify` is how the last two leaks happened.
 * `test_scan_blob_skips_binaries_and_skip_suffixes` updated: the "binary is
   silent" assertion is now pinned on an *unknown* extension, not on a `.pyc`,
   so the test cannot quietly re-legitimise the old behaviour.
+* `test_a_genuine_compiled_pyc_defeats_the_text_detector_so_refusal_is_required`
+  — `py_compile` at runtime, the strong mutant §1b shows is necessary. Pins the
+  naive-scan hit, the `FORBIDDEN` miss, and the refusal, in one case.
+* `test_a_genuinely_compiled_pyc_is_blocked_by_the_hook` (in
+  `hscc_daemon/tests`) — the same blob through a real `git add -f` + `git commit`.
 
 `.github/scripts/tests/test_redact_guard_report.py` (CI job level, via the same
 `_run_job_leg` helper that runs the real step script):
