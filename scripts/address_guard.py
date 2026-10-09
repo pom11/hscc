@@ -63,13 +63,21 @@ SKIP_SUFFIXES = (".png", ".jpg", ".jpeg", ".pdf", ".ico", ".zip", ".gz", ".xcuse
 # rewrite). `.gitignore` cannot help once the blob is tracked: a fresh clone and
 # a CI checkout get what was committed.
 #
-# Extracting strings from arbitrary binaries answers the wrong question. If it
-# finds an address in a `.pyc` the fix is still "do not track this file", and if
-# it finds none the file is still build output with no business being here. It
-# would also have no stopping rule -- a `.pyc` is a container, but so are `.zip`,
-# `.gz`, `.jar` and PDFs with embedded fonts -- and every layer is code paid for
-# on every commit in the repo, which is the thing that gets `--no-verify`'d.
-# Full reasoning + measurements:
+# Extract-and-scan is not merely slower and noisier than this -- for the exact
+# blob class in question it is measurably BLIND. A real `py_compile` output of
+# source carrying a real-shaped address has that address visible to a naive
+# `192\.168\.88\.\d{1,3}` over the decoded bytes, and INVISIBLE to FORBIDDEN:
+# FORBIDDEN's `\b` boundaries assume a delimited (text-shaped) occurrence, and
+# in a marshal'd code object the byte immediately AFTER the string constant is
+# the first char of the next interned name -- a word character -- so the
+# trailing `\b` fails. Pinned by
+# test_a_genuine_compiled_pyc_defeats_the_text_detector_so_refusal_is_required;
+# the refusal never reads the bytes, so it cannot be defeated that way.
+#
+# It would also have no stopping rule -- a `.pyc` is a container, but so are
+# `.zip`, `.gz`, `.jar` and PDFs with embedded fonts -- and every layer is code
+# paid for on every commit in the repo, which is the thing that gets
+# `--no-verify`'d. Full reasoning + measurements:
 # docs/audits/address-guard-binary-policy-t_3e6d3db7.md
 BUILD_ARTEFACT_SUFFIXES = (
     ".pyc", ".pyo", ".pyd", ".o", ".a", ".so", ".dylib", ".dll",

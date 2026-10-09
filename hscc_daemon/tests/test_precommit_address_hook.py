@@ -269,6 +269,35 @@ def test_hook_and_tracked_agree_on_a_tracked_build_artefact(repo):
         f"hook says {named_by_hook[0]!r}, tracked says {named_by_tracked[0]!r}")
 
 
+def test_a_genuinely_compiled_pyc_is_blocked_by_the_hook(repo, tmp_path):
+    """End-to-end with REAL compiler output, not a hand-built blob.
+
+    The orchestrator's probe (2026-10-09) showed a genuinely compiled `.pyc` of
+    leaking source is invisible even to the shipping FORBIDDEN pattern once
+    decoded as text — in marshal's framing the byte after the string constant is
+    a word char, so the pattern's trailing `\\b` fails. The hook's refusal never
+    looks at the bytes, so it is the only local control that catches this blob.
+    """
+    # Compile real source that carries a real-shaped address (assembled at
+    # runtime; the repo's own guard scans this file).
+    src = tmp_path / "leaky_source.py"
+    src.write_text("NAS = " + repr(REAL_LAN) + "\n", encoding="utf-8")
+    import py_compile
+    py_compile.compile(str(src), cfile=str(tmp_path / "leaky.pyc"), doraise=True)
+    blob = (tmp_path / "leaky.pyc").read_bytes()
+    assert b"\0" in blob and REAL_LAN.encode() in blob
+
+    # `git add -f` past the .gitignore — the accident this card is about.
+    target = repo / "vendor_pkg" / "__pycache__"
+    target.mkdir(parents=True)
+    (target / "leaky.cpython-313.pyc").write_bytes(blob)
+    rc, out, err = _run(GIT + ["add", "-f", "-A"], repo)
+    assert rc == 0, err
+    rc, out, err = _run(GIT + ["commit", "-q", "-m", "chore: compiled"], repo)
+    assert rc != 0, f"a real compiled .pyc must be refused\nSTDOUT={out}\nSTDERR={err}"
+    assert "vendor_pkg/__pycache__/leaky.cpython-313.pyc" in err, err
+
+
 def test_a_legitimate_binary_asset_still_commits(repo):
     """The new rule must not break the binaries that belong here.
 

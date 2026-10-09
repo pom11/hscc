@@ -13,9 +13,17 @@ task: t_3e6d3db7
   contains** — `*.pyc` `*.pyo` `*.pyd` `*.o` `*.a` `*.so` `*.dylib` `*.dll`
   `*.class` `*.jar` `*.egg` `*.whl` `*.pyz` and any `__pycache__/` segment are
   rejected before their bytes are read. Extract-and-scan was considered and
-  declined: it has no stopping rule (`.zip`, `.gz`, `.jar`, PDFs are containers
-  too), it costs the same on every commit as the refusal does, and if it finds an
-  address the fix is still "do not track this file". `ALLOWED_BINARY_PATHS` is the
+  declined, and a probe during review showed why it is the *weaker* option, not
+  just the slower one: a real `py_compile` output of source carrying a real-shaped
+  address has that address visible to a naive scan over the decoded bytes yet
+  **invisible to `FORBIDDEN`** — the detector's `\b` assume a text-delimited
+  occurrence, and marshal writes no delimiter after a string constant, so the
+  byte that follows is the first letter of the next interned name, a word
+  character, and the trailing `\b` fails. A content scan inherits that blind
+  spot; a name-based refusal never reads the bytes and cannot be defeated that
+  way. It would also have no stopping rule (`.zip`, `.gz`, `.jar`, PDFs are
+  containers too).
+  `ALLOWED_BINARY_PATHS` is the
   escape hatch for a binary that genuinely belongs here — it exempts a path from
   the refusal only, and such a path is then decoded and text-scanned even when it
   carries NULs, so widening it can never hide a leak. `report()` splits the two
@@ -29,26 +37,31 @@ task: t_3e6d3db7
 kind: Verified
 order: 1
 
-- `scripts/tests/test_address_guard.py`: **10 new cases** — a `.pyc` carrying a
-  real LAN address is refused; every artefact shape is refused *even when clean*
-  (the verdict is about the path, not the content); case/backslash forms do not
-  dodge the list; the tracked `.png` population and an unknown-extension binary
-  are **not** broken; the allowlist exempts the refusal but not the scan;
-  `scan_paths` refuses a deleted-but-tracked or unreadable artefact; `report()`
-  names the artefact and `git rm --cached`; and the CLI's `--staged`/`--tracked`
-  exit 1 on it (including after the working tree is scrubbed).
-- `hscc_daemon/tests/test_precommit_address_hook.py`: **3 new cases**, including
+- `scripts/tests/test_address_guard.py`: **10 new functions / 19 collected cases**
+  — a `.pyc` carrying a real LAN address is refused; every artefact shape is
+  refused *even when clean* (the verdict is about the path, not the content);
+  **a genuinely compiled `.pyc` defeats `FORBIDDEN` entirely and is still refused**
+  (`py_compile` at runtime, address assembled via the `_addr(*parts)` idiom — a
+  hand-spliced NUL blob would have been caught by the existing pattern and proved
+  nothing); case/backslash forms do not dodge the list; the tracked `.png`
+  population and an unknown-extension binary are **not** broken; the allowlist
+  exempts the refusal but not the scan; `scan_paths` refuses a deleted-but-tracked
+  or unreadable artefact; `report()` names the artefact and `git rm --cached`; and
+  the CLI's `--staged`/`--tracked` exit 1 on it (including after a scrubbed tree).
+- `hscc_daemon/tests/test_precommit_address_hook.py`: **4 new cases**, including
   the card's agreement test — a real `git commit` through the real hook and the
-  real `--tracked` CLI over the same tree emit **identical** verdict strings.
+  real `--tracked` CLI over the same tree emit **identical** verdict strings — and
+  a real `git add -f` of real compiler output blocked by the hook.
 - `.github/scripts/tests/test_redact_guard_report.py`: **2 new cases** at the CI
   job level, through the same `_run_job_leg` helper that runs the workflow's real
   step script.
-- Full suite, both interpreters, clean worktree at the frozen tip
-  `a02506ad`: `scripts/run_tests.sh` **ALL GREEN, RUN_TESTS_RC=0** on
-  py3.11.16 (`hscc-bootstrap` venv, 18:02) and py3.13.7 (`p313`, 18:15), 11/11
-  suites each (`scripts` and `.github/scripts` included). The worktree was
-  frozen for the whole window — the stamp and the pushed tip are the same SHA.
-- `python3 scripts/address_guard.py --staged` exits 0 on this card's own diff;
-  every fixture address in the new tests is assembled at runtime, so none of
-  them is a contiguous real-shaped literal in a tracked file.
+- Full suite, both interpreters, clean worktree at the **frozen final gated tip**:
+  `scripts/run_tests.sh` **ALL GREEN, RUN_TESTS_RC=0** on py3.11.16
+  (`~/.hermes/hermes-agent/venv`) and py3.13.7 (`p313`), 11/11 suites each
+  (`scripts` and `.github/scripts` included). The stamped SHA and both legs'
+  `RUN_TESTS_RC` lines are in this card's completion metadata; the worktree was
+  frozen for the whole stamp window, so the stamped SHA is the SHA that lands.
+- `python3 scripts/address_guard.py --tracked` and `--staged` both exit 0 on this
+  card's own diff; every fixture address in the new tests is assembled at runtime,
+  so none of them is a contiguous real-shaped literal in a tracked file.
 ---

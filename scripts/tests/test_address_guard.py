@@ -12,6 +12,7 @@ cover the detector's own contract, which both triggers share:
 """
 
 import subprocess
+import re
 import shutil
 import sys
 import importlib.util
@@ -105,8 +106,75 @@ def _pyc_like(addr):
     section holds the source's string literals verbatim, so the address is in the
     blob in exactly the form the text scan cannot see. NUL bytes either side so
     the OLD guard would have returned [] and stayed silent about it.
+
+    This is the WEAK mutant. The strong one — `test_a_genuine_compiled_pyc_...`,
+    which compiles real source at runtime — is what proves the refusal is not
+    merely a content-scan in disguise.
     """
     return b"\xe3\r\r\n\x00\x00\x00\x00" + b"\x00" + addr.encode() + b"\x00\x00"
+
+
+@pytest.fixture()
+def genuine_leaky_pyc(tmp_path):
+    """A REAL `.pyc`, compiled by this interpreter, from source that carried an
+    address — assembled at runtime so the repo's own guard stays clean.
+
+    Why this fixture exists rather than a hand-built blob: a mutant made by
+    splicing the dotted string into NUL filler is MATCHED by the current pattern
+    (both boundaries land on non-word bytes) and so proves nothing. A genuinely
+    compiled `.pyc` is not: marshal writes the string constant with no delimiter
+    before the next interned name, so the character immediately AFTER the address
+    is a word character, the trailing `\\b` fails, and FORBIDDEN finds 0 while a
+    naive `192\\.168\\.88\\.\\d{1,3}` still finds 1. Measured, not assumed: leading
+    char in the compiled blob is U+000E (non-word), trailing is 'N' (word), and
+    relaxing the trailing boundary is what restores the match.
+    """
+    src = tmp_path / "leaky_source.py"
+    src.write_text("NAS = " + repr(REAL_LAN) + "\n", encoding="utf-8")
+    import py_compile
+    py_compile.compile(str(src), cfile=str(tmp_path / "leaky.pyc"), doraise=True)
+    blob = (tmp_path / "leaky.pyc").read_bytes()
+    assert b"\0" in blob, "a real .pyc is NUL-bearing — that is the whole premise"
+    return blob
+
+
+def test_a_genuine_compiled_pyc_defeats_the_text_detector_so_refusal_is_required(
+        genuine_leaky_pyc):
+    """THE reason this card's policy is 'refuse the type', not 'scan the bytes'.
+
+    Three assertions, each measured rather than argued:
+
+      1. the address really is inside the compiled blob — a naive scan sees it;
+      2. the SHIPPING FORBIDDEN pattern does NOT. Its `\\b` boundaries assume the
+         address is delimited, and undelimited binary framing breaks that: marshal
+         puts a word character immediately AFTER the constant, so the trailing
+         `\\b` fails. Extract-and-scan would inherit exactly this blind spot;
+      3. the name-based refusal catches it anyway, because it never looked at the
+         bytes at all.
+
+    This is the case an extract-and-scan policy cannot pass, and it is why that
+    option was declined rather than merely deferred.
+    """
+    blob = genuine_leaky_pyc
+    assert REAL_LAN.encode() in blob, "the address is in the blob"
+    text = blob.decode("utf-8", errors="ignore")
+    # (1) the naive scan sees it... (pattern assembled at runtime for the same
+    # reason the addresses are: the repo's own single-implementation pin scans
+    # this file and must not find a second copy of the detector's literal.)
+    naive = re.compile(_addr("192", r"\.168\.88\.\d{1,3}"))
+    assert naive.findall(text), "naive scan should see it"
+    # (2) ...the shipping detector does not
+    assert address_guard.find_in_text(text) == [], (
+        "FORBIDDEN unexpectedly matched the compiled blob — if this ever goes red,"
+        " the boundary-context finding is stale and extract-and-scan becomes"
+        " arguable again; re-measure before believing it")
+    # (3) the refusal is blind to that blindness, and still refuses
+    got = address_guard.scan_blob("hscc-provision/__pycache__/hscc.cpython-313.pyc", blob)
+    assert got == ["hscc-provision/__pycache__/hscc.cpython-313.pyc:0: "
+                   "build artefact must not be tracked"]
+    # ...and an un-listed extension is still blind to the SAME bytes, which is the
+    # honest limit of this card: the type list is what closes it, not the scanner.
+    assert address_guard.scan_blob("vendor/blob.bin", blob) == []
 
 
 def test_scan_blob_refuses_a_pyc_carrying_a_real_address():
