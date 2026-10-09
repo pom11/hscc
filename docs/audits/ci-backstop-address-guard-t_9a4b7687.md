@@ -426,20 +426,33 @@ outlives the window. The conclusion the reviewer drew and I agree with: **in-pro
 containment of untrusted import-time code has no closed boundary.** So the fix is
 not a fourth layer — it removes the premise.
 
-**TRUST BOUNDARY (stated explicitly, as the reviewer asked):** *the redactor no
-longer executes the guard's module code in the process that owns the job log.* It
-extracts `FORBIDDEN` from a child (`subprocess.Popen([sys.executable, "-E", "-s",
-"-W", "ignore", "-c", ...], stdin=DEVNULL, stdout=PIPE, stderr=DEVNULL,
-close_fds=True, start_new_session=True)`) over a one-line protocol —
-`OK\t<b64 pattern>\t<flags>` or `ERR\t<TypeName>` — that the parent validates
-strictly: base64 `validate=True`, pattern length bounded, flags bounded via
-`ast.literal_eval` (never `eval`), exception names matched against
-`[A-Za-z_][A-Za-z0-9_]{0,63}`. A real address is not expressible in that charset
-(no digits, no dots). **No byte read from the child is ever echoed.** No pickle:
-unpickling guard-derived bytes would execute guard code in the parent, i.e.
-reintroduce the exact thing being fixed. Whatever the guard body does — `print`,
-`os.write` to any descriptor, atexit dumps, threads, fd scans, `dup2` games, forks
-— it lands on the pipe or `/dev/null`, never on the step.
+**TRUST BOUNDARY (stated explicitly, as the reviewer asked; rewritten by round 4**
+**— t_38fd345f — see `ci-backstop-child-authorship-pycache-t_38fd345f.md` for the**
+**reproduction and the tests that pin this):** *the redactor does not execute the
+guard's module code in the process that owns the job log, and the child's verdict
+alone cannot steer redaction.* The parent derives `FORBIDDEN` TWICE, independently,
+and the two must AGREE by compiled equality (`.pattern` and `.flags`): once from the
+guard's SOURCE BYTES with `ast` (zero execution: only a module-level
+`FORBIDDEN = re.compile(<str literal>[, <int literal>])` is accepted — node-shape
+gates, so an f-string, a concat, a name or an attribute all fail closed), and once
+from a child (`subprocess.Popen([sys.executable, "-E", "-s", "-W", "ignore", "-c",
+...], stdin=DEVNULL, stdout=PIPE, stderr=DEVNULL, close_fds=True,
+start_new_session=True)`) that RE-READS the guard file itself and refuses to emit
+any verdict unless its bytes hash (sha256) to the digest the parent pinned in argv;
+it then `compile()`s exactly those bytes — there is no import machinery on that
+path, so a committed unchecked-hash `.pyc` cannot shadow it, and the parent outright
+refuses to redact while one sits on the guard's cache name. The protocol remains a
+one-line `OK\t<b64 pattern>\t<flags>` or `ERR\t<TypeName>`, validated strictly:
+base64 `validate=True`, pattern length bounded, flags a bounded int literal (never
+`eval`), exception names matched against `[A-Za-z_][A-Za-z0-9_]{0,63}` — a charset
+in which a real address is not expressible (no digits, no dots). **No byte read from
+the child is ever echoed.** No pickle: unpickling guard-derived bytes would execute
+guard code in the parent, i.e. reintroduce the exact thing being fixed. Whatever the
+guard body does — `print`, `os.write` to any descriptor, atexit dumps, threads, fd
+scans, `dup2` games, forks, or writing a forged `OK` line and `os._exit(0)` itself —
+it lands on the pipe or `/dev/null`, never on the step; and a verdict the guard
+authorizes for itself is refused by agreement, because what the redactor masks with
+is the SOURCE-DERIVED pattern.
 
 **Protocol contract, pinned both ways rather than left ambiguous** (the reviewer's
 correction comment asked for this to be decided and stated, not left to the suite).
