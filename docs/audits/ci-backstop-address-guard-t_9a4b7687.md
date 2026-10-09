@@ -516,6 +516,11 @@ module-level path constant).
 ### Verification at this round's tip
 
 `orch_r4/probe_r4.py` 0/12 leaks (both interpreters, step + alone);
+`orch_r4/probe_r4_alone.py` 0/12 on **Python 3.14.8** as well (that interpreter has
+no pyyaml, so the step-leg harness cannot run there; this half is the redactor CLI
+alone, bare and flagged — the stricter of the two, since it relies on no
+interpreter flags), and it also proves the child boundary is not version-specific
+while `subprocess`+`selectors` behaviour could in principle be;
 the reviewer's own `probe_r3_reviewer.py` 0 leaks, `probe_r3_fdscan.py` 0 leaks and
 round-2 `probe_r2.py` all-ok, **re-run unmodified against my implementation** on
 py3.11.16 and py3.13.7; card file 76 collected (50 test functions) / `.github/scripts`
