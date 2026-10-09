@@ -58,7 +58,7 @@ def cmd_archive_sessions(args: argparse.Namespace) -> int:
         return 0
 
     lines = [f"archived {esc(result.sessions)} session(s), {esc(result.messages)} message(s)",
-             f"bytes:  {esc(result.bytes_written):,} across {esc(result.files)} file(s)"]
+             f"bytes:  {esc(f'{result.bytes_written:,}')} across {esc(result.files)} file(s)"]
     for proj, n in sorted(result.by_project.items()):
         lines.append(f"  {escape(proj):<12} {esc(n)} session(s)")
     if result.unmapped_threads:
