@@ -1,4 +1,83 @@
+import pathlib
+import re
+
 import install_payload
+
+# ── repo-root test-dir census (shared by the two DIRS drift guards) ──────────
+# Both guards below compare the tree's test dirs against the DIRS array in
+# scripts/run_tests.sh, and both must use the runner's own definition of what is
+# collectable or they disagree with it in both directions (false pass on an
+# unregistered dir, false failure on one the runner can never run).
+# Anchored on __file__, never the cwd: under run_tests.sh pytest runs with the
+# repo root as cwd but the plugin dir on sys.path, and pytest's rootdir can move
+# to the plugin when a plugin dir carries its own ini (t_95d864fc recorded the
+# same anchoring requirement for hscc-project tests).
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+# Mirrors pytest.ini `norecursedirs` (read back by _norecurse_names so the two
+# cannot drift silently): a dir the runner does not even descend into cannot be
+# collected by it, so requiring it in DIRS would be a false failure.
+_NORECURSE_SKIP_DIRS = {".git", "__pycache__", ".venv", "node_modules"}
+_NORECURSE_SKIP_SUFFIXES = (".egg-info",)
+
+
+def _norecurse_names():
+    """The `norecursedirs` patterns from pytest.ini at the repo root.
+
+    Returns (exact_names, suffixes). A missing/blank pytest.ini fails closed to
+    the hardcoded defaults instead of silently widening the census.
+    """
+    exact, suffixes = set(), []
+    ini = _REPO_ROOT / "pytest.ini"
+    if ini.is_file():
+        for line in ini.read_text().splitlines():
+            if not line.strip().startswith("norecursedirs"):
+                continue
+            rhs = line.split("=", 1)[1] if "=" in line else ""
+            for pat in rhs.split():
+                pat = pat.strip()
+                if not pat:
+                    continue
+                if pat.startswith("*"):
+                    suffixes.append(pat[1:])
+                elif "*" not in pat and "?" not in pat:
+                    exact.add(pat)
+    return (exact or {".worktrees", "_archive", ".venv"}), tuple(suffixes) or (".egg-info",)
+
+
+def _test_dirs_on_tree():
+    """Every dir in the tree that holds `test_*.py` directly, as repo-relative
+    posix paths — the census run_tests.sh would collect if it were pointed at the
+    whole repo.
+
+    Scoped to `git ls-files`: an untracked dir is not the repo's promise to test
+    anything, and a scratch or generated dir must not turn the guard red.
+    """
+    import subprocess
+
+    exact, suffixes = _norecurse_names()
+    skip_dirs = _NORECURSE_SKIP_DIRS | exact
+
+    out = subprocess.run(
+        ["git", "ls-files", "*test_*.py"],
+        cwd=_REPO_ROOT, capture_output=True, text=True, check=True,
+    ).stdout
+    dirs = set()
+    for rel in out.splitlines():
+        parts = rel.split("/")
+        if any(p in skip_dirs or p.endswith(suffixes) for p in parts[:-1]):
+            continue
+        if parts[-1].startswith("test_") and len(parts) > 1:
+            dirs.add("/".join(parts[:-1]))
+    return dirs
+
+
+def _dirs_listed_in_runner():
+    """The DIRS=() array parsed out of the actual scripts/run_tests.sh."""
+    script = (_REPO_ROOT / "scripts" / "run_tests.sh").read_text()
+    m = re.search(r"DIRS=\(([^)]*)\)", script)
+    assert m, "could not find DIRS=(...) in scripts/run_tests.sh"
+    return set(m.group(1).split())
 
 
 def _make_repo(tmp_path):
@@ -270,21 +349,21 @@ def test_run_tests_sh_covers_every_tested_payload_package():
     changed package went completely untested. DEFAULT_PAYLOAD is the single
     source of truth (same precedent as check_plugin_payload in
     hscc_daemon/verify.py:959, which loads it by file path for this reason), so
-    the two lists can never drift again."""
-    import pathlib
-    import re
+    the two lists can never drift again.
 
-    root = pathlib.Path(__file__).resolve().parents[2]
+    This guard sees PACKAGES only. It is the narrower of two guards: the
+    companion below covers every test dir in the tree, package or not, and is
+    the one that would have caught `scripts/tests` and `.github/scripts/tests`
+    (neither is in DEFAULT_PAYLOAD, so neither was ever visible from here).
+    """
+    root = _REPO_ROOT
 
     # DEFAULT_PAYLOAD is the single source of truth (same reason verify.py loads
     # it by file path rather than re-globbing `hscc-*`).
     payload = install_payload.DEFAULT_PAYLOAD
 
     # Parse the DIRS=() array out of the actual runner script.
-    script = (root / "scripts" / "run_tests.sh").read_text()
-    m = re.search(r"DIRS=\(([^)]*)\)", script)
-    assert m, "could not find DIRS=(...) in scripts/run_tests.sh"
-    dirs = set(m.group(1).split())
+    dirs = _dirs_listed_in_runner()
 
     for pkg in payload:
         pkg_dir = root / pkg
@@ -296,4 +375,73 @@ def test_run_tests_sh_covers_every_tested_payload_package():
                 f"{pkg}/tests/ but is missing from scripts/run_tests.sh DIRS — "
                 f"the runner would silently skip it"
             )
+
+
+def test_run_tests_sh_covers_every_tested_dir_not_just_packages():
+    """The wide version of the guard above: EVERY dir in the tracked tree that
+    holds test_*.py must be reachable from scripts/run_tests.sh DIRS — not just
+    dirs belonging to a deployable package.
+
+    Why the wide version had to exist: the payload guard above enumerates
+    DEFAULT_PAYLOAD, so any test dir that is not a deployed plugin is invisible
+    to it, and dirs stayed uncollected behind a green ALL GREEN stamp twice —
+    `.github/scripts/tests` (t_9a4b7687) and `scripts/tests` (t_95d864fc, the
+    address guard's own 56-case suite among them). Registering each instance
+    fixes the sighting; only this assertion prevents the next one.
+
+    The runner resolves each DIRS entry `d` as `<root>/d/tests`, so a test dir is
+    reachable iff `rel` ends in `/tests` and everything before that leaf is a
+    DIRS entry (entries may be multi-component — `.github/scripts` is one). Any
+    other shape (`foo/test/`, `a/b/tests`, a dir not named `tests`) cannot be
+    reached by the runner at all, so it is reported too — it needs a new runner
+    leg, not a token. Dirs under pytest.ini's norecursedirs are exempt: the
+    runner cannot collect them either, so demanding registration is a false
+    failure.
+    """
+    dirs = _dirs_listed_in_runner()
+    uncollected = []
+    for rel in sorted(_test_dirs_on_tree()):
+        if rel.endswith("/tests"):
+            entry = rel[: -len("/tests")]
+            if entry in dirs:
+                continue
+        uncollected.append(rel)
+    assert not uncollected, (
+        "test dir(s) hold test_*.py but are unreachable from "
+        "scripts/run_tests.sh DIRS — the runner would print ALL GREEN while "
+        f"never running them: {', '.join(uncollected)}. Fix: if the dir is "
+        "<top>/tests, add <top> to DIRS in scripts/run_tests.sh; otherwise it "
+        "needs its own leg in the runner, since the loop only resolves "
+        "$ROOT/<entry>/tests."
+    )
+
+
+def test_test_dir_census_helper_sees_every_registered_leg():
+    """Meta-check: the wide guard above passes VACUOUSLY if the census helper
+    returns an empty or short set (a bad git glob, a skip-list bug, a moved
+    pytest.ini). Assert the helper actually reproduces the runner's own DIRS
+    list — every registered entry whose <entry>/tests exists must come back from
+    the census, which makes a silently-empty census impossible.
+    """
+    dirs = _dirs_listed_in_runner()
+    census = _test_dirs_on_tree()
+
+    expected = {
+        d + "/tests" for d in dirs
+        if (_REPO_ROOT / d / "tests").is_dir()
+        and next((_REPO_ROOT / d / "tests").glob("test_*.py"), None) is not None
+    }
+    missing = sorted(expected - census)
+    assert not missing, (
+        f"_test_dirs_on_tree() failed to report registered test dirs {missing} "
+        "— the census is broken, so the wide drift guard would pass vacuously"
+    )
+    # Sanity: the census is a superset of the registered legs, and the two are
+    # equal on a clean tree (every tracked test dir is registered).
+    assert census >= expected
+    assert census == expected, (
+        f"census has unregistered dirs {sorted(census - expected)} — that is "
+        "exactly what test_run_tests_sh_covers_every_tested_dir_not_just_packages "
+        "fails on; this meta-check must not be where it first surfaces"
+    )
 
