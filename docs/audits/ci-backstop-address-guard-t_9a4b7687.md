@@ -75,8 +75,19 @@ the wrong tool for a security control.
 `scripts/address_guard.py` and substitutes the match with `***`, keeping
 `file:line`. Pattern knowledge stays in exactly one place (the one-regex rule the
 parent card established), it cannot drift, and it is path-agnostic. It **fails
-closed**: if the pattern cannot be loaded it exits 3 without echoing anything, so
-an unredacted address cannot reach the log on our account.
+closed**: if the pattern cannot be loaded it exits 3.
+
+> **Corrected in review round 1 — do not read "fails closed" as "cannot leak".**
+> My first version of this section said it "exits 3 WITHOUT echoing anything, so
+> an unredacted address can never reach the log on our account". The exit code
+> was always right; the claim was wrong, and the reviewer reproduced both
+> channels (§10). Exiting non-zero is not the guarantee, because a failure path
+> also WRITES TEXT to the log. The guarantee now comes from three things this
+> file does instead: every diagnostic is a fixed string plus the exception TYPE
+> (never `str(exc)`, which can quote the address); the guard's import runs under
+> `catch_warnings()` with its stdout/stderr captured and discarded; and a loaded
+> `FORBIDDEN` that is not a compiled regex is rejected rather than allowed to
+> raise an `AttributeError` traceback into the log.
 
 Verified behaviour of the real command chain (`docs/ledger.md` holding a real-shaped
 NAS host), showing what a public job log would contain:
@@ -228,12 +239,68 @@ send `gh`'s stderr to `/dev/null` — those bytes cannot be proven to be non-job
 content, so they need the same redaction, and swallowing them also hides real
 `gh` errors.
 
+## 10. Review round 1 — two publish channels, both reproduced
+
+Reviewer verdict: REQUEST CHANGES. Everything else passed independent
+re-execution (all three acceptance criteria, my gate logs, their own full-suite
+leg at the tip, all 10 CI runs verified via `gh`, merge-tree 0 markers). One
+defect blocked approval, and it was in the one place I had documented as an
+absolute — see the correction in §4.
+
+**Channel 1 — `str(exc)`.** The load-failure diagnostic interpolated the
+exception message. A guard module that raises at import with an address in the
+message published it verbatim while still exiting 3. I reproduced this
+independently before touching any code:
+
+```
+redact_guard_report: CANNOT LOAD PATTERN — boom at <LAN host>     # rc still 3
+```
+
+**Channel 2 — import-time warnings (the escalation, and the one that matters).**
+The step ran the redactor with no stderr redirect and no warning filter, and
+`exec_module(guard)` runs *inside the redactor process*. Python's default
+warning renderer prints the offending SOURCE LINE. So:
+
+- guard FULLY FUNCTIONAL (correct pattern, correct detection, correct rc=1,
+  report correctly redacted to `***`), ADVISORY posture;
+- one edit: a debug `NOTE` string naming a real-shaped tailnet host inside a
+  non-raw literal containing `\d` — a single missing `r` prefix;
+- result: the guard's own source line, address included, reached the PUBLIC job
+  log on EVERY run while the check reported **GREEN rc=0**.
+
+That last part is what took it from "broken-guard corner case" to the card's
+worst input class. CI checkouts have no `__pycache__`, so the module recompiles
+each time, and on Python ≥ 3.12 (the runner) invalid-escape is a SyntaxWarning
+shown by default. Activation needs a leak-shaped edit to the DETECTOR, which is
+exactly what the local hook blocks at commit time — and this card exists
+precisely for the hook-bypass set (`--no-verify`, `git apply --cached`, an
+un-bootstrapped clone). Dormant on today's tree (measured warning-free on 3.11
+and 3.13); live-class by this card's own threat model.
+
+**Fix** (three commits, inside files this card already ships):
+`f33b0e40` redactor, `20e53cb1` step, `16113b09` tests. Fixed-string diagnostics
+carrying `type(exc).__name__` only; `catch_warnings()` plus captured-and-discarded
+stdout/stderr around the guard import; `isinstance(pattern, re.Pattern)` or fail
+closed; no traceback can escape `main()`.
+
+**Layer independence, measured rather than assumed.** The step also passes
+`-W ignore -E` now, which on its own would suppress channel 2 — so a test that
+only used the flagged form would still pass if `catch_warnings()` were deleted.
+`test_warning_channel_closed_by_the_redactor_itself` runs the same input as bare
+`python3` with no flags to pin the redactor's own silencing. Reverting the
+redactor alone fails 5 of the new cases; reverting the workflow alone fails 6.
+
+**Two non-blocking advisories taken as well** (both cheap, both about failing
+open): `guard.out` is now piped through the redactor instead of `cat`'ed, and
+`ENFORCE` is normalised so `True`/`TRUE`/`1`/`yes` enforce — a variable named
+ENFORCE must not go advisory on a capitalisation.
+
 ## 11. Files
 
 | File | Purpose |
 |---|---|
 | `.github/workflows/address-guard.yml` | the job; enforcement posture documented as an operator variable |
-| `.github/scripts/redact_guard_report.py` | public-log-safe redactor; imports the guard's pattern; fails closed |
-| `.github/scripts/tests/test_redact_guard_report.py` | 23 tests: end-to-end job legs, structural workflow assertions, verbatim step-script decision states |
+| `.github/scripts/redact_guard_report.py` | public-log-safe redactor; imports the guard's pattern; fails closed AND publishes nothing on the way down |
+| `.github/scripts/tests/test_redact_guard_report.py` | 51 tests: end-to-end job legs, structural workflow assertions, verbatim step-script decision states, fail-closed publish channels |
 | `scripts/run_tests.sh` | `DIRS` += `.github/scripts` |
 | `changelog.d/t_9a4b7687.md` | fragment (kind: Security) |
