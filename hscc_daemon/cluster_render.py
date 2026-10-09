@@ -20,19 +20,27 @@ from typing import Any
 from rich.console import Console
 
 from hscc_daemon import cli_theme as theme
+from hscc_daemon.cli_theme import esc
 
 
 # ── shared helpers ─────────────────────────────────────────────────────────
 
 def _as_lines(value: Any) -> list[str]:
-    """Collapse a scalar/blob into a list of display lines (never empty)."""
+    """Collapse a scalar/blob into a list of display lines (never empty).
+
+    Every line is Rich-markup ESCAPED here: this is the choke point through
+    which raw sparkrun/ssh output and on-disk config blobs enter panel bodies,
+    and a single ``[/bold]`` in that output would otherwise crash the human
+    view with MarkupError (t_716cf37c). Callers still wrap the lines in their
+    own ``[label]``/``[dim]`` markup, which stays live.
+    """
     if value is None:
         return []
     if isinstance(value, str):
-        return value.split("\n")
+        return [esc(line) for line in value.split("\n")]
     if isinstance(value, (dict, list)):
-        return [json.dumps(value, indent=2, default=str)]
-    return [str(value)]
+        return [esc(json.dumps(value, indent=2, default=str))]
+    return [esc(str(value))]
 
 
 def _object_error(result: dict) -> str | None:
@@ -44,9 +52,9 @@ def _emit_error_panel(console: Console, title: str, result: dict) -> int:
     """Render a uniform red error panel; exit code is always 1."""
     msg = result.get("error", "command failed")
     usage = result.get("usage")
-    body = str(msg)
+    body = esc(msg)
     if usage:
-        body = f"{body}\n\nusage: {usage}"
+        body = f"{body}\n\nusage: {esc(usage)}"
     console.print(theme.make_status_panel(body, status="error", title=title))
     return 1
 
@@ -66,11 +74,12 @@ def render_cluster_status(console: Console, result: dict) -> int:
     table.add_column("container", no_wrap=True)
     workloads = result.get("workloads") or []
     for w in workloads:
+        # Workload/container names come from sparkrun over ssh — DATA.
         table.add_row(
-            str(w.get("name", "?")),
-            str(w.get("tp", "?")),
-            str(w.get("pp", "?")),
-            str(w.get("container_id", "?")),
+            esc(w.get("name", "?")),
+            esc(w.get("tp", "?")),
+            esc(w.get("pp", "?")),
+            esc(w.get("container_id", "?")),
         )
     if not workloads:
         table.add_row("[dim]no running workloads[/dim]", "", "", "")
@@ -78,10 +87,10 @@ def render_cluster_status(console: Console, result: dict) -> int:
 
     idle = result.get("idle_hosts") or []
     total = result.get("total_hosts", 0)
-    lines = [f"[label]total hosts[/label]  {total}",
+    lines = [f"[label]total hosts[/label]  {esc(total)}",
              f"[label]idle hosts[/label]   {len(idle)}"]
     if idle:
-        lines.append("[dim]" + ", ".join(str(h) for h in idle) + "[/dim]")
+        lines.append("[dim]" + esc(", ".join(str(h) for h in idle)) + "[/dim]")
     console.print(theme.make_panel("cluster summary", "\n".join(lines)))
     return 0
 
@@ -99,9 +108,9 @@ def render_hosts(console: Console, result: dict) -> int:
     table.add_column("role", no_wrap=True)
     for h in hosts:
         table.add_row(
-            str(h.get("name") or h.get("id") or "?"),
-            str(h.get("ip", "?")),
-            str(h.get("role", "?")),
+            esc(h.get("name") or h.get("id") or "?"),
+            esc(h.get("ip", "?")),
+            esc(h.get("role", "?")),
         )
     if not hosts:
         table.add_row("[dim]no hosts recorded in cluster.json[/dim]", "", "")
@@ -114,7 +123,7 @@ def render_hosts(console: Console, result: dict) -> int:
                        ("live sparkrun status", live)):
         body = _as_lines(src.get("output")) if isinstance(src, dict) else _as_lines(src)
         if not body:
-            body = [str(src)]
+            body = [esc(str(src))]
         out_lines.append(f"[label]{label}[/label]")
         for line in body:
             out_lines.append(f"  {line}")
@@ -134,14 +143,14 @@ def render_monitor(console: Console, result: dict) -> int:
         table.add_column("metric")
         table.add_column("value")
         for k, v in data.items():
-            table.add_row(str(k), str(v))
+            table.add_row(esc(k), esc(v))
         console.print(table)
         return 0
 
     # Fall back to the raw output line when there was no parseable JSON.
     body = result.get("output") or (result if not isinstance(result, dict)
                                     else json.dumps(result, indent=2, default=str))
-    console.print(theme.make_panel("cluster monitor", str(body)))
+    console.print(theme.make_panel("cluster monitor", esc(body)))
     return 0
 
 
@@ -153,7 +162,7 @@ def render_jobs(console: Console, result: dict) -> int:
 
     output = result.get("output") if isinstance(result, dict) else None
     if output:
-        console.print(theme.make_panel("cluster jobs", str(output)))
+        console.print(theme.make_panel("cluster jobs", esc(output)))
     else:
         console.print(theme.make_status_panel(
             "no sparkrun job output", status="ok", title="cluster jobs"))
@@ -184,7 +193,7 @@ def render_info(console: Console, result: dict) -> int:
     files = result.get("cluster_files") or {}
     if files:
         sections.append(f"[label]saved cluster files[/label]  "
-                        f"{', '.join(sorted(files)) or '(none)'}")
+                        f"{esc(', '.join(sorted(files)) or '(none)')}")
 
     if not sections:
         sections.append("[dim]no cluster configuration found[/dim]")
@@ -203,8 +212,8 @@ def _render_fleet_op(console: Console, title: str, result: dict) -> int:
     lines = []
     if result.get("command"):
         cmd = result["command"]
-        lines.append(f"[label]command[/label]  "
-                     f"{cmd if isinstance(cmd, str) else ' '.join(map(str, cmd))}")
+        cmd_str = cmd if isinstance(cmd, str) else " ".join(map(str, cmd))
+        lines.append(f"[label]command[/label]  {esc(cmd_str)}")
     if dry_run:
         lines.append("[dim]--dry-run: nothing executed[/dim]")
     for key in ("output", "error"):
@@ -227,12 +236,12 @@ def render_stop(console: Console, result: dict) -> int:
         body = ""
         for key in ("output", "error"):
             if result.get(key):
-                body += f"{key}: {result[key]}\n"
+                body += f"{key}: {esc(result[key])}\n"
         console.print(theme.make_status_panel(body.strip() or "stop failed",
                                               status="error", title="cluster stop"))
         return 1
     body = result.get("output") or "workload stopped"
-    console.print(theme.make_status_panel(str(body), status="ok",
+    console.print(theme.make_status_panel(esc(body), status="ok",
                                           title="cluster stop"))
     return 0
 
@@ -258,7 +267,7 @@ def render_up(console: Console, result: dict) -> int:
     if failed:
         lines.append(f"[label]failed[/label]  {len(failed)}")
     for i in failed:
-        lines.append(f"  [error]{i.get('error', i.get('output', '?') or '?')}[/error]")
+        lines.append(f"  [error]{esc(i.get('error', i.get('output', '?') or '?'))}[/error]")
     if not lines:
         lines = ["[dim]no units to start[/dim]"]
     console.print(theme.make_status_panel("\n".join(lines), status=status,
@@ -286,24 +295,24 @@ def render_profiles(console: Console, result: dict) -> int:
 
     if isinstance(counts, dict):
         for name, count in counts.items():
-            table.add_row(str(name), str(count))
+            table.add_row(esc(name), esc(count))
     elif isinstance(profiles, list):
         for p in profiles:
             if isinstance(p, dict):
-                table.add_row(str(p.get("name", "?")),
-                              str(p.get("running", p.get("count", "?"))))
+                table.add_row(esc(p.get("name", "?")),
+                              esc(p.get("running", p.get("count", "?"))))
             else:
-                table.add_row(str(p), "?")
+                table.add_row(esc(p), "?")
     elif isinstance(profiles, dict):
         for name, count in profiles.items():
-            table.add_row(str(name), str(count))
+            table.add_row(esc(name), esc(count))
     else:
         # fall back to any scalar dict entries
         for k, v in result.items():
             if k in ("profiles", "counts", "total_running", "success", "error"):
                 continue
             if isinstance(v, (int, str)):
-                table.add_row(str(k), str(v))
+                table.add_row(esc(k), esc(v))
 
     if result.get("total_running") is not None:
         table.caption = f"{result['total_running']} running task(s)"
@@ -337,7 +346,7 @@ def _render_template_generic(console: Console, result: dict) -> int:
         console.print("[dim]no output[/dim]")
     else:
         console.print(theme.make_panel(
-            "template", json.dumps(result, indent=2, default=str)))
+            "template", esc(json.dumps(result, indent=2, default=str))))
     return 0
 
 
@@ -349,10 +358,10 @@ def _render_template_list(console: Console, result: dict) -> int:
     table.add_column("description")
     for t in result.get("templates") or []:
         table.add_row(
-            str(t.get("name", "?")),
-            str(t.get("version", "?")),
-            str(t.get("group", "") or "-"),
-            str(t.get("description", "") or "-"),
+            esc(t.get("name", "?")),
+            esc(t.get("version", "?")),
+            esc(t.get("group", "") or "-"),
+            esc(t.get("description", "") or "-"),
         )
     if not table.rows:
         table.add_row("[dim]no templates found[/dim]", "", "", "")
@@ -365,11 +374,11 @@ def _render_template_status(console: Console, result: dict) -> int:
     applied = result.get("applied")
     note = result.get("note", "")
     if applied:
-        body = f"applied template: [primary]{applied}[/primary]"
+        body = f"applied template: [primary]{esc(applied)}[/primary]"
     else:
         body = "no template applied"
     if note:
-        body = f"{body}\n[dim]{note}[/dim]"
+        body = f"{body}\n[dim]{esc(note)}[/dim]"
     console.print(theme.make_status_panel(body, status="ok",
                                           title="template status"))
     return 0
@@ -380,39 +389,39 @@ def _append_labeled_list(lines: list[str], label: str, values: list) -> None:
         values = ["(none)"]
     lines.append(f"[label]{label}[/label]")
     for v in values:
-        lines.append(f"  {v}")
+        lines.append(f"  {esc(v)}")
 
 
 def _render_template_preview(console: Console, result: dict) -> int:
     title = f"template preview: {result.get('template', '')}"
     lines = []
     if result.get("description"):
-        lines.append(f"[dim]{result['description']}[/dim]")
+        lines.append(f"[dim]{esc(result['description'])}[/dim]")
     changes = result.get("changes") or []
     lines.append(f"[label]changes[/label]  {len(changes)}")
     for c in changes:
         file = c.get("file", "?")
         summary = c.get("summary", "")
-        lines.append(f"  [accent]{file}[/accent]  {summary}")
+        lines.append(f"  [accent]{esc(file)}[/accent]  {esc(summary)}")
         for d in c.get("details") or []:
-            lines.append(f"      {d}")
+            lines.append(f"      {esc(d)}")
     serve_delta = result.get("serve_delta")
     if isinstance(serve_delta, dict):
         lines.append("")
         lines.append("[label]serve delta[/label]")
         for k, v in serve_delta.items():
             if isinstance(v, list) and v:
-                lines.append(f"  [accent]{k}[/accent]  {len(v)}")
+                lines.append(f"  [accent]{esc(k)}[/accent]  {len(v)}")
                 for item in v:
-                    lines.append(f"      {item}")
+                    lines.append(f"      {esc(item)}")
             elif not isinstance(v, list):
-                lines.append(f"  [accent]{k}[/accent]  {v}")
+                lines.append(f"  [accent]{esc(k)}[/accent]  {esc(v)}")
     routing = result.get("routing")
     if routing:
         lines.append("")
         lines.append(f"[label]routing[/label]  {len(routing)}")
         for r in routing:
-            lines.append(f"  {r}")
+            lines.append(f"  {esc(r)}")
     if not lines:
         lines.append("[dim](no changes)[/dim]")
     console.print(theme.make_panel(title, "\n".join(lines)))
@@ -446,9 +455,9 @@ def _render_template_apply(console: Console, result: dict) -> int:
     status = result.get("status", "preview")
     success = result.get("success", False)
     if not success:
-        err = result.get("note") or "apply failed"
+        err = esc(result.get("note") or "apply failed")
         if result.get("errors"):
-            err += "\n" + "\n".join(f"  {e}" for e in result["errors"])
+            err += "\n" + "\n".join(f"  {esc(e)}" for e in result["errors"])
         if result.get("validation") and result["validation"].get("ok") is False:
             err += "\n  template not deployable (see: hscc template validate)"
         console.print(theme.make_status_panel(err, status="error",
@@ -456,7 +465,7 @@ def _render_template_apply(console: Console, result: dict) -> int:
         return 1
     lines = []
     if result.get("note"):
-        lines.append(result["note"])
+        lines.append(esc(result["note"]))
     steps = result.get("steps") or []
     if steps:
         lines.append(f"[label]steps[/label]  {len(steps)}")
@@ -464,7 +473,7 @@ def _render_template_apply(console: Console, result: dict) -> int:
             s_ok = s.get("status", "ok") != "error"
             glyph = "\N{CHECK MARK}" if s_ok else "\N{BALLOT X}"
             lines.append(f"  [{('ok' if s_ok else 'error')}]{glyph}[/] "
-                         f"{s.get('step', '?')}")
+                         f"{esc(s.get('step', '?'))}")
     else:
         lines.append("[dim]no steps recorded[/dim]")
     console.print(theme.make_status_panel(
