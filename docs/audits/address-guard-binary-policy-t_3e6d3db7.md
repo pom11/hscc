@@ -485,6 +485,16 @@ under test), the shipped hook refusing the commit, then the two shipped CLI
 invocations (`--staged`, `--tracked`) and the hook all naming the same path with
 the same verdict string.
 
+`.github/scripts/tests/test_redact_guard_report.py`:
+`test_a_trailing_byte_artefact_name_fails_the_job_leg_and_survives_redaction` —
+the third shipped surface. The backstop must fail on the trailing-byte name and
+the **public job log** must still show it with the byte, because
+`git rm --cached evil.pyc` on a file named `evil.pyc ` fixes nothing. It also
+pins why this is safe at all: the verdict is `<path>:0: build artefact must not
+be tracked`, so the byte sits mid-line and survives any log post-processor that
+strips trailing whitespace — a shape `artefact_offender()` should not change
+without re-checking that claim.
+
 Six mutants, each applied to a copy outside the workspace, each failing a real
 test — no survivors:
 

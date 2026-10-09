@@ -47,6 +47,12 @@ order: 1
   shared helper decodes, which is exactly what would hide the byte under test),
   the shipped hook refusing the commit, then the hook, `--staged` and `--tracked`
   all naming the same path with the same verdict string.
+- `.github/scripts/tests/test_redact_guard_report.py`: **1 new case** (93 → 94)
+  at the CI job level through the same `_run_job_leg` helper that runs the
+  workflow's real step script — the backstop fails on `evil.pyc ` **and** the
+  public job log still names it with the trailing byte. The verdict's shape
+  (`<path>:0: …`) puts that byte mid-line rather than at line end, so no CI log
+  post-processor that strips trailing whitespace can silently eat it.
 - 6 mutants, each in a copy outside the workspace, each caught by a real test —
   no survivors: raw-string suffix (pre-fix behaviour, 15 cases), whole-path trim
   (3), normalised verdict (5), normalised skip list, normalised hatch match, and
