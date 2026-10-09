@@ -16,9 +16,14 @@ name: address-guard
 # advisory-vs-blocking decision stays an operator setting:
 #
 #   Settings -> Secrets and variables -> Actions -> Repository variables
-#     ADDRESS_GUARD_ENFORCE unset or "false"  -> advisory: a leak is a warning
-#         annotation and the job stays green (nothing blocks, you still see it)
-#     ADDRESS_GUARD_ENFORCE=true              -> the job goes RED on a real address
+#     ADDRESS_GUARD_ENFORCE unset, empty, or "false"
+#                                       -> advisory: a leak is a warning annotation
+#                                          and the job stays green (nothing blocks,
+#                                          you still see it)
+#     ADDRESS_GUARD_ENFORCE=true        -> the job goes RED on a real address
+#                                          ("True"/"TRUE"/"1"/"yes" count too: a
+#                                          variable named ENFORCE is never allowed
+#                                          to fail OPEN because of capitalisation)
 #     (a guard that CANNOT RUN fails either way — never a silent pass)
 #
 # Red alone does not stop a merge. To make it block, require this check
@@ -84,12 +89,20 @@ jobs:
           python3 scripts/address_guard.py --tracked \
             >"${RUNNER_TEMP}/guard.out" 2>"${RUNNER_TEMP}/guard.err"
           rc=$?
-          cat "${RUNNER_TEMP}/guard.out"
           # This repo is PUBLIC and a job log is public too, so the matched
           # address must not be echoed — the backstop would itself publish the
-          # leak. Keep the file:line, drop the value.
-          python3 .github/scripts/redact_guard_report.py <"${RUNNER_TEMP}/guard.err"
-          redact_rc=$?
+          # leak. Keep the file:line, drop the value. BOTH streams go through
+          # the redactor: the guard writes its report to stderr today, but a
+          # future print() to stdout — or any import-time noise it emits —
+          # would otherwise reach the log raw (t_9a4b7687 review, round 1).
+          # -W ignore -E: no warning may render the guard's source line at the
+          # interpreter level either; the redactor also silences the import.
+          python3 -W ignore -E .github/scripts/redact_guard_report.py \
+            <"${RUNNER_TEMP}/guard.out"
+          redact_out_rc=$?
+          python3 -W ignore -E .github/scripts/redact_guard_report.py \
+            <"${RUNNER_TEMP}/guard.err"
+          redact_err_rc=$?
           set -e
           # rc=2 first: a checkout missing scripts/address_guard.py breaks the
           # redactor too, and blaming the redactor would send the reader to the
@@ -98,15 +111,20 @@ jobs:
             echo "::error::address_guard could not run — failing closed even in advisory mode"
             exit 2
           fi
-          if [ "$redact_rc" -ne 0 ]; then
+          if [ "$redact_out_rc" -ne 0 ] || [ "$redact_err_rc" -ne 0 ]; then
             echo "::error::redactor could not load the guard pattern; refusing to print an unredacted report"
             exit 3
           fi
           if [ "$rc" -ne 0 ]; then
-            if [ "${ENFORCE:-}" = "true" ]; then
-              echo "::error::real operator address in the committed tree — see the file:line list above"
-              exit "$rc"
-            fi
-            echo "::warning::real operator address in the committed tree (advisory: ADDRESS_GUARD_ENFORCE is not 'true') — see the file:line list above"
+            # Normalised so a capitalised or truthy-looking ENFORCE can never
+            # fail OPEN: a variable named ENFORCE only gets to loosen the job
+            # when it says so in so many letters.
+            case "$(printf '%s' "${ENFORCE:-}" | tr '[:upper:]' '[:lower:]')" in
+              true|1|yes)
+                echo "::error::real operator address in the committed tree — see the file:line list above"
+                exit "$rc"
+                ;;
+            esac
+            echo "::warning::real operator address in the committed tree (advisory: ADDRESS_GUARD_ENFORCE is not set to true) — see the file:line list above"
           fi
           exit 0
