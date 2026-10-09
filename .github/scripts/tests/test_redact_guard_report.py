@@ -168,23 +168,26 @@ def test_workflow_needs_no_network_beyond_checkout():
 
 # ── end to end: the real command the job runs ───────────────────────────────
 
-def _run_job_leg(repo_dir):
+def _run_job_leg(repo_dir, guard=None):
     """Run exactly what the workflow step runs: guard --tracked, then redact.
 
     Returns (exit_code, printed_output). stderr is routed through the redactor
     as the workflow does, so `printed_output` is what a job log would show.
+    ``guard`` defaults to the shipped file; a test that widens the hatch passes the
+    copy inside ``repo_dir`` instead, so the job leg runs against that variant.
     """
     env = dict(os.environ)
-    guard = subprocess.run(
-        [sys.executable, str(GUARD), "--tracked", "--repo", str(repo_dir)],
+    guard_path = Path(guard) if guard else GUARD
+    proc = subprocess.run(
+        [sys.executable, str(guard_path), "--tracked", "--repo", str(repo_dir)],
         capture_output=True, cwd=repo_dir, env=env,
     )
     red = subprocess.run(
         [sys.executable, str(REDACTOR)],
-        input=guard.stderr, capture_output=True, env=env,
+        input=proc.stderr, capture_output=True, env=env,
     )
     assert red.returncode == 0, f"redactor failed closed: {red.stderr.decode()}"
-    return guard.returncode, guard.stdout.decode() + red.stdout.decode()
+    return proc.returncode, proc.stdout.decode() + red.stdout.decode()
 
 
 @pytest.fixture()
@@ -239,6 +242,81 @@ def test_placeholders_and_fixture_block_do_not_fail(throwaway):
 
     rc, printed = _run_job_leg(throwaway)
     assert rc == 0, f"placeholders and the fixture block must not fail the job:\n{printed}"
+
+
+def test_committed_build_artefact_fails_the_job_leg_and_stays_redacted(throwaway):
+    """t_3e6d3db7 at the CI level: the backstop must see what the hook missed.
+
+    A `.pyc` gets into HEAD via `--no-verify` (or a clone that never ran
+    bootstrap, so it had no hook at all). The tracked scan is the last line, and
+    the redactor must still keep the address out of the PUBLIC job log — the
+    artefact verdict carries no address, but the class is new and this is where
+    that gets proven.
+    """
+    pyc = throwaway / "scripts" / "__pycache__"
+    pyc.mkdir(parents=True)
+    (pyc / "hscc.cpython-313.pyc").write_bytes(
+        b"\xe3\r\r\n\x00\x00\x00\x00\x00" + REAL_LAN.encode() + b"\x00\x00")
+    subprocess.run(["git", "add", "-A"], cwd=throwaway, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "chore", "--no-verify"],
+                   cwd=throwaway, check=True)
+
+    rc, printed = _run_job_leg(throwaway)
+    assert rc == 1, printed
+    assert "scripts/__pycache__/hscc.cpython-313.pyc" in printed, printed
+    assert "git rm --cached" in printed, printed
+    assert REAL_LAN not in printed, "a PUBLIC job log must not carry the address"
+
+
+def test_a_hatched_compiled_artefact_still_fails_the_job_leg(throwaway):
+    """CI-level proof of the two-tier hatch (round-1 review of t_3e6d3db7).
+
+    The backstop is the last line: the blob reached HEAD through `--no-verify`, or
+    through a clone that never ran bootstrap and so had no hook. If widening the
+    hatch could waive a compiled artefact, the ONE remaining control would go
+    silent on exactly the blob class it cannot read — so the hatch is patched open
+    here, and the job leg must still fail.
+    """
+    guard = throwaway / "scripts" / "address_guard.py"
+    src = guard.read_text(encoding="utf-8")
+    assert "ALLOWED_BINARY_PATHS = frozenset()" in src, (
+        "the guard's hatch changed shape; update this test's patch site")
+    guard.write_text(src.replace(
+        "ALLOWED_BINARY_PATHS = frozenset()",
+        'ALLOWED_BINARY_PATHS = frozenset({"scripts/__pycache__/hscc.cpython-313.pyc"})', 1),
+        encoding="utf-8")
+
+    pyc = throwaway / "scripts" / "__pycache__"
+    pyc.mkdir(parents=True)
+    # A genuinely compiled blob, not a spliced one: the spliced form is matched by
+    # FORBIDDEN, so a pre-two-tier guard would have "caught" it by accident and the
+    # case would prove nothing. Compiled output is the class the text scan cannot
+    # read — the only class where the hatch could have hidden a leak.
+    import py_compile
+    src_file = throwaway / "leaky_source.py"
+    src_file.write_text("NAS = " + repr(REAL_LAN) + "\n", encoding="utf-8")
+    py_compile.compile(str(src_file), cfile=str(pyc / "hscc.cpython-313.pyc"),
+                       doraise=True)
+    src_file.unlink()
+    assert REAL_LAN.encode() in (pyc / "hscc.cpython-313.pyc").read_bytes()
+    subprocess.run(["git", "add", "-A"], cwd=throwaway, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "chore", "--no-verify"],
+                   cwd=throwaway, check=True)
+
+    rc, printed = _run_job_leg(throwaway, guard=guard)
+    assert rc == 1, f"a hatched compiled artefact must still fail the job leg:\n{printed}"
+    assert "scripts/__pycache__/hscc.cpython-313.pyc" in printed, printed
+    assert REAL_LAN not in printed, "a PUBLIC job log must not carry the address"
+
+
+def test_a_tracked_binary_asset_keeps_the_job_leg_green(throwaway):
+    """The CI job must not start failing over a file that belongs here."""
+    (throwaway / "assets").mkdir()
+    (throwaway / "assets" / "hscc.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x0dIHDR")
+    subprocess.run(["git", "add", "-A"], cwd=throwaway, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feat: logo"], cwd=throwaway, check=True)
+    rc, printed = _run_job_leg(throwaway)
+    assert rc == 0, printed
 
 
 def test_the_real_repo_passes_the_job_leg():
