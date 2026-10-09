@@ -242,6 +242,32 @@ send `gh`'s stderr to `/dev/null` — those bytes cannot be proven to be non-job
 content, so they need the same redaction, and swallowing them also hides real
 `gh` errors.
 
+### 9b. CLOSED by t_914b8db5 — the sanctioned reader, and THE RULE
+
+`ci_log.sh <run-id> [--job NAME] [--keep]` is now the sanctioned way to read a
+CI log on this repo: it dumps `gh run view --log` (stdout **and** stderr,
+merged) into a mode-0600 temp file, prints only what the redactor emits, and
+deletes the dump unless `--keep` — which leaves exactly one 0600 file and
+warns in stderr that it is UNREDACTED. If the redactor cannot load the guard's
+pattern the wrapper exits non-zero and prints NOTHING on stdout; there is no
+path from a raw dump byte to the terminal. (`gh`'s stderr goes through the
+redactor too, exactly as specified above — never `/dev/null`.)
+
+**The rule, for every worker on this repo:**
+
+> **Never paste, attach, or comment a raw CI or suite log on this repo without
+> running it through `.github/scripts/redact_guard_report.py` first.** Read CI
+> logs with `.github/scripts/ci_log.sh`, not raw `gh run view --log`. For any
+> *local* log (a suite leg you tee'd, a workspace run log), pass the file as
+> an argument — `redact_guard_report.py <file>` — and publish only its output.
+> The guard's report format is `file:line: <address>`; a log that embeds one
+> embeds the leak, and this repo is PUBLIC.
+
+The rule is deliberately stated twice for reach: here, and at the top of
+`ci_log.sh` itself (the file workers open when they go looking for the log
+reader). `redact_guard_report.py FILE` is byte-faithful — clean logs come out
+byte-identical (`splitlines(True)`, byte I/O) — so scrubbing costs nothing.
+
 ## 10. Review round 1 — two publish channels, both reproduced
 
 Reviewer verdict: REQUEST CHANGES. Everything else passed independent
