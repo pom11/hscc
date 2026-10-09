@@ -64,6 +64,13 @@ with a markup-bearing input. Before the fix, 7/7 touched surfaces raised
   enable/disable/wake panels (cron job names, reasons, blocked_by, state).
 - `hscc_daemon/verify_chat_roundtrip.py` — job id, http, status, reply,
   token counts (a model reply quoting `[/bold]` crashed the console).
+- `hscc_daemon/install.py` — install/uninstall/plist views: the generated
+  plist/unit bodies, every `Plist|Unit installed|removed:` line, the
+  enable-failed launchctl stderr and both copy-to path hints are HOME-derived
+  DATA (the new `cmd_plist` pin caught a miss here mid-stamp — test-first
+  doing its job).
+- `hscc_daemon/event_driven.py` (second pass) — the periodic-install header
+  prints `HSCC_DIR`/`STATE_DIR`/`PLIST_DIR`, all HOME-derived.
 
 ## Deliberately NOT changed
 
@@ -81,5 +88,7 @@ with a markup-bearing input. Before the fix, 7/7 touched surfaces raised
 
 - flightdeck `make_console().print(panel(...))` sweep (~135 sites) — same
   class, different subproject; needs its own test pin per command.
+  **Carded: t_12f3c8a8** (child of this card; carries the fixed decisions —
+  reuse `_theme.escape`, escape DATA not renderer markup).
 - `hscc_daemon/desktop.py` `emit_event` JSON consumers: out of scope (machine
   path).
