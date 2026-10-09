@@ -31,7 +31,7 @@ import argparse
 import sys
 
 from ..core import kanban, registry
-from ._theme import escape, make_console, panel, status_panel
+from ._theme import esc, escape, make_console, panel, status_panel
 
 
 def _get_project(projects: list[registry.Project], project_name: str):
@@ -300,7 +300,7 @@ def cmd_dispatch(args: argparse.Namespace, projects: list[registry.Project]) -> 
     # and anchors a worktree), so it earns the gate. Telegram has been removed,
     # so there is no announce step.
     if not getattr(args, "apply", False):
-        plan_lines = [f"dispatch (dry-run) project={args.project} board={board!r}:"]
+        plan_lines = [f"dispatch (dry-run) project={esc(args.project)} board={esc(repr(board))}:"]
         plan_lines.append(f"  card title: {escape(args.task)}")
         if assignee := getattr(args, "assignee", None):
             plan_lines.append(f"  assignee  : {escape(assignee)}")
@@ -351,7 +351,7 @@ def cmd_dispatch(args: argparse.Namespace, projects: list[registry.Project]) -> 
     # Telegram (the outbound announce surface) has been removed, so dispatch
     # is complete once the card exists — nothing is announced.
     make_console().print(status_panel(
-        f"card {card_id} created on board {board!r} "
+        f"card {esc(card_id)} created on board {esc(repr(board))} "
         "(Telegram removed — not announced).",
         status="ok", title="message dispatch"))
     return 0
