@@ -270,37 +270,39 @@ def _cmd_status(rest, json_mode, theme_name=None):
         rows.append("  force-armed:     [warn]YES[/warn] "
                     "(armed despite active Hermes cron jobs)")
         for job in status["force_armed_overrides"]:
-            rows.append(f"    overridden job: {job}")
+            # job names come from hermes cron — operator data, may contain
+            # brackets; the panel body is markup-parsed (t_716cf37c).
+            rows.append(f"    overridden job: {theme.esc(job)}")
     # Informational note for any active CPU-only watchdog(s) — they do not
     # block arming (and autodown never wakes for them), but the operator
     # should still know they exist (feat t_c94f8b8c).
     if status["active_cron_cpu_only"]:
-        names = ", ".join(status["active_cron_cpu_only"])
+        names = ", ".join(theme.esc(n) for n in status["active_cron_cpu_only"])
         rows.append(f"  active cron (cpu-only): {names} — CPU-side "
                     "watchdog(s), not GPU-dependent, do not block arming.")
     if status["active_cron_model"]:
-        names = ", ".join(status["active_cron_model"])
+        names = ", ".join(theme.esc(n) for n in status["active_cron_model"])
         rows.append(f"  active cron (model):    {names} — model-requiring, "
                     "the reason enable aborts/force-arms.")
-    rows.append(f"  state:           {status['state']}")
+    rows.append(f"  state:           {theme.esc(status['state'])}")
     if status["blocked_by"]:
         rows.append("  blocked by:      "
-                    f"[warn]{status['blocked_by']}[/warn]")
-    rows.append(f"  last activity:   {status['last_activity_iso']}")
+                    f"[warn]{theme.esc(status['blocked_by'])}[/warn]")
+    rows.append(f"  last activity:   {theme.esc(status['last_activity_iso'])}")
     if status["down_since"]:
         # Only show the down-since line when there is a value — a null/absent
         # down_since means the fleet is not down (never printed 'None').
-        rows.append(f"  down since:      {status['down_since']}")
+        rows.append(f"  down since:      {theme.esc(status['down_since'])}")
     if status["wake_source"]:
-        rows.append(f"  wake source:     {status['wake_source']}")
+        rows.append(f"  wake source:     {theme.esc(status['wake_source'])}")
     if status["reason"]:
-        rows.append(f"  reason:          {status['reason']}")
+        rows.append(f"  reason:          {theme.esc(status['reason'])}")
     rows.append("  watchdog block:  "
                 f"{'set' if status['watchdog_blocked'] else 'clear'}"
-                f"{' (intentional: ' + str(status['watchdog_intentional']) + ')' if status['watchdog_intentional'] else ''}")
+                f"{' (intentional: ' + theme.esc(status['watchdog_intentional']) + ')' if status['watchdog_intentional'] else ''}")
     if kc is not None and kc["ok"] is False:
         rows.append("  kanban interlock: [error]UNEVALUABLE[/error] — "
-                    f"{kc['reason']}")
+                    f"{theme.esc(kc['reason'])}")
     elif kc is not None and kc["ok"]:
         rows.append("  kanban interlock: [ok]ok[/ok] (board readable)")
     if status["prci_active"]:
@@ -453,8 +455,9 @@ def _cmd_enable(rest, json_mode, theme_name=None):
             rows.append("autodown: [warn]ENABLED[/warn] "
                         f"(idle_minutes={idle_minutes}, FORCED)")
             for j in model_jobs:
-                rows.append(f"  overrode schedule: {j.get('name') or j.get('id')}"
-                            f" (schedule {j.get('schedule_display') or '?'})")
+                # Cron job names/schedules are operator-authored text — DATA.
+                rows.append(f"  overrode schedule: {theme.esc(j.get('name') or j.get('id'))}"
+                            f" (schedule {theme.esc(j.get('schedule_display') or '?')})")
         else:
             rows.append("autodown: [ok]ENABLED[/ok] "
                         f"(idle_minutes={idle_minutes})")
@@ -462,7 +465,7 @@ def _cmd_enable(rest, json_mode, theme_name=None):
         # the operator should still know they are scheduled (feat t_c94f8b8c).
         if cpu_only_jobs:
             names = ", ".join(
-                (j.get("name") or j.get("id")) for j in cpu_only_jobs)
+                theme.esc(j.get("name") or j.get("id")) for j in cpu_only_jobs)
             rows.append(f"  Note: {len(cpu_only_jobs)} active CPU-only cron "
                         f"watchdog(s) present ({names}) — not GPU-dependent, "
                         "so they do not block arming.")
@@ -506,7 +509,7 @@ def _cmd_disable(rest, json_mode, theme_name=None):
     else:
         rows = [
             "autodown: [ok]DISABLED[/ok]",
-            f"  state: {cfg['state']}",
+            f"  state: {theme.esc(cfg['state'])}",
             "  Intentional watchdog block cleared — normal supervision "
             "resumed.",
             "  Serving layer NOT restarted (use 'hscc autodown wake' to "
@@ -563,8 +566,8 @@ def _cmd_wake(rest, json_mode, theme_name=None):
             # cleared the block so the watchdog can heal. Report it.
             msg = cfg.get("reason") or result.get("reason", res)
             _print_status_panel(
-                f"autodown: wake did [error]NOT complete[/error] ({res})\n"
-                f"  {msg}",
+                f"autodown: wake did [error]NOT complete[/error] ({theme.esc(res)})\n"
+                f"  {theme.esc(msg)}",
                 status="error", title="autodown wake", theme_name=theme_name)
             return 1
     return 0

@@ -66,6 +66,12 @@ except ImportError:  # pragma: no cover - standalone-script fallback
             kwargs.setdefault("expand", False)
             return Table(title=title, **kwargs)
 
+        @staticmethod
+        def esc(value):
+            """Same DATA-escape contract as ``cli_theme.esc`` (see t_716cf37c)."""
+            from rich.markup import escape
+            return escape(str(value))
+
     theme = _FallbackTheme()
 
 
@@ -999,7 +1005,8 @@ def cmd_install_event_driven() -> None:
     for stream, interval in PERIODIC_STREAMS.items():
         success, msg = gen.install_job(stream, interval)
         mark = "[ok]✓[/ok]" if success else "[error]✗[/error]"
-        table.add_row(mark, stream, f"every {interval}s", msg)
+        # ``msg`` is launchd/plistutil output — arbitrary text.
+        table.add_row(mark, stream, f"every {interval}s", theme.esc(msg))
     console.print(table)
 
     console.print()
@@ -1027,7 +1034,7 @@ def cmd_uninstall_event_driven() -> None:
     table.add_column("result")
     for stream, (ok, msg) in results.items():
         mark = "[ok]✓[/ok]" if ok else "[error]✗[/error]"
-        table.add_row(mark, stream, msg)
+        table.add_row(mark, stream, theme.esc(msg))
     console.print(table)
 
     console.print()
@@ -1079,7 +1086,8 @@ def cmd_event_status() -> None:
             console.print(
                 f"    Active watchers found in log ({len(kqueue_lines)} entries)")
             for line in kqueue_lines[-5:]:
-                console.print(f"    {line.strip()}")
+                # daemon.log lines are DATA — may quote arbitrary text.
+                console.print(f"    {theme.esc(line.strip())}")
         else:
             console.print(
                 "    No active watchers (daemon not running or polling fallback)")
@@ -1555,7 +1563,7 @@ def main() -> None:
     }
 
     if cmd not in commands:
-        console.print(f"[error]Unknown command: {cmd}[/error]")
+        console.print(f"[error]Unknown command: {theme.esc(cmd)}[/error]")
         console.print(f"Available: {', '.join(commands.keys())}")
         sys.exit(1)
 
@@ -1564,7 +1572,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     except Exception as e:
-        console.print(f"[error]Error: {e}[/error]")
+        console.print(f"[error]Error: {theme.esc(e)}[/error]")
         sys.exit(1)
 
 
