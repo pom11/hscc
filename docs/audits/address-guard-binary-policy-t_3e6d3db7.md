@@ -53,7 +53,7 @@ interpreters:**
 
 | decode of the same 46762 bytes | chars | bytes not preserved | `FORBIDDEN` | naive |
 |---|---|---|---|---|
-| `utf-8`, `errors="ignore"` (what `scan_blob` does) | 42072 | 4690 | **1** | 1 |
+| `utf-8`, `errors="ignore"` (what `scan_blob` does) | 42072 | 4332 | **1** | 1 |
 | `latin-1` (faithful, one char per byte) | 46762 | 0 | **0** | 1 |
 
 Same object, same pattern, same interpreter (measured on 3.11.16 and 3.13.x,
@@ -63,19 +63,37 @@ mechanism, measured:
 * the address's **true** neighbours in the blob are U+000E before and byte 0xDA
   after. 0xDA decodes as `Ú`, a word character, so over a faithful decode the
   trailing `\b` fails → **0 matches**;
-* `utf-8/ignore` drops 4332 invalid bytes and replaces 179 more with U+FFFD, so
-  the character after the address is no longer the true one but a leftover
-  control byte (ord 5) — non-word → both `\b` hold → **1 match**.
+* the lossy decode does not preserve 4332 of the 46762 bytes — `utf-8/replace`
+  yields 4323 U+FFFD, so there are 4323 invalid byte sequences — and the character
+  left after the address is no longer the true one but a leftover control byte
+  (ord 5), which is non-word, so both `\b` hold → **1 match**. (The review
+  recorded "4690 bytes dropped"; that figure is the *character*-count delta between
+  the two decodes — 46762 − 42072 — not a byte count. Both measurements are the
+  same measurement.)
 
 So the operator's 0 is what a **faithful** decode yields, and my 1 was an
 artifact of the guard's lossy decode. Three consequences, all of which make the
 policy *more* defensible than my first write-up did:
 
-1. Extract-and-scan is **not reliably blind-spot-free even on this historical
-   blob**. The shipped `scan_blob` happens to match it — but only because lossy
-   decoding sanitised the neighbouring bytes. A detector whose verdict depends on
-   which bytes a lossy codec chose to discard is not a control, and a
-   byte-pattern scan of the same object finds 0 too.
+1. **Every content-scanning form has a measured miss, and every one of them misses
+   the accident that actually matters.** Run the shipping detector over the two
+   blobs in every form an extract-and-scan could take:
+
+   | detector form | historical blob `0f165f7c` | fresh-compile blob (the realistic accident) |
+   |---|---|---|
+   | naive `192\.168\.88\.\d{1,3}` over bytes | 1 | 1 |
+   | `FORBIDDEN` over raw bytes | 1 | **0** |
+   | `FORBIDDEN` over `utf-8/ignore` (the shipped decode) | 1 | **0** |
+   | `FORBIDDEN` over `latin-1` (faithful) | **0** | **0** |
+   | name-based refusal (this card) | refused | refused |
+
+   A bytes-pattern scan is the obvious implementation and it misses the
+   fresh-compile case — because `\w` in bytes mode is ASCII-only, and there the
+   trailing byte *is* ASCII `N`. A decoded scan misses it under both decodes, and
+   over-decodes the historical blob only by accident. So the historical blob's
+   `FORBIDDEN`=1 under the shipped decode is not a detection: it is an artifact of
+   which bytes a lossy codec chose to discard, and the same object reads 0 under a
+   faithful one. The refusal is the only row with no measured miss.
 2. My original table in this section was measured on decoded *strings*, so for the
    faithful-decode row it described a context that the decode itself had created.
    Re-measured on **raw bytes** — the only faithful representation — with the
