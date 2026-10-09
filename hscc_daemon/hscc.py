@@ -297,6 +297,8 @@ def _get_help_text():
     health = _section("Health & monitoring", [
         "check [stream]       Run one check cycle now (default: all)",
         "                       streams: dgx gateway local heartbeat nas watchdog triggers",
+        "check --repo <path>  Commit-time address-guard posture for that checkout",
+        "                       (default cwd; --json; exit 0 only when 'armed')",
         "watch [stream]       Live-tail check results",
         "triggers             Show trigger-engine rules and recent firings",
         "verify               Run a full compatibility/health smoke-test of the cluster",
@@ -374,7 +376,7 @@ COMMAND_HELP = {
     "uninstall": "Remove the service and stop the daemon",
     "plist": "Print the launchd plist (no install)",
     "log": "Show the daemon log output",
-    "check": "Run one check cycle now. Usage: hscc check [stream]\n  streams: dgx gateway local heartbeat nas watchdog triggers",
+    "check": "Run one check cycle now. Usage: hscc check [stream]\n  streams: dgx gateway local heartbeat nas watchdog triggers\n  hscc check --repo <path> [--json]   address-guard posture for that checkout\n          (default: cwd's top-level). Calls posture() from hscc-bootstrap/\n          install_hooks.py — single implementation, nothing recomputed here.\n          States: armed | unarmed | armed-but-absent (config advertises\n          protection, this checkout resolves no runnable hook = FAIL-OPEN) |\n          not-a-repo. Exit 0 only for 'armed', non-zero otherwise.",
     "watch": "Live-tail check results. Usage: hscc watch [stream]",
     "triggers": "Show trigger-engine rules and recent firings",
     "notify": "Send a desktop notification. Usage: hscc notify <message>",
@@ -696,19 +698,21 @@ def _handle_verify():
             # substring stays contiguous and at-a-glance guidance is kept.
             if not ok and next_step:
                 next_steps.append(next_step)
+            # name/detail are written by the checks themselves (they quote
+            # paths, versions, command output) — DATA, never markup.
             table.add_row(f"[{colour}]{glyph}[/]",
-                          f"[label]{name}[/]", detail)
+                          f"[label]{theme.esc(name)}[/]", theme.esc(detail))
         console.print(table)
         for hint in next_steps:
             # Keep the exact "next step: <hint>" substring the pre-Rich
             # rendering produced (automation greps it), just dimmed.
-            console.print(f"[dim]next step: {hint}[/dim]")
+            console.print(f"[dim]next step: {theme.esc(hint)}[/dim]")
         unver = result.get("unverified") or []
         if not result.get("ok"):
             overall = "\N{BALLOT X} Some checks failed"
         elif unver:
             overall = "\N{CHECK MARK} All checks passed (%d unverified: %s)" % (
-                len(unver), ", ".join(unver))
+                len(unver), ", ".join(theme.esc(u) for u in unver))
         else:
             overall = "\N{CHECK MARK} All checks passed"
         console.print(f"[{'error' if not result.get('ok') else 'ok'}]{overall}[/]")
@@ -739,7 +743,9 @@ def _handle_stats():
         print(json.dumps(result))
     else:
         console = theme.make_console(theme_name)
-        body = stats_mod.format_stats(result)
+        # format_stats() embeds profile/tool names read from the kanban DB —
+        # DATA that must not be markup-parsed (t_716cf37c).
+        body = theme.esc(stats_mod.format_stats(result))
         console.print(theme.make_panel("fleet stats", body))
     sys.exit(0)
 
@@ -756,7 +762,8 @@ def _handle_throughput():
         print(json.dumps(tp))
     else:
         console = theme.make_console(theme_name)
-        body = throughput.format_throughput(tp)
+        # format_throughput() embeds node names/labels from the fleet — DATA.
+        body = theme.esc(throughput.format_throughput(tp))
         console.print(theme.make_panel("fleet throughput", body))
     sys.exit(0)
 
@@ -779,8 +786,9 @@ def _handle_autoscale():
         print(json.dumps(d))
     else:
         # A "none" decision carries no target — only scale_up/down do.
-        tgt = f" (target {d['target']})" if "target" in d else ""
-        body = f"autoscale: {d['action']}{tgt} — {d['reason']}"
+        tgt = f" (target {theme.esc(d['target'])})" if "target" in d else ""
+        body = (f"autoscale: {theme.esc(d['action'])}{tgt} — "
+                f"{theme.esc(d['reason'])}")
         # Colour by how the operator should read it: scale_up is a live
         # capacity signal (warn), scale_down/none are calm (ok).
         colour = "warn" if d.get("action") == "scale_up" else "ok"
@@ -819,7 +827,8 @@ def _handle_escalate():
                 to = a.get("to", a.get("category", "?"))
                 colour = "error" if action == "escalate_failed" else (
                     "warn" if action == "escalate" else "accent")
-                table.add_row(f"[{colour}]{task_id}[/]", action, to)
+                table.add_row(f"[{colour}]{theme.esc(task_id)}[/]",
+                              theme.esc(action), theme.esc(to))
             console.print(table)
         else:
             console.print("[dim]no escalations pending[/dim]")
@@ -1063,7 +1072,9 @@ def main():
         cmd_status()
     elif cmd_lower == "check":
         from hscc_daemon.cli import cmd_check
-        cmd_check(args[1] if len(args) > 1 else None)
+        # Forward EVERYTHING after `check`: cmd_check separates the optional
+        # stream positional from the `--repo`/`--json` flags (t_5abdb13d).
+        cmd_check(*args[1:])
     elif cmd_lower == "watch":
         from hscc_daemon.cli import cmd_watch
         cmd_watch(args[1] if len(args) > 1 else None)
