@@ -52,6 +52,38 @@ FORBIDDEN = re.compile(
 # Binary/vendored paths that would only produce noise.
 SKIP_SUFFIXES = (".png", ".jpg", ".jpeg", ".pdf", ".ico", ".zip", ".gz", ".xcuserstate")
 
+# Build artefacts: refused outright, whatever their content (t_3e6d3db7).
+#
+# Why a *refusal* and not an extract-and-scan. The guard used to treat any
+# NUL-bearing blob as out of scope, so a committed `.pyc` was invisible to the
+# hook, the pytest gate and the CI backstop alike -- and a `.pyc` embeds the
+# string constants of the source it was compiled from, which is exactly where a
+# real address lands (this repo had one in published history:
+# `hscc-provision/__pycache__/hscc.cpython-313.pyc`, removed by the 2026-10-09
+# rewrite). `.gitignore` cannot help once the blob is tracked: a fresh clone and
+# a CI checkout get what was committed.
+#
+# Extracting strings from arbitrary binaries answers the wrong question. If it
+# finds an address in a `.pyc` the fix is still "do not track this file", and if
+# it finds none the file is still build output with no business being here. It
+# would also have no stopping rule -- a `.pyc` is a container, but so are `.zip`,
+# `.gz`, `.jar` and PDFs with embedded fonts -- and every layer is code paid for
+# on every commit in the repo, which is the thing that gets `--no-verify`'d.
+# Full reasoning + measurements:
+# docs/audits/address-guard-binary-policy-t_3e6d3db7.md
+BUILD_ARTEFACT_SUFFIXES = (
+    ".pyc", ".pyo", ".pyd", ".o", ".a", ".so", ".dylib", ".dll",
+    ".class", ".jar", ".egg", ".whl", ".pyz",
+)
+BUILD_ARTEFACT_PATH_SEGMENTS = ("__pycache__",)
+
+# A binary that genuinely belongs in this repo goes here: it is exempt from the
+# artefact REFUSAL only -- the address scan still applies to it, so widening this
+# can never hide a leak. Empty today; adding to it must be a deliberate,
+# reviewed diff in this file (the guard's tests pin the scanner's contract, not
+# this list, so this stays the single visible place to widen the policy).
+ALLOWED_BINARY_PATHS = frozenset()
+
 
 class GuardError(RuntimeError):
     """The guard could not run (no git, unreadable repo). Not a leak verdict."""
@@ -69,18 +101,69 @@ def find_in_text(text):
     return hits
 
 
+def is_build_artefact(rel):
+    """True if ``rel`` is a build artefact that must never be tracked here.
+
+    Name-based, deliberately: it must be decidable WITHOUT reading the file, so
+    the verdict costs nothing on the commit path and applies even to a path whose
+    bytes are unreadable or absent from the working tree. A compiled artefact
+    renamed to a text extension is not caught — see the limits section of
+    docs/audits/address-guard-binary-policy-t_3e6d3db7.md.
+    """
+    if rel in ALLOWED_BINARY_PATHS:
+        return False
+    lowered = rel.lower()
+    if lowered.endswith(BUILD_ARTEFACT_SUFFIXES):
+        return True
+    # Git always reports paths with forward slashes; a backslash is matched too
+    # so a Windows-authored `pkg\__pycache__\x.pyc` cannot dodge the segment test.
+    normalised = lowered.replace("\\", "/")
+    return any(seg in normalised.split("/") for seg in BUILD_ARTEFACT_PATH_SEGMENTS)
+
+
+# The verdict text for a refused build artefact. A constant, not an inline
+# literal, because `artefact_offender` writes it and `report` has to recognise it
+# to sort offenders into the two classes it explains differently.
+BUILD_ARTEFACT_OFFENDER_SUFFIX = "build artefact must not be tracked"
+
+
+def artefact_offender(rel):
+    """The offender string for a refused build artefact, or None.
+
+    One formatter for both gates: `scan_blob` (staged) and `scan_paths` (tracked)
+    must name an artefact identically, or the hook and the CI job disagree about
+    the same tree -- the exact failure this repo keeps being reminded of.
+    """
+    if is_build_artefact(rel):
+        # Line 0: there is no line to point at. The offence is the path itself.
+        return f"{rel}:0: {BUILD_ARTEFACT_OFFENDER_SUFFIX}"
+    return None
+
+
 def scan_blob(rel, data):
     """Scan one file's bytes; return offender strings ``rel:line: address``.
 
     Bytes (not str) so the same function serves a working-tree read and a staged
-    blob read. Files with a NUL byte are treated as binary and skipped — same
-    intent as SKIP_SUFFIXES, and it keeps a vendored asset from being decoded.
+    blob read. Three cases, in this order:
+
+      * a build artefact is refused on its NAME, before anything is decoded
+        (t_3e6d3db7);
+      * a path on ALLOWED_BINARY_PATHS is exempt from that refusal, and is
+        therefore scanned as text EVEN IF it carries NUL bytes — utf-8/ignore
+        decoding is what makes it cheap, and the one binary we chose to track is
+        exactly the binary whose contents we cannot afford to wave through
+        unread (the hatch must never be able to hide a leak);
+      * anything else with a NUL byte is treated as binary and skipped — same
+        intent as SKIP_SUFFIXES, and it keeps a vendored asset from being decoded.
     """
-    if rel.endswith(SKIP_SUFFIXES):
+    offender = artefact_offender(rel)
+    if offender:
+        return [offender]
+    allowlisted = rel in ALLOWED_BINARY_PATHS
+    if rel.endswith(SKIP_SUFFIXES) or (not allowlisted and not isinstance(data, str)
+                                       and b"\0" in data):
         return []
     if not isinstance(data, str):
-        if b"\0" in data:
-            return []
         data = data.decode("utf-8", errors="ignore")
     return [f"{rel}:{line}: {addr}" for line, addr in find_in_text(data)]
 
@@ -88,11 +171,17 @@ def scan_blob(rel, data):
 def scan_paths(root, rels, read=None):
     """Scan ``rels`` (relative to ``root``) from disk. Missing/unreadable files
     are skipped, matching the pytest gate (a deleted-but-tracked path is not a
-    leak, and an unreadable file cannot be judged)."""
+    leak, and an unreadable file cannot be judged) -- EXCEPT a build artefact,
+    which is refused on its name alone: a path in HEAD's index is a tracked
+    artefact whether or not the working tree happens to carry the bytes."""
     root = Path(root)
     read = read or (lambda p: p.read_bytes())
     offenders = []
     for rel in rels:
+        offender = artefact_offender(rel)
+        if offender:
+            offenders.append(offender)
+            continue
         if rel.endswith(SKIP_SUFFIXES):
             continue
         p = root / rel
@@ -194,13 +283,21 @@ def staged_blobs(repo, rels):
 # ── gates ────────────────────────────────────────────────────────────────────
 
 def scan_staged(repo):
-    """Offenders in the staged tree (the pre-commit gate)."""
+    """Offenders in the staged tree (the pre-commit gate).
+
+    The artefact verdict is taken from `staged_paths` directly, not from the blob
+    dict: `staged_blobs` legitimately has no entry for a spec git could not
+    resolve, and a name-based refusal must not depend on having read the bytes.
+    """
     rels = staged_paths(repo)
-    return [
+    offenders = [o for o in (artefact_offender(r) for r in rels) if o]
+    offenders.extend(
         o
         for rel, blob in staged_blobs(repo, rels).items()
+        if not is_build_artefact(rel)   # already refused by name above
         for o in scan_blob(rel, blob)
-    ]
+    )
+    return offenders
 
 
 def scan_tracked(repo):
@@ -209,19 +306,50 @@ def scan_tracked(repo):
 
 
 def report(offenders, scope="staged tree"):
-    """The failure text: offending file:line, then the placeholders to use."""
+    """The failure text: offending file:line, then the fix for each class.
+
+    Two classes of offender, two different fixes, so they are reported apart. An
+    address is scrubbed to a placeholder; a build artefact is removed from the
+    index (telling someone to "scrub to 10.0.0.x" a `.pyc` is a dead end, and a
+    dead end on a commit path is how `--no-verify` gets used).
+    """
+    artefacts, addresses = [], []
+    for o in offenders:
+        (artefacts if o.endswith(BUILD_ARTEFACT_OFFENDER_SUFFIX) else addresses).append(o)
+
     lines = [
-        f"REAL OPERATOR ADDRESS in the {scope} — this repo is PUBLIC, the commit is blocked.",
+        (f"REAL OPERATOR ADDRESS in the {scope} — this repo is PUBLIC, the commit is blocked."
+         if addresses else
+         f"BUILD ARTEFACT in the {scope} — this repo is PUBLIC, the commit is blocked."),
         "",
     ]
-    lines += [f"  {o}" for o in offenders[:20]]
-    if len(offenders) > 20:
-        lines.append(f"  ... and {len(offenders) - 20} more")
+    lines += [f"  {o}" for o in addresses[:20]]
+    if len(addresses) > 20:
+        lines.append(f"  ... and {len(addresses) - 20} more")
+    if addresses:
+        lines += [
+            "",
+            "Scrub them to the documented placeholders:",
+            f"  LAN node     -> {LAN_PLACEHOLDER}",
+            f"  tailnet host -> {TAILNET_PLACEHOLDER}",
+        ]
+    if artefacts:
+        lines += [
+            "",
+            f"BUILD ARTEFACTS tracked in the {scope} — refused whatever they contain",
+            "(a .pyc embeds the string constants of its source, so it can carry an",
+            "address no text scan will ever see):",
+        ]
+        lines += [f"  {o}" for o in artefacts[:20]]
+        if len(artefacts) > 20:
+            lines.append(f"  ... and {len(artefacts) - 20} more")
+        lines += [
+            "",
+            "Untrack them:  git rm --cached <path>   (and keep them ignored; see",
+            "BUILD_ARTEFACT_SUFFIXES in scripts/address_guard.py for what is refused",
+            "and ALLOWED_BINARY_PATHS for the escape hatch).",
+        ]
     lines += [
-        "",
-        "Scrub them to the documented placeholders:",
-        f"  LAN node     -> {LAN_PLACEHOLDER}",
-        f"  tailnet host -> {TAILNET_PLACEHOLDER}",
         "",
         "If a file genuinely must carry a real address it must not be committed"
         " to this repo at all. Do not use `git commit --no-verify` to get past"

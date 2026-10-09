@@ -204,6 +204,85 @@ def test_binary_and_unusual_files_are_survivable(repo):
     assert "asset.bin" not in err                      # binary skipped, not decoded
 
 
+def test_tracked_build_artefact_is_blocked_by_the_hook(repo):
+    """t_3e6d3db7: a committed `.pyc` was invisible to all three gates.
+
+    The blob is NUL-bearing, so the pre-policy scanner returned [] for it and the
+    commit went through. The name-based refusal must stop it at the hook.
+    """
+    pyc = repo / "hscc-provision" / "__pycache__"
+    pyc.mkdir(parents=True)
+    (pyc / "hscc.cpython-313.pyc").write_bytes(
+        b"\xe3\r\r\n\x00\x00\x00\x00\x00" + REAL_LAN.encode() + b"\x00\x00")
+    rc, out, err = _run(GIT + ["add", "-A"], repo)
+    assert rc == 0, err
+    rc, out, err = _run(GIT + ["commit", "-q", "-m", "chore: build output"], repo)
+    assert rc != 0, f"a tracked .pyc must be refused\nSTDOUT={out}\nSTDERR={err}"
+    assert "hscc-provision/__pycache__/hscc.cpython-313.pyc" in err, err
+    assert "git rm --cached" in err, err
+    rc, out, _ = _run(GIT + ["log", "--oneline"], repo)
+    assert out.strip().count("\n") == 0, "the artefact commit must not exist"
+
+
+def test_hook_and_tracked_agree_on_a_tracked_build_artefact(repo):
+    """Same input, both gates, same verdict — they share `scan_blob`.
+
+    The card's test requirement, and the reason the artefact verdict is formatted
+    in ONE place: the hook (staged) and the CI backstop / pytest gate (tracked)
+    must never disagree about the same tree. `--no-verify` gets the blob into
+    HEAD here so the tracked scan has something to find; that is the state a
+    bypass leaves behind, and it is exactly what the backstop has to catch.
+    """
+    pyc = repo / "scripts" / "__pycache__"
+    pyc.mkdir(parents=True)
+    (pyc / "mod.cpython-313.pyc").write_bytes(
+        b"\xe3\r\r\n\x00\x00\x00\x00\x00" + REAL_TAILNET.encode() + b"\x00\x00")
+    _run(GIT + ["add", "-A"], repo)
+    rc, out, err = _run(GIT + ["commit", "-q", "-m", "chore: bypassed", "--no-verify"], repo)
+    assert rc == 0, err
+
+    # Gate 1: the hook, over the staged artefact. The blob is in HEAD now, so the
+    # hook's contract ("judge what this commit introduces") needs the path to be
+    # *changed* to appear in the staged set again — a re-`add` with new bytes is
+    # the state where the hook gets a second chance to stop it.
+    (pyc / "mod.cpython-313.pyc").write_bytes(
+        b"\xe3\r\r\n\x00\x00\x00\x00\x01" + REAL_TAILNET.encode() + b"\x00\x00")
+    (repo / "touch.md").write_text("x\n", encoding="utf-8")
+    _run(GIT + ["add", "-A"], repo)
+    rc, hook_out, hook_err = _run(GIT + ["commit", "-q", "-m", "chore: next"], repo)
+    assert rc != 0, "the hook must still refuse the staged artefact"
+
+    # Gate 2: the CLI the CI job runs (`python3 scripts/address_guard.py --tracked`),
+    # so the comparison is between the two shipped invocations, not two imports.
+    proc = subprocess.run(
+        [sys.executable, str(GUARD), "--tracked", "--repo", str(repo)],
+        capture_output=True)
+    assert proc.returncode == 1, proc.stderr.decode()
+    tracked = proc.stderr.decode().splitlines()
+
+    named_by_hook = [ln for ln in hook_err.splitlines()
+                     if "mod.cpython-313.pyc" in ln]
+    named_by_tracked = [ln for ln in tracked if "mod.cpython-313.pyc" in ln]
+    assert named_by_hook and named_by_tracked, (hook_err, tracked)
+    # And not merely "both mentioned it": the verdict strings are identical.
+    assert named_by_hook[0].strip() == named_by_tracked[0].strip(), (
+        f"hook says {named_by_hook[0]!r}, tracked says {named_by_tracked[0]!r}")
+
+
+def test_a_legitimate_binary_asset_still_commits(repo):
+    """The new rule must not break the binaries that belong here.
+
+    The tracked tree carries two .png files; a policy that refuses them is a
+    policy that gets --no-verify'd on its first real use.
+    """
+    (repo / "assets").mkdir()
+    (repo / "assets" / "hscc.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x0dIHDR")
+    rc, out, err = _run(GIT + ["add", "-A"], repo)
+    assert rc == 0, err
+    rc, out, err = _run(GIT + ["commit", "-q", "-m", "feat: logo"], repo)
+    assert rc == 0, f"a real asset must commit\nSTDOUT={out}\nSTDERR={err}"
+
+
 def test_guard_is_dependency_free_and_bounded(repo):
     """Requirement 4: fast + stdlib-only. A slow leak check gets --no-verify'd."""
     src = GUARD.read_text(encoding="utf-8")
