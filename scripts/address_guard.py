@@ -85,11 +85,26 @@ BUILD_ARTEFACT_SUFFIXES = (
 )
 BUILD_ARTEFACT_PATH_SEGMENTS = ("__pycache__",)
 
-# A binary that genuinely belongs in this repo goes here: it is exempt from the
-# artefact REFUSAL only -- the address scan still applies to it, so widening this
-# can never hide a leak. Empty today; adding to it must be a deliberate,
-# reviewed diff in this file (the guard's tests pin the scanner's contract, not
-# this list, so this stays the single visible place to widen the policy).
+# The escape hatch for a binary that genuinely belongs in this repo. It is
+# deliberately WEAKER than it looks, and the reason is this card's own §1b
+# finding (docs/audits/address-guard-binary-policy-t_3e6d3db7.md): the text scan
+# is BLIND to a compiled blob, so a hatch that could waive the refusal of a
+# compiled artefact would waive detection with it. Hence two tiers:
+#
+#   * a path whose SUFFIX is in BUILD_ARTEFACT_SUFFIXES is refused no matter what
+#     this list says -- a compiled artefact is never waivable, so widening the
+#     hatch can never hide a leak;
+#   * everything else the refusal covers (a `__pycache__/` segment, a path with an
+#     unknown extension that is NUL-bearing) may be waived, and such a path is
+#     then decoded and text-scanned even when it carries NUL bytes -- it stays
+#     open to the one detector that works on non-compiled bytes.
+#
+# Consequence to weigh before widening: a prebuilt `.so` can never be tracked
+# here. Today's tracked binary population is two `.png` files, so that costs
+# nothing; if a real need appears, add a *non-artefact* extension rather than
+# reaching for this list. Empty today, and it lives in the one file the guard's
+# tests pin, so widening it is a visible diff in a security control rather than a
+# config edit.
 ALLOWED_BINARY_PATHS = frozenset()
 
 
@@ -117,12 +132,18 @@ def is_build_artefact(rel):
     bytes are unreadable or absent from the working tree. A compiled artefact
     renamed to a text extension is not caught — see the limits section of
     docs/audits/address-guard-binary-policy-t_3e6d3db7.md.
+
+    The suffix tier runs FIRST and ignores ``ALLOWED_BINARY_PATHS`` on purpose
+    (round-1 review of this card): the text scan is blind to a compiled blob, so
+    if the hatch could waive a `.pyc`/`.so` refusal it would waive detection too,
+    and the guarantee "widening the hatch can never hide a leak" would be false.
+    Only the segment tier is waivable.
     """
-    if rel in ALLOWED_BINARY_PATHS:
-        return False
     lowered = rel.lower()
     if lowered.endswith(BUILD_ARTEFACT_SUFFIXES):
-        return True
+        return True                                  # never waivable
+    if rel in ALLOWED_BINARY_PATHS:
+        return False                                 # segment tier only
     # Git always reports paths with forward slashes; a backslash is matched too
     # so a Windows-authored `pkg\__pycache__\x.pyc` cannot dodge the segment test.
     normalised = lowered.replace("\\", "/")
@@ -148,28 +169,48 @@ def artefact_offender(rel):
     return None
 
 
+def is_skipped_asset(rel):
+    """A declared asset the guard does not decode (`.png`, `.zip`, ...).
+
+    ONE predicate for both gates: `scan_paths` has a pre-read skip shortcut and
+    `scan_blob` has the same rule after the read, and if those two spellings ever
+    drift the hook and the CI job start disagreeing about the same tree. So both
+    call this. It is also the reason the hatch belongs here and not in the
+    callers: an allowlisted path must never be skipped unread by either gate,
+    whatever extension it has.
+    """
+    return rel not in ALLOWED_BINARY_PATHS and rel.endswith(SKIP_SUFFIXES)
+
+
 def scan_blob(rel, data):
     """Scan one file's bytes; return offender strings ``rel:line: address``.
 
     Bytes (not str) so the same function serves a working-tree read and a staged
-    blob read. Three cases, in this order:
+    blob read. Four cases, in this order:
 
       * a build artefact is refused on its NAME, before anything is decoded
-        (t_3e6d3db7);
-      * a path on ALLOWED_BINARY_PATHS is exempt from that refusal, and is
-        therefore scanned as text EVEN IF it carries NUL bytes — utf-8/ignore
-        decoding is what makes it cheap, and the one binary we chose to track is
-        exactly the binary whose contents we cannot afford to wave through
-        unread (the hatch must never be able to hide a leak);
+        (t_3e6d3db7), and a compiled-artefact SUFFIX is refused even if it sits on
+        ``ALLOWED_BINARY_PATHS`` — the text scan below cannot see an address in a
+        compiled blob, so waiving the refusal would waive detection;
+      * a path on ``ALLOWED_BINARY_PATHS`` (segment tier only, per the previous
+        bullet) is exempt from the refusal and is therefore decoded and scanned
+        EVEN IF it carries NUL bytes and even if its extension is in
+        ``SKIP_SUFFIXES`` — the hatch may say "this path may be tracked", never
+        "this path may be unread" (round-1 review: an allowlisted `.pdf` used to
+        short-circuit here and go unscanned);
+      * anything else whose extension is in ``SKIP_SUFFIXES`` is skipped — declared
+        assets the guard has no business decoding;
       * anything else with a NUL byte is treated as binary and skipped — same
         intent as SKIP_SUFFIXES, and it keeps a vendored asset from being decoded.
     """
     offender = artefact_offender(rel)
     if offender:
         return [offender]
-    allowlisted = rel in ALLOWED_BINARY_PATHS
-    if rel.endswith(SKIP_SUFFIXES) or (not allowlisted and not isinstance(data, str)
-                                       and b"\0" in data):
+    # Two ways a blob stays unread -- a declared asset (`is_skipped_asset`, which
+    # already exempts the hatch) and an unknown NUL-bearing blob (exempted here).
+    # The hatch may say "this path may be tracked", never "this path may be unread".
+    if is_skipped_asset(rel) or (rel not in ALLOWED_BINARY_PATHS
+                                 and not isinstance(data, str) and b"\0" in data):
         return []
     if not isinstance(data, str):
         data = data.decode("utf-8", errors="ignore")
@@ -190,7 +231,7 @@ def scan_paths(root, rels, read=None):
         if offender:
             offenders.append(offender)
             continue
-        if rel.endswith(SKIP_SUFFIXES):
+        if is_skipped_asset(rel):
             continue
         p = root / rel
         if not p.is_file():
@@ -355,7 +396,8 @@ def report(offenders, scope="staged tree"):
             "",
             "Untrack them:  git rm --cached <path>   (and keep them ignored; see",
             "BUILD_ARTEFACT_SUFFIXES in scripts/address_guard.py for what is refused",
-            "and ALLOWED_BINARY_PATHS for the escape hatch).",
+            "and ALLOWED_BINARY_PATHS for the escape hatch — which can waive a path",
+            "segment, never a compiled-artefact suffix).",
         ]
     lines += [
         "",
