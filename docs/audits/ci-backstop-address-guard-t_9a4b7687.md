@@ -82,12 +82,15 @@ closed**: if the pattern cannot be loaded it exits 3.
 > an unredacted address can never reach the log on our account". The exit code
 > was always right; the claim was wrong, and the reviewer reproduced both
 > channels (§10). Exiting non-zero is not the guarantee, because a failure path
-> also WRITES TEXT to the log. The guarantee now comes from three things this
+> also WRITES TEXT to the log. The guarantee now comes from four things this
 > file does instead: every diagnostic is a fixed string plus the exception TYPE
 > (never `str(exc)`, which can quote the address); the guard's import runs under
-> `catch_warnings()` with its stdout/stderr captured and discarded; and a loaded
-> `FORBIDDEN` that is not a compiled regex is rejected rather than allowed to
-> raise an `AttributeError` traceback into the log.
+> `catch_warnings()`, `redirect_stdout/stderr` **and fd-1/2→/dev/null** (§10c —
+> the first two rebind objects, only the descriptor layer stops `os.write(2,…)`);
+> `main()` catches `BaseException`, not just `Exception`, so no CPython traceback
+> (whose frame text IS guard source) escapes; and a loaded `FORBIDDEN` that is
+> not a compiled regex is rejected rather than allowed to raise an
+> `AttributeError` traceback into the log.
 
 Verified behaviour of the real command chain (`docs/ledger.md` holding a real-shaped
 NAS host), showing what a public job log would contain:
@@ -282,6 +285,11 @@ and 3.13); live-class by this card's own threat model.
 carrying `type(exc).__name__` only; `catch_warnings()` plus captured-and-discarded
 stdout/stderr around the guard import; `isinstance(pattern, re.Pattern)` or fail
 closed; no traceback can escape `main()`.
+
+**That last clause was itself a false absolute — corrected by review round 2
+(§10c):** `except Exception` does not catch `SystemExit`/`BaseException`, and an
+uncaught one prints a CPython traceback whose frame text IS the guard's source
+line. The docstring here and in the redactor both repeated it until round 2.
 
 **Layer independence, measured rather than assumed.** The step also passes
 `-W ignore -E` now, which on its own would suppress channel 2 — so a test that
