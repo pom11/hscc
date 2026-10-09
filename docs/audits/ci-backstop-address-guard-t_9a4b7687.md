@@ -295,6 +295,39 @@ open): `guard.out` is now piped through the redactor instead of `cat`'ed, and
 `ENFORCE` is normalised so `True`/`TRUE`/`1`/`yes` enforce — a variable named
 ENFORCE must not go advisory on a capitalisation.
 
+## 10b. Resume after the operator's history rewrite (run 955)
+
+Run 953 was SIGTERM'd by the dispatcher while the operator paused the card for
+an authorized history rewrite (force-push re-SHA'd `main`). Resuming surfaced
+three things worth recording:
+
+1. **A poisoned index survived the kill.** The worktree carried a *staged,
+   uncommitted* merge resolution left by the dead run — and its content
+   **reverted the operator's scrub**, restoring pre-rewrite text in the ledger
+   and in `ios-app/docs/templatedetailview-audit.md`. No `MERGE_HEAD` existed:
+   orphaned index state, not a merge in progress, so nothing but a
+   `git status --porcelain` at resume would ever have shown it. Had it been
+   committed (e.g. by an auto-commit step or a careless `commit -a`), the
+   branch would have resurrected masked-range text the rewrite deliberately
+   removed — and `address_guard --staged` returns **rc=0 on that content**,
+   because a masked range (`192.168.88.x`) is not a concrete address the
+   detector matches. The control did not catch this; noticing did. Rule
+   learned: after any reclaimed run, inspect the index before doing anything.
+2. **The branch had merged the pre-rewrite main.** Local tip `3b8c7dd9` merged
+   `685eeb9e` (rewritten lineage), so content was already scrubbed-clean; the
+   remote branch ref `a620967c` still pointed at pre-rewrite ancestry and had
+   to give way (force-push of the local tip, not the reverse). `git diff` of
+   the two trees = exactly the two scrubbed doc files.
+3. **Landing math re-checked against the *new* main** (`06746d40`) with
+   `git merge-tree`: 0 conflict markers; the DIRS hotspot resolves to the
+   union `… memori_byodb scripts .github/scripts` (t_95d864fc's token + this
+   card's, disjoint as designed); the ledger keeps main's 05:46 tick and its
+   verification section (branch adds, never drops, ledger lines post-merge);
+   scrub intact. A clean `git merge origin/main` then produced `26f51c1d` —
+   the exact tip the round-2 gate re-stamps below (ledger-only delta of 30
+   lines, so the fast legs at the previous tip stay meaningful, but the
+   authoritative stamp is taken at the tip that will actually merge).
+
 ## 11. Files
 
 | File | Purpose |
