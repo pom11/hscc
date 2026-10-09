@@ -268,6 +268,14 @@ The rule is deliberately stated twice for reach: here, and at the top of
 reader). `redact_guard_report.py FILE` is byte-faithful — clean logs come out
 byte-identical (`splitlines(True)`, byte I/O) — so scrubbing costs nothing.
 
+Files (t_914b8db5):
+
+| File | Purpose |
+|---|---|
+| `.github/scripts/ci_log.sh` | sanctioned CI-log reader; 0600 dump of both `gh` streams, publishes only redactor output, fail-closed preflight, `--keep` = one 0600 file + `UNREDACTED` warning; mode **100755 in the git tree** (a 0644 script is unrunnable by path — t_ec2c2f95) |
+| `.github/scripts/redact_guard_report.py` | + FILE-argument mode (byte-faithful; stdin mode and pattern extraction unchanged) |
+| `.github/scripts/tests/test_ci_log.py` | 23 executed cases: fake-`gh` battery, fail-closed-prints-nothing, mode/permission pins, byte-identity, rule pin |
+
 ## 10. Review round 1 — two publish channels, both reproduced
 
 Reviewer verdict: REQUEST CHANGES. Everything else passed independent
