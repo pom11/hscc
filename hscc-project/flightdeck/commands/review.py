@@ -61,7 +61,7 @@ import time
 
 from ..core import git_state, kanban, registry, review
 from ..core.review import BaselineStore
-from ._theme import escape, make_console, panel, status_panel
+from ._theme import esc, escape, make_console, panel, status_panel
 
 # The base branch every card's work is reviewed against and merged into.
 DEFAULT_BASE = "main"
@@ -627,7 +627,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         "\n".join(escape(ln) if ln else ln for ln in lines)))
     if close_ok:
         make_console().print(status_panel(
-            f"card {card_id} closed", status="ok", title="review"))
+            f"card {esc(card_id)} closed", status="ok", title="review"))
     else:
         print(
             f"warning: card {card_id} merged but could not be archived — "
@@ -766,7 +766,7 @@ def _print_watermark(enriched, *, _run=None) -> None:
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(int(watermark)))
     make_console().print(panel(
         "review queue",
-        f"data as of {when} ({_format_age(int(time.time()) - int(watermark))} ago)"))
+        f"data as of {esc(when)} ({esc(_format_age(int(time.time()) - int(watermark)))} ago)"))
 
 
 # --------------------------------------------------------------------------- #

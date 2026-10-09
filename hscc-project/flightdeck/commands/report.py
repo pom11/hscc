@@ -59,7 +59,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ..core import git_state, kanban, registry, roadmap, verify
-from ._theme import escape, make_console, panel
+from ._theme import esc, escape, make_console, panel
 
 # The hard character cap for the full rendered summary. It was inherited from
 # Telegram's per-message limit; kept as a constant so the renderer still caps
@@ -661,7 +661,7 @@ def _report_one(
         make_console().print(panel(
             "report",
             f"[dim]nothing to report for {escape(project.name)} since "
-            f"{_window_str(since_ts)}.[/dim]"))
+            f"{esc(_window_str(since_ts))}.[/dim]"))
         return "nothing", 0
 
     summary = renderer(data)
@@ -669,7 +669,7 @@ def _report_one(
         make_console().print(panel(
             "report",
             f"[dim]nothing to report for {escape(project.name)} since "
-            f"{_window_str(since_ts)}.[/dim]"))
+            f"{esc(_window_str(since_ts))}.[/dim]"))
         return "nothing", 0
 
     if args.apply:

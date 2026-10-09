@@ -45,7 +45,7 @@ import sys
 
 from ..core import registry, release
 from ..core.release import DEFAULT_CHANGELOG
-from ._theme import escape, make_console, panel, status_panel
+from ._theme import esc, escape, make_console, panel, status_panel
 
 # The ordered steps a real release performs. This command only PRINTS them.
 PLAN_STEPS = [
@@ -93,7 +93,7 @@ def _print_plan(project, version: str) -> None:
         "(dry run — nothing executed):"
     ]
     for i, step in enumerate(PLAN_STEPS, 1):
-        lines.append(f"  {i}. {escape(step)}")
+        lines.append(f"  {esc(i)}. {escape(step)}")
     make_console().print(panel("release — plan", "\n".join(lines)))
 
 
@@ -111,11 +111,11 @@ def _print_apply(project, completed: list[str], version: str,
         lines.append(f"  released step: {escape(step)}")
     version_file = project.version_file or "VERSION"
     if files_written:
-        names = ", ".join(escape(f) for f in files_written)
-        lines.append(f"bumped {escape(project.name)} {version_file} to "
-                     f"{escape(version.lstrip('v'))} (wrote {names})")
+        names = ", ".join(files_written)
+        lines.append(f"bumped {escape(project.name)} {esc(version_file)} to "
+                     f"{escape(version.lstrip('v'))} (wrote {esc(names)})")
     else:
-        lines.append(f"bumped {escape(project.name)} {version_file} to "
+        lines.append(f"bumped {escape(project.name)} {esc(version_file)} to "
                      f"{escape(version.lstrip('v'))}")
     make_console().print(status_panel(
         "\n".join(lines), status="ok", title="release --apply"))
