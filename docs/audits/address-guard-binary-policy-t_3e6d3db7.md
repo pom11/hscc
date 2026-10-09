@@ -42,44 +42,70 @@ The orchestrator ran the pre-rewrite leak blob —
 
 I reproduced it independently against the same object (probe scripts in the task
 scratch dir; they print counts and byte-context classes only, never values).
-**Point 1 reproduces exactly.** Point 2 does not, on my machine: I get **1 match**
-from `FORBIDDEN` over the decoded blob, from a source-compiled import *and* a
-normal import (so this is not t_38fd345f's `__pycache__` shadowing vector — I
-checked `__file__`, `__cached__`, and pattern identity between the two loads).
-In that object the address sits between `\x0e` and `\x05` — both non-word bytes,
-so both `\b` boundaries hold and the match stands. I could not make the shipped
-pattern miss *that* blob. The probe did not state its interpreter; I did not
-chase the difference further because **the card does not depend on it** — see
-the next paragraph, and note that if the operator's 0-match result is right on
-their machine, it only strengthens what follows, it cannot weaken it.
+**Point 1 reproduces exactly.** Point 2 did not on my first attempt: I got **1
+match** from `FORBIDDEN`, from a source-compiled import *and* a normal import (so
+this is not t_38fd345f's `__pycache__` shadowing vector — I checked `__file__`,
+`__cached__`, and pattern identity between the two loads). My first write-up of
+this attributed the difference to the interpreter/marshal version and claimed I
+"could not make the shipped pattern miss that blob". **Round-1 review showed both
+of those statements were wrong, and I reproduced the correction myself on two
+interpreters:**
 
-What *does* reproduce — and is the finding that decides the policy — is the
-stronger version: **a freshly compiled `.pyc` of leaking source defeats the
-shipping detector entirely.** Compile `NAS = <real-shaped address>` with
-`py_compile` and the naive regex finds the address in the decoded bytes while
-`FORBIDDEN` finds **0**. The mechanism is the *trailing* boundary, measured
-rather than assumed: in that blob the character before the address is U+000E
-(non-word, leading `\b` holds) and the character after is `N` — the first letter
-of the next interned name, which marshal writes with no delimiter — so the
-trailing `\b` fails. Relaxing only the leading boundary still matches 0; relaxing
-only the trailing one restores 1. Meaning: **FORBIDDEN's `\b` assume the address
-is delimited the way text delimits it, and undelimited binary framing breaks
-that assumption.** Extract-and-scan would inherit exactly this blind spot. A
-synthetic context table for the same boundary logic (address spliced after
-various single bytes, decoded as text):
+| decode of the same 46762 bytes | chars | bytes not preserved | `FORBIDDEN` | naive |
+|---|---|---|---|---|
+| `utf-8`, `errors="ignore"` (what `scan_blob` does) | 42072 | 4690 | **1** | 1 |
+| `latin-1` (faithful, one char per byte) | 46762 | 0 | **0** | 1 |
 
-| byte immediately before the address | naive regex | shipping FORBIDDEN |
-|---|---|---|
-| `\x00` (opcode framing) | 1 | 1 |
-| `\x0e` (non-word) | 1 | 1 |
-| ASCII digit `5` (word char) | 1 | **0** |
-| ASCII letter `z` (word char) | 1 | **0** |
-| `\n` (line-anchored, i.e. ordinary text) | 1 | 1 |
+Same object, same pattern, same interpreter (measured on 3.11.16 and 3.13.x,
+identical results). **The discriminator is the decode, not the interpreter.** The
+mechanism, measured:
 
-This is the card's requirement-3 question answered with a number instead of an
-argument: extract-and-scan **inherits the text detector's blind spot**, and the
-card's own suggested mutant — "a NUL-bearing blob" — is matched by the *current*
-pattern and therefore proves nothing. So:
+* the address's **true** neighbours in the blob are U+000E before and byte 0xDA
+  after. 0xDA decodes as `Ú`, a word character, so over a faithful decode the
+  trailing `\b` fails → **0 matches**;
+* `utf-8/ignore` drops 4332 invalid bytes and replaces 179 more with U+FFFD, so
+  the character after the address is no longer the true one but a leftover
+  control byte (ord 5) — non-word → both `\b` hold → **1 match**.
+
+So the operator's 0 is what a **faithful** decode yields, and my 1 was an
+artifact of the guard's lossy decode. Three consequences, all of which make the
+policy *more* defensible than my first write-up did:
+
+1. Extract-and-scan is **not reliably blind-spot-free even on this historical
+   blob**. The shipped `scan_blob` happens to match it — but only because lossy
+   decoding sanitised the neighbouring bytes. A detector whose verdict depends on
+   which bytes a lossy codec chose to discard is not a control, and a
+   byte-pattern scan of the same object finds 0 too.
+2. My original table in this section was measured on decoded *strings*, so for the
+   faithful-decode row it described a context that the decode itself had created.
+   Re-measured on **raw bytes** — the only faithful representation — with the
+   marshal-shaped trailing byte:
+
+   | byte immediately before the address | naive (bytes) | `FORBIDDEN` (bytes) |
+   |---|---|---|
+   | `\x00` (opcode framing) | 1 | 1 |
+   | `\x0e` (non-word) | 1 | 1 |
+   | `\n` (line-anchored, i.e. ordinary text) | 1 | 1 |
+   | ` `, `=`, `,`, `"` (the realistic text contexts) | 1 | 1 |
+   | ASCII digit `5` (word char) | 1 | **0** |
+   | ASCII letter `z` (word char) | 1 | **0** |
+
+   The realistic **text** miss class is empty — every text separator is a
+   non-word byte — which is why t_1b7b3166 records the miss class as
+   binary-framing-only rather than a live text exposure.
+3. The **fresh-compile** case — the realistic accident, and the one that decides
+   the policy — misses under *every* decode, faithful or lossy. `py_compile` of
+   `NAS = <real-shaped address>` gives a 200-byte blob in which the naive scan
+   finds the address and `FORBIDDEN` finds **0** over the raw bytes, over
+   `utf-8/ignore`, over `utf-8/replace` and over `latin-1`. The neighbour before
+   is U+000E (leading `\b` holds) and after is `N` — marshal writes the next
+   interned name with no delimiter — so it is the *trailing* boundary that fails:
+   relaxing only the leading one still matches 0, relaxing only the trailing one
+   restores 1. Meaning: **FORBIDDEN's `\b` assume the address is delimited the way
+   text delimits it, and undelimited binary framing breaks that assumption.**
+   Extract-and-scan would inherit exactly this blind spot.
+
+So:
 
 * `test_a_genuine_compiled_pyc_defeats_the_text_detector_so_refusal_is_required`
   (`scripts/tests`) compiles real source at runtime via `py_compile` and pins all
@@ -95,12 +121,16 @@ The consequence for §3 is that the refusal is not merely *cheaper* than
 extract-and-scan, it is *strictly stronger*: for the exact blob class the card
 names, scanning the bytes is not a fallback, it is blind.
 
-A corollary the follow-up card should own: this is a **detector-side** finding,
-not only a binary-side one. Any text file that ends up with a word character
-immediately after an address — a minified JSON blob, a CSV column, a compacted
-log line — slips past the trailing `\b` the same way. Changing the boundary is a
-change to the single source of truth and to every pin built on it, which is
-bigger than this card's scope; carding it rather than absorbing it.
+A corollary the follow-up card (t_1b7b3166) should own: this is a **detector-side**
+finding, not only a binary-side one — the trailing `\b` is what fails. I first
+wrote that any text file with a word character after an address (a minified JSON
+blob, a CSV column, a compacted log line) would slip past the same way, then
+measured it: those contexts all put a *non-word* separator after the address
+(`"`, `,`, ` `, `=`), so the **realistic text miss class is empty** and the
+exposure is binary framing only. That is a recordable outcome for t_1b7b3166 rather
+than a live text hole. Changing the boundary would still be a change to the single
+source of truth and to every pin built on it, which is bigger than this card's
+scope; carding it rather than absorbing it.
 
 ## 2. Measured, not assumed
 
@@ -157,14 +187,44 @@ still refused: the guard cannot tell the two apart without the machinery we just
 declined to build, and a rule that is only enforced when it can prove a leak is
 a rule that leaks.
 
-### Allowlisted exceptions
+### Allowlisted exceptions (two tiers — round-1 review made this real)
 
 `ALLOWED_BINARY_PATHS` in the guard is the escape hatch for a binary that
-genuinely belongs in this repo. It exempts a path from the artefact refusal
-only; the text scan still applies to it, so the hatch cannot hide an address.
-It is empty today. It is deliberately a literal in the one file the guard
-tests pin, so widening it is a visible diff in the security control rather than
-a config file edit.
+genuinely belongs in this repo. It is deliberately **weaker than it first looks**,
+and the reason is §1b: the text scan is blind to a compiled blob, so a hatch that
+could waive the refusal of a compiled artefact would waive detection with it. My
+first version of this section claimed the hatch "cannot hide an address" because
+an allowlisted path is still text-scanned. The reviewer's probe disproved it — a
+genuinely compiled `.pyc` on the hatch returned `[]` from `scan_blob`, silent,
+because the scan that was supposed to be the backstop cannot read that blob. The
+guarantee was made true by changing the code, not the wording:
+
+* **a path whose suffix is in `BUILD_ARTEFACT_SUFFIXES` is never waivable.** The
+  suffix tier of `is_build_artefact()` runs first and ignores the hatch. So a
+  `.pyc`/`.so`/`.class`/`.whl` on the hatch is still refused, and no review of a
+  diff to that list can open a silent hole in the compiled class.
+* **the segment tier (`__pycache__/`) is waivable**, and a waived path is decoded
+  and text-scanned even when it carries NUL bytes — i.e. it stays open to the one
+  detector that works on non-compiled bytes.
+
+The same review logic exposed a second hole in the same guarantee, which is closed
+by the same change: `SKIP_SUFFIXES` is an *independent* way for a path to escape
+the scan, so an allowlisted `.pdf` used to short-circuit before any decode —
+"tracked and never read", precisely what a hatch entry must never mean. Now an
+allowlisted path bypasses both silence rules, in `scan_blob` and in
+`scan_paths`'s pre-read shortcut (both call one `is_skipped_asset()` predicate, so
+the two gates cannot spell the rule differently). Pinned by
+`test_hatch_does_not_bypass_the_skip_suffix_shortcut_silently` and
+`test_scan_paths_and_scan_blob_agree_on_a_hatched_path`.
+
+Honest cost of the suffix tier: a prebuilt `.so` can never be tracked here, even
+deliberately. Today's tracked binary population is two `.png` files, so that costs
+nothing today. If a real need ever appears, the answer is a non-artefact extension
+or a vendored source build, not a wider hatch.
+
+The hatch is empty today, and it stays a literal in the one file the guard's tests
+pin, so widening it is a visible diff in a security control rather than a config
+edit.
 
 ## 4. Hook and CI agree because they cannot not agree
 
@@ -209,8 +269,17 @@ warning that `--no-verify` is how the last two leaks happened.
   `data/alpine.software.json` do not get caught by it.
 * `test_legitimate_binary_asset_is_still_accepted` — the tracked `.png` population
   (and a NUL-bearing unknown extension) is **not** broken by the new rule.
-* `test_artefact_allowlist_exempts_the_refusal_not_the_scan` — an allowlisted
-  artefact path commits, and is still scanned for an address even when NUL-bearing.
+* Four cases for the two-tier hatch (round-1 review; see §3):
+  `test_a_compiled_artefact_suffix_is_never_waivable_by_the_hatch` — every
+  compiled shape stays refused *from the hatch alone*;
+  `test_a_genuinely_compiled_pyc_on_the_hatch_is_still_refused` — the reviewer's
+  exact probe inverted into a requirement, and it re-pins from the inside that the
+  text scan is still blind to that blob;
+  `test_hatch_waives_only_the_segment_refusal_and_still_scans` — a `__pycache__`
+  path on the hatch commits and is still scanned with its NULs;
+  `test_hatch_does_not_bypass_the_skip_suffix_shortcut_silently` and
+  `test_scan_paths_and_scan_blob_agree_on_a_hatched_path` — the hatch cannot make a
+  path tracked-and-never-read, and the two gates spell that rule identically.
 * `test_scan_paths_refuses_a_tracked_artefact_even_if_unreadable` — the tracked
   gate's pre-read path.
 * `test_cli_blocks_a_staged_pyc_carrying_a_real_address` and
