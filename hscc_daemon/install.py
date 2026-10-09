@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from .cli_theme import make_console, make_status_panel
+from .cli_theme import esc, make_console, make_status_panel
 
 
 HSCC_DIR = os.path.expanduser("~/.hscc")
@@ -184,7 +184,7 @@ def _install_launchd():
     Path(PLIST_DIR).mkdir(parents=True, exist_ok=True)
     plist_file = Path(PLIST_FILE)
     plist_file.write_text(generate_plist())
-    _console().print(f"  Plist installed: {plist_file}")
+    _console().print(f"  Plist installed: {esc(plist_file)}")
 
     result = subprocess.run(
         ["launchctl", "load", str(plist_file)],
@@ -206,7 +206,7 @@ def _install_systemd():
     SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
     unit_file = Path(SYSTEMD_UNIT_FILE)
     unit_file.write_text(generate_systemd_unit())
-    _console().print(f"  Unit installed: {unit_file}")
+    _console().print(f"  Unit installed: {esc(unit_file)}")
 
     subprocess.run(["systemctl", "--user", "daemon-reload"],
                    capture_output=True, text=True, timeout=10)
@@ -223,7 +223,8 @@ def _install_systemd():
         _console().print(f"  Check status: systemctl --user status {SYSTEMD_UNIT_NAME}")
         _console().print("  Tip: run `loginctl enable-linger $USER` so it survives logout.")
     else:
-        _console().print(f"  systemctl enable failed ({result.stderr.strip()}), starting manually...")
+        # stderr is launchctl's own text — DATA (may quote paths with brackets).
+        _console().print(f"  systemctl enable failed ({esc(result.stderr.strip())}), starting manually...")
         _console().print(f"  To enable later: systemctl --user enable --now {SYSTEMD_UNIT_NAME}")
 
 
@@ -234,7 +235,7 @@ def _uninstall_launchd():
                        capture_output=True, text=True, timeout=10)
         plist_file.unlink()
         _console().print(make_status_panel(
-            f"Plist removed: {plist_file} — hscc_daemon uninstalled.",
+            f"Plist removed: {esc(plist_file)} — hscc_daemon uninstalled.",
             status="ok", title="uninstall",
         ))
     else:
@@ -249,7 +250,7 @@ def _uninstall_systemd():
         subprocess.run(["systemctl", "--user", "daemon-reload"],
                        capture_output=True, text=True, timeout=10)
         _console().print(make_status_panel(
-            f"Unit removed: {SYSTEMD_UNIT_FILE} — hscc_daemon uninstalled.",
+            f"Unit removed: {esc(SYSTEMD_UNIT_FILE)} — hscc_daemon uninstalled.",
             status="ok", title="uninstall",
         ))
     else:
@@ -267,19 +268,20 @@ def cmd_plist():
         unit = generate_systemd_unit()
         console.print(make_status_panel(
             "Systemd unit (copy to "
-            + f"{SYSTEMD_UNIT_FILE})",
+            + f"{esc(SYSTEMD_UNIT_FILE)})",
             status="", title="plist", color="accent",
         ))
-        console.print(unit)
+        # The unit/plist bodies embed the HOME-derived python + path — DATA.
+        console.print(esc(unit))
         console.print(f"  # systemctl --user daemon-reload && systemctl --user enable --now {SYSTEMD_UNIT_NAME}")
         return
     plist = generate_plist()
     console.print(make_status_panel(
-        f"Launchd plist (copy to {PLIST_FILE})",
+        f"Launchd plist (copy to {esc(PLIST_FILE)})",
         status="", title="plist", color="accent",
     ))
-    console.print(plist)
-    console.print(f"  # launchctl load {PLIST_FILE}")
+    console.print(esc(plist))
+    console.print(f"  # launchctl load {esc(PLIST_FILE)}")
 
 
 def cmd_install():
