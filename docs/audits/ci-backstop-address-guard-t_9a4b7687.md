@@ -467,7 +467,59 @@ path, including the failure paths.
 **Reviewer's non-blocking note taken:** every wait on the child is bounded —
 `selectors` read loop with ONE deadline and a byte cap, then pipe close (further
 child writes die on EPIPE), then `killpg`, then a second, shorter `wait`. So a
-grandchild holding the pipe cannot hang the step to the job timeout.
+grandchild holding the pipe cannot hang the step to the job timeout. **Measured, not
+asserted** (`orch_r4/measure_slowfail.py`: a guard that emits nothing and spawns a
+helper holding the verdict pipe open): `PatternUnavailable [TimeoutError]` after
+**30.00 s** — the step invokes the redactor twice, so the worst case a job can pay
+is ~60 s against GitHub's 6 h default job timeout. Fail-slow, bounded, never a hang.
+
+### A new attack surface that THIS design introduced: cwd shadowing
+
+Checking my own boundary claims turned up something the reviewer's rounds did not
+cover, and it was **created by this fix**, not pre-existing: the child runs
+`python -c`, and with `-c` CPython puts the **current directory** at `sys.path[0]`.
+In CI that directory is the checkout root, so a committed `base64.py` at the repo
+root would satisfy the child's own `import base64` and run its module body inside
+the child. Measured on py3.11.16 and py3.13.7: `sys.path[0]` is `''` under `-c`,
+and a repo-root `base64.py` wins the import. (Script mode puts the *script's*
+directory there instead — also attacker-influenced, but the child uses `-c`.)
+
+Why it matters here specifically: the shadow does not need to leak anything. A
+committed `base64.py` that emits `OK\t<base64 of one real address>\t0` would make
+the parent redact with a **single-address pattern**, silently un-redacting every
+other value — the weakened-`FORBIDDEN` trick arriving from the other side of the
+boundary, where it *is* a publish channel rather than an integrity question. The
+pre-fix in-process redactor could not be attacked this way, because its
+`sys.path[0]` was the script's own directory.
+
+My first fix was wrong and caught before it shipped: I added the `-P` flag (PEP 674
+safe path) to the child argv. `-P` needs Python >= 3.11, and this repo's floor is
+**3.10** (`hscc-cli/pyproject.toml`, `hscc-project/pyproject.toml`, both
+`requires-python = ">=3.10"`); an unsupported flag exits the child 2 before it can
+emit a verdict, which takes the whole guard down on a supported interpreter — a
+fail-closed that is really a breakage, and the draft audit text asserted a 3.11
+floor that does not exist. Closed instead inside `CHILD_SOURCE`: `sys.path` is
+sanitised (drop `''` and `'.'`) *before* importing anything resolvable from it.
+Works on every version, including 3.10. Pinned twice: the load-bearing one is a
+real end-to-end attack (`test_a_repo_root_module_cannot_shadow_the_childs_stdlib_imports`
+— the shadow emits a forged single-address verdict; the assertion is that BOTH
+addresses still get scrubbed, so a winning shadow prints `REAL_TAILNET` in the
+clear) and a structural pin asserting the sanitisation happens inside the child and
+precedes the imports it protects. Mutation `M11_no_safe_path` deletes the
+sanitising line and is killed by both.
+
+### Direct pins for the parent's own payload handling
+
+The end-to-end route cannot reach a single-`OK` line whose **payload** is hostile
+without adding a second verdict line — which dies at the exactly-one check before
+the payload guard runs. Same lesson as the base64 case: test the guard you mean. So
+`_parse_verdict` gets direct pins for uncompilable pattern text, the flags field
+(`0x200`, a 20-digit int, `-1`, `__import__('os')`, `[1,2]`, `True`, `None`, and
+`len(b'')` — the discriminator, because `eval` returns `0` for it and
+`ast.literal_eval` refuses it; without that case the `eval` mutant **survived** my
+first run), an oversized pattern, and a verdict with no trailing newline (accepted
+deliberately; distinct from the merged-junk case, where junk *precedes* the verdict
+on the same line).
 
 ### Two bugs in MY OWN first cut of this fix
 
@@ -504,7 +556,14 @@ one "died" for the wrong reason, so the honest record:
 | M5 `killpg` → `proc.kill()` | KILLED | grandchild survives |
 | M5b don't pass the captured pgid | KILLED | **the real bug I shipped first** |
 | M6 `base64` without `validate=True` | survived first, then KILLED | my e2e version died at the exactly-one-`OK` check BEFORE base64 ran, so it passed against the mutant. Re-pinned as a direct unit test on `_parse_verdict` (clean payload accepted, URL-safe-spliced payload rejected). |
+| M8 drop the flags bound | KILLED | parametrised flags test |
+| M9 drop the pattern-size bound | KILLED | oversized-pattern test |
+| M10 `eval` instead of `ast.literal_eval` | survived first, then KILLED | needed the `len(b'')` discriminator: `eval` returns a valid int where literal_eval refuses. |
+| M11 delete the child's sys.path sanitisation | KILLED | the cwd-shadow attack test + the structural sanitisation pin |
 | M7 echo the child's raw bytes on parse failure | KILLED | the round-3 rule itself |
+
+Final run: **13 mutants, all killed, survivors: none** — after two rounds where
+three of them (M2, M6, M10) survived and had to be re-pinned properly.
 
 Two lessons restated, both already in this audit and both re-earned: a mutant that
 "fails" on a `SyntaxError` is not a killed mutant (my M2 pattern initially ate a
@@ -523,8 +582,8 @@ interpreter flags), and it also proves the child boundary is not version-specifi
 while `subprocess`+`selectors` behaviour could in principle be;
 the reviewer's own `probe_r3_reviewer.py` 0 leaks, `probe_r3_fdscan.py` 0 leaks and
 round-2 `probe_r2.py` all-ok, **re-run unmodified against my implementation** on
-py3.11.16 and py3.13.7; card file 76 collected (50 test functions) / `.github/scripts`
-leg 86, both interpreters; `address_guard --tracked` rc=0; guard's own 25 detector
+py3.11.16 and py3.13.7; card file 90 collected (57 test functions) / `.github/scripts`
+leg 100, both interpreters; `address_guard --tracked` rc=0; guard's own 25 detector
 tests green. Behavioural proof the boundary is real, not just the source text: the
 stub records the pid that imported it and the test asserts it is NOT the redactor's
 pid.
@@ -535,6 +594,6 @@ pid.
 |---|---|
 | `.github/workflows/address-guard.yml` | the job; enforcement posture documented as an operator variable |
 | `.github/scripts/redact_guard_report.py` | public-log-safe redactor; extracts the guard's pattern from a CHILD process (never executes guard code in the log-owning process); fails closed AND publishes nothing on the way down |
-| `.github/scripts/tests/test_redact_guard_report.py` | 76 collected (50 functions): end-to-end job legs, structural workflow assertions, verbatim step-script decision states, fail-closed publish channels (each layer pinned on its own), the round-3 deferred-write channels, and the child-boundary pins |
+| `.github/scripts/tests/test_redact_guard_report.py` | 90 collected (57 functions): end-to-end job legs, structural workflow assertions, verbatim step-script decision states, fail-closed publish channels (each layer pinned on its own), the round-3 deferred-write channels, and the child-boundary pins |
 | `scripts/run_tests.sh` | `DIRS` += `.github/scripts` |
 | `changelog.d/t_9a4b7687.md` | fragment (kind: Security) |

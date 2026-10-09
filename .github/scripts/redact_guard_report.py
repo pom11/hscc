@@ -111,7 +111,25 @@ MAX_FLAGS = 0x1FF
 # so the guard is recompiled every run and an invalid-escape SyntaxWarning would
 # otherwise render, and its renderer prints the source line.
 CHILD_SOURCE = r"""
-import base64, importlib.util, re, sys
+import sys
+
+# With `-c`, CPython puts the CURRENT DIRECTORY at sys.path[0] (measured: '' on
+# both 3.11.16 and 3.13.7, with and without any flag). In CI that directory is the
+# checkout root, so a committed `base64.py` / `re.py` / `importlib.py` there would
+# satisfy the stdlib imports below and its module body would run in this child.
+# Drop cwd from the path BEFORE importing anything resolvable from it. `sys` itself
+# is a builtin, so the import above can never be shadowed.
+#
+# This is deliberately done HERE rather than with the `-P` interpreter flag: `-P`
+# needs Python >= 3.11, and this repo's floor is 3.10 (hscc-cli/pyproject.toml,
+# hscc-project/pyproject.toml both `requires-python = ">=3.10"`). An unsupported
+# flag makes the child exit 2 before it can emit a verdict, i.e. it would take the
+# whole guard down on a supported interpreter — a fail-closed that is a breakage.
+# Sanitising here closes the same vector on every version and is pinnable.
+sys.path = [p for p in sys.path if p not in ("", ".")]
+
+import base64, importlib.util, re
+
 
 def emit(kind, payload=""):
     sys.stdout.write("%s\t%s\n" % (kind, payload))
@@ -203,6 +221,8 @@ def _child_pipe():
         # -E: no PYTHONPATH / PYTHONSTARTUP hijacking the child.
         # -s: no user site-packages, so a module installed in the runner's user
         #     dir cannot shadow what the guard imports.
+        # (cwd shadowing — sys.path[0] under `-c` — is closed inside CHILD_SOURCE,
+        #  not by the -P flag, so it works on the 3.10 floor too; see there.)
         # -W ignore: no warning may render the guard's source line inside the child.
         # bufsize=0: an unbuffered handle, so os.read below is the only reader.
         [sys.executable, "-E", "-s", "-W", "ignore", "-c", CHILD_SOURCE, str(GUARD)],
