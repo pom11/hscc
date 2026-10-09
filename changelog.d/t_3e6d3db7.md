@@ -40,4 +40,15 @@ order: 1
 - `hscc_daemon/tests/test_precommit_address_hook.py`: **3 new cases**, including
   the card's agreement test — a real `git commit` through the real hook and the
   real `--tracked` CLI over the same tree emit **identical** verdict strings.
+- `.github/scripts/tests/test_redact_guard_report.py`: **2 new cases** at the CI
+  job level, through the same `_run_job_leg` helper that runs the workflow's real
+  step script.
+- Full suite, both interpreters, clean worktree at the frozen tip
+  `a02506ad`: `scripts/run_tests.sh` **ALL GREEN, RUN_TESTS_RC=0** on
+  py3.11.16 (`hscc-bootstrap` venv, 18:02) and py3.13.7 (`p313`, 18:15), 11/11
+  suites each (`scripts` and `.github/scripts` included). The worktree was
+  frozen for the whole window — the stamp and the pushed tip are the same SHA.
+- `python3 scripts/address_guard.py --staged` exits 0 on this card's own diff;
+  every fixture address in the new tests is assembled at runtime, so none of
+  them is a contiguous real-shaped literal in a tracked file.
 ---
