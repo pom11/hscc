@@ -92,13 +92,13 @@ One place changed — `FORBIDDEN` in `scripts/address_guard.py`:
 ```
 
 Rationale: what the guard must reject is an address that is a **fragment of a longer
-digit run**. `1192.168.88.244` and `192.168.88.2441` are not dotted quads, and
+digit run**. `1<addr>` and `<addr>1` are not dotted quads, and
 flagging them would make the tool unusable (this repo carries version strings on
 every page). A letter or `_` on either side is not that — it is a *label*, and the
 address inside `NAS_<addr>` is still a real address.
 
 - Miss set: **315 → 51 cells**, and the residue is *exactly* the digit row and
-  column — deliberate, and the reason `192.168.88.2441` stays unflagged.
+  column — deliberate, and the reason `<addr>1` stays unflagged.
 - **Strictly widening — provably.** Every `\b`-delimited occurrence is also
   digit-delimited (a digit is a word char, so non-word ⇒ non-digit), so the new
   pattern matches a superset of the old one. Pinned as a property test rather than
@@ -249,3 +249,96 @@ against only the eight new/rewritten functions. Every mutant was caught:
 The second row is the important one: the exact defect this card was written for,
 reintroduced on one side only, fails five functions — the hair trigger t_3e6d3db7
 built still fires, it simply points at the new truth.
+
+## 8. Round-1 review: this card leaked the thing it guards, through its own residue
+
+Round 1 of review returned REQUEST CHANGES on one blocking finding, and the
+finding was correct. `docs/audits/address-guard-boundary-t_1b7b3166.md` §3 — the
+section that *justifies* the anti-truncation boundary — spelled the live LAN value
+inside two digit-run examples, three occurrences. Independent re-measurement
+(`probe_containment_t_1b7b3166.py`, both interpreters) before any fix:
+
+```
+tracked=1105  containment_hits=3  files=1        (3.11.16 and 3.13.12 identical)
+  line  95: digit .. backtick
+  line  95: backtick .. digit
+  line 101: backtick .. digit
+shipped scan_tracked offenders = 0               <-- every gate green
+```
+
+Every control failed to see it **for the reason this card documents**: all three
+occurrences abut a digit, and `(?<![0-9])…(?![0-9])` refuses digit-adjacency by
+design. The guard was behaving exactly as specified. What was wrong was the
+*evidence*: the pre-commit self-scan of the diff was guard-based, so it shared the
+blind spot it was used to clear, and I cited "768 added lines, 0 offenders" as
+proof of something no guard-based scan can prove. A control cannot audit the class
+it is defined to skip.
+
+### The containment control
+
+The companion control now lives in
+`hscc_daemon/tests/test_no_real_addresses_committed.py`:
+`test_no_real_value_survives_as_a_substring_in_any_tracked_file`, which checks
+whether either real value appears **as a substring** of any tracked file. No
+boundary to miss, no adjacency to get wrong. Three properties it was written to
+have, each pinned:
+
+- **Bytes-level**, so it covers the population `scan_blob` skips by content or
+  extension (a `.png`, an unlisted NUL-bearing blob) —
+  `test_the_containment_tripwire_covers_blobs_the_guard_skips` asserts the guard
+  returns `[]` on exactly those files *while the tripwire names them*.
+- **Never prints the value.** An offender string is `path:line: which-value
+  (+digit-abutting)`. A failing assertion goes to the GitHub job log, the log is
+  public, and the redactor that scrubs logs keys on the same boundary that hid the
+  leak — a tripwire that quoted what it found would be the 2026-08-30 incident
+  relocated into the test suite.
+- **Differentially pinned** — `test_the_containment_tripwire_sees_what_the_guard_regex_cannot`
+  asserts the guard's own regex returns `[]` on the fixture and the
+  tripwire returns 2, so the tripwire cannot quietly be "simplified" into a regex
+  reusing `FORBIDDEN` and keep passing.
+
+Mutation proof (the reviewer's own standard — the control must have failed the
+commit it exists to catch): run over `git show e25b7677:…`, the tripwire reports
+**3 offenders, all three flagged digit-abutting**, on both interpreters; over the
+scrubbed tree, **0**.
+
+### The stronger finding: absorption
+
+Writing that differential surfaced something neither the card nor the review
+named. Digit adjacency is not only a *miss* class — it can be a **misread** class.
+The tailnet branch's last octet is `\d{1,3}`, so a real value followed by one
+digit is *not* refused: the pattern absorbs the abutting digit and reports a
+longer quad. A match comes back on a string that does not contain the value, and
+the reported text is not the value. (The example is deliberately not spelled out
+here or in the test — `value + "1"` is itself a real-shaped token, and the widened
+boundary would flag it in this very file, as it flagged §3.)
+
+So the regex is unreliable in **both** directions once a digit abuts: it can stay
+silent on a real value (the LAN branch, whose prefix is a fixed literal and so has
+no quantifier to re-anchor into) and it can report a hit that is not the value
+(the CGNAT branches, whose octets are quantified). Absorption stops at the octet
+width — value + 4 digits is refused again — which is pinned by
+`test_a_digit_neighbour_can_shift_what_the_regex_thinks_it_matched`.
+
+Practical consequence, stated for whoever reads a gate verdict next: **"the guard
+flagged it" is not evidence that a file is value-clean, and "the guard was quiet"
+is not evidence that it is.** For the yes/no question "is this value in this
+tree", the control of record is containment, because it reads the value rather
+than a shape. The regex stays what it is for — a *blocking* rule with an
+acceptable false-positive budget on version numbers — and is now complemented, not
+trusted, on the residue.
+
+### History reachability, recorded so it is not mistaken for fixed
+
+The scrub is forward-only, as the gated-ref discipline requires (merge, never
+rebase a pushed ref). That means the value is scrubbed from the **tip** and not
+from the **branch**: `e25b7677` still carries all three occurrences, and that
+commit is on the pushed refs `wt/t_1b7b3166` and `wt/t_1b7b3166-gated` on the
+public origin, so `git show e25b7677:<path>` serves the value today even though
+`origin/main` is 0-hit. Merging this branch to main on a forward-only scrub would
+move the value into **main's** history — the state that cost a force-push rewrite
+on 2026-08-30. Merge-vs-rewrite is therefore an operator decision, not a worker
+one, and it is flagged in the handoff rather than resolved here. Deleting the two
+spent refs after the scrub lands restores remote-unreachability for the branch;
+GitHub may retain detached objects, and rewriting published history remains
+operator-side under the standing rule.
