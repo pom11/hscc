@@ -56,9 +56,10 @@ order: 1
   (`<path>:0: …`) puts that byte mid-line rather than at line end, so no CI log
   post-processor that strips trailing whitespace can silently eat it.
 - 6 mutants, each in a copy outside the workspace, each caught by a real test —
-  no survivors: raw-string suffix (pre-fix behaviour, 15 cases), whole-path trim
-  (3), normalised verdict (5), normalised skip list, normalised hatch match, and
-  trailing-end-only trim (each caught by the case that names it).
+  no survivors: raw-string suffix (pre-fix behaviour, 16 cases across all three
+  suites), whole-path trim (3), normalised verdict (5), normalised skip list,
+  normalised hatch match, and trailing-end-only trim (each caught by the case
+  that names it).
 - Full suite, both interpreters, worktree frozen at the stamped tip: see this
   card's completion metadata for the SHA and both `RUN_TESTS_RC` lines.
 - `python3 scripts/address_guard.py --tracked` and `--staged` both exit 0 on this
