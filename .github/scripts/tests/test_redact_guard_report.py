@@ -385,6 +385,22 @@ def test_redactor_fails_closed_if_pattern_cannot_load(tmp_path):
 # Python's warning renderer print the guard's SOURCE LINE. Both are pinned here
 # with the address assembled at runtime, exactly as the repo's guard requires.
 
+# Shared scaffold for stub guards used by the fail-closed tests: import the REAL
+# shipped guard for FORBIDDEN (one regex in the repo, and the report keeps being
+# genuinely redacted), then optionally override behaviour at import or as CLI.
+_GUARD_BODY = (
+    "import importlib.util, pathlib, sys\n"
+    f"_s = importlib.util.spec_from_file_location('_real', r'{GUARD}')\n"
+    "_m = importlib.util.module_from_spec(_s); _s.loader.exec_module(_m)\n"
+    "FORBIDDEN = _m.FORBIDDEN\n"
+)
+_GUARD_CLI = (
+    "if __name__ == '__main__':\n"
+    "    sys.stderr.write(pathlib.Path(sys.argv[2]).read_text())\n"
+    "    sys.exit(1)\n"
+)
+
+
 def _stub_raising_with_address(addr):
     """A guard that blows up at import, quoting an address in the message."""
     return f"raise ValueError('boom at {addr}')\n"
@@ -430,6 +446,45 @@ def _stub_prints_at_import(addr):
         f"print('scanning {addr}', file=sys.stderr)",
         f"print('also on stdout {addr}')",
     ]) + "\n"
+
+
+# ── review round 2: channels the round-1 fix left open ───────────────────────
+#
+# Round 1 sealed `except Exception`, the warning renderer, and the sys-level
+# streams. Two channels in the SAME input class survived it and were reproduced
+# on both interpreters against the gated tip:
+#
+#   * BaseException / SystemExit raised at guard import unwinds past main(), and
+#     CPython prints the traceback — the frame text IS the guard's source line;
+#   * a write straight to **fd 1/2** (`os.write(2, b'...')`, or C-level output)
+#     ignores redirect_stdout/redirect_stderr, because those rebind the *objects*
+#     while the descriptor still points at the step's inherited pipes.
+#
+# The second one is the shape round 1 escalated for: it publishes the value while
+# the ADVISORY job reports GREEN.
+
+def _stub_baseexception_at_import(addr):
+    """Any BaseException at module level — `except Exception` does not catch it."""
+    return _GUARD_BODY + f"raise BaseException('fatal at {addr}')\n"
+
+
+def _stub_sysexit_at_import(addr):
+    """A plausible defensive-guard edit: refuse to run, quoting a host.
+
+    A local `python3 scripts/address_guard.py --tracked` shows only the message
+    line, so the author never sees the traceback CI would print.
+    """
+    return _GUARD_BODY + f"sys.exit('cannot run with {addr}')\n"
+
+
+def _stub_fdwrite_at_import(addr, fd=2):
+    """A fully functional guard (right FORBIDDEN, right rc) that writes to a raw
+    file descriptor at import time.
+    """
+    return _GUARD_BODY.replace(
+        "import importlib.util, pathlib, sys",
+        "import importlib.util, os, pathlib, sys",
+    ) + f"os.write({fd}, b'fd{fd} {addr}\\n')\n" + _GUARD_CLI
 
 
 def _redactor_alone(stub_src, tmp_path, stdin_text=None, bare=False):
@@ -505,6 +560,10 @@ def test_nonpattern_forbidden_fails_closed_without_traceback(tmp_path):
     assert rc == 3, out
     assert "Traceback" not in out, f"raw traceback would reach the log:\n{out}"
     assert REAL_LAN not in out, out
+    # Pinned to the gate itself (mutation-tested): without the isinstance check
+    # the same input dies LATER inside the redaction loop and reports
+    # "UNEXPECTED ERROR [AttributeError]" — same rc, wrong diagnosis.
+    assert "CANNOT LOAD PATTERN [TypeError]" in out, out
 
 
 def test_import_time_noise_is_discarded_not_forwarded(tmp_path):
@@ -575,3 +634,93 @@ def test_enforce_variable_cannot_fail_open_on_capitalisation(tmp_path, value, ex
     assert ("::error::" in out) is expect_red, out
     assert ("::warning::" in out) is (not expect_red), out
     assert REAL_LAN not in out
+
+
+# ── round-2 regressions: BaseException out of main(), and fd-level writes ────
+
+def test_guard_baseexception_at_import_does_not_publish_through_the_step(tmp_path):
+    """`raise BaseException('fatal at <addr>')` at guard module level (review r2).
+
+    `except Exception` did not catch it: it unwound past main() and CPython
+    printed the traceback, whose frame text IS the guard source line. The step
+    must still fail closed (rc=3) with the value nowhere in the output.
+    """
+    rc, out = _run_step(
+        tmp_path, 1, f"  docs/x.md:3: {REAL_LAN}\n", "",
+        guard_source=_stub_baseexception_at_import(REAL_LAN),
+    )
+    assert rc == 3, f"a guard that cannot import must fail the job:\n{out}"
+    assert REAL_LAN not in out, f"the traceback published the address:\n{out}"
+    assert "fatal at" not in out, out
+    assert "Traceback" not in out, out
+    assert "CANNOT LOAD PATTERN [BaseException]" in out, out
+
+
+def test_guard_sysexit_with_address_does_not_publish_through_the_step(tmp_path):
+    """`sys.exit('cannot run with <addr>')` at guard module level (review r2).
+
+    SystemExit is a BaseException, and a bare `sys.exit(str)` prints the string
+    to stderr on its way out — the plausible defensive-guard edit whose local
+    repro shows the author only the message, never the CI traceback.
+    """
+    rc, out = _run_step(
+        tmp_path, 1, f"  docs/x.md:3: {REAL_LAN}\n", "",
+        guard_source=_stub_sysexit_at_import(REAL_LAN),
+    )
+    assert rc == 3, out
+    assert REAL_LAN not in out, f"the exit message published the address:\n{out}"
+    assert "cannot run with" not in out, out
+    assert "CANNOT LOAD PATTERN [SystemExit]" in out, out
+
+
+def test_fd_level_write_at_import_never_reaches_the_log(tmp_path):
+    """fd 1/2 writes bypass every OBJECT-level silencer (review r2, the probe7
+    shape): redirect_stdout/redirect_stderr rebind sys.stdout/std.stderr, but
+    the descriptor still points at the step's inherited pipes.
+
+    The stub is a FULLY FUNCTIONAL guard (right FORBIDDEN, right rc=1) and the
+    posture is advisory, so the job must stay GREEN while the fd write is
+    swallowed — and the report must still come out redacted.
+    """
+    rc, out = _run_step(
+        tmp_path, 1, f"  docs/x.md:3: {REAL_LAN}\n", "",
+        guard_source=_stub_fdwrite_at_import(REAL_TAILNET, fd=2),
+    )
+    assert rc == 0, f"advisory posture with a functional guard must be green:\n{out}"
+    assert REAL_TAILNET not in out, f"fd-2 write reached the log:\n{out}"
+    assert REAL_LAN not in out, out
+    assert "docs/x.md:3" in out and "***" in out, out  # check still works
+
+
+def test_fd_level_write_through_the_redactor_alone(tmp_path):
+    """Same input with no step wrapper and NO -W/-E flags: the redactor's own
+    load_pattern() must be the layer that holds, not the interpreter flags."""
+    rc, out = _redactor_alone(
+        _stub_fdwrite_at_import(REAL_TAILNET, fd=2), tmp_path, bare=True)
+    assert rc == 0, out
+    assert REAL_TAILNET not in out, f"fd-2 write reached the log:\n{out}"
+    assert "***" in out, "the report itself must still be redacted"
+    assert "docs/x.md:1" in out, "position kept"
+
+
+def test_fd1_write_at_import_never_reaches_the_log(tmp_path):
+    """fd 1 is as exposed as fd 2 — pin both descriptors, not just stderr."""
+    rc, out = _redactor_alone(
+        _stub_fdwrite_at_import(REAL_LAN, fd=1), tmp_path, bare=True)
+    assert rc == 0, out
+    assert REAL_LAN not in out, f"fd-1 write reached the log:\n{out}"
+    assert "***" in out, out
+
+
+def test_redactor_still_works_after_the_fd_juggling():
+    """Normal operation under the fd-restore path (regression both ways).
+
+    The dup2 swap must leave stdout/stderr USABLE for main(): the redacted
+    report still arrives on stdout, position kept, value gone.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(REDACTOR)],
+        input=f"  docs/ok.md:9: {REAL_LAN}\n".encode(), capture_output=True)
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert proc.stdout.decode() == f"  docs/ok.md:9: ***\n"
+    assert REAL_LAN not in proc.stdout.decode() + proc.stderr.decode()
