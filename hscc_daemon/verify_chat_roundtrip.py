@@ -309,35 +309,40 @@ def render_human(code, result, theme_name=None):
     the palette (dark | light) or None for auto-detect. On a NON-tty stdout
     Rich degrades to PLAIN text with NO ANSI escape codes. Only fixed labels
     are colourised; job ids / replies / token counts stay plain so live data
-    can never inject Rich markup.
+    can never inject Rich markup — and "plain" here means markup-ESCAPED
+    (``theme.esc``): a model reply quoting ``[/bold]`` must render literally,
+    not crash the console with MarkupError (t_716cf37c).
     """
     console = theme.make_console(theme_name)
     if code == 2:
         console.print(theme.make_status_panel(
-            "cannot run chat round trip: %s" % result.get("error"),
+            "cannot run chat round trip: %s" % theme.esc(result.get("error")),
             status="error", title="chat round trip"))
     elif code == 1:
         body = [
             "  CHAT ROUND TRIP FAILED at step:",
-            "      %s" % result.get("error"),
+            "      %s" % theme.esc(result.get("error")),
             "      http=%s job=%s reply=%r"
-            % (result.get("http"), result.get("job_id"), result.get("reply")),
+            % (theme.esc(result.get("http")), theme.esc(result.get("job_id")),
+               theme.esc(result.get("reply"))),
         ]
         if result.get("tokens_before") is not None:
             body.append(
                 "      generation_tokens_total: %s -> %s"
-                % (result["tokens_before"], result.get("tokens_after")))
+                % (theme.esc(result["tokens_before"]),
+                   theme.esc(result.get("tokens_after"))))
         console.print(theme.make_status_panel(
             "\n".join(body), status="error", title="chat round trip failed"))
     else:
         body = [
-            "  POST accepted  -> job %s" % result["job_id"],
+            "  POST accepted  -> job %s" % theme.esc(result["job_id"]),
             "  status=%s  elapsed=%.1fs"
-            % (result["status"], result["elapsed"]),
-            "  reply = %r" % result["reply"],
+            % (theme.esc(result["status"]), result["elapsed"]),
+            "  reply = %r" % theme.esc(result["reply"]),
             "  orchestrator vllm:generation_tokens_total  %s -> %s  (delta +%s)"
-            % (result["tokens_before"], result["tokens_after"],
-               result.get("delta")),
+            % (theme.esc(result["tokens_before"]),
+               theme.esc(result["tokens_after"]),
+               theme.esc(result.get("delta"))),
         ]
         if result.get("metric_verified") is False:
             body.append(
