@@ -377,9 +377,10 @@ def cmd_blocked(rest, json_mode, theme_name=None):
             print(json.dumps({"recovered": task_id, "board": label,
                               "reason": reason, "exit": 0}))
         else:
-            msg = f"recovered {task_id} (board '{label}') to ready"
+            msg = theme.esc(f"recovered {task_id} (board '{label}') to ready")
             if reason:
-                msg += f" — reason: {reason}"
+                # --reason is operator free text: DATA, markup-escaped.
+                msg += f" — reason: {theme.esc(reason)}"
             _console(theme_name).print(theme.make_status_panel(
                 msg, status="ok", title="kanban"))
         return 0
@@ -418,7 +419,10 @@ def cmd_blocked(rest, json_mode, theme_name=None):
                     if len(first) > 160:
                         first = first[:160] + "…"
                     why += "\ncomment: " + first
-                table.add_row(t["board"], t["id"], kind, age, why)
+                # Board/id/kind/why are kanban-DB strings — a card title or a
+                # block reason can quote a path with brackets. Escape the ROW.
+                table.add_row(theme.esc(t["board"]), theme.esc(t["id"]),
+                              theme.esc(kind), theme.esc(age), theme.esc(why))
             console.print(table)
         if result["errors"]:
             print("\nWarnings (boards not fully scanned):", file=sys.stderr)
