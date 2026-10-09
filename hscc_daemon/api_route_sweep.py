@@ -166,7 +166,9 @@ def render_human(rows, failures, dynamic, theme_name=None):
     On a NON-tty stdout (pipe/redirect) Rich degrades to PLAIN text with NO
     ANSI escape codes, so scripts capturing the human view still get clean
     text. Only fixed labels are colourised; route/status values stay plain so
-    sweep-derived data can never inject Rich markup.
+    sweep-derived data can never inject Rich markup — every sweep-derived
+    value below goes through ``theme.esc`` first (Rich would otherwise raise
+    MarkupError on a route or note containing ``[/bold]``).
     """
     console = theme.make_console(theme_name)
 
@@ -190,15 +192,16 @@ def render_human(rows, failures, dynamic, theme_name=None):
         else:
             mark = "FAIL"
             glyph = "error"
-        table.add_row(f"[{glyph}]{mark}[/{glyph}]", str(r["status"]),
-                      "%.1f" % r["seconds"], r["route"], r["note"])
+        table.add_row(f"[{glyph}]{mark}[/{glyph}]", theme.esc(r["status"]),
+                      "%.1f" % r["seconds"], theme.esc(r["route"]),
+                      theme.esc(r["note"]))
     console.print(table)
 
     if dynamic:
         console.print("")
         console.print(theme.make_panel(
             "interpolated routes (not swept)",
-            "\n".join("  %s" % d for d in dynamic) +
+            "\n".join("  %s" % theme.esc(d) for d in dynamic) +
             "\n\nSwept GETs only cover literal paths; interpolated routes need "
             "a live id to exercise."))
 
@@ -208,7 +211,7 @@ def render_human(rows, failures, dynamic, theme_name=None):
         console.print(theme.make_status_panel(
             "%d ROUTE(S) FAILED: %s\n"
             "A route the app calls that does not answer means that screen is "
-            "dead." % (len(failures), ", ".join(failures)),
+            "dead." % (len(failures), ", ".join(theme.esc(f) for f in failures)),
             status="error", title="failures"))
     else:
         console.print(theme.make_status_panel(
