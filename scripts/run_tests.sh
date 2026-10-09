@@ -30,7 +30,10 @@ PY="${HSCC_TEST_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 # of dir, so a non-plugin dir needs no special leg. It must stay registered here
 # for the same reason the plugins do: scripts/tests does `sys.path.insert` of
 # scripts/ and imports `changelog_fragments` / `dep_pr_watcher` bare.
-DIRS=(hscc-bootstrap hscc-commands hscc-roles hscc-cluster hscc-project hscc_daemon sparkrun-hermes hscc-api memori_byodb scripts)
+# `.github/scripts` is registered for the same reason and by the same argument
+# (t_9a4b7687): it is CI tooling, not a deployed plugin, and its tests are the
+# only thing that executes the address-guard workflow's real step script.
+DIRS=(hscc-bootstrap hscc-commands hscc-roles hscc-cluster hscc-project hscc_daemon sparkrun-hermes hscc-api memori_byodb scripts .github/scripts)
 
 # ━━━ SIGTERM forensics (t_6bb29d46) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # RULE: NEVER stop a suite with a name-based sweep — `pkill -f "run_tests.sh"`,
