@@ -44,6 +44,7 @@ from flightdeck.commands import _theme
 from flightdeck.commands import archive as archive_cmd
 from flightdeck.commands import daemon as daemon_cmd
 from flightdeck.commands import map_sessions as maps_cmd
+from flightdeck.commands import project as project_cmd
 from flightdeck.commands import release as release_cmd
 from flightdeck.commands import report as report_cmd
 from flightdeck.commands import review as review_cmd
@@ -426,6 +427,31 @@ def test_start_plan_caps_and_labels_survive():
         total_cap=3, per_profile_cap=2, remaining=1))
     _assert_literal(out)
     _assert_literal(out, MARK_BOTH)
+
+
+def test_project_list_rows_survive_markup(tmp_path):
+    """`project list` is a 5-column themed Table of operator-derived strings.
+
+    The largest single surface in the sweep (63 of the 154 flagged sites), and
+    three of its five cells are registry DATA: project name, repo path, board
+    slug. HEALTH is the renderer's own [ok]/[error] wrapper around a fixed
+    token, so this also proves the sweep did not escape the style away.
+    """
+    repo = tmp_path / f"repo{MARK_CLOSE}"
+    os.makedirs(str(repo))
+    reg = _registry(tmp_path, [registry.Project(
+        name=f"alpha{MARK_BOTH}", repo=str(repo), board=f"board{MARK_CLOSE}")])
+
+    # Health resolves the board through the injected provider; reporting the
+    # board as present keeps the cell on its [ok] branch rather than degrading
+    # the whole row to the error path.
+    kb = type("KB", (), {"board_exists": staticmethod(lambda slug: True)})()
+    args = argparse.Namespace(project=None, json=False, registry=reg,
+                              run=None, client=None, kanban=kb,
+                              func=project_cmd.cmd_list)
+    out = _run(lambda: project_cmd.run(args, reg))
+    _assert_literal(out, MARK_BOTH)
+    assert "ok" in out, f"[ok] health styling lost: {out!r}"
 
 
 # ── the {escape(x)!r} hole ─────────────────────────────────────────────────
