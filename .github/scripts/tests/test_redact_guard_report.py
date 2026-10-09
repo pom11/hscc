@@ -1222,3 +1222,147 @@ def test_forged_err_name_alongside_a_real_one_keeps_only_the_real_one(tmp_path):
     assert REAL_LAN not in out, f"the forged name reached the log:\n{out}"
     assert "CANNOT LOAD PATTERN [ValueError]" in out, \
         f"the forged line must not cost the reader the real diagnosis:\n{out}"
+
+
+# ── the parent's own payload handling, pinned directly ───────────────────────
+#
+# Everything above drives the whole tool. These three hit _parse_verdict with a
+# single OK line whose PAYLOAD is hostile, which end-to-end cannot be arranged
+# without adding a second verdict line (and so dying at the exactly-one check
+# first) — the same lesson as the base64 pin above: test the guard you mean.
+
+def test_uncompilable_pattern_text_fails_closed():
+    """A payload that decodes fine but is not a valid regex must not reach redact().
+
+    base64 of "[" decodes cleanly and then raises re.error at compile. The parent
+    must turn that into the fixed fail-closed diagnostic, rc=3, not a traceback and
+    not a partially-working redactor that prints report lines unredacted.
+    """
+    blob = base64.b64encode(b"[").decode()
+    with pytest.raises(redactor.PatternUnavailable):
+        redactor._parse_verdict(f"OK\t{blob}\t0\n".encode())
+
+
+@pytest.mark.parametrize("flags_txt", ["0x200", "99999999999999999999", "-1",
+                                       "__import__('os')", "[1,2]", "True", "None",
+                                       # the discriminator for literal_eval vs eval:
+                                       # eval() returns the int 0 and would ACCEPT
+                                       # this, literal_eval refuses it. Without it
+                                       # the eval() mutant survives (my first cut).
+                                       "len(b'')"])
+def test_flags_field_accepts_only_a_bounded_int(flags_txt):
+    """The flags field is the one place a number crosses the boundary.
+
+    ``ast.literal_eval`` (not ``eval``) plus an int/range check means expressions,
+    lists, bools and out-of-range values are all refused. An unbounded int would
+    reach ``re.compile`` and a non-int would be a type error at best.
+    """
+    blob = base64.b64encode(b"abc").decode()
+    with pytest.raises(redactor.PatternUnavailable):
+        redactor._parse_verdict(f"OK\t{blob}\t{flags_txt}\n".encode())
+
+
+def test_oversized_pattern_text_fails_closed():
+    """Length bound: the payload must not be able to size the parent's memory."""
+    blob = base64.b64encode(b"a" * (redactor.MAX_PATTERN_CHARS + 1)).decode()
+    with pytest.raises(redactor.PatternUnavailable):
+        redactor._parse_verdict(f"OK\t{blob}\t0\n".encode())
+
+
+def test_verdict_without_trailing_newline_is_still_accepted():
+    """The child flushes and exits, so a final line may lack its newline.
+
+    Accepted deliberately: refusing it would make the common case depend on the
+    child's last write ending in \\n. Note this is NOT the merged-junk case — there
+    the junk PRECEDES the verdict on the same line, so no line is well-formed.
+    """
+    blob = base64.b64encode(b"abc").decode()
+    assert redactor._parse_verdict(f"OK\t{blob}\t0".encode()).pattern == "abc"
+
+
+def test_child_has_no_descriptor_to_the_job_log():
+    """Structural statement of the boundary, pinned so a future edit cannot drift.
+
+    The containment claim is: the child gets NO descriptor that reaches the step.
+    If anyone adds ``stderr=PIPE``-adjacent plumbing, ``pass_fds``, an inherited
+    handle or ``close_fds=False``, the guard's import-time code gets a path to the
+    job log again and this assertion fails with the reason in its message.
+    """
+    src = REDACTOR.read_text(encoding="utf-8")
+    assert "stdin=subprocess.DEVNULL" in src
+    assert "stderr=subprocess.DEVNULL" in src
+    assert "stdout=subprocess.PIPE" in src
+    assert "close_fds=True" in src, "close_fds=False would hand the child our fds"
+    assert "pass_fds" not in src, "pass_fds deliberately forwards descriptors"
+    assert "start_new_session=True" in src, "needed to take the group down whole"
+
+
+def test_a_repo_root_module_cannot_shadow_the_childs_stdlib_imports(tmp_path):
+    """The child must not import a committed module from the checkout root.
+
+    With ``python -c``, ``sys.path[0]`` is the CURRENT DIRECTORY — which in CI is
+    the checkout root — so a committed ``base64.py`` there would satisfy the
+    child's own ``import base64`` and its module body would run in the child.
+    Measured on py3.11.16: without ``-P`` the repo file wins; with it, cwd is kept
+    out of sys.path (PEP 674). The vector is created by THIS design (the pre-fix
+    redactor imported in-process, where sys.path[0] was the script's own dir), so
+    it is this card's to close and to pin.
+
+    Constructed as a real attack: the shadow emits a FORGED OK verdict carrying a
+    single-address pattern, which would "redact" every other value into silence —
+    the weakest-possible-FORBIDDEN trick from the other side of the boundary.
+    """
+    work = tmp_path / "shadow"
+    (work / "scripts").mkdir(parents=True)
+    (work / ".github" / "scripts").mkdir(parents=True)
+    shutil.copy2(REDACTOR, work / ".github" / "scripts" / "redact_guard_report.py")
+    # a working guard, so the legit verdict would be a real pattern
+    (work / "scripts" / "address_guard.py").write_text(_GUARD_BODY + _GUARD_CLI,
+                                                       encoding="utf-8")
+    # the shadow: emits a one-address pattern as if it were the guard's FORBIDDEN
+    forged = base64.b64encode(REAL_LAN.encode()).decode()
+    (work / "base64.py").write_text(
+        "import sys\n"
+        f"sys.stdout.write('OK\\t{forged}\\t0\\n')\n"
+        "sys.stdout.flush()\n"
+        "raise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [sys.executable, "-E", "-s", "-W", "ignore",
+         str(work / ".github" / "scripts" / "redact_guard_report.py")],
+        input=f"  docs/x.md:1: {REAL_LAN}\n  docs/y.md:2: {REAL_TAILNET}\n".encode(),
+        capture_output=True, cwd=work,
+    )
+    out = proc.stdout.decode() + proc.stderr.decode()
+    assert proc.returncode == 0, out
+    # Both addresses must be scrubbed. If the shadow had won, only REAL_LAN would
+    # be masked and REAL_TAILNET would print in the clear.
+    assert REAL_LAN not in out and REAL_TAILNET not in out, \
+        f"a repo-root module shadowed the child's stdlib:\n{out}"
+    assert out.count("***") == 2, out
+
+
+def test_child_invocation_drops_cwd_from_its_own_sys_path():
+    """Cheap structural backstop to the shadow test above.
+
+    The child sanitises ``sys.path`` itself (drop ``''``/``'.'``) BEFORE importing
+    anything resolvable from it. Pinned structurally because the end-to-end attack
+    above can only show the vector is closed *on the interpreter running the suite*;
+    this pin says HOW it is closed, so it cannot silently rot into "-P does it".
+
+    Deliberately NOT the ``-P`` flag: ``-P`` needs Python >= 3.11 and this repo's
+    floor is 3.10 (hscc-cli/ and hscc-project/ pyproject.toml both
+    ``requires-python = ">=3.10"``). An unsupported flag makes the child exit 2
+    before it emits a verdict — that would take the whole guard down on a supported
+    interpreter, i.e. a fail-closed that is really a breakage.
+    """
+    src = REDACTOR.read_text(encoding="utf-8")
+    child = src.split('CHILD_SOURCE = r"""', 1)[1].split('"""', 1)[0]
+    assert 'not in ("", ".")' in child, \
+        "child no longer drops cwd from its own sys.path"
+    # the sanitisation must come BEFORE the stdlib imports it protects
+    assert child.index('not in ("", ".")') < child.index("import base64"), \
+        "sys.path sanitised after the imports it is supposed to protect"
+    assert 'import sys' == child.strip().splitlines()[0], \
+        "child must import only `sys` before sanitising (sys is a builtin)"
