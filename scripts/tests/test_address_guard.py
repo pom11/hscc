@@ -12,6 +12,7 @@ cover the detector's own contract, which both triggers share:
 """
 
 import subprocess
+import io
 import re
 import shutil
 import sys
@@ -46,7 +47,66 @@ TAILNET_PLACEHOLDER = "100.64.0.1"
 
 # ── pattern verdicts (shared by pytest gate and hook) ────────────────────────
 
-@pytest.mark.parametrize("text,expect_hit", [
+# The delimiter classes the t_1b7b3166 probe cross-multiplied (26 x 26 = 676
+# cells, both interpreters). Pinning the WHOLE cross product rather than a sample:
+# the shipped boundary used to be `\b`, which turned an address touching any word
+# character on either side into a silent miss, and a sampled matrix is exactly how
+# that regression would survive review again. `""` means the absence of a
+# character, so that row/column pins start- and end-of-line.
+#
+# `uni_cjk` / `uni_latin1` / `uni_cyrillic` / `uni_ordm` are here because `\w` is
+# Unicode: the old boundary hid unspaced CJK prose (`服务器<addr>`), not just
+# `LABEL_<addr>` identifier tokens. The address values stay assembled by `_addr`
+# because the repo's own gate scans this file.
+_DELIM_CLASSES = (
+    ("letter_ascii", "z"),
+    ("digit", "5"),
+    ("underscore", "_"),
+    ("uni_cjk", "\u4e2d"),
+    ("uni_latin1", "\u00e9"),
+    ("uni_cyrillic", "\u0438"),
+    ("uni_ordm", "\u00aa"),
+    ("space", " "),
+    ("tab", "\t"),
+    ("comma", ","),
+    ("equals", "="),
+    ("amp", "&"),
+    ("colon", ":"),
+    ("slash", "/"),
+    ("dquote", '"'),
+    ("squote", "'"),
+    ("rbracket", "]"),
+    ("dash", "-"),
+    ("dot", "."),
+    ("semi", ";"),
+    ("at", "@"),
+    ("nul", "\x00"),
+    ("ctrl_0e", "\x0e"),
+    ("ctrl_01", "\x01"),
+    ("newline", "\n"),
+    ("eol", ""),
+)
+
+
+def _matrix_cases():
+    """(param, id) for every delimiter cell, expected verdict computed from the
+    rule the fix implements: a match unless a DIGIT abuts either side.
+
+    The expectation is written as the *rule*, not as a captured table, so this
+    suite says what the boundary is for and the audit says what it measured.
+    """
+    cases = []
+    for pre_name, pre in _DELIM_CLASSES:
+        for post_name, post in _DELIM_CLASSES:
+            text = pre + REAL_LAN + post
+            digit_abuts = pre.isdigit() or post.isdigit()
+            cases.append(
+                pytest.param(text, None if digit_abuts else REAL_LAN,
+                             id=f"{pre_name}_{post_name}"))
+    return cases
+
+
+_VERDICT_CASES = [
     (f"mount {REAL_LAN}:/models", REAL_LAN),                       # live LAN
     (f"subnet {REAL_LAN}/24", REAL_LAN),                            # export list
     (f"ping {_addr('192', '.168.88.1')}", _addr("192", ".168.88.1")),   # LAN gateway
@@ -59,13 +119,127 @@ TAILNET_PLACEHOLDER = "100.64.0.1"
     ("172.16.4.5 and 8.8.8.8", None),                                # out of scope
     ("10.0.0.244/24 export", None),                                  # placeholder subnet
     ("192.168.89.244 is a different subnet", None),                  # not the live LAN
-])
+    # ── whole-line shapes t_3e6d3db7 §1b claimed as risky; all non-word on both
+    # sides, so these matched BEFORE the fix too and must keep matching.
+    ('{"host":"' + REAL_LAN + '","x":1}', REAL_LAN),                # minified JSON
+    ("nas," + REAL_LAN + ",6379", REAL_LAN),                         # CSV column
+    ("key=" + REAL_LAN + "&x=1", REAL_LAN),                          # query string
+    ("https://" + REAL_LAN + ":8787/v1", REAL_LAN),                  # URL
+    # ── the class the `\b` boundary actually hid (t_1b7b3166) ──
+    ("NAS_" + REAL_LAN, REAL_LAN),                                   # label token
+    ("host" + REAL_LAN, REAL_LAN),                                   # concatenated label
+    (REAL_LAN + "backup", REAL_LAN),                                 # trailing label
+    ("\u670d\u52a1\u5668" + REAL_LAN, REAL_LAN),                     # unspaced CJK prose
+    (REAL_LAN + "\u7684\u914d\u7f6e", REAL_LAN),                     # trailing CJK prose
+    ("h\u00f6st" + REAL_LAN, REAL_LAN),                              # accented label
+    ("\x0e" + REAL_LAN + "N", REAL_LAN),                             # marshal framing
+    # ── truncation guard: a longer digit RUN is not a dotted quad ──
+    ("1" + REAL_LAN, None),                                          # leading digit run
+    (REAL_LAN + "1", None),                                          # trailing digit run
+    (_addr("192", ".168.88.2444"), None),                            # 4-digit last octet
+]
+
+
+@pytest.mark.parametrize("text,expect_hit", _VERDICT_CASES + _matrix_cases())
 def test_find_in_text_verdicts(text, expect_hit):
     hits = address_guard.find_in_text(text)
     if expect_hit is None:
         assert hits == [], f"false positive on {text!r}"
     else:
         assert hits and hits[0][1] == expect_hit, f"missed {expect_hit!r} in {text!r}"
+
+
+def test_the_new_boundary_is_a_strict_superset_of_the_old_word_boundary():
+    """Detection can only have widened, never narrowed.
+
+    The one property that makes a boundary change safe to review: every string the
+    OLD pattern matched must still be matched. The old form is rebuilt FROM THE
+    SHIPPED PATTERN at runtime (swap the two digit-exclusions back for `\\b`) —
+    never written out as a second literal, which would break
+    `test_forbidden_pattern_is_defined_in_exactly_one_tracked_file` in
+    hscc_daemon/tests and give the repo a competing implementation.
+    """
+    shipped = address_guard.FORBIDDEN.pattern
+    assert shipped.startswith("(?<![0-9])(?:") and shipped.endswith(")(?![0-9])"), (
+        "the boundary changed shape again; this superset proof no longer describes it")
+    old = re.compile(shipped.replace("(?<![0-9])", "\\b", 1).replace("(?![0-9])", "\\b", 1))
+    assert old.pattern != shipped
+
+    probes = [pre + REAL_LAN + post
+              for pre, _ in _DELIM_CLASSES for post, _ in _DELIM_CLASSES]
+    probes += [
+        "mount " + REAL_LAN + ":/models", "subnet " + REAL_LAN + "/24",
+        "nas," + REAL_LAN + ",6379", "key=" + REAL_LAN + "&x=1",
+        '{"h":"' + REAL_LAN + '"}', REAL_LAN,
+        "host " + REAL_TAILNET, "NAS_" + REAL_TAILNET,
+    ]
+    for probe in probes:
+        if old.search(probe):
+            assert address_guard.FORBIDDEN.search(probe), (
+                f"a previously-detected occurrence is now missed: {probe!r}")
+    # And it is a STRICT superset: at least the CJK-adjacency class is new.
+    assert not old.search("\u670d\u52a1\u5668" + REAL_LAN), (
+        "the old pattern already caught unspaced CJK prose, so this card's premise "
+        "is stale — re-measure the delimiter matrix")
+    assert address_guard.FORBIDDEN.search("\u670d\u52a1\u5668" + REAL_LAN)
+
+
+def test_pattern_text_is_bytes_transportable_and_verdict_identical():
+    """The guard applies the pattern to `str`; the redactor ships its `.pattern`
+    as bytes over a child-process protocol and re-compiles it there. Those two
+    forms must not be able to disagree, and they would if the boundary used `\\d`
+    (Unicode-aware in str, ASCII-only in bytes). Pinned over the whole delimiter
+    corpus and the fixture block, not just one example.
+    """
+    shipped = address_guard.FORBIDDEN
+    twin = re.compile(shipped.pattern.encode("utf-8"))
+    corpus = [pre + REAL_LAN + post
+              for pre, _ in _DELIM_CLASSES for post, _ in _DELIM_CLASSES]
+    corpus += [pre + "100.64.0.1" + post
+               for pre, _ in _DELIM_CLASSES for post, _ in _DELIM_CLASSES]
+    corpus += ["host " + REAL_TAILNET, "1" + REAL_LAN, REAL_LAN + "1"]
+    for probe in corpus:
+        assert bool(shipped.search(probe)) == bool(twin.search(probe.encode())), \
+            f"str and bytes forms disagree on a delimiter context: {probe!r}"
+    # The behaviour that `[0-9]` buys over `\\d`: `\\d` is Unicode-aware in str mode,
+    # so a `\\d` boundary would let a non-ASCII digit abut the address and silently
+    # suppress the match — in str mode only, which is exactly the str/bytes split this
+    # guard and the redactor straddle. Arabic-Indic five beside the address must
+    # therefore still be a hit.
+    assert shipped.search("\u0665" + REAL_LAN), (
+        "the boundary is Unicode-aware: a non-ASCII digit neighbour now hides an "
+        "address in str mode while bytes mode would still catch it")
+
+
+def test_the_sanctioned_forms_stay_accepted_in_every_context():
+    """Placeholders and the fixture block stay allowed — including when they abut
+    a word character, which is precisely the context the new boundary opens up.
+
+    Widening the boundary is only safe if the sanctioned spellings do not get
+    swept up with it: `10.0.0.x` and `100.64.0.1` are the documented convention
+    this repo tells people to write, so a boundary that flags `NAS_100.64.0.1`
+    would be reverted by whoever hits it first.
+    """
+    sanctioned = [
+        "10.0.0" + ".x", "10.0.0" + ".x/24 export", "host10.0.0" + ".x",
+        "100.64.0.1", "api https://100.64.0.1:8787", "NAS_100.64.0.1",
+        "node100.64.0.1x", "100.64.0.1backup", "100.64.0.3 and 100.64.0.254",
+        "\u670d\u52a1\u5668100.64.0.1", "5100.64.0.19",
+    ]
+    for text in sanctioned:
+        assert address_guard.find_in_text(text) == [], f"false positive: {text!r}"
+    # every class on both sides, around the fixture host itself
+    for pre, _ in _DELIM_CLASSES:
+        for post, _ in _DELIM_CLASSES:
+            assert address_guard.find_in_text(pre + "100.64.0.1" + post) == []
+    # ...and around a real-shaped one, where the same sweep MUST now fire. Built
+    # from REAL_TAILNET, not spelled out: the widened boundary flags exactly this
+    # `LABEL_<addr>` shape, so a literal here would be caught by the gate this file
+    # is testing — which is the proof the fix works, and why fixtures stay assembled.
+    assert address_guard.find_in_text("NAS_" + REAL_TAILNET) == [(1, REAL_TAILNET)], \
+        "a real CGNAT host with a label prefix must be caught"
+    assert address_guard.find_in_text(REAL_TAILNET + "\u7684\u914d\u7f6e"), \
+        "trailing CJK prose must be caught on a tailnet address too"
 
 
 def test_reports_the_line_number_of_every_hit():
@@ -138,43 +312,140 @@ def genuine_leaky_pyc(tmp_path):
     return blob
 
 
-def test_a_genuine_compiled_pyc_defeats_the_text_detector_so_refusal_is_required(
-        genuine_leaky_pyc):
-    """THE reason this card's policy is 'refuse the type', not 'scan the bytes'.
+def test_a_genuine_compiled_pyc_is_now_visible_to_the_pattern(genuine_leaky_pyc):
+    """RE-PINNED by t_1b7b3166. This test used to assert the OPPOSITE — read that
+    before "fixing" it.
 
-    Three assertions, each measured rather than argued:
+    t_3e6d3db7 wrote this as a hair trigger: `FORBIDDEN` had `\\b` on both sides, so
+    marshal's undelimited framing (a word character immediately AFTER the constant)
+    made a genuinely compiled `.pyc` invisible to the shipping pattern while a naive
+    scan still saw it. That blindness was the whole stated basis for "refuse the
+    type, never scan the bytes".
 
-      1. the address really is inside the compiled blob — a naive scan sees it;
-      2. the SHIPPING FORBIDDEN pattern does NOT. Its `\\b` boundaries assume the
-         address is delimited, and undelimited binary framing breaks that: marshal
-         puts a word character immediately AFTER the constant, so the trailing
-         `\\b` fails. Extract-and-scan would inherit exactly this blind spot;
-      3. the name-based refusal catches it anyway, because it never looked at the
-         bytes at all.
+    t_1b7b3166 measured the delimiter cross-product (26x26, both interpreters) and
+    found that `\\b` was a *delimiter assumption*, not a safety property, and that it
+    also hid unspaced CJK prose and any `LABEL_<addr>` token in ordinary text. The
+    boundary is now digit-exclusion, which stops a truncated digit run and nothing
+    else. Measured consequence, re-pinned here: the same compiled blob is now seen
+    by `FORBIDDEN` in text, bytes and latin-1 form.
 
-    This is the case an extract-and-scan policy cannot pass, and it is why that
-    option was declined rather than merely deferred.
+    So the refusal is NO LONGER justified by "the scanner cannot read this blob". It
+    is justified by the two things that remain true, both pinned next door:
+    `test_a_deflated_container_member_is_unreachable_at_any_boundary` (a compressed
+    member does not contain the bytes, so no pattern can ever reach them) and
+    `test_the_nul_gate_not_the_pattern_is_now_the_blind_layer` (an unlisted
+    extension is skipped before any decode). If a future edit makes the FIRST
+    assertion below go red — the pattern stops seeing a compiled blob — that is not
+    a regression to revert: it means the boundary went back to assuming prose-style
+    delimiters, and the t_3e6d3db7 argument needs re-measuring before it is
+    re-adopted. See docs/audits/address-guard-boundary-t_1b7b3166.md.
     """
     blob = genuine_leaky_pyc
     assert REAL_LAN.encode() in blob, "the address is in the blob"
-    text = blob.decode("utf-8", errors="ignore")
-    # (1) the naive scan sees it... (pattern assembled at runtime for the same
-    # reason the addresses are: the repo's own single-implementation pin scans
-    # this file and must not find a second copy of the detector's literal.)
+    text = blob.decode("utf-8", "ignore")
+    # Pattern assembled at runtime for the same reason the addresses are: the repo's
+    # own single-implementation pin scans this file and must not find a second copy
+    # of the detector's literal.
     naive = re.compile(_addr("192", r"\.168\.88\.\d{1,3}"))
     assert naive.findall(text), "naive scan should see it"
-    # (2) ...the shipping detector does not
-    assert address_guard.find_in_text(text) == [], (
-        "FORBIDDEN unexpectedly matched the compiled blob — if this ever goes red,"
-        " the boundary-context finding is stale and extract-and-scan becomes"
-        " arguable again; re-measure before believing it")
-    # (3) the refusal is blind to that blindness, and still refuses
+    # (1) the shipping detector now sees it too, in every decode form the guard or
+    # the redactor could apply. `bytes` mode matters: the redactor ships
+    # `.pattern` over a child-process protocol, so str and bytes must agree.
+    assert [a for _, a in address_guard.find_in_text(text)] == [REAL_LAN], (
+        "FORBIDDEN no longer matches a compiled blob — the boundary has regressed to "
+        "assuming prose-style delimiters, which is the t_1b7b3166 defect. Re-measure "
+        "the delimiter matrix before re-adopting any 'the scanner is blind here' claim")
+    # The pattern TEXT must be bytes-compilable and agree with text mode. That is the
+    # documented reason the boundary spells `[0-9]` instead of `\d`: `\d` is
+    # Unicode-aware in str mode and ASCII-only in bytes mode, so a `\d` boundary
+    # would make the verdict depend on which the caller happens to hold. The redactor
+    # ships `.pattern` as bytes over a child-process protocol and re-compiles it on
+    # the far side, so the two forms must not be able to disagree.
+    as_bytes = re.compile(address_guard.FORBIDDEN.pattern.encode("utf-8"))
+    assert as_bytes.search(blob), "bytes form must agree with the text form"
+    assert address_guard.FORBIDDEN.search(blob.decode("latin-1")), \
+        "the lossless decode must not hide it either"
+    # (2) the refusal still fires, and fires on the NAME before any of this is read
     got = address_guard.scan_blob("hscc-provision/__pycache__/hscc.cpython-313.pyc", blob)
     assert got == ["hscc-provision/__pycache__/hscc.cpython-313.pyc:0: "
                    "build artefact must not be tracked"]
-    # ...and an un-listed extension is still blind to the SAME bytes, which is the
-    # honest limit of this card: the type list is what closes it, not the scanner.
+    # (3) ...and an unlisted extension is STILL silent on bytes the pattern can read,
+    # which relocates the honest limit of this card from the pattern to the NUL gate.
     assert address_guard.scan_blob("vendor/blob.bin", blob) == []
+
+
+def test_a_deflated_container_member_is_unreachable_at_any_boundary(tmp_path):
+    """The blindness that is REAL and irreducible — and no boundary can fix it.
+
+    t_3e6d3db7 declined extract-and-scan partly for cost. This adds the harder
+    reason, measured, and it is the reason the name-based refusal stays load-bearing
+    after t_1b7b3166 widened the pattern: a `.whl`/`.zip`/`.jar` member written with
+    DEFLATE does not CONTAIN the address bytes at all. Before that fix the compiled
+    blob was the one class where a content scan provably lost to a name refusal; now
+    the compressed container is, and unlike the boundary this cannot be repaired by
+    any regex, because there are no bytes to match.
+
+    The stored (uncompressed) sibling is included as the control that makes the
+    deflated case mean something: same content, same size class, different container
+    format, and readability flips. Readability is a property of the format, not of
+    the pattern — so the pattern is the wrong layer to fix this at.
+    """
+    import zipfile
+
+    def container(compression):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", compression) as zf:
+            zf.writestr("pkg/config.py", "NAS = " + repr(REAL_LAN) + "\n")
+            zf.writestr("pkg/pad.txt", "nothing here\n" * 120)
+        return buf.getvalue()
+
+    deflated = container(zipfile.ZIP_DEFLATED)
+    stored = container(zipfile.ZIP_STORED)
+    naive = re.compile(_addr("192", r"\.168\.88\.\d{1,3}"))
+
+    # The deflated member genuinely does not carry the bytes — this is the premise.
+    assert REAL_LAN.encode() not in deflated, (
+        "the fixture stopped being compressible, so the premise of this case is gone")
+    assert not naive.findall(deflated.decode("utf-8", "ignore")), \
+        "a naive scan cannot see it either, which is the point"
+    assert not address_guard.find_in_text(deflated.decode("utf-8", "ignore")), \
+        "the pattern must not see what is not there"
+    # The stored control DOES carry them, and the pattern sees them.
+    assert REAL_LAN.encode() in stored
+    assert [a for _, a in address_guard.find_in_text(stored.decode("utf-8", "ignore"))] \
+        == [REAL_LAN]
+    # Either way the guard refuses, on the NAME, without needing to read a byte.
+    for rel in ("dist/pkg-1.0-py3-none-any.whl", "dist/stored-1.0-py3-none-any.whl"):
+        assert address_guard.scan_blob(rel, deflated) == [
+            f"{rel}:0: build artefact must not be tracked"]
+
+
+def test_the_nul_gate_not_the_pattern_is_now_the_blind_layer():
+    """Where a leak can still ride through unread, stated honestly.
+
+    Before t_1b7b3166 this input was blind twice over — the pattern could not match
+    it AND `scan_blob` never decoded it — which is why the old prose blamed the
+    pattern for a gap the gate was responsible for. With the digit boundary the
+    pattern CAN match these bytes; the silence is now entirely the gate's.
+
+    And note what the gate keys on: the CONTENT (a NUL byte), not the extension.
+    Renaming the blob to `.txt` does not make it readable to the guard, so the
+    honest limit of the policy is "NUL-bearing and not on the hatch", which is
+    narrower than the old `SKIP_SUFFIXES` prose implies and worth pinning before
+    someone 'fixes' the gate by widening the suffix list.
+    """
+    leaky = b"\x00\x00host " + REAL_LAN.encode() + b"\x00\x00"
+    # the pattern, applied to the same bytes decoded, has no trouble at all
+    assert [a for _, a in address_guard.find_in_text(
+        leaky.decode("utf-8", "ignore"))] == [REAL_LAN]
+    # the gate declines to look, whatever the extension is
+    assert address_guard.scan_blob("vendor/blob.bin", leaky) == []
+    assert address_guard.scan_blob("docs/notes.txt", leaky) == [], (
+        "the NUL gate keys on the extension, not the content — the policy is then "
+        "wider than documented and a renamed binary becomes unreadable-by-accident")
+    # strip the NULs and the very same address is reported: the gate, not the pattern
+    assert address_guard.scan_blob("docs/notes.txt", b"host " + REAL_LAN.encode()) == [
+        f"docs/notes.txt:1: {REAL_LAN}"]
 
 
 def test_scan_blob_refuses_a_pyc_carrying_a_real_address():
@@ -237,15 +508,20 @@ def test_legitimate_binary_asset_is_still_accepted():
 
 
 def test_a_compiled_artefact_suffix_is_never_waivable_by_the_hatch(monkeypatch):
-    """The hatch cannot reach the tier whose bytes the scanner cannot read.
+    """The hatch cannot reach the tier whose readability the reviewer cannot see.
 
-    Round-1 review (t_3e6d3db7) found the claim "widening the hatch can never
-    hide a leak" was FALSE while the hatch could waive a `.pyc`: the text scan is
-    blind to a compiled blob (see
-    `test_a_genuine_compiled_pyc_defeats_the_text_detector_so_refusal_is_required`),
-    so waiving the refusal waived detection too. The fix is structural, not
-    wording: the suffix tier in `is_build_artefact` ignores the hatch, so every
-    compiled shape below stays refused from the hatch alone.
+    Round-1 review (t_3e6d3db7) found the claim "widening the hatch can never hide
+    a leak" was FALSE while the hatch could waive a `.pyc`, and justified the fix by
+    saying the text scan is blind to a compiled blob. t_1b7b3166 re-measured that
+    after replacing the `\\b` boundary with digit-exclusion: a genuine compiled blob
+    is now READABLE (see
+    `test_a_genuine_compiled_pyc_is_now_visible_to_the_pattern`). The rule is
+    unchanged and still load-bearing, on the blindness that survives any boundary:
+    a DEFLATE-compressed container member carries no scan bytes at all, and whether a
+    given blob is readable depends on the container format and on whichever
+    interpreter emitted it -- neither visible to whoever edits this list. The fix
+    stays structural, not wording: the suffix tier in `is_build_artefact` ignores the
+    hatch, so every compiled shape below stays refused from the hatch alone.
     """
     monkeypatch.setattr(address_guard, "ALLOWED_BINARY_PATHS", frozenset(
         ["native/bundled.so", "pkg/leak.pyc", "pkg/leak.pyo", "native/x.pyd",
@@ -262,20 +538,31 @@ def test_a_genuinely_compiled_pyc_on_the_hatch_is_still_refused(
         monkeypatch, genuine_leaky_pyc):
     """The exact probe the round-1 review ran, inverted into a requirement.
 
-    Before the two-tier hatch, `scan_blob` returned `[]` here — silent — because
-    the hatch waived the refusal and the text scan was blind to the blob. It must
-    now name the path, and the case is worthless unless the text scan is *still*
-    blind, which the first assertion re-pins from the inside rather than trusting.
+    Before the two-tier hatch, `scan_blob` returned `[]` here — silent — because the
+    hatch waived the refusal. It must still name the path.
+
+    The *reason* it must has changed, and this test is where that change is recorded.
+    t_3e6d3db7 pinned the first assertion below as `== []` ("the case is worthless
+    unless the text scan is still blind"), because with `\\b` on both sides marshal's
+    word-char neighbour broke the trailing boundary. t_1b7b3166 replaced that boundary
+    with digit-exclusion and re-measured the blob: it is now visible. So this case is
+    no longer justified by scanner blindness — it is justified because the hatch waives
+    the *name* refusal, and a hatch that can waive the name refusal of an artefact the
+    guard cannot reliably read (see the deflated-container and NUL-gate pins) is a
+    hatch that can hide a leak. The first assertion is now an equality the other way,
+    with a message that says which measurement to redo if it flips.
     """
     monkeypatch.setattr(address_guard, "ALLOWED_BINARY_PATHS", frozenset({"pkg/leak.pyc"}))
-    assert address_guard.find_in_text(
-        genuine_leaky_pyc.decode("utf-8", errors="ignore")) == [], (
-        "FORBIDDEN now sees a compiled blob: the hatch's justification changed,"
-        " re-measure before touching the two-tier rule")
+    assert [a for _, a in address_guard.find_in_text(
+        genuine_leaky_pyc.decode("utf-8", errors="ignore"))] == [REAL_LAN], (
+        "FORBIDDEN stopped seeing a compiled blob: the boundary went back to assuming "
+        "prose-style delimiters. Re-run the delimiter cross-product in "
+        "docs/audits/address-guard-boundary-t_1b7b3166.md before re-arguing the "
+        "two-tier rule from 'the scanner cannot read this'")
     got = address_guard.scan_blob("pkg/leak.pyc", genuine_leaky_pyc)
     assert got == ["pkg/leak.pyc:0: build artefact must not be tracked"], (
-        "the hatch let a compiled artefact through — the blind blob is now tracked"
-        " and unscanned, which is the leak this card exists to prevent")
+        "the hatch let a compiled artefact through — it is now tracked and readable"
+        " only by luck of the container format, which is not a control")
 
 
 def test_hatch_waives_only_the_segment_refusal_and_still_scans(monkeypatch):

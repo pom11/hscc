@@ -207,6 +207,20 @@ a rule that leaks.
 
 ### Allowlisted exceptions (two tiers — round-1 review made this real)
 
+> **Amendment, t_1b7b3166 (2026-10-09).** The sentence below — "the text scan is
+> blind to a compiled blob" — was true when this section was written and is **no
+> longer true**: after `FORBIDDEN`'s `\b` boundary was replaced with digit-exclusion,
+> 7 marshal framings of a genuinely compiled `.pyc` are all seen by the pattern, in
+> text, bytes and latin-1 form. The two-tier rule is **unchanged** and still
+> non-negotiable; it now rests on the blindness that survives any boundary — a
+> DEFLATE-compressed container member contains no scan bytes at all, and whether a
+> blob is readable depends on the container format and on whichever interpreter
+> emitted it, neither of which the reviewer editing the hatch can see. Measurements,
+> the full delimiter matrix and the re-pinned tests:
+> `docs/audits/address-guard-boundary-t_1b7b3166.md`. The §1b numbers above are not
+> retracted — they describe the `\b` pattern accurately, and are retained as the
+> evidence for the policy as it then stood.
+
 `ALLOWED_BINARY_PATHS` in the guard is the escape hatch for a binary that
 genuinely belongs in this repo. It is deliberately **weaker than it first looks**,
 and the reason is §1b: the text scan is blind to a compiled blob, so a hatch that
