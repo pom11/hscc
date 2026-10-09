@@ -300,6 +300,27 @@ def test_autodown_status_panel_markup():
     _assert_literal(out, MARK_BOTH)
 
 
+# ── install cmd_plist (HOME-derived paths embedded in panel + body) ───────
+
+def test_plist_markup_path(monkeypatch, tmp_path):
+    from hscc_daemon import install as install_mod
+    # cmd_plist only GENERATES + prints — nothing needs to exist on disk.
+    # The plist body embeds HOME-derived paths; a HOME containing brackets
+    # reaches console.print verbatim, so it must be markup-escaped (pre-fix
+    # this raises MarkupError). The panel title also carries PLIST_FILE.
+    plists = f"{tmp_path}/plists{MARK_CLOSE}"
+    monkeypatch.setattr(install_mod, "PLIST_DIR", plists)
+    monkeypatch.setattr(install_mod, "PLIST_FILE",
+                        f"{plists}/com.hermes.hscc_daemon.plist")
+    monkeypatch.setattr(install_mod, "_service_manager", lambda: "launchd")
+    monkeypatch.setattr(install_mod, "generate_plist",
+                        lambda: f"<string>{MARK_BOTH}</string>")
+    out = _run(install_mod.cmd_plist)
+    # The path lands in the panel title AND the plist body (ProgramArguments);
+    # both must survive markup parsing and print literally.
+    _assert_literal(out)
+
+
 # ── the esc() contract itself ─────────────────────────────────────────────
 
 def test_esc_pins_data_but_keeps_renderer_markup():
