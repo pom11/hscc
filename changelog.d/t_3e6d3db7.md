@@ -41,9 +41,10 @@ task: t_3e6d3db7
 kind: Verified
 order: 1
 
-- `scripts/tests/test_address_guard.py`: **10 new functions / 19 collected cases**
-  — a `.pyc` carrying a real LAN address is refused; every artefact shape is
-  refused *even when clean* (the verdict is about the path, not the content);
+- `scripts/tests/test_address_guard.py`: 25 -> **48 collected** (14 new
+  functions / 23 new cases) — a `.pyc` carrying a real LAN address is refused;
+  every artefact shape is refused *even when clean* (the verdict is about the
+  path, not the content);
   **a genuinely compiled `.pyc` defeats `FORBIDDEN` entirely and is still refused**
   (`py_compile` at runtime, address assembled via the `_addr(*parts)` idiom — a
   hand-spliced NUL blob would have been caught by the existing pattern and proved
@@ -52,19 +53,22 @@ order: 1
   exempts the refusal but not the scan; `scan_paths` refuses a deleted-but-tracked
   or unreadable artefact; `report()` names the artefact and `git rm --cached`; and
   the CLI's `--staged`/`--tracked` exit 1 on it (including after a scrubbed tree).
-- `hscc_daemon/tests/test_precommit_address_hook.py`: **4 new cases**, including
-  the card's agreement test — a real `git commit` through the real hook and the
-  real `--tracked` CLI over the same tree emit **identical** verdict strings — and
-  a real `git add -f` of real compiler output blocked by the hook.
-- `.github/scripts/tests/test_redact_guard_report.py`: **2 new cases** at the CI
-  job level, through the same `_run_job_leg` helper that runs the workflow's real
-  step script.
-- Full suite, both interpreters, clean worktree at the **frozen final gated tip**:
+- `hscc_daemon/tests/test_precommit_address_hook.py`: 14 -> **19** collected
+  cases (5 new), including the card's agreement test — a real `git commit`
+  through the real hook and the real `--tracked` CLI over the same tree emit
+  **identical** verdict strings — and a real `git add -f` of real compiler
+  output blocked by the hook.
+- `.github/scripts/tests/test_redact_guard_report.py`: 90 -> **93** collected
+  cases (3 new) at the CI job level, through the same `_run_job_leg` helper that
+  runs the workflow's real step script.
+- Full suite, both interpreters, clean worktree at the **frozen final gated
+  tip** `104eac34`:
   `scripts/run_tests.sh` **ALL GREEN, RUN_TESTS_RC=0** on py3.11.16
   (`~/.hermes/hermes-agent/venv`) and py3.13.7 (`p313`), 11/11 suites each
   (`scripts` and `.github/scripts` included). The stamped SHA and both legs'
   `RUN_TESTS_RC` lines are in this card's completion metadata; the worktree was
-  frozen for the whole stamp window, so the stamped SHA is the SHA that lands.
+  frozen for the whole stamp window, and `104eac34` is the SHA that landed (the
+  second parent of merge `dd62e479`; `wt/t_3e6d3db7-gated` still points at it).
 - `python3 scripts/address_guard.py --tracked` and `--staged` both exit 0 on this
   card's own diff; every fixture address in the new tests is assembled at runtime,
   so none of them is a contiguous real-shaped literal in a tracked file.
