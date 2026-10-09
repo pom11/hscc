@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..core import git_state, kanban, registry
-from ._theme import escape, make_console, panel, status_panel
+from ._theme import esc, escape, make_console, panel, status_panel
 
 
 @dataclass
@@ -1066,8 +1066,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
         written = apply_writes(report.to_write, args.registry)
         for proj in written:
             applied_lines.append(
-                f"applied: wrote {escape(proj.name)!r} -> repo "
-                f"{escape(proj.repo)!r}, topic {proj.topic}"
+                f"applied: wrote {esc(repr(proj.name))} -> repo "
+                f"{esc(repr(proj.repo))}, topic {esc(proj.topic)}"
                 f"{', board ' + escape(str(proj.board)) if proj.board else ''}")
 
         # --apply with --ignore-topic persists the ignore set so the topic stops
@@ -1093,7 +1093,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
             )
             for slug in created:
                 applied_lines.append(
-                    f"applied: created board {escape(slug)!r} and bound it to "
+                    f"applied: created board {esc(repr(slug))} and bound it to "
                     "its project")
             if not created and not report.board_conflicts:
                 applied_lines.append(
@@ -1101,8 +1101,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
             if report.board_conflicts:
                 for c in report.board_conflicts:
                     applied_lines.append(
-                        f"conflict: project {escape(c.name)!r} wants slug "
-                        f"{escape(c.slug)!r} but that board already exists; "
+                        f"conflict: project {esc(repr(c.name))} wants slug "
+                        f"{esc(repr(c.slug))} but that board already exists; "
                         "skipped (never silently adopted).")
     else:
         created = []
