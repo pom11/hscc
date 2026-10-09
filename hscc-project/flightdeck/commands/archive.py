@@ -19,7 +19,7 @@ import json
 import sys
 
 from ..core import archive
-from ._theme import escape, make_console, panel
+from ._theme import esc, escape, make_console, panel
 
 _DEFAULT_OUT = archive.DEFAULT_OUT_DIR
 _DEFAULT_DB = archive.DEFAULT_STATE_DB
@@ -57,10 +57,13 @@ def cmd_archive_sessions(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
         return 0
 
-    lines = [f"archived {result.sessions} session(s), {result.messages} message(s)",
-             f"bytes:  {result.bytes_written:,} across {result.files} file(s)"]
+    # Format the count as a number FIRST, then escape the resulting text: an
+    # esc()'d value is a str, and {str:,} is an illegal format spec.
+    byte_count = f"{result.bytes_written:,}"
+    lines = [f"archived {esc(result.sessions)} session(s), {esc(result.messages)} message(s)",
+             f"bytes:  {esc(byte_count)} across {esc(result.files)} file(s)"]
     for proj, n in sorted(result.by_project.items()):
-        lines.append(f"  {escape(proj):<12} {n} session(s)")
+        lines.append(f"  {escape(proj):<12} {esc(n)} session(s)")
     if result.unmapped_threads:
         lines.append("non-null unmapped thread ids (no registry owner; reported, not guessed):")
         for t in result.unmapped_threads:

@@ -92,3 +92,75 @@ with a markup-bearing input. Before the fix, 7/7 touched surfaces raised
   reuse `_theme.escape`, escape DATA not renderer markup).
 - `hscc_daemon/desktop.py` `emit_event` JSON consumers: out of scope (machine
   path).
+
+
+---
+
+## Appendix — the flightdeck sweep (t_12f3c8a8, child card)
+
+The "Deliberately NOT changed" entry above read "135 render call sites"; the
+flow-classified count was **154 sites across 19 files** (a name-based scan
+over-attributes across function scopes, which is why the number moved). All of
+them are now escaped, and the gate now walks **all 30 modules** in the
+directory — 9 beyond the 19 the estimate counted have render calls of their own
+(`hygiene`, `incident`, `ingest`, `metrics`, `qa`, `reconcile`, `standup`,
+`update`, `why`), and all come back clean.
+
+### What landed
+
+- `flightdeck/commands/_theme.py` gains module-level `esc()` — the same
+  contract as `cli_theme.esc` above, including `str(value)` coercion. It is a
+  separate function rather than an import because the daemon package is not on
+  flightdeck's import path (a standalone plugin install has no `hscc_daemon`).
+- `panel()` / `status_panel()` / `table()` in `_theme` escape their **title**
+  centrally (mirroring `_view_title`), so a call site must not pre-escape one —
+  double-escaping shows the operator literal backslashes. The fallback theme
+  uses `rich.markup.escape`, which escapes only the opening bracket, hence the
+  two render paths are not byte-identical on a markup-bearing title; the pin
+  asserts the two properties that matter on both (text survives, no
+  MarkupError) rather than one shared byte string.
+- Every module under `flightdeck/commands/` swept — the gate walks all 30.
+  `--json` paths and exit codes untouched; daemon streaming lines stay
+  un-styled (same design rule as above).
+
+### Proving the gate is not blind there
+
+Nine of those 30 modules (`hygiene`, `incident`, `ingest`, `metrics`, `qa`,
+`reconcile`, `standup`, `update`, `why`) came back CLEAN but were never in the
+estimate, so their CLEAN was unverified by construction. A checker that cannot
+*see* a file reports it CLEAN too. Each was copied to scratch with a provably
+non-constant interpolation injected into a real `panel()` body — a name the
+checker cannot prove constant — and every one was flagged, alongside a synthetic
+control file. Without that control, "30 files ALL CLEAN" would have been the
+same class of false green as a local `docker ps`.
+
+### Two findings worth keeping
+
+1. **`{escape(x)!r}` is not safe** and predated this card (5 sites in
+   `sync.py`, 1 in `start.py`). `escape()` emits `\[`; `repr()` then escapes
+   that backslash to `\\[`, which Rich renders as a literal backslash followed
+   by a *live* tag — the markup survives and still raises. Confirmed
+   empirically, not reasoned. `{esc(x!r)}` is worse: it is a `SyntaxError`,
+   because a conversion flag is only legal at the top of a replacement field.
+   Safe form when a repr is genuinely wanted: `esc(repr(x))`.
+2. **`repr` is not an escaper.** `repr("a[/bold]b")` keeps the brackets. An
+   early version of the checker whitelisted it and reported a clean tree that
+   was not clean — the same class of false green as a local `docker ps`.
+
+### What the pin caught that the checker could not
+
+`archive.py` briefly read `{esc(result.bytes_written):,}`. The value is escaped
+so the AST gate passes, but `esc()` returns `str` and `{str:,}` is an illegal
+format spec — a runtime `ValueError` on the happy path. Only running the pin
+found it; the fix formats the number into a named local, then escapes once.
+A checker that proves "the value passed an escaper" cannot see a format spec.
+
+### Gate
+
+`tools/markup-sweep/check_sweep.py` (side branch `tooling/t_12f3c8a8`) is the
+AST gate over every render call in the directory: it reports any non-constant
+interpolation that does not pass an escaper, skips centrally-escaped title
+arguments at every nesting level, does not whitelist helper functions
+(`_card_label` returns raw card-title data — a name that sounds formatted is
+not evidence), carries no `ALLOW` entries, and reports the `escape`-then-`!r`
+shape. `RESULT: ALL CLEAN` over all 30 modules at the stamped tip.
