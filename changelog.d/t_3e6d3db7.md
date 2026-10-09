@@ -24,9 +24,13 @@ task: t_3e6d3db7
   way. It would also have no stopping rule (`.zip`, `.gz`, `.jar`, PDFs are
   containers too).
   `ALLOWED_BINARY_PATHS` is the
-  escape hatch for a binary that genuinely belongs here — it exempts a path from
-  the refusal only, and such a path is then decoded and text-scanned even when it
-  carries NULs, so widening it can never hide a leak. `report()` splits the two
+  escape hatch for a binary that genuinely belongs here, and round-1 review made
+  it honest by making it two-tier: a **compiled-artefact suffix is never
+  waivable**, so widening the hatch cannot make a `.pyc` trackable-and-unreadable;
+  the hatch waives a `__pycache__`-segment path only, and such a path is then
+  decoded and text-scanned even when it carries NULs. It also now overrides
+  `SKIP_SUFFIXES`, so no hatch entry can ever mean "tracked and never read".
+  `report()` splits the two
   offender classes, because "scrub to `10.0.0.x`" is not the fix for a `.pyc` —
   `git rm --cached` is. Hook and `--tracked` cannot disagree: the verdict is
   formatted in one function. Current exposure was measured at zero (0 tracked
