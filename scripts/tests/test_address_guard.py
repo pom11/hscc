@@ -236,6 +236,150 @@ def test_legitimate_binary_asset_is_still_accepted():
     assert address_guard.scan_blob("vendor/blob.dat", b"\x00\x01\x02") == []
 
 
+# ── terminal name bytes (t_ecc3f190) ─────────────────────────────────────────
+#
+# The reviewer's probe at 104eac34: `git add -A --force` tracks `evil.pyc ` and
+# BOTH gates then return []. Not an accident class — no compiler emits such a
+# name — but a name-based control is only as good as the string it compares.
+
+@pytest.mark.parametrize("rel,expect", [
+    # the four spellings the reviewer measured, plus the ones the same fix costs
+    ("evil.pyc ", True),                     # trailing space
+    ("evil.pyc.", True),                     # trailing dot
+    ("dir/evil.pyc\t", True),                # trailing tab
+    ("evil.pyc\x00", True),                  # NUL in the name
+    ("evil.pyc \n", True),                   # trailing space AND newline
+    ("evil.pyc \t .", True),                 # several, mixed
+    ("evil.pyc\u00a0", True),                # trailing NBSP — paths arrive decoded
+    ("evil.PYc.", True),                     # case + terminal byte together
+    ("native/helper.so.", True),
+    # the SEGMENT tier has the same hole: here the artefact is the DIRECTORY, and
+    # a whole-path trim would never see its trailing byte
+    ("pkg/__pycache__ /m.dat", True),
+    ("pkg/ __pycache__/m.dat", True),        # leading byte defeats the exact match
+    # mid-name bytes are NOT name bytes — these were refused before and still are
+    ("docs/ev il.pyc", True),
+    ("leak.pyc", True),
+    ("leak.PYC", True),
+    ("PKG/__pycache__/m.pyc", True),
+    ("PKG/__PYCACHE__/m.dat", True),
+    # and the negatives that keep the list meaning something. `README.` is the
+    # case the card asked me to protect: a leaf that legitimately ends in `.`
+    # must not become newly blocked, so the trim applies to the ARTEFACT test
+    # only, never as a blanket "normalise the path" rewrite.
+    ("README.", False),
+    ("docs/notes.", False),
+    ("Makefile.", False),
+    ("docs/pycall.md", False),
+    ("assets/logo.png", False),
+    ("docs/evil.pyc.txt", False),            # documented limit #3, unchanged here
+])
+def test_terminal_name_bytes_do_not_dodge_the_refusal(rel, expect):
+    assert address_guard.is_build_artefact(rel) is expect, (
+        f"{rel!r}: expected refusal={expect}; the name tiers must compare "
+        f"_name_key(), not the raw string")
+
+
+def test_normalisation_is_applied_where_it_can_only_widen_a_refusal(monkeypatch):
+    """The asymmetry, pinned — the part of this fix that could have opened a hole.
+
+    `_name_key` is used by the refusal and NOT by the skip list or the hatch, and
+    the direction of that choice is the whole safety argument: normalising a
+    REFUSAL can only catch more; normalising a SKIP or a WAIVER would catch less.
+    So a trailing-byte name must never match a hatch entry (it falls through to
+    the refusal — fails closed), and `x.png ` must stay scanned rather than being
+    skipped as a "declared asset".
+    """
+    monkeypatch.setattr(address_guard, "ALLOWED_BINARY_PATHS",
+                        frozenset({"vendor/__pycache__/fixture.dat"}))
+    # exact entry: waived, as the segment tier promises
+    assert not address_guard.is_build_artefact("vendor/__pycache__/fixture.dat")
+    # the same path with a terminal byte: does NOT match the waiver -> refused
+    assert address_guard.is_build_artefact("vendor/__pycache__/fixture.dat."), (
+        "a terminal name byte reached the hatch — the waiver is now wider than "
+        "the path someone reviewed")
+    assert address_guard.is_build_artefact("vendor/__pycache__ /fixture.dat")
+    # and a waiver that itself names a compiled artefact still waives nothing
+    monkeypatch.setattr(address_guard, "ALLOWED_BINARY_PATHS",
+                        frozenset({"vendor/leak.pyc "}))
+    assert address_guard.is_build_artefact("vendor/leak.pyc ")
+    # the skip list stays on the raw path: `x.png ` is scanned, not skipped
+    assert address_guard.is_skipped_asset("a.png") is True
+    assert address_guard.is_skipped_asset("a.png ") is False
+    leaky = ("remount " + REAL_LAN + ":/models\n").encode()
+    assert address_guard.scan_blob("a.png ", leaky) == [f"a.png :1: {REAL_LAN}"], (
+        "a terminal name byte turned a scannable file into an unread one")
+
+
+def test_scan_blob_names_the_raw_path_so_the_two_gates_name_one_file():
+    """The verdict carries the REAL path, not the normalised one.
+
+    The fix the report tells you to run is `git rm --cached <path>`; a verdict
+    that printed `evil.pyc` for a file named `evil.pyc ` would name a file that
+    does not exist, and the hook and the CI job would then describe the same tree
+    with two different strings — the agreement failure t_3e6d3db7 §4 is about.
+    """
+    rel = "pkg/evil.pyc "
+    assert address_guard.scan_blob(rel, b"\x00clean\x00") == [
+        "pkg/evil.pyc :0: build artefact must not be tracked"]
+    assert address_guard.artefact_offender("evil.pyc.") == (
+        "evil.pyc.:0: build artefact must not be tracked")
+
+
+def test_no_tracked_path_changes_verdict_under_the_normalisation():
+    """The blast radius of a security control, measured instead of argued.
+
+    The card asked for this before choosing the normalisation: a rule that newly
+    refuses a path someone legitimately tracks is a rule that gets `--no-verify`'d
+    on its first real use. Population measured at this base: 1103 tracked files,
+    0 trailing-whitespace names, 0 trailing-dot names, 0 NUL-bearing names, and 0
+    paths whose verdict the trim changes. Re-measured here on every run, so if a
+    future commit adds `docs/notes.` this tells us in CI rather than at a commit.
+    """
+    rels = address_guard.tracked_paths(REPO)
+    assert rels, "no tracked files — this gate stopped measuring anything"
+
+    def legacy_refusal(r):
+        """What the pre-t_ecc3f190 code decided: suffix/segment on the RAW name."""
+        low = r.lower()
+        return (low.endswith(address_guard.BUILD_ARTEFACT_SUFFIXES)
+                or "__pycache__" in low.replace("\\", "/").split("/"))
+
+    newly_refused = [r for r in rels if address_guard.is_build_artefact(r)
+                     and not legacy_refusal(r)]
+    # Paths where the TRIM (not the case-fold or the backslash fold) changed the
+    # name — the only ones where this control touches an existing tracked file.
+    folded = [r for r in rels
+              if address_guard._name_key(r) != r.lower().replace("\\", "/")]
+    assert newly_refused == [], f"newly refused tracked paths: {newly_refused!r}"
+    for r in folded:
+        assert not address_guard.is_skipped_asset(r), (
+            f"{r!r} is a declared asset whose name the trim touches")
+
+
+def test_a_trailing_byte_name_does_not_make_the_tracked_scan_silent(tmp_path):
+    """Both gates over a real index entry, without a hook in the way.
+
+    `scan_tracked` is what the CI job and the pytest gate run, and it takes its
+    artefact verdict from `tracked_paths()` — the same `git ls-files -z` output
+    the reviewer measured as `b'evil.pyc \\n'`. This pins that the refusal fires
+    from the tracked population alone, with no working-tree bytes required.
+    """
+    r = tmp_path / "tracked"
+    r.mkdir()
+    assert _git(r, "init", "-q", "-b", "main").returncode == 0
+    (r / "evil.pyc ").write_bytes(b"\xe3\r\n\x00\x00" + REAL_LAN.encode() + b"\x00")
+    assert _git(r, "add", "-A", "--force").returncode == 0
+    assert "evil.pyc " in address_guard.tracked_paths(r)
+    assert address_guard.scan_tracked(r) == [
+        "evil.pyc :0: build artefact must not be tracked"]
+    # and the same blob via the staged gate, so neither invocation is the one
+    # that depends on having read the bytes
+    assert address_guard.scan_staged(r) == [
+        "evil.pyc :0: build artefact must not be tracked"]
+
+
+
 def test_a_compiled_artefact_suffix_is_never_waivable_by_the_hatch(monkeypatch):
     """The hatch cannot reach the tier whose bytes the scanner cannot read.
 

@@ -124,6 +124,56 @@ def find_in_text(text):
     return hits
 
 
+# Terminal name bytes that a name-based control must not treat as part of the
+# name (t_ecc3f190). Git happily tracks `evil.pyc `, `evil.pyc.` and
+# `evil.pyc\t` verbatim — measured: APFS creates them, `git add -A --force`
+# accepts them, `git ls-files -z` reports the trailing byte back — so a suffix
+# test on the RAW string lets the tracked blob through both gates.
+NAME_TRIM_EXTRA = ".\x00"
+
+
+def _is_name_trim(ch):
+    # `.isspace()` rather than a literal whitespace set: paths reach here decoded
+    # with `surrogateescape`, so a trailing NBSP or U+2028 is exactly as reachable
+    # as a trailing space and costs one method call to cover.
+    return ch.isspace() or ch in NAME_TRIM_EXTRA
+
+
+def _trim_name(segment):
+    """Strip leading/trailing name bytes from one path segment."""
+    start, end = 0, len(segment)
+    while start < end and _is_name_trim(segment[start]):
+        start += 1
+    while end > start and _is_name_trim(segment[end - 1]):
+        end -= 1
+    return segment[start:end]
+
+
+def _name_key(rel):
+    """The form of ``rel`` that the name tiers compare against. ONE definition.
+
+    Lower-cased, backslashes folded to `/` (a Windows-authored
+    `pkg\\__pycache__\\x.pyc` must not dodge the segment test), and every
+    `/`-segment trimmed of leading/trailing whitespace, dots and NUL. Trimming
+    per SEGMENT, not the whole path, is what catches `pkg/__pycache__ /m.dat`:
+    the artefact there is the directory, and a whole-path trim never sees its
+    trailing byte.
+
+    Trimming both ENDS because both ends are reachable: a trailing byte defeats
+    the suffix test, a leading byte defeats the exact segment comparison.
+
+    Deliberately NOT applied anywhere else. The skip list (`is_skipped_asset`)
+    and the hatch (`ALLOWED_BINARY_PATHS`) are matched on the RAW path on
+    purpose: those are the two places where normalising could only ever NARROW a
+    scan or WIDEN a waiver, i.e. open a hole. Here it can only widen a refusal.
+    A trailing-byte name therefore never matches a hatch entry, and falls through
+    to the refusal — it fails closed, which is the only direction that is safe to
+    get wrong.
+    """
+    lowered = rel.lower().replace("\\", "/")
+    return "/".join(_trim_name(seg) for seg in lowered.split("/"))
+
+
 def is_build_artefact(rel):
     """True if ``rel`` is a build artefact that must never be tracked here.
 
@@ -133,21 +183,23 @@ def is_build_artefact(rel):
     renamed to a text extension is not caught — see the limits section of
     docs/audits/address-guard-binary-policy-t_3e6d3db7.md.
 
+    The comparison is against `_name_key()`, not the raw path: `evil.pyc `,
+    `evil.pyc.` and `dir/evil.pyc\\t` are the same offence as `evil.pyc`, and git
+    tracks all of them. The RAW path is what gets reported (see
+    `artefact_offender`), so the fix `git rm --cached` names the real file.
+
     The suffix tier runs FIRST and ignores ``ALLOWED_BINARY_PATHS`` on purpose
     (round-1 review of this card): the text scan is blind to a compiled blob, so
     if the hatch could waive a `.pyc`/`.so` refusal it would waive detection too,
     and the guarantee "widening the hatch can never hide a leak" would be false.
     Only the segment tier is waivable.
     """
-    lowered = rel.lower()
-    if lowered.endswith(BUILD_ARTEFACT_SUFFIXES):
+    key = _name_key(rel)
+    if key.endswith(BUILD_ARTEFACT_SUFFIXES):
         return True                                  # never waivable
     if rel in ALLOWED_BINARY_PATHS:
         return False                                 # segment tier only
-    # Git always reports paths with forward slashes; a backslash is matched too
-    # so a Windows-authored `pkg\__pycache__\x.pyc` cannot dodge the segment test.
-    normalised = lowered.replace("\\", "/")
-    return any(seg in normalised.split("/") for seg in BUILD_ARTEFACT_PATH_SEGMENTS)
+    return any(seg in key.split("/") for seg in BUILD_ARTEFACT_PATH_SEGMENTS)
 
 
 # The verdict text for a refused build artefact. A constant, not an inline
