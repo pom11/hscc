@@ -374,6 +374,8 @@ descriptors handed back in `finally` — restore path deliberately NOT a fresh
 close fd 1) and the trailing flush guarded so a guard that closed our streams
 cannot abort the restore (the reviewer's non-blocking note). The two
 python-level layers stay INSIDE the fd layer — three layers, defense in depth.
+(Superseded by 10e: all three were in-process windows and all three are gone —
+the import now happens in a child process.)
 
 **My fix differs from the reviewer's prototype on purpose** at that restore
 point (`sys.stdout, sys.stderr = saved` instead of reopening fd 1/2); the
@@ -399,12 +401,135 @@ SIGTERM of the operator's pause, not a test failure — rc=141/143 class already
 guarded via t_6bb29d46. Round 4's two clean legs at `5fc58b4a` supersede it;
 the round-5 legs at this round's tip supersede those.)
 
+## 10e. Review round 3 — the fd layer was a WINDOW; the fix is a process boundary
+
+Reviewer round 3 (contract lens, run 962) reproduced four more publish channels in
+the SAME input class at `d4fa0db8`, py3.11.16 + py3.13.7, through the shipping step
+script parsed verbatim from the YAML **and** the redactor CLI alone, with the
+advisory job GREEN while the value reached the public log. I re-reproduced them
+myself before touching code, with my own harness rather than the reviewer's
+(`orch_r4/probe_r4.py`: 12/12 leaking at `d4fa0db8` on both interpreters):
+
+| # | Input (guard module body) | Why the round-2 fd window misses it |
+|---|---|---|
+| C1 | `atexit.register(...)` writing to stderr, fd 1 or fd 2 | the handler runs at interpreter exit — AFTER `finally` handed fd 1/2 back |
+| C2 | non-daemon `threading.Thread` started at import, writes at +150 ms | joined by the interpreter at exit, after the window |
+| C3 | fd-table scan `for fd in range(3,64): os.write(fd, ...)` | the window's OWN `os.dup(1)`/`os.dup(2)` saved descriptors sit live in the fd table for the whole import — 4 hits |
+| C4 | `dup2` a saved descriptor back over fd 1, rebind `sys.stdout`, print | the window defends fd 1/2 but hands the module live copies of them |
+
+**The pattern across three rounds is the finding.** Round 1 added fixed-string
+diagnostics, round 2 added `except BaseException` plus `catch_warnings` + stream
+redirects plus a `dup`/`dup2`-over-`/dev/null` window. Each was individually
+correct and each was bypassed from *inside* the same process, because every
+in-process silencing layer is a time window and guard code can register work that
+outlives the window. The conclusion the reviewer drew and I agree with: **in-process
+containment of untrusted import-time code has no closed boundary.** So the fix is
+not a fourth layer — it removes the premise.
+
+**TRUST BOUNDARY (stated explicitly, as the reviewer asked):** *the redactor no
+longer executes the guard's module code in the process that owns the job log.* It
+extracts `FORBIDDEN` from a child (`subprocess.Popen([sys.executable, "-E", "-s",
+"-W", "ignore", "-c", ...], stdin=DEVNULL, stdout=PIPE, stderr=DEVNULL,
+close_fds=True, start_new_session=True)`) over a one-line protocol —
+`OK\t<b64 pattern>\t<flags>` or `ERR\t<TypeName>` — that the parent validates
+strictly: base64 `validate=True`, pattern length bounded, flags bounded via
+`ast.literal_eval` (never `eval`), exception names matched against
+`[A-Za-z_][A-Za-z0-9_]{0,63}`. A real address is not expressible in that charset
+(no digits, no dots). **No byte read from the child is ever echoed.** No pickle:
+unpickling guard-derived bytes would execute guard code in the parent, i.e.
+reintroduce the exact thing being fixed. Whatever the guard body does — `print`,
+`os.write` to any descriptor, atexit dumps, threads, fd scans, `dup2` games, forks
+— it lands on the pipe or `/dev/null`, never on the step.
+
+**Protocol contract, pinned both ways rather than left ambiguous** (the reviewer's
+correction comment asked for this to be decided and stated, not left to the suite).
+Both are safe for the same reason — a child byte is never printed:
+
+  * junk terminated by `\n` is its own line, is not a verdict, is dropped, and the
+    single well-formed `OK` is honoured → an otherwise-healthy guard that merely
+    chatters stays **advisory-green** (existing tests keep passing unmodified);
+  * junk with NO trailing newline merges into the verdict line (`fd1 <addr>
+    OK\t...`), so no line is well-formed → **fail-closed rc=3**.
+
+Named in the module docstring and pinned by
+`test_child_junk_terminated_with_newline_is_dropped_and_verdict_honoured` /
+`test_unterminated_junk_merged_into_the_verdict_line_fails_closed`.
+
+**Out of scope, named so round 4 does not re-open it:** a guard whose `FORBIDDEN`
+has been *weakened* (narrowed, or replaced by one matching nothing) still redacts
+"correctly" and the job still passes. That is a guard-INTEGRITY attack, not a
+publish channel — the value never leaves the process and nothing is printed.
+Detection correctness is the parent's probe battery and
+`scripts/tests/test_address_guard.py`; this file's guarantee is narrower and is the
+one that matters for a public log: a real address never reaches the log, on any
+path, including the failure paths.
+
+**Reviewer's non-blocking note taken:** every wait on the child is bounded —
+`selectors` read loop with ONE deadline and a byte cap, then pipe close (further
+child writes die on EPIPE), then `killpg`, then a second, shorter `wait`. So a
+grandchild holding the pipe cannot hang the step to the job timeout.
+
+### Two bugs in MY OWN first cut of this fix
+
+Both found by tests I wrote for this round, reported because a clean handoff would
+hide the information:
+
+1. **A deadlock in the containment code itself.** My first version read the pipe on
+   a helper thread and then closed it from the main thread. `BufferedReader.close()`
+   blocks on the lock the blocked reader is holding — and the deadlock happens
+   BEFORE the kill, so the step hangs forever. Measured: `load_pattern()` never
+   returned (py3.11.16, instrumented in `orch_r4/`). Replaced with a `selectors`
+   loop over an unbuffered handle (`bufsize=0`), no helper thread at all. Note the
+   irony worth keeping: a control written to stop a *slow* failure became one.
+2. **The group kill was a silent no-op.** `os.getpgid(proc.pid)` in the `finally`
+   block runs after the child has usually exited, so it raises ESRCH, my
+   `except OSError` fell through to `proc.kill()`, and the spawned grandchild
+   survived on the runner (instrumented: pgid lookup → `OSError:3`, grandchild
+   `STILL ALIVE`). The pgid is now captured while the child is alive and passed in.
+   Pinned twice: `test_bounded_child_read_leaves_no_surviving_grandchild` and
+   mutation `M5b_pgid_not_passed`.
+
+### Mutation battery for my own round-4 tests (`orch_r4/mutate_r4.py`)
+
+Nine mutants, **all killed, none surviving** — but two survived the first run and
+one "died" for the wrong reason, so the honest record:
+
+| Mutant | Result | Note |
+|---|---|---|
+| M1 revert to in-process `exec_module` | KILLED | pid proof + AST audit + probe cases |
+| M2 drop the PARSE-side `TYPE_NAME` filter | survived first, then KILLED | survived because the constructor applies the same filter (defence in depth, same shape as round 2's M3). A second filter is invisible to a single-layer test: pinned with two `ERR` lines, where dropping the parse filter loses the real diagnosis. |
+| M2c drop the CONSTRUCTOR-side `TYPE_NAME` gate | KILLED | the other half of that redundancy, pinned on its own |
+| M3 accept multiple `OK` lines | KILLED | forged-extra-`OK` test |
+| M4 swallow the timeout | KILLED | hang test expects `PatternUnavailable` |
+| M5 `killpg` → `proc.kill()` | KILLED | grandchild survives |
+| M5b don't pass the captured pgid | KILLED | **the real bug I shipped first** |
+| M6 `base64` without `validate=True` | survived first, then KILLED | my e2e version died at the exactly-one-`OK` check BEFORE base64 ran, so it passed against the mutant. Re-pinned as a direct unit test on `_parse_verdict` (clean payload accepted, URL-safe-spliced payload rejected). |
+| M7 echo the child's raw bytes on parse failure | KILLED | the round-3 rule itself |
+
+Two lessons restated, both already in this audit and both re-earned: a mutant that
+"fails" on a `SyntaxError` is not a killed mutant (my M2 pattern initially ate a
+closing paren), and an end-to-end test that reaches a different guard first proves
+nothing about the guard you meant to test (M6 — and the same class as the `GUARD`
+constant bug I hit in the hang test, where `monkeypatch.chdir` does not redirect a
+module-level path constant).
+
+### Verification at this round's tip
+
+`orch_r4/probe_r4.py` 0/12 leaks (both interpreters, step + alone);
+the reviewer's own `probe_r3_reviewer.py` 0 leaks, `probe_r3_fdscan.py` 0 leaks and
+round-2 `probe_r2.py` all-ok, **re-run unmodified against my implementation** on
+py3.11.16 and py3.13.7; card file 76 collected (50 test functions) / `.github/scripts`
+leg 86, both interpreters; `address_guard --tracked` rc=0; guard's own 25 detector
+tests green. Behavioural proof the boundary is real, not just the source text: the
+stub records the pid that imported it and the test asserts it is NOT the redactor's
+pid.
+
 ## 11. Files
 
 | File | Purpose |
 |---|---|
 | `.github/workflows/address-guard.yml` | the job; enforcement posture documented as an operator variable |
-| `.github/scripts/redact_guard_report.py` | public-log-safe redactor; imports the guard's pattern; fails closed AND publishes nothing on the way down |
-| `.github/scripts/tests/test_redact_guard_report.py` | 47 tests: end-to-end job legs, structural workflow assertions, verbatim step-script decision states, fail-closed publish channels (each layer pinned on its own) |
+| `.github/scripts/redact_guard_report.py` | public-log-safe redactor; extracts the guard's pattern from a CHILD process (never executes guard code in the log-owning process); fails closed AND publishes nothing on the way down |
+| `.github/scripts/tests/test_redact_guard_report.py` | 76 collected (50 functions): end-to-end job legs, structural workflow assertions, verbatim step-script decision states, fail-closed publish channels (each layer pinned on its own), the round-3 deferred-write channels, and the child-boundary pins |
 | `scripts/run_tests.sh` | `DIRS` += `.github/scripts` |
 | `changelog.d/t_9a4b7687.md` | fragment (kind: Security) |
