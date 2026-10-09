@@ -1,0 +1,130 @@
+name: address-guard
+
+# Server-side backstop for the commit-time address guard (t_ec2c2f95).
+#
+# A local pre-commit hook has gaps that cannot be closed locally — see
+# docs/audits/commit-time-address-guard-t_ec2c2f95.md section 6: `git commit
+# --no-verify` skips it, `git apply --cached` / `git stash pop` / `format-patch`
+# write blobs without running it, and `core.hooksPath` is local machine state so
+# a clone that never ran bootstrap has no hook at all. This job evaluates the
+# COMMITTED tree on the runner, where none of those bypasses apply.
+#
+# Detection is the SAME module the hook and the pytest gate use
+# (scripts/address_guard.py) — never a second regex.
+#
+# Enforcement is a repository variable, not an edit to this file, so the
+# advisory-vs-blocking decision stays an operator setting:
+#
+#   Settings -> Secrets and variables -> Actions -> Repository variables
+#     ADDRESS_GUARD_ENFORCE unset, empty, or "false"
+#                                       -> advisory: a leak is a warning annotation
+#                                          and the job stays green (nothing blocks,
+#                                          you still see it)
+#     ADDRESS_GUARD_ENFORCE=true        -> the job goes RED on a real address
+#                                          ("True"/"TRUE"/"1"/"yes" count too: a
+#                                          variable named ENFORCE is never allowed
+#                                          to fail OPEN because of capitalisation)
+#     (a guard that CANNOT RUN fails either way — never a silent pass)
+#
+# Red alone does not stop a merge. To make it block, require this check
+# ("address-guard / guard") in branch protection — for PRs only (option b), or
+# also enforced on pushes to main (option c):
+#
+#   gh api -X PUT repos/$GITHUB_REPOSITORY/branches/main/protection/required_status_checks \
+#     -f strict=true -f contexts[]=guard
+#
+# Start advisory. Two reasons, both measured rather than assumed:
+#
+# 1. A required check on `main` does not merely mark a push red. Per
+#    https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks
+#    a push to a protected branch with failing required checks is rejected
+#    outright ("GH006: Protected branch update failed ... Required status check
+#    X is failing"). So option (c) would hard-block the heartbeat's own ledger
+#    commits the moment the guard flags anything — including its own rc=2
+#    "cannot run" case. Option (b), PRs only, keeps that path open.
+# 2. The emitter-side scrub is not finished: the cron policy landed
+#    (t_56dda2c8) but the durable scrubber (t_a98c009f) is still in review, so
+#    a required red check on `main` today would be noise from my own ticks
+#    rather than signal — which trains everyone to ignore the check.
+#
+# Two facts this file gets right for whoever enables (b)/(c) (both from the doc
+# above): a check is only selectable once it has run successfully in the repo
+# within 7 days, and a workflow that triggers on `push` but NOT `pull_request`
+# never runs on the PR head and leaves the PR permanently blocked — so keep BOTH
+# triggers below. This repo has no branch protection today; I did not test
+# enforcement against your live `main`.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: address-guard-${{ github.ref }}
+  # Keep this false once the job is made a required check: a CANCELLED check
+  # counts against branch protection, and at ~13 s the job is not worth racing.
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # --tracked scans every file git tracks in the checked-out commit (measured
+      # ~0.13 s over ~1070 files). stdlib only, no network, exit 0 clean / 1 leak
+      # / 2 cannot-run. The offender report goes to stderr, so both streams are
+      # captured to files and the real exit code is preserved.
+      - name: Scan committed tree for real operator addresses
+        # The exit code is decided here rather than by continue-on-error, so a
+        # guard that cannot run (rc=2) fails even in advisory mode: a silent pass
+        # is exactly how the 2026-10-08 leak survived. Advisory mode reports the
+        # leak as a warning annotation and still exits 0.
+        env:
+          ENFORCE: ${{ vars.ADDRESS_GUARD_ENFORCE }}
+        run: |
+          set +e
+          python3 scripts/address_guard.py --tracked \
+            >"${RUNNER_TEMP}/guard.out" 2>"${RUNNER_TEMP}/guard.err"
+          rc=$?
+          # This repo is PUBLIC and a job log is public too, so the matched
+          # address must not be echoed — the backstop would itself publish the
+          # leak. Keep the file:line, drop the value. BOTH streams go through
+          # the redactor: the guard writes its report to stderr today, but a
+          # future print() to stdout — or any import-time noise it emits —
+          # would otherwise reach the log raw (t_9a4b7687 review, round 1).
+          # -W ignore -E: no warning may render the guard's source line at the
+          # interpreter level either; the redactor also silences the import.
+          python3 -W ignore -E .github/scripts/redact_guard_report.py \
+            <"${RUNNER_TEMP}/guard.out"
+          redact_out_rc=$?
+          python3 -W ignore -E .github/scripts/redact_guard_report.py \
+            <"${RUNNER_TEMP}/guard.err"
+          redact_err_rc=$?
+          set -e
+          # rc=2 first: a checkout missing scripts/address_guard.py breaks the
+          # redactor too, and blaming the redactor would send the reader to the
+          # wrong file. (Measured on real CI by probe/failclosed-9a4b7687.)
+          if [ "$rc" -eq 2 ]; then
+            echo "::error::address_guard could not run — failing closed even in advisory mode"
+            exit 2
+          fi
+          if [ "$redact_out_rc" -ne 0 ] || [ "$redact_err_rc" -ne 0 ]; then
+            echo "::error::redactor could not load the guard pattern; refusing to print an unredacted report"
+            exit 3
+          fi
+          if [ "$rc" -ne 0 ]; then
+            # Normalised so a capitalised or truthy-looking ENFORCE can never
+            # fail OPEN: a variable named ENFORCE only gets to loosen the job
+            # when it says so in so many letters.
+            case "$(printf '%s' "${ENFORCE:-}" | tr '[:upper:]' '[:lower:]')" in
+              true|1|yes)
+                echo "::error::real operator address in the committed tree — see the file:line list above"
+                exit "$rc"
+                ;;
+            esac
+            echo "::warning::real operator address in the committed tree (advisory: ADDRESS_GUARD_ENFORCE is not set to true) — see the file:line list above"
+          fi
+          exit 0
