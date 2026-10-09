@@ -32,11 +32,22 @@ both reproduced against the first version of this file:
     module recompiles each time, and Python >= 3.12 shows invalid-escape
     SyntaxWarnings by default.
 
-So: every diagnostic this file can emit is a FIXED string; the guard's import
-runs with warnings suppressed and its stdout/stderr captured into a buffer that
-is discarded, never echoed; a loaded pattern that is not a compiled regex is
-rejected instead of raising AttributeError later; and an unexpected error is
-reported as ``<exception type>`` only — never ``str(exc)``, never a traceback.
+So: every diagnostic this file can emit is a FIXED string; a loaded pattern that
+is not a compiled regex is rejected instead of raising AttributeError later; and
+an unexpected error is reported as ``<exception type>`` only — never ``str(exc)``,
+never a traceback, for ANY exception including ``BaseException``/``SystemExit``
+(review round 2: ``except Exception`` let ``sys.exit("... <addr>")`` at guard
+module level unwind past main(), and CPython prints the frame text, which IS the
+guard's source line).
+
+Silencing the import also takes TWO layers, because they close different holes
+(review round 2): ``warnings.catch_warnings()`` + ``redirect_stdout/stderr``
+rebind the *objects*, so a write straight to **fd 1/2** — ``os.write(2, ...)`` in
+the guard, or C-level output — still lands on the pipes this process inherited
+from the CI step, which the step echoes verbatim. That published the address while
+the ADVISORY job reported GREEN. The only layer that catches it is the descriptor
+table: ``load_pattern()`` points fd 1/2 at ``/dev/null`` for the duration of the
+import and hands the real descriptors back afterwards.
 
 That input class is the reason: a committed detector that is itself broken AND
 carries a real address is exactly the state the local hooks cannot catch (both
@@ -50,6 +61,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import os
 import re
 import sys
 import warnings
@@ -67,20 +79,57 @@ MSG_REFUSING = "redact_guard_report: refusing to echo unredacted output."
 def load_pattern():
     """The FORBIDDEN pattern from the shipped guard — never a copy of it.
 
-    The import is silenced on purpose (warnings + stdout + stderr, all of it):
-    a warning raised while the guard compiles prints the guard's source line,
-    and that line may itself be the address. Whatever the guard emits during
-    import is discarded, not forwarded to our caller's log.
+    The import is silenced on purpose, at TWO layers that close different holes
+    (review round 2). ``catch_warnings`` + ``redirect_stdout/stderr`` catch the
+    Python-level channels — a warning whose renderer prints the guard's source
+    line, or a stray module-level ``print``. But those rebind the *objects*;
+    ``os.write(2, ...)`` inside the guard — or C-level output — goes to the fd,
+    and the fd still points at the step's inherited pipes. Measured: the
+    ADVISORY job stayed GREEN while the address reached the public log. So fd 1/2
+    are pointed at ``/dev/null`` for the duration of the import and the real
+    descriptors handed back in ``finally``, which is the only layer that holds.
     """
     spec = importlib.util.spec_from_file_location("address_guard_for_redact", GUARD)
     if spec is None or spec.loader is None:
         raise RuntimeError("guard module cannot be located")
     module = importlib.util.module_from_spec(spec)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        with contextlib.redirect_stdout(io.StringIO()):
-            with contextlib.redirect_stderr(io.StringIO()):
-                spec.loader.exec_module(module)
+    # Anything already buffered belongs to the real streams, not to /dev/null.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    saved_stdout, saved_stderr = sys.stdout, sys.stderr
+    saved_out = os.dup(1)
+    saved_err = os.dup(2)
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with contextlib.redirect_stdout(io.StringIO()):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    spec.loader.exec_module(module)
+    finally:
+        # Descriptors back first, unconditionally — then the high-level objects.
+        # `sys.stdout` is already the original wrapper here (the redirect_*
+        # context managers exited inside the try), but a guard that reassigned
+        # `sys.stdout` itself during import would have left something else
+        # behind. Restoring the objects we saved is what lets main() write the
+        # redacted report and its own diagnostics.
+        # NOTE: deliberately NOT a fresh io.open(1, ...) — that would orphan the
+        # interpreter's own std wrapper, whose deallocation can close fd 1.
+        os.dup2(saved_out, 1)
+        os.dup2(saved_err, 2)
+        os.close(devnull)
+        os.close(saved_out)
+        os.close(saved_err)
+        sys.stdout, sys.stderr = saved_stdout, saved_stderr
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except BaseException:  # noqa: BLE001 - a guard that CLOSED our streams
+            # must not abort the restore above; the diagnostics that follow are
+            # ours (fixed strings), and worst case they are lost, never leaked.
+            pass
     pattern = module.FORBIDDEN
     if not isinstance(pattern, re.Pattern):
         # Anything else would raise AttributeError later, and an uncaught
@@ -103,8 +152,12 @@ def _emit(text):
 def main():
     try:
         pattern = load_pattern()
-    except Exception as exc:  # noqa: BLE001 - any import failure means fail closed
-        # Type name only: str(exc) can quote the very value we are hiding.
+    except BaseException as exc:  # noqa: BLE001 - NOT Exception; see below
+        # `except Exception` was not enough (review round 2): a guard that calls
+        # sys.exit("... <addr>") at module level raises SystemExit, and any
+        # BaseException unwinds past this function — where CPython prints the
+        # traceback, and the frame text IS the guard's source line. Type name
+        # only: str(exc) can quote the very value we are hiding.
         _emit(f"{MSG_CANNOT_LOAD} [{type(exc).__name__}]")
         _emit(MSG_REFUSING)
         return 3
