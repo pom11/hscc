@@ -534,7 +534,8 @@ def _handle_status(argv, theme_name=None):
         try:
             token = api.load_token()
         except RuntimeError as exc:
-            console.print(f"No connection QR: could not read auth token ({exc})")
+            # exc text embeds the token-file path — DATA.
+            console.print(f"No connection QR: could not read auth token ({theme.esc(exc)})")
         else:
             _print_api_qr(host, port, token, theme_name=theme_name)
     return 0
