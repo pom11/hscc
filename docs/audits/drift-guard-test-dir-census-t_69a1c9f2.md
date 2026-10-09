@@ -8,9 +8,12 @@ Task: t_69a1c9f2. Workspace branch: `wt/t_69a1c9f2`. Base: `main` @ `3c20990c` (
 - [x] Drift guard widened to every tracked `*/tests/` dir (the remaining scope)
 - [x] Guard proven failing closed on a throwaway dir, and green on the real tree
 - [x] Changelog fragment (`changelog.d/t_69a1c9f2.md`, via `changelog_fragments.py add`; CHANGELOG.md untouched)
-- [ ] Full sequential two-interpreter gate at the frozen tip (py3.11.16 + p313 3.13.12) —
-      results land in the card's completion metadata + comment, citing this file's commit
-      as `stamp_for` (same chicken-and-egg convention as t_95d864fc's "Final re-stamp")
+- [x] Sequential two-interpreter gate (4 legs, clean detached worktrees, every log
+      stamped commit + `dirty_files: 0` + interpreter) — see "Gate" below
+- [ ] Final re-stamp of the two POST legs at the frozen final tip; results go in the
+      card's completion metadata + comment (appending them here would move the tip
+      again — chicken-and-egg; same convention t_95d864fc's "Final re-stamp" used),
+      citing this file's commit as `stamp_for`
 
 ## Premise re-check (measured, not assumed)
 
@@ -150,6 +153,36 @@ since the card was written — matching t_95d864fc's measurement.)
   untouched, per the card's "Do not".
 - No dir dropped or skipped (the card's other "Do not"): the change only ever
   *adds* coverage.
+
+## Gate (4 sequential legs, clean detached worktrees, tree frozen while legs ran)
+
+Runner: `t_69a1c9f2-gate/gate_leg.sh` (scratch); logs `t_69a1c9f2-gate/*.log`. Each
+log's header stamps `commit`, `detached: yes-detached`, `dirty_files: 0`,
+`interpreter` — verified by grep, all four `RUN_TESTS_RC=0`, 11/11 legs ✓ each.
+
+| leg | commit | dirty | interpreter | wall | result |
+|---|---|---|---|---|---|
+| base-311 | 9b96d41b | 0 | 3.11.16 | 774 s | ALL GREEN rc=0 |
+| base-313 | 9b96d41b | 0 | 3.13.12 | 776 s | ALL GREEN rc=0 |
+| post-311 | f83cf437 | 0 | 3.11.16 | 774 s | ALL GREEN rc=0 |
+| post-313 | f83cf437 | 0 | 3.13.12 | 774 s | ALL GREEN rc=0 |
+
+Per-leg pass counts base→post, identical on each interpreter except the one
+expected delta (`hscc-bootstrap` +2 = the two new guard tests):
+
+- 3.11: 416→**418** · 69 · 135 · 479 · 1377 · 1275 · 12 · 876+1skip · 11 · 97 · 100
+- 3.13: 416→**418** · 69 · 135 · 460+15skip · 1377 · 1272+3skip · 12 · 861+16skip · 11 · 97 · 100
+
+No collection-order interaction appeared (the wide guard reads only git
+metadata + two files; it adds no imports and no fixtures).
+
+**Re-gate:** main moved twice during the gate (both docs-only GOAL_LEDGER
+commits). The branch was rebased to the current tip **before any push** (the one
+clean window; tree content of my diff verified byte-identical — the rebase delta
+is only the ledger file), and the two POST legs are re-run at the frozen final
+tip. Repo policy: a stamp taken before any later commit is stale, even a docs
+commit. Final results: card completion metadata + comment, `stamp_for` = the
+commit of this file.
 
 ## Sequencing note for the landing step
 
