@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 
 from ..core import daemon as d
-from ._theme import escape, make_console, panel, status_panel
+from ._theme import esc, escape, make_console, panel, status_panel
 
 PLIST_LABEL = "com.flightdeck.daemon"
 
@@ -133,7 +133,7 @@ def _stop_running_daemon() -> None:
     if pid is not None:
         make_console().print(panel(
             "daemon install",
-            f"Stopping running daemon (PID {pid})"))
+            f"Stopping running daemon (PID {esc(pid)}"))
         try:
             os.kill(pid, signal.SIGTERM)
             time.sleep(2)
@@ -170,7 +170,7 @@ def cmd_install(args: argparse.Namespace, registry_path: str) -> int:
         if cp.returncode == 0:
             lines.append("Loaded into launchd")
         else:
-            lines.append(f"launchctl load returned {cp.returncode}: {escape(cp.stderr.strip())}")
+            lines.append(f"launchctl load returned {esc(cp.returncode)}: {escape(cp.stderr.strip())}")
     except (OSError, subprocess.SubprocessError) as exc:
         lines.append(f"launchctl load failed: {escape(str(exc))}")
     lines.append("flightdeck daemon is now managed by launchd (auto-start at login).")
