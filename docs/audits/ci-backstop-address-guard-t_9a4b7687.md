@@ -336,12 +336,75 @@ three things worth recording:
    lines, so the fast legs at the previous tip stay meaningful, but the
    authoritative stamp is taken at the tip that will actually merge).
 
+## 10c. Review round 2 — the same class again, and what "sealed" had missed
+
+Reviewer verdict at `5fc58b4a`: REQUEST CHANGES again, with both round-1 items
+verified genuinely landed (their own probes clean, 41/41 mine green on both
+interpreters, their own full-suite legs at the tip). The block: two publish
+channels in the SAME input class that my round-1 fix had not closed — and my
+round-1 audit text had repeated the overclaim (`"no traceback can escape
+main()"`, `"captured into a buffer that is discarded, never echoed"`).
+
+**Reproduced before touching code**, with my own harness (`orch_r3/probe_r3.py`
+in the task workspace — not the reviewer's, per their instruction to
+re-implement), driving the SHIPPING step script parsed verbatim from the YAML
+plus the redactor alone, stub guards carrying `_addr`-assembled values, output
+scanned with the shipped detector's own `FORBIDDEN`: **10 leaks on py3.11.16 and
+10 on py3.13.7** at `5fc58b4a`.
+
+1. **BaseException out of `main()`.** `raise BaseException('fatal at <addr>')`
+   and `sys.exit('cannot run with <addr>')` at guard module level walk past
+   `except Exception`; CPython prints the traceback, and the frame text IS the
+   guard source — value in the log twice (both step redactions), rc=3. The
+   `sys.exit` form is the plausible one: locally it shows the author only the
+   message line, never the CI traceback.
+2. **fd-level writes.** `os.write(2, b'<addr>')` at import, functional guard,
+   ADVISORY posture: value in the log, **job GREEN rc=0** — the probe7 shape
+   round 1 escalated for, arriving through a different door. `redirect_stdout`/
+   `redirect_stderr` rebind the *objects*; fd 1/2 still point at the step's
+   inherited pipes. My own extra probe (a warning from a thread the guard spawns
+   at import) was caught by the existing layers — the descriptor write is the
+   real hole.
+
+**Fix** (4cbdd51b + 3332f372, same files as before): `except BaseException`
+around `load_pattern()` with the same fixed-string, type-name-only diagnostic;
+`os.dup` + `dup2`/dev-null over fds 1/2 for the duration of `exec_module`, real
+descriptors handed back in `finally` — restore path deliberately NOT a fresh
+`io.open(1, ...)` (that orphans the interpreter's std wrapper, whose GC can
+close fd 1) and the trailing flush guarded so a guard that closed our streams
+cannot abort the restore (the reviewer's non-blocking note). The two
+python-level layers stay INSIDE the fd layer — three layers, defense in depth.
+
+**My fix differs from the reviewer's prototype on purpose** at that restore
+point (`sys.stdout, sys.stderr = saved` instead of reopening fd 1/2); the
+prototype was evidence, not to be copied.
+
+**Mutation-tested my own tests this round** (the reviewer caught a vacuous
+mutation on themselves in round 2; I checked mine): M1 drop `dup2` -> 3 failed
+(exactly the fd tests); M2 back to `except Exception` -> 2 failed (exactly the
+new ones); M3 drop BOTH python-level layers -> 1 failed, not the 2 the reviewer
+measured pre-fd — expected, since the fd layer now also covers the bare-mode
+warning case (redundancy, their words: "fine for a fail-closed control"); M4
+drop the `isinstance` gate -> **SURVIVED at first**, so I hardened
+`test_nonpattern_forbidden_fails_closed_without_traceback` to pin the
+diagnosis name (`CANNOT LOAD PATTERN [TypeError]` vs the mutant's
+`UNEXPECTED ERROR [AttributeError]`) and it is now caught. A surviving mutant
+is a test that doesn't test — worth saying when it happens on your own work.
+
+## 10d. Pause-induced gate legs must be stamped as such
+
+(Run 953/955 note, kept from the routing comment so re-review does not read it
+red: the round-3 p313 leg `RUN_TESTS_RC=141` at 06:14:41 was the dispatcher
+SIGTERM of the operator's pause, not a test failure — rc=141/143 class already
+guarded via t_6bb29d46. Round 4's two clean legs at `5fc58b4a` supersede it;
+the round-5 legs at this round's tip supersede those.)
+
 ## 11. Files
 
 | File | Purpose |
 |---|---|
 | `.github/workflows/address-guard.yml` | the job; enforcement posture documented as an operator variable |
 | `.github/scripts/redact_guard_report.py` | public-log-safe redactor; imports the guard's pattern; fails closed AND publishes nothing on the way down |
-| `.github/scripts/tests/test_redact_guard_report.py` | 51 tests: end-to-end job legs, structural workflow assertions, verbatim step-script decision states, fail-closed publish channels |
+| `.github/scripts/tests/test_redact_guard_report.py` | 47 tests: end-to-end job legs, structural workflow assertions, verbatim step-script decision states, fail-closed publish channels (each layer pinned on its own) |
 | `scripts/run_tests.sh` | `DIRS` += `.github/scripts` |
 | `changelog.d/t_9a4b7687.md` | fragment (kind: Security) |
