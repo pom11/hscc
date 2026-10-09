@@ -564,7 +564,7 @@ def cmd_api(argv):
     if sub == "status":
         return _handle_status(rest, theme_name=theme_name)
 
-    _console(theme_name).print(f"Error: unknown api subcommand: {sub}")
+    _console(theme_name).print(f"Error: unknown api subcommand: {theme.esc(sub)}")
     _console(theme_name).print(
         f"Valid subcommands: {', '.join(VALID_SUBCOMMANDS)}"
     )
