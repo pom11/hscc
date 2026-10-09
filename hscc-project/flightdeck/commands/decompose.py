@@ -63,7 +63,7 @@ from typing import Callable
 
 from ..core import kanban, registry, roadmap, templates
 from ..core.lint import referenced_modules
-from ._theme import escape, make_console, panel, status_panel
+from ._theme import esc, escape, make_console, panel, status_panel
 
 # A ``.py`` reference with a concrete anchor: ``mod.py:123`` or ``mod.py:func``.
 _CONCRETE_REF_RE = re.compile(r"[A-Za-z0-9_./-]+\.py\s*:\s*[A-Za-z0-9_]+")
@@ -574,7 +574,7 @@ def cmd_decompose(args: argparse.Namespace, projects: list[registry.Project]) ->
         lines.append("")
         lines.append("ACCEPTED CARDS:")
         for card in accepted:
-            lines.append(f"  {card.id}. {escape(card.title)}")
+            lines.append(f"  {esc(card.id)}. {escape(card.title)}")
             if card.assignee:
                 lines.append(f"       assignee: {escape(card.assignee)}")
             if card.depends_on:
@@ -585,7 +585,7 @@ def cmd_decompose(args: argparse.Namespace, projects: list[registry.Project]) ->
         lines.append("")
         lines.append("REJECTED CARDS:")
         for card in rejected:
-            lines.append(f"  {card.id}. {escape(card.title)}")
+            lines.append(f"  {esc(card.id)}. {escape(card.title)}")
             lines.append(f"       REJECTED: {escape('; '.join(card.rejection_reasons))}")
 
     # Dependency edges summary.
@@ -594,7 +594,7 @@ def cmd_decompose(args: argparse.Namespace, projects: list[registry.Project]) ->
         lines.append("")
         lines.append("DEPENDENCY EDGES:")
         for (child, parent) in edges:
-            lines.append(f"  {child} -> {parent}")
+            lines.append(f"  {esc(child)} -> {esc(parent)}")
     make_console().print(panel("decompose proposal", "\n".join(lines)))
 
     if args.apply:
@@ -619,7 +619,7 @@ def cmd_decompose(args: argparse.Namespace, projects: list[registry.Project]) ->
                 continue
             created.append(new_id)
             make_console().print(status_panel(
-                f"created card {new_id}: {escape(card.title)}",
+                f"created card {esc(new_id)}: {escape(card.title)}",
                 status="ok", title="decompose --apply"))
         if not created:
             print("error: --apply created nothing (all cards rejected or failed).", file=sys.stderr)

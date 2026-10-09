@@ -21,7 +21,7 @@ import sys
 
 from ..core import registry, verify
 from ..core.verify import FAIL, NO_VERIFY, PASS
-from ._theme import escape, make_console, panel, status_panel
+from ._theme import esc, escape, make_console, panel, status_panel
 
 
 def build_subparser(sub: argparse._SubParsersAction) -> None:
@@ -106,11 +106,11 @@ def _cmd_single(args: argparse.Namespace, projects: list[registry.Project]) -> i
         return 0
     if result.status == PASS:
         make_console().print(status_panel(
-            f"{escape(proj.name)}: PASS ({_fmt_duration(result.duration_s)})",
+            f"{escape(proj.name)}: PASS ({esc(_fmt_duration(result.duration_s))})",
             status="ok", title="verify"))
         return 0
     # FAIL
-    lines = [f"{escape(proj.name)}: FAIL ({_fmt_duration(result.duration_s)})"]
+    lines = [f"{escape(proj.name)}: FAIL ({esc(_fmt_duration(result.duration_s))})"]
     if result.error:
         for line in result.error.splitlines():
             lines.append(f"  {escape(line)}")
@@ -155,10 +155,10 @@ def _cmd_all(args: argparse.Namespace, projects: list[registry.Project]) -> int:
         dur = o["duration_s"]
         if status == PASS:
             passed += 1
-            rows.append(f"  {escape(name):<24} PASS ({_fmt_duration(dur)})")
+            rows.append(f"  {escape(name):<24} PASS ({esc(_fmt_duration(dur))})")
         elif status == FAIL:
             failed += 1
-            rows.append(f"  {escape(name):<24} FAIL ({_fmt_duration(dur)})")
+            rows.append(f"  {escape(name):<24} FAIL ({esc(_fmt_duration(dur))})")
         else:
             no_verify += 1
             rows.append(f"  {escape(name):<24} no verify configured")

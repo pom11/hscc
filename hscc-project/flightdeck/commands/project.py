@@ -29,7 +29,7 @@ from ..core import git_state, project_lifecycle, registry
 from ..core import session_discovery
 from ..core import bindings
 from ..core import digest as digest_core
-from ._theme import escape, make_console, panel, status_panel, table
+from ._theme import esc, escape, make_console, panel, status_panel, table
 
 # --------------------------------------------------------------------------- #
 # Orchestrator resolver (reused from hscc-roles so CLI/REST/WS never disagree)
@@ -68,8 +68,8 @@ def cmd_new(args: argparse.Namespace) -> int:
     dry_run = bool(args.dry_run)
 
     plan_lines = [
-        f"flightdeck project new {name}",
-        f"  repo    {repo}" + ("  (--github --private)" if private else ("  (--github)" if github else "")),
+        f"flightdeck project new {esc(name)}",
+        f"  repo    {esc(repo)}" + ("  (--github --private)" if private else ("  (--github)" if github else "")),
         "  topic   forum topic named after the project",
         "  board   kanban board slug = project name",
         "  roadmap ROADMAP.md seeded with Now/Next/Later",
@@ -97,7 +97,7 @@ def cmd_new(args: argparse.Namespace) -> int:
     lines = ["\nresult:"]
     for step in result["steps"]:
         mark = "ok " if step["status"] == "ok" else ("-- " if step["status"] == "skipped" else "FAIL")
-        lines.append(f"  [{mark}] {step['id']:<8} {escape(step['detail'])}")
+        lines.append(f"  [{mark}] {esc(step['id']):<8} {escape(step['detail'])}")
         if step["status"] == "failed":
             lines.append(f"         retry: {escape(step.get('retry', ''))}")
 
@@ -111,7 +111,7 @@ def cmd_new(args: argparse.Namespace) -> int:
         make_console().print(panel("project new", "\n".join(lines), border_style="error"))
         return 1
 
-    lines.append(f"\nproject {name!r} created.")
+    lines.append(f"\nproject {esc(repr(name))} created.")
     make_console().print(panel("project new", "\n".join(lines)))
     return 0
 
@@ -177,7 +177,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
     name = args.name
 
     plan_lines = [
-        f"flightdeck project remove {name}",
+        f"flightdeck project remove {esc(name)}",
         "  this removes the REGISTRY ENTRY only.",
         "  it does NOT delete the git repo.",
         "  (the registry 'topic' field is cleared too — Telegram is removed.)",
@@ -196,7 +196,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
         return 2
 
     make_console().print(status_panel(
-        f"removed registry entry for {name!r}. The repo and topic are untouched.",
+        f"removed registry entry for {esc(repr(name))}. The repo and topic are untouched.",
         status="ok", title="project remove"))
     return 0
 
@@ -219,8 +219,8 @@ def cmd_repair(args: argparse.Namespace) -> int:
     private = bool(args.private)
 
     plan_lines = [
-        f"flightdeck project repair {name}",
-        f"  repo    {repo}",
+        f"flightdeck project repair {esc(name)}",
+        f"  repo    {esc(repo)}",
         "  .. ensures repo / topic / board / roadmap / registry are all present",
     ]
     if not args.apply:
@@ -249,7 +249,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
     lines = ["\nresult:"]
     for step in result["steps"]:
         mark = "ok " if step["status"] == "ok" else ("-- " if step["status"] == "skipped" else "FAIL")
-        lines.append(f"  [{mark}] {step['id']:<8} {escape(step['detail'])}")
+        lines.append(f"  [{mark}] {esc(step['id']):<8} {escape(step['detail'])}")
         if step["status"] == "failed":
             lines.append(f"         retry: {escape(step.get('retry', ''))}")
 
@@ -259,7 +259,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
             lines.append(f"\nretry command: {escape(retry)}")
         make_console().print(panel("project repair", "\n".join(lines), border_style="error"))
         return 1
-    lines.append(f"\nproject {name!r} repaired.")
+    lines.append(f"\nproject {esc(repr(name))} repaired.")
     make_console().print(panel("project repair", "\n".join(lines)))
     return 0
 
@@ -300,7 +300,7 @@ def cmd_pull(args: argparse.Namespace) -> int:
         return resolved
     targets = resolved
 
-    heading = f"flightdeck project pull{' ' + args.name if args.name else ''}"
+    heading = f"flightdeck project pull{esc(' ' + args.name) if args.name else ''}"
     rows = []
     for proj in targets:
         res = git_state.pull_project(proj.repo, _run=args.run)
@@ -308,7 +308,7 @@ def cmd_pull(args: argparse.Namespace) -> int:
             "name": proj.name,
             "repo": proj.repo,
             "status": res["status"],
-            "detail": res["detail"],
+            "detail": esc(res["detail"]),
             "n": res["n"],
         })
 
@@ -322,7 +322,7 @@ def cmd_pull(args: argparse.Namespace) -> int:
     t.add_column("RESULT")
     for row in rows:
         if row["status"] == "pulled":
-            line = f"pulled {row['n']} commit(s)"
+            line = f"pulled {esc(row['n'])} commit(s)"
         elif row["status"] == "up_to_date":
             line = "already up to date"
         else:
@@ -352,7 +352,7 @@ def cmd_push(args: argparse.Namespace) -> int:
     targets = resolved
 
     apply = bool(args.apply)
-    heading = f"flightdeck project push{' ' + args.name if args.name else ''}"
+    heading = f"flightdeck project push{esc(' ' + args.name) if args.name else ''}"
     rows = []
     for proj in targets:
         branch = git_state.current_branch(proj.repo, _run=args.run)
@@ -376,7 +376,7 @@ def cmd_push(args: argparse.Namespace) -> int:
                 "upstream": res["upstream"],
                 "ahead": res["n"],
                 "status": res["status"],
-                "detail": res["detail"],
+                "detail": esc(res["detail"]),
             })
         else:
             # Dry-run: report what WOULD be pushed, push nothing.
@@ -397,7 +397,7 @@ def cmd_push(args: argparse.Namespace) -> int:
                     "name": proj.name, "repo": proj.repo, "branch": branch,
                     "upstream": None, "ahead": 0,
                     "status": "skipped",
-                    "detail": f"no upstream tracking branch for {branch}; nothing to push",
+                    "detail": f"no upstream tracking branch for {esc(branch)}; nothing to push",
                 })
             elif ahead == 0:
                 rows.append({
@@ -410,7 +410,7 @@ def cmd_push(args: argparse.Namespace) -> int:
                     "name": proj.name, "repo": proj.repo, "branch": branch,
                     "upstream": upstream, "ahead": ahead,
                     "status": "would_push",
-                    "detail": f"{ahead} commit(s) ahead of {upstream} (pass --apply to push)",
+                    "detail": f"{esc(ahead)} commit(s) ahead of {esc(upstream)} (pass --apply to push)",
                 })
 
     if getattr(args, "json", False):
@@ -422,15 +422,15 @@ def cmd_push(args: argparse.Namespace) -> int:
         # The gate note goes on its own (dim) line so a narrow Rich Table title
         # cannot wrap it mid-phrase and swallow the "nothing was pushed" signal.
         make_console().print(
-            f"[dim]{heading}  (--apply not given: nothing was pushed)[/dim]")
+            f"[dim]{esc(heading)}  (--apply not given: nothing was pushed)[/dim]")
     t = table(heading)
     t.add_column("NAME")
     t.add_column("RESULT")
     for row in rows:
         if row["status"] == "pushed":
-            line = f"pushed {row['ahead']} commit(s) to {escape(row['upstream'])}"
+            line = f"pushed {esc(row['ahead'])} commit(s) to {escape(row['upstream'])}"
         elif row["status"] == "would_push":
-            line = f"would push {row['ahead']} commit(s) to {escape(row['upstream'])}"
+            line = f"would push {esc(row['ahead'])} commit(s) to {escape(row['upstream'])}"
         elif row["status"] == "up_to_date":
             line = "nothing to push"
         else:
@@ -503,8 +503,8 @@ def _print_history_note(discovery: dict) -> None:
     plural = "" if len(rows) == 1 else "s"
     make_console().print(
         f"[dim]note: {len(rows)} earlier telegram session{plural} for this "
-        f"project ({total_msgs} msgs) — `hscc project sessions "
-        f"{discovery['project']}` to list, `--resume <id>` to open[/dim]"
+        f"project ({esc(total_msgs)} msgs) — `hscc project sessions "
+        f"{esc(discovery['project'])}` to list, `--resume <id>` to open[/dim]"
     )
 
 
@@ -577,8 +577,8 @@ def _seed_empty_orchestrator(
         # plain session with no archive history isn't spammed on every chat).
         if digest_sessions:
             make_console().print(
-                f"[dim]session '{session}' already has history — not re-seeding "
-                f"the {len(digest_sessions)}-thread / {digest_msgs}-message "
+                f"[dim]session '{esc(session)}' already has history — not re-seeding "
+                f"the {len(digest_sessions)}-thread / {esc(digest_msgs)}-message "
                 f"digest[/dim]"
             )
         return 0
@@ -589,11 +589,11 @@ def _seed_empty_orchestrator(
         # new project with no archived history, or an empty project with none).
         if just_created:
             make_console().print(
-                f"[label]created session '{session}' on {profile!r} "
+                f"[label]created session '{esc(session)}' on {esc(repr(profile))} "
                 f"(first use)[/label]")
         else:
             make_console().print(
-                f"[label]session '{session}' has no archived history — "
+                f"[label]session '{esc(session)}' has no archived history — "
                 f"starting fresh[/label]")
         return 0
 
@@ -627,8 +627,8 @@ def _seed_empty_orchestrator(
     if seeded:
         plural = "" if len(digest_sessions) == 1 else "s"
         make_console().print(
-            f"[ok]seeded session '{seed_target}' with the project digest "
-            f"({len(digest_sessions)} thread{plural}, {digest_msgs} messages)[/ok]"
+            f"[ok]seeded session '{esc(seed_target)}' with the project digest "
+            f"({len(digest_sessions)} thread{plural}, {esc(digest_msgs)} messages)[/ok]"
         )
     else:
         # LOUD, not a stderr line that scrolls past as the chat opens. A silent
@@ -637,14 +637,14 @@ def _seed_empty_orchestrator(
         # unnoticed for a full working session.
         plural = "" if len(digest_sessions) == 1 else "s"
         make_console().print(
-            f"[warn]WARNING: could not seed session {seed_target!r} with the "
+            f"[warn]WARNING: could not seed session {esc(repr(seed_target))} with the "
             f"project digest (write failed).[/warn]"
         )
         make_console().print(
             f"[warn]  {len(digest_sessions)} archived thread{plural} / "
-            f"{digest_msgs} messages are NOT in this session. Recover with: "
-            f"hscc project digest {name}[/warn]"
-        )
+            f"{esc(digest_msgs)} messages are NOT in this session. Recover with: "
+            f"hscc project digest {esc(name)}[/warn]"
+            )
         print(
             f"could not seed session '{seed_target}' with the project digest "
             f"(write failed) — continuing without "
@@ -741,7 +741,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
     # as. Explicit > implicit; print before exec'ing so it is on the terminal.
     make_console().print(panel(
         "project chat",
-        f"[accent]project {name} -> profile {profile}, session '{session}'[/accent] "
+        f"[accent]project {esc(name)} -> profile {esc(profile)}, session '{esc(session)}'[/accent] "
         f"(permanent, shared with the app)"))
 
     argv = ["hermes", "-p", profile, "chat", "--continue", session]
@@ -792,8 +792,8 @@ def _cmd_chat_resume(name: str, resume_id: str, args, resolved: dict) -> int:
     profile, argv = target
     make_console().print(panel(
         "project chat",
-        f"[accent]project {name} -> profile {profile}, resuming session "
-        f"'{resume_id}'[/accent]"))
+        f"[accent]project {esc(name)} -> profile {esc(profile)}, resuming session "
+        f"'{esc(resume_id)}'[/accent]"))
     exec_seam = getattr(args, "exec_seam", None) or os.execvp
     exec_seam("hermes", argv)
     return 0
@@ -831,15 +831,15 @@ def cmd_sessions(args: argparse.Namespace) -> int:
 
     topic = discovery.get("topic")
     lines = [
-        f"project {name} sessions (topic "
-        f"{topic if topic is not None else '(none)'}, "
-        f"telegram profile {discovery['telegram_profile']}):"
+        f"project {esc(name)} sessions (topic "
+        f"{esc(topic) if topic is not None else '(none)'}, "
+        f"telegram profile {esc(discovery['telegram_profile'])}):"
     ]
     # An unreadable runtime is NOT an empty history — say which one it is.
     if discovery.get("runtime_error"):
-        lines.append(f"  cannot read session history: {discovery['runtime_error']}")
+        lines.append(f"  cannot read session history: {esc(discovery['runtime_error'])}")
         lines.append("    - retry under the Hermes venv, e.g.")
-        lines.append(f"      ~/.hermes/hermes-agent/venv/bin/hscc project sessions {name}")
+        lines.append(f"      ~/.hermes/hermes-agent/venv/bin/hscc project sessions {esc(name)}")
         make_console().print(panel("project sessions", "\n".join(lines),
                                    border_style="error"))
         return 3
@@ -850,8 +850,8 @@ def cmd_sessions(args: argparse.Namespace) -> int:
         lines.append(escape(_format_session_row(orch, discovery["orch_profile"], current=True)))
     else:
         lines.append(
-            f"  {discovery['orch_profile']}: (no orchestrator session found)\n"
-            f"    - `hscc project chat {name}` creates it on first use"
+            f"  {esc(discovery['orch_profile'])}: (no orchestrator session found)\n"
+            f"    - `hscc project chat {esc(name)}` creates it on first use"
         )
     if discovery["telegram"]:
         for row in discovery["telegram"]:
@@ -860,9 +860,9 @@ def cmd_sessions(args: argparse.Namespace) -> int:
         reason = (
             "project has no telegram topic"
             if topic is None
-            else f"no telegram sessions on thread {topic}"
+            else f"no telegram sessions on thread {esc(topic)}"
         )
-        lines.append(f"  {discovery['telegram_profile']}: (no telegram history — {reason})")
+        lines.append(f"  {esc(discovery['telegram_profile'])}: (no telegram history — {esc(reason)})")
     make_console().print(panel("project sessions", "\n".join(lines)))
     return 0
 
@@ -931,7 +931,7 @@ def cmd_link(args: argparse.Namespace) -> int:
         if not store:
             if project_filter:
                 make_console().print(panel(
-                    "project link", f"no bindings for {project_filter!r}."))
+                    "project link", f"no bindings for {esc(repr(project_filter))}."))
             else:
                 make_console().print(panel("project link", "no bindings."))
             return 0
@@ -967,7 +967,7 @@ def cmd_link(args: argparse.Namespace) -> int:
     method_conf = escape(f"[method {entry['method']}, confidence {entry['confidence']}]")
     make_console().print(panel(
         "project link",
-        f"linked session {escape(session_id)} -> project {project!r} {method_conf}\n"
+        f"linked session {escape(session_id)} -> project {esc(repr(project))} {method_conf}\n"
         f"  evidence: {escape(entry['evidence'])}\n"
         f"  store: {escape(mapping_path or bindings.MAPPING_FILE)}"))
     return 0
@@ -994,7 +994,7 @@ def cmd_unlink(args: argparse.Namespace) -> int:
     project = getattr(args, "project", None)
     if removed:
         body = (f"unlinked session {escape(session_id)} "
-                + (f"from project {project!r} " if project else "")
+                + (f"from project {esc(repr(project))} " if project else "")
                 + "from the binding store.")
     else:
         body = f"unlink: session {escape(session_id)} had no binding — nothing removed."

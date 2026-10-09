@@ -42,7 +42,7 @@ from typing import Any, Callable, Optional
 
 from ..core import daemon as d
 from ..core import kanban, registry
-from ._theme import escape, make_console, panel, status_panel, table
+from ._theme import esc, escape, make_console, panel, status_panel, table
 
 # --------------------------------------------------------------------------- #
 # Check streams — the flightdeck-specific read logic (generic loop in core)
@@ -456,7 +456,7 @@ def cmd_start(args: argparse.Namespace, registry_path: str) -> int:
     pid = d.get_pid()
     if pid is not None:
         make_console().print(status_panel(
-            f"Daemon already running (PID {pid}).",
+            f"Daemon already running (PID {esc(pid)}).",
             status="ok", title="daemon start"))
         return 0
 
@@ -468,7 +468,7 @@ def cmd_start(args: argparse.Namespace, registry_path: str) -> int:
         # Parent: save the child PID and return immediately.
         d.save_pid()
         make_console().print(status_panel(
-            f"flightdeck daemon started (PID {child}).",
+            f"flightdeck daemon started (PID {esc(child)}).",
             status="ok", title="daemon start"))
         return 0
 
@@ -520,7 +520,7 @@ def cmd_stop(args: argparse.Namespace, registry_path: str) -> int:
         d.write_stopped()
         return 0
     make_console().print(panel(
-        "daemon stop", f"Stopping flightdeck daemon (PID {pid})…"))
+        "daemon stop", f"Stopping flightdeck daemon (PID {esc(pid)})…"))
     d.log("Daemon stop requested")
     try:
         os.kill(pid, signal.SIGTERM)
@@ -530,13 +530,13 @@ def cmd_stop(args: argparse.Namespace, registry_path: str) -> int:
                 os.kill(pid, 0)
             except OSError:
                 make_console().print(status_panel(
-                    f"flightdeck daemon stopped (PID {pid}).",
+                    f"flightdeck daemon stopped (PID {esc(pid)}).",
                     status="ok", title="daemon stop"))
                 d.write_stopped()
                 return 0
         os.kill(pid, signal.SIGKILL)
         make_console().print(status_panel(
-            f"flightdeck daemon force-killed (PID {pid}).",
+            f"flightdeck daemon force-killed (PID {esc(pid)}).",
             status="error", title="daemon stop"))
     except ProcessLookupError:
         make_console().print(panel(
@@ -549,12 +549,12 @@ def cmd_stop(args: argparse.Namespace, registry_path: str) -> int:
 def _status_line(stream: str, state: Optional[dict]) -> str:
     """One ``status`` row for a stream from its persisted state (or 'never')."""
     if not state:
-        return f"  {stream:<12s} — never"
+        return f"  {esc(stream):<12s} — never"
     ok = state.get("ok")
     ok_str = "OK" if ok is True else ("FAIL" if ok is False else "—")
     ts = str(state.get("timestamp") or "?")[:19]
     msg = str(state.get("message") or "")
-    return f"  {stream:<12s} {ok_str:<5s} {ts:<22s} {msg}"
+    return f"  {esc(stream):<12s} {esc(ok_str):<5s} {esc(ts):<22s} {esc(msg)}"
 
 
 def cmd_status(args: argparse.Namespace, registry_path: str) -> int:
@@ -564,7 +564,7 @@ def cmd_status(args: argparse.Namespace, registry_path: str) -> int:
 
     lines = []
     if pid is not None:
-        lines.append(f"Status:    RUNNING (PID {pid})")
+        lines.append(f"Status:    RUNNING (PID {esc(pid)})")
     else:
         stale = os.path.exists(d.PID_FILE)
         if stale:

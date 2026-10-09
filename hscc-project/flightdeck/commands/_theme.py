@@ -35,6 +35,29 @@ from rich.console import Console
 from rich.markup import escape
 from rich.theme import Theme
 
+
+def esc(value) -> str:
+    """Escape DATA before it is interpolated into a Rich markup renderable.
+
+    WHY this exists (t_12f3c8a8, same class as t_716cf37c in hscc_daemon):
+    Rich parses every ``str`` renderable (``Console.print``, ``Table.add_row``,
+    ``Panel`` body/title) as MARKUP, so a project name, path, report line, card
+    title or daemon message that contains ``[/bold]`` — or any closing tag —
+    raises ``rich.errors.MarkupError`` and takes the whole human view down with
+    a traceback. Data never contains our styles, so data gets escaped; the
+    ``[ok]``/``[error]``/``[dim]`` markup the renderer itself builds stays live.
+
+    Rule for call sites: ``esc()`` the VALUE, never the surrounding markup.
+    ``f"[error]{esc(msg)}[/error]"`` is correct; ``esc(f"[error]{msg}[/error]")``
+    would drop the styling.
+
+    Same contract as ``hscc_daemon.cli_theme.esc`` (``rich.markup.escape`` over
+    ``str(value)``), re-declared here so a standalone flightdeck install —
+    where the peer package is deliberately not importable — keeps the contract
+    (the ``escape`` re-export above requires an actual ``str``; ``esc`` coerces).
+    """
+    return escape(str(value))
+
 # The hscc_daemon.cli_theme module, or None when the peer package is absent.
 _theme = None
 _theme_loaded = False
@@ -129,7 +152,11 @@ def panel(title: str, renderable: str = "", **kwargs):
         return t.make_panel(title, renderable, **kwargs)
     from rich.panel import Panel
     kwargs.setdefault("title_align", "left")
-    return Panel(renderable, title=title, **kwargs)
+    # Fallback path mirrors cli_theme._view_title: the Panel TITLE parses as
+    # markup too, so dynamic title DATA is escaped here (the themed path
+    # escapes it inside make_panel — call sites must never pre-esc() a title,
+    # that would double-escape and leak backslashes).
+    return Panel(renderable, title=esc(title), **kwargs)
 
 
 def status_panel(message: str, status: str = "ok", *, title: str = "status",
@@ -141,7 +168,9 @@ def status_panel(message: str, status: str = "ok", *, title: str = "status",
                                    **kwargs)
     from rich.panel import Panel
     kwargs.setdefault("title_align", "left")
-    return Panel(f"{status.upper()}  {message}", title=title, **kwargs)
+    # ``message`` stays live markup (callers build f"[label]…{esc(x)}…" — same
+    # contract as cli_theme.make_status_panel); only the title is DATA.
+    return Panel(f"{status.upper()}  {message}", title=esc(title), **kwargs)
 
 
 def table(title: str | None = None, **kwargs):
@@ -150,4 +179,4 @@ def table(title: str | None = None, **kwargs):
     if t is not None:
         return t.make_table(title, **kwargs)
     from rich.table import Table
-    return Table(title=title, **kwargs)
+    return Table(title=esc(title) if title is not None else None, **kwargs)

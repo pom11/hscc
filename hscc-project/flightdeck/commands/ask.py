@@ -33,7 +33,7 @@ import sys
 
 from ..core import registry, templates
 from ..core.templates import UnfilledSlotError
-from ._theme import escape, make_console, panel
+from ._theme import esc, escape, make_console, panel
 
 
 def _get_project(projects: list[registry.Project], project_name: str):
@@ -147,7 +147,7 @@ def cmd_template_show(args: argparse.Namespace, projects: list[registry.Project]
     # The template body is a bounded document; render it in a themed Panel so it
     # reads as one block. Markup is escaped so template text containing brackets
     # renders literally (never interpreted as styling).
-    make_console().print(panel(f"ask template: {args.name}", escape(body)))
+    make_console().print(panel(f"ask template: {esc(args.name)}", escape(body)))
     return 0
 
 

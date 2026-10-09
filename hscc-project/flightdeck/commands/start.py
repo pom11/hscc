@@ -55,7 +55,7 @@ from typing import Callable, Optional
 import yaml
 
 from ..core import git_state, kanban, registry
-from ._theme import escape, make_console, panel
+from ._theme import esc, escape, make_console, panel
 
 # Hermes' own config, where the kanban concurrency knobs live. Overridable for
 # tests via the ``_read_config`` seam.
@@ -325,8 +325,8 @@ def _print_plan(
     per_profile_cap: int,
     remaining: int,
 ) -> None:
-    lines = [f"RELEASE PLAN for milestone {escape(milestone)!r} (fleet ceiling "
-             f"{total_cap}, max {per_profile_cap} per profile):"]
+    lines = [f"RELEASE PLAN for milestone {esc(repr(milestone))} (fleet ceiling "
+             f"{esc(total_cap)}, max {esc(per_profile_cap)} per profile):"]
     if not assigned and not held:
         lines.append("  no cards for this milestone.")
         make_console().print(panel("start", "\n".join(lines)))
@@ -334,7 +334,7 @@ def _print_plan(
     lines.append("")
     lines.append("RELEASE ORDER:")
     for i, card in enumerate(assigned, 1):
-        lines.append(f"  {i}. {escape(_card_label(card))}  -> {escape(card.get('_assignee') or '?')}")
+        lines.append(f"  {esc(i)}. {escape(_card_label(card))}  -> {escape(card.get('_assignee') or '?')}")
     if held:
         lines.append("")
         lines.append("HELD (dependency not merged):")
@@ -344,7 +344,7 @@ def _print_plan(
             lines.append(f"       held by: {escape(holder)}")
     if remaining:
         lines.append("")
-        lines.append(f"{remaining} card(s) not released (beyond the concurrency "
+        lines.append(f"{esc(remaining)} card(s) not released (beyond the concurrency "
                      f"ceiling or no profile slot free).")
     make_console().print(panel("start — plan", "\n".join(lines)))
 

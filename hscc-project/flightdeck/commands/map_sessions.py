@@ -28,7 +28,7 @@ import sys
 import time
 
 from ..core import map_sessions
-from ._theme import escape, make_console, panel
+from ._theme import esc, escape, make_console, panel
 
 _DEFAULT_OUT = map_sessions.DEFAULT_OUT_DIR
 _DEFAULT_DB = map_sessions.DEFAULT_STATE_DB
@@ -103,14 +103,14 @@ def cmd_map_sessions(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
         return 0
 
-    lines = [f"proposed owners for {result.total} unmapped session(s)"]
-    lines.append(f"  resolved deterministic (repo-path): {result.resolved_repo_path}")
+    lines = [f"proposed owners for {esc(result.total)} unmapped session(s)"]
+    lines.append(f"  resolved deterministic (repo-path): {esc(result.resolved_repo_path)}")
     for proj, n in sorted(result.deterministic_by_project.items()):
-        lines.append(f"    {escape(proj):<12} {n}")
-    lines.append(f"  resolved by model: {result.resolved_model}")
+        lines.append(f"    {escape(proj):<12} {esc(n)}")
+    lines.append(f"  resolved by model: {esc(result.resolved_model)}")
     for proj, n in sorted(result.model_by_project.items()):
-        lines.append(f"    {escape(proj):<12} {n}")
-    lines.append(f"  left unknown: {result.unknown}")
+        lines.append(f"    {escape(proj):<12} {esc(n)}")
+    lines.append(f"  left unknown: {esc(result.unknown)}")
     lines.append(f"proposal: {escape(md_path)}")
     lines.append(f"json:     {escape(json_path)}")
 
