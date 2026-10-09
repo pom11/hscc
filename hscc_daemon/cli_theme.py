@@ -24,6 +24,7 @@ import os
 
 from rich.color import Color
 from rich.console import Console
+from rich.markup import escape as escape_markup
 from rich.panel import Panel
 from rich.style import Style
 from rich.table import Table
@@ -40,6 +41,7 @@ __all__ = [
     "make_panel",
     "make_table",
     "make_status_panel",
+    "esc",
 ]
 
 
@@ -182,6 +184,27 @@ def _view_title(title: str) -> str:
     # containing markup cannot inject styles or break the box.
     escaped = title.replace("[", r"\[").replace("]", r"\]")
     return f"[title]{escaped}[/title]"
+
+
+def esc(value) -> str:
+    """Escape DATA before it is interpolated into a Rich markup string.
+
+    WHY this exists: Rich parses every ``str`` renderable (``Console.print``,
+    ``Table.add_row``, ``Panel`` body) as MARKUP, so a filesystem path, a log
+    line, a card title or an exception message that contains ``[/bold]`` — or
+    any closing tag — raises ``rich.errors.MarkupError`` and takes the whole
+    human view down with a traceback. Data never contains our styles, so data
+    gets escaped; the ``[ok]``/``[error]``/``[dim]`` markup the renderer itself
+    builds stays live.
+
+    Rule for call sites: ``esc()`` the VALUE, never the surrounding markup.
+    ``f"[error]{esc(msg)}[/error]"`` is correct; ``esc(f"[error]{msg}[/error]")``
+    would drop the styling.
+
+    Same precedent as ``hscc-cluster/_theme.py`` / ``hscc-roles/hscc.py``, which
+    already import ``rich.markup.escape`` for exactly this.
+    """
+    return escape_markup(str(value))
 
 
 # ── Standard constructors downstream cards render through ────────────────

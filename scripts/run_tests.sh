@@ -20,7 +20,20 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="${HSCC_TEST_PY:-$HOME/.hermes/hermes-agent/venv/bin/python}"
 [ -x "$PY" ] || PY="python3"
 
-DIRS=(hscc-bootstrap hscc-commands hscc-roles hscc-cluster hscc-project hscc_daemon sparkrun-hermes hscc-api memori_byodb .github/scripts)
+# `scripts` is the one entry that is NOT a deployed plugin (it is absent from
+# install_payload.DEFAULT_PAYLOAD): it is the repo's own tooling dir, and
+# scripts/tests holds the suites for scripts/address_guard.py,
+# changelog_fragments.py and dep_pr_watcher.py. It was added because those tests
+# were unreachable from the canonical runner, so every `ALL GREEN` stamp silently
+# excluded the commit-time address guard's own suite (t_95d864fc). The isolation
+# property comes from the loop — one pytest process per entry — not from the kind
+# of dir, so a non-plugin dir needs no special leg. It must stay registered here
+# for the same reason the plugins do: scripts/tests does `sys.path.insert` of
+# scripts/ and imports `changelog_fragments` / `dep_pr_watcher` bare.
+# `.github/scripts` is registered for the same reason and by the same argument
+# (t_9a4b7687): it is CI tooling, not a deployed plugin, and its tests are the
+# only thing that executes the address-guard workflow's real step script.
+DIRS=(hscc-bootstrap hscc-commands hscc-roles hscc-cluster hscc-project hscc_daemon sparkrun-hermes hscc-api memori_byodb scripts .github/scripts)
 
 # ━━━ SIGTERM forensics (t_6bb29d46) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # RULE: NEVER stop a suite with a name-based sweep — `pkill -f "run_tests.sh"`,
