@@ -169,7 +169,7 @@ def _cmd_stale(rest, json_mode, theme_name=None):
             print(json.dumps({"archived": task_id, "board": label, "exit": 0}))
         else:
             _console(theme_name).print(theme.make_status_panel(
-                f"archived {task_id} (board '{label}')",
+                theme.esc(f"archived {task_id} (board '{label}')"),
                 status="ok", title="kanban"))
         return 0
 
@@ -209,8 +209,12 @@ def _cmd_stale(rest, json_mode, theme_name=None):
             for t in tasks:
                 assignee = t["assignee"] or "-"
                 age = f"{t['age_days']}d"
+                # Card titles/ids are arbitrary DB text — the exact DATA class
+                # that crashes Rich markup parsing on a '[/bold]' (t_716cf37c).
                 table.add_row(
-                    t["board"], t["id"], t["status"], assignee, age, t["title"])
+                    theme.esc(t["board"]), theme.esc(t["id"]),
+                    theme.esc(t["status"]), theme.esc(assignee),
+                    theme.esc(age), theme.esc(t["title"]))
             console.print(table)
         if result["errors"]:
             print("\nWarnings (boards not fully scanned):", file=sys.stderr)
