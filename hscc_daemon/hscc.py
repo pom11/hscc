@@ -698,19 +698,21 @@ def _handle_verify():
             # substring stays contiguous and at-a-glance guidance is kept.
             if not ok and next_step:
                 next_steps.append(next_step)
+            # name/detail are written by the checks themselves (they quote
+            # paths, versions, command output) — DATA, never markup.
             table.add_row(f"[{colour}]{glyph}[/]",
-                          f"[label]{name}[/]", detail)
+                          f"[label]{theme.esc(name)}[/]", theme.esc(detail))
         console.print(table)
         for hint in next_steps:
             # Keep the exact "next step: <hint>" substring the pre-Rich
             # rendering produced (automation greps it), just dimmed.
-            console.print(f"[dim]next step: {hint}[/dim]")
+            console.print(f"[dim]next step: {theme.esc(hint)}[/dim]")
         unver = result.get("unverified") or []
         if not result.get("ok"):
             overall = "\N{BALLOT X} Some checks failed"
         elif unver:
             overall = "\N{CHECK MARK} All checks passed (%d unverified: %s)" % (
-                len(unver), ", ".join(unver))
+                len(unver), ", ".join(theme.esc(u) for u in unver))
         else:
             overall = "\N{CHECK MARK} All checks passed"
         console.print(f"[{'error' if not result.get('ok') else 'ok'}]{overall}[/]")
@@ -741,7 +743,9 @@ def _handle_stats():
         print(json.dumps(result))
     else:
         console = theme.make_console(theme_name)
-        body = stats_mod.format_stats(result)
+        # format_stats() embeds profile/tool names read from the kanban DB —
+        # DATA that must not be markup-parsed (t_716cf37c).
+        body = theme.esc(stats_mod.format_stats(result))
         console.print(theme.make_panel("fleet stats", body))
     sys.exit(0)
 
@@ -758,7 +762,8 @@ def _handle_throughput():
         print(json.dumps(tp))
     else:
         console = theme.make_console(theme_name)
-        body = throughput.format_throughput(tp)
+        # format_throughput() embeds node names/labels from the fleet — DATA.
+        body = theme.esc(throughput.format_throughput(tp))
         console.print(theme.make_panel("fleet throughput", body))
     sys.exit(0)
 
@@ -781,8 +786,9 @@ def _handle_autoscale():
         print(json.dumps(d))
     else:
         # A "none" decision carries no target — only scale_up/down do.
-        tgt = f" (target {d['target']})" if "target" in d else ""
-        body = f"autoscale: {d['action']}{tgt} — {d['reason']}"
+        tgt = f" (target {theme.esc(d['target'])})" if "target" in d else ""
+        body = (f"autoscale: {theme.esc(d['action'])}{tgt} — "
+                f"{theme.esc(d['reason'])}")
         # Colour by how the operator should read it: scale_up is a live
         # capacity signal (warn), scale_down/none are calm (ok).
         colour = "warn" if d.get("action") == "scale_up" else "ok"
@@ -821,7 +827,8 @@ def _handle_escalate():
                 to = a.get("to", a.get("category", "?"))
                 colour = "error" if action == "escalate_failed" else (
                     "warn" if action == "escalate" else "accent")
-                table.add_row(f"[{colour}]{task_id}[/]", action, to)
+                table.add_row(f"[{colour}]{theme.esc(task_id)}[/]",
+                              theme.esc(action), theme.esc(to))
             console.print(table)
         else:
             console.print("[dim]no escalations pending[/dim]")
