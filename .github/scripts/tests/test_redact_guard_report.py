@@ -268,6 +268,37 @@ def test_committed_build_artefact_fails_the_job_leg_and_stays_redacted(throwaway
     assert REAL_LAN not in printed, "a PUBLIC job log must not carry the address"
 
 
+def test_a_trailing_byte_artefact_name_fails_the_job_leg_and_survives_redaction(throwaway):
+    """CI-level proof for t_ecc3f190: the trailing byte must survive to the LOG.
+
+    Two things have to hold at once here, and they pull against each other. The
+    job leg must fail on `evil.pyc ` (the backstop is the only control left once
+    `--no-verify` has run), and the public log must name the path *with* its
+    trailing byte — a log line saying `evil.pyc` tells the operator to
+    `git rm --cached` a file that does not exist, which is how a blocked commit
+    ends up committed anyway.
+
+    Also pins the accident-class fact that made this survivable at all: the
+    verdict is `<path>:0: build artefact must not be tracked`, so the path's
+    trailing byte sits MID-line, not at line end, and no CI log post-processor
+    that strips trailing whitespace can eat it.
+    """
+    (throwaway / "evil.pyc ").write_bytes(
+        b"\xe3\r\r\n\x00\x00\x00\x00\x00" + REAL_LAN.encode() + b"\x00\x00")
+    subprocess.run(["git", "add", "-A", "--force"], cwd=throwaway, check=True)
+    # Premise in raw bytes: if git dropped the trailing byte, this proves nothing.
+    raw = subprocess.run(["git", "ls-files", "-z"], cwd=throwaway,
+                         capture_output=True).stdout
+    assert b"evil.pyc \x00" in raw, raw
+
+    subprocess.run(["git", "commit", "-q", "-m", "chore", "--no-verify"],
+                   cwd=throwaway, check=True)
+    rc, printed = _run_job_leg(throwaway)
+    assert rc == 1, printed
+    assert "evil.pyc :0: build artefact must not be tracked" in printed, printed
+    assert REAL_LAN not in printed, "a PUBLIC job log must not carry the address"
+
+
 def test_a_hatched_compiled_artefact_still_fails_the_job_leg(throwaway):
     """CI-level proof of the two-tier hatch (round-1 review of t_3e6d3db7).
 
