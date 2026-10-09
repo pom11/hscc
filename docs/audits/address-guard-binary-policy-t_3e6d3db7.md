@@ -134,21 +134,35 @@ warning that `--no-verify` is how the last two leaks happened.
   the file, not the content: a clean `.pyc`, a `.so` and a `__pycache__/` path are
   all refused.
 * `test_scan_blob_refuses_an_artefact_regardless_of_case_and_separators` —
-  `PYC` and a backslash form do not dodge the list.
+  `PYC` and a backslash form do not dodge the list, and `native/source.c` /
+  `data/alpine.software.json` do not get caught by it.
 * `test_legitimate_binary_asset_is_still_accepted` — the tracked `.png` population
   (and a NUL-bearing unknown extension) is **not** broken by the new rule.
 * `test_artefact_allowlist_exempts_the_refusal_not_the_scan` — an allowlisted
-  artefact path commits, and is still scanned for an address.
+  artefact path commits, and is still scanned for an address even when NUL-bearing.
 * `test_scan_paths_refuses_a_tracked_artefact_even_if_unreadable` — the tracked
   gate's pre-read path.
+* `test_cli_blocks_a_staged_pyc_carrying_a_real_address` and
+  `test_cli_tracked_flags_a_committed_pyc_even_after_a_scrubbed_worktree` — the
+  two shipped invocations, exit 1, actionable text, and the tracked verdict
+  survives a scrubbed working tree.
 * `test_report_names_the_artefact_and_the_removal_command` — the failure text is
   actionable.
-* `test_hook_and_tracked_agree_on_a_tracked_build_artefact` — same input, both
-  gates, same verdict (in `hscc_daemon/tests/test_precommit_address_hook.py`,
-  which is where the real `git commit` runs).
+* `test_hook_and_tracked_agree_on_a_tracked_build_artefact` (in
+  `hscc_daemon/tests/test_precommit_address_hook.py`, which is where the real
+  `git commit` runs) — the real hook and the real `--tracked` CLI over the same
+  tree produce **identical** verdict strings.
 * `test_scan_blob_skips_binaries_and_skip_suffixes` updated: the "binary is
   silent" assertion is now pinned on an *unknown* extension, not on a `.pyc`,
   so the test cannot quietly re-legitimise the old behaviour.
+
+`.github/scripts/tests/test_redact_guard_report.py` (CI job level, via the same
+`_run_job_leg` helper that runs the real step script):
+
+* `test_committed_build_artefact_fails_the_job_leg_and_stays_redacted` — the
+  backstop catches what `--no-verify` let into HEAD, and the public log still
+  never sees the address.
+* `test_a_tracked_binary_asset_keeps_the_job_leg_green`.
 
 ## 7. Known limits (stated, not hidden)
 

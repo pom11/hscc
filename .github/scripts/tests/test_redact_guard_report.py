@@ -241,6 +241,40 @@ def test_placeholders_and_fixture_block_do_not_fail(throwaway):
     assert rc == 0, f"placeholders and the fixture block must not fail the job:\n{printed}"
 
 
+def test_committed_build_artefact_fails_the_job_leg_and_stays_redacted(throwaway):
+    """t_3e6d3db7 at the CI level: the backstop must see what the hook missed.
+
+    A `.pyc` gets into HEAD via `--no-verify` (or a clone that never ran
+    bootstrap, so it had no hook at all). The tracked scan is the last line, and
+    the redactor must still keep the address out of the PUBLIC job log — the
+    artefact verdict carries no address, but the class is new and this is where
+    that gets proven.
+    """
+    pyc = throwaway / "scripts" / "__pycache__"
+    pyc.mkdir(parents=True)
+    (pyc / "hscc.cpython-313.pyc").write_bytes(
+        b"\xe3\r\r\n\x00\x00\x00\x00\x00" + REAL_LAN.encode() + b"\x00\x00")
+    subprocess.run(["git", "add", "-A"], cwd=throwaway, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "chore", "--no-verify"],
+                   cwd=throwaway, check=True)
+
+    rc, printed = _run_job_leg(throwaway)
+    assert rc == 1, printed
+    assert "scripts/__pycache__/hscc.cpython-313.pyc" in printed, printed
+    assert "git rm --cached" in printed, printed
+    assert REAL_LAN not in printed, "a PUBLIC job log must not carry the address"
+
+
+def test_a_tracked_binary_asset_keeps_the_job_leg_green(throwaway):
+    """The CI job must not start failing over a file that belongs here."""
+    (throwaway / "assets").mkdir()
+    (throwaway / "assets" / "hscc.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x0dIHDR")
+    subprocess.run(["git", "add", "-A"], cwd=throwaway, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feat: logo"], cwd=throwaway, check=True)
+    rc, printed = _run_job_leg(throwaway)
+    assert rc == 0, printed
+
+
 def test_the_real_repo_passes_the_job_leg():
     """The acceptance case that matters: today's main must be green."""
     rc, printed = _run_job_leg(REPO)
