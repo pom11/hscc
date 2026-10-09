@@ -57,8 +57,11 @@ def cmd_archive_sessions(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
         return 0
 
+    # Format the count as a number FIRST, then escape the resulting text: an
+    # esc()'d value is a str, and {str:,} is an illegal format spec.
+    byte_count = f"{result.bytes_written:,}"
     lines = [f"archived {esc(result.sessions)} session(s), {esc(result.messages)} message(s)",
-             f"bytes:  {esc(f'{result.bytes_written:,}')} across {esc(result.files)} file(s)"]
+             f"bytes:  {esc(byte_count)} across {esc(result.files)} file(s)"]
     for proj, n in sorted(result.by_project.items()):
         lines.append(f"  {escape(proj):<12} {esc(n)} session(s)")
     if result.unmapped_threads:
