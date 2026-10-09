@@ -331,6 +331,72 @@ def test_a_genuinely_compiled_pyc_on_a_widened_hatch_is_still_blocked_by_the_hoo
     assert "vendor/leak.pyc" in err, err
 
 
+def test_a_trailing_byte_artefact_name_is_blocked_by_the_hook_and_named_alike(repo, tmp_path):
+    """The card's ASK 2: a real `git add -f` + `git commit` of `evil.pyc `.
+
+    Reviewer round 3 of t_3e6d3db7 measured that `git add -A --force` tracks
+    `evil.pyc ` verbatim while BOTH gates returned [] — the suffix test ran
+    against the raw string. This pins it at the git level, not in the unit: real
+    `py_compile` output, real index, real hook.
+
+    The trailing space is load-bearing. The verdict must still CARRY it, or the
+    fix the report prescribes (`git rm --cached <path>`) would name a file that
+    does not exist and the two gates would describe the same tree with two
+    different strings — t_3e6d3db7 §4's agreement failure, one spelling over.
+    """
+    src = tmp_path / "leaky_source.py"
+    src.write_text("NAS = " + repr(REAL_LAN) + "\n", encoding="utf-8")
+    import py_compile
+    py_compile.compile(str(src), cfile=str(tmp_path / "evil.pyc"), doraise=True)
+    blob = (tmp_path / "evil.pyc").read_bytes()
+    assert b"\0" in blob and REAL_LAN.encode() in blob, "the premise is a real .pyc"
+
+    name = "evil.pyc "                       # the trailing space IS the bypass
+    (repo / name).write_bytes(blob)
+    rc, out, err = _run(GIT + ["add", "-f", "-A"], repo)
+    assert rc == 0, err
+
+    # Premise check in RAW bytes (`_run` decodes, which is exactly what would hide
+    # a NUL): if git stopped tracking the trailing-space name this test would be
+    # silently proving nothing.
+    raw = subprocess.run(GIT + ["ls-files", "-z"], cwd=str(repo),
+                         capture_output=True).stdout
+    assert b"evil.pyc \x00" in raw, (
+        f"git did not track the trailing-space name; premise gone: {raw!r}")
+
+    # Gate 1 — the shipped hook refuses the commit.
+    rc, out, hook_err = _run(GIT + ["commit", "-q", "-m", "chore: compiled"], repo)
+    assert rc != 0, "a trailing-space .pyc must be refused\nSTDOUT=%s\nSTDERR=%s" % (out, hook_err)
+    rc, out, _ = _run(GIT + ["log", "--oneline"], repo)
+    assert out.strip().count("\n") == 0, "the artefact commit must not exist"
+
+    # The state a bypass leaves behind: `--no-verify` gets it into HEAD.
+    rc, out, err = _run(GIT + ["commit", "-q", "-m", "chore: bypassed", "--no-verify"], repo)
+    assert rc == 0, err
+
+    # Gate 2 — the CLI the CI job / pytest gate runs over the tracked tree.
+    tracked = subprocess.run([sys.executable, str(GUARD), "--tracked", "--repo", str(repo)],
+                             capture_output=True)
+    assert tracked.returncode == 1, tracked.stderr.decode()
+
+    # Gate 3 — the same CLI over the staged tree (what the hook wraps). Re-add
+    # with new bytes: after the commit the staged set is empty, and an empty
+    # staged set would make "both gates agree" true of nothing.
+    (repo / name).write_bytes(blob + b"\x00")
+    assert _run(GIT + ["add", "-f", "-A"], repo)[0] == 0
+    staged = subprocess.run([sys.executable, str(GUARD), "--staged", "--repo", str(repo)],
+                            capture_output=True)
+    assert staged.returncode == 1, staged.stderr.decode()
+
+    # The agreement property, stated as the card asks it: all three shipped
+    # surfaces name the SAME path with the SAME verdict string.
+    want = "evil.pyc :0: build artefact must not be tracked"
+    for label, text in (("hook", hook_err),
+                        ("--tracked", tracked.stderr.decode()),
+                        ("--staged", staged.stderr.decode())):
+        assert want in text, f"{label} does not name {want!r}:\n{text}"
+
+
 def test_a_legitimate_binary_asset_still_commits(repo):
     """The new rule must not break the binaries that belong here.
 

@@ -345,6 +345,13 @@ warning that `--no-verify` is how the last two leaks happened.
    scanned as text (NUL-bearing → skipped) and slips through. Detecting that
    means sniffing content types, i.e. the extract-and-scan machinery §3 declines.
    A deliberate evader already has `--no-verify`; the list's job is accidents.
+   **This limit had a second spelling, and that one is now closed** (t_ecc3f190,
+   §9): keeping the real extension and appending a name byte — `evil.pyc `,
+   `evil.pyc.`, `dir/evil.pyc\t` — was tracked verbatim by git while the suffix
+   test, run against the raw string, saw a name that ends in nothing. That was
+   pure string handling, not a content question, so it was closable and it is
+   closed. The rename-to-`.txt` half of this limit is unchanged: it is a content
+   question, and closing it is what §3 declines to buy.
 4. **History is not rewritten here.** The `.pyc` from §1 is in commits before the
    2026-10-09 rewrite; publishing that decision is the operator's, as before.
 
@@ -358,3 +365,135 @@ warning that `--no-verify` is how the last two leaks happened.
 
 No change to `.githooks/pre-commit` or `.github/workflows/address-guard.yml`:
 both call the scanner, which is the point of §4.
+
+## 9. Terminal name bytes — the second spelling of limit #3 (t_ecc3f190)
+
+Round-3 review of this card measured, at `104eac34`, that a name carrying a
+trailing byte defeats the refusal while git tracks it happily:
+
+```
+tracked: b'evil.pyc \n'      # git ls-files after `git add -A --force`
+scan_staged:  []             # the hook's contract
+scan_tracked: []             # the CI job / the pytest gate
+```
+
+**Severity, stated honestly.** This is not the accident class the list's job is
+accidents. No compiler, packer or `git add -f scripts/__pycache__/*.pyc` emits a
+trailing-space or trailing-dot name — a human must type or script it. It is also
+a strictly *weaker* class than limit #3: here the extension is intact, so the
+bypass is pure string handling rather than a content question. But it is a bypass
+of a name-based control that costs nothing to close, so the honest move was to
+close it, not to document it and move on.
+
+### What is actually reachable (measured, not assumed)
+
+Each spelling was created in a throwaway repo and read back from
+`git ls-files -z` in raw bytes:
+
+| name | creatable on APFS? | tracked by `git add -A --force`? | refused after the fix? |
+|---|---|---|---|
+| `evil.pyc ` (trailing space) | yes | yes, verbatim | **yes** |
+| `evil.pyc.` (trailing dot) | yes | yes, verbatim | **yes** |
+| `evil.pyc\t` (trailing tab) | yes | yes, verbatim | **yes** |
+| `evil.pyc\n` (trailing newline) | yes | yes, verbatim | **yes** |
+| `evil.pyc\u00a0` (trailing NBSP) | yes | yes, verbatim | **yes** |
+| `pkg/__pycache__ /m.dat` (byte on the **directory**) | yes | yes, verbatim | **yes** |
+| `evil.pyc\x00` (NUL **in** the name) | **no — macOS refuses the open** | **no — `git update-index -z` truncates at the NUL and errors** | yes, defensively |
+
+Six of the seven spellings in that table are real, reachable bypasses; the NUL
+one is not reachable on this platform by creation *or* by git plumbing. (The
+reviewer's probe measured the *unit predicate* on `'evil.pyc\x00'`, which did
+return `False` — correct as a measurement, but no `.pyc` with that name can be
+created here, so it was never a tracked-blob case.) It is refused anyway because
+the trim costs the same whether the byte is reachable here or not, and the fleet
+is not uniformly macOS: on Linux a NUL in a name is rejected by the syscall too,
+so the case stays unreachable there as well, but a future platform or a crafted
+index (a `git fast-import` stream, a hand-written tree object) is not something a
+name check should make assumptions about. Defense in depth, labelled as such
+rather than counted as a closed hole.
+
+### The decision, and where it deliberately is *not* applied
+
+One function, `_name_key(rel)`, defines the comparison form: lower-cased,
+backslashes folded to `/`, and every `/`-segment trimmed of leading/trailing
+whitespace (Unicode, via `str.isspace()`), `.` and NUL. Trimming is per **segment**,
+not per path, because the artefact in `pkg/__pycache__ /m.dat` is the directory
+and a whole-path trim never sees its trailing byte.
+
+`_name_key` is used by the refusal and by nothing else. That direction is the
+whole safety argument, and it is pinned by
+`test_normalisation_is_applied_where_it_can_only_widen_a_refusal`:
+
+* Normalising a **refusal** can only ever catch more. Safe direction.
+* Normalising a **skip** (`is_skipped_asset`) or a **waiver**
+  (`ALLOWED_BINARY_PATHS`) would catch *less* — a trailing byte would turn
+  `x.png ` into a skipped asset, or let a trailing-byte name match a hatch entry
+  someone reviewed as something narrower. Both stay on the **raw** path.
+* Consequence worth having on the record: a trailing-byte name therefore never
+  matches a hatch entry, so it falls through to the refusal. The asymmetry fails
+  **closed**, which is the only direction it is safe to get wrong.
+
+`artefact_offender()` reports the **raw** path. A verdict that printed
+`evil.pyc` for a file named `evil.pyc ` would tell the operator to run
+`git rm --cached evil.pyc` on a path that does not exist, and would make the two
+gates describe one tree with two strings — the §4 agreement failure, one
+character wide.
+
+### Blast radius, measured before choosing
+
+| measurement (this base) | value |
+|---|---|
+| tracked files | 1103 |
+| names with trailing whitespace | **0** |
+| names ending in `.` | **0** |
+| names containing NUL | **0** |
+| tracked build artefacts | **0** |
+| tracked paths whose verdict the trim changes | **0** |
+| `--tracked` wall time, best of 7 | **0.152 s** (0.121 s before; see below) |
+| `_name_key()` per call | 0.82 µs |
+
+Zero existing paths change verdict, so nothing that is tracked today can newly
+break — including the two `.png` files and any leaf that legitimately ends in
+`.` (`README.`, `docs/notes.` are pinned as **not** refused). The timing moved
+0.121 s → 0.152 s, which is git and process start-up, not the trim: 1103 calls
+of `_name_key` are 0.9 ms total, well inside the noise of the 7 runs, and the
+`--staged` budget that `test_guard_is_dependency_free_and_bounded` enforces
+(5 s) is untouched. `--tracked` reads no new files and starts no new subprocess.
+
+### Why not `posixpath.normpath` / `Path`
+
+`normpath` collapses `//` and `..` and strips nothing relevant; it does **not**
+strip terminal whitespace or dots, so it would have fixed none of the rows above.
+`Path(...).name` throws away the directory, which is the tier that catches
+`__pycache__ `. Neither is smaller than the four-line trim that fixes the actual
+problem, and both would have needed this same section to explain why they were
+the wrong tool.
+
+### Tests + mutation
+
+`scripts/tests/test_address_guard.py`: 22 parametrised refusal cases (the five
+reachable spellings, the NUL case, mid-name controls like `docs/ev il.pyc`, and
+the `README.`-style negatives), the asymmetry test above, the raw-path verdict
+test, a live-population guard that re-measures the tracked tree on every run, and
+a two-gate test over a real index entry.
+
+`hscc_daemon/tests/test_precommit_address_hook.py`:
+`test_a_trailing_byte_artefact_name_is_blocked_by_the_hook_and_named_alike` —
+runtime `py_compile` output written to `evil.pyc `, a premise assertion on the
+**raw** `git ls-files -z` bytes (a decoded helper would hide exactly the byte
+under test), the shipped hook refusing the commit, then the two shipped CLI
+invocations (`--staged`, `--tracked`) and the hook all naming the same path with
+the same verdict string.
+
+Six mutants, each applied to a copy outside the workspace, each failing a real
+test — no survivors:
+
+| mutant | caught by |
+|---|---|
+| suffix test against the raw lowered path (pre-fix behaviour) | 15 cases |
+| whole-path trim instead of per-segment | 3 cases |
+| verdict reports the normalised path | 5 cases |
+| skip list normalised (would silence `evil.png `) | the asymmetry test |
+| hatch matched on the normalised path | the asymmetry test |
+| trim only the trailing end (leading byte dodges the segment match) | the segment case |
+
