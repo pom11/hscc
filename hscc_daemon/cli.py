@@ -12,11 +12,19 @@ decorates the human path, and Rich's Console auto-degrades to plain text (no
 ANSI) when stdout is not a tty, which the no-ANSI regression test pins.
 """
 
+import json
 import os
 import signal
+import sys
 import time
 
-from .cli_theme import make_console, make_panel, make_status_panel, make_table
+from .cli_theme import (
+    esc,
+    make_console,
+    make_panel,
+    make_status_panel,
+    make_table,
+)
 
 
 def _console(**kwargs):
@@ -157,7 +165,9 @@ def cmd_stop():
     except ProcessLookupError:
         console.print("hscc_daemon already stopped")
     except Exception as e:
-        console.print(f"Error stopping daemon: {e}")
+        # Exception text is DATA (an OSError message can carry a path with
+        # arbitrary brackets) — escape before it reaches Rich markup.
+        console.print(f"Error stopping daemon: {esc(e)}")
     finally:
         write_stopped()
 
@@ -206,14 +216,14 @@ def cmd_status():
     detail = None
     if liv_state == "running-fresh":
         # Genuinely alive: pid present + alive + fresh heartbeat.
-        status, note = "RUNNING", f"alive (PID {liv['pid']})"
+        status, note = "RUNNING", f"alive (PID {esc(liv['pid'])})"
     elif liv_state == "running-stale-heartbeat":
         # Process present but the durable heartbeat stopped advancing — the
         # operator's dead-daemon case. Surface it loudly, never "RUNNING".
         status, note = "STOPPED", "stale heartbeat"
         detail = (f"possible unexpected exit / stale heartbeat — Heartbeat "
-                  f"last advanced {liv['last_heartbeat']} (older than "
-                  f"HEARTBEAT_STALE_AFTER); PID {liv['pid']} still present but "
+                  f"last advanced {esc(liv['last_heartbeat'])} (older than "
+                  f"HEARTBEAT_STALE_AFTER); PID {esc(liv['pid'])} still present but "
                   "not supervised, treat as dead daemon.")
     elif liv_state == "running-no-heartbeat":
         # Pid alive but no heartbeat written yet — the pid file alone cannot
@@ -271,17 +281,20 @@ def cmd_status():
                 row_status = f"[warn]{status_str}[/warn]"
             else:
                 row_status = status_str
-            table.add_row(stream_name, row_status, ts, ok_char)
+            # stream_name / timestamp come from files on disk — DATA.
+            table.add_row(esc(stream_name), row_status, esc(ts), esc(ok_char))
         console.print(table)
         console.print()
 
     wd_state = states.get("watchdog")
     if wd_state:
+        # ``reason`` is the watchdog's own text — it can quote a log line, a
+        # path, or tool output, so it is DATA and must never be markup-parsed.
         console.print(make_panel(
             "watchdog",
-            f"Blocked:  {wd_state.get('blocked', False)}\n"
-            f"Reason:   {wd_state.get('reason', '')}\n"
-            f"Restarts: {wd_state.get('auto_restart_count', 0)}",
+            f"Blocked:  {esc(wd_state.get('blocked', False))}\n"
+            f"Reason:   {esc(wd_state.get('reason', ''))}\n"
+            f"Restarts: {esc(wd_state.get('auto_restart_count', 0))}",
         ))
         console.print()
 
@@ -294,19 +307,127 @@ def cmd_status():
         ))
 
 
-def cmd_check(stream=None):
-    """Run a single check cycle.
+def _extract_repo_flag(argv):
+    """Pull ``--repo <path>`` / ``--repo=<path>`` and ``--json`` out of argv.
+
+    Returns ``(repo_or_None, has_repo_flag, json_mode, rest)``. ``--repo`` with
+    no value is an error the caller surfaces — silently defaulting to cwd would
+    hide a typo in the one command whose whole point is the posture HERE.
+    """
+    repo = None
+    has_repo = False
+    json_mode = False
+    rest = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--json":
+            json_mode = True
+            i += 1
+            continue
+        if a == "--repo":
+            has_repo = True
+            if i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+                repo = argv[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        if a.startswith("--repo="):
+            has_repo = True
+            repo = a.split("=", 1)[1]
+            i += 1
+            continue
+        rest.append(a)
+        i += 1
+    return repo, has_repo, json_mode, rest
+
+
+def cmd_check(stream=None, *rest):
+    """Run a single check cycle — or, with ``--repo``, the address-guard posture.
 
     Ad-hoc (from the terminal): prints the result only and NEVER writes the
     shared stream-state files the daemon owns. If a CLI-side check fails where
     the daemon succeeds (TCC, off-LAN laptop, a transient blip), `hscc status`
     must keep reporting what the daemon observes — a manual failure must not
     masquerade as a fleet failure.
+
+    ``hscc check --repo <path>`` (t_5abdb13d): reports the commit-time address
+    guard's TRUE posture for that checkout by calling ``posture()`` from the
+    shipped ``hscc-bootstrap/install_hooks.py`` (via :mod:`hscc_daemon.guard_posture`
+    — no logic duplicated here). Default path is the cwd's checkout. Exit code
+    is 0 only for ``armed``; ``unarmed``, ``armed-but-absent`` (the fail-open
+    line the operator asked to see: config advertises protection, this checkout
+    resolves no runnable hook) and ``not-a-repo`` are all non-zero so
+    scripts/cron can key off it. ``--json`` carries the posture dict verbatim.
     """
     from .state import persist_disabled
 
+    argv = ([stream] if stream is not None else []) + [a for a in rest]
+    repo, has_repo, json_mode, leftover = _extract_repo_flag(argv)
+    if has_repo:
+        with persist_disabled():
+            return _cmd_check_repo(repo, json_mode, leftover)
+
     with persist_disabled():
         return _cmd_check_impl(stream)
+
+
+def _cmd_check_repo(repo, json_mode, leftover):
+    """Render the guard posture for one checkout; exits per the state contract.
+
+    Kept inside persist_disabled() by the caller: this path must not touch the
+    daemon's stream state any more than the other ad-hoc check paths do.
+    """
+    from . import guard_posture
+
+    console = _console()
+    if leftover:
+        # A stream name alongside --repo is ambiguous — refusing beats
+        # quietly dropping one of the two intents.
+        console.print(f"[error]check --repo does not take a stream "
+                      f"(got: {esc(' '.join(leftover))})[/error]")
+        sys.exit(2)
+    try:
+        p = guard_posture.posture(repo)
+    except guard_posture.GuardSourceError as exc:
+        # Fail closed: a status line that cannot SEE the guard must not
+        # advertise that it can. Non-zero, loudly.
+        if json_mode:
+            print(json.dumps({"state": "error", "detail": str(exc),
+                              "repo": repo or os.getcwd()}))
+        else:
+            # exc text embeds candidate paths (operator-controlled); escape
+            # the DATA, keep the [error] style the renderer chose.
+            console.print(f"[error]guard posture UNVERIFIED — {esc(exc)}[/error]")
+            console.print("[dim]next step: run hscc-bootstrap/bootstrap.sh "
+                          "(installs hscc-bootstrap/) so the single-implementation "
+                          "posture() is available[/dim]")
+        sys.exit(1)
+
+    if json_mode:
+        # Machine contract: the dict EXACTLY as posture() produced it —
+        # plain print, never Rich (same rule as `hscc verify --json`).
+        print(json.dumps(p))
+    else:
+        role = guard_posture.status_role_for(p.get("state"))
+        # The table title is the checkout path — user input. make_table escapes
+        # titles; cell VALUES are not escaped by Rich, so every value below is.
+        table = make_table(f"address-guard posture — {p.get('toplevel') or repo or os.getcwd()}")
+        table.add_column("field", no_wrap=True)
+        table.add_column("value")
+        table.add_row("state", f"[{role}]{esc(p.get('state'))}[/]")
+        table.add_row("core.hooksPath", esc(p.get("core_hooks_path")))
+        table.add_row("hook present", "yes" if p.get("hook_present") else "no")
+        table.add_row("hook executable", "yes" if p.get("hook_executable") else "no")
+        table.add_row("detector present", "yes" if p.get("guard_present") else "no")
+        table.add_row("detail", esc(p.get("detail")))
+        console.print(table)
+        hint = guard_posture.next_step_for(p)
+        if hint:
+            # Keep the exact "next step: <hint>" substring (automation greps it).
+            console.print(f"[dim]next step: {esc(hint)}[/dim]")
+    sys.exit(guard_posture.exit_code_for(p))
 
 
 def _cmd_check_impl(stream=None):
@@ -336,7 +457,9 @@ def _cmd_check_impl(stream=None):
                 ok = fn()
                 results[name] = ok
             except Exception as e:
-                console.print(f"  Error: {e}")
+                # A check's exception text can quote a path, a host, or tool
+                # output — DATA, never markup.
+                console.print(f"  Error: {esc(e)}")
                 results[name] = False
         console.print()
         table = make_table("Results")
@@ -345,7 +468,7 @@ def _cmd_check_impl(stream=None):
         for name, ok in results.items():
             status = ("[ok]OK[/ok]" if ok
                       else "[error]FAIL[/error]")
-            table.add_row(name, status)
+            table.add_row(esc(name), status)
         console.print(table)
         return
 
@@ -359,9 +482,11 @@ def _cmd_check_impl(stream=None):
             if state:
                 msg = state.get("message", "")
                 if msg:
-                    console.print(f"  Detail: {msg}")
+                    # The message is written by the check itself and commonly
+                    # quotes command output — escape it.
+                    console.print(f"  Detail: {esc(msg)}")
         except Exception as e:
-            console.print(f"  Error: {e}")
+            console.print(f"  Error: {esc(e)}")
         return
 
     console.print("Running DGX check...")
@@ -369,7 +494,7 @@ def _cmd_check_impl(stream=None):
         ok = check_dgx()
         console.print(f"  Result: {'[ok]OK[/ok]' if ok else '[error]FAIL[/error]'}")
     except Exception as e:
-        console.print(f"  Error: {e}")
+        console.print(f"  Error: {esc(e)}")
 
 
 def cmd_watch(stream=None):
@@ -410,7 +535,7 @@ def cmd_triggers():
     else:
         body += "\nLast run:   no check results yet"
 
-    console.print(make_panel("Trigger Engine Status", body))
+    console.print(make_panel("Trigger Engine Status", esc(body)))
     console.print()
 
     if rules:
@@ -420,15 +545,17 @@ def cmd_triggers():
         table.add_column("Cooldown", justify="right")
         table.add_column("Last fired", justify="left")
         for r in rules:
-            rid = r.get("id", "?")
+            # Rule ids + cooldown strings come from triggers.json — edited by
+            # hand and by the trigger API, so both are DATA.
+            rid = esc(r.get("id", "?"))
             enabled = "[ok]✓[/ok]" if r.get("enabled", True) else "✗"
             cooldown = r.get("cooldown_seconds", 0)
-            last = cooldowns.get(rid, "never")
+            last = cooldowns.get(r.get("id", "?"), "never")
             if isinstance(last, (int, float)):
                 last = datetime.datetime.fromtimestamp(last).isoformat()[:19]
             else:
                 last = str(last)[:19]
-            table.add_row(enabled, rid, f"{cooldown}s", last)
+            table.add_row(enabled, rid, esc(f"{cooldown}s"), esc(last))
         console.print(table)
     else:
         console.print(make_status_panel(
@@ -467,9 +594,12 @@ def cmd_log():
             )
         )
         return
+    # Log lines are the daemon's own text — they quote tool output, paths and
+    # subprocess errors, i.e. arbitrary brackets. Escape EVERY line before it
+    # goes into the panel body (make_panel markup-parses its renderable).
     console.print(make_panel(
         "Daemon Log (last 50 lines)",
-        "\n".join(line.rstrip() for line in lines),
+        "\n".join(esc(line.rstrip()) for line in lines),
     ))
 
 
