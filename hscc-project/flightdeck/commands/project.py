@@ -97,7 +97,7 @@ def cmd_new(args: argparse.Namespace) -> int:
     lines = ["\nresult:"]
     for step in result["steps"]:
         mark = "ok " if step["status"] == "ok" else ("-- " if step["status"] == "skipped" else "FAIL")
-        lines.append(f"  [{mark}] {step['id']:<8} {escape(step['detail'])}")
+        lines.append(f"  [{mark}] {esc(step['id']):<8} {escape(step['detail'])}")
         if step["status"] == "failed":
             lines.append(f"         retry: {escape(step.get('retry', ''))}")
 
@@ -249,7 +249,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
     lines = ["\nresult:"]
     for step in result["steps"]:
         mark = "ok " if step["status"] == "ok" else ("-- " if step["status"] == "skipped" else "FAIL")
-        lines.append(f"  [{mark}] {step['id']:<8} {escape(step['detail'])}")
+        lines.append(f"  [{mark}] {esc(step['id']):<8} {escape(step['detail'])}")
         if step["status"] == "failed":
             lines.append(f"         retry: {escape(step.get('retry', ''))}")
 
@@ -503,7 +503,7 @@ def _print_history_note(discovery: dict) -> None:
     plural = "" if len(rows) == 1 else "s"
     make_console().print(
         f"[dim]note: {len(rows)} earlier telegram session{plural} for this "
-        f"project ({total_msgs} msgs) — `hscc project sessions "
+        f"project ({esc(total_msgs)} msgs) — `hscc project sessions "
         f"{esc(discovery['project'])}` to list, `--resume <id>` to open[/dim]"
     )
 
@@ -578,7 +578,7 @@ def _seed_empty_orchestrator(
         if digest_sessions:
             make_console().print(
                 f"[dim]session '{esc(session)}' already has history — not re-seeding "
-                f"the {len(digest_sessions)}-thread / {digest_msgs}-message "
+                f"the {len(digest_sessions)}-thread / {esc(digest_msgs)}-message "
                 f"digest[/dim]"
             )
         return 0
@@ -628,7 +628,7 @@ def _seed_empty_orchestrator(
         plural = "" if len(digest_sessions) == 1 else "s"
         make_console().print(
             f"[ok]seeded session '{esc(seed_target)}' with the project digest "
-            f"({len(digest_sessions)} thread{plural}, {digest_msgs} messages)[/ok]"
+            f"({len(digest_sessions)} thread{plural}, {esc(digest_msgs)} messages)[/ok]"
         )
     else:
         # LOUD, not a stderr line that scrolls past as the chat opens. A silent
@@ -642,7 +642,7 @@ def _seed_empty_orchestrator(
         )
         make_console().print(
             f"[warn]  {len(digest_sessions)} archived thread{plural} / "
-            f"{digest_msgs} messages are NOT in this session. Recover with: "
+            f"{esc(digest_msgs)} messages are NOT in this session. Recover with: "
             f"hscc project digest {esc(name)}[/warn]"
             )
         print(
