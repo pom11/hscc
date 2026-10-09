@@ -475,7 +475,14 @@ the wrong tool.
 reachable spellings, the NUL case, mid-name controls like `docs/ev il.pyc`, and
 the `README.`-style negatives), the asymmetry test above, the raw-path verdict
 test, a live-population guard that re-measures the tracked tree on every run, and
-a two-gate test over a real index entry.
+a two-gate test over a real index entry. Plus
+`test_a_surrogate_escape_in_a_path_never_raises_on_the_commit_path`: the paths
+the guard sees are `surrogateescape`-decoded from `git ... -z`, so a non-UTF-8
+byte in a real filename arrives as a lone surrogate, and `_name_key` is now code
+that inspects every character of every segment. A raise there is a traceback on
+the commit path — which is exactly how `--no-verify` gets used and the control
+stops existing — so the case asserts no exception across five malformed encodings
+and that the artefact verdict is still correct on them.
 
 `hscc_daemon/tests/test_precommit_address_hook.py`:
 `test_a_trailing_byte_artefact_name_is_blocked_by_the_hook_and_named_alike` —

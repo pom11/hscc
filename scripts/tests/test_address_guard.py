@@ -357,6 +357,30 @@ def test_no_tracked_path_changes_verdict_under_the_normalisation():
             f"{r!r} is a declared asset whose name the trim touches")
 
 
+def test_a_surrogate_escape_in_a_path_never_raises_on_the_commit_path():
+    """Crash safety for the new per-character trim, on the shape git really gives us.
+
+    `tracked_paths()` / `staged_paths()` decode `git ... -z` output with
+    `surrogateescape`, so any non-UTF-8 byte in a real filename arrives as a lone
+    surrogate — `b"docs/caf\\xe9.pyc "` becomes `'docs/caf\\udce9.pyc '`. `_name_key`
+    now looks at every character of every segment (`.isspace()`), so this is the
+    new code's own risk, and a raise here is a traceback on the commit path —
+    which is precisely how `--no-verify` gets used and the guard stops existing.
+    """
+    for raw in (b"docs/caf\xe9.pyc ", b"\xff\xfe.pyc", b"docs/\xc3\x28bad.pyc",
+                b"docs/caf\xe9.md", b"pkg/__pycache__\xe9/m.dat"):
+        rel = raw.decode("utf-8", "surrogateescape")
+        try:
+            verdict = address_guard.is_build_artefact(rel)
+        except Exception as exc:                      # noqa: BLE001 - the point
+            pytest.fail(f"is_build_artefact({raw!r}) raised {type(exc).__name__}: {exc}")
+        assert verdict is True or verdict is False
+    # and the surrogate case still refuses: the byte is mid-segment, the suffix is intact
+    assert address_guard.is_build_artefact(b"docs/caf\xe9.pyc ".decode("utf-8", "surrogateescape"))
+    # a non-artefact with a surrogate is still not refused
+    assert not address_guard.is_build_artefact(b"docs/caf\xe9.md".decode("utf-8", "surrogateescape"))
+
+
 def test_a_trailing_byte_name_does_not_make_the_tracked_scan_silent(tmp_path):
     """Both gates over a real index entry, without a hook in the way.
 

@@ -33,14 +33,16 @@ task: t_ecc3f190
 kind: Verified
 order: 1
 
-- `scripts/tests/test_address_guard.py`: **5 new functions / 26 collected cases**
-  (48 → 74) — 22 parametrised refusal cases (the reachable spellings, the NUL
+- `scripts/tests/test_address_guard.py`: **6 new functions / 27 collected cases**
+  (48 → 75) — 22 parametrised refusal cases (the reachable spellings, the NUL
   case, mid-name controls like `docs/ev il.pyc` which must **still** be refused,
   and the `README.`/`Makefile.` negatives that must **not** become newly
   blocked); the asymmetry test that pins normalisation on the refusal only; the
   raw-path verdict test; a live-population guard that re-measures the tracked
-  tree on every run so a future `docs/notes.` trips CI rather than a commit; and
-  a two-gate test over a real index entry.
+  tree on every run so a future `docs/notes.` trips CI rather than a commit; a
+  crash-safety case for the new per-character trim over `surrogateescape`-decoded
+  paths (a raise there is a traceback on the commit path, which is how
+  `--no-verify` gets used); and a two-gate test over a real index entry.
 - `hscc_daemon/tests/test_precommit_address_hook.py`: **1 new case** (19 → 20) —
   the card's ASK 2 at the git level: runtime `py_compile` output written to
   `evil.pyc `, a premise assertion on the **raw** `git ls-files -z` bytes (the
