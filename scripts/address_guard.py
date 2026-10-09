@@ -41,12 +41,39 @@ from pathlib import Path
 LAN_PLACEHOLDER = "10.0.0.x"
 TAILNET_PLACEHOLDER = "100.64.0.1"
 
+# The boundary is an ANTI-TRUNCATION guard, not a delimiter requirement.
+#
+# It used to be `\b ... \b`, which requires the address to sit between two
+# NON-WORD characters — i.e. it assumes an address is written the way prose
+# writes it. Measured (t_1b7b3166, py3.11.16 + py3.13.12, 26x26 delimiter
+# cross-product) that misses every occurrence touching a word character on
+# EITHER side, and `\w` is Unicode, so the blind class was not just a
+# `LABEL_<addr>` identifier token but also ordinary CJK prose with no spacing
+# (`服务器<addr>`, `<addr>的配置`), plus the byte-adjacency inside a compiled blob.
+# 315 of 676 matrix cells missed. (No real address is spelled out anywhere in this
+# file, including here and including adjacent to a label — the widened boundary
+# below now flags that shape in its own source, which is the correct outcome for a
+# gate whose first test subject is its own repo.)
+#
+# What the guard actually needs to reject is an address that is a FRAGMENT of a
+# longer digit run — a digit glued on either side means the token is not a dotted
+# quad at all, and flagging those would make the tool unusable. A word character
+# on either side is not that: it is a label, and the address in it is still a real
+# address. So the boundary is now digit-exclusion on both sides, which drops the
+# miss set from 315 cells to exactly the digit row and column (51), while keeping
+# `10.0.0.x`, `100.64.0.1` and the whole sanctioned `100.64.0.0/24` fixture block
+# accepted — including when they too are adjacent to a word char.
+#
+# `[0-9]` and not `\d`: in text mode `\d` is Unicode-aware, and these octets are
+# ASCII. The explicit class makes the pattern byte-for-byte identical whether it
+# is applied to str or to bytes (the redactor ships this `.pattern` over a
+# child-process protocol and re-compiles it on the far side).
 FORBIDDEN = re.compile(
-    r"\b(?:"
+    r"(?<![0-9])(?:"
     r"100\.(?:6[5-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}"  # CGNAT above 100.64
     r"|100\.64\.(?!0\.)\d{1,3}\.\d{1,3}"                          # 100.64.x, x != 0
     r"|192\.168\.88\.\d{1,3}"                                      # the live LAN
-    r")\b"
+    r")(?![0-9])"
 )
 
 # Binary/vendored paths that would only produce noise.
@@ -63,22 +90,29 @@ SKIP_SUFFIXES = (".png", ".jpg", ".jpeg", ".pdf", ".ico", ".zip", ".gz", ".xcuse
 # rewrite). `.gitignore` cannot help once the blob is tracked: a fresh clone and
 # a CI checkout get what was committed.
 #
-# Extract-and-scan is not merely slower and noisier than this -- for the exact
-# blob class in question it is measurably BLIND. A real `py_compile` output of
-# source carrying a real-shaped address has that address visible to a naive
-# `192\.168\.88\.\d{1,3}` over the decoded bytes, and INVISIBLE to FORBIDDEN:
-# FORBIDDEN's `\b` boundaries assume a delimited (text-shaped) occurrence, and
-# in a marshal'd code object the byte immediately AFTER the string constant is
-# the first char of the next interned name -- a word character -- so the
-# trailing `\b` fails. Pinned by
-# test_a_genuine_compiled_pyc_defeats_the_text_detector_so_refusal_is_required;
-# the refusal never reads the bytes, so it cannot be defeated that way.
+# Extract-and-scan was declined for this class, and t_3e6d3db7's stated reason was
+# that FORBIDDEN was measurably BLIND to a compiled blob (`\b` assumed a delimited
+# occurrence; marshal writes no delimiter after a string constant, so the next
+# interned name's first char -- a word char -- broke the trailing boundary).
+# t_1b7b3166 MEASURED that premise again after replacing `\b` with digit-exclusion
+# and it is NO LONGER TRUE: 7 marshal framings of a genuine `py_compile` output are
+# now all seen, in text, bytes and latin-1 form. The refusal is kept, on the two
+# blind spots that ARE irreducible and that no boundary change can reach:
 #
-# It would also have no stopping rule -- a `.pyc` is a container, but so are
-# `.zip`, `.gz`, `.jar` and PDFs with embedded fonts -- and every layer is code
-# paid for on every commit in the repo, which is the thing that gets
-# `--no-verify`'d. Full reasoning + measurements:
-# docs/audits/address-guard-binary-policy-t_3e6d3db7.md
+#   * a DEFLATE-compressed container member (`.whl`/`.zip`/`.jar`) does not contain
+#     the address bytes at all -- pinned by
+#     test_a_deflated_container_member_is_unreachable_at_any_boundary, whose stored
+#     control shows readability is a property of the format, not of the pattern;
+#   * a NUL-bearing blob with an unlisted extension is never decoded at all --
+#     pinned by test_the_nul_gate_not_the_pattern_is_now_the_blind_layer, which now
+#     demonstrates the pattern CAN match those bytes, so the gate owns that silence.
+#
+# Either way the refusal never reads the bytes, so it cannot be defeated by framing.
+# The stopping-rule argument stands untouched -- a `.pyc` is a container, but so are
+# `.zip`, `.gz`, `.jar` and PDFs with embedded fonts, and every layer is code paid
+# for on every commit in the repo, which is the thing that gets `--no-verify`'d.
+# Full reasoning + measurements: docs/audits/address-guard-binary-policy-t_3e6d3db7.md
+# and docs/audits/address-guard-boundary-t_1b7b3166.md
 BUILD_ARTEFACT_SUFFIXES = (
     ".pyc", ".pyo", ".pyd", ".o", ".a", ".so", ".dylib", ".dll",
     ".class", ".jar", ".egg", ".whl", ".pyz",
@@ -86,10 +120,14 @@ BUILD_ARTEFACT_SUFFIXES = (
 BUILD_ARTEFACT_PATH_SEGMENTS = ("__pycache__",)
 
 # The escape hatch for a binary that genuinely belongs in this repo. It is
-# deliberately WEAKER than it looks, and the reason is this card's own §1b
-# finding (docs/audits/address-guard-binary-policy-t_3e6d3db7.md): the text scan
-# is BLIND to a compiled blob, so a hatch that could waive the refusal of a
-# compiled artefact would waive detection with it. Hence two tiers:
+# deliberately WEAKER than it looks. t_3e6d3db7's §1b reason was "the text scan is
+# BLIND to a compiled blob, so a hatch that waived a compiled refusal would waive
+# detection with it"; t_1b7b3166 re-measured that and the compiled blob is now READABLE
+# (see the note above BUILD_ARTEFACT_SUFFIXES). The tier survives on the blindness that
+# IS irreducible -- a deflated container member has no bytes to scan, and whether any
+# given blob is readable depends on the container format and on whatever interpreter
+# emitted it, neither of which a reviewer controlling this list can see. A hatch whose
+# safety depends on bytes a foreign build produced is not a control. Hence two tiers:
 #
 #   * a path whose SUFFIX is in BUILD_ARTEFACT_SUFFIXES is refused no matter what
 #     this list says -- a compiled artefact is never waivable, so widening the
@@ -97,7 +135,7 @@ BUILD_ARTEFACT_PATH_SEGMENTS = ("__pycache__",)
 #   * everything else the refusal covers (a `__pycache__/` segment, a path with an
 #     unknown extension that is NUL-bearing) may be waived, and such a path is
 #     then decoded and text-scanned even when it carries NUL bytes -- it stays
-#     open to the one detector that works on non-compiled bytes.
+#     open to the detector rather than being skipped unread.
 #
 # Consequence to weigh before widening: a prebuilt `.so` can never be tracked
 # here. Today's tracked binary population is two `.png` files, so that costs
@@ -134,8 +172,12 @@ def is_build_artefact(rel):
     docs/audits/address-guard-binary-policy-t_3e6d3db7.md.
 
     The suffix tier runs FIRST and ignores ``ALLOWED_BINARY_PATHS`` on purpose
-    (round-1 review of this card): the text scan is blind to a compiled blob, so
-    if the hatch could waive a `.pyc`/`.so` refusal it would waive detection too,
+    (round-1 review of t_3e6d3db7, re-measured by t_1b7b3166): a compiled blob is
+    now READABLE by the pattern, so this tier is no longer justified by scanner
+    blindness -- it holds because readability depends on the container format and
+    on whichever interpreter emitted the blob, neither visible to the reviewer who
+    edits the hatch. If the hatch could waive a `.pyc`/`.so` refusal, a leak could
+    still ride through in a deflated container member that no pattern can read,
     and the guarantee "widening the hatch can never hide a leak" would be false.
     Only the segment tier is waivable.
     """

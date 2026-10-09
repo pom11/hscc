@@ -272,11 +272,18 @@ def test_hook_and_tracked_agree_on_a_tracked_build_artefact(repo):
 def test_a_genuinely_compiled_pyc_is_blocked_by_the_hook(repo, tmp_path):
     """End-to-end with REAL compiler output, not a hand-built blob.
 
-    The orchestrator's probe (2026-10-09) showed a genuinely compiled `.pyc` of
-    leaking source is invisible even to the shipping FORBIDDEN pattern once
-    decoded as text — in marshal's framing the byte after the string constant is
-    a word char, so the pattern's trailing `\\b` fails. The hook's refusal never
-    looks at the bytes, so it is the only local control that catches this blob.
+    The orchestrator's probe (2026-10-09, t_3e6d3db7) showed a genuinely compiled
+    `.pyc` of leaking source was invisible even to the shipping FORBIDDEN pattern once
+    decoded as text — in marshal's framing the byte after the string constant is a
+    word char, so the pattern's trailing `\\b` failed — which made the hook's
+    never-looks-at-bytes refusal the ONLY local control for that blob.
+
+    t_1b7b3166 replaced that `\\b` boundary with digit-exclusion and re-measured: the
+    compiled blob is now visible to the pattern, so the hook is no longer the *only*
+    control for this exact blob. The requirement is unchanged — a real compiled `.pyc`
+    must still be refused at commit time — and the refusal remains the control that
+    does not depend on container format or emitting interpreter. If the first
+    assertion below ever stops holding, the refusal still does the job.
     """
     # Compile real source that carries a real-shaped address (assembled at
     # runtime; the repo's own guard scans this file).
