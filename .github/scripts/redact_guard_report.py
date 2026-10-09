@@ -16,11 +16,12 @@ pattern. Still one regex in the repo — this file never carries a copy of it.
 
 Reads the report on stdin, writes the redacted report on stdout. Fails closed.
 
-TRUST BOUNDARY (review round 3, t_9a4b7687) — read this before adding a layer:
-**this process does not execute the guard's module code.** It asks a CHILD process
-to import the guard and hand the pattern back over a one-line protocol on a pipe.
-That is the whole design decision, and rounds 1-2 are the reason it is a process
-boundary rather than another filter:
+TRUST BOUNDARY (review round 3, t_9a4b7687; extended by round 4, t_38fd345f) —
+read this before adding a layer: **this process does not execute the guard's
+module code.** It asks a CHILD process to execute the exact source bytes this
+process read and hashed, and to hand the pattern back over a one-line protocol on
+a pipe. That is the whole design decision, and rounds 1-2 are the reason it is a
+process boundary rather than another filter:
 
   * round 1 — the load-failure path interpolated ``str(exc)``, and the import let
     Python's warning renderer print the guard's SOURCE LINE. Fixed by making every
@@ -56,20 +57,64 @@ against a fixed charset) and **never echoes a byte read from the child**. Pickle
 deliberately not used: unpickling guard-derived bytes would execute guard code in
 this process, i.e. reintroduce the thing being fixed.
 
+LANDING ON THE PIPE IS ITSELF AN AUTHORSHIP OPPORTUNITY (review round 4, D0), so the
+pipe is inert only in the printing sense, never in the authoring sense. A guard
+module body runs inside the child and can therefore write a well-formed verdict
+line ITSELF and ``os._exit(0)`` before the child's own emit: the last-emit guarantee
+the protocol quietly assumes is gone, and the parent is left holding exactly one
+well-formed verdict that the guard authored. So the verdict is no longer trusted on
+FORM alone. This process derives the pattern a second time, independently, from the
+guard's SOURCE TEXT with ``ast`` (zero execution: the module-level
+``FORBIDDEN = re.compile(<literal>)``, with node-shape gates so only a single
+string/int ``ast.Constant`` is accepted) and the child's verdict must AGREE with it
+by compiled equality — ``.pattern`` and ``.flags`` of two ``re`` objects, not argv
+tuples. Any deviation fails closed: source that cannot be parsed, no module-level
+literal, a non-literal argument (``FORBIDDEN = _m.FORBIDDEN``, an f-string, a
+concatenation), or a verdict that disagrees. What the redactor ultimately masks with
+is the SOURCE-DERIVED pattern; the child's line is an attestation of what it
+executed, and an attestation that does not match is a failure, not a fallback.
+
+THE CHILD EXECUTES THE SOURCE THIS PROCESS READ, NOT A MODULE IT LOOKED UP (review
+round 4, D1). The child used to ``importlib.util.spec_from_file_location`` the guard,
+which means ``SourceFileLoader``, which means the cache directory
+``scripts/__pycache__/`` — and an unchecked-hash ``.pyc`` (PEP 552; the official
+``compileall --invalidation-mode unchecked-hash`` artifact) is trusted WITHOUT
+reading the source at all, so it beats a NEWER ``.py``. That handed the child a
+different ``FORBIDDEN`` from the one the step's own ``python3 scripts/address_guard.py``
+executed (the main module never consults a cache), i.e. detection stayed honest
+while redaction used the attacker's pattern — and a committed ``.pyc`` is invisible
+to the pre-commit hook and the pytest gate alike, because ``scan_blob`` skips any
+NUL-containing file. There is now no import on that path at all: the parent reads the
+guard's bytes and passes their sha256 to the child as an argument; the child
+re-reads the file itself, refuses to emit a verdict unless its bytes hash to the
+pinned digest, and ``compile()``\\ s what it read. ``compile()`` of a byte string
+neither consults nor writes a cache, so the cache directory is not merely
+invalidated, it is not on the path. ``sys.dont_write_bytecode`` covers the write
+side; on its own it never did anything about the read side.
+
 OUT OF SCOPE, named so it is not re-litigated as a leak: a guard whose ``FORBIDDEN``
 has been *weakened* (narrowed, or replaced by one matching nothing) still redacts
 "correctly" and this job still passes. That is a guard-INTEGRITY attack, not a
 publish channel — the value never leaves the process and nothing gets printed.
-Detection correctness is pinned by the parent's probe battery and
+THE SAME CARVE-OUT COVERS THE ROUND-4 RESIDUAL, in these words: a compromised
+contributor can keep the source literal strong and make the CLI *report* values the
+literal does not match (a detection path that diverges from the one regex, e.g.
+through a committed ``__pycache__`` the redactor no longer reads, or a ``scan_blob``
+blind spot). That is guard-INTEGRITY territory too, not a publish channel: the
+check can only flag what its one regex detects, and the report is attacker-authored
+bytes which the redactor passes through (minus whatever the source literal does
+match). Detection correctness is pinned by the parent's probe battery and
 ``scripts/tests/test_address_guard.py``; this file's guarantee is narrower and is
 the one that matters for a public log: **a real address never reaches the log, on
-any path, including the failure paths.**
+any path, including the failure paths — and the pattern it masks with is the one in
+the guard's source text, never one the child (or a cache artifact) authored.**
 """
 
 from __future__ import annotations
 
 import ast
 import base64
+import hashlib
 import os
 import re
 import selectors
@@ -77,6 +122,7 @@ import signal
 import subprocess
 import sys
 import time
+import warnings
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -84,7 +130,19 @@ GUARD = REPO / "scripts" / "address_guard.py"
 
 # Fixed diagnostics only — nothing below is derived from the guard's content.
 MSG_CANNOT_LOAD = "redact_guard_report: CANNOT LOAD PATTERN"
+# A DIFFERENT failure, so a different fixed sentence: the child answered the
+# protocol correctly but its verdict is not the pattern the guard's SOURCE TEXT
+# says (review round 4 D0/D1). Blaming "cannot load" here would send the reader
+# to the child, when the mismatch is the whole point — same lesson as the
+# step's rc=2-before-redactor ordering.
+MSG_DISAGREEMENT = "redact_guard_report: PATTERN DISAGREEMENT — child verdict is not the guard source's pattern"
 MSG_UNEXPECTED = "redact_guard_report: UNEXPECTED ERROR"
+# Third failure class: the source is fine and the child agrees with it, but an
+# unchecked-hash pyc sits on the guard's cache name. The CURRENT child cannot be
+# fooled by it (compile() never consults a cache) — we refuse anyway rather than
+# depend on every future reader being loader-free. Fixed string, no path: the
+# reader can find the cache dir from the guard path the step already names.
+MSG_CACHE_SHADOWED = "redact_guard_report: CACHE SHADOW — unchecked-hash pyc on the guard's cache name"
 MSG_REFUSING = "redact_guard_report: refusing to echo unredacted output."
 # What is written where an address was. A module constant so the shape is stated
 # once (tests assert on it) and nothing assembles a value-shaped string by accident.
@@ -99,6 +157,10 @@ REAP_TIMEOUT_S = 5
 # stop reading, close the pipe and kill the group. Bounds memory as well as time.
 MAX_PIPE_BYTES = 64 * 1024
 MAX_PATTERN_CHARS = 4096
+# Cap what we ever hand to the child as the guard's source. The shipped guard is
+# ~10 KB; anything past a megabyte is not this file, and the cap also bounds the
+# write side of the pipe (a child that never reads cannot be waited out forever).
+MAX_SOURCE_BYTES = 1024 * 1024
 # Exception NAMES (never messages) may cross the process boundary. A real address
 # is not expressible in this charset: no digits, no dots.
 TYPE_NAME = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
@@ -106,10 +168,11 @@ TYPE_NAME = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
 MAX_FLAGS = 0x1FF
 
 # Runs in the child, which has no descriptor that can reach the job log, so this is
-# all it does: emit the pattern, or emit an exception TYPE and nothing else.
-# ``-W ignore`` matters on the child's side too — a CI checkout has no __pycache__,
-# so the guard is recompiled every run and an invalid-escape SyntaxWarning would
-# otherwise render, and its renderer prints the source line.
+# all it does: read the source bytes the parent is holding, prove they are the ones
+# the parent pinned, execute them WITHOUT the import system, and emit the pattern —
+# or emit an exception TYPE and nothing else.
+# ``-W ignore`` matters on the child's side too — the exec'd source may contain an
+# invalid-escape SyntaxWarning whose renderer prints the source line.
 CHILD_SOURCE = r"""
 import sys
 
@@ -128,20 +191,42 @@ import sys
 # Sanitising here closes the same vector on every version and is pinnable.
 sys.path = [p for p in sys.path if p not in ("", ".")]
 
-import base64, importlib.util, re
+import base64, hashlib, re
 
 
 def emit(kind, payload=""):
     sys.stdout.write("%s\t%s\n" % (kind, payload))
     sys.stdout.flush()
 
+
 try:
-    spec = importlib.util.spec_from_file_location("address_guard_extract", sys.argv[1])
-    if spec is None or spec.loader is None:
-        raise RuntimeError("guard module cannot be located")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    pattern = module.FORBIDDEN
+    # The guard path is argv[1]; argv[2] is the sha256 of the EXACT bytes the
+    # parent parsed into its source-derived pattern. We read the file ourselves
+    # and refuse to speak for bytes we cannot vouch for: a digest mismatch
+    # raises BEFORE any OK can be emitted, so the parent only ever sees ERR
+    # (type NAME — the message never crosses) and fails closed. That is how the
+    # child proves it executed the source the parent verified; a file swapped
+    # between the parent's read and ours lands here, not in a forged OK.
+    with open(sys.argv[1], "rb") as fh:
+        source = fh.read()
+    if hashlib.sha256(source).hexdigest() != sys.argv[2]:
+        raise RuntimeError("source bytes do not match the pinned digest")
+    # compile() of a byte string neither CONSULTS nor writes __pycache__: the
+    # read side of the import cache is where a committed unchecked-hash .pyc
+    # (PEP 552) used to shadow this file (review round 4, D1). There is no
+    # import machinery on this path at all — spec_from_file_location/
+    # SourceFileLoader are gone — so the cache dir is not invalidated, it is
+    # simply not on the path. sys.dont_write_bytecode would only have covered
+    # the write side.
+    namespace = {
+        "__name__": "address_guard_extract",
+        "__file__": sys.argv[1],
+        "__package__": None,
+        "__loader__": None,
+        "__spec__": None,
+    }
+    exec(compile(source, "address_guard_source", "exec"), namespace)
+    pattern = namespace.get("FORBIDDEN")
     if not isinstance(pattern, re.Pattern):
         raise TypeError("FORBIDDEN is not a compiled regex")
     blob = pattern.pattern.encode("utf-8")
@@ -173,6 +258,192 @@ class PatternUnavailable(Exception):
         self.type_name = type_name if type_name and TYPE_NAME.match(type_name) else None
 
 
+class PatternDisagreement(Exception):
+    """The child's verdict is not the pattern the guard's SOURCE TEXT carries.
+
+    Round 4's answer to "the protocol validates FORM, never AUTHORSHIP": a verdict
+    that parses perfectly and still did not come from the source the parent read
+    (a forged ``OK`` from the guard body, or a poisoned cache artifact) lands here.
+    Deliberately carries NOTHING — no child bytes, no pattern text, no names —
+    because there is no safe thing to say about a verdict we just refused.
+    """
+
+    def __init__(self):
+        super().__init__("child verdict disagrees with the guard source")
+
+
+class PatternCacheShadowed(Exception):
+    """A committed unchecked-hash ``.pyc`` shadows the guard's cache name.
+
+    The child no longer CONSULTS the cache (it ``compile()``\\ s the bytes the
+    parent passes, and ``compile()`` of a byte string neither reads nor writes a
+    cache), so such an artifact is inert on the current path — but PEP 552
+    unchecked-hash is precisely the format whose whole purpose is to be trusted
+    without reading the source, and a committed one is invisible to the guard's
+    own scanners (NUL bytes ⇒ binary ⇒ skipped). We refuse to redact at all
+    rather than depend on every present and future reader being loader-free.
+    Deliberately carries nothing: a path here is our own plumbing, and the log
+    gains nothing from it.
+    """
+
+    def __init__(self):
+        super().__init__("unchecked-hash pyc shadows the guard")
+
+
+def _read_guard_source():
+    """The shipped guard's bytes — read by THIS process, executed by no code here.
+
+    These exact bytes are what the parent parses with ``ast`` and what the child
+    is handed (digest-pinned) to execute. Reading them here rather than letting
+    the child open the path is the point: the parent verifies the same bytes the
+    child runs, and the child proves it by refusing to emit without a match.
+    """
+    try:
+        blob = GUARD.read_bytes()
+    except OSError as exc:  # missing/broken checkout: the same rc=3 as before
+        raise PatternUnavailable(type(exc).__name__) from None
+    if len(blob) > MAX_SOURCE_BYTES:
+        raise PatternUnavailable()
+    return blob
+
+
+def _refuse_if_cache_shadows():
+    """Refuse to redact while a committed unchecked-hash pyc shadows the guard.
+
+    The child no longer consults ``__pycache__`` at all (compile() of bytes), so
+    such an artifact is already inert FOR THE CHILD — but it is exactly the thing
+    the round-4 probe planted (PEP 552 ``compileall --invalidation-mode
+    unchecked-hash``), it is invisible to the guard's own scanners (``scan_blob``
+    skips NUL-containing files), and any future path that DOES import the guard
+    by file location would honour it without reading the source. So we refuse
+    outright rather than rely on every future reader being loader-free.
+
+    Header layout (PEP 552): magic(4) | flags(4) | ... ; ``flags & 0b11``:
+    0b00 timestamp-based, 0b01 unchecked-hash (loader trusts it WITHOUT reading
+    the source — the dangerous class), 0b11 checked-hash. A timestamp/checked-
+    hash artifact written by a normal local test run (flags 0b00/0b11) is inert
+    or self-invalidating, and must NOT fail the job — dev machines legitimately
+    carry pytest-generated ``scripts/__pycache__`` (measured: scripts/tests
+    imports the guard bare, which writes one on every suite run).
+    """
+    cache_dir = GUARD.parent / "__pycache__"
+    try:
+        names = sorted(p.name for p in cache_dir.glob("address_guard.*.pyc"))
+    except OSError:
+        return  # no cache dir (the CI case): nothing to refuse
+    for name in names:
+        try:
+            with open(cache_dir / name, "rb") as fh:
+                header = fh.read(8)
+        except OSError:
+            continue
+        if len(header) < 8:
+            continue
+        # flags field: little-endian uint32 at offset 4 (same on every CPython
+        # that writes PEP 552 headers; struct keeps it one expression).
+        flags = header[4] | (header[5] << 8) | (header[6] << 16) | (header[7] << 24)
+        if (flags & 0b11) == 0b01:
+            raise PatternCacheShadowed()
+
+
+def _extract_source_pattern(blob):
+    """The FORBIDDEN pattern as the guard's SOURCE TEXT states it — zero execution.
+
+    Only ONE shape is accepted: a module-level ``FORBIDDEN = re.compile(<str
+    literal>)`` or ``FORBIDDEN = re.compile(<str literal>, <int literal>)``
+    (also as an annotated assignment, since exec binds those too). Adjacent
+    literals fold into ONE ``ast.Constant`` at parse time — that is how the
+    shipped guard's multi-line pattern passes; ``flags`` must be an INT literal
+    or absent (``re.IGNORECASE`` as a name is a deviation: the file must state
+    its pattern as data, and adding flags means a literal number).
+    The LAST module-level binding wins, mirroring what exec ends up binding.
+    EVERY deviation fails closed: unparsable source, no module-level literal,
+    a non-literal argument (``_m.FORBIDDEN``, an f-string, a concat, a name, a
+    call, an attribute — any of which lets a stub smuggle whatever pattern it
+    likes), a keyword argument, three arguments. The gates are NODE-SHAPE gates
+    (``ast.Constant``), not ``ast.literal_eval``: what an evaluator agrees to
+    compute is version-dependent (measured: it refuses a str-concat BinOp but
+    FOLDS a numeric one, so a flags expression like 2-0 would pass an
+    evaluator check), and on an f-string it RAISES — a naive evaluator-based
+    check turns that raise into a traceback in the log instead of a clean rc=3.
+
+    Returns a COMPILED pattern. Agreement with the child is later checked on the
+    compiled objects (``.pattern`` / ``.flags``), never on the (text, flags)
+    tuple the AST saw: a bare ``re.compile(text)`` adds ``re.UNICODE`` (32) at
+    compile time, so the AST tuple is ``flags=0`` while the executed object is
+    ``flags=32`` on the SHIPPED guard (measured, both interpreters) — a
+    tuple-compare implementation fails on the repo's own current state.
+    """
+    with warnings.catch_warnings():
+        # An invalid-escape SyntaxWarning can be raised while parsing untrusted
+        # source on 3.12+, and the warning renderer prints the source LINE. The
+        # parent's diagnostics are fixed strings; silence the renderer here
+        # (round 1's lesson, applied to this process for the first time).
+        warnings.simplefilter("ignore")
+        try:
+            tree = ast.parse(blob)
+        except Exception:  # noqa: BLE001 - SyntaxError/ValueError on NULs etc
+            raise PatternUnavailable() from None
+
+    last = None
+    for node in tree.body:
+        target = None
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "FORBIDDEN" for t in node.targets):
+            target = node.value
+        elif (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+              and node.target.id == "FORBIDDEN" and node.value is not None):
+            target = node.value
+        if target is not None:
+            last = target
+    if last is None:
+        raise PatternUnavailable()
+
+    call = last
+    if not (isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "compile"
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "re"):
+        raise PatternUnavailable()
+    if len(call.args) == 1 and not call.keywords:
+        text_node, flags_node = call.args[0], None
+    elif len(call.args) == 2 and not call.keywords:
+        text_node, flags_node = call.args
+    else:
+        raise PatternUnavailable()
+    # NODE-SHAPE gate, not an evaluator: what the source states must be ONE
+    # literal datum, not something an evaluator agrees to compute. Which nodes
+    # ``ast.literal_eval`` accepts is a moving target across versions (measured
+    # here: it refuses a str-concat BinOp with ValueError but FOLDS a numeric
+    # one, so a flags expression like 2-0 would pass an evaluator check and is
+    # refused here). An f-string is a JoinedStr, a concat a BinOp, an
+    # attribute-access an Attribute, a bare name a Name: all fail on shape,
+    # never by depending on what an evaluator happens to raise or return.
+    if not isinstance(text_node, ast.Constant) or not isinstance(text_node.value, str):
+        raise PatternUnavailable()
+    text = text_node.value
+    if flags_node is None:
+        flags = 0
+    elif (isinstance(flags_node, ast.Constant)
+          and isinstance(flags_node.value, int)
+          and not isinstance(flags_node.value, bool)):
+        flags = flags_node.value
+    else:
+        raise PatternUnavailable()
+    if not text or len(text) > MAX_PATTERN_CHARS:
+        raise PatternUnavailable()
+    if not 0 <= flags <= MAX_FLAGS:
+        raise PatternUnavailable()
+    try:
+        pattern = re.compile(text, flags)
+    except Exception:  # noqa: BLE001 - a source pattern that will not compile is unusable
+        raise PatternUnavailable() from None
+    if not isinstance(pattern, re.Pattern):
+        raise PatternUnavailable("TypeError")
+    return pattern
+
+
 def _kill_group(proc, pgid=None):
     """Take the child and anything it spawned down; never wait on them forever.
 
@@ -202,8 +473,13 @@ def _kill_group(proc, pgid=None):
         pass
 
 
-def _child_pipe():
-    """Import the guard in a child and return the raw bytes it wrote on stdout.
+def _child_pipe(source_digest):
+    """Execute the guard's verified source bytes in a child; return its stdout.
+
+    ``source_digest`` is the sha256 of the exact bytes the parent parsed into its
+    source-derived pattern. The child re-reads the file, hashes what it read and
+    refuses to emit any verdict unless the digests match — the child's line is an
+    attestation of executing THOSE bytes, not a lookup of its own choosing.
 
     Bounded on every path. The read is a ``select`` loop with one overall deadline
     and a byte cap — never a blocking ``read()`` — so neither a guard that sleeps
@@ -220,12 +496,13 @@ def _child_pipe():
     proc = subprocess.Popen(
         # -E: no PYTHONPATH / PYTHONSTARTUP hijacking the child.
         # -s: no user site-packages, so a module installed in the runner's user
-        #     dir cannot shadow what the guard imports.
+        #     dir cannot shadow what the child imports.
         # (cwd shadowing — sys.path[0] under `-c` — is closed inside CHILD_SOURCE,
         #  not by the -P flag, so it works on the 3.10 floor too; see there.)
         # -W ignore: no warning may render the guard's source line inside the child.
         # bufsize=0: an unbuffered handle, so os.read below is the only reader.
-        [sys.executable, "-E", "-s", "-W", "ignore", "-c", CHILD_SOURCE, str(GUARD)],
+        [sys.executable, "-E", "-s", "-W", "ignore", "-c", CHILD_SOURCE,
+         str(GUARD), source_digest],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -346,23 +623,56 @@ def _parse_verdict(raw):
 
 
 def load_pattern():
-    """The FORBIDDEN pattern from the shipped guard — never a copy of it.
+    """The FORBIDDEN pattern the guard's SOURCE TEXT carries — never a copy of it.
 
-    One child process per invocation, and no guard code in this one. Fails closed
-    (``PatternUnavailable`` -> rc=3) on ANY deviation: the child timed out, exited
-    without exactly one well-formed verdict, sent a payload that is not a base64
-    ``str``, reported flags that are not a bounded int, or a pattern that will not
-    compile.
+    Round 4 made this TWO independent derivations that must agree, because either
+    one alone was a publish channel:
+
+      1. source authority (zero execution, in this process): the module-level
+         ``FORBIDDEN = re.compile(<literal>)`` in the shipped file's bytes,
+         extracted with ``ast``;
+      2. execution attestation (in the child): the pattern the guard's module
+         body actually binds when those same bytes run, digest-pinned to the
+         bytes parsed in (1).
+
+    The verdict returned is the SOURCE-DERIVED pattern, and only after the
+    child's compiled pattern AGREES with it (``.pattern`` and ``.flags`` of two
+    ``re`` objects — never the AST's (text, flags) tuple, which misses the
+    implicit ``re.UNICODE``). Fails closed — rc=3, nothing echoed, nothing
+    printed — on ANY deviation:
+
+      * ``PatternUnavailable``: source unparsable / no module-level literal /
+        non-literal argument (an f-string, a concat, a name, an attribute) / the
+        child timed out, produced no verdict, sent a payload that is not a
+        base64 ``str``, flags not a bounded int, or a pattern that will not
+        compile;
+      * ``PatternDisagreement``: a well-formed verdict that is not the source's
+        pattern — the forged-``OK`` (D0) and poisoned-cache (D1) classes;
+      * ``PatternCacheShadowed``: an unchecked-hash ``.pyc`` on the guard's cache
+        name (defense-in-depth; see the check's own docstring).
     """
+    blob = _read_guard_source()
+    _refuse_if_cache_shadows()
+    source_pattern = _extract_source_pattern(blob)
+    digest = hashlib.sha256(blob).hexdigest()
     try:
-        raw = _child_pipe()
-    except PatternUnavailable:
+        raw = _child_pipe(digest)
+    except (PatternUnavailable, PatternDisagreement, PatternCacheShadowed):
         raise
     except BaseException as exc:  # noqa: BLE001 - OSError starting the child, etc.
         # str(exc) here would be OUR OWN plumbing (it carries only our argv, never
         # the guard's content), but the log does not need it: type name only.
         raise PatternUnavailable(type(exc).__name__) from None
-    return _parse_verdict(raw)
+    child_pattern = _parse_verdict(raw)
+    # COMPILED equality, not argv tuples: ast sees flags=0 on a bare
+    # re.compile(text) while the executed object carries re.UNICODE (32) — a
+    # (text, flags) comparison fails on the repo's own shipped guard (measured,
+    # round 4). PatternDisagreement carries no payload: a verdict we refused has
+    # nothing safe to say about it.
+    if (child_pattern.pattern != source_pattern.pattern
+            or child_pattern.flags != source_pattern.flags):
+        raise PatternDisagreement()
+    return source_pattern
 
 
 def redact(line, pattern):
@@ -385,6 +695,20 @@ MASK = "*" * 3
 def main():
     try:
         pattern = load_pattern()
+    except PatternCacheShadowed:
+        # Distinct sentence on top of the shared baseline: an operator seeing it
+        # must not chase a redactor bug when the tree carries a cache artifact.
+        _emit(MSG_CACHE_SHADOWED)
+        _emit(MSG_CANNOT_LOAD)
+        _emit(MSG_REFUSING)
+        return 3
+    except PatternDisagreement:
+        # The child answered correctly and was still refused. Never quote what it
+        # said — the reason we refused is that we cannot trust its bytes.
+        _emit(MSG_DISAGREEMENT)
+        _emit(MSG_CANNOT_LOAD)
+        _emit(MSG_REFUSING)
+        return 3
     except BaseException as exc:  # noqa: BLE001 - fail closed on ANY escape
         # Fixed text + a VALIDATED type name; never str(exc), never a traceback.
         # The guard's code ran in the child, so there is no guard-derived traceback
