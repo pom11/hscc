@@ -984,9 +984,10 @@ def cmd_install_event_driven() -> None:
     console = _console()
     console.print(theme.make_status_panel(
         "Installing event-driven mode…", status="ok", title="event-driven"))
-    console.print(f"  Config dir:  {HSCC_DIR}")
-    console.print(f"  State dir:   {STATE_DIR}")
-    console.print(f"  Plist dir:   {PLIST_DIR}")
+    # HOME-derived paths — DATA (a bracketed HOME must render literally).
+    console.print(f"  Config dir:  {theme.esc(HSCC_DIR)}")
+    console.print(f"  State dir:   {theme.esc(STATE_DIR)}")
+    console.print(f"  Plist dir:   {theme.esc(PLIST_DIR)}")
 
     # Create launchd dir
     os.makedirs(PLIST_DIR, exist_ok=True)
