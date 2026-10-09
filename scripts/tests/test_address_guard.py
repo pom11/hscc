@@ -236,24 +236,101 @@ def test_legitimate_binary_asset_is_still_accepted():
     assert address_guard.scan_blob("vendor/blob.dat", b"\x00\x01\x02") == []
 
 
-def test_artefact_allowlist_exempts_the_refusal_not_the_scan(monkeypatch):
-    """The escape hatch is narrow: it stops the refusal, never the address scan.
+def test_a_compiled_artefact_suffix_is_never_waivable_by_the_hatch(monkeypatch):
+    """The hatch cannot reach the tier whose bytes the scanner cannot read.
 
-    This is the guarantee that makes widening ALLOWED_BINARY_PATHS safe: an
-    allowlisted binary is decoded utf-8/ignore and scanned LIKE TEXT even though
-    it is full of NUL bytes, so the hatch can only ever say "this path may be
-    tracked", never "this path may be unread".
+    Round-1 review (t_3e6d3db7) found the claim "widening the hatch can never
+    hide a leak" was FALSE while the hatch could waive a `.pyc`: the text scan is
+    blind to a compiled blob (see
+    `test_a_genuine_compiled_pyc_defeats_the_text_detector_so_refusal_is_required`),
+    so waiving the refusal waived detection too. The fix is structural, not
+    wording: the suffix tier in `is_build_artefact` ignores the hatch, so every
+    compiled shape below stays refused from the hatch alone.
     """
-    monkeypatch.setattr(address_guard, "ALLOWED_BINARY_PATHS", frozenset({"native/bundled.so"}))
+    monkeypatch.setattr(address_guard, "ALLOWED_BINARY_PATHS", frozenset(
+        ["native/bundled.so", "pkg/leak.pyc", "pkg/leak.pyo", "native/x.pyd",
+         "build/obj.o", "build/lib.a", "native/x.dylib", "native/x.dll",
+         "java/Thing.class", "dist/pkg-1.0-py3-none-any.whl"]))
+    for rel in address_guard.ALLOWED_BINARY_PATHS:
+        assert address_guard.scan_blob(rel, b"\x00clean\x00") == [
+            f"{rel}:0: build artefact must not be tracked"], (
+            f"{rel} is on the hatch and got through: a compiled artefact the text"
+            " scan cannot read is now tracked and unscanned")
+
+
+def test_a_genuinely_compiled_pyc_on_the_hatch_is_still_refused(
+        monkeypatch, genuine_leaky_pyc):
+    """The exact probe the round-1 review ran, inverted into a requirement.
+
+    Before the two-tier hatch, `scan_blob` returned `[]` here — silent — because
+    the hatch waived the refusal and the text scan was blind to the blob. It must
+    now name the path, and the case is worthless unless the text scan is *still*
+    blind, which the first assertion re-pins from the inside rather than trusting.
+    """
+    monkeypatch.setattr(address_guard, "ALLOWED_BINARY_PATHS", frozenset({"pkg/leak.pyc"}))
+    assert address_guard.find_in_text(
+        genuine_leaky_pyc.decode("utf-8", errors="ignore")) == [], (
+        "FORBIDDEN now sees a compiled blob: the hatch's justification changed,"
+        " re-measure before touching the two-tier rule")
+    got = address_guard.scan_blob("pkg/leak.pyc", genuine_leaky_pyc)
+    assert got == ["pkg/leak.pyc:0: build artefact must not be tracked"], (
+        "the hatch let a compiled artefact through — the blind blob is now tracked"
+        " and unscanned, which is the leak this card exists to prevent")
+
+
+def test_hatch_waives_only_the_segment_refusal_and_still_scans(monkeypatch):
+    """What the hatch *does* buy: a `__pycache__`-segment path is tracked, decoded
+    and text-scanned even though it is full of NUL bytes and would be a skipped
+    asset by extension. "This path may be tracked", never "this path may be unread".
+    """
+    monkeypatch.setattr(address_guard, "ALLOWED_BINARY_PATHS",
+                        frozenset({"vendor/__pycache__/fixture.dat", "docs/reference.pdf"}))
     # clean -> tracked, no verdict
-    assert address_guard.scan_blob("native/bundled.so", b"\x00clean\x00") == []
-    # leaking, NUL-bearing -> the address is still found
+    assert address_guard.scan_blob("vendor/__pycache__/fixture.dat", b"\x00clean\x00") == []
+    # leaking + NUL-bearing -> the address is still found (the scan applies to a
+    # path the hatch has waived, NULs and all)
     leaky = b"\x00\x00host " + REAL_LAN.encode() + b"\x00\x00"
-    assert address_guard.scan_blob("native/bundled.so", leaky) == [
-        f"native/bundled.so:1: {REAL_LAN}"]
-    # and the hatch is exactly as wide as the path that is on it
-    assert address_guard.scan_blob("native/other.so", b"\x00clean\x00") == [
-        "native/other.so:0: build artefact must not be tracked"]
+    assert address_guard.scan_blob("vendor/__pycache__/fixture.dat", leaky) == [
+        f"vendor/__pycache__/fixture.dat:1: {REAL_LAN}"]
+    # and the waiver is exactly as wide as the path on the hatch
+    assert address_guard.scan_blob("vendor/__pycache__/other.dat", b"\x00clean\x00") == [
+        "vendor/__pycache__/other.dat:0: build artefact must not be tracked"]
+
+
+def test_hatch_does_not_bypass_the_skip_suffix_shortcut_silently(monkeypatch):
+    """A hatch entry must not turn a declared asset into an unread, unscanned file.
+
+    Same guarantee, the other hole the review's logic exposes: `SKIP_SUFFIXES` is a
+    second way a path escapes the scan. An allowlisted path is decoded even when its
+    extension is on that list, so a reviewer adding one entry can never — by
+    accident or on purpose — get "tracked AND never read" for a path they listed.
+    """
+    monkeypatch.setattr(address_guard, "ALLOWED_BINARY_PATHS",
+                        frozenset({"docs/reference.pdf"}))
+    leaky = "remount " + REAL_LAN + ":/models\n"
+    assert address_guard.scan_blob("docs/reference.pdf", leaky.encode()) == [
+        f"docs/reference.pdf:1: {REAL_LAN}"]
+    # without the hatch the same path is a declared asset and stays unread
+    assert address_guard.scan_blob("docs/other.pdf", leaky.encode()) == []
+
+
+def test_scan_paths_and_scan_blob_agree_on_a_hatched_path(tmp_path, monkeypatch):
+    """`scan_paths` has its own pre-read skip shortcut; it must honour the hatch.
+
+    The two gates re-implement the same silence rules in two places, which is
+    exactly where the hook and the CI job drift apart. Pin the pair on the one
+    input where they could disagree: an allowlisted path with a skipped extension.
+    """
+    monkeypatch.setattr(address_guard, "ALLOWED_BINARY_PATHS",
+                        frozenset({"docs/reference.pdf"}))
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "reference.pdf").write_text(
+        "remount " + REAL_LAN + ":/models\n", encoding="utf-8")
+    expected = [f"docs/reference.pdf:1: {REAL_LAN}"]
+    assert address_guard.scan_paths(tmp_path, ["docs/reference.pdf"]) == expected
+    assert address_guard.scan_blob(
+        "docs/reference.pdf",
+        (tmp_path / "docs" / "reference.pdf").read_bytes()) == expected
 
 
 def test_scan_paths_refuses_a_tracked_artefact_even_if_unreadable(tmp_path):

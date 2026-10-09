@@ -298,6 +298,39 @@ def test_a_genuinely_compiled_pyc_is_blocked_by_the_hook(repo, tmp_path):
     assert "vendor_pkg/__pycache__/leaky.cpython-313.pyc" in err, err
 
 
+def test_a_genuinely_compiled_pyc_on_a_widened_hatch_is_still_blocked_by_the_hook(repo, tmp_path):
+    """The two-tier hatch, end to end through the real hook.
+
+    Round-1 review of t_3e6d3db7: with a one-tier hatch, a reviewer who widened
+    `ALLOWED_BINARY_PATHS` to cover a `.pyc` would have opened a silent hole —
+    the refusal waived, and the text scan blind to compiled bytes. This runs the
+    widened-hatch guard under a real `git add -f` + `git commit` so the guarantee
+    is proven at the trigger, not only in the unit.
+    """
+    guard = repo / "scripts" / "address_guard.py"
+    src = guard.read_text(encoding="utf-8")
+    assert "ALLOWED_BINARY_PATHS = frozenset()" in src, (
+        "the guard's hatch changed shape; update this test's patch site")
+    src = src.replace("ALLOWED_BINARY_PATHS = frozenset()",
+                      'ALLOWED_BINARY_PATHS = frozenset({"vendor/leak.pyc"})', 1)
+    guard.write_text(src, encoding="utf-8")
+    _run(GIT + ["add", "-A"], repo)
+    _run(GIT + ["commit", "-q", "-m", "chore: widen hatch", "--no-verify"], repo)
+
+    src_file = tmp_path / "leaky_source.py"
+    src_file.write_text("NAS = " + repr(REAL_LAN) + "\n", encoding="utf-8")
+    import py_compile
+    py_compile.compile(str(src_file), cfile=str(tmp_path / "leaky.pyc"), doraise=True)
+    (repo / "vendor").mkdir()
+    (repo / "vendor" / "leak.pyc").write_bytes((tmp_path / "leaky.pyc").read_bytes())
+    _run(GIT + ["add", "-f", "-A"], repo)
+    rc, out, err = _run(GIT + ["commit", "-q", "-m", "chore: compiled on hatch"], repo)
+    assert rc != 0, (
+        "a hatch entry must never make a compiled artefact trackable and unscanned"
+        f"\nSTDOUT={out}\nSTDERR={err}")
+    assert "vendor/leak.pyc" in err, err
+
+
 def test_a_legitimate_binary_asset_still_commits(repo):
     """The new rule must not break the binaries that belong here.
 
