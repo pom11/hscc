@@ -11,6 +11,257 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.5.8] - 2026-10-09
+
+### Changed
+- **Published git history was rewritten on 2026-10-09.** Every real LAN address
+  was mapped to the documented `10.0.0.x` placeholder across the 85 commits that
+  carried one — in blob content *and* in commit messages, which `--replace-text`
+  does not touch on its own. `main` was force-pushed and all 73 tags re-SHA'd, so
+  **any clone made before that date is divergent and must be re-cloned.** Verified
+  afterwards: zero occurrences across every reachable object.
+
+### Added
+- **`hscc check --repo <path>` — the commit-time address guard's TRUE posture
+  per checkout.** `core.hooksPath` lives in the COMMON git config and is
+  relative, so the config value alone lies per checkout: measured during the
+  t_ec2c2f95 review, the primary plus every pre-merge worktree reported
+  "armed" while resolving no hook at all. `hscc check --repo <path>` (default:
+  cwd's top-level) now calls `posture()` from the shipped
+  `hscc-bootstrap/install_hooks.py` — same single-implementation rule that
+  governs the detector itself; `hscc_daemon/guard_posture.py` locates and loads
+  that file (repo layout and deployed-plugin layout are siblings, so the
+  lookup works in both) and passes its dict through untouched. `--json` prints
+  the posture verbatim (plain print, never Rich). Exit code is 0 only for
+  `armed`; `unarmed`, `armed-but-absent` (config advertises protection while
+  THIS checkout resolves no runnable hook — the fail-open line the operator
+  asked to see) and `not-a-repo` all exit non-zero for scripts/cron. A missing
+  or unloadable `install_hooks.py` is reported as `guard posture UNVERIFIED`
+  and exits non-zero — fail closed; a status line that cannot see the guard
+  must not advertise that it can.
+- **`scripts/ledger_scrub.py` — the ledger tick now redacts at the source instead
+  of being rejected at the commit.** Follow-up 3 of the commit-time guard audit
+  (`docs/audits/commit-time-address-guard-t_ec2c2f95.md` §7): the guard armed by
+  that card is correct but fires at the *end* of a tick — the capture is already
+  written into `docs/audits/GOAL_LEDGER_*.md`, the `git commit` exits non-zero and
+  prints the offending `file:line`, and the operator's automation is left holding
+  the leak. This puts redaction upstream of that. Interface (fixed — the live
+  `hscc-orch-goal-heartbeat` cron prompt already calls it):
+  `python3 scripts/ledger_scrub.py --stdin` writes the scrubbed text to stdout and
+  the count (`ledger_scrub: N address(es) scrubbed`) to **stderr**, so stdout stays
+  the pure text the tick writes; `python3 scripts/ledger_scrub.py FILE...` scrubs
+  each file in place via `mkstemp` + `fsync` + `os.replace` in the same directory,
+  preserving the file mode. **It imports `FORBIDDEN`, `find_in_text`,
+  `LAN_PLACEHOLDER` and `TAILNET_PLACEHOLDER` from `scripts/address_guard.py` and
+  defines no pattern of its own** — the same rule `.githooks/pre-commit` follows,
+  proven structurally (tokenize the module, drop comments and strings, assert no
+  dotted-quad digit run survives in the code, and that `re.compile` never appears),
+  so the scrubber and both commit gates cannot disagree about what is a leak. The
+  LAN/tailnet discriminator is derived from `TAILNET_PLACEHOLDER` itself, which is
+  also why not even a fragment of an address appears in the source. Mapping is the
+  documented one: live LAN -> `10.0.0.x`, CGNAT outside the sanctioned fixture
+  block -> `100.64.0.1`; the fixture block and both placeholders are outside
+  `FORBIDDEN`, so **a second pass is a byte-for-byte no-op** (idempotency is a hard
+  requirement — the tick re-reads text it already scrubbed, and a clean file is not
+  rewritten at all, so mtime and `git status` do not churn). Fails closed: an
+  unreadable file or a surviving offender exits non-zero and emits nothing rather
+  than handing the tick dirty text to commit; a closed downstream pipe is not an
+  error (`--stdin | head -1` would otherwise exit 120 via Python's shutdown flush
+  and read as a failed scrub under `pipefail`). Stdlib-only, no network.
+- **`.githooks/` + `hscc-bootstrap/install_hooks.py`** — hooks can now ship with
+  the repository. Plain `.git/hooks` is not cloned, so it cannot be the mechanism;
+  the committed `.githooks/pre-commit` plus `core.hooksPath .githooks` is.
+  `install_hooks.py` is a new bootstrap stage (3c) and is idempotent: `verified`
+  with zero writes on re-run, repairs a missing exec bit (git silently ignores a
+  non-executable hook). It arms a checkout **only when both halves — the hook and
+  `scripts/address_guard.py` — exist in that checkout**: `core.hooksPath` lives in
+  the COMMON config and is relative, so writing it from a partial checkout would
+  make every sibling worktree report itself armed while it silently finds no hook
+  (measured live during this card's review; `posture()` / `install_hooks.py
+  --check` reports the truth per checkout: `armed` / `unarmed` / `armed-but-absent`
+  / `not-a-repo`). Reports `skipped` — never a faked success — for a non-checkout
+  runtime dir or an incomplete revision. When complete, the COMMON-config write
+  means every linked worktree — the dispatcher's worker worktrees included, even
+  ones created outside the repo directory — is armed by ONE install. Stdlib-only,
+  one `git diff` plus one `git cat-file --batch`: measured **0.133 s** over the
+  repo's 1070 tracked files (13.3 MB), because a slow leak check gets bypassed
+  with `--no-verify`.
+
+### Fixed
+- **The `hscc project …` / `roadmap` / `report` / `daemon` / `archive` human
+  views no longer crash on a path or name containing `[/bold]`.** Same failure
+  class as t_716cf37c, one subproject over: Rich parses every `str` renderable
+  as *markup*, so a project name, repo path, kanban stamp, version file or
+  daemon stream name carrying an unmatched closing tag raised
+  `rich.errors.MarkupError` mid-render and the command died with a traceback
+  instead of its output. Every interpolated value reaching a
+  `Console.print` / `Table.add_row|add_column` / `panel` / `status_panel` body
+  now passes through the escaper — all 154 flagged sites in the 19 files the
+  audit counted, and the AST gate now walks all 30 modules in
+  `hscc-project/flightdeck/commands/` (9 of them have render calls the
+  estimate never counted; all clean), while the
+  `[ok]`/`[error]`/`[warn]`/`[dim]` styles the
+  renderer builds stay live — DATA escaped, markup left alone.
+  `flightdeck.commands._theme.esc()` is the single source (same contract as
+  `hscc_daemon.cli_theme.esc`, incl. `str()` coercion); `panel()`/`table()`
+  titles are escaped centrally so call sites must not pre-escape them.
+  Also closes a latent variant of the bug that predated this card: the
+  `{escape(x)!r}` idiom (6 sites in `sync.py`/`start.py`) is **not** safe —
+  `repr()` escapes the backslash `escape()` just inserted, so the markup
+  survives and still raises. The safe form when a repr is wanted is
+  `esc(repr(x))`; both shapes are now rejected by the pin's static gate.
+  `--json` untouched (plain `print`), exit codes unchanged, daemon streaming
+  lines stay un-styled.
+  Pinned by `hscc-project/tests/test_markup_escape.py` (25 tests — escaper
+  contract, a `panel`/`table`/`status_panel` × themed/fallback matrix, 10
+  command-level drives, and an AST gate over every render site; **15 of 25
+  fail on the pre-sweep tree**). Audit trail:
+  `docs/audits/rich_markup_escape_t_716cf37c.md` (flightdeck section).
+- **`posture()` mislabeled a fresh clone as the fail-open state.** Found while
+  wiring `check --repo`: `unarmed` was classified `not armed and not runnable`,
+  so a checkout carrying both halves but with `core.hooksPath` unset — every
+  fresh clone before bootstrap, advertising nothing — landed in
+  `armed-but-absent`, the name reserved for "the config advertises protection
+  and this checkout delivers none". Both states exit non-zero, so no existing
+  test caught it, but `armed-but-absent` is exactly the alarm an operator keys
+  cron/scripts on: false alarms there erode the real one. The config is the
+  only thing that arms the guard, so the config alone now decides armedness
+  (`unarmed` / `armed` / `armed-but-absent` / `not-a-repo` are disjoint), and
+  the detail line names the missing key (`core.hooksPath unset`). Pinned by
+  `test_posture_four_states_are_disjoint_and_config_decides_armedness`.
+- **A path, log line, rule id, card title or exception message containing
+  `[/bold]` no longer crashes the `hscc` human view.** Rich parses every `str`
+  renderable as *markup*, so any operator- or filesystem-derived string with an
+  unmatched closing tag raised `rich.errors.MarkupError` mid-render and the
+  command died with a traceback instead of its output (reproduced live on
+  `hscc log`, `hscc triggers`, `hscc check --repo`, `hscc status`,
+  `hscc cluster …`, `hscc kanban stale|blocked`, `hscc verify|stats|
+  throughput|autoscale|escalate`, `hscc autodown …` and the route sweep /
+  chat round-trip renderers). `hscc_daemon.cli_theme.esc()` is the new
+  single-source escape helper (`rich.markup.escape` over DATA, stringifying
+  non-str); every interpolated value reaching a `Console.print` /
+  `Table.add_row` / `Panel` body in those surfaces now passes through it,
+  while the `[ok]`/`[error]`/`[warn]`/`[dim]`/`[label]` styles the renderer
+  itself builds stay live — the fix escapes the DATA, not the markup.
+  `--json` is untouched (plain `print`), exit codes unchanged.
+  Pinned by `hscc_daemon/tests/test_markup_escape.py`: each touched surface
+  renders a `[/bold]`- and `[bold]`-bearing value literally with no
+  MarkupError, intentional styling still emits ANSI on a tty, and the same
+  pin fails with `MarkupError` when run against the pre-fix tree. Audit trail:
+  `docs/audits/rich_markup_escape_t_716cf37c.md`.
+- **`scripts/run_tests.sh` never ran `scripts/tests`, so an `ALL GREEN` stamp said
+  nothing about the address guard.** The runner keeps one pytest process per
+  entry in `DIRS` and resolves each as `"$ROOT/$d/tests"`; `scripts` was not in
+  that list, so the suites for `scripts/address_guard.py` (the commit-time
+  detector), `changelog_fragments.py`, `dep_pr_watcher.py` — and now
+  `ledger_scrub.py` too — were unreachable from the command every card quotes
+  as its green stamp. `scripts` now joins `DIRS`: the isolation property comes
+  from the loop, not from the kind of dir, and the four modules those tests
+  import bare have exactly one holder each in the repo, so the new leg cannot
+  perturb the others. `scripts` is the first non-plugin entry (absent from
+  `install_payload.DEFAULT_PAYLOAD`), and the header says so.
+
+### Security
+- **The address guard now has a server-side backstop.** A local pre-commit hook
+  has gaps that cannot be closed locally: `git commit --no-verify` skips it,
+  `git apply --cached` / `git stash pop` / `format-patch` write blobs without
+  running it, and `core.hooksPath` is local machine state, so a clone that never
+  ran bootstrap has no hook at all. `.github/workflows/address-guard.yml` runs
+  `python3 scripts/address_guard.py --tracked` on every push and PR, evaluating
+  the COMMITTED tree on the runner where none of those bypasses apply. Same
+  module, still one regex.
+- **The job log cannot itself leak the value it is checking for.** The repo is
+  PUBLIC and a job log is public, while the guard's report line carries the
+  matched address.
+  `.github/scripts/redact_guard_report.py` keeps the `file:line` and drops the
+  value, using the guard's OWN pattern — not a line-shape guess, which would
+  silently stop matching on the colon-bearing paths the t_ec2c2f95 probe battery
+  shows are a supported evasion. It fails closed, and the guarantee took three
+  review rounds to state honestly. Rounds 1 and 2 added in-process silencers —
+  fixed-string diagnostics (never `str(exc)`, never a traceback, `except
+  BaseException`), `catch_warnings` + stream redirects, and a
+  `dup`/`dup2`-over-`/dev/null` window over fds 1/2 — and each was bypassed from
+  *inside* the same process: `atexit` handlers and non-daemon threads run after
+  such a window closes, and the window's own `os.dup(1)`/`os.dup(2)` saved
+  descriptors sit live in the fd table for the whole import, so a guard that scans
+  fd 3..63 finds writable copies of the job log (or `dup2`s one back over fd 1).
+  All reproduced on py3.11 and py3.13 with the ADVISORY JOB GREEN WHILE THE
+  ADDRESS REACHED THE PUBLIC LOG. So the fix is structural rather than a fourth
+  layer: **the redactor no longer executes the guard's module code in the process
+  that owns the job log.** It extracts the pattern from a child process whose
+  stdin/stderr are `/dev/null` and whose stdout is a pipe only the parent reads,
+  over a one-line protocol the parent validates strictly (base64 `validate=True`,
+  bounded flags via `ast.literal_eval`, exception names matched against a charset
+  that cannot express an address) and never echoes. No pickle. Every wait on the
+  child is bounded, so a guard that spawns a helper cannot hang the job. The child
+  also sanitises its own `sys.path` first: under `python -c` the current directory
+  is `sys.path[0]`, which in CI is the checkout root, so a committed `base64.py`
+  there could otherwise satisfy the child's own stdlib imports — and a shadow does
+  not have to leak anything to win, since forging a one-address verdict would
+  silently un-redact every other value. (Closed inside the child rather than with
+  the `-P` flag, which needs 3.11 while the repo floor is 3.10.)
+- **Advisory by default; blocking is a repository variable.**
+  `ADDRESS_GUARD_ENFORCE` unset -> a leak is a warning annotation and the job
+  stays green; `=true` -> the job goes red, and requiring the `guard` check in
+  branch protection makes it block. A guard that *cannot run* (rc=2) fails either
+  way, so a broken guard is never a silent pass. The exit code is computed in the
+  step rather than delegated to `continue-on-error`, which would have swallowed
+  rc=2 in advisory mode.
+- **`.github/scripts` is now collected by `scripts/run_tests.sh`.** That dir
+  already existed and was collected by *nothing* — not the runner's `DIRS`, not
+  any workflow step — so its existing tests had never run in the gate, and the
+  new ones would have shared that fate. One leg, ~11 s, 100 tests.
+- 90 tests in `.github/scripts/tests/test_redact_guard_report.py` (100 in the
+  whole `.github/scripts` leg with the pre-existing runtime-deps cases), 57 test
+  functions: the end-to-end
+  job leg (a committed real-shaped LAN/tailnet address -> non-zero with visible
+  `file:line` and no address in the log), placeholders and the sanctioned
+  `100.64.0.0/24` block stay green, colon-bearing paths, idempotent scrub, the
+  one-regex rule, a structural pass over the workflow, the step's decision
+  logic run **verbatim from the YAML** in all four states (advisory leak -> green
+  + warning, enforced leak -> red, guard-cannot-run -> red in both postures,
+  clean -> green), and the fail-closed publish channels (each pinned twice — the
+  redactor alone with no interpreter flags, so the step's own `-W ignore` cannot
+  mask a regression in the redactor); the round-3 deferred-write channels (atexit
+  on stderr/fd1/fd2, a non-daemon thread, an fd-table scan, a `dup2` back over
+  fd 1); pins that the guard's module code never runs in the redactor's own
+  process (a recorded-pid proof plus an AST audit of the parent's imports); and
+  both halves of the verdict-parsing contract — newline-terminated junk dropped
+  and the verdict honoured, unterminated junk merged into the verdict line failing
+  closed. Verified on real Actions: eight runs
+  including a probe branch with `scripts/address_guard.py` deleted, which failed
+  the job in advisory mode as designed. Structural assertions also pin that the
+  job needs no network beyond checkout and carries no write permissions.
+- **The address guard now runs at commit time, not only under pytest.** This is
+  a PUBLIC repo and real operator LAN/tailnet addresses have reached tracked
+  files **twice**; most recently the orchestrator's ledger tick committed a
+  verbatim `mount_nfs` command carrying the real NAS host and subnet, and it
+  reached `origin/main`. `hscc_daemon/tests/test_no_real_addresses_committed.py`
+  detected that leak correctly and still could not stop it, because its only
+  trigger was somebody running the suite — and a docs-only commit never does.
+  The guard was sound; its **trigger point** was wrong. Detection is now factored
+  into one module, `scripts/address_guard.py`, shared by both gates:
+  `.githooks/pre-commit` (the committed hook directory, armed by
+  `core.hooksPath`) scans the **staged tree from the index**, and the pytest gate
+  scans the tracked tree. A blocked commit prints the offending `file:line` plus
+  the documented placeholders (`10.0.0.x` LAN, `100.64.0.1` tailnet). The hook
+  reads staged blobs, never the working tree — the 2026-08-30 audit's pre-push
+  check grepped the worktree, which had already been scrubbed while the committed
+  blob still carried the address.
+
+### Verified
+- Full suite `scripts/run_tests.sh` **ALL GREEN (10/10 legs)** on both
+  interpreters, exit 0 each. Measured twice, sequentially, every log stamped
+  commit + `dirty_files: 0` + interpreter: at base `fb15d97b`/tip `b32954c`
+  (scripts leg = 56), then re-run after main moved mid-card at base
+  `4216df50`/tip `f5e0358f` (scripts leg = **97 passed in ~3 s on both**
+  py3.11.16 and p313 3.13.12, after t_a98c009f's scrubber suite landed). The 9
+  pre-existing legs are count-for-count identical to the same-base baseline
+  (3.11: 416/69/135/479/1351/1259/12/876+1skip/11; 3.13: 416/69/135/
+  460+15skip/1351/1256+3skip/12/861+16skip/11). Standalone `pytest -q
+  scripts/tests` still green (2.89 s / 2.81 s). `changelog_fragments.py check`
+  rc=0, `address_guard.py --tracked` exit 0, `CHANGELOG.md` untouched, all
+  commits passed through the armed hook.
 ## [2.5.7] - 2026-10-08
 
 ### Fixed
