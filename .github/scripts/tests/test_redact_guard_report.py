@@ -13,11 +13,15 @@ Fixtures are assembled at runtime (``_addr``) because the repo's own guard scans
 every tracked file, including this one.
 """
 
+import ast
+import base64
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -724,3 +728,497 @@ def test_redactor_still_works_after_the_fd_juggling():
     assert proc.returncode == 0, proc.stderr.decode()
     assert proc.stdout.decode() == f"  docs/ok.md:9: ***\n"
     assert REAL_LAN not in proc.stdout.decode() + proc.stderr.decode()
+
+
+# ── round-3 regressions: guard code that OUTLIVES an in-process window ────────
+#
+# Rounds 1 and 2 each added another in-process silencer (fixed-string diagnostics,
+# then catch_warnings + stream redirects, then a dup/dup2 window over fd 1/2) and
+# each was bypassed from inside the same process. Round 3 reproduced four such
+# bypasses on both interpreters while the ADVISORY job stayed GREEN:
+#
+#   * ``atexit.register`` at import — the handler runs at interpreter shutdown,
+#     i.e. AFTER ``finally`` handed fd 1/2 back to the step's pipes;
+#   * a non-daemon ``threading.Thread`` started at import — joined at shutdown,
+#     also after the window;
+#   * an fd-table scan DURING the window — the window's own ``os.dup(1)`` /
+#     ``os.dup(2)`` saved descriptors sit live in the fd table for the whole
+#     import, so the writes land on the step's pipes;
+#   * ``dup2`` back over fd 1 during the window, then ``print``.
+#
+# The fix is therefore structural, not another layer: the guard's module code runs
+# in a CHILD whose stdin/stderr are /dev/null and whose stdout is a pipe only the
+# redactor reads, and the redactor never echoes a byte from that pipe. These tests
+# pin that boundary — each is the exact input that leaked at d4fa0db8.
+
+def _stub_atexit_dump(addr, channel="stderr"):
+    """A fully functional guard that dumps an address at interpreter shutdown.
+
+    ``atexit`` handlers run after load_pattern()'s ``finally`` has restored the
+    descriptors, so no window inside the redactor can cover them. The address is
+    interpolated into the stub body, exactly as the round-2 fd-write stubs do.
+    """
+    action = {
+        "stderr": "sys.stderr.write(" + repr("bye " + addr + "\n") + ")",
+        "fd1": "os.write(1, " + repr(b"bye1 " + addr.encode() + b"\n") + ")",
+        "fd2": "os.write(2, " + repr(b"bye2 " + addr.encode() + b"\n") + ")",
+    }[channel]
+    return _GUARD_BODY.replace(
+        "import importlib.util, pathlib, sys",
+        "import importlib.util, os, pathlib, sys, atexit",
+    ) + "atexit.register(lambda: " + action + ")\n" + _GUARD_CLI
+
+
+def _stub_thread_dump(addr):
+    """A functional guard that writes an address from a non-daemon thread."""
+    return _GUARD_BODY.replace(
+        "import importlib.util, pathlib, sys",
+        "import importlib.util, os, pathlib, sys, threading, time",
+    ) + ("threading.Thread(target=lambda: (time.sleep(0.15), "
+         "os.write(2, b'thr %s\\n'))).start()\n" % addr) + _GUARD_CLI
+
+
+def _stub_fdscan(addr):
+    """A functional guard that writes to every writable descriptor it can find.
+
+    This is the one the fd WINDOW cannot survive: it does not need fd 1/2, it
+    finds the redactor's own saved copies of them in the fd table.
+    """
+    return _GUARD_BODY.replace(
+        "import importlib.util, pathlib, sys",
+        "import importlib.util, os, pathlib, sys",
+    ) + ("for _fd in range(3, 64):\n"
+        "    try:\n"
+        "        os.write(_fd, b'scan %s\\n')\n"
+        "    except OSError:\n"
+        "        pass\n" % addr) + _GUARD_CLI
+
+
+def _stub_dup2_back(addr):
+    """A functional guard that re-points a saved descriptor over fd 1 and prints."""
+    return _GUARD_BODY.replace(
+        "import importlib.util, pathlib, sys",
+        "import importlib.util, os, pathlib, stat, sys",
+    ) + ("for _fd in range(3, 64):\n"
+        "    try:\n"
+        "        _st = os.fstat(_fd)\n"
+        "    except OSError:\n"
+        "        continue\n"
+        "    if stat.S_ISFIFO(_st.st_mode) or stat.S_ISSOCK(_st.st_mode):\n"
+        "        os.dup2(_fd, 1)\n"
+        "        sys.stdout = os.fdopen(1, 'w')\n"
+        "        break\n"
+        "print('dup2back %s')\n" % addr) + _GUARD_CLI
+
+
+# Every input, both postures of the driver: the shipping step script (parsed
+# verbatim from the YAML) and the redactor CLI alone with NO interpreter flags.
+_ROUND3_STUBS = {
+    "atexit_stderr": lambda: _stub_atexit_dump(REAL_TAILNET, "stderr"),
+    "atexit_fd1": lambda: _stub_atexit_dump(REAL_LAN, "fd1"),
+    "atexit_fd2": lambda: _stub_atexit_dump(REAL_TAILNET, "fd2"),
+    "thread": lambda: _stub_thread_dump(REAL_TAILNET),
+    "fdscan": lambda: _stub_fdscan(REAL_LAN),
+    "dup2_back": lambda: _stub_dup2_back(REAL_TAILNET),
+}
+_ROUND3_IDS = list(_ROUND3_STUBS)
+
+
+@pytest.mark.parametrize("channel", ["stderr", "fd1", "fd2"])
+def test_atexit_dump_at_shutdown_never_reaches_the_log(tmp_path, channel):
+    """Round-3 channel 1, through the STEP in advisory posture.
+
+    The stub is a FULLY FUNCTIONAL guard (right FORBIDDEN, right rc=1), so the
+    job must stay GREEN — and the report must still come out redacted with its
+    position kept. Before the structural fix this published the address twice per
+    step (once per redactor invocation) while reporting success.
+    """
+    addr = REAL_LAN if channel == "fd1" else REAL_TAILNET
+    rc, out = _run_step(
+        tmp_path, 1, f"  docs/x.md:3: {REAL_LAN}\n", "",
+        guard_source=_stub_atexit_dump(addr, channel),
+    )
+    assert rc == 0, f"advisory posture with a functional guard must be green:\n{out}"
+    assert addr not in out, f"{channel} atexit dump reached the log:\n{out}"
+    assert REAL_LAN not in out and REAL_TAILNET not in out, out
+    assert "docs/x.md:3" in out and "***" in out, out  # check still works
+
+
+@pytest.mark.parametrize("case", _ROUND3_IDS)
+def test_round3_guard_behaviours_publish_nothing_alone(case, tmp_path):
+    """The same six inputs with no step wrapper and NO -W/-E flags.
+
+    Layer proof, as in round 1: the interpreter flags the step passes must not be
+    what holds. Here what holds is that the guard's code does not run in this
+    process at all.
+    """
+    stub = _ROUND3_STUBS[case]()
+    rc, out = _redactor_alone(stub, tmp_path, bare=True)
+    assert rc == 0, f"a functional guard must still redact (case {case}):\n{out}"
+    assert REAL_LAN not in out and REAL_TAILNET not in out, \
+        f"{case} published an address through the CLI:\n{out}"
+    assert "***" in out and "docs/x.md:1" in out, out
+
+
+@pytest.mark.parametrize("case", _ROUND3_IDS)
+def test_round3_guard_behaviours_publish_nothing_through_the_step(case, tmp_path):
+    """All six through the shipping step script — the shape the reviewer measured."""
+    rc, out = _run_step(
+        tmp_path, 1, f"  docs/x.md:3: {REAL_LAN}\n", "",
+        guard_source=_ROUND3_STUBS[case](),
+    )
+    assert rc == 0, f"advisory + functional guard must be green (case {case}):\n{out}"
+    assert REAL_LAN not in out and REAL_TAILNET not in out, \
+        f"{case} published an address through the step:\n{out}"
+    assert "docs/x.md:3" in out and "***" in out, out
+
+
+def test_guard_module_code_never_runs_in_the_redactors_own_process(tmp_path):
+    """The trust boundary, pinned behaviourally rather than by reading the source.
+
+    The stub records the pid it was imported into. If extraction ever went back to
+    ``exec_module`` in this process, the recorded pid would be the redactor's own —
+    and every deferred-write channel in this section would reopen. So this test
+    fails on any regression to the in-process design, independent of the probes.
+    """
+    pidfile = tmp_path / "imported_by.pid"
+    stub = (
+        "import importlib.util, os, pathlib, sys\n"
+        f"_s = importlib.util.spec_from_file_location('_real', r'{GUARD}')\n"
+        "_m = importlib.util.module_from_spec(_s); _s.loader.exec_module(_m)\n"
+        "FORBIDDEN = _m.FORBIDDEN\n"
+        f"pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid()))\n"
+        "if __name__ == '__main__':\n"
+        "    sys.stderr.write(pathlib.Path(sys.argv[2]).read_text())\n"
+        "    sys.exit(1)\n"
+    )
+    work = tmp_path / "pidproof"
+    (work / "scripts").mkdir(parents=True)
+    (work / ".github" / "scripts").mkdir(parents=True)
+    shutil.copy2(REDACTOR, work / ".github" / "scripts" / "redact_guard_report.py")
+    (work / "scripts" / "address_guard.py").write_text(stub, encoding="utf-8")
+    env = dict(os.environ, PYTHONHASHSEED="0")
+    proc = subprocess.Popen(
+        [sys.executable, str(work / ".github" / "scripts" / "redact_guard_report.py")],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cwd=work, env=env,
+    )
+    out, err = proc.communicate(f"  docs/x.md:1: {REAL_LAN}\n".encode())
+    assert proc.returncode == 0, (out + err).decode()
+    assert "***" in out.decode(), out.decode()
+    assert pidfile.exists(), "the guard was never imported — the test is not testing"
+    imported_by = int(pidfile.read_text())
+    assert imported_by != proc.pid, (
+        f"the guard's module code ran IN the redactor process ({proc.pid}); "
+        "the child boundary that closes atexit/thread/fd-scan is gone"
+    )
+
+
+def test_the_parent_code_has_no_in_process_import_of_the_guard():
+    """Structural counterpart to the pid proof: the parent must not exec the guard.
+
+    ``importlib`` may appear only inside the child's source STRING — which is a
+    string literal to the parser, not an import statement. A regression that
+    reintroduces in-process ``exec_module`` fails here even if every probe happens
+    to pass.
+    """
+    src = REDACTOR.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    parent_imports = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            parent_imports.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            parent_imports.add(node.module.split(".")[0])
+    allowed = {"__future__", "ast", "base64", "os", "re", "selectors", "signal",
+               "subprocess", "sys", "time", "pathlib"}
+    assert parent_imports <= allowed, f"unexpected in-process import: {parent_imports - allowed}"
+    assert "importlib" not in parent_imports, \
+        "the redactor imports importlib in-process again — guard code would run here"
+    assert "subprocess" in parent_imports, "no child process = no boundary"
+    # Nothing that executes guard-derived bytes may cross the boundary.
+    assert "import pickle" not in src and "pickle.load" not in src, \
+        "unpickling guard bytes would run guard code in this process"
+
+
+def _stub_no_verdict(addr):
+    """A guard the step can run fine, but that dies silently when IMPORTED.
+
+    ``os._exit`` skips atexit and leaves the pipe empty: the redactor gets no
+    verdict at all and must refuse rather than print the report unredacted.
+    """
+    return (
+        "import importlib.util, pathlib, sys\n"
+        f"_s = importlib.util.spec_from_file_location('_real', r'{GUARD}')\n"
+        "_m = importlib.util.module_from_spec(_s); _s.loader.exec_module(_m)\n"
+        "FORBIDDEN = _m.FORBIDDEN\n"
+        "if '--tracked' not in sys.argv:\n"
+        "    import os; os._exit(0)\n"
+        "if __name__ == '__main__':\n"
+        "    sys.stderr.write(pathlib.Path(sys.argv[2]).read_text())\n"
+        "    sys.exit(1)\n"
+    )
+
+
+def test_child_that_emits_no_verdict_fails_closed(tmp_path):
+    """No protocol line = no pattern = refuse. rc=3, and nothing unredacted out."""
+    rc, out = _run_step(
+        tmp_path, 1, f"  docs/x.md:3: {REAL_LAN}\n", "",
+        guard_source=_stub_no_verdict(REAL_LAN),
+    )
+    assert rc == 3, f"a guard that yields no verdict must fail the job:\n{out}"
+    assert REAL_LAN not in out, f"the report went out unredacted:\n{out}"
+    assert "docs/x.md:3" not in out, "no pattern means no redaction, so no report"
+    assert "CANNOT LOAD PATTERN" in out, out
+
+
+def test_child_junk_terminated_with_newline_is_dropped_and_verdict_honoured(tmp_path):
+    """Protocol contract (a), pinned explicitly by request of review round 3.
+
+    Guard chatter that ends with a newline is its OWN line: it is not a verdict,
+    it is dropped without being echoed, and the single well-formed OK verdict is
+    still honoured — so a healthy guard that just chatters stays ADVISORY-GREEN
+    with the report redacted.
+    """
+    stub = _GUARD_BODY.replace(
+        "import importlib.util, pathlib, sys",
+        "import importlib.util, pathlib, sys",
+    ) + "sys.stdout.write('chatter %s\\n')\n" % REAL_TAILNET + _GUARD_CLI
+    rc, out = _redactor_alone(stub, tmp_path, bare=True)
+    assert rc == 0, f"newline-terminated junk must not break a healthy guard:\n{out}"
+    assert REAL_TAILNET not in out, f"child pipe bytes were echoed:\n{out}"
+    assert "chatter" not in out, "the child's chatter must not be printed either"
+    assert "***" in out and "docs/x.md:1" in out, out
+
+
+def test_unterminated_junk_merged_into_the_verdict_line_fails_closed(tmp_path):
+    """Protocol contract (b), also pinned by request: the merged-line edge.
+
+    Junk with NO trailing newline merges into the child's verdict line
+    (``fd1 <addr> OK\\t...``), so the line is no longer well-formed and there is no
+    single OK verdict. The step fails CLOSED (rc=3) instead of going advisory-green.
+    Safe in both directions for the same reason: not one byte read from the child is
+    ever printed.
+    """
+    stub = _GUARD_BODY.replace(
+        "import importlib.util, pathlib, sys",
+        "import importlib.util, os, pathlib, sys",
+    ) + "os.write(1, b'fd1 %s')\n" % REAL_TAILNET + _GUARD_CLI
+    rc, out = _redactor_alone(stub, tmp_path, bare=True)
+    assert rc == 3, f"an unparseable verdict stream must fail closed, got rc={rc}:\n{out}"
+    assert REAL_TAILNET not in out, f"the merged junk line was echoed:\n{out}"
+
+
+def test_guard_that_burns_the_pipe_cannot_hang_the_step(monkeypatch, tmp_path):
+    """The reviewer's non-blocking note: bound the child's cleanup too.
+
+    A guard that spawns a GRANDCHILD inheriting stdout leaves the pipe's write end
+    open, so ``read()`` never sees EOF. Without a bound that is a slow failure — the
+    step hangs to the job timeout. Here the read is time-boxed, the pipe is closed,
+    the whole process group is SIGKILLed and reaped with a second, shorter bound.
+    """
+    monkeypatch.setattr(redactor, "CHILD_TIMEOUT_S", 2)
+    monkeypatch.setattr(redactor, "REAP_TIMEOUT_S", 1)
+    # close_fds=False is the WHOLE test: it is what lets the grandchild inherit
+    # the child's stdout (the verdict pipe) and keep its write end open after the
+    # child exits. With the default close_fds=True the pipe sees EOF instantly and
+    # the test would pass without exercising anything (my first cut did exactly
+    # that — caught by mutation-checking my own tests, per 10c).
+    stub = _GUARD_BODY.replace(
+        "import importlib.util, pathlib, sys",
+        "import importlib.util, pathlib, subprocess, sys",
+    ) + ("subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'],"
+         " close_fds=False)\n") + _GUARD_CLI
+    work = tmp_path / "hang"
+    (work / "scripts").mkdir(parents=True)
+    (work / ".github" / "scripts").mkdir(parents=True)
+    (work / ".github" / "scripts" / "redact_guard_report.py").write_text(
+        REDACTOR.read_text(encoding="utf-8"), encoding="utf-8")
+    stub_path = work / "scripts" / "address_guard.py"
+    stub_path.write_text(stub, encoding="utf-8")
+    # load_pattern resolves the guard via the module constant, not cwd — point it
+    # at the stub or the test would run the REAL guard and test nothing.
+    monkeypatch.setattr(redactor, "GUARD", stub_path)
+    started = time.monotonic()
+    with pytest.raises(redactor.PatternUnavailable) as excinfo:
+        redactor.load_pattern()
+    elapsed = time.monotonic() - started
+    assert elapsed < 15, f"the child was not taken down within bounds ({elapsed:.1f}s)"
+    assert excinfo.value.type_name == "TimeoutError", excinfo.value.type_name
+
+
+def test_load_pattern_still_returns_the_real_compiled_pattern():
+    """The boundary must not have quietly broken the thing the file is for.
+
+    Equivalence, not existence: the pattern that comes back over the pipe must be
+    the guard's own — same source text, same flags — so the redaction is still the
+    repo's ONE regex rather than something that merely compiles.
+    """
+    spec = importlib.util.spec_from_file_location("guard_for_equivalence", GUARD)
+    assert spec is not None and spec.loader is not None
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+
+    pattern = redactor.load_pattern()
+    assert isinstance(pattern, re.Pattern)
+    assert pattern.pattern == guard.FORBIDDEN.pattern
+    assert pattern.flags == guard.FORBIDDEN.flags
+    # and it still catches what the guard catches, on both shapes
+    assert pattern.search(REAL_LAN) and pattern.search(REAL_TAILNET)
+    assert not pattern.search(LAN_PLACEHOLDER) and not pattern.search(TAILNET_PLACEHOLDER)
+
+
+def test_child_forged_err_name_is_never_echoed(tmp_path):
+    """The TYPE_NAME gate, pinned by attacking it from the guard's side.
+
+    Guard module code runs in the CHILD, so it can write anything to the child's
+    stdout — including a forged ``ERR`` line whose "exception name" field carries a
+    real address. The parent must reject it: that field is validated against
+    ``TYPE_NAME`` (no digits, no dots), so the diagnostic loses the name and the
+    address never reaches the log. Delete the filter in _parse_verdict and this
+    test fails by printing the address.
+    """
+    stub = _GUARD_BODY + (
+        "import sys as _s\n"
+        "_s.stdout.write('ERR\\t%s\\n'); _s.stdout.flush()\n" % REAL_LAN
+    ) + _GUARD_CLI
+    rc, out = _redactor_alone(stub, tmp_path, bare=True)
+    assert rc == 3, f"a forged ERR verdict must poison the stream:\n{out}"
+    assert REAL_LAN not in out, f"the name field was echoed unfiltered:\n{out}"
+    assert "CANNOT LOAD PATTERN" in out, out
+
+
+def test_child_forged_extra_ok_line_fails_closed(tmp_path):
+    """Two verdicts is not a verdict.
+
+    A guard that writes its own ``OK`` line — e.g. one whose pattern is a single
+    address, which would "redact" every other value into silence — must not get to
+    choose the pattern by out-voting the real one. Exactly-one is the contract, and
+    the forged line's content is never printed either way.
+    """
+    forged = base64.b64encode(REAL_LAN.encode()).decode()
+    stub = _GUARD_BODY + (
+        "import sys as _s\n"
+        f"_s.stdout.write('OK\\t{forged}\\t0\\n'); _s.stdout.flush()\n"
+    ) + _GUARD_CLI
+    rc, out = _redactor_alone(stub, tmp_path, bare=True)
+    assert rc == 3, f"a second verdict line must fail closed, got rc={rc}:\n{out}"
+    assert REAL_LAN not in out, out
+
+
+def test_bounded_child_read_leaves_no_surviving_grandchild(tmp_path, monkeypatch):
+    """The child's WHOLE process group must go down, not just the child.
+
+    The bounded read is what keeps the STEP from hanging; this pins the other half
+    of the reviewer's non-blocking note — that the spawned helper is actually
+    taken with it, rather than sitting on the runner for its full sleep. Replace
+    the process-group kill with a plain ``proc.kill()`` and the grandchild outlives
+    load_pattern(), which fails here.
+    """
+    monkeypatch.setattr(redactor, "CHILD_TIMEOUT_S", 2)
+    monkeypatch.setattr(redactor, "REAP_TIMEOUT_S", 1)
+    pidfile = tmp_path / "grandchild.pid"
+    stub = _GUARD_BODY.replace(
+        "import importlib.util, pathlib, sys",
+        "import importlib.util, pathlib, subprocess, sys",
+    ) + (
+        "import os as _os\n"
+        f"_p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'],"
+        " close_fds=False)\n"
+        f"pathlib.Path({str(pidfile)!r}).write_text(str(_p.pid))\n"
+    ) + _GUARD_CLI
+    stub_path = tmp_path / "gc" / "scripts" / "address_guard.py"
+    stub_path.parent.mkdir(parents=True)
+    stub_path.write_text(stub, encoding="utf-8")
+    monkeypatch.setattr(redactor, "GUARD", stub_path)
+
+    with pytest.raises(redactor.PatternUnavailable):
+        redactor.load_pattern()
+
+    pid = int(pidfile.read_text())
+    # Give the reaper a moment; a SIGKILLed process that launchd has not reaped yet
+    # still answers signal 0. If it is ALIVE (M5), it answers for the full 120 s.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return  # gone: the process group went down with the child
+        except PermissionError:  # not ours (should not happen); treat as evidence
+            break
+        time.sleep(0.2)
+    pytest.fail(f"grandchild pid {pid} survived load_pattern() — the process-group "
+                "kill is missing, so a spawned helper holds runner resources")
+
+
+def test_blob_that_is_not_strict_base64_is_rejected(tmp_path):
+    """``validate=True`` is a real gate, not decoration.
+
+    A URL-safe character spliced into the verdict's payload is discarded by a
+    lenient decode, which would hand back the correct pattern and let the job
+    proceed on a stream that is NOT the protocol the parent agreed to. Strict
+    decoding rejects it: rc=3, and the payload's bytes never reach the log.
+    """
+    import base64 as _b64
+    blob = _b64.b64encode(b"\\b(?:192\\.168\\.88\\.\\d{1,3})\\b").decode()
+    spliced = blob[:10] + "-" + blob[10:]
+    stub = _GUARD_BODY + (
+        "import sys as _s\n"
+        f"_s.stdout.write('OK\\t{spliced}\\t0\\n'); _s.stdout.flush()\n"
+    ) + _GUARD_CLI
+    rc, out = _redactor_alone(stub, tmp_path, bare=True)
+    assert rc == 3, f"a non-strict-base64 payload must fail closed, got rc={rc}:\n{out}"
+    assert REAL_LAN not in out, out
+    assert "CANNOT LOAD PATTERN" in out, out
+
+
+def test_parse_verdict_rejects_non_strict_base64_payload():
+    """Direct unit pin for ``validate=True`` — why not end-to-end only?
+
+    Through the CLI a stub that writes its own OK line produces TWO verdicts and
+    dies at the exactly-one check before the base64 gate is ever reached (my first
+    e2e version of this test passed against the mutated redactor for exactly that
+    reason — the mutation battery caught it, audit 10c lesson applied again).
+    Directly: drop validate and the spliced payload decodes to a WORKING pattern
+    and the job proceeds on a stream that is not the agreed protocol.
+    """
+    clean = base64.b64encode(b"abc").decode()          # "YWJj"
+    spliced = clean[:2] + "-" + clean[2:]               # discarded by lenient decode
+    # control: the clean payload is accepted
+    assert redactor._parse_verdict(f"OK\t{clean}\t0\n".encode()).pattern == "abc"
+    with pytest.raises(redactor.PatternUnavailable):
+        redactor._parse_verdict(f"OK\t{spliced}\t0\n".encode())
+
+
+def test_pattern_unavailable_never_carries_an_unvalidated_name():
+    """The constructor's own TYPE_NAME gate, pinned directly (mutation M2c).
+
+    The parse side already filters forged names; this is the second lock. Remove
+    THIS filter and only this filter and the forged-ERR end-to-end test would still
+    pass — so both layers get their own pin rather than sharing one.
+    """
+    assert redactor.PatternUnavailable(REAL_LAN).type_name is None
+    assert redactor.PatternUnavailable("ValueError").type_name == "ValueError"
+    assert redactor.PatternUnavailable().type_name is None
+
+
+def test_forged_err_name_alongside_a_real_one_keeps_only_the_real_one(tmp_path):
+    """Pins the PARSE-side TYPE_NAME filter on its own (mutation M2 survivor).
+
+    With one ERR line the constructor-side gate makes the two layers
+    indistinguishable (defense in depth — the reviewer's words for the round-2
+    M3 survivor). Two ERR lines separate them: the parse side must drop the
+    forged name and honour the single valid one. Without that filter `names`
+    holds two entries, no single name is trusted, and the reader loses the
+    diagnosis this control exists to give.
+    """
+    stub = _GUARD_BODY + (
+        "import sys as _s\n"
+        "_s.stdout.write('ERR\\tValueError\\n')\n"
+        "_s.stdout.write('ERR\\t%s\\n'); _s.stdout.flush()\n" % REAL_LAN
+    ) + _GUARD_CLI
+    rc, out = _redactor_alone(stub, tmp_path, bare=True)
+    assert rc == 3, out
+    assert REAL_LAN not in out, f"the forged name reached the log:\n{out}"
+    assert "CANNOT LOAD PATTERN [ValueError]" in out, \
+        f"the forged line must not cost the reader the real diagnosis:\n{out}"
