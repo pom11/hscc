@@ -32,7 +32,7 @@ from datetime import date
 from pathlib import Path
 
 from ..core import kanban, registry
-from ._theme import escape, make_console, panel, status_panel
+from ._theme import esc, escape, make_console, panel, status_panel
 
 # Length of the body excerpt shown per card.
 BODY_EXCERPT_CHARS = 200
@@ -391,8 +391,8 @@ def cmd_migrate_card(args: argparse.Namespace, projects: list[registry.Project])
         return 1
 
     make_console().print(status_panel(
-        f"card {new_id} created on board {escape(repr(board))}; original "
-        f"{escape(str(card.get('id')))} archived with a pointer to {new_id}.",
+        f"card {esc(new_id)} created on board {escape(repr(board))}; original "
+        f"{escape(str(card.get('id')))} archived with a pointer to {esc(new_id)}.",
         status="ok", title="migrate-card"))
     return 0
 
