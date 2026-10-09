@@ -204,6 +204,147 @@ def test_binary_and_unusual_files_are_survivable(repo):
     assert "asset.bin" not in err                      # binary skipped, not decoded
 
 
+def test_tracked_build_artefact_is_blocked_by_the_hook(repo):
+    """t_3e6d3db7: a committed `.pyc` was invisible to all three gates.
+
+    The blob is NUL-bearing, so the pre-policy scanner returned [] for it and the
+    commit went through. The name-based refusal must stop it at the hook.
+    """
+    pyc = repo / "hscc-provision" / "__pycache__"
+    pyc.mkdir(parents=True)
+    (pyc / "hscc.cpython-313.pyc").write_bytes(
+        b"\xe3\r\r\n\x00\x00\x00\x00\x00" + REAL_LAN.encode() + b"\x00\x00")
+    rc, out, err = _run(GIT + ["add", "-A"], repo)
+    assert rc == 0, err
+    rc, out, err = _run(GIT + ["commit", "-q", "-m", "chore: build output"], repo)
+    assert rc != 0, f"a tracked .pyc must be refused\nSTDOUT={out}\nSTDERR={err}"
+    assert "hscc-provision/__pycache__/hscc.cpython-313.pyc" in err, err
+    assert "git rm --cached" in err, err
+    rc, out, _ = _run(GIT + ["log", "--oneline"], repo)
+    assert out.strip().count("\n") == 0, "the artefact commit must not exist"
+
+
+def test_hook_and_tracked_agree_on_a_tracked_build_artefact(repo):
+    """Same input, both gates, same verdict — they share `scan_blob`.
+
+    The card's test requirement, and the reason the artefact verdict is formatted
+    in ONE place: the hook (staged) and the CI backstop / pytest gate (tracked)
+    must never disagree about the same tree. `--no-verify` gets the blob into
+    HEAD here so the tracked scan has something to find; that is the state a
+    bypass leaves behind, and it is exactly what the backstop has to catch.
+    """
+    pyc = repo / "scripts" / "__pycache__"
+    pyc.mkdir(parents=True)
+    (pyc / "mod.cpython-313.pyc").write_bytes(
+        b"\xe3\r\r\n\x00\x00\x00\x00\x00" + REAL_TAILNET.encode() + b"\x00\x00")
+    _run(GIT + ["add", "-A"], repo)
+    rc, out, err = _run(GIT + ["commit", "-q", "-m", "chore: bypassed", "--no-verify"], repo)
+    assert rc == 0, err
+
+    # Gate 1: the hook, over the staged artefact. The blob is in HEAD now, so the
+    # hook's contract ("judge what this commit introduces") needs the path to be
+    # *changed* to appear in the staged set again — a re-`add` with new bytes is
+    # the state where the hook gets a second chance to stop it.
+    (pyc / "mod.cpython-313.pyc").write_bytes(
+        b"\xe3\r\r\n\x00\x00\x00\x00\x01" + REAL_TAILNET.encode() + b"\x00\x00")
+    (repo / "touch.md").write_text("x\n", encoding="utf-8")
+    _run(GIT + ["add", "-A"], repo)
+    rc, hook_out, hook_err = _run(GIT + ["commit", "-q", "-m", "chore: next"], repo)
+    assert rc != 0, "the hook must still refuse the staged artefact"
+
+    # Gate 2: the CLI the CI job runs (`python3 scripts/address_guard.py --tracked`),
+    # so the comparison is between the two shipped invocations, not two imports.
+    proc = subprocess.run(
+        [sys.executable, str(GUARD), "--tracked", "--repo", str(repo)],
+        capture_output=True)
+    assert proc.returncode == 1, proc.stderr.decode()
+    tracked = proc.stderr.decode().splitlines()
+
+    named_by_hook = [ln for ln in hook_err.splitlines()
+                     if "mod.cpython-313.pyc" in ln]
+    named_by_tracked = [ln for ln in tracked if "mod.cpython-313.pyc" in ln]
+    assert named_by_hook and named_by_tracked, (hook_err, tracked)
+    # And not merely "both mentioned it": the verdict strings are identical.
+    assert named_by_hook[0].strip() == named_by_tracked[0].strip(), (
+        f"hook says {named_by_hook[0]!r}, tracked says {named_by_tracked[0]!r}")
+
+
+def test_a_genuinely_compiled_pyc_is_blocked_by_the_hook(repo, tmp_path):
+    """End-to-end with REAL compiler output, not a hand-built blob.
+
+    The orchestrator's probe (2026-10-09) showed a genuinely compiled `.pyc` of
+    leaking source is invisible even to the shipping FORBIDDEN pattern once
+    decoded as text — in marshal's framing the byte after the string constant is
+    a word char, so the pattern's trailing `\\b` fails. The hook's refusal never
+    looks at the bytes, so it is the only local control that catches this blob.
+    """
+    # Compile real source that carries a real-shaped address (assembled at
+    # runtime; the repo's own guard scans this file).
+    src = tmp_path / "leaky_source.py"
+    src.write_text("NAS = " + repr(REAL_LAN) + "\n", encoding="utf-8")
+    import py_compile
+    py_compile.compile(str(src), cfile=str(tmp_path / "leaky.pyc"), doraise=True)
+    blob = (tmp_path / "leaky.pyc").read_bytes()
+    assert b"\0" in blob and REAL_LAN.encode() in blob
+
+    # `git add -f` past the .gitignore — the accident this card is about.
+    target = repo / "vendor_pkg" / "__pycache__"
+    target.mkdir(parents=True)
+    (target / "leaky.cpython-313.pyc").write_bytes(blob)
+    rc, out, err = _run(GIT + ["add", "-f", "-A"], repo)
+    assert rc == 0, err
+    rc, out, err = _run(GIT + ["commit", "-q", "-m", "chore: compiled"], repo)
+    assert rc != 0, f"a real compiled .pyc must be refused\nSTDOUT={out}\nSTDERR={err}"
+    assert "vendor_pkg/__pycache__/leaky.cpython-313.pyc" in err, err
+
+
+def test_a_genuinely_compiled_pyc_on_a_widened_hatch_is_still_blocked_by_the_hook(repo, tmp_path):
+    """The two-tier hatch, end to end through the real hook.
+
+    Round-1 review of t_3e6d3db7: with a one-tier hatch, a reviewer who widened
+    `ALLOWED_BINARY_PATHS` to cover a `.pyc` would have opened a silent hole —
+    the refusal waived, and the text scan blind to compiled bytes. This runs the
+    widened-hatch guard under a real `git add -f` + `git commit` so the guarantee
+    is proven at the trigger, not only in the unit.
+    """
+    guard = repo / "scripts" / "address_guard.py"
+    src = guard.read_text(encoding="utf-8")
+    assert "ALLOWED_BINARY_PATHS = frozenset()" in src, (
+        "the guard's hatch changed shape; update this test's patch site")
+    src = src.replace("ALLOWED_BINARY_PATHS = frozenset()",
+                      'ALLOWED_BINARY_PATHS = frozenset({"vendor/leak.pyc"})', 1)
+    guard.write_text(src, encoding="utf-8")
+    _run(GIT + ["add", "-A"], repo)
+    _run(GIT + ["commit", "-q", "-m", "chore: widen hatch", "--no-verify"], repo)
+
+    src_file = tmp_path / "leaky_source.py"
+    src_file.write_text("NAS = " + repr(REAL_LAN) + "\n", encoding="utf-8")
+    import py_compile
+    py_compile.compile(str(src_file), cfile=str(tmp_path / "leaky.pyc"), doraise=True)
+    (repo / "vendor").mkdir()
+    (repo / "vendor" / "leak.pyc").write_bytes((tmp_path / "leaky.pyc").read_bytes())
+    _run(GIT + ["add", "-f", "-A"], repo)
+    rc, out, err = _run(GIT + ["commit", "-q", "-m", "chore: compiled on hatch"], repo)
+    assert rc != 0, (
+        "a hatch entry must never make a compiled artefact trackable and unscanned"
+        f"\nSTDOUT={out}\nSTDERR={err}")
+    assert "vendor/leak.pyc" in err, err
+
+
+def test_a_legitimate_binary_asset_still_commits(repo):
+    """The new rule must not break the binaries that belong here.
+
+    The tracked tree carries two .png files; a policy that refuses them is a
+    policy that gets --no-verify'd on its first real use.
+    """
+    (repo / "assets").mkdir()
+    (repo / "assets" / "hscc.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x0dIHDR")
+    rc, out, err = _run(GIT + ["add", "-A"], repo)
+    assert rc == 0, err
+    rc, out, err = _run(GIT + ["commit", "-q", "-m", "feat: logo"], repo)
+    assert rc == 0, f"a real asset must commit\nSTDOUT={out}\nSTDERR={err}"
+
+
 def test_guard_is_dependency_free_and_bounded(repo):
     """Requirement 4: fast + stdlib-only. A slow leak check gets --no-verify'd."""
     src = GUARD.read_text(encoding="utf-8")

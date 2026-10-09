@@ -12,6 +12,8 @@ cover the detector's own contract, which both triggers share:
 """
 
 import subprocess
+import re
+import shutil
 import sys
 import importlib.util
 from pathlib import Path
@@ -77,8 +79,15 @@ def test_scan_blob_carries_file_line_and_address():
 
 
 def test_scan_blob_skips_binaries_and_skip_suffixes():
+    """A blob the policy does NOT cover stays silent (t_3e6d3db7 narrowed this).
+
+    The old guard skipped *every* NUL-bearing blob, which is how a committed
+    `.pyc` escaped all three gates. Only two classes are silent now: a declared
+    asset (SKIP_SUFFIXES) and an unknown-extension binary. A build artefact is
+    refused instead — see test_scan_blob_refuses_a_pyc_carrying_a_real_address.
+    """
     dirty = b"\x00binary " + REAL_LAN.encode() + b"\x00"
-    assert address_guard.scan_blob("x.bin", dirty) == []
+    assert address_guard.scan_blob("x.bin", dirty) == []          # unknown extension
     assert address_guard.scan_blob("logo.png", REAL_LAN.encode()) == []
 
 
@@ -86,6 +95,307 @@ def test_skip_suffixes_unchanged_from_the_original_gate():
     """The gate's original noise list must not silently shrink."""
     assert address_guard.SKIP_SUFFIXES == (
         ".png", ".jpg", ".jpeg", ".pdf", ".ico", ".zip", ".gz", ".xcuserstate")
+
+
+# ── build artefacts: refused on the name, not the content (t_3e6d3db7) ───────
+
+def _pyc_like(addr):
+    """A `.pyc`-shaped blob: NUL-framed, with the address in a string constant.
+
+    What a real one looks like on the matters-here axis: the compiled constants
+    section holds the source's string literals verbatim, so the address is in the
+    blob in exactly the form the text scan cannot see. NUL bytes either side so
+    the OLD guard would have returned [] and stayed silent about it.
+
+    This is the WEAK mutant. The strong one — `test_a_genuine_compiled_pyc_...`,
+    which compiles real source at runtime — is what proves the refusal is not
+    merely a content-scan in disguise.
+    """
+    return b"\xe3\r\r\n\x00\x00\x00\x00" + b"\x00" + addr.encode() + b"\x00\x00"
+
+
+@pytest.fixture()
+def genuine_leaky_pyc(tmp_path):
+    """A REAL `.pyc`, compiled by this interpreter, from source that carried an
+    address — assembled at runtime so the repo's own guard stays clean.
+
+    Why this fixture exists rather than a hand-built blob: a mutant made by
+    splicing the dotted string into NUL filler is MATCHED by the current pattern
+    (both boundaries land on non-word bytes) and so proves nothing. A genuinely
+    compiled `.pyc` is not: marshal writes the string constant with no delimiter
+    before the next interned name, so the character immediately AFTER the address
+    is a word character, the trailing `\\b` fails, and FORBIDDEN finds 0 while a
+    naive `192\\.168\\.88\\.\\d{1,3}` still finds 1. Measured, not assumed: leading
+    char in the compiled blob is U+000E (non-word), trailing is 'N' (word), and
+    relaxing the trailing boundary is what restores the match.
+    """
+    src = tmp_path / "leaky_source.py"
+    src.write_text("NAS = " + repr(REAL_LAN) + "\n", encoding="utf-8")
+    import py_compile
+    py_compile.compile(str(src), cfile=str(tmp_path / "leaky.pyc"), doraise=True)
+    blob = (tmp_path / "leaky.pyc").read_bytes()
+    assert b"\0" in blob, "a real .pyc is NUL-bearing — that is the whole premise"
+    return blob
+
+
+def test_a_genuine_compiled_pyc_defeats_the_text_detector_so_refusal_is_required(
+        genuine_leaky_pyc):
+    """THE reason this card's policy is 'refuse the type', not 'scan the bytes'.
+
+    Three assertions, each measured rather than argued:
+
+      1. the address really is inside the compiled blob — a naive scan sees it;
+      2. the SHIPPING FORBIDDEN pattern does NOT. Its `\\b` boundaries assume the
+         address is delimited, and undelimited binary framing breaks that: marshal
+         puts a word character immediately AFTER the constant, so the trailing
+         `\\b` fails. Extract-and-scan would inherit exactly this blind spot;
+      3. the name-based refusal catches it anyway, because it never looked at the
+         bytes at all.
+
+    This is the case an extract-and-scan policy cannot pass, and it is why that
+    option was declined rather than merely deferred.
+    """
+    blob = genuine_leaky_pyc
+    assert REAL_LAN.encode() in blob, "the address is in the blob"
+    text = blob.decode("utf-8", errors="ignore")
+    # (1) the naive scan sees it... (pattern assembled at runtime for the same
+    # reason the addresses are: the repo's own single-implementation pin scans
+    # this file and must not find a second copy of the detector's literal.)
+    naive = re.compile(_addr("192", r"\.168\.88\.\d{1,3}"))
+    assert naive.findall(text), "naive scan should see it"
+    # (2) ...the shipping detector does not
+    assert address_guard.find_in_text(text) == [], (
+        "FORBIDDEN unexpectedly matched the compiled blob — if this ever goes red,"
+        " the boundary-context finding is stale and extract-and-scan becomes"
+        " arguable again; re-measure before believing it")
+    # (3) the refusal is blind to that blindness, and still refuses
+    got = address_guard.scan_blob("hscc-provision/__pycache__/hscc.cpython-313.pyc", blob)
+    assert got == ["hscc-provision/__pycache__/hscc.cpython-313.pyc:0: "
+                   "build artefact must not be tracked"]
+    # ...and an un-listed extension is still blind to the SAME bytes, which is the
+    # honest limit of this card: the type list is what closes it, not the scanner.
+    assert address_guard.scan_blob("vendor/blob.bin", blob) == []
+
+
+def test_scan_blob_refuses_a_pyc_carrying_a_real_address():
+    """THE regression this card exists for.
+
+    Before the policy, `b"\\0" in data` returned [] and the address rode through
+    the hook, the pytest gate and the CI backstop — all three call this function.
+    """
+    got = address_guard.scan_blob("scripts/__pycache__/hscc.cpython-313.pyc",
+                                  _pyc_like(REAL_LAN))
+    assert got, "a committed .pyc must not be invisible to the guard"
+    assert got[0].startswith("scripts/__pycache__/hscc.cpython-313.pyc:0:")
+
+
+@pytest.mark.parametrize("rel", [
+    "pkg/mod.pyc",                    # the case that actually happened here
+    "pkg/__pycache__/mod.cpython-313.pyc",
+    "vendor/thing.pyo",
+    "native/helper.so",
+    "native/helper.dylib",
+    "native/helper.dll",
+    "build/obj.o",
+    "build/lib.a",
+    "java/Thing.class",
+    "dist/pkg-1.0-py3-none-any.whl",
+])
+def test_scan_blob_refuses_build_artefacts_even_when_clean(rel):
+    """Content-independent: the offence is that the path is tracked at all.
+
+    The guard cannot tell a clean .pyc from a leaking one without the
+    extract-and-scan machinery the policy declines to build, so a rule enforced
+    only when a leak is provable is a rule that leaks.
+    """
+    assert address_guard.scan_blob(rel, b"harmless text") == [
+        f"{rel}:0: build artefact must not be tracked"]
+    assert address_guard.scan_blob(rel, _pyc_like(REAL_TAILNET))
+
+
+def test_scan_blob_refuses_an_artefact_regardless_of_case_and_separators():
+    assert address_guard.is_build_artefact("PKG/MOD.PYC")
+    assert address_guard.is_build_artefact("pkg\\__pycache__\\mod.pyc")
+    assert address_guard.is_build_artefact("pkg/__pycache__/x.PYC")
+    # and the negative controls that make the list mean something
+    assert not address_guard.is_build_artefact("docs/pycall.md")
+    assert not address_guard.is_build_artefact("data/alpine.software.json")
+    assert not address_guard.is_build_artefact("native/source.c")
+    assert not address_guard.is_build_artefact("assets/logo.png")
+
+
+def test_legitimate_binary_asset_is_still_accepted():
+    """The tracked binary population must survive the new rule untouched.
+
+    Measured at 3c20990c the tracked tree has exactly two NUL-bearing files, both
+    .png, and this is the guard against a policy that "fixes" the .pyc gap by
+    breaking a real asset.
+    """
+    assert not address_guard.is_build_artefact("assets/hscc.png")
+    assert address_guard.scan_blob("assets/hscc.png", b"\x89PNG\r\n\x1a\n\x00\x00") == []
+    assert address_guard.scan_blob("vendor/blob.dat", b"\x00\x01\x02") == []
+
+
+def test_a_compiled_artefact_suffix_is_never_waivable_by_the_hatch(monkeypatch):
+    """The hatch cannot reach the tier whose bytes the scanner cannot read.
+
+    Round-1 review (t_3e6d3db7) found the claim "widening the hatch can never
+    hide a leak" was FALSE while the hatch could waive a `.pyc`: the text scan is
+    blind to a compiled blob (see
+    `test_a_genuine_compiled_pyc_defeats_the_text_detector_so_refusal_is_required`),
+    so waiving the refusal waived detection too. The fix is structural, not
+    wording: the suffix tier in `is_build_artefact` ignores the hatch, so every
+    compiled shape below stays refused from the hatch alone.
+    """
+    monkeypatch.setattr(address_guard, "ALLOWED_BINARY_PATHS", frozenset(
+        ["native/bundled.so", "pkg/leak.pyc", "pkg/leak.pyo", "native/x.pyd",
+         "build/obj.o", "build/lib.a", "native/x.dylib", "native/x.dll",
+         "java/Thing.class", "dist/pkg-1.0-py3-none-any.whl"]))
+    for rel in address_guard.ALLOWED_BINARY_PATHS:
+        assert address_guard.scan_blob(rel, b"\x00clean\x00") == [
+            f"{rel}:0: build artefact must not be tracked"], (
+            f"{rel} is on the hatch and got through: a compiled artefact the text"
+            " scan cannot read is now tracked and unscanned")
+
+
+def test_a_genuinely_compiled_pyc_on_the_hatch_is_still_refused(
+        monkeypatch, genuine_leaky_pyc):
+    """The exact probe the round-1 review ran, inverted into a requirement.
+
+    Before the two-tier hatch, `scan_blob` returned `[]` here — silent — because
+    the hatch waived the refusal and the text scan was blind to the blob. It must
+    now name the path, and the case is worthless unless the text scan is *still*
+    blind, which the first assertion re-pins from the inside rather than trusting.
+    """
+    monkeypatch.setattr(address_guard, "ALLOWED_BINARY_PATHS", frozenset({"pkg/leak.pyc"}))
+    assert address_guard.find_in_text(
+        genuine_leaky_pyc.decode("utf-8", errors="ignore")) == [], (
+        "FORBIDDEN now sees a compiled blob: the hatch's justification changed,"
+        " re-measure before touching the two-tier rule")
+    got = address_guard.scan_blob("pkg/leak.pyc", genuine_leaky_pyc)
+    assert got == ["pkg/leak.pyc:0: build artefact must not be tracked"], (
+        "the hatch let a compiled artefact through — the blind blob is now tracked"
+        " and unscanned, which is the leak this card exists to prevent")
+
+
+def test_hatch_waives_only_the_segment_refusal_and_still_scans(monkeypatch):
+    """What the hatch *does* buy: a `__pycache__`-segment path is tracked, decoded
+    and text-scanned even though it is full of NUL bytes and would be a skipped
+    asset by extension. "This path may be tracked", never "this path may be unread".
+    """
+    monkeypatch.setattr(address_guard, "ALLOWED_BINARY_PATHS",
+                        frozenset({"vendor/__pycache__/fixture.dat", "docs/reference.pdf"}))
+    # clean -> tracked, no verdict
+    assert address_guard.scan_blob("vendor/__pycache__/fixture.dat", b"\x00clean\x00") == []
+    # leaking + NUL-bearing -> the address is still found (the scan applies to a
+    # path the hatch has waived, NULs and all)
+    leaky = b"\x00\x00host " + REAL_LAN.encode() + b"\x00\x00"
+    assert address_guard.scan_blob("vendor/__pycache__/fixture.dat", leaky) == [
+        f"vendor/__pycache__/fixture.dat:1: {REAL_LAN}"]
+    # and the waiver is exactly as wide as the path on the hatch
+    assert address_guard.scan_blob("vendor/__pycache__/other.dat", b"\x00clean\x00") == [
+        "vendor/__pycache__/other.dat:0: build artefact must not be tracked"]
+
+
+def test_hatch_does_not_bypass_the_skip_suffix_shortcut_silently(monkeypatch):
+    """A hatch entry must not turn a declared asset into an unread, unscanned file.
+
+    Same guarantee, the other hole the review's logic exposes: `SKIP_SUFFIXES` is a
+    second way a path escapes the scan. An allowlisted path is decoded even when its
+    extension is on that list, so a reviewer adding one entry can never — by
+    accident or on purpose — get "tracked AND never read" for a path they listed.
+    """
+    monkeypatch.setattr(address_guard, "ALLOWED_BINARY_PATHS",
+                        frozenset({"docs/reference.pdf"}))
+    leaky = "remount " + REAL_LAN + ":/models\n"
+    assert address_guard.scan_blob("docs/reference.pdf", leaky.encode()) == [
+        f"docs/reference.pdf:1: {REAL_LAN}"]
+    # without the hatch the same path is a declared asset and stays unread
+    assert address_guard.scan_blob("docs/other.pdf", leaky.encode()) == []
+
+
+def test_scan_paths_and_scan_blob_agree_on_a_hatched_path(tmp_path, monkeypatch):
+    """`scan_paths` has its own pre-read skip shortcut; it must honour the hatch.
+
+    The two gates re-implement the same silence rules in two places, which is
+    exactly where the hook and the CI job drift apart. Pin the pair on the one
+    input where they could disagree: an allowlisted path with a skipped extension.
+    """
+    monkeypatch.setattr(address_guard, "ALLOWED_BINARY_PATHS",
+                        frozenset({"docs/reference.pdf"}))
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "reference.pdf").write_text(
+        "remount " + REAL_LAN + ":/models\n", encoding="utf-8")
+    expected = [f"docs/reference.pdf:1: {REAL_LAN}"]
+    assert address_guard.scan_paths(tmp_path, ["docs/reference.pdf"]) == expected
+    assert address_guard.scan_blob(
+        "docs/reference.pdf",
+        (tmp_path / "docs" / "reference.pdf").read_bytes()) == expected
+
+
+def test_scan_paths_refuses_a_tracked_artefact_even_if_unreadable(tmp_path):
+    """The tracked gate must not depend on reading the bytes.
+
+    A path in HEAD's index is a tracked artefact whether or not the working tree
+    carries it (deleted-but-tracked) or it cannot be opened. The name is verdict
+    enough, so the pre-read skip shortcuts must not run for it.
+    """
+    rel = "hscc-provision/__pycache__/hscc.cpython-313.pyc"
+    assert address_guard.scan_paths(tmp_path, [rel]) == [
+        f"{rel}:0: build artefact must not be tracked"]
+    # present-but-unreadable via the injected reader, same verdict
+    def boom(_p):
+        raise OSError("EIO")
+    (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / rel).write_bytes(_pyc_like(REAL_LAN))
+    assert address_guard.scan_paths(tmp_path, [rel], read=boom) == [
+        f"{rel}:0: build artefact must not be tracked"]
+
+
+def test_cli_blocks_a_staged_pyc_carrying_a_real_address(tmp_path):
+    """The card's acceptance case, through the CLI the hook actually calls."""
+    r = _repo(tmp_path)
+    pyc = r / "scripts" / "__pycache__"
+    pyc.mkdir(parents=True)
+    (pyc / "hscc.cpython-313.pyc").write_bytes(_pyc_like(REAL_LAN))
+    _git(r, "add", "-A")
+    proc = subprocess.run([sys.executable, str(REPO / "scripts" / "address_guard.py"),
+                           "--staged", "--repo", str(r)], capture_output=True)
+    assert proc.returncode == 1
+    err = proc.stderr.decode()
+    assert "hscc.cpython-313.pyc" in err
+    assert "git rm --cached" in err
+
+
+def test_cli_tracked_flags_a_committed_pyc_even_after_a_scrubbed_worktree(tmp_path):
+    """`--tracked` must name the artefact from the INDEX, not the working tree.
+
+    Same failure mode as the 2026-08-30 audit, one class over: the file may be
+    gone (or clean) on disk while HEAD still carries the blob.
+    """
+    r = _repo(tmp_path)
+    pyc = r / "pkg" / "__pycache__"
+    pyc.mkdir(parents=True)
+    (pyc / "m.cpython-313.pyc").write_bytes(_pyc_like(REAL_TAILNET))
+    _git(r, "add", "-A")
+    assert _git(r, "commit", "-q", "-m", "oops", "--no-verify").returncode == 0
+    # Working tree scrubbed: the bytes are gone, the tracked path is not.
+    shutil.rmtree(pyc)
+    proc = subprocess.run([sys.executable, str(REPO / "scripts" / "address_guard.py"),
+                           "--tracked", "--repo", str(r)], capture_output=True)
+    assert proc.returncode == 1, proc.stderr.decode()
+    assert "pkg/__pycache__/m.cpython-313.pyc" in proc.stderr.decode()
+
+
+def test_report_names_the_artefact_and_the_removal_command():
+    text = address_guard.report(["pkg/__pycache__/m.pyc:0: build artefact must not be tracked"])
+    assert "pkg/__pycache__/m.pyc" in text
+    assert "git rm --cached" in text, "the fix for an artefact is untracking, not scrubbing"
+    assert "PUBLIC" in text
+    # Mixed input: both classes explained, and an address still gets placeholders.
+    mixed = address_guard.report([f"a.md:3: {REAL_LAN}", "m.pyc:0: build artefact must not be tracked"])
+    assert "a.md:3" in mixed and "10.0.0.x" in mixed and "100.64.0.1" in mixed
+    assert "git rm --cached" in mixed
 
 
 # ── staged content, not working-tree content ─────────────────────────────────
