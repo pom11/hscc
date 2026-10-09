@@ -32,7 +32,7 @@ import sys
 from typing import Optional
 
 from ..core import kanban, registry, roadmap
-from ._theme import escape, make_console, panel, status_panel
+from ._theme import esc, escape, make_console, panel, status_panel
 
 # The three sections this command works with, and their markdown headings.
 _SECTION_HEADING = {"now": "Now", "next": "Next", "later": "Later"}
@@ -519,7 +519,7 @@ def cmd_add(args: argparse.Namespace, projects: list[registry.Project]) -> int:
     new_lines = _apply_add(lines, items, heading, args.item)
     _write_file(path, "\n".join(new_lines))
     make_console().print(status_panel(
-        f"added {escape(args.item)} to '{heading}' in {path}",
+        f"added {escape(args.item)} to '{esc(heading)}' in {esc(path)}",
         status="ok", title="roadmap add"))
     return 0
 
@@ -571,7 +571,7 @@ def _locate_and_mutate(
         if item["section"] == to_heading:
             make_console().print(panel(
                 "roadmap", f"item {escape(args.item)} is already in "
-                f"'{to_heading}'; nothing to do."))
+                f"'{esc(to_heading)}'; nothing to do."))
             return 0
         if _heading_line(lines, to_heading) is None:
             print(
@@ -582,7 +582,7 @@ def _locate_and_mutate(
         make_console().print(panel(
             "roadmap",
             f"will move {escape(args.item)} from "
-            f"'{item['section'] or '(no section)'}' to '{to_heading}' in {path}"))
+            f"'{esc(item['section'] or '(no section)')}' to '{esc(to_heading)}' in {esc(path)}"))
     else:  # done
         if item["checked"]:
             make_console().print(panel(
@@ -592,7 +592,7 @@ def _locate_and_mutate(
         make_console().print(panel(
             "roadmap",
             f"will mark {escape(args.item)} done in "
-            f"'{item['section'] or '(no section)'}' of {path}"))
+            f"'{esc(item['section'] or '(no section)')}' of {esc(path)}"))
 
     if not args.apply:
         print("dry-run: pass --apply to perform this change.", file=sys.stderr)
@@ -853,7 +853,7 @@ def cmd_adopt(args: argparse.Namespace, projects: list[registry.Project]) -> int
     if _exists(target):
         bak = target + ".bak"
         _write_file(bak, _read_file(target) or "")
-        make_console().print(panel("roadmap adopt", f"backed up existing roadmap to {bak}"))
+        make_console().print(panel("roadmap adopt", f"backed up existing roadmap to {esc(bak)}"))
 
     _write_file(target, draft_text)
     # The write succeeded; only now remove the draft.
@@ -865,7 +865,7 @@ def cmd_adopt(args: argparse.Namespace, projects: list[registry.Project]) -> int
             file=sys.stderr,
         )
     make_console().print(status_panel(
-        f"adopted {draft} -> {target}", status="ok", title="roadmap adopt"))
+        f"adopted {esc(draft)} -> {esc(target)}", status="ok", title="roadmap adopt"))
     return 0
 
 
