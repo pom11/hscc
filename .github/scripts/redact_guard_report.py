@@ -16,6 +16,23 @@ pattern. Still one regex in the repo — this file never carries a copy of it.
 
 Reads the report on stdin, writes the redacted report on stdout. Fails closed.
 
+FILE ARGUMENTS (t_914b8db5): ``redact_guard_report.py FILE [FILE...]`` redacts
+each named file (``-`` means stdin) to stdout. That is what lets ``ci_log.sh``
+hand it a 0600 dump of ``gh run view --log`` — the log is a file, not a pipe,
+and it must reach the redactor without ever being echoed. Files are read and
+written as BYTES (decoded/encoded with ``surrogateescape``) and split with
+``splitlines(True)`` so terminators survive and clean input comes out
+**byte-identical** — no newline normalisation, no trailing-newline damage, no
+crash on a byte that is not valid UTF-8. File mode adds no second regex and no
+line-shape guessing (colon-bearing paths are supported evasion), and it adds no
+second pattern source: the SAME source-derived pattern below is what masks, in
+both modes. Stdin mode is unchanged — line iteration on ``sys.stdin`` — so the
+shipped workflow step keeps its exact behaviour.
+
+Neither mode reads its input before ``load_pattern()`` has returned: the
+fail-closed rails below sit in FRONT of both input modes, so a refused pattern
+means nothing is read and nothing is written, whichever way the report arrived.
+
 TRUST BOUNDARY (review round 3, t_9a4b7687; extended by round 4, t_38fd345f) —
 read this before adding a layer: **this process does not execute the guard's
 module code.** It asks a CHILD process to execute the exact source bytes this
@@ -680,6 +697,23 @@ def redact(line, pattern):
     return pattern.sub(MASK, line)
 
 
+def redact_file(path, pattern, out):
+    """Redact one FILE argument to the text stream ``out``, byte-faithfully.
+
+    ``splitlines(True)`` keeps each terminator with its line, so text with no
+    address comes out byte-identical — including a file with no trailing
+    newline (line iteration over a *decoded* stream would "helpfully" add one,
+    and would also have to survive bytes that are not UTF-8 at all). Bytes in,
+    bytes out, with ``surrogateescape`` so an undecodable byte round-trips
+    instead of raising: the guarantee is that the bytes we did not match are
+    exactly the bytes we got.
+    """
+    data = path.read_bytes().decode("utf-8", errors="surrogateescape")
+    for line in data.splitlines(True):
+        out.write(redact(line, pattern))
+    out.flush()
+
+
 def _emit(text):
     """Write a diagnostic. stdout may already carry report text, so flush both."""
     sys.stdout.flush()
@@ -692,7 +726,13 @@ def _emit(text):
 MASK = "*" * 3
 
 
-def main():
+def main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
+    # FILE arguments (t_914b8db5): a lone "-" keeps stdin. ci_log.sh passes a
+    # 0600 log dump this way; nothing about pattern loading or fail-closed
+    # behaviour changes between the two modes.
+    files = [Path(a) for a in args if a != "-"]
+    use_stdin = (not args) or any(a == "-" for a in args)
     try:
         pattern = load_pattern()
     except PatternCacheShadowed:
@@ -718,10 +758,15 @@ def main():
         _emit(MSG_REFUSING)
         return 3
     try:
-        for line in sys.stdin:
-            sys.stdout.write(redact(line, pattern))
+        if use_stdin:
+            for line in sys.stdin:
+                sys.stdout.write(redact(line, pattern))
+        for path in files:
+            redact_file(path, pattern, sys.stdout)
         sys.stdout.flush()
     except Exception as exc:  # noqa: BLE001 - fail closed; never leak a traceback
+        # Type NAME only — an OSError message would quote the caller's path, and
+        # a log path is the caller's business, not the job log's.
         _emit(f"{MSG_UNEXPECTED} [{type(exc).__name__}]")
         return 3
     return 0
