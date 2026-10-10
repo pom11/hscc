@@ -339,6 +339,263 @@ class TestExclusivityLock:
         assert rec.up_calls == 0
 
 
+class TestContainerIdResolution:
+    """`_resolve_container_id` pinned (t_873590dd): identity (node+port) is
+    the production path — the probe's wedged entry carries node+port and NO
+    model/recipe, and a uniform-pool fleet shares one recipe across every
+    unit, so the legacy name-substring cannot resolve it (measured 2/2 inert,
+    docs/audits/t_873590dd_engine-wedge-inert.md). The unique-match fail-safe
+    is pinned for BOTH strategies: zero OR multiple matches -> None.
+    """
+
+    ID = [  # normalised identity entries (uniform pool: same recipe/model)
+        {"container_id": "cid-node1-8000", "hosts": ["10.0.0.11"],
+         "port": 8000, "model": "m", "recipe": "r.yaml"},
+        {"container_id": "cid-node2-8001", "hosts": ["10.0.0.12"],
+         "port": 8001, "model": "m", "recipe": "r.yaml"},
+    ]
+
+    def _status(self, entries=None, workloads=None):
+        s = {}
+        if entries is not None:
+            s["identity"] = entries
+        if workloads is not None:
+            s["workloads"] = workloads
+        return s
+
+    # ── (a) unique match ──────────────────────────────────────────────────
+    def test_unique_identity_match_resolves(self):
+        unit = {"unit": "worker-a", "node": "10.0.0.12", "port": 8001}
+        assert recover._resolve_container_id(
+            self._status(entries=self.ID), unit) == "cid-node2-8001"
+
+    def test_unique_identity_match_string_port(self):
+        """serve_cmd ports are strings; the probe's may be int — must agree."""
+        unit = {"unit": "worker-a", "node": "10.0.0.11", "port": "8000"}
+        assert recover._resolve_container_id(
+            self._status(entries=self.ID), unit) == "cid-node1-8000"
+
+    # ── (b) zero match ────────────────────────────────────────────────────
+    def test_zero_identity_match_is_none(self):
+        unit = {"unit": "ghost", "node": "10.0.0.99", "port": 9999}
+        assert recover._resolve_container_id(
+            self._status(entries=self.ID), unit) is None
+
+    def test_node_match_wrong_port_is_none(self):
+        unit = {"unit": "worker-a", "node": "10.0.0.11", "port": 8001}
+        assert recover._resolve_container_id(
+            self._status(entries=self.ID), unit) is None
+
+    # ── (c) multi match -> ambiguous -> fail-safe ─────────────────────────
+    def test_multi_identity_match_is_ambiguous_none(self):
+        dup = [
+            {"container_id": "cid-x", "hosts": ["10.0.0.13"], "port": 8000},
+            {"container_id": "cid-y", "hosts": ["10.0.0.13"], "port": 8000},
+        ]
+        unit = {"unit": "worker-a", "node": "10.0.0.13", "port": 8000}
+        assert recover._resolve_container_id(
+            self._status(entries=dup), unit) is None
+
+    def test_identity_entry_with_missing_cid_is_none(self):
+        e = [{"container_id": "?", "hosts": ["10.0.0.11"], "port": 8000}]
+        unit = {"unit": "worker-a", "node": "10.0.0.11", "port": 8000}
+        assert recover._resolve_container_id(
+            self._status(entries=e), unit) is None
+
+    # ── legacy name-substring contract preserved ──────────────────────────
+    def test_legacy_unique_name_match_still_works(self):
+        status = {"workloads": [
+            {"name": "qwen-a-serve", "container_id": "cid-a"},
+            {"name": "qwen-b-serve", "container_id": "cid-b"}]}
+        assert recover._resolve_container_id(
+            status, {"model": "qwen-a"}) == "cid-a"
+        assert recover._resolve_container_id(
+            status, {"recipe": "/x/qwen-b.yaml"}) == "cid-b"
+
+    def test_legacy_zero_and_multi_name_match_are_none(self):
+        status = {"workloads": [
+            {"name": "qwen-a", "container_id": "cid-a"},
+            {"name": "qwen-a2", "container_id": "cid-b"}]}
+        assert recover._resolve_container_id(status, {"model": "qwen-z"}) is None
+        assert recover._resolve_container_id(status, {"model": "qwen-a"}) is None
+
+    def test_unit_without_node_or_port_falls_to_legacy(self):
+        """Identity cannot decide without node+port — legacy contract rules."""
+        status = self._status(
+            entries=self.ID,
+            workloads=[{"name": "qwen-a-serve", "container_id": "cid-a"}])
+        assert recover._resolve_container_id(
+            status, {"model": "qwen-a"}) == "cid-a"
+
+    def test_raw_structured_to_dict_shape_normalised(self):
+        """The resolver consumes a raw classify_cluster_status to_dict()."""
+        data = {
+            "groups": {"cid_group": {
+                "meta": {"hosts": ["10.0.0.20", "10.0.0.21"],
+                         "overrides": {"port": 8000}}}},
+            "solo_entries": [{
+                "cluster_id": "cid_solo", "host": "10.0.0.22",
+                "meta": {"port": 8002, "overrides": {"port": 8002}}}],
+        }
+        assert recover._resolve_container_id(
+            data, {"node": "10.0.0.21", "port": 8000}) == "cid_group"
+        assert recover._resolve_container_id(
+            data, {"node": "10.0.0.22", "port": 8002}) == "cid_solo"
+
+    # ── (d) the REAL orch case ────────────────────────────────────────────
+    def test_real_orch_case_resolves(self):
+        """Verbatim live-fleet shape (t_873590dd, 2026-10-10): four units,
+        ONE model + ONE recipe, four distinct node+port solo entries; the
+        wedged entry is the probe's (unit/node/port, no model, no recipe).
+        Pre-fix this resolved to None 2/2 in production; post-fix it must
+        resolve to the container on the unit's own node+port."""
+        recipe = "/home/op/.sparkrun-local/recipes/local-fixed/qwen3.8.yaml"
+        model = "local-inference-lab/Qwen3.8-Flash-Next-NVFP4"
+        entries = recover._normalise_identity_entries({
+            "groups": {},
+            "solo_entries": [
+                {"cluster_id": f"sparkrun_{h}_tok", "host": h,
+                 "meta": {"hosts": [h], "port": p,
+                          "overrides": {"port": p},
+                          "model": model, "recipe": recipe}}
+                for h, p in (("10.0.0.244", 8000), ("10.0.0.246", 8001),
+                             ("10.0.0.247", 8002), ("10.0.0.248", 8003))],
+        })
+        orch_wedged = {"unit": "orch", "node": "10.0.0.244", "port": 8000,
+                       "status": "wedged",
+                       "message": "HTTP 200 but no generated tokens",
+                       "last_success": 1791600000.0, "stalled_for_s": 240}
+        status = {"workloads": [  # the legacy text shape the wrapper also has
+            {"name": recipe, "container_id": "03fae933e3df92bf_de6e280b97b0"}
+            for _ in range(4)], "raw_output": ""}
+        status["identity"] = entries
+        assert recover._resolve_container_id(status, orch_wedged) == \
+            "sparkrun_10.0.0.244_tok"
+        # And the legacy branch ALONE (identity absent) still fails on this
+        # shape — proof the identity path, not luck, is what fixed it.
+        del status["identity"]
+        assert recover._resolve_container_id(status, orch_wedged) is None
+
+
+class TestIdentityWiring:
+    """The identity overlay reaching the resolver through the guarded pass —
+    the e2e that pins the LIVE defect (stop was never issued because the
+    resolver never saw node+port-matchable entries)."""
+
+    def _wedged_stream(self):
+        return {"wedged": [{"unit": "orch", "node": "10.0.0.11", "port": 8000,
+                            "status": "wedged"}],
+                "ok_units": [], "loading": [], "down": [], "ok": False}
+
+    def test_identity_overlay_drives_a_real_stop(self):
+        """Uniform pool, no fakes for resolution: the REAL resolver +
+        injected identity entries -> the wedged unit's OWN container stops."""
+        recover.RECOVER_CONSECUTIVE_WEDGES = 1
+        rec = Recorders()
+        r = recover.recover_engine_wedge(
+            stream_state=self._wedged_stream(),
+            status_fn=lambda: {"workloads": [
+                {"name": "shared-recipe.yaml", "container_id": "wrong"},
+                {"name": "shared-recipe.yaml", "container_id": "also-wrong"}],
+                "raw_output": ""},
+            stop_fn=rec.stop_fn, up_fn=rec.up_fn,
+            identity_fn=lambda: [
+                {"container_id": "cid-orch", "hosts": ["10.0.0.11"],
+                 "port": 8000},
+                {"container_id": "cid-sibling", "hosts": ["10.0.0.12"],
+                 "port": 8001}],
+            lock_acquire=rec.lock_acquire, lock_release=rec.lock_release,
+            intentional_fn=_intentional_false, now=0.0)
+        assert r["result"] == "recovered"
+        assert rec.stops == ["cid-orch"], (\
+            "ONLY the wedged unit's container stops; the ambiguous legacy "
+            "name match and the healthy sibling must not")
+
+    def test_identity_unavailable_falls_back_to_legacy_shape(self):
+        """identity_fn returning [] keeps the pre-fix contract: the ambiguous
+        shared-name fleet resolves to None -> fail-safe, no stop."""
+        recover.RECOVER_CONSECUTIVE_WEDGES = 1
+        rec = Recorders()
+        r = recover.recover_engine_wedge(
+            stream_state=self._wedged_stream(),
+            status_fn=lambda: {"workloads": [
+                {"name": "shared.yaml", "container_id": "a"},
+                {"name": "shared.yaml", "container_id": "b"}]},
+            stop_fn=rec.stop_fn, up_fn=rec.up_fn,
+            identity_fn=lambda: [],
+            lock_acquire=rec.lock_acquire, lock_release=rec.lock_release,
+            intentional_fn=_intentional_false, now=0.0)
+        assert r["result"] == "suppressed"
+        assert rec.stops == []
+        assert any(a.get("reason") == "no_container_id" for a in r["actions"])
+
+    def test_identity_ambiguity_still_fail_safe(self):
+        """Two identity entries on the SAME node+port -> ambiguous -> None."""
+        recover.RECOVER_CONSECUTIVE_WEDGES = 1
+        rec = Recorders()
+        r = recover.recover_engine_wedge(
+            stream_state=self._wedged_stream(),
+            status_fn=lambda: {"workloads": []},
+            stop_fn=rec.stop_fn, up_fn=rec.up_fn,
+            identity_fn=lambda: [
+                {"container_id": "x", "hosts": ["10.0.0.11"], "port": 8000},
+                {"container_id": "y", "hosts": ["10.0.0.11"], "port": 8000}],
+            lock_acquire=rec.lock_acquire, lock_release=rec.lock_release,
+            intentional_fn=_intentional_false, now=0.0)
+        assert r["result"] == "suppressed"
+        assert rec.stops == []
+
+    def test_injected_fakes_never_trigger_identity_fetch(self):
+        """A caller that injects status/stop/up (the tests) must not pull the
+        production identity fetch — no shelling out from tests."""
+        recover.RECOVER_CONSECUTIVE_WEDGES = 1
+        rec = Recorders()
+        r = _run(_stream(wedged=[UNIT_A]), rec, now=0.0)
+        assert r["result"] == "recovered"
+        assert rec.stops == ["cid-a"]
+
+
+class TestFetchIdentityEntries:
+    """`fetch_identity_entries` — the sanctioned structured query adapter.
+    The transport itself (health._SPARKRUN_STATUS_SCRIPT under sparkrun's own
+    venv python) is health's, proven in t_b543e530; here only the adapter's
+    parsing + fail-soft behaviour is pinned, with run_cmd faked (no real
+    subprocess)."""
+
+    _UNSET = object()
+
+    def _patch_transport(self, monkeypatch, payload=None, ok=True,
+                         venv=_UNSET):
+        from hscc_daemon import health as health_mod
+        from hscc_daemon import util as util_mod
+        resolved = "/fake/venv/bin/python" if venv is TestFetchIdentityEntries._UNSET else venv
+        monkeypatch.setattr(health_mod, "_sparkrun_venv_python",
+                            lambda: resolved)
+
+        def fake_run(args, **kw):
+            return {"ok": ok, "output": payload if payload is not None else ""}
+        monkeypatch.setattr(util_mod, "run_cmd", fake_run)
+
+    def test_parses_solo_entries(self, monkeypatch):
+        import json as _json
+        self._patch_transport(monkeypatch, _json.dumps({"groups": {},
+            "solo_entries": [{"cluster_id": "cid_1", "host": "10.0.0.11",
+                              "meta": {"overrides": {"port": 8000}}}]}))
+        entries = recover.fetch_identity_entries()
+        assert entries == [{"container_id": "cid_1", "hosts": ["10.0.0.11"],
+                            "port": 8000, "model": "", "recipe": ""}]
+
+    def test_unresolvable_venv_returns_empty(self, monkeypatch):
+        self._patch_transport(monkeypatch, venv=None)
+        assert recover.fetch_identity_entries() == []
+
+    def test_failed_or_unparsable_query_returns_empty(self, monkeypatch):
+        self._patch_transport(monkeypatch, ok=False, payload="")
+        assert recover.fetch_identity_entries() == []
+        self._patch_transport(monkeypatch, payload="{not json")
+        assert recover.fetch_identity_entries() == []
+
+
 class TestContainerResolutionSafety:
     def test_no_container_id_resolved_is_fail_safe(self):
         """If a unit's container cannot be resolved uniquely, NO stop is issued."""
