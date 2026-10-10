@@ -589,12 +589,18 @@ def _stub_fdwrite_at_import(addr, fd=2):
     ) + f"os.write({fd}, b'fd{fd} {addr}\\n')\n" + _GUARD_CLI
 
 
-def _redactor_alone(stub_src, tmp_path, stdin_text=None, bare=False, plant=None):
+def _redactor_alone(stub_src, tmp_path, stdin_text=None, bare=False, plant=None,
+                    file_mode=False):
     """Run the real redactor CLI against a checkout carrying STUB_SRC.
 
     bare=True runs it as plain ``python3`` with NO -W/-E flags, which pins the
     REDACTOR's own silencing rather than the interpreter flags the step happens
     to pass. The step uses the flagged form; both must be safe.
+
+    file_mode=True switches the CLI to its FILE-arguments mode (t_914b8db5): the
+    report goes into a file passed as ``argv``, stdin is ``DEVNULL``. Both input
+    modes must share the same fail-closed rails, so the round-4 attacks are
+    driven through each of them.
     """
     work = tmp_path / "alone"
     (work / "scripts").mkdir(parents=True)
@@ -604,11 +610,17 @@ def _redactor_alone(stub_src, tmp_path, stdin_text=None, bare=False, plant=None)
     if plant is not None:
         plant(work)
     argv = [sys.executable] + (["-W", "ignore", "-E"] if not bare else [])
-    proc = subprocess.run(
-        argv + [str(work / ".github" / "scripts" / "redact_guard_report.py")],
-        input=(stdin_text or f"  docs/x.md:1: {REAL_LAN}\n").encode(),
-        capture_output=True, cwd=work,
-    )
+    argv.append(str(work / ".github" / "scripts" / "redact_guard_report.py"))
+    report = stdin_text or f"  docs/x.md:1: {REAL_LAN}\n"
+    if file_mode:
+        (work / "report.txt").write_text(report, encoding="utf-8")
+        argv.append(str(work / "report.txt"))
+        # No pipe at all on stdin: file mode must fail closed with nothing there.
+        proc = subprocess.run(argv, stdin=subprocess.DEVNULL,
+                              capture_output=True, cwd=work)
+    else:
+        proc = subprocess.run(argv, input=report.encode(),
+                              capture_output=True, cwd=work)
     return proc.returncode, proc.stdout.decode() + proc.stderr.decode()
 
 
@@ -1504,6 +1516,18 @@ def _extract(blob):
     # signature deviations: keyword flags, three args
     b"import re; FORBIDDEN = re.compile('abc', flags=2)",
     b"import re; FORBIDDEN = re.compile('abc', 0, 0)",
+    # flags as an ATTRIBUTE — `re.IGNORECASE` is an `ast.Attribute` node, and the
+    # contract above promises it is a deviation. Reviewer round-1 mutant
+    # `mflags_attr` widened the flags gate to accept exactly this (an
+    # evaluator-style `getattr(re, name)` for UPPER-case names) and SURVIVED the
+    # whole matrix, because every other flags case here is a Constant. Without
+    # this blob the promise in the docstring is unpinned: the shape gate could
+    # silently become name-resolving and no test would notice.
+    b"import re; FORBIDDEN = re.compile('abc', re.IGNORECASE)",
+    # same class, folded by hand: BitOr of two attributes is still not a literal
+    # datum, and it is the shape a real editor reaches for when it wants two
+    # flags, so it is the more likely accidental widening.
+    b"import re; FORBIDDEN = re.compile('abc', re.IGNORECASE | re.MULTILINE)",
     # flags must be a plain int literal in range: bool (isinstance(int) trap),
     # out-of-range, string
     b"import re; FORBIDDEN = re.compile('abc', True)",
@@ -1764,3 +1788,81 @@ def test_child_refuses_bytes_that_do_not_match_the_pinned_digest():
     with pytest.raises(redactor.PatternUnavailable) as excinfo:
         redactor._parse_verdict(raw)
     assert excinfo.value.type_name == "RuntimeError"
+
+
+# ── merge integration: the FILE-args mode (t_914b8db5) shares every rail ─────
+#
+# Landing main's FILE-arguments mode put a SECOND input path next to stdin. A
+# rail that only guards stdin is worse than no rail: the attacker simply passes
+# the report as an argument instead of piping it. So each round-4 attack is
+# driven through file mode too, and the ordering inside main() is pinned rather
+# than trusted — a unit test of load_pattern() cannot see a removed call site or
+# an arm moved below the read.
+
+
+def test_file_mode_fails_closed_on_the_d0_forgery(tmp_path):
+    """Same forged OK + os._exit as stdin mode: refused, and no file echoed."""
+    rc, out = _redactor_alone(_stub_forged_ok("ZZZNOPE", True), tmp_path,
+                              file_mode=True)
+    assert rc == 3, f"file mode must honour the agreement rail:\n{out}"
+    assert "PATTERN DISAGREEMENT" in out, out
+    assert "CANNOT LOAD PATTERN" in out, out
+    assert REAL_LAN not in out, f"file mode echoed the report:\n{out}"
+    assert "docs/x.md:1" not in out, "refusal must echo no report line"
+    assert "ZZZNOPE" not in out, "a refused verdict must not be quoted back"
+
+
+def test_file_mode_fails_closed_on_the_d1_cache_artifact(tmp_path):
+    """The cache refusal must precede the FILE read too, not just the stdin read."""
+    rc, out = _redactor_alone(
+        _GUARD_BODY + _GUARD_CLI, tmp_path, file_mode=True,
+        plant=lambda work: _plant_pyc(work, 0b01),
+    )
+    assert rc == 3, f"an unchecked-hash pyc must fail file mode too:\n{out}"
+    assert "CACHE SHADOW" in out, out
+    assert "CANNOT LOAD PATTERN" in out, out
+    assert REAL_LAN not in out, out
+
+
+def test_file_mode_happy_path_still_redacts(tmp_path):
+    """The rails must not have made file mode useless: clean pattern ⇒ rc=0 and a
+    masked line, which is what ci_log.sh depends on."""
+    rc, out = _redactor_alone(_GUARD_BODY + _GUARD_CLI, tmp_path, file_mode=True)
+    assert rc == 0, out
+    assert "***" in out, out
+    assert REAL_LAN not in out, out
+
+
+def test_main_loads_the_pattern_before_either_input_mode_reads():
+    """Ordering pin on the merged main(): the pattern is decided BEFORE any read,
+    and the two round-4 arms sit above both input modes.
+
+    Mutation this kills: hoisting `redact_file(...)` (or the stdin loop) above
+    `load_pattern()`, wrapping only the stdin loop in the PatternDisagreement /
+    PatternCacheShadowed arms, or giving file mode its own bare `except`. Any of
+    those reads input before the pattern is trusted, so a refusal would arrive
+    after the report had already been written.
+    """
+    import inspect
+
+    src = inspect.getsource(redactor.main)
+    load_at = src.index("load_pattern()")
+    for reads in ("sys.stdin", "redact_file("):
+        assert reads in src, f"main() lost an input mode: {reads}"
+        assert load_at < src.index(reads), \
+            f"main() must resolve the pattern before touching {reads}"
+    first_read = min(src.index("sys.stdin"), src.index("redact_file("))
+    for arm in ("except PatternCacheShadowed", "except PatternDisagreement"):
+        assert arm in src, f"main() lost the {arm} arm entirely"
+        arm_at = src.index(arm)
+        assert arm_at < first_read, \
+            f"{arm} must be raised and handled before {reads} is read"
+        # The arm's OWN body must not fall through: dropping its `return 3`
+        # would let execution continue into the read block after a refusal.
+        # Slice to the NEXT handler, or the following arm's `return 3` makes
+        # this assertion pass vacuously (measured: a fall-through mutant did).
+        nxt = src.find("except ", arm_at + len(arm))
+        body = src[arm_at:nxt if nxt != -1 else first_read]
+        assert "return 3" in body, \
+            f"{arm} must return before any input is read"
+    assert src.index("except PatternDisagreement") < src.index("except BaseException")
