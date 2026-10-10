@@ -1,7 +1,10 @@
 # Closing the round-4 publish channels: child authorship + `__pycache__` (t_38fd345f)
 
-Status: implementation complete at the tip named in the completion comment; the
-authoritative two-interpreter gate is stamped there (see Results).
+Status: implementation complete; review round 1 (run 981) returned REQUEST
+CHANGES on two items — merge posture against `main`, and one unpinned promise in
+the refusal matrix — both closed here (see *Review round 1 close-out*). The
+authoritative two-interpreter gate is stamped at the re-stamped tip named in the
+completion comment.
 
 Follow-up to `ci-backstop-address-guard-t_9a4b7687.md`. Reviewer round 4
 (run 966) reproduced two publish channels *inside* the round-3 child boundary,
@@ -96,8 +99,13 @@ reviewer broke:
   identically against the untouched `main` checkout (it never ran against any
   implementation). The channel it targets is covered by `probe_r4_pyc_step.py`
   and `probe_r4_site.py`, which both pass.
-* Card suite: **122 passed** on py3.11 and py3.13
-  (`.github/scripts/tests/test_redact_guard_report.py`). The 32 round-4 cases (13 new test functions, 122 collected total):
+* Card suite: **131 passed** on py3.11 and py3.13
+  (`.github/scripts/tests/test_redact_guard_report.py`). Collected-count audit
+  trail: 90 at the fork base `f8e38edc`, **122** at the round-4 tip `11ebbb69`
+  (our 32 round-4 cases), **93** on `origin/main` (its 3 artifact/FILE-args
+  cases), **131** merged = 122 + 3 + 6 from this pass (+2 flags-attribute refusal
+  cases, +3 file-mode end-to-end, +1 `main()` ordering pin).
+  The 32 round-4 cases (13 new test functions):
   16-case source-deviation matrix (incl. the numeric-`BinOp` flags case that
   kills the evaluator mutant), acceptance shapes incl. annotated + last-binding
   + compiled-vs-tuple pin, forged-OK end-to-end (honoured-path proof that the
@@ -118,6 +126,57 @@ reviewer broke:
 * Authoritative gate: `scripts/run_tests.sh` from a clean DETACHED worktree at
   the frozen stamped tip, `HSCC_TEST_PY` = p311 venv and p313 — stamps and log
   paths are in the completion comment (`RUN_TESTS_RC=0` required on both).
+
+## Review round 1 close-out (run 981 → this pass)
+
+The reviewer verified D0/D1 clean under independent execution and named two
+correctable items. Neither reopened a publish channel; both were real.
+
+**1. Merge posture.** The gated ref forked at `f8e38edc`, before `f8d3a685`
+landed `main`'s FILE-arguments mode on the SAME file (`redact_file()` plus the
+`argv`/`use_stdin` plumbing in `main()`), so `git merge-tree` against `main`
+reported a content conflict and the branch was not landable. Fixed by merging
+`origin/main` FORWARD (`7fee067a`) — the pushed gated ref is never rebased;
+precedent is t_3e6d3db7's pre-stamp sync. The conflict was one hunk, the module
+docstring; the resolution keeps `main`'s FILE ARGUMENTS paragraph and extends the
+round-4 TRUST BOUNDARY text with the two statements this merge makes true: file
+mode adds no second pattern source (the source-derived pattern masks in both
+modes), and the fail-closed rails sit in front of BOTH input modes.
+
+The code half merged cleanly and that was VERIFIED, not trusted: `redact_file()`
+is byte-identical to `main`'s, `main()` keeps `main`'s argv handling verbatim
+with the `PatternCacheShadowed` and `PatternDisagreement` arms inserted ahead of
+both modes (14 added lines, nothing removed). All rails intact.
+
+**2. The unpinned promise (`mflags_attr`).** The reviewer widened the source gate
+to ACCEPT `re.compile(text, re.<UPPER>)` — an `ast.Attribute` flags node,
+evaluator-style name resolution — and the mutant survived all 122 cases. Behaviour
+today was correct; what was missing is that the docstring *promises*
+`re.IGNORECASE`-as-a-name is a deviation, and no case in the refusal matrix fed an
+`Attribute` into the flags position (every other flags case is a `Constant`). So
+the promise could rot silently. Two blobs added to the deviation matrix: a single
+attribute, and `re.IGNORECASE | re.MULTILINE` — the `BitOr` a real editor writes
+when it wants two flags, i.e. the likelier accidental widening. Both mutants now
+FAIL the matrix test (measured, not asserted from the code).
+
+**3. The gap the merge exposed, found while testing item 1.** A FILE-arguments
+mode is a second input path. A rail that guards only stdin is worse than no rail:
+the attacker passes the report as an argument instead of piping it. The round-4
+attacks are now driven through file mode too (`_redactor_alone(...,
+file_mode=True)` — report in a file, `stdin=DEVNULL`, so file mode is also proven
+to fail closed with nothing on the pipe): forged `OK` + `os._exit` ⇒ rc=3
+`PATTERN DISAGREEMENT` with nothing echoed, unchecked-hash pyc ⇒ rc=3
+`CACHE SHADOW`, and the happy path still redacts (rc=0, masked) because
+`ci_log.sh` depends on it. Plus an ORDERING pin on `main()`: `load_pattern()`
+resolves before either `sys.stdin` or `redact_file()` is touched, and each arm
+returns inside its own body. A unit test of `load_pattern()` cannot see a hoisted
+read or a moved arm — same class of miss as the round-4 call-site lesson.
+
+Battery at this tip: 7/7 mutants CAUGHT — `mflags_attr`, `mflags_bitor`, cache
+arm returning 0, cache check dropped, agreement dropped, file read hoisted above
+`load_pattern()`, disagreement arm falling through. Restore between mutants is by
+COPY: `git checkout --` as a restore wiped this card's uncommitted fix in the
+previous run.
 
 ## The residual, named so round 5 cannot re-open it
 
