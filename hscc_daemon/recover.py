@@ -119,20 +119,135 @@ def _load_cluster_engine():
     return mod
 
 
+def _normalise_identity_entries(data):
+    """Normalise a structured sparkrun status ``to_dict()`` into matchable
+    identity entries: ``[{container_id, hosts, port, model, recipe}, ...]``.
+
+    Covers BOTH shapes of ``ClusterStatusResult.to_dict()``: ``groups``
+    (multi-host jobs, keyed by cluster id) and ``solo_entries`` (one host
+    per entry — the live fleet's shape). ``hosts`` prefers the OBSERVED
+    placement host (``entry.host``) over the intent-recorded ``meta.hosts``;
+    ``port`` prefers the applied ``meta.overrides.port`` over the recipe's
+    default ``meta.port`` (an overridden port is the one the probe hit).
+    Anything missing degrades to empty — never raises.
+    """
+    entries = []
+    if not isinstance(data, dict):
+        return entries
+    groups = data.get("groups")
+    if isinstance(groups, dict):
+        for cid, group in groups.items():
+            if not isinstance(group, dict):
+                continue
+            meta = group.get("meta") or {}
+            hosts = meta.get("hosts") or [
+                c.get("host") for c in (group.get("containers") or [])
+                if isinstance(c, dict) and c.get("host")]
+            overrides = meta.get("overrides") or {}
+            entries.append({
+                "container_id": str(cid or ""),
+                "hosts": [h for h in (hosts or []) if h],
+                "port": overrides.get("port") or meta.get("port"),
+                "model": meta.get("model") or "",
+                "recipe": meta.get("recipe") or "",
+            })
+    for e in (data.get("solo_entries") or []):
+        if not isinstance(e, dict):
+            continue
+        meta = e.get("meta") or {}
+        hosts = [e["host"]] if e.get("host") else (meta.get("hosts") or [])
+        overrides = meta.get("overrides") or {}
+        entries.append({
+            "container_id": e.get("cluster_id") or "",
+            "hosts": [h for h in (hosts or []) if h],
+            "port": overrides.get("port") or meta.get("port"),
+            "model": meta.get("model") or "",
+            "recipe": meta.get("recipe") or "",
+        })
+    return entries
+
+
+def _entry_identity_matches(entry, node, port):
+    """True iff this identity entry is the unit's container: the unit's node
+    is one of the entry's hosts AND the ports agree (string-compared — the
+    probe's port may be an int, ``serve_cmd`` may carry a string)."""
+    hosts = entry.get("hosts") or []
+    if isinstance(hosts, str):
+        hosts = [hosts]
+    if node not in [str(h).strip() for h in hosts]:
+        return False
+    ep = entry.get("port")
+    return ep not in (None, "") and str(ep).strip() == port
+
+
+def _match_by_identity(entries, unit):
+    """Resolve a unit to its container id by node+port identity.
+
+    The wedged entry the probe writes carries ``node`` + ``port`` (that is
+    what the HTTP probe hit), and structured sparkrun status reports those
+    same two fields per running workload. They are the ONLY stable per-unit
+    identity in a uniform-pool fleet, where model and recipe are shared by
+    every unit (measured in docs/audits/t_873590dd_engine-wedge-inert.md:
+    four serving units, one recipe, one model — name matching is 0/4).
+
+    SAFETY mirrors the legacy rule exactly: a UNIQUE match is required; zero
+    OR multiple matches return None (fail-safe — a healthy sibling is never
+    at risk of being stopped by a misidentified container).
+    """
+    if not isinstance(unit, dict):
+        return None
+    node = unit.get("node") or ""
+    port = unit.get("port")
+    if not node or port in (None, ""):
+        return None
+    node = str(node).strip()
+    port = str(port).strip()
+    matches = [e for e in entries if _entry_identity_matches(e, node, port)]
+    if len(matches) != 1:
+        return None
+    cid = str(matches[0].get("container_id") or "").strip()
+    if cid and cid != "?":
+        return cid
+    return None
+
+
 def _resolve_container_id(status_result, unit):
     """Best-effort map a wedged unit to its sparkrun container id.
 
-    `hscc cluster status` reports workloads keyed by job/recipe name
-    (``cmd_cluster_status()`` returns a ``workloads`` list with ``name`` +
-    ``container_id``). A unit's container is the workload whose name contains
-    the unit's concrete model id or recipe filename stem (the stable identity
-    the operator sees in `hscc cluster status`).
+    TWO strategies, in order of trust:
 
-    SAFETY: a unique match is required. If zero OR multiple workloads match
-    (ambiguous), return None — the caller then records "cannot resolve
-    container" and issues NO stop. A healthy sibling unit is never at risk of
-    being stopped by a misidentified container.
+    1. IDENTITY (node+port): when the status carries identity entries
+       (key ``identity``, or a raw structured ``to_dict()`` with
+       ``groups``/``solo_entries`` — both normalised via
+       ``_normalise_identity_entries``), the unit's ``node``+``port`` select
+       its container. This is the production path: the probe's wedged entry
+       carries node+port and NOTHING else, and on a uniform pool the model/
+       recipe name is shared by every unit, so name matching cannot work
+       (t_873590dd: resolution returned None 2/2 with zero stops ever).
+    2. LEGACY name-substring: for status shapes without identity (the
+       ``cmd_cluster_status()`` text-parse shape ``{workloads:[{name,
+       container_id}]}``), the unit's concrete model id or recipe filename
+       stem must appear in EXACTLY one workload name.
+
+    SAFETY in BOTH: a unique match is required. Zero OR multiple matches
+    (ambiguous) return None — the caller records "cannot resolve container"
+    and issues NO stop.
     """
+    if not isinstance(status_result, dict):
+        return None
+    entries = status_result.get("identity")
+    if not entries:
+        entries = _normalise_identity_entries(status_result)
+    # Only entries that actually carry usable host+port can take part in an
+    # identity decision; if none do, the shape is legacy after all. When the
+    # unit lacks node/port, identity cannot decide either — fall through to
+    # the legacy name contract instead of failing it.
+    usable = [e for e in entries
+              if e.get("hosts") and e.get("port") not in (None, "")]
+    if usable and isinstance(unit, dict) and unit.get("node") \
+            and unit.get("port") not in (None, ""):
+        return _match_by_identity(usable, unit)
+
     workloads = (status_result or {}).get("workloads") or []
     if not workloads:
         return None
@@ -152,6 +267,33 @@ def _resolve_container_id(status_result, unit):
         if cid and cid != "?":
             return cid
     return None
+
+
+def fetch_identity_entries():
+    """Identity entries from the structured sparkrun status query.
+
+    The sanctioned fleet transport (t_b543e530): the SAME
+    ``health._SPARKRUN_STATUS_SCRIPT`` under sparkrun's own venv python that
+    the DGX check already uses — no second transport, no raw ssh/docker.
+    Returns ``[]`` on ANY failure (unresolvable venv python, non-zero exit,
+    unparsable JSON): the caller then falls back to the legacy text-parse
+    status shape, i.e. exactly today's behaviour, never worse.
+    """
+    from . import health as _health
+    from .util import run_cmd
+    try:
+        venv_py = _health._sparkrun_venv_python()
+        if not venv_py:
+            return []
+        res = run_cmd([venv_py, "-c", _health._SPARKRUN_STATUS_SCRIPT],
+                      timeout=25)
+        if not res or not res.get("ok") or not res.get("output"):
+            return []
+        return _normalise_identity_entries(json.loads(res["output"]))
+    except Exception as e:  # never let a status read break the guard pass
+        log(f"Engine-wedge recovery: identity status query failed ({e}) — "
+            "falling back to the legacy status shape", "WARN")
+        return []
 
 
 # ── Persistent recovery state (recover.json): cooldown + attempt cap ─────
@@ -184,6 +326,7 @@ def _save_recover_state(state, state_file=None):
 # ── The guarded recovery pass ────────────────────────────────────────────
 def recover_engine_wedge(stream_state=None, resolve_container=None,
                          status_fn=None, stop_fn=None, up_fn=None,
+                         identity_fn=None,
                          lock_acquire=None, lock_release=None,
                          intentional_fn=None, now=None, state_file=None):
     """One guarded recovery pass. Returns a dict (never raises).
@@ -204,6 +347,14 @@ def recover_engine_wedge(stream_state=None, resolve_container=None,
         for a wedged unit (default: ``_resolve_container_id``).
       * ``stop_fn(cid)``  — ``hscc cluster stop <cid>`` wrapper → result dict.
       * ``up_fn()``       — ``hscc cluster up`` wrapper → result dict.
+      * ``identity_fn()`` — structured identity entries
+        (``[{container_id, hosts, port}, ...]``) from the sanctioned
+        sparkrun status query (default on the production path:
+        ``fetch_identity_entries``; when the caller injects the status/stop/up
+        fakes it stays None unless explicitly passed, so tests never shell
+        out). Merged into the status result under ``identity`` so
+        ``_resolve_container_id`` can match by node+port — the only identity
+        a uniform-pool fleet has (t_873590dd).
       * ``lock_acquire``/``lock_release`` — autodown's O_EXCL lock functions
         (defaults: ``autodown._acquire_lock`` / ``_release_lock``).
       * ``intentional_fn`` — True iff an intentional autodown is in effect
@@ -305,14 +456,15 @@ def recover_engine_wedge(stream_state=None, resolve_container=None,
     try:
         return _recover_locked(candidates, resolve_container=resolve_container,
                                status_fn=status_fn, stop_fn=stop_fn,
-                               up_fn=up_fn, now=now, state_file=state_file)
+                               up_fn=up_fn, now=now, state_file=state_file,
+                               identity_fn=identity_fn)
     finally:
         lock_release()
 
 
 def _recover_locked(candidates, resolve_container=None,
                     status_fn=None, stop_fn=None, up_fn=None, now=None,
-                    state_file=None):
+                    state_file=None, identity_fn=None):
     """The recovery sequence, run while holding the autodown O_EXCL lock.
 
     Split out of ``recover_engine_wedge`` so the O_EXCL lock acquisition +
@@ -342,10 +494,29 @@ def _recover_locked(candidates, resolve_container=None,
             stop_fn = cl.cmd_stop
         if up_fn is None:
             up_fn = cl.cmd_cluster_up
+        # Production path only (all three wrappers un-injected): the identity
+        # overlay is what makes resolution possible on a uniform-pool fleet.
+        # When a caller injects any wrapper fake, identity stays off unless
+        # explicitly passed — tests never shell out.
+        if identity_fn is None:
+            identity_fn = fetch_identity_entries
 
     # Resolve container ids for all candidate units in ONE status call, so a
-    # healthy sibling is never in the stop set.
+    # healthy sibling is never in the stop set. The structured identity
+    # entries (node+port per container) are merged into the status result so
+    # the resolver can match by identity; when the identity query is
+    # unavailable the legacy text-parse shape alone is used, exactly as
+    # before (t_873590dd).
     status_result = status_fn()
+    if identity_fn is not None:
+        try:
+            entries = identity_fn() or []
+        except Exception as e:
+            log(f"Engine-wedge recovery: identity lookup failed ({e})", "WARN")
+            entries = []
+        if entries:
+            status_result = dict(status_result or {})
+            status_result["identity"] = entries
     by_key = {}
     for key, u, streak in candidates:
         cid = resolve_container(status_result, u)
