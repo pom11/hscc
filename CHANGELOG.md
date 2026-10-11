@@ -11,6 +11,175 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.5.9] - 2026-10-11
+
+### Fixed
+- **The CI-log redactor refused any report that was not valid UTF-8.**
+  `redact_file()` decodes with `errors="surrogateescape"` and its docstring
+  promises an undecodable byte "round-trips instead of raising" — but only the
+  decode carried the error handler. Writing those lone surrogates to a
+  strict-UTF-8 stdout raised `UnicodeEncodeError`, so the redactor exited 3 on
+  any non-UTF-8 input. Fail-closed, but a CI log is arbitrary bytes, so the
+  common case for the feature it exists to serve would have been a refusal
+  rather than a redacted log. The streams now carry the same error handler.
+- **The `run_tests.sh` DIRS drift guard only saw deployed packages, so a test dir could
+  sit uncollected behind an `ALL GREEN` stamp.** `test_run_tests_sh_covers_every_tested_payload_package`
+  enumerated `install_payload.DEFAULT_PAYLOAD`, which is the right source of truth for *plugins*
+  and the wrong one for *coverage*: a dir that is not a deployed package was invisible to it, and
+  that is exactly how `.github/scripts/tests` and `scripts/tests` (the address guard's own 56-case
+  suite among them) went unrun for two cards. The guard is now two guards — the package guard kept
+  verbatim for its original 2026-09-08 failure mode, plus a wide one asserting that EVERY tracked
+  dir holding `test_*.py` is reachable the way the runner actually resolves entries
+  (`$ROOT/<entry>/tests`), failing closed and naming the missing dir. Reachability — not
+  "top-level name in DIRS" — so the multi-component `.github/scripts` entry counts, and dirs under
+  pytest.ini's `norecursedirs` are exempt because the runner cannot collect them either. A
+  meta-check asserts the census reproduces the registered legs, so a broken census cannot let the
+  wide guard pass vacuously.
+- **The engine-wedge auto-heal had never stopped a container on this fleet —
+  and could not have.** `recover._resolve_container_id` matched a wedge
+  candidate against the container-name list from the `sparkrun status`
+  text-parse, but the candidate `_recover_locked` passes is the probe's
+  wedged STREAM entry, which carries only `unit`/`node`/`port` — no model,
+  no recipe — so the needle was ALWAYS empty and every pass returned None
+  before matching even started (the two logged episodes, 2026-10-09 and
+  2026-10-10, were deterministic, not a race; `recover.json` shows
+  `attempts: 0` for every unit). And even had the needle existed, a
+  uniform-pool fleet shares one model and one recipe across all units, so
+  name matching is zero- or multi-match 100% of the time — both the
+  deliberate fail-safe. The fix adds the only per-unit identity a uniform
+  pool HAS: **node+port**, available (unused until now) in the structured
+  sparkrun status `to_dict()` the DGX check already fetches via the
+  sanctioned query. `fetch_identity_entries()` normalises
+  `groups`/`solo_entries` to `{container_id, hosts, port}` (hosts: observed
+  placement first; port: applied override first), the resolver matches them
+  against the unit's node+port with string-compared ports, and
+  `_recover_locked` overlays them onto the status result on the production
+  path only (injected fakes keep the old contract; tests never shell out).
+  The ambiguity fail-safe is untouched and now provably load-bearing:
+  zero OR multiple node+port matches still resolve to None and issue no
+  stop. Legacy name matching survives verbatim for status shapes without
+  identity — worst case equals the pre-fix behaviour, never worse. Measured
+  post-fix against the LIVE fleet (read-only, no stop): all four units
+  resolve to distinct `sparkrun_*` cluster ids; the audit reproduces the
+  pre-fix None 4/4 and pins which branch caused it
+  (`docs/audits/t_873590dd_engine-wedge-inert.md`). The resolved ids are
+  valid `sparkrun stop` targets (both the canonical and digest
+  `<intent16>_<placement12>` forms pass `_is_cluster_id`).
+
+### Security
+- **The address guard was blind to binary blobs, so a committed `.pyc` could
+  carry a real address past all three gates.** `scan_blob()` returned `[]` for
+  any NUL-bearing content, and the pre-commit hook, the pytest gate and the CI
+  backstop all call that one function — so a stray `git add -f
+  scripts/__pycache__/*.pyc`, or a vendored dir committed with an old build,
+  shipped a blob whose embedded string constants hold whatever address the source
+  had at build time, invisible to every control and unaffected by `.gitignore`
+  (this repo had exactly such a blob in published history before the 2026-10-09
+  rewrite). Policy now: **a build artefact is refused on its name, whatever it
+  contains** — `*.pyc` `*.pyo` `*.pyd` `*.o` `*.a` `*.so` `*.dylib` `*.dll`
+  `*.class` `*.jar` `*.egg` `*.whl` `*.pyz` and any `__pycache__/` segment are
+  rejected before their bytes are read. Extract-and-scan was considered and
+  declined, and a probe during review showed why it is the *weaker* option, not
+  just the slower one: a real `py_compile` output of source carrying a real-shaped
+  address has that address visible to a naive scan over the decoded bytes yet
+  **invisible to `FORBIDDEN`** — the detector's `\b` assume a text-delimited
+  occurrence, and marshal writes no delimiter after a string constant, so the
+  byte that follows is the first letter of the next interned name, a word
+  character, and the trailing `\b` fails. A content scan inherits that blind
+  spot; a name-based refusal never reads the bytes and cannot be defeated that
+  way. It would also have no stopping rule (`.zip`, `.gz`, `.jar`, PDFs are
+  containers too).
+  `ALLOWED_BINARY_PATHS` is the
+  escape hatch for a binary that genuinely belongs here, and round-1 review made
+  it honest by making it two-tier: a **compiled-artefact suffix is never
+  waivable**, so widening the hatch cannot make a `.pyc` trackable-and-unreadable;
+  the hatch waives a `__pycache__`-segment path only, and such a path is then
+  decoded and text-scanned even when it carries NULs. It also now overrides
+  `SKIP_SUFFIXES`, so no hatch entry can ever mean "tracked and never read".
+  `report()` splits the two
+  offender classes, because "scrub to `10.0.0.x`" is not the fix for a `.pyc` —
+  `git rm --cached` is. Hook and `--tracked` cannot disagree: the verdict is
+  formatted in one function. Current exposure was measured at zero (0 tracked
+  artefacts; 2 NUL-bearing tracked files, both `.png`), and `--tracked` timing is
+  unchanged at 0.12 s. Reasoning + limits:
+  `docs/audits/address-guard-binary-policy-t_3e6d3db7.md`.
+- **No sanctioned way to read a CI log — a raw `gh run view --log` could
+  publish the very leak the guard reports.** The guard's offender format is
+  `file:line: <address>`; the shipped `address-guard` job's own logs are
+  clean (streams redirected, only redacted output echoed), but ANY other
+  job that ran the guard without stream redirection — a manual
+  `workflow_dispatch`, an ad-hoc step elsewhere, any pre-fix run — printed
+  the live address into scrollback, and the one leak that actually happened
+  (t_9a4b7687) was a local suite log nearly attached to a card. New
+  `.github/scripts/ci_log.sh <run-id> [--job NAME] [--keep]` is now the
+  sanctioned reader: both `gh` streams merge into ONE mode-0600 dump (gh's
+  stderr goes through the redactor too — those bytes cannot be proven to be
+  non-job content, and /dev/null would also swallow real gh errors), stdout
+  carries ONLY `redact_guard_report.py` output, the pattern is probed
+  end-to-end BEFORE any fetch so a redactor that cannot load it exits non-zero
+  printing NOTHING (never a fall-through to the raw dump), and the dump is
+  deleted unless `--keep` — which leaves exactly one 0600 file and warns
+  `UNREDACTED` on stderr. `redact_guard_report.py` gained byte-faithful FILE
+  arguments (`redact_guard_report.py FILE...`, `-` = stdin) so local suite
+  logs are as easy to scrub as CI ones: byte I/O plus `splitlines(True)`
+  means clean input comes back byte-identical (no trailing-newline damage,
+  no UTF-8 crash on binary noise); stdin mode is untouched and the pattern
+  still comes from the guard's `FORBIDDEN` via the child process — no second
+  regex, no line-shape guessing. The written rule now lives in
+  `docs/audits/ci-backstop-address-guard-t_9a4b7687.md` §9b: never
+  paste/attach/comment a raw CI or suite log on this repo without running it
+  through the redactor first.
+
+### Verified
+- `scripts/tests/test_address_guard.py`: 25 -> **48 collected** (14 new
+  functions / 23 new cases) — a `.pyc` carrying a real LAN address is refused;
+  every artefact shape is refused *even when clean* (the verdict is about the
+  path, not the content);
+  **a genuinely compiled `.pyc` defeats `FORBIDDEN` entirely and is still refused**
+  (`py_compile` at runtime, address assembled via the `_addr(*parts)` idiom — a
+  hand-spliced NUL blob would have been caught by the existing pattern and proved
+  nothing); case/backslash forms do not dodge the list; the tracked `.png`
+  population and an unknown-extension binary are **not** broken; the allowlist
+  exempts the refusal but not the scan; `scan_paths` refuses a deleted-but-tracked
+  or unreadable artefact; `report()` names the artefact and `git rm --cached`; and
+  the CLI's `--staged`/`--tracked` exit 1 on it (including after a scrubbed tree).
+- `hscc_daemon/tests/test_precommit_address_hook.py`: 14 -> **19** collected
+  cases (5 new), including the card's agreement test — a real `git commit`
+  through the real hook and the real `--tracked` CLI over the same tree emit
+  **identical** verdict strings — and a real `git add -f` of real compiler
+  output blocked by the hook.
+- `.github/scripts/tests/test_redact_guard_report.py`: 90 -> **93** collected
+  cases (3 new) at the CI job level, through the same `_run_job_leg` helper that
+  runs the workflow's real step script.
+- Full suite, both interpreters, clean worktree at the **frozen final gated
+  tip** `104eac34`:
+  `scripts/run_tests.sh` **ALL GREEN, RUN_TESTS_RC=0** on py3.11.16
+  (`~/.hermes/hermes-agent/venv`) and py3.13.7 (`p313`), 11/11 suites each
+  (`scripts` and `.github/scripts` included). The stamped SHA and both legs'
+  `RUN_TESTS_RC` lines are in this card's completion metadata; the worktree was
+  frozen for the whole stamp window, and `104eac34` is the SHA that landed (the
+  second parent of merge `dd62e479`; `wt/t_3e6d3db7-gated` still points at it).
+- `python3 scripts/address_guard.py --tracked` and `--staged` both exit 0 on this
+  card's own diff; every fixture address in the new tests is assembled at runtime,
+  so none of them is a contiguous real-shaped literal in a tracked file.
+- `.github/scripts/tests/test_ci_log.py`: 23 cases executed against a fake
+  `gh` on PATH whose log carries a runtime-assembled real-shaped address —
+  stdout keeps `file:line` and never the address; gh-stderr redacted not
+  swallowed; clean log byte-identical (with and without trailing newline);
+  `gh` argv + exit code propagated; raw dump gone by default; `--keep`
+  leaves exactly one mode-0600 file, provably containing the raw address,
+  with the `UNREDACTED` warning naming the path; fail-closed (guard missing /
+  guard raises at import / `FORBIDDEN` wrong type) exits non-zero with stdout
+  EXACTLY empty and no fetch and no leftover dir; redactor FILE-mode unit
+  pins (multi-file, dash, missing-file rc=3 with no path echo, stdin mode
+  byte-for-byte unchanged); `ci_log.sh` asserted **100755 via
+  `git ls-files -s`** (the t_ec2c2f95 unrunnable-by-path trap) and executable
+  on disk; the §9b rule sentence itself pinned by regex so the doc cannot
+  silently lose it.
+- `.github/scripts` leg 123 green on **py3.11.16 and p313.12**; full
+  `scripts/run_tests.sh` ALL GREEN on both interpreters from a clean detached
+  worktree at the stamped SHA (see card metadata); `address_guard --tracked`
+  rc=0 at the tip.
 ## [2.5.8] - 2026-10-09
 
 ### Changed
