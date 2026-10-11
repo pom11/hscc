@@ -420,6 +420,19 @@ def main(argv=None):
     # behaviour changes between the two modes.
     files = [Path(a) for a in args if a != "-"]
     use_stdin = (not args) or any(a == "-" for a in args)
+    # The round-trip promised by redact_file() needs surrogateescape on the way
+    # OUT as well as in. Decoding undecodable bytes to lone surrogates and then
+    # writing them to a strict-UTF-8 stdout raises UnicodeEncodeError, so the
+    # redactor exited 3 on any report that was not valid UTF-8 -- fail-closed,
+    # but a CI log is arbitrary bytes, so the common case would have been a
+    # refusal rather than a redacted log. Reconfiguring the stream (rather than
+    # encoding at each call site) keeps redact_file() usable with a plain
+    # StringIO in tests.
+    for stream in (sys.stdout, sys.stdin):
+        try:
+            stream.reconfigure(errors="surrogateescape")
+        except (AttributeError, ValueError, OSError):
+            pass        # already detached, or not a reconfigurable text stream
     try:
         pattern = load_pattern()
     except BaseException as exc:  # noqa: BLE001 - fail closed on ANY escape
