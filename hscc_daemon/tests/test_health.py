@@ -1344,19 +1344,50 @@ class TestCheckProxy:
         assert health.check_proxy() is False
         assert len(ran) == 2                     # window elapsed -> attempt again
 
-    def test_successful_relaunch_clears_cooldown(self, tmp_hfcc_dir, monkeypatch):
-        """A relaunch that WORKS (down-proxy recovery: plain start succeeds)
-        must not hold the window: a later genuine proxy-down has to recover
-        immediately, not wait out a cooldown."""
+    def test_successful_relaunch_still_stamps_and_healthy_clears(self, tmp_hfcc_dir, monkeypatch):
+        """PR #22 round 2 semantics: a relaunch whose `proxy start` EXITS 0
+        still stamps the window (an ok exit over still-empty discovery is the
+        10-11 shape). The cooldown is cleared by the HEALTHY branch: once a
+        probe comes back good, its state rewrite drops the stamp, so a later
+        genuine down-proxy recovers on its next tick."""
         health, ran = self._unhealthy_setup(tmp_hfcc_dir, monkeypatch)
         monkeypatch.setattr(health, "run_cmd",
                             lambda args, **k: ran.append(args) or {"ok": True})
-        assert health.check_proxy() is True      # attempt succeeds
-        assert len(ran) == 1
+        assert health.check_proxy() is True      # start exited 0
         state = json.loads((tmp_hfcc_dir / "state" / "proxy.json").read_text())
         assert state["relaunched"] is True
-        assert "last_relaunch" not in state      # success clears -> immediate next recovery
+        assert state["last_relaunch"]            # EVERY attempt stamps
+        # tick 2 still unhealthy -> suppressed (the round-2 gap closed)
+        assert health.check_proxy() is False
+        assert len(ran) == 1
+        # tick 3: probe recovered -> healthy rewrite clears the stamp
+        monkeypatch.setattr(health, "_proxy_models_probe",
+                            lambda url, timeout=5: {"ok": True, "models": ["worker-model"], "error": ""})
+        assert health.check_proxy() is True
+        state = json.loads((tmp_hfcc_dir / "state" / "proxy.json").read_text())
+        assert "last_relaunch" not in state
         assert health._proxy_relaunch_cooldown_state() is None
+
+    def test_ok_start_still_unhealthy_next_tick_is_suppressed(self, tmp_hfcc_dir, monkeypatch):
+        """PR #22 round 2 (the exact 2026-10-11 shape): `proxy start` returns
+        ok, but discovery is still empty so the NEXT probe is still unhealthy.
+        The second tick must be SUPPRESSED by the cooldown, not relaunch —
+        stamping only failures let this loop run every tick."""
+        health, ran = self._unhealthy_setup(tmp_hfcc_dir, monkeypatch)
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(args) or {"ok": True})
+        # tick 1: unhealthy -> attempt -> start ok (stamp written regardless)
+        assert health.check_proxy() is True
+        assert len(ran) == 1
+        state = json.loads((tmp_hfcc_dir / "state" / "proxy.json").read_text())
+        assert state["last_relaunch"]
+        # tick 2: probe STILL unhealthy (empty discovery) -> cooldown suppresses
+        assert health.check_proxy() is False
+        assert len(ran) == 1                     # NO second start
+        state = json.loads((tmp_hfcc_dir / "state" / "proxy.json").read_text())
+        assert "cooldown" in state["message"]
+        # the suppressed tick did not extend the window
+        assert state["last_relaunch"]
 
     def test_cooldown_state_reader_tolerates_garbage(self):
         from hscc_daemon import health

@@ -43,14 +43,17 @@ task: t_proxy_outage_20261011
   check tick (60s): each attempt runs a full SSH endpoint discovery sweep
   and spams WARN, even though plain `proxy start` REFUSES a running proxy
   (sparkrun `engine.py` returns 1 on `is_running()`; SIGTERM-ing the live
-  proxy happens only under `--restart`, which we never pass). Failed
-  attempts now stamp `last_relaunch` in the proxy STATE FILE — not module
-  memory, so a daemon restart cannot reset the window (the in-memory state
-  flaw) — and further attempts are suppressed until
-  `HSCC_PROXY_RELAUNCH_COOLDOWN_S` (default 300s) elapses. Suppressed ticks
-  carry the original stamp forward verbatim (re-stamping would extend the
-  window forever); a SUCCESSFUL relaunch clears the stamp so genuine
-  down-proxy recovery stays immediate.
+  proxy happens only under `--restart`, which we never pass). EVERY relaunch
+  attempt now stamps `last_relaunch` in the proxy STATE FILE — success or
+  failure, because `proxy start` exiting 0 over still-empty discovery is
+  precisely the 2026-10-11 shape — and further attempts are suppressed
+  until `HSCC_PROXY_RELAUNCH_COOLDOWN_S` (default 300s) elapses. The stamp
+  lives in the state file, not module memory, so a daemon restart cannot
+  reset the window (the in-memory state flaw). Suppressed ticks carry the
+  original stamp forward verbatim (re-stamping would extend the window
+  forever); the HEALTHY branch rewrites the state without the stamp, so a
+  recovered proxy clears the cooldown on its own and the next genuine
+  down-proxy recovers on its next tick.
 - **Three report-only doctor checks for the outage's blind spots.**
   `sparkrun lan reachability` TCP-probes every serving node FROM SPARKRUN'S
   OWN INTERPRETER (shebang of the resolved CLI): a python denied the macOS
@@ -70,19 +73,21 @@ task: t_proxy_outage_20261011
 kind: Verified
 order: 1
 
-- `hscc_daemon/tests/test_health.py`: TestCheckProxy 3 -> **20** cases —
+- `hscc_daemon/tests/test_health.py`: TestCheckProxy 3 -> **21** cases —
   the outage shape (200 + `data: []` must relaunch), alias-missing shapes
   scoped to the relaunch host set (non-uniform worker-only catalogue is
   HEALTHY and must NOT relaunch — the PR #22 blocking case; reachable
   worker alias missing DOES relaunch; uniform pool demands both), the
   healthy baseline, uniform-pool relaunch hosts INCLUDING every unit node,
   non-uniform relaunch hosts UNCHANGED (worker-only), the durable relaunch
-  cooldown (failed attempt suppresses retries, suppressed ticks carry the
-  stamp forward without extending the window, expiry retries, success
-  clears, garbage stamps tolerated), plus direct units for the probe's
-  body-parsing, the healthy-verdict matrix and host-scoped alias
-  expectation. Stubs `_proxy_models_probe` + `serving.load_serving` —
-  never the live `:4000`, never the operator's live serving.json.
+  cooldown (EVERY attempt stamps — an ok exit over still-empty discovery is
+  the 10-11 shape and must still suppress the next tick; suppressed ticks
+  carry the stamp forward without extending the window; expiry retries;
+  garbage stamps tolerated; healthy rewrite clears so recovery stays fast),
+  plus direct units for the probe's body-parsing, the healthy-verdict
+  matrix and host-scoped alias expectation. Stubs `_proxy_models_probe` +
+  `serving.load_serving` — never the live `:4000`, never the operator's
+  live serving.json.
 - `hscc-bootstrap/tests/test_enable_plugins.py`: +**10** goal_judge cases
   (root+profiles wiring, never-overwrite, model-less-block,
   totally-untouched-when-model-set, idempotency, and

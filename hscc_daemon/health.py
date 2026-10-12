@@ -716,9 +716,11 @@ def check_proxy():
     recover the orchestrator's endpoint.
     Relaunch attempts are throttled by a DURABLE cooldown
     (:func:`_proxy_relaunch_cooldown_state`, HSCC_PROXY_RELAUNCH_COOLDOWN_S
-    default 300s, stamped in the proxy state file): a persistently-missing
-    alias must not re-run the SSH discovery sweep every 60s tick. A successful
-    relaunch clears the stamp so genuine down-proxy recovery stays immediate.
+    default 300s, stamped in the proxy state file): EVERY attempt stamps the
+    window — `proxy start` exiting 0 over still-empty discovery (the
+    2026-10-11 shape) must not relaunch every tick. The healthy branch
+    rewrites the state WITHOUT the stamp, so a recovered proxy clears the
+    cooldown and a later genuine down-proxy recovers on its next tick.
     """
     from .state import write_state
 
@@ -783,11 +785,15 @@ def check_proxy():
         stamp = _proxy_relaunch_stamp()
         if stamp:
             proxy_data["last_relaunch"] = stamp
-    elif not ok:
-        # A FAILED attempt holds the cooldown. A relaunch that worked restores
-        # the alias set, so the stamp clears and the next genuine proxy-down
-        # can recover immediately instead of waiting out the window (down-
-        # proxy fast recovery beats cooldown conservatism).
+    else:
+        # EVERY attempt stamps the cooldown — success or failure (PR #22
+        # round 2). `sparkrun proxy start` exiting 0 does NOT mean the fleet
+        # is served: the exact 2026-10-11 shape is a start that succeeds
+        # while discovery is still empty, so the NEXT probe is still
+        # unhealthy — stamping only failures left that path relaunching
+        # every tick all over again. The healthy branch rewrites the state
+        # WITHOUT the stamp, so a genuinely recovered proxy clears the
+        # cooldown on its own and stays fast to recover later.
         proxy_data["last_relaunch"] = now_iso()
     if ok is False and _intentional_window():
         # Fleet in an intentional-autodown window (down by design or waking) —
