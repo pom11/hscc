@@ -9,6 +9,7 @@ import sys
 import datetime
 import time
 import threading
+import urllib.request
 from pathlib import Path
 
 from . import serving
@@ -502,6 +503,104 @@ def check_gateway():
 PROXY_PORT = int(os.environ.get("HSCC_PROXY_PORT", "4000"))
 
 
+def _proxy_models_probe(url, timeout=5):
+    """GET the proxy /v1/models endpoint and PARSE ITS BODY.
+
+    The 2026-10-11 outage showed why a bare reachability check is not health:
+    a litellm proxy whose discovery sweep wiped its model list answers HTTP 200
+    with ``{"data": []}`` forever — reachable, and serving nothing. A check
+    that only looks at the status code calls that state healthy while every
+    worker-model call behind it 404s.
+
+    Returns ``{"ok": bool, "models": [id, ...], "error": str}`` where ok means
+    "a parseable /v1/models body was received" — NOT "the proxy is healthy";
+    the alias requirement lives in :func:`_proxy_models_healthy`. Network /
+    HTTP / JSON failures return ok=False with the error text (never raises).
+    """
+    try:
+        req = urllib.request.urlopen(url, timeout=timeout)
+        body = req.read()
+    except Exception as e:
+        return {"ok": False, "models": [], "error": str(e)}
+    try:
+        data = json.loads(body.decode("utf-8", "replace"))
+        models = [m.get("id", "") for m in (data.get("data") or []) if m.get("id")]
+    except Exception as e:
+        return {"ok": False, "models": [], "error": f"unparseable /v1/models body: {e}"}
+    return {"ok": True, "models": models, "error": ""}
+
+
+def _proxy_expected_aliases(serving_data=None):
+    """Aliases the proxy MUST serve, from serving.json units.
+
+    Mirrors the serving layer's own alias SSoT (serving._role_alias /
+    _served_model_name): the orchestrator advertises ``orchestrator-model``,
+    workers ``worker-model``, and under a uniform_pool EVERY unit advertises
+    BOTH. So the union over configured units is exactly what a correctly
+    loaded proxy's /v1/models must contain.
+
+    Empty set = nothing configured (missing/corrupt serving.json) — the caller
+    then falls back to the weakest honest requirement: at least one model.
+    """
+    if serving_data is None:
+        serving_data = serving.load_serving()
+    units = serving_data.get("units") if isinstance(serving_data, dict) else None
+    units = [u for u in (units or []) if isinstance(u, dict)]
+    if not units:
+        return set()
+    expected = set()
+    if serving.is_uniform_pool(serving_data):
+        return {"worker-model", "orchestrator-model"}
+    for u in units:
+        expected.add(serving._role_alias(u.get("role")))
+    return expected
+
+
+def _proxy_models_healthy(probe, expected_aliases):
+    """(healthy, reason) for a proxy probe against the alias requirement.
+
+    expected_aliases empty (no serving.json) → require AT LEAST ONE model:
+    an empty catalogue is unhealthy even when nothing is configured.
+    With aliases configured → every expected alias must appear among the
+    served model ids. 200 + empty/missing ids is unhealthy by construction
+    (that is precisely the outage shape).
+    """
+    if not probe.get("ok"):
+        return False, f"probe failed: {probe.get('error') or 'no response'}"
+    models = set(probe.get("models") or [])
+    if not models:
+        return False, "empty model catalogue (HTTP ok, data: [])"
+    if not expected_aliases:
+        return True, f"{len(models)} model(s) served (no serving.json; >=1 required)"
+    missing = set(expected_aliases) - models
+    if missing:
+        return False, (f"missing expected alias(es) {sorted(missing)}; "
+                       f"served: {sorted(models)}")
+    return True, f"expected aliases {sorted(expected_aliases)} all served"
+
+
+def _proxy_relaunch_hosts(serving_data=None):
+    """Hosts to pass to `sparkrun proxy start` when relaunching the LB.
+
+    Non-uniform pools keep the historical behaviour: the keep-alive WORKER
+    nodes only (serving.KEEPALIVE_NODES deliberately excludes orchestrator
+    nodes, serving.py _resolve_serving_overlay). Under a uniform_pool that is
+    WRONG — every serving node may serve either role, and the 2026-10-11
+    outage was exactly a proxy that lost the orchestrator's endpoint: with the
+    orchestrator node absent from --hosts, its model is never added back, the
+    aliases never reappear, and the LB serves only half the fleet forever.
+    So a uniform pool relaunches over ALL serving nodes: keep-alive workers ∪
+    orchestrator nodes (the orchestrator is normally not keep-alive, so the
+    union is what recovers it).
+    """
+    if serving_data is None:
+        serving_data = serving.load_serving()
+    nodes = set(serving.KEEPALIVE_NODES)
+    if serving.is_uniform_pool(serving_data):
+        nodes |= serving.orchestrator_nodes(serving_data)
+    return sorted(nodes)
+
+
 def _ensure_cmdlib_on_path():
     """Put the sibling hscc-commands plugin dir on sys.path for the cmdlib import.
 
@@ -546,8 +645,15 @@ def check_proxy():
     Role-worker profiles + orchestrator subagents reach the worker GPUs through
     this proxy (http://localhost:PROXY_PORT). If it dies, all worker work falls
     back onto the orchestrator. Health-check it and relaunch via `sparkrun proxy
-    start` over the keep-alive worker nodes if it's down. No-op when there are no
-    keep-alive workers configured.
+    start` if it's down. No-op when there are no keep-alive workers configured.
+
+    Health is NOT mere reachability (2026-10-11 outage): a litellm proxy can
+    answer 200 with an EMPTY model catalogue, which serves nobody. Healthy
+    requires the aliases serving.json says the fleet advertises (both role
+    aliases under a uniform_pool; >=1 model when serving.json is absent).
+    Relaunch hosts follow :func:`_proxy_relaunch_hosts` — under a uniform_pool
+    they MUST include the orchestrator node, or the relaunched LB can never
+    recover the orchestrator's endpoint.
     """
     from .state import write_state
 
@@ -558,19 +664,29 @@ def check_proxy():
                               "last_check": now_iso()})
         return True
 
+    serving_data = serving.load_serving()
     url = f"http://localhost:{PROXY_PORT}/v1/models"
-    if http_check(url, timeout=5).get("ok"):
+    probe = _proxy_models_probe(url, timeout=5)
+    expected = _proxy_expected_aliases(serving_data)
+    healthy, reason = _proxy_models_healthy(probe, expected)
+    if healthy:
         write_state("proxy", {"ok": True, "port": PROXY_PORT,
-                              "last_check": now_iso(), "message": "proxy healthy"})
+                              "last_check": now_iso(), "message": reason,
+                              "models": sorted(probe.get("models") or [])})
         return True
 
-    log(f"Worker proxy down on :{PROXY_PORT} — relaunching", "WARN")
+    relaunch_hosts = _proxy_relaunch_hosts(serving_data)
+    log(f"Worker proxy unhealthy on :{PROXY_PORT} ({reason}) — relaunching "
+        f"with {relaunch_hosts}", "WARN")
     r = run_cmd(sparkrun_bin.argv("proxy", "start", "--cluster", serving.HSCC_CLUSTER,
-                                  "--hosts", ",".join(nodes), "--port", str(PROXY_PORT)),
+                                  "--hosts", ",".join(relaunch_hosts),
+                                  "--port", str(PROXY_PORT)),
                 timeout=90)
     ok = r.get("ok", False)
     proxy_data = {"ok": ok, "port": PROXY_PORT, "relaunched": True,
                   "last_check": now_iso(),
+                  "reason": reason,
+                  "relaunch_hosts": relaunch_hosts,
                   "message": "relaunched" if ok else "relaunch failed"}
     if ok is False and _intentional_window():
         # Fleet in an intentional-autodown window (down by design or waking) —
