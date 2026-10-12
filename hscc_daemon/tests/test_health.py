@@ -1278,6 +1278,100 @@ class TestCheckProxy:
         assert health.check_proxy() is True
         assert ran == []                         # healthy -> no relaunch
 
+    # ── t_proxy_outage_20261011 PR #22 review: durable relaunch cooldown ───
+
+    def _unhealthy_setup(self, tmp_hfcc_dir, monkeypatch):
+        """Running proxy (probe ok) whose reachable worker alias is missing —
+        the shape that would otherwise relaunch-spam every 60s tick. The stub
+        run_cmd models reality: plain `sparkrun proxy start` REFUSES a running
+        proxy (engine.py is_running -> rc 1), so attempts come back failed."""
+        serving_data = {"version": 2, "units": [
+            {"id": "w1", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.2"], "port": 8001},
+        ]}
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"], probe={
+                "ok": True, "models": ["some-model"], "error": ""},
+            serving_data=serving_data)
+        ran = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(args) or {"ok": False})
+        return health, ran
+
+    def test_failed_relaunch_holds_cooldown(self, tmp_hfcc_dir, monkeypatch):
+        """Tick 1 attempts + stamps; tick 2 within the window must NOT invoke
+        sparkrun again, and the state must say why (retry-in), not re-attempt.
+        The stamp lives in the STATE FILE — a daemon restart reads the same
+        file (durability requirement: no in-memory cooldown)."""
+        health, ran = self._unhealthy_setup(tmp_hfcc_dir, monkeypatch)
+        assert health.check_proxy() is False     # attempt 1 refused (rc 1)
+        assert len(ran) == 1
+        state = json.loads((tmp_hfcc_dir / "state" / "proxy.json").read_text())
+        stamp1 = state["last_relaunch"]
+        assert stamp1
+        assert health.check_proxy() is False     # attempt 2 = suppressed
+        assert len(ran) == 1                     # NO second sparkrun call
+        state = json.loads((tmp_hfcc_dir / "state" / "proxy.json").read_text())
+        assert "cooldown" in state["message"]
+        # A suppressed tick must NOT re-stamp: extending the window every tick
+        # would make the cooldown perpetual (never retries, never recovers).
+        assert state["last_relaunch"] == stamp1
+
+    def test_cooldown_survives_state_reload(self, tmp_hfcc_dir, monkeypatch):
+        """Fresh health-module semantics only via the state file: helper call
+        after a simulated daemon restart (state file kept, no process-level
+        memory) must still see the stamp."""
+        health, ran = self._unhealthy_setup(tmp_hfcc_dir, monkeypatch)
+        health.check_proxy()
+        assert len(ran) == 1
+        since = health._proxy_relaunch_cooldown_state()
+        assert since is not None and 0 <= since < 60
+
+    def test_cooldown_expires_and_retry_proceeds(self, tmp_hfcc_dir, monkeypatch):
+        """Backdate the stamp past the window -> next tick attempts again."""
+        import datetime
+        health, ran = self._unhealthy_setup(tmp_hfcc_dir, monkeypatch)
+        health.check_proxy()
+        assert len(ran) == 1
+        state_path = tmp_hfcc_dir / "state" / "proxy.json"
+        state = json.loads(state_path.read_text())
+        assert state["last_relaunch"]            # attempt 1 stamped
+        stale = (datetime.datetime.now(datetime.timezone.utc)
+                 - datetime.timedelta(seconds=2 * health.PROXY_RELAUNCH_COOLDOWN_S + 5)
+                 ).isoformat()
+        state["last_relaunch"] = stale
+        state_path.write_text(json.dumps(state))
+        assert health.check_proxy() is False
+        assert len(ran) == 2                     # window elapsed -> attempt again
+
+    def test_successful_relaunch_clears_cooldown(self, tmp_hfcc_dir, monkeypatch):
+        """A relaunch that WORKS (down-proxy recovery: plain start succeeds)
+        must not hold the window: a later genuine proxy-down has to recover
+        immediately, not wait out a cooldown."""
+        health, ran = self._unhealthy_setup(tmp_hfcc_dir, monkeypatch)
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(args) or {"ok": True})
+        assert health.check_proxy() is True      # attempt succeeds
+        assert len(ran) == 1
+        state = json.loads((tmp_hfcc_dir / "state" / "proxy.json").read_text())
+        assert state["relaunched"] is True
+        assert "last_relaunch" not in state      # success clears -> immediate next recovery
+        assert health._proxy_relaunch_cooldown_state() is None
+
+    def test_cooldown_state_reader_tolerates_garbage(self):
+        from hscc_daemon import health
+        import hscc_daemon.state as st
+        orig = st.read_state
+        try:
+            st.read_state = lambda name: {"last_relaunch": "not-a-timestamp"}
+            assert health._proxy_relaunch_cooldown_state() is None
+            st.read_state = lambda name: None
+            assert health._proxy_relaunch_cooldown_state() is None
+            st.read_state = lambda name: "not a dict"
+            assert health._proxy_relaunch_cooldown_state() is None
+        finally:
+            st.read_state = orig
+
     def test_proxy_down_relaunched(self, tmp_hfcc_dir, monkeypatch):
         health = self._setup(
             tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"],
@@ -1308,9 +1402,12 @@ class TestCheckProxy:
         state = json.loads((tmp_hfcc_dir / "state" / "proxy.json").read_text())
         assert "empty" in state["reason"]
 
-    def test_missing_expected_alias_is_unhealthy(self, tmp_hfcc_dir, monkeypatch):
-        """Non-uniform fleet with orch+worker units: worker-only catalogue
-        is unhealthy even though models exist."""
+    def test_non_uniform_worker_only_catalogue_is_healthy(self, tmp_hfcc_dir, monkeypatch):
+        """PR #22 review (blocking): non-uniform fleets point `proxy start
+        --hosts` at keep-alive WORKER nodes only, so orchestrator-model is NOT
+        something the proxy can serve — a healthy worker-model catalogue must
+        be HEALTHY and must NOT relaunch. Requiring orchestrator-model here
+        made every check tick relaunch a proxy that could never satisfy it."""
         serving_data = {"version": 2, "units": [
             {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"], "port": 8000},
             {"id": "w1", "role": "worker", "keepalive": True,
@@ -1324,7 +1421,32 @@ class TestCheckProxy:
         monkeypatch.setattr(health, "run_cmd",
                             lambda args, **k: ran.append(args) or {"ok": True})
         assert health.check_proxy() is True
-        assert len(ran) == 1                     # orchestrator-model missing -> relaunch
+        assert ran == []                         # NO relaunch — proxy serves all it can
+        state = json.loads((tmp_hfcc_dir / "state" / "proxy.json").read_text())
+        assert state["ok"] is True
+
+    def test_non_uniform_reachable_worker_alias_missing_relaunches(self, tmp_hfcc_dir, monkeypatch):
+        """The genuine version of the old test: the worker unit IS reachable
+        (its node is in the host set) and its alias is missing → unhealthy →
+        relaunch. The bug was never 'orchestrator alias missing'; it is any
+        REACHABLE unit's alias missing."""
+        serving_data = {"version": 2, "units": [
+            {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"], "port": 8000},
+            {"id": "w1", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.2"], "port": 8001},
+        ]}
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"], probe={
+                "ok": True, "models": ["some-model"], "error": ""},
+            serving_data=serving_data)
+        ran = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(args) or {"ok": True})
+        assert health.check_proxy() is True      # attempt made and (stub) succeeded
+        assert len(ran) == 1                     # relaunch WAS invoked
+        state = json.loads((tmp_hfcc_dir / "state" / "proxy.json").read_text())
+        assert "worker-model" in state["reason"]
+        assert state["relaunched"] is True
 
     def test_uniform_pool_requires_both_aliases(self, tmp_hfcc_dir, monkeypatch):
         serving_data = {"version": 2, "uniform_pool": True, "units": [
@@ -1463,11 +1585,25 @@ class TestCheckProxy:
         from hscc_daemon import health, serving
         monkeypatch.setattr(serving, "load_serving", lambda *a, **k: None)
         assert health._proxy_expected_aliases(None) == set()
+        # PR #22 review: alias expectation is scoped to the relaunch host set
+        # (what `proxy start --hosts` points the proxy at). Worker on a host
+        # the proxy reaches -> worker-model expected; orchestrator-only unit
+        # on a host it cannot reach -> orchestrator-model NOT expected.
         assert health._proxy_expected_aliases(
-            {"units": [{"role": "worker"}, {"role": "orchestrator"}]}) == \
+            {"units": [{"role": "worker", "nodes": ["10.0.0.2"]},
+                       {"role": "orchestrator", "nodes": ["10.0.0.1"]}]},
+            relaunch_hosts=["10.0.0.2"]) == {"worker-model"}
+        # when the orchestrator node IS in the host set (e.g. tp-peer union or
+        # env override), its alias IS expected again
+        assert health._proxy_expected_aliases(
+            {"units": [{"role": "worker", "nodes": ["10.0.0.2"]},
+                       {"role": "orchestrator", "nodes": ["10.0.0.1"]}]},
+            relaunch_hosts=["10.0.0.1", "10.0.0.2"]) == \
             {"worker-model", "orchestrator-model"}
+        # a unit with no node info is expected wherever the proxy points
         assert health._proxy_expected_aliases(
-            {"units": [{"role": "worker"}]}) == {"worker-model"}
+            {"units": [{"role": "worker"}]}, relaunch_hosts=["10.0.0.2"]) == \
+            {"worker-model"}
         # uniform pool demands BOTH regardless of configured roles
         assert health._proxy_expected_aliases(
             {"uniform_pool": True, "units": [{"role": "worker"}]}) == \

@@ -530,16 +530,21 @@ def _proxy_models_probe(url, timeout=5):
     return {"ok": True, "models": models, "error": ""}
 
 
-def _proxy_expected_aliases(serving_data=None):
-    """Aliases the proxy MUST serve, from serving.json units.
+def _proxy_expected_aliases(serving_data=None, relaunch_hosts=None):
+    """Aliases the proxy MUST serve — scoped to what `proxy start --hosts` can
+    actually reach (PR #22 review: expected aliases must match the relaunch
+    host set, or a correctly-configured fleet flaps unhealthy forever).
 
-    Mirrors the serving layer's own alias SSoT (serving._role_alias /
-    _served_model_name): the orchestrator advertises ``orchestrator-model``,
-    workers ``worker-model``, and under a uniform_pool EVERY unit advertises
-    BOTH. So the union over configured units is exactly what a correctly
-    loaded proxy's /v1/models must contain.
+    The relaunch host set (see _proxy_relaunch_hosts) is what the proxy is
+    pointed at: non-uniform fleets point ONLY at keep-alive WORKER nodes, so an
+    orchestrator-only unit's ``orchestrator-model`` is NOT expected — requiring
+    it made every check relaunch a proxy that could never satisfy it (a
+    self-inflicted relaunch-every-tick flapper). A unit's alias is expected
+    only when at least one of its nodes is in the host set; a unit with no
+    node info is expected wherever the proxy points. Uniform pools point at
+    EVERY serving node and serve both role aliases.
 
-    Empty set = nothing configured (missing/corrupt serving.json) — the caller
+    Empty set = nothing reachable to require (no units at all) — the caller
     then falls back to the weakest honest requirement: at least one model.
     """
     if serving_data is None:
@@ -548,11 +553,16 @@ def _proxy_expected_aliases(serving_data=None):
     units = [u for u in (units or []) if isinstance(u, dict)]
     if not units:
         return set()
-    expected = set()
     if serving.is_uniform_pool(serving_data):
         return {"worker-model", "orchestrator-model"}
+    if relaunch_hosts is None:
+        relaunch_hosts = serving.KEEPALIVE_NODES
+    host_set = set(relaunch_hosts)
+    expected = set()
     for u in units:
-        expected.add(serving._role_alias(u.get("role")))
+        nodes = [n for n in (u.get("nodes") or []) if n]
+        if not nodes or any(n in host_set for n in nodes):
+            expected.add(serving._role_alias(u.get("role")))
     return expected
 
 
@@ -606,6 +616,49 @@ def _proxy_relaunch_hosts(serving_data=None):
     return sorted(nodes)
 
 
+PROXY_RELAUNCH_COOLDOWN_S = int(os.environ.get("HSCC_PROXY_RELAUNCH_COOLDOWN_S", "300"))
+
+
+def _proxy_relaunch_stamp():
+    """Raw `last_relaunch` stamp from the proxy state file, or None.
+
+    Separate from _proxy_relaunch_cooldown_state() so check_proxy can CARRY
+    the stamp forward verbatim on suppressed ticks — re-stamping during
+    cooldown would extend the window every tick and make it perpetual."""
+    from .state import read_state
+    prev = read_state("proxy")
+    if not isinstance(prev, dict):
+        return None
+    stamp = prev.get("last_relaunch")
+    return stamp or None
+
+
+def _seconds_since_stamp(stamp):
+    """Seconds elapsed since an ISO stamp; None if missing/unparsable."""
+    if not stamp:
+        return None
+    try:
+        then = datetime.datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=datetime.timezone.utc)
+    return (datetime.datetime.now(datetime.timezone.utc) - then).total_seconds()
+
+
+def _proxy_relaunch_cooldown_state():
+    """Seconds since the last proxy relaunch attempt, read DURABLY.
+
+    PR #22 review: a persistently-missing alias must not hammer `sparkrun
+    proxy start` every check tick. The stamp lives in the proxy stream state
+    file (written by check_proxy itself), NOT in module memory — a daemon
+    restart must not reset the cooldown (the in-memory state flaw). Returns
+    None when there is no recorded relaunch (or the timestamp is unreadable),
+    meaning "no cooldown".
+    """
+    return _seconds_since_stamp(_proxy_relaunch_stamp())
+
+
 def _ensure_cmdlib_on_path():
     """Put the sibling hscc-commands plugin dir on sys.path for the cmdlib import.
 
@@ -654,11 +707,18 @@ def check_proxy():
 
     Health is NOT mere reachability (2026-10-11 outage): a litellm proxy can
     answer 200 with an EMPTY model catalogue, which serves nobody. Healthy
-    requires the aliases serving.json says the fleet advertises (both role
-    aliases under a uniform_pool; >=1 model when serving.json is absent).
+    requires the aliases serving.json says the fleet advertises FOR THE HOSTS
+    THE PROXY IS POINTED AT (PR #22 review) — non-uniform fleets reach only
+    keep-alive workers, so orchestrator-model is not required there; uniform
+    pools require both role aliases; >=1 model when serving.json is absent.
     Relaunch hosts follow :func:`_proxy_relaunch_hosts` — under a uniform_pool
     they MUST include the orchestrator node, or the relaunched LB can never
     recover the orchestrator's endpoint.
+    Relaunch attempts are throttled by a DURABLE cooldown
+    (:func:`_proxy_relaunch_cooldown_state`, HSCC_PROXY_RELAUNCH_COOLDOWN_S
+    default 300s, stamped in the proxy state file): a persistently-missing
+    alias must not re-run the SSH discovery sweep every 60s tick. A successful
+    relaunch clears the stamp so genuine down-proxy recovery stays immediate.
     """
     from .state import write_state
 
@@ -671,8 +731,12 @@ def check_proxy():
 
     serving_data = serving.load_serving()
     url = f"http://localhost:{PROXY_PORT}/v1/models"
+    # Host set FIRST: it is what `proxy start --hosts` points the LB at, so
+    # the expected-alias requirement below must be scoped to it (PR #22 review
+    # — expecting an alias the host set can never serve = relaunch forever).
+    relaunch_hosts = _proxy_relaunch_hosts(serving_data)
     probe = _proxy_models_probe(url, timeout=5)
-    expected = _proxy_expected_aliases(serving_data)
+    expected = _proxy_expected_aliases(serving_data, relaunch_hosts)
     healthy, reason = _proxy_models_healthy(probe, expected)
     if healthy:
         write_state("proxy", {"ok": True, "port": PROXY_PORT,
@@ -680,19 +744,51 @@ def check_proxy():
                               "models": sorted(probe.get("models") or [])})
         return True
 
-    relaunch_hosts = _proxy_relaunch_hosts(serving_data)
-    log(f"Worker proxy unhealthy on :{PROXY_PORT} ({reason}) — relaunching "
-        f"with {relaunch_hosts}", "WARN")
-    r = run_cmd(sparkrun_bin.argv("proxy", "start", "--cluster", serving.HSCC_CLUSTER,
-                                  "--hosts", ",".join(relaunch_hosts),
-                                  "--port", str(PROXY_PORT)),
-                timeout=90)
-    ok = r.get("ok", False)
-    proxy_data = {"ok": ok, "port": PROXY_PORT, "relaunched": True,
+    log(f"Worker proxy unhealthy on :{PROXY_PORT} ({reason})")
+    # Durable cooldown (PR #22 review): a persistently-missing alias must not
+    # hammer `sparkrun proxy start` — every attempt runs a full SSH endpoint
+    # discovery sweep and spams WARN once per check tick even when it is a
+    # no-op (plain start REFUSES a running proxy; sparkrun engine.py start()
+    # `if self.is_running(): return 1`, cli exits 1 on ProxyAlreadyRunning —
+    # it only SIGTERMs the live proxy under --restart, which we never pass).
+    # The stamp lives in the proxy stream state file, NOT in memory, so a
+    # daemon restart cannot reset it.
+    since = _proxy_relaunch_cooldown_state()
+    r = {"ok": False, "skipped": "cooldown"}
+    suppressed = False
+    if since is not None and since < PROXY_RELAUNCH_COOLDOWN_S:
+        suppressed = True
+        wait = int(PROXY_RELAUNCH_COOLDOWN_S - since)
+        log(f"proxy relaunch suppressed — attempted {int(since)}s ago "
+            f"(cooldown {PROXY_RELAUNCH_COOLDOWN_S}s); retry in {wait}s", "WARN")
+        message = f"relaunch cooldown — retry in {wait}s"
+    else:
+        log(f"relaunching with {relaunch_hosts}", "WARN")
+        r = run_cmd(sparkrun_bin.argv("proxy", "start", "--cluster", serving.HSCC_CLUSTER,
+                                      "--hosts", ",".join(relaunch_hosts),
+                                      "--port", str(PROXY_PORT)),
+                    timeout=90)
+        message = "relaunched" if r.get("ok") else "relaunch failed"
+    ok = bool(r.get("ok"))
+    proxy_data = {"ok": ok, "port": PROXY_PORT, "relaunched": ok,
                   "last_check": now_iso(),
                   "reason": reason,
                   "relaunch_hosts": relaunch_hosts,
-                  "message": "relaunched" if ok else "relaunch failed"}
+                  "relaunch_failed": (not ok and not suppressed),
+                  "message": message}
+    if suppressed:
+        # Carry the ORIGINAL attempt stamp forward verbatim. Re-stamping on a
+        # suppressed tick would push the window out every tick and make the
+        # cooldown perpetual (never retries, never recovers).
+        stamp = _proxy_relaunch_stamp()
+        if stamp:
+            proxy_data["last_relaunch"] = stamp
+    elif not ok:
+        # A FAILED attempt holds the cooldown. A relaunch that worked restores
+        # the alias set, so the stamp clears and the next genuine proxy-down
+        # can recover immediately instead of waiting out the window (down-
+        # proxy fast recovery beats cooldown conservatism).
+        proxy_data["last_relaunch"] = now_iso()
     if ok is False and _intentional_window():
         # Fleet in an intentional-autodown window (down by design or waking) —
         # the worker proxy is not serving models while the layer is stopped or
