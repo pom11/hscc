@@ -627,7 +627,7 @@ class TestCheckModelsServed:
         def fake_get(url, api_key=None):
             return '{"data": [{"id": "X"}]}'
 
-        os.makedirs(os.path.join(str(tmp_path), "hermes-agent"), exist_ok=True)
+        os.makedirs(os.path.join(str(tmp_path), ".hermes", "hermes-agent"), exist_ok=True)
         result = doctor.run_doctor(hermes_home=str(tmp_path),
                                    _cluster_runner=lambda: "[]",
                                    _http_get=fake_get)
@@ -1137,7 +1137,7 @@ class TestAliasMigrationInFix:
         assert any("unreachable" in r for r in res["alias_conversion_refused"])
 
     def test_fix_no_config_path_has_empty_refused(self, tmp_path):
-        os.makedirs(os.path.join(str(tmp_path), "hermes-agent"), exist_ok=True)
+        os.makedirs(os.path.join(str(tmp_path), ".hermes", "hermes-agent"), exist_ok=True)
         res = doctor.run_doctor_fix(
             config_path=None, hermes_home=str(tmp_path),
             _cluster_runner=lambda: "[]",
@@ -1214,6 +1214,8 @@ class TestDoctorFixNoopWhenFresh:
                     "model": enable_plugins.COMPACT_MODEL,
                     "api_key": enable_plugins.COMPACT_KEY,
                 } for task in enable_plugins._LOCAL_TEXT_AUX_TASKS},
+                # goal_judge is part of a fully-wired config (t_proxy_outage_20261011)
+                "goal_judge": dict(enable_plugins.GOAL_JUDGE),
             },
             "fallback_providers": [{
                 "provider": "custom",
@@ -1411,3 +1413,192 @@ class TestDoctorNoAnsi:
         assert out == _json.dumps(res, indent=2) + "\n", (
             "--json must be byte-identical to canonical dumps")
         assert "\x1b" not in out
+
+# ── proxy-outage 2026-10-11 report-only checks (t_proxy_outage_20261011) ────
+#
+# All three fleet checks must (a) never be fatal — they report, they do not
+# stop; (b) take their fleet I/O through injected seams — the live cluster is
+# never touched by the suite; (c) run_doctor() without fleet_checks=True must
+# skip them inside pytest, so no existing test can accidentally shell out.
+
+import json as _json_fleet
+
+_SERVING_TWO = _json_fleet.dumps({"version": 2, "units": [
+    {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"], "port": 8000},
+    {"id": "w1", "role": "worker", "keepalive": True,
+     "nodes": ["10.0.0.2"], "port": 8001},
+]})
+
+
+class TestSparkrunLanReachability:
+    def test_errno65_names_the_local_network_fix(self):
+        c = doctor._sparkrun_lan_reachability(
+            _venv_python="/home/u/.venvs/sparkrun/bin/python",
+            _probe=lambda interp, node: "errno=65 No route to host",
+            _serving_raw=_SERVING_TWO)
+        assert c.ok is False and c.fatal is False
+        assert "macOS Local Network permission blocks this Python" in c.detail
+        assert "rebuild sparkrun on a uv Python" in c.fix
+
+    def test_all_reachable_ok(self):
+        seen = []
+
+        def probe(interp, node):
+            seen.append((interp, node))
+            return None
+        c = doctor._sparkrun_lan_reachability(
+            _venv_python="/home/u/.venvs/sparkrun/bin/python", _probe=probe,
+            _serving_raw=_SERVING_TWO)
+        assert c.ok is True and c.fatal is False
+        assert {n for _i, n in seen} == {"10.0.0.1", "10.0.0.2"}  # orch node probed too
+
+    def test_homebrew_interpreter_warns_even_when_reachable(self):
+        c = doctor._sparkrun_lan_reachability(
+            _venv_python="/opt/homebrew/Cellar/python@3.12/3.12.0/bin/python3.12",
+            _probe=lambda interp, node: None, _serving_raw=_SERVING_TWO)
+        assert c.ok is True
+        assert "Homebrew/Framework python" in c.detail
+        assert "uv" in c.detail
+
+    def test_unresolved_interpreter_skips(self):
+        c = doctor._sparkrun_lan_reachability(
+            _venv_python="", _probe=lambda i, n: None, _serving_raw=_SERVING_TWO)
+        assert c.ok is True and "skipped" in c.detail
+
+    def test_plain_refused_is_reported_without_the_tcc_hint(self):
+        c = doctor._sparkrun_lan_reachability(
+            _venv_python="/home/u/.venvs/sparkrun/bin/python",
+            _probe=lambda interp, node: "errno=61 Connection refused",
+            _serving_raw=_SERVING_TWO)
+        assert c.ok is False and c.fatal is False
+        assert "Local Network" not in c.detail   # errno 61 is NOT the TCC story
+        assert "10.0.0.1: errno=61" in c.detail
+
+
+class TestClusterVsServing:
+    def test_missing_orchestrator_node_is_reported(self):
+        raw = _json_fleet.dumps({"name": "hscc", "hosts": ["10.0.0.2"]})  # no 10.0.0.1
+        c = doctor._sparkrun_default_cluster_matches_serving(
+            _runner=lambda: raw, _serving_raw=_SERVING_TWO)
+        assert c.ok is False and c.fatal is False
+        assert "10.0.0.1" in c.detail and "MISSING" in c.detail
+
+    def test_exact_match_ok(self):
+        raw = _json_fleet.dumps({"hosts": ["10.0.0.1", "10.0.0.2"]})
+        c = doctor._sparkrun_default_cluster_matches_serving(
+            _runner=lambda: raw, _serving_raw=_SERVING_TWO)
+        assert c.ok is True
+
+    def test_extra_host_reported(self):
+        raw = _json_fleet.dumps({"hosts": ["10.0.0.1", "10.0.0.2", "10.0.0.9"]})
+        c = doctor._sparkrun_default_cluster_matches_serving(
+            _runner=lambda: raw, _serving_raw=_SERVING_TWO)
+        assert c.ok is False and "10.0.0.9" in c.detail
+
+    def test_no_default_skips(self):
+        c = doctor._sparkrun_default_cluster_matches_serving(
+            _runner=lambda: "", _serving_raw=_SERVING_TWO)
+        assert c.ok is True and "skipped" in c.detail
+
+
+class TestServingConsistency:
+    @staticmethod
+    def _status(entries):
+        return _json_fleet.dumps({"groups": {}, "solo_entries": entries})
+
+    @staticmethod
+    def _solo(host, port):
+        return {"host": host, "cluster_id": "sparkrun_x_y", "meta": {"port": port}}
+
+    def test_clean_matches_ok(self):
+        raw = self._status([self._solo("10.0.0.1", 8000), self._solo("10.0.0.2", 8001)])
+        c = doctor._serving_consistency(_status_runner=lambda cl: raw,
+                                        _serving_raw=_SERVING_TWO, cluster="hscc")
+        assert c.ok is True
+
+    def test_duplicate_on_mapped_port_flagged(self):
+        raw = self._status([self._solo("10.0.0.1", 8000),
+                            self._solo("10.0.0.1", 8000),      # the duplicate
+                            self._solo("10.0.0.2", 8001)])
+        c = doctor._serving_consistency(_status_runner=lambda cl: raw,
+                                        _serving_raw=_SERVING_TWO, cluster="hscc")
+        assert c.ok is False and c.fatal is False
+        assert "10.0.0.1:8000" in c.detail and "duplicate" in c.detail
+
+    def test_stale_record_flagged(self):
+        raw = self._status([self._solo("10.0.0.1", 8000)])     # worker vanished
+        c = doctor._serving_consistency(_status_runner=lambda cl: raw,
+                                        _serving_raw=_SERVING_TWO, cluster="hscc")
+        assert c.ok is False and "10.0.0.2:8001" in c.detail
+        assert "stale" in c.detail
+
+    def test_no_status_skips(self):
+        c = doctor._serving_consistency(_status_runner=lambda cl: "",
+                                        _serving_raw=_SERVING_TWO, cluster="hscc")
+        assert c.ok is True and "skipped" in c.detail
+
+    def test_tp_peer_node_not_mapped(self):
+        """Only each unit's PRIMARY (nodes[0]) exposes an endpoint; a tp peer
+        running no container of its own is NOT a stale record."""
+        serving = _json_fleet.dumps({"units": [
+            {"id": "big", "role": "worker", "nodes": ["10.0.0.2", "10.0.0.3"],
+             "port": 8001, "tp": 2}]})
+        raw = self._status([self._solo("10.0.0.2", 8001)])
+        c = doctor._serving_consistency(_status_runner=lambda cl: raw,
+                                        _serving_raw=serving, cluster="hscc")
+        assert c.ok is True
+
+
+class TestFleetChecksSkipInSuite:
+    def test_run_doctor_skips_fleet_io_without_flag(self, tmp_path, monkeypatch):
+        """No existing run_doctor() call may shell out to sparkrun: inside a
+        pytest process fleet checks skip unless explicitly requested."""
+        _pin_home(monkeypatch, tmp_path)
+        # hermes install marker (same convention as TestRunDoctor above).
+        os.makedirs(os.path.join(str(tmp_path), ".hermes", "hermes-agent"), exist_ok=True)
+        calls = []
+        monkeypatch.setattr(doctor, "_run_cluster_default",
+                            lambda: calls.append("default") or "")
+        monkeypatch.setattr(doctor, "_run_cluster_status",
+                            lambda cl: calls.append("status") or "")
+        monkeypatch.setattr(doctor, "_tcp_probe_error",
+                            lambda *a, **k: calls.append("probe") or None)
+        monkeypatch.setattr(doctor, "_sparkrun_interpreter",
+                            lambda: calls.append("interp") or (None, None))
+        res = doctor.run_doctor(str(tmp_path / ".hermes"),
+                                _cluster_runner=lambda: _FAKE_CLUSTER)
+        names = {c["name"]: c for c in res["checks"]}
+        assert "skipped" in names["sparkrun lan reachability"]["detail"]
+        assert calls == []
+        assert res["ok"] is True
+
+    def test_run_doctor_fleet_flag_runs_stubbed_checks(self, tmp_path, monkeypatch):
+        _pin_home(monkeypatch, tmp_path)
+        os.makedirs(os.path.join(str(tmp_path), ".hermes", "hermes-agent"), exist_ok=True)
+        res = doctor.run_doctor(
+            str(tmp_path / ".hermes"),
+            _cluster_runner=lambda: _FAKE_CLUSTER,
+            fleet_checks=True,
+            _venv_python="/home/u/.venvs/sparkrun/bin/python",
+            _lan_probe=lambda i, n: None,
+            _cluster_default_runner=lambda: _json_fleet.dumps(
+                {"hosts": ["10.0.0.1", "10.0.0.2"]}),
+            _status_runner=lambda cl: TestServingConsistency._status(
+                [TestServingConsistency._solo("10.0.0.1", 8000),
+                 TestServingConsistency._solo("10.0.0.2", 8001)]),
+            _serving_raw=_SERVING_TWO)
+        names = {c["name"]: c for c in res["checks"]}
+        assert names["sparkrun lan reachability"]["ok"] is True
+        assert names["sparkrun cluster vs serving"]["ok"] is True
+        assert names["serving consistency"]["ok"] is True
+        # warnings never gate preflight even when they fire
+        res2 = doctor.run_doctor(
+            str(tmp_path / ".hermes"),
+            _cluster_runner=lambda: _FAKE_CLUSTER,
+            fleet_checks=True,
+            _venv_python="/home/u/.venvs/sparkrun/bin/python",
+            _lan_probe=lambda i, n: "errno=65 No route to host",
+            _cluster_default_runner=lambda: "",
+            _status_runner=lambda cl: "",
+            _serving_raw=_SERVING_TWO)
+        assert res2["ok"] is True   # TCC denial is a WARNING, not fatal
