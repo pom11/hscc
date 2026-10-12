@@ -1476,7 +1476,6 @@ class TestCheckProxy:
     def test_probe_parses_models_body(self, monkeypatch):
         """The probe must PARSE the body — a 200 whose JSON has no model ids
         is not health (that is the whole outage)."""
-        import io
         import json as _json
         from hscc_daemon import health
 
