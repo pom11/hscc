@@ -111,6 +111,8 @@ def _fully_wired_cfg():
                 "model": enable_plugins.COMPACT_MODEL,
                 "api_key": enable_plugins.COMPACT_KEY,
             } for task in enable_plugins._LOCAL_TEXT_AUX_TASKS},
+            # t_proxy_outage_20261011: goal_judge is part of a fully-wired config.
+            "goal_judge": dict(enable_plugins.GOAL_JUDGE),
         },
         "fallback_providers": [{
             "provider": "custom",
@@ -158,6 +160,7 @@ def test_missing_config_noop(tmp_path):
     changed = {k: v for k, v in res.items() if isinstance(v, (list, tuple))}
     assert changed == {"plugins": [], "toolsets": [], "kanban": [],
                        "delegation": [], "compaction": [], "text_aux": [],
+                       "goal_judge": [], "goal_judge_profiles": [],
                        "fallback": [], "bitwarden": [], "prompt_caching": [],
                        "dashboard": [], "multiplex": [], "hooks": [],
                        "approvals": [], "worktree": []}
@@ -1124,3 +1127,143 @@ def test_warn_stderr_no_ansi():
     out = buf.getvalue()
     assert "HSCC compaction probe failed: boom" in out
     assert "\x1b" not in out, f"ANSI escape in piped stderr: {out!r}"
+
+# ── goal_judge auxiliary (t_proxy_outage_20261011) ──────────────────────────
+#
+# The whole point of these tests running against tmp_path trees: the sweep
+# must derive its root from config_path, never ambient HERMES_HOME — a test
+# (or a dispatched worker) must never be able to make it rewrite the LIVE
+# profile tree. Every case here asserts only on its own tmp files.
+
+
+def _profile_cfg(root, name, data):
+    d = root / "profiles" / name
+    d.mkdir(parents=True)
+    (d / "config.yaml").write_text(yaml.safe_dump(data))
+    return d / "config.yaml"
+
+
+class TestEnsureGoalJudge:
+    BASE = {"toolsets": ["hermes-cli"]}
+
+    def test_missing_goal_judge_filled(self, tmp_path):
+        path = _write(tmp_path / "config.yaml", dict(self.BASE))
+        res = enable_plugins.enable(path)
+        assert "aux.goal_judge.model" in res["goal_judge"]
+        gj = yaml.safe_load(open(path))["auxiliary"]["goal_judge"]
+        assert gj["provider"] == "custom"
+        assert gj["model"] == enable_plugins.WORKER_MODEL
+        assert gj["base_url"] == enable_plugins.WORKER_PROXY_URL
+        assert gj["timeout"] == 600
+
+    def test_existing_goal_judge_never_overwritten(self, tmp_path):
+        mine = {"provider": "openrouter", "model": "some/judge",
+                "base_url": "https://example.invalid/v1", "api_key": "k",
+                "timeout": 5}
+        path = _write(tmp_path / "config.yaml",
+                      {**self.BASE, "auxiliary": {"goal_judge": dict(mine)}})
+        res = enable_plugins.enable(path)
+        assert res["goal_judge"] == []
+        gj = yaml.safe_load(open(path))["auxiliary"]["goal_judge"]
+        assert gj == mine, "operator's goal_judge was mutated"
+
+    def test_goal_judge_without_model_is_treated_as_missing(self, tmp_path):
+        path = _write(tmp_path / "config.yaml",
+                      {**self.BASE, "auxiliary": {"goal_judge": {"timeout": 600}}})
+        res = enable_plugins.enable(path)
+        assert "aux.goal_judge.model" in res["goal_judge"]
+        gj = yaml.safe_load(open(path))["auxiliary"]["goal_judge"]
+        assert gj["model"] == enable_plugins.WORKER_MODEL
+        assert gj["timeout"] == 600          # existing non-empty field survives
+
+    def test_existing_model_means_totally_untouched(self, tmp_path):
+        """A goal_judge that names a model is OPERATOR territory: even empty
+        sibling fields (api_key!) are NOT filled — half-patching someone's
+        judge config with fleet defaults is the overwrite we must never do."""
+        path = _write(tmp_path / "config.yaml", {**self.BASE, "auxiliary": {
+            "goal_judge": {"provider": "custom", "model": "worker-model",
+                           "base_url": "http://10.0.0.9:4000/v1",
+                           "api_key": "", "timeout": 30}}})
+        res = enable_plugins.enable(path)
+        assert res["goal_judge"] == []
+        gj = yaml.safe_load(open(path))["auxiliary"]["goal_judge"]
+        assert gj["model"] == "worker-model"
+        assert gj["base_url"] == "http://10.0.0.9:4000/v1"   # operator endpoint kept
+        assert gj["timeout"] == 30                            # operator timeout kept
+        assert gj["api_key"] == ""                            # even empty: untouched
+
+    def test_idempotent_second_enable(self, tmp_path):
+        path = _write(tmp_path / "config.yaml", dict(self.BASE))
+        enable_plugins.enable(path)
+        res2 = enable_plugins.enable(path)
+        assert res2["goal_judge"] == []
+
+
+class TestGoalJudgeSweep:
+    """ensure_goal_judge_everywhere: root + every profile, tmp trees only."""
+
+    def _root(self, tmp_path):
+        r = tmp_path / "hermes"
+        (r / "profiles").mkdir(parents=True)
+        return r
+
+    def test_root_and_profiles_all_wired(self, tmp_path):
+        root = self._root(tmp_path)
+        (root / "config.yaml").write_text(yaml.safe_dump({"toolsets": []}))
+        p1 = _profile_cfg(root, "backend-engineer", {"model": {"default": "x"}})
+        p2 = _profile_cfg(root, "hscc-orch", {"model": {"default": "y"}})
+        out = enable_plugins.ensure_goal_judge_everywhere(home=str(root))
+        assert set(out) == {str(root / "config.yaml"), str(p1), str(p2)}
+        for p in (root / "config.yaml", p1, p2):
+            gj = yaml.safe_load(p.read_text())["auxiliary"]["goal_judge"]
+            assert gj["model"] == enable_plugins.WORKER_MODEL
+            assert gj["timeout"] == 600
+        # model defaults preserved (nothing else touched)
+        assert yaml.safe_load(p1.read_text())["model"]["default"] == "x"
+
+    def test_existing_profile_goal_judge_untouched(self, tmp_path):
+        root = self._root(tmp_path)
+        mine = {"provider": "openrouter", "model": "ecofire/judge"}
+        p = _profile_cfg(root, "ecofire-bc-orch", {"auxiliary": {"goal_judge": mine}})
+        out = enable_plugins.ensure_goal_judge_everywhere(home=str(root))
+        assert str(p) not in out
+        assert yaml.safe_load(p.read_text())["auxiliary"]["goal_judge"] == mine
+        assert not list(root.glob("profiles/ecofire-bc-orch/*.bak-*")), \
+            "no-change file must not be backed up/rewritten at all"
+
+    def test_missing_profile_config_not_created(self, tmp_path):
+        root = self._root(tmp_path)
+        (root / "profiles" / "bare").mkdir()   # profile dir WITHOUT config.yaml
+        (root / "config.yaml").write_text(yaml.safe_dump({"toolsets": []}))
+        out = enable_plugins.ensure_goal_judge_everywhere(home=str(root))
+        assert not (root / "profiles" / "bare" / "config.yaml").exists()
+        assert set(out) == {str(root / "config.yaml")}
+
+    def test_profile_scoped_home_resolves_to_root(self, tmp_path):
+        """Hermes runs profiles with HERMES_HOME=<root>/profiles/<name>; the
+        profiles-grandparent rule must still sweep the whole tree."""
+        root = self._root(tmp_path)
+        prof = root / "profiles" / "hscc-orch"
+        prof_cfg = _profile_cfg(root, "hscc-orch", {})
+        _profile_cfg(root, "worker", {})
+        out = enable_plugins.ensure_goal_judge_everywhere(home=str(prof))
+        assert str(prof_cfg) in out and str(root / "profiles" / "worker" / "config.yaml") in out
+
+    def test_sweep_root_comes_from_config_path_not_env(self, tmp_path, monkeypatch):
+        """THE safety property: ambient HERMES_HOME must NOT be able to steer
+        the sweep — config_path owns the root (t_267f9d88 class)."""
+        live = tmp_path / "live-hermes"
+        (live / "profiles" / "worker").mkdir(parents=True)
+        live_cfg = live / "profiles" / "worker" / "config.yaml"
+        live_cfg.write_text(yaml.safe_dump({"model": {"default": "untouched"}}))
+        monkeypatch.setenv("HERMES_HOME", str(live))
+
+        tmp_root = tmp_path / "test-hermes"
+        tmp_root.mkdir()
+        cfg = tmp_root / "config.yaml"
+        cfg.write_text(yaml.safe_dump({"toolsets": []}))
+        enable_plugins.enable(str(cfg))
+
+        gj = yaml.safe_load(live_cfg.read_text())
+        assert "auxiliary" not in gj, "sweep leaked to the live tree via ambient HERMES_HOME"
+        assert gj["model"]["default"] == "untouched"

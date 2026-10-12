@@ -487,6 +487,96 @@ def _ensure_text_auxiliaries(cfg):
     return changed
 
 
+# ── goal_judge auxiliary (t_proxy_outage_20261011) ──────────────────────────
+#
+# Hermes' goal-loop judge (cron/gateways judge a worker's turn against the
+# card before allowing it to stop) reads auxiliary.goal_judge. Bootstrap never
+# wrote it: every profile without it fell through to provider:auto → a cloud
+# credential read with no active secret scope → the judge call threw → goals
+# silently degraded (the 2026-10-11 audit found root config.yaml carrying it
+# and NOT ONE role profile). Route it at the local worker proxy exactly like
+# the delegation/compression aux entries above, with a generous timeout: a
+# goal judge runs a full reasoning turn.
+
+GOAL_JUDGE = {
+    "provider": "custom",
+    "model": WORKER_MODEL,
+    "base_url": WORKER_PROXY_URL,
+    "api_key": WORKER_PROXY_KEY,
+    "timeout": 600,
+}
+
+
+def _ensure_goal_judge(cfg):
+    """Point auxiliary.goal_judge at the local worker proxy. Returns keys changed.
+
+    NEVER overwrites an existing goal_judge that already names a model — an
+    operator (or another project's bootstrap) that configured one wins. A
+    present-but-empty block (``goal_judge:`` with no model, or all-empty
+    fields) is treated as missing and filled, matching _ensure_delegation's
+    fill-empty philosophy.
+    """
+    aux_root = cfg.setdefault("auxiliary", {})
+    if not isinstance(aux_root, dict):
+        return []
+    gj = aux_root.get("goal_judge")
+    if isinstance(gj, dict) and (gj.get("model") or "").strip():
+        return []           # deliberately configured — hands off
+    changed = []
+    gj = aux_root.setdefault("goal_judge", {})
+    if not isinstance(gj, dict):
+        # A scalar there is an operator statement we cannot honour — leave it.
+        return changed
+    for key, want in GOAL_JUDGE.items():
+        if not (str(gj.get(key) or "")).strip():
+            gj[key] = want
+            changed.append(f"aux.goal_judge.{key}")
+    return changed
+
+
+def ensure_goal_judge_everywhere(home=None):
+    """Apply _ensure_goal_judge to the root config AND every profile config.
+
+    enable() only wires the config.yaml it is pointed at; role profiles live at
+    <root>/profiles/<name>/config.yaml and Hermes loads each as its own root,
+    so a profile never wired by bootstrap keeps provider:auto and its goal
+    judge throws. Runs at the ROOT home (profiles-grandparent rule, same as
+    doctor/backup_util sweep) so a dispatched worker's profile-scoped
+    HERMES_HOME still reaches every config in the tree. Never creates a config
+    that does not exist (Hermes owns fresh profile creation), never touches a
+    file without a goal_judge change, and backs up atomically like enable()
+    itself. Returns {config_path: [changed keys]} — empty when nothing needed
+    fixing (the steady state, and the safe repeat-run answer).
+    """
+    root = backup_util._hermes_root(home or os.environ.get("HERMES_HOME")
+                                    or os.path.expanduser("~/.hermes"))
+    import yaml                                    # file-local convention (see enable())
+    results = {}
+    targets = [os.path.join(root, "config.yaml")]
+    profiles_dir = os.path.join(root, "profiles")
+    if os.path.isdir(profiles_dir):
+        for name in sorted(os.listdir(profiles_dir)):
+            targets.append(os.path.join(profiles_dir, name, "config.yaml"))
+    for path in targets:
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path) as fh:
+                cfg = yaml.safe_load(fh) or {}
+        except Exception:
+            continue                      # unreadable/corrupt: Hermes' problem, not ours
+        if not isinstance(cfg, dict):
+            continue
+        changed = _ensure_goal_judge(cfg)
+        if not changed:
+            continue
+        backup_util.backup_file(path)
+        with open(path, "w") as fh:
+            yaml.safe_dump(cfg, fh, sort_keys=False, default_flow_style=False)
+        results[path] = changed
+    return results
+
+
 def _ensure_fallback(cfg):
     """Seed a fallback provider = the worker LB (M5), so a wedged orchestrator
     degrades to the worker tier instead of hanging. Only fills an EMPTY
@@ -893,7 +983,9 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
         )
 
     empty = {"plugins": [], "toolsets": [], "kanban": [], "delegation": [],
-             "compaction": [], "text_aux": [], "fallback": [], "bitwarden": [],
+             "compaction": [], "text_aux": [], "goal_judge": [],
+             "goal_judge_profiles": [], "fallback": [],
+             "bitwarden": [],
              "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": [],
              "approvals": [], "worktree": []}
     if not os.path.exists(config_path):
@@ -917,6 +1009,7 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
     changed_delegation = _ensure_delegation(cfg)
     changed_compaction = _ensure_compaction(cfg)
     changed_text_aux = _ensure_text_auxiliaries(cfg)
+    changed_goal_judge = _ensure_goal_judge(cfg)
     changed_fallback = _ensure_fallback(cfg)
     changed_bitwarden = _ensure_bitwarden(cfg)
     changed_prompt_caching = _ensure_prompt_caching(cfg)
@@ -950,6 +1043,7 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
 
     if (added_plugins or added_toolsets or changed_kanban or changed_worktree
             or changed_delegation or changed_compaction or changed_text_aux
+            or changed_goal_judge
             or changed_fallback or changed_bitwarden or changed_prompt_caching
             or changed_dashboard or changed_multiplex or changed_hooks
             or changed_approvals):
@@ -960,9 +1054,23 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
         with open(config_path, "w") as fh:
             yaml.safe_dump(cfg, fh, sort_keys=False, default_flow_style=False)
 
+    # Role profiles are separate roots for Hermes, so wiring only the config
+    # enable() was pointed at left every profile's goal judge at provider:auto
+    # (2026-10-11 audit: not one role profile carried auxiliary.goal_judge).
+    # Sweep the whole tree — but derive the root from config_path, NEVER from
+    # ambient HERMES_HOME: a dispatched worker carries HERMES_HOME=<root>/
+    # profiles/<name>, and an env-derived sweep would let a test wiring a tmp
+    # config silently rewrite the LIVE profile tree (the t_267f9d88 class of
+    # ambient-state bug, one config.yaml at a time).
+    sweep_root = backup_util._hermes_root(os.path.dirname(os.path.abspath(config_path)))
+    gj_profiles = ensure_goal_judge_everywhere(home=sweep_root)
+
     return {"plugins": added_plugins, "toolsets": added_toolsets,
             "kanban": changed_kanban, "delegation": changed_delegation,
             "compaction": changed_compaction, "text_aux": changed_text_aux,
+            "goal_judge": changed_goal_judge,
+            "goal_judge_profiles": sorted(
+                os.path.relpath(p, sweep_root) for p in gj_profiles),
             "fallback": changed_fallback,
             "bitwarden": changed_bitwarden,
             "prompt_caching": changed_prompt_caching,

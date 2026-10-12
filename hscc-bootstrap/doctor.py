@@ -456,8 +456,326 @@ def _run_cluster_list() -> str:
         return ""
 
 
+# ── proxy-outage 2026-10-11 report-only checks (t_proxy_outage_20261011) ────
+#
+# Three fleet-state checks the outage proved worth having BEFORE the next
+# outage: (4) sparkrun's own interpreter can be denied macOS Local Network
+# (errno 65 on every private-range connect while nc/ssh work fine); (5) the
+# saved sparkrun cluster can drift from serving.json (it lacked the
+# orchestrator node during the outage); (6) duplicate sparkrun jobs on one
+# node+port (the intent-hash duplicate class) and stale serving.json endpoint
+# records. All three are warnings — report only, never fix, never fatal.
+
+
+def _serving_units(_serving_raw=None):
+    """Units list from serving.json (injectable raw text for tests)."""
+    import json
+    raw = _serving_raw
+    if raw is None:
+        path = os.path.expanduser(os.environ.get("HSCC_SERVING_JSON",
+                                                 "~/.hscc/serving.json"))
+        try:
+            with open(path) as fh:
+                raw = fh.read()
+        except OSError:
+            return []
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return []
+    units = data.get("units") if isinstance(data, dict) else None
+    return [u for u in (units or []) if isinstance(u, dict)]
+
+
+def _sparkrun_interpreter():
+    """(cli_path, interpreter) for the sparkrun CLI: which → ~/.local/bin,
+    then read the shebang. (None, None) when the CLI cannot be found.
+
+    The 2026-10-11 incident class: sparkrun installed under a Homebrew or
+    python.org Framework python — a binary whose TCC identity may lack the
+    macOS Local Network grant, so EVERY private-range connect from it fails
+    errno 65 while ssh/nc from other binaries work.
+    """
+    cli = shutil.which("sparkrun") or os.path.expanduser("~/.local/bin/sparkrun")
+    if not os.path.isfile(cli) or not os.access(cli, os.X_OK):
+        return None, None
+    try:
+        with open(cli, "rb") as fh:
+            first = fh.readline(256)
+    except OSError:
+        return cli, None
+    if not first.startswith(b"#!"):
+        return cli, None
+    shebang = first[2:].decode("utf-8", "replace").strip()
+    # "#!/usr/bin/env python3" style → the interpreter is resolved at exec;
+    # take the literal path when absolute, else None (env/relative).
+    parts = shebang.split()
+    interp = parts[0] if parts else ""
+    if interp.startswith("/"):
+        return cli, interp
+    if parts and parts[0].endswith("/env") and len(parts) > 1:
+        return cli, shutil.which(parts[1])  # best effort via PATH
+    return cli, None
+
+
+_INTERP_DENY_HINT = ("macOS Local Network permission blocks this Python — "
+                    "rebuild sparkrun on a uv Python")
+_FRAMEWORK_HINT = ("sparkrun runs on a Homebrew/Framework python — its TCC "
+                   "identity may lack the Local Network grant; a uv-built "
+                   "sparkrun is the supported install")
+
+
+def _sparkrun_lan_reachability(_venv_python=None, _probe=None,
+                               _serving_raw=None) -> Check:
+    """TCP-probe every serving node FROM SPARKRUN'S OWN INTERPRETER (report only).
+
+    A python with no Local Network grant answers errno 65 for every
+    private-range connect, so the outage looked like "fleet down" while the
+    fleet was fine — the ONLY probe that catches it is one that runs under
+    sparkrun's interpreter, not doctor's own. Connect target is port 22:
+    what sparkrun itself must reach.
+    """
+    cli, interp = (None, None)
+    if _venv_python is None:
+        cli, interp = _sparkrun_interpreter()
+    else:
+        interp = _venv_python
+    if not interp:
+        return Check("sparkrun lan reachability", True,
+                     detail="sparkrun interpreter unresolved — skipped",
+                     fatal=False)
+
+    nodes = []
+    for u in _serving_units(_serving_raw):
+        for n in (u.get("nodes") or []):
+            if n and n not in nodes:
+                nodes.append(n)
+    if not nodes:
+        return Check("sparkrun lan reachability", True,
+                     detail="no serving nodes to probe — skipped", fatal=False)
+
+    deny_detected = False
+    failures = []
+    for node in nodes:
+        if _probe is not None:
+            err = _probe(interp, node)
+        else:
+            err = _tcp_probe_error(interp, node, 22)
+        if err is None:
+            continue
+        failures.append(f"{node}: {err}")
+        if "errno 65" in err or "No route to host" in err:
+            deny_detected = True
+
+    detail_bits = []
+    is_homebrew = interp.startswith("/opt/homebrew/") or interp.startswith(
+        "/usr/local/Cellar/") or interp.startswith("/Library/Frameworks/")
+    if is_homebrew:
+        detail_bits.append(_FRAMEWORK_HINT)
+    if deny_detected:
+        return Check("sparkrun lan reachability", False,
+                     detail="; ".join(failures) + " — " + _INTERP_DENY_HINT,
+                     fix=_INTERP_DENY_HINT + " (uv venv), re-grant Local "
+                         "Network to it in System Settings > Privacy.",
+                     fatal=False)
+    if failures:
+        return Check("sparkrun lan reachability", False,
+                     detail="; ".join(failures)
+                     + ("" if not detail_bits else " — " + "; ".join(detail_bits)),
+                     fix="Check node reachability / ssh.", fatal=False)
+    if detail_bits:
+        return Check("sparkrun lan reachability", True,
+                     detail=f"all {len(nodes)} serving node(s) reachable; "
+                            + "; ".join(detail_bits), fatal=False)
+    return Check("sparkrun lan reachability", True,
+                 detail=f"all {len(nodes)} serving node(s) reachable from "
+                        f"{os.path.basename(interp)}", fatal=False)
+
+
+def _tcp_probe_error(interpreter, host, port, timeout=5):
+    """None when <interpreter> can TCP-connect host:port; else the error text.
+
+    Runs the connect INSIDE the given interpreter so the verdict belongs to
+    that binary's TCC identity — the entire point (doctor's own python having
+    the grant says nothing about sparkrun's).
+    """
+    script = (
+        "import socket,sys\n"
+        "try:\n"
+        "    s=socket.create_connection((sys.argv[1],int(sys.argv[2])),5)\n"
+        "    s.close()\n"
+        "except OSError as e:\n"
+        "    print(f'errno={e.errno} {e.strerror}')\n"
+        "    sys.exit(1)\n"
+    )
+    try:
+        r = subprocess.run([interpreter, "-c", script, host, str(port)],
+                           capture_output=True, text=True, timeout=timeout + 5)
+    except (subprocess.SubprocessError, FileNotFoundError, OSError) as e:
+        return f"probe could not run: {e}"
+    if r.returncode == 0:
+        return None
+    return (r.stdout or r.stderr or "connect failed").strip()
+
+
+def _run_cluster_default() -> str:
+    try:
+        r = subprocess.run(["sparkrun", "cluster", "default", "--json"],
+                           capture_output=True, text=True, timeout=15)
+        return (r.stdout or "").strip() if r.returncode == 0 else ""
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return ""
+
+
+def _sparkrun_default_cluster_matches_serving(_runner=None,
+                                              _serving_raw=None) -> Check:
+    """Warn when `sparkrun cluster default` hosts differ from serving.json nodes.
+
+    During the outage the saved cluster LACKED the orchestrator node, so any
+    sparkrun operation scoped to the cluster (including the proxy relaunch)
+    silently excluded it. Report only — re-writing a saved cluster is an
+    operator decision.
+    """
+    import json
+    raw = (_runner or _run_cluster_default)()
+    if not raw:
+        return Check("sparkrun cluster vs serving", True,
+                     detail="no default cluster / sparkrun not reachable — skipped",
+                     fatal=False)
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return Check("sparkrun cluster vs serving", True,
+                     detail="unparseable cluster default output — skipped",
+                     fatal=False)
+    cluster_hosts = {h for h in (data.get("hosts") or []) if h}
+    serving_nodes = set()
+    for u in _serving_units(_serving_raw):
+        serving_nodes.update(n for n in (u.get("nodes") or []) if n)
+    if not cluster_hosts or not serving_nodes:
+        return Check("sparkrun cluster vs serving", True,
+                     detail="nothing to compare — skipped", fatal=False)
+    missing_in_cluster = serving_nodes - cluster_hosts
+    extra_in_cluster = cluster_hosts - serving_nodes
+    if not missing_in_cluster and not extra_in_cluster:
+        return Check("sparkrun cluster vs serving", True,
+                     detail=f"cluster hosts == serving nodes ({len(cluster_hosts)})",
+                     fatal=False)
+    bits = []
+    if missing_in_cluster:
+        bits.append(f"serving nodes MISSING from sparkrun cluster: "
+                    f"{sorted(missing_in_cluster)}")
+    if extra_in_cluster:
+        bits.append(f"cluster hosts not in serving.json: {sorted(extra_in_cluster)}")
+    return Check("sparkrun cluster vs serving", False,
+                 detail="; ".join(bits),
+                 fix="sparkrun cluster update <name> --hosts <full serving set>",
+                 fatal=False)
+
+
+def _run_cluster_status(cluster) -> str:
+    if not cluster:
+        return ""
+    try:
+        r = subprocess.run(["sparkrun", "status", "--cluster", cluster, "--json"],
+                           capture_output=True, text=True, timeout=30)
+        return (r.stdout or "").strip() if r.returncode == 0 else ""
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return ""
+
+
+def _serving_consistency(_status_runner=None, _serving_raw=None,
+                         cluster=None) -> Check:
+    """Flag duplicate sparkrun jobs on one node+port + stale endpoint records.
+
+    The 2026-10-11 duplicate class: force-recreates with a changed
+    --served-model-name carry a different sparkrun intent hash, so the OLD
+    container is left running beside the NEW one on the same node+port. One
+    of the pair maps to serving.json's serve_cmd / (node,port); the unmapped
+    extra is the duplicate. The inverse — a serving.json (node,port) with no
+    running container — is a stale record: something the fleet believes is
+    served but sparkrun cannot see. Report only.
+    """
+    import json
+    if cluster is None:
+        cluster = os.environ.get("HSCC_CLUSTER", "hscc")
+    raw = (_status_runner or _run_cluster_status)(cluster)
+    units = _serving_units(_serving_raw)
+    if not raw or not units:
+        return Check("serving consistency", True,
+                     detail="no status data or no serving units — skipped",
+                     fatal=False)
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return Check("serving consistency", True,
+                     detail="unparseable sparkrun status JSON — skipped",
+                     fatal=False)
+
+    # (host, port) -> [container entries] from groups + solo_entries
+    running = {}
+    for _cid, group in (data.get("groups") or {}).items():
+        meta = group.get("meta") or {}
+        port = meta.get("port")
+        for c in group.get("containers") or []:
+            host = c.get("host")
+            if host and port is not None:
+                running.setdefault((host, int(port)), []).append(c)
+    for entry in data.get("solo_entries") or []:
+        meta = entry.get("meta") or {}
+        host, port = entry.get("host"), meta.get("port")
+        if host and port is not None:
+            running.setdefault((host, int(port)), []).append(entry)
+
+    # serving.json's authoritative (host, port) set: every unit's PRIMARY
+    # (nodes[0]) on the unit's port; tp peers expose no endpoint of their own.
+    mapped = set()
+    for u in units:
+        nodes = [n for n in (u.get("nodes") or []) if n]
+        port = u.get("port")
+        if nodes and port is not None:
+            mapped.add((nodes[0], int(port)))
+
+    problems = []
+    for (host, port), containers in sorted(running.items()):
+        if len(containers) > 1 and (host, port) in mapped:
+            problems.append(
+                f"{host}:{port} has {len(containers)} sparkrun containers; "
+                f"serving.json maps only one — the extra is the duplicate class "
+                f"(intent-hash drift on a served-name change), stop the unmapped one")
+    for (host, port) in sorted(mapped):
+        if (host, port) not in running:
+            problems.append(
+                f"serving.json record {host}:{port} has no running container "
+                f"(stale endpoint record)")
+    if problems:
+        return Check("serving consistency", False,
+                     detail="; ".join(problems),
+                     fix="Report only — verify each duplicate/stale pair with "
+                         "`sparkrun status --cluster "
+                         f"{cluster}` before stopping anything.",
+                     fatal=False)
+    return Check("serving consistency", True,
+                 detail=f"{len(mapped)} serving.json endpoint(s) == sparkrun "
+                        f"containers, no duplicates", fatal=False)
+
+
 def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
-               _http_get=None) -> dict:
+               _http_get=None, _serving_raw=None, _venv_python=None,
+               _lan_probe=None, _cluster_default_runner=None,
+               _status_runner=None, fleet_checks=None) -> dict:
+    """Run all checks.
+
+    Fleet checks (lan reachability / cluster-vs-serving / serving
+    consistency) shell out to sparkrun and TCP-probe the fleet — READ-ONLY,
+    but still fleet I/O. ``fleet_checks=True`` forces them, False skips them
+    (reported as skipped); the default (None) auto-detects: they run in a
+    human CLI process and skip inside a pytest process, so the test suite can
+    never accidentally probe the live fleet by calling run_doctor(). A test
+    that WANTS them passes fleet_checks=True plus the stub seams.
+    """
+    if fleet_checks is None:
+        fleet_checks = "pytest" not in sys.modules
     home = (hermes_home or os.environ.get("HERMES_HOME")
             or os.path.expanduser("~/.hermes"))
     checks: List[Check] = [
@@ -477,6 +795,19 @@ def run_doctor(hermes_home: Optional[str] = None, *, _cluster_runner=None,
         # reported as ok (no false alarm), so it never flips preflight `ok`.
         _check_models_served(home, _http_get=_http_get),
     ]
+    if fleet_checks:
+        checks += [
+            _sparkrun_lan_reachability(_venv_python=_venv_python,
+                                       _probe=_lan_probe,
+                                       _serving_raw=_serving_raw),
+            _sparkrun_default_cluster_matches_serving(
+                _runner=_cluster_default_runner, _serving_raw=_serving_raw),
+            _serving_consistency(_status_runner=_status_runner,
+                                 _serving_raw=_serving_raw),
+        ]
+    else:
+        checks.append(Check("sparkrun lan reachability", True,
+                            detail="skipped (fleet checks off)", fatal=False))
     fatal_failed = [c for c in checks if not c.ok and c.fatal]
     return {
         "ok": not fatal_failed,
@@ -802,8 +1133,10 @@ def run_doctor_fix(config_path: Optional[str] = None,
         for section, keys in result.items():
             # `result` sections are lists of config key names; `hooks_file`
             # (the hook-script install status dict) is surfaced alongside but
-            # is not a config section — skip it.
-            if not isinstance(keys, list):
+            # is not a config section — skip it. `goal_judge_profiles` is a
+            # list of PROFILE FILE paths the sweep wired (t_proxy_outage_20261011),
+            # not keys of THIS config — reported separately below.
+            if not isinstance(keys, list) or section == "goal_judge_profiles":
                 continue
             for k in keys:
                 old_val = _get_nested(snapshot, section, k)
@@ -816,6 +1149,9 @@ def run_doctor_fix(config_path: Optional[str] = None,
                     fixes_applied.append(
                         f"{section}/{k}: was {old_val} -> set {new_val}"
                     )
+
+        for prof in result.get("goal_judge_profiles") or []:
+            fixes_applied.append(f"auxiliary.goal_judge wired in profile file {prof}")
 
         # Card D: one-time CONCRETE → alias migration. Runs on the reconciled
         # config only; never touches ~/.hermes directly (config_path is the
