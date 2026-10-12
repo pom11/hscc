@@ -54,13 +54,14 @@ task: t_proxy_outage_20261011
 kind: Verified
 order: 1
 
-- `hscc_daemon/tests/test_health.py`: TestCheckProxy 3 -> **12** cases —
+- `hscc_daemon/tests/test_health.py`: TestCheckProxy 3 -> **14** cases —
   the outage shape (200 + `data: []` must relaunch), each alias-missing
   shape (non-uniform worker-only, uniform worker-only / orchestrator-only),
   the healthy baseline, uniform-pool relaunch hosts INCLUDING the
   orchestrator node (the union), non-uniform relaunch hosts UNCHANGED
   (worker-only), plus direct units for the probe's body-parsing and the
-  healthy-verdict matrix. Stubs `_proxy_models_probe` +
+  healthy-verdict matrix, uniform relaunch over ALL unit nodes incl.
+  keepalive:false workers, env-override union. Stubs `_proxy_models_probe` +
   `serving.load_serving` — never the live `:4000`, never the operator's
   live serving.json.
 - `hscc-bootstrap/tests/test_enable_plugins.py`: +**10** goal_judge cases

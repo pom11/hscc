@@ -589,15 +589,20 @@ def _proxy_relaunch_hosts(serving_data=None):
     outage was exactly a proxy that lost the orchestrator's endpoint: with the
     orchestrator node absent from --hosts, its model is never added back, the
     aliases never reappear, and the LB serves only half the fleet forever.
-    So a uniform pool relaunches over ALL serving nodes: keep-alive workers ∪
-    orchestrator nodes (the orchestrator is normally not keep-alive, so the
-    union is what recovers it).
+    So a uniform pool relaunches over ALL serving nodes — every node named by
+    every serving.json unit (orchestrators, keep-alive AND non-keep-alive
+    workers, tp peers included; a probe of a peer's absent endpoint is
+    harmless), unioned with KEEPALIVE_NODES so an env-only override
+    (serving.json absent, HSCC_KEEPALIVE_NODES set) still reaches the fleet.
     """
     if serving_data is None:
         serving_data = serving.load_serving()
     nodes = set(serving.KEEPALIVE_NODES)
     if serving.is_uniform_pool(serving_data):
-        nodes |= serving.orchestrator_nodes(serving_data)
+        units = serving_data.get("units") if isinstance(serving_data, dict) else None
+        for u in (units or []):
+            if isinstance(u, dict):
+                nodes.update(n for n in (u.get("nodes") or []) if n)
     return sorted(nodes)
 
 
