@@ -983,7 +983,8 @@ def enable(config_path, plugins=HSCC_PLUGINS, toolsets=HSCC_TOOLSETS,
         )
 
     empty = {"plugins": [], "toolsets": [], "kanban": [], "delegation": [],
-             "compaction": [], "text_aux": [], "goal_judge": [], "fallback": [],
+             "compaction": [], "text_aux": [], "goal_judge": [],
+             "goal_judge_profiles": [], "fallback": [],
              "bitwarden": [],
              "prompt_caching": [], "dashboard": [], "multiplex": [], "hooks": [],
              "approvals": [], "worktree": []}
