@@ -7,10 +7,13 @@ task: t_proxy_outage_20261011
   `200` with `{"data": []}` and the daemon called it healthy forever, while
   every `worker-model` call behind it 404'd (the 2026-10-11 outage). Health
   is now a BODY verdict: `{"data": []}` / a non-parseable body / a missing
-  expected role alias (`orchestrator-model` + `worker-model` from the
-  serving.json units — both aliases under a uniform_pool) are all unhealthy
-  and trigger the relaunch path; with no serving.json the floor is `>=1`
-  model. The state payload records the reason and the served ids.
+  expected role alias are all unhealthy and trigger the relaunch path; the
+  expected aliases are scoped to the hosts `proxy start --hosts` actually
+  points the proxy at (a non-uniform fleet reaches only keep-alive workers,
+  so `orchestrator-model` is not required there; a uniform pool demands both)
+  — an alias the proxy cannot serve must never make it unhealthy; with no
+  serving.json the floor is `>=1` model. The state payload records the
+  reason and the served ids.
 - **Proxy relaunch dropped the orchestrator node under a uniform pool.**
   `serving.KEEPALIVE_NODES` excludes orchestrator nodes by design
   (`_resolve_serving_overlay`), and the relaunch passed exactly that set to
@@ -35,6 +38,19 @@ task: t_proxy_outage_20261011
 kind: Added
 task: t_proxy_outage_20261011
 
+- **Durable relaunch cooldown on the proxy check (PR #22 review).** A
+  persistently-unhealthy proxy used to invoke `sparkrun proxy start` every
+  check tick (60s): each attempt runs a full SSH endpoint discovery sweep
+  and spams WARN, even though plain `proxy start` REFUSES a running proxy
+  (sparkrun `engine.py` returns 1 on `is_running()`; SIGTERM-ing the live
+  proxy happens only under `--restart`, which we never pass). Failed
+  attempts now stamp `last_relaunch` in the proxy STATE FILE — not module
+  memory, so a daemon restart cannot reset the window (the in-memory state
+  flaw) — and further attempts are suppressed until
+  `HSCC_PROXY_RELAUNCH_COOLDOWN_S` (default 300s) elapses. Suppressed ticks
+  carry the original stamp forward verbatim (re-stamping would extend the
+  window forever); a SUCCESSFUL relaunch clears the stamp so genuine
+  down-proxy recovery stays immediate.
 - **Three report-only doctor checks for the outage's blind spots.**
   `sparkrun lan reachability` TCP-probes every serving node FROM SPARKRUN'S
   OWN INTERPRETER (shebang of the resolved CLI): a python denied the macOS
@@ -54,16 +70,19 @@ task: t_proxy_outage_20261011
 kind: Verified
 order: 1
 
-- `hscc_daemon/tests/test_health.py`: TestCheckProxy 3 -> **14** cases —
-  the outage shape (200 + `data: []` must relaunch), each alias-missing
-  shape (non-uniform worker-only, uniform worker-only / orchestrator-only),
-  the healthy baseline, uniform-pool relaunch hosts INCLUDING the
-  orchestrator node (the union), non-uniform relaunch hosts UNCHANGED
-  (worker-only), plus direct units for the probe's body-parsing and the
-  healthy-verdict matrix, uniform relaunch over ALL unit nodes incl.
-  keepalive:false workers, env-override union. Stubs `_proxy_models_probe` +
-  `serving.load_serving` — never the live `:4000`, never the operator's
-  live serving.json.
+- `hscc_daemon/tests/test_health.py`: TestCheckProxy 3 -> **20** cases —
+  the outage shape (200 + `data: []` must relaunch), alias-missing shapes
+  scoped to the relaunch host set (non-uniform worker-only catalogue is
+  HEALTHY and must NOT relaunch — the PR #22 blocking case; reachable
+  worker alias missing DOES relaunch; uniform pool demands both), the
+  healthy baseline, uniform-pool relaunch hosts INCLUDING every unit node,
+  non-uniform relaunch hosts UNCHANGED (worker-only), the durable relaunch
+  cooldown (failed attempt suppresses retries, suppressed ticks carry the
+  stamp forward without extending the window, expiry retries, success
+  clears, garbage stamps tolerated), plus direct units for the probe's
+  body-parsing, the healthy-verdict matrix and host-scoped alias
+  expectation. Stubs `_proxy_models_probe` + `serving.load_serving` —
+  never the live `:4000`, never the operator's live serving.json.
 - `hscc-bootstrap/tests/test_enable_plugins.py`: +**10** goal_judge cases
   (root+profiles wiring, never-overwrite, model-less-block,
   totally-untouched-when-model-set, idempotency, and
