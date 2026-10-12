@@ -1380,6 +1380,28 @@ class TestCheckProxy:
         cmd = ran[0]
         assert "10.0.0.1,10.0.0.2,10.0.0.3" in cmd   # orchestrator node included
 
+    def test_uniform_relaunch_includes_nonkeepalive_workers(self, tmp_hfcc_dir, monkeypatch):
+        """ALL serving nodes means ALL: a uniform pool may legitimately carry
+        keepalive:false workers; they serve either role and the LB must know
+        about them (KEEPALIVE_NODES alone would drop them)."""
+        serving_data = {"version": 2, "uniform_pool": True, "units": [
+            {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"], "port": 8000},
+            {"id": "w1", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.2"], "port": 8001},
+            {"id": "w2", "role": "worker", "keepalive": False,
+             "nodes": ["10.0.0.4"], "port": 8003},
+        ]}
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"],   # keepalive set is w1 only
+            probe={"ok": False, "models": [], "error": "down"},
+            serving_data=serving_data)
+        ran = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(args) or {"ok": True})
+        health.check_proxy()
+        cmd = ran[0]
+        assert cmd[cmd.index("--hosts") + 1] == "10.0.0.1,10.0.0.2,10.0.0.4"
+
     def test_relaunch_non_uniform_excludes_orchestrator(self, tmp_hfcc_dir, monkeypatch):
         """Non-uniform behaviour UNCHANGED: worker nodes only (historical)."""
         serving_data = {"version": 2, "units": [
@@ -1399,6 +1421,26 @@ class TestCheckProxy:
         assert cmd[cmd.index("--hosts") + 1] == "10.0.0.2"   # no orchestrator union
 
     # ── pure-function units (the health VERDICT itself) ─────────────────────
+
+    def test_relaunch_hosts_units_union_and_env_override(self):
+        """Direct unit: uniform pool = every unit node ∪ KEEPALIVE_NODES (so an
+        env-only HSCC_KEEPALIVE_NODES with no serving.json still reaches the
+        fleet); non-uniform = KEEPALIVE_NODES exactly."""
+        from hscc_daemon import health, serving
+        original = serving.KEEPALIVE_NODES
+        serving.KEEPALIVE_NODES = {"10.0.0.2", "10.0.0.9"}
+        try:
+            assert health._proxy_relaunch_hosts(
+                {"uniform_pool": True, "units": [
+                    {"role": "orchestrator", "nodes": ["10.0.0.1"]},
+                    {"role": "worker", "nodes": ["10.0.0.2"]}]}) == \
+                ["10.0.0.1", "10.0.0.2", "10.0.0.9"]
+            # non-uniform: env/keepalive set only, unit nodes NOT unioned
+            assert health._proxy_relaunch_hosts(
+                {"units": [{"role": "orchestrator", "nodes": ["10.0.0.1"]}]}) == \
+                ["10.0.0.2", "10.0.0.9"]
+        finally:
+            serving.KEEPALIVE_NODES = set()
 
     def test_models_healthy_verdicts(self):
         from hscc_daemon.health import _proxy_models_healthy
