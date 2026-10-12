@@ -111,6 +111,8 @@ def _fully_wired_cfg():
                 "model": enable_plugins.COMPACT_MODEL,
                 "api_key": enable_plugins.COMPACT_KEY,
             } for task in enable_plugins._LOCAL_TEXT_AUX_TASKS},
+            # t_proxy_outage_20261011: goal_judge is part of a fully-wired config.
+            "goal_judge": dict(enable_plugins.GOAL_JUDGE),
         },
         "fallback_providers": [{
             "provider": "custom",
@@ -158,6 +160,7 @@ def test_missing_config_noop(tmp_path):
     changed = {k: v for k, v in res.items() if isinstance(v, (list, tuple))}
     assert changed == {"plugins": [], "toolsets": [], "kanban": [],
                        "delegation": [], "compaction": [], "text_aux": [],
+                       "goal_judge": [], "goal_judge_profiles": [],
                        "fallback": [], "bitwarden": [], "prompt_caching": [],
                        "dashboard": [], "multiplex": [], "hooks": [],
                        "approvals": [], "worktree": []}
