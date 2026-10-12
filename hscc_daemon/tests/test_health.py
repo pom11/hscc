@@ -1433,6 +1433,46 @@ class TestCheckProxy:
         state = json.loads((tmp_hfcc_dir / "state" / "proxy.json").read_text())
         assert "empty" in state["reason"]
 
+    def _relaunch_args(self, tmp_hfcc_dir, monkeypatch, probe, serving_data=None):
+        kw = {} if serving_data is None else {"serving_data": serving_data}
+        health = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"],
+                             probe=probe, **kw)
+        ran = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(list(args)) or {"ok": True})
+        health.check_proxy()
+        assert len(ran) == 1
+        return ran[0]
+
+    def test_empty_catalogue_relaunch_passes_restart(self, tmp_hfcc_dir, monkeypatch):
+        """A LIVE proxy serving nothing: plain `proxy start` refuses a running
+        proxy (exit 1), so without --restart the outage shape is detected but
+        never healed. Empty catalogue = no traffic to drop -> --restart."""
+        args = self._relaunch_args(tmp_hfcc_dir, monkeypatch,
+                                   {"ok": True, "models": [], "error": ""})
+        assert "--restart" in args
+        state = json.loads((tmp_hfcc_dir / "state" / "proxy.json").read_text())
+        assert state["restart"] is True
+
+    def test_partial_catalogue_relaunch_never_restarts(self, tmp_hfcc_dir, monkeypatch):
+        """One alias missing but others served: a restart would drop live
+        traffic, so the relaunch stays a plain start."""
+        serving_data = {"version": 2, "units": [
+            {"id": "w1", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.2"], "port": 8001},
+        ]}
+        args = self._relaunch_args(
+            tmp_hfcc_dir, monkeypatch,
+            {"ok": True, "models": ["some-model"], "error": ""}, serving_data)
+        assert "--restart" not in args
+
+    def test_unreachable_proxy_relaunch_never_restarts(self, tmp_hfcc_dir, monkeypatch):
+        """Unreachable = not running: plain start brings it up."""
+        args = self._relaunch_args(
+            tmp_hfcc_dir, monkeypatch,
+            {"ok": False, "models": [], "error": "connection refused"})
+        assert "--restart" not in args
+
     def test_non_uniform_worker_only_catalogue_is_healthy(self, tmp_hfcc_dir, monkeypatch):
         """PR #22 review (blocking): non-uniform fleets point `proxy start
         --hosts` at keep-alive WORKER nodes only, so orchestrator-model is NOT
