@@ -1240,9 +1240,18 @@ class TestWorkersStartupGrace:
 
 
 class TestCheckProxy:
-    """check_proxy() keeps the worker load-balancer alive."""
+    """check_proxy() keeps the worker load-balancer alive.
 
-    def _setup(self, tmp_hfcc_dir, monkeypatch, nodes):
+    t_proxy_outage_20261011: health is a BODY verdict, not a status code.
+    These stub _proxy_models_probe (never the live :4000) and stub
+    serving.load_serving (never the operator's live serving.json — the same
+    ambient-state discipline as test_doctor's _HOME_ENV guard).
+    """
+
+    _SERVING_NO_UNITS = {"version": 2, "units": []}
+
+    def _setup(self, tmp_hfcc_dir, monkeypatch, nodes, probe=None,
+               serving_data=_SERVING_NO_UNITS):
         from hscc_daemon import health, serving
         from hscc_daemon import state as state_mod
         monkeypatch.setattr(health, "log", lambda *a, **kw: None)
@@ -1250,6 +1259,10 @@ class TestCheckProxy:
         state_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
         monkeypatch.setattr(serving, "KEEPALIVE_NODES", set(nodes))
+        monkeypatch.setattr(serving, "load_serving", lambda *a, **k: serving_data)
+        if probe is not None:
+            monkeypatch.setattr(health, "_proxy_models_probe",
+                                lambda url, timeout=5: dict(probe))
         return health
 
     def test_no_workers_noop(self, tmp_hfcc_dir, monkeypatch):
@@ -1257,16 +1270,18 @@ class TestCheckProxy:
         assert health.check_proxy() is True
 
     def test_proxy_healthy(self, tmp_hfcc_dir, monkeypatch):
-        health = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
-        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": True})
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"],
+            probe={"ok": True, "models": ["worker-model"], "error": ""})
         ran = []
         monkeypatch.setattr(health, "run_cmd", lambda *a, **k: ran.append(a) or {"ok": True})
         assert health.check_proxy() is True
         assert ran == []                         # healthy -> no relaunch
 
     def test_proxy_down_relaunched(self, tmp_hfcc_dir, monkeypatch):
-        health = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"])
-        monkeypatch.setattr(health, "http_check", lambda url, timeout=5: {"ok": False})
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"],
+            probe={"ok": False, "models": [], "error": "connection refused"})
         ran = []
         monkeypatch.setattr(health, "run_cmd",
                             lambda args, **k: ran.append(args) or {"ok": True})
@@ -1277,6 +1292,176 @@ class TestCheckProxy:
         assert os.path.basename(cmd[0]) == "sparkrun"
         assert cmd[1:3] == ["proxy", "start"]
         assert "10.0.0.2,10.0.0.3" in cmd
+
+    # ── t_proxy_outage_20261011 bug 1: HTTP 200 + empty catalogue ──────────
+
+    def test_empty_catalogue_is_unhealthy_and_relaunches(self, tmp_hfcc_dir, monkeypatch):
+        """THE outage shape: proxy answers 200 with data: [] — must relaunch."""
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"],
+            probe={"ok": True, "models": [], "error": ""})
+        ran = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(args) or {"ok": True})
+        assert health.check_proxy() is True
+        assert len(ran) == 1                     # empty body = down
+        state = json.loads((tmp_hfcc_dir / "state" / "proxy.json").read_text())
+        assert "empty" in state["reason"]
+
+    def test_missing_expected_alias_is_unhealthy(self, tmp_hfcc_dir, monkeypatch):
+        """Non-uniform fleet with orch+worker units: worker-only catalogue
+        is unhealthy even though models exist."""
+        serving_data = {"version": 2, "units": [
+            {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"], "port": 8000},
+            {"id": "w1", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.2"], "port": 8001},
+        ]}
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"], probe={
+                "ok": True, "models": ["some-model", "worker-model"], "error": ""},
+            serving_data=serving_data)
+        ran = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(args) or {"ok": True})
+        assert health.check_proxy() is True
+        assert len(ran) == 1                     # orchestrator-model missing -> relaunch
+
+    def test_uniform_pool_requires_both_aliases(self, tmp_hfcc_dir, monkeypatch):
+        serving_data = {"version": 2, "uniform_pool": True, "units": [
+            {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"], "port": 8000},
+            {"id": "w1", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.2"], "port": 8001},
+        ]}
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"], probe={
+                "ok": True, "models": ["m", "orchestrator-model"], "error": ""},
+            serving_data=serving_data)
+        ran = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(args) or {"ok": True})
+        assert health.check_proxy() is True
+        assert len(ran) == 1                     # worker-model missing -> relaunch
+
+    def test_both_aliases_served_is_healthy(self, tmp_hfcc_dir, monkeypatch):
+        serving_data = {"version": 2, "uniform_pool": True, "units": [
+            {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"], "port": 8000},
+        ]}
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"], probe={
+                "ok": True, "models": ["m", "worker-model", "orchestrator-model"],
+                "error": ""},
+            serving_data=serving_data)
+        ran = []
+        monkeypatch.setattr(health, "run_cmd", lambda *a, **k: ran.append(a) or {"ok": True})
+        assert health.check_proxy() is True
+        assert ran == []
+
+    # ── t_proxy_outage_20261011 bug 2: uniform-pool relaunch hosts ─────────
+
+    def test_relaunch_includes_orchestrator_under_uniform_pool(self, tmp_hfcc_dir, monkeypatch):
+        """KEEPALIVE_NODES excludes the orchestrator node BY DESIGN; under a
+        uniform pool the relaunch must union it back, or the LB can never
+        re-add the orchestrator endpoint (the 2026-10-11 outage)."""
+        serving_data = {"version": 2, "uniform_pool": True, "units": [
+            {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"], "port": 8000},
+            {"id": "w1", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.2"], "port": 8001},
+            {"id": "w2", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.3"], "port": 8002},
+        ]}
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"],
+            probe={"ok": False, "models": [], "error": "down"},
+            serving_data=serving_data)
+        ran = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(args) or {"ok": True})
+        health.check_proxy()
+        cmd = ran[0]
+        assert "10.0.0.1,10.0.0.2,10.0.0.3" in cmd   # orchestrator node included
+
+    def test_relaunch_non_uniform_excludes_orchestrator(self, tmp_hfcc_dir, monkeypatch):
+        """Non-uniform behaviour UNCHANGED: worker nodes only (historical)."""
+        serving_data = {"version": 2, "units": [
+            {"id": "orch", "role": "orchestrator", "nodes": ["10.0.0.1"], "port": 8000},
+            {"id": "w1", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.2"], "port": 8001},
+        ]}
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"],
+            probe={"ok": False, "models": [], "error": "down"},
+            serving_data=serving_data)
+        ran = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda args, **k: ran.append(args) or {"ok": True})
+        health.check_proxy()
+        cmd = ran[0]
+        assert cmd[cmd.index("--hosts") + 1] == "10.0.0.2"   # no orchestrator union
+
+    # ── pure-function units (the health VERDICT itself) ─────────────────────
+
+    def test_models_healthy_verdicts(self):
+        from hscc_daemon.health import _proxy_models_healthy
+        # no aliases configured: >=1 model required, empty is unhealthy
+        assert _proxy_models_healthy({"ok": True, "models": []}, set())[0] is False
+        assert _proxy_models_healthy({"ok": True, "models": ["x"]}, set())[0] is True
+        # failed probe never healthy regardless of models
+        assert _proxy_models_healthy({"ok": False, "models": ["x"]}, {"worker-model"})[0] is False
+        # alias requirement is exact-union, subset is unhealthy
+        ok, reason = _proxy_models_healthy(
+            {"ok": True, "models": ["a", "worker-model"]},
+            {"worker-model", "orchestrator-model"})
+        assert ok is False and "orchestrator-model" in reason
+        ok, _ = _proxy_models_healthy(
+            {"ok": True, "models": ["a", "worker-model", "orchestrator-model"]},
+            {"worker-model", "orchestrator-model"})
+        assert ok is True
+
+    def test_expected_aliases_from_serving(self, monkeypatch):
+        from hscc_daemon import health, serving
+        monkeypatch.setattr(serving, "load_serving", lambda *a, **k: None)
+        assert health._proxy_expected_aliases(None) == set()
+        assert health._proxy_expected_aliases(
+            {"units": [{"role": "worker"}, {"role": "orchestrator"}]}) == \
+            {"worker-model", "orchestrator-model"}
+        assert health._proxy_expected_aliases(
+            {"units": [{"role": "worker"}]}) == {"worker-model"}
+        # uniform pool demands BOTH regardless of configured roles
+        assert health._proxy_expected_aliases(
+            {"uniform_pool": True, "units": [{"role": "worker"}]}) == \
+            {"worker-model", "orchestrator-model"}
+
+    def test_probe_parses_models_body(self, monkeypatch):
+        """The probe must PARSE the body — a 200 whose JSON has no model ids
+        is not health (that is the whole outage)."""
+        import io
+        import json as _json
+        from hscc_daemon import health
+
+        class _Resp:
+            def __init__(self, payload):
+                self._b = _json.dumps(payload).encode()
+
+            def read(self):
+                return self._b
+
+        monkeypatch.setattr(
+            health.urllib.request, "urlopen",
+            lambda url, timeout=5: _Resp({"data": [{"id": "worker-model"}, {"id": "x"}]}))
+        out = health._proxy_models_probe("http://localhost:4000/v1/models")
+        assert out["ok"] is True and sorted(out["models"]) == ["worker-model", "x"]
+
+        monkeypatch.setattr(
+            health.urllib.request, "urlopen", lambda url, timeout=5: _Resp({"data": []}))
+        out = health._proxy_models_probe("http://localhost:4000/v1/models")
+        assert out["ok"] is True and out["models"] == []   # verdict lives in _healthy
+
+        def boom(url, timeout=5):
+            raise OSError("connection refused")
+        monkeypatch.setattr(health.urllib.request, "urlopen", boom)
+        out = health._proxy_models_probe("http://localhost:4000/v1/models")
+        assert out["ok"] is False and "refused" in out["error"]
+
 
 
 class TestCheckMultiplexProfiles:
