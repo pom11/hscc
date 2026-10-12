@@ -94,3 +94,15 @@ order: 1
   `test_sweep_root_comes_from_config_path_not_env` — the live-tree-leak
   guard). `hscc-bootstrap/tests/test_doctor.py`: +**17** cases across the
   three checks + the skip-in-suite / warnings-never-fatal gates.
+---
+kind: Fixed
+- **The empty-proxy outage was detected but could never heal.** Plain
+  `sparkrun proxy start` refuses a proxy that is already running (exit 1),
+  and the 2026-10-11 shape is exactly a LIVE proxy whose discovery emptied
+  its catalogue — so every relaunch attempt failed and the proxy stayed
+  empty. The relaunch now passes `--restart` when, and only when, the proxy
+  answered with a parseable but EMPTY catalogue: it serves nothing, so
+  there is no in-flight traffic to drop. A partial catalogue (one alias
+  missing, others served) keeps a plain start so live traffic is never cut,
+  and an unreachable proxy is not running, so plain start brings it up.
+  No `--host` is passed, so the persisted bind address is unchanged.

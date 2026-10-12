@@ -589,6 +589,20 @@ def _proxy_models_healthy(probe, expected_aliases):
     return True, f"expected aliases {sorted(expected_aliases)} all served"
 
 
+def _proxy_needs_restart(probe):
+    """True when the relaunch must pass ``--restart``.
+
+    Plain ``sparkrun proxy start`` refuses a proxy that is already running, so
+    the 2026-10-11 shape — a LIVE proxy whose discovery emptied its catalogue —
+    was detected but could never be healed. Restart only when the proxy
+    answered with a parseable but EMPTY catalogue: it serves nothing, so there
+    is no in-flight traffic to drop. A partial catalogue (one alias missing)
+    still serves the other alias, so it never restarts; an unreachable proxy
+    is not running and plain start brings it up.
+    """
+    return bool(probe.get("ok")) and not (probe.get("models") or [])
+
+
 def _proxy_relaunch_hosts(serving_data=None):
     """Hosts to pass to `sparkrun proxy start` when relaunching the LB.
 
@@ -752,9 +766,10 @@ def check_proxy():
     # discovery sweep and spams WARN once per check tick even when it is a
     # no-op (plain start REFUSES a running proxy; sparkrun engine.py start()
     # `if self.is_running(): return 1`, cli exits 1 on ProxyAlreadyRunning —
-    # it only SIGTERMs the live proxy under --restart, which we never pass).
+    # it only SIGTERMs the live proxy under --restart).
     # The stamp lives in the proxy stream state file, NOT in memory, so a
     # daemon restart cannot reset it.
+    restart = _proxy_needs_restart(probe)
     since = _proxy_relaunch_cooldown_state()
     r = {"ok": False, "skipped": "cooldown"}
     suppressed = False
@@ -765,16 +780,19 @@ def check_proxy():
             f"(cooldown {PROXY_RELAUNCH_COOLDOWN_S}s); retry in {wait}s", "WARN")
         message = f"relaunch cooldown — retry in {wait}s"
     else:
-        log(f"relaunching with {relaunch_hosts}", "WARN")
-        r = run_cmd(sparkrun_bin.argv("proxy", "start", "--cluster", serving.HSCC_CLUSTER,
-                                      "--hosts", ",".join(relaunch_hosts),
-                                      "--port", str(PROXY_PORT)),
-                    timeout=90)
+        log(f"relaunching with {relaunch_hosts}"
+            f"{' (--restart: running proxy serves nothing)' if restart else ''}", "WARN")
+        args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
+                "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT)]
+        if restart:
+            args.append("--restart")
+        r = run_cmd(sparkrun_bin.argv(*args), timeout=90)
         message = "relaunched" if r.get("ok") else "relaunch failed"
     ok = bool(r.get("ok"))
     proxy_data = {"ok": ok, "port": PROXY_PORT, "relaunched": ok,
                   "last_check": now_iso(),
                   "reason": reason,
+                  "restart": restart,
                   "relaunch_hosts": relaunch_hosts,
                   "relaunch_failed": (not ok and not suppressed),
                   "message": message}
