@@ -117,6 +117,16 @@ def _no_tmux_discovery(monkeypatch):
     import gateway_bridge
     monkeypatch.setattr(gateway_bridge, "_tmux_repl_present",
                         lambda project: False, raising=False)
+    # Same hermetic contract for the orphaned-serve port heal (iOS-chat-e2e
+    # 2026-10-13): default "port is free, no occupant to probe" so no unit
+    # test ever WS-probes a real serve or shells out to lsof. Heal tests
+    # patch these seams themselves.
+    monkeypatch.setattr(gateway_bridge, "_probe_tcp_occupied",
+                        lambda port: False, raising=False)
+    monkeypatch.setattr(gateway_bridge, "_serve_accepts_token",
+                        lambda port, token: False, raising=False)
+    monkeypatch.setattr(gateway_bridge, "_listener_cmdline",
+                        lambda port: None, raising=False)
 
 
 @pytest.fixture(autouse=True)

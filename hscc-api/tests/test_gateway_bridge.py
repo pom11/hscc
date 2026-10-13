@@ -199,6 +199,8 @@ def test_start_serve_success_sets_up_and_token(monkeypatch):
         pid = 999
 
     monkeypatch.setattr(bridge, "_probe_tcp", fake_probe)
+    # Free-port case for the occupancy heal: nothing already on the port.
+    monkeypatch.setattr(bridge, "_probe_tcp_occupied", lambda port: False)
     monkeypatch.setattr(bridge.subprocess, "Popen",
                         lambda *a, **k: _FakeProc())
 
@@ -216,6 +218,92 @@ def test_start_serve_success_sets_up_and_token(monkeypatch):
     # — proven live on t_29e033a4). Loopback keeps it a pure bridge with no
     # wider network surface.
     assert env.get("HERMES_DASHBOARD_PUBLIC_URL") == "http://127.0.0.1:1"
+
+
+# --------------------------------------------------------------------------- #
+# Orphaned-serve port heal (iOS-chat-e2e 2026-10-13)
+# --------------------------------------------------------------------------- #
+
+def _fake_spawn_env(monkeypatch):
+    """Probe seams for 'something already holds the port before we spawn'."""
+    class _FakeProc:
+        poll = lambda self: None
+        terminate = lambda self: None
+        wait = lambda self, timeout=1: None
+        returncode = None
+        pid = 999
+    monkeypatch.setattr(bridge.subprocess, "Popen", lambda *a, **k: _FakeProc())
+
+
+def test_start_serve_adopts_serve_matching_our_token(monkeypatch):
+    """An occupant that authenticates with our minted token is ADOPTED:
+    is_serve_up True, _serve_proc None (not ours), no second spawn."""
+    spawned = []
+    _fake_spawn_env(monkeypatch)
+    monkeypatch.setattr(bridge.subprocess, "Popen",
+                        lambda *a, **k: spawned.append(1))
+    monkeypatch.setattr(bridge, "_probe_tcp_occupied", lambda port: True)
+    monkeypatch.setattr(bridge, "_serve_accepts_token",
+                        lambda port, token: True)
+
+    ok = bridge.start_serve(port=9124, bin_path="/bin/echo")
+    assert ok is True
+    assert bridge.is_serve_up() is True
+    assert bridge._serve_proc is None
+    assert spawned == []                       # adopted — no second serve
+
+
+def test_start_serve_terminates_stale_orphan_and_respawns(monkeypatch):
+    """The 2.7.0 outage shape: occupant rejects our token (stale) and its
+    cmdline is a hermes serve → terminate it, spawn our own."""
+    spawned = []
+    monkeypatch.setattr(bridge.subprocess, "Popen",
+                        lambda *a, **k: spawned.append(1) or _Proc999())
+    monkeypatch.setattr(bridge, "_probe_tcp", lambda *a, **k: True)  # readiness
+    monkeypatch.setattr(bridge, "_probe_tcp_occupied", lambda port: True)
+    monkeypatch.setattr(bridge, "_serve_accepts_token",
+                        lambda port, token: False)
+    killed = []
+    monkeypatch.setattr(bridge, "_listener_cmdline",
+                        lambda port: "/venv/bin/python /x/hermes serve "
+                                     "--port 9119 --skip-build")
+    monkeypatch.setattr(bridge, "_terminate_listener",
+                        lambda port: killed.append(port) or True)
+
+    ok = bridge.start_serve(port=9124, bin_path="/bin/echo")
+    assert ok is True
+    assert killed == [9124]                    # the orphan was terminated
+    assert len(spawned) == 1                   # and a fresh one spawned
+    assert bridge.is_serve_up() is True
+
+
+def test_start_serve_refuses_foreign_occupant(monkeypatch):
+    """An occupant that is NOT a hermes serve is never killed: honest False,
+    no spawn, no serve — the operator's other process stays untouched."""
+    spawned = []
+    killed = []
+    monkeypatch.setattr(bridge.subprocess, "Popen",
+                        lambda *a, **k: spawned.append(1))
+    monkeypatch.setattr(bridge, "_probe_tcp_occupied", lambda port: True)
+    monkeypatch.setattr(bridge, "_serve_accepts_token",
+                        lambda port, token: False)
+    monkeypatch.setattr(bridge, "_listener_cmdline",
+                        lambda port: "/usr/sbin/httpd -DFOREGROUND")
+    monkeypatch.setattr(bridge, "_terminate_listener",
+                        lambda port: killed.append(port) or True)
+
+    ok = bridge.start_serve(port=9124, bin_path="/bin/echo")
+    assert ok is False
+    assert killed == [] and spawned == []
+    assert bridge.is_serve_up() is False
+
+
+class _Proc999:
+    poll = lambda self: None
+    terminate = lambda self: None
+    wait = lambda self, timeout=1: None
+    returncode = None
+    pid = 999
 
 
 def test_serve_env_forces_loopback_public_url():

@@ -107,6 +107,89 @@ def _probe_tcp(host: str, port: int, timeout: float = 1.0) -> bool:
         return False
 
 
+def _probe_tcp_occupied(port: int) -> bool:
+    """Is 127.0.0.1:port already taken BEFORE we spawn our sidecar?
+
+    Separate seam from the readiness probe _probe_tcp (which answers "did OUR
+    child bind?"): occupancy is a different question, and tests fake them
+    independently.
+    """
+    return _probe_tcp("127.0.0.1", port)
+
+
+def _serve_accepts_token(port: int, token: Optional[str]) -> bool:
+    """True when the serve on 127.0.0.1:port completes the /api/events WS
+    upgrade for ``token`` — the SAME handshake the driver does.
+
+    A real handshake is the only faithful probe: serve 401s a wrong/bad token
+    and answers 101 for the right one (verified against live serve,
+    iOS-chat-e2e 2026-10-13). No HTTP GET substitutes: /api/status is public
+    (200 regardless of token), so it cannot distinguish.
+    """
+    if not token:
+        return False
+    from gateway_driver import GatewayConfig, _WSClient  # local: cycle guard
+    ws = _WSClient("127.0.0.1", port,
+                   GatewayConfig(token=token).ws_path("/api/events"))
+    try:
+        ws.connect()
+        return True
+    except Exception:  # noqa: BLE001 — any rejection/refusal = not ours
+        return False
+    finally:
+        try:
+            ws.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _listener_cmdline(port: int) -> Optional[str]:
+    """Cmdline of the process LISTENING on 127.0.0.1:port, or None."""
+    try:
+        out = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True, text=True, timeout=5).stdout
+        pids = [p for p in out.split() if p.strip().isdigit()]
+        if not pids:
+            return None
+        cmd = subprocess.run(
+            ["ps", "-o", "command=", "-p", pids[0]],
+            capture_output=True, text=True, timeout=5).stdout
+        return cmd.strip() or None
+    except Exception:  # noqa: BLE001 — probe failure = unknown occupant
+        return None
+
+
+def _terminate_listener(port: int) -> bool:
+    """Terminate the (already-cmdline-vetted) listener on ``port``.
+
+    Callers MUST run the hermes-serve cmdline guard first — this function
+    kills, so the guard is the blast-radius contract. Returns True once the
+    port is actually free.
+    """
+    import signal
+    try:
+        out = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True, text=True, timeout=5).stdout
+        pid = next((int(p) for p in out.split() if p.strip().isdigit()), None)
+        if pid is None:
+            return True   # raced away — port already free
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if not _probe_tcp("127.0.0.1", port):
+                return True
+            time.sleep(0.2)
+        os.kill(pid, signal.SIGKILL)
+        time.sleep(0.5)
+        return not _probe_tcp("127.0.0.1", port)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("gateway-bridge: could not terminate listener on %s: %r",
+                    port, exc)
+        return False
+
+
 def _serve_env(env) -> dict:
     """Env for the spawned serve: inherit parent, add the session token and
     force a LOOPBACK-only public URL.
@@ -174,6 +257,39 @@ def start_serve(port: Optional[int] = None, bin_path: Optional[str] = None,
         log.warning("gateway-bridge: serve binary not found at %s; serving "
                     "without the live gateway sidecar", binary)
         return False
+
+    # Port-occupancy heal (iOS-chat-e2e 2026-10-13): the readiness probe below
+    # cannot tell OUR serve from an ORPHANED one. A previous API instance
+    # spawns serve with start_new_session=True, so when that API died (crash /
+    # kill / restart) the serve survived, reparented to launchd, holding port
+    # 9119 with the DEAD API's token. The old code probed TCP-accept, called
+    # that "serve up", and every driver mount then 403'd forever (102 lines in
+    # one operator session; the app read-path died with it — the tmux tail was
+    # also gated on mount success, see the degraded-driver fix).
+    # Contract: 127.0.0.1:9119 belongs to the API-managed sidecar. If the
+    # occupant authenticates with OUR freshly-minted token it is adoptable
+    # (same token in this process's env below); if not, it is stale — terminate
+    # it (guard: a hermes serve process we can identify by cmdline) and spawn
+    # our own. An occupant we refuse to kill → honest False, not a lie.
+    if _probe_tcp_occupied(port):
+        if _serve_accepts_token(port, _serve_token):
+            log.info("gateway-bridge: adopting serve already listening on "
+                     "127.0.0.1:%s (token matches)", port)
+            with _LOCK:
+                _serve_up = True
+                _serve_proc = None      # adopted, not supervised by us
+            return True
+        victim = _listener_cmdline(port)
+        if victim is None or "serve" not in victim or "hermes" not in victim:
+            log.warning("gateway-bridge: port %s is held by a non-hermes "
+                        "process (%r); not killing it, serving without the "
+                        "live gateway sidecar", port, (victim or "")[:120])
+            return False
+        log.warning("gateway-bridge: orphaned serve (stale token) holds port "
+                    "%s — terminating it to spawn a fresh one", port)
+        if not _terminate_listener(port):
+            return False
+        # fall through: port is free, spawn below
 
     cmd = [binary, "serve", "--port", str(port), "--skip-build"]
     try:
