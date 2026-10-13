@@ -661,7 +661,7 @@ def test_single_token_disambiguation(tmp_path, capsys, monkeypatch):
     captured = capsys.readouterr()
     assert rc == 0
     assert "detected from cwd" in captured.err
-    # Telegram removed — send reports no delivery target; nothing is delivered.
+    # Dry run (no --apply flag on the namespace): renders, delivers nothing.
     assert "would deliver to hscc" in captured.out
     assert fake.calls == []
 
