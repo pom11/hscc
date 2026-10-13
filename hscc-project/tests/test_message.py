@@ -636,7 +636,7 @@ def test_run_explicit_project_wins_over_cwd(tmp_path, capsys):
     assert "detected from cwd" not in captured.err
     # Explicit project wins, referenced on the (no-delivery) output, not by the
     # cwd-matched hscc. Telegram removed, so no send call is made.
-    assert "would post to other" in captured.out
+    assert "would deliver to other" in captured.out
     assert fake.calls == []
 
 
@@ -662,7 +662,7 @@ def test_single_token_disambiguation(tmp_path, capsys, monkeypatch):
     assert rc == 0
     assert "detected from cwd" in captured.err
     # Telegram removed — send reports no delivery target; nothing is delivered.
-    assert "would post to hscc" in captured.out
+    assert "would deliver to hscc" in captured.out
     assert fake.calls == []
 
     # Case B: single token that IS a project name -> it is the project; the
@@ -890,7 +890,7 @@ class TestNoAnsiMessage:
         projects = [registry.Project(name="hscc", repo="~/dev/hscc", topic=140, board="hscc")]
         out = _no_ansi(lambda: msg_cmd.cmd_send(
             _ns(project="hscc", message="standing up now"), projects))
-        assert "would post to hscc" in out
+        assert "would deliver to hscc" in out
         assert "standing up now" in out
 
     def test_read(self):
