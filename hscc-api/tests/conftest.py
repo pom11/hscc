@@ -105,6 +105,21 @@ def hscc_dir(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _no_tmux_discovery(monkeypatch):
+    """Default the degraded-mount tmux probe to FALSE suite-wide.
+
+    The bridge consults a tmux probe to decide whether to mount a DEGRADED
+    (tail-only) driver when the serve is down (iOS-chat-e2e 2026-10-13). In
+    unit tests that probe must never shell out to the machine's real tmux
+    server — on the operator's Mac it WOULD find real REPL panes and mount a
+    real driver. Tests that want the probe True patch the seam themselves.
+    """
+    import gateway_bridge
+    monkeypatch.setattr(gateway_bridge, "_tmux_repl_present",
+                        lambda project: False, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_hscc(tmp_path, monkeypatch):
     """Redirect hscc-api's ~/.hscc write path to a per-test tmp dir.
 

@@ -44,6 +44,11 @@ def _fake_driver_factory():
         def start(self):
             self._alive = True
 
+        def native_attached(self):
+            # Mirrors the real driver: a degraded (tail-only) driver is alive
+            # but NOT natively attached (iOS-chat-e2e remount contract).
+            return self._alive and not getattr(self.config, "degraded", False)
+
     return _FakeDriver, created
 
 
@@ -53,13 +58,78 @@ def _fake_driver_factory():
 
 def test_ensure_mounted_is_noop_without_serve(monkeypatch):
     """With no serve: ensure_mounted must not create a driver, not raise, and
-    leave nothing mounted — even for a random project name."""
+    leave nothing mounted — even for a random project name.
+
+    The tmux-REPL seam is pinned False so the degraded-mount branch (iOS-chat-
+    e2e 2026-10-13) stays hermetic: this test pins the NO-tmux-REPL case."""
+    monkeypatch.setattr(bridge, "_tmux_repl_present", lambda project: False)
     monkeypatch.setattr(bridge, "GatewayDriver", lambda *a, **k: pytest.fail(
         "must not construct a driver with no serve up"))
     bridge.ensure_mounted("any_project")
     assert bridge._drivers == {}
     assert bridge.is_serve_up() is False
     assert bridge.mounted("any_project") is False
+
+
+def test_degraded_mount_when_serve_down_but_tmux_repl(monkeypatch):
+    """iOS-chat-e2e 2026-10-13 (defect A, second half): serve DOWN but the
+    project's REPL is a tmux pane → a DEGRADED (tail-only) driver is mounted,
+    because the store-tail is the app's only reply source on the tmux path.
+    The tail must run even though native attach is skipped entirely."""
+    FakeDriver, created = _fake_driver_factory()
+    monkeypatch.setattr(bridge, "GatewayDriver", FakeDriver)
+    monkeypatch.setattr(bridge, "_tmux_repl_present", lambda project: True)
+
+    bridge.ensure_mounted("proj_tmux")
+
+    assert len(created) == 1
+    drv = created[0]
+    assert drv._alive is True                       # mounted + started
+    assert drv.config.degraded is True              # tail-only, no native attempt
+    assert bridge.mounted("proj_tmux") is True
+    # Idempotent: a second ensure_mounted reuses the alive degraded driver.
+    bridge.ensure_mounted("proj_tmux")
+    assert len(created) == 1
+
+
+def test_no_degraded_mount_without_tmux_repl(monkeypatch):
+    """Serve down AND no tmux REPL → still a pure no-op: the REST fallback
+    relay (_default_relay) stays authoritative — mounting a dead driver would
+    shadow it."""
+    monkeypatch.setattr(bridge, "_tmux_repl_present", lambda project: False)
+    monkeypatch.setattr(bridge, "GatewayDriver", lambda *a, **k: pytest.fail(
+        "no driver may be constructed when there is neither serve nor tmux REPL"))
+    bridge.ensure_mounted("proj_plain")
+    assert bridge._drivers == {}
+
+
+def test_serve_back_up_replaces_degraded_driver(monkeypatch):
+    """Once the serve is up again, ensure_mounted must NOT keep reusing the
+    degraded tail-only driver — it tears it down and mounts a native one
+    (native_attached() gates the reuse path)."""
+    FakeDriver, created = _fake_driver_factory()
+    # The reuse path consults native_attached(); give the fake one.
+    monkeypatch.setattr(FakeDriver, "native_attached",
+                        lambda self: not getattr(self.config, "degraded", False),
+                        raising=False)
+    monkeypatch.setattr(bridge, "GatewayDriver", FakeDriver)
+    monkeypatch.setattr(bridge, "_tmux_repl_present", lambda project: True)
+
+    bridge.ensure_mounted("proj_x")                 # degraded mount
+    assert len(created) == 1 and created[0].config.degraded is True
+
+    # Serve comes back: fake the endpoint + token so the native path runs.
+    monkeypatch.setattr(bridge, "is_serve_up", lambda: True)
+    monkeypatch.setattr(bridge, "serve_endpoint", lambda: ("127.0.0.1", 9119))
+    monkeypatch.setattr(bridge, "_serve_token_value", lambda: "tok")
+
+    stopped = []
+    created[0].stop = lambda: stopped.append(True)
+    bridge.ensure_mounted("proj_x")
+
+    assert stopped == [True]                         # degraded one torn down
+    assert len(created) == 2
+    assert created[1].config.degraded is False       # native remount
 
 
 def test_shutdown_is_idempotent_and_safe_without_serve():

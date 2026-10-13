@@ -241,6 +241,25 @@ def _serve_token_value() -> Optional[str]:
 # Driver mounts (lazy per-project, gated on the serve being up)
 # --------------------------------------------------------------------------- #
 
+def _tmux_repl_present(project: str) -> bool:
+    """True when a tmux pane provably runs ``project``'s orchestrator REPL.
+
+    Injected seam for the degraded-mount decision (iOS-chat-e2e 2026-10-13):
+    unit tests patch THIS so the bridge never shells out to a real tmux
+    server. Lazy import of routes_ws avoids the module-level cycle (routes_ws
+    imports gateway_bridge lazily too). Ambiguity counts as "present": the
+    tail is keyed to the named SESSION, not to a pane, so an ambiguous pane
+    set still streams the right session — the ambiguity only gates where to
+    TYPE (routes_ws surfaces ``tmux_ambiguous`` there).
+    """
+    try:
+        from routes_ws import _tmux_pane_for  # lazy: import cycle guard
+        pane, ambiguous = _tmux_pane_for(project)
+        return pane is not None or ambiguous is not None
+    except Exception:  # noqa: BLE001 — discovery failure = absent
+        return False
+
+
 def ensure_mounted(project: str, registry_path: Optional[str] = None) -> None:
     """Mount (or remount) a GatewayDriver for ``project`` (idempotent).
 
@@ -257,9 +276,38 @@ def ensure_mounted(project: str, registry_path: Optional[str] = None) -> None:
     Fail-safe: NEVER raises — a failed mount must not break the WS stream or
     the history read (the REST fallback relay remains authoritative). Logs the
     reason honestly.
+
+    No-serve case (iOS-chat-e2e 2026-10-13): when the sidecar is DOWN but the
+    project's orchestrator REPL is provably in a tmux pane, the store-tail
+    poller is still the app's only reply source (the tmux REPL writes replies
+    straight to state.db), so a DEGRADED (tail-only) driver is mounted —
+    native serve attach is skipped, the tail runs. Projects without a tmux
+    REPL keep the old no-op (the REST fallback relay stays authoritative —
+    mounting a dead driver would shadow it, see routes_ws._default_relay).
     """
-    if not is_serve_up():
+    serve_up = is_serve_up()
+    if not serve_up:
+        if not _tmux_repl_present(project):
+            return
+        with _LOCK:
+            existing = _drivers.get(project)
+            if existing is not None and existing._alive:
+                return   # degraded or otherwise live — already streaming the tail
+            cfg = GatewayConfig(project=project, registry_path=registry_path,
+                                degraded=True)
+            driver = GatewayDriver(cfg)
+            _drivers[project] = driver
+        try:
+            driver.start()
+        except Exception as exc:  # noqa: BLE001 — fail-safe
+            log.warning("gateway-bridge: degraded mount for %s failed: %r",
+                        project, exc)
+            return
+        log.info("gateway-bridge: mounted DEGRADED (tail-only) driver for %s "
+                 "(serve down; REPL is in tmux — tail is the reply source)",
+                 project)
         return
+
     endpoint = serve_endpoint()
     token = _serve_token_value()
     if endpoint is None or token is None:
@@ -267,9 +315,11 @@ def ensure_mounted(project: str, registry_path: Optional[str] = None) -> None:
 
     with _LOCK:
         existing = _drivers.get(project)
-        if existing is not None and existing._alive:
-            # Still connected and streaming — reuse it (reconnect-safe: the
-            # thread loops keep it alive; a dead one falls through to recreate).
+        if existing is not None and existing._alive and existing.native_attached():
+            # Still connected and streaming NATIVELY — reuse it (reconnect-safe:
+            # the thread loops keep it alive; a dead one falls through to
+            # recreate). A DEGRADED (tail-only) driver does NOT count once the
+            # serve is back: fall through and remount with native attach.
             return
         if existing is not None:
             # Stale/dead driver from a previous mount — tear it down cleanly

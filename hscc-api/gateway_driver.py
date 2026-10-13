@@ -120,6 +120,7 @@ class GatewayConfig:
         session_id: Optional[str] = None,
         profile: Optional[str] = None,
         registry_path: Optional[str] = None,
+        degraded: bool = False,
     ) -> None:
         self.host = host
         self.port = int(port)
@@ -138,6 +139,12 @@ class GatewayConfig:
         # in the SAME conversation the CLI continues (§3.3).
         self.session_id = session_id
         self.profile = profile
+        # iOS-chat-e2e 2026-10-13: ``degraded=True`` means "tail-only" — the
+        # bridge mounts this driver when ``hermes serve`` is DOWN but the
+        # project's REPL is a tmux pane, so native attach is skipped entirely
+        # (no connect attempt, no log noise) and only the store-tail poller
+        # runs. The terminal REPL is the single source of truth on that path.
+        self.degraded = bool(degraded)
 
     @property
     def base_url(self) -> str:
@@ -1012,6 +1019,13 @@ class GatewayDriver:
 
     # -- lifecycle ---------------------------------------------------------- #
 
+    def native_attached(self) -> bool:
+        """True when BOTH serve sockets are attached (not a degraded/tail-only
+        driver). The bridge uses this to decide whether a live driver still
+        satisfies the contract once ``hermes serve`` is up again (iOS-chat-e2e
+        2026-10-13): a degraded driver must be replaced by a full one."""
+        return self._alive and self._pty is not None and self._events is not None
+
     def _resolve_named_session(self) -> None:
         """Resolve the project's named Hermes session (same-session pinning, §3.1).
 
@@ -1069,7 +1083,7 @@ class GatewayDriver:
                      result.get("session"))
 
     def start(self) -> None:
-        """Connect both upstream sockets and start the reader threads.
+        """Start the store-tail poller, then try to attach to ``hermes serve``.
 
         Order matters (the session-continuity contract, design §3.2/§3.3):
 
@@ -1077,21 +1091,45 @@ class GatewayDriver:
              session this project is and can pin / backfill it;
           2. Backfill the store from that session's history (§3.2) BEFORE the
              live feed opens, so iOS shows the whole conversation immediately;
-          3. Open /api/pty pinned to that named session (§3.3) + /api/events;
-          4. Start the live reader threads.
+          3. Start the reader threads — the store-tail poller is the LIVE
+             source for the tmux delivery path and does NOT need the upstream
+             sockets (t_93f1ba4d docstring), so it must never be gated on
+             them;
+          4. Best-effort: open /api/pty + /api/events pinned to the named
+             session (§3.3). If the mount fails (serve down, stale token,
+             403 on the upgrade) the driver stays alive DEGRADED — tail-only —
+             and the failure is logged once per mount instead of raised.
+
+        Rationale (iOS-chat-e2e 2026-10-13): with the tmux REPL as the single
+        source of truth, ``hermes serve`` is not on the reply path at all —
+        the reply is written straight to state.db by the terminal REPL and
+        must reach the app through the store-tail. When every mount 403'd,
+        the raise in the old code killed the driver BEFORE the tail thread
+        ever started, so nothing the operator's terminal wrote ever streamed
+        back. (The 403 root cause is tracked separately; a degraded driver is
+        the correct steady state either way.)
 
         The backfill is log-only: a failure (e.g. state.db locked) logs and
         continues — it must never drop the live stream (design §4); a later
-        reconnect retries it (idempotent).
-
-        Raises ConnectionError if either upstream connection cannot be
-        established (e.g. the gateway is down or the token is rejected).
+        reconnect retries it (idempotent). This method never raises.
         """
         if self._alive:
             return
         self._resolve_named_session()
         self._backfill()
-        pty, events = self._connect_upstreams()
+        if getattr(self.config, "degraded", False):
+            # Bridge-decided tail-only (serve down + REPL in tmux): don't even
+            # attempt the native attach — no connect churn, no log noise.
+            pty = events = None
+        else:
+            try:
+                pty, events = self._connect_upstreams()
+            except Exception as exc:  # noqa: BLE001 — degraded, not dead
+                # Honest, once-per-mount (not a spam loop): serve is unreachable,
+                # the tail keeps the app live off the tmux REPL's state.db writes.
+                log.warning("gateway: %s running DEGRADED (tail-only): serve mount "
+                            "failed: %r", self.config.project, exc)
+                pty = events = None
         self._pty = pty
         self._events = events
         self._stop_evt.clear()
