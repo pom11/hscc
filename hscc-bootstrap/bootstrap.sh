@@ -317,6 +317,19 @@ else
   warn "trigger rules install failed (~/.hscc/triggers.json may be missing default rules)"
 fi
 
+hdr "Install: API boot-resilience (opt-in)"
+# Nothing is written or loaded here. The API normally runs from a PID-file
+# start that does NOT survive a reboot (iPhone goes offline). `hscc api
+# install-service` writes a launchd unit when the operator wants boot+crash
+# resilience; bootstrap only reports the current state and the command.
+if [ "$(uname -s)" = "Darwin" ]; then
+  if [ -f "$HOME/Library/LaunchAgents/com.hscc.api.plist" ]; then
+    ok "launchd unit present (opt-in already taken) — check: launchctl print gui/\$UID/com.hscc.api"
+  else
+    ok "launchd unit not installed (API won't survive reboot) — opt in: hscc api install-service"
+  fi
+fi
+
 hdr "Install: daemon"
 if $SKIP_DAEMON; then warn "skipped"; else
   if [ "$(uname -s)" = "Darwin" ]; then
