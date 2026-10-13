@@ -265,6 +265,7 @@ def test_branch_C_broken_server_message_includes_stderr(monkeypatch, capsys):
 def test_real_seams_refuse_under_pytest():
     for fn, args in ((tmux_chat._ORIG_RUN_TMUX, ("has-session", "-t", "=x")),
                      (tmux_chat._ORIG_RUN_PS, ("ttys000",)),
+                     (tmux_chat._ORIG_RUN_PS_ALL, ()),
                      (tmux_chat._ORIG_READ_LINE, ())):
         with pytest.raises(RuntimeError, match="hermeticity guard"):
             fn(*args)

@@ -81,6 +81,18 @@ def run_ps(tty: str) -> str:
                           capture_output=True, text=True).stdout
 
 
+def run_ps_all() -> str:
+    """``tty`` + command line for EVERY process (ps -axo tty=,command=).
+
+    Used to find REPL chats running OUTSIDE tmux (a tty no pane owns).
+    Same pytest identity guard as :func:`run_ps`.
+    """
+    if run_ps_all is _ORIG_RUN_PS_ALL:
+        _guard("run_ps_all")
+    return subprocess.run(["ps", "-axo", "tty=,command="],
+                          capture_output=True, text=True).stdout
+
+
 def exec_chat(file: str, argv: list) -> None:
     """Replace the process with the chat (os.execvp contract)."""
     if exec_chat is _ORIG_EXEC_CHAT:
@@ -107,6 +119,7 @@ def prompt_yes_no(question: str) -> bool:
 
 _ORIG_RUN_TMUX = run_tmux
 _ORIG_RUN_PS = run_ps
+_ORIG_RUN_PS_ALL = run_ps_all
 _ORIG_EXEC_CHAT = exec_chat
 _ORIG_READ_LINE = read_line
 
@@ -124,6 +137,42 @@ def target_profile(argv: list) -> str | None:
     """The ``-p/--profile`` the chat will run under (foreign-session check)."""
     m = _PROFILE_RE.search(" ".join(argv))
     return m.group(1) if m else None
+
+
+def chat_cmd_profile(cmdline: str) -> str | None:
+    """Profile of a RUNNING Hermes REPL chat process, else None.
+
+    The same matcher hscc-api/repl_inject uses for pane discovery (the rule's
+    owner; kept in sync deliberately — a chat process is "``hermes ... chat``
+    without ``gateway``"), applied to a raw ``ps`` command line instead of a
+    pane tty. This is how doctor sees REPLs that live OUTSIDE tmux.
+    """
+    if "hermes" not in cmdline or " chat" not in f" {cmdline}" or "gateway" in cmdline:
+        return None
+    m = _PROFILE_RE.search(cmdline)
+    return m.group(1) if m else "default"
+
+
+def pane_ttys() -> set:
+    """ttys owned by tmux panes (normalised, no /dev/ prefix). Empty when tmux
+    reports none; raises via the guarded seam when tmux cannot be consulted."""
+    r = run_tmux("list-panes", "-a", "-F", "#{pane_tty}")
+    if r.returncode != 0:
+        return set()
+    return {t.replace("/dev/", "") for t in r.stdout.split() if t != "no tty"}
+
+
+def chat_processes() -> list:
+    """[(tty, profile)] for every running Hermes REPL chat (tmux or not)."""
+    rows = []
+    for line in run_ps_all().splitlines():
+        tty, _, cmd = line.strip().partition(" ")
+        if not tty or tty == "?":
+            continue
+        prof = chat_cmd_profile(cmd)
+        if prof:
+            rows.append((tty, prof))
+    return rows
 
 
 def _session_profiles(session: str) -> set:
