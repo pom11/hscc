@@ -66,6 +66,13 @@ class FakeTmux:
         self.calls.append(list(args))
         if args[0] == "has-session":
             return Cp(0) if args[-1].lstrip("=") in self.sessions else Cp(1)
+        if args[0] == "list-panes" and "-a" in args:
+            return Cp(0, out="".join(
+                f"{name}\t%{i}-{tty}\t{tty}\n"
+                for name, ttys in self.sessions.items()
+                for i, tty in enumerate(ttys)))
+        if args[0] in ("select-window", "select-pane"):
+            return Cp(0)
         if args[0] == "list-panes":
             name = args[args.index("-t") + 1].lstrip("=")
             if name not in self.sessions:
@@ -153,6 +160,44 @@ def test_branch_B_reuses_live_chat_attach_only(monkeypatch):
     assert rc == 0
     assert fake.tmux_argv("new-session") == []
     assert seam.calls == [("tmux", ["tmux", "attach-session", "-t", "=hscc-pom"])]
+
+
+def test_branch_B_reuses_live_pane_in_any_session(monkeypatch, capsys):
+    """The profile's REPL already runs in an ad-hoc session ('0') -> attach to
+    THAT pane; never create hscc-<project> with a second chat (two panes for
+    one profile would make the iOS path refuse as ambiguous)."""
+    fake = FakeTmux(sessions={"0": ["t0", "t1"]},
+                   ps={"t0": "hermes -p other-orch chat",
+                       "t1": "hermes -p pom-orch chat"})
+    seam = CapExec()
+    _wire(monkeypatch, fake, exec_chat=seam)
+
+    rc = tmux_chat.launch_interactive_chat("pom", HERMES_CHAT, env={}, exec_seam=seam,
+                                           which=lambda _: "/usr/bin/tmux")
+
+    assert rc == 0
+    assert fake.tmux_argv("new-session") == []
+    assert fake.tmux_argv("new-window") == []
+    assert fake.tmux_argv("select-pane") == [["select-pane", "-t", "%1-t1"]]
+    assert seam.calls == [("tmux", ["tmux", "attach-session", "-t", "=0"])]
+    assert "'0'" in capsys.readouterr().out
+
+
+def test_branch_C_two_live_panes_for_profile_asks(monkeypatch, capsys):
+    """Two panes already run this profile -> no guess, no third chat: named
+    reason + Y/N (here N)."""
+    fake = FakeTmux(sessions={"0": ["t0"], "x": ["t1"]},
+                   ps={"t0": "hermes -p pom-orch chat", "t1": "hermes -p pom-orch chat"})
+    seam = CapExec()
+    _wire(monkeypatch, fake, exec_chat=seam)
+
+    rc = tmux_chat.launch_interactive_chat("pom", HERMES_CHAT, env={}, exec_seam=seam,
+                                           which=lambda _: "/usr/bin/tmux",
+                                           is_tty=True, ask=lambda q: False)
+
+    assert rc == 1
+    assert seam.calls == []
+    assert fake.tmux_argv("new-session") == []
 
 
 def test_branch_B_chatless_named_session_gets_chat_window(monkeypatch):
