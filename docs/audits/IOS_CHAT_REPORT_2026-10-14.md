@@ -1,7 +1,8 @@
 # iOS chat end-to-end — overnight report (2026-10-14)
 
 Branch: `fix/ios-chat-e2e-2026-10-13` (from main `e9a2766c`, hscc 2.7.0 + hooks fix).
-PR: see link below. NOTHING released, installed, or restarted on the live runtime:
+PR: **https://github.com/pom11/hscc/pull/25** (draft; CI guard pass x2).
+NOTHING released, installed, or restarted on the live runtime:
 the operator's API (PID 45019, installed 2.7.0) and daemon were never touched.
 All live verification ran against a THROWAWAY world (project `pom`, profile
 `pom-orch`, API on 127.0.0.1:8799, tmux session `smoke-pom`).
