@@ -385,7 +385,7 @@ def flightdeck_migrate_card(card_id: str, project: str, apply: bool = False) -> 
 
 @mcp.tool()
 def flightdeck_message_send(project: str, text: str) -> str:
-    """Render a message for a project (Telegram removed — no delivery; the send path now only renders catalogued text)."""
+    """Render a message for a project (dry run — this MCP tool never delivers; real delivery into the project's live REPL pane is the CLI's --apply path)."""
     from .commands import message
 
     return _run_cmd(

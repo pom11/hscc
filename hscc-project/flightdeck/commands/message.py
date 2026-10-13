@@ -18,11 +18,16 @@ reimplemented. Telegram has been REMOVED from flightdeck, so:
 - ``dispatch`` keeps its non-Telegram logic (kanban card creation + worktree
   anchoring). It creates the card and announces nothing.
 
-Behavior contract (what remains):
-- ``dispatch`` is mutating: it creates a card on the project's board. Dry-run
-  by default — ``--apply`` actually creates the card.
-- A project with no ``topic`` in the registry is fine for dispatch (the topic
-  is no longer required). Unknown projects error clearly.
+Behavior contract:
+- ``send`` is mutating with ``--apply``: it delivers into the project's live
+  orchestrator REPL pane via the shared hscc-api/repl_inject module (the
+  tmux-first path; same module as the iOS/WS write path). Without --apply
+  it is a dry-run render. Telegram delivery is gone for good.
+- ``read`` / ``broadcast`` had no non-Telegram transport; they report that.
+- ``dispatch`` keeps its non-Telegram logic (kanban card creation + worktree
+  anchoring). It creates the card and announces nothing. It is mutating:
+  dry-run by default — ``--apply`` actually creates the card. Unknown
+  projects error clearly.
 """
 
 from __future__ import annotations
@@ -50,17 +55,36 @@ def cmd_send(args: argparse.Namespace, projects: list[registry.Project]) -> int:
     if not args.message:
         print(
             "error: message text is required. "
-            "usage: flightdeck message send [project] \"message\"",
+            "usage: flightdeck message send [project] \"message\" [--apply]",
             file=sys.stderr,
         )
         return 2
     target = args.project or "<detected>"
+    if not getattr(args, "apply", False):
+        # Dry run: render only. --apply is what actually types into the pane.
+        make_console().print(panel(
+            "message send (dry run)",
+            f"would deliver to {escape(target)} into its live REPL pane.\n"
+            f"---\n{escape(args.message)}\n---\n"
+            f"add --apply to deliver for real (dry run — nothing delivered)."))
+        return 0
+
+    # --apply: deliver through the SAME module the iOS/WS write path uses —
+    # both doors type into the one pane the operator watches. No second REPL.
+    from ..core import repl_delivery
+    try:
+        receipt = repl_delivery.deliver(target, args.message)
+    except repl_delivery.ReplDeliveryError as exc:
+        make_console().print(panel(
+            "message send — NOT delivered",
+            f"[red]{escape(exc.kind)}[/red]: {escape(exc.message)}"))
+        return 1
+    state = "queued (REPL was busy — nothing interrupted)" \
+        if receipt.get("queued") else "typed into the pane"
     make_console().print(panel(
-        "message send",
-        f"message send: no delivery target — Telegram has been removed.\n"
-        f"would post to {escape(target)} (topic records kept in the "
-        f"registry but no outbound send exists).\n"
-        f"---\n{escape(args.message)}\n---"))
+        "message send — delivered",
+        f"delivered to {escape(target)} via tmux pane {escape(receipt['target'])}"
+        f" — {state}."))
     return 0
 
 
@@ -386,11 +410,14 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        epilog="example: flightdeck message dispatch flightdeck \"ship 0.6.0\" --apply")
     msub = p.add_subparsers(dest="message_cmd", metavar="MESSAGE_CMD")
 
-    sp = msub.add_parser("send", help="render a message for a project (no delivery — Telegram removed)",
-                         epilog='example: flightdeck message send flightdeck "standing up now"')
+    sp = msub.add_parser("send", help="deliver a message to a project's live REPL pane (--apply)",
+                         epilog='example: flightdeck message send flightdeck "standing up now" --apply')
     sp.add_argument("project", nargs="?", default=None,
                     help="project name in the registry (default: detected from cwd)")
-    sp.add_argument("message", nargs="?", default=None, help="message text to post")
+    sp.add_argument("message", nargs="?", default=None, help="message text to deliver")
+    sp.add_argument("--apply", action="store_true",
+                    help="actually deliver (types into the project's tmux REPL pane; "
+                         "without it this is a dry run — renders only)")
     sp.set_defaults(func=cmd_send)
 
     sp = msub.add_parser("read", help="list a project's recorded messages (Telegram removed — no live source)",
