@@ -139,3 +139,18 @@ def test_repl_matcher_excludes_gateway_and_default_profile():
     # gateway/serve processes carry 'chat' in their argv too — never a REPL.
     assert tc.chat_cmd_profile("hermes gateway run --serve chat") is None
     assert tc.chat_cmd_profile("python -m http.server") is None
+
+
+def test_chat_processes_excludes_headless_workers(monkeypatch):
+    """Kanban workers (`chat -q`, no tty — ps prints '?'/'??') are NOT the
+    operator's REPL: counting them would flood doctor/bootstrap with false
+    'outside tmux' warnings (seen live on the first run)."""
+    from flightdeck.core import tmux_chat as tc
+    ps_out = (
+        "ttys001 hermes -p pom-orch chat --continue pom\n"
+        "?? /usr/bin/python /usr/local/bin/hermes -p pom-engineer chat -q work kanban task t1\n"
+        "? hermes -p other-orch chat -Q --continue other\n"
+        "?? ssh node docker ps\n"
+    )
+    monkeypatch.setattr(tc, "run_ps_all", lambda: ps_out)
+    assert tc.chat_processes() == [("ttys001", "pom-orch")]

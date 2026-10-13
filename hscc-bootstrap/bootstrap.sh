@@ -317,6 +317,39 @@ else
   warn "trigger rules install failed (~/.hscc/triggers.json may be missing default rules)"
 fi
 
+hdr "Install: tmux (iOS chat reachability)"
+# The iOS app types into the project's REPL *pane* (hscc-api/repl_inject),
+# so tmux is not optional for the phone → terminal path: a REPL started
+# outside tmux is invisible to the app (messages would go to a hidden
+# serve session). bootstrap checks the tool exists and shows the current
+# REPL split — which chats the phone can reach RIGHT NOW (IN_TMUX) and
+# which it cannot (OUTSIDE_TMUX). Report-only: installing tmux stays the
+# operator's call (brew), same posture as the launchd opt-in below.
+if ! command -v tmux >/dev/null 2>&1; then
+  warn "tmux is NOT installed — the iOS app cannot deliver into any REPL (brew install tmux)"
+else
+  ok "tmux present ($(command -v tmux)) — chat opened OUTSIDE tmux would be invisible to the iOS app"
+  # One matcher for both doors: the helper loads the installed
+  # flightdeck/core/tmux_chat.py (same code `hscc project chat` uses to
+  # decide where the chat opens), so bootstrap never re-implements ps/tmux
+  # discovery and cannot drift from it.
+  TMUX_REPL_JSON=$("$PYBIN" "$BOOT_DIR/tmux_repl_report.py" "$REPO_ROOT" 2>/dev/null) \
+    || TMUX_REPL_JSON=""
+  if [ -z "$TMUX_REPL_JSON" ]; then
+    warn "REPL/tmux visibility report unavailable (run: $PYBIN $BOOT_DIR/tmux_repl_report.py $REPO_ROOT)"
+  elif printf '%s' "$TMUX_REPL_JSON" | grep -q '^TMUX_UNVERIFIED '; then
+    # The helper itself could not consult tmux/ps — say so, never render an
+    # unverifiable world as "no REPLs running".
+    warn "REPL/tmux visibility UNVERIFIED: $(printf '%s\n' "$TMUX_REPL_JSON" | grep '^TMUX_UNVERIFIED ' | head -1)"
+  else
+    IN_N=$(printf '%s\n' "$TMUX_REPL_JSON" | grep -c '^IN_TMUX ' || true)
+    OUT_N=$(printf '%s\n' "$TMUX_REPL_JSON" | grep -c '^OUTSIDE_TMUX ' || true)
+    [ "$IN_N" -gt 0 ]  && ok  "REPLs in tmux (iOS can reach them): $(printf '%s\n' "$TMUX_REPL_JSON" | grep '^IN_TMUX ' | awk '{print $2}' | paste -sd ' ' -)"
+    [ "$OUT_N" -gt 0 ] && warn "REPLs OUTSIDE tmux (iOS messages would MISS them — reopen with 'hscc project chat <project>'): $(printf '%s\n' "$TMUX_REPL_JSON" | grep '^OUTSIDE_TMUX ' | awk '{print $2}' | paste -sd ' ' -)"
+    [ "$IN_N" -eq 0 ] && [ "$OUT_N" -eq 0 ] && ok "no REPL chats running right now — 'hscc project chat <project>' opens one inside tmux"
+  fi
+fi
+
 hdr "Install: API boot-resilience (opt-in)"
 # Nothing is written or loaded here. The API normally runs from a PID-file
 # start that does NOT survive a reboot (iPhone goes offline). `hscc api
