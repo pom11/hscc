@@ -163,11 +163,18 @@ def pane_ttys() -> set:
 
 
 def chat_processes() -> list:
-    """[(tty, profile)] for every running Hermes REPL chat (tmux or not)."""
+    """[(tty, profile)] for every running Hermes REPL chat (tmux or not).
+
+    Headless ``chat -q``/``-Q`` invocations (kanban workers, server-side
+    one-shots) have NO controlling tty — ps prints it as ``?``/``??``. An
+    interactive REPL always has a real tty (that is how repl_inject finds
+    panes in the first place), so ttyless rows are excluded: a worker is
+    not the operator's chat and must never be reported as one outside tmux.
+    """
     rows = []
     for line in run_ps_all().splitlines():
         tty, _, cmd = line.strip().partition(" ")
-        if not tty or tty == "?":
+        if not tty or tty.startswith("?"):
             continue
         prof = chat_cmd_profile(cmd)
         if prof:
