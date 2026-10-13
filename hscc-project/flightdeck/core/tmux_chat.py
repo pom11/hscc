@@ -196,6 +196,32 @@ def _session_profiles(session: str) -> set:
     return found
 
 
+def _live_profile_panes(profile: str | None) -> list:
+    """Panes in ANY tmux session already running ``profile``'s REPL chat.
+
+    Each entry is ``(session_name, pane_id)``. The operator's REPLs often live
+    in an ad-hoc session (e.g. ``0``), not in ``hscc-<project>``; opening a
+    second chat there would give the iOS path two panes for one profile, and
+    repl_inject refuses ambiguity — so the live pane must be reused first.
+    """
+    if not profile:
+        return []
+    r = run_tmux("list-panes", "-a", "-F",
+                 "#{session_name}\t#{pane_id}\t#{pane_tty}")
+    if r.returncode != 0:
+        return []
+    found = []
+    for line in r.stdout.splitlines():
+        try:
+            session, pane_id, tty = line.split("\t")
+        except ValueError:
+            continue
+        if any(chat_cmd_profile(cmd) == profile
+               for cmd in run_ps(tty).splitlines()):
+            found.append((session, pane_id))
+    return found
+
+
 def _ensure_tmux_session(project: str, argv: list, which) -> str | None:
     """Guarantee the named session hosts THIS chat; return a branch-C reason
     instead, if it cannot.
@@ -266,7 +292,25 @@ def launch_interactive_chat(project: str, argv: list, *,
         return 0
 
     # B/C. Decide whether tmux can host it.
-    reason = _ensure_tmux_session(project, argv, which)
+    reason = None
+    if which("tmux"):
+        live = _live_profile_panes(target_profile(argv))
+        if len(live) == 1:
+            # Reuse the operator's existing REPL wherever it lives; never
+            # start a second chat for the same profile.
+            session, pane_id = live[0]
+            run_tmux("select-window", "-t", pane_id)
+            run_tmux("select-pane", "-t", pane_id)
+            print(f"project chat: this REPL is already open in tmux session "
+                  f"'{session}' — attaching to it.")
+            exec_fn("tmux", ["tmux", "attach-session", "-t", f"={session}"])
+            return 0
+        if len(live) > 1:
+            where = ", ".join(f"{s}:{p}" for s, p in live)
+            reason = (f"{len(live)} tmux panes already run this profile's REPL "
+                      f"({where}); close the extras")
+    if reason is None:
+        reason = _ensure_tmux_session(project, argv, which)
     if reason is None:
         session = session_name(project)
         # The chat opens in the named session, not in this terminal — say so,
