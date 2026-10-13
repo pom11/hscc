@@ -2,6 +2,12 @@
 events.jsonl
 agent-workspaces/
 *.jsonl
+# WS decode fixtures are the exception: they are checked-in test evidence
+# (live-captured API frames, scripts/ws_decode_check.sh). The negation must
+# come AFTER *.jsonl — in gitignore the LAST matching pattern wins, and a
+# silently-ignored fixture means the decode check "passes" on zero files in
+# a fresh clone.
+!ios-app/tests/fixtures/ws_frames/*.jsonl
 agents.json
 projects.json
 serving.json
