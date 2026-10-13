@@ -54,6 +54,28 @@ Two independent gates made this permanent instead of transient:
    when our spawn then 403'd, nothing distinguished "wrong serve" from
    "transport broken".
 
+The full chain was reproduced live (02:5x, throwaway port 9121):
+
+```
+$ HERMES_DASHBOARD_SESSION_TOKEN=… hermes serve --port 9121 --skip-build
+Refusing to start: this host is already served by PID 8958 (127.0.0.1:9119;
+profiles: …). You asked for --port 9121 (the host owner is on port 9119).
+```
+
+`hermes serve` is a **host singleton**: while PID 8958 lives, ANY new
+`hermes serve` exits within seconds — regardless of port. So the new API's
+spawn died almost immediately, while `start_serve`'s readiness loop raced:
+`proc.poll()` first (still None during the ~1-2s refusal window), then
+`_probe_tcp` saw the **orphan's** accept and declared `_serve_up=True` with
+a dead `_serve_proc`. Every mount then hit the orphan with the new token →
+403 forever. (The `serve did not bind … within 20.0s` log line is the same
+race losing the other way.) Consequence for verification: the replace-path
+heal CANNOT be live-proven on this host without killing the operator's live
+PID 8958 (which serves every gateway profile) — deliberately not done. Its
+proof ceiling tonight is unit tests + the exact rejection shapes reproduced
+locally (wrong-token handshake → 403, foreign listener → abstain); first
+live exercise is the operator's morning API restart.
+
 ### 1c. Store correctness defects in the captured replay (state.db forensics)
 
 * **Out-of-order replay / "seq 1 at 14:50Z"**: `state.db` `messages.id` order
