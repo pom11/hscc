@@ -1,0 +1,25 @@
+#!/bin/sh
+# Strip co-author / AI attribution trailers from every commit message.
+#
+# Why: agents (Hermes, and other assistants) append trailers such as
+# "Co-Authored-By: Hermes <hermes@nousresearch.com>" on their own. GitHub maps
+# the trailer's email to whichever account registered it, so an unrelated
+# stranger showed up as a co-author on this PUBLIC repo (2026-10-13; seven
+# commits had to be rewritten). The operator's rule: no attribution lines in
+# commits, ever.
+#
+# Mechanism: same as pre-commit — `.githooks` is committed and core.hooksPath
+# points at it, so every clone and linked worktree runs this. It edits the
+# message file in place (never blocks the commit), and says what it removed.
+
+msg_file="$1"
+[ -f "$msg_file" ] || exit 0
+
+pattern='^[[:space:]]*(Co-Authored-By|Generated-By|Assisted-By):'
+if grep -Eiq "$pattern" "$msg_file"; then
+  removed=$(grep -Ei "$pattern" "$msg_file")
+  tmp="${msg_file}.hscc-strip"
+  grep -Eiv "$pattern" "$msg_file" > "$tmp" && mv "$tmp" "$msg_file"
+  printf 'commit-msg: removed attribution trailer(s) (repo rule: no co-authors):\n%s\n' "$removed" >&2
+fi
+exit 0
