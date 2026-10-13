@@ -45,3 +45,31 @@ func helloNextSeq(_ text: String) -> Int? {
     }
     return payload["next_seq"] as? Int
 }
+
+// ===========================================================================
+// Server-restart rebase (iOS-chat-e2e 2026-10-13)
+// ===========================================================================
+
+/// Pure decision: when a `hello` announces `serverNextSeq` but the client
+/// cursor already sits at `clientLastSeq`, what should the cursor become?
+///
+/// The server's event store is IN-MEMORY (session_event.get_store): an API
+/// restart rebuilds it from history and seq restarts from 1. A client whose
+/// persisted/live cursor is at, say, 500 would then classify EVERY later
+/// frame as `.duplicate` (seq <= lastSequence) — the stream would look
+/// Connected while silently dropping everything (the "no replies ever come"
+/// failure class, second variant). There is no way to align the old rows
+/// with the new numbering, so the honest move is to accept everything the
+/// new server emits from here on (cursor 0) and tell the operator the
+/// window may show repeats. Returning nil means "no rebase needed".
+///
+/// Headlessly proven in scripts/reconnect_check.sh (compiles this file).
+func cursorRebaseAfterHello(serverNextSeq: Int, clientLastSeq: Int) -> Int? {
+    guard serverNextSeq >= 0, clientLastSeq > 0, serverNextSeq <= clientLastSeq else {
+        return nil
+    }
+    // next_seq is the boundary where live frames BEGIN (first frame has
+    // seq == next_seq... or > next_seq for a trimmed store). Rebasing to 0
+    // accepts every frame the new numbering emits, including the boundary.
+    return 0
+}

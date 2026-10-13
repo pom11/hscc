@@ -349,6 +349,19 @@ final class StreamingChatStore: ObservableObject {
             // reconnect waits the 15s ceiling — even a brief blip costs 15s for
             // the rest of the session (t_ec570637 Q4).
             reconnectAttempt = 0
+            // Server-restart rebase (iOS-chat-e2e 2026-10-13): the store is
+            // in-memory, so an API restart renumbers from 1. A cursor left
+            // above the new boundary would silently .duplicate EVERY later
+            // frame — Connected, silent, forever. Accept the new numbering
+            // and say so out loud instead.
+            if let nextSeq = helloNextSeq(text),
+               let rebased = cursorRebaseAfterHello(serverNextSeq: nextSeq,
+                                                    clientLastSeq: Int(cursor.resumeRequest)) {
+                cursor = SessionStreamCursor(lastSequence: UInt64(rebased))
+                isResume = true
+                transcript.addNotice("The API restarted its event numbering — this window may briefly repeat a message.")
+                rows = transcript.rows
+            }
             return
         }
         guard let event = try? JSONDecoder().decode(SessionEvent.self, from: Data(text.utf8)) else {

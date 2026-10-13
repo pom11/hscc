@@ -279,4 +279,54 @@ do {
     h.expect(classifyStreamError(drop) == .transient, "mid-stream drop (-1005) stays .transient")
 }
 
-h.finish("7 scenarios, mid-stream drop + reconnect + error classification")
+// ---------------------------------------------------------------------------
+// 8. Server-restart rebase (iOS-chat-e2e 2026-10-13): the in-memory store
+//    renumbers from 1 after an API restart; a stale high cursor would silently
+//    .duplicate every later frame. cursorRebaseAfterHello must catch that.
+// ---------------------------------------------------------------------------
+h.expect(cursorRebaseAfterHello(serverNextSeq: 2, clientLastSeq: 500) == 0,
+         "stale cursor above the new boundary rebases to 0 (accept the new numbering)")
+h.expect(cursorRebaseAfterHello(serverNextSeq: 501, clientLastSeq: 500) == nil,
+         "normal continuation (boundary just above cursor) does NOT rebase")
+h.expect(cursorRebaseAfterHello(serverNextSeq: 500, clientLastSeq: 500) == 0,
+         "boundary AT the cursor means the store rewound — rebase")
+h.expect(cursorRebaseAfterHello(serverNextSeq: 12, clientLastSeq: 0) == nil,
+         "fresh cursor (0) never rebases — nothing to invalidate")
+h.expect(cursorRebaseAfterHello(serverNextSeq: -1, clientLastSeq: 500) == nil,
+         "absent/invalid next_seq never rebases")
+
+// End-to-end shape: after a rebase the low seqs that follow must ACCEPT
+// (the very frames the old cursor would have dropped as duplicates).
+do {
+    var c = SessionStreamCursor(lastSequence: 500)
+    let first = SessionStreamCursor.Event(seq: 2, payload: "a")
+    if case .duplicate = c.accept(first, isResume: true) {} else {
+        h.expect(false, "baseline: stale cursor really does duplicate seq 2")
+    }
+    if let rebased = cursorRebaseAfterHello(serverNextSeq: 2, clientLastSeq: 500) {
+        c = SessionStreamCursor(lastSequence: UInt64(rebased))
+    }
+    if case .accept = c.accept(first, isResume: true) {
+        h.expect(true, "post-rebase seq 2 is accepted, not dropped")
+    } else {
+        h.expect(false, "post-rebase seq 2 must be accepted")
+    }
+    if case .accept = c.accept(SessionStreamCursor.Event(seq: 3, payload: "b"), isResume: true) {
+        h.expect(true, "post-rebase stream continues contiguously")
+    } else {
+        h.expect(false, "post-rebase continuation must accept seq 3")
+    }
+}
+
+// hello detection itself: the REAL wire flavor is type=hello; kind never
+// appears on server frames (the stuck-banner bug matched on kind).
+h.expect(isHelloEnvelope("{\"seq\":1,\"type\":\"hello\",\"payload\":{\"next_seq\":1}}"),
+         "real wire hello (type field) is detected")
+h.expect(!isHelloEnvelope("{\"seq\":1,\"type\":\"message\",\"payload\":{}}"),
+         "an event frame is never hello")
+h.expect(helloNextSeq("{\"seq\":1,\"type\":\"hello\",\"payload\":{\"next_seq\":7}}") == 7,
+         "hello announces next_seq for the rebase decision")
+h.expect(helloNextSeq("{\"seq\":1,\"type\":\"message\",\"payload\":{\"next_seq\":7}}") == nil,
+         "next_seq outside a hello is ignored")
+
+h.finish("8 scenarios, mid-stream drop + reconnect + error classification + server-restart rebase")

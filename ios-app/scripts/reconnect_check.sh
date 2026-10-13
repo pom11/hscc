@@ -41,6 +41,7 @@ trap 'rm -rf "$TMP"' EXIT
 real_sources=(
   Sources/HSCC/SessionStreamCursor.swift
   Sources/HSCC/StreamConnectionError.swift
+  Sources/HSCC/StreamHello.swift
 )
 harness=(
   scripts/reconnect_check/main.swift
