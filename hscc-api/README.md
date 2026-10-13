@@ -89,6 +89,30 @@ overrides passed to `create_server()` / the CLI flags.
   at `/Applications/Tailscale.app/Contents/MacOS/Tailscale`. Both that path and
   a bare `tailscale` are probed, plus the interfaces for a `100.x` address.
 
+## Chat delivery: tmux-first, serve fallback (what the app must show)
+
+A `send` on `/v1/projects/{name}/session/ws` is delivered tmux-first: if the
+project's orchestrator REPL (`hermes -p <name>-orch chat`) runs in a tmux
+pane, the message is typed **into that pane** (bracketed paste; `/queue`d
+automatically while a turn is busy, so a running `/goal` is never cut off)
+and the reply streams back via the session store-tail — one REPL is the
+source of truth for terminal and phone alike. The `working` system frame
+carries the receipt: `details.via="tmux"` plus `pane`, `busy`, `queued`.
+
+Every non-tmux outcome is labelled honestly in the same frames:
+
+| Situation | Frame |
+|---|---|
+| REPL in a tmux pane | `working` `via="tmux"` (+ pane/busy/queued) |
+| injection itself failed | `tmux_delivery_failed` (never a silent hang) |
+| which pane is the REPL is unprovable | `tmux_ambiguous` — refused, never guessed |
+| **no** tmux REPL exists (serve fallback) | `working` `via="serve"` + `details.notice`: *"Your terminal REPL isn't in tmux, so this went to a background session…"* — **the app should surface `notice` verbatim**; it is the operator's only clue the terminal stayed dark |
+
+`hscc doctor` (tmux/REPL section) and bootstrap print the same in-tmux /
+outside-tmux / idle split up front, so the fallback should be rare:
+`hscc project chat <project>` always opens the chat where the app can see
+it.
+
 ## Error contract
 
 Every error response is:

@@ -108,6 +108,10 @@ def test_no_pane_falls_back_to_serve_and_says_so(monkeypatch):
     w = [e for e in _sys_events(events)
          if e["payload"].get("kind") == "working"]
     assert w and w[-1]["payload"]["details"]["via"] == "serve"
+    # The fallback must be VISIBLE, not just labeled: the frame carries the
+    # human explanation the app shows (operator requirement, 2026-10-13).
+    notice = w[-1]["payload"]["details"].get("notice") or ""
+    assert "isn't in tmux" in notice and "background session" in notice
 
 
 # --------------------------------------------------------------------------- #

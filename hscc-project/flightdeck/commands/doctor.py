@@ -633,6 +633,91 @@ def _learning_checks(
     return checks
 
 
+# --------------------------------------------------------------------------- #
+# tmux/REPL section — is the operator's chat reachable from the iOS app?
+# --------------------------------------------------------------------------- #
+
+def _tmux_repl_checks(*, projects=None, _which=None, _pane_ttys=None,
+                      _chat_procs=None) -> list[dict]:
+    """One check per registry project: is its orchestrator REPL running
+    inside a tmux pane?
+
+    Why this exists: the iOS app delivers chat messages by typing into the
+    project's REPL pane (hscc-api/repl_inject). A REPL started OUTSIDE tmux
+    is invisible to that path — iPhone messages then fall back to a hidden
+    serve-hosted session the operator never sees, and any /goal loop in the
+    terminal never runs. This makes that silent split loud, in the place an
+    operator already looks for "is my setup trustworthy".
+
+    Statuses (the hard rule: an unverifiable answer is never silently ok):
+      ok        — this project's REPL is live in a tmux pane.
+      problem   — REPL found but OUTSIDE tmux (consequence named); or no
+                  REPL running at all (iOS falls back — hint at the fix).
+      unverified— tmux itself cannot be consulted (not installed / broken
+                  server): we refuse to claim the REPL is unreachable.
+
+    ``_which`` / ``_pane_ttys`` / ``_chat_procs`` are injectable seams so the
+    check is hermetically testable (the guarded tmux_chat seams refuse to run
+    under pytest).
+    """
+    from ..core import tmux_chat as tc
+    which = _which or __import__("shutil").which
+    projects = projects or []
+    checks: list[dict] = []
+
+    def _add(check: str, status: str, detail: str) -> None:
+        checks.append({"check": check, "status": status, "detail": detail})
+
+    tmux_ok = bool(which("tmux"))
+    # Initialised empty: the per-project loop only reads them when tmux_ok,
+    # but empty containers keep the flow safe (and statically honest) either
+    # way — an unread world is reported via the tmux check above, never as
+    # silently-ok.
+    ttys: set = set()
+    procs: list = []
+    if tmux_ok:
+        try:
+            pane_fn = _pane_ttys or tc.pane_ttys
+            proc_fn = _chat_procs or tc.chat_processes
+            ttys, procs = pane_fn(), proc_fn()
+        except Exception as exc:  # tmux/ps refused or broke — never claim ok
+            _add("tmux", "unverified",
+                 f"tmux cannot be consulted ({exc}) — REPL visibility from "
+                 "the iOS app is unknown")
+            return checks
+    else:
+        _add("tmux", "problem",
+             "tmux is not installed (brew install tmux) — the iOS app can "
+             "only deliver into a REPL that runs inside tmux")
+
+    for proj in projects:
+        profile = f"{proj.name}-orch"
+        if not tmux_ok:
+            _add(f"repl:{proj.name}", "problem",
+                 f"no tmux: REPL for '{profile}' (if any) is invisible to the "
+                 "iOS app — start it with: hscc project chat " + proj.name)
+            continue
+        # `procs` is [(tty, profile)]: every live REPL chat, tmux or not.
+        on_tty = [t for t, p in procs if p == profile]
+        if not on_tty:
+            # No chat running is a NORMAL state (the operator is not always
+            # in chat) — not a problem. The launch door guarantees the next
+            # `hscc project chat` opens inside tmux; say so, don't cry wolf.
+            _add(f"repl:{proj.name}", "ok",
+                 f"no REPL running for '{profile}' right now — "
+                 f"`hscc project chat {proj.name}` opens one inside tmux")
+        elif all(t not in ttys for t in on_tty):
+            _add(f"repl:{proj.name}", "problem",
+                 f"REPL for '{profile}' runs OUTSIDE tmux (tty "
+                 f"{', '.join(sorted(on_tty))}) — iOS messages will NOT "
+                 f"reach it; reopen with: hscc project chat {proj.name}")
+        else:
+            _add(f"repl:{proj.name}", "ok",
+                 f"REPL for '{profile}' is in a tmux pane — iOS delivery "
+                 "targets it")
+    return checks
+
+
 def _learning_has_problem(learning: list[dict]) -> bool:
     """True when any learning check is not ``ok``.
 
@@ -806,12 +891,29 @@ def cmd_doctor(args: argparse.Namespace, projects: list[registry.Project]) -> in
             _plist_source=getattr(args, "plist_source", None),
         )
 
+    # tmux/REPL section (same opt-in sentinel as `learning`): the iOS app can
+    # only deliver into a REPL that lives in a tmux pane — surface REPLs that
+    # would silently miss iPhone messages.
+    tmux_repl = None
+    if getattr(args, "tmux_repl", _NOT_PROVIDED) is not _NOT_PROVIDED:
+        tmux_repl = _tmux_repl_checks(
+            projects=projects,
+            _which=getattr(args, "which", None),
+            _pane_ttys=getattr(args, "pane_ttys", None),
+            _chat_procs=getattr(args, "chat_procs", None),
+        )
+
     if args.json:
         payload = _render_json(report)
         if learning is not None:
             payload["_learning"] = {
                 c["check"]: {"status": c["status"], "detail": c["detail"]}
                 for c in learning
+            }
+        if tmux_repl is not None:
+            payload["_tmux_repl"] = {
+                c["check"]: {"status": c["status"], "detail": c["detail"]}
+                for c in tmux_repl
             }
         print(json.dumps(payload))
     else:
@@ -830,10 +932,23 @@ def cmd_doctor(args: argparse.Namespace, projects: list[registry.Project]) -> in
                     f"{escape(c['detail'])}"
                 )
             lines.append("")
+        if tmux_repl is not None:
+            lines.append("iOS chat reachability (tmux/REPL):")
+            for c in tmux_repl:
+                mark = _STATUS_MARK.get(c["status"], c["status"])
+                mark_str = str(mark)
+                lines.append(
+                    f"  {escape(c['check'])} {escape('[' + mark_str + ']')} "
+                    f"{escape(c['detail'])}"
+                )
+            lines.append("")
         make_console().print(panel("doctor", "\n".join(lines)))
 
     problems = _any_problem(report) or (
         learning is not None and _learning_has_problem(learning)
+    ) or (
+        tmux_repl is not None and any(
+            c["status"] in ("problem", "unverified") for c in tmux_repl)
     )
     all_clear = _all_clear_count(report)
     passes = f"{all_clear} of {len(report)} projects passed the triangle check"
@@ -859,5 +974,11 @@ def run(args: argparse.Namespace, registry_path: str) -> int:
     # Doctor ALWAYS includes the learning-pipeline section in production. The
     # sentinel gating (in cmd_doctor) is what lets tests opt out via _args().
     args.learning = True
+    # Same for the tmux/REPL section: iOS chat reachability is a first-class
+    # "is this setup trustworthy" answer, not an extra.
+    args.tmux_repl = True
+    args.which = getattr(args, "which", None)
+    args.pane_ttys = getattr(args, "pane_ttys", None)
+    args.chat_procs = getattr(args, "chat_procs", None)
     projects = registry.load_registry(registry_path)
     return cmd_doctor(args, projects)
