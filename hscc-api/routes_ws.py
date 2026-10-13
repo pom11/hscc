@@ -203,10 +203,17 @@ def _handle_client_send(sock: socket.socket, project: str, payload: dict) -> Non
     # reply streams in. The assistant reply (streamed deltas + done) follows via
     # the attached driver (serve) or the REST job fallback.
     # No tmux pane was found (no_panes / discovery failed), so this is the
-    # serve-PTY/REST fallback — the working frame says so (details.via).
+    # serve-PTY/REST fallback — the working frame says so (details.via) AND
+    # carries a human notice: an operator whose terminal REPL is simply not
+    # in tmux must learn it HERE (the app renders details.notice), not
+    # discover it by watching a pane that never lights up.
     get_store(project).append(
-        TYPE_SYSTEM, SystemPayload(kind="working",
-                                   details={"text": text, "via": "serve"}))
+        TYPE_SYSTEM, SystemPayload(kind="working", details={
+            "text": text, "via": "serve",
+            "notice": "Your terminal REPL isn't in tmux, so this went to a "
+                      "background session. Open the chat with "
+                      "`hscc project chat <project>` (or attach the REPL in "
+                      "tmux) and messages will land in your terminal instead."}))
 
     # Increment 3: forward to the attached hermes serve gateway (if any). The
     # hook defaults to a no-op when no GatewayDriver is running, so the WS

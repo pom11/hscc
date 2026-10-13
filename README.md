@@ -64,6 +64,28 @@ The result: Hermes goes from *one smart agent* to a *self-running, specialized f
 - [Hermes](https://github.com/NousResearch/hermes-agent) installed (`~/.hermes/hermes-agent`)
 - A control host for the daemon — macOS (launchd) or Linux (systemd --user); Python 3 (stdlib only)
 - Optional: a NAS for the offline model cache
+- tmux — REQUIRED for the iOS chat path (see below)
+
+### iOS chat needs tmux
+
+The iOS app delivers a chat message by typing it into the project's REPL
+**pane** — the `hermes -p <profile> chat` process that lives in a tmux pane
+on your terminal (discovery via `hscc-api/repl_inject.py`). It is the one
+REPL you both see: your messages, the phone's messages, and any `/goal`
+work all land in the same place.
+
+A REPL started outside tmux is invisible to the app. Messages then go to a
+hidden background session the API hosts — your terminal stays dark, and
+the reply comes back to the phone only (the app shows a visible notice
+when this happens). This is exactly the silent split the launch door
+prevents: **`hscc project chat <project>` always opens the chat inside
+tmux** (in your current tmux session if you're in one, else the named
+session `hscc-<project>`; if tmux is unusable it stops and asks you
+explicitly before ever opening a chat the phone can't see).
+
+Check what the phone can reach right now: `hscc doctor` reports each
+project's REPL as in-tmux / outside-tmux / idle, and bootstrap prints the
+same split at install time.
 
 ---
 
