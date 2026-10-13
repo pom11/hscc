@@ -742,6 +742,17 @@ private struct SystemRow: View {
                     .font(.caption.weight(.semibold))
                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     .textCase(.uppercase)
+                // A system frame may carry a human `notice` (e.g. the serve
+                // fallback explaining the terminal REPL wasn't in tmux). It is
+                // the one line the operator must actually read, so it gets its
+                // own full-width line instead of drowning in the details dump.
+                if let notice = system.details?["notice"]?.string, !notice.isEmpty {
+                    Text(notice)
+                        .font(.footnote)
+                        .foregroundColor(Theme.Semantic.onSurface)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 if let d = system.details, !d.isEmpty {
                     Text(d.renderArgs(pretty: false))
                         .font(.caption2)
