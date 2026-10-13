@@ -381,17 +381,24 @@ final class StreamingChatStore: ObservableObject {
         }
     }
 
-    /// True when the frame is the server's opening `hello` envelope
-    /// (`{"kind":"hello","next_seq":N}`) — control framing, not a session event.
+    /// True when the frame is the server's opening `hello` envelope.
+    ///
+    /// THE stuck-banner bug (iOS-chat-e2e 2026-10-13): this matched on
+    /// `kind == "hello"`, but the server's hello envelope carries
+    /// `{"seq":N,"type":"hello","payload":{"next_seq":N}}` — there is no
+    /// `kind` field anywhere on the SERVER→client wire (`kind` is only in the
+    /// client→server send/stop frames). The check never matched, so `phase`
+    /// never left `.connecting` ("Connecting to the live stream…" forever,
+    /// while frames were actually arriving) and the hello frame itself fell
+    /// through to the seq-cursor as a normal event — where a fresh/trimmed
+    /// store made it look like a gap and triggered a reconnect loop (the
+    /// server-side ConnectionResetError churn seen in the API log).
+    /// Accepting BOTH field names keeps the check true regardless of which
+    /// envelope flavor a server version emits.
     private func isHelloFrame(_ text: String) -> Bool {
-        // Cheapest reliable check: it is a JSON object carrying `kind == hello`.
-        guard text.first == "{",
-              let data = text.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              (obj["kind"] as? String) == "hello" else {
-            return false
-        }
-        return true
+        // Single definition lives in StreamHello.swift (proven headlessly by
+        // scripts/ws_decode_check.sh against real captured frames).
+        isHelloEnvelope(text)
     }
 
     /// The socket closed (or failed to receive). Classify WHY: if the server
