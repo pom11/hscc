@@ -38,7 +38,7 @@ from hscc_daemon import verify
 API_PID_FILE = os.path.expanduser("~/.hscc/api.pid")
 API_LOG_FILE = os.path.expanduser("~/.hscc/api.log")
 
-VALID_SUBCOMMANDS = ("start", "stop", "status")
+VALID_SUBCOMMANDS = ("start", "stop", "status", "install-service", "uninstall-service")
 
 HELP_TEXT = """\
 HSCC API server — HTTP API for external apps (e.g. the iOS client).
@@ -48,6 +48,8 @@ Usage: hscc api <subcommand> [args]
   hscc api start [--tailscale] [--bind <ip>] [--port <n>] [--no-qr]   Start the API server in the background
   hscc api stop                                                       Stop the running API server
   hscc api status [--no-qr]                                           Show running/stopped + bound host:port
+  hscc api install-service                                            OPT-IN: write the launchd unit (boot-resilient API; loading stays manual)
+  hscc api uninstall-service                                          Remove the launchd unit file written by install-service
   hscc api --help                                                     This help
 
 Bind defaults to loopback (127.0.0.1). '--tailscale' or '--bind <ip>' opt in
@@ -541,6 +543,62 @@ def _handle_status(argv, theme_name=None):
     return 0
 
 
+def _handle_install_service(argv, theme_name=None):
+    """OPT-IN boot-resilience for the API (REPL-injection 2026-10-13).
+
+    Writes ~/Library/LaunchAgents/com.hscc.api.plist — RunAtLoad+KeepAlive so
+    a REBOOT no longer takes the iPhone offline (a PID-file start does not
+    survive login). Deliberately does NOT load the unit: `launchctl bootstrap`
+    stays a manual operator step, same opt-in spirit as `hscc daemon install`
+    but one notch stricter — writing the file changes nothing until you load
+    it. macOS only (launchd).
+    """
+    argv, theme_name_ = _strip_theme(argv)
+    if sys.platform != "darwin":
+        print("install-service is macOS-only (launchd)", file=sys.stderr)
+        return 1
+    from hscc_daemon import api_launchd
+    api_dir = _resolve_api_dir()
+    if not api_dir.is_dir():
+        print(f"error: hscc-api dir not found at {api_dir}", file=sys.stderr)
+        return 1
+    try:
+        res = api_launchd.install_api_plist(str(api_dir))
+    except (RuntimeError, OSError) as exc:
+        print(f"error: {theme.esc(exc)}", file=sys.stderr)
+        return 1
+    console = _console(theme_name)
+    state = "written" if res["changed"] else "already up to date"
+    console.print(
+        f"launchd unit {state}: {res['path']}\n"
+        f"  interpreter: {res['python']}\n"
+        "NOT loaded yet (opt-in). To activate:\n"
+        f"  plutil -lint {res['path']}\n"
+        f"  launchctl bootstrap gui/$UID {res['path']}\n"
+        f"To check: launchctl print gui/$UID/{api_launchd.API_LABEL} | head -20\n"
+        "Note: 'hscc api status' reads the PID file and will look stopped "
+        "under launchd — trust launchctl, not the PID file.")
+    return 0
+
+
+def _handle_uninstall_service(argv, theme_name=None):
+    """Remove the launchd unit FILE. Bootout first, yourself:
+    `launchctl bootout gui/$UID/com.hscc.api` (this command never execs
+    launchctl — removal is a file op only)."""
+    argv, theme_name_ = _strip_theme(argv)
+    from hscc_daemon import api_launchd
+    res = api_launchd.uninstall_api_plist()
+    console = _console(theme_name)
+    if res["removed"]:
+        console.print(f"removed {res['path']}")
+        console.print(
+            "If it was loaded, unload it now:\n"
+            f"  launchctl bootout gui/$UID/{api_launchd.API_LABEL}")
+    else:
+        console.print(f"no unit file at {res['path']} (nothing to remove)")
+    return 0
+
+
 def cmd_api(argv):
     """Dispatch `hscc api <subcommand>`; returns an exit code (never raises).
 
@@ -563,6 +621,10 @@ def cmd_api(argv):
         return _handle_stop(rest, theme_name=theme_name)
     if sub == "status":
         return _handle_status(rest, theme_name=theme_name)
+    if sub == "install-service":
+        return _handle_install_service(rest, theme_name=theme_name)
+    if sub == "uninstall-service":
+        return _handle_uninstall_service(rest, theme_name=theme_name)
 
     _console(theme_name).print(f"Error: unknown api subcommand: {theme.esc(sub)}")
     _console(theme_name).print(
