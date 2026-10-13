@@ -199,9 +199,11 @@ def test_each_apply_gated_tool_docstring_first_sentence_mentions_apply_gate():
 
 
 def test_message_send_docstring_notes_no_delivery():
-    """message_send no longer delivers: docstring states Telegram removal, no gate."""
+    """message_send stays render-only: the docstring states the dry-run
+    contract (never delivers) and points delivery at the CLI --apply path."""
     doc = (inspect.getdoc(mcp_server.flightdeck_message_send) or "").lower()
-    assert "telegram" in doc and "no delivery" in doc
+    assert "dry run" in doc and "never delivers" in doc
+    assert "--apply" in doc                       # names where real delivery lives
 
 
 # --------------------------------------------------------------------------- #
@@ -608,15 +610,17 @@ def test_roadmap_adopt_apply_reaches_cli_command(monkeypatch, tmp_path):
 
 
 def test_message_send_renders_no_delivery(monkeypatch):
-    """flightdeck_message_send renders the message; Telegram delivery is removed."""
+    """flightdeck_message_send stays a DRY RUN (its namespace carries no
+    apply flag): it renders and says so — it can never type into a pane."""
     monkeypatch.setattr(registry, "load_registry",
                         lambda path: [_project(name="hscc", board="hscc",
                                                repo="/repo", topic=140)])
 
     out = mcp_server.flightdeck_message_send(project="hscc", text="hello")
 
-    assert "no delivery target" in out.lower()
-    assert "telegram has been removed" in out.lower()
+    assert "dry run" in out.lower()
+    assert "would deliver to hscc" in out.lower()
+    assert "add --apply" in out.lower()          # the delivery gate is named
     assert "hello" in out
 
 
