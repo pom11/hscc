@@ -153,6 +153,34 @@ def _handle_client_send(sock: socket.socket, project: str, payload: dict) -> Non
     get_store(project).append(
         TYPE_MESSAGE, MessagePayload(role="user", delta=text, done=True))
 
+    # tmux-first (REPL-injection 2026-10-13): when the project's orchestrator
+    # REPL is a pane in tmux, THAT pane is the single source of truth — the
+    # operator sees it, any /goal loop runs inside it, and it already owns
+    # the session lease, so no handoff consent and no second driver are
+    # needed. Pane discovery (fast: one list-panes + ps per pane) runs here;
+    # the delivery itself (busy capture + paste + Enter settle) goes to a
+    # worker so the WS socket keeps serving. Every event says which path
+    # carried the message (details.via), so "did it reach my terminal?" is
+    # answerable from the transcript alone.
+    pane, ambiguous = _tmux_pane_for(project)
+    if ambiguous is not None:
+        # Panes EXIST but which one is the project's REPL is not provable —
+        # and "fall back to serve only when no tmux REPL exists" means an
+        # ambiguous pane must NOT silently drive serve (the operator would
+        # watch two candidate panes while a hidden second REPL typed).
+        # Refuse honestly, never guess (same rule as the CLI tool).
+        get_store(project).append(TYPE_SYSTEM, SystemPayload(
+            kind="tmux_ambiguous",
+            details={"text": text,
+                     "message": "Multiple tmux panes run this project's REPL — "
+                                "I did not guess which to type into. Close the "
+                                "extra pane(s) or use the terminal you want."}))
+        return
+    if pane is not None:
+        _spawn_worker(lambda: _tmux_deliver(project, text, pane),
+                      "ws-tmux-%s" % project)
+        return
+
     # t_f109e7ea: honest state, not a silent ack. Before claiming the turn we
     # check whether the project's named session is owned by the operator's
     # interactive CLI REPL. Hermes refuses any other driver (SESSION_NOT_OWNED,
@@ -174,8 +202,11 @@ def _handle_client_send(sock: socket.socket, project: str, payload: dict) -> Non
     # so the app always sees the turn start, before the (possibly minutes-long)
     # reply streams in. The assistant reply (streamed deltas + done) follows via
     # the attached driver (serve) or the REST job fallback.
+    # No tmux pane was found (no_panes / discovery failed), so this is the
+    # serve-PTY/REST fallback — the working frame says so (details.via).
     get_store(project).append(
-        TYPE_SYSTEM, SystemPayload(kind="working", details={"text": text}))
+        TYPE_SYSTEM, SystemPayload(kind="working",
+                                   details={"text": text, "via": "serve"}))
 
     # Increment 3: forward to the attached hermes serve gateway (if any). The
     # hook defaults to a no-op when no GatewayDriver is running, so the WS
@@ -285,6 +316,70 @@ def _handle_busy_send(project: str, text: str) -> None:
             _append_busy_notice(project)
 
     _spawn_worker(_run, "ws-handoff-%s" % project)
+
+
+def _tmux_pane_for(project: str):
+    """Resolve the project's REPL pane in tmux, tri-state without guessing.
+
+    Returns ``(pane, ambiguous)``:
+      * ``(pane_dict, None)``  — exactly one pane runs this project's REPL;
+      * ``(None, message)``    — panes for the profile exist but which is THE
+        REPL is not provable (refuse; never pick, never serve-fallback);
+      * ``(None, None)``       — no tmux REPL for this project at all (or the
+        project->profile resolution / discovery itself failed), so the caller
+        takes the serve fallback — matching "fall back ONLY when no tmux REPL
+        exists".
+
+    Project -> profile uses the SAME named-session seam the rest of the WS
+    layer uses (``resolve_named_session_id``); the REPL pane is the
+    ``hermes -p <profile> chat`` process. Discovery is cheap (list-panes +
+    one ps per pane), which is why it runs on the socket thread to decide
+    routing before any turn work starts.
+    """
+    import repl_inject
+    try:
+        import routes_orchestrator as _ro
+        profile, _title, _sid = _ro.resolve_named_session_id(
+            project, registry_path=_ro._registry_path(None))
+        if not profile:
+            return None, None
+        pane = repl_inject.resolve_pane(profile)
+        return pane, None
+    except repl_inject.InjectError as exc:
+        if exc.kind == "ambiguous":
+            return None, exc.message
+        return None, None
+    except Exception:  # noqa: BLE001 — routing decision, never fatal to the socket
+        return None, None
+
+
+def _tmux_deliver(project: str, text: str, pane: dict) -> None:
+    """Worker: inject ``text`` into the project's REPL pane, then tell the store.
+
+    Runs on a tracked worker thread (the paste does a busy capture, a 0.5s
+    settle and Enter). The reply itself is NOT fetched here: the operator's
+    REPL writes the session's rows in state.db and the existing store-tail
+    (read direction) folds the reply into the same store 1:1 — that is the
+    whole point of one-REPL-as-source-of-truth. The working frame carries
+    ``via=tmux`` plus the receipt (pane/busy/mode) so the app — and the
+    transcript — state exactly which path carried the message and whether it
+    queued instead of interrupting.
+    """
+    import repl_inject
+    try:
+        receipt = repl_inject.deliver(pane, text)
+    except repl_inject.InjectError as exc:
+        # Honest failure: the operator's message echoed already, so say the
+        # injection did not land rather than leaving a hanging turn.
+        get_store(project).append(TYPE_SYSTEM, SystemPayload(
+            kind="tmux_delivery_failed",
+            details={"text": text, "via": "tmux", "message": exc.message}))
+        return
+    get_store(project).append(TYPE_SYSTEM, SystemPayload(
+        kind="working",
+        details={"text": text, "via": "tmux", "pane": receipt["target"],
+                 "busy": receipt["busy"], "mode": receipt["mode"],
+                 "queued": receipt["mode"] == "queue"}))
 
 
 def _append_busy_notice(project: str) -> None:
