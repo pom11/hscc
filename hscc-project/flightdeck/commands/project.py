@@ -29,6 +29,7 @@ from ..core import git_state, project_lifecycle, registry
 from ..core import session_discovery
 from ..core import bindings
 from ..core import digest as digest_core
+from ..core import tmux_chat
 from ._theme import esc, escape, make_console, panel, status_panel, table
 
 # --------------------------------------------------------------------------- #
@@ -749,12 +750,16 @@ def cmd_chat(args: argparse.Namespace) -> int:
     if trailing:
         argv += list(trailing)
 
-    exec_seam = getattr(args, "exec_seam", None) or os.execvp
-    # os.execvp replaces this process — the operator gets a real TTY. On a
-    # success path this never returns; the return 0 is for the seam-injected
-    # tests (and is unreachable in production).
-    exec_seam("hermes", argv)
-    return 0
+    # tmux-aware (2026-10-13): inside tmux the chat opens here as always;
+    # outside, it opens in (or attaches to) the named session hscc-<project>
+    # so the iOS app's pane discovery can SEE this REPL. A non-tmux chat
+    # requires an explicit Y/N — never a silent fallback. `exec_seam` keeps
+    # the execvp contract for tests; `chat_env` pins the branch they test.
+    return tmux_chat.launch_interactive_chat(
+        name, argv,
+        exec_seam=getattr(args, "exec_seam", None),
+        env=getattr(args, "chat_env", None),
+    )
 
 
 def _cmd_chat_resume(name: str, resume_id: str, args, resolved: dict) -> int:
@@ -794,9 +799,13 @@ def _cmd_chat_resume(name: str, resume_id: str, args, resolved: dict) -> int:
         "project chat",
         f"[accent]project {esc(name)} -> profile {esc(profile)}, resuming session "
         f"'{esc(resume_id)}'[/accent]"))
-    exec_seam = getattr(args, "exec_seam", None) or os.execvp
-    exec_seam("hermes", argv)
-    return 0
+    # tmux-aware, same door as the plain orchestrator chat (see cmd_chat):
+    # --resume opens in tmux when tmux is usable, else explicit Y/N.
+    return tmux_chat.launch_interactive_chat(
+        name, argv,
+        exec_seam=getattr(args, "exec_seam", None),
+        env=getattr(args, "chat_env", None),
+    )
 
 
 def cmd_sessions(args: argparse.Namespace) -> int:

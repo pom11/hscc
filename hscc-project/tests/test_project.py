@@ -143,6 +143,10 @@ def _ns(**kw):
         apply=False, dry_run=False, name="", repo=None, github=False,
         private=False, project_cmd=None, session_db=None,
         default_db=_FakeDefaultDBProvider(),
+        # Chat tests exercise the IN-PLACE exec (tmux_chat branch A); pin the
+        # env so they are deterministic outside tmux too. Branch B/C have
+        # their own tests in test_tmux_chat.py.
+        chat_env={"TMUX": "1"},
     )
     defaults.update(kw)
     return argparse.Namespace(**defaults)

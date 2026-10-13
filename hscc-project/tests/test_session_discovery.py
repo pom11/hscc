@@ -589,6 +589,8 @@ def _ns(**kw):
     defaults = dict(
         registry=None, session_db=None, default_db=None, exec_seam=None,
         name="", extra=None, resume_id=None,
+        # chat exec tests = tmux_chat branch A (in place); pin it.
+        chat_env={"TMUX": "1"},
     )
     defaults.update(kw)
     return argparse.Namespace(**defaults)
