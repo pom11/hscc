@@ -206,6 +206,8 @@ def _ns(tmp_path, name, orch_db, *, archive_dir, registry_path=None,
         resume_id=None,
         extra=None,
         session=None,  # filled by resolve path (kept for parity with prod args)
+        # chat exec tests = tmux_chat branch A (in place); pin it.
+        chat_env={"TMUX": "1"},
     )
     # Model the argv/cmd fields cmd_chat reads defensively via getattr.
     return ns
