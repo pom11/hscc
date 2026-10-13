@@ -11,6 +11,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.6.0] - 2026-10-13
+
+### Added
+- **iPhone messages now type into the operator's REAL terminal REPL.** The
+  API WebSocket write path is tmux-first: when the project's orchestrator
+  REPL (`hermes -p <profile> chat`) is a pane in tmux, the send is delivered
+  there via `repl_inject` — bracketed paste, so a multi-line message arrives
+  as ONE message; `/queue` automatically when the REPL is mid-turn, so a
+  running `/goal` is never interrupted; the reply comes back through the
+  existing state.db store-tail (read direction), 1:1. The serve-PTY path
+  remains ONLY as the fallback for "no tmux REPL exists". Every decision is
+  visible in the transcript: the `working` frame carries `via=tmux` (with
+  the pane and busy/queued receipt) or `via=serve`. If MULTIPLE panes run
+  the project's REPL the send refuses honestly (`tmux_ambiguous`) instead of
+  guessing or silently falling back — the same never-guess rule as the CLI
+  tool. Pane resolution failures degrade to the serve path, never to a dead
+  socket.
+- **Opt-in boot resilience for `hscc api`** — `hscc api install-service`
+  writes `~/Library/LaunchAgents/com.hscc.api.plist` (RunAtLoad + KeepAlive,
+  the real `python3 -m api_server serve` entrypoint with the unchanged
+  loopback/token bind rules) so a REBOOT no longer takes the iPhone client
+  offline. Strictly opt-in: the command writes the file and prints the
+  `launchctl bootstrap` step — it NEVER loads the unit itself (the module has
+  no subprocess import at all, and a test enforces that structurally).
+  `hscc api uninstall-service` removes the file. The bootstrap reports the
+  current state and the opt-in command but never runs either. Honest note
+  (same asymmetry as the daemon unit): `hscc api status` reads the PID file,
+  so a launchd-run instance looks stopped there — trust `launchctl print`.
+
+### Changed
+- **`hscc project message send` delivers for real.** `--apply` types the
+  message into the project's live orchestrator REPL pane through the SAME
+  `repl_inject` module the iOS/WS write path uses (bracketed paste, `/queue`
+  when busy) — both doors, one pane. Without `--apply` the command stays a
+  dry-run render, matching `message dispatch`. The old "Telegram removed →
+  no delivery" notice is gone: the delivery target is the operator's REPL,
+  and refusals are honest (named pane/profile, never a silent success).
 ## [2.5.10] - 2026-10-12
 
 ### Added
