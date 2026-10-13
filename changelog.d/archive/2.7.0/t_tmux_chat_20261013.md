@@ -15,6 +15,10 @@ task: t_tmux_chat_20261013
   surprised. The real tmux/ps/stdin seams carry the `repl_inject`-style
   identity guard (they refuse under pytest). `hscc-project/tests/test_tmux_chat.py`:
   15 cases (branches A/B/C incl. reuse/chatless-window/foreign-profile/no-TTY).
+  Outside tmux it first looks for the profile's REPL in **any** tmux session
+  (e.g. an ad-hoc `0`) and attaches to that pane, so it never starts a second
+  chat for the same profile (two panes would make the iOS path refuse as
+  ambiguous); two or more live panes -> named reason + Y/N.
 - **`hscc doctor` gained an iOS chat-reachability section.** Per registry
   project: is its `-orch` REPL live, and does it own a tty a tmux pane
   claims? `problem` (outside tmux — the exact consequence spelled out) or
