@@ -58,6 +58,11 @@ DEFAULT_SERVE_PORT = 9119
 
 # Seconds to wait for the serve to accept TCP before declaring startup failed.
 _SERVE_READY_TIMEOUT_S = 20.0
+# Per-project mount-failure backoff (iOS-chat-e2e B): after a failed native
+# mount, the next attempt waits this long — one honest warning per window
+# instead of one per WS connect (the 102-line log flood of 2026-10-13).
+_MOUNT_RETRY_BACKOFF_S = 60.0
+_MOUNT_FAIL_HW: dict = {}
 # Seconds between TCP accept probes while health-checking the serve boot.
 _SERVE_PROBE_INTERVAL_S = 0.5
 
@@ -91,6 +96,7 @@ def _reset_for_tests() -> None:
         _serve_port = DEFAULT_SERVE_PORT
         _serve_bin = DEFAULT_SERVE_BIN
         _drivers = {}
+        _MOUNT_FAIL_HW.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -437,6 +443,14 @@ def ensure_mounted(project: str, registry_path: Optional[str] = None) -> None:
             # recreate). A DEGRADED (tail-only) driver does NOT count once the
             # serve is back: fall through and remount with native attach.
             return
+        # Mount-failure backoff (iOS-chat-e2e B): a serve that is *up* but
+        # refuses the mount (the 403 shape) used to be retried on EVERY WS
+        # connect/history read — 102 identical warning lines in one operator
+        # session. Remount attempts per project are now rate-limited; healthy
+        # mounts clear the record so a recovery is immediate next time.
+        last_fail = _MOUNT_FAIL_HW.get(project, 0.0)
+        if time.time() - last_fail < _MOUNT_RETRY_BACKOFF_S:
+            return
         if existing is not None:
             # Stale/dead driver from a previous mount — tear it down cleanly
             # before creating a fresh one (reconnect semantics). Best-effort.
@@ -460,14 +474,26 @@ def ensure_mounted(project: str, registry_path: Optional[str] = None) -> None:
     try:
         driver.start()
     except Exception as exc:  # noqa: BLE001 — fail-safe: never break the caller
-        # A connect that fails (e.g. the serve just died mid-mount) leaves the
-        # driver recorded but not alive; the next ensure_mounted retries. The
-        # history/WS stream continues on whatever it has (possibly empty until
-        # the serve comes back). Honest log, not a silent swallow.
+        # Legacy path: a start() that raises (pre-2.7.1 drivers / injected
+        # test doubles) leaves the driver recorded but not alive. Rate-limit
+        # the next attempt; the stream continues on whatever it has.
         log.warning("gateway-bridge: mount driver for %s failed: %r",
                     project, exc)
+        with _LOCK:
+            _MOUNT_FAIL_HW[project] = time.time()
         return
 
+    if driver._alive and not driver.native_attached() and not cfg.degraded:
+        # serve was up but the ATTACH failed (403 / stale-token shape): the
+        # driver is alive tail-only. start() logged it once; here we only
+        # rate-limit the next remount attempt so a broken serve costs one
+        # warning per backoff window per project, not one per WS connect.
+        with _LOCK:
+            _MOUNT_FAIL_HW[project] = time.time()
+        return
+
+    with _LOCK:
+        _MOUNT_FAIL_HW.pop(project, None)   # healthy — next recovery is instant
     log.info("gateway-bridge: mounted live GatewayDriver for project %s",
              project)
 

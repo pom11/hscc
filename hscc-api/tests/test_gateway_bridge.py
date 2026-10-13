@@ -306,6 +306,32 @@ class _Proc999:
     pid = 999
 
 
+def test_mount_failure_backoff_suppresses_retry_storm(monkeypatch):
+    """iOS-chat-e2e B: a serve that is UP but whose mount fails must not be
+    retried on every WS connect (the 102-warning flood). While inside the
+    backoff window, ensure_mounted is a no-op; after it, one attempt runs."""
+    FakeDriver, created = _fake_driver_factory()
+    monkeypatch.setattr(bridge, "GatewayDriver", FakeDriver)
+    monkeypatch.setattr(bridge, "is_serve_up", lambda: True)
+    monkeypatch.setattr(bridge, "serve_endpoint", lambda: ("127.0.0.1", 9119))
+    monkeypatch.setattr(bridge, "_serve_token_value", lambda: "tok")
+    monkeypatch.setattr(FakeDriver, "native_attached", lambda self: False)
+
+    # start() marks alive; native_attached stays False → the "serve up but
+    # attach failed" shape stamps the backoff.
+    bridge.ensure_mounted("proj_flood")            # attempt 1
+    assert len(created) == 1
+    for _ in range(5):
+        bridge.ensure_mounted("proj_flood")        # suppressed attempts
+    assert len(created) == 1                        # no retry storm
+
+    # Back off the window → the next call attempts once more.
+    bridge._MOUNT_FAIL_HW["proj_flood"] = (
+        __import__("time").time() - bridge._MOUNT_RETRY_BACKOFF_S - 1)
+    bridge.ensure_mounted("proj_flood")
+    assert len(created) == 2
+
+
 def test_serve_env_forces_loopback_public_url():
     """A missing or non-loopback dashboard URL is overridden to the loopback
     sentinel (so the serve is NOT ticket-gated and the driver's ?token= auth
