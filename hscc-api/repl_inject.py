@@ -54,29 +54,6 @@ class InjectError(Exception):
 # the reference tool).
 # --------------------------------------------------------------------------- #
 
-def run_tmux(*args: str, input_text: str | None = None) -> str:
-    """Run tmux with argv; return stdout. Raise InjectError on non-zero rc."""
-    p = subprocess.run(["tmux", *args], input=input_text,
-                       capture_output=True, text=True)
-    if p.returncode != 0:
-        raise InjectError("tmux",
-                          f"tmux {' '.join(args[:2])} failed: {p.stderr.strip()}")
-    return p.stdout
-
-
-def run_ps(tty: str) -> str:
-    """Commands running on ``tty`` (one per line), via ps."""
-    return subprocess.run(["ps", "-t", tty.replace("/dev/", ""), "-o", "command="],
-                          capture_output=True, text=True).stdout
-
-
-# --------------------------------------------------------------------------- #
-# Pane discovery + busy detection (reference-identical parsing)
-# --------------------------------------------------------------------------- #
-
-_PROFILE_RE = re.compile(r"(?:^|\s)(?:-p|--profile)[ =](\S+)")
-
-
 def _under_pytest() -> bool:
     """True inside a pytest run. The ORIGINAL subprocess seams refuse to
     execute there: tests that forget to stub them must not list — let alone
@@ -123,6 +100,13 @@ def run_ps(tty: str) -> str:
 # Captured after definition: identity check for the hermeticity guards above.
 _ORIG_RUN_TMUX = run_tmux
 _ORIG_RUN_PS = run_ps
+
+
+# --------------------------------------------------------------------------- #
+# Pane discovery + busy detection (reference-identical parsing)
+# --------------------------------------------------------------------------- #
+
+_PROFILE_RE = re.compile(r"(?:^|\s)(?:-p|--profile)[ =](\S+)")
 
 
 def hermes_panes() -> list[dict]:
