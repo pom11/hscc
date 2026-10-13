@@ -769,17 +769,141 @@ def _tool_call_from_history(msg: dict) -> ToolCallPayload:
     )
 
 
+_USER_ECHO_DEDUPE_WINDOW_S = 120.0   # same text within 2 min = the app echo
+_COMPACT_CONTENT_PREFIX = "[CONTEXT COMPACTION"
+
+
+def _is_compaction_summary(msg: dict) -> bool:
+    """True for hermes' context-compaction summary rows.
+
+    These arrive as ``role=user`` but were NEVER typed by the operator: they
+    are the summarizer's output injected into the conversation (verified live:
+    66 such rows in the operator session, all with ``_compressed_summary=1``).
+    The flag is authoritative; the content prefix is the belt for old schema
+    or rows the flag was not stamped on. Rendering them as user messages made
+    seq 1 of the iOS transcript a giant fake prompt (report defect 3).
+    """
+    if msg.get("_compressed_summary"):
+        return True
+    content = msg.get("content")
+    return isinstance(content, str) and content.startswith(
+        _COMPACT_CONTENT_PREFIX)
+
+
+def _recent_user_echo(store, text: str) -> bool:
+    """True when ``store`` already shows a user message ``text`` very recently.
+
+    THE user-message duplicate (report defect 3, iOS msg appearing twice at
+    seq 116 + 233): the app's WS send appends the echo itself
+    (routes_ws._handle_client_send) *and* the tmux REPL persists the same
+    text as a state.db user row the tail later translates — two frames for
+    one send. The echo is the one the app should keep (it is immediate), so
+    the TAIL skips a user row whose text matches a very recently echoed
+    message. Residual false-suppression (operator types the same text in the
+    terminal within the window of an app send) hides only that terminal
+    duplicate — the app echo already showed the message.
+    """
+    if not text:
+        return False
+    cutoff = time.time() - _USER_ECHO_DEDUPE_WINDOW_S
+    try:
+        events = store.history(limit=30)["events"]
+    except Exception:  # noqa: BLE001 — dedupe is best-effort
+        return False
+    for ev in reversed(events):
+        if ev.get("type") != TYPE_MESSAGE:
+            continue
+        pay = ev.get("payload") or {}
+        if pay.get("role") != "user" or pay.get("delta") != text:
+            continue
+        ts = ev.get("ts") or ""
+        try:
+            # ISO-8601 Z form written by make_event/_now_iso — UTC, so parse
+            # with timegm (mktime would read it as LOCAL wall clock and skew
+            # the window by the host's UTC offset).
+            import calendar
+            ev_secs = calendar.timegm(
+                time.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S"))
+        except (ValueError, TypeError):
+            return False   # unknown ts shape: do not suppress
+        return ev_secs >= cutoff
+    return False
+
+
+def _reasoning_text(msg: dict) -> str:
+    """Persisted reasoning of an assistant row, best-effort ('' when none).
+
+    Hermes DOES persist chain-of-thought for our deployment (verified live:
+    ``reasoning`` + ``reasoning_content`` are populated on assistant rows;
+    ``reasoning_details``/codex columns are provider-specific and None here).
+    """
+    for key in ("reasoning", "reasoning_content"):
+        val = msg.get(key)
+        if isinstance(val, str) and val.strip():
+            return val
+    return ""
+
+
+def _tool_starts_from_row(msg: dict) -> list:
+    """tool_call status=start frames for an assistant row's pending tool_calls.
+
+    A role=assistant row that ends its turn with ``finish_reason=tool_calls``
+    carries the calls it made (name + args) — the START half of the contract.
+    The matching role=tool row supplies the finish half (existing
+    :func:`_tool_call_from_history`), paired by ``call_id`` in the iOS chip
+    view. Malformed entries are skipped; a row with none yields [].
+    """
+    out = []
+    tcs = msg.get("tool_calls")
+    if not isinstance(tcs, list):
+        return out
+    for tc in tcs:
+        if not isinstance(tc, dict):
+            continue
+        call_id = str(tc.get("id") or tc.get("call_id") or "")
+        fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+        name = str(fn.get("name") or tc.get("name") or "tool")
+        args_raw = fn.get("arguments", tc.get("arguments", tc.get("input")))
+        args: dict = {}
+        if isinstance(args_raw, dict):
+            args = args_raw
+        elif isinstance(args_raw, str) and args_raw:
+            from json import loads
+            try:
+                parsed = loads(args_raw)
+            except (ValueError, TypeError):
+                parsed = None
+            if isinstance(parsed, dict):
+                args = parsed
+        out.append(ToolCallPayload(call_id=call_id, name=name,
+                                   status="start", args=args))
+    return out
+
+
 def _translate_history_to_store(store, messages: list) -> int:
     """Translate a session's stored messages into store frames; returns count.
 
-    One ``role=\"user\"`` / ``role=\"assistant\"`` message -> a single
-    ``message`` frame with the full text and ``done=True`` (the terminal
-    frame the live feed would have emitted — a complete turn is a finalised
-    row). A ``role=\"tool\"`` message -> one ``tool_call status=\"finish\"``
-    frame; ``role=\"system\"`` -> one ``system`` frame. Each frame keeps the
-    original message timestamp so the iOS transcript shows real times, and
-    seq is assigned sequentially by the store, so backfilled history and the
-    live feed share ONE contiguous seq space (the reconnect contract).
+    Frame contract per role (report defects 3 + 4 — tool calls and the
+    reasoning the terminal REPL produced never reached the app):
+
+    * ``role=user`` (real prompt) → one ``message`` frame, ``done=True``.
+      Compaction summaries (``_compressed_summary`` / content prefix) are
+      rendered as ``system kind=context_summary`` — NEVER a user message.
+      Rows duplicating a very recent app echo are SKIPPED (the echo already
+      carries them; see :func:`_recent_user_echo`).
+    * ``role=assistant`` → optional ``system kind=reasoning`` (when the row
+      persists reasoning), ``tool_call status=start`` per pending call, then
+      the ``message`` frame — but ONLY when content is non-empty (tool-calling
+      turns persist an empty-content assistant row per API call; those made
+      empty bubbles in the transcript).
+    * ``role=tool`` → one ``tool_call status=finish`` frame (result), paired
+      with its start by ``call_id``.
+    * ``role=system`` → ``system kind=session_history``.
+
+    ORDER: one row emits reasoning < tool-start < message; rows translate in
+    id order (hermes' own ordering contract — ids, never timestamps, which
+    can regress). Each frame keeps the row's timestamp; the store assigns
+    contiguous seq in APPEND order, which is what clients must sort by.
     """
     count = 0
     for m in messages:
@@ -787,11 +911,35 @@ def _translate_history_to_store(store, messages: list) -> int:
             continue   # a malformed row should never abort the backfill
         ts = _epoch_to_iso(m.get("timestamp"))
         role = m.get("role")
-        if role in ("user", "assistant"):
+        if role == "user":
+            text = _content_to_text(m.get("content"))
+            if _is_compaction_summary(m):
+                store.append(TYPE_SYSTEM, SystemPayload(
+                    kind="context_summary",
+                    details={"text": text[:400],
+                             "note": "context-compaction summary "
+                                     "(not an operator message)"}), ts=ts)
+                count += 1
+                continue
+            if _recent_user_echo(store, text):
+                continue   # the app already echoed this exact send
             store.append(TYPE_MESSAGE, MessagePayload(
-                role=role, delta=_content_to_text(m.get("content")), done=True),
-                ts=ts)
+                role="user", delta=text, done=True), ts=ts)
             count += 1
+        elif role == "assistant":
+            reasoning = _reasoning_text(m)
+            if reasoning:
+                store.append(TYPE_SYSTEM, SystemPayload(
+                    kind="reasoning", details={"text": reasoning}), ts=ts)
+                count += 1
+            for start in _tool_starts_from_row(m):
+                store.append(TYPE_TOOL_CALL, start, ts=ts)
+                count += 1
+            text = _content_to_text(m.get("content"))
+            if text:
+                store.append(TYPE_MESSAGE, MessagePayload(
+                    role="assistant", delta=text, done=True), ts=ts)
+                count += 1
         elif role == "tool":
             store.append(TYPE_TOOL_CALL, _tool_call_from_history(m), ts=ts)
             count += 1
