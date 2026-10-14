@@ -336,9 +336,15 @@ are `List`, most are hand-rolled ScrollView cards): `List` with `.listStyle
 everywhere; `HSEmpty`/`HSError` for states.
 
 **Fleet** (was 5 copy-pasted 5-case `switch` blocks): one section per feed
-(Health · Throughput · Streams · Autoscale · Models) in a `List`; the
+(Health · Throughput · Stats · Streams · Autoscale · Models) in a `List`; the
 byte-twin `verifyBody`/`healthBody` collapse to one `HealthCheckList` used by
-Fleet and Ops. Model-serving moves here (absorbs `ModelsView`).
+Fleet and Ops. Stats was always one of the screen's own feeds — the first draft
+of this list left it out; it is not new. **Models** is the serving read: one row
+per workload from `GET /v1/cluster/status` (model name · the units serving it ·
+stream count), the same feed ServingControl reads — exactly what mockup frames
+7/8 draw (`Models · 3 serving`). It is a **new** section, not a merge: there is
+no `ModelsView` to absorb (ruling `t_1897550c` — see the note under the §8
+table).
 
 **Nodes & serving** (absorbs ServingControl + the NodeTopology strip): topology
 as a header, then a unit list with per-row Stop/Restart. **Fix:** Stop and
@@ -448,13 +454,15 @@ the same master for the widget and Live-Activity glyph assets. **Phase 2.**
 | SettingsView (tab) | drawer · App/Settings |
 | WidgetSurfaceEditor / QRScannerView | Settings subpages (kept) |
 | NodeTopologyView | component (kept; shown in Fleet + Nodes) |
-| **ModelsView** | **merged into Fleet** (a serving section) |
+| ~~**ModelsView**~~ | **never existed** (ruling `t_1897550c`, 2026-10-14): no `struct ModelsView` in any commit ever (verified across every ref, stash, and unreachable object), and no `Views/Models*.swift` was ever added or deleted. The row named it because §5's Fleet feed list already wanted a **Models serving feed** (mockup frames 7/8: `Models · 3 serving`) — a *new* read-only section in Fleet over the same `/v1/cluster/status` workloads ServingControl reads, **not** a merge of a screen. Nothing is lost: this row moves no code and deletes no feature. Fleet's Models section ships as its own Phase 2 card. |
 | **ProjectDetailView** as a segment-sandwich | **dissolved** (Overview/Board/Settings → detail subpages; Chat → Chat screen) |
 | OrchestratorChatView (dead) | **retired** — model migrates to `ChatEntry`/OfflineSendQueue, view deleted |
 
-Two merges (Autodown+self-heal; Models→Fleet) and one dissolve (ProjectDetail
+One merge (Autodown+self-heal) and one dissolve (ProjectDetail
 segments) are the only non-1:1 moves; each keeps its data and actions. Say no
-to any and it stays a separate screen in Phase 2.
+to any and it stays a separate screen in Phase 2. (The Models→Fleet row used to
+count as a second merge; it does not — see the ruled-out row above. §5's
+Models section is new read-only surface, additive, and cannot drop anything.)
 
 ---
 
