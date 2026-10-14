@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HSCC iOS redesign — mockup (2026-10-14)</title>
+<style>
+  /* ============ design tokens (mirror docs/design/IOS_REDESIGN_2026-10-14.md §2) ============ */
+  :root[data-theme="dark"]{
+    --surface:#14161B; --raised:#1E222A; --elevated:#262B35; --overlay:rgba(10,12,16,.55);
+    --on:#EEF1F6; --muted:#A7B0C0; --sep:rgba(255,255,255,.08);
+    --accent:#7AE2B0; --on-accent:#0E241A; --ok:#7AE2B0; --warn:#F2A65A; --bad:#E56A6A; --neutral:#8FA0B8;
+    --bubble-user:#233043; --on-bubble:#DCE8FF; --mono-bg:#191D24;
+    --shadow:0 8px 24px rgba(0,0,0,.45); --dock:rgba(30,34,42,.82);
+  }
+  :root[data-theme="light"]{
+    --surface:#F6F7FA; --raised:#FFFFFF; --elevated:#FFFFFF; --overlay:rgba(30,34,42,.35);
+    --on:#14161B; --muted:#55606E; --sep:rgba(20,22,27,.10);
+    --accent:#0F7A52; --on-accent:#FFFFFF; --ok:#1B7E55; --warn:#B45309; --bad:#B3261E; --neutral:#55606E;
+    --bubble-user:#DCE8FF; --on-bubble:#0B2A5B; --mono-bg:#EEF0F4;
+    --shadow:0 6px 20px rgba(20,22,27,.16); --dock:rgba(255,255,255,.85);
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-font-smoothing:antialiased}
+  body{background:#0a0b0e;color:var(--on);font:15px/1.45 -apple-system,"SF Pro Text",Segoe UI,Roboto,sans-serif;padding:28px 20px 80px}
+  :root[data-theme="light"] body{background:#e9ebef}
+  h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:4px}
+  :root[data-theme="light"] h1{color:#14161B}
+  .sub{color:#9aa3b2;font-size:13px;margin-bottom:18px}
+  .toolbar{position:sticky;top:0;z-index:50;display:flex;gap:10px;align-items:center;padding:10px 0;margin-bottom:14px;background:inherit}
+  .toolbar button{font:600 13px -apple-system;padding:8px 14px;border-radius:10px;border:1px solid rgba(160,170,190,.35);background:rgba(160,170,190,.12);color:inherit;cursor:pointer}
+  .board{display:flex;flex-wrap:wrap;gap:34px}
+  .shot{display:flex;flex-direction:column;gap:8px}
+  .shot>h2{font-size:13px;font-weight:600;color:#8d97a8;letter-spacing:.02em}
+  /* iPhone frame */
+  .ph{width:390px;height:844px;border-radius:52px;background:var(--surface);box-shadow:var(--shadow),0 0 0 10px #1c1f26,0 0 0 12px #333845;position:relative;overflow:hidden;color:var(--on)}
+  .ph::before{content:"";position:absolute;top:12px;left:50%;transform:translateX(-50%);width:124px;height:30px;border-radius:16px;background:#0c0d10;z-index:40}
+  .sb{display:flex;justify-content:space-between;padding:18px 26px 4px;font:600 14px -apple-system;color:var(--on)}
+  .sb .r{display:flex;gap:6px;align-items:center}
+  /* ---- generic pieces ---- */
+  .navbar{display:flex;align-items:center;gap:12px;padding:10px 16px 12px}
+  .navbar .title{font:600 17px -apple-system;flex:1;display:flex;align-items:center;gap:7px}
+  .iconbtn{width:44px;height:44px;display:flex;align-items:center;justify-content:center;border-radius:12px;color:var(--on)}
+  .iconbtn:active{background:var(--raised)}
+  svg{display:block}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .conn{position:relative;width:9px;height:9px}
+  .conn::after{content:"";position:absolute;inset:-7px}      /* >=44pt rule noted; visual 9pt */
+  /* transcript */
+  .tx{position:absolute;top:104px;left:0;right:0;bottom:112px;overflow:hidden;padding:2px 16px}
+  .msg-user{background:var(--bubble-user);color:var(--on-bubble);margin-left:56px;border-radius:18px 18px 5px 18px;padding:10px 14px;font-size:16px;width:max-content;max-width:100%}
+  .msg-asst{padding:10px 0 2px;font-size:16px;line-height:1.5;color:var(--on)}
+  .row-sys{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12.5px;padding:8px 0}
+  .row-sys .hair{flex:1;height:1px;background:var(--sep)}
+  .disc{border-radius:12px;background:var(--raised);margin:6px 0}
+  .disc .hd{display:flex;align-items:center;gap:8px;padding:9px 12px;min-height:40px;font-size:13px;color:var(--muted)}
+  .disc .hd .chev{margin-left:auto;transition:transform .2s}
+  .disc .hd .kind{font-weight:600;color:var(--on);font-size:13px}
+  .disc .bd{border-top:1px solid var(--sep);padding:10px 12px;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);white-space:pre-wrap}
+  .disc.tool .hd .name{font-weight:600;color:var(--on)}
+  .chip{font-size:11.5px;font-weight:600;padding:2px 8px;border-radius:999px;border:1px solid var(--sep)}
+  .chip.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,transparent)}
+  .chip.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,transparent)}
+  .chip.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,transparent)}
+  /* composer */
+  .composer{position:absolute;left:0;right:0;bottom:0;padding:10px 14px 24px;background:linear-gradient(to top,var(--surface) 72%,transparent)}
+  .cbar{display:flex;align-items:flex-end;gap:9px;background:var(--raised);border:1px solid var(--sep);border-radius:22px;padding:7px 8px 7px 16px;box-shadow:var(--shadow)}
+  .cbar .in{flex:1;font-size:16px;color:var(--muted);padding:6px 0}
+  .send{width:38px;height:38px;border-radius:50%;background:var(--accent);color:var(--on-accent);display:flex;align-items:center;justify-content:center;flex:none}
+  .turn{position:absolute;right:16px;bottom:96px;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--warn);background:var(--raised);border:1px solid var(--sep);border-radius:999px;padding:5px 11px;box-shadow:var(--shadow)}
+  .spin{width:10px;height:10px;border-radius:50%;border:2px solid var(--warn);border-top-color:transparent;animation:s 1s linear infinite}
+  @keyframes s{to{transform:rotate(360deg)}}
+  /* home */
+  .home{position:absolute;top:104px;left:0;right:0;bottom:136px;padding:4px 22px;overflow:hidden}
+  .greet{font-size:13px;color:var(--muted);margin:8px 0 2px}
+  .h1x{font:700 26px/1.2 -apple-system;margin-bottom:16px}
+  .hero{background:var(--raised);border:1px solid var(--sep);border-radius:18px;padding:14px 16px;display:flex;gap:12px;align-items:center;margin-bottom:14px}
+  .hero .t{font-weight:600;font-size:15px}
+  .hero .s{font-size:12.5px;color:var(--muted)}
+  .hero .go{margin-left:auto;color:var(--accent)}
+  .hgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .tile{background:var(--raised);border:1px solid var(--sep);border-radius:18px;padding:14px;display:flex;flex-direction:column;gap:8px;min-height:96px}
+  .tile .ic{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center}
+  .tile .t{font-weight:600;font-size:14.5px}
+  .tile .s{font-size:12px;color:var(--muted)}
+  /* dock */
+  .dock{position:absolute;left:20px;right:20px;bottom:26px;height:84px;border-radius:26px;background:var(--dock);backdrop-filter:blur(18px);border:1px solid var(--sep);box-shadow:var(--shadow);display:flex;align-items:center;justify-content:space-evenly;padding:0 8px}
+  .d{display:flex;flex-direction:column;align-items:center;gap:4px;width:64px}
+  .d .b{width:54px;height:54px;border-radius:15px;display:flex;align-items:center;justify-content:center;position:relative}
+  .d .lbl{font-size:10.5px;color:var(--muted)}
+  .d.active .lbl{color:var(--on)}
+  .d .bdg{position:absolute;top:-5px;right:-5px;min-width:20px;height:20px;border-radius:10px;background:var(--bad);color:#fff;font:700 11px/20px -apple-system;text-align:center;padding:0 5px}
+  /* sidebar */
+  .drawer{position:absolute;top:0;bottom:0;left:0;width:310px;background:var(--raised);border-right:1px solid var(--sep);z-index:30;display:flex;flex-direction:column;padding:56px 0 16px;box-shadow:var(--shadow)}
+  .scrim{position:absolute;inset:0;background:var(--overlay);z-index:20}
+  .side-h{padding:0 20px 14px;display:flex;align-items:center;gap:10px}
+  .side-h .name{font:700 18px -apple-system}
+  .side-h .sub{font-size:12px;color:var(--muted)}
+  .sgrp{font:600 11px -apple-system;letter-spacing:.08em;color:var(--muted);padding:14px 20px 6px}
+  .sitem{display:flex;align-items:center;gap:13px;padding:0 20px;min-height:46px;font-size:15.5px;color:var(--on)}
+  .sitem .ic{width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex:none}
+  .sitem.on{color:var(--accent)}
+  .sitem .bdg{margin-left:auto;background:var(--bad);color:#fff;font:700 11.5px/18px -apple-system;min-width:18px;text-align:center;border-radius:9px;padding:0 5px}
+  .sitem .chev{margin-left:auto;color:var(--muted)}
+  /* list screen (fleet) */
+  .list{position:absolute;top:104px;left:0;right:0;bottom:0;overflow:hidden;padding:0 16px}
+  .sec{font:600 12px -apple-system;letter-spacing:.06em;color:var(--muted);padding:16px 4px 8px;text-transform:uppercase}
+  .lrow{display:flex;align-items:center;gap:12px;background:var(--raised);border:1px solid var(--sep);border-radius:14px;padding:12px 14px;margin-bottom:8px;min-height:56px}
+  .lrow .st{width:10px;height:10px;border-radius:50%;flex:none}
+  .lrow .tt{font-weight:600;font-size:15px}
+  .lrow .cap{font-size:12.5px;color:var(--muted);margin-top:1px}
+  .lrow .right{margin-left:auto;text-align:right}
+  .kbd{font:11px ui-monospace;margin-left:6px;color:var(--muted);border:1px solid var(--sep);border-radius:6px;padding:1px 5px}
+  /* icons sheet */
+  .iconsheet{width:390px;background:var(--raised);border:1px solid var(--sep);border-radius:22px;padding:20px;box-shadow:var(--shadow);color:var(--on)}
+  .iconsheet h3{font-size:14px;margin:14px 0 8px}
+  .iconsheet h3:first-child{margin-top:0}
+  .icand{display:flex;align-items:center;gap:18px;padding:10px 0;border-bottom:1px solid var(--sep)}
+  .icand .meta{font-size:12px;color:var(--muted);line-height:1.5}
+  .icand .meta b{color:var(--on);font-size:13px}
+  .homepreview{display:flex;gap:10px;align-items:flex-end}
+  .hp-cell{display:flex;flex-direction:column;align-items:center;gap:5px}
+  .hp-cell span{font-size:10px;color:var(--muted)}
+  .note{max-width:860px;color:#8d97a8;font-size:12.5px;line-height:1.6;margin-top:26px;border-top:1px solid rgba(140,150,170,.2);padding-top:16px}
+  .note b{color:#c9d1dd}
+</style>
+</head>
+<body>
+<h1>HSCC iOS redesign — Phase 1 mockup</h1>
+<div class="sub">Design spec: docs/design/IOS_REDESIGN_2026-10-14.md &nbsp;·&nbsp; no implementation code in this PR &nbsp;·&nbsp; toggle theme ↓ &nbsp;·&nbsp; every screen in both modes: flip the toggle</div>
+<div class="toolbar">
+  <button onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'">Toggle light / dark</button>
+</div>
+<div class="board">
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+ <defs>
+  <symbol id="i-menu" viewBox="0 0 22 22"><path d="M4 6h14M4 11h14M4 16h9" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></symbol>
+  <symbol id="i-send" viewBox="0 0 22 22"><path d="M11 17V5M6 10l5-5 5 5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/></symbol>
+  <symbol id="i-chevd" viewBox="0 0 16 16"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M12 3C6.9 3 3 6.4 3 10.6c0 2.4 1.3 4.6 3.4 6-.2 1-.8 2.2-1.9 3.4 2-.1 3.8-.9 5-1.9 1.4.5 2.9.8 4.5.8 5.1 0 9-3.4 9-7.6S17.1 3 12 3z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/></symbol>
+  <symbol id="i-fleet" viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="7" rx="2" fill="none" stroke="currentColor" stroke-width="1.9"/><rect x="3.5" y="14" width="17" height="6" rx="2" fill="none" stroke="currentColor" stroke-width="1.9"/><circle cx="7" cy="7.5" r="1.15" fill="currentColor"/><circle cx="7" cy="17" r="1.15" fill="currentColor"/></symbol>
+  <symbol id="i-cluster" viewBox="0 0 24 24"><circle cx="12" cy="5.2" r="2.3" fill="none" stroke="currentColor" stroke-width="1.9"/><circle cx="5.2" cy="17" r="2.3" fill="none" stroke="currentColor" stroke-width="1.9"/><circle cx="18.8" cy="17" r="2.3" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M10.7 7.3 6.5 15m11 0-4.2-7.7M7.5 17h9" stroke="currentColor" stroke-width="1.7"/></symbol>
+  <symbol id="i-cards" viewBox="0 0 24 24"><rect x="4" y="3.5" width="16" height="17" rx="2.4" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M8 8h8M8 12h8M8 16h5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></symbol>
+  <symbol id="i-approve" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M8.2 12.2l2.6 2.6 5-5.4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></symbol>
+  <symbol id="i-cron" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M12 7.4V12l3.2 2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" fill="none"/></symbol>
+  <symbol id="i-logs" viewBox="0 0 24 24"><path d="M4 6.5h16M4 12h16M4 17.5h10" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><path d="M17.5 15l2.8 2.5-2.8 2.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" fill="none"/></symbol>
+  <symbol id="i-memory" viewBox="0 0 24 24"><path d="M12 4.5c-2-1.6-4.6-1.6-6.4-.3-1.5 1.1-2 3.1-1.3 4.9-1.2 1.7-1.2 4 .1 5.6 1.3 1.7 3.7 2.3 5.7 1.5.7.7 1.1 1.8 1.1 3.1.2-1.3.6-2.4 1.3-3.1 2 .8 4.4.2 5.7-1.5 1.3-1.6 1.3-3.9.1-5.6.7-1.8.2-3.8-1.3-4.9-1.8-1.3-4.4-1.3-6.4.3-.2-.1-.4-.1-.6 0z" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 6v12" stroke="currentColor" stroke-width="1.5"/></symbol>
+  <symbol id="i-template" viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.9"/><rect x="13" y="4" width="7" height="7" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.9"/><rect x="4" y="13" width="7" height="7" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.9"/><rect x="13" y="13" width="7" height="7" rx="3.5" fill="none" stroke="currentColor" stroke-width="1.9"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M12 3.5v2.4M12 18.1v2.4M3.5 12h2.4M18.1 12h2.4M6 6l1.7 1.7M16.3 16.3 18 18M18 6l-1.7 1.7M7.7 16.3 6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M16 16l4.4 4.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></symbol>
+  <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" fill="none"/></symbol>
+  <symbol id="i-sessions" viewBox="0 0 24 24"><circle cx="8" cy="8" r="3.4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 19c.6-3 2.4-4.5 4.5-4.5S12 16 12.6 19M15.5 6.2a3.4 3.4 0 0 1 0 5.6M18 19c-.3-1.8-1-3.1-2-3.9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-term" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M4.5 6l2.2 2-2.2 2M8.5 10.5h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></symbol>
+  <symbol id="i-brain" viewBox="0 0 16 16"><path d="M8 3.2c-1.3-1.1-3.1-1.1-4.2-.2-1 .7-1.3 2-.9 3.2-.8 1.1-.8 2.6.1 3.6.9 1.1 2.4 1.5 3.7 1 .5.4.8 1.1.8 1.9.1-.8.4-1.5.9-1.9 1.3.5 2.8.1 3.7-1 .9-1 .9-2.5.1-3.6.4-1.2.1-2.5-.9-3.2-1.1-.9-2.9-.9-4.2.2z" fill="none" stroke="currentColor" stroke-width="1.4"/></symbol>
+  <symbol id="i-signal" viewBox="0 0 12 12"><path d="M2.5 8.5a5 5 0 0 1 0-5M4.7 7a2.6 2.6 0 0 1 0-2M9.5 8.5a5 5 0 0 0 0-5M7.3 7a2.6 2.6 0 0 0 0-2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/><circle cx="6" cy="6" r="1.15" fill="currentColor"/></symbol>
+  <!-- App icon candidates -->
+  <symbol id="ic-a" viewBox="0 0 60 60"><rect width="60" height="60" rx="13.5" fill="#14161B"/><circle cx="30" cy="15.5" r="4.6" fill="#7AE2B0"/><circle cx="15.5" cy="41" r="4.6" fill="#A7B0C0"/><circle cx="44.5" cy="41" r="4.6" fill="#F2A65A"/><path d="M27.8 19.4 17.7 37.1m24.6 0L32.2 19.4M20 41h20" stroke="#7AE2B0" stroke-width="2.6" stroke-linecap="round" opacity=".85"/></symbol>
+  <symbol id="ic-a-tint" viewBox="0 0 60 60"><rect width="60" height="60" rx="13.5" fill="#1d2129"/><circle cx="30" cy="15.5" r="4.6" fill="#fff"/><circle cx="15.5" cy="41" r="4.6" fill="#fff"/><circle cx="44.5" cy="41" r="4.6" fill="#fff"/><path d="M27.8 19.4 17.7 37.1m24.6 0L32.2 19.4M20 41h20" stroke="#fff" stroke-width="2.6" stroke-linecap="round"/></symbol>
+  <symbol id="ic-b" viewBox="0 0 60 60"><rect width="60" height="60" rx="13.5" fill="#14161B"/><rect x="13" y="13.5" width="34" height="9" rx="4.5" fill="#7AE2B0"/><circle cx="19.5" cy="18" r="1.9" fill="#14161B"/><rect x="13" y="25.5" width="34" height="9" rx="4.5" fill="#3a4150"/><circle cx="19.5" cy="30" r="1.9" fill="#A7B0C0"/><rect x="13" y="37.5" width="34" height="9" rx="4.5" fill="#3a4150"/><circle cx="19.5" cy="42" r="1.9" fill="#F2A65A"/></symbol>
+  <symbol id="ic-b-tint" viewBox="0 0 60 60"><rect width="60" height="60" rx="13.5" fill="#1d2129"/><rect x="13" y="13.5" width="34" height="9" rx="4.5" fill="#fff"/><rect x="13" y="25.5" width="34" height="9" rx="4.5" fill="#fff" opacity=".55"/><rect x="13" y="37.5" width="34" height="9" rx="4.5" fill="#fff" opacity=".35"/></symbol>
+  <symbol id="ic-c" viewBox="0 0 60 60"><rect width="60" height="60" rx="13.5" fill="#14161B"/><rect x="12.5" y="12.5" width="15" height="15" rx="4" fill="#3a4150"/><rect x="32.5" y="12.5" width="15" height="15" rx="4" fill="#3a4150"/><rect x="12.5" y="32.5" width="15" height="15" rx="4" fill="#3a4150"/><path d="M40 31.5v17M31.5 40h17M34 34l12 12M46 34 34 46" stroke="#7AE2B0" stroke-width="3" stroke-linecap="round"/></symbol>
+  <symbol id="ic-c-tint" viewBox="0 0 60 60"><rect width="60" height="60" rx="13.5" fill="#1d2129"/><rect x="12.5" y="12.5" width="15" height="15" rx="4" fill="#fff" opacity=".45"/><rect x="32.5" y="12.5" width="15" height="15" rx="4" fill="#fff" opacity=".45"/><rect x="12.5" y="32.5" width="15" height="15" rx="4" fill="#fff" opacity=".45"/><path d="M40 31.5v17M31.5 40h17M34 34l12 12M46 34 34 46" stroke="#fff" stroke-width="3" stroke-linecap="round"/></symbol>
+ </defs>
+</svg>
+
+<style>
+  /* local theme override for the light-mode phone frames */
+  .ph.lt{
+    --surface:#F6F7FA; --raised:#FFFFFF; --elevated:#FFFFFF; --overlay:rgba(30,34,42,.35);
+    --on:#14161B; --muted:#55606E; --sep:rgba(20,22,27,.10);
+    --accent:#0F7A52; --on-accent:#FFFFFF; --ok:#1B7E55; --warn:#B45309; --bad:#B3261E; --neutral:#55606E;
+    --bubble-user:#DCE8FF; --on-bubble:#0B2A5B; --mono-bg:#EEF0F4;
+    --shadow:0 6px 20px rgba(20,22,27,.16); --dock:rgba(255,255,255,.85);
+  }
+</style>
+<div class="shot"><h2>1 · Home + dock (dark)</h2>
+<div class="ph"><div class="sb"><span>9:41</span><span class="r"><svg width="16" height="12"><use href="#i-signal"/></svg><svg width="22" height="12"><rect x="1" y="1" width="18" height="10" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="3" y="3" width="12" height="6" rx="1.5" fill="currentColor"/></svg></span></div>
+  <div class="navbar"><div class="iconbtn"><svg width="22" height="22"><use href="#i-menu"/></svg></div>
+    <div class="title">hscc-cluster<span class="conn dot" style="background:var(--ok)"></span></div>
+    <div class="iconbtn"><svg width="20" height="20"><use href="#i-search"/></svg></div></div>
+  <div class="home">
+    <div class="greet">Good evening, operator</div>
+    <div class="h1x">Your cluster</div>
+    <div class="hero"><span class="dot" style="background:var(--ok)"></span>
+      <div><div class="t">All 4 nodes online</div><div class="s">3 models serving · 0 down · last check 12s ago</div></div>
+      <div class="go"><svg width="16" height="16"><use href="#i-chev"/></svg></div></div>
+    <div class="hgrid">
+      <div class="tile"><div class="ic" style="background:color-mix(in srgb,var(--accent) 16%,transparent);color:var(--accent)"><svg width="20" height="20"><use href="#i-chat"/></svg></div><div class="t">Projects</div><div class="s">12 · 2 need a reply</div></div>
+      <div class="tile"><div class="ic" style="background:color-mix(in srgb,var(--ok) 14%,transparent);color:var(--ok)"><svg width="20" height="20"><use href="#i-activity"/></svg></div><div class="t">Activity</div><div class="s">8 events since 18:00</div></div>
+      <div class="tile"><div class="ic" style="background:color-mix(in srgb,var(--warn) 14%,transparent);color:var(--warn)"><svg width="20" height="20"><use href="#i-approve"/></svg></div><div class="t">Approvals</div><div class="s">3 waiting on you</div></div>
+      <div class="tile"><div class="ic" style="background:color-mix(in srgb,var(--neutral) 14%,transparent);color:var(--neutral)"><svg width="20" height="20"><use href="#i-cards"/></svg></div><div class="t">Cards</div><div class="s">hscc board · 6 ready</div></div>
+    </div>
+  </div>
+  <div class="dock"><div class="d "><div class="b" style="background:var(--raised);border:1px solid var(--sep);color:var(--muted)"><svg width="24" height="24"><use href="#i-chat"/></svg><span class="bdg">2</span></div><span class="lbl">Chat</span></div><div class="d "><div class="b" style="background:var(--raised);border:1px solid var(--sep);color:var(--muted)"><svg width="24" height="24"><use href="#i-fleet"/></svg></div><span class="lbl">Fleet</span></div><div class="d "><div class="b" style="background:var(--raised);border:1px solid var(--sep);color:var(--muted)"><svg width="24" height="24"><use href="#i-cluster"/></svg></div><span class="lbl">Cluster</span></div><div class="d "><div class="b" style="background:var(--raised);border:1px solid var(--sep);color:var(--muted)"><svg width="24" height="24"><use href="#i-approve"/></svg><span class="bdg">3</span></div><span class="lbl">Approvals</span></div><div class="d "><div class="b" style="background:var(--raised);border:1px solid var(--sep);color:var(--muted)"><svg width="24" height="24"><use href="#i-gear"/></svg></div><span class="lbl">Settings</span></div></div>
+</div></div><div class="shot"><h2>2 · Sidebar drawer (dark) — edge-swipe or top-left button</h2>
+<div class="ph"><div class="sb"><span>9:41</span><span class="r"><svg width="16" height="12"><use href="#i-signal"/></svg><svg width="22" height="12"><rect x="1" y="1" width="18" height="10" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="3" y="3" width="12" height="6" rx="1.5" fill="currentColor"/></svg></span></div>
+  <div class="scrim"></div>
+  <div class="drawer">
+    <div class="side-h">
+      <svg width="34" height="34"><use href="#ic-a"/></svg>
+      <div><div class="name">hscc-cluster</div><div class="sub">4 nodes · connected <span class="dot" style="background:var(--ok)"></span></div></div>
+    </div>
+    <div class="sgrp">Work</div>
+    <div class="sitem on"><span class="ic" style="background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent)"><svg width="17" height="17"><use href="#i-cluster"/></svg></span>Home<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-chat"/></svg></span>Chats<span class="bdg">2</span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-cards"/></svg></span>Projects<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-cards"/></svg></span>Cards<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-approve"/></svg></span>Approvals<span class="bdg">3</span></div>
+    <div class="sgrp">Cluster</div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-fleet"/></svg></span>Fleet<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-cluster"/></svg></span>Nodes & serving<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-activity"/></svg></span>Autodown & self-heal<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-cron"/></svg></span>Cron<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-logs"/></svg></span>Logs<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sgrp">Knowledge</div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-memory"/></svg></span>Memory<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-template"/></svg></span>Templates<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-sessions"/></svg></span>Sessions<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sgrp">App</div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-search"/></svg></span>Search everywhere<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-gear"/></svg></span>Settings<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem" style="color:var(--muted)"><span class="ic" style="background:var(--elevated)"><svg width="17" height="17"><use href="#i-gear"/></svg></span>Switch cluster ▾</div>
+  </div>
+</div></div><div class="shot"><h2>3 · Chat, full-bleed (dark) — no cards, composer pinned, live dot in the nav bar</h2>
+<div class="ph"><div class="sb"><span>9:41</span><span class="r"><svg width="16" height="12"><use href="#i-signal"/></svg><svg width="22" height="12"><rect x="1" y="1" width="18" height="10" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="3" y="3" width="12" height="6" rx="1.5" fill="currentColor"/></svg></span></div>
+  <div class="navbar"><div class="iconbtn"><svg width="22" height="22"><use href="#i-menu"/></svg></div>
+    <div class="title">hscc · hscc-orch<span class="conn dot" style="background:var(--ok)" title="Live — connected, receiving"></span></div>
+    <div class="iconbtn"><svg width="20" height="20"><use href="#i-activity"/></svg></div></div>
+  <div class="tx">
+    <div class="msg-user">is the cluster healthy?</div>
+    <div class="disc" style="color:var(--muted)">
+      <div class="hd"><svg width="15" height="15" style="color:var(--muted)"><use href="#i-brain"/></svg><span class="kind" style="color:var(--muted);font-weight:600">Reasoning</span><span style="font-size:11.5px">412 chars</span><svg class="chev" width="14" height="14"><use href="#i-chevd"/></svg></div>
+      <div class="bd">Checking the three sources I trust: /v1/verify for the API view,
+node state for the physical layer, and the last autodown ledger.
+Spark-01/02/03 report serving; spark-04 idle. No wedged units in
+the last 2h. Composing the one-line answer…</div>
+    </div>
+    <div class="disc tool">
+      <div class="hd"><svg width="15" height="15" style="color:var(--muted)"><use href="#i-term"/></svg><span class="name">sparkrun status</span><span class="chip ok">finished</span><svg class="chev" width="14" height="14"><use href="#i-chevd"/></svg></div>
+      <div class="bd">$ sparkrun status --json
+spark-01  up  serving: qwen3-30b
+spark-02  up  serving: qwen3-30b
+spark-03  up  serving: embed-8b
+spark-04  up  idle</div>
+    </div>
+    <div class="msg-asst">Yes — 4/4 nodes up, 3 models serving, nothing down or wedged in the last 2 h. spark-04 is idle by design (autodown keeps it parked).</div>
+    <div class="msg-user">run echo TOOLTEST with the terminal tool, then reply PONG</div>
+    <div class="disc tool" style="opacity:.9">
+      <div class="hd"><svg width="15" height="15" style="color:var(--warn)"><use href="#i-term"/></svg><span class="name">terminal</span><span class="chip warn">running</span><svg class="chev" width="14" height="14"><use href="#i-chev"/></svg></div>
+    </div>
+    <div class="row-sys"><span>via tmux · hscc-orch pane 0:0.2</span><span class="hair"></span><span>22:41</span></div>
+  </div>
+  <div class="turn"><span class="spin"></span>working…</div>
+  <div class="composer"><div class="cbar"><div class="in">Message hscc-orch…</div><div class="send"><svg width="18" height="18"><use href="#i-send"/></svg></div></div></div>
+</div></div><div class="shot"><h2>4 · Chat, full-bleed (light) — identical layout, remapped tokens</h2>
+<div class="ph lt"><div class="sb"><span>9:41</span><span class="r"><svg width="16" height="12"><use href="#i-signal"/></svg><svg width="22" height="12"><rect x="1" y="1" width="18" height="10" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="3" y="3" width="12" height="6" rx="1.5" fill="currentColor"/></svg></span></div>
+  <div class="navbar"><div class="iconbtn"><svg width="22" height="22"><use href="#i-menu"/></svg></div>
+    <div class="title">hscc · hscc-orch<span class="conn dot" style="background:var(--ok)"></span></div>
+    <div class="iconbtn"><svg width="20" height="20"><use href="#i-activity"/></svg></div></div>
+  <div class="tx">
+    <div class="msg-user">is the cluster healthy?</div>
+    <div class="disc">
+      <div class="hd"><svg width="15" height="15"><use href="#i-brain"/></svg><span class="kind">Reasoning</span><span style="font-size:11.5px">412 chars</span><svg class="chev" width="14" height="14"><use href="#i-chev"/></svg></div>
+    </div>
+    <div class="disc tool">
+      <div class="hd"><svg width="15" height="15"><use href="#i-term"/></svg><span class="name">sparkrun status</span><span class="chip ok">finished</span><svg class="chev" width="14" height="14"><use href="#i-chevd"/></svg></div>
+      <div class="bd">$ sparkrun status --json
+spark-01  up  serving: qwen3-30b
+spark-02  up  serving: qwen3-30b
+spark-03  up  serving: embed-8b
+spark-04  up  idle</div>
+    </div>
+    <div class="msg-asst">Yes — 4/4 nodes up, 3 models serving, nothing down or wedged in the last 2 h. spark-04 is idle by design (autodown keeps it parked).</div>
+    <div class="row-sys"><span>via tmux · hscc-orch pane 0:0.2</span><span class="hair"></span><span>22:41</span></div>
+  </div>
+  <div class="composer"><div class="cbar"><div class="in">Message hscc-orch…</div><div class="send"><svg width="18" height="18"><use href="#i-send"/></svg></div></div></div>
+</div></div><div class="shot"><h2>5 · Home + dock (light)</h2>
+<div class="ph lt"><div class="sb"><span>9:41</span><span class="r"><svg width="16" height="12"><use href="#i-signal"/></svg><svg width="22" height="12"><rect x="1" y="1" width="18" height="10" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="3" y="3" width="12" height="6" rx="1.5" fill="currentColor"/></svg></span></div>
+  <div class="navbar"><div class="iconbtn"><svg width="22" height="22"><use href="#i-menu"/></svg></div>
+    <div class="title">hscc-cluster<span class="conn dot" style="background:var(--ok)"></span></div>
+    <div class="iconbtn"><svg width="20" height="20"><use href="#i-search"/></svg></div></div>
+  <div class="home">
+    <div class="greet">Good evening, operator</div>
+    <div class="h1x">Your cluster</div>
+    <div class="hero"><span class="dot" style="background:var(--ok)"></span>
+      <div><div class="t">All 4 nodes online</div><div class="s">3 models serving · 0 down · last check 12s ago</div></div>
+      <div class="go"><svg width="16" height="16"><use href="#i-chev"/></svg></div></div>
+    <div class="hgrid">
+      <div class="tile"><div class="ic" style="background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent)"><svg width="20" height="20"><use href="#i-chat"/></svg></div><div class="t">Projects</div><div class="s">12 · 2 need a reply</div></div>
+      <div class="tile"><div class="ic" style="background:color-mix(in srgb,var(--ok) 14%,transparent);color:var(--ok)"><svg width="20" height="20"><use href="#i-activity"/></svg></div><div class="t">Activity</div><div class="s">8 events since 18:00</div></div>
+      <div class="tile"><div class="ic" style="background:color-mix(in srgb,var(--warn) 16%,transparent);color:var(--warn)"><svg width="20" height="20"><use href="#i-approve"/></svg></div><div class="t">Approvals</div><div class="s">3 waiting on you</div></div>
+      <div class="tile"><div class="ic" style="background:color-mix(in srgb,var(--neutral) 14%,transparent);color:var(--neutral)"><svg width="20" height="20"><use href="#i-cards"/></svg></div><div class="t">Cards</div><div class="s">hscc board · 6 ready</div></div>
+    </div>
+  </div>
+  <div class="dock"><div class="d "><div class="b" style="background:var(--raised);border:1px solid var(--sep);color:var(--muted)"><svg width="24" height="24"><use href="#i-chat"/></svg><span class="bdg">2</span></div><span class="lbl">Chat</span></div><div class="d "><div class="b" style="background:var(--raised);border:1px solid var(--sep);color:var(--muted)"><svg width="24" height="24"><use href="#i-fleet"/></svg></div><span class="lbl">Fleet</span></div><div class="d "><div class="b" style="background:var(--raised);border:1px solid var(--sep);color:var(--muted)"><svg width="24" height="24"><use href="#i-cluster"/></svg></div><span class="lbl">Cluster</span></div><div class="d "><div class="b" style="background:var(--raised);border:1px solid var(--sep);color:var(--muted)"><svg width="24" height="24"><use href="#i-approve"/></svg><span class="bdg">3</span></div><span class="lbl">Approvals</span></div><div class="d "><div class="b" style="background:var(--raised);border:1px solid var(--sep);color:var(--muted)"><svg width="24" height="24"><use href="#i-gear"/></svg></div><span class="lbl">Settings</span></div></div>
+</div></div><div class="shot"><h2>6 · Sidebar drawer (light)</h2>
+<div class="ph lt"><div class="sb"><span>9:41</span><span class="r"><svg width="16" height="12"><use href="#i-signal"/></svg><svg width="22" height="12"><rect x="1" y="1" width="18" height="10" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="3" y="3" width="12" height="6" rx="1.5" fill="currentColor"/></svg></span></div>
+  <div class="scrim"></div>
+  <div class="drawer">
+    <div class="side-h"><svg width="34" height="34"><use href="#ic-a"/></svg>
+      <div><div class="name">hscc-cluster</div><div class="sub">4 nodes · connected <span class="dot" style="background:var(--ok)"></span></div></div></div>
+    <div class="sgrp">Work</div>
+    <div class="sitem on"><span class="ic" style="background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent)"><svg width="17" height="17"><use href="#i-cluster"/></svg></span>Home<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-chat"/></svg></span>Chats<span class="bdg">2</span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-cards"/></svg></span>Projects<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-cards"/></svg></span>Cards<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-approve"/></svg></span>Approvals<span class="bdg">3</span></div>
+    <div class="sgrp">Cluster</div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-fleet"/></svg></span>Fleet<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-cluster"/></svg></span>Nodes & serving<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-activity"/></svg></span>Autodown & self-heal<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-cron"/></svg></span>Cron<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-logs"/></svg></span>Logs<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sgrp">Knowledge</div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-memory"/></svg></span>Memory<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-template"/></svg></span>Templates<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-sessions"/></svg></span>Sessions<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sgrp">App</div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-search"/></svg></span>Search everywhere<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem "><span class="ic" style="background:var(--elevated);color:var(--muted)"><svg width="17" height="17"><use href="#i-gear"/></svg></span>Settings<span class="chev"><svg width="14" height="14"><use href="#i-chev"/></svg></span></div>
+    <div class="sitem" style="color:var(--muted)"><span class="ic" style="background:var(--elevated)"><svg width="17" height="17"><use href="#i-gear"/></svg></span>Switch cluster ▾</div>
+  </div>
+</div></div><div class="shot"><h2>7 · Fleet list (dark) — one list style, pull-to-refresh, no cards-in-cards</h2>
+<div class="ph"><div class="sb"><span>9:41</span><span class="r"><svg width="16" height="12"><use href="#i-signal"/></svg><svg width="22" height="12"><rect x="1" y="1" width="18" height="10" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="3" y="3" width="12" height="6" rx="1.5" fill="currentColor"/></svg></span></div>
+  <div class="navbar"><div class="iconbtn"><svg width="22" height="22"><use href="#i-menu"/></svg></div>
+    <div class="title">Fleet<span class="conn dot" style="background:var(--ok)"></span></div>
+    <div class="iconbtn"><svg width="20" height="20"><use href="#i-activity"/></svg></div></div>
+  <div class="list">
+    <div class="sec">Nodes · 4</div>
+    <div class="lrow"><span class="st" style="background:var(--ok)"></span><div><div class="tt">spark-01</div><div class="cap">DGX Spark · 4× GPU · serving qwen3-30b</div></div><div class="right"><span class="chip ok">serving</span><div class="cap" style="font:12px ui-monospace">94%</div></div></div><div class="lrow"><span class="st" style="background:var(--ok)"></span><div><div class="tt">spark-02</div><div class="cap">DGX Spark · 4× GPU · serving qwen3-30b</div></div><div class="right"><span class="chip ok">serving</span><div class="cap" style="font:12px ui-monospace">91%</div></div></div><div class="lrow"><span class="st" style="background:var(--ok)"></span><div><div class="tt">spark-03</div><div class="cap">DGX Spark · serving embed-8b</div></div><div class="right"><span class="chip ok">serving</span><div class="cap" style="font:12px ui-monospace">88%</div></div></div><div class="lrow"><span class="st" style="background:var(--warn)"></span><div><div class="tt">spark-04</div><div class="cap">DGX Spark · parked by autodown 6m ago</div></div><div class="right"><span class="chip warn">idle</span><div class="cap" style="font:12px ui-monospace">—</div></div></div>
+    <div class="sec">Models · 3 serving</div>
+    <div class="lrow"><span class="st" style="background:var(--ok)"></span><div><div class="tt">qwen3-30b</div><div class="cap">spark-01, spark-02 · 2 streams</div></div><div class="right"><span class="chip ok">up</span></div></div>
+    <div class="lrow"><span class="st" style="background:var(--ok)"></span><div><div class="tt">embed-8b</div><div class="cap">spark-03 · 0 streams</div></div><div class="right"><span class="chip ok">up</span></div></div>
+    <div class="lrow"><span class="st" style="background:var(--warn)"></span><div><div class="tt">whisper-large</div><div class="cap">waking on spark-04 · 34s</div></div><div class="right"><span class="chip warn">waking</span></div></div>
+  </div>
+</div></div><div class="shot"><h2>8 · Fleet list (light) — one list style, pull-to-refresh, no cards-in-cards</h2>
+<div class="ph lt"><div class="sb"><span>9:41</span><span class="r"><svg width="16" height="12"><use href="#i-signal"/></svg><svg width="22" height="12"><rect x="1" y="1" width="18" height="10" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="3" y="3" width="12" height="6" rx="1.5" fill="currentColor"/></svg></span></div>
+  <div class="navbar"><div class="iconbtn"><svg width="22" height="22"><use href="#i-menu"/></svg></div>
+    <div class="title">Fleet<span class="conn dot" style="background:var(--ok)"></span></div>
+    <div class="iconbtn"><svg width="20" height="20"><use href="#i-activity"/></svg></div></div>
+  <div class="list">
+    <div class="sec">Nodes · 4</div>
+    <div class="lrow"><span class="st" style="background:var(--ok)"></span><div><div class="tt">spark-01</div><div class="cap">DGX Spark · 4× GPU · serving qwen3-30b</div></div><div class="right"><span class="chip ok">serving</span><div class="cap" style="font:12px ui-monospace">94%</div></div></div><div class="lrow"><span class="st" style="background:var(--ok)"></span><div><div class="tt">spark-02</div><div class="cap">DGX Spark · 4× GPU · serving qwen3-30b</div></div><div class="right"><span class="chip ok">serving</span><div class="cap" style="font:12px ui-monospace">91%</div></div></div><div class="lrow"><span class="st" style="background:var(--ok)"></span><div><div class="tt">spark-03</div><div class="cap">DGX Spark · serving embed-8b</div></div><div class="right"><span class="chip ok">serving</span><div class="cap" style="font:12px ui-monospace">88%</div></div></div><div class="lrow"><span class="st" style="background:var(--warn)"></span><div><div class="tt">spark-04</div><div class="cap">DGX Spark · parked by autodown 6m ago</div></div><div class="right"><span class="chip warn">idle</span><div class="cap" style="font:12px ui-monospace">—</div></div></div>
+    <div class="sec">Models · 3 serving</div>
+    <div class="lrow"><span class="st" style="background:var(--ok)"></span><div><div class="tt">qwen3-30b</div><div class="cap">spark-01, spark-02 · 2 streams</div></div><div class="right"><span class="chip ok">up</span></div></div>
+    <div class="lrow"><span class="st" style="background:var(--ok)"></span><div><div class="tt">embed-8b</div><div class="cap">spark-03 · 0 streams</div></div><div class="right"><span class="chip ok">up</span></div></div>
+    <div class="lrow"><span class="st" style="background:var(--warn)"></span><div><div class="tt">whisper-large</div><div class="cap">waking on spark-04 · 34s</div></div><div class="right"><span class="chip warn">waking</span></div></div>
+  </div>
+</div></div><div class="shot"><h2>9 · App-icon candidates — rendered at real home-screen size (dark) on an iOS-style home row</h2>
+<div class="iconsheet">
+  <h3>Candidate A · “Orbit” — the cluster motif</h3>
+  <div class="icand">
+    <div class="homepreview">
+      <div class="hp-cell"><svg width="60" height="60" style="border-radius:13.5px"><use href="#ic-a"/></svg><span>HSCC</span></div>
+      <div class="hp-cell"><svg width="29" height="29" style="border-radius:6.5px"><use href="#ic-a"/></svg><span>29pt</span></div>
+      <div class="hp-cell"><svg width="29" height="29" style="border-radius:6.5px"><use href="#ic-a-tint"/></svg><span>tinted</span></div>
+    </div>
+    <div class="meta"><b>A — three nodes in orbit, the live one lit mint.</b><br>Legible at 29pt; reads as “a thing watching three things”. Tinted variant collapses to white shapes on system tint. <b>Recommended.</b></div>
+  </div>
+  <h3>Candidate B · “Rack” — the control-center motif</h3>
+  <div class="icand">
+    <div class="homepreview">
+      <div class="hp-cell"><svg width="60" height="60" style="border-radius:13.5px"><use href="#ic-b"/></svg><span>HSCC</span></div>
+      <div class="hp-cell"><svg width="29" height="29" style="border-radius:6.5px"><use href="#ic-b"/></svg><span>29pt</span></div>
+      <div class="hp-cell"><svg width="29" height="29" style="border-radius:6.5px"><use href="#ic-b-tint"/></svg><span>tinted</span></div>
+    </div>
+    <div class="meta"><b>B — server rack, one unit lit.</b><br>Strongest literal read of the product; slightly busier at 29pt than A.</div>
+  </div>
+  <h3>Candidate C · “Grid + hub” — control motif</h3>
+  <div class="icand">
+    <div class="homepreview">
+      <div class="hp-cell"><svg width="60" height="60" style="border-radius:13.5px"><use href="#ic-c"/></svg><span>HSCC</span></div>
+      <div class="hp-cell"><svg width="29" height="29" style="border-radius:6.5px"><use href="#ic-c"/></svg><span>29pt</span></div>
+      <div class="hp-cell"><svg width="29" height="29" style="border-radius:6.5px"><use href="#ic-c-tint"/></svg><span>tinted</span></div>
+    </div>
+    <div class="meta"><b>C — node grid with a lit hub.</b><br>Cleanest geometry; the cross can read as “add” at small sizes — the reason it is not recommended.</div>
+  </div>
+  <div class="note" style="margin-top:8px">All three ship as <b>single-size 1024px</b> AppIcon sets (Xcode 15+ format): one 1024 PNG per appearance (light/dark/tinted) generated from these SVGs — iOS scales every required size. Wired via <code>ASSETCATALOG_COMPILER_APPICON_NAME</code> in project.yml, same source used for widget/Live-Activity glyphs.</div>
+</div></div>
+</div>
+<div class="note">
+<b>Reading the shots.</b> 1–2: home dock (Chat · Fleet · Cluster · Approvals · Settings) and the drawer reached by edge-swipe or the top-left button; the drawer groups are Work / Cluster / Knowledge / App and every existing screen lives there — nothing is dropped (migration map: spec §8).
+3–4: the chat is edge-to-edge — no list chrome, no cards around rows; your messages are the only filled bubbles, the REPL's replies are plain text; reasoning and tool calls are compact hairline rows that expand in place; the connection state is the 9pt dot in the nav bar (VoiceOver: “Live — connected, receiving”), and turn state is the small pill that only exists while a turn runs. 5–6: home + drawer in light. 7–8: one list recipe everywhere (leading status dot, title over mono caption, trailing chip). 9: app-icon candidates at real 60pt + 29pt sizes with tinted variants.<br><br>
+<b>Rules the mockup follows:</b> 44pt minimum hit targets (icon buttons are 44×44 even when the glyph is 22); semantic colour roles only (mint/amber/muted-red, light-remapped values ≥4.5:1); Dynamic Type respected (rows grow, composer caps at xLarge); no destructive action without confirm; primary action is always top-right or the circular send, never floating mid-screen.
+</div>
+</body>
+</html>
