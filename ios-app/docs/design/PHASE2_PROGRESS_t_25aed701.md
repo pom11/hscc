@@ -197,19 +197,25 @@ the recipe now; what remains is only the merges:
    per-card Allow and Recover labels survived verbatim; the drawer row is
    gone and `.boardHygiene` remains as a mapped legacy alias (same recipe as
    `.selfHeal`), so deeplink_check stays 41/41.
-4. `ModelsView` → "merged into Fleet" per spec line 451 and line 341. Filed as
-   ruling-card `t_1897550c` (to @architect, the spec author) because **the screen
-   is not in the tree**: `git grep -l "ModelsView" 23fcfb15 -- ios-app` finds
-   nothing, `git log --all -S "struct ModelsView"` has no commit that ever added
-   one, and there is no `Views/Models*.swift`. Fleet already has §5's Models
-   *feed* section (`45645201`), so the likely truth is that line 451 names the
-   feed, not a screen — but choosing a merge destination is the spec owner's
-   call, not a restyle worker's.
+4. ~~`ModelsView` → "merged into Fleet" per spec line 451 and line 341~~ —
+   **RULED (card `t_1897550c`, spec owner): `ModelsView` never existed.** Full
+   object-database sweep (`git cat-file --batch-all-objects --batch |
+   git grep ModelsView`) finds it only in docs and one FleetView comment; no
+   commit ever added `struct ModelsView` or a `Views/Models*.swift`; the app
+   never called `GET /v1/models` at all. The §5/§8 lines were naming the
+   **Models serving FEED** the spec itself draws in mockup frames 7/8
+   (`Models · 3 serving`) — so this is NOT a merge of a screen (nothing is
+   lost, "two merges" was corrected to "one merge" in §8) and the feed is
+   **not yet in Fleet** (earlier text here claimed `45645201` shipped it; it
+   did not — Fleet has Health · Throughput · Stats · Streams · Autoscale).
+   The new read-only Models section (workload rows from
+   `GET /v1/cluster/status`, the same feed ServingControl reads) ships as its
+   own Phase 2 card.
 5. `FleetControlView` is on the recipe but is still its own drawer row; §8 wants
    it as a "Control section" of Fleet. Small, but it changes the drawer, so it
    belongs with the merge cards rather than with a restyle. No card yet —
-   folded into whichever Fleet-touching merge lands first (`t_1897550c` if the
-   ruling is that model-serving belongs there).
+   folded into whichever Fleet-touching merge lands first (the Models-section
+   card created by the `t_1897550c` ruling).
 
 
 ## Screenshots (what each one actually shows)
