@@ -10,6 +10,17 @@ import SwiftUI
 /// Every section routes through `Offline.load`, so an unreachable cluster
 /// surfaces last-known data (clearly marked stale) instead of a hard "failed" —
 /// a transient blip must not make the whole fleet look idle or down.
+///
+/// LIST RECIPE (spec §5, Phase 2 C3): one plain `List` with one `Section` per
+/// feed — Health · Throughput · Stats · Streams · Autoscale (the §5 feed list
+/// plus the Stats feed the screen already had; "Models" is a separate §5 item
+/// about absorbing ModelsView here, left to its own card). The five
+/// `HSSectionCard` boxes are gone; each feed keeps its own `LoadState`, and a
+/// feed that is loading/failed shows an inline row rather than a full-pane
+/// spinner so the four feeds that DID load stay visible. The check rows render
+/// through the shared `HealthCheckList` (the §5 byte-twin collapse with Ops);
+/// only `statBadge`/`statGrid` remain bespoke, because they are value-over-
+/// label stat tiles rather than status chips.
 struct FleetView: View {
     let client: HSCCClient
 
@@ -20,17 +31,16 @@ struct FleetView: View {
     @State private var autoscale = LoadState<AutoscaleResponse>.idle
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
-                healthSection
-                throughputSection
-                statsSection
-                streamsSection
-                autoscaleSection
-            }
-            .padding()
+        List {
+            healthSection
+            throughputSection
+            statsSection
+            streamsSection
+            autoscaleSection
         }
+        .listStyle(.plain)
         .navigationTitle("Fleet")
+        .navigationBarTitleDisplayMode(.inline)
         .refreshable { await loadAll() }
         .task {
             if health.value == nil, !health.isLoading {
@@ -97,12 +107,17 @@ struct FleetView: View {
 
     // MARK: - Health (5-check verify)
 
+    /// Each of the five reads is a `Section` of the ONE List (spec §5: one
+    /// section per feed — Health · Throughput · Stats · Streams · Autoscale).
+    /// The `HSSectionCard` boxes are gone; List supplies the separators and
+    /// the caps section headers. Each keeps its own `LoadState`, so one
+    /// degraded endpoint still cannot blank the rest of the screen.
     @ViewBuilder
     private var healthSection: some View {
-        HSSectionCard(title: "Health", systemImage: "stethoscope") {
+        Section("Health") {
             switch health {
-            case .loading:
-                HSLoading()
+            case .idle, .loading:
+                loadingRow("Loading health…")
             case .failed(let message):
                 errorLabel(message, retry: { Task { await loadHealth() } })
             case .stale(let state, let age):
@@ -112,8 +127,6 @@ struct FleetView: View {
                 healthBody(state)
             case .loaded(let state):
                 healthBody(state)
-            default:
-                EmptyView()
             }
         }
     }
@@ -132,10 +145,10 @@ struct FleetView: View {
 
     @ViewBuilder
     private var throughputSection: some View {
-        HSSectionCard(title: "Throughput", systemImage: "speedometer") {
+        Section("Throughput") {
             switch throughput {
-            case .loading:
-                HSLoading()
+            case .idle, .loading:
+                loadingRow("Loading throughput…")
             case .failed(let message):
                 errorLabel(message, retry: { Task { await loadThroughput() } })
             case .stale(let state, let age):
@@ -145,39 +158,34 @@ struct FleetView: View {
                 throughputBody(state)
             case .loaded(let state):
                 throughputBody(state)
-            default:
-                EmptyView()
             }
         }
     }
 
     @ViewBuilder
     private func throughputBody(_ state: FleetThroughputResponse) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
-            Text(state.speak)
-                .font(.subheadline)
-                .italic()
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        Text(state.speak)
+            .font(.footnote.italic())
+            .foregroundColor(Theme.Semantic.onSurfaceMuted)
 
-            if let fleet = state.fleet {
-                HStack(spacing: Theme.Spacing.md.rawValue) {
-                    statBadge(value: "\(fleet.nodes_ok ?? 0)/\(fleet.nodes_total ?? 0)",
-                              label: "nodes ok",
-                              color: (fleet.nodes_ok ?? 0) >= (fleet.nodes_total ?? 1) ? Theme.Semantic.ok : Theme.Semantic.warn)
-                    statBadge(value: fmt(fleet.prompt_tokens), label: "prompt",
-                              color: Theme.Semantic.onSurfaceMuted)
-                    statBadge(value: fmt(fleet.generation_tokens), label: "generation",
-                              color: Theme.Semantic.onSurfaceMuted)
-                }
-                HStack(spacing: Theme.Spacing.md.rawValue) {
-                    statBadge(value: fmt(fleet.running), label: "running",
-                              color: Theme.Semantic.onSurface)
-                    statBadge(value: fmt(fleet.waiting), label: "waiting",
-                              color: Theme.Semantic.warn)
-                }
-            } else {
-                emptyLabel("No throughput data.")
-            }
+        if let fleet = state.fleet {
+            // The stat tiles stay tiles (value over label), not status chips:
+            // HSStatusChip has no value/label hierarchy to give them. They are
+            // laid out by `statGrid` (three-up) so a List row can give them the
+            // full width — an HStack of `maxWidth: .infinity` tiles inside a
+            // row sizes to content and starts a horizontal scroll.
+            statGrid([
+                ("\(fleet.nodes_ok ?? 0)/\(fleet.nodes_total ?? 0)", "nodes ok",
+                 (fleet.nodes_ok ?? 0) >= (fleet.nodes_total ?? 1) ? Theme.Semantic.ok : Theme.Semantic.warn),
+                (fmt(fleet.prompt_tokens), "prompt", Theme.Semantic.onSurfaceMuted),
+                (fmt(fleet.generation_tokens), "generation", Theme.Semantic.onSurfaceMuted),
+                (fmt(fleet.running), "running", Theme.Semantic.onSurface),
+                (fmt(fleet.waiting), "waiting", Theme.Semantic.warn),
+            ])
+        } else {
+            HSEmpty("No throughput",
+                    message: "No throughput data.",
+                    systemImage: "speedometer")
         }
     }
 
@@ -185,10 +193,10 @@ struct FleetView: View {
 
     @ViewBuilder
     private var statsSection: some View {
-        HSSectionCard(title: "Stats", systemImage: "chart.bar") {
+        Section("Stats") {
             switch stats {
-            case .loading:
-                HSLoading()
+            case .idle, .loading:
+                loadingRow("Loading stats…")
             case .failed(let message):
                 errorLabel(message, retry: { Task { await loadStats() } })
             case .stale(let state, let age):
@@ -198,73 +206,70 @@ struct FleetView: View {
                 statsBody(state)
             case .loaded(let state):
                 statsBody(state)
-            default:
-                EmptyView()
             }
         }
     }
 
     @ViewBuilder
     private func statsBody(_ state: FleetStatsResponse) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
-            Text(state.speak)
-                .font(.subheadline)
-                .italic()
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        Text(state.speak)
+            .font(.footnote.italic())
+            .foregroundColor(Theme.Semantic.onSurfaceMuted)
 
-            if let completions = state.completions {
-                statBadge(value: "\(completions.total)", label: "work items",
-                          color: Theme.Semantic.onSurface)
+        if let completions = state.completions {
+            statGrid([(("\(completions.total)", "work items", Theme.Semantic.onSurface))])
 
-                if let byProfile = completions.by_profile, !byProfile.isEmpty {
-                    VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
-                        Text("By profile").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                        ForEach(byProfile.sorted { $0.value > $1.value }, id: \.key) { key, value in
-                            row(key, value: "\(value)")
-                        }
-                    }
+            if let byProfile = completions.by_profile, !byProfile.isEmpty {
+                Text("By profile")
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                ForEach(byProfile.sorted { $0.value > $1.value }, id: \.key) { key, value in
+                    row(key, value: "\(value)")
                 }
-
-                if let byDay = completions.by_day, !byDay.isEmpty {
-                    VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
-                        Text("By day").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                        let maxValue = byDay.values.max() ?? 1
-                        ForEach(byDay.keys.sorted(), id: \.self) { date in
-                            let value = byDay[date] ?? 0
-                            HStack(spacing: Theme.Spacing.sm.rawValue) {
-                                Text(shortDay(date))
-                                    .font(.caption2)
-                                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                                    .frame(width: 44, alignment: .leading)
-                                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                    .fill(Theme.Semantic.ok)
-                                    .frame(width: CGFloat(value) / CGFloat(maxValue) * 140, height: 8)
-                                Text("\(value)")
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundColor(Theme.Semantic.onSurface)
-                            }
-                        }
-                    }
-                }
-            } else {
-                emptyLabel("No stats reported.")
             }
 
-            if let activity = state.activity,
-               !(activity.top_tools?.isEmpty ?? true) ||
-               !(activity.tool_calls_by_profile?.isEmpty ?? true) {
-                VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
-                    Text("Activity").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    if let tools = activity.top_tools, !tools.isEmpty {
-                        ForEach(tools.compactMap(Self.parseToolPair), id: \.0) { name, count in
-                            row(name, value: "\(count)")
-                        }
+            if let byDay = completions.by_day, !byDay.isEmpty {
+                Text("By day")
+                    .font(.caption)
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                let maxValue = byDay.values.max() ?? 1
+                ForEach(byDay.keys.sorted(), id: \.self) { date in
+                    let value = byDay[date] ?? 0
+                    HStack(spacing: Theme.Spacing.sm.rawValue) {
+                        Text(shortDay(date))
+                            .font(.caption2)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .frame(width: 44, alignment: .leading)
+                        RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous)
+                            .fill(Theme.Semantic.ok)
+                            .frame(width: CGFloat(value) / CGFloat(maxValue) * 140, height: 8)
+                        Text("\(value)")
+                            .font(.hsccMono(.caption, weight: .regular))
+                            .foregroundColor(Theme.Semantic.onSurface)
                     }
-                    if let byProfile = activity.tool_calls_by_profile, !byProfile.isEmpty {
-                        ForEach(byProfile.sorted { $0.value > $1.value }, id: \.key) { key, value in
-                            row(key, value: "\(value)")
-                        }
-                    }
+                    .accessibilityLabel("\(date): \(value) work items")
+                }
+            }
+        } else {
+            HSEmpty("No stats",
+                    message: "No stats reported.",
+                    systemImage: "chart.bar")
+        }
+
+        if let activity = state.activity,
+           !(activity.top_tools?.isEmpty ?? true) ||
+           !(activity.tool_calls_by_profile?.isEmpty ?? true) {
+            Text("Activity")
+                .font(.caption)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            if let tools = activity.top_tools, !tools.isEmpty {
+                ForEach(tools.compactMap(Self.parseToolPair), id: \.0) { name, count in
+                    row(name, value: "\(count)")
+                }
+            }
+            if let byProfile = activity.tool_calls_by_profile, !byProfile.isEmpty {
+                ForEach(byProfile.sorted { $0.value > $1.value }, id: \.key) { key, value in
+                    row(key, value: "\(value)")
                 }
             }
         }
@@ -274,10 +279,10 @@ struct FleetView: View {
 
     @ViewBuilder
     private var streamsSection: some View {
-        HSSectionCard(title: "Streams", systemImage: "point.3.connected.trianglepath.dotted") {
+        Section("Streams") {
             switch streams {
-            case .loading:
-                HSLoading()
+            case .idle, .loading:
+                loadingRow("Loading streams…")
             case .failed(let message):
                 errorLabel(message, retry: { Task { await loadStreams() } })
             case .stale(let state, let age):
@@ -287,45 +292,42 @@ struct FleetView: View {
                 streamsBody(state)
             case .loaded(let state):
                 streamsBody(state)
-            default:
-                EmptyView()
             }
         }
     }
 
     @ViewBuilder
     private func streamsBody(_ state: FleetStreamsResponse) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
-            Text(state.speak)
-                .font(.subheadline)
-                .italic()
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-            if state.streams.isEmpty {
-                emptyLabel("No daemon streams reported.")
-            } else {
-                let sorted = state.streams.sorted { $0.key < $1.key }
-                ForEach(sorted, id: \.key) { name, stream in
-                    HStack(spacing: Theme.Spacing.sm.rawValue) {
-                        Image(systemName: stream.ok == true ? "checkmark.circle.fill" : "xmark.circle.fill")
-                            .foregroundColor(stream.ok == true ? Theme.Semantic.ok : Theme.Semantic.bad)
-                        VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
-                            Text(name)
-                                .font(.body)
-                            if let message = stream.message, !message.isEmpty {
-                                Text(message)
-                                    .font(.caption)
-                                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                            }
-                        }
-                        Spacer()
-                        if let ts = stream.timestamp {
-                            Text(shortTimestamp(ts))
-                                .font(.caption2)
+        Text(state.speak)
+            .font(.footnote.italic())
+            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        if state.streams.isEmpty {
+            HSEmpty("No streams",
+                    message: "No daemon streams reported.",
+                    systemImage: "point.3.connected.trianglepath.dotted")
+        } else {
+            let sorted = state.streams.sorted { $0.key < $1.key }
+            ForEach(sorted, id: \.key) { name, stream in
+                HStack(spacing: Theme.Spacing.sm.rawValue) {
+                    Image(systemName: stream.ok == true ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundColor(stream.ok == true ? Theme.Semantic.ok : Theme.Semantic.bad)
+                    VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+                        Text(name)
+                            .font(.body)
+                        if let message = stream.message, !message.isEmpty {
+                            Text(message)
+                                .font(.caption)
                                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
                         }
                     }
-                    .frame(maxWidth: .infinity)
+                    Spacer(minLength: 0)
+                    if let ts = stream.timestamp {
+                        Text(shortTimestamp(ts))
+                            .font(.caption2)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    }
                 }
+                .accessibilityElement(children: .combine)
             }
         }
     }
@@ -334,10 +336,10 @@ struct FleetView: View {
 
     @ViewBuilder
     private var autoscaleSection: some View {
-        HSSectionCard(title: "Autoscale", systemImage: "arrow.up.arrow.down.circle") {
+        Section("Autoscale") {
             switch autoscale {
-            case .loading:
-                HSLoading()
+            case .idle, .loading:
+                loadingRow("Loading autoscale…")
             case .failed(let message):
                 errorLabel(message, retry: { Task { await loadAutoscale() } })
             case .stale(let state, let age):
@@ -347,29 +349,35 @@ struct FleetView: View {
                 autoscaleBody(state)
             case .loaded(let state):
                 autoscaleBody(state)
-            default:
-                EmptyView()
             }
         }
     }
 
     @ViewBuilder
     private func autoscaleBody(_ state: AutoscaleResponse) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(state.speak)
-                .font(.subheadline)
-                .italic()
+        Text(state.speak)
+            .font(.footnote.italic())
+            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        if let reason = state.reason, !reason.isEmpty {
+            Text(reason)
+                .font(.caption)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
-            if let reason = state.reason, !reason.isEmpty {
-                Text(reason)
-                    .font(.caption)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
-            }
         }
     }
 
     // MARK: - Shared building blocks
 
+    /// Inline loading line for a section that is still fetching. Inline (not
+    /// the centred `HSLoading`) because the other four sections may already
+    /// have content — one slow endpoint must not blank them.
+    private func loadingRow(_ label: String) -> some View {
+        HStack(spacing: Theme.Spacing.sm.rawValue) {
+            ProgressView()
+            Text(label)
+                .font(.subheadline)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        }
+    }
 
     private func statBadge(value: String, label: String, color: Color) -> some View {
         VStack(spacing: Theme.Spacing.xxs.rawValue) {
@@ -388,6 +396,38 @@ struct FleetView: View {
         )
     }
 
+    /// The stat tiles laid out three-up inside a List row. `GridRow`s are used
+    /// rather than `HStack`s because a List row sizes to its content: a plain
+    /// HStack of `maxWidth: .infinity` tiles would fight the row and clip.
+    /// Tiles keep their value-over-label hierarchy (deliberately NOT
+    /// `HSStatusChip` — a chip has no room for a value).
+    private func statGrid(_ stats: [(value: String, label: String, color: Color)]) -> some View {
+        let rows = stride(from: 0, to: stats.count, by: 3).map {
+            Array(stats[$0..<min($0 + 3, stats.count)])
+        }
+        return Grid(alignment: .center,
+                    horizontalSpacing: Theme.Spacing.md.rawValue,
+                    verticalSpacing: Theme.Spacing.md.rawValue) {
+            ForEach(rows.indices, id: \.self) { i in
+                GridRow {
+                    ForEach(rows[i].indices, id: \.self) { j in
+                        statBadge(value: rows[i][j].value,
+                                  label: rows[i][j].label,
+                                  color: rows[i][j].color)
+                            .gridColumnAlignment(.center)
+                    }
+                    // Pad a short final row so tile widths stay equal.
+                    if rows[i].count < 3 {
+                        ForEach(1...(3 - rows[i].count), id: \.self) { _ in
+                            Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                        }
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
     private func row(_ title: String, value: String) -> some View {
         HStack {
             Text(title)
@@ -400,7 +440,6 @@ struct FleetView: View {
     }
 
     private func errorLabel(_ message: String, retry: (() -> Void)? = nil) -> some View { HSErrorLabel(message: message, retry: retry) }
-    private func emptyLabel(_ text: String) -> some View { HSEmptyLabel(message: text) }
 
     // MARK: - Formatting
 
