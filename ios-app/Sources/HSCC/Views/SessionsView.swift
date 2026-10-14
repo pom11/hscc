@@ -227,12 +227,8 @@ struct SessionsView: View {
     }
 
     private var bloatBadge: some View {
-        Text("bloated")
-            .font(.caption2.bold())
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(Theme.Semantic.bad.opacity(0.18)))
-            .foregroundColor(Theme.Semantic.bad)
+        // Shared chip (spec §6: one of the six bespoke badges it replaces).
+        HSStatusChip("bloated", color: Theme.Semantic.bad)
     }
 
     private func statText(_ value: String, _ label: String) -> some View {

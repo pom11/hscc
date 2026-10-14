@@ -165,14 +165,12 @@ struct ActivityFeedView: View {
     }
 
     private func kindBadge(_ entry: ActivityEntry) -> some View {
-        let tint: Color = entry.isRunning ? Theme.Semantic.warn : Theme.Semantic.ok
-        return Text(entry.kindLabel)
-            .font(.caption2.bold())
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(tint.opacity(0.18)))
-            .foregroundColor(tint)
-    }
+    // The shared chip (spec §6 inventory: kindBadge is one of the six
+    // bespoke badges HSStatusChip replaces). Colour role kept — running
+    // warns, settled is ok.
+    HSStatusChip(entry.kindLabel,
+                 color: entry.isRunning ? Theme.Semantic.warn : Theme.Semantic.ok)
+}
 
     /// A compact "how long ago" label for an ISO timestamp (newest-first feed
     /// reads best as relative time). Falls back to the raw timestamp.

@@ -273,12 +273,8 @@ struct MemoryView: View {
     }
 
     private func sourceBadge(_ text: String) -> some View {
-        Text(text)
-            .font(.caption2.bold())
-            .padding(.horizontal, 6)
-            .padding(.vertical, Theme.Spacing.xxs.rawValue)
-            .background(Capsule().fill(Color.accentColor.opacity(0.18)))
-            .foregroundColor(Color.accentColor)
+        // Shared chip (spec §6: one of the six bespoke badges it replaces).
+        HSStatusChip(text, color: Theme.Semantic.accent)
     }
 
     private func titleDisplay(_ item: MemoryItem) -> String {

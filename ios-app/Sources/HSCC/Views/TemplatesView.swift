@@ -352,15 +352,11 @@ struct TemplatesView: View {
 
 /// The unmistakable marker on the currently-applied template row.
 private struct AppliedBadge: View {
+    // Shared chip (spec §6 inventory). It used to be a filled ok capsule
+    // with surface ink; HSStatusChip is the canonical role-tinted chip now.
     var body: some View {
-        Text("APPLIED")
-            .font(.caption2.weight(.bold))
-            .foregroundColor(Theme.Semantic.surface)
-            .padding(.horizontal, 6)
-            .padding(.vertical, Theme.Spacing.xxs.rawValue)
-            .background(
-                Capsule().fill(Theme.Semantic.ok)
-            )
+        HSStatusChip("Applied", systemImage: "checkmark.seal.fill",
+                     color: Theme.Semantic.ok)
             .accessibilityLabel("Currently applied")
     }
 }
