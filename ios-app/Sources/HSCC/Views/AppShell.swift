@@ -18,9 +18,15 @@ import SwiftUI
 enum AppDestination: String, Hashable, Identifiable {
     case home, chats, projects, cards, approvals
     case fleet, clusterHub, fleetControl, nodesServing, opsHealth
-    case autodown, selfHeal, cron, logs, boardHygiene
+    case autodown, cron, logs, boardHygiene
     case memory, templates, sessions, activity
     case search, settings
+    /// LEGACY alias, kept deliberately (spec §8 merge: SelfHealHistoryView is
+    /// now the trailing section of AutodownView). No drawer row and no screen
+    /// of its own — but any stale caller that still names `.selfHeal`
+    /// (rawValue "selfHeal") lands on the MERGED destination instead of
+    /// silently failing. New code must route `.autodown`.
+    case selfHeal
 
     var id: String { rawValue }
 
@@ -36,8 +42,8 @@ enum AppDestination: String, Hashable, Identifiable {
         case .fleetControl: "Fleet control"
         case .nodesServing: "Nodes & serving"
         case .opsHealth: "Ops & health"
-        case .autodown: "Autodown"
-        case .selfHeal: "Self-heal history"
+        case .autodown: "Autodown & self-heal"
+        case .selfHeal: "Autodown & self-heal"   // legacy alias, §3.1 wording
         case .cron: "Cron"
         case .logs: "Logs"
         case .boardHygiene: "Board hygiene"
@@ -63,7 +69,7 @@ enum AppDestination: String, Hashable, Identifiable {
         case .nodesServing: "serverrack"
         case .opsHealth: "heart.text.square"
         case .autodown: "power"
-        case .selfHeal: "wrench.and.screwdriver"
+        case .selfHeal: "power"   // legacy alias — same destination, same glyph
         case .cron: "clock"
         case .logs: "doc.text.magnifyingglass"
         case .boardHygiene: "broom"
@@ -176,7 +182,9 @@ struct AppShell: View {
         case .nodesServing: ServingControlView(client: client)
         case .opsHealth: OpsView(client: client)
         case .autodown: AutodownView(client: client)
-        case .selfHeal: SelfHealHistoryView(client: client)
+        // §8 merge: the retired screen has no view of its own any more; its
+        // destination lands on the SAME merged screen as `.autodown`.
+        case .selfHeal: AutodownView(client: client)
         case .cron: CronView(client: client)
         case .logs: LogsView(client: client)
         case .boardHygiene: BoardHygieneView(client: client)
@@ -234,7 +242,11 @@ struct AppShell: View {
     /// router and the router writes the path AFTER any selection change
     /// lands (its resolve goes through an await first).
     private func go(_ destination: AppDestination?) {
-        selection = destination
+        // §8 merge, mapped not deleted: the retired self-heal screen's
+        // destination resolves to the merged Autodown & self-heal screen, and
+        // it does so HERE so the selection identity (and the sidebar row's
+        // highlight) is `.autodown`, never a phantom second row.
+        selection = destination == .selfHeal ? .autodown : destination
         router.projectsPath = []
     }
 

@@ -548,12 +548,100 @@ struct HSMetaLine: View {
     }
 }
 
-// MARK: - Offline stale banner
+// MARK: - Banners (the ONE in-content banner recipe)
+
+/// The app's one in-content banner: a leading glyph (or spinner), a bold title
+/// line, an optional muted reason line, and an optional trailing icon action,
+/// on the elevated surface fill.
+///
+/// Spec §1.3 counted this recipe written twice — `StaleBanner` here and
+/// AutodownView's private `wakingBanner` — same shape, different meaning. They
+/// could NOT simply share `StaleBanner`'s copy: it prints "Offline — …", and a
+/// fleet that is *coming up* is not a fleet that is *unreachable*. Printing
+/// "Offline — waking the fleet…" is precisely the word/state disagreement spec
+/// §9 bans, so the shapes collapse and the copy stays with the caller. Each
+/// state still says its own truth; the geometry can no longer drift.
+struct HSBanner: View {
+    /// The glyph/tone role. `warn` = something needs attention (offline data,
+    /// a blocked pipeline); `neutral` = an in-progress state that is not a
+    /// fault (a wake in flight).
+    enum Tone {
+        case warn, neutral
+
+        var glyphColor: Color {
+            switch self {
+            case .warn: return Theme.Semantic.warn
+            case .neutral: return Theme.Semantic.onSurfaceMuted
+            }
+        }
+        var titleColor: Color {
+            switch self {
+            case .warn: return Theme.Semantic.warn
+            case .neutral: return Theme.Semantic.onSurface
+            }
+        }
+    }
+
+    /// What leads the banner: a status glyph, or a spinner when the state is
+    /// literally "in progress" (the wake poll) — a spinner is information, not
+    /// decoration, so it is part of the recipe rather than a call-site hack.
+    enum Leading {
+        case symbol(String)
+        case spinner
+    }
+
+    let leading: Leading
+    var tone: Tone = .neutral
+    let title: String
+    var reason: String = ""
+    /// Trailing icon-button action (e.g. retry). Ignored unless `action` is set.
+    var actionSystemImage: String = "arrow.clockwise"
+    var actionLabel: String = "Retry loading"
+    var action: (() -> Void)?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
+            switch leading {
+            case .symbol(let name):
+                Image(systemName: name)
+                    .foregroundColor(tone.glyphColor)
+            case .spinner:
+                ProgressView()
+            }
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(tone.titleColor)
+                if !reason.isEmpty {
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+            }
+            Spacer(minLength: 0)
+            if let action {
+                Button(action: action) {
+                    Image(systemName: actionSystemImage)
+                }
+                .buttonStyle(.borderless)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .accessibilityLabel(actionLabel)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(Theme.Spacing.md.rawValue)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous)
+                .fill(Theme.Semantic.surfaceElevated)
+        )
+    }
+}
 
 /// A small reusable banner a view overlays when rendering stale last-known
 /// data: the age ("showing state from 6m ago") + the real reason the fetch
-/// failed. Tapping refetches. Defined here (with the rest of the system
-/// components) because it is pure UI and lives beside the palette.
+/// failed. Tapping refetches. This is `HSBanner`'s offline shape — one
+/// façade so the 20+ call sites keep their exact wording while the geometry
+/// lives in one place.
 struct StaleBanner: View {
     /// The staleness age message, e.g. "showing state from 6m ago".
     let age: String
@@ -563,32 +651,12 @@ struct StaleBanner: View {
     var retry: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
-            Image(systemName: "clock.arrow.circlepath")
-                .foregroundColor(Theme.Semantic.warn)
-            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
-                Text("Offline — \(age.lowercased())")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundColor(Theme.Semantic.warn)
-                if !reason.isEmpty {
-                    Text(reason)
-                        .font(.caption)
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                }
-            }
-            Spacer(minLength: 0)
-            Button(action: retry) {
-                Image(systemName: "arrow.clockwise")
-            }
-            .buttonStyle(.borderless)
-            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-            .accessibilityLabel("Retry loading")
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(Theme.Spacing.md.rawValue)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous)
-                .fill(Theme.Semantic.surfaceElevated)
-        )
+        HSBanner(leading: .symbol("clock.arrow.circlepath"),
+                 tone: .warn,
+                 title: "Offline — \(age.lowercased())",
+                 reason: reason,
+                 actionSystemImage: "arrow.clockwise",
+                 actionLabel: "Retry loading",
+                 action: retry)
     }
 }

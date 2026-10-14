@@ -42,8 +42,10 @@ struct Sidebar: View {
                 row(.nodesServing)
                 row(.fleetControl)
                 row(.opsHealth)
+                // spec §3.1: "Autodown & self-heal (was Autodown; history
+                // becomes a section)" — ONE row. The old `.selfHeal` row is
+                // gone; its destination still resolves (see AppShell.go).
                 row(.autodown)
-                row(.selfHeal)
                 row(.cron)
                 row(.logs)
                 row(.boardHygiene)

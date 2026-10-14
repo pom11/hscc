@@ -172,7 +172,8 @@ targets:
       - path: Sources/HSCC/Views/OpsView.swift
       - path: Sources/HSCC/Views/LogsView.swift
       - path: Sources/HSCC/Views/LogRedactor.swift
-      - path: Sources/HSCC/Views/SelfHealHistoryView.swift
+      # SelfHealHistoryView.swift retired (spec §8 merge): the timeline is now
+      # the trailing Section of AutodownView — one destination, one row dialect.
       - path: Sources/HSCC/Views/BoardHygieneView.swift
       - path: Sources/HSCC/Views/ApprovalsView.swift
       - path: Sources/HSCC/Views/ApprovalBadge.swift
