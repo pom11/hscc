@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- HSCC app icon, candidate A "Orbit" — DARK (default) appearance master.
+       Three nodes: the live one lit mint (#7AE2B0 signal), one parked in cool
+       grey (#A7B0C0 mist), one waking in amber (#F2A65A thermal), joined by
+       links. Approved by the operator (PR #26). No text.
+       Background is the app's graphite #16181D. Full-bleed: iOS applies the
+       home-screen mask itself. -->
+  <rect width="1024" height="1024" fill="#16181D"/>
+  <g stroke="#7AE2B0" stroke-opacity="0.85" stroke-width="34" stroke-linecap="round" fill="none">
+    <path d="M512 262 L300 682"/>
+    <path d="M512 262 L724 682"/>
+    <path d="M330 700 L694 700"/>
+  </g>
+  <circle cx="512" cy="262" r="118" fill="#7AE2B0"/>
+  <circle cx="280" cy="712" r="118" fill="#A7B0C0"/>
+  <circle cx="744" cy="712" r="118" fill="#F2A65A"/>
+</svg>

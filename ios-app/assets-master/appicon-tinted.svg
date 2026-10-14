@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- HSCC app icon, candidate A "Orbit" — TINTED appearance master.
+       Monochrome: every shape in one value, so iOS can recolour the field
+       with the user's chosen tint while the mark stays legible. -->
+  <rect width="1024" height="1024" fill="#1D2129"/>
+  <g stroke="#FFFFFF" stroke-opacity="0.92" stroke-width="34" stroke-linecap="round" fill="none">
+    <path d="M512 262 L300 682"/>
+    <path d="M512 262 L724 682"/>
+    <path d="M330 700 L694 700"/>
+  </g>
+  <circle cx="512" cy="262" r="118" fill="#FFFFFF"/>
+  <circle cx="280" cy="712" r="118" fill="#FFFFFF" fill-opacity="0.72"/>
+  <circle cx="744" cy="712" r="118" fill="#FFFFFF" fill-opacity="0.72"/>
+</svg>
