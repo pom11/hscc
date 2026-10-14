@@ -410,6 +410,76 @@ they are the kind that make a suite lie):
 **Mutation check:** see §5 (run separately, since it temporarily neuters the
 gate in the same worktree the suite runs from).
 
+### F6 — the CLI must refuse to guess on a destructive command
+
+**Files:** `hscc_daemon/hscc.py`, `hscc_daemon/cli.py`,
+`hscc_daemon/tests/test_cli_arg_safety.py` (new, 20 tests)
+
+Two defects, both "the CLI guessed where it should have refused".
+
+**1. `hscc cluster up --help` started the fleet.** The `up`/`down` branches
+computed `dry_run = "--dry-run" in cluster_args` and looked at nothing else, so
+every other token was silently discarded:
+
+```python
+if sub == "up":
+    dry_run = "--dry-run" in cluster_args     # <-- the only token ever read
+    result = eng.cmd_cluster_up(dry_run=dry_run)
+```
+
+`--help`, `-h`, a typo'd `--hosts`, even a stray positional — all of them fell
+through to the **destructive** branch and upped all four nodes while looking
+like a normal invocation. The audit's original one-liner understated this: it is
+not just `--help`, it is *any* unrecognised argument.
+
+`_parse_cluster_flags()` now validates the whole token list against an explicit
+allow-list (`--dry-run`) and returns an error for anything else, and the branch
+returns rc=1 without calling the engine. The rule: **for a destructive command
+the default must be refusal, not optimism** — an unparsed argument may never
+imply "go ahead".
+
+**1b. the same class, second instance, found while writing the fix.**
+`hscc cluster up --theme` (palette name omitted): `_strip_theme_arg` consumes
+`--theme <value>`, and on a *dangling* `--theme` it drops the token silently —
+so the parser saw a clean bare `up` and started the fleet again. A flag-stripper
+that discards evidence of a typo re-opens the hole the parser just closed, so
+the parser now also receives the **unstripped** argv and refuses a valueless
+`--theme`. Pinned by `test_dangling_theme_does_not_start_the_fleet`, with three
+companion tests proving the *supported* theme forms still work — a fix that
+breaks the normal path is its own outage.
+
+**2. `hscc start` kept the caller's stdout open.** `cmd_start` double-forks but
+never redirected the standard streams, so the daemonised grandchild inherited
+the operator's terminal. Beyond the daemon being able to write into the
+terminal at will, the real symptom is a **hang**: anything that waits for stdout
+to close (`hscc start | cat`, an editor's shell integration, a tool capturing
+output) blocks forever even though `hscc start` had already printed its panel
+and returned. It also leaks the caller's file descriptors into a long-lived
+daemon.
+
+`_detach_stdio()` now runs in the grandchild immediately after the second fork
+and before `run_daemon_loop`. Two decisions worth the comment in the code:
+
+* **DEVNULL, not `os.close(1)`.** Verified empirically while writing this —
+  `fd = open("f","w"); os.dup2(fd, 1); f.close(); open("g","w").fileno()`
+  returns **1**: after `os.close(1)` the next `open()` in the process silently
+  gets fd 1, and from then on that file's content is written into the caller's
+  pipe — strictly worse than today. A device keeps fd 1 valid and inert.
+* **Non-fatal by design.** It runs after fork and before the loop; a failure
+  there must not kill an otherwise-healthy daemon, so every step is guarded.
+
+Also verified while writing the fallback path: `dup2(fd, 1)` followed by a
+Python `f.close()` leaves fd 1 usable (they share a file description), so the
+`builtins.open` fallback cannot leave a dangling stream.
+
+**Tests.** 20 tests. The e2e ones drive `main()` through `_handle_cluster()`
+with a fake engine that *records* being called, so "it didn't execute" is
+asserted as `calls == []` rather than by parsing output text — a parser bug that
+lets a flag through fails by construction, not by string matching. The fork
+chain is emulated following the existing `test_cli.py` pattern, and
+placement is pinned as an ordering assertion (`detach` before `loop`) because
+that ordering is the entire fix.
+
 ## 4. Node hang investigation (F7)
 
 Read-only forensics on the two hard-hung nodes, driven through sparkrun's own

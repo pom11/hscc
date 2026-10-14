@@ -487,8 +487,11 @@ def _handle_cluster():
         return 1
 
     # `--theme` selects the palette for the human view only; strip it before
-    # the engine sees argv (it is not a cluster argument).
-    cluster_args, theme_name = _strip_theme_arg(sys.argv[2:])
+    # the engine sees argv (it is not a cluster argument). Keep the raw slice:
+    # a *dangling* --theme is dropped silently by the stripper, and the F6
+    # flag parser needs the untouched argv to refuse it.
+    cluster_args_raw = list(sys.argv[2:])
+    cluster_args, theme_name = _strip_theme_arg(cluster_args_raw)
     sub = cluster_args[0] if cluster_args else sub
 
     eng = _load_cluster_engine()
@@ -505,12 +508,20 @@ def _handle_cluster():
         return cluster_render.render_stop(console, result)
 
     if sub == "down":
-        dry_run = "--dry-run" in cluster_args
+        dry_run, err = _parse_cluster_flags(cluster_args, "down",
+                                           raw_args=cluster_args_raw)
+        if err:
+            print(err)
+            return 1
         result = eng.cmd_cluster_down(dry_run=dry_run)
         return cluster_render.render_down(console, result)
 
     if sub == "up":
-        dry_run = "--dry-run" in cluster_args
+        dry_run, err = _parse_cluster_flags(cluster_args, "up",
+                                           raw_args=cluster_args_raw)
+        if err:
+            print(err)
+            return 1
         result = eng.cmd_cluster_up(dry_run=dry_run)
         return cluster_render.render_up(console, result)
 
@@ -614,6 +625,50 @@ def _handle_template():
     if sub == "apply" and isinstance(result, dict) and result.get("success") is False:
         return 1
     return rc
+
+
+def _parse_cluster_flags(cluster_args, sub, raw_args=None):
+    """Validate the flag list of a DESTRUCTIVE cluster command (up/down).
+
+    Returns ``(dry_run, error_message)``; exactly one of the two is meaningful
+    — when ``error_message`` is not None the caller must NOT run the command.
+
+    F6 (HEAL_CASCADE 2026-10-14): these two branches used to read
+    ``dry_run = "--dry-run" in cluster_args`` and nothing else, so every other
+    token was silently ignored. ``hscc cluster up --help`` therefore STARTED
+    THE FLEET, and a mistyped ``--hosts`` upped all four nodes while looking
+    like a normal invocation. Anything the parser does not understand is an
+    error, never an implicit "go ahead": the default for a destructive command
+    must be refusal, not optimism.
+
+    ``raw_args`` is the *unstripped* argv slice. ``--theme`` is consumed earlier
+    by ``_strip_theme_arg``, which drops a dangling ``--theme`` (no value)
+    silently — leaving ``up`` looking like a clean bare call that starts the
+    fleet. Passing the raw slice lets the same refusal cover that hole.
+    """
+    allowed = ("--dry-run",)
+    dry_run = False
+    raw = list(raw_args or [])
+    for i, tok in enumerate(raw):
+        if tok == "--theme":
+            nxt = raw[i + 1] if i + 1 < len(raw) else None
+            if nxt is None or str(nxt).startswith("-"):
+                return False, (
+                    f"Error: '--theme' needs a palette name "
+                    f"(e.g. --theme dark). Nothing was started or stopped.")
+    for tok in cluster_args[1:]:
+        if tok in allowed:
+            dry_run = True
+            continue
+        return False, (
+            f"Error: unknown argument for 'hscc cluster {sub}': {tok}\n"
+            f"  'hscc cluster {sub}' accepts only: "
+            + ", ".join(allowed)
+            + " (and --theme <name> for the human view).\n"
+            f"  Nothing was started or stopped. Refusing to guess what {tok} "
+            f"meant — a destructive command runs only on arguments it "
+            f"understands.")
+    return dry_run, None
 
 
 def _strip_theme_arg(args):
