@@ -153,6 +153,37 @@ enum Theme {
         case dock = 24
     }
 
+    // MARK: Elevation (IOS_REDESIGN 2026-10-14 §2.3)
+    //
+    // Spec'd as `hairline`, `low`, `mid`. Before this the app had NO elevation
+    // token at all — raised surfaces in dark mode were readable only by luck,
+    // and the first view that needed a shadow would have hardcoded one (the
+    // check_theme gate rejects raw colours outside this file). Apply with
+    // `.hsElevated(.low)` / `.hsElevated(.mid)`.
+    enum Elevation {
+        /// Separators between rows: a hairline stroke, no shadow.
+        static var hairline: Color { Theme.Semantic.onSurface.opacity(0.08) }
+
+        /// Cards and small raised surfaces (spec `low` = 0/1/3). Light mode is
+        /// stronger because white-on-white carries no other cue (spec §2.3).
+        static var lowShadow: Color {
+            dynamic { $0.userInterfaceStyle == .light
+                ? UIColor.black.withAlphaComponent(0.28)
+                : UIColor.black.withAlphaComponent(0.20) }
+        }
+        static let lowRadius: CGFloat = 3
+        static let lowY: CGFloat = 1
+
+        /// Floating bars such as the home dock (spec `mid` = 0/6/16).
+        static var midShadow: Color {
+            dynamic { $0.userInterfaceStyle == .light
+                ? UIColor.black.withAlphaComponent(0.28)
+                : UIColor.black.withAlphaComponent(0.18) }
+        }
+        static let midRadius: CGFloat = 16
+        static let midY: CGFloat = 6
+    }
+
     /// Build a `Color` that re-resolves per trait collection (used to make the
     /// semantic roles adapt to light/dark automatically).
     private static func dynamic(_ resolve: @escaping (UITraitCollection) -> UIColor) -> Color {
