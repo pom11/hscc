@@ -207,6 +207,115 @@ commit): the F2 lease was not redirected in `conftest.py`, so tests wrote a live
 the operator's real `~/.hscc` — verified by stashing the conftest change and watching
 `heal-lease.json` appear with a 600s TTL while the suite stayed green.
 
+### F4 — proxy health must compare the LIVE router to actually-healthy units
+
+**Files:** `hscc_daemon/health.py`, `hscc_daemon/tests/test_health.py`
+
+The incident's second failure ran for ~2 hours while every check said OK. After
+recovery, `:4000` was an **orphan litellm** routing to ONE backend (`.246`)
+although three units were healthy:
+
+* `sparkrun proxy status` and `sparkrun proxy sync` both reported "in sync" —
+  both read the **config file on disk**, which listed all 4 backends.
+* `sparkrun proxy start --restart` did not fix it: the orphan was not the
+  tracked PID, so sparkrun SIGTERMs nothing that matters, and the new instance
+  **silently bound `:1708`** while the orphan kept `:4000`.
+* The existing hscc check could not see it either: `_proxy_models_probe` reads
+  `/v1/models`, which lists model **ids** only. A proxy serving every expected
+  alias through ONE backend passes the alias test — the catalogue was genuinely
+  correct, the routing was not.
+
+**Root cause, read out of sparkrun's source** (`src/sparkrun/proxy/`, not
+edited here). `apply_desired_state()` writes the config and then:
+
+```python
+if not self.is_running():
+    logger.debug("Proxy not running — new config applies on next start")
+    return added, removed
+```
+
+and `is_running()` is only `process_exists(_read_pid())` — **the state-file
+PID, never the actual owner of the port**. With a live proxy on `:4000` that
+sparkrun does not recognise, every auto-discover sweep rewrites the config and
+then skips the restart that would have applied it. That single early-return
+explains the whole F4b symptom (below), and it is not hscc-visible state we can
+fix — so hscc stops trusting it.
+
+**What hscc does now.** `check_proxy` keeps the catalogue check and adds a
+second, live one:
+
+* `_proxy_backend_probe()` GETs **`/v1/model/info`** on the running proxy — the
+  only endpoint that reveals `litellm_params.api_base` — and reduces it to a
+  `{"host:port", ...}` set. Verified against the running fleet: it answers
+  without auth and returns the real api_base per model.
+* `_fleet_unit_backends()` probes each unit's `/health` with a **2s** timeout —
+  deliberately stricter than the workers check's 5s, because this is a
+  consistency check and the cost of demanding too much is a needless LB restart.
+  The authoritative down verdict (load grace + debounce + cooldown) stays in
+  `check_workers`, so F1's protection is not bypassed.
+* `_proxy_backend_drift()` compares the two, scoped to hscc's own fleet:
+  a healthy unit missing from the live router, or a router pointing at an
+  unhealthy fleet backend, is unhealthy. Backends hscc does not supervise are
+  ignored (demanding them would relaunch forever); an empty live set is *not*
+  drift here, because the catalogue check already owns "answers but serves
+  nothing" and reporting one fault twice makes it look like two.
+* A probe failure (`/v1/model/info` unavailable) **fails open** — it is logged
+  and the drift check is skipped, because the catalogue probe just succeeded and
+  restarting a working LB on an endpoint change is worse than a missed drift.
+
+**Heal = `_proxy_repair_orphan()`, not `proxy start`.** Drift selects a different
+path on purpose: plain `proxy start` REFUSES a running proxy (sparkrun returns
+1 on `ProxyAlreadyRunning`), and `--restart` only SIGTERMs the PID in sparkrun's
+own state file — which is exactly what was wrong. So the repair is:
+`sparkrun proxy stop` → reap any listener sparkrun does **not** track,
+**cmdline-vetted for `litellm` before any signal** (same blast-radius contract as
+the orphaned-serve heal; a foreign listener on `:4000` is reported and left
+alone; the tracked PID is never killed) → plain `sparkrun proxy start --hosts
+<fleet>` → **verify the port owner equals the tracked PID**. Exit code is not
+accepted as success: `proxy start --restart` exited 0 during the incident.
+
+### F4b — node reboot: the proxy MUST re-add a returned unit
+
+This is the path the operator actually took: power-cycling `.244`/`.247` while
+the proxy was running. The proxy was (re)started at 10:25 local while only
+`.246` was up; when the rebooted nodes came back and their units turned healthy
+(10:52), the running proxy **never picked them up**, even though
+`Auto-discover enabled (every 30s)` was logged and the config file on disk was
+rewritten with all 4 backends.
+
+That is the same early-return above, not a separate bug: auto-discover's sweep
+*does* discover the returned units and *does* rewrite the config, then skips the
+restart because `is_running()` is false for a proxy it does not track. The
+config file and the live router permanently diverge, and both `proxy status`
+and `proxy sync` read the file — so the divergence is invisible by construction.
+
+F4's live-vs-healthy comparison catches it either way, without touching
+sparkrun: the unit is healthy again, the live router has no backend for it, that
+is drift, and the repair re-registers it. Pinned by
+`test_returned_unit_is_readded_within_one_sweep`, which walks the operator's
+sequence: unit leaves (no drift demanded on a rebooting node — a healthy-set
+with one backend matches a router with one backend), unit returns and is
+healthy, the *next single sweep* must detect it and repair.
+
+Tests (14): api_base parsing from `/v1/model/info`; each drift direction
+(missing / dead / out-of-scope / match); probe-failure-is-not-drift;
+`check_proxy` routes catalogue-healthy-but-single-backend into the repair path
+and records `backend_drift` in state; drift never falls back to plain `proxy
+start`; the reboot scenario above; the three reap guards (tracked PID refused,
+non-litellm refused, untracked litellm reaped); and repair verifying port-owner
+== tracked PID plus the stop → reap → start order with `--restart` absent.
+Mutation-checked by disabling only the wiring in `check_proxy` (helpers kept):
+**2 fail** — the two end-to-end integration tests — while the 40 helper/unit
+tests pass either way, which is the expected shape.
+
+Test-isolation note: `TestCheckProxy._setup` now stubs `_proxy_backend_probe`
+**by default**. The first run of these tests failed on
+`test_both_aliases_served_is_healthy` because the new path reached the
+operator's live `:4000`. That class of ambient-state leak is what the class
+docstring already forbids for `_proxy_models_probe`; the default is now
+"could not ask the proxy" (the documented fail-open), so every pre-F4
+expectation is preserved unchanged and no test can reach the running fleet.
+
 ## 4. Node hang investigation (F7)
 
 Read-only forensics on the two hard-hung nodes, driven through sparkrun's own

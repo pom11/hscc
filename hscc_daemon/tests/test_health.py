@@ -1506,12 +1506,20 @@ class TestCheckProxy:
     These stub _proxy_models_probe (never the live :4000) and stub
     serving.load_serving (never the operator's live serving.json — the same
     ambient-state discipline as test_doctor's _HOME_ENV guard).
+
+    F4 added a SECOND live probe (_proxy_backend_probe -> /v1/model/info, plus
+    a /health sweep of the fleet). _setup stubs BOTH by default so no test in
+    this class can reach the operator's running proxy or nodes: the backend
+    probe defaults to "could not ask the proxy", which is the documented
+    fail-open (drift check skipped) and preserves every pre-F4 expectation
+    exactly. Tests that exercise drift pass `backend=` explicitly.
     """
 
     _SERVING_NO_UNITS = {"version": 2, "units": []}
 
     def _setup(self, tmp_hfcc_dir, monkeypatch, nodes, probe=None,
-               serving_data=_SERVING_NO_UNITS):
+               serving_data=_SERVING_NO_UNITS, backend=None,
+               healthy_units=None, fleet_hp=None):
         from hscc_daemon import health, serving
         from hscc_daemon import state as state_mod
         monkeypatch.setattr(health, "log", lambda *a, **kw: None)
@@ -1523,11 +1531,273 @@ class TestCheckProxy:
         if probe is not None:
             monkeypatch.setattr(health, "_proxy_models_probe",
                                 lambda url, timeout=5: dict(probe))
+        # F4: never probe the live proxy or the real nodes from a test.
+        if backend is None:
+            backend = {"ok": False, "backends": set(),
+                       "error": "stubbed — drift check skipped"}
+        monkeypatch.setattr(health, "_proxy_backend_probe",
+                            lambda url=None, timeout=5: dict(backend))
+        if healthy_units is not None:
+            monkeypatch.setattr(
+                health, "_fleet_unit_backends",
+                lambda serving_data=None, probe=None:
+                    (set(healthy_units), set(fleet_hp or healthy_units)))
         return health
 
     def test_no_workers_noop(self, tmp_hfcc_dir, monkeypatch):
         health = self._setup(tmp_hfcc_dir, monkeypatch, nodes=[])
         assert health.check_proxy() is True
+
+    # ── F4 (HEAL_CASCADE 2026-10-14): live router vs. actually-healthy units ──
+
+    def test_backend_probe_parses_live_api_base_set(self):
+        """_proxy_backend_probe must read the LIVE router out of
+        /v1/model/info's litellm_params.api_base — /v1/models cannot show this,
+        which is exactly why the orphan routing everything to one node looked
+        healthy for two hours."""
+        from hscc_daemon import health
+        body = {
+            "data": [
+                {"model_name": "worker-model",
+                 "litellm_params": {"api_base": "http://10.0.0.2:8001/v1"}},
+                {"model_name": "orchestrator-model",
+                 "litellm_params": {"api_base": "http://10.0.0.2:8001"}},
+                {"model_name": "no-params"},
+            ]}
+        import io
+        class _FakeResp:
+            def __init__(self, b): self._b = b
+            def read(self): return self._b        # urlopen().read() -> bytes
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        payload = json.dumps(body).encode()
+        monkey_fake = lambda url, timeout=5: _FakeResp(payload)
+        orig = health.urllib.request.urlopen
+        health.urllib.request.urlopen = monkey_fake
+        try:
+            res = health._proxy_backend_probe("http://x/v1/model/info")
+        finally:
+            health.urllib.request.urlopen = orig
+        assert res["ok"] is True
+        assert res["backends"] == {"10.0.0.2:8001"}
+
+    def test_backend_probe_failure_is_not_drift(self):
+        """"Could not ask the proxy" must NOT be read as drift — failing closed
+        here would restart a working LB on any endpoint change."""
+        from hscc_daemon import health
+        assert health._proxy_backend_drift(set(), {"10.0.0.2:8001"},
+                                           {"10.0.0.2:8001"})[0] is True
+
+    def test_drift_missing_backend_is_unhealthy(self):
+        """THE INCIDENT SHAPE: the catalogue serves every alias, but all of it
+        routes through ONE backend while three units are healthy."""
+        from hscc_daemon import health
+        ok, reason = health._proxy_backend_drift(
+            {"10.0.0.2:8001"},                              # live router
+            {"10.0.0.2:8001", "10.0.0.3:8002", "10.0.0.4:8003"},  # healthy
+            {"10.0.0.2:8001", "10.0.0.3:8002", "10.0.0.4:8003"})
+        assert ok is False
+        assert "10.0.0.3:8002" in reason and "10.0.0.4:8003" in reason
+
+    def test_drift_dead_backend_is_unhealthy(self):
+        """A router pointing at a unit that is NOT healthy is sending load to a
+        dead worker — unhealthy even when every healthy unit is covered."""
+        from hscc_daemon import health
+        ok, reason = health._proxy_backend_drift(
+            {"10.0.0.2:8001", "10.0.0.9:8099"},
+            {"10.0.0.2:8001"},
+            {"10.0.0.2:8001", "10.0.0.9:8099"})
+        assert ok is False and "10.0.0.9:8099" in reason
+
+    def test_drift_ignores_backends_hscc_does_not_supervise(self):
+        """The proxy may legitimately serve endpoints outside serving.json. They
+        must never make us relaunch the LB forever."""
+        from hscc_daemon import health
+        ok, _ = health._proxy_backend_drift(
+            {"10.0.0.2:8001", "10.9.9.9:9000"},
+            {"10.0.0.2:8001"},
+            {"10.0.0.2:8001"})
+        assert ok is True
+
+    def test_drift_matches_is_healthy(self):
+        from hscc_daemon import health
+        hp = {"10.0.0.2:8001", "10.0.0.3:8002"}
+        ok, _ = health._proxy_backend_drift(hp, hp, hp)
+        assert ok is True
+
+    def test_healthy_aliases_but_single_backend_triggers_repair(
+            self, tmp_hfcc_dir, monkeypatch):
+        """check_proxy must treat catalogue-healthy + single-backend as
+        UNHEALTHY and take the repair path, not the plain `proxy start` that
+        refuses a running proxy."""
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"],
+            probe={"ok": True, "models": ["worker-model"], "error": ""},
+            serving_data={"version": 2, "units": [
+                {"id": "w1", "role": "worker", "keepalive": True,
+                 "nodes": ["10.0.0.2"], "port": 8001, "recipe": "r"},
+                {"id": "w2", "role": "worker", "keepalive": True,
+                 "nodes": ["10.0.0.3"], "port": 8002, "recipe": "r"},
+            ]},
+            backend={"ok": True, "backends": {"10.0.0.2:8001"}, "error": ""},
+            healthy_units={"10.0.0.2:8001", "10.0.0.3:8002"},
+            fleet_hp={"10.0.0.2:8001", "10.0.0.3:8002"})
+        calls = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda a, **k: calls.append(list(a)) or {"ok": True})
+        monkeypatch.setattr(health, "_proxy_repair_orphan",
+                            lambda hosts: calls.append(["REPAIR", list(hosts)])
+                            or {"ok": True, "verified": True})
+        assert health.check_proxy() is True
+        assert any(c and c[0] == "REPAIR" for c in calls), \
+            f"drift must take the repair path, got {calls}"
+        from hscc_daemon import state as state_mod
+        assert (state_mod.read_state("proxy") or {}).get("backend_drift") is True
+
+    def test_drift_repair_does_not_use_plain_start(self, tmp_hfcc_dir, monkeypatch):
+        """The repair must never fall back to plain `proxy start`: sparkrun
+        REFUSES a running proxy (rc 1), which is how the incident persisted."""
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"],
+            probe={"ok": True, "models": ["worker-model"], "error": ""},
+            backend={"ok": True, "backends": {"10.0.0.2:8001"}, "error": ""},
+            healthy_units={"10.0.0.2:8001", "10.0.0.3:8002"})
+        started = []
+        monkeypatch.setattr(health, "_proxy_repair_orphan",
+                            lambda hosts: {"ok": True, "verified": True})
+        monkeypatch.setattr(
+            health, "run_cmd",
+            lambda a, **k: started.append(list(a)) or {"ok": True})
+        health.check_proxy()
+        for c in started:
+            assert not ("start" in c and "--restart" not in c
+                        and "stop" not in c and "status" not in c), \
+            f"plain `proxy start` used despite drift: {c}"
+
+    # ── F4b: node reboot -> proxy MUST re-add the returned unit ──────────────
+
+    def test_returned_unit_is_readded_within_one_sweep(
+            self, tmp_hfcc_dir, monkeypatch):
+        """THE OPERATOR'S PATH: power-cycle a node while the proxy runs. Its unit
+        leaves (proxy drops it), comes back healthy, and the RUNNING proxy never
+        re-adds it — sparkrun's auto-discover rewrites the config file but skips
+        the restart because is_running() only checks its own state-file PID.
+        One check_proxy sweep must detect that and repair."""
+        healthy_units = {"10.0.0.2:8001", "10.0.0.3:8002"}
+        # Sweep 1: node .3 is down for reboot -> proxy legitimately has 1 backend.
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"],
+            probe={"ok": True, "models": ["worker-model"], "error": ""},
+            backend={"ok": True, "backends": {"10.0.0.2:8001"}, "error": ""},
+            healthy_units={"10.0.0.2:8001"})
+        monkeypatch.setattr(health, "run_cmd", lambda a, **k: {"ok": True})
+        monkeypatch.setattr(health, "_proxy_repair_orphan", lambda hosts: {"ok": True})
+        assert health.check_proxy() is True          # no demand on a rebooting node
+
+        # Sweep 2: .3 is back and healthy, but the live router still has only .2.
+        health2 = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"],
+            probe={"ok": True, "models": ["worker-model"], "error": ""},
+            backend={"ok": True, "backends": {"10.0.0.2:8001"}, "error": ""},
+            healthy_units=healthy_units)
+        repaired = []
+        monkeypatch.setattr(health2, "_proxy_repair_orphan",
+                            lambda hosts: repaired.append(list(hosts))
+                            or {"ok": True, "verified": True})
+        monkeypatch.setattr(health2, "run_cmd", lambda a, **k: {"ok": True})
+        health2.check_proxy()
+        assert repaired, "returned unit was not re-added within one sweep"
+
+    # ── F4: orphan reap guards ───────────────────────────────────────────────
+
+    def _reap_setup(self, monkeypatch, health, listener, tracked, killed):
+        monkeypatch.setattr(health, "_proxy_listener", lambda: listener)
+        monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: tracked)
+        monkeypatch.setattr(health.os, "kill",
+                            lambda pid, sig: killed.append((pid, sig)))
+
+    def test_reap_refuses_tracked_pid(self, tmp_hfcc_dir, monkeypatch):
+        """The tracked PID is sparkrun's own proxy — never kill it here."""
+        from hscc_daemon import health
+        killed = []
+        self._reap_setup(monkeypatch, health, (555, "litellm --config x"), 555, killed)
+        assert health._reap_orphan_proxy_listener(555) is False
+        assert killed == []
+
+    def test_reap_refuses_non_litellm_cmdline(self, tmp_hfcc_dir, monkeypatch):
+        """Blast-radius contract: an unrecognised listener on :4000 is reported
+        and left alone, same rule as the orphaned-serve heal."""
+        from hscc_daemon import health
+        killed = []
+        self._reap_setup(monkeypatch, health, (777, "/usr/bin/some-other-server"),
+                         None, killed)
+        assert health._reap_orphan_proxy_listener(None) is False
+        assert killed == []
+
+    def test_reap_kills_untracked_litellm_orphan(self, tmp_hfcc_dir, monkeypatch):
+        from hscc_daemon import health
+        killed = []
+        state = {"listener": (999, "python -m litellm --config /tmp/x.yaml")}
+        monkeypatch.setattr(health, "_proxy_listener", lambda: state["listener"])
+        monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: 111)
+        def fake_kill(pid, sig):
+            killed.append((pid, sig))
+            state["listener"] = (None, None)      # dies on first signal
+        monkeypatch.setattr(health.os, "kill", fake_kill)
+        assert health._reap_orphan_proxy_listener(111) is True
+        assert killed and killed[0][0] == 999
+
+    def test_repair_verifies_port_owner_is_tracked_pid(
+            self, tmp_hfcc_dir, monkeypatch):
+        """exit 0 is not success. `proxy start --restart` exited fine during the
+        incident while the orphan kept :4000 and the new instance bound :1708."""
+        from hscc_daemon import health
+        monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: 222)
+        monkeypatch.setattr(health, "_proxy_listener", lambda: (333, "litellm"))
+        monkeypatch.setattr(health, "_reap_orphan_proxy_listener", lambda t: True)
+        monkeypatch.setattr(health, "run_cmd", lambda a, **k: {"ok": True})
+        res = health._proxy_repair_orphan(["10.0.0.2"])
+        assert res["verified"] is False and res["ok"] is False
+
+    def test_repair_orders_stop_then_reap_then_start(
+            self, tmp_hfcc_dir, monkeypatch):
+        """Stop before reaping, verify after starting — the order that makes
+        `--restart` unnecessary (and which --restart could never satisfy).
+
+        Sequence labels are derived from the SUBCOMMAND TOKEN inside each argv
+        (`sparkrun_bin.argv` prefixes the resolved binary path, so argv[0] is
+        never "stop"/"start" — asserting on argv[0] would pass vacuously).
+        """
+        from hscc_daemon import health
+        seq = []
+        monkeypatch.setattr(health, "_proxy_tracked_pid",
+                            lambda: seq.append("tracked") or 222)
+        monkeypatch.setattr(
+            health, "run_cmd",
+            lambda a, **k: seq.append(list(a)) or {"ok": True})
+        monkeypatch.setattr(
+            health, "_reap_orphan_proxy_listener",
+            lambda t: seq.append("reap") or True)
+        monkeypatch.setattr(health, "_proxy_listener",
+                            lambda: seq.append("listen") or (222, "litellm"))
+        res = health._proxy_repair_orphan(["10.0.0.2", "10.0.0.3"])
+        assert res["ok"] is True and res["verified"] is True
+
+        kinds = []
+        for c in seq:
+            if c == "reap":
+                kinds.append("reap")
+            elif isinstance(c, list) and "proxy" in c:
+                if "stop" in c:
+                    kinds.append("stop")
+                elif "start" in c:
+                    kinds.append("start")
+        assert kinds == ["stop", "reap", "start"], \
+            f"repair sequence must be stop -> reap -> start, got {kinds}"
+        start = [c for c in seq if isinstance(c, list) and "start" in c][0]
+        assert "--restart" not in start, \
+            "--restart must not be used: it only SIGTERMs sparkrun's own tracked PID"
+        assert "10.0.0.2,10.0.0.3" in start
 
     def test_proxy_healthy(self, tmp_hfcc_dir, monkeypatch):
         health = self._setup(

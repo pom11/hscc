@@ -4,11 +4,13 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import datetime
 import time
 import threading
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -715,6 +717,289 @@ def _tp_peer_nodes():
 
 
 
+# ── Proxy live-vs-healthy backend comparison (F4, HEAL_CASCADE 2026-10-14) ──
+#
+# The incident's second failure: after recovery, :4000 was an ORPHAN litellm
+# routing to ONE backend (.246) while `sparkrun proxy status` and `proxy sync`
+# both reported "in sync" — because both read the CONFIG FILE on disk, which
+# listed all 4. `proxy start --restart` did not kill the orphan either: the new
+# instance silently bound :1708, so the orphan kept :4000 and the gateway check
+# stayed OK for ~2 hours while all load went to one node.
+#
+# Root cause, read out of sparkrun's own source (we do not edit it):
+# ProxyEngine.apply_desired_state() writes the config, then returns early
+#
+#     if not self.is_running():
+#         logger.debug("Proxy not running — new config applies on next start")
+#         return added, removed
+#
+# and is_running() is only `process_exists(_read_pid())` — the STATE-FILE PID,
+# never the actual owner of the port. So with a live proxy on :4000 that sparkrun
+# does not recognise (PID file lost / PID reused / second instance bound another
+# port), every auto-discover sweep REWRITES the config and then skips the restart
+# that would have applied it. That is exactly the observed "Auto-discover enabled
+# (every 30s)" + config file holding all 4 backends + live router serving one.
+#
+# hscc cannot fix sparkrun's state file, but it can stop trusting it: compare
+# what the RUNNING proxy actually routes to against the units that are actually
+# healthy, and repair when they disagree.
+
+
+def _proxy_backend_probe(url=None, timeout=5):
+    """GET the RUNNING proxy's /v1/model/info and return the api_base set it
+    actually routes to, as {"host:port", ...}.
+
+    /v1/model/info is the only endpoint that reveals the LIVE router: it returns
+    each model's ``litellm_params.api_base``. It answers without auth on the
+    sparkrun-launched proxy (verified against the running fleet). Note this is
+    deliberately NOT /v1/models — that lists model ids only, so the 2026-10-11
+    "200 with empty catalogue" check cannot see a proxy that serves the right
+    aliases through ONE backend.
+
+    Returns {"ok": bool, "backends": set, "error": str}. ok=False means "could
+    not ask the proxy" (caller must NOT treat that as drift).
+    """
+    url = url or f"http://localhost:{PROXY_PORT}/v1/model/info"
+    try:
+        req = urllib.request.urlopen(url, timeout=timeout)
+        body = req.read()
+    except Exception as e:
+        return {"ok": False, "backends": set(), "error": str(e)}
+    try:
+        data = json.loads(body.decode("utf-8", "replace"))
+    except Exception as e:
+        return {"ok": False, "backends": set(),
+                "error": f"unparseable /v1/model/info body: {e}"}
+    backends = set()
+    for m in (data.get("data") or []):
+        base = ((m.get("litellm_params") or {}).get("api_base")) or ""
+        hostport = _hostport_from_api_base(base)
+        if hostport:
+            backends.add(hostport)
+    return {"ok": True, "backends": backends, "error": ""}
+
+
+def _hostport_from_api_base(api_base):
+    """'http://10.0.0.2:8001/v1' -> '10.0.0.2:8001'; '' when unparseable.
+
+    Hostnames and ports are kept verbatim so the comparison never has to
+    resolve anything (a proxy may legitimately use a name or a loopback).
+    """
+    if not api_base:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(api_base)
+    except Exception:
+        return ""
+    host = parsed.hostname
+    if not host:
+        return ""
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return f"{host}:{port}"
+
+
+def _fleet_unit_backends(serving_data=None, probe=None):
+    """(healthy_backends, fleet_hostports) for the units the proxy should route to.
+
+    ``healthy_backends`` = {"node:port"} for every keep-alive worker whose
+    /health answers 200 RIGHT NOW, plus the orchestrator node when serving.json
+    declares a uniform pool (that is when the proxy is expected to route
+    orchestrator-model). A unit still loading is absent from this set, which is
+    what keeps a slow load from looking like drift.
+
+    ``fleet_hostports`` = every node:port hscc owns. Backends outside this set
+    are ignored by the comparison — the proxy may be configured with endpoints
+    hscc does not supervise, and demanding them would relaunch the LB forever.
+    """
+    if probe is None:
+        probe = http_check
+    if serving_data is None:
+        serving_data = serving.load_serving()
+    healthy, all_hp = set(), set()
+    try:
+        units = serving.keepalive_units(serving_data) or []
+    except Exception:
+        units = []
+    for u in units:
+        node, port = u.get("node"), u.get("port")
+        if not node or not port:
+            continue
+        all_hp.add(f"{node}:{port}")
+        if node in serving.ORCH_NODES:
+            continue
+        if probe(f"http://{node}:{port}/health", timeout=5).get("ok"):
+            healthy.add(f"{node}:{port}")
+    if serving.is_uniform_pool(serving_data):
+        try:
+            orch_port = int(serving.serving_port(serving_data) or serving.VLLM_PORT)
+        except Exception:
+            orch_port = serving.VLLM_PORT
+        for node in serving.ORCH_NODES:
+            all_hp.add(f"{node}:{orch_port}")
+            if probe(f"http://{node}:{orch_port}/health", timeout=5).get("ok"):
+                healthy.add(f"{node}:{orch_port}")
+    return healthy, all_hp
+
+
+def _proxy_backend_drift(live_backends, healthy_backends, fleet_hostports):
+    """(healthy, reason) — does the RUNNING proxy route to what is actually up?
+
+    Only two directions matter, both scoped to hscc's own fleet:
+      * MISSING: a unit is healthy but the live router has no backend for it —
+        the incident shape (3 units up, proxy routed to 1) and the node-reboot
+        shape (rebooted nodes came back healthy, the running proxy never
+        re-added them).
+      * DEAD: the live router points at a fleet backend whose unit is NOT
+        healthy — load is being sent to a dead worker.
+    An empty live set is NOT drift here: the catalogue check already owns
+    "proxy answers but serves nothing", and reporting it twice would make one
+    fault look like two.
+    """
+    if not live_backends:
+        return True, "no live backends to compare (catalogue check owns that)"
+    scoped_fleet = set(fleet_hostports)
+    live_in_fleet = {b for b in live_backends if b in scoped_fleet}
+    missing = set(healthy_backends) - live_in_fleet
+    if missing:
+        return False, (f"live router missing backend(s) {sorted(missing)} "
+                       f"— healthy unit(s) the proxy is not serving")
+    dead = live_in_fleet - set(healthy_backends)
+    if dead:
+        return False, (f"live router points at unhealthy backend(s) {sorted(dead)} "
+                       f"— load is being sent to a dead worker")
+    return True, (f"live router matches {len(healthy_backends)} healthy "
+                  f"backend(s)")
+
+
+def _proxy_listener():
+    """(pid, cmdline) of the process LISTENING on PROXY_PORT, or (None, None).
+
+    Same lsof+ps technique as hscc-api/gateway_bridge._listener_cmdline: the
+    port owner is what actually serves, so it is the only thing worth trusting.
+    """
+    try:
+        out = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{PROXY_PORT}", "-sTCP:LISTEN", "-t"],
+            capture_output=True, text=True, timeout=5).stdout
+        pids = [int(p) for p in out.split() if p.strip().isdigit()]
+        if not pids:
+            return None, None
+        cmd = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pids[0])],
+            capture_output=True, text=True, timeout=5).stdout
+        return pids[0], (cmd.strip() or None)
+    except Exception:
+        return None, None
+
+
+def _proxy_tracked_pid():
+    """PID sparkrun believes owns the proxy (from its state file), or None.
+
+    Read through sparkrun's own `proxy status --json` rather than by parsing its
+    state file — sparkrun owns that file's format and we must not fork it.
+    """
+    res = run_cmd(sparkrun_bin.argv("proxy", "status", "--json"), timeout=30)
+    if not res.get("ok"):
+        return None
+    try:
+        data = json.loads(res.get("output") or "{}")
+    except Exception:
+        return None
+    pid = data.get("pid")
+    return int(pid) if isinstance(pid, int) and pid > 0 else None
+
+
+def _reap_orphan_proxy_listener(tracked_pid):
+    """SIGTERM a listener on PROXY_PORT that sparkrun does not track.
+
+    Guards, in order, all required before any signal is sent:
+      1. no listener -> nothing to do (returns True, port is free).
+      2. the listener IS the tracked PID -> not an orphan, do NOT touch it
+         (that is sparkrun's own process and it can stop it).
+      3. the cmdline must mention litellm -> we kill only the thing we mean.
+         A foreign listener (a second hscc-api, a dev server) is reported and
+         left alone, exactly like the 2.8.0 orphaned-serve heal's contract.
+
+    Returns True when the port ends up free.
+    """
+    pid, cmdline = _proxy_listener()
+    if pid is None:
+        return True
+    if tracked_pid is not None and pid == tracked_pid:
+        log(f"proxy listener on :{PROXY_PORT} is the tracked PID {pid} — "
+            f"not an orphan, leaving it to sparkrun")
+        return False
+    if not cmdline or "litellm" not in cmdline.lower():
+        log(f"proxy listener on :{PROXY_PORT} is PID {pid} but its cmdline is "
+            f"not litellm ({cmdline!r}) — refusing to kill an unrecognised "
+            "process", "WARN")
+        return False
+    log(f"reaping ORPHAN proxy listener PID {pid} on :{PROXY_PORT} "
+        f"(sparkrun tracks {tracked_pid}): {cmdline[:120]}", "WARN")
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except Exception as e:
+        log(f"could not SIGTERM orphan proxy PID {pid}: {e}", "ERROR")
+        return False
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        if _proxy_listener()[0] is None:
+            return True
+        time.sleep(0.2)
+    log(f"orphan proxy PID {pid} survived SIGTERM — escalating to SIGKILL", "WARN")
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except Exception as e:
+        log(f"could not SIGKILL orphan proxy PID {pid}: {e}", "ERROR")
+        return False
+    time.sleep(0.5)
+    return _proxy_listener()[0] is None
+
+
+def _proxy_repair_orphan(relaunch_hosts):
+    """Full orphan repair: stop, reap any untracked litellm listener, start.
+
+    `proxy start --restart` was PROVEN unable to fix the incident state: the
+    orphan was not the tracked PID, so sparkrun SIGTERMs nothing that matters
+    and the new instance silently binds another port (:1708) while the orphan
+    keeps :4000. So the order here is deliberate —
+      1. `sparkrun proxy stop` (the polite path, when sparkrun does track it),
+      2. reap a listener sparkrun does NOT track, cmdline-vetted first,
+      3. `sparkrun proxy start --hosts <fleet>` — plain start, no --restart:
+         after 1+2 the port is genuinely free, and --restart's own state-file
+         assumptions are what failed us.
+      4. verify the port is now owned by the tracked PID.
+    """
+    tracked_before = _proxy_tracked_pid()
+    run_cmd(sparkrun_bin.argv("proxy", "stop"), timeout=60)
+    reaped = _reap_orphan_proxy_listener(tracked_before)
+    if not reaped:
+        owner, cmd = _proxy_listener()
+        if owner is not None:
+            log(f"proxy listener on :{PROXY_PORT} still present after reap "
+                f"(PID {owner}, {cmd!r}) — starting anyway; the drift check "
+                "will re-detect it next tick", "WARN")
+    args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
+            "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT)]
+    res = run_cmd(sparkrun_bin.argv(*args), timeout=90)
+    # VERIFY, do not trust exit code: exit 0 over a proxy that bound a
+    # different port is exactly how this incident stayed invisible.
+    owner, owner_cmd = _proxy_listener()
+    tracked_after = _proxy_tracked_pid()
+    verified = (owner is not None and tracked_after is not None
+                and owner == tracked_after)
+    if not verified:
+        log(f"proxy repair UNVERIFIED on :{PROXY_PORT} — port owner {owner}, "
+            f"sparkrun tracks {tracked_after} ({owner_cmd!r})", "WARN")
+    else:
+        log(f"proxy repaired on :{PROXY_PORT}, owned by tracked PID {owner}")
+    return {"ok": bool(res.get("ok")) and verified,
+            "port_owner": owner, "tracked_pid": tracked_after,
+            "verified": verified, "output": res.get("output", "")}
+
+
 def check_proxy():
     """Keep the sparkrun LiteLLM worker proxy alive (worker load-balancer).
 
@@ -758,6 +1043,33 @@ def check_proxy():
     probe = _proxy_models_probe(url, timeout=5)
     expected = _proxy_expected_aliases(serving_data, relaunch_hosts)
     healthy, reason = _proxy_models_healthy(probe, expected)
+    # LIVE-vs-HEALTHY (F4). A catalogue that serves every expected alias can
+    # still be routing ALL of it through ONE backend — the incident shape — and
+    # the alias check above cannot see that, because /v1/models lists ids and
+    # never reveals api_base. Ask the running proxy what it actually routes to.
+    backend_drift = False
+    if healthy:
+        live = _proxy_backend_probe(timeout=5)
+        if not live.get("ok"):
+            # Could not ask the proxy. The catalogue probe just succeeded, so
+            # this is unusual (endpoint disabled/changed); it is NOT evidence of
+            # drift, and failing closed here would restart a working LB.
+            log(f"proxy backend drift check skipped — /v1/model/info "
+                f"unavailable: {live.get('error')}", "WARN")
+        else:
+            # timeout 2s, not the 5s the workers check uses: this is a
+            # consistency check, and a unit that cannot answer /health in 2s is
+            # not a backend we should DEMAND from the router. Being conservative
+            # about what we demand is what keeps a slow-but-alive unit from
+            # triggering a needless proxy restart; the authoritative down
+            # verdict (with load grace + debounce) stays with check_workers.
+            healthy_units, fleet_hp = _fleet_unit_backends(
+                serving_data, probe=lambda u, timeout=5: http_check(u, timeout=2))
+            drift_ok, drift_reason = _proxy_backend_drift(
+                live.get("backends") or set(), healthy_units, fleet_hp)
+            if not drift_ok:
+                backend_drift = True
+                healthy, reason = False, drift_reason
     if healthy:
         write_state("proxy", {"ok": True, "port": PROXY_PORT,
                               "last_check": now_iso(), "message": reason,
@@ -803,14 +1115,28 @@ def check_proxy():
             log(f"proxy relaunch deferred — {message}", "WARN")
         else:
             try:
-                log(f"relaunching with {relaunch_hosts}"
-                    f"{' (--restart: running proxy serves nothing)' if restart else ''}", "WARN")
-                args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
-                        "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT)]
-                if restart:
-                    args.append("--restart")
-                r = run_cmd(sparkrun_bin.argv(*args), timeout=90)
-                message = "relaunched" if r.get("ok") else "relaunch failed"
+                if backend_drift:
+                    # F4: the catalogue is fine but the live router disagrees with
+                    # what is healthy, so `proxy start` alone cannot help — plain
+                    # start REFUSES a running proxy (sparkrun returns 1 on
+                    # ProxyAlreadyRunning) and --restart only SIGTERMs the PID in
+                    # sparkrun's OWN state file, which is precisely what was wrong
+                    # (the orphan kept :4000 while the new instance bound :1708).
+                    # Needs stop + cmdline-vetted reap + start + verification.
+                    log(f"repairing proxy backend drift on :{PROXY_PORT} — {reason}",
+                        "WARN")
+                    r = _proxy_repair_orphan(relaunch_hosts)
+                    message = ("repaired" if r.get("ok")
+                               else "repair incomplete (unverified)")
+                else:
+                    log(f"relaunching with {relaunch_hosts}"
+                        f"{' (--restart: running proxy serves nothing)' if restart else ''}", "WARN")
+                    args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
+                            "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT)]
+                    if restart:
+                        args.append("--restart")
+                    r = run_cmd(sparkrun_bin.argv(*args), timeout=90)
+                    message = "relaunched" if r.get("ok") else "relaunch failed"
             finally:
                 heal_lease.release("proxy-relaunch")
     ok = bool(r.get("ok"))
@@ -818,6 +1144,7 @@ def check_proxy():
                   "last_check": now_iso(),
                   "reason": reason,
                   "restart": restart,
+                  "backend_drift": backend_drift,
                   "relaunch_hosts": relaunch_hosts,
                   # A deferral is not a FAILED relaunch — nothing was attempted.
                   # Same treatment as `suppressed`, so a deferred tick cannot
