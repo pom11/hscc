@@ -580,6 +580,45 @@ def cmd_notify(msg):
     ))
 
 
+def cmd_heal(node=None, reason="", status_only=False):
+    """Inspect or clear the per-node heal circuit breaker (F5).
+
+    The breaker's alert tells the operator to run this after investigating, so
+    it must exist — an alert pointing at a command that does not exist is worse
+    than no alert. Default (no --status) CLEARS the node's strikes.
+    """
+    from . import heal_breaker
+    console = _console()
+
+    if status_only:
+        rows = []
+        for k, v in sorted(heal_breaker._load().items()):
+            if k.startswith("_") or not isinstance(v, list):
+                continue
+            remaining = heal_breaker.suspended(k)
+            rows.append(f"  {k:<16} {len(v)} action(s) in window  "
+                        + (f"SUSPENDED {int(remaining)}s more" if remaining > 0
+                           else "healing allowed"))
+        console.print(make_status_panel(
+            "\n".join(rows) if rows
+            else "No heal strikes recorded — all nodes healing normally.",
+            status="ok", title="heal breaker"))
+        return
+
+    if not node:
+        console.print("Usage: hscc heal-clear <node> [reason...]   "
+                      "(or: hscc heal-status)")
+        return
+    cleared = heal_breaker.clear(node, reason or "cleared by operator")
+    # A clear must un-silence the node too, so a later trip can alert again.
+    heal_breaker.reset_alert(node)
+    console.print(make_status_panel(
+        (f"Cleared heal strikes for {node} — healing resumes now."
+         if cleared else
+         f"No strikes recorded for {node} (nothing to clear)."),
+        status="ok" if cleared else "warn", title="heal breaker"))
+
+
 def cmd_log():
     """Show daemon log output."""
     from .daemon_ops import get_daemon_log_tail

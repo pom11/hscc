@@ -1108,9 +1108,19 @@ def main():
     elif cmd_lower == "ed-uninstall":
         from hscc_daemon.cli import cmd_ed_uninstall
         cmd_ed_uninstall()
+    elif cmd_lower == "heal-clear":
+        # F5 operator override: the breaker's alert text names this command,
+        # so it must resolve (an alert pointing at a non-existent command is
+        # worse than no alert).
+        from hscc_daemon.cli import cmd_heal
+        cmd_heal(node=args[1] if len(args) > 1 else None,
+                 reason=" ".join(args[2:]))
+    elif cmd_lower == "heal-status":
+        from hscc_daemon.cli import cmd_heal
+        cmd_heal(status_only=True)
     else:
         print(f"Unknown command: {cmd}")
-        print(f"Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, project, api, kanban, verify, stats, throughput, autoscale, escalate, start-daemon")
+        print(f"Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, project, api, kanban, verify, stats, throughput, autoscale, escalate, start-daemon, heal-clear, heal-status")
         sys.exit(1)
 
 

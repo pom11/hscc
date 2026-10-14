@@ -89,7 +89,8 @@ def _isolate_hscc(tmp_path, monkeypatch):
     # (b) Module-level constants already computed at import — overwrite each.
     def _module_attrs():
         from hscc_daemon import (
-            autodown, daemon_ops, desktop, health, heal_lease, hscc, lifecycle,
+            autodown, daemon_ops, desktop, health, heal_breaker, heal_lease,
+            hscc, lifecycle,
             serving, state, trigger, usage,
         )
         def p(sub):
@@ -154,6 +155,12 @@ def _isolate_hscc(tmp_path, monkeypatch):
             # lease into the operator's real ~/.hscc and suppress the running
             # daemon's heals for the whole TTL.
             (heal_lease, "HEAL_LEASE_FILE", p("heal-lease.json")),
+            # heal_breaker.py (F5) — the durable per-node strike ledger. Same
+            # MUST-redirect rationale as the lease: check_workers / check_proxy
+            # now count a strike on every heal, so an unredirected path would
+            # write strikes into the operator's real ~/.hscc and could suspend
+            # healing a LIVE node from a test run.
+            (heal_breaker, "HEAL_BREAKER_FILE", p("heal-breaker.json")),
         ]
 
     for mod, attr, val in _module_attrs():

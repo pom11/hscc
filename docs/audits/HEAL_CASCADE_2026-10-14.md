@@ -316,6 +316,100 @@ docstring already forbids for `_proxy_models_probe`; the default is now
 "could not ask the proxy" (the documented fail-open), so every pre-F4
 expectation is preserved unchanged and no test can reach the running fleet.
 
+### F5 — per-node heal circuit breaker (finite, not just sequential)
+
+**Files:** `hscc_daemon/heal_breaker.py` (new), `hscc_daemon/health.py`,
+`hscc_daemon/cli.py`, `hscc_daemon/tests/conftest.py`,
+`hscc_daemon/tests/test_heal_breaker.py` (new, 25 tests)
+
+F2's lease made repairs **sequential**. It did not make them **finite**, and
+finiteness is what this incident needed: four sequential-but-unbounded paths
+fired every ~60s for ~35 minutes against degrading hardware until two nodes
+hard-hung and needed a manual power-cycle. A repair loop that never gives up is
+not persistence — on a dying node it *is* the fault.
+
+**Design decisions (and why):**
+
+* **Per-node, not per-unit.** The per-unit cooldowns cannot see a node being
+  hammered across several of its units, and `check_proxy`'s cooldown was
+  per-*(host,port)* — which is why it never fired during a 35-minute storm
+  (§2.4). Strikes are keyed on the node.
+* **Per-node also means a tripped node never disables the fleet.** Pinned by a
+  test: node A suspended, node B keeps getting repaired.
+* **Durable ledger, not a dict.** The incident's in-memory
+  `_worker_down_streak`/`_worker_last_autoheal` reset on every daemon restart —
+  and a heal storm is exactly what restarts a daemon, so the counters could
+  never reach their threshold. `~/.hscc/heal-breaker.json` survives, and there
+  is a test that reloads the module with `HOME` moved to prove the count
+  survives (a plain in-memory counter would come back empty there).
+* **Self-clearing suspension.** `suspended()` returns seconds until the oldest
+  strike ages out of the window, so the node recovers without operator action.
+  A latch with no expiry would strand a node forever — the mirror-image failure
+  — and the incident already proved nobody is watching at 07:00.
+* **Suspension does not re-count.** A tick arriving during suspension returns
+  through `suspended()` *without* adding a strike; re-counting would extend the
+  suspension forever and the node could never come back.
+* **Threshold 6, not the incident's 3.** A legitimate `cluster up` recovery can
+  fan out across several units on one node in a single tick; 6 sits above that
+  and well below the incident's pace (dozens of actions in 35 min). Overridable
+  via `HSCC_HEAL_BREAKER_MAX` / `_WINDOW_S` / `_SUSPEND_S`.
+* **Count the attempt, withhold the action.** A strike is recorded when a heal
+  is attempted, and the attempt that crosses the line is refused — so a heal
+  that *fails* still counts (a failing heal is precisely the storm signal), but
+  the trip never itself performs a destructive action.
+* **Gate placement = after the lease, inside the try.** A tick deferred by the
+  lease attempts nothing and must not strike; `continue` inside the `try` runs
+  the `finally` that releases the lease.
+
+**Alerting — and why not Telegram.** The breaker alerts **once** per latch
+(`should_alert`, separate from the strike ledger; the 2026-10-08 NAS rule fired
+178 notifications in 11 minutes by conflating them) via a **direct**
+`send_macos_notification(priority="high")` plus an `emit_event` ledger record.
+Telegram is deliberately NOT implemented here, and this is an honest gap rather
+than an oversight: `grep -ri telegram` across `hscc_daemon/` finds **no sender
+at all** (it appears only in iOS/docs/tests), the documented design is "health
+check emits an event; the orchestrator forwards via Telegram", and the webhook
+platform that would carry it is disabled (`hermes webhook list` → "Webhook
+platform is not enabled"; enabling it needs a gateway restart, which is out of
+scope for this card and would disturb the co-tenant workload). So the operator
+gets a desktop notification and a durable `events.jsonl` record, and a
+Telegram/mobile push remains **open work**: it needs either the webhook platform
+enabled or a small `alert_sink` module, plus a `heal_breaker.tripped` rule in
+`triggers.default.json`. I did not invent a bot token or a second transport.
+
+**Why a direct notify instead of a trigger rule:** `autodown.py`,
+`lifecycle.py` and `escalate_watcher.py` all notify directly for critical
+signals, and the live `~/.hscc/triggers.json` only gains a rule on a fresh
+bootstrap — a critical alert that silently depends on a rule that may not exist
+is the same class of silent failure that left the 2026-10-08 NAS outage
+un-noticed.
+
+**`hscc heal-clear <node>` / `hscc heal-status` (`cmd_heal`).** The alert text
+tells the operator to run a command; an alert pointing at a command that does
+not exist is worse than no alert, so the override ships with the breaker.
+Clearing also calls `reset_alert`, so a node that heals and later fails again
+can raise a *new* alert instead of being silenced forever.
+
+**Test isolation.** `conftest.py` redirects `HEAL_BREAKER_FILE` into the per-test
+tmp dir, for the same reason the lease must be: `check_workers`/`check_proxy` now
+strike on every heal, so an unredirected path could suspend healing of a **live**
+node from a test run.
+
+**Two test bugs found and fixed while writing these** (both recorded because
+they are the kind that make a suite lie):
+
+1. Asserting `heals == [... a[0] ...]` compares against `_autoheal_worker_fn`'s
+   **key tuple** `(node, port)`, so `a[0] == "10.0.0.2"` is never true and the
+   assertion passes vacuously — *worse* than failing, because it looks like
+   coverage. The signature is `(key, label, node, port)`; the node is `a[2]`.
+2. The restart test used `monkeypatch.setattr(MODULE, "HEAL_BREAKER_MAX", 3)`
+   and then `importlib.reload`: reload re-executes the module and recomputes the
+   constant from `os.environ`, silently reverting the patch. Constants that
+   `reload` recomputes must be set via the **environment**.
+
+**Mutation check:** see §5 (run separately, since it temporarily neuters the
+gate in the same worktree the suite runs from).
+
 ## 4. Node hang investigation (F7)
 
 Read-only forensics on the two hard-hung nodes, driven through sparkrun's own

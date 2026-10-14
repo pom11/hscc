@@ -17,6 +17,8 @@ from pathlib import Path
 from . import serving
 from . import sparkrun_bin
 from . import heal_lease
+from . import heal_breaker
+from .desktop import emit_event, send_macos_notification
 from .daemon_ops import log
 from .state import now_iso, write_state
 from .util import run_cmd, ssh_cmd, http_check
@@ -1114,31 +1116,45 @@ def check_proxy():
             message = f"deferred — heal in progress: {heal_lease.describe(holder)}"
             log(f"proxy relaunch deferred — {message}", "WARN")
         else:
-            try:
-                if backend_drift:
-                    # F4: the catalogue is fine but the live router disagrees with
-                    # what is healthy, so `proxy start` alone cannot help — plain
-                    # start REFUSES a running proxy (sparkrun returns 1 on
-                    # ProxyAlreadyRunning) and --restart only SIGTERMs the PID in
-                    # sparkrun's OWN state file, which is precisely what was wrong
-                    # (the orphan kept :4000 while the new instance bound :1708).
-                    # Needs stop + cmdline-vetted reap + start + verification.
-                    log(f"repairing proxy backend drift on :{PROXY_PORT} — {reason}",
-                        "WARN")
-                    r = _proxy_repair_orphan(relaunch_hosts)
-                    message = ("repaired" if r.get("ok")
-                               else "repair incomplete (unverified)")
-                else:
-                    log(f"relaunching with {relaunch_hosts}"
-                        f"{' (--restart: running proxy serves nothing)' if restart else ''}", "WARN")
-                    args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
-                            "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT)]
-                    if restart:
-                        args.append("--restart")
-                    r = run_cmd(sparkrun_bin.argv(*args), timeout=90)
-                    message = "relaunched" if r.get("ok") else "relaunch failed"
-            finally:
-                heal_lease.release("proxy-relaunch")
+            # F5 breaker gate, AFTER the lease so a lease-deferred tick (no
+            # action attempted) never counts a strike — same semantics as the
+            # worker sites. Keyed on the host the relaunch leads with: this path
+            # issues ONE command against the whole fleet, so one strike per
+            # storm-on-a-node is the faithful count, and tripping any single
+            # host correctly stops the fleet-wide hammering.
+            allowed, note = _note_heal_action(
+                (relaunch_hosts or ["?"])[0], PROXY_PORT, "proxy-relaunch",
+                f"proxy:{PROXY_PORT}")
+            if not allowed:
+                deferred = True
+                message = note
+                log(f"proxy relaunch {note}", "WARN")
+            else:
+                try:
+                    if backend_drift:
+                        # F4: the catalogue is fine but the live router disagrees with
+                        # what is healthy, so `proxy start` alone cannot help — plain
+                        # start REFUSES a running proxy (sparkrun returns 1 on
+                        # ProxyAlreadyRunning) and --restart only SIGTERMs the PID in
+                        # sparkrun's OWN state file, which is precisely what was wrong
+                        # (the orphan kept :4000 while the new instance bound :1708).
+                        # Needs stop + cmdline-vetted reap + start + verification.
+                        log(f"repairing proxy backend drift on :{PROXY_PORT} — {reason}",
+                            "WARN")
+                        r = _proxy_repair_orphan(relaunch_hosts)
+                        message = ("repaired" if r.get("ok")
+                                   else "repair incomplete (unverified)")
+                    else:
+                        log(f"relaunching with {relaunch_hosts}"
+                            f"{' (--restart: running proxy serves nothing)' if restart else ''}", "WARN")
+                        args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
+                                "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT)]
+                        if restart:
+                            args.append("--restart")
+                        r = run_cmd(sparkrun_bin.argv(*args), timeout=90)
+                        message = "relaunched" if r.get("ok") else "relaunch failed"
+                finally:
+                    heal_lease.release("proxy-relaunch")
     ok = bool(r.get("ok"))
     proxy_data = {"ok": ok, "port": PROXY_PORT, "relaunched": ok,
                   "last_check": now_iso(),
@@ -1845,6 +1861,70 @@ def _default_worker_container_created_ts(node, port):
 _worker_container_created_ts = _default_worker_container_created_ts
 
 
+def _note_heal_action(node, port, actor, label):
+    """Count one heal ACTION against `node` and honour the per-node breaker.
+
+    Returns (allowed, note). When the breaker trips or is already suspended,
+    the caller must NOT act — it logs `note` and moves on, exactly like the
+    F2 lease deferral.
+
+    WHY A BREAKER ON TOP OF THE LEASE (F5, HEAL_CASCADE 2026-10-14): the lease
+    makes repairs *sequential*; it does not make them *finite*. The incident's
+    killer was four sequential-but-unbounded repair paths firing every ~60s for
+    ~35 min against degrading hardware, until two nodes hard-hung and needed a
+    manual power-cycle. Counting per-node actions and STOPPING after HEAL_
+    BREAKER_MAX is what converts "relentless" into "relentless for a while".
+
+    Counting is durable (heal_breaker writes under ~/.hscc), so — unlike the
+    in-memory _worker_down_streak a crash-looping daemon reset every restart —
+    the count survives the very restarts healing itself can cause.
+    """
+    remaining = heal_breaker.suspended(node)
+    if remaining > 0:
+        return False, (f"node {node} heal-suspended for another {int(remaining)}s "
+                       f"after {heal_breaker.strike_count(node)} repair actions — "
+                       f"NOT attempting {actor} for {label}")
+    res = heal_breaker.note_heal(node)
+    if res["tripped"]:
+        # LATCH ONCE (heal_breaker.should_alert dedupes; the 2026-10-08 NAS
+        # rule fired 178 notifications in 11 min by getting this wrong). A tick
+        # that arrives while already suspended returns via `suspended()` above
+        # WITHOUT adding a strike — the suspension is self-sustaining (it lasts
+        # until the oldest strike ages out of the window), so re-counting would
+        # only extend it indefinitely and never let the node recover.
+        if heal_breaker.should_alert(node):
+            msg = (f"Stopped auto-healing node {node} after {res['count']} "
+                   f"repair actions in "
+                   f"{int(heal_breaker.HEAL_BREAKER_WINDOW_S)}s — the cluster is "
+                   f"not self-healing, it is being destroyed. Refusing further "
+                   f"heals for {int(res['suspended_s'])}s. Investigate the node "
+                   f"(dmesg/ping) before clearing: "
+                   f"hscc heal-clear {node}")
+            log(msg, "ERROR")
+            # Notify DIRECTLY, like autodown/watchdog/escalate_watcher do. The
+            # trigger engine could carry this, but the live ~/.hscc/triggers.json
+            # only gets a new rule on a fresh bootstrap — a critical alert that
+            # silently depends on a rule that may not exist is the same silent
+            # failure that left the 2026-10-08 NAS outage un-noticed.
+            try:
+                send_macos_notification("HSCC: heal breaker tripped", msg,
+                                        priority="high")
+            except Exception:
+                pass
+            # Ledger record regardless (the events.jsonl trail + any rule that
+            # does exist still see the trip).
+            emit_event("heal_breaker.tripped", {
+                "node": node, "strikes": res["count"],
+                "window_s": heal_breaker.HEAL_BREAKER_WINDOW_S,
+                "suspend_s": res["suspended_s"], "actor": actor, "unit": label,
+                "severity": "critical",
+            }, source="health")
+        return False, (f"node {node} just tripped the heal breaker "
+                       f"({res['count']} actions) — NOT attempting {actor} "
+                       f"for {label}; operator alerted")
+    return True, ""
+
+
 def _unit_is_still_loading(key, node, port, now_wall, *, fail_closed=False):
     """True if the (node, port) unit is still LOADING, not dead: its container
     is younger than WORKER_AUTOHEAL_LOAD_GRACE AND has never served.
@@ -2247,6 +2327,16 @@ def check_workers():
                 down.append(label)
                 continue
             try:
+                # F5 breaker gate, INSIDE the lease and inside the try so the
+                # `continue` below runs the finally-release (a lease-deferred
+                # tick earlier attempts nothing and counts no strike). This is
+                # the most destructive path — a whole-template force-recreate —
+                # so its strikes matter most.
+                allowed, note = _note_heal_action(node, port, "auto-heal", label)
+                if not allowed:
+                    log(f"Auto-heal: {note}", "WARN")
+                    down.append(label)
+                    continue
                 log(f"Auto-heal: worker {label} ({node}:{port}) down {streak}x "
                     f"consecutively — recreating this unit only")
                 _worker_last_autoheal[key] = now_wall
@@ -2294,6 +2384,15 @@ def check_workers():
             down.append(label)
             continue
         try:
+            # F5 breaker gate, inside the lease/try so `continue` runs the
+            # finally-release. Per-UNIT relaunch has its own load-grace cooldown,
+            # which cannot see this: a degrading node hammered across several of
+            # its units. The breaker is the per-NODE count that closes that gap.
+            allowed, note = _note_heal_action(node, port, "worker-relaunch", label)
+            if not allowed:
+                log(f"Worker {label}: {note}", "WARN")
+                down.append(label)
+                continue
             log(f"Worker {label} down — relaunching ({recipe}) on :{port}")
             # Re-issue the unit AS DEFINED in serving.json, using the SAME shared
             # command builder as fleet_up_plan (_unit_run_cmd), so sparkrun derives
