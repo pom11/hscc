@@ -171,30 +171,9 @@ struct OpsView: View {
         Label(state.speak, systemImage: state.ok ? "checkmark.seal.fill" : "xmark.seal.fill")
             .font(.subheadline)
             .foregroundColor(state.ok ? Theme.Semantic.ok : Theme.Semantic.bad)
-        if state.checks.isEmpty {
-            HSEmpty("No checks",
-                    message: "The cluster reported no verify checks.",
-                    systemImage: "checkmark.seal")
-        } else {
-            ForEach(state.checks) { check in
-                HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
-                    Image(systemName: HealthCheckIndicator.icon(check.ok))
-                        .foregroundColor(HealthCheckIndicator.tint(check.ok))
-                    VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
-                        Text(check.name)
-                            .font(.body)
-                        if let detail = check.detail, !detail.isEmpty {
-                            Text(detail)
-                                .font(.caption)
-                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                        }
-                    }
-                    Spacer(minLength: 0)
-                }
-                // One VoiceOver element per check (spec §9).
-                .accessibilityElement(children: .combine)
-            }
-        }
+        // Spec §5: the byte-twin `verifyBody`/`healthBody` collapsed to ONE
+        // HealthCheckList shared with Fleet — the row layout cannot drift.
+        HealthCheckList(state.checks, emptyMessage: "The cluster reported no verify checks.")
     }
 
     // MARK: - Daemon status

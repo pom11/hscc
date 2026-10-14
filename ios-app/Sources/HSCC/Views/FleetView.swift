@@ -120,31 +120,12 @@ struct FleetView: View {
 
     @ViewBuilder
     private func healthBody(_ state: HealthResponse) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
-            Label(state.speak, systemImage: state.ok ? "checkmark.seal.fill" : "xmark.seal.fill")
-                .font(.subheadline)
-                .foregroundColor(state.ok ? Theme.Semantic.ok : Theme.Semantic.bad)
-            if state.checks.isEmpty {
-                emptyLabel("No health checks reported.")
-            } else {
-                ForEach(state.checks) { check in
-                    HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
-                        Image(systemName: HealthCheckIndicator.icon(check.ok))
-                            .foregroundColor(HealthCheckIndicator.tint(check.ok))
-                        VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
-                            Text(check.name)
-                                .font(.body)
-                            if let detail = check.detail, !detail.isEmpty {
-                                Text(detail)
-                                    .font(.caption)
-                                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-        }
+        Label(state.speak, systemImage: state.ok ? "checkmark.seal.fill" : "xmark.seal.fill")
+            .font(.subheadline)
+            .foregroundColor(state.ok ? Theme.Semantic.ok : Theme.Semantic.bad)
+        // Spec §5: was a byte-twin of Ops' `verifyBody`; both now render
+        // through the one HealthCheckList so the check rows cannot drift.
+        HealthCheckList(state.checks, emptyMessage: "No health checks reported.")
     }
 
     // MARK: - Throughput
