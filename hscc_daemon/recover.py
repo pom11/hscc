@@ -40,6 +40,7 @@ import os
 import sys
 import time
 
+from . import heal_lease
 from .daemon_ops import log
 from .state import now_iso
 
@@ -453,12 +454,33 @@ def recover_engine_wedge(stream_state=None, resolve_container=None,
         log("Engine-wedge recovery: autodown lock held (teardown/wake in "
             "flight) — skipping this pass")
         return {"result": "skipped", "reason": "lock held", "actions": []}
+    # -- Guard: single-flight repair lease (F2, HEAL_CASCADE 2026-10-14) ----
+    # The autodown lock above excludes autodown teardown/wake, but NOT the
+    # other three repair paths — check_workers relaunch, the proxy relaunch and
+    # template auto-heal all act without it. That is exactly the 2026-10-14
+    # shape: this recovery stopped the unit and ran `hscc cluster up` while
+    # check_workers relaunched the same unit and auto-heal force-recreated the
+    # whole template. The lease covers all four; unlike the autodown lock it
+    # never blocks and always expires, so it cannot wedge recovery.
+    #
+    # Order is deliberate: the blocking lock first, the non-blocking lease
+    # second. A lease can never be held while we wait on the lock, so no
+    # acquirer can be starved by this path.
+    lease_ok, holder = heal_lease.acquire(
+        "engine-wedge-recovery",
+        ",".join(sorted({str(c[0]) for c in candidates})) or "wedged unit")
+    if not lease_ok:
+        log(f"Engine-wedge recovery: deferred — heal in progress: "
+            f"{heal_lease.describe(holder)}", "WARN")
+        lock_release()
+        return {"result": "skipped", "reason": "heal lease held", "actions": []}
     try:
         return _recover_locked(candidates, resolve_container=resolve_container,
                                status_fn=status_fn, stop_fn=stop_fn,
                                up_fn=up_fn, now=now, state_file=state_file,
                                identity_fn=identity_fn)
     finally:
+        heal_lease.release("engine-wedge-recovery")
         lock_release()
 
 

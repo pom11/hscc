@@ -339,6 +339,120 @@ class TestExclusivityLock:
         assert rec.up_calls == 0
 
 
+class TestHealLeaseSingleFlight:
+    """F2 (HEAL_CASCADE 2026-10-14): recovery must also respect the durable
+    single-flight heal lease.
+
+    The O_EXCL lock above only excludes autodown teardown/wake. It does NOT
+    exclude check_workers relaunch, the proxy relaunch or template auto-heal —
+    and on 2026-10-14 all four fired on ONE wedged unit inside three minutes:
+    this path stopped the unit and ran `hscc cluster up` while check_workers
+    relaunched the same unit and auto-heal force-recreated the whole template.
+    """
+
+    def test_recovery_deferred_when_a_repair_holds_the_lease(self, monkeypatch):
+        """Another mechanism mid-repair (here: worker relaunch) -> recovery
+        stands down WITHOUT releasing that holder's lease and without touching
+        a unit."""
+        from hscc_daemon import heal_lease
+        rec = Recorders()
+        recover.RECOVER_CONSECUTIVE_WEDGES = 1
+        s = _stream(wedged=[UNIT_A])
+        assert heal_lease.acquire("worker-relaunch", "10.0.0.2:8001")[0] is True
+
+        r = recover.recover_engine_wedge(
+            stream_state=s,
+            status_fn=lambda: {"workloads": []},
+            resolve_container=_resolve_containers,
+            stop_fn=rec.stop_fn, up_fn=rec.up_fn,
+            lock_acquire=rec.lock_acquire, lock_release=rec.lock_release,
+            intentional_fn=_intentional_false,
+            now=0.0,
+        )
+        assert r["result"] == "skipped"
+        assert r["reason"] == "heal lease held"
+        assert rec.stops == [] and rec.up_calls == 0
+        # The real holder still owns the lease — a deferred pass must not drop
+        # someone else's claim.
+        assert heal_lease.held_by("worker-relaunch") is True
+
+    def test_recovery_takes_then_releases_the_lease(self, monkeypatch):
+        """A real recovery claims the lease for its duration and releases it,
+        so the other three paths are excluded while it runs and resume after."""
+        from hscc_daemon import heal_lease
+        rec = Recorders()
+        recover.RECOVER_CONSECUTIVE_WEDGES = 1
+        s = _stream(wedged=[UNIT_A])
+
+        seen = {}
+
+        def up_probe():
+            # While `cluster up` is running, the lease must be held by us.
+            seen["held_during_up"] = heal_lease.held_by("engine-wedge-recovery")
+            rec.up_calls += 1
+            return {"success": True, "output": "relaunched"}
+
+        rec.up_fn = up_probe
+        r = _run(s, rec, now=30)
+        assert r["result"] == "recovered"
+        assert seen.get("held_during_up") is True
+        # Released on the way out.
+        assert heal_lease.held_by() is False
+
+    def test_lease_released_when_recovery_raises(self):
+        """The release lives in a ``finally`` — a raising recovery must not
+        strand the fleet with a lease nobody owns."""
+        from hscc_daemon import heal_lease
+        rec = Recorders()
+        recover.RECOVER_CONSECUTIVE_WEDGES = 1
+        s = _stream(wedged=[UNIT_A])
+
+        def boom(*a, **k):
+            raise RuntimeError("cluster up exploded")
+
+        rec.up_fn = boom
+        with pytest.raises(RuntimeError):
+            _run(s, rec, now=30)
+        assert heal_lease.held_by() is False
+
+    def test_lease_is_taken_after_the_lock_not_before(self, monkeypatch):
+        """Ordering matters for starvation-freedom: the blocking O_EXCL lock is
+        acquired FIRST and the non-blocking lease second, so this path can never
+        sit holding a lease while it waits on the lock.
+
+        Observed by refusing the lock: the lease must then never be touched.
+        """
+        from hscc_daemon import heal_lease
+        rec = Recorders()
+        recover.RECOVER_CONSECUTIVE_WEDGES = 1
+        s = _stream(wedged=[UNIT_A])
+        order = []
+
+        def locked_acquire(**kw):
+            order.append("lock")
+            return False
+
+        real_acquire = heal_lease.acquire
+
+        def spy_lease(*a, **k):
+            order.append("lease")
+            return real_acquire(*a, **k)
+
+        monkeypatch.setattr(recover.heal_lease, "acquire", spy_lease)
+        r = recover.recover_engine_wedge(
+            stream_state=s,
+            status_fn=lambda: {"workloads": []},
+            resolve_container=_resolve_containers,
+            stop_fn=rec.stop_fn, up_fn=rec.up_fn,
+            lock_acquire=locked_acquire, lock_release=rec.lock_release,
+            intentional_fn=_intentional_false,
+            now=0.0,
+        )
+        assert r["result"] == "skipped" and r["reason"] == "lock held"
+        # Lock was refused first and the lease was NEVER claimed.
+        assert order == ["lock"]
+
+
 class TestContainerIdResolution:
     """`_resolve_container_id` pinned (t_873590dd): identity (node+port) is
     the production path — the probe's wedged entry carries node+port and NO

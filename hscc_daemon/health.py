@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import serving
 from . import sparkrun_bin
+from . import heal_lease
 from .daemon_ops import log
 from .state import now_iso, write_state
 from .util import run_cmd, ssh_cmd, http_check
@@ -773,6 +774,7 @@ def check_proxy():
     since = _proxy_relaunch_cooldown_state()
     r = {"ok": False, "skipped": "cooldown"}
     suppressed = False
+    deferred = False
     if since is not None and since < PROXY_RELAUNCH_COOLDOWN_S:
         suppressed = True
         wait = int(PROXY_RELAUNCH_COOLDOWN_S - since)
@@ -780,26 +782,50 @@ def check_proxy():
             f"(cooldown {PROXY_RELAUNCH_COOLDOWN_S}s); retry in {wait}s", "WARN")
         message = f"relaunch cooldown — retry in {wait}s"
     else:
-        log(f"relaunching with {relaunch_hosts}"
-            f"{' (--restart: running proxy serves nothing)' if restart else ''}", "WARN")
-        args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
-                "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT)]
-        if restart:
-            args.append("--restart")
-        r = run_cmd(sparkrun_bin.argv(*args), timeout=90)
-        message = "relaunched" if r.get("ok") else "relaunch failed"
+        # ONE REPAIR AT A TIME (F2, HEAL_CASCADE 2026-10-14). The proxy relaunch
+        # was one of the four paths that fired on a single wedged unit, and the
+        # loudest of them: `sparkrun proxy start --hosts <all 4> --restart`
+        # SIGTERMs the live LB while three other mechanisms are mid-repair. Take
+        # the durable heal lease before acting; if another repair holds it, log
+        # what is in flight and back off THIS tick.
+        #
+        # Claimed only here (not before the cooldown test) so a cooldown tick
+        # neither claims nor releases anything, and a lease is held only for the
+        # duration of an actual `proxy start`.
+        lease_ok, holder = heal_lease.acquire(
+            "proxy-relaunch", f"worker proxy on :{PROXY_PORT}")
+        if not lease_ok:
+            deferred = True
+            message = f"deferred — heal in progress: {heal_lease.describe(holder)}"
+            log(f"proxy relaunch deferred — {message}", "WARN")
+        else:
+            try:
+                log(f"relaunching with {relaunch_hosts}"
+                    f"{' (--restart: running proxy serves nothing)' if restart else ''}", "WARN")
+                args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
+                        "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT)]
+                if restart:
+                    args.append("--restart")
+                r = run_cmd(sparkrun_bin.argv(*args), timeout=90)
+                message = "relaunched" if r.get("ok") else "relaunch failed"
+            finally:
+                heal_lease.release("proxy-relaunch")
     ok = bool(r.get("ok"))
     proxy_data = {"ok": ok, "port": PROXY_PORT, "relaunched": ok,
                   "last_check": now_iso(),
                   "reason": reason,
                   "restart": restart,
                   "relaunch_hosts": relaunch_hosts,
-                  "relaunch_failed": (not ok and not suppressed),
+                  # A deferral is not a FAILED relaunch — nothing was attempted.
+                  # Same treatment as `suppressed`, so a deferred tick cannot
+                  # raise a "relaunch failed" alert.
+                  "relaunch_failed": (not ok and not suppressed and not deferred),
+                  "deferred": deferred,
                   "message": message}
-    if suppressed:
+    if suppressed or deferred:
         # Carry the ORIGINAL attempt stamp forward verbatim. Re-stamping on a
-        # suppressed tick would push the window out every tick and make the
-        # cooldown perpetual (never retries, never recovers).
+        # suppressed/deferred tick would push the window out every tick and make
+        # the cooldown perpetual (never retries, never recovers).
         stamp = _proxy_relaunch_stamp()
         if stamp:
             proxy_data["last_relaunch"] = stamp
@@ -1817,11 +1843,23 @@ def check_workers():
                     f"never served — still loading, NOT auto-healing")
                 down.append(label)
                 continue
-            log(f"Auto-heal: worker {label} ({node}:{port}) down {streak}x "
-                f"consecutively — force-recreate via template apply")
-            _worker_last_autoheal[key] = now_wall
-            _worker_down_streak[key] = 0  # finalise this debounce round
-            heal_result = _autoheal_worker_fn(key, label, node, port)
+            # ONE REPAIR AT A TIME (F2, HEAL_CASCADE 2026-10-14): this is the
+            # most destructive of the four paths — it recreates units while
+            # others are acting. Back off a tick rather than join the pile-up.
+            lease_ok, holder = heal_lease.acquire("auto-heal", f"{node}:{port}")
+            if not lease_ok:
+                log(f"Auto-heal: {label} deferred — heal in progress: "
+                    f"{heal_lease.describe(holder)}", "WARN")
+                down.append(label)
+                continue
+            try:
+                log(f"Auto-heal: worker {label} ({node}:{port}) down {streak}x "
+                    f"consecutively — force-recreate via template apply")
+                _worker_last_autoheal[key] = now_wall
+                _worker_down_streak[key] = 0  # finalise this debounce round
+                heal_result = _autoheal_worker_fn(key, label, node, port)
+            finally:
+                heal_lease.release("auto-heal")
             heal_note = (heal_result.get("status") or heal_result.get("ok")
                          or heal_result.get("error") or "?")
             log(f"Auto-heal result for {label}: {heal_note} "
@@ -1852,47 +1890,59 @@ def check_workers():
             down.append(label)
             log(f"Worker {label} down but no recipe in serving.json — skipping", "WARN")
             continue
-        log(f"Worker {label} down — relaunching ({recipe}) on :{port}")
-        # Re-issue the unit AS DEFINED in serving.json, using the SAME shared
-        # command builder as fleet_up_plan (_unit_run_cmd), so sparkrun derives
-        # the SAME cluster_id as the declared workload. keepalive_units() now
-        # carries the unit's full span (`nodes`), tp, model and role on every
-        # per-node entry, so a TP unit is relaunched as a whole group
-        # (head + workers) WITH `--served-model-name`, exactly like
-        # fleet_up_plan. Passing --served-model-name is essential: sparkrun
-        # folds it into the intent hash, so omitting it (the pre-fix behaviour)
-        # derived a DIFFERENT cluster_id and `--ensure` then launched a
-        # PARALLEL DUPLICATE instead of re-issuing the declared workload
-        # (t_e1ff0e8e). For a plain single-node unit (tp<=1, no model) this
-        # reduces to the same single-host, no-`--tp` command as before.
-        span = u.get("nodes") or [node]
-        relaunch_cmd = serving._unit_run_cmd(u)
-        # Stop the WHOLE span first (not just this node) so requirement #3 holds:
-        # never leave two workloads bound to the same host:port. Stopping the
-        # full span clears the surviving pair members on the peer(s) before the
-        # re-provisioned group binds :port. --hosts <span> scopes the stop to the
-        # span (not --all), so an unrelated co-located sibling on another port
-        # survives.
-        stop_result = run_cmd(sparkrun_bin.argv(
-            "stop", recipe, "--hosts", ",".join(span)), timeout=60)
-        if not stop_result.get("ok"):
-            log(f"sparkrun stop for {label} failed: {stop_result.get('output', '')}", "WARN")
-        # Record relaunch time before launching so we do not thrash even if
-        # Popen itself raises.
-        _worker_relaunch_at[key] = time.time()
-        _save_worker_relaunch_timestamps()
-        log_path = os.path.expanduser(f"~/.hscc/relaunch-{node}-{port}.log")
-        try:
-            with open(log_path, "a") as log_file:
-                subprocess.Popen(
-                    _sparkrun_exec_argv(relaunch_cmd),
-                    stdout=log_file, stderr=log_file,
-                    start_new_session=True,
-                )
-            relaunched.append(label)
-        except Exception as e:
-            log(f"ERROR: failed to launch worker {label}: {e}", "ERROR")
+        # ONE REPAIR AT A TIME (F2, HEAL_CASCADE 2026-10-14). This path fired on
+        # a 60s tick against containers three other mechanisms were creating.
+        # Take the lease for the stop+re-issue; back off one tick if held.
+        lease_ok, holder = heal_lease.acquire("worker-relaunch", f"{node}:{port}")
+        if not lease_ok:
+            log(f"Worker {label} relaunch deferred — heal in progress: "
+                f"{heal_lease.describe(holder)}", "WARN")
             down.append(label)
+            continue
+        try:
+            log(f"Worker {label} down — relaunching ({recipe}) on :{port}")
+            # Re-issue the unit AS DEFINED in serving.json, using the SAME shared
+            # command builder as fleet_up_plan (_unit_run_cmd), so sparkrun derives
+            # the SAME cluster_id as the declared workload. keepalive_units() now
+            # carries the unit's full span (`nodes`), tp, model and role on every
+            # per-node entry, so a TP unit is relaunched as a whole group
+            # (head + workers) WITH `--served-model-name`, exactly like
+            # fleet_up_plan. Passing --served-model-name is essential: sparkrun
+            # folds it into the intent hash, so omitting it (the pre-fix behaviour)
+            # derived a DIFFERENT cluster_id and `--ensure` then launched a
+            # PARALLEL DUPLICATE instead of re-issuing the declared workload
+            # (t_e1ff0e8e). For a plain single-node unit (tp<=1, no model) this
+            # reduces to the same single-host, no-`--tp` command as before.
+            span = u.get("nodes") or [node]
+            relaunch_cmd = serving._unit_run_cmd(u)
+            # Stop the WHOLE span first (not just this node) so requirement #3 holds:
+            # never leave two workloads bound to the same host:port. Stopping the
+            # full span clears the surviving pair members on the peer(s) before the
+            # re-provisioned group binds :port. --hosts <span> scopes the stop to the
+            # span (not --all), so an unrelated co-located sibling on another port
+            # survives.
+            stop_result = run_cmd(sparkrun_bin.argv(
+                "stop", recipe, "--hosts", ",".join(span)), timeout=60)
+            if not stop_result.get("ok"):
+                log(f"sparkrun stop for {label} failed: {stop_result.get('output', '')}", "WARN")
+            # Record relaunch time before launching so we do not thrash even if
+            # Popen itself raises.
+            _worker_relaunch_at[key] = time.time()
+            _save_worker_relaunch_timestamps()
+            log_path = os.path.expanduser(f"~/.hscc/relaunch-{node}-{port}.log")
+            try:
+                with open(log_path, "a") as log_file:
+                    subprocess.Popen(
+                        _sparkrun_exec_argv(relaunch_cmd),
+                        stdout=log_file, stderr=log_file,
+                        start_new_session=True,
+                    )
+                relaunched.append(label)
+            except Exception as e:
+                log(f"ERROR: failed to launch worker {label}: {e}", "ERROR")
+                down.append(label)
+        finally:
+            heal_lease.release("worker-relaunch")
 
     ok = not down
     write_state("workers", {

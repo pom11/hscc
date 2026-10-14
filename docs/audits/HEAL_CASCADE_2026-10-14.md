@@ -58,7 +58,98 @@ fires every 60s. Every relaunch therefore destroyed a load in progress, which is
 
 ## 3. Fixes
 
-_(append per commit)_
+### F1 — `check_workers` must not relaunch a unit still inside its load grace
+
+**Commit:** (this commit) `fix(daemon): share the load grace with the gentle worker relaunch`
+**Files:** `hscc_daemon/health.py`, `hscc_daemon/tests/test_health.py`
+
+Root cause, sharper than the report's framing: the gentle relaunch path *did* have a
+grace (`_worker_relaunch_at`, `VLLM_LOAD_GRACE_MINUTES` = 20 min) but it is keyed on
+**relaunches that path itself issued**. It knows nothing about a container that wedge
+recovery, `cluster up` or a template apply created seconds earlier. The per-unit cadence
+is therefore not "every minute" — after its own relaunch a unit is left alone for 20
+minutes — but any container created elsewhere is fair game on the next 60s check.
+
+Log proof the predicate existed but was unreachable from this path: at 07:37:58 auto-heal
+correctly declined (line 421) while the same kind of young container was relaunched at
+07:19:34 / 07:24:29 / 07:25:29 / 07:47:28.
+
+Fix: `_suppress_autoheal_for_startup_grace(...)` → `_unit_is_still_loading(key, node,
+port, now_wall, *, fail_closed=...)`, called from BOTH down-repair paths. The flag splits
+the two paths' deliberately different treatment of *unknown* age:
+
+| Path | Action | `fail_closed` | Unknown age means |
+|---|---|---|---|
+| debounced auto-heal | force-recreate (destroys the container) | `True` | assume loading, shield (unchanged behaviour) |
+| gentle relaunch | stop + re-issue the unit | `False` | no container evidence → no load to destroy → repair proceeds |
+
+Fail-open on the relaunch path is not an oversight: the created-ts map returns a stale
+cache rather than an empty map on query failure, so a genuinely missing entry means a
+missing container — and shielding there would strand a dead unit unrepaired for 20 min.
+
+Tests (4 new, in `TestWorkersStartupGrace`): a young never-served container created by
+another path is NOT relaunched (this one FAILS pre-fix, reproducing the incident line
+`Worker w-10.0.0.2 down — relaunching`, verified by reverting `health.py`); the grace is
+bounded so an old container still gets repaired; unknown age does not block the gentle
+path; the destructive path still fails closed. 13/13 in the class pass.
+
+### F2 — one repair at a time (durable heal lease)
+
+**Commit:** (this commit) `fix(daemon): single-flight heal lease across the four repair paths`
+**Files:** `hscc_daemon/heal_lease.py` (new), `health.py`, `recover.py`,
+`tests/test_heal_lease.py` (new), `tests/test_health.py`, `tests/test_recover.py`,
+`tests/conftest.py`
+
+Root cause: four mechanisms could act on one fault at once, and the only exclusivity
+that existed (`autodown.AUTODOWN_LOCK`, also held by engine-wedge recovery) covered just
+two of them. Worker relaunch and the proxy relaunch never consult it, so 07:19:34–07:19:35
+had wedge recovery running `hscc cluster up` on the same unit that `check_workers` had
+relaunched one second earlier, while the proxy check SIGTERM-restarted the LB.
+
+Why a **lease** and not a second lock: `autodown`'s rule is "a LIVE holder is never
+broken, no matter its age", which is right for a lock whose holder is a process and
+exactly wrong here, because our holders are **threads inside one long-lived daemon**. A
+thread that dies inside the section, or a `break`/`continue` that skips a release, would
+then suppress every repair for the rest of the daemon's life — a worse failure than the
+one being fixed. So the lease is:
+
+| Property | Why it matters here |
+|---|---|
+| durable file `~/.hscc/heal-lease.json` | the incident's strike counters were in-memory and reset on restart; who-is-repairing must not |
+| bounded TTL (`HSCC_HEAL_LEASE_TTL_S`, 600s) | a leaked lease expires on its own; healing can never be disabled permanently |
+| non-blocking | a second mechanism logs what is in flight and backs off ONE tick; skipping a tick is cheap, two concurrent repairs are not |
+| owner-scoped release | a late `finally` cannot drop someone else's fresh lease |
+| re-entrant per `who` | one repair's second step is not blocked by its own claim |
+
+Wired into all four paths — `engine-wedge-recovery` (in `recover.py`, after the O_EXCL
+lock), `worker-relaunch`, `auto-heal` and `proxy-relaunch` (in `health.py`). The lease is
+claimed only around the action itself, not around the whole check, and the proxy claims it
+*after* the cooldown test so a cooldown tick neither claims nor releases anything.
+
+Deferral is reported honestly, not as failure: the proxy stream gains `deferred: true` and
+is excluded from `relaunch_failed`, and a deferred tick carries the ORIGINAL cooldown stamp
+forward — re-stamping would make the window perpetual and the proxy would never recover
+(the same rule the existing `suppressed` path follows).
+
+Deadlock/starvation: the only path holding both primitives takes the blocking O_EXCL lock
+FIRST and the non-blocking lease second, so it can never sit holding a lease while waiting
+on the lock. Pinned by `test_lease_is_taken_after_the_lock_not_before`.
+
+Test isolation: `tests/conftest.py`'s autouse redirect now includes `heal_lease.HEAL_LEASE_FILE`.
+Without that, every `check_workers`/`check_proxy` test would write a LIVE lease into the
+operator's real `~/.hscc` and suppress the running daemon's heals for the whole TTL — a
+test-poisoning class this repo has already been bitten by (`git status` in a test, patched
+PID globals).
+
+Tests: 14 in `test_heal_lease.py` (mutual exclusion, durability across a simulated restart
+via fresh re-import, bounded expiry incl. a leaked lease, corrupt-file and unparseable-
+expiry both read as free, release-by-owner, renew) plus 8 integration tests across
+`test_health.py` (relaunch defers, auto-heal defers, no leak after a repair, no leak when
+the heal action raises, proxy defers, deferral does not extend the cooldown, release after
+attempt, release when `run_cmd` raises) and `test_recover.py` (defer, claim-and-release
+across `cluster up`, release on raise, ordering). Mutation-checked: reverting the wiring in
+`health.py` + `recover.py` and re-running makes **7 of those 12 fail**; the 5 that pass
+either way are the "must not leak" guards, which are trivially true with no lease code.
 
 ## 4. Node hang investigation (F7)
 
