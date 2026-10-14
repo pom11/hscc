@@ -44,10 +44,15 @@ struct SearchView: View {
 
     @ViewBuilder
     private var content: some View {
-        if client == nil {
-            notConfiguredView
+        // Unwrap `client` ONCE here and hand the non-optional down. The result
+        // rows used to read `client!` at two sites; the guard above and the
+        // `let client` made those safe today, but a force-unwrap whose safety
+        // depends on a sibling view's `if` is a latent trap — the next edit
+        // that renders `resultsList` from anywhere else turns it into a crash.
+        if let client {
+            results(client: client)
         } else {
-            results
+            notConfiguredView
         }
     }
 
@@ -58,7 +63,7 @@ struct SearchView: View {
     // MARK: - Results
 
     @ViewBuilder
-    private var results: some View {
+    private func results(client: HSCCClient) -> some View {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
 
         switch (projects, cards) {
@@ -68,7 +73,7 @@ struct SearchView: View {
             }
         default:
             if trimmed.isEmpty {
-                emptyQueryView
+                emptyQueryView(client: client)
             } else if !hasLoaded {
                 // The search sources are still resolving — don't claim
                 // "No results" before we actually know. On a slow cluster they
@@ -81,7 +86,7 @@ struct SearchView: View {
                 if ps.isEmpty && cs.isEmpty {
                     noResultsView
                 } else {
-                    resultsList(projects: ps, cards: cs)
+                    resultsList(client: client, projects: ps, cards: cs)
                 }
             }
         }
@@ -132,7 +137,7 @@ struct SearchView: View {
     /// plus a hint. Shows regardless of the current load freshness — if it's
     /// cached and stale, the banner says so.
     @ViewBuilder
-    private var emptyQueryView: some View {
+    private func emptyQueryView(client: HSCCClient) -> some View {
         List {
             if let stale = staleBanner() {
                 Section { stale }
@@ -148,7 +153,7 @@ struct SearchView: View {
                 Section("Likely items") {
                     ForEach(ps) { project in
                         NavigationLink {
-                            ProjectDetailView(client: client!, project: project)
+                            ProjectDetailView(client: client, project: project)
                         } label: {
                             projectRow(project)
                         }
@@ -171,7 +176,7 @@ struct SearchView: View {
     }
 
     @ViewBuilder
-    private func resultsList(projects ps: [Project], cards cs: [Card]) -> some View {
+    private func resultsList(client: HSCCClient, projects ps: [Project], cards cs: [Card]) -> some View {
         List {
             if let stale = staleBanner() {
                 Section { stale }
@@ -180,7 +185,7 @@ struct SearchView: View {
                 Section("Projects — \(ps.count)") {
                     ForEach(ps) { project in
                         NavigationLink {
-                            ProjectDetailView(client: client!, project: project)
+                            ProjectDetailView(client: client, project: project)
                         } label: {
                             projectRow(project)
                         }
