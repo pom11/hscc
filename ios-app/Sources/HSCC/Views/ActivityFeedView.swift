@@ -142,9 +142,19 @@ struct ActivityFeedView: View {
             Spacer(minLength: Theme.Spacing.sm.rawValue)
             VStack(alignment: .trailing, spacing: Theme.Spacing.xxs.rawValue) {
                 if let at = entry.at {
-                    Text(timeLabel(at))
-                        .font(.hsccMono(.caption2))
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    // Spec §5: the relative time is TICKED, not computed once.
+                    // `Text(timeLabel(at))` rendered "3 minutes ago" and then
+                    // sat there for the rest of the session — a feed you keep
+                    // open drifts into lying about how old its events are.
+                    // TimelineView re-evaluates the label every 30 s while the
+                    // feed is on screen (30 s because the smallest bucket the
+                    // phrasing shows is a minute; a faster tick would repaint
+                    // nothing).
+                    TimelineView(.periodic(from: .now, by: 30)) { context in
+                        Text(timeLabel(at, now: context.date))
+                            .font(.hsccMono(.caption2))
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    }
                 }
                 kindBadge(entry)
             }
@@ -173,7 +183,10 @@ struct ActivityFeedView: View {
 
     /// A compact "how long ago" label for an ISO timestamp (newest-first feed
     /// reads best as relative time). Falls back to the raw timestamp.
-    private func timeLabel(_ iso: String) -> String {
+    /// `now` is injected by the row's `TimelineView` so the label ages without
+    /// a manual refresh; the default keeps the helper usable from one-shot
+    /// render sites.
+    private func timeLabel(_ iso: String, now: Date = Date()) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         var date = formatter.date(from: iso)
@@ -182,7 +195,7 @@ struct ActivityFeedView: View {
             date = formatter.date(from: iso)
         }
         guard let date else { return iso }
-        let seconds = Date().timeIntervalSince(date)
+        let seconds = now.timeIntervalSince(date)
         return Offline.agePhrase(seconds)
     }
 
