@@ -30,8 +30,23 @@ them; it consumed them and did the cutover on top.
 - [ ] §8 screen MERGES filed as cards, NOT done here (each retires a screen —
       a different decision class from restyling): Autodown+self-heal
       `t_1a9bd7f8` · BoardHygiene→Approvals `t_31d037ac` · Serving+topology
-      "Nodes & serving" `t_65d791da` · Models→Fleet (needs the destination
-      identified first — see below)
+      "Nodes & serving" `t_65d791da` · Models→Fleet ruling `t_1897550c` ·
+      clean screenshot set `t_0d5632bc`
+
+## How to review this (branch state)
+
+Everything is pushed to `feat/ios-redesign-2026-10-14` and the work is
+**committed** — nothing in this card exists only in a worktree.
+
+- PR **#27** (`wt/t_25aed701` → `feat/ios-redesign-2026-10-14`) — the Phase 2
+  implementation PR, MERGED into the feature branch at 13:30Z.
+- PR **#26** (`feat/ios-redesign-2026-10-14` → `main`) — OPEN. It opened as the
+  Phase 1 spec PR and now carries the whole branch, so at `95b57143` it shows
+  **38 commits** ahead of `main`: Phase 1 spec + mockup, the operator's dormant
+  shell components, and all of Phase 2. Reviewing Phase 2 means reviewing #26,
+  not #27.
+- Per-commit rationale for every one of those commits is the table below, and
+  `git log --oneline origin/main..HEAD` is the index.
 
 ## Cutover — commit ad215658
 
@@ -170,15 +185,19 @@ the recipe now; what remains is only the merges:
    earlier (`dca7f25c`), so only the topology merge is outstanding.
 3. `BoardHygieneView` → **merged into Approvals** (same `/v1/kanban/blocked`
    endpoint, two row dialects) — card `t_31d037ac`.
-4. `ModelsView` → **merged into Fleet** as a serving section. No card filed:
-   **there is no `ModelsView` in `Sources/HSCC/Views/` at base `23fcfb15` or at
-   HEAD** — the spec's migration map names a screen that is not in the tree.
-   The serving reads live in `ServingControlView` today, so either the map's
-   name is stale or the screen was retired earlier. Someone with the daemon's
-   model inventory should say which before this can be scoped.
+4. `ModelsView` → "merged into Fleet" per spec line 451 and line 341. Filed as
+   ruling-card `t_1897550c` (to @architect, the spec author) because **the screen
+   is not in the tree**: `git grep -l "ModelsView" 23fcfb15 -- ios-app` finds
+   nothing, `git log --all -S "struct ModelsView"` has no commit that ever added
+   one, and there is no `Views/Models*.swift`. Fleet already has §5's Models
+   *feed* section (`45645201`), so the likely truth is that line 451 names the
+   feed, not a screen — but choosing a merge destination is the spec owner's
+   call, not a restyle worker's.
 5. `FleetControlView` is on the recipe but is still its own drawer row; §8 wants
    it as a "Control section" of Fleet. Small, but it changes the drawer, so it
-   belongs with the merge cards rather than with a restyle.
+   belongs with the merge cards rather than with a restyle. No card yet —
+   folded into whichever Fleet-touching merge lands first (`t_1897550c` if the
+   ruling is that model-serving belongs there).
 
 
 ## Screenshots (what each one actually shows)
@@ -194,10 +213,24 @@ content is dimmed — they show the empty state and the shell, NOT a connected
 fleet or any list recipe. The old `check.png` was removed: it was a third
 capture of the same dimmed Home with the same alert, adding nothing.
 
-A clean (dialog-free, connected) screen set is still owed to the reviewer — the
-first-run alert cannot be dismissed headlessly (`simctl privacy grant` is
-refused on this simulator: "Operation not permitted"), so it needs one tap in
-the Simulator UI.
+A clean (dialog-free, connected) screen set is still owed to the reviewer, now
+tracked as card `t_0d5632bc`. It is blocked on ONE human tap, and the reason is
+worth the detail so nobody re-derives it:
+
+- The app requests notification authorisation at launch
+  (`NotificationsAppDelegate` → `NotificationCoordinator.requestAuthorization`,
+  `NotificationCoordinator.swift:80`), and that alert holds the key window.
+- `simctl privacy <dev> grant notifications com.hscc.ios` → **"Operation not
+  permitted"**. Control run on the same device in the same shell:
+  `grant camera com.hscc.ios` → exit 0. So notifications are specifically
+  protected here; simctl is not broken. `reset notifications` is refused too.
+- No headless input path: `simctl io` exposes only screenshot/recordVideo/
+  screenConfig (no tap/key), Simulator.app is not installed on this host, and an
+  AX keystroke through System Events hung past 120s (no accessibility permission
+  for the daemon).
+- An XCUITest with `addUIInterruptionMonitor` could answer it, but
+  `project.yml` has exactly ONE target (`HSCC`, application) — no UI test target
+  exists to add it to.
 
 ## Gates (all re-run at `644286f6`, the last code commit)
 
