@@ -57,6 +57,10 @@ enum Theme {
         static let lightHalt = Theme.hex(0xB3261E)
         /// #55606E — secondary text, tuned for light surfaces (6.39:1 on white).
         static let lightMist = Theme.hex(0x55606E)
+
+        /// #08241A — the ink drawn ON a mint fill in dark mode. White on mint
+        /// is 1.58:1 (fails AA); this near-black scores 10.44:1 on `signal`.
+        static let signalInk = Theme.hex(0x08241A)
     }
 
     // MARK: - Semantic roles (the ONLY thing views should reference)
@@ -84,6 +88,36 @@ enum Theme {
         static var bad: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.halt) : UIColor(Palette.lightHalt) } }
         /// A neutral signal for an unknown / indeterminate state.
         static var neutral: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.mist) : UIColor(Palette.lightMist) } }
+
+        /// PRIMARY ACTION + selection + the live/connection dot (IOS_REDESIGN
+        /// 2026-10-14 §2.1). Previously the app used `Color.accentColor` in 6+
+        /// views because Theme had no accent role at all — every accent usage
+        /// was off-system by construction. Same value as `ok` (mint), but a
+        /// distinct ROLE: mint-as-status and mint-as-primary-action can now be
+        /// retuned independently without touching each other.
+        static var accent: Color { ok }
+
+        /// Text/glyph drawn ON an accent-colored fill. The real contrast bug
+        /// this fixes: white on the mint fill is 1.58:1 (fails AA by a mile),
+        /// so `.white` was hardcoded on filled buttons. This resolves to a
+        /// near-black on dark-mode mint (10.44:1) and white on the darker
+        /// light-mode mint (5.05:1).
+        static var onAccent: Color {
+            // dark: #08241A on mint #7AE2B0 = 10.44:1
+            // light: white on #1B7E55 = 5.05:1
+            dynamic { $0.userInterfaceStyle == .dark
+                ? UIColor(Palette.signalInk)
+                : .white }
+        }
+
+        /// The tint wash behind banners/chips that used to hand-roll
+        /// `someColor.opacity(0.12)` / `0.15` in at least four places
+        /// (StreamingChatView, ContentView). One recipe, one place.
+        static func tintOverlay(_ base: Color) -> Color {
+            dynamic { traits in
+                UIColor(base).withAlphaComponent(traits.userInterfaceStyle == .dark ? 0.14 : 0.12)
+            }
+        }
     }
 
     // MARK: - Spacing scale (the ONE spacing scale)
@@ -115,6 +149,8 @@ enum Theme {
         case card = 12
         /// Badges / chips / small containers (10 pt, continuous).
         case badge = 10
+        /// Home dock + floating bars (IOS_REDESIGN §2.3, 24 pt, continuous).
+        case dock = 24
     }
 
     /// Build a `Color` that re-resolves per trait collection (used to make the
@@ -138,6 +174,20 @@ extension Font {
     /// system fonts (`.font(.body)`, `.font(.caption)`, etc.) for human copy.
     static func hsccMono(_ size: CGFloat, weight: Font.Weight? = nil) -> Font {
         var f = Font.system(size: size, design: .monospaced)
+        if let weight { f = f.weight(weight) }
+        return f
+    }
+
+    /// Dynamic-Type-scaling monospaced font (IOS_REDESIGN 2026-10-14 §2.2).
+    ///
+    /// `hsccMono(_:)` takes a FIXED point size, so machine-produced values
+    /// (tool args, JSON, ids, tails) could not scale for a large-text user —
+    /// and several call sites clamped that unscaled text with `lineLimit(1)`.
+    /// Prefer this where the text must stay readable at accessibility sizes;
+    /// keep the fixed-size form only where the glyph grid must not move (e.g.
+    /// aligned hex dumps).
+    static func hsccMono(_ style: Font.TextStyle, weight: Font.Weight? = nil) -> Font {
+        var f = Font.system(style, design: .monospaced)
         if let weight { f = f.weight(weight) }
         return f
     }
