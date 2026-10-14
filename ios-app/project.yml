@@ -139,8 +139,8 @@ targets:
       - path: Sources/HSCC/Views/FleetView.swift
       - path: Sources/HSCC/Views/CardsView.swift
       - path: Sources/HSCC/Views/MutationSupport.swift
-      - path: Sources/HSCC/Views/OrchestratorChatView.swift
       - path: Sources/HSCC/Views/ChatStore.swift
+      - path: Sources/HSCC/Views/ChatEntry.swift
       - path: Sources/HSCC/Views/StreamingChatStore.swift
       - path: Sources/HSCC/Views/StreamingChatView.swift
       - path: Sources/HSCC/Views/ComposerText.swift
