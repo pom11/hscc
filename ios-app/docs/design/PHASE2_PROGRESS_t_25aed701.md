@@ -27,11 +27,14 @@ them; it consumed them and did the cutover on top.
       Control): **no screen in the app builds a ScrollView of HSSectionCard
       boxes any more** (10 screens converted in total)
 - [x] reviewer screenshots committed (`docs/design/screens/phase2-home*.png`)
-- [ ] §8 screen MERGES filed as cards, NOT done here (each retires a screen —
-      a different decision class from restyling): Autodown+self-heal
-      `t_1a9bd7f8` · BoardHygiene→Approvals `t_31d037ac` · Serving+topology
-      "Nodes & serving" `t_65d791da` · Models→Fleet ruling `t_1897550c` ·
-      clean screenshot set `t_0d5632bc`
+- [x] §8 merge Autodown + self-heal → `t_1a9bd7f8` (`5ac4f954`: SelfHealHistory
+      retired as a screen, history is the trailing Section of the merged
+      "Autodown & self-heal" List; `wakingBanner` collapsed onto the shared
+      `HSBanner` recipe without stealing StaleBanner's "Offline" copy)
+- [ ] §8 screen MERGES filed as cards, NOT done there (each retires a screen —
+      a different decision class from restyling): BoardHygiene→Approvals
+      `t_31d037ac` · Serving+topology "Nodes & serving" `t_65d791da` ·
+      Models→Fleet ruling `t_1897550c` · clean screenshot set `t_0d5632bc`
 
 ## How to review this (branch state)
 
@@ -174,11 +177,14 @@ navigation decision with a screen disappearing, which is a different risk class
 from restyling, and this card is already 14 commits deep. All TEN screens are on
 the recipe now; what remains is only the merges:
 
-1. `AutodownView` + `SelfHealHistoryView` → one "Autodown & self-heal"
-   destination (history as a section) — card `t_1a9bd7f8`. Autodown's own
-   restyle landed in `79be2dd5`; `wakingBanner` was left alone and the reason is
-   recorded there (it means "wake in progress", not "offline" — folding it into
-   `StaleBanner` would make it lie).
+1. ~~`AutodownView` + `SelfHealHistoryView`~~ — **LANDED** in `5ac4f954`
+   (card `t_1a9bd7f8`). One "Autodown & self-heal" drawer destination, history
+   as the trailing Section. `wakingBanner` did NOT get folded into
+   `StaleBanner`'s copy, for the reason `79be2dd5` recorded (it means "wake in
+   progress", not "offline" — folding it in would make it lie). What landed
+   instead is the shared `HSBanner` component: `StaleBanner` is now its offline
+   façade and the wake state its spinner/neutral shape, so the §1.3 recipe
+   duplication is gone and each state still says its own truth.
 2. `ServingControlView` + the NodeTopology strip → "Nodes & serving" (topology
    as header, per-row Stop/Restart) — card `t_65d791da`. The restyle landed in
    `644286f6`; the Stop/Restart colour fix and per-unit a11y labels landed
@@ -244,6 +250,14 @@ converted screens are not merely compiling, they boot).
 
 Earlier runs: gates green at every commit in C3, C3b and C3c; the device build
 was also run at `c8df2177` and `df396a20`.
+
+`t_1a9bd7f8` (§8 merge, `5ac4f954`): build_check 88 files in the HSCC target
+(96 on disk — one file retired by the merge) / 0 err / 0 warn · check_theme
+CLEAN · sources in sync 96 · **deeplink 41/41 with the negative test** (the
+`.selfHeal` vocabulary is mapped to the merged destination, not deleted) ·
+reconnect 42/42 · ws_decode ok · turn_state ok · first_run ok · model_decode
+62/62 · shared_store ok · **xcodebuild (iPhone 17 Pro simulator) BUILD
+SUCCEEDED**.
 
 **Launch gotcha worth recording** (cost me a false bug report this run): the
 bundle id is `com.hscc.ios`, NOT `ro.hscc.ios`. `simctl launch ro.hscc.ios`
