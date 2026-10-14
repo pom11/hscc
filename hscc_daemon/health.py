@@ -18,6 +18,7 @@ from . import serving
 from . import sparkrun_bin
 from . import heal_lease
 from . import heal_breaker
+from . import launch_guard
 from .desktop import emit_event, send_macos_notification
 from .daemon_ops import log
 from .state import now_iso, write_state
@@ -1861,6 +1862,102 @@ def _default_worker_container_created_ts(node, port):
 _worker_container_created_ts = _default_worker_container_created_ts
 
 
+# --------------------------------------------------------------------------
+# A2 — one-vLLM-per-host launch guard (HEAL_CASCADE 2026-10-14, F7 follow-up)
+#
+# Policy lives in launch_guard.py (pure, unit-testable). What lives here is
+# only the I/O: ONE cached sparkrun status fetch shared by every launch site,
+# so four heal paths do not each pay a fresh fleet scan, and the alert glue.
+# --------------------------------------------------------------------------
+
+_LAUNCH_STATUS_CACHE = {"at": 0.0, "status": None}
+_LAUNCH_STATUS_TTL = float(os.environ.get("HSCC_LAUNCH_GUARD_TTL_S", "20"))
+_LAUNCH_STATUS_LOCK = threading.Lock()
+
+# (host, port) -> last alert epoch. The refusal returns every heal tick; the
+# NOTIFY must not (2026-10-08 NAS: 178 notifications in 11 minutes). The
+# refusal itself still logs every time — the alert cooldown is on the push
+# channel only, never on the ERROR line.
+_LAUNCH_ALERT_AT = {}
+_LAUNCH_ALERT_COOLDOWN_S = float(os.environ.get("HSCC_LAUNCH_GUARD_ALERT_COOLDOWN_S", "1800"))
+
+
+def _sparkrun_cluster_status(force=False):
+    """Structured sparkrun status dict, or launch_guard.NO_STATUS on failure.
+
+    Deliberately a DIFFERENT cache from _sparkrun_created_map: that one returns
+    a (host,port)->epoch projection and returns a stale cache on failure, which
+    is right for age checks but WRONG here — A2's whole point is that "could
+    not look" must not read as "the host is free". So a failed fetch returns
+    the NO_STATUS sentinel and the caller refuses, and there is no stale-data
+    fallback path to fail open through.
+    """
+    now = time.time()
+    if not force and now - _LAUNCH_STATUS_CACHE["at"] < _LAUNCH_STATUS_TTL:
+        return _LAUNCH_STATUS_CACHE["status"]
+    with _LAUNCH_STATUS_LOCK:
+        if not force and now - _LAUNCH_STATUS_CACHE["at"] < _LAUNCH_STATUS_TTL:
+            return _LAUNCH_STATUS_CACHE["status"]
+        status = launch_guard.NO_STATUS
+        venv_py = _sparkrun_venv_python()
+        if venv_py:
+            try:
+                res = run_cmd([venv_py, "-c", _SPARKRUN_STATUS_SCRIPT], timeout=25)
+                if res.get("ok") and res.get("output"):
+                    status = json.loads(res["output"])
+            except Exception as e:
+                log(f"launch guard: sparkrun status query failed ({e})", "WARN")
+        _LAUNCH_STATUS_CACHE["at"] = now
+        _LAUNCH_STATUS_CACHE["status"] = status
+        return status
+
+
+# Tests monkeypatch this name (the seam) rather than the transport.
+_launch_guard_status_fn = _sparkrun_cluster_status
+
+
+def _guard_launch_or_refuse(host, port, span, actor, unit, status=None,
+                            declared=None):
+    """A2 gate. True = may launch; False = refused (caller must not launch).
+
+    Call sites pass the `span` their command builds (the unit's declared
+    `nodes`) and their own `actor` label. `status` lets a caller that already
+    fetched (cluster up / autoup fetch once for the whole plan) avoid a second
+    scan; None means "fetch it yourself (cached)". `declared` is the
+    serving.json footprint (see launch_guard.declared_footprint); None means
+    "resolve from the serving module" — a caller holding its own serving dict
+    (autoup) should pass it so planner and guard read the SAME document.
+
+    On refusal this function has already logged ERROR, notified (deduped) and
+    emitted the events.jsonl row — callers just skip the launch and record the
+    skip, like every other gate in this file (F2 lease, F5 breaker).
+    """
+    if status is None:
+        status = _launch_guard_status_fn()
+    if declared is None:
+        declared = launch_guard.declared_footprint(serving.load_serving())
+    ok, reason, detail = launch_guard.evaluate(status, host, port, span,
+                                               declared=declared)
+    if ok:
+        return True
+    key = (host, port, reason)
+    last = _LAUNCH_ALERT_AT.get(key, 0.0)
+    if time.time() - last >= _LAUNCH_ALERT_COOLDOWN_S:
+        _LAUNCH_ALERT_AT[key] = time.time()
+        # Pass OUR module-level names explicitly: launch_guard's own deferred
+        # desktop import would bypass tests that patch health.send_macos_
+        # notification / health.emit_event (the F5 alert tests set that
+        # precedent), and an unpatched desktop path fires real osascript.
+        launch_guard.alert_refusal(actor, unit, reason, detail,
+                                   notify=send_macos_notification,
+                                   emit=emit_event)
+    else:
+        # Suppressed push, but the decision must still be visible in the log.
+        log(f"launch guard: refused {unit} on {host}:{port} ({reason}: "
+            f"{detail.get('error')}) — alert suppressed (cooldown)", "ERROR")
+    return False
+
+
 def _note_heal_action(node, port, actor, label):
     """Count one heal ACTION against `node` and honour the per-node breaker.
 
@@ -2092,6 +2189,14 @@ def _default_autoheal_worker(key, label, node, port):
     run_argv = serving._unit_run_cmd(unit)
     # --ensure would no-op on an Up-but-wedged container (see docstring).
     recreate_argv = [a for a in run_argv if a != "--ensure"]
+
+    # A2 (before ANY destructive step): if sparkrun reports a vLLM workload on
+    # this host outside this unit's declared span, this recreate would
+    # over-commit the GPU — and the stop below would take the unit's own
+    # healthy span down first to do it. Refuse, alert, leave everything alone.
+    if not _guard_launch_or_refuse(node, port, span, "autoheal-recreate", label):
+        return {"ok": False, "error": "refused by launch guard (A2)",
+                "reason": "foreign_workload_or_no_status"}
 
     log(f"Auto-heal {label}: recreating ONLY this unit "
         f"({recipe} on {'+'.join(span)}:{port}) — template untouched")
@@ -2408,6 +2513,13 @@ def check_workers():
             # reduces to the same single-host, no-`--tp` command as before.
             span = u.get("nodes") or [node]
             relaunch_cmd = serving._unit_run_cmd(u)
+            # A2 (before the stop below): a launch that would land on a host
+            # whose GPU already holds a foreign vLLM is refused + alerted; the
+            # unit stays down and its healthy span members stay up.
+            if not _guard_launch_or_refuse(node, port, span,
+                                           "worker-relaunch", label):
+                down.append(label)
+                continue
             # Stop the WHOLE span first (not just this node) so requirement #3 holds:
             # never leave two workloads bound to the same host:port. Stopping the
             # full span clears the surviving pair members on the peer(s) before the

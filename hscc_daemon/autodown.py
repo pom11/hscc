@@ -2514,7 +2514,31 @@ def _autoup_locked(serving_path=None, run_cmd_fn=None, http_check_fn=None,
     # launch that eventually becomes ready still wakes successfully.
     start_timeout = _wake_ready_grace_minutes() * 60
     started = []
+    # A2 launch guard (HEAL_CASCADE 2026-10-14): a wake must not start a unit
+    # onto a host whose GPU already holds a foreign vLLM — over-committing the
+    # GPU is how a wake becomes the 2026-10-14 incident. One status fetch for
+    # the whole plan; any refusal is routed through the §8 start-failure path
+    # (record failure, clear intentional, notify) — never a silent skip.
+    from . import health as _health  # deferred: avoids an import cycle
+    from .launch_guard import declared_footprint as lg_declared_footprint
+    guard_status = _health._launch_guard_status_fn()
+    guard_declared = lg_declared_footprint(serving)
     for entry in plan:
+        refused_host = None
+        for host in entry["nodes"]:
+            if not _health._guard_launch_or_refuse(
+                    host, entry["port"], entry["nodes"],
+                    "autoup", entry["unit_id"], status=guard_status,
+                    declared=guard_declared):
+                refused_host = host
+                break
+        if refused_host is not None:
+            return _handle_start_failure(
+                entry, {"ok": False, "output": (
+                    f"launch guard refused start on {refused_host}: a vLLM "
+                    "outside the declared span is already there (or host "
+                    "status unavailable) — see daemon log")},
+                notify=notify)
         res = run_cmd(entry["cmd"], timeout=start_timeout)
         started.append({"kind": entry["kind"], "nodes": entry["nodes"],
                         "port": entry["port"], "cmd": entry["cmd"],

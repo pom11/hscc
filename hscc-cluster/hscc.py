@@ -317,8 +317,29 @@ def cmd_cluster_up(dry_run=False):
     if not plan:
         return {"error": "no serving units to start (serving.json missing or "
                          "empty?)", "units": 0}
+    # A2 launch guard (HEAL_CASCADE 2026-10-14): one status fetch for the whole
+    # plan, then every unit is checked host-by-host before its start is issued.
+    # A refused unit is reported, never silently skipped; dry-run shows the
+    # plan regardless (nothing is launched, so nothing can over-commit).
+    from hscc_daemon import health as _daemon_health  # deferred: CLI stays light
+    guard_status = (None if dry_run
+                    else _daemon_health._launch_guard_status_fn())
     issued = []
     for entry in plan:
+        if not dry_run:
+            refused = None
+            for host in entry["nodes"]:
+                if not _daemon_health._guard_launch_or_refuse(
+                        host, entry["port"], entry["nodes"],
+                        "cluster-up", entry["unit_id"], status=guard_status):
+                    refused = host
+                    break
+            if refused is not None:
+                issued.append({"success": False, "refused": True,
+                               "cmd": entry["cmd"],
+                               "output": f"launch guard refused {entry['unit_id']} "
+                                         f"on {refused} (see daemon log; alert sent)"})
+                continue
         issued.append(_run_or_print(entry["cmd"], dry_run))
     return {
         "success": not dry_run and all(i.get("success") for i in issued),

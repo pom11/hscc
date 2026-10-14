@@ -159,12 +159,36 @@ def _isolate_hscc(tmp_path, monkeypatch):
             # MUST-redirect rationale as the lease: check_workers / check_proxy
             # now count a strike on every heal, so an unredirected path would
             # write strikes into the operator's real ~/.hscc and could suspend
-            # healing a LIVE node from a test run.
+            # healing a LIVE node from the test run.
             (heal_breaker, "HEAL_BREAKER_FILE", p("heal-breaker.json")),
+            # launch guard (A2) — every launch path consults
+            # health._launch_guard_status_fn() before starting a container.
+            # Default it to "we looked, nothing foreign is running" ({}), so
+            # the ~100 pre-existing heal/autoup tests keep their semantics
+            # instead of failing on NO_STATUS, and freshen the guard's caches
+            # so a refusal-alert cooldown from one test cannot suppress
+            # another test's assertion. A2's own tests re-patch the seam.
+            (health, "_launch_guard_status_fn", lambda force=False: {}),
+            (health, "_LAUNCH_STATUS_CACHE", {"at": 0.0, "status": None}),
+            (health, "_LAUNCH_ALERT_AT", {}),
         ]
 
     for mod, attr, val in _module_attrs():
         monkeypatch.setattr(mod, attr, val, raising=False)
+
+    # Native notifiers are a LIVE side effect on the operator's desktop:
+    # _notify_macos shells to osascript and _notify_linux to notify-send, and
+    # the (a) expanduser redirect only catches the notifications.json
+    # FALLBACK. Any test that reaches a notification path (F5 breaker trip,
+    # A2 launch-guard refusal, watchdog, escalate_watcher, autodown) would
+    # push a real notification on the developer/operator machine. Neuter both
+    # for every test; tests that assert on notification *delivery* patch the
+    # high-level send_* function themselves (that pattern already exists) and
+    # their patch is more specific than this floor.
+    monkeypatch.setattr(desktop, "_notify_macos",
+                        lambda *a, **k: False, raising=False)
+    monkeypatch.setattr(desktop, "_notify_linux",
+                        lambda *a, **k: False, raising=False)
 
 
 @pytest.fixture(autouse=True)
