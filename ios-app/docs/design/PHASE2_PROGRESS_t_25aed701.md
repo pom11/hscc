@@ -20,9 +20,9 @@ them; it consumed them and did the cutover on top.
 - [x] C3 remaining screens on the list recipe + shared components — commits
       `182b8266`..`0ac20295` (9 commits, one/two screens each per the
       operator's "one/two per commit" instruction)
-- [x] C3b the rest of §5/§2 — commits `45645201`..`df396a20` (5 commits: Fleet,
+- [x] C3b the rest of §5/§2 — commits `45645201`..`9d51e473` (6 commits: Fleet,
       app-wide list style, Activity's ticking time, displayJSON/statusColor,
-      AppliedTemplateStatus)
+      AppliedTemplateStatus, Approvals' last bespoke badge + count-in-title)
 - [x] reviewer screenshots committed (`docs/design/screens/phase2-home*.png`)
 - [ ] follow-ups filed as cards, NOT done here: Autodown + ServingControl on the
       recipe, Autodown/self-heal merge, BoardHygiene→Approvals merge,
@@ -143,6 +143,7 @@ its commit message rather than left for a reviewer to rediscover.
 | `80529362` | **Activity's relative time ticks** — §5 "relative-time ticked by a timer". The row rendered `Text(timeLabel(at))`: a String computed once, so an open feed kept saying "3 minutes ago" for the whole session. `TimelineView(.periodic(by: 30))` + an injectable `now`. 30 s because the finest bucket `Offline.agePhrase` prints is a minute. |
 | `b28cf1f7` | **§2 duplicate renderers** — `DisplayJSON.render` (Ops rendered object fields; FleetControl returned `"<complex>"` for the same payload, so the applied-unit count was readable on one screen and hidden on the other) and `Theme.cardStatusColor` (the status→colour switch was copied THREE times, not twice as §2 counted). `StreamingChatView.statusColor` deliberately stays separate — it maps `blocked`→bad on purpose where the board screens map it→warn. |
 | `df396a20` | **`AppliedTemplateStatus`** — §5's "two renders of `/v1/template/status` collapse". They had drifted: Templates rendered the structured `applied` fields and never printed `speak` (the live `speak` is a Python dict repr); Fleet Control printed that dict repr FIRST as an italic subheadline, as if it were prose. One structured render now; `speak` only when there is nothing structured to say. Fleet Control's boxes also became `Section`s of one `List` and its two fleet-wide mutations got scope-naming `accessibilityLabel`s. |
+| `9d51e473` | **§6 badge inventory closed + Approvals count** — of §6's six bespoke badges, five already used `HSStatusChip` and `statBadge` is the documented keep (stat tile, not a chip). The last un-converted one was the block-kind chip on each approval row — still a warn `Label`, so Approvals was the one screen where a badge could drift from the shared chip. Now the chip. Approvals also gets §5's "count in the title" ("Approvals (3)"), derived from the same response + same `isPendingApproval` filter the list renders — not from the shell's separately-polled badge count, which can be a different moment. |
 
 ## Screens §5 wanted merged that are NOT merged (follow-ups)
 
@@ -185,7 +186,7 @@ first-run alert cannot be dismissed headlessly (`simctl privacy grant` is
 refused on this simulator: "Operation not permitted"), so it needs one tap in
 the Simulator UI.
 
-## Gates (all re-run at `df396a20`)
+## Gates (all re-run at `9d51e473`)
 
 build_check 97 files / 0 err / 0 warn · check_theme CLEAN · sources in sync
 97 files · ws_decode ok · reconnect 42/42 · deeplink 41/41 · turn_state ok ·
