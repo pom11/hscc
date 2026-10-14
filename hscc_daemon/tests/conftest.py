@@ -176,19 +176,21 @@ def _isolate_hscc(tmp_path, monkeypatch):
     for mod, attr, val in _module_attrs():
         monkeypatch.setattr(mod, attr, val, raising=False)
 
-    # Native notifiers are a LIVE side effect on the operator's desktop:
-    # _notify_macos shells to osascript and _notify_linux to notify-send, and
-    # the (a) expanduser redirect only catches the notifications.json
-    # FALLBACK. Any test that reaches a notification path (F5 breaker trip,
-    # A2 launch-guard refusal, watchdog, escalate_watcher, autodown) would
-    # push a real notification on the developer/operator machine. Neuter both
-    # for every test; tests that assert on notification *delivery* patch the
-    # high-level send_* function themselves (that pattern already exists) and
-    # their patch is more specific than this floor.
-    monkeypatch.setattr(desktop, "_notify_macos",
-                        lambda *a, **k: False, raising=False)
-    monkeypatch.setattr(desktop, "_notify_linux",
-                        lambda *a, **k: False, raising=False)
+    # NOT neutered here, deliberately. desktop._notify_macos / _notify_linux
+    # shell out to osascript / notify-send, so a test that reaches a real
+    # notification path would push one on the operator's desktop. The obvious
+    # fix -- an autouse floor replacing both -- was tried and BROKE the suite:
+    # test_desktop.py tests those two functions directly (fakes subprocess.run,
+    # asserts the rc-0 return), so replacing them replaces the code under test
+    # (2 failures, and the no-live-leak canary failed on its nested run). A
+    # global floor needs a growing carve-out list, i.e. it silently changes
+    # behaviour for 1460 tests to protect against a hypothetical.
+    #
+    # Convention instead, already used across the suite: a test that exercises
+    # a notification path patches the high-level sender itself
+    # (monkeypatch.setattr(<module>, "send_macos_notification", ...)) -- see
+    # test_autodown.py (30+ sites), test_cli.py, test_heal_breaker.py:332 and
+    # test_launch_guard.py. Patch the sender, not the OS shim.
 
 
 @pytest.fixture(autouse=True)
