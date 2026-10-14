@@ -23,10 +23,15 @@ them; it consumed them and did the cutover on top.
 - [x] C3b the rest of §5/§2 — commits `45645201`..`9d51e473` (6 commits: Fleet,
       app-wide list style, Activity's ticking time, displayJSON/statusColor,
       AppliedTemplateStatus, Approvals' last bespoke badge + count-in-title)
+- [x] C3c the last two screens — `79be2dd5` (Autodown) + `644286f6` (Serving
+      Control): **no screen in the app builds a ScrollView of HSSectionCard
+      boxes any more** (10 screens converted in total)
 - [x] reviewer screenshots committed (`docs/design/screens/phase2-home*.png`)
-- [ ] follow-ups filed as cards, NOT done here: Autodown + ServingControl on the
-      recipe, Autodown/self-heal merge, BoardHygiene→Approvals merge,
-      Models→Fleet merge, NodeTopology into Nodes & serving (see Follow-ups)
+- [ ] §8 screen MERGES filed as cards, NOT done here (each retires a screen —
+      a different decision class from restyling): Autodown+self-heal
+      `t_1a9bd7f8` · BoardHygiene→Approvals `t_31d037ac` · Serving+topology
+      "Nodes & serving" `t_65d791da` · Models→Fleet (needs the destination
+      identified first — see below)
 
 ## Cutover — commit ad215658
 
@@ -144,28 +149,36 @@ its commit message rather than left for a reviewer to rediscover.
 | `b28cf1f7` | **§2 duplicate renderers** — `DisplayJSON.render` (Ops rendered object fields; FleetControl returned `"<complex>"` for the same payload, so the applied-unit count was readable on one screen and hidden on the other) and `Theme.cardStatusColor` (the status→colour switch was copied THREE times, not twice as §2 counted). `StreamingChatView.statusColor` deliberately stays separate — it maps `blocked`→bad on purpose where the board screens map it→warn. |
 | `df396a20` | **`AppliedTemplateStatus`** — §5's "two renders of `/v1/template/status` collapse". They had drifted: Templates rendered the structured `applied` fields and never printed `speak` (the live `speak` is a Python dict repr); Fleet Control printed that dict repr FIRST as an italic subheadline, as if it were prose. One structured render now; `speak` only when there is nothing structured to say. Fleet Control's boxes also became `Section`s of one `List` and its two fleet-wide mutations got scope-naming `accessibilityLabel`s. |
 | `9d51e473` | **§6 badge inventory closed + Approvals count** — of §6's six bespoke badges, five already used `HSStatusChip` and `statBadge` is the documented keep (stat tile, not a chip). The last un-converted one was the block-kind chip on each approval row — still a warn `Label`, so Approvals was the one screen where a badge could drift from the shared chip. Now the chip. Approvals also gets §5's "count in the title" ("Approvals (3)"), derived from the same response + same `isPendingApproval` filter the list renders — not from the shell's separately-polled badge count, which can be a different moment. |
+| `79be2dd5` | **Autodown** — its three `HSSectionCard` boxes (Status · Controls · Active cron jobs) became Sections of one `List`. The four `statusRow` label/value lines became `LabeledContent` (the manual `HStack`+`Spacer` was re-implementing a control that already does label-leading/value-trailing, and gets VoiceOver pairing free). Controls still appear only once the real `enabled` state is known, so an armed cluster never flashes "Enable Autodown". The four mutations keep their confirm prompts and gained scope-naming `accessibilityLabel`s. `wakingBanner` kept — §2 calls it a `StaleBanner` *sibling*, not a twin (it says "wake in progress", and folding it into StaleBanner would make it claim "Offline" during a wake). |
+| `644286f6` | **Serving Control** — the worst case of the pattern: an `HSSectionCard` that contained, per unit, ANOTHER hand-rolled `surfaceRaised` card. A card inside a card inside a scroll view, for a list of things that should be rows. Now one `List`, one row per workload (name · mono tp/pp + container id · Stop/Restart). The screen's two prose blocks (a `Text` above the cards plus a titled "fleet-wide actions" card below) became one section footer. **The unit rows deliberately do NOT combine into one VoiceOver element** — every other converted row does, but these carry two buttons that must stay individually reachable, and §9 asks for those buttons to be *named* (done in `dca7f25c`), not absorbed. Documented in the file so nobody "fixes" the inconsistency later. |
 
 ## Screens §5 wanted merged that are NOT merged (follow-ups)
 
 Deliberately left as separate cards rather than folded in here — each is a
 navigation decision with a screen disappearing, which is a different risk class
-from restyling, and this card is already 14 commits deep:
+from restyling, and this card is already 14 commits deep. All TEN screens are on
+the recipe now; what remains is only the merges:
 
-1. `AutodownView` — still `HSSectionCard`; §8 wants it **merged** with
-   SelfHealHistory into one "Autodown & self-heal" destination (history as a
-   section).
-2. `ServingControlView` — still `HSSectionCard`; §5 wants it merged with the
-   NodeTopology strip into "Nodes & serving" (topology as header, per-row
-   Stop/Restart). Its Stop/Restart colour fix and per-unit a11y labels DID land
-   (`dca7f25c`), so only the merge is outstanding.
-3. `BoardHygieneView` → **merged into Approvals** (§8: same
-   `/v1/kanban/blocked` endpoint, two row dialects).
-4. `ModelsView` → **merged into Fleet** as a serving section. Not done: there is
-   no `ModelsView` in `Sources/HSCC/Views/` at base or at HEAD — the merge needs
-   the destination identified first (the serving reads live in
-   `ServingControlView` today).
-5. `FleetControlView` is now on the recipe but is still its own drawer row; §8
-   wants it as a "Control section" of Fleet.
+1. `AutodownView` + `SelfHealHistoryView` → one "Autodown & self-heal"
+   destination (history as a section) — card `t_1a9bd7f8`. Autodown's own
+   restyle landed in `79be2dd5`; `wakingBanner` was left alone and the reason is
+   recorded there (it means "wake in progress", not "offline" — folding it into
+   `StaleBanner` would make it lie).
+2. `ServingControlView` + the NodeTopology strip → "Nodes & serving" (topology
+   as header, per-row Stop/Restart) — card `t_65d791da`. The restyle landed in
+   `644286f6`; the Stop/Restart colour fix and per-unit a11y labels landed
+   earlier (`dca7f25c`), so only the topology merge is outstanding.
+3. `BoardHygieneView` → **merged into Approvals** (same `/v1/kanban/blocked`
+   endpoint, two row dialects) — card `t_31d037ac`.
+4. `ModelsView` → **merged into Fleet** as a serving section. No card filed:
+   **there is no `ModelsView` in `Sources/HSCC/Views/` at base `23fcfb15` or at
+   HEAD** — the spec's migration map names a screen that is not in the tree.
+   The serving reads live in `ServingControlView` today, so either the map's
+   name is stale or the screen was retired earlier. Someone with the daemon's
+   model inventory should say which before this can be scoped.
+5. `FleetControlView` is on the recipe but is still its own drawer row; §8 wants
+   it as a "Control section" of Fleet. Small, but it changes the drawer, so it
+   belongs with the merge cards rather than with a restyle.
 
 
 ## Screenshots (what each one actually shows)
