@@ -13,6 +13,11 @@ import SwiftUI
 /// own `TemplatesView` — this screen is cluster up/down + the applied-status
 /// read only.
 ///
+/// LIST RECIPE (spec §5, Phase 2 C3): two `Section`s of one plain `List`. The
+/// applied-status render is no longer local — it is `AppliedTemplateStatus`,
+/// shared with TemplatesView (the §5 "two renders of /v1/template/status"
+/// collapse). The cluster actions stay confirm-gated `MutationButton`s.
+///
 /// Every mutation goes through `MutationButton` (confirm dialog + `confirm:
 /// true` + honest failure). Nothing here fires from a single tap.
 struct FleetControlView: View {
@@ -21,24 +26,24 @@ struct FleetControlView: View {
     @State private var status = LoadState<TemplateStatusResponse>.idle
 
     var body: some View {
-            ScrollView {
-                if let client {
-                    VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
-                        appliedSection
-                        clusterActionsSection(client: client)
+        Group {
+            if let client {
+                List {
+                    appliedSection
+                    clusterActionsSection(client: client)
+                }
+                .listStyle(.plain)
+                .refreshable { await loadStatus() }
+                .task {
+                    if status.value == nil, !status.isLoading {
+                        await loadStatus()
                     }
-                    .padding()
-                } else {
-                    notConfiguredView
                 }
+            } else {
+                notConfiguredView
             }
-            .navigationTitle("Fleet Control")
-            .refreshable { if client != nil { await loadStatus() } }
-            .task {
-                if client != nil, status.value == nil, !status.isLoading {
-                    await loadStatus()
-                }
-            }
+        }
+        .navigationTitle("Fleet Control")
     }
 
     // MARK: - Not configured
@@ -63,60 +68,15 @@ struct FleetControlView: View {
 
     // MARK: - Applied template
 
+    /// The shared render (see `AppliedTemplateStatus`). This screen keeps its
+    /// own header, refresh gesture and load call — only the rows are shared, so
+    /// Templates and Fleet Control can no longer disagree about what the same
+    /// response means.
     @ViewBuilder
     private var appliedSection: some View {
-        HSSectionCard(title: "Applied Template", systemImage: "checkmark.rectangle.stack") {
-            switch status {
-            case .loading:
-                HSLoading()
-            case .failed(let message):
-                errorLabel(message, retry: { Task { await loadStatus() } })
-            case .stale(let state, let ageMessage):
-                VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-                    StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
-                        Task { await loadStatus() }
-                    }
-                    statusBody(state)
-                }
-            case .loaded(let state):
-                statusBody(state)
-            default:
-                EmptyView()
-            }
-        }
-    }
-
-    /// The rendered body for a successfully-loaded (or stale last-known) status.
-    @ViewBuilder
-    private func statusBody(_ state: TemplateStatusResponse) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-            Text(state.speak)
-                .font(.subheadline)
-                .italic()
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-            if let applied = state.applied {
-                if let name = applied.template, !name.isEmpty {
-                    LabeledContent("Template") { Text(name) }
-                }
-                if let at = applied.applied_at, !at.isEmpty {
-                    LabeledContent("Applied at") { Text(at) }
-                }
-                if let node = applied.orchestrator_node, !node.isEmpty {
-                    LabeledContent("Orchestrator") { Text(node) }
-                }
-                if let fams = applied.families, !fams.isEmpty {
-                    LabeledContent("Families") { Text(fams.joined(separator: ", ")) }
-                }
-                if let units = applied.units {
-                    LabeledContent("Units") { Text(DisplayJSON.render(units)) }
-                }
-            } else {
-                emptyLabel("No template applied.")
-            }
-            if let note = state.note, !note.isEmpty {
-                Label(note, systemImage: "info.circle")
-                    .font(.caption)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        Section("Applied template") {
+            AppliedTemplateStatus(status: status) {
+                Task { await loadStatus() }
             }
         }
     }
@@ -125,44 +85,40 @@ struct FleetControlView: View {
 
     @ViewBuilder
     private func clusterActionsSection(client: HSCCClient) -> some View {
-        HSSectionCard(title: "Cluster", systemImage: "power") {
-            VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
-                Text("Bring the serving fleet up, or stop ALL workloads fleet-wide.")
-                    .font(.subheadline)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        Section {
+            // Cluster Up — starts every serving unit. Confirm names it.
+            MutationButton(
+                title: "Bring Fleet Up",
+                systemImage: "play.circle",
+                prompt: "Bring the fleet up? This starts every serving unit in the cluster (orchestrator + workers).",
+                run: {
+                    let result = try await client.clusterUp()
+                    await loadStatus()
+                    return result.message ?? "Fleet up issued."
+                }
+            )
+            .accessibilityLabel("Bring serving fleet up")
 
-                // Cluster Up — starts every serving unit. Confirm names it.
-                MutationButton(
-                    title: "Bring Fleet Up",
-                    systemImage: "play.circle",
-                    prompt: "Bring the fleet up? This starts every serving unit in the cluster (orchestrator + workers).",
-                    run: {
-                        let result = try await client.clusterUp()
-                        await loadStatus()
-                        return result.message ?? "Fleet up issued."
-                    }
-                )
-
-                // Cluster Down — destructive. Confirmation NAMES what happens:
-                // it stops ALL workloads fleet-wide.
-                MutationButton(
-                    title: "Stop All Workloads",
-                    systemImage: "stop.circle",
-                    destructive: true,
-                    prompt: "Stop ALL workloads fleet-wide? This shuts down every serving unit across the entire cluster and interrupts any in-flight work.",
-                    run: {
-                        let result = try await client.clusterDown()
-                        await loadStatus()
-                        return result.message ?? "Fleet down issued."
-                    }
-                )
-            }
+            // Cluster Down — destructive. Confirmation NAMES what happens:
+            // it stops ALL workloads fleet-wide.
+            MutationButton(
+                title: "Stop All Workloads",
+                systemImage: "stop.circle",
+                destructive: true,
+                prompt: "Stop ALL workloads fleet-wide? This shuts down every serving unit across the entire cluster and interrupts any in-flight work.",
+                run: {
+                    let result = try await client.clusterDown()
+                    await loadStatus()
+                    return result.message ?? "Fleet down issued."
+                }
+            )
+            .accessibilityLabel("Stop all cluster workloads")
+        } header: {
+            Text("Cluster")
+        } footer: {
+            Text("Bring the serving fleet up, or stop ALL workloads fleet-wide.")
+                .font(.footnote)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
     }
-
-    // MARK: - Shared building blocks
-
-
-    private func errorLabel(_ message: String, retry: (() -> Void)? = nil) -> some View { HSErrorLabel(message: message, retry: retry) }
-    private func emptyLabel(_ text: String) -> some View { HSEmptyLabel(message: text) }
 }
