@@ -192,8 +192,6 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Button("Save", action: save)
-                        .disabled(!hasEdits)
                     if let tokenSaveFailure = settings.tokenSaveFailure {
                         Label(tokenSaveFailure, systemImage: "exclamationmark.triangle.fill")
                             .font(.footnote)
@@ -208,6 +206,12 @@ struct SettingsView: View {
                     }
                 }
             }
+            // Save is a STICKY bottom bar (spec §5): it used to be a row at the
+            // bottom of a long form, disconnected from the fields it commits —
+            // an operator who edited Host had to scroll to the very end to find
+            // the control, and the failure labels below it pushed it further
+            // away. The two diagnostics stay as the form's last section.
+            .safeAreaInset(edge: .bottom) { saveBar }
             .navigationTitle("Settings")
             .onAppear(perform: loadFromStore)
             // MARK: QR-scan flow — camera sheet → confirm → apply → test.
@@ -240,9 +244,53 @@ struct SettingsView: View {
             } message: {
                 Text(scanError ?? "")
             }
+            // Delete confirm (spec §5): the dialog names the exact cluster and
+            // says its token goes too, so the operator can't delete the wrong
+            // one by a swipe they didn't mean.
+            .confirmationDialog(
+                "Delete this cluster?",
+                isPresented: Binding(
+                    get: { pendingDelete != nil },
+                    set: { if !$0 { pendingDelete = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Delete \(pendingDelete?.name ?? "cluster")", role: .destructive) {
+                    if let cluster = pendingDelete {
+                        deleteCluster(cluster)
+                    }
+                    pendingDelete = nil
+                }
+                Button("Cancel", role: .cancel) { pendingDelete = nil }
+            } message: {
+                if let cluster = pendingDelete {
+                    Text("Removes “\(cluster.name)” (\(cluster.host):\(cluster.port)) and its Keychain token from this device. The cluster itself is untouched; you can add it again later.")
+                }
+            }
     }
 
     // MARK: - State helpers
+
+    /// The sticky Save bar (spec §5 button-placement contract: the primary
+    /// action sits in a fixed slot, not at the end of a scroll). Disabled
+    /// until a field actually differs from the store, exactly as the old
+    /// in-form row was.
+    private var saveBar: some View {
+        Button(action: save) {
+            Text(addingCluster ? "Save New Cluster" : "Save")
+                .font(.body.weight(.semibold))
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(Theme.Semantic.accent)
+        .disabled(!hasEdits)
+        .padding(.horizontal, Theme.Spacing.md.rawValue)
+        .padding(.vertical, Theme.Spacing.sm.rawValue)
+        .background(Theme.Semantic.surface)
+        .accessibilityHint(hasEdits
+            ? "Saves host, port and token for this cluster"
+            : "Nothing to save — no field has changed")
+    }
 
     private var isReadyToTest: Bool {
         !hostField.trimmingCharacters(in: .whitespaces).isEmpty
@@ -265,7 +313,7 @@ struct SettingsView: View {
     }
 
     /// One row in the Clusters list. Shows name + host:port, a health dot, a
-    /// checkmark on the active cluster, and swipe-to-delete.
+    /// checkmark on the active cluster, and an explicit Delete row.
     private func clusterRow(_ cluster: SavedCluster) -> some View {
         let isActive = cluster.id == settings.activeClusterID
         return Button {
@@ -273,17 +321,18 @@ struct SettingsView: View {
                 switchTo(cluster)
             }
         } label: {
-            HStack(spacing: 12) {
+            HStack(spacing: Theme.Spacing.md.rawValue) {
                 // Health dot: unknown/ok/failed from the last connection test.
-                Circle()
-                    .fill(healthColor(cluster.health))
-                    .frame(width: 10, height: 10)
-                VStack(alignment: .leading, spacing: 2) {
+                // HSStatusDot is the shared component, and the state it paints
+                // is also spelled out as text next to it (spec §9 — colour is
+                // never the only carrier).
+                HSStatusDot(healthColor(cluster.health))
+                VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
                     Text(cluster.name)
                         .foregroundColor(Theme.Semantic.onSurface)
                         .lineLimit(1)
                     if !cluster.host.isEmpty {
-                        Text("\(cluster.host):\(cluster.port)")
+                        Text("\(cluster.host):\(cluster.port) · \(healthLabel(cluster.health))")
                             .font(.caption)
                             .foregroundColor(Theme.Semantic.onSurfaceMuted)
                             .lineLimit(1)
@@ -306,12 +355,34 @@ struct SettingsView: View {
             ? "This cluster is active"
             : "Switch to this cluster")
         .accessibilityAddTraits(isActive ? .isSelected : [])
+        // Explicit Delete row + confirm (spec §5): swipe-only deletion was
+        // undiscoverable, and the swipe had no confirm naming what it removes.
+        // The destructive confirm names the cluster.
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button(role: .destructive) {
-                deleteCluster(cluster)
+                pendingDelete = cluster
             } label: {
                 Label("Delete", systemImage: "trash")
             }
+        }
+        .contextMenu {
+            Button(role: .destructive) {
+                pendingDelete = cluster
+            } label: {
+                Label("Delete cluster", systemImage: "trash")
+            }
+        }
+    }
+
+    /// The cluster awaiting the delete confirm (spec §5: a destructive action
+    /// gets a `confirmationDialog` that names the target).
+    @State private var pendingDelete: SavedCluster?
+
+    private func healthLabel(_ health: ClusterHealth) -> String {
+        switch health {
+        case .ok: return "last test ok"
+        case .failed: return "last test failed"
+        case .unknown: return "not tested yet"
         }
     }
 
@@ -439,40 +510,47 @@ struct SettingsView: View {
 
     // MARK: - Widgets & Live Activities
 
-    /// One row per surface: an inline Active toggle + a link to the surface's
-    /// sub-editor (refresh rate + content selection). Reuses the generic
+    /// One row per surface: a labelled row with a SEPARATE Active toggle,
+    /// beside a link into the surface's sub-editor (refresh rate + content
+    /// selection). Spec §5 split the old Toggle-inside-NavigationLink: a
+    /// control nested in a link is ambiguous for VoiceOver and misfires — one
+    /// tap could toggle or navigate depending on where it landed. Now the
+    /// toggle and the link are two distinct controls. Reuses the generic
     /// `WidgetSurfaceEditor` for every surface — no bespoke per-surface editors.
     @ViewBuilder
     private var widgetsAndLiveActivitiesRows: some View {
         ForEach(WidgetSurfaceKind.allCases, id: \.self) { kind in
             let surface = widgetSettings.setting(for: kind)
-            NavigationLink {
-                WidgetSurfaceEditor(kind: kind, store: widgetSettings)
-            } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: surfaceIcon(kind))
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                        .frame(width: 24)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(surfaceName(kind))
-                            .foregroundColor(Theme.Semantic.onSurface)
-                        Text("\(surface.refreshMinutes) min refresh")
-                            .font(.caption)
+            HStack(spacing: Theme.Spacing.md.rawValue) {
+                NavigationLink {
+                    WidgetSurfaceEditor(kind: kind, store: widgetSettings)
+                } label: {
+                    HStack(spacing: Theme.Spacing.md.rawValue) {
+                        Image(systemName: surfaceIcon(kind))
                             .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .frame(width: 24)
+                        VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+                            Text(surfaceName(kind))
+                                .foregroundColor(Theme.Semantic.onSurface)
+                            Text("\(surface.refreshMinutes) min refresh")
+                                .font(.caption)
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        }
+                        Spacer(minLength: 0)
                     }
-                    Spacer()
-                    // Inline Active toggle — the operator's single most common
-                    // action; the sub-editor has the same toggle for context.
-                    Toggle("", isOn: Binding(
-                        get: { surface.isActive },
-                        set: { widgetSettings.setActive($0, for: kind) }
-                    ))
-                    .labelsHidden()
-                    .toggleStyle(.switch)
                 }
+                .accessibilityLabel("\(surfaceName(kind)) settings")
+                .accessibilityHint("Opens refresh and content settings")
+
+                // The Active toggle is its OWN labelled control, never nested
+                // in the link above.
+                Toggle("Active", isOn: Binding(
+                    get: { surface.isActive },
+                    set: { widgetSettings.setActive($0, for: kind) }
+                ))
+                .toggleStyle(.switch)
+                .accessibilityLabel("\(surfaceName(kind)) active")
             }
-            .accessibilityLabel("\(surfaceName(kind)) settings")
-            .accessibilityHint("Toggle active or open refresh and content settings")
         }
     }
 
