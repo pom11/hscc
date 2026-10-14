@@ -17,10 +17,20 @@ import SwiftUI
 /// replaces the ten screens that used to wrap their own `NavigationStack`.
 enum AppDestination: String, Hashable, Identifiable {
     case home, chats, projects, cards, approvals
-    case fleet, clusterHub, fleetControl, nodesServing, opsHealth
+    case fleet, fleetControl, nodesServing, opsHealth
     case autodown, cron, logs
     case memory, templates, sessions, activity
     case search, settings
+    /// LEGACY alias, kept deliberately. `ClusterView` (the topology-only
+    /// "Cluster" drawer row) was retired by t_65d791da — its strip and fleet
+    /// status line are now the header Section of NodesServingView, and spec §3.1
+    /// has no Cluster row while §5/§8 both say the hub is "retired as a screen".
+    /// No drawer row and no screen of its own — but the dock's "Cluster" verb,
+    /// `ContentView.Tab.cluster` and any stale caller that still names
+    /// `.clusterHub` (rawValue "clusterHub") land on the merged screen instead of
+    /// silently failing. New code must route `.nodesServing`. (Same pattern as
+    /// `.selfHeal` below.)
+    case clusterHub
     /// LEGACY alias, kept deliberately (spec §8 merge: SelfHealHistoryView is
     /// now the trailing section of AutodownView). No drawer row and no screen
     /// of its own — but any stale caller that still names `.selfHeal`
@@ -45,7 +55,10 @@ enum AppDestination: String, Hashable, Identifiable {
         case .cards: "Cards"
         case .approvals: "Approvals"
         case .fleet: "Fleet"
-        case .clusterHub: "Cluster"
+        // The retired hub's alias carries the MERGED screen's title, exactly as
+        // `.selfHeal` carries "Autodown & self-heal" — a stale caller must never
+        // land on a nav bar that names a screen which no longer exists.
+        case .clusterHub: "Nodes & serving"
         case .fleetControl: "Fleet control"
         case .nodesServing: "Nodes & serving"
         case .opsHealth: "Ops & health"
@@ -158,7 +171,7 @@ struct AppShell: View {
         }
         .onChange(of: router.requestedTab) { _, requested in
             guard let requested else { return }
-            selection = AppDestination(tab: requested)
+            selection = normalized(AppDestination(tab: requested))
             router.requestedTab = nil
         }
         .alert("Couldn't open that link", isPresented: Binding(
@@ -184,9 +197,12 @@ struct AppShell: View {
         case .cards: CardsRootView(client: client)
         case .approvals: ApprovalsView(client: client)
         case .fleet: FleetView(client: client ?? FleetViewPlaceholder.client)
-        case .clusterHub: ClusterView(client: client)
+        // §8 merge (t_65d791da): the retired Cluster hub has no view of its own
+        // any more; its destination lands on the SAME merged screen as
+        // `.nodesServing`, which now carries the topology strip as its header.
+        case .clusterHub: NodesServingView(client: client)
         case .fleetControl: FleetControlView(client: client)
-        case .nodesServing: ServingControlView(client: client)
+        case .nodesServing: NodesServingView(client: client)
         case .opsHealth: OpsView(client: client)
         case .autodown: AutodownView(client: client)
         // §8 merge: the retired screen has no view of its own any more; its
@@ -243,6 +259,20 @@ struct AppShell: View {
         )
     }
 
+    /// Map a legacy alias onto the drawer row that actually exists, so a
+    /// destination arriving through the ROUTER (`requestedTab`) normalises the
+    /// same way one arriving through `go` does — otherwise the selection would sit
+    /// on `.clusterHub`, which has no row to highlight, and the drawer would open
+    /// with nothing marked.
+    private func normalized(_ destination: AppDestination?) -> AppDestination? {
+        switch destination {
+        case .selfHeal: return .autodown
+        case .boardHygiene: return .approvals
+        case .clusterHub: return .nodesServing
+        default: return destination
+        }
+    }
+
     /// Switch the drawer selection. Clearing the shared detail path is the
     /// point: the drawer swaps the ROOT of the stack, and a stale pushed
     /// screen must never sit on top of the newly chosen root (the tab bar
@@ -250,23 +280,23 @@ struct AppShell: View {
     /// Deep links are unaffected — they set `requestedTab`/path from the
     /// router and the router writes the path AFTER any selection change
     /// lands (its resolve goes through an await first).
+    ///
+    /// The §8 merges are applied here (`normalized`), mapped not deleted: a
+    /// retired screen's destination resolves to the merged screen it now lives
+    /// inside, so the selection identity — and the sidebar row's highlight — is
+    /// the real row, never a phantom second one.
+    ///   .selfHeal    -> Autodown & self-heal  (t_1a9bd7f8)
+    ///   .boardHygiene-> Approvals             (t_31d037ac)
+    ///   .clusterHub  -> Nodes & serving       (t_65d791da)
     private func go(_ destination: AppDestination?) {
-        // §8 merges, mapped not deleted: the retired self-heal and board-
-        // hygiene screens' destinations resolve to the merged screens, and
-        // they do so HERE so the selection identity (and the sidebar row's
-        // highlight) is `.autodown` / `.approvals`, never a phantom second row.
-        switch destination {
-        case .selfHeal: selection = .autodown
-        case .boardHygiene: selection = .approvals
-        default: selection = destination
-        }
+        selection = normalized(destination)
         router.projectsPath = []
     }
 
     /// Legacy deep-link / intent tabs map onto drawer destinations.
     private func applyPendingTabRequest() {
         if let requested = router.requestedTab {
-            selection = AppDestination(tab: requested)
+            selection = normalized(AppDestination(tab: requested))
             router.requestedTab = nil
         }
     }

@@ -136,6 +136,10 @@ targets:
       - path: Sources/HSCC/StreamingTranscript.swift
       - path: Sources/HSCC/SessionActivitySummary.swift
       - path: Sources/HSCC/SessionActivityDriver.swift
+      # Unit->node attribution for "Nodes & serving" (t_65d791da): the ONE place
+      # that reads the live `sparkrun status` text out of /v1/cluster/hosts.
+      # Headless-gated by scripts/serving_placement_check.sh.
+      - path: Sources/HSCC/ServingPlacement.swift
       - path: Sources/HSCC/Models.swift
       - path: Sources/HSCC/APIError.swift
       - path: Sources/HSCC/KeychainStore.swift
@@ -149,7 +153,12 @@ targets:
       - path: Sources/HSCC/Views/Theme.swift
       - path: Sources/HSCC/Views/NodeTopologyView.swift
       - path: Sources/HSCC/Views/LoadState.swift
-      - path: Sources/HSCC/Views/ClusterView.swift
+      # ClusterView.swift retired as a screen (t_65d791da, spec §5 + §8): its
+      # topology strip + fleet status line are now the header Section of
+      # NodesServingView, so one screen answers "which machines are up" AND
+      # "what runs on each of them". The `.clusterHub` destination survives as a
+      # mapped alias (AppShell.go), not as a drawer row.
+      - path: Sources/HSCC/Views/NodesServingView.swift
       # Phase 2 shell (IOS_REDESIGN 2026-10-14 §3): drawer roots for the
       # dock's Chat verb (project list that pushes chat directly) and the
       # drawer's cross-board Cards row (the id-less card route).
@@ -182,7 +191,9 @@ targets:
       - path: Sources/HSCC/Views/AppliedTemplateStatus.swift
       - path: Sources/HSCC/Views/HealthCheckIndicator.swift
       - path: Sources/HSCC/Views/FleetControlView.swift
-      - path: Sources/HSCC/Views/ServingControlView.swift
+      # ServingControlView.swift was renamed and merged into NodesServingView
+      # (t_65d791da) — listed above at ClusterView's old slot, since the new
+      # screen is the union of both.
       - path: Sources/HSCC/Views/TemplatesView.swift
       - path: Sources/HSCC/Views/TemplateDetailView.swift
       - path: Sources/HSCC/Views/TemplateTopologyView.swift

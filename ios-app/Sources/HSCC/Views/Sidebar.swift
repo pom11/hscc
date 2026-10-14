@@ -38,7 +38,11 @@ struct Sidebar: View {
             }
             group("Cluster") {
                 row(.fleet)
-                row(.clusterHub)
+                // The "Cluster" row is gone (t_65d791da, spec §3.1/§5/§8): the
+                // topology strip it existed for is now the header Section of
+                // "Nodes & serving", so one row covers machines AND what runs on
+                // them. `.clusterHub` still resolves — as a mapped alias in
+                // AppShell.normalized, never as a second row.
                 row(.nodesServing)
                 row(.fleetControl)
                 row(.opsHealth)

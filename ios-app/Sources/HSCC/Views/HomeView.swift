@@ -24,7 +24,14 @@ enum DockItem: String, CaseIterable, Identifiable {
         // in the cutover now that `.chats` exists as a first-class route.
         case .chat: .chats
         case .fleet: .fleet
-        case .cluster: .clusterHub
+        // The dock's "Cluster" verb is spec §3.2's word for "the physical
+        // layer", and that layer now lives on ONE screen: `ClusterView` was
+        // retired by t_65d791da and its topology strip is the header Section of
+        // "Nodes & serving". Points straight at the real drawer row — NOT at the
+        // `.clusterHub` alias — because the dock's active indicator compares
+        // against `selection`, and `AppShell.go` normalises every alias before it
+        // lands there. The glyph and label below keep the spec's "Cluster" word.
+        case .cluster: .nodesServing
         case .approvals: .approvals
         case .settings: .settings
         }

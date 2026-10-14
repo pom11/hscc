@@ -101,6 +101,11 @@ enum StateCache {
 enum EndpointPath {
     static let projects = "/v1/projects"
     static let clusterStatus = "/v1/cluster/status"
+    /// Node list + the live `sparkrun status` report "Nodes & serving" parses its
+    /// unit→node grouping from. Cached so a cluster that is unreachable still
+    /// shows WHERE its last-known units sat (marked stale) instead of forgetting
+    /// its own nodes.
+    static let clusterHosts = "/v1/cluster/hosts"
     static let verify = "/v1/verify"
     static let autodownStatus = "/v1/autodown/status"
     static let cronList = "/v1/cron/list"
