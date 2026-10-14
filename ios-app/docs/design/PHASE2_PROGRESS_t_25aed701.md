@@ -185,10 +185,19 @@ the recipe now; what remains is only the merges:
    instead is the shared `HSBanner` component: `StaleBanner` is now its offline
    façade and the wake state its spinner/neutral shape, so the §1.3 recipe
    duplication is gone and each state still says its own truth.
-2. `ServingControlView` + the NodeTopology strip → "Nodes & serving" (topology
-   as header, per-row Stop/Restart) — card `t_65d791da`. The restyle landed in
-   `644286f6`; the Stop/Restart colour fix and per-unit a11y labels landed
-   earlier (`dca7f25c`), so only the topology merge is outstanding.
+2. ~~`ServingControlView` + the NodeTopology strip~~ → **LANDED** in `0e3fc16f`
+   (card `t_65d791da`). One "Nodes & serving" destination: topology strip as the
+   header Section, units grouped under the node that runs them, per-row
+   Stop/Restart. `ClusterView.swift` retired as a screen (its strip moved here);
+   `.clusterHub` survives as a mapped alias like `.selfHeal`, and the drawer's
+   "Cluster" row is gone — which resolves reviewer note 2 below. The restyle
+   landed in `644286f6`; the Stop/Restart colour fix and per-unit a11y labels
+   landed earlier (`dca7f25c`). Units are grouped per node from the ONLY payload
+   that pairs a job with its machines — the `sparkrun status` text inside
+   `/v1/cluster/hosts` → `live_status` — parsed in `ServingPlacement.swift` and
+   gated by `scripts/serving_placement_check.sh` (41 assertions + negative test);
+   an unplaceable unit is shown as "Node not reported", never guessed.
+   See `ios-app/docs/nodes-serving-t_65d791da.md`.
 3. ~~`BoardHygieneView` → **merged into Approvals** (same `/v1/kanban/blocked`
    endpoint, two row dialects)~~ — **LANDED** (card `t_31d037ac`). One
    "Approvals" destination whose single List carries three sections — Pending
@@ -290,13 +299,24 @@ for a small follow-up card, not Phase 2 scope.
 
 1. Home tiles: Projects / Activity / Approvals / Cards (spec §3.3's set);
    Search is a toolbar ⌘ on Home AND a drawer row.
-2. Sidebar splits Fleet (rollups) and Cluster (topology) into two rows —
+2. ~~Sidebar splits Fleet (rollups) and Cluster (topology) into two rows —
    spec §3.1 lists them as one line, but they were two screens before and
-   merging them would have deleted a screen.
-3. Home hero taps reach the Cluster topology (spec: "tapping the hero should
-   reach the Cluster screen").
+   merging them would have deleted a screen.~~ **Resolved by `0e3fc16f`** (card
+   `t_65d791da`): the Cluster row is gone; the topology strip is the header of
+   "Nodes & serving", so Fleet + Nodes & serving is now §3.1's shape and the
+   deletion happened as the spec's §5/§8 hub-retirement, not silently.
+3. Home hero taps reach the **Fleet** screen — the code has always done that
+   (`statusHero` sets `selection = .fleet`), matching spec §3.3's own words ("a
+   status hero (the single 'everything is fine' glance, tap → Fleet)"). The
+   earlier note here claimed the hero reached the Cluster topology; it was
+   describing the shell commit's intent, not the shipped code. What reaches the
+   topology is the dock's "Cluster" verb, which `0e3fc16f` points at
+   "Nodes & serving" — §3.2 describes that verb as "the physical layer".
 4. `ConnectionBanner` kept — still used by 8 non-chat screens; only the
-   chat's stacked banner was removed.
-5. `AppDestination.clusterHub` is what the old "Cluster tab" hub became —
+   chat's stacked banner was removed. (`NodesServingView` is a `List` recipe and
+   uses inline loading/failed rows instead, like Fleet / Autodown / Approvals.)
+5. ~~`AppDestination.clusterHub` is what the old "Cluster tab" hub became —
    deliberately not called `.cluster` to keep the drawer row honest about
-   it being topology-only now.
+   it being topology-only now.~~ **Superseded by `271ab375`**: `ClusterView` is
+   retired, so `.clusterHub` is now a drawer-row-less LEGACY ALIAS (the
+   `.selfHeal` precedent) that `AppShell.normalized()` maps to `.nodesServing`.
