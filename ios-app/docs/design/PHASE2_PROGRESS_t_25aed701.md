@@ -199,16 +199,25 @@ first-run alert cannot be dismissed headlessly (`simctl privacy grant` is
 refused on this simulator: "Operation not permitted"), so it needs one tap in
 the Simulator UI.
 
-## Gates (all re-run at `9d51e473`)
+## Gates (all re-run at `644286f6`, the last code commit)
 
 build_check 97 files / 0 err / 0 warn · check_theme CLEAN · sources in sync
 97 files · ws_decode ok · reconnect 42/42 · deeplink 41/41 · turn_state ok ·
 shared_store ok · first_run ok · actool icon ok · xcodegen re-run after each
 file addition (stale-project pitfall) · **xcodebuild device-target (iPhone 17
-Pro simulator) BUILD SUCCEEDED** at `df396a20`.
+Pro simulator) BUILD SUCCEEDED, installed and launched** at `644286f6` (the
+running process was confirmed via `launchctl list` on the device, so the
+converted screens are not merely compiling, they boot).
 
-Earlier runs: gates green at every commit in C3 and C3b; the device build was
-also run at `c8df2177`.
+Earlier runs: gates green at every commit in C3, C3b and C3c; the device build
+was also run at `c8df2177` and `df396a20`.
+
+**Launch gotcha worth recording** (cost me a false bug report this run): the
+bundle id is `com.hscc.ios`, NOT `ro.hscc.ios`. `simctl launch ro.hscc.ios`
+fails with `FBSOpenApplicationServiceErrorDomain code=4`, which reads exactly
+like "the app crashes on launch" but means "no such bundle installed". Nothing
+in this repo references `ro.hscc.ios` — check `plutil -extract CFBundleIdentifier
+raw HSCC.app/Info.plist` before believing a launch failure.
 
 Pre-existing failures NOT touched (verified failing identically at base
 23fcfb15): chat_state_check.sh and offline_queue_check.sh (both grep the
