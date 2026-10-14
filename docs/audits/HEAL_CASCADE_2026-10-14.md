@@ -407,8 +407,12 @@ they are the kind that make a suite lie):
    constant from `os.environ`, silently reverting the patch. Constants that
    `reload` recomputes must be set via the **environment**.
 
-**Mutation check:** see §5 (run separately, since it temporarily neuters the
-gate in the same worktree the suite runs from).
+**Mutation check:** neutering `_note_heal_action` to always allow (one inserted
+`return True, ""`) makes **4 of the 25 fail** — every integration test in
+`TestBreakerStopsARealStorm` — while the 21 module-level tests still pass (they
+test the ledger directly and correctly don't care about the wiring). Restoring
+the file byte-identically returns 25/25. So the storm-stopping tests are
+non-vacuous by measurement, not by assertion.
 
 ### F6 — the CLI must refuse to guess on a destructive command
 
@@ -475,10 +479,14 @@ Python `f.close()` leaves fd 1 usable (they share a file description), so the
 **Tests.** 20 tests. The e2e ones drive `main()` through `_handle_cluster()`
 with a fake engine that *records* being called, so "it didn't execute" is
 asserted as `calls == []` rather than by parsing output text — a parser bug that
-lets a flag through fails by construction, not by string matching. The fork
-chain is emulated following the existing `test_cli.py` pattern, and
-placement is pinned as an ordering assertion (`detach` before `loop`) because
-that ordering is the entire fix.
+lets a flag through fails by construction, not by string matching. No mutation
+check is needed here because the suite carries its own positive control:
+`test_bare_up_still_performs_the_up` asserts `calls == [("up", False)]` for the
+bare command, proving the fake engine is reachable and does record — so an empty
+`calls` in the `--help` cases means the gate stopped it, not that the harness was
+wired wrong. The fork chain is emulated following the existing `test_cli.py`
+pattern, and placement is pinned as an ordering assertion (`detach` before
+`loop`) because that ordering is the entire fix.
 
 ## 4. Node hang investigation (F7)
 
