@@ -141,6 +141,11 @@ struct BoardHygieneView: View {
             )
             .font(.caption)
             .buttonStyle(.borderless)
+            // Spec §5: "Recover gets the same per-card label Allow has."
+            // Approvals' Allow already names its card; this row's Recover read
+            // as a bare "Recover" for every row, so VoiceOver couldn't say
+            // which blocked card it would re-run.
+            .accessibilityLabel("Recover \(card.id) (\(card.displayTitle))")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

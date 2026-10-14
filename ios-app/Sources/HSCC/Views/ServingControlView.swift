@@ -183,6 +183,11 @@ struct ServingControlView: View {
                     )
                     .buttonStyle(.bordered)
                     .tint(Theme.Semantic.bad)
+                    // Spec §5: the confirm names the unit; the BUTTON must too.
+                    // A VoiceOver user swiping the unit list heard only "Stop"
+                    // and "Restart" repeated for every row with no idea which
+                    // unit either one pointed at.
+                    .accessibilityLabel("Stop \(unit.name)")
 
                     MutationButton(
                         title: "Restart",
@@ -206,6 +211,7 @@ struct ServingControlView: View {
                     )
                     .buttonStyle(.bordered)
                     .tint(Theme.Semantic.accent)
+                    .accessibilityLabel("Restart \(unit.name)")
 
                     Spacer()
                 }
