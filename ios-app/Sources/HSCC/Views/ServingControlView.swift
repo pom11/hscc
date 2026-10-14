@@ -27,33 +27,42 @@ import SwiftUI
 /// true` → in-flight spinner/disable → honest success/failure alert). A single
 /// tap never fires a request, and the screen reloads after each mutation so the
 /// operator sees the real post-action state.
+///
+/// LIST RECIPE (spec §5, Phase 2 C3): one plain `List`, two `Section`s (Serving
+/// units · the fleet-wide note). The `HSSectionCard` box and the per-unit
+/// `surfaceRaised` card inside it are gone — the List row is the card now, so a
+/// unit is a row with its Stop/Restart trailing, the same shape as every other
+/// data screen. The unit rows deliberately do NOT combine their children into
+/// one VoiceOver element: unlike a read-only row, each of these carries two
+/// buttons that must stay individually reachable (§9 names the buttons
+/// separately for exactly that reason).
+///
+/// Restyle only — §5's merge of this screen with the NodeTopology strip into
+/// "Nodes & serving" is deliberately NOT done here (filed as its own card; it
+/// changes what the destination is).
 struct ServingControlView: View {
     let client: HSCCClient?
 
     @State private var status = LoadState<ClusterStatusResponse>.idle
 
     var body: some View {
-            ScrollView {
-                if let client {
-                    VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
-                        header(client: client)
-                        unitsSection(client: client)
-                        noteSection
+        Group {
+            if let client {
+                List {
+                    unitsSection(client: client)
+                }
+                .listStyle(.plain)
+                .refreshable { await loadStatus() }
+                .task {
+                    if status.value == nil, !status.isLoading {
+                        await loadStatus()
                     }
-                    .padding()
-                } else {
-                    notConfiguredView
                 }
+            } else {
+                notConfiguredView
             }
-            .navigationTitle("Serving Control")
-            .refreshable {
-                if client != nil { await loadStatus() }
-            }
-            .task {
-                if client != nil, status.value == nil, !status.isLoading {
-                    await loadStatus()
-                }
-            }
+        }
+        .navigationTitle("Serving Control")
     }
 
     // MARK: - Not configured
@@ -76,80 +85,77 @@ struct ServingControlView: View {
         }
     }
 
-    // MARK: - Header
+    // MARK: - Header copy
 
-    @ViewBuilder
-    private func header(client: HSCCClient) -> some View {
-        // The summary line reflects the honest current state.
-        Text(loadingHeaderText)
-            .font(.subheadline)
-            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-    }
-
+    /// The screen's honest "how to use this safely" prose. It was a `Text` above
+    /// the cards plus a titled card below them; the recipe puts both in the one
+    /// section footer, where they describe the rows they sit under.
     private var loadingHeaderText: String {
+        let countLine: String
         if case .loaded(let state) = status {
             let n = state.workloads.count
-            return "\(n) serving unit\(n == 1 ? "" : "s") running. Pick exactly the one you need to recover — each card names what it serves so you cannot stop or restart the wrong unit."
+            countLine = "\(n) serving unit\(n == 1 ? "" : "s") running. Pick exactly the one you need to recover — each row names what it serves so you cannot stop or restart the wrong unit."
+        } else {
+            countLine = "Each serving unit is listed with what it serves. Stop or restart exactly the one you mean — never a blind whole-fleet action from a single tap."
         }
-        return "Each serving unit is listed with what it serves. Stop or restart exactly the one you mean — never a blind whole-fleet action from a single tap."
+        return countLine + " Fleet-wide actions live in Fleet Control: stopping a unit takes it out of service immediately, and to start a unit that is down — or recover after a hard stop — bring the fleet up or down from there (same confirm gate)."
     }
 
     // MARK: - Units
 
     @ViewBuilder
     private func unitsSection(client: HSCCClient) -> some View {
-        switch status {
-        case .loading, .idle:
-            HSSectionCard(title: "Serving Units", systemImage: "cpu") {
-                HSLoading()
-            }
-        case .failed(let message):
-            HSSectionCard(title: "Serving Units", systemImage: "cpu") {
-                HSErrorLabel(message: message, retry: { Task { await loadStatus() } })
-            }
-        case .stale(let state, let ageMessage):
-            HSSectionCard(title: "Serving Units", systemImage: "cpu") {
-                VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
-                    StaleBanner(age: ageMessage,
-                                reason: "Can't reach the cluster right now.") {
-                        Task { await loadStatus() }
-                    }
-                    unitsBody(client: client, state: state)
+        Section {
+            switch status {
+            case .idle, .loading:
+                HStack(spacing: Theme.Spacing.sm.rawValue) {
+                    ProgressView()
+                    Text("Loading serving units…")
+                        .font(.subheadline)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
-            }
-        case .loaded(let state):
-            HSSectionCard(title: "Serving Units", systemImage: "cpu") {
+            case .failed(let message):
+                HSErrorLabel(message: message, retry: { Task { await loadStatus() } })
+            case .stale(let state, let ageMessage):
+                StaleBanner(age: ageMessage,
+                            reason: "Can't reach the cluster right now.") {
+                    Task { await loadStatus() }
+                }
+                unitsBody(client: client, state: state)
+            case .loaded(let state):
                 unitsBody(client: client, state: state)
             }
+        } header: {
+            Text("Serving units")
+        } footer: {
+            Text(loadingHeaderText)
+                .font(.footnote)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
     }
 
-    /// The unit list body for a loaded (or stale last-known) status snapshot.
+    /// The unit list for a loaded (or stale last-known) status snapshot.
     @ViewBuilder
     private func unitsBody(client: HSCCClient, state: ClusterStatusResponse) -> some View {
         if state.workloads.isEmpty {
-            VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-                HSEmptyLabel(message: "No serving units running right now.")
-                Text("A unit that is down does not appear here. `cluster up` (in Fleet Control) starts the whole serving fleet — orchestrator and workers — so a stopped unit only comes back through a fleet-up.")
-                    .font(.caption)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
-            }
+            HSEmpty("No serving units",
+                    message: "A unit that is down does not appear here. `cluster up` (in Fleet Control) starts the whole serving fleet — orchestrator and workers — so a stopped unit only comes back through a fleet-up.",
+                    systemImage: "cpu")
         } else {
-            VStack(spacing: Theme.Spacing.md.rawValue) {
-                ForEach(state.workloads) { unit in
-                    unitCard(client: client, unit: unit)
-                }
+            ForEach(state.workloads) { unit in
+                unitRow(client: client, unit: unit)
             }
         }
     }
 
     /// One serving unit: what it serves, its parallelism, and its container id —
-    /// then Stop / Restart, both confirm-gated.
+    /// then Stop / Restart, both confirm-gated. It is one List row now (the old
+    /// per-unit `surfaceRaised` card inside a card is gone).
     @ViewBuilder
-    private func unitCard(client: HSCCClient, unit: ClusterWorkload) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
+    private func unitRow(client: HSCCClient, unit: ClusterWorkload) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
             // What this unit serves — the name is the model it hosts.
-            VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
                 Text(unit.name)
                     .font(.headline)
                     .foregroundColor(Theme.Semantic.onSurface)
@@ -160,7 +166,7 @@ struct ServingControlView: View {
                         Label(cid, systemImage: "shippingbox")
                     }
                 }
-                .font(.caption)
+                .font(.hsccMono(.caption))
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
             }
 
@@ -237,15 +243,5 @@ struct ServingControlView: View {
             return "parallelism unknown"
         }
         return "tp=\(tp) · pp=\(pp)"
-    }
-
-    // MARK: - Note
-
-    private var noteSection: some View {
-        HSSectionCard(title: "Fleet-wide actions live in Fleet Control", systemImage: "arrow.up.to.line") {
-            Text("Stopping a unit takes it out of service immediately. To start a unit that is down — or recover after a hard stop — bring the fleet up or down from \"Fleet Control\" (same confirm gate).")
-                .font(.subheadline)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-        }
     }
 }
