@@ -279,6 +279,175 @@ class TestPerProfileCapIsNotAStall:
         assert ok is False, "without a per-profile cap this is the old stall"
         assert stream["roomy_spawnable"] == ["default"]
 
+class TestGlobalCapIsNotAStall:
+    """A1 — the cap is FLEET-WIDE, and the detector read it per board.
+
+    Live failure this class pins: with ``kanban.max_in_progress = 3`` and three
+    tasks running across two boards, hermes was CORRECTLY refusing to spawn
+    more, yet every board looked roomy because each held fewer than 3 of its
+    own. The stream sat red all morning with
+    ``GENUINE STALL … spawnable=['hscc'], roomy=['hscc'], total_running=3``
+    until recovery gave up. (Fake board names here are inert strings in an
+    in-memory sqlite DB — no real board is read.)
+    """
+
+    # Two boards: work waiting on 'a', and running tasks split so that NO
+    # single board reaches the cap while the FLEET does.
+    def _split(self, a_run, b_run):
+        return {
+            "a": [READY] + [RUNNING] * a_run,
+            "b": [("running", "worker-b")] * b_run,
+        }
+
+    def test_fleet_at_cap_across_boards_is_not_a_stall(self):
+        """The exact incident shape: 1 + 2 running, cap 3, ready work waiting."""
+        ok, stream = _run_detect(self._split(1, 2), cap=3, n=1)
+        assert ok is True, "paged on a correctly-throttled dispatcher"
+        assert stream["ok"] is True
+        assert stream["roomy_spawnable"] == []
+        assert "a" in stream["at_capacity"]
+        assert stream["total_running"] == 3
+
+    def test_healthy_reason_says_at_capacity_global(self):
+        _, stream = _run_detect(self._split(1, 2), cap=3, n=1)
+        msg = stream["message"]
+        assert "at_capacity (global)" in msg, msg
+        # And it must name the numbers that made the call, or an operator
+        # cannot tell a fleet cap from a board cap.
+        assert "total_running=3" in msg and "max_in_progress=3" in msg
+
+    def test_stays_green_across_many_ticks(self):
+        """A false alarm that lasts one tick is noise; this one lasted hours.
+        Repeated ticks must not accumulate into a declaration."""
+        for i in range(6):
+            ok, stream = _run_detect(self._split(1, 2), cap=3, n=1,
+                                     now=float(i * 5))
+            assert ok is True, f"tick {i} paged"
+            assert stream["ok"] is True
+
+    def test_still_a_stall_when_the_fleet_genuinely_has_room(self):
+        """The other direction, so the fix cannot silently disable detection:
+        1 + 1 running under a cap of 3 leaves a real free slot, and zero
+        spawns for N ticks IS a wedge."""
+        ok, stream = _run_detect(self._split(1, 1), cap=3, n=1)
+        assert ok is False
+        assert stream["ok"] is False
+        assert "a" in stream["roomy_spawnable"]
+
+    def test_single_board_at_its_own_cap_reports_the_global_flag(self):
+        """A single board that reaches the cap is also the fleet reaching it
+        (total >= board, always), so the global wording is the correct one —
+        asserted here so the two caps cannot drift apart silently."""
+        ok, stream = _run_detect([READY] + [RUNNING] * 3, cap=3, n=1)
+        assert ok is True
+        assert stream["total_running"] == 3
+        assert stream.get("global_at_capacity") is True
+
+    def test_no_cap_configured_never_global_blocks(self):
+        """max_in_progress unset ⇒ no cap at any level ⇒ a real wedge."""
+        ok, _ = _run_detect(self._split(4, 4), cap=None, n=1)
+        assert ok is False
+
+    def test_capture_exposes_the_global_flag(self):
+        cap = _capture(self._split(1, 2), cap=3)
+        assert cap["global_at_capacity"] is True
+        assert cap["total_running"] == 3
+        cap2 = _capture(self._split(1, 1), cap=3)
+        assert cap2["global_at_capacity"] is False
+
+
+class TestGaveUpLatchClearsOnGreen:
+    """A1 second half: a ``gave_up`` latch must not outlive its incident.
+
+    The cap latch was persisted and never cleared, so once recovery gave up the
+    probe could never self-heal again — even weeks later, after the operator had
+    fixed the real cause — without hand-deleting
+    ``~/.hscc/dispatcher_recover.json``. Green means the incident is over, so
+    the budget is renewed automatically.
+    """
+
+    def _latched_state(self, tmp_path):
+        from hscc_daemon import dispatcher_wedge as d
+        p = str(tmp_path / "recover.json")
+        d._save_recover_state({"gave_up": True, "attempts": 5,
+                               "last_recovery_at": 0.0}, p)
+        return p
+
+    def test_green_stream_clears_the_latch_with_no_manual_deletion(self,
+                                                                   tmp_path):
+        p = self._latched_state(tmp_path)
+        # The stream is green: a healthy dispatcher, nothing to recover.
+        r = dw.recover_dispatcher_wedge(
+            stream_state={"ok": True}, restart_fn=Recorder(), now=100.0,
+            state_file=p)
+        assert r["result"] == "none-wedged"
+        state = dw._load_recover_state(p)
+        assert "gave_up" not in state, "latch survived a green stream"
+        assert state.get("attempts") is None, "attempt budget not renewed"
+        # The cooldown from the restart that DID happen is preserved on purpose.
+        assert state["last_recovery_at"] == 0.0
+        assert state.get("resolved_at") == 100.0
+
+    def test_after_clearing_a_new_wedge_can_restart_again(self, tmp_path):
+        """Proves the renewal is real, not cosmetic: a fresh wedge must be able
+        to act despite the earlier gave-up."""
+        p = self._latched_state(tmp_path)
+        rec = Recorder()
+        dw.recover_dispatcher_wedge(stream_state={"ok": True}, restart_fn=rec,
+                                    now=100.0, state_file=p)
+        results = [dw.recover_dispatcher_wedge(
+            stream_state={"ok": False, "declared": True}, restart_fn=rec,
+            now=200.0, state_file=p)
+            for _ in range(dw.DISPATCHER_RESTART_AFTER_DETECTIONS)]
+        assert results, "M is 0 — the loop under test never ran"
+        assert results[-1]["result"] == "recovered", results[-1]
+        assert rec.calls == 1
+
+    def test_unreadable_green_does_not_renew_the_budget(self, tmp_path):
+        """``ok: True`` written by the unreachable path is a fail-safe, not an
+        observation of health. Renewing the budget on a read failure would
+        re-arm restarts exactly when we know least."""
+        p = self._latched_state(tmp_path)
+        dw.recover_dispatcher_wedge(
+            stream_state={"ok": True, "unreadable": "cannot read board db"},
+            restart_fn=Recorder(), now=100.0, state_file=p)
+        state = dw._load_recover_state(p)
+        assert state.get("gave_up") is True, "latch cleared on a read failure"
+
+    def test_red_stream_does_not_clear_the_latch(self, tmp_path):
+        p = self._latched_state(tmp_path)
+        dw.recover_dispatcher_wedge(stream_state={"ok": False,
+                                                 "declared": True},
+                                    restart_fn=Recorder(), now=100.0,
+                                    state_file=p)
+        assert dw._load_recover_state(p).get("gave_up") is True
+
+    def test_end_to_end_incident_closes_itself(self, tmp_path):
+        """The full sequence the operator saw, with no manual step: false stall
+        declared -> recovery gives up -> A1's fix makes the stream green ->
+        the latch is gone on its own.
+
+        Uses one board whose running count reaches the cap, which is the
+        simplest capture that is (correctly) not a stall.
+        """
+        from hscc_daemon import dispatcher_wedge as d
+        p = str(tmp_path / "recover.json")
+        d._save_recover_state({"gave_up": True, "attempts": 9,
+                               "last_recovery_at": 0.0}, p)
+
+        # 3 running == cap 3, with ready work still waiting: correctly NOT a
+        # stall, because the fleet has no free slot.
+        boards = [READY] + [RUNNING] * 3
+        ok, stream = _run_detect(boards, cap=3, n=1, now=10.0)
+        assert ok is True and stream["ok"] is True, "A1 fix must go green"
+
+        rec = Recorder()
+        d.recover_dispatcher_wedge(stream_state=stream, restart_fn=rec,
+                                   now=20.0, state_file=p)
+        assert "gave_up" not in d._load_recover_state(p)
+        assert rec.calls == 0, "a green stream must never restart anything"
+
+
 class TestNoSpawnableWorkIsNotAStall:
     def test_no_ready_work_goes_green(self):
         """Correctly idle (no spawnable work) -> never red."""

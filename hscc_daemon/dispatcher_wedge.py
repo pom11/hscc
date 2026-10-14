@@ -379,26 +379,51 @@ def _capture_kanban(kanban_db=None, max_in_progress=None,
                 "boards": [], "spawnable": [], "roomy_spawnable": [],
                 "at_capacity": [], "total_running": 0,
                 "max_in_progress": max_in_progress, "errors": []}
-    spawnable, roomy_spawnable, at_capacity, errors = [], [], [], []
-    total_running = 0
+    # Pass 1: every board's state. total_running must be COMPLETE before any
+    # board's roominess is judged, because the cap is fleet-wide (see below),
+    # so the roomy/at_capacity split happens in pass 2.
+    snaps, errors = [], []
     for board in boards:
         snap = _board_snapshot(kanban_db, board, multi, max_in_progress,
                                max_per_profile)
-        total_running += snap["in_progress"]
         if snap["error"]:
             errors.append(f"{snap['board']}: {snap['error']}")
             continue
-        if snap["spawnable"]:
-            spawnable.append(snap["board"])
-            if snap["roomy"]:
-                roomy_spawnable.append(snap["board"])
-            else:
-                at_capacity.append(snap["board"])
+        snaps.append(snap)
+    total_running = sum(s["in_progress"] for s in snaps)
+
+    # THE CAP IS GLOBAL, NOT PER BOARD (A1, false dispatcher stall
+    # 2026-10-14). hermes enforces kanban.max_in_progress ACROSS ALL BOARDS
+    # (hermes_cli/kanban.py, "#33488"), but this check judged each board
+    # against the cap on its OWN running count. With max_in_progress=3 and 3
+    # tasks running fleet-wide, the gateway was correctly holding further work
+    # while every board still looked roomy (each had <3 of its own), so the
+    # probe paged "GENUINE STALL … roomy=['hscc'], total_running=3" all
+    # morning and recovery eventually gave up. A board is roomy only if the
+    # FLEET has a slot too: `in_progress < cap` per board AND
+    # `total_running < cap` overall. The per-profile cap check is unchanged —
+    # it answers a different question (could this board's waiting profiles
+    # spawn even with a free slot).
+    global_at_capacity = (max_in_progress is not None
+                          and total_running >= max_in_progress)
+
+    spawnable, roomy_spawnable, at_capacity = [], [], []
+    for snap in snaps:
+        if not snap["spawnable"]:
+            continue
+        spawnable.append(snap["board"])
+        if snap["roomy"] and not global_at_capacity:
+            roomy_spawnable.append(snap["board"])
+        else:
+            # A board blocked by the fleet-wide cap genuinely cannot spawn,
+            # so it belongs in at_capacity; `global_at_capacity` says WHY.
+            at_capacity.append(snap["board"])
     return {
         "boards": ["default" if b is None else b for b in boards],
         "spawnable": spawnable, "roomy_spawnable": roomy_spawnable,
         "at_capacity": at_capacity, "total_running": total_running,
         "max_in_progress": max_in_progress, "errors": errors,
+        "global_at_capacity": global_at_capacity,
     }
 
 
@@ -513,6 +538,10 @@ def check_dispatcher_wedge(kanban_db=None, max_in_progress=None, now=None,
         "at_capacity": capture["at_capacity"],
         "total_running": capture["total_running"],
         "max_in_progress": capture["max_in_progress"],
+        # Exposed on the stream (not just the capture) so an operator reading
+        # `hscc status`/`verify` can tell a fleet-wide cap from a board cap
+        # without re-deriving it. A1.
+        "global_at_capacity": capture.get("global_at_capacity", False),
         "stall_ticks": _detector["stall_ticks"],
         "errors": capture["errors"],
     }
@@ -559,8 +588,15 @@ def _healthy_reason(capture):
     if not capture.get("spawnable"):
         return "no spawnable ready work (correctly idle)"
     if not capture.get("roomy_spawnable"):
-        return (f"all spawnable boards at capacity "
-                f"(max_in_progress={capture.get('max_in_progress')})")
+        # A1 renamed this to "at_capacity (global)" because the cap is
+        # fleet-wide. The condition is deliberately NOT ``and not
+        # global_at_capacity``: total_running >= any board's in_progress, so a
+        # board that is at capacity forces the fleet to be at capacity too —
+        # a board-at-capacity-but-fleet-has-room state is unreachable, and
+        # keeping a branch for it would be dead code that reads like a case.
+        return ("all spawnable boards at capacity — at_capacity (global) "
+                f"(total_running={capture.get('total_running')} >= "
+                f"max_in_progress={capture.get('max_in_progress')})")
     return "worker recently spawned"
 
 
@@ -623,6 +659,29 @@ def recover_dispatcher_wedge(stream_state=None, restart_fn=None, now=None,
     # The probe's verdict: only a DECLARED genuine stall (ok: False) counts.
     if stream.get("ok") is not False:
         _recovery_detection_streak = 0
+        # A CONFIRMED-HEALTHY stream clears the latch (A1, 2026-10-14). Once
+        # the attempt cap set ``gave_up`` it persisted forever: the very next
+        # wedge — possibly weeks later, after the operator fixed the real
+        # problem — could never self-heal, and un-sticking it meant hand-editing
+        # ``~/.hscc/dispatcher_recover.json``. ``gave_up`` bounds restarts
+        # WITHIN one incident; "the stream is green again" means that incident
+        # is over, so the budget is renewed.
+        #
+        # Only a REAL green clears it. The unreachable-kanban path writes
+        # ``ok: True`` as a fail-safe (we did not observe health, we just
+        # refused to page on our own read failure) — treating that as a
+        # recovery would renew the budget precisely when we know least.
+        if stream.get("ok") is True and "unreadable" not in stream:
+            state = _load_recover_state(state_file)
+            if state.get("gave_up") or state.get("attempts"):
+                # Keep `last_recovery_at`: the cooldown protects a restart that
+                # just happened, and the probe's green is not proof it worked.
+                state.pop("gave_up", None)
+                state.pop("attempts", None)
+                state["resolved_at"] = now
+                _save_recover_state(state, state_file)
+                log("Dispatcher-wedge recovery: stream green — wedge "
+                    "resolved, latch cleared (attempt budget renewed)")
         return {"result": "none-wedged",
                 "message": "dispatcher stream not red — nothing to recover",
                 "actions": []}
