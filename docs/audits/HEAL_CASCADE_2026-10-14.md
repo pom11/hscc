@@ -601,49 +601,17 @@ was placed on the wrong host".
 
 ## 5. Changelog fragment
 
-Filed as `changelog.d/t_13edf7d4.md` under the tracking card
-(`t_13edf7d4`, "Heal cascade 2026-10-14: F1-F6 + A1/A2 landing") — created
-for exactly this purpose, since the fragment filename must carry a kanban
-task id. `scripts/changelog_fragments.py check` passes; landing the card
-runs `sync`. The pre-card draft text is kept below for the record — the
-committed fragment is the canonical one.
+`changelog.d/t_13edf7d4.md`, under the tracking card `t_13edf7d4`
+("Heal cascade 2026-10-14: F1-F6 + A1/A2 landing") — created for exactly this
+purpose, because a fragment filename must carry a kanban task id. Two
+`kind: Fixed` entries: the six-defect heal cascade (F1–F6 + A2) and the
+dispatcher global-cap false page (A1). `scripts/changelog_fragments.py check`
+passes; landing the card runs `sync`.
 
-```markdown
-kind: Fixed
-
-- **A heal cascade destroyed two nodes on 2026-10-14.** One wedged unit set off
-  four independent repair paths (engine-wedge recovery, `check_workers`
-  relaunch, proxy relaunch, template auto-heal), all firing every ~60s for
-  ~35 minutes, until two nodes hard-hung and needed a manual power-cycle. Six
-  defects, each fixed in its own commit: the gentle worker relaunch ignored the
-  load grace and re-destroyed a ~3 min model load every minute (**F1**); the
-  four paths had no mutual exclusion and their strike counters were in-memory,
-  so a daemon restart reset them (**F2**, new durable `heal_lease.py`);
-  auto-heal force-recreated the **whole template** for one down unit (**F3**);
-  proxy health asked only "does :4000 answer", so an orphan router serving one
-  of four healthy units read healthy for ~2h (**F4**, now compares the live
-  router to healthy units and repairs what `proxy start --restart` cannot);
-  there was no bound on heal actions per node (**F5**, new per-node
-  `heal_breaker.py` + `hscc heal-clear`/`heal-status`); and
-  `hscc cluster up --help` **started the fleet**, while `hscc start` kept the
-  caller's stdout open (**F6**). The lease makes repairs *sequential*, the
-  breaker makes them *finite* — sequential-but-unbounded is what killed the
-  nodes. Timeline and node forensics:
-  `docs/audits/HEAL_CASCADE_2026-10-14.md`.
----
-kind: Verified
-
-- `scripts/run_tests.sh`, `SUITE_RC=0`, all legs green: 446 / 69 / 135 / 479 /
-  1411 / **1426** / 12 / 936(+1 skip) / 11 / 120 / 126 passed. The daemon leg
-  went 1367 → 1426 (+14 F4, +25 F5, +20 F6); no test removed or weakened.
-- Mutation-checked, not assert-checked: reverting F2's wiring fails 7 of 12
-  lease tests; pre-F3 `health.py` fails the template tests; disabling only
-  F4's `check_proxy` wiring fails its 2 integration tests while the 40 helper
-  tests pass either way; neutering F5's `_note_heal_action` fails 4 of 25
-  (every integration test) and restores byte-identical to 25/25.
-- `hscc heal-clear` / `heal-status` exercised against a fake `HOME`
-  (suspend → status → clear → resume).
-```
+No duplicate draft is kept here on purpose. An earlier revision of this
+section carried the entry text inline, when no card existed to name the file;
+with the file committed, a second copy in the audit would leave a reader
+unable to tell which one `sync` will publish.
 
 ## 6. A1 — the dispatcher stall was a global cap read per board
 
