@@ -189,7 +189,15 @@ struct ServingControlView: View {
                     MutationButton(
                         title: "Restart",
                         systemImage: "arrow.clockwise.circle",
-                        destructive: true,
+                        // Restart is RECOVERY, not destruction. It was marked
+                        // destructive and tinted `bad` alongside Stop, so the
+                        // two highest-contrast colours on the screen meant the
+                        // same thing — an operator scanning for the safe option
+                        // could not tell them apart by colour. The confirm
+                        // prompt still names exactly what happens (it stops
+                        // this unit and re-asserts the whole serving fleet),
+                        // so the warning is carried by words, not by red.
+                        destructive: false,
                         prompt: "Restart unit \"\(unit.name)\" (container \(cid))? It is stopped, then the serving fleet is brought back up. The fleet-up re-asserts EVERY unit in serving.json — there is no per-unit start, so the rest of the fleet is re-started too.",
                         run: {
                             _ = try await client.stopCluster(containerID: cid)
@@ -199,7 +207,7 @@ struct ServingControlView: View {
                         }
                     )
                     .buttonStyle(.bordered)
-                    .tint(Theme.Semantic.bad)
+                    .tint(Theme.Semantic.accent)
 
                     Spacer()
                 }
