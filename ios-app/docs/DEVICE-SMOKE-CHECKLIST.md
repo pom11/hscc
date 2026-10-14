@@ -96,8 +96,9 @@ Until 2026-08-30 every relative time in the app rendered as the literal text
 `\(s)s` instead of `5s`, because the string interpolation was escaped. If the
 fix did not land you will see it instantly, everywhere.
 
-- [ ] Open **Fleet**, **Cluster**, **Activity feed**, **Approvals**, **Autodown & self-heal**
-      (its history section included) and **Board hygiene**.
+- [ ] Open **Fleet**, **Cluster**, **Activity feed**, **Approvals** (the merged
+      board-hygiene sections included) and **Autodown & self-heal**
+      (its history section included).
 - [ ] Every "time ago" label reads like `5s` / `12m` / `3h` / `2d`.
 - [ ] **FAIL** if you see a literal `\(s)s` or `\(m)m` anywhere.
 

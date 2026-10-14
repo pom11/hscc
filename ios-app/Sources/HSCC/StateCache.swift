@@ -108,6 +108,10 @@ enum EndpointPath {
     static let templateList = "/v1/template/list"
     static let templateStatus = "/v1/template/status"
     static let kanbanBlocked = "/v1/kanban/blocked"
+    /// The plain path `kanbanStale(olderThan:)` caches under — `get(path:
+    /// queryItems:)` stores a non-paging query read under the path, not the
+    /// URL, so `Offline.load` must use this exact key to find the value.
+    static let kanbanStale = "/v1/kanban/stale"
     static let activityFeed = "/v1/activity/feed"
     static let sessions = "/v1/sessions"
 }

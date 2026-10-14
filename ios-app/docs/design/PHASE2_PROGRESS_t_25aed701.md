@@ -189,8 +189,14 @@ the recipe now; what remains is only the merges:
    as header, per-row Stop/Restart) — card `t_65d791da`. The restyle landed in
    `644286f6`; the Stop/Restart colour fix and per-unit a11y labels landed
    earlier (`dca7f25c`), so only the topology merge is outstanding.
-3. `BoardHygieneView` → **merged into Approvals** (same `/v1/kanban/blocked`
-   endpoint, two row dialects) — card `t_31d037ac`.
+3. ~~`BoardHygieneView` → **merged into Approvals** (same `/v1/kanban/blocked`
+   endpoint, two row dialects)~~ — **LANDED** (card `t_31d037ac`). One
+   "Approvals" destination whose single List carries three sections — Pending
+   approvals (count) / Other blocked cards (count) / Stale cards (count) —
+   each with its own `LoadState` and inline loading/failed/banner rows. The
+   per-card Allow and Recover labels survived verbatim; the drawer row is
+   gone and `.boardHygiene` remains as a mapped legacy alias (same recipe as
+   `.selfHeal`), so deeplink_check stays 41/41.
 4. `ModelsView` → "merged into Fleet" per spec line 451 and line 341. Filed as
    ruling-card `t_1897550c` (to @architect, the spec author) because **the screen
    is not in the tree**: `git grep -l "ModelsView" 23fcfb15 -- ios-app` finds
@@ -258,6 +264,14 @@ CLEAN · sources in sync 96 · **deeplink 41/41 with the negative test** (the
 reconnect 42/42 · ws_decode ok · turn_state ok · first_run ok · model_decode
 62/62 · shared_store ok · **xcodebuild (iPhone 17 Pro simulator) BUILD
 SUCCEEDED**.
+
+`t_31d037ac` (§8 merge, BoardHygiene→Approvals): build_check 87 files in the
+HSCC target (95 on disk — the second file retired by a §8 merge) / 0 err /
+0 warn · check_theme CLEAN · sources in sync 95 · **deeplink 41/41 with the
+negative test** (`.boardHygiene` mapped to `.approvals` in `AppShell.go`, the
+enum case kept) · reconnect 42/42 · ws_decode ok · turn_state ok · first_run
+ok · model_decode 62/62 · xcodebuild device-sim BUILD SUCCEEDED (see commit
+for the sha).
 
 **Launch gotcha worth recording** (cost me a false bug report this run): the
 bundle id is `com.hscc.ios`, NOT `ro.hscc.ios`. `simctl launch ro.hscc.ios`

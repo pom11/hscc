@@ -48,7 +48,9 @@ struct Sidebar: View {
                 row(.autodown)
                 row(.cron)
                 row(.logs)
-                row(.boardHygiene)
+                // spec §8: BoardHygiene is merged into Approvals — its row is
+                // gone; the `.boardHygiene` destination still resolves (see
+                // AppShell.go), landing on the Approvals List.
             }
             group("Knowledge") {
                 row(.memory)
