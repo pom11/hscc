@@ -51,8 +51,11 @@ NAS_PROBE_TIMEOUT = float(os.environ.get("HSCC_NAS_PROBE_TIMEOUT", "5"))
 
 # ── Worker auto-heal (WD1) ─────────────────────────────────────────────────
 # A worker unit that stays DOWN across WORKER_AUTOHEAL_DEBOUNCE CONSECUTIVE
-# checks is force-recreated via `template apply <applied-template>
-# --confirm --force-recreate` — the REAL apply path (no reimplementation).
+# checks is recreated via `sparkrun stop <recipe> --hosts <span>` + a re-issued
+# `sparkrun run` for THAT unit only (see _default_autoheal_worker). Since F3
+# (HEAL_CASCADE 2026-10-14) this no longer re-applies the whole template with
+# `--force-recreate`, which stopped and re-ran every healthy unit in the fleet
+# to heal one.
 # This fixes the "container stays Up in docker but the vLLM server inside
 # never answers (stuck past the CUDA banner)" class of failure that a plain
 # sparkrun --ensure relaunch cannot: --ensure sees the container already
@@ -1612,45 +1615,109 @@ def _record_container_served(key, node, port):
 
 # ── Worker auto-heal helper ────────────────────────────────────────────────
 # The heal ACTION is injectable (``_autoheal_worker_fn``) so tests can stub it;
-# production uses the REAL template-apply path via cmd_cluster_template — the
-# exact function ``hscc template apply`` dispatches to, no reimplementation.
+# production recreates ONLY the down unit through the sanctioned sparkrun stop +
+# run path (``serving._unit_run_cmd``), never a whole-template apply — see
+# ``_default_autoheal_worker`` for why (F3, HEAL_CASCADE 2026-10-14).
 
-def _autoheal_cluster_dir():
-    """Sibling hscc-cluster plugin dir (same resolution as hscc.py)."""
-    return Path(__file__).resolve().parent.parent / "hscc-cluster"
+def _autoheal_find_unit(node, port):
+    """The serving.json unit owning (node, port), or None.
+
+    Uses the same ``keepalive_units`` view check_workers iterates, so the heal
+    acts on the very entry the check just declared down (same ``nodes`` span,
+    recipe, port, tp and served names).
+    """
+    try:
+        units = serving.keepalive_units(serving.load_serving())
+    except Exception as e:  # unreadable serving.json -> caller reports, no heal
+        log(f"Auto-heal: cannot read serving.json ({e})", "ERROR")
+        return None
+    for u in units or []:
+        if u.get("node") == node and int(u.get("port") or 0) == int(port):
+            return u
+    return None
 
 
 def _default_autoheal_worker(key, label, node, port):
-    """REAL auto-heal: force-recreate the down unit by re-applying the currently
-    applied template with ``--force-recreate``.
+    """REAL auto-heal: recreate ONLY the down unit — never the whole template.
 
-    Reuses the existing apply path (``cmd_cluster_template`` → the same function
-    ``hscc template apply <name> --confirm --force-recreate`` dispatches to) —
-    NOT a parallel mechanism. Resolves the currently-applied template from the
-    same state ``hscc template status`` reads (``~/.hscc/applied_template.json``).
-    Returns the apply result dict.
+    F3 (HEAL_CASCADE 2026-10-14). This used to re-apply the applied template
+    with ``--force-recreate``, i.e. stop and re-run EVERY unit in the fleet to
+    heal ONE. At 07:21Z and 07:43Z that tore down .246 and .248 — both healthy,
+    each mid-way through a ~3 minute model load — and the daemon then saw them
+    "down", which fed the cascade that hung .244 and .247.
 
-    Injectable for tests via monkeypatching ``_autoheal_worker_fn``; a test that
-    exercises THIS function patches ``cmd_cluster_template`` to prove the real
-    path is reached with force-recreate, never touching a real node/docker.
+    A whole-template apply is also not what the wedge needs: the wedge is one
+    unit whose vLLM never answers. So heal exactly that unit:
+
+      1. stop ITS span (``sparkrun stop <recipe> --hosts <span>`` — scoped to
+         the span, not ``--all``, so a co-located sibling on another port
+         survives), then
+      2. re-issue the unit AS DEFINED via the shared ``serving._unit_run_cmd``
+         (the single source of truth shared with ``fleet_up_plan``), with
+         ``--ensure`` STRIPPED — ``--ensure`` no-ops on a container that is
+         ``Up`` but wedged, which is precisely the failure class this path
+         exists for. Stopping first plus no ``--ensure`` is what makes the
+         recreate real; a leftover container then collides LOUDLY in the heal
+         log instead of being silently skipped.
+
+    The launch is detached (``start_new_session``) into
+    ``~/.hscc/heal-<node>-<port>.log`` because the recreate re-stages weights
+    for minutes; blocking the health check for that would stall every other
+    stream. The relaunch timestamp is recorded so the F1 load grace protects
+    the container this just created from the gentle relaunch.
+
+    Injectable for tests via monkeypatching ``_autoheal_worker_fn``; a test
+    that exercises THIS function patches ``run_cmd``/``Popen`` to prove only
+    the down unit is touched, never a real node or docker.
     """
-    cluster_dir = str(_autoheal_cluster_dir())
-    if cluster_dir not in sys.path:
-        sys.path.insert(0, cluster_dir)
+    unit = _autoheal_find_unit(node, port)
+    if unit is None:
+        log(f"Auto-heal {label}: no serving.json unit for {node}:{port} — "
+            f"nothing to recreate", "WARN")
+        return {"ok": False, "error": f"no serving.json unit for {node}:{port}"}
+
+    recipe = unit.get("recipe")
+    if not recipe:
+        log(f"Auto-heal {label}: unit has no recipe — cannot recreate", "WARN")
+        return {"ok": False, "error": "unit has no recipe in serving.json"}
+
+    span = [n for n in (unit.get("nodes") or [node]) if n] or [node]
+    run_argv = serving._unit_run_cmd(unit)
+    # --ensure would no-op on an Up-but-wedged container (see docstring).
+    recreate_argv = [a for a in run_argv if a != "--ensure"]
+
+    log(f"Auto-heal {label}: recreating ONLY this unit "
+        f"({recipe} on {'+'.join(span)}:{port}) — template untouched")
+    # Stop the whole span (not just this node) so two workloads can never bind
+    # the same host:port, exactly as the gentle relaunch does.
+    stop_result = run_cmd(sparkrun_bin.argv(
+        "stop", recipe, "--hosts", ",".join(span)), timeout=60)
+    if not stop_result.get("ok"):
+        log(f"Auto-heal {label}: stop reported failure "
+            f"({stop_result.get('output', '')}) — recreating anyway; a leftover "
+            f"container will collide loudly in the heal log", "WARN")
+
+    # Record BEFORE launching so we never thrash even if Popen raises, and so
+    # the shared load grace (F1) shields the container we are about to create.
+    if key is not None:
+        _worker_relaunch_at[key] = time.time()
+        _save_worker_relaunch_timestamps()
+
+    log_path = os.path.expanduser(f"~/.hscc/heal-{node}-{port}.log")
     try:
-        from cluster_template_cli import cmd_cluster_template
-        from cluster_template import applied_status
-    except ImportError as e:
-        log(f"Auto-heal {label}: cannot load apply path ({e})", "ERROR")
-        return {"ok": False, "error": f"apply path unavailable: {e}"}
-    # The currently applied template (what `hscc template status` reports).
-    state = applied_status().get("applied") or {}
-    name = state.get("template")
-    if not name:
-        log(f"Auto-heal {label}: no applied template recorded — cannot force-recreate", "WARN")
-        return {"ok": False, "error": "no applied template recorded"}
-    log(f"Auto-heal {label}: force-recreating via template apply '{name}' --force-recreate")
-    return cmd_cluster_template(["apply", name, "--confirm", "--force-recreate"])
+        with open(log_path, "a") as log_file:
+            subprocess.Popen(
+                _sparkrun_exec_argv(recreate_argv),
+                stdout=log_file, stderr=log_file,
+                start_new_session=True,
+            )
+    except Exception as e:
+        log(f"Auto-heal {label}: failed to launch recreate: {e}", "ERROR")
+        return {"ok": False, "error": f"recreate launch failed: {e}"}
+
+    return {"ok": True, "status": "recreating", "unit": label,
+            "recipe": recipe, "hosts": span, "port": port,
+            "note": f"single-unit recreate detached to {log_path}"}
 
 
 # Production default; tests monkeypatch this to inject the heal call.
@@ -1814,8 +1881,8 @@ def check_workers():
             continue
         # DEBOUNCED AUTO-HEAL (WD1): the unit is DOWN. Increment its
         # consecutive-down streak and, once it crosses the debounce threshold
-        # AND is out of this unit's cooldown, force-recreate it via the REAL
-        # template-apply path (--force-recreate). This is what fixes a unit
+        # AND is out of this unit's cooldown, recreate THAT unit via the
+        # sanctioned sparkrun stop+run path. This is what fixes a unit
         # that stays "Up" in docker but whose vLLM never answers — a plain
         # sparkrun --ensure relaunch no-ops on it (--ensure sees the container
         # already running). Debounce/cooldown are configurable, not hardcoded.
@@ -1854,7 +1921,7 @@ def check_workers():
                 continue
             try:
                 log(f"Auto-heal: worker {label} ({node}:{port}) down {streak}x "
-                    f"consecutively — force-recreate via template apply")
+                    f"consecutively — recreating this unit only")
                 _worker_last_autoheal[key] = now_wall
                 _worker_down_streak[key] = 0  # finalise this debounce round
                 heal_result = _autoheal_worker_fn(key, label, node, port)

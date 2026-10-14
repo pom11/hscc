@@ -151,6 +151,168 @@ across `cluster up`, release on raise, ordering). Mutation-checked: reverting th
 `health.py` + `recover.py` and re-running makes **7 of those 12 fail**; the 5 that pass
 either way are the "must not leak" guards, which are trivially true with no lease code.
 
+### F3 — auto-heal must recreate ONLY the down unit, never the whole template
+
+**Files:** `hscc_daemon/health.py`, `hscc_daemon/tests/test_health.py`
+
+The most destructive of the four actors. `_default_autoheal_worker(key, label, node, port)`
+is handed the exact unit that is down — node, port, recipe, span — and then discarded that
+information and ran:
+
+```
+cmd_cluster_template(["apply", <applied-template>, "--confirm", "--force-recreate"])
+```
+
+That stops and re-runs **every** unit in the fleet to heal one. The log records it firing at
+`07:21:45` and `07:43:19` for `...-247-8002` alone, and between those two calls `.246` and
+`.248` — both healthy — were torn down and re-launched, so neither ever finished its ~3 min
+model load and both were then seen as "down", feeding the next round.
+
+The wedge is one unit whose vLLM never answers; a fleet-wide apply is never the right
+treatment for it. The heal now recreates exactly that unit:
+
+1. `sparkrun stop <recipe> --hosts <span>` — scoped to the unit's own span, never `--all`,
+   so a co-located sibling on another port survives. The whole span is stopped (not just
+   this node) so two workloads can never bind the same `host:port`.
+2. Re-issue the unit **as defined** through `serving._unit_run_cmd(unit)` — the single
+   source of truth shared with `fleet_up_plan`, so sparkrun derives the SAME `cluster_id`
+   — with `--ensure` **stripped**. `--ensure` no-ops on a container that is `Up` but wedged,
+   which is precisely the failure class this path exists for (that is the documented reason
+   the auto-heal path exists at all). Stopping first plus no `--ensure` makes the recreate
+   real; a leftover container then collides loudly in the heal log rather than being
+   silently skipped.
+3. Detached (`start_new_session`) into `~/.hscc/heal-<node>-<port>.log`, because the
+   recreate re-stages weights for minutes and blocking the health check that long would
+   stall every other stream. The relaunch timestamp is recorded **before** launching, so
+   the F1 grace shields the container this path just created from the gentle relaunch —
+   the exact pairing F1 was written to protect.
+
+No new mechanism and no sparkrun change: `stop --hosts` and `run` are the same sanctioned
+primitives the gentle relaunch already uses. `sparkrun run` has no `--force-recreate` flag
+(verified against `sparkrun run --help`), which is why stop-then-run-without-`--ensure` is
+the correct expression of "recreate one unit". `_autoheal_cluster_dir()` became dead and was
+removed. Log wording changed from "force-recreate via template apply" to "recreating this
+unit only" so the log tells the truth about the blast radius.
+
+Tests (6, in `TestCheckWorkersAutoHeal`): one stop + one launch for the down unit only, with
+the healthy sibling's recipe **and** host absent from both; a TP unit recreates as a group
+(`--hosts a,b --tp 2`); a `cmd_cluster_template` that raises proves the apply path is never
+reached; the relaunch timestamp is recorded; an unknown `(node, port)` stops/launches
+nothing and reports loudly. Mutation-checked: reverting `health.py` to the pre-F3 version
+makes **all 6 fail**. `TestCheckWorkersAutoHeal::test_action_logged_distinctly` was updated
+because it asserted the old "force-recreate" wording.
+
+A test-isolation bug found while writing these (fixed separately in `b94b9377`, before this
+commit): the F2 lease was not redirected in `conftest.py`, so tests wrote a live lease into
+the operator's real `~/.hscc` — verified by stashing the conftest change and watching
+`heal-lease.json` appear with a 600s TTL while the suite stayed green.
+
 ## 4. Node hang investigation (F7)
 
-_pending_
+Read-only forensics on the two hard-hung nodes, driven through sparkrun's own
+`resolve_hosts` + `build_ssh_kwargs` + `run_remote_command` (no hand-rolled ssh).
+Hosts are shown as `10.0.0.x` placeholders. `journalctl -b -1` is the boot that
+hung; boot 0 starts at the power-cycle.
+
+**Baseline first — the fleet runs ONE unit per host.** `sparkrun`'s own status
+(`classify_cluster_status(...).to_dict()`, keys `groups / solo_entries /
+total_containers / host_count`) reports `total_containers=4`, `host_count=4`,
+`solo_entries` one per host on ports 8000/8001/8002/8003. So two vLLM containers
+on one node is an anomaly, not normal operation. This matters because the F7
+question was exactly "did two containers load on one node at once".
+
+### .247 — hard lockup, and by design nothing was written
+
+Boot `-1` runs `2026-10-08 14:15:58` → `2026-10-14 10:20:33` EEST, i.e. the
+journal **stops at 07:20:33Z**, about three minutes into the cascade and
+~70 s before the first whole-template force-recreate (`07:21:45`). Boot `-1`
+contains **no** oom-kill, **no** Xid and **no** hung-task record — grep count 0
+for those terms apart from two boot-start banner lines.
+
+The silence is explained by the boot banner itself:
+
+```
+kernel: watchdog: NMI not fully supported
+kernel: watchdog: Hard watchdog permanently disabled
+```
+
+On this SoC the hard lockup detector is **permanently disabled**, so a hard
+lockup produces no panic, no stack dump, no OOPS — the journal simply ends.
+That is why the operator saw ping + TCP/22 answering (the NIC stack was still
+alive) with never an SSH banner, and why a power-cycle was the only recovery.
+**The absence of evidence on .247 is a property of the platform, not evidence
+that nothing happened.** Any future hscc-side diagnosis must not expect a
+node-side trace after this class of hang.
+
+Last lines before it died are a `snap.firmware-updater.firmware-notifier`
+restart loop at restart counter **38,300** (~12 s cadence for six days, each
+failing `timeout waiting for snap system profiles to get updated`) interleaved
+with an sshd disconnect every few seconds from the orchestrator. That snap loop
+is background load worth cleaning up on the nodes, but it is not the hang
+mechanism — it survives on the healthy nodes too.
+
+### .244 — the mechanism is visible: memory pressure + NVIDIA rw-semaphore deadlock
+
+Boot `-1` on .244 has **104** matches for oom-kill / OOM / Xid / hung-task /
+blocked-for-more-than. The decisive lines:
+
+```
+kernel: INFO: task nvidia-smi:485292 <reader> blocked on an rw-semaphore
+        likely owned by task VLLM::EngineCor:482133 <writer>
+kernel: task:VLLM::EngineCor state:R  running task
+systemd-journald[625]: Under memory pressure, flushing caches.   (repeated)
+systemd[3237600]: wireplumber.service: Failed with result 'oom-kill'.
+```
+
+So it is not "the model was too big". A `nvidia-smi` reader was blocked on a
+driver rw-semaphore whose holder was a **live vLLM engine core**, while the host
+was already under enough memory pressure to journald-flush caches and OOM-kill
+user services. That is the "GPU work never completes, and every process that
+touches the driver queues behind it" state — which is exactly what makes a node
+look alive on TCP and never answer an SSH banner: sshd needs a fork + PAM +
+memory, and the box cannot make progress.
+
+And the cascade put a second workload on that node. In the `10:15–10:25` window
+dockerd deactivates **two** container scopes at `10:22:46`, then starts **two**
+new solo containers 60 ms apart at `10:22:48`, both `net=host`:
+
+```
+Started docker-f828420f….scope      → sparkrun_03fae933e3df92bf_…_solo net=host
+Started docker-ff034b55e….scope     → sparkrun_bf3f4c53163359c1_…_solo net=host
+```
+
+`…03fae933e3df92bf…` is the declared unit for that host (it is what
+`solo_entries` still reports there on port 8000). The second one is not part of
+that host's declared set — against a one-unit-per-host baseline, .244 was
+staging weights for **two** vLLM instances at once, on a host already
+OOM-killing services. Two simultaneous NVFP4 weight stagings on one SoC is the
+plausible trigger for the memory-pressure + driver-semaphore pile-up above.
+
+### Honest limits of this finding
+
+I could **not** name the second container's recipe. `docker ps -a` on .244 now
+shows only the declared unit plus one exited 8 weeks ago — the cascade-era
+container is gone and the journal does not record its image or command.
+The intent id `bf3f4c53163359c1` is not a usable fingerprint either: the daemon
+log reports that SAME id as "no running workload matches" for three different
+units (`247-8002`, `248-8003`, `246-8001`), so it looks like a shared
+recipe/pool id rather than a per-unit one. So the claim stands at "a second,
+undeclared solo workload was started on .244 during the cascade", not "unit X
+was placed on the wrong host".
+
+### What hscc should conclude
+
+1. The hang is not a model-size problem and not fixable from hscc. It was
+   *induced*: F3's whole-template force-recreate plus F1's per-minute relaunch
+   created concurrent weight stagings on hosts that hold one unit each, on a
+   platform that cannot survive that without leaving a trace. F1–F3 remove the
+   actor; that is the fix.
+2. hscc has no invariant "one vLLM per host outside the declared span". Every
+   launch path trusts serving.json. Adding that check before any launch would
+   have refused the second container outright. Proposed as a follow-up card
+   rather than folded into this one, since it needs a decision on what the
+   daemon should do when the invariant is violated (refuse vs. alert).
+3. Do not rely on node-side forensics after a hang on these nodes. With the
+   hard watchdog permanently disabled there is nothing to read. Persisting a
+   trace (ramoops/pstore or netconsole) is a node-side operator change, outside
+   this card's scope, and hscc should not pretend otherwise.
