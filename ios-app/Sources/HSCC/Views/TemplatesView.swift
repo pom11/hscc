@@ -15,6 +15,13 @@ import SwiftUI
 /// takes several minutes, during which the fleet cannot serve. After apply the
 /// view shows the fleet reloading and polls `/v1/template/status` +
 /// `/v1/verify` rather than claiming instant success.
+///
+/// LIST RECIPE (spec §5, Phase 2 C3): one plain `List`. The applied-template
+/// status is the list's first section (was a `surfaceRaised` box floating
+/// above a second box), and each template group is a `Section` whose header
+/// is the group name — the recipe's `sgrp` caps, not a hand-rolled label.
+/// Rows are plain list rows (no per-row card background, no manual chevrons —
+/// List draws those), and states use HSLoading / HSErrorLabel / HSEmpty.
 struct TemplatesView: View {
     let client: HSCCClient?
 
@@ -22,20 +29,19 @@ struct TemplatesView: View {
     @State private var list = LoadState<TemplateListResponse>.idle
 
     var body: some View {
-        ScrollView {
+        Group {
             if let client {
-                VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
-                    appliedCard
+                List {
+                    appliedSection()
                     librarySection(client: client)
                 }
-                .padding(.horizontal)
-                .padding(.top, Theme.Spacing.sm.rawValue)
-                .padding(.bottom)
+                .listStyle(.plain)
             } else {
                 notConfiguredView
             }
         }
         .navigationTitle("Templates")
+        .navigationBarTitleDisplayMode(.inline)
         .refreshable { if client != nil { await loadAll() } }
         .task {
             if client != nil, status.value == nil, !status.isLoading {
@@ -103,35 +109,33 @@ struct TemplatesView: View {
 
     // MARK: - Applied template (status)
 
+    /// The applied-template status as the list's first section. The old
+    /// `surfaceRaised` box is gone; List supplies the grouping and the
+    /// section header.
     @ViewBuilder
-    private var appliedCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("Applied Template", systemImage: "checkmark.rectangle.stack")
-                .font(.headline)
+    private func appliedSection() -> some View {
+        Section {
             switch status {
-            case .loading:
-                HSLoading("Loading…")
+            case .idle, .loading:
+                HStack(spacing: Theme.Spacing.sm.rawValue) {
+                    ProgressView()
+                    Text("Loading…")
+                        .font(.subheadline)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
             case .failed(let message):
                 errorLabel(message, retry: { Task { await refreshStatus() } })
             case .stale(let state, let ageMessage):
-                VStack(alignment: .leading, spacing: 10) {
-                    StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
-                        Task { await refreshStatus() }
-                    }
-                    appliedBody(state)
+                StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
+                    Task { await refreshStatus() }
                 }
+                appliedBody(state)
             case .loaded(let state):
                 appliedBody(state)
-            default:
-                EmptyView()
             }
+        } header: {
+            Text("Applied template")
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
-                .fill(Theme.Semantic.surfaceRaised)
-        )
     }
 
     @ViewBuilder
@@ -200,115 +204,88 @@ struct TemplatesView: View {
 
     @ViewBuilder
     private func librarySection(client: HSCCClient) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
-            Text("Library")
-                .font(.title3.weight(.semibold))
-            switch list {
-            case .loading:
-                HSLoading("Loading…")
-            case .failed(let message):
-                VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-                    errorLabel(message, retry: { Task { await loadList(client) } })
+        switch list {
+        case .idle, .loading:
+            Section {
+                HStack(spacing: Theme.Spacing.sm.rawValue) {
+                    ProgressView()
+                    Text("Loading templates…")
+                        .font(.subheadline)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
-            case .stale(let state, let ageMessage):
-                VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
-                    StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
-                        Task { await loadList(client) }
-                    }
-                    if state.templates.isEmpty {
-                        emptyLabel("No templates are available right now.")
-                    } else {
-                        groupedLibrary(state.templates)
-                    }
+            }
+        case .failed(let message):
+            Section {
+                errorLabel(message, retry: { Task { await loadList(client) } })
+            }
+        case .stale(let state, let ageMessage):
+            Section {
+                StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
+                    Task { await loadList(client) }
                 }
-            case .loaded(let state):
-                if state.templates.isEmpty {
-                    VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-                        emptyLabel("No templates are available right now.")
-                        Text("Add template definitions to the cluster to see them here.")
-                            .font(.caption)
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    }
-                } else {
-                    groupedLibrary(state.templates)
+            }
+            libraryGroups(state.templates)
+        case .loaded(let state):
+            if state.templates.isEmpty {
+                Section {
+                    HSEmpty("No templates",
+                            message: "Add template definitions to the cluster to see them here.",
+                            systemImage: "square.stack.3d.up")
                 }
-            default:
-                EmptyView()
+            } else {
+                libraryGroups(state.templates)
             }
         }
     }
 
-    /// Group the templates by their `group` field and render a section per
+    /// Group the templates by their `group` field and render a `Section` per
     /// group, in the conventional node-count order (1node → 2node → … → other).
-    private func groupedLibrary(_ templates: [ClusterTemplate]) -> some View {
+    @ViewBuilder
+    private func libraryGroups(_ templates: [ClusterTemplate]) -> some View {
         let appliedName = currentAppliedName
         let groups = Self.orderedGroups(templates)
-        return VStack(alignment: .leading, spacing: 20) {
-            ForEach(groups, id: \.self) { group in
-                let members = templates.filter { ($0.group ?? "") == group }
-                if !members.isEmpty {
-                    groupSection(group, members: members, appliedName: appliedName)
+        ForEach(groups, id: \.self) { group in
+            let members = templates.filter { ($0.group ?? "") == group }
+            if !members.isEmpty {
+                Section(groupHeaderLabel(group)) {
+                    ForEach(members) { template in
+                        templateRow(template, applied: template.name == appliedName)
+                    }
                 }
-            }
-        }
-    }
-
-    /// Render one group's templates as a section with a header + rows.
-    private func groupSection(_ group: String,
-                              members: [ClusterTemplate],
-                              appliedName: String?) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-            Text(groupHeaderLabel(group))
-                .font(.subheadline.weight(.semibold))
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                .textCase(.uppercase)
-            ForEach(members) { template in
-                templateRow(template, applied: template.name == appliedName)
             }
         }
     }
 
     /// One template row: families, description, and an unmistakable Applied
-    /// marker when it's the one live right now.
+    /// marker when it's the one live right now. A plain List row inside a
+    /// NavigationLink — List supplies the disclosure chevron, so the row no
+    /// longer draws its own card background or chevron.
     private func templateRow(_ template: ClusterTemplate, applied: Bool) -> some View {
         NavigationLink(value: template) {
-            HStack(alignment: .top, spacing: Theme.Spacing.md.rawValue) {
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: Theme.Spacing.sm.rawValue) {
-                        Text(template.name)
-                            .font(.body.weight(.semibold))
-                            .foregroundColor(Theme.Semantic.onSurface)
-                            .multilineTextAlignment(.leading)
-                        if applied {
-                            AppliedBadge()
-                        }
-                    }
-                    if let desc = template.description, !desc.isEmpty {
-                        Text(desc)
-                            .font(.caption)
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                            .multilineTextAlignment(.leading)
-                    }
-                    if let fams = template.families, !fams.isEmpty {
-                        Text("Families: \(fams.joined(separator: ", "))")
-                            .font(.caption2)
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+                HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm.rawValue) {
+                    Text(template.name)
+                        .font(.headline)
+                        .foregroundColor(Theme.Semantic.onSurface)
+                        .multilineTextAlignment(.leading)
+                    Spacer(minLength: 0)
+                    if applied {
+                        AppliedBadge()
                     }
                 }
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    .padding(.top, Theme.Spacing.xs.rawValue)
+                if let desc = template.description, !desc.isEmpty {
+                    Text(desc)
+                        .font(.caption)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                        .multilineTextAlignment(.leading)
+                }
+                if let fams = template.families, !fams.isEmpty {
+                    Text("Families: \(fams.joined(separator: ", "))")
+                        .font(.hsccMono(.caption2))
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
             }
-            .padding()
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
-                    .fill(Theme.Semantic.surfaceRaised)
-            )
         }
-        .buttonStyle(.plain)
         .accessibilityHint("Shows what applying \(template.name) would change.")
     }
 
@@ -347,7 +324,6 @@ struct TemplatesView: View {
     // MARK: - Building blocks
 
     private func errorLabel(_ message: String, retry: (() -> Void)? = nil) -> some View { HSErrorLabel(message: message, retry: retry) }
-    private func emptyLabel(_ text: String) -> some View { HSEmptyLabel(message: text) }
 }
 
 /// The unmistakable marker on the currently-applied template row.
