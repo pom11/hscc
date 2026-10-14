@@ -590,22 +590,23 @@ was placed on the wrong host".
    actor; that is the fix.
 2. hscc has no invariant "one vLLM per host outside the declared span". Every
    launch path trusts serving.json. Adding that check before any launch would
-   have refused the second container outright. Proposed as a follow-up card
-   rather than folded into this one, since it needs a decision on what the
-   daemon should do when the invariant is violated (refuse vs. alert).
+   have refused the second container outright. **Decided and implemented
+   (A2, §7): refuse + alert** — the operator decision was that hscc never
+   stops a workload it did not declare, and a refused launch that alerts is
+   strictly better than an over-committed GPU.
 3. Do not rely on node-side forensics after a hang on these nodes. With the
    hard watchdog permanently disabled there is nothing to read. Persisting a
    trace (ramoops/pstore or netconsole) is a node-side operator change, outside
    this card's scope, and hscc should not pretend otherwise.
 
-## 5. Ready-to-land changelog fragment
+## 5. Changelog fragment
 
-This branch came from a direct instruction with no kanban card, and
-`changelog.d/` requires a kanban task id as the filename (`check` rejects other
-names), so no fragment is committed here. Whoever files the landing card should
-save this as `changelog.d/<that-task-id>.md` and run
-`python3 scripts/changelog_fragments.py sync` — it is written in the fragment
-format, so nothing needs re-authoring.
+Filed as `changelog.d/t_13edf7d4.md` under the tracking card
+(`t_13edf7d4`, "Heal cascade 2026-10-14: F1-F6 + A1/A2 landing") — created
+for exactly this purpose, since the fragment filename must carry a kanban
+task id. `scripts/changelog_fragments.py check` passes; landing the card
+runs `sync`. The pre-card draft text is kept below for the record — the
+committed fragment is the canonical one.
 
 ```markdown
 kind: Fixed
@@ -643,3 +644,115 @@ kind: Verified
 - `hscc heal-clear` / `heal-status` exercised against a fake `HOME`
   (suspend → status → clear → resume).
 ```
+
+## 6. A1 — the dispatcher stall was a global cap read per board
+
+**Live shape (2026-10-14, ~13:24Z onward):** the dispatcher stream red,
+`GENUINE STALL … spawnable=['hscc'], roomy=['hscc'], total_running=3`,
+recovery GAVE UP — while the gateway was doing exactly the right thing.
+
+**Root cause.** `kanban.max_in_progress` is a GLOBAL cap: the gateway sums
+running tasks ACROSS all boards and holds everything when the sum reaches the
+cap (`hermes_cli/kanban.py`, #33488). `dispatcher_wedge.evaluate_stall_tick`
+computed roominess per board (`in_progress < max_in_progress`). With cap=3,
+one task running on this board and two on another tenant's board: every board
+is individually roomy, work is spawnable, nothing spawned — and the detector
+called that a stall. The per-profile `spawnable` notion was already board-
+scoped (it must stay so: a worker on board B cannot pick up board A's card),
+but roominess is not a board property — it is a fleet property.
+
+**Fix.** Two-pass capture: sum `in_progress` across all boards first, then a
+board is roomy only if `snap["roomy"] and total_running < max_in_progress`.
+The per-profile cap check (`in_progress >= max_in_progress`) is unchanged and
+still reports its own reason. The healthy reason now says which cap bound —
+`at_capacity (global) (total_running=3 >= max_in_progress=3)` — so the
+operator sees "gateway correctly backlogged", not "gateway wedged". (A
+board-at-capacity-but-fleet-has-room reason is unreachable — total >= any
+board's count — so no dead branch is kept for it.)
+
+**The latch, which would have undone the fix.** `recover_dispatcher_wedge`
+persists `gave_up` once the restart-attempt cap is hit, and nothing ever
+cleared it. Without a second change, landing A1 would have left the stream red
+until someone hand-deleted `~/.hscc/dispatcher_recover.json` — and recovery had
+already given up that morning. Now a capture-backed green (the same
+full-evidence path that declares stalls — never the fail-open/unreachable path)
+clears `gave_up`/attempts: the cap bounds restarts WITHIN an incident, and a
+green stream means the incident is over.
+
+**Evidence.** 6 new tests (36 pass): fleet-at-cap goes green with the global
+flag; a per-profile cap still reports a stall (the fix must not swallow real
+stalls); two-board arithmetic (neither board alone hits the cap, the fleet
+does); a per-host status ERROR still goes red (global roominess must not make
+the detector blind); the alert suppression keeps the decision line; the latch
+clears end-to-end (red→3 attempts→gave-up→green clears→fresh incident restarts
+again). Mutation-checked both directions: reverting the capacity term fails 3,
+disabling the latch clear fails 3; restore byte-identical.
+
+## 7. A2 — one vLLM per host outside the declared span (refuse + alert)
+
+**The invariant.** Before ANY launch path starts a container on a host, ask
+sparkrun status what actually runs there. A vLLM workload at a (host, port)
+NOT covered by serving.json belongs to someone else: refuse the launch, log
+ERROR, notify, emit an `events.jsonl` row. **Never** stop the foreign workload
+— the fleet is shared with another tenant and hscc has no authority over a
+workload it never declared. `status unavailable` (whole-query failure OR that
+host in sparkrun's per-host errors map) is ALSO a refusal: that morning
+every status surface reported success while an orphan held :4000, so
+"could not look" must not read as "the host is free".
+
+**Why "outside the declared span" and not "one per host".** The
+orchestrator's host legitimately serves the orchestrator (:8000) AND an
+embedding model. A naive per-host count would refuse a working deployment on
+its first day and get the guard disabled. Co-location serving.json DECLARES is
+fine; an UNdeclared (host, port) holding a GPU is the incident shape. The
+declared footprint resolves ports through `serving.serving_port` — the same
+helper `fleet_up_plan` uses — so planner and guard cannot disagree about where
+a unit is supposed to live. Non-vLLM recipes (a database, a build) are not
+this invariant's business; an unlabelled recipe IS (the orphan shape — fail
+closed).
+
+**Gate placement.** All four launch sites consult one cached
+(20 s TTL) sparkrun status fetch, each BEFORE any destructive step:
+- `health._default_autoheal_worker` (auto-heal recreate) — the gate sits
+  BEFORE the span stop. This ordering is the point: the pre-A2 code stopped
+  the unit's own (possibly healthy, mid-load) span first, so a wrong-target
+  heal took healthy capacity DOWN on its way to over-committing the GPU.
+- `health.check_workers` (gentle worker relaunch) — same, before the stop;
+  the unit is recorded down and no stop/launch happens.
+- `hscc-cluster/hscc.py cmd_cluster_up` — one fetch for the whole plan; a
+  refused unit is reported in `issued` (`refused: True`, reason, host) and
+  fails the up; dry-run never consults the guard (nothing launches, so
+  nothing can over-commit, and a dry-run must survive a status outage).
+- `autodown.autoup` — a refusal routes through the existing start-failure
+  path (autodown's own §8 wake-fails: record failure, clear intentional,
+  notify). Honest partial-start semantics: units ordered before the refused
+  one may already have started; what must never happen is the refused unit's
+  own start or a "wake succeeded" claim.
+The engine-wedge stream (E) launches nothing — verified, not assumed — so it
+needs no gate.
+
+**Alert de-duplication.** The refusal re-happens every heal tick (~60 s); the
+push must not. Per (host, port, reason) cooldown 30 min on the notification +
+event; the ERROR line is logged every time. Same lesson as the 2026-10-08 NAS
+storm (178 notifications in 11 minutes). The alert text states that hscc will
+NOT stop the workload already there — an operator reading it must know nothing
+was preempted.
+
+**Evidence.** 25 daemon-side tests (policy matrix: foreign/declared/own-slot/
+TP-span/non-vLLM/unknown-recipe/group-shape/NO_STATUS/per-host-error/strictest
+reading; the real `_default_autoheal_worker` refusing BEFORE its stop; alert
+exactly once across 5 ticks; autoup §8 routing) + 5 cluster-CLI seam tests
+against the REAL guard (refusal reported, dry-run untouched, span-level
+refusal, declared co-location allowed). Mutation-checked: making a detected
+foreign workload not refuse fails 8 daemon tests + the CLI refusal tests;
+making NO_STATUS pass fails the two no-status tests; restore byte-identical.
+
+## 8. A3 — sparkrun upstream (filed, not fixed here)
+
+Filed as kanban card `t_bbce7f58` (triage, board `hscc`): sparkrun's
+`proxy is_running()` checks only the state-file PID, never who owns the port,
+so an orphan proxy reads "in sync" and `proxy start --restart` exits 0 while
+changing nothing. That is the root cause under F4/F4b; hscc compensates (F4's
+live-router comparison + cmdline-vetted reap) but sparkrun should own the
+invariant. Deliberately NOT fixed from this repo — sparkrun is a separate
+deliverable shared with the other tenant, and this branch touches no fleet.
