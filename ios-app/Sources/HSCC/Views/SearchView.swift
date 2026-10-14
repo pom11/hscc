@@ -109,6 +109,7 @@ struct SearchView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .listStyle(.plain)
     }
 
     /// Matched result rows for the current query.
@@ -155,6 +156,7 @@ struct SearchView: View {
                 }
             }
         }
+        .listStyle(.plain)
     }
 
     @ViewBuilder
@@ -167,6 +169,7 @@ struct SearchView: View {
                      message: "Search project names, repos, boards, or card titles, ids, and statuses.",
                      systemImage: "magnifyingglass")
         }
+        .listStyle(.plain)
     }
 
     @ViewBuilder
@@ -194,6 +197,7 @@ struct SearchView: View {
                 }
             }
         }
+        .listStyle(.plain)
     }
 
     /// A stale banner when either source is showing cached last-known data.

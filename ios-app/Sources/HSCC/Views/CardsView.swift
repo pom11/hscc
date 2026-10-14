@@ -63,6 +63,7 @@ struct CardDetailView: View {
                         actionsSection(card)
                     }
                 }
+                .listStyle(.plain)
             } else {
                 HSLoading("Loading…")
             }

@@ -82,6 +82,7 @@ struct ProjectsView: View {
                     }
                 }
             }
+            .listStyle(.plain)
             .refreshable { await load() }
         }
     }
@@ -110,6 +111,7 @@ struct ProjectsView: View {
                 }
             }
         }
+        .listStyle(.plain)
         .refreshable { await load() }
     }
 
@@ -346,6 +348,7 @@ struct ProjectOverviewView: View {
                 lastReplySection(last)
             }
         }
+        .listStyle(.plain)
         .refreshable { await load() }
     }
 
@@ -778,6 +781,7 @@ struct ProjectBoardView: View {
                 }
             }
         }
+        .listStyle(.plain)
         .refreshable { await load() }
     }
 
@@ -951,6 +955,7 @@ struct ProjectSettingsView: View {
                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
             }
         }
+        .listStyle(.plain)
     }
 
     @ViewBuilder

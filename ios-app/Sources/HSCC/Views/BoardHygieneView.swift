@@ -111,6 +111,7 @@ struct BoardHygieneView: View {
                 }
             }
         }
+        .listStyle(.plain)
         .refreshable { await loadBlocked(client) }
     }
 
@@ -210,6 +211,7 @@ struct BoardHygieneView: View {
                 }
             }
         }
+        .listStyle(.plain)
         .refreshable { await loadStale(client) }
     }
 

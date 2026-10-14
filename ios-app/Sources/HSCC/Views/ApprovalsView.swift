@@ -82,10 +82,14 @@ struct ApprovalsView: View {
                     .font(.subheadline)
             }
             if pending.isEmpty {
-                Section {
-                    Label("No pending approvals.", systemImage: "checkmark.seal.fill")
-                        .foregroundColor(Theme.Semantic.ok)
-                }
+                // Spec §5: the "nothing to do" state was a `Section` with a
+                // green `Label` — the same idea the other screens render with
+                // `HSEmpty`, but a different dialect (no title/message split, no
+                // glyph treatment, no consistent vertical rhythm). One shared
+                // empty view now.
+                HSEmpty("No pending approvals",
+                        message: "Nothing is waiting on you right now.",
+                        systemImage: "checkmark.seal.fill")
             }
             ForEach(pending) { card in
                 approvalRow(card, client: client)
@@ -98,6 +102,7 @@ struct ApprovalsView: View {
                 }
             }
         }
+        .listStyle(.plain)
         .refreshable { await loadApprovals(client) }
     }
 

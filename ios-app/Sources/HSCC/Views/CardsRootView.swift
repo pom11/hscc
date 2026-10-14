@@ -97,6 +97,7 @@ struct CardsRootView: View {
                 }
             }
         }
+        .listStyle(.plain)
         .refreshable { await load() }
     }
 

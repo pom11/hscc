@@ -96,6 +96,7 @@ struct ChatsRootView: View {
                 .accessibilityLabel("Open chat with \(project.name)")
             }
         }
+        .listStyle(.plain)
         .refreshable { await load() }
     }
 
