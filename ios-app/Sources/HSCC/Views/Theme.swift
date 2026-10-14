@@ -191,6 +191,32 @@ enum Theme {
     }
 }
 
+extension Theme {
+    /// Colour ROLE for a kanban card status — the tone a leading `HSStatusDot`
+    /// or chip carries.
+    ///
+    /// Spec §2 "Duplicated renderers" counted this switch twice (SearchView,
+    /// ProjectsView); by the time this landed it had been copied a third time
+    /// into CardsRootView. Four screens, one meaning: when the daemon adds a
+    /// status, the dot colour for it now has one place to be added.
+    ///
+    /// `StreamingChatView.statusColor` is deliberately NOT folded in. It maps
+    /// the same words to different roles on purpose — a blocked card is `bad`
+    /// there (it is the reason the chat is stuck) and `warn` here (it is one
+    /// status among many on a board), and `ready` warns there but is neutral
+    /// here. Merging them would quietly change one screen's meaning to match
+    /// the other's.
+    static func cardStatusColor(_ status: String) -> Color {
+        switch status {
+        case "running", "claimed", "in_progress": return Semantic.ok
+        case "review", "blocked": return Semantic.warn
+        case "done", "merged", "closed": return Semantic.ok
+        case "failed", "failing": return Semantic.bad
+        default: return Semantic.neutral
+        }
+    }
+}
+
 // MARK: - Typography rules
 
 extension Font {

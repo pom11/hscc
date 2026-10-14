@@ -810,22 +810,12 @@ struct ProjectBoardView: View {
     @ViewBuilder
     private func cardRow(_ card: Card) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm.rawValue) {
-            HSStatusDot(statusColor(card.displayStatus))
+            HSStatusDot(Theme.cardStatusColor(card.displayStatus))
             VStack(alignment: .leading, spacing: 3) {
                 Text(card.displayTitle)
                     .foregroundColor(Theme.Semantic.onSurface)
                 HSMetaLine([card.displayStatus, card.assignee, card.id])
             }
-        }
-    }
-
-    private func statusColor(_ status: String) -> Color {
-        switch status {
-        case "running", "claimed", "in_progress": return Theme.Semantic.ok
-        case "review", "blocked": return Theme.Semantic.warn
-        case "done", "merged", "closed": return Theme.Semantic.ok
-        case "failed", "failing": return Theme.Semantic.bad
-        default: return Theme.Semantic.neutral
         }
     }
 

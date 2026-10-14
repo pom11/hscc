@@ -108,7 +108,7 @@ struct FleetControlView: View {
                     LabeledContent("Families") { Text(fams.joined(separator: ", ")) }
                 }
                 if let units = applied.units {
-                    LabeledContent("Units") { Text(displayJSON(units)) }
+                    LabeledContent("Units") { Text(DisplayJSON.render(units)) }
                 }
             } else {
                 emptyLabel("No template applied.")
@@ -165,15 +165,4 @@ struct FleetControlView: View {
 
     private func errorLabel(_ message: String, retry: (() -> Void)? = nil) -> some View { HSErrorLabel(message: message, retry: retry) }
     private func emptyLabel(_ text: String) -> some View { HSEmptyLabel(message: text) }
-
-    private func displayJSON(_ value: JSONValue) -> String {
-        switch value {
-        case .int(let n): return "\(n)"
-        case .double(let d): return String(format: "%.2f", d)
-        case .string(let s): return s
-        case .bool(let b): return b ? "true" : "false"
-        case .null: return "—"
-        case .object, .array: return "<complex>"
-        }
-    }
 }

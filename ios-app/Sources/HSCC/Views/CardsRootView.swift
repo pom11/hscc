@@ -109,7 +109,7 @@ struct CardsRootView: View {
     /// (spec §5/§9).
     private func cardRow(_ card: Card) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm.rawValue) {
-            HSStatusDot(statusColor(card.displayStatus))
+            HSStatusDot(Theme.cardStatusColor(card.displayStatus))
             VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
                 Text(card.displayTitle)
                     .foregroundColor(Theme.Semantic.onSurface)
@@ -117,16 +117,6 @@ struct CardsRootView: View {
             }
         }
         .accessibilityElement(children: .combine)
-    }
-
-    private func statusColor(_ status: String) -> Color {
-        switch status {
-        case "running", "claimed", "in_progress": return Theme.Semantic.ok
-        case "review", "blocked": return Theme.Semantic.warn
-        case "done", "merged", "closed": return Theme.Semantic.ok
-        case "failed", "failing": return Theme.Semantic.bad
-        default: return Theme.Semantic.neutral
-        }
     }
 
     private func load() async {

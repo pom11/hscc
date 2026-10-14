@@ -260,7 +260,7 @@ struct OpsView: View {
                                     Text("when \(metric)")
                                     if let op = rule.condition?.op { Text(op).foregroundColor(Theme.Semantic.onSurfaceMuted) }
                                     if let value = rule.condition?.value {
-                                        Text(displayJSON(value)).foregroundColor(Theme.Semantic.onSurfaceMuted)
+                                        Text(DisplayJSON.render(value)).foregroundColor(Theme.Semantic.onSurfaceMuted)
                                     }
                                 }
                                 .font(.hsccMono(.caption))
@@ -302,7 +302,7 @@ struct OpsView: View {
                             systemImage: "arrow.up.right.circle")
                 } else {
                     ForEach(es.indices, id: \.self) { i in
-                        Text(displayJSON(es[i]))
+                        Text(DisplayJSON.render(es[i]))
                             .font(.caption)
                             .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     }
@@ -364,27 +364,5 @@ struct OpsView: View {
 
     private func errorLabel(_ message: String, retry: (() -> Void)? = nil) -> some View {
         HSErrorLabel(message: message, retry: retry)
-    }
-
-    private func displayJSON(_ value: JSONValue) -> String {
-        switch value {
-        case .string(let s): return s
-        case .int(let n): return "\(n)"
-        case .double(let d): return String(format: "%.2f", d)
-        case .bool(let b): return b ? "true" : "false"
-        case .null: return "null"
-        case .object(let o):
-            // Render small objects readably instead of the opaque "<complex>"
-            // placeholder. Escalation entries are {task, action, category}
-            // (live /v1/escalate) — the operator needs to SEE which tasks are
-            // pending, not a placeholder that hides every field.
-            let items = o.keys.sorted().compactMap { key -> String? in
-                guard let v = o[key] else { return nil }
-                return key + ": " + displayJSON(v)
-            }
-            return items.joined(separator: " · ")
-        case .array(let a):
-            return "[" + a.map { displayJSON($0) }.joined(separator: ", ") + "]"
-        }
     }
 }
