@@ -89,7 +89,7 @@ def _isolate_hscc(tmp_path, monkeypatch):
     # (b) Module-level constants already computed at import — overwrite each.
     def _module_attrs():
         from hscc_daemon import (
-            autodown, daemon_ops, desktop, health, hscc, lifecycle,
+            autodown, daemon_ops, desktop, health, heal_lease, hscc, lifecycle,
             serving, state, trigger, usage,
         )
         def p(sub):
@@ -148,6 +148,12 @@ def _isolate_hscc(tmp_path, monkeypatch):
             (health, "_WORKER_RELATCH_FILE", p("worker_relaunch.json")),
             (health, "_WORKER_CONTAINER_STATE_FILE",
              p("worker_container_state.json")),
+            # heal_lease.py (F2) — the durable single-flight repair lease. This
+            # MUST be redirected: check_workers / check_proxy / recover now all
+            # take and release it, so an unredirected path would write a LIVE
+            # lease into the operator's real ~/.hscc and suppress the running
+            # daemon's heals for the whole TTL.
+            (heal_lease, "HEAL_LEASE_FILE", p("heal-lease.json")),
         ]
 
     for mod, attr, val in _module_attrs():
