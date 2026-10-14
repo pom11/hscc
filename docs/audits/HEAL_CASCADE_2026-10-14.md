@@ -597,3 +597,49 @@ was placed on the wrong host".
    hard watchdog permanently disabled there is nothing to read. Persisting a
    trace (ramoops/pstore or netconsole) is a node-side operator change, outside
    this card's scope, and hscc should not pretend otherwise.
+
+## 5. Ready-to-land changelog fragment
+
+This branch came from a direct instruction with no kanban card, and
+`changelog.d/` requires a kanban task id as the filename (`check` rejects other
+names), so no fragment is committed here. Whoever files the landing card should
+save this as `changelog.d/<that-task-id>.md` and run
+`python3 scripts/changelog_fragments.py sync` — it is written in the fragment
+format, so nothing needs re-authoring.
+
+```markdown
+kind: Fixed
+
+- **A heal cascade destroyed two nodes on 2026-10-14.** One wedged unit set off
+  four independent repair paths (engine-wedge recovery, `check_workers`
+  relaunch, proxy relaunch, template auto-heal), all firing every ~60s for
+  ~35 minutes, until two nodes hard-hung and needed a manual power-cycle. Six
+  defects, each fixed in its own commit: the gentle worker relaunch ignored the
+  load grace and re-destroyed a ~3 min model load every minute (**F1**); the
+  four paths had no mutual exclusion and their strike counters were in-memory,
+  so a daemon restart reset them (**F2**, new durable `heal_lease.py`);
+  auto-heal force-recreated the **whole template** for one down unit (**F3**);
+  proxy health asked only "does :4000 answer", so an orphan router serving one
+  of four healthy units read healthy for ~2h (**F4**, now compares the live
+  router to healthy units and repairs what `proxy start --restart` cannot);
+  there was no bound on heal actions per node (**F5**, new per-node
+  `heal_breaker.py` + `hscc heal-clear`/`heal-status`); and
+  `hscc cluster up --help` **started the fleet**, while `hscc start` kept the
+  caller's stdout open (**F6**). The lease makes repairs *sequential*, the
+  breaker makes them *finite* — sequential-but-unbounded is what killed the
+  nodes. Timeline and node forensics:
+  `docs/audits/HEAL_CASCADE_2026-10-14.md`.
+---
+kind: Verified
+
+- `scripts/run_tests.sh`, `SUITE_RC=0`, all legs green: 446 / 69 / 135 / 479 /
+  1411 / **1426** / 12 / 936(+1 skip) / 11 / 120 / 126 passed. The daemon leg
+  went 1367 → 1426 (+14 F4, +25 F5, +20 F6); no test removed or weakened.
+- Mutation-checked, not assert-checked: reverting F2's wiring fails 7 of 12
+  lease tests; pre-F3 `health.py` fails the template tests; disabling only
+  F4's `check_proxy` wiring fails its 2 integration tests while the 40 helper
+  tests pass either way; neutering F5's `_note_heal_action` fails 4 of 25
+  (every integration test) and restores byte-identical to 25/25.
+- `hscc heal-clear` / `heal-status` exercised against a fake `HOME`
+  (suspend → status → clear → resume).
+```
