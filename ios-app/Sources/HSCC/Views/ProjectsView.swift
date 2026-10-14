@@ -1,11 +1,14 @@
 import SwiftUI
 
-/// Projects — the PRIMARY tab (new project-centric IA).
+/// Projects — drawer destination (IOS_REDESIGN 2026-10-14 Phase 2).
 ///
-/// Lists the dozen projects from GET /v1/projects. Tapping a project opens a
-/// detail screen (`ProjectDetailView`) with segmented sections:
-/// Overview · Chat · Board · Settings. This is the surface the operator
-/// actually cares about — everything flows from a project.
+/// Lists the dozen projects from GET /v1/projects. Tapping a project pushes
+/// `ProjectDetailView` (the Overview; its Board / Chat / Settings live as
+/// pushed sub-screens — the old 4-segment sandwich is dissolved, spec §4/§8).
+///
+/// Cutover: this screen no longer owns a `NavigationStack` — AppShell's
+/// single app-wide stack hosts it, and `ProjectRoute` destinations are
+/// registered there (deep links push through the same path).
 ///
 /// Read-only: navigation + pull-to-refresh only. Follows the LoadState pattern
 /// (settings-provided client, honest error handling).
@@ -13,77 +16,38 @@ struct ProjectsView: View {
     let client: HSCCClient?
 
     @EnvironmentObject private var unread: ProjectUnreadCenter
-    /// The navigation path of this stack, bound from the shared DeepLinkRouter
-    /// (t_136762f3). User taps and external deep links append to the same path.
-    @Binding var path: [ProjectRoute]
 
     @State private var projects = LoadState<ProjectsResponse>.idle
-    /// Whether the cross-project search sheet is presented.
-    @State private var showSearch = false
 
     var body: some View {
-        NavigationStack(path: $path) {
-            Group {
-                // Connection banner sits BELOW the nav bar, inside the content —
-                // never .safeAreaInset(edge: .top) on the stack root, which
-                // would draw over the nav bar & toolbar (t_4889e978).
-                ConnectionBanner()
-                if let client {
-                    content(client)
-                } else {
-                    notConfiguredView
-                }
-            }
-            .navigationTitle("Projects")
-            .navigationDestination(for: ProjectRoute.self) { destination in
-                destinationView(destination)
-            }
-            .task {
-                // First load: fetch once the view appears (idle → loading).
-                if client != nil, projects.value == nil, !projects.isLoading {
-                    await load()
-                }
-            }
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        showSearch = true
-                    } label: {
-                        Image(systemName: "magnifyingglass")
-                    }
-                    .accessibilityLabel("Search projects")
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        Task { await load() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .disabled(projects.isLoading)
-                    .accessibilityLabel("Refresh projects")
-                }
-            }
-            .sheet(isPresented: $showSearch) {
-                SearchView(client: client)
+        Group {
+            // Connection banner sits BELOW the nav bar, inside the content —
+            // never .safeAreaInset(edge: .top) on the stack root, which
+            // would draw over the nav bar & toolbar (t_4889e978).
+            ConnectionBanner()
+            if let client {
+                content(client)
+            } else {
+                notConfiguredView
             }
         }
-    }
-
-    /// The ViewBuilder for a deep-link destination (t_136762f3, registered via
-    /// navigationDestination(for:)). Returns a card or a project detail; when
-    /// no client is configured it shows the connect gate — a deep link must
-    /// never crash or produce a blank screen, however it arrives.
-    @ViewBuilder
-    private func destinationView(_ destination: ProjectRoute) -> some View {
-        if let client {
-            switch destination {
-            case .projectDetail(let name, let board):
-                ProjectDetailView(client: client, project: Project(name: name, repo: nil, board: board, topic: nil))
-            case .card(let id):
-                CardDetailView(cardID: id)
+        .navigationTitle("Projects")
+        .task {
+            // First load: fetch once the view appears (idle → loading).
+            if client != nil, projects.value == nil, !projects.isLoading {
+                await load()
             }
-        } else {
-            HSConnectGate(systemImage: "link", verb: "to open this link")
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    Task { await load() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .disabled(projects.isLoading)
+                .accessibilityLabel("Refresh projects")
+            }
         }
     }
 
@@ -196,16 +160,18 @@ struct ProjectsView: View {
     }
 }
 
-/// One project's detail — the hub for everything about that project.
+/// One project's detail — the Overview hub (IOS_REDESIGN 2026-10-14 §8).
 ///
-/// Four segmented sections behind a picker:
-///   * **Overview** — board counts + git state (GET /v1/projects/{name}).
-///   * **Chat**     — OrchestratorChatView fixed to THIS project's orchestrator.
-///   * **Board**    — the project's kanban board (cards filtered to its board).
-///   * **Settings** — project-level settings SHELL (a follow-up card fills this in).
+/// The 4-segment sandwich is DISSOLVED: this screen is the Overview, and
+/// Chat · Board · Settings are pushed sub-screens of the shell's single stack
+/// (`ProjectRoute.chat` / `.board` / `.projectSettings`). Deep links keep
+/// their semantics: `DeepLinkRouter.pendingSegment` still says which section
+/// a link wanted, and this view — the segment's only consumer — pushes it
+/// once, and ONLY when this detail is the top of the stack (a card link has
+/// already pushed the card above; yanking then would fight the link target).
 ///
-/// Each section owns its own load state, so switching never cross-contaminates.
-/// Follow-up cards build depth on top — the navigation shell is established here.
+/// `Section` stays public: DeepLink.swift references it (pendingSegment's
+/// type) and the deeplink_check harness compiles against it.
 struct ProjectDetailView: View {
     let client: HSCCClient
     let project: Project
@@ -225,53 +191,35 @@ struct ProjectDetailView: View {
         }
     }
 
-    @State private var selected: Section = .overview
-    /// Whether the deep-link pending segment has already been applied. A link
-    /// that wants the Chat (session) or Board segment sets it once; user taps
-    /// afterwards own the picker normally.
-    @State private var appliedPendingSegment = false
-
     var body: some View {
-        VStack(spacing: 0) {
-            Picker("Section", selection: $selected) {
-                ForEach(Section.allCases) { section in
-                    Text(section.label).tag(section)
-                }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal)
-            .padding(.vertical, 8)
+        ProjectOverviewView(client: client, name: project.name,
+                            board: project.board,
+                            onOpenChat: { openSection(.chat) })
+            .navigationTitle(project.name)
+            .navigationBarTitleDisplayMode(.inline)
+            .onAppear { applyPendingSegmentIfNeeded() }
+    }
 
-            switch selected {
-            case .overview: ProjectOverviewView(client: client, name: project.name, onOpenChat: { selected = .chat })
-            case .chat:     StreamingChatView(project: project.name)
-            case .board:    ProjectBoardView(client: client, board: project.board)
-            case .settings: ProjectSettingsView(client: client, name: project.name)
-            }
+    /// Push one of the project's subpages on the shell's app-wide stack.
+    private func openSection(_ section: Section) {
+        switch section {
+        case .overview: break                       // already here
+        case .chat:     router.projectsPath.append(.chat(name: project.name))
+        case .board:    router.projectsPath.append(.board(name: project.name, board: project.board))
+        case .settings: router.projectsPath.append(.projectSettings(name: project.name))
         }
-        .navigationTitle(project.name)
-        .navigationBarTitleDisplayMode(.inline)
-        // Apply a deep-link's pending segment once (t_136762f3). A session link
-        // opens on Chat; a card link opens on Board. Consumed once so the user
-        // is never yanked back to a link segment after they've navigated away.
-        .onAppear {
-            guard !appliedPendingSegment, let segment = router.pendingSegment else { return }
-            appliedPendingSegment = true
-            router.pendingSegment = nil
-            selected = segment
-        }
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                // Session history — the project's chat log as a window onto
-                // the session. Loads context that predates this install and
-                // pages further back on scroll-up (t_2776ea3c).
-                NavigationLink {
-                    SessionHistoryView(client: client, project: project.name)
-                } label: {
-                    Label("Session History", systemImage: "clock.arrow.circlepath")
-                }
-            }
-        }
+    }
+
+    /// Apply a deep link's pending segment once (t_136762f3). A session link
+    /// lands on Chat; a card link opens on Board. Only when THIS detail is the
+    /// top of the stack — if the link has already pushed something above
+    /// (the card itself), the consumer stays silent and that target stands.
+    private func applyPendingSegmentIfNeeded() {
+        guard let segment = router.pendingSegment,
+              case .projectDetail(let name, _)? = router.projectsPath.last,
+              name == project.name else { return }
+        router.pendingSegment = nil
+        openSection(segment)
     }
 }
 
@@ -291,8 +239,10 @@ struct ProjectDetailView: View {
 struct ProjectOverviewView: View {
     let client: HSCCClient
     let name: String
-    /// Navigate to the Chat section (wired by ProjectDetailView to flip its
-    /// segmented picker). The last-reply preview calls this on tap.
+    /// The project's board name (nil when unknown) — the Board subpage needs it.
+    var board: String? = nil
+    /// Push the Chat subpage (wired by ProjectDetailView onto the shell's
+    /// app-wide stack). The last-reply preview calls this on tap.
     var onOpenChat: () -> Void = {}
 
     @State private var detail = LoadState<ProjectDetailResponse>.idle
@@ -315,6 +265,19 @@ struct ProjectOverviewView: View {
         .task {
             if detail.value == nil, !detail.isLoading { await load() }
         }
+        .toolbar {
+            // Session history — the project's chat log as a read-back pager
+            // (t_2776ea3c). Lived on the old segment sandwich's toolbar; the
+            // chat screen keeps this same action, so the history stays one
+            // tap from both entry points.
+            ToolbarItem(placement: .topBarTrailing) {
+                NavigationLink {
+                    SessionHistoryView(client: client, project: name)
+                } label: {
+                    Label("Session History", systemImage: "clock.arrow.circlepath")
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -330,6 +293,25 @@ struct ProjectOverviewView: View {
             Section {
                 Label(state.speak, systemImage: "text.bubble")
                     .font(.hsccMono(15))
+            }
+
+            // The dissolved segment sandwich: Chat, Board and Settings are
+            // pushed subpages of the shell's stack now (spec §8 keeps them
+            // reachable from the project detail). `value:` routes go through
+            // the ONE navigationDestination(for: ProjectRoute.self) AppShell
+            // registers; Chat uses the injected closure so the caller owns
+            // the push (same route either way).
+            Section("In this project") {
+                Button(action: onOpenChat) {
+                    Label("Chat", systemImage: "bubble.left.and.bubble.right")
+                }
+                .accessibilityLabel("Open Chat for \(name)")
+                NavigationLink(value: ProjectRoute.board(name: name, board: board)) {
+                    Label("Board", systemImage: "square.grid.2x2")
+                }
+                NavigationLink(value: ProjectRoute.projectSettings(name: name)) {
+                    Label("Settings", systemImage: "gearshape")
+                }
             }
 
             // Compact ident — board + repo so the operator knows exactly which

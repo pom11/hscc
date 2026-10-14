@@ -20,7 +20,6 @@ struct OpsView: View {
     @State private var profiles = LoadState<ProfilesResponse>.idle
 
     var body: some View {
-        NavigationStack {
             ScrollView {
                 if let client {
                     VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
@@ -42,7 +41,6 @@ struct OpsView: View {
                     await loadAll()
                 }
             }
-        }
     }
 
     // MARK: - Not configured

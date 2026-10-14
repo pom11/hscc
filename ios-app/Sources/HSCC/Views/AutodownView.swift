@@ -33,7 +33,6 @@ struct AutodownView: View {
     private let idleOptions = [10, 20, 30, 60, 90, 120]
 
     var body: some View {
-        NavigationStack {
             ScrollView {
                 if let client {
                     VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
@@ -53,7 +52,6 @@ struct AutodownView: View {
                     await loadStatus()
                 }
             }
-        }
     }
 
     // MARK: - Not configured

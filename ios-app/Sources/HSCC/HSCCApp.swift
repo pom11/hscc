@@ -44,7 +44,12 @@ struct HSCCApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            // Root (IOS_REDESIGN 2026-10-14 Phase 2): the drawer shell replaces
+            // the three-tab TabView root. The SAME five environment objects are
+            // injected — and `unread`/`replyWatcher` still share the ONE
+            // ProjectUnreadCenter built in init() (two centers would disagree
+            // about what has been read).
+            AppShell()
                 .environmentObject(settings)
                 .environmentObject(widgetSettings)
                 .environmentObject(unread)

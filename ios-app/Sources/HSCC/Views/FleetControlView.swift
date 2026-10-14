@@ -21,7 +21,6 @@ struct FleetControlView: View {
     @State private var status = LoadState<TemplateStatusResponse>.idle
 
     var body: some View {
-        NavigationStack {
             ScrollView {
                 if let client {
                     VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
@@ -40,7 +39,6 @@ struct FleetControlView: View {
                     await loadStatus()
                 }
             }
-        }
     }
 
     // MARK: - Not configured

@@ -1,62 +1,45 @@
 import SwiftUI
 
-/// Cluster tab — the fleet hub (new project-centric IA).
+/// Cluster hub — the topology glance (IOS_REDESIGN 2026-10-14 §5).
 ///
-/// Everything fleet-level lives in ONE place here. The signature node topology
-/// strip is pinned at the top; beneath it are nested screens for each fleet
-/// surface. Nothing fleet-related lives outside this tab:
-///
-///   * the **node topology strip** — the two TP pairs, the signature element
-///   * **Health**        — OpsView (verify, daemon, triggers, escalations, profiles)
-///   * **Fleet**         — FleetView (health, stats, throughput, streams, autoscale)
-///   * **Fleet Control** — FleetControlView (cluster up/down)
-///   * **Templates**     — TemplatesView (browse, preview, confirm-gated apply)
-///   * **Autodown**      — AutodownView (the operator's most-used surface)
-///   * **Approvals**     — ApprovalsView (the destructive-action decision inbox)
-///   * **Board Hygiene** — BoardHygieneView (blocked/stale ACROSS all boards)
-///
-/// Kanban/board content that belongs to a SPECIFIC project lives under that
-/// project (ProjectsView → detail → Board), not here.
+/// RETIRED AS A HUB: its 14 navigation rows became the drawer (the migration
+/// map in spec §8 is the contract — every row is a drawer destination). What
+/// remains is the one thing worth a screen of its own: the signature node
+/// topology strip + the fleet status line, reachable from the drawer's
+/// Cluster row and the dock.
 ///
 /// Only the hub's own header needs live reads: `/v1/cluster/status` (hosts up /
 /// workloads) and `/v1/cluster/hosts` (node IPs/roles) drive the topology
-/// strip. The nested screens each own their own load state and refresh
-/// independently when opened.
+/// strip. The surfaces that used to hang off the hub each own their own load
+/// state and refresh independently when opened.
 struct ClusterView: View {
     let client: HSCCClient?
-    /// The pending-approval count from the tab badge poller (nil = not yet
-    /// known). Shown on the Approvals hub row so the inbox is reachable and
-    /// its count is visible at a glance.
-    var approvalCount: Int? = nil
 
     @State private var status = LoadState<ClusterStatusResponse>.idle
     @State private var hosts = LoadState<ClusterHostsResponse>.idle
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                // Connection banner sits BELOW the nav bar, inside the content —
-                // never .safeAreaInset(edge: .top) on the stack root, which
-                // would draw over the nav bar (t_4889e978).
-                ConnectionBanner()
-                if let client {
-                    VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
-                        topologyStrip
-                        hubLinks(client: client)
-                    }
-                    .padding(.horizontal)
-                    .padding(.top, Theme.Spacing.sm.rawValue)
-                    .padding(.bottom)
-                } else {
-                    notConfiguredView
+        ScrollView {
+            // Connection banner sits BELOW the nav bar, inside the content —
+            // never .safeAreaInset(edge: .top) on the stack root, which
+            // would draw over the nav bar (t_4889e978).
+            ConnectionBanner()
+            if client != nil {
+                VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
+                    topologyStrip
                 }
+                .padding(.horizontal)
+                .padding(.top, Theme.Spacing.sm.rawValue)
+                .padding(.bottom)
+            } else {
+                notConfiguredView
             }
-            .navigationTitle("Cluster")
-            .refreshable { if client != nil { await loadAll() } }
-            .task {
-                if client != nil, status.value == nil, !status.isLoading {
-                    await loadAll()
-                }
+        }
+        .navigationTitle("Cluster")
+        .refreshable { if client != nil { await loadAll() } }
+        .task {
+            if client != nil, status.value == nil, !status.isLoading {
+                await loadAll()
             }
         }
     }
@@ -179,156 +162,5 @@ struct ClusterView: View {
         case .loading, .idle:
             return status.value == nil ? .unknown : .up
         }
-    }
-
-    // MARK: - Hub navigation rows
-
-    private func hubLinks(client: HSCCClient) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
-            approvalsRow(client)
-            hubRow("Health & Ops", systemImage: "stethoscope",
-                   subtitle: "verify, daemon, triggers, escalations, profiles") {
-                OpsView(client: client)
-            }
-            hubRow("Logs", systemImage: "doc.text.magnifyingglass",
-                   subtitle: "tail the daemon, API, or worker log — redacted") {
-                LogsView(client: client)
-            }
-            hubRow("Self-Heal History", systemImage: "clock.arrow.circlepath",
-                   subtitle: "what automation decided — restarts, blocks, autodown") {
-                SelfHealHistoryView(client: client)
-            }
-            hubRow("Fleet", systemImage: "wave.3.right",
-                   subtitle: "stats, throughput, streams, autoscale") {
-                FleetView(client: client)
-            }
-            hubRow("Fleet Control", systemImage: "power",
-                   subtitle: "bring fleet up / down") {
-                FleetControlView(client: client)
-            }
-            hubRow("Serving Control", systemImage: "cpu",
-                   subtitle: "stop or restart ONE serving unit — confirm-gated") {
-                ServingControlView(client: client)
-            }
-            hubRow("Templates", systemImage: "square.grid.2x2",
-                   subtitle: "browse layouts, preview, apply a fleet template") {
-                TemplatesView(client: client)
-            }
-            hubRow("Autodown", systemImage: "timer",
-                   subtitle: "the idle power-down you can arm or wake") {
-                AutodownView(client: client)
-            }
-            hubRow("Scheduled Jobs", systemImage: "calendar.badge.clock",
-                   subtitle: "the cron roster — schedule, next/last run, last outcome") {
-                CronView(client: client)
-            }
-            hubRow("Board Hygiene", systemImage: "wand.and.sparkles",
-                   subtitle: "blocked and stale cards across every board") {
-                BoardHygieneView(client: client)
-            }
-            hubRow("Sessions", systemImage: "text.bubble",
-                   subtitle: "list a profile's sessions, compact or retire one") {
-                SessionsView(client: client)
-            }
-            hubRow("Memories", systemImage: "brain",
-                   subtitle: "what a profile remembers — correct or delete one") {
-                MemoryView(client: client)
-            }
-            hubRow("Activity", systemImage: "waveform.path.ecg",
-                   subtitle: "live feed — who is running, which tool, on which card") {
-                ActivityFeedView(client: client)
-            }
-        }
-    }
-
-    private func approvalsRow(_ client: HSCCClient) -> some View {
-        NavigationLink {
-            ApprovalsView(client: client)
-        } label: {
-            HStack(spacing: Theme.Spacing.md.rawValue) {
-                Image(systemName: "checkmark.seal")
-                    .font(.title3)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    .frame(width: 28)
-                VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
-                    Text("Approvals")
-                        .font(.headline)
-                        .foregroundColor(Theme.Semantic.onSurface)
-                    Text(approvalCountLabel)
-                        .font(.caption)
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
-            }
-            .padding()
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
-                    .fill(approvalTint)
-            )
-        }
-        .buttonStyle(.plain)
-    }
-
-    /// The subtitle for the Approvals hub row — either the pending count when
-    /// known, or a neutral "still loading" cue when the badge poller hasn't
-    /// produced a number yet.
-    private var approvalCountLabel: String {
-        if let approvalCount, approvalCount > 0 {
-            return "\(approvalCount) pending — allow or leave blocked"
-        }
-        if approvalCount == 0 {
-            return "no pending approvals"
-        }
-        return "this is where you allow or leave blocked a worker's request"
-    }
-
-    /// A distinct tint so the approvals inbox reads as the attention surface it
-    /// is — amber when there's something to decide, neutral otherwise.
-    private var approvalTint: Color {
-        guard let approvalCount, approvalCount > 0 else {
-            return Theme.Semantic.surfaceRaised
-        }
-        return Theme.Semantic.warn.opacity(0.14)
-    }
-
-    private func hubRow<Destination: View>(
-        _ title: String,
-        systemImage: String,
-        subtitle: String,
-        @ViewBuilder destination: @escaping () -> Destination
-    ) -> some View {
-        NavigationLink {
-            destination()
-        } label: {
-            HStack(spacing: Theme.Spacing.md.rawValue) {
-                Image(systemName: systemImage)
-                    .font(.title3)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    .frame(width: 28)
-                VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
-                    Text(title)
-                        .font(.headline)
-                        .foregroundColor(Theme.Semantic.onSurface)
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
-            }
-            .padding()
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
-                    .fill(Theme.Semantic.surfaceRaised)
-            )
-        }
-        .buttonStyle(.plain)
     }
 }

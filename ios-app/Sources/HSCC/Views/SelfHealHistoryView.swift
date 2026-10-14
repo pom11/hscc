@@ -30,7 +30,6 @@ struct SelfHealHistoryView: View {
     @State private var state = LoadState<[HistoryEvent]>.idle
 
     var body: some View {
-        NavigationStack {
             Group {
                 if let client {
                     content(client)
@@ -40,7 +39,6 @@ struct SelfHealHistoryView: View {
                 }
             }
             .navigationTitle("Self-Heal History")
-        }
     }
 
     // MARK: - Configured content

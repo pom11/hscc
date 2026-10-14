@@ -16,7 +16,7 @@ import SwiftUI
 /// Every first-class destination in the drawer. One enum, one stack — this
 /// replaces the ten screens that used to wrap their own `NavigationStack`.
 enum AppDestination: String, Hashable, Identifiable {
-    case home, projects, approvals
+    case home, chats, projects, cards, approvals
     case fleet, clusterHub, fleetControl, nodesServing, opsHealth
     case autodown, selfHeal, cron, logs, boardHygiene
     case memory, templates, sessions, activity
@@ -27,7 +27,9 @@ enum AppDestination: String, Hashable, Identifiable {
     var title: String {
         switch self {
         case .home: "Home"
+        case .chats: "Chats"
         case .projects: "Projects"
+        case .cards: "Cards"
         case .approvals: "Approvals"
         case .fleet: "Fleet"
         case .clusterHub: "Cluster"
@@ -55,6 +57,8 @@ enum AppDestination: String, Hashable, Identifiable {
         case .approvals: "checkmark.circle"
         case .fleet: "chart.bar"
         case .clusterHub: "bolt"
+        case .chats: "bubble.left.and.bubble.right"
+        case .cards: "square.grid.2x2"
         case .fleetControl: "slider.horizontal.3"
         case .nodesServing: "serverrack"
         case .opsHealth: "heart.text.square"
@@ -88,12 +92,20 @@ struct AppShell: View {
 
     var body: some View {
         NavigationSplitView {
-            Sidebar(selection: $selection, approvalCount: approvals.pendingCount)
+            Sidebar(selection: drawerBinding, approvalCount: approvals.pendingCount)
                 .navigationTitle("HSCC")
         } detail: {
             NavigationStack(path: $router.projectsPath) {
                 destinationView(selection ?? .home)
                     .navigationDestination(for: AppDestination.self) { destinationView($0) }
+                    // THE app-wide deep-link/user destination (t_136762f3).
+                    // Hoisted from ProjectsView during the Phase 2 cutover:
+                    // with one stack there is exactly one registration site,
+                    // so a hscc:// push and a user tap resolve identically
+                    // no matter which drawer row was active.
+                    .navigationDestination(for: ProjectRoute.self) { route in
+                        projectRouteView(route)
+                    }
             }
             .id(settings.activeClusterID)   // cluster switch = clean rebuild
         }
@@ -153,11 +165,13 @@ struct AppShell: View {
     private func destinationView(_ destination: AppDestination) -> some View {
         let client = makeClient()
         switch destination {
-        case .home: HomeView(selection: $selection, approvalCount: approvals.pendingCount)
-        case .projects: ProjectsView(client: client, path: $router.projectsPath)
+        case .home: HomeView(selection: drawerBinding, approvalCount: approvals.pendingCount)
+        case .chats: ChatsRootView(client: client)
+        case .projects: ProjectsView(client: client)
+        case .cards: CardsRootView(client: client)
         case .approvals: ApprovalsView(client: client)
         case .fleet: FleetView(client: client ?? FleetViewPlaceholder.client)
-        case .clusterHub: ClusterView(client: client, approvalCount: approvals.pendingCount)
+        case .clusterHub: ClusterView(client: client)
         case .fleetControl: FleetControlView(client: client)
         case .nodesServing: ServingControlView(client: client)
         case .opsHealth: OpsView(client: client)
@@ -173,6 +187,55 @@ struct AppShell: View {
         case .search: SearchView(client: client)
         case .settings: SettingsView()
         }
+    }
+
+    /// Render a `ProjectRoute` (deep-link pushes AND the in-app project taps
+    /// land here — one registration site, one path). With no client the
+    /// destinations show the connect gate: a deep link must never crash or
+    /// produce a blank screen, however it arrives.
+    @ViewBuilder
+    private func projectRouteView(_ route: ProjectRoute) -> some View {
+        if let client = makeClient() {
+            switch route {
+            case .projectDetail(let name, let board):
+                ProjectDetailView(client: client, project: Project(name: name, repo: nil, board: board, topic: nil))
+            case .chat(let name):
+                StreamingChatView(project: name)
+            case .board(let name, let board):
+                ProjectBoardView(client: client, board: board)
+                    .navigationTitle("\(name) · Board")
+                    .navigationBarTitleDisplayMode(.inline)
+            case .projectSettings(let name):
+                ProjectSettingsView(client: client, name: name)
+                    .navigationTitle("\(name) · Settings")
+                    .navigationBarTitleDisplayMode(.inline)
+            case .card(let id):
+                CardDetailView(cardID: id)
+            }
+        } else {
+            HSConnectGate(systemImage: "link", verb: "to open this link")
+        }
+    }
+
+    /// Drawer selection with the stack-consistency rule (see `go`). Both the
+    /// Sidebar and Home's hero/tiles/dock drive the root through this.
+    private var drawerBinding: Binding<AppDestination?> {
+        Binding(
+            get: { selection },
+            set: { go($0) }
+        )
+    }
+
+    /// Switch the drawer selection. Clearing the shared detail path is the
+    /// point: the drawer swaps the ROOT of the stack, and a stale pushed
+    /// screen must never sit on top of the newly chosen root (the tab bar
+    /// used to own this for free; with one stack it must be explicit).
+    /// Deep links are unaffected — they set `requestedTab`/path from the
+    /// router and the router writes the path AFTER any selection change
+    /// lands (its resolve goes through an await first).
+    private func go(_ destination: AppDestination?) {
+        selection = destination
+        router.projectsPath = []
     }
 
     /// Legacy deep-link / intent tabs map onto drawer destinations.

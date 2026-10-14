@@ -33,7 +33,6 @@ struct ApprovalsView: View {
     @State private var approvals = LoadState<KanbanBlockedResponse>.idle
 
     var body: some View {
-        NavigationStack {
             Group {
                 if let client {
                     content(client)
@@ -42,7 +41,6 @@ struct ApprovalsView: View {
                 }
             }
             .navigationTitle("Approvals")
-        }
     }
 
     private var notConfiguredView: some View {

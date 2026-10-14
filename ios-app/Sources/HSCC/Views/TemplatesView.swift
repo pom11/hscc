@@ -20,8 +20,6 @@ struct TemplatesView: View {
 
     @State private var status = LoadState<TemplateStatusResponse>.idle
     @State private var list = LoadState<TemplateListResponse>.idle
-    @State private var selected: ClusterTemplate?
-    @State private var showDetail = false
 
     var body: some View {
         ScrollView {
@@ -44,11 +42,17 @@ struct TemplatesView: View {
                 await loadAll()
             }
         }
-        .sheet(isPresented: $showDetail) {
-            if let selected, let client {
+        // Sheet → PUSH (spec §3.1): TemplateDetail rides the app-wide stack
+        // (a ClusterTemplate is the navigation value); the L4 sheet-in-sheet
+        // chain is gone. The destination lives here so the push can still
+        // hand the detail its `refreshStatus` callback.
+        .navigationDestination(for: ClusterTemplate.self) { template in
+            if let client {
                 TemplateDetailView(client: client,
-                                   template: selected,
+                                   template: template,
                                    onApplied: { await refreshStatus() })
+            } else {
+                HSConnectGate(systemImage: "square.grid.2x2", verb: "to apply a template")
             }
         }
     }
@@ -267,10 +271,7 @@ struct TemplatesView: View {
     /// One template row: families, description, and an unmistakable Applied
     /// marker when it's the one live right now.
     private func templateRow(_ template: ClusterTemplate, applied: Bool) -> some View {
-        Button {
-            selected = template
-            showDetail = true
-        } label: {
+        NavigationLink(value: template) {
             HStack(alignment: .top, spacing: Theme.Spacing.md.rawValue) {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: Theme.Spacing.sm.rawValue) {

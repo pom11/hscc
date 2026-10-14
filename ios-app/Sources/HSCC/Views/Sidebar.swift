@@ -16,8 +16,13 @@ struct Sidebar: View {
     @Binding var selection: AppDestination?
     let approvalCount: Int?
     @EnvironmentObject private var settings: SettingsStore
+    @EnvironmentObject private var unread: ProjectUnreadCenter
+    /// The shared monitor, OBSERVED: the header dot/text must redraw when the
+    /// most-recent-request outcome changes, not only when this view is built.
+    @ObservedObject private var monitor = ConnectionMonitor.shared
 
     private var pendingBadge: Int { approvalCount ?? 0 }
+    private var chatBadge: Int { unread.totalUnread }
 
     var body: some View {
         List(selection: $selection) {
@@ -26,7 +31,9 @@ struct Sidebar: View {
             }
             group("Work") {
                 row(.home)
+                row(.chats, badge: chatBadge)
                 row(.projects)
+                row(.cards)
                 row(.approvals, badge: pendingBadge)
             }
             group("Cluster") {
@@ -66,7 +73,9 @@ struct Sidebar: View {
                     .foregroundColor(Theme.Semantic.onSurface)
                 HStack(spacing: Theme.Spacing.xs.rawValue) {
                     HSStatusDot(dotTint)
-                    Text("connected")
+                    // The word MUST match the dot — "connected" printed under
+                    // a grey or red dot is the colour-lie the spec bans (§9).
+                    Text(dotWord)
                         .font(.footnote)
                         .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
@@ -105,12 +114,24 @@ struct Sidebar: View {
 
 extension Sidebar {
     /// Header dot colour: honest three-state (unknown is grey, not green).
+    /// Reads the OBSERVED monitor, so the dot follows the most recent request.
     private var dotTint: Color {
         guard settings.isConfigured else { return Theme.Semantic.neutral }
-        switch ConnectionMonitor.shared.status {
+        switch monitor.status {
         case .reachable: return Theme.Semantic.ok
         case .unreachable: return Theme.Semantic.bad
         case .unknown: return Theme.Semantic.neutral
+        }
+    }
+
+    /// The dot's word — never colour alone (spec §9). Matches `dotTint`'s
+    /// three states exactly.
+    private var dotWord: String {
+        guard settings.isConfigured else { return "not configured" }
+        switch monitor.status {
+        case .reachable: return "connected"
+        case .unreachable: return "unreachable"
+        case .unknown: return "checking…"
         }
     }
 }

@@ -59,7 +59,6 @@ struct SettingsView: View {
     @State private var showingConfirm = false
 
     var body: some View {
-        NavigationStack {
             Form {
                 Section {
                     ForEach(settings.clusters) { cluster in
@@ -241,7 +240,6 @@ struct SettingsView: View {
             } message: {
                 Text(scanError ?? "")
             }
-        }
     }
 
     // MARK: - State helpers

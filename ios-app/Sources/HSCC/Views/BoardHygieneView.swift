@@ -31,7 +31,6 @@ struct BoardHygieneView: View {
     @State private var stale = LoadState<KanbanStaleResponse>.idle
 
     var body: some View {
-        NavigationStack {
             VStack(spacing: 0) {
                 Picker("Pane", selection: $selected) {
                     ForEach(Pane.allCases) { pane in
@@ -52,7 +51,6 @@ struct BoardHygieneView: View {
                 }
             }
             .navigationTitle("Hygiene")
-        }
     }
 
     private var notConfiguredView: some View {

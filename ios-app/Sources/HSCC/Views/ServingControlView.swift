@@ -33,7 +33,6 @@ struct ServingControlView: View {
     @State private var status = LoadState<ClusterStatusResponse>.idle
 
     var body: some View {
-        NavigationStack {
             ScrollView {
                 if let client {
                     VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
@@ -55,7 +54,6 @@ struct ServingControlView: View {
                     await loadStatus()
                 }
             }
-        }
     }
 
     // MARK: - Not configured

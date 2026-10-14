@@ -29,7 +29,6 @@ struct LogsView: View {
     @State private var state = LoadState<LogsResponse>.idle
 
     var body: some View {
-        NavigationStack {
             Group {
                 if let client {
                     content(client)
@@ -39,7 +38,6 @@ struct LogsView: View {
                 }
             }
             .navigationTitle("Logs")
-        }
     }
 
     // MARK: - Configured content

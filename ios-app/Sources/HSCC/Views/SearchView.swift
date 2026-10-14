@@ -23,23 +23,19 @@ struct SearchView: View {
     @State private var projects = LoadState<ProjectsResponse>.idle
     @State private var cards = LoadState<CardsResponse>.idle
     @State private var query = ""
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
             content
                 .navigationTitle("Search")
                 .navigationBarTitleDisplayMode(.inline)
-                .navigationBarItems(leading: closeButton)
+                // The old "Done" leading button + deprecated `.navigationBarItems`
+                // are gone: Search is a drawer destination now (spec §5), so the
+                // drawer itself is the way back. Results push through the one
+                // app-wide ProjectRoute registration.
                 .searchable(text: $query,
                             placement: .navigationBarDrawer(displayMode: .always),
                             prompt: "Projects, cards, boards…")
                 .task { await load() }
-        }
-    }
-
-    private var closeButton: some View {
-        Button("Done") { dismiss() }
     }
 
     @ViewBuilder
@@ -152,9 +148,7 @@ struct SearchView: View {
             if !ps.isEmpty {
                 Section("Likely items") {
                     ForEach(ps) { project in
-                        NavigationLink {
-                            ProjectDetailView(client: client, project: project)
-                        } label: {
+                        NavigationLink(value: ProjectRoute.projectDetail(name: project.name, board: project.board)) {
                             projectRow(project)
                         }
                     }
@@ -184,9 +178,7 @@ struct SearchView: View {
             if !ps.isEmpty {
                 Section("Projects — \(ps.count)") {
                     ForEach(ps) { project in
-                        NavigationLink {
-                            ProjectDetailView(client: client, project: project)
-                        } label: {
+                        NavigationLink(value: ProjectRoute.projectDetail(name: project.name, board: project.board)) {
                             projectRow(project)
                         }
                     }
@@ -195,9 +187,7 @@ struct SearchView: View {
             if !cs.isEmpty {
                 Section("Cards — \(cs.count)") {
                     ForEach(cs) { card in
-                        NavigationLink {
-                            CardDetailView(cardID: card.id)
-                        } label: {
+                        NavigationLink(value: ProjectRoute.card(id: card.id)) {
                             cardRow(card)
                         }
                     }

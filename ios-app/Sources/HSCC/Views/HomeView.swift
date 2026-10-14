@@ -19,7 +19,10 @@ enum DockItem: String, CaseIterable, Identifiable {
 
     var destination: AppDestination {
         switch self {
-        case .chat: .projects
+        // The real global Chats screen (spec §3.2: Chat leads the dock). The
+        // shell commit had this pointing at Projects as a stopgap — replaced
+        // in the cutover now that `.chats` exists as a first-class route.
+        case .chat: .chats
         case .fleet: .fleet
         case .cluster: .clusterHub
         case .approvals: .approvals
@@ -53,6 +56,10 @@ struct HomeView: View {
     let approvalCount: Int?
 
     @EnvironmentObject private var settings: SettingsStore
+    @EnvironmentObject private var unread: ProjectUnreadCenter
+    /// Observed so the hero follows the most-recent-request outcome (the
+    /// hero IS the "everything is fine" glance; it must move).
+    @ObservedObject private var monitor = ConnectionMonitor.shared
 
     var body: some View {
         ScrollView {
@@ -69,6 +76,18 @@ struct HomeView: View {
         .background(Theme.Semantic.surface)
         .navigationTitle("Home")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            // Search is a drawer destination; Home also carries the ⌘ shortcut
+            // (spec §5 Search: "promoted to a drawer destination + Home ⌘").
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    selection = .search
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+                .accessibilityLabel("Search everywhere")
+            }
+        }
         .overlay(alignment: .bottom) { dock }
     }
 
@@ -131,7 +150,7 @@ struct HomeView: View {
     /// a guess, never a green light on an untested connection).
     private var heroTint: Color {
         guard settings.isConfigured else { return Theme.Semantic.neutral }
-        switch ConnectionMonitor.shared.status {
+        switch monitor.status {
         case .reachable: return Theme.Semantic.ok
         case .unreachable: return Theme.Semantic.bad
         case .unknown: return Theme.Semantic.neutral
@@ -140,7 +159,7 @@ struct HomeView: View {
 
     private var heroTitle: String {
         guard settings.isConfigured else { return "Not connected" }
-        switch ConnectionMonitor.shared.status {
+        switch monitor.status {
         case .reachable: return "Cluster is up"
         case .unreachable: return "Can't reach the cluster"
         case .unknown: return "Checking the cluster"
@@ -151,10 +170,10 @@ struct HomeView: View {
         guard settings.isConfigured else {
             return "Add your cluster in Settings to begin."
         }
-        switch ConnectionMonitor.shared.status {
+        switch monitor.status {
         case .reachable: return "Last request succeeded · tap for fleet detail"
         case .unreachable(let reason): return reason
-        case .unknown: return "Send a request or pull to refresh"
+        case .unknown: return "No request yet — tap for fleet detail"
         }
     }
 
@@ -167,7 +186,7 @@ struct HomeView: View {
             tile(.projects, "Projects", "folder")
             tile(.approvals, "Approvals", "checkmark.circle", badge: approvalCount)
             tile(.activity, "Activity", "waveform.path.ecg")
-            tile(.search, "Search", "magnifyingglass")
+            tile(.cards, "Cards", "square.grid.2x2")
         }
     }
 
@@ -250,6 +269,19 @@ struct HomeView: View {
                             .clipShape(Capsule())
                             .offset(x: 8, y: -2)
                             .accessibilityLabel("\(count) pending approvals")
+                    }
+                    // Chat carries the waiting-replies badge (spec §3.2: the
+                    // dock's Chat icon is the operator's way back in; the
+                    // count is the pull). Text, not only colour (§9).
+                    if item == .chat, unread.totalUnread > 0 {
+                        Text("\(unread.totalUnread)")
+                            .font(.caption2.weight(.bold))
+                            .foregroundColor(Theme.Semantic.onAccent)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Theme.Semantic.accent)
+                            .clipShape(Capsule())
+                            .offset(x: 8, y: -2)
+                            .accessibilityLabel("\(unread.totalUnread) unread replies")
                     }
                 }
                 Text(item.title)

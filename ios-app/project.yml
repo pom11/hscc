@@ -150,6 +150,11 @@ targets:
       - path: Sources/HSCC/Views/NodeTopologyView.swift
       - path: Sources/HSCC/Views/LoadState.swift
       - path: Sources/HSCC/Views/ClusterView.swift
+      # Phase 2 shell (IOS_REDESIGN 2026-10-14 §3): drawer roots for the
+      # dock's Chat verb (project list that pushes chat directly) and the
+      # drawer's cross-board Cards row (the id-less card route).
+      - path: Sources/HSCC/Views/ChatsRootView.swift
+      - path: Sources/HSCC/Views/CardsRootView.swift
       - path: Sources/HSCC/Views/FleetView.swift
       - path: Sources/HSCC/Views/CardsView.swift
       - path: Sources/HSCC/Views/MutationSupport.swift
