@@ -12,6 +12,17 @@ import SwiftUI
 /// autoup() on a background thread (it can block ~9 minutes). This view shows
 /// a waking state and polls /v1/autodown/status while `state == "waking"`
 /// rather than blocking the UI or claiming success early.
+///
+/// LIST RECIPE (spec §5, Phase 2 C3): three `Section`s of ONE plain `List`
+/// (Status · Controls · Active cron jobs). The three `HSSectionCard` boxes are
+/// gone; List supplies the grouping, the caps headers and the separators, and
+/// `speak` becomes a footnote caption line instead of a boxed italic
+/// subheadline. The status fields are `LabeledContent` rows (the label/value
+/// HStack they replace was the same thing with manual spacing).
+///
+/// Restyle only — §8's merge of this screen with SelfHealHistory into one
+/// "Autodown & self-heal" destination is deliberately NOT done here (filed as
+/// its own card; it retires a screen).
 struct AutodownView: View {
     let client: HSCCClient?
 
@@ -33,25 +44,29 @@ struct AutodownView: View {
     private let idleOptions = [10, 20, 30, 60, 90, 120]
 
     var body: some View {
-            ScrollView {
-                if let client {
-                    VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
-                        statusSection
-                        controlSection(client: client)
-                        cronSection
+        Group {
+            if let client {
+                List {
+                    statusSection
+                    // Only show actionable controls once we actually KNOW the
+                    // current enabled state — see controlSection.
+                    if let value {
+                        controlSection(client: client, value: value)
                     }
-                    .padding()
-                } else {
-                    notConfiguredView
+                    cronSection
                 }
-            }
-            .navigationTitle("Autodown")
-            .refreshable { if client != nil { await loadStatus() } }
-            .task {
-                if client != nil, status.value == nil, !status.isLoading {
-                    await loadStatus()
+                .listStyle(.plain)
+                .refreshable { await loadStatus() }
+                .task {
+                    if status.value == nil, !status.isLoading {
+                        await loadStatus()
+                    }
                 }
+            } else {
+                notConfiguredView
             }
+        }
+        .navigationTitle("Autodown")
     }
 
     // MARK: - Not configured
@@ -95,66 +110,64 @@ struct AutodownView: View {
 
     @ViewBuilder
     private var statusSection: some View {
-        switch status {
-        case .loading:
-            HSSectionCard(title: "Status", systemImage: "timer") { HSLoading() }
-        case .failed(let message):
-            HSSectionCard(title: "Status", systemImage: "timer") {
-                errorLabel(message, retry: { Task { await loadStatus() } })
-            }
-        case .stale(let state, let ageMessage):
-            HSSectionCard(title: "Status", systemImage: "timer") {
-                VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
-                    StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
-                        Task { await loadStatus() }
-                    }
-                    statusBody(state)
+        Section("Status") {
+            switch status {
+            case .idle, .loading:
+                HStack(spacing: Theme.Spacing.sm.rawValue) {
+                    ProgressView()
+                    Text("Loading autodown status…")
+                        .font(.subheadline)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
-            }
-        case .loaded(let state):
-            HSSectionCard(title: "Status", systemImage: "timer") {
+            case .failed(let message):
+                errorLabel(message, retry: { Task { await loadStatus() } })
+            case .stale(let state, let ageMessage):
+                StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
+                    Task { await loadStatus() }
+                }
+                statusBody(state)
+            case .loaded(let state):
                 statusBody(state)
             }
-        default:
-            EmptyView()
         }
     }
 
     @ViewBuilder
     private func statusBody(_ state: AutodownStatusResponse) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
-            if waking, let wakeMessage {
-                wakingBanner(wakeMessage)
-            }
+        if waking, let wakeMessage {
+            wakingBanner(wakeMessage)
+        }
 
-            // Summary line (design §B).
-            Text(state.speak)
-                .font(.subheadline)
-                .italic()
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        // Summary line (design §B).
+        Text(state.speak)
+            .font(.footnote.italic())
+            .foregroundColor(Theme.Semantic.onSurfaceMuted)
 
-            // Key status fields.
-            statusRow("State", value: stateLabel(state.state),
-                      color: stateColor(state.state))
-            statusRow("Idle limit", value: idleMinutesLabel(state.idle_minutes))
-            statusRow("Enabled", value: state.enabled == true ? "Yes" : "No",
-                      color: state.enabled == true ? Theme.Semantic.ok : Theme.Semantic.onSurfaceMuted)
-            if state.watchdog_blocked == true {
-                // `intentional` is a STRING ("autodown") during a teardown,
-                // not a Bool — an intentional block is expected, not a fault.
-                statusRow("Watchdog block",
-                          value: state.watchdog_intentional == nil ? "active" : "intentional (\(state.watchdog_intentional!))",
-                          color: state.watchdog_intentional == nil ? Theme.Semantic.bad : Theme.Semantic.onSurfaceMuted)
+        // Key status fields.
+        LabeledContent("State") {
+            Text(stateLabel(state.state)).foregroundColor(stateColor(state.state))
+        }
+        LabeledContent("Idle limit") { Text(idleMinutesLabel(state.idle_minutes)) }
+        LabeledContent("Enabled") {
+            Text(state.enabled == true ? "Yes" : "No")
+                .foregroundColor(state.enabled == true ? Theme.Semantic.ok : Theme.Semantic.onSurfaceMuted)
+        }
+        if state.watchdog_blocked == true {
+            // `intentional` is a STRING ("autodown") during a teardown,
+            // not a Bool — an intentional block is expected, not a fault.
+            LabeledContent("Watchdog block") {
+                Text(state.watchdog_intentional == nil ? "active" : "intentional (\(state.watchdog_intentional!))")
+                    .foregroundColor(state.watchdog_intentional == nil ? Theme.Semantic.bad : Theme.Semantic.onSurfaceMuted)
             }
-            if let blockedBy = state.blocked_by, !blockedBy.isEmpty {
-                blockedByRow(blockedBy)
-            }
-            if state.force_armed == true {
-                Label("Force-armed (cron guard overridden)",
-                      systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundColor(Theme.Semantic.warn)
-            }
+        }
+        if let blockedBy = state.blocked_by, !blockedBy.isEmpty {
+            blockedByRow(blockedBy)
+        }
+        if state.force_armed == true {
+            Label("Force-armed (cron guard overridden)",
+                  systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundColor(Theme.Semantic.warn)
         }
     }
 
@@ -198,18 +211,6 @@ struct AutodownView: View {
         return "\(minutes) min"
     }
 
-    private func statusRow(_ label: String, value: String, color: Color = Theme.Semantic.onSurfaceMuted) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label)
-                .font(.body)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-            Spacer()
-            Text(value)
-                .font(.body.weight(.medium))
-                .foregroundColor(color)
-        }
-    }
-
     private func blockedByRow(_ text: String) -> some View {
         Label(text, systemImage: "hand.raised.fill")
             .font(.caption)
@@ -218,108 +219,110 @@ struct AutodownView: View {
 
     // MARK: - Controls (all confirm-gated)
 
+    /// `value` is the loaded status: the controls are only shown once the
+    /// screen actually KNOWS the enabled state. Before a status value has
+    /// arrived (loading / idle / failed-with-no-fallback) `value?.enabled` is
+    /// nil, which would drop us into the ENABLE branch and show a misleading
+    /// "Enable Autodown" set on an already-armed cluster — the operator's
+    /// most-used surface, and every visit used to flash the wrong controls at
+    /// the start of a load.
     @ViewBuilder
-    private func controlSection(client: HSCCClient) -> some View {
-        // Only show actionable controls once we actually KNOW the current
-        // enabled state. Before a status value has arrived (loading / idle /
-        // failed-with-no-fallback) `value?.enabled` is nil, which would drop us
-        // into the ENABLE branch and show a misleading "Enable Autodown" set
-        // on an already-armed cluster — the operator's most-used surface, and
-        // every visit flashes the wrong controls at the start of a load.
-        if let value {
-            let enabled = value.enabled == true
-            HSSectionCard(title: "Controls", systemImage: "slider.horizontal.3") {
-                VStack(alignment: .leading, spacing: 14) {
-                    if enabled {
-                        // Disable — confirm-gated. Names what will happen.
-                        MutationButton(
-                            title: "Disable Autodown",
-                            systemImage: "pause.circle",
-                            destructive: false,
-                            prompt: "Disable autodown? The serving layer is NOT restarted (use Wake to bring it up).",
-                            run: {
-                                let result = try await client.autodownDisable()
-                                await reloadAfterMutation()
-                                return result.message ?? "Autodown disabled."
-                            }
-                        )
+    private func controlSection(client: HSCCClient, value: AutodownStatusResponse) -> some View {
+        let enabled = value.enabled == true
+        Section("Controls") {
+            if enabled {
+                // Disable — confirm-gated. Names what will happen.
+                MutationButton(
+                    title: "Disable Autodown",
+                    systemImage: "pause.circle",
+                    destructive: false,
+                    prompt: "Disable autodown? The serving layer is NOT restarted (use Wake to bring it up).",
+                    run: {
+                        let result = try await client.autodownDisable()
+                        await reloadAfterMutation()
+                        return result.message ?? "Autodown disabled."
+                    }
+                )
+                .accessibilityLabel("Disable autodown")
 
-                        // Wake — confirm-gated; enters the polling "waking" state.
-                        MutationButton(
-                            title: "Wake Now",
-                            systemImage: "bolt.circle",
-                            destructive: false,
-                            prompt: "Force-wake the serving layer now? This starts every serving unit and can take up to ~9 minutes.",
-                            run: {
-                                let result = try await client.autodownWake()
-                                beginWaking(result)
-                                return result.message ?? "Wake initiated."
-                            }
-                        )
+                // Wake — confirm-gated; enters the polling "waking" state.
+                MutationButton(
+                    title: "Wake Now",
+                    systemImage: "bolt.circle",
+                    destructive: false,
+                    prompt: "Force-wake the serving layer now? This starts every serving unit and can take up to ~9 minutes.",
+                    run: {
+                        let result = try await client.autodownWake()
+                        beginWaking(result)
+                        return result.message ?? "Wake initiated."
+                    }
+                )
+                .accessibilityLabel("Wake the serving fleet now")
 
-                        // Cancel — confirm-gated.
-                        MutationButton(
-                            title: "Cancel Teardown",
-                            systemImage: "xmark.circle",
-                            destructive: true,
-                            prompt: "Cancel an in-progress autodown teardown? Any stop already issued stays stopped.",
-                            run: {
-                                let result = try await client.autodownCancel()
-                                await reloadAfterMutation()
-                                return result.message ?? "Cancel requested."
-                            }
-                        )
-                    } else {
-                        // Enable — confirm-gated, with an idle-minutes picker and a
-                        // force toggle. The confirmation names what enabling does.
-                        Picker("Idle minutes", selection: $idleMinutes) {
-                            ForEach(idleOptions, id: \.self) { m in
-                                Text("\(m) min").tag(m)
-                            }
-                        }
-                        .pickerStyle(.menu)
-
-                        Toggle("Force (override cron guard)", isOn: $force)
-                            .font(.subheadline)
-
-                        MutationButton(
-                            title: "Enable Autodown",
-                            systemImage: "play.circle",
-                            prompt: "Enable autodown\(force ? " (forced)" : "") with a \(idleMinutes)-min idle limit? The cluster will power down after \(idleMinutes) min idle.",
-                            run: {
-                                let result = try await client.autodownEnable(idleMinutes: idleMinutes, force: force)
-                                await reloadAfterMutation()
-                                return result.message ?? "Autodown enabled (\(idleMinutes) min)."
-                            }
-                        )
+                // Cancel — confirm-gated.
+                MutationButton(
+                    title: "Cancel Teardown",
+                    systemImage: "xmark.circle",
+                    destructive: true,
+                    prompt: "Cancel an in-progress autodown teardown? Any stop already issued stays stopped.",
+                    run: {
+                        let result = try await client.autodownCancel()
+                        await reloadAfterMutation()
+                        return result.message ?? "Cancel requested."
+                    }
+                )
+                .accessibilityLabel("Cancel autodown teardown")
+            } else {
+                // Enable — confirm-gated, with an idle-minutes picker and a
+                // force toggle. The confirmation names what enabling does.
+                Picker("Idle minutes", selection: $idleMinutes) {
+                    ForEach(idleOptions, id: \.self) { m in
+                        Text("\(m) min").tag(m)
                     }
                 }
+                .pickerStyle(.menu)
+
+                Toggle("Force (override cron guard)", isOn: $force)
+                    .font(.subheadline)
+
+                MutationButton(
+                    title: "Enable Autodown",
+                    systemImage: "play.circle",
+                    prompt: "Enable autodown\(force ? " (forced)" : "") with a \(idleMinutes)-min idle limit? The cluster will power down after \(idleMinutes) min idle.",
+                    run: {
+                        let result = try await client.autodownEnable(idleMinutes: idleMinutes, force: force)
+                        await reloadAfterMutation()
+                        return result.message ?? "Autodown enabled (\(idleMinutes) min)."
+                    }
+                )
+                .accessibilityLabel("Enable autodown with \(idleMinutes) minute idle limit")
             }
         }
     }
 
     // MARK: - Cron notes
 
+    /// Only appears when the server actually reports cron jobs — an empty
+    /// "no cron jobs" section would be noise on the operator's most-used
+    /// screen (this was the behaviour inside the old card and it is kept).
     @ViewBuilder
     private var cronSection: some View {
         if let state = value {
             let cpuOnly = state.active_cron_cpu_only ?? []
             let model = state.active_cron_model ?? []
             if !cpuOnly.isEmpty || !model.isEmpty {
-                HSSectionCard(title: "Active cron jobs", systemImage: "calendar") {
-                    VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-                        if !model.isEmpty {
-                            Label("Model-requiring jobs block autodown: \(model.joined(separator: ", "))",
-                                  systemImage: "exclamationmark.triangle.fill")
-                                .font(.caption)
-                                .foregroundColor(Theme.Semantic.warn)
-                        }
-                        if !cpuOnly.isEmpty {
-                            Label("CPU-only jobs run through idle: \(cpuOnly.joined(separator: ", "))",
-                                  systemImage: "cpu")
-                                .font(.caption)
-                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                        }
+                Section("Active cron jobs") {
+                    if !model.isEmpty {
+                        Label("Model-requiring jobs block autodown: \(model.joined(separator: ", "))",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundColor(Theme.Semantic.warn)
+                    }
+                    if !cpuOnly.isEmpty {
+                        Label("CPU-only jobs run through idle: \(cpuOnly.joined(separator: ", "))",
+                              systemImage: "cpu")
+                            .font(.caption)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     }
                 }
             }
