@@ -86,7 +86,7 @@ enum AppDestination: String, Hashable, Identifiable {
         case .chats: "bubble.left.and.bubble.right"
         case .cards: "square.grid.2x2"
         case .fleetControl: "slider.horizontal.3"
-        case .nodesServing: "serverrack"
+        case .nodesServing: "server.rack"
         case .opsHealth: "heart.text.square"
         case .autodown: "power"
         case .selfHeal: "power"   // legacy alias — same destination, same glyph

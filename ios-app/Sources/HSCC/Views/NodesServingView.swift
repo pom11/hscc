@@ -71,7 +71,7 @@ struct NodesServingView: View {
                     }
                 }
             } else {
-                HSConnectGate(systemImage: "serverrack",
+                HSConnectGate(systemImage: "server.rack",
                               verb: "to see which node runs what and control the serving units")
             }
         }
