@@ -1180,6 +1180,90 @@ class TestWorkersStartupGrace:
         assert len(heals) == 1       # grace elapsed → genuine failure → heal
         assert heals[0][2] == "10.0.0.2"
 
+    # ── F1 (HEAL_CASCADE 2026-10-14): the GENTLE relaunch path shares the grace ──
+    #
+    # The pre-fix code had the load grace ONLY on the force-recreate path. The
+    # plain `Worker X down — relaunching` path was guarded solely by
+    # `_worker_relaunch_at`, which records relaunches THAT path issued — so a
+    # container created by engine-wedge recovery, `cluster up` or a template
+    # apply was invisible to it and got destroyed mid-load, every check. The
+    # incident log shows exactly that: template apply recreated all 4 units at
+    # 07:21:45 and 07:24:29 check_workers relaunched a unit created 2m44s
+    # earlier, with a ~3 min model load ahead of it.
+
+    def _relaunch_recorder(self, health, monkeypatch):
+        """Record the gentle relaunches (stop+Popen) without touching a node."""
+        relaunches = []
+        monkeypatch.setattr(
+            health.subprocess, "Popen",
+            lambda argv, **k: relaunches.append(list(argv)) or None)
+        return relaunches
+
+    def test_relaunch_shares_grace_for_container_started_by_another_path(
+            self, tmp_hfcc_dir, monkeypatch):
+        """A unit created by ANOTHER path (age known, never served) must not be
+        relaunched by check_workers, even though this path never relaunched it.
+        This is the cascade bug: `_worker_relaunch_at` is empty, so the pre-fix
+        guard let the relaunch through and destroyed the load."""
+        import time as _t
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        relaunches = self._relaunch_recorder(health, monkeypatch)
+        heals = self._heals_recorder(health, monkeypatch)
+        # Container is 60s old (well inside the grace) and has never served.
+        young = _t.time() - 60
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: young)
+        health._worker_container_state[("10.0.0.2", 8000)] = {
+            "created_ts": young, "has_served": False}
+        for _ in range(3):                      # several 60s checks
+            health.check_workers()
+        assert relaunches == []                 # mid-load -> no destroy
+        assert heals == []                      # and still no force-recreate
+        # The unit is honestly reported down (not silently "online").
+        from hscc_daemon import state as state_mod
+        state = state_mod.read_state("workers") or {}
+        assert "w-10.0.0.2" in state.get("down", [])
+
+    def test_relaunch_still_fires_once_grace_expires(self, tmp_hfcc_dir, monkeypatch):
+        """The grace is bounded: an OLD never-served container is a genuine
+        failure and the gentle path must still repair it (no stranding)."""
+        import time as _t
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        relaunches = self._relaunch_recorder(health, monkeypatch)
+        monkeypatch.setattr(health, "_autoheal_worker_fn", lambda *a: {"status": "ok"})
+        old = _t.time() - health.WORKER_AUTOHEAL_LOAD_GRACE - 60
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: old)
+        health._worker_container_state[("10.0.0.2", 8000)] = {
+            "created_ts": old, "has_served": False}
+        health.check_workers()
+        assert len(relaunches) == 1
+
+    def test_relaunch_not_blocked_when_no_container_evidence(
+            self, tmp_hfcc_dir, monkeypatch):
+        """The gentle path is fail-OPEN on unknown age (unlike the destructive
+        force-recreate path): with no container at all there is no load to
+        destroy, and shielding would strand a dead unit for 20 minutes."""
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        relaunches = self._relaunch_recorder(health, monkeypatch)
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: None)
+        health.check_workers()
+        assert len(relaunches) == 1
+
+    def test_force_recreate_path_still_fails_closed(
+            self, tmp_hfcc_dir, monkeypatch):
+        """The destructive path keeps its fail-CLOSED behaviour after F1's
+        rename/flag split: unknown age → no force-recreate."""
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        heals = self._heals_recorder(health, monkeypatch)
+        self._relaunch_recorder(health, monkeypatch)
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: None)
+        for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE * 2):
+            health.check_workers()
+        assert heals == []
+
     def test_sparkrun_created_map_builds_host_port_launch(self, monkeypatch):
         """_sparkrun_created_map() turns a ClusterStatusResult.to_dict()-shaped
         dict into a (host, port) → launch-epoch map — the signal the grace keys

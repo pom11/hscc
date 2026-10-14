@@ -1489,9 +1489,28 @@ def _default_worker_container_created_ts(node, port):
 _worker_container_created_ts = _default_worker_container_created_ts
 
 
-def _suppress_autoheal_for_startup_grace(key, label, node, port, now_wall):
-    """True if the down unit is still LOADING, not dead: its container is
-    younger than WORKER_AUTOHEAL_LOAD_GRACE AND has never served.
+def _unit_is_still_loading(key, node, port, now_wall, *, fail_closed=False):
+    """True if the (node, port) unit is still LOADING, not dead: its container
+    is younger than WORKER_AUTOHEAL_LOAD_GRACE AND has never served.
+
+    SHARED PREDICATE (F1, HEAL_CASCADE 2026-10-14): BOTH down-repair paths in
+    check_workers consult this — the debounced auto-heal (force-recreate) AND
+    the plain gentle relaunch ("Worker X down — relaunching"). Before the
+    cascade only the auto-heal path asked, so check_workers destroyed loads in
+    progress that other paths (wedge recovery, `cluster up`, template apply)
+    had started: the age key here is the CONTAINER, so a unit created
+    elsewhere is recognised as loading too. The relaunch path's own guard
+    (`_worker_relaunch_at`) only knew about relaunches IT had issued.
+
+    `fail_closed` decides what UNKNOWN age means, and the two callers differ
+    on purpose because their actions differ in cost:
+      * auto-heal passes True — a force-recreate is destructive and expensive,
+        so with no age evidence we assume loading and shield for the window.
+      * the gentle relaunch passes False — when we have no age AND no stored
+        record, there is no container to destroy (the created-ts map returns a
+        stale cache rather than nothing on query failure, so a genuinely
+        missing entry means missing container), and shielding would strand a
+        dead unit unrepaired for the whole grace window.
 
     Both facts are durable: container age comes from sparkrun (re-resolved
     here on the down-threshold path, so a recreate is detected and has_served
@@ -1503,11 +1522,10 @@ def _suppress_autoheal_for_startup_grace(key, label, node, port, now_wall):
     A unit that HAS served and then stopped is exempt (has_served=True) and
     heals promptly.
 
-    FAIL-CLOSED (bounded): when the container age cannot be determined at all
-    (live sparkrun age unknown AND no stored created_ts), we ASSUME the unit is
-    still loading rather than dead — store created_ts = now_wall and shield it
-    for the grace window. Rationale: a force-recreate costs a full multi-minute
-    model reload and can loop (the incident this grace exists to kill), which is
+    FAIL-CLOSED (bounded, `fail_closed=True` only): assume the unit is still
+    loading rather than dead — store created_ts = now_wall and shield it for
+    the grace window. Rationale: a repair costs a full multi-minute model
+    reload and can loop (the incident this grace exists to kill), which is
     strictly worse than a bounded grace-window of suppressed healing. The
     fresh-assumption is durable, so it holds across a daemon restart, and it
     EXPIRES after WORKER_AUTOHEAL_LOAD_GRACE — a genuinely dead unit still
@@ -1527,6 +1545,11 @@ def _suppress_autoheal_for_startup_grace(key, label, node, port, now_wall):
         has_served = False
     created_ts = live_ts if live_ts is not None else stored_ts
     if created_ts is None:
+        if not fail_closed:
+            # Gentle-relaunch caller: no container evidence at all, so there
+            # is no in-progress load to destroy — let the repair proceed
+            # instead of stranding a dead unit for the whole grace window.
+            return False
         # Fail-closed: cannot determine age and have never recorded one —
         # assume this is a freshly (re)created, still-loading container and
         # shield it for the grace window. Durable so a restart doesn't reset
@@ -1783,12 +1806,12 @@ def check_workers():
                 and now_wall - _worker_last_autoheal.get(key, 0.0) >= cooldown_s):
             # STARTUP GRACE (durable): a unit whose container is younger than
             # the grace AND has never served is still LOADING, not dead — do
-            # NOT force-recreate it. Keyed on container age (docker inspect) +
+            # NOT force-recreate it. Keyed on container age (sparkrun status) +
             # a persisted has-served flag, so this holds ACROSS a daemon
             # restart (the in-memory debounce resets; container age does not).
             # A unit that HAS served and then stopped is exempt and heals
             # promptly. The unit still counts as down (not online).
-            if _suppress_autoheal_for_startup_grace(key, label, node, port, now_wall):
+            if _unit_is_still_loading(key, node, port, now_wall, fail_closed=True):
                 log(f"Auto-heal: worker {label} ({node}:{port}) down {streak}x "
                     f"but container <{WORKER_AUTOHEAL_LOAD_GRACE}s old and has "
                     f"never served — still loading, NOT auto-healing")
@@ -1809,6 +1832,21 @@ def check_workers():
         last = _worker_relaunch_at.get(key)
         if last and now_wall - last < grace_secs:
             down.append(label)  # still within load grace — leave it
+            continue
+        # SHARED LOAD GRACE (F1, HEAL_CASCADE 2026-10-14): the guard above only
+        # knows about relaunches THIS path issued. A container started by wedge
+        # recovery, `cluster up` or a template apply is invisible to it, so the
+        # cascade could relaunch (destroying a ~3 min model load) every check.
+        # The durable container-age + never-served predicate sees loads started
+        # by ANY path, which is exactly what a model still loading needs.
+        # Fail-open here (no container evidence -> repair proceeds) because the
+        # alternative strands a dead unit; the destructive force-recreate path
+        # keeps fail-closed.
+        if _unit_is_still_loading(key, node, port, now_wall, fail_closed=False):
+            down.append(label)  # a container is loading (started by any path)
+            log(f"Worker {label} ({node}:{port}) down but container "
+                f"<{WORKER_AUTOHEAL_LOAD_GRACE}s old and has never served — "
+                f"still loading, NOT relaunching")
             continue
         if not recipe:
             down.append(label)
