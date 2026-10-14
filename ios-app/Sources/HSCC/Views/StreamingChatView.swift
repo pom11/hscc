@@ -297,12 +297,35 @@ struct StreamingChatView: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, Theme.Spacing.xl.rawValue)
             }
-            Text("Check Settings → Host, Port, and Token, then pull to reconnect.")
+            Text("Check Settings → Host, Port, and Token, then retry.")
                 .font(.footnote)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, Theme.Spacing.xl.rawValue)
+            // The text used to say "pull to reconnect" while the ScrollView had
+            // no .refreshable — the affordance did not exist. A Retry button
+            // (rather than .refreshable) keeps the fix confined to the failed
+            // state: a pull-to-refresh on the outer ScrollView would also fire
+            // mid-turn while browsing a live stream and re-seed the window.
+            Button(action: retryStream) {
+                Label("Retry", systemImage: "arrow.clockwise")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Theme.Semantic.accent)
+            .foregroundColor(Theme.Semantic.onAccent)
+            .accessibilityHint("Reopens the session stream for \(project).")
         }
+    }
+
+    /// Reconnect from the failed state using only the store's public
+    /// lifecycle: `stop()` tears the socket down and clears `isActive`, so
+    /// `start()` rebuilds a fresh window (re-seed from history, reopen the
+    /// socket) exactly as a fresh appearance would. The stream files stay
+    /// untouched.
+    private func retryStream() {
+        store.stop()
+        startStream()
     }
 
     // MARK: - Composer
