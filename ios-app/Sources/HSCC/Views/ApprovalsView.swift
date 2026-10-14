@@ -40,7 +40,17 @@ struct ApprovalsView: View {
                     notConfiguredView
                 }
             }
-            .navigationTitle("Approvals")
+            // Spec §5: "count in the title". Derived from the SAME response the
+            // list renders (its own pending filter), not from the shell's
+            // separately-polled badge count — so the title can never disagree
+            // with the rows below it. Nil count (loading/failed) = plain title.
+            .navigationTitle(pendingCount.map { "Approvals (\($0))" } ?? "Approvals")
+    }
+
+    /// Pending approvals in the currently-loaded (or stale last-known) read.
+    private var pendingCount: Int? {
+        guard let response = approvals.value else { return nil }
+        return (response.tasks ?? []).filter(\.isPendingApproval).count
     }
 
     private var notConfiguredView: some View {
@@ -123,9 +133,13 @@ struct ApprovalsView: View {
                     Text("\(age)d").font(.caption).foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
                 Spacer()
-                Label(approvalKindLabel(card.block_kind), systemImage: "hand.raised.fill")
-                    .font(.caption)
-                    .foregroundColor(Theme.Semantic.warn)
+                // The sixth of §6's bespoke badges ("Approvals comment
+                // chips"): a warn-tinted `Label`, the only badge left in the
+                // app that wasn't HSStatusChip. Same role (warn), now the same
+                // chip — so it can't drift from the other five again.
+                HSStatusChip(approvalKindLabel(card.block_kind),
+                             systemImage: "hand.raised.fill",
+                             color: Theme.Semantic.warn)
             }
             // A human-readable why (the reason the worker blocked), when the
             // server recorded one.
