@@ -49,6 +49,24 @@ for f in v1_ping v1_health v1_verify v1_cluster_status cluster_hosts \
 done
 
 mkdir -p "$OUT"
+mkdir -p "$OUT/manifests"
+
+# The device may report "booted" before SpringBoard actually accepts launches
+# (FBSOpenApplicationServiceErrorDomain code=1, "denied by service delegate")
+# — seen right after `simctl boot`. Wait for one real launch before looping.
+wait_launchable() {
+  for i in $(seq 1 24); do
+    if xcrun simctl launch "$DEVICE" "$BUNDLE" >/dev/null 2>&1; then
+      xcrun simctl terminate "$DEVICE" "$BUNDLE" >/dev/null 2>&1
+      echo "  device accepts launches (attempt $i)"
+      return 0
+    fi
+    sleep 5
+  done
+  echo "FATAL: device never accepted a launch after 120s"; return 1
+}
+wait_launchable || exit 1
+
 # The recipe screens (spec §5/§8) + the shell's own surfaces. Fleet here also
 # serves as the t_2a29a7ab gate shot once the Models section lands.
 SCREENS=(home fleet nodesServing opsHealth autodown approvals memory \
@@ -66,7 +84,35 @@ for screen in "${SCREENS[@]}"; do
     sleep 4   # fixture fetches + SwiftUI first render (local canned bodies)
     png="$OUT/phase2-${screen}-${mode}.png"
     xcrun simctl io "$DEVICE" screenshot "$png"
+    # proof, not vibes: pull the per-launch manifest (fixture paths served vs
+    # missed, written by DebugHarness.writeCaptureManifest) so a screen that
+    # silently fell back to its connect gate FAILS the run instead of shipping
+    # an empty-state screenshot labelled as the redesigned screen.
+    if [ -f "$DOC/manifest-$screen.json" ]; then
+      cp "$DOC/manifest-$screen.json" "$OUT/manifests/manifest-${screen}-${mode}.json"
+    fi
     echo "  captured $png"
   done
 done
+
+echo "==> verifying manifests (every screen must have served >= 1 fixture)"
+FAIL=0
+python3 - "$OUT/manifests" <<'PY' || FAIL=1
+import json, sys, pathlib
+screens = {}
+for p in sorted(pathlib.Path(sys.argv[1]).glob("manifest-*.json")):
+    d = json.loads(p.read_text())
+    name = p.stem.replace("manifest-", "").rsplit("-", 1)[0]
+    screens.setdefault(name, d)
+missing = [s for s, d in screens.items() if not d.get("served")]
+print(f"  screens with manifests: {len(screens)}")
+for s in sorted(screens):
+    d = screens[s]
+    print(f"  {s:14s} served={len(d.get('served', {}))} missed={len(d.get('missed', {}))} "
+          f"isConfigured={d.get('isConfigured')}")
+if missing:
+    print(f"  FAIL — no fixture served (screen showed a gate/empty state): {missing}")
+    sys.exit(1)
+PY
+[ "$FAIL" = "0" ] || { echo "MANIFEST CHECK FAILED"; exit 1; }
 echo "DONE: ${#SCREENS[@]} screens x 2 appearances -> $OUT"

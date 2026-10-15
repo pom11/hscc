@@ -52,6 +52,7 @@ struct HSCCApp: App {
         if DebugHarness.fixturesEnabled {
             let store = SettingsStore()
             DebugHarness.seedFixtureCluster(in: store)
+            DebugHarness.writeCaptureManifest(settings: store)
             _settings = StateObject(wrappedValue: store)
         } else {
             _settings = StateObject(wrappedValue: SettingsStore())

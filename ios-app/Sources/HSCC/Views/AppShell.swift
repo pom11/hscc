@@ -342,6 +342,20 @@ struct AppShell: View {
     }
 
     private func makeClient() -> HSCCClient? {
+        #if DEBUG
+        // Capture harness (t_0d5632bc): a headless `simctl launch` cannot write
+        // the Keychain (OSStatus -34018 errSecMissingEntitlement), so the seeded
+        // fixture cluster reads back as "no token" and every optional-client
+        // screen would honestly show its connect gate — proving the shell but
+        // not the list recipe. Fixture mode therefore builds the client
+        // directly, bypassing the Keychain entirely; its URLSession is the
+        // fixture protocol (HSCCClient.defaultSession), which forwards NOTHING
+        // to the network. Release builds never take this path.
+        if DebugHarness.fixturesEnabled {
+            return HSCCClient(host: "fixtures.invalid", port: 8788,
+                              token: "debug-fixture-token")
+        }
+        #endif
         guard settings.isConfigured,
               let token = settings.token,
               let port = Int(settings.port) else { return nil }

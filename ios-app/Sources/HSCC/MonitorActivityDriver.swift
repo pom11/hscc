@@ -300,6 +300,17 @@ final class MonitorActivityDriver {
 
     /// Push content to the activity, lazily starting it on first real data.
     private func push(_ content: MonitorActivityAttributes.ContentState) async {
+        #if DEBUG
+        // Capture harness (t_0d5632bc): requesting a Live Activity while
+        // notification authorization is `notDetermined` raises the same system
+        // "Would Like to Send You Notifications" sheet the harness exists to
+        // avoid — and with fixtures feeding real monitor data, this path fires
+        // on every capture launch. A bubble is not screenshot content.
+        if DebugHarness.suppressNotifications {
+            DebugHarness.noteSuppressed("live-activity:monitor")
+            return
+        }
+        #endif
         if current == nil {
             // Only start a bubble once there is real data (anything other than
             // a bare "unreachable" skeleton). A monitor with no data is better

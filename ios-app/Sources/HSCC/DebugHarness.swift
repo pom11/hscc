@@ -50,6 +50,25 @@ import Foundation
 
 enum DebugHarness {
 
+    /// True when this process must not touch the notification/Live-Activity
+    /// surfaces at all. THREE prompters share the same system sheet:
+    ///   1. `requestAuthorization` at launch (gated in NotificationsAppDelegate),
+    ///   2. `UNUserNotificationCenter.add()` when a banner fires (gated in
+    ///      NotificationCoordinator.fire),
+    ///   3. `ActivityKit.Activity.request` — asking for a Live Activity while
+    ///      notification authorization is still `notDetermined` raises the SAME
+    ///      "Would Like to Send You Notifications" sheet (and once data flows,
+    ///      the monitor/session drivers request one on every launch).
+    /// A screenshot never needs any of them, and each gate is a no-op for
+    /// shipping builds (this whole file, and every caller, is #if DEBUG).
+    static var suppressNotifications: Bool { fixturesEnabled }
+
+    /// Which suppression gate actually fired this launch (DEBUG manifest only).
+    /// If a capture STILL shows the sheet with an empty log, the prompt is not
+    /// app-initiated and the theory needs revisiting — that is the point.
+    nonisolated(unsafe) static var suppressionLog: [String] = []
+    static func noteSuppressed(_ what: String) { suppressionLog.append(what) }
+
     /// True when this process was launched for headless capture.
     static var fixturesEnabled: Bool {
         ProcessInfo.processInfo.environment["HSCC_DEBUG_FIXTURES"] == "1"
@@ -142,12 +161,47 @@ enum DebugHarness {
                                    host: "fixtures.invalid", port: 8788)
         store.saveCluster(cluster, token: "debug-fixture-token")
     }
+
+    /// Per-launch proof that the capture produced REAL rendered content, for
+    /// `capture_screens.sh` to check instead of a human eyeballing 24 PNGs:
+    /// whether the shell considered itself configured (the exact inputs
+    /// `makeClient()` reads) and which fixture paths were served vs missed.
+    /// Written ~3s after launch, i.e. after the views' `.task` loads have run
+    /// but before the script's screenshot.
+    @MainActor
+    static func writeCaptureManifest(settings: SettingsStore) {
+        Task {
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            let obj: [String: Any] = [
+                "screen": ProcessInfo.processInfo.environment["HSCC_DEBUG_SCREEN"] ?? "",
+                "isConfigured": settings.isConfigured,
+                "hasToken": settings.hasToken,
+                "activeClusterID": settings.activeClusterID.map { $0.uuidString } ?? "nil",
+                "tokenSaveFailure": settings.tokenSaveFailure ?? "none",
+                "served": FixtureURLProtocol.served,
+                "missed": FixtureURLProtocol.missed,
+                "suppressed": DebugHarness.suppressionLog,
+            ]
+            guard let dir = fixturesDirectory,
+                  let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
+            else { return }
+            let screen = (ProcessInfo.processInfo.environment["HSCC_DEBUG_SCREEN"] ?? "unknown")
+                .replacingOccurrences(of: "/", with: "_")
+            try? data.write(to: dir.appendingPathComponent("manifest-\(screen).json"))
+        }
+    }
 }
 
 /// Answers GETs from the canned folder; everything else fails fast with 501
 /// ("no fixture served for this path"), which surfaces as the view's honest
 /// failed-row rather than fake content.
 final class FixtureURLProtocol: URLProtocol {
+
+    /// (path -> served/missed) for the capture manifest. Static on purpose:
+    /// one protocol class answers every request in the process, and the
+    /// manifest is only ever read in DEBUG fixture mode.
+    nonisolated(unsafe) static var served: [String: Int] = [:]
+    nonisolated(unsafe) static var missed: [String: Int] = [:]
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -161,10 +215,12 @@ final class FixtureURLProtocol: URLProtocol {
         guard let name = DebugHarness.fixtureFile(forPath: path),
               let dir = DebugHarness.fixturesDirectory,
               let data = try? Data(contentsOf: dir.appendingPathComponent(name)) else {
+            FixtureURLProtocol.missed[path, default: 0] += 1
             finish(status: 501,
                    body: Data("{\"speak\":\"debug fixture mode: no fixture served for \(path)\"}".utf8))
             return
         }
+        FixtureURLProtocol.served[path, default: 0] += 1
         finish(status: 200, body: data)
     }
 
