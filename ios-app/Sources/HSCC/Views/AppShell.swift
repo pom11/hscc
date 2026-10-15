@@ -131,9 +131,17 @@ struct AppShell: View {
     /// PHASE2_PROGRESS_t_25aed701 "Screenshots"). Unknown values and Release
     /// builds get the normal `.home` default; this NEVER guesses a screen.
     /// (Fixture seeding for the same launch runs in onAppear below.)
+    /// Debug-only drawer-open seam (t_5ed5d281): `HSCC_DEBUG_OPEN_DRAWER=1`
+    /// attempts the two documented ways to present the sidebar column at
+    /// launch (selection nil = documented "sidebar first when no selection";
+    /// delayed preferredCompactColumn write). iPhone 16 / iOS 26.3 XCUITest
+    /// evidence (DrawerNavigationUITests, 2026-10-15): the compact column
+    /// ignores BOTH — selection .home stays on screen and the column write
+    /// never lands. The shipping path of this flag is fixed in commit B.
     static func initialSelection() -> AppDestination? {
         #if DEBUG
         if let screen = DebugHarness.requestedScreen() { return screen }
+        if DebugHarness.openDrawerAtLaunch { return nil }
         #endif
         return .home
     }

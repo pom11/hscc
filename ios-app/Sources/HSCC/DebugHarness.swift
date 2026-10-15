@@ -74,6 +74,17 @@ enum DebugHarness {
         ProcessInfo.processInfo.environment["HSCC_DEBUG_FIXTURES"] == "1"
     }
 
+    /// True when the drawer must be OPEN at launch (t_5ed5d281 UI tests). A
+    /// launch with `HSCC_DEBUG_OPEN_DRAWER=1` puts NavigationSplitView into
+    /// the exact compact presentation a user's top-left toggle tap produces
+    /// (the sidebar column filling the screen), so XCUITest can assert the
+    /// drawer walk deterministically from a known start state instead of
+    /// first fighting its way into the drawer. The seam only CHOOSES the
+    /// column; every navigation rule under test is the shipping one.
+    static var openDrawerAtLaunch: Bool {
+        ProcessInfo.processInfo.environment["HSCC_DEBUG_OPEN_DRAWER"] == "1"
+    }
+
     /// The drawer destination a capture launch should open, nil for a normal
     /// launch or an unknown value (never a crash on a typo — same honesty rule
     /// as DeepLinkParser's refusal to guess).

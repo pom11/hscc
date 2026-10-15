@@ -87,6 +87,18 @@ schemes:
       config: Debug
     archive:
       config: Release
+  # The UI-test lane gets its OWN scheme so `xcodebuild test -scheme HSCC`
+  # stays exactly what it was (nothing) and the drawer walk runs explicitly:
+  #   xcodebuild test -scheme HSCCUITests -destination 'platform=iOS Simulator,id=<iPhone16>'
+  HSCCUITests:
+    build:
+      targets:
+        HSCC: [test]
+        HSCCUITests: [test]
+    test:
+      config: Debug
+      targets:
+        - HSCCUITests
 
 
 targets:
@@ -531,3 +543,25 @@ targets:
     dependencies:
       - sdk: WidgetKit.framework
       - sdk: ActivityKit.framework
+
+  # The app's FIRST UI-testing target (t_5ed5d281, operator directive
+  # 2026-10-15: "real taps, no human"). The drawer dead-end is a compact-size-
+  # class navigation bug: unit/typecheck gates cannot see it, and an iPad
+  # (regular width) proves nothing. Launches carry HSCC_DEBUG_FIXTURES=1 (the
+  # canned-fixture URLProtocol — zero live API) and the drawer-open seam; the
+  # tests themselves are ordinary XCUITest taps and queries.
+  HSCCUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: UITests/DrawerNavigationUITests.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        SKIP_INSTALL: YES
+        TEST_TARGET_NAME: HSCC        # hosts the runner inside the HSCC app
+    dependencies:
+      - target: HSCC
