@@ -27,6 +27,72 @@ from hscc_daemon import cli_theme as theme
 
 VALID_SUBCOMMANDS = ("status", "enable", "disable", "wake", "cancel")
 
+# Flags that mean "print help, execute nothing" at the subcommand level
+# (BROKEN B7/B8/B9, card t_3dd8651e). Intercepted in cmd_autodown BEFORE the
+# verb runs — see SUBCOMMAND_HELP.
+SUB_HELP = ("--help", "-h")
+
+# Per-subcommand help, printed INSTEAD of running the verb when the
+# subcommand's FIRST positional is --help/-h. The verbs all mutate or act
+# (record_activity, save_config, autoup, the cron-guard, the interlock
+# screens) — before this map existed, ``hscc autodown disable --help``
+# DISARMED autodown while printing "help" (B8). Lines stay <= 78 columns,
+# matching the group HELP_TEXT convention (keeps the CLI help-surface gate's
+# wrap analysis clean at width 80).
+SUBCOMMAND_HELP = {
+    "status": """\
+hscc autodown status [--json]
+
+Read-only report of the idle autodown/autoup state: enabled/disabled, state,
+idle window, last activity, down_since, the watchdog block, and which
+interlocks (kanban work, PR/CI) are currently holding off a teardown.
+
+Never writes, never creates, never acts. Pass --json for machine-readable
+output (scripting).""",
+    "enable": """\
+hscc autodown enable [--idle-minutes <n>] [--force]
+
+Arm idle autodown. Resets the idle timer so arming never immediately tears
+down. Non-acting: if serving is down it does NOT start it — run
+'hscc autodown wake' (or bring it up another way) when you want it up.
+
+Aborts non-zero if an ACTIVE model-requiring Hermes cron job exists (one
+that runs an agent and needs the GPU serving layer). CPU-only watchdogs
+(no_agent:true, model:null) do NOT block — they are noted.
+
+  --idle-minutes <n>   Idle window before teardown (default 10; a
+                       non-negative integer; 0 = only via explicit wake)
+  --force              Arm despite active model-requiring cron jobs
+                       (autodown may power the cluster down when they are
+                       due). Overridden jobs are recorded and shown in
+                       'status'.
+
+Pass --json for machine-readable output (scripting).""",
+    "disable": """\
+hscc autodown disable
+
+Disarm autodown and clear the intentional watchdog block so ordinary
+supervision resumes. Does NOT restart serving — if you want it up, run
+'hscc autodown wake' or bring it up another way.
+
+Pass --json for machine-readable output (scripting).""",
+    "wake": """\
+hscc autodown wake
+
+Force autoup now: bring the serving layer back up (also resets the idle
+timer). Idempotent — no-op while a wake is already in flight.
+
+Pass --json for machine-readable output (scripting).""",
+    "cancel": """\
+hscc autodown cancel
+
+Abort an in-progress teardown: the sequence re-checks the flag between
+stops and, if set, stops cleanly, rolls the block back, and reports.
+Harmless if no teardown is running (the flag is consumed by the next one).
+
+Pass --json for machine-readable output (scripting).""",
+}
+
 # Default idle window (minutes) when `enable` is given no --idle-minutes (§7).
 DEFAULT_IDLE_MINUTES = 10
 
@@ -611,6 +677,18 @@ def cmd_autodown(argv):
         return 0
 
     json_mode = "--json" in argv
+    # --help/-h ANYWHERE in the subcommand argv prints that subcommand's help
+    # and executes NOTHING (BROKEN B7/B8/B9): every verb below mutates or
+    # acts before it reports (record_activity/save_config disarm, autoup
+    # starts the fleet, the cron-guard and the interlock screens shell out),
+    # so the intercept must come BEFORE dispatch — `disable --help` used to
+    # DISARM autodown while printing "help". The check runs on the RAW argv
+    # (before --json/--theme stripping) so a help flag can never be swallowed
+    # as a flag value (e.g. `disable --theme --help`). An unknown subcommand
+    # + --help shows the group help (there is no verb-specific help to print).
+    if len(argv) > 1 and any(a in SUB_HELP for a in argv[1:]):
+        print(SUBCOMMAND_HELP.get(argv[0], HELP_TEXT))
+        return 0
     # Strip --json so no subcommand has to re-filter it from its own rest.
     argv = [a for a in argv if a != "--json"]
     # Strip --theme <name> / --theme=<name> too. hscc.py passes raw args[1:]

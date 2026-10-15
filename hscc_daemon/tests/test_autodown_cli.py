@@ -12,6 +12,10 @@ tmp HOME) is smoke-tested separately in the task report.
 """
 
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -772,6 +776,243 @@ class TestCancel:
         assert rc == 0
         data = json.loads(capsys.readouterr().out)
         assert data["cancel_requested"] is True
+
+
+# ---------------------------------------------------------------------------
+# per-subcommand --help — BROKEN B7/B8/B9 (card t_3dd8651e)
+# ---------------------------------------------------------------------------
+
+class TestSubcommandHelpIsInert:
+    """``<sub> --help`` prints subcommand help and executes NOTHING.
+
+    RED on the base tree (measured): ``disable --help`` DISARMED autodown
+    (rewrote autodown.json + watchdog-block.json), ``status --help`` ran the
+    kanban + PR/CI interlocks (gh canary trip + daemon.log write), ``wake
+    --help`` ran autoup, ``enable --help`` exited 1 via the cron-guard.
+
+    The unit-level guard is a landmine: every mutating / acting / shelling
+    entry point in ``autodown`` is monkeypatched to RAISE — a ``--help`` that
+    reaches any of them fails here even in a sandbox where the side effect
+    itself would be invisible.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _landmines(self, monkeypatch):
+        """Re-patch (declared after the module autouse stubs, so LIFO wins)
+        every entry point a help path must never touch."""
+        def boom(name):
+            def _f(*a, **k):
+                raise AssertionError(
+                    f"--help executed mutating/acting code: {name}()")
+            return _f
+        for fn in ("record_activity", "save_config", "autoup",
+                   "_clear_intentional_block", "list_active_cron_jobs",
+                   "_has_active_work", "kanban_blocking_board",
+                   "list_stale_tasks", "_has_active_pr_ci",
+                   "kanban_check_state", "prci_check_state",
+                   "prci_blocking_signal"):
+            monkeypatch.setattr(ad, fn, boom(fn))
+
+    @pytest.mark.parametrize("sub", ["status", "enable", "disable", "wake",
+                                     "cancel"])
+    def test_sub_help_exits_zero_with_its_own_help(self, sub, capsys,
+                                                   autodown_file, block_file):
+        rc = cmd_autodown([sub, "--help"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert f"hscc autodown {sub}" in out
+        # It is the SUBCOMMAND's help, not the whole group blob.
+        assert "Usage: hscc autodown <subcommand>" not in out
+
+    @pytest.mark.parametrize("sub", ["status", "enable", "disable", "wake",
+                                     "cancel"])
+    def test_sub_help_short_flag(self, sub, capsys, autodown_file,
+                                 block_file):
+        assert cmd_autodown([sub, "-h"]) == 0
+        assert f"hscc autodown {sub}" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("sub", ["status", "enable", "disable", "wake",
+                                     "cancel"])
+    def test_sub_help_leaves_state_files_byte_identical(
+            self, sub, capsys, autodown_file, block_file):
+        """B8 assertion: a help request must never touch live safety state."""
+        armed = json.dumps({"enabled": True, "state": "down",
+                            "idle_minutes": 10,
+                            "last_activity_iso": "2026-08-23T00:00:00+00:00",
+                            "down_since": "2026-08-23T00:10:00+00:00"})
+        blocked = json.dumps({"blocked": True, "intentional": True,
+                              "reason": "autodown teardown"})
+        autodown_file.write_text(armed)
+        Path(block_file).write_text(blocked)
+        stamps = {p: (p.read_bytes(), p.stat().st_mtime_ns)
+                  for p in (autodown_file, Path(block_file))}
+
+        assert cmd_autodown([sub, "--help"]) == 0
+
+        for p, (blob, ns) in stamps.items():
+            assert p.read_bytes() == blob, f"--help mutated {p.name}"
+            assert p.stat().st_mtime_ns == ns, f"--help rewrote {p.name}"
+
+    def test_disable_help_does_not_disarm(self, capsys, autodown_file,
+                                          block_file):
+        """The exact B8 repro, spelled out: disable --help keeps autodown ARMED."""
+        autodown_file.write_text(json.dumps(
+            {"enabled": True, "state": "up", "idle_minutes": 10}))
+        Path(block_file).write_text(json.dumps(
+            {"blocked": True, "intentional": True}))
+        assert cmd_autodown(["disable", "--help"]) == 0
+        cfg = _read_config(autodown_file)
+        assert cfg["enabled"] is True
+        block = json.loads(Path(block_file).read_text())
+        assert block["blocked"] is True and block["intentional"] is True
+
+    @pytest.mark.parametrize("sub", ["status", "enable", "disable", "wake",
+                                     "cancel"])
+    def test_sub_help_text_fits_group_width_convention(
+            self, sub, capsys, autodown_file, block_file):
+        """Sub help lines stay <= 78 cols (group HELP_TEXT convention; keeps
+        the (B) wrap gate clean at width 80)."""
+        assert cmd_autodown([sub, "--help"]) == 0
+        out = capsys.readouterr().out
+        for ln in out.splitlines():
+            assert len(ln) <= 78, f"line over 78 cols: {ln!r}"
+
+    def test_group_help_unchanged_for_bare_and_flag(self, capsys):
+        """Non-help behaviour byte-identical: group paths still print HELP_TEXT."""
+        for argv in ([], ["--help"], ["-h"]):
+            assert cmd_autodown(list(argv)) == 0
+            out = capsys.readouterr().out
+            assert "Usage: hscc autodown <subcommand>" in out
+
+    def test_help_after_json_flag_still_help(self, capsys, autodown_file,
+                                             block_file):
+        """--json is stripped before dispatch; <sub> --json --help is help."""
+        assert cmd_autodown(["disable", "--json", "--help"]) == 0
+        assert "hscc autodown disable" in capsys.readouterr().out
+
+    def test_unknown_sub_help_shows_group_help_rc0(self, capsys):
+        assert cmd_autodown(["bogus", "--help"]) == 0
+        assert "Usage: hscc autodown <subcommand>" in capsys.readouterr().out
+
+    def test_help_in_flag_value_position_still_help(self, capsys,
+                                                    autodown_file,
+                                                    block_file,
+                                                    monkeypatch):
+        """A --help ANYWHERE in the subcommand argv is help, never execution.
+
+        A landmine test: if --help were only intercepted as the first
+        positional, `enable --idle-minutes --help` (or `--theme --help`)
+        would swallow it as a flag VALUE and run the verb — exactly the B8
+        class of bug one level deeper. cmd_autodown scans the raw argv
+        before --json/--theme stripping, so no placement of --help may
+        trigger record_activity/save_config.
+        """
+        hits = []
+        monkeypatch.setattr(
+            ad, "record_activity",
+            lambda *a, **k: hits.append(a) or {
+                "enabled": False, "state": "up", "idle_minutes": 10})
+        monkeypatch.setattr(ad, "save_config", lambda cfg: None)
+        for argv in (["enable", "--idle-minutes", "--help"],
+                     ["disable", "--theme", "--help"],
+                     ["wake", "--theme=dark", "-h"]):
+            assert cmd_autodown(list(argv)) == 0
+            assert "hscc autodown" in capsys.readouterr().out
+            assert hits == [], f"--help at {argv!r} executed the verb"
+
+
+# ---------------------------------------------------------------------------
+# real-CLI sandbox — `python -m hscc_daemon.hscc autodown <sub> --help`
+# (audit-engine safety model: throwaway HOME + recording PATH canaries)
+# ---------------------------------------------------------------------------
+
+class TestSubcommandHelpRealCLI:
+    """End-to-end inertness of the exact audit probes (B7/B8/B9 repros).
+
+    Pre-seeds an ARMED autodown.json + set watchdog-block.json in the sandbox
+    HOME, so a --help that still acts is measurable: file contents and mtimes
+    must not move, no canary may trip, no new file may appear, rc must be 0.
+    """
+
+    REPO = Path(__file__).resolve().parents[2]
+
+    @pytest.fixture()
+    def sandbox(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        home = tmp_path / "home"
+        (home / ".hscc").mkdir(parents=True)
+        # Seed cluster.json so module import never shells out (address guard:
+        # 10.0.0.1 is the documented LAN placeholder, never a real host).
+        (home / ".hscc" / "cluster.json").write_text(json.dumps(
+            {"gateway": {"host": "10.0.0.1"}, "workers": [],
+             "nasDevices": []}))
+        (home / ".hscc" / "autodown.json").write_text(json.dumps(
+            {"enabled": True, "state": "up", "idle_minutes": 10,
+             "last_activity_iso": "2026-08-23T00:00:00+00:00"}))
+        (home / ".hscc" / "watchdog-block.json").write_text(json.dumps(
+            {"blocked": True, "intentional": True,
+             "reason": "autodown teardown"}))
+        canary = tmp_path / "canary-bin"
+        canary.mkdir()
+        for name in ("sparkrun", "hermes", "gh", "git"):
+            p = canary / name
+            p.write_text("#!/bin/sh\n"
+                         'echo "' + name + ' $*" >> "$AUDIT_CANARY_LOG"\n'
+                         "exit 97\n")
+            p.chmod(0o755)
+        trips = canary / "trips.log"
+        trips.write_text("")
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("CONDA_") and k not in (
+                   "HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKSPACE",
+                   "HERMES_DELEGATED_CHILD_CONTEXT", "HSCC_SPARKRUN_BIN",
+                   "COLUMNS")}
+        env.update({
+            "HOME": str(home),
+            "PYTHONPATH": os.pathsep.join(
+                [str(self.REPO), str(self.REPO / "hscc-project")]),
+            "COLUMNS": "120", "NO_COLOR": "1", "TERM": "dumb",
+            "HSCC_THEME": "dark",
+            "PATH": os.pathsep.join([str(canary), env.get("PATH", "")]),
+            "AUDIT_CANARY_LOG": str(trips),
+        })
+        return {"home": home, "trips": trips, "env": env, "tmp": tmp_path}
+
+    def _run(self, sandbox, sub):
+        proc = subprocess.run(
+            [sys.executable, "-m", "hscc_daemon.hscc", "autodown", sub,
+             "--help"],
+            env=sandbox["env"], cwd=str(sandbox["tmp"]),
+            capture_output=True, text=True, timeout=120)
+        return proc
+
+    @pytest.mark.parametrize("sub", ["status", "enable", "disable", "wake",
+                                     "cancel"])
+    def test_real_cli_help_inert(self, sub, sandbox):
+        home = sandbox["home"]
+        state = [home / ".hscc" / "autodown.json",
+                 home / ".hscc" / "watchdog-block.json"]
+        stamps = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in state}
+        before = {str(p.relative_to(home)) for p in home.rglob("*")
+                  if p.is_file() and "trips.log" not in str(p)}
+
+        proc = self._run(sandbox, sub)
+
+        assert proc.returncode == 0, (
+            f"--help exited {proc.returncode}\n{proc.stdout}\n{proc.stderr}")
+        assert f"hscc autodown {sub}" in proc.stdout
+        for p, (blob, ns) in stamps.items():
+            assert p.read_bytes() == blob, (
+                f"B8-class regression: --help rewrote {p.name} (live safety "
+                "state must be untouched)")
+            assert p.stat().st_mtime_ns == ns, (
+                f"--help rewrote {p.name} (mtime moved)")
+        after = {str(p.relative_to(home)) for p in home.rglob("*")
+                 if p.is_file() and "trips.log" not in str(p)}
+        assert after == before, (
+            f"--help wrote state under HOME: {sorted(after - before)}")
+        trips = sandbox["trips"].read_text().strip()
+        assert trips == "", f"--help shelled out: {trips}"
 
 
 # ---------------------------------------------------------------------------
