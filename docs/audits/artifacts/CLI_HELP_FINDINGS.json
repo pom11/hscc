@@ -1,0 +1,2458 @@
+{
+  "surface_paths": 153,
+  "probes": 182,
+  "findings": [
+    {
+      "group": "api",
+      "command": "hscc api start --help",
+      "kind": "D",
+      "detail": "NOT EXECUTED by the audit (forking a live server cannot be undone by the sandbox); cmd_api dispatches 'start' before any --help check, so --help would start the API (api_cli.py cmd_api -> _handle_start fork)",
+      "fix": "intercept --help in cmd_api before dispatch"
+    },
+    {
+      "group": "top-level",
+      "command": "python -m hscc_daemon.hscc --help (empty HOME)",
+      "kind": "D",
+      "detail": "import of hscc_daemon.hscc executes sparkrun (module-level resolve_cluster_config fallback): sparkrun cluster list --json",
+      "fix": "make cluster-config resolution lazy (first use, not import)"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc --help",
+      "kind": "A",
+      "detail": "project <cmd>        Project-portfolio (flightdeck) commands: standup verify",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc --help",
+      "kind": "B",
+      "detail": "width=80 bare-wrap: triggers",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc --help",
+      "kind": "B",
+      "detail": "width=80 bare-wrap: (default 7)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc --help",
+      "kind": "B",
+      "detail": "width=80 bare-wrap: (read-only)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc --help",
+      "kind": "B",
+      "detail": "width=80 bare-wrap: load",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc --help",
+      "kind": "B",
+      "detail": "width=80 bare-wrap: structural (offline) layer always; placement (live) layer unless ",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc --help",
+      "kind": "B",
+      "detail": "width=80 bare-wrap: (--confirm executes; --force-recreate stops+reruns units so changed serve flags ",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc --help",
+      "kind": "B",
+      "detail": "width=80 bare-wrap: reach vLLM)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc --help",
+      "kind": "B",
+      "detail": "width=80 bare-wrap: doctor ...",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc --help",
+      "kind": "B",
+      "detail": "width=80 bare-wrap: (list/archive)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc --help",
+      "kind": "B",
+      "detail": "width=80 bare-wrap: auto).",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc --help",
+      "kind": "A",
+      "detail": "project <cmd>        Project-portfolio (flightdeck) commands: standup verify doctor ...",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc --help",
+      "kind": "B",
+      "detail": "width=120 bare-wrap: placement (live) layer unless --structural-only. Exit non-zero if either layer fails.",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc --help",
+      "kind": "B",
+      "detail": "width=120 bare-wrap: stops+reruns units so changed serve flags reach vLLM)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help advanced",
+      "kind": "DEAD",
+      "detail": "ed-status       Event-driven mode status (placeholder, not yet available)",
+      "fix": "hide or remove the dead command from help (documented decision per card)"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help advanced",
+      "kind": "DEAD",
+      "detail": "ed-install      Event-driven mode install (placeholder, not yet available)",
+      "fix": "hide or remove the dead command from help (documented decision per card)"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help advanced",
+      "kind": "DEAD",
+      "detail": "ed-uninstall    Event-driven mode uninstall (placeholder, not yet available)",
+      "fix": "hide or remove the dead command from help (documented decision per card)"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help advanced",
+      "kind": "B",
+      "detail": "width=80 bare-wrap: ed-status       Event-driven mode status (placeholder, not yet available)  ",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help advanced",
+      "kind": "B",
+      "detail": "width=80 bare-wrap: ed-install      Event-driven mode install (placeholder, not yet available)  ",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help advanced",
+      "kind": "B",
+      "detail": "width=80 bare-wrap: ed-uninstall    Event-driven mode uninstall (placeholder, not yet available)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help advanced",
+      "kind": "DEAD",
+      "detail": "(placeholder, not yet available)  ed-install      Event-driven mode install (placeholder, not yet available)",
+      "fix": "hide or remove the dead command from help (documented decision per card)"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help advanced",
+      "kind": "B",
+      "detail": "width=120 bare-wrap: (placeholder, not yet available)  ed-install      Event-driven mode install (placeholder, not yet available)  ",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help advanced",
+      "kind": "B",
+      "detail": "width=120 bare-wrap: ed-uninstall    Event-driven mode uninstall (placeholder, not yet available)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help cluster",
+      "kind": "B",
+      "detail": "width=80 overflow:   Subcommands: status hosts monitor jobs info stop <id> down [--dry-run] up [--dry-run]",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help ed-install",
+      "kind": "DEAD",
+      "detail": "Event-driven mode install (placeholder, not yet available)",
+      "fix": "hide or remove the dead command from help (documented decision per card)"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help ed-status",
+      "kind": "DEAD",
+      "detail": "Event-driven mode status (placeholder, not yet available)",
+      "fix": "hide or remove the dead command from help (documented decision per card)"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help ed-uninstall",
+      "kind": "DEAD",
+      "detail": "Event-driven mode uninstall (placeholder, not yet available)",
+      "fix": "hide or remove the dead command from help (documented decision per card)"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help kanban",
+      "kind": "B",
+      "detail": "width=80 overflow:   blocked [--json]: list BLOCKED cards with why; blocked --recover <id> [--reason <t>]: recover one blocked card to ready",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help kanban",
+      "kind": "B",
+      "detail": "width=80 overflow:   stale [--older-than <days>] [--json]: list non-terminal cards; stale --archive <id>: archive one (t_e751e652)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help kanban",
+      "kind": "B",
+      "detail": "width=120 overflow:   blocked [--json]: list BLOCKED cards with why; blocked --recover <id> [--reason <t>]: recover one blocked card to ready",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help project",
+      "kind": "A",
+      "detail": "Project-portfolio (flightdeck) commands.",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help project",
+      "kind": "A",
+      "detail": "Delegates to the relocated flightdeck CLI under hscc-project/. Try 'hscc project --help' for the full subcommand surface.",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help project",
+      "kind": "B",
+      "detail": "width=80 overflow:   Delegates to the relocated flightdeck CLI under hscc-project/. Try 'hscc project --help' for the full subcommand surface.",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help project",
+      "kind": "B",
+      "detail": "width=120 overflow:   Delegates to the relocated flightdeck CLI under hscc-project/. Try 'hscc project --help' for the full subcommand surface.",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help template",
+      "kind": "B",
+      "detail": "width=80 overflow:   Subcommands: list status preview <name> validate <name> [--structural-only] [--json] apply <name> [--confirm]",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc advanced --help",
+      "kind": "B",
+      "detail": "width=80 overflow: Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, project, api, kanban, verify, stats, throughput, autoscale, escalate, start-daemon, heal-clear, heal-status",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc advanced --help",
+      "kind": "D-rc",
+      "detail": "--help exited 1 (expected 0)",
+      "fix": "help paths should exit 0"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc advanced --help",
+      "kind": "B",
+      "detail": "width=120 overflow: Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, project, api, kanban, verify, stats, throughput, autoscale, escalate, start-daemon, heal-clear, heal-status",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help advanced",
+      "kind": "DEAD",
+      "detail": "start-daemon    Run the daemon loop in the foreground (used by launchd)  ed-status       Event-driven mode status (placeholder, not yet available)  ed-install      Event-driven mode install (placehold",
+      "fix": "hide or remove the dead command from help (documented decision per card)"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc ed-status --help",
+      "kind": "DEAD",
+      "detail": "Event-driven mode status (placeholder, not yet available)",
+      "fix": "hide or remove the dead command from help (documented decision per card)"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc ed-install --help",
+      "kind": "DEAD",
+      "detail": "Event-driven mode install (placeholder, not yet available)",
+      "fix": "hide or remove the dead command from help (documented decision per card)"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc ed-uninstall --help",
+      "kind": "DEAD",
+      "detail": "Event-driven mode uninstall (placeholder, not yet available)",
+      "fix": "hide or remove the dead command from help (documented decision per card)"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc heal-clear --help",
+      "kind": "D",
+      "detail": "--help executed the mutating verb (output echo: 'No strikes recorded for --help')",
+      "fix": "intercept --help before dispatching the verb"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help heal-clear",
+      "kind": "D-rc",
+      "detail": "--help exited 1 (expected 0)",
+      "fix": "help paths should exit 0"
+    },
+    {
+      "group": "top-level",
+      "command": "hscc help heal-status",
+      "kind": "D-rc",
+      "detail": "--help exited 1 (expected 0)",
+      "fix": "help paths should exit 0"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   hscc cluster monitor      One CPU/RAM/GPU snapshot (--live: refreshing view + per-model load)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   hscc cluster up   [--dry-run]  Start every unit in serving.json (orch + keepalive)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster down --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   'hscc cluster down' accepts only: --dry-run (and --theme <name> for the human view).",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster down --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   Nothing was started or stopped. Refusing to guess what --help meant \u2014 a destructive command runs only on arguments it understands.",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster down --help",
+      "kind": "D-rc",
+      "detail": "--help exited 1 (expected 0)",
+      "fix": "help paths should exit 0"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster down --help",
+      "kind": "B",
+      "detail": "width=120 overflow:   Nothing was started or stopped. Refusing to guess what --help meant \u2014 a destructive command runs only on arguments it understands.",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster hosts --help",
+      "kind": "D",
+      "detail": "--help shelled out: sparkrun cluster list; sparkrun status",
+      "fix": "intercept --help before shelling out to sparkrun/hermes"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster info --help",
+      "kind": "D",
+      "detail": "--help shelled out: sparkrun cluster list; sparkrun cluster show hscc",
+      "fix": "intercept --help before shelling out to sparkrun/hermes"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster jobs --help",
+      "kind": "D",
+      "detail": "--help shelled out: sparkrun cluster status",
+      "fix": "intercept --help before shelling out to sparkrun/hermes"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster monitor --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   hscc cluster monitor                 one CPU/RAM/GPU snapshot (sparkrun's JSON frame)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster monitor --help",
+      "kind": "B",
+      "detail": "width=80 overflow:                                        `sparkrun cluster monitor` (Jobs column, no",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster monitor --help",
+      "kind": "B",
+      "detail": "width=80 overflow:                                        container detail) + per-node, per-model load",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster monitor --help",
+      "kind": "B",
+      "detail": "width=80 overflow:                                        (requests running/waiting, KV cache, tok/s)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster monitor --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   --cluster NAME                       sparkrun cluster to watch (default: sparkrun's default)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster status --help",
+      "kind": "D",
+      "detail": "--help shelled out: sparkrun status",
+      "fix": "intercept --help before shelling out to sparkrun/hermes"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster stop --help",
+      "kind": "D",
+      "detail": "--help shelled out: sparkrun stop --help",
+      "fix": "intercept --help before shelling out to sparkrun/hermes"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster stop --help",
+      "kind": "D-rc",
+      "detail": "--help exited 1 (expected 0)",
+      "fix": "help paths should exit 0"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster up --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   'hscc cluster up' accepts only: --dry-run (and --theme <name> for the human view).",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster up --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   Nothing was started or stopped. Refusing to guess what --help meant \u2014 a destructive command runs only on arguments it understands.",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster up --help",
+      "kind": "D-rc",
+      "detail": "--help exited 1 (expected 0)",
+      "fix": "help paths should exit 0"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster up --help",
+      "kind": "B",
+      "detail": "width=120 overflow:   Nothing was started or stopped. Refusing to guess what --help meant \u2014 a destructive command runs only on arguments it understands.",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster monitor --live --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   hscc cluster monitor                 one CPU/RAM/GPU snapshot (sparkrun's JSON frame)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster monitor --live --help",
+      "kind": "B",
+      "detail": "width=80 overflow:                                        `sparkrun cluster monitor` (Jobs column, no",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster monitor --live --help",
+      "kind": "B",
+      "detail": "width=80 overflow:                                        container detail) + per-node, per-model load",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster monitor --live --help",
+      "kind": "B",
+      "detail": "width=80 overflow:                                        (requests running/waiting, KV cache, tok/s)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "cluster",
+      "command": "hscc cluster monitor --live --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   --cluster NAME                       sparkrun cluster to watch (default: sparkrun's default)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "template",
+      "command": "hscc template --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   hscc template validate <name> [--structural-only] [--json]  Validate: structural (offline) layer always; placement (live) layer unless --structural-only",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "template",
+      "command": "hscc template --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   hscc template apply <name> [--confirm] [--force-recreate]  Apply a template (--force-recreate re-applies changed serve flags)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "template",
+      "command": "hscc template --help",
+      "kind": "B",
+      "detail": "width=120 overflow:   hscc template validate <name> [--structural-only] [--json]  Validate: structural (offline) layer always; placement (live) layer unless --structural-only",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "template",
+      "command": "hscc template --help",
+      "kind": "B",
+      "detail": "width=120 overflow:   hscc template apply <name> [--confirm] [--force-recreate]  Apply a template (--force-recreate re-applies changed serve flags)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "template",
+      "command": "hscc template apply --help",
+      "kind": "D-rc",
+      "detail": "--help exited 1 (expected 0)",
+      "fix": "help paths should exit 0"
+    },
+    {
+      "group": "template",
+      "command": "hscc template preview --help",
+      "kind": "D-rc",
+      "detail": "--help exited 1 (expected 0)",
+      "fix": "help paths should exit 0"
+    },
+    {
+      "group": "template",
+      "command": "hscc template validate --help",
+      "kind": "D-rc",
+      "detail": "--help exited 1 (expected 0)",
+      "fix": "help paths should exit 0"
+    },
+    {
+      "group": "api",
+      "command": "hscc api --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   hscc api start [--tailscale] [--bind <ip>] [--port <n>] [--no-qr]   Start the API server in the background",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api",
+      "command": "hscc api --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   hscc api stop                                                       Stop the running API server",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api",
+      "command": "hscc api --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   hscc api status [--no-qr]                                           Show running/stopped + bound host:port",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api",
+      "command": "hscc api --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   hscc api install-service                                            OPT-IN: write the launchd unit (boot-resilient API; loading stays manual)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api",
+      "command": "hscc api --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   hscc api uninstall-service                                          Remove the launchd unit file written by install-service",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api",
+      "command": "hscc api --help",
+      "kind": "B",
+      "detail": "width=120 overflow:   hscc api install-service                                            OPT-IN: write the launchd unit (boot-resilient API; loading stays manual)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api",
+      "command": "hscc api --help",
+      "kind": "B",
+      "detail": "width=120 overflow:   hscc api uninstall-service                                          Remove the launchd unit file written by install-service",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api",
+      "command": "hscc api status --help",
+      "kind": "D",
+      "detail": "--help wrote state under HOME: .hscc/api-token",
+      "fix": "intercept --help before any state write"
+    },
+    {
+      "group": "api",
+      "command": "hscc api install-service --help",
+      "kind": "D-rc",
+      "detail": "--help exited 1 (expected 0)",
+      "fix": "help paths should exit 0"
+    },
+    {
+      "group": "api",
+      "command": "hscc api uninstall-service --help",
+      "kind": "B",
+      "detail": "width=80 overflow: no unit file at <SANDBOX>/home/Library/LaunchAgents/com.hscc.api.plist (nothing to remove)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api",
+      "command": "hscc api uninstall-service --help",
+      "kind": "B",
+      "detail": "width=120 overflow: no unit file at <SANDBOX>/home/Library/LaunchAgents/com.hscc.api.plist (nothing to remove)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown --help",
+      "kind": "B",
+      "detail": "width=80 overflow: idle, and back up automatically on the next inbound activity. Opt-in, OFF by default.",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   hscc autodown status [--json]              Show enabled? state? idle_minutes? last activity? down_since?",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   hscc autodown enable [--idle-minutes <n>]  Arm idle autodown (default 10). Resets the idle timer",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown --help",
+      "kind": "B",
+      "detail": "width=80 overflow:                                                so arming never immediately tears down. Non-acting: if",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown --help",
+      "kind": "B",
+      "detail": "width=80 overflow:                                                serving is down it does NOT start it. Aborts non-zero if an",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown --help",
+      "kind": "B",
+      "detail": "width=80 overflow:                                                ACTIVE model-requiring Hermes cron job exists (one that",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown --help",
+      "kind": "B",
+      "detail": "width=80 overflow:                                                runs an agent and needs the GPU serving layer). CPU-only",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown --help",
+      "kind": "B",
+      "detail": "width=80 overflow:                                                watchdogs (no_agent:true, model:null) do NOT block \u2014 they",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   hscc autodown enable --force               Arm even when active model-requiring Hermes cron jobs",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown --help",
+      "kind": "B",
+      "detail": "width=80 overflow:                                                exist (autodown may power the cluster down when they are",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown --help",
+      "kind": "B",
+      "detail": "width=80 overflow:                                                due). Overridden jobs are recorded and shown in 'status'.",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   hscc autodown disable                      Disarm autodown and clear the intentional watchdog block so",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown --help",
+      "kind": "B",
+      "detail": "width=80 overflow:                                                ordinary supervision resumes. Does NOT restart serving \u2014 if",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown --help",
+      "kind": "B",
+      "detail": "width=80 overflow:                                                you want it up, run 'hscc autodown wake' or bring it up another way.",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown --help",
+      "kind": "B",
+      "detail": "width=80 overflow:   hscc autodown wake                         Force autoup now (also resets the idle timer)",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown --help",
+      "kind": "B",
+      "detail": "width=80 overflow: 'status' is read-only and never mutates anything. Pass --json for machine-readable",
+      "fix": "indent continuation lines / shorten help lines"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown status --help",
+      "kind": "D",
+      "detail": "help emitted a daemon log line (a check ran while printing help): [<TS>] [ WARN] Autodown kanban interlock unevaluable: Hermes agent source not found at '<SANDBOX>/home/.",
+      "fix": "intercept --help before running checks"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown status --help",
+      "kind": "D",
+      "detail": "help emitted a daemon log line (a check ran while printing help): [<TS>] [ WARN] Autodown PR/CI interlock unevaluable: PR/CI source unreachable \u2014 treating as active (fail-safe)",
+      "fix": "intercept --help before running checks"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown status --help",
+      "kind": "D",
+      "detail": "--help wrote state under HOME: .hscc/daemon.log",
+      "fix": "intercept --help before any state write"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown status --help",
+      "kind": "D",
+      "detail": "--help shelled out: gh pr list --repo pom11/hscc --state open --limit 1 --json number -q length",
+      "fix": "intercept --help before shelling out to sparkrun/hermes"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown enable --help",
+      "kind": "D-rc",
+      "detail": "--help exited 1 (expected 0)",
+      "fix": "help paths should exit 0"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown disable --help",
+      "kind": "D",
+      "detail": "--help wrote state under HOME: .hscc/autodown.json, .hscc/watchdog-block.json",
+      "fix": "intercept --help before any state write"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown wake --help",
+      "kind": "D",
+      "detail": "help emitted a daemon log line (a check ran while printing help): [<TS>] [ INFO] Autodown autoup: state is already \"up\" \u2014 returning busy (no starts issued)",
+      "fix": "intercept --help before running checks"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc autodown wake --help",
+      "kind": "D-rc",
+      "detail": "--help exited 1 (expected 0)",
+      "fix": "help paths should exit 0"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc kanban blocked --help",
+      "kind": "D",
+      "detail": "help emitted a daemon log line (a check ran while printing help): [<TS>] [ WARN] Autodown kanban interlock unevaluable: Hermes agent source not found at '<SANDBOX>/home/.",
+      "fix": "intercept --help before running checks"
+    },
+    {
+      "group": "api-autodown-kanban",
+      "command": "hscc kanban stale --help",
+      "kind": "D",
+      "detail": "help emitted a daemon log line (a check ran while printing help): [<TS>] [ WARN] Autodown kanban interlock unevaluable: Hermes agent source not found at '<SANDBOX>/home/.",
+      "fix": "intercept --help before running checks"
+    },
+    {
+      "group": "project",
+      "command": "hscc project --help",
+      "kind": "A",
+      "detail": "usage: flightdeck [-h] [--json] [--registry PATH] COMMAND ...",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project --help",
+      "kind": "A",
+      "detail": "doctor          self-check: is flightdeck's view of the fleet trustworthy",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project --help",
+      "kind": "A",
+      "detail": "~/.flightdeck, seed it, check the environment",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project --help",
+      "kind": "A",
+      "detail": "update          check the installed flightdeck against its git upstream,",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project --help",
+      "kind": "A",
+      "detail": "~/.flightdeck/registry.yaml)",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project --help",
+      "kind": "A",
+      "detail": "examples: flightdeck standup one-shot fleet digest flightdeck report",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project --help",
+      "kind": "A",
+      "detail": "flightdeck --all post completion summaries flightdeck qa show the manual-",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project --help",
+      "kind": "A",
+      "detail": "testing queue Try `flightdeck <COMMAND> --help` for per-command usage",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project --help",
+      "kind": "A",
+      "detail": "init            one-command bootstrap for a new machine: create ~/.flightdeck, seed it, check the environment",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project --help",
+      "kind": "A",
+      "detail": "update          check the installed flightdeck against its git upstream, or update it (--apply-gated, no daemon)",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project --help",
+      "kind": "A",
+      "detail": "--registry PATH   path to registry.yaml (default: ~/.flightdeck/registry.yaml)",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project --help",
+      "kind": "A",
+      "detail": "examples: flightdeck standup one-shot fleet digest flightdeck report flightdeck --all post completion summaries",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project --help",
+      "kind": "A",
+      "detail": "flightdeck qa show the manual-testing queue Try `flightdeck <COMMAND> --help` for per-command usage examples.",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project --help",
+      "kind": "A",
+      "detail": "examples: flightdeck standup one-shot fleet digest flightdeck report flightdeck --all post completion summaries flightdeck qa show the manual-testing queue Try `flightdeck <COMMAND> --help` for per-co",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project archive-sessions --help",
+      "kind": "A",
+      "detail": "usage: flightdeck archive-sessions [-h] [--out DIR] [--project NAME]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project archive-sessions --help",
+      "kind": "A",
+      "detail": "example: flightdeck archive-sessions flightdeck archive-sessions --out",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project archive-sessions --help",
+      "kind": "A",
+      "detail": "/path/to/archive flightdeck archive-sessions --project hscc",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project archive-sessions --help",
+      "kind": "A",
+      "detail": "example: flightdeck archive-sessions flightdeck archive-sessions --out /path/to/archive flightdeck archive-sessions",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project archive-sessions --help",
+      "kind": "A",
+      "detail": "example: flightdeck archive-sessions flightdeck archive-sessions --out /path/to/archive flightdeck archive-sessions --project hscc",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project ask --help",
+      "kind": "A",
+      "detail": "usage: flightdeck ask [-h] [--set KEY=VALUE] [--dry-run] [--editor EDITOR]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project ask --help",
+      "kind": "A",
+      "detail": "example: flightdeck ask flightdeck standup --set focus=q3 --dry-run",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project ask --help",
+      "kind": "A",
+      "detail": "usage: flightdeck ask [-h] [--set KEY=VALUE] [--dry-run] [--editor EDITOR] [ARG ...]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon --help",
+      "kind": "A",
+      "detail": "usage: flightdeck daemon [-h] SUBCOMMAND ...",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon --help",
+      "kind": "A",
+      "detail": "examples: flightdeck daemon start start the background daemon flightdeck",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon --help",
+      "kind": "A",
+      "detail": "daemon status show running state + last checks flightdeck daemon check fleet",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon --help",
+      "kind": "A",
+      "detail": "run one check cycle for 'fleet' flightdeck daemon check run every stream once",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon --help",
+      "kind": "A",
+      "detail": "now flightdeck daemon log show the daemon log flightdeck daemon watch tail",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon --help",
+      "kind": "A",
+      "detail": "stream states in real time flightdeck daemon stop stop the daemon flightdeck",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon --help",
+      "kind": "A",
+      "detail": "examples: flightdeck daemon start start the background daemon flightdeck daemon status show running state + last",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon --help",
+      "kind": "A",
+      "detail": "checks flightdeck daemon check fleet run one check cycle for 'fleet' flightdeck daemon check run every stream once now",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon --help",
+      "kind": "A",
+      "detail": "flightdeck daemon log show the daemon log flightdeck daemon watch tail stream states in real time flightdeck daemon",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon --help",
+      "kind": "A",
+      "detail": "stop stop the daemon flightdeck daemon install install launchd auto-start (needs your go-ahead)",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon --help",
+      "kind": "A",
+      "detail": "examples: flightdeck daemon start start the background daemon flightdeck daemon status show running state + last checks flightdeck daemon check fleet run one check cycle for 'fleet' flightdeck daemon ",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon check --help",
+      "kind": "A",
+      "detail": "usage: flightdeck daemon check [-h] [--max-fleet N] [--threshold N]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon check --help",
+      "kind": "A",
+      "detail": "example: flightdeck daemon check fleet",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon check --help",
+      "kind": "A",
+      "detail": "usage: flightdeck daemon check [-h] [--max-fleet N] [--threshold N] [{fleet,freshness,orphans,version,all}]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon install --help",
+      "kind": "A",
+      "detail": "usage: flightdeck daemon install [-h] [--apply]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon install --help",
+      "kind": "A",
+      "detail": "example: flightdeck daemon install --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon log --help",
+      "kind": "A",
+      "detail": "usage: flightdeck daemon log [-h] [--lines N]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon log --help",
+      "kind": "A",
+      "detail": "example: flightdeck daemon log",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon notify --help",
+      "kind": "A",
+      "detail": "usage: flightdeck daemon notify [-h] [message]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon notify --help",
+      "kind": "A",
+      "detail": "example: flightdeck daemon notify 'fleet over cap'",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon start --help",
+      "kind": "A",
+      "detail": "usage: flightdeck daemon start [-h]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon start --help",
+      "kind": "A",
+      "detail": "example: flightdeck daemon start",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon status --help",
+      "kind": "A",
+      "detail": "usage: flightdeck daemon status [-h]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon status --help",
+      "kind": "A",
+      "detail": "example: flightdeck daemon status",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon stop --help",
+      "kind": "A",
+      "detail": "usage: flightdeck daemon stop [-h]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon stop --help",
+      "kind": "A",
+      "detail": "example: flightdeck daemon stop",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon uninstall --help",
+      "kind": "A",
+      "detail": "usage: flightdeck daemon uninstall [-h]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon uninstall --help",
+      "kind": "A",
+      "detail": "example: flightdeck daemon uninstall",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon watch --help",
+      "kind": "A",
+      "detail": "usage: flightdeck daemon watch [-h] [--interval N]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon watch --help",
+      "kind": "A",
+      "detail": "example: flightdeck daemon watch freshness",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project daemon watch --help",
+      "kind": "A",
+      "detail": "usage: flightdeck daemon watch [-h] [--interval N] [{fleet,freshness,orphans,version,all}]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project decompose --help",
+      "kind": "A",
+      "detail": "usage: flightdeck decompose [-h] [--milestone MILESTONE] [--apply]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project decompose --help",
+      "kind": "A",
+      "detail": "example: flightdeck decompose flightdeck \"make the release installable\"",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project decompose --help",
+      "kind": "A",
+      "detail": "usage: flightdeck decompose [-h] [--milestone MILESTONE] [--apply] [--timeout SECONDS] project [goal]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project decompose --help",
+      "kind": "A",
+      "detail": "example: flightdeck decompose flightdeck \"make the release installable\" --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project doctor --help",
+      "kind": "A",
+      "detail": "usage: flightdeck doctor [-h]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project doctor --help",
+      "kind": "A",
+      "detail": "example: flightdeck doctor",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project hygiene --help",
+      "kind": "A",
+      "detail": "usage: flightdeck hygiene [-h] [--apply] [--similarity RATIO]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project hygiene --help",
+      "kind": "A",
+      "detail": "example: flightdeck hygiene --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project incident --help",
+      "kind": "A",
+      "detail": "usage: flightdeck incident [-h] [--project PROJECT] [--fix FIX]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project incident --help",
+      "kind": "A",
+      "detail": "flightdeck)",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project incident --help",
+      "kind": "A",
+      "detail": "example: flightdeck incident \"board not linked\" --fix \"re-ran flightdeck",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project incident --help",
+      "kind": "A",
+      "detail": "usage: flightdeck incident [-h] [--project PROJECT] [--fix FIX] [--cause CAUSE] [--lesson LESSON] [--apply] symptom",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project incident --help",
+      "kind": "A",
+      "detail": "--project PROJECT  project in the registry whose repo to write (default: flightdeck)",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project incident --help",
+      "kind": "A",
+      "detail": "example: flightdeck incident \"board not linked\" --fix \"re-ran flightdeck project repair\" --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project ingest --help",
+      "kind": "A",
+      "detail": "usage: flightdeck ingest [-h] [--limit LIMIT] [--timeout SECONDS] [--apply]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project ingest --help",
+      "kind": "A",
+      "detail": "example: flightdeck ingest flightdeck --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project ingest --help",
+      "kind": "A",
+      "detail": "usage: flightdeck ingest [-h] [--limit LIMIT] [--timeout SECONDS] [--apply] [--ask-inline] project",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project init --help",
+      "kind": "A",
+      "detail": "usage: flightdeck init [-h] [--apply] [--home PATH]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project init --help",
+      "kind": "A",
+      "detail": "--home PATH  flightdeck home to create/seed (default: ~/.flightdeck)",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project init --help",
+      "kind": "A",
+      "detail": "example: flightdeck init --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project legacy-cards --help",
+      "kind": "A",
+      "detail": "usage: flightdeck legacy-cards [-h] [--include-archived-boards]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project legacy-cards --help",
+      "kind": "A",
+      "detail": "example: flightdeck legacy-cards --include-archived-boards",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project lint-cards --help",
+      "kind": "A",
+      "detail": "usage: flightdeck lint-cards [-h] [--repo-root REPO_ROOT] [board]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project lint-cards --help",
+      "kind": "A",
+      "detail": "example: flightdeck lint-cards",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project map-sessions --help",
+      "kind": "A",
+      "detail": "usage: flightdeck map-sessions [-h] [--out DIR] [--apply]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project map-sessions --help",
+      "kind": "A",
+      "detail": "example: flightdeck map-sessions flightdeck map-sessions --json flightdeck",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project map-sessions --help",
+      "kind": "A",
+      "detail": "map-sessions --apply flightdeck map-sessions --ask-module mypkg.ask:call",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project map-sessions --help",
+      "kind": "A",
+      "detail": "usage: flightdeck map-sessions [-h] [--out DIR] [--apply] [--ask-module module:function]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project map-sessions --help",
+      "kind": "A",
+      "detail": "example: flightdeck map-sessions flightdeck map-sessions --json flightdeck map-sessions --apply flightdeck map-",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project map-sessions --help",
+      "kind": "A",
+      "detail": "example: flightdeck map-sessions flightdeck map-sessions --json flightdeck map-sessions --apply flightdeck map-sessions --ask-module mypkg.ask:call",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project map-sessions --help",
+      "kind": "C",
+      "detail": "example does not parse: 'flightdeck map-sessions --json' \u2014 argparse rejected 'map-sessions --json' (exit 2)",
+      "fix": "rewrite the example against the real parser"
+    },
+    {
+      "group": "project",
+      "command": "hscc project message --help",
+      "kind": "A",
+      "detail": "usage: flightdeck message [-h] MESSAGE_CMD ...",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project message --help",
+      "kind": "A",
+      "detail": "example: flightdeck message dispatch flightdeck \"ship 0.6.0\" --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project message --help",
+      "kind": "DEAD",
+      "detail": "read       list a project's recorded messages (Telegram removed \u2014 no live",
+      "fix": "hide or remove the dead command from help (documented decision per card)"
+    },
+    {
+      "group": "project",
+      "command": "hscc project message --help",
+      "kind": "DEAD",
+      "detail": "read       list a project's recorded messages (Telegram removed \u2014 no live source)",
+      "fix": "hide or remove the dead command from help (documented decision per card)"
+    },
+    {
+      "group": "project",
+      "command": "hscc project message --help",
+      "kind": "DEAD",
+      "detail": "broadcast  render one message for several projects (no delivery \u2014 Telegram removed)",
+      "fix": "hide or remove the dead command from help (documented decision per card)"
+    },
+    {
+      "group": "project",
+      "command": "hscc project message broadcast --help",
+      "kind": "A",
+      "detail": "usage: flightdeck message broadcast [-h] [--to a,b,c] message",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project message broadcast --help",
+      "kind": "A",
+      "detail": "example: flightdeck message broadcast \"outage over\" --to flightdeck,hscc",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project message dispatch --help",
+      "kind": "A",
+      "detail": "usage: flightdeck message dispatch [-h] [--assignee X] [--message MESSAGE]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project message dispatch --help",
+      "kind": "A",
+      "detail": "example: flightdeck message dispatch flightdeck \"ship 0.6.0\" --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project message dispatch --help",
+      "kind": "A",
+      "detail": "usage: flightdeck message dispatch [-h] [--assignee X] [--message MESSAGE] [--body-file PATH] [--apply] [--no-wait]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project message dispatch --help",
+      "kind": "A",
+      "detail": "usage: flightdeck message dispatch [-h] [--assignee X] [--message MESSAGE] [--body-file PATH] [--apply] [--no-wait] [project] [task]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project message read --help",
+      "kind": "A",
+      "detail": "usage: flightdeck message read [-h] [-n N] [project]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project message read --help",
+      "kind": "A",
+      "detail": "example: flightdeck message read flightdeck -n 20",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project message send --help",
+      "kind": "A",
+      "detail": "usage: flightdeck message send [-h] [--apply] [project] [message]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project message send --help",
+      "kind": "A",
+      "detail": "example: flightdeck message send flightdeck \"standing up now\" --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project metrics --help",
+      "kind": "A",
+      "detail": "usage: flightdeck metrics [-h] [--since DURATION] [PROJECT]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project metrics --help",
+      "kind": "A",
+      "detail": "example: flightdeck metrics flightdeck --since 7d",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project migrate-card --help",
+      "kind": "A",
+      "detail": "usage: flightdeck migrate-card [-h] --to PROJECT [--apply] card_id",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project migrate-card --help",
+      "kind": "A",
+      "detail": "example: flightdeck migrate-card t_a1b2c3 --to flightdeck --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project monitor --help",
+      "kind": "A",
+      "detail": "usage: flightdeck monitor [-h] [--time N]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project monitor --help",
+      "kind": "A",
+      "detail": "example: flightdeck monitor --time 30",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project [-h] PROJECT_CMD ...",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project --help",
+      "kind": "A",
+      "detail": "example: flightdeck project list",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project chat --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project chat [-h] [--resume SESSION_ID] [name] ...",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project chat --help",
+      "kind": "A",
+      "detail": "example: flightdeck project chat flightdeck (attaches to the permanent",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project chat --help",
+      "kind": "A",
+      "detail": "example: flightdeck project chat flightdeck (attaches to the permanent orchestrator thread the app uses)",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project digest --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project digest [-h] [--json] name",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project digest --help",
+      "kind": "A",
+      "detail": "example: flightdeck project digest flightdeck (reads",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project digest --help",
+      "kind": "A",
+      "detail": "~/.hermes/archive/telegram/flightdeck/; bounded to a few thousand tokens,",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project digest --help",
+      "kind": "A",
+      "detail": "example: flightdeck project digest flightdeck (reads ~/.hermes/archive/telegram/flightdeck/; bounded to a few thousand",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project digest --help",
+      "kind": "A",
+      "detail": "example: flightdeck project digest flightdeck (reads ~/.hermes/archive/telegram/flightdeck/; bounded to a few thousand tokens, never raw transcripts)",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project link --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project link [-h] [--list] [project] [session_id]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project link --help",
+      "kind": "A",
+      "detail": "example: flightdeck project link flightdeck <session-id> flightdeck project",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project link --help",
+      "kind": "A",
+      "detail": "link --list flightdeck project link --list flightdeck (just one project)",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project link --help",
+      "kind": "A",
+      "detail": "example: flightdeck project link flightdeck <session-id> flightdeck project link --list flightdeck project link --list",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project link --help",
+      "kind": "A",
+      "detail": "flightdeck (just one project)",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project link --help",
+      "kind": "A",
+      "detail": "example: flightdeck project link flightdeck <session-id> flightdeck project link --list flightdeck project link --list flightdeck (just one project)",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project list --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project list [-h]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project list --help",
+      "kind": "A",
+      "detail": "example: flightdeck project list",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project new --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project new [-h] [--repo REPO] [--github [GITHUB]]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project new --help",
+      "kind": "A",
+      "detail": "example: flightdeck project new flightdeck --github",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project new --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project new [-h] [--repo REPO] [--github [GITHUB]] [--private] [--apply] [--dry-run] name",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project pull --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project pull [-h] [--json] [name]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project pull --help",
+      "kind": "A",
+      "detail": "example: flightdeck project pull flightdeck (no --apply: only ever fast-",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project pull --help",
+      "kind": "A",
+      "detail": "example: flightdeck project pull flightdeck (no --apply: only ever fast-forwards or skips)",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project push --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project push [-h] [--json] [--apply] [--dry-run] [name]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project push --help",
+      "kind": "A",
+      "detail": "example: flightdeck project push flightdeck --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project remove --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project remove [-h] [--apply] [--dry-run] name",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project remove --help",
+      "kind": "A",
+      "detail": "example: flightdeck project remove flightdeck --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project repair --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project repair [-h] [--repo REPO] [--github [GITHUB]]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project repair --help",
+      "kind": "A",
+      "detail": "example: flightdeck project repair flightdeck",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project repair --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project repair [-h] [--repo REPO] [--github [GITHUB]] [--private] [--apply] [--dry-run] name",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project sessions --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project sessions [-h] name",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project sessions --help",
+      "kind": "A",
+      "detail": "example: flightdeck project sessions flightdeck (resolves registry topic ->",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project sessions --help",
+      "kind": "A",
+      "detail": "example: flightdeck project sessions flightdeck (resolves registry topic -> sessions.thread_id on the DEFAULT profile;",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project sessions --help",
+      "kind": "A",
+      "detail": "example: flightdeck project sessions flightdeck (resolves registry topic -> sessions.thread_id on the DEFAULT profile; read-only)",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project sync --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project sync [-h] [--root PATH] [--apply]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project sync --help",
+      "kind": "A",
+      "detail": "example: flightdeck project sync --root ~/dev --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project sync --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project sync [-h] [--root PATH] [--apply] [--ignore-topic ID] [--json] [--create-boards]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project unlink --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project unlink [-h] [project] [session_id]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project project unlink --help",
+      "kind": "A",
+      "detail": "example: flightdeck project unlink flightdeck <session-id>",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project qa --help",
+      "kind": "A",
+      "detail": "usage: flightdeck qa [-h] [--card CARD_ID] [--watch] [--interval N] [--notify]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project qa --help",
+      "kind": "A",
+      "detail": "example: flightdeck qa add flightdeck \"verify the new dashboard loads\"",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project qa --help",
+      "kind": "A",
+      "detail": "usage: flightdeck qa [-h] [--card CARD_ID] [--watch] [--interval N] [--notify] [project ...]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project reconcile --help",
+      "kind": "A",
+      "detail": "usage: flightdeck reconcile [-h] [--apply] [--days N]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project reconcile --help",
+      "kind": "A",
+      "detail": "example: flightdeck reconcile --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project release --help",
+      "kind": "A",
+      "detail": "usage: flightdeck release [-h] [--apply] project version",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project release --help",
+      "kind": "A",
+      "detail": "example: flightdeck release flightdeck 0.6.0 --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project report --help",
+      "kind": "A",
+      "detail": "usage: flightdeck report [-h] [--since DURATION] [--all] [--backfill DURATION]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project report --help",
+      "kind": "A",
+      "detail": "example: flightdeck report flightdeck --all",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project report --help",
+      "kind": "A",
+      "detail": "usage: flightdeck report [-h] [--since DURATION] [--all] [--backfill DURATION] [--apply] [project]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project review --help",
+      "kind": "A",
+      "detail": "usage: flightdeck review [-h] [--queue] [--apply] [--base BASE]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project review --help",
+      "kind": "A",
+      "detail": "--baseline PATH     test-baseline file (default ~/.flightdeck/test-",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project review --help",
+      "kind": "A",
+      "detail": "example: flightdeck review t_942dcbd1 --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project review --help",
+      "kind": "A",
+      "detail": "usage: flightdeck review [-h] [--queue] [--apply] [--base BASE] [--baseline PATH] [CARD_ID_OR_PROJECT]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project review --help",
+      "kind": "A",
+      "detail": "--baseline PATH     test-baseline file (default ~/.flightdeck/test-baseline.yaml)",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project roadmap --help",
+      "kind": "A",
+      "detail": "usage: flightdeck roadmap [-h] ROADMAP_CMD ...",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project roadmap --help",
+      "kind": "A",
+      "detail": "example: flightdeck roadmap show flightdeck",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project roadmap add --help",
+      "kind": "A",
+      "detail": "usage: flightdeck roadmap add [-h] [--section {now,next,later}] [--apply]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project roadmap add --help",
+      "kind": "A",
+      "detail": "example: flightdeck roadmap add flightdeck \"ship 0.6.0\" --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project roadmap add --help",
+      "kind": "A",
+      "detail": "usage: flightdeck roadmap add [-h] [--section {now,next,later}] [--apply] project item",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project roadmap adopt --help",
+      "kind": "A",
+      "detail": "usage: flightdeck roadmap adopt [-h] [--apply] project",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project roadmap adopt --help",
+      "kind": "A",
+      "detail": "example: flightdeck roadmap adopt flightdeck --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project roadmap done --help",
+      "kind": "A",
+      "detail": "usage: flightdeck roadmap done [-h] [--apply] project item",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project roadmap done --help",
+      "kind": "A",
+      "detail": "example: flightdeck roadmap done flightdeck \"0.6.0\" --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project roadmap move --help",
+      "kind": "A",
+      "detail": "usage: flightdeck roadmap move [-h] --to {now,next,later} [--apply]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project roadmap move --help",
+      "kind": "A",
+      "detail": "example: flightdeck roadmap move flightdeck \"0.6.0\" --to next --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project roadmap move --help",
+      "kind": "A",
+      "detail": "usage: flightdeck roadmap move [-h] --to {now,next,later} [--apply] project item",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project roadmap progress --help",
+      "kind": "A",
+      "detail": "usage: flightdeck roadmap progress [-h] [project]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project roadmap progress --help",
+      "kind": "A",
+      "detail": "example: flightdeck roadmap progress flightdeck",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project roadmap show --help",
+      "kind": "A",
+      "detail": "usage: flightdeck roadmap show [-h] [project]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project roadmap show --help",
+      "kind": "A",
+      "detail": "example: flightdeck roadmap show flightdeck",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project standup --help",
+      "kind": "A",
+      "detail": "usage: flightdeck standup [-h] [--watch] [--interval N] [--max-fleet N]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project standup --help",
+      "kind": "A",
+      "detail": "example: flightdeck standup",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project start --help",
+      "kind": "A",
+      "detail": "usage: flightdeck start [-h] --milestone MILESTONE [--max-concurrent N]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project start --help",
+      "kind": "A",
+      "detail": "example: flightdeck start flightdeck --milestone 0.6.0 --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project start --help",
+      "kind": "A",
+      "detail": "usage: flightdeck start [-h] --milestone MILESTONE [--max-concurrent N] [--apply] project",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project update --help",
+      "kind": "A",
+      "detail": "usage: flightdeck update [-h] [--apply] [--dry-run]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project update --help",
+      "kind": "A",
+      "detail": "example: flightdeck update (dry-run plan) | flightdeck update --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project update --help",
+      "kind": "A",
+      "detail": "example: flightdeck update (dry-run plan) | flightdeck update --apply (actually update)",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project verify --help",
+      "kind": "A",
+      "detail": "usage: flightdeck verify [-h] [--all] [project]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project verify --help",
+      "kind": "A",
+      "detail": "example: flightdeck verify --all",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project why --help",
+      "kind": "A",
+      "detail": "usage: flightdeck why [-h] CARD_ID",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project why --help",
+      "kind": "A",
+      "detail": "example: flightdeck why t_942dcbd1",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project chat --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project chat [-h] [--resume SESSION_ID] [name] ...",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project chat --help",
+      "kind": "A",
+      "detail": "example: flightdeck project chat flightdeck (attaches to the permanent",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project chat --help",
+      "kind": "A",
+      "detail": "example: flightdeck project chat flightdeck (attaches to the permanent orchestrator thread the app uses)",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project list --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project list [-h]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project list --help",
+      "kind": "A",
+      "detail": "example: flightdeck project list",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project new --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project new [-h] [--repo REPO] [--github [GITHUB]]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project new --help",
+      "kind": "A",
+      "detail": "example: flightdeck project new flightdeck --github",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project new --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project new [-h] [--repo REPO] [--github [GITHUB]] [--private] [--apply] [--dry-run] name",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project pull --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project pull [-h] [--json] [name]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project pull --help",
+      "kind": "A",
+      "detail": "example: flightdeck project pull flightdeck (no --apply: only ever fast-",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project pull --help",
+      "kind": "A",
+      "detail": "example: flightdeck project pull flightdeck (no --apply: only ever fast-forwards or skips)",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project push --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project push [-h] [--json] [--apply] [--dry-run] [name]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project push --help",
+      "kind": "A",
+      "detail": "example: flightdeck project push flightdeck --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project remove --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project remove [-h] [--apply] [--dry-run] name",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project remove --help",
+      "kind": "A",
+      "detail": "example: flightdeck project remove flightdeck --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project repair --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project repair [-h] [--repo REPO] [--github [GITHUB]]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project repair --help",
+      "kind": "A",
+      "detail": "example: flightdeck project repair flightdeck",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project repair --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project repair [-h] [--repo REPO] [--github [GITHUB]] [--private] [--apply] [--dry-run] name",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project sync --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project sync [-h] [--root PATH] [--apply]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project sync --help",
+      "kind": "A",
+      "detail": "example: flightdeck project sync --root ~/dev --apply",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    },
+    {
+      "group": "project",
+      "command": "hscc project sync --help",
+      "kind": "A",
+      "detail": "usage: flightdeck project sync [-h] [--root PATH] [--apply] [--ignore-topic ID] [--json] [--create-boards]",
+      "fix": "rename standalone 'flightdeck' to 'hscc project'"
+    }
+  ],
+  "skips": [
+    {
+      "surface": "hscc api start --help",
+      "reason": "would fork a live API server (D-static finding covers it)"
+    }
+  ],
+  "styles": {
+    "hscc --help": "rich",
+    "hscc help advanced": "print",
+    "hscc help api": "print",
+    "hscc help autodown": "print",
+    "hscc help autoscale": "print",
+    "hscc help check": "print",
+    "hscc help cluster": "print",
+    "hscc help ed-install": "print",
+    "hscc help ed-status": "print",
+    "hscc help ed-uninstall": "print",
+    "hscc help escalate": "print",
+    "hscc help help": "print",
+    "hscc help install": "print",
+    "hscc help kanban": "print",
+    "hscc help log": "print",
+    "hscc help notify": "print",
+    "hscc help plist": "print",
+    "hscc help profiles": "print",
+    "hscc help project": "print",
+    "hscc help start": "print",
+    "hscc help start-daemon": "print",
+    "hscc help stats": "print",
+    "hscc help status": "print",
+    "hscc help stop": "print",
+    "hscc help template": "print",
+    "hscc help throughput": "print",
+    "hscc help triggers": "print",
+    "hscc help uninstall": "print",
+    "hscc help verify": "print",
+    "hscc help watch": "print",
+    "hscc autoscale --help": "print",
+    "hscc check --help": "print",
+    "hscc escalate --help": "print",
+    "hscc install --help": "print",
+    "hscc log --help": "print",
+    "hscc notify --help": "print",
+    "hscc plist --help": "print",
+    "hscc start --help": "print",
+    "hscc stats --help": "print",
+    "hscc status --help": "print",
+    "hscc stop --help": "print",
+    "hscc throughput --help": "print",
+    "hscc triggers --help": "print",
+    "hscc uninstall --help": "print",
+    "hscc verify --help": "print",
+    "hscc watch --help": "print",
+    "hscc advanced --help": "print",
+    "hscc start-daemon --help": "print",
+    "hscc ed-status --help": "print",
+    "hscc ed-install --help": "print",
+    "hscc ed-uninstall --help": "print",
+    "hscc heal-clear --help": "print",
+    "hscc help heal-clear": "print",
+    "hscc heal-status --help": "print",
+    "hscc help heal-status": "print",
+    "hscc cluster --help": "print",
+    "hscc cluster down --help": "print",
+    "hscc cluster hosts --help": "print",
+    "hscc cluster info --help": "print",
+    "hscc cluster jobs --help": "print",
+    "hscc cluster monitor --help": "print",
+    "hscc cluster status --help": "print",
+    "hscc cluster stop --help": "print",
+    "hscc cluster up --help": "print",
+    "hscc cluster monitor --live --help": "print",
+    "hscc profiles --help": "print",
+    "hscc template --help": "print",
+    "hscc template apply --help": "print",
+    "hscc template list --help": "print",
+    "hscc template preview --help": "print",
+    "hscc template status --help": "print",
+    "hscc template validate --help": "print",
+    "hscc api --help": "rich",
+    "hscc api start --help": "rich",
+    "hscc api stop --help": "rich",
+    "hscc api status --help": "rich",
+    "hscc api install-service --help": "rich",
+    "hscc api uninstall-service --help": "rich",
+    "hscc autodown --help": "print",
+    "hscc autodown status --help": "print",
+    "hscc autodown enable --help": "print",
+    "hscc autodown disable --help": "print",
+    "hscc autodown wake --help": "print",
+    "hscc autodown cancel --help": "print",
+    "hscc kanban --help": "rich",
+    "hscc kanban blocked --help": "rich",
+    "hscc kanban stale --help": "rich",
+    "hscc project --help": "argparse",
+    "hscc project archive-sessions --help": "argparse",
+    "hscc project ask --help": "argparse",
+    "hscc project daemon --help": "argparse",
+    "hscc project daemon check --help": "argparse",
+    "hscc project daemon install --help": "argparse",
+    "hscc project daemon log --help": "argparse",
+    "hscc project daemon notify --help": "argparse",
+    "hscc project daemon start --help": "argparse",
+    "hscc project daemon status --help": "argparse",
+    "hscc project daemon stop --help": "argparse",
+    "hscc project daemon uninstall --help": "argparse",
+    "hscc project daemon watch --help": "argparse",
+    "hscc project decompose --help": "argparse",
+    "hscc project doctor --help": "argparse",
+    "hscc project hygiene --help": "argparse",
+    "hscc project incident --help": "argparse",
+    "hscc project ingest --help": "argparse",
+    "hscc project init --help": "argparse",
+    "hscc project legacy-cards --help": "argparse",
+    "hscc project lint-cards --help": "argparse",
+    "hscc project map-sessions --help": "argparse",
+    "hscc project message --help": "argparse",
+    "hscc project message broadcast --help": "argparse",
+    "hscc project message dispatch --help": "argparse",
+    "hscc project message read --help": "argparse",
+    "hscc project message send --help": "argparse",
+    "hscc project metrics --help": "argparse",
+    "hscc project migrate-card --help": "argparse",
+    "hscc project monitor --help": "argparse",
+    "hscc project project --help": "argparse",
+    "hscc project project chat --help": "argparse",
+    "hscc project project digest --help": "argparse",
+    "hscc project project link --help": "argparse",
+    "hscc project project list --help": "argparse",
+    "hscc project project new --help": "argparse",
+    "hscc project project pull --help": "argparse",
+    "hscc project project push --help": "argparse",
+    "hscc project project remove --help": "argparse",
+    "hscc project project repair --help": "argparse",
+    "hscc project project sessions --help": "argparse",
+    "hscc project project sync --help": "argparse",
+    "hscc project project unlink --help": "argparse",
+    "hscc project qa --help": "argparse",
+    "hscc project reconcile --help": "argparse",
+    "hscc project release --help": "argparse",
+    "hscc project report --help": "argparse",
+    "hscc project review --help": "argparse",
+    "hscc project roadmap --help": "argparse",
+    "hscc project roadmap add --help": "argparse",
+    "hscc project roadmap adopt --help": "argparse",
+    "hscc project roadmap done --help": "argparse",
+    "hscc project roadmap move --help": "argparse",
+    "hscc project roadmap progress --help": "argparse",
+    "hscc project roadmap show --help": "argparse",
+    "hscc project standup --help": "argparse",
+    "hscc project start --help": "argparse",
+    "hscc project update --help": "argparse",
+    "hscc project verify --help": "argparse",
+    "hscc project why --help": "argparse",
+    "hscc project chat --help": "argparse",
+    "hscc project list --help": "argparse",
+    "hscc project new --help": "argparse",
+    "hscc project pull --help": "argparse",
+    "hscc project push --help": "argparse",
+    "hscc project remove --help": "argparse",
+    "hscc project repair --help": "argparse",
+    "hscc project sync --help": "argparse"
+  },
+  "examples_total": 75,
+  "examples_failed": 1,
+  "widths": [
+    80,
+    120,
+    500
+  ]
+}
