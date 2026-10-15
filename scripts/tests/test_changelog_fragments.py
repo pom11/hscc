@@ -316,7 +316,10 @@ def test_migration_is_lossless_on_the_live_changelog():
     # find the last commit whose CHANGELOG.md still had hand-written bullets
     log = subprocess.run(["git", "log", "--format=%H", "--", "CHANGELOG.md"],
                          cwd=str(REPO_ROOT), capture_output=True, text=True).stdout.split()
-    for rev in log[:12]:
+    # Whole history, not a recent window: every release adds a CHANGELOG.md
+    # commit, so a fixed window eventually loses the pre-migration blob and the
+    # test silently falls back to HEAD's pointer-only [Unreleased].
+    for rev in log:
         text = blob(rev)
         if not text:
             continue
