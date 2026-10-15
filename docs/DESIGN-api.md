@@ -76,7 +76,8 @@ Request: none (no body).
 Response:
 ```json
 {
-  "workloads": [{"name": "...", "tp": "1", "pp": "1", "container_id": "..."}],
+  "workloads": [{"name": "...", "tp": "1", "pp": "1", "container_id": "...",
+                 "nodes": ["192.0.2.11", "192.0.2.12"]}],
   "idle_hosts": ["192.0.2.11"],
   "total_hosts": 4,
   "speak": "4 hosts up. 2 workloads running, 1 idle."
@@ -84,6 +85,14 @@ Response:
 ```
 The `workloads` / `idle_hosts` / `total_hosts` fields are copied verbatim from the
 engine's return dict; `speak` is derived (section B).
+
+`workloads[].nodes` (t_db6a32da) is **optional and additive**: the host lines of
+that job's block in `sparkrun status`, de-duplicated in block order — the
+unit→node edge no other endpoint exposes as structured data. A `tp=2` job
+legitimately lists BOTH nodes; a solo job lists its one. A pre-field engine
+omits the key entirely, so clients must treat it as optional. `idle_hosts`
+cannot substitute: it files every indented dotted line of the blob, including
+the container lines of RUNNING jobs.
 
 #### `GET /v1/cluster/hosts`
 

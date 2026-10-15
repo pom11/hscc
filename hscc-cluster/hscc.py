@@ -72,6 +72,24 @@ def read_json_file(path):
 
 # ── Commands ──────────────────────────────────────────────────────────────
 
+def _job_host_ip(stripped):
+    """Return the node IP of a Job-block host line, or None.
+
+    Host lines under a ``Job:`` block carry a label column then the address:
+    ``node_0     10.0.0.1     Up 12 hours    <image>`` (or ``solo`` for a
+    single-container job). The idle-section lines (``  192.0.2.11``) have no
+    label column, so requiring a dot-free first token and a dotted second
+    token separates the two classes. (t_db6a32da)
+    """
+    parts = stripped.split()
+    if len(parts) < 2:
+        return None
+    label, addr = parts[0], parts[1]
+    if "." in label or "." not in addr:
+        return None
+    return addr
+
+
 def cmd_cluster_status():
     """Show running workloads and idle hosts on the DGX Spark cluster."""
     result = run_cmd([SPARKRUN, "status"], timeout=15)
@@ -80,10 +98,20 @@ def cmd_cluster_status():
     workloads = []
     idle_hosts = []
     total_hosts = 0
+    # Host lines of the ``Job:`` block currently being read (None outside a
+    # block). The SAME loop that yields name/tp/pp/container_id pairs each
+    # job with the nodes it runs on — the unit→node edge clients cannot get
+    # from anywhere else (t_db6a32da). The list object is shared with the
+    # workload dict, so later host lines of the block land in its ``nodes``.
+    current_nodes = None
     
     for line in output.split("\n"):
         stripped = line.strip()
-        if not stripped or stripped.startswith("Idle"):
+        if not stripped:
+            current_nodes = None  # a blank line closes the Job block
+            continue
+        if stripped.startswith("Idle"):
+            current_nodes = None  # the idle section is never inside a block
             continue
         
         # Job line: "Job: @official/qwen3.6...  [1b6e77192e59]  (1 container(s))"
@@ -103,11 +131,16 @@ def cmd_cluster_status():
                 if p.startswith("[") and p.endswith("]"):
                     container_id = p.strip("[]")
                     break
+            current_nodes = []
             workloads.append({
                 "name": name,
                 "tp": tp,
                 "pp": pp,
                 "container_id": container_id,
+                # Optional/additive (t_db6a32da): the host lines of this
+                # job's block, in order, de-duplicated. A tp=2 job
+                # legitimately lists BOTH nodes.
+                "nodes": current_nodes,
             })
         # Solo host line: "  solo       192.0.2.10                           Up 26 minutes             sparkrun-eugr-vllm"
         elif "solo" in stripped and "." in stripped and ("Up " in stripped or "since" in stripped.lower()):
@@ -116,13 +149,20 @@ def cmd_cluster_status():
                 if p == "solo" and i+1 < len(parts):
                     ip = parts[i+1]
                     total_hosts += 1
+                    if current_nodes is not None and ip not in current_nodes:
+                        current_nodes.append(ip)
                     break
         # "  192.0.2.11" — check raw line for indentation
         elif line.startswith("  ") and stripped.count(".") >= 3 and not stripped.startswith(("logs:", "stop:", "solo")):
             idle_hosts.append(stripped)
             total_hosts += 1
+            if current_nodes is not None:
+                ip = _job_host_ip(stripped)
+                if ip is not None and ip not in current_nodes:
+                    current_nodes.append(ip)
         # Total line: "Total: 1 container(s) across 4 host(s)"
         elif stripped.startswith("Total:"):
+            current_nodes = None
             try:
                 parts = stripped.split()
                 for i, p in enumerate(parts):

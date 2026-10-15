@@ -91,6 +91,41 @@ def test_cluster_status_shape(running, token, stub_cluster):
     assert isinstance(payload["speak"], str) and payload["speak"]
 
 
+def test_cluster_status_workload_nodes_passthrough(running, token, stub_cluster):
+    """t_db6a32da: the per-workload `nodes` list (unit→node edge) is forwarded
+    verbatim like the other workload keys — `handle_cluster_status` must not
+    whitelist its way into dropping it. A tp=2 job legitimately lists BOTH
+    nodes; speak must not change because of the new key."""
+    stub_cluster(status={
+        "workloads": [{"name": "ds4", "tp": "2", "pp": "1",
+                       "container_id": "cid_1",
+                       "nodes": ["192.0.2.244", "192.0.2.246"]}],
+        "idle_hosts": [],
+        "total_hosts": 2,
+        "raw_output": "...",
+    })
+    status, payload = _request(running, token, "/v1/cluster/status")
+    assert status == 200
+    assert payload["workloads"][0]["nodes"] == ["192.0.2.244", "192.0.2.246"]
+    assert payload["speak"] == "2 hosts up. 1 workload running, 0 idle."
+
+
+def test_cluster_status_nodes_absent_still_decodes(running, token, stub_cluster):
+    """Back-compat half: a pre-field engine (no `nodes` anywhere) yields the
+    exact pre-change payload — clients must treat the key as optional."""
+    stub_cluster(status={
+        "workloads": [{"name": "qwen", "tp": "1", "pp": "1", "container_id": "abc"}],
+        "idle_hosts": [],
+        "total_hosts": 1,
+        "raw_output": "...",
+    })
+    status, payload = _request(running, token, "/v1/cluster/status")
+    assert status == 200
+    assert "nodes" not in payload["workloads"][0]
+    assert payload["workloads"][0] == {"name": "qwen", "tp": "1", "pp": "1",
+                                       "container_id": "abc"}
+
+
 def test_cluster_status_unavailable(running, token, stub_cluster):
     stub_cluster(status={"error": "boom"})
     status, payload = _request(running, token, "/v1/cluster/status")
