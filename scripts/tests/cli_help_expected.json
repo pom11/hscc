@@ -1,0 +1,1070 @@
+{
+  "generated_from_commit": "e2278355",
+  "note": "Baseline expectations for scripts/tests/test_cli_help_surface.py. A fix card prunes the rules it clears; an unmatched rule fails the gate (stale) and an unmatched finding fails it (new violation).",
+  "rules": [
+    {
+      "kind": "A",
+      "command": "hscc --help",
+      "needle": "flightdeck",
+      "owner": "F5",
+      "count_at_baseline": 2,
+      "example": "project <cmd>        Project-portfolio (flightdeck) commands: standup verify"
+    },
+    {
+      "kind": "A",
+      "command": "hscc help project",
+      "needle": "flightdeck",
+      "owner": "F5",
+      "count_at_baseline": 2,
+      "example": "Project-portfolio (flightdeck) commands."
+    },
+    {
+      "kind": "A",
+      "command": "hscc project --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 14,
+      "example": "usage: flightdeck [-h] [--json] [--registry PATH] COMMAND ..."
+    },
+    {
+      "kind": "A",
+      "command": "hscc project archive-sessions --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 5,
+      "example": "usage: flightdeck archive-sessions [-h] [--out DIR] [--project NAME]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project ask --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck ask [-h] [--set KEY=VALUE] [--dry-run] [--editor EDITOR]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project chat --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck project chat [-h] [--resume SESSION_ID] [name] ..."
+    },
+    {
+      "kind": "A",
+      "command": "hscc project daemon --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 11,
+      "example": "usage: flightdeck daemon [-h] SUBCOMMAND ..."
+    },
+    {
+      "kind": "A",
+      "command": "hscc project daemon check --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck daemon check [-h] [--max-fleet N] [--threshold N]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project daemon install --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck daemon install [-h] [--apply]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project daemon log --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck daemon log [-h] [--lines N]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project daemon notify --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck daemon notify [-h] [message]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project daemon start --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck daemon start [-h]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project daemon status --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck daemon status [-h]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project daemon stop --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck daemon stop [-h]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project daemon uninstall --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck daemon uninstall [-h]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project daemon watch --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck daemon watch [-h] [--interval N]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project decompose --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 4,
+      "example": "usage: flightdeck decompose [-h] [--milestone MILESTONE] [--apply]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project doctor --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck doctor [-h]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project hygiene --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck hygiene [-h] [--apply] [--similarity RATIO]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project incident --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 6,
+      "example": "usage: flightdeck incident [-h] [--project PROJECT] [--fix FIX]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project ingest --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck ingest [-h] [--limit LIMIT] [--timeout SECONDS] [--apply]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project init --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck init [-h] [--apply] [--home PATH]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project legacy-cards --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck legacy-cards [-h] [--include-archived-boards]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project lint-cards --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck lint-cards [-h] [--repo-root REPO_ROOT] [board]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project list --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck project list [-h]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project map-sessions --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 6,
+      "example": "usage: flightdeck map-sessions [-h] [--out DIR] [--apply]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project message --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck message [-h] MESSAGE_CMD ..."
+    },
+    {
+      "kind": "A",
+      "command": "hscc project message broadcast --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck message broadcast [-h] [--to a,b,c] message"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project message dispatch --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 4,
+      "example": "usage: flightdeck message dispatch [-h] [--assignee X] [--message MESSAGE]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project message read --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck message read [-h] [-n N] [project]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project message send --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck message send [-h] [--apply] [project] [message]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project metrics --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck metrics [-h] [--since DURATION] [PROJECT]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project migrate-card --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck migrate-card [-h] --to PROJECT [--apply] card_id"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project monitor --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck monitor [-h] [--time N]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project new --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck project new [-h] [--repo REPO] [--github [GITHUB]]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project project --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck project [-h] PROJECT_CMD ..."
+    },
+    {
+      "kind": "A",
+      "command": "hscc project project chat --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck project chat [-h] [--resume SESSION_ID] [name] ..."
+    },
+    {
+      "kind": "A",
+      "command": "hscc project project digest --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 5,
+      "example": "usage: flightdeck project digest [-h] [--json] name"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project project link --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 6,
+      "example": "usage: flightdeck project link [-h] [--list] [project] [session_id]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project project list --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck project list [-h]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project project new --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck project new [-h] [--repo REPO] [--github [GITHUB]]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project project pull --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck project pull [-h] [--json] [name]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project project push --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck project push [-h] [--json] [--apply] [--dry-run] [name]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project project remove --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck project remove [-h] [--apply] [--dry-run] name"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project project repair --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck project repair [-h] [--repo REPO] [--github [GITHUB]]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project project sessions --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 4,
+      "example": "usage: flightdeck project sessions [-h] name"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project project sync --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck project sync [-h] [--root PATH] [--apply]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project project unlink --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck project unlink [-h] [project] [session_id]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project pull --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck project pull [-h] [--json] [name]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project push --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck project push [-h] [--json] [--apply] [--dry-run] [name]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project qa --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck qa [-h] [--card CARD_ID] [--watch] [--interval N] [--notify]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project reconcile --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck reconcile [-h] [--apply] [--days N]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project release --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck release [-h] [--apply] project version"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project remove --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck project remove [-h] [--apply] [--dry-run] name"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project repair --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck project repair [-h] [--repo REPO] [--github [GITHUB]]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project report --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck report [-h] [--since DURATION] [--all] [--backfill DURATION]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project review --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 5,
+      "example": "usage: flightdeck review [-h] [--queue] [--apply] [--base BASE]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project roadmap --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck roadmap [-h] ROADMAP_CMD ..."
+    },
+    {
+      "kind": "A",
+      "command": "hscc project roadmap add --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck roadmap add [-h] [--section {now,next,later}] [--apply]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project roadmap adopt --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck roadmap adopt [-h] [--apply] project"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project roadmap done --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck roadmap done [-h] [--apply] project item"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project roadmap move --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck roadmap move [-h] --to {now,next,later} [--apply]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project roadmap progress --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck roadmap progress [-h] [project]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project roadmap show --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck roadmap show [-h] [project]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project standup --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck standup [-h] [--watch] [--interval N] [--max-fleet N]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project start --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck start [-h] --milestone MILESTONE [--max-concurrent N]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project sync --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck project sync [-h] [--root PATH] [--apply]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project update --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "usage: flightdeck update [-h] [--apply] [--dry-run]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project verify --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck verify [-h] [--all] [project]"
+    },
+    {
+      "kind": "A",
+      "command": "hscc project why --help",
+      "needle": "flightdeck",
+      "owner": "F1",
+      "count_at_baseline": 2,
+      "example": "usage: flightdeck why [-h] CARD_ID"
+    },
+    {
+      "kind": "B",
+      "command": "hscc --help",
+      "needle": "width=120",
+      "owner": "F5",
+      "count_at_baseline": 2,
+      "example": "width=120 bare-wrap: placement (live) layer unless --structural-only. Exit non-zero if either layer fails."
+    },
+    {
+      "kind": "B",
+      "command": "hscc --help",
+      "needle": "width=80",
+      "owner": "F5",
+      "count_at_baseline": 10,
+      "example": "width=80 bare-wrap: triggers"
+    },
+    {
+      "kind": "B",
+      "command": "hscc advanced --help",
+      "needle": "width=120",
+      "owner": "F5",
+      "count_at_baseline": 1,
+      "example": "width=120 overflow: Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, project, api, kanban, verify, stats, throughput, autoscale, escalate, start-daemon, heal-clear,"
+    },
+    {
+      "kind": "B",
+      "command": "hscc advanced --help",
+      "needle": "width=80",
+      "owner": "F5",
+      "count_at_baseline": 1,
+      "example": "width=80 overflow: Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, project, api, kanban, verify, stats, throughput, autoscale, escalate, start-daemon, heal-clear, "
+    },
+    {
+      "kind": "B",
+      "command": "hscc api --help",
+      "needle": "width=120",
+      "owner": "F4",
+      "count_at_baseline": 2,
+      "example": "width=120 overflow:   hscc api install-service                                            OPT-IN: write the launchd unit (boot-resilient API; loading stays manual)"
+    },
+    {
+      "kind": "B",
+      "command": "hscc api --help",
+      "needle": "width=80",
+      "owner": "F4",
+      "count_at_baseline": 5,
+      "example": "width=80 overflow:   hscc api start [--tailscale] [--bind <ip>] [--port <n>] [--no-qr]   Start the API server in the background"
+    },
+    {
+      "kind": "B",
+      "command": "hscc api uninstall-service --help",
+      "needle": "width=120",
+      "owner": "BROKEN-API-SVC",
+      "count_at_baseline": 1,
+      "example": "width=120 overflow: no unit file at <SANDBOX>/home/Library/LaunchAgents/com.hscc.api.plist (nothing to remove)"
+    },
+    {
+      "kind": "B",
+      "command": "hscc api uninstall-service --help",
+      "needle": "width=80",
+      "owner": "BROKEN-API-SVC",
+      "count_at_baseline": 1,
+      "example": "width=80 overflow: no unit file at <SANDBOX>/home/Library/LaunchAgents/com.hscc.api.plist (nothing to remove)"
+    },
+    {
+      "kind": "B",
+      "command": "hscc autodown --help",
+      "needle": "width=80",
+      "owner": "F4",
+      "count_at_baseline": 16,
+      "example": "width=80 overflow: idle, and back up automatically on the next inbound activity. Opt-in, OFF by default."
+    },
+    {
+      "kind": "B",
+      "command": "hscc cluster --help",
+      "needle": "width=80",
+      "owner": "F3",
+      "count_at_baseline": 2,
+      "example": "width=80 overflow:   hscc cluster monitor      One CPU/RAM/GPU snapshot (--live: refreshing view + per-model load)"
+    },
+    {
+      "kind": "B",
+      "command": "hscc cluster down --help",
+      "needle": "width=120",
+      "owner": "F3",
+      "count_at_baseline": 1,
+      "example": "width=120 overflow:   Nothing was started or stopped. Refusing to guess what --help meant \u2014 a destructive command runs only on arguments it understands."
+    },
+    {
+      "kind": "B",
+      "command": "hscc cluster down --help",
+      "needle": "width=80",
+      "owner": "F3",
+      "count_at_baseline": 2,
+      "example": "width=80 overflow:   'hscc cluster down' accepts only: --dry-run (and --theme <name> for the human view)."
+    },
+    {
+      "kind": "B",
+      "command": "hscc cluster monitor --help",
+      "needle": "width=80",
+      "owner": "MONITOR-t_1cc33407",
+      "count_at_baseline": 5,
+      "example": "width=80 overflow:   hscc cluster monitor                 one CPU/RAM/GPU snapshot (sparkrun's JSON frame)"
+    },
+    {
+      "kind": "B",
+      "command": "hscc cluster monitor --live --help",
+      "needle": "width=80",
+      "owner": "MONITOR-t_1cc33407",
+      "count_at_baseline": 5,
+      "example": "width=80 overflow:   hscc cluster monitor                 one CPU/RAM/GPU snapshot (sparkrun's JSON frame)"
+    },
+    {
+      "kind": "B",
+      "command": "hscc cluster up --help",
+      "needle": "width=120",
+      "owner": "F3",
+      "count_at_baseline": 1,
+      "example": "width=120 overflow:   Nothing was started or stopped. Refusing to guess what --help meant \u2014 a destructive command runs only on arguments it understands."
+    },
+    {
+      "kind": "B",
+      "command": "hscc cluster up --help",
+      "needle": "width=80",
+      "owner": "F3",
+      "count_at_baseline": 2,
+      "example": "width=80 overflow:   'hscc cluster up' accepts only: --dry-run (and --theme <name> for the human view)."
+    },
+    {
+      "kind": "B",
+      "command": "hscc help advanced",
+      "needle": "width=120",
+      "owner": "F5",
+      "count_at_baseline": 2,
+      "example": "width=120 bare-wrap: (placeholder, not yet available)  ed-install      Event-driven mode install (placeholder, not yet available)  "
+    },
+    {
+      "kind": "B",
+      "command": "hscc help advanced",
+      "needle": "width=80",
+      "owner": "F5",
+      "count_at_baseline": 3,
+      "example": "width=80 bare-wrap: ed-status       Event-driven mode status (placeholder, not yet available)  "
+    },
+    {
+      "kind": "B",
+      "command": "hscc help cluster",
+      "needle": "width=80",
+      "owner": "F5",
+      "count_at_baseline": 1,
+      "example": "width=80 overflow:   Subcommands: status hosts monitor jobs info stop <id> down [--dry-run] up [--dry-run]"
+    },
+    {
+      "kind": "B",
+      "command": "hscc help kanban",
+      "needle": "width=120",
+      "owner": "F5",
+      "count_at_baseline": 1,
+      "example": "width=120 overflow:   blocked [--json]: list BLOCKED cards with why; blocked --recover <id> [--reason <t>]: recover one blocked card to ready"
+    },
+    {
+      "kind": "B",
+      "command": "hscc help kanban",
+      "needle": "width=80",
+      "owner": "F5",
+      "count_at_baseline": 2,
+      "example": "width=80 overflow:   blocked [--json]: list BLOCKED cards with why; blocked --recover <id> [--reason <t>]: recover one blocked card to ready"
+    },
+    {
+      "kind": "B",
+      "command": "hscc help project",
+      "needle": "width=120",
+      "owner": "F5",
+      "count_at_baseline": 1,
+      "example": "width=120 overflow:   Delegates to the relocated flightdeck CLI under hscc-project/. Try 'hscc project --help' for the full subcommand surface."
+    },
+    {
+      "kind": "B",
+      "command": "hscc help project",
+      "needle": "width=80",
+      "owner": "F5",
+      "count_at_baseline": 1,
+      "example": "width=80 overflow:   Delegates to the relocated flightdeck CLI under hscc-project/. Try 'hscc project --help' for the full subcommand surface."
+    },
+    {
+      "kind": "B",
+      "command": "hscc help template",
+      "needle": "width=80",
+      "owner": "F5",
+      "count_at_baseline": 1,
+      "example": "width=80 overflow:   Subcommands: list status preview <name> validate <name> [--structural-only] [--json] apply <name> [--confirm]"
+    },
+    {
+      "kind": "B",
+      "command": "hscc template --help",
+      "needle": "width=120",
+      "owner": "F2",
+      "count_at_baseline": 2,
+      "example": "width=120 overflow:   hscc template validate <name> [--structural-only] [--json]  Validate: structural (offline) layer always; placement (live) layer unless --structural-only"
+    },
+    {
+      "kind": "B",
+      "command": "hscc template --help",
+      "needle": "width=80",
+      "owner": "F2",
+      "count_at_baseline": 2,
+      "example": "width=80 overflow:   hscc template validate <name> [--structural-only] [--json]  Validate: structural (offline) layer always; placement (live) layer unless --structural-only"
+    },
+    {
+      "kind": "C",
+      "command": "hscc project map-sessions --help",
+      "needle": "does not parse",
+      "owner": "F1",
+      "count_at_baseline": 1,
+      "example": "example does not parse: 'flightdeck map-sessions --json' \u2014 argparse rejected 'map-sessions --json' (exit 2)"
+    },
+    {
+      "kind": "D",
+      "command": "hscc api start --help",
+      "needle": "NOT EXECUTED",
+      "owner": "BROKEN-API-START",
+      "count_at_baseline": 1,
+      "example": "NOT EXECUTED by the audit (forking a live server cannot be undone by the sandbox); cmd_api dispatches 'start' before any --help check, so --help would start the API (api_cli.py cmd_api -> _handle_start fork)"
+    },
+    {
+      "kind": "D",
+      "command": "hscc api status --help",
+      "needle": "wrote state",
+      "owner": "BROKEN-API-STATUS",
+      "count_at_baseline": 1,
+      "example": "--help wrote state under HOME: .hscc/api-token"
+    },
+    {
+      "kind": "D",
+      "command": "hscc autodown disable --help",
+      "needle": "wrote state",
+      "owner": "BROKEN-AUTODOWN-DISABLE",
+      "count_at_baseline": 1,
+      "example": "--help wrote state under HOME: .hscc/autodown.json, .hscc/watchdog-block.json"
+    },
+    {
+      "kind": "D",
+      "command": "hscc autodown status --help",
+      "needle": "log line",
+      "owner": "BROKEN-AUTODOWN-STATUS",
+      "count_at_baseline": 2,
+      "example": "help emitted a daemon log line (a check ran while printing help): [<TS>] [ WARN] Autodown kanban interlock unevaluable: Hermes agent source not found at '<SANDBOX>/home/."
+    },
+    {
+      "kind": "D",
+      "command": "hscc autodown status --help",
+      "needle": "shelled out",
+      "owner": "BROKEN-AUTODOWN-STATUS",
+      "count_at_baseline": 1,
+      "example": "--help shelled out: gh pr list --repo pom11/hscc --state open --limit 1 --json number -q length"
+    },
+    {
+      "kind": "D",
+      "command": "hscc autodown status --help",
+      "needle": "wrote state",
+      "owner": "BROKEN-AUTODOWN-STATUS",
+      "count_at_baseline": 1,
+      "example": "--help wrote state under HOME: .hscc/daemon.log"
+    },
+    {
+      "kind": "D",
+      "command": "hscc autodown wake --help",
+      "needle": "log line",
+      "owner": "BROKEN-AUTODOWN-WAKE",
+      "count_at_baseline": 1,
+      "example": "help emitted a daemon log line (a check ran while printing help): [<TS>] [ INFO] Autodown autoup: state is already \"up\" \u2014 returning busy (no starts issued)"
+    },
+    {
+      "kind": "D",
+      "command": "hscc cluster hosts --help",
+      "needle": "shelled out",
+      "owner": "F3",
+      "count_at_baseline": 1,
+      "example": "--help shelled out: sparkrun cluster list; sparkrun status"
+    },
+    {
+      "kind": "D",
+      "command": "hscc cluster info --help",
+      "needle": "shelled out",
+      "owner": "F3",
+      "count_at_baseline": 1,
+      "example": "--help shelled out: sparkrun cluster list; sparkrun cluster show hscc"
+    },
+    {
+      "kind": "D",
+      "command": "hscc cluster jobs --help",
+      "needle": "shelled out",
+      "owner": "F3",
+      "count_at_baseline": 1,
+      "example": "--help shelled out: sparkrun cluster status"
+    },
+    {
+      "kind": "D",
+      "command": "hscc cluster status --help",
+      "needle": "shelled out",
+      "owner": "F3",
+      "count_at_baseline": 1,
+      "example": "--help shelled out: sparkrun status"
+    },
+    {
+      "kind": "D",
+      "command": "hscc cluster stop --help",
+      "needle": "shelled out",
+      "owner": "BROKEN-CLUSTER",
+      "count_at_baseline": 1,
+      "example": "--help shelled out: sparkrun stop --help"
+    },
+    {
+      "kind": "D",
+      "command": "hscc heal-clear --help",
+      "needle": "executed the mutating verb",
+      "owner": "BROKEN-HEAL",
+      "count_at_baseline": 1,
+      "example": "--help executed the mutating verb (output echo: 'No strikes recorded for --help')"
+    },
+    {
+      "kind": "D",
+      "command": "hscc kanban blocked --help",
+      "needle": "log line",
+      "owner": "BROKEN-KANBAN",
+      "count_at_baseline": 1,
+      "example": "help emitted a daemon log line (a check ran while printing help): [<TS>] [ WARN] Autodown kanban interlock unevaluable: Hermes agent source not found at '<SANDBOX>/home/."
+    },
+    {
+      "kind": "D",
+      "command": "hscc kanban stale --help",
+      "needle": "log line",
+      "owner": "BROKEN-KANBAN",
+      "count_at_baseline": 1,
+      "example": "help emitted a daemon log line (a check ran while printing help): [<TS>] [ WARN] Autodown kanban interlock unevaluable: Hermes agent source not found at '<SANDBOX>/home/."
+    },
+    {
+      "kind": "D",
+      "command": "python -m hscc_daemon.hscc --help (empty HOME)",
+      "needle": "executes sparkrun",
+      "owner": "BROKEN-IMPORT",
+      "count_at_baseline": 1,
+      "example": "import of hscc_daemon.hscc executes sparkrun (module-level resolve_cluster_config fallback): sparkrun cluster list --json"
+    },
+    {
+      "kind": "D-rc",
+      "command": "hscc advanced --help",
+      "needle": "exited 1",
+      "owner": "F5",
+      "count_at_baseline": 1,
+      "example": "--help exited 1 (expected 0)"
+    },
+    {
+      "kind": "D-rc",
+      "command": "hscc api install-service --help",
+      "needle": "exited 1",
+      "owner": "BROKEN-API-SVC",
+      "count_at_baseline": 1,
+      "example": "--help exited 1 (expected 0)"
+    },
+    {
+      "kind": "D-rc",
+      "command": "hscc autodown enable --help",
+      "needle": "exited 1",
+      "owner": "BROKEN-AUTODOWN-ENABLE",
+      "count_at_baseline": 1,
+      "example": "--help exited 1 (expected 0)"
+    },
+    {
+      "kind": "D-rc",
+      "command": "hscc autodown wake --help",
+      "needle": "exited 1",
+      "owner": "BROKEN-AUTODOWN-WAKE",
+      "count_at_baseline": 1,
+      "example": "--help exited 1 (expected 0)"
+    },
+    {
+      "kind": "D-rc",
+      "command": "hscc cluster down --help",
+      "needle": "exited 1",
+      "owner": "F3",
+      "count_at_baseline": 1,
+      "example": "--help exited 1 (expected 0)"
+    },
+    {
+      "kind": "D-rc",
+      "command": "hscc cluster stop --help",
+      "needle": "exited 1",
+      "owner": "BROKEN-CLUSTER",
+      "count_at_baseline": 1,
+      "example": "--help exited 1 (expected 0)"
+    },
+    {
+      "kind": "D-rc",
+      "command": "hscc cluster up --help",
+      "needle": "exited 1",
+      "owner": "F3",
+      "count_at_baseline": 1,
+      "example": "--help exited 1 (expected 0)"
+    },
+    {
+      "kind": "D-rc",
+      "command": "hscc help heal-clear",
+      "needle": "exited 1",
+      "owner": "BROKEN-HEAL",
+      "count_at_baseline": 1,
+      "example": "--help exited 1 (expected 0)"
+    },
+    {
+      "kind": "D-rc",
+      "command": "hscc help heal-status",
+      "needle": "exited 1",
+      "owner": "BROKEN-HEAL",
+      "count_at_baseline": 1,
+      "example": "--help exited 1 (expected 0)"
+    },
+    {
+      "kind": "D-rc",
+      "command": "hscc template apply --help",
+      "needle": "exited 1",
+      "owner": "F2",
+      "count_at_baseline": 1,
+      "example": "--help exited 1 (expected 0)"
+    },
+    {
+      "kind": "D-rc",
+      "command": "hscc template preview --help",
+      "needle": "exited 1",
+      "owner": "F2",
+      "count_at_baseline": 1,
+      "example": "--help exited 1 (expected 0)"
+    },
+    {
+      "kind": "D-rc",
+      "command": "hscc template validate --help",
+      "needle": "exited 1",
+      "owner": "F2",
+      "count_at_baseline": 1,
+      "example": "--help exited 1 (expected 0)"
+    },
+    {
+      "kind": "DEAD",
+      "command": "hscc ed-install --help",
+      "needle": "not yet available",
+      "owner": "F5",
+      "count_at_baseline": 1,
+      "example": "Event-driven mode install (placeholder, not yet available)"
+    },
+    {
+      "kind": "DEAD",
+      "command": "hscc ed-status --help",
+      "needle": "not yet available",
+      "owner": "F5",
+      "count_at_baseline": 1,
+      "example": "Event-driven mode status (placeholder, not yet available)"
+    },
+    {
+      "kind": "DEAD",
+      "command": "hscc ed-uninstall --help",
+      "needle": "not yet available",
+      "owner": "F5",
+      "count_at_baseline": 1,
+      "example": "Event-driven mode uninstall (placeholder, not yet available)"
+    },
+    {
+      "kind": "DEAD",
+      "command": "hscc help advanced",
+      "needle": "not yet available",
+      "owner": "F5",
+      "count_at_baseline": 5,
+      "example": "ed-status       Event-driven mode status (placeholder, not yet available)"
+    },
+    {
+      "kind": "DEAD",
+      "command": "hscc help ed-install",
+      "needle": "not yet available",
+      "owner": "F5",
+      "count_at_baseline": 1,
+      "example": "Event-driven mode install (placeholder, not yet available)"
+    },
+    {
+      "kind": "DEAD",
+      "command": "hscc help ed-status",
+      "needle": "not yet available",
+      "owner": "F5",
+      "count_at_baseline": 1,
+      "example": "Event-driven mode status (placeholder, not yet available)"
+    },
+    {
+      "kind": "DEAD",
+      "command": "hscc help ed-uninstall",
+      "needle": "not yet available",
+      "owner": "F5",
+      "count_at_baseline": 1,
+      "example": "Event-driven mode uninstall (placeholder, not yet available)"
+    },
+    {
+      "kind": "DEAD",
+      "command": "hscc project message --help",
+      "needle": "Telegram removed",
+      "owner": "F1",
+      "count_at_baseline": 3,
+      "example": "read       list a project's recorded messages (Telegram removed \u2014 no live"
+    }
+  ]
+}
