@@ -120,6 +120,11 @@ final class SessionActivityDriver {
     }
 
     private func start(_ content: SessionActivityAttributes.ContentState) {
+        #if DEBUG
+        // Capture harness (t_0d5632bc): see MonitorActivityDriver.push —
+        // Activity.request re-raises the notification authorization sheet.
+        if DebugHarness.suppressNotifications { return }
+        #endif
         let attributes = SessionActivityAttributes()
         do {
             current = try Activity.request(

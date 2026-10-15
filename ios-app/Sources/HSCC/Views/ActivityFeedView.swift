@@ -13,6 +13,11 @@ import SwiftUI
 ///     no tool call in the window, so "who is on what" is never blank).
 ///   * "Tool" — a specific tool the profile just called, tied to its card.
 ///
+/// LIST RECIPE (spec §5, Phase 2 C3): the old ScrollView of hand-rolled
+/// `surfaceRaised` cards — the app's second row dialect — is gone. One plain
+/// List; each row = leading status dot, title (headline) over machine
+/// caption, trailing time + `HSStatusChip`. No boxes, no in-content headers.
+///
 /// Tap-to-trace: tapping a row pushes `ActivityTraceView` with that entry's
 /// trace metadata (profile, session id, card, tool, timestamp) — the operator
 /// can then open that profile's Sessions hub to see the full session.
@@ -22,29 +27,33 @@ struct ActivityFeedView: View {
     @State private var feed = LoadState<ActivityFeedResponse>.idle
 
     var body: some View {
-        ScrollView {
+        Group {
             if let client {
-                VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
-                    listSection(client)
+                switch feed {
+                case .idle, .loading:
+                    HSLoading("Loading…")
+                case .failed(let message):
+                    HSError("Couldn't load the feed", message: message) {
+                        Task { await load(client) }
+                    }
+                case .stale(let state, let ageMessage):
+                    feedList(state, staleMessage: ageMessage, client: client)
+                case .loaded(let state):
+                    feedList(state, staleMessage: nil, client: client)
                 }
-                .padding()
             } else {
-                notConfiguredView
+                HSConnectGate(systemImage: "waveform.path.ecg",
+                              verb: "to watch the live feed")
             }
         }
         .navigationTitle("Activity")
+        .navigationBarTitleDisplayMode(.inline)
         .refreshable { if let client { await load(client) } }
         .task {
             if let client, feed.value == nil, !feed.isLoading {
                 await load(client)
             }
         }
-    }
-
-    // MARK: - Not configured
-
-    private var notConfiguredView: some View {
-        HSConnectGate(systemImage: "waveform.path.ecg", verb: "to watch the live feed")
     }
 
     // MARK: - Load
@@ -64,119 +73,120 @@ struct ActivityFeedView: View {
         }
     }
 
-    // MARK: - List
+    // MARK: - List (the shared recipe)
 
-    private func listSection(_ client: HSCCClient) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
-            Label("Cluster Activity", systemImage: "waveform.path.ecg")
-                .font(.headline)
-            switch feed {
-            case .loading:
-                HSLoading("Loading…")
-            case .failed(let message):
-                errorLabel(message, retry: { Task { await load(client) } })
-            case .stale(let state, let ageMessage):
-                VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-                    StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
+    private func feedList(_ state: ActivityFeedResponse,
+                          staleMessage: String?,
+                          client: HSCCClient) -> some View {
+        let items = state.entries ?? []
+        return List {
+            if let staleMessage {
+                Section {
+                    StaleBanner(age: staleMessage,
+                                reason: "Can't reach the cluster right now.") {
                         Task { await load(client) }
                     }
-                    feedBody(client, state)
-                }
-            case .loaded(let state):
-                feedBody(client, state)
-            default:
-                EmptyView()
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
-                .fill(Theme.Semantic.surfaceRaised)
-        )
-    }
-
-    private func feedBody(_ client: HSCCClient, _ state: ActivityFeedResponse) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-            Text(state.speak)
-                .font(.subheadline)
-                .italic()
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-            let items = state.entries ?? []
-            if items.isEmpty {
-                emptyLabel("No agents running right now.")
-            } else {
-                ForEach(items) { entry in
-                    entryRow(entry)
-                    if entry.id != items.last?.id {
-                        Divider()
-                    }
                 }
             }
-        }
-    }
-
-    private func entryRow(_ entry: ActivityEntry) -> some View {
-        NavigationLink {
-            ActivityTraceView(entry: entry)
-        } label: {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: Theme.Spacing.sm.rawValue) {
-                    kindBadge(entry)
-                    Text(entry.profile ?? "unknown profile")
-                        .font(.headline)
-                        .lineLimit(1)
-                    Spacer()
-                    if let at = entry.at {
-                        Text(timeLabel(at))
-                            .font(.caption2.monospacedDigit())
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    }
-                }
-                if entry.isRunning {
-                    Text("running \(entry.card_title ?? "a card")"
-                         + cardRef(entry.card_id))
-                        .font(.subheadline)
+            if !state.speak.isEmpty {
+                // The feed's one-line summary — a recipe caption line, not a
+                // boxed label like the card dialect used.
+                Section {
+                    Text(state.speak)
+                        .font(.footnote.italic())
                         .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                } else {
-                    HStack(spacing: 6) {
-                        Image(systemName: "wrench.and.screwdriver")
-                            .font(.caption)
-                            .foregroundColor(Theme.Semantic.ok)
-                        Text(entry.tool ?? "tool")
-                            .font(.subheadline)
-                            .foregroundColor(Theme.Semantic.onSurface)
-                    }
-                    if let cardTitle = entry.card_title {
-                        Text("on \(cardTitle)" + cardRef(entry.card_id))
-                            .font(.caption)
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+            }
+            if items.isEmpty {
+                Section {
+                    HSEmpty("Idle",
+                            message: "No agents running right now.",
+                            systemImage: "tray")
+                }
+            } else {
+                Section("Latest") {
+                    ForEach(items) { entry in
+                        NavigationLink {
+                            ActivityTraceView(entry: entry)
+                        } label: {
+                            feedRow(entry)
+                        }
                     }
                 }
             }
         }
-        .buttonStyle(.plain)
+        .listStyle(.plain)
     }
 
-    /// e.g. " (t_abc)" — a compact card reference suffix, or "" when unknown.
-    private func cardRef(_ cardID: String?) -> String {
-        guard let cardID, !cardID.isEmpty else { return "" }
-        return " (\(cardID))"
+    /// One timeline row, per the recipe: dot · title over machine caption ·
+    /// trailing time + chip. VoiceOver gets ONE combined element per event
+    /// (spec §9) so the rotor walks the timeline line by line.
+    private func feedRow(_ entry: ActivityEntry) -> some View {
+        let tint = entry.isRunning ? Theme.Semantic.warn : Theme.Semantic.ok
+        return HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm.rawValue) {
+            HSStatusDot(tint)
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+                Text(entry.profile ?? "unknown profile")
+                    .font(.headline)
+                    .foregroundColor(Theme.Semantic.onSurface)
+                    .lineLimit(1)
+                Text(entry.isRunning
+                     ? "running " + (entry.card_title ?? "a card") + cardRef(entry.card_id)
+                     : (entry.tool ?? "tool")
+                        + (entry.card_title.map { " on " + $0 } ?? "")
+                        + cardRef(entry.card_id))
+                    .font(.hsccMono(.footnote))
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: Theme.Spacing.sm.rawValue)
+            VStack(alignment: .trailing, spacing: Theme.Spacing.xxs.rawValue) {
+                if let at = entry.at {
+                    // Spec §5: the relative time is TICKED, not computed once.
+                    // `Text(timeLabel(at))` rendered "3 minutes ago" and then
+                    // sat there for the rest of the session — a feed you keep
+                    // open drifts into lying about how old its events are.
+                    // TimelineView re-evaluates the label every 30 s while the
+                    // feed is on screen (30 s because the smallest bucket the
+                    // phrasing shows is a minute; a faster tick would repaint
+                    // nothing).
+                    TimelineView(.periodic(from: .now, by: 30)) { context in
+                        Text(timeLabel(at, now: context.date))
+                            .font(.hsccMono(.caption2))
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    }
+                }
+                kindBadge(entry)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLine(for: entry))
     }
+
+    private func accessibilityLine(for entry: ActivityEntry) -> String {
+        let who = entry.profile ?? "unknown profile"
+        if entry.isRunning {
+            return "Running, \(who), on \(entry.card_title ?? "a card")"
+        }
+        return "Tool call, \(who), \(entry.tool ?? "tool")"
+    }
+
+    // MARK: - Bits
 
     private func kindBadge(_ entry: ActivityEntry) -> some View {
-        let tint: Color = entry.isRunning ? Theme.Semantic.warn : Theme.Semantic.ok
-        return Text(entry.kindLabel)
-            .font(.caption2.bold())
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(tint.opacity(0.18)))
-            .foregroundColor(tint)
+        // The shared chip (spec §6 inventory: kindBadge is one of the six
+        // bespoke badges HSStatusChip replaces). Colour role kept — running
+        // warns, settled is ok.
+        HSStatusChip(entry.kindLabel,
+                     color: entry.isRunning ? Theme.Semantic.warn : Theme.Semantic.ok)
     }
 
     /// A compact "how long ago" label for an ISO timestamp (newest-first feed
     /// reads best as relative time). Falls back to the raw timestamp.
-    private func timeLabel(_ iso: String) -> String {
+    /// `now` is injected by the row's `TimelineView` so the label ages without
+    /// a manual refresh; the default keeps the helper usable from one-shot
+    /// render sites.
+    private func timeLabel(_ iso: String, now: Date = Date()) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         var date = formatter.date(from: iso)
@@ -185,18 +195,14 @@ struct ActivityFeedView: View {
             date = formatter.date(from: iso)
         }
         guard let date else { return iso }
-        let seconds = Date().timeIntervalSince(date)
+        let seconds = now.timeIntervalSince(date)
         return Offline.agePhrase(seconds)
     }
 
-    private func errorLabel(_ message: String, retry: (() -> Void)? = nil) -> some View {
-        HSErrorLabel(message: message, retry: retry)
-    }
-
-    private func emptyLabel(_ text: String) -> some View {
-        Label(text, systemImage: "tray")
-            .font(.subheadline)
-            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+    /// e.g. " (t_abc)" — a compact card reference suffix, or "" when unknown.
+    private func cardRef(_ cardID: String?) -> String {
+        guard let cardID, !cardID.isEmpty else { return "" }
+        return " (\(cardID))"
     }
 }
 

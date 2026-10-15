@@ -10,6 +10,13 @@ import SwiftUI
 /// the operator in the field at the top — sessions are per-profile, and a
 /// single honest edit box beats guessing at which profile the operator means.
 ///
+/// LIST RECIPE (spec §5, Phase 2 C3): plain List, one row per session —
+/// leading status dot, title over the mono machine line, trailing
+/// `HSStatusChip`. The old hand-rolled `surfaceRaised` boxes (the app's
+/// second row dialect) are gone; the profile picker rides as the list's
+/// first section. The picker is `ProfilePickerSheet` — the searchable roster
+/// Memory already used — replacing the old TextField + "Load" pair (spec §5).
+///
 /// Design contract mirrored from the API:
 ///   * List is READ-ONLY (no `confirm`). It reloads on pull-to-refresh and on
 ///     profile change, and re-fetches after a mutation so the row reflects the
@@ -25,64 +32,54 @@ struct SessionsView: View {
 
     @State private var profile = "hscc-orch"
     @State private var list = LoadState<SessionsListResponse>.idle
+    @State private var profileOptions = LoadState<ProfileListResponse>.idle
+    @State private var profilePickerShown = false
 
     var body: some View {
-        ScrollView {
+        Group {
             if let client {
-                VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
-                    profileField(client)
-                    listSection(client)
-                }
-                .padding()
+                sessionsScreen(client)
             } else {
-                notConfiguredView
+                HSConnectGate(systemImage: "text.bubble", verb: "to inspect sessions")
             }
         }
         .navigationTitle("Sessions")
-        .refreshable { if let client { await load(client) } }
+        .navigationBarTitleDisplayMode(.inline)
+        .refreshable { if let client { await loadAll(client) } }
         .task {
             if let client, list.value == nil, !list.isLoading {
-                await load(client)
+                await loadAll(client)
             }
         }
-    }
-
-    // MARK: - Not configured
-
-    private var notConfiguredView: some View {
-        HSConnectGate(systemImage: "text.bubble", verb: "to inspect sessions")
-    }
-
-    // MARK: - Profile picker
-
-    private func profileField(_ client: HSCCClient) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-            Label("Profile", systemImage: "person.crop.circle")
-                .font(.headline)
-            TextField("hscc-orch", text: $profile)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .textFieldStyle(.roundedBorder)
-                .onSubmit { Task { await load(client) } }
-            Button {
-                Task { await load(client) }
-            } label: {
-                Label("Load", systemImage: "arrow.clockwise")
+        .sheet(isPresented: $profilePickerShown) {
+            if let client {
+                ProfilePickerSheet(options: profileOptions,
+                                   selection: $profile) {
+                    // A profile was chosen. Clear the stale list (the new
+                    // profile's sessions differ) and load fresh — no separate
+                    // "Load" tap.
+                    list = .idle
+                    await load(client)
+                }
             }
-            .font(.subheadline)
-            Text("The Hermes profile whose sessions you want to inspect.")
-                .font(.caption)
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
-                .fill(Theme.Semantic.surfaceRaised)
-        )
     }
 
     // MARK: - Load
+
+    private func loadAll(_ client: HSCCClient) async {
+        async let m: Void = load(client)
+        async let p: Void = loadProfiles(client)
+        _ = await (m, p)
+    }
+
+    private func loadProfiles(_ client: HSCCClient) async {
+        profileOptions = await Offline.load(profileOptions,
+                                            cacheKey: "/v1/profiles/list",
+                                            client: client) {
+            try await client.profileList()
+        }
+    }
 
     private func load(_ client: HSCCClient) async {
         let trimmed = profile.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -101,63 +98,125 @@ struct SessionsView: View {
         }
     }
 
-    // MARK: - List
+    // MARK: - List (the shared recipe)
 
-    private func listSection(_ client: HSCCClient) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
-            Label("Sessions", systemImage: "text.bubble")
-                .font(.headline)
+    /// One plain `List`: the profile picker as its first section, then the
+    /// session rows. The picker rides INSIDE the list on every load state —
+    /// it is the only way to switch profile, so an error must never hide it
+    /// (same reason Memory keeps its states inline).
+    private func sessionsScreen(_ client: HSCCClient) -> some View {
+        List {
+            profileSection(client)
             switch list {
-            case .loading:
-                HSLoading("Loading…")
+            case .idle, .loading:
+                Section {
+                    HStack(spacing: Theme.Spacing.sm.rawValue) {
+                        ProgressView()
+                        Text("Loading sessions…")
+                            .font(.subheadline)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    }
+                }
             case .failed(let message):
-                errorLabel(message, retry: { Task { await load(client) } })
+                Section {
+                    HSErrorLabel(message: message, retry: { Task { await load(client) } })
+                }
             case .stale(let state, let ageMessage):
-                VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-                    StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
+                Section {
+                    StaleBanner(age: ageMessage,
+                                reason: "Can't reach the cluster right now.") {
                         Task { await load(client) }
                     }
-                    sessListBody(client, state)
                 }
+                sessionRows(state, client: client)
             case .loaded(let state):
-                sessListBody(client, state)
+                sessionRows(state, client: client)
+            }
+        }
+        .listStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func sessionRows(_ state: SessionsListResponse, client: HSCCClient) -> some View {
+        let items = state.sessions ?? []
+        if !state.speak.isEmpty {
+            Section {
+                Text(state.speak)
+                    .font(.footnote.italic())
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            }
+        }
+        if items.isEmpty {
+            Section {
+                HSEmpty("Nothing here",
+                        message: "No sessions on this profile.",
+                        systemImage: "text.bubble")
+            }
+        } else {
+            Section("Sessions") {
+                ForEach(items) { session in
+                    sessionRow(client, session)
+                }
+            }
+        }
+    }
+
+    /// The profile picker as the list's first section (recipe: no boxed
+    /// field floating above the list).
+    ///
+    /// Spec §5: Sessions reuses `ProfilePickerSheet` (the searchable picker
+    /// Memory already solved with) instead of the old TextField + "Load" —
+    /// one tap picks AND loads, so a profile can't be typed, left unapplied
+    /// and mistaken for the one on screen.
+    private func profileSection(_ client: HSCCClient) -> some View {
+        Section {
+            Button {
+                profilePickerShown = true
+            } label: {
+                HStack {
+                    Text(trimmedProfile.isEmpty ? "Choose a profile…" : trimmedProfile)
+                        .font(.body)
+                        .foregroundColor(trimmedProfile.isEmpty ? Theme.Semantic.onSurfaceMuted : Theme.Semantic.onSurface)
+                    Spacer()
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+            }
+            .accessibilityLabel("Profile: \(trimmedProfile.isEmpty ? "none" : trimmedProfile)")
+            .accessibilityHint("Opens a searchable list of profiles")
+
+            switch profileOptions {
+            case .failed(let message):
+                // The roster couldn't be fetched — say so and offer a retry
+                // rather than letting the picker open onto an empty list.
+                HStack(spacing: Theme.Spacing.sm.rawValue) {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundColor(Theme.Semantic.bad)
+                        .lineLimit(2)
+                    Spacer()
+                    Button("Retry") {
+                        Task { await loadProfiles(client) }
+                    }
+                    .font(.caption)
+                }
             default:
                 EmptyView()
             }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
-                .fill(Theme.Semantic.surfaceRaised)
-        )
-    }
 
-    /// The rendered session list for a live or stale-last-known response.
-    @ViewBuilder
-    private func sessListBody(_ client: HSCCClient, _ state: SessionsListResponse) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-            Text(state.speak)
-                .font(.subheadline)
-                .italic()
+            Text("The Hermes profile whose sessions you want to inspect. Picker shows every profile the cluster serves.")
+                .font(.caption)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
-            let items = state.sessions ?? []
-            if items.isEmpty {
-                emptyLabel("No sessions on this profile.")
-            } else {
-                ForEach(items) { session in
-                    sessionRow(client, session)
-                    if session.id != items.last?.id {
-                        Divider()
-                    }
-                }
-            }
+        } header: {
+            Text("Profile")
         }
     }
 
     private func sessionRow(_ client: HSCCClient, _ session: SessionItem) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: Theme.Spacing.sm.rawValue) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
+            HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm.rawValue) {
+                HSStatusDot(session.isBloated ? Theme.Semantic.bad : Theme.Semantic.ok)
                 Text(session.displayTitle)
                     .font(.headline)
                     .lineLimit(1)
@@ -166,6 +225,7 @@ struct SessionsView: View {
                     bloatBadge
                 }
             }
+            // Machine stats line — the recipe's mono caption row.
             HStack(spacing: Theme.Spacing.md.rawValue) {
                 statText("\(session.message_count ?? 0)", "msgs")
                 statText(session.tokenSummary, "tokens")
@@ -227,18 +287,14 @@ struct SessionsView: View {
     }
 
     private var bloatBadge: some View {
-        Text("bloated")
-            .font(.caption2.bold())
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(Theme.Semantic.bad.opacity(0.18)))
-            .foregroundColor(Theme.Semantic.bad)
+        // Shared chip (spec §6: one of the six bespoke badges it replaces).
+        HSStatusChip("bloated", color: Theme.Semantic.bad)
     }
 
     private func statText(_ value: String, _ label: String) -> some View {
         HStack(spacing: 3) {
             Text(value)
-                .font(.caption.monospacedDigit())
+                .font(.hsccMono(.caption))
                 .foregroundColor(Theme.Semantic.onSurface)
             Text(label)
                 .font(.caption2)
@@ -253,15 +309,5 @@ struct SessionsView: View {
 
     private func reloadAfterMutation(_ client: HSCCClient) async {
         await load(client)
-    }
-
-    private func errorLabel(_ message: String, retry: (() -> Void)? = nil) -> some View {
-        HSErrorLabel(message: message, retry: retry)
-    }
-
-    private func emptyLabel(_ text: String) -> some View {
-        Label(text, systemImage: "tray")
-            .font(.subheadline)
-            .foregroundColor(Theme.Semantic.onSurfaceMuted)
     }
 }

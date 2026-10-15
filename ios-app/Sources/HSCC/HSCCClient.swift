@@ -25,9 +25,23 @@ struct HSCCClient {
     private let token: String
     private let session: URLSession
 
+    /// The session a caller gets when it passes none. Release: always
+    /// `.shared` — identical to the previous default argument. Debug: a
+    /// capture launch (HSCC_DEBUG_FIXTURES=1) gets the canned-fixture
+    /// session instead of the network (see DebugHarness.swift; the session
+    /// still drives ConnectionMonitor through the normal decode path, so a
+    /// screen rendered from fixtures reports its dot exactly as it would
+    /// live).
+    static func defaultSession() -> URLSession {
+        #if DEBUG
+        if DebugHarness.fixturesEnabled { return DebugHarness.fixtureSession() }
+        #endif
+        return .shared
+    }
+
     /// `portFallback` is used when `port` isn't a valid Int.
     init(host: String, port: Int, token: String,
-         session: URLSession = .shared) {
+         session: URLSession = HSCCClient.defaultSession()) {
         self.host = host
         self.port = port
         self.token = token

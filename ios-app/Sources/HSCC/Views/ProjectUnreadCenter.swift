@@ -88,6 +88,12 @@ final class ProjectUnreadCenter: ObservableObject {
         unread[project] ?? 0
     }
 
+    /// Every unread reply across all projects — the Chats drawer row's and the
+    /// dock's badge (IOS_REDESIGN §3.2: "Chat leads the dock; its badge is
+    /// what pulls the operator back in"). Derived, never stored, so it can
+    /// never disagree with the per-project counts.
+    var totalUnread: Int { unread.values.reduce(0, +) }
+
     private func persist() {
         if let data = try? JSONEncoder().encode(unread) {
             UserDefaults.standard.set(data, forKey: Self.storageKey)

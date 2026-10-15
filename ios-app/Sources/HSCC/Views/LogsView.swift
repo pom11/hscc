@@ -10,10 +10,15 @@ import SwiftUI
 ///   * **Bounded** — it requests at most `maxLines` (200) recent lines and
 ///     renders exactly what comes back. It NEVER loads a whole file or fetches
 ///     an unbounded body into memory.
-///   * **Pull-to-refresh** — SwiftUI `.refreshable` on the ScrollView.
+///   * **Pull-to-refresh** — SwiftUI `.refreshable` on the List.
 ///   * **Redacted** — every line is passed through `LogRedactor` before it is
 ///     displayed, so the view only ever holds redacted text. The backend is
 ///     required to redact first and this is a second line of defence.
+///
+/// LIST RECIPE (spec §5, Phase 2 C3): one plain `List` — the source picker as
+/// the first section, each redacted line a row (List draws the separators, so
+/// the boxed LazyVStack with manual `Divider()`s is gone), and the bound/
+/// redaction note as a caption section.
 ///
 /// SECURITY: no raw (unredacted) log line is ever stored, printed, or written
 /// by the app. `LogRedactor.redact` is the only place raw text exists, as a
@@ -29,7 +34,6 @@ struct LogsView: View {
     @State private var state = LoadState<LogsResponse>.idle
 
     var body: some View {
-        NavigationStack {
             Group {
                 if let client {
                     content(client)
@@ -39,36 +43,52 @@ struct LogsView: View {
                 }
             }
             .navigationTitle("Logs")
-        }
+            .navigationBarTitleDisplayMode(.inline)
     }
 
     // MARK: - Configured content
 
     private func content(_ client: HSCCClient) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
-                sourcePicker
+        List {
+            sourceSection
 
-                switch state {
-                case .loading:
-                    HSLoading("Fetching \(source.label.lowercased()) log…")
-                case .failed(let message):
+            switch state {
+            case .loading:
+                Section {
+                    HStack(spacing: Theme.Spacing.sm.rawValue) {
+                        ProgressView()
+                        Text("Fetching \(source.label.lowercased()) log…")
+                            .font(.subheadline)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    }
+                }
+            case .failed(let message):
+                Section {
                     HSErrorLabel(message: message, retry: { Task { await load(client) } })
-                case .stale(let entries, let ageMessage):
+                }
+            case .stale(let entries, let ageMessage):
+                Section {
                     StaleBanner(age: ageMessage,
                                 reason: "Can't reach the cluster right now.") {
                         Task { await load(client) }
                     }
-                    logBody(entries)
-                case .loaded(let entries):
-                    logBody(entries)
-                default:
-                    // idle: nothing loaded yet — let .task trigger the first load.
-                    HSLoading()
+                }
+                logBody(entries)
+            case .loaded(let entries):
+                logBody(entries)
+            default:
+                // idle: nothing loaded yet — let .task trigger the first load.
+                Section {
+                    HStack(spacing: Theme.Spacing.sm.rawValue) {
+                        ProgressView()
+                        Text("Loading…")
+                            .font(.subheadline)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    }
                 }
             }
-            .padding()
         }
+        .listStyle(.plain)
         .refreshable { await load(client) }
         .task {
             if state.value == nil, !state.isLoading { await load(client) }
@@ -80,8 +100,10 @@ struct LogsView: View {
 
     // MARK: - Source picker
 
-    private var sourcePicker: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
+    /// The picker as the list's first section (recipe: nothing floats above
+    /// the list).
+    private var sourceSection: some View {
+        Section {
             Picker("Log source", selection: $source) {
                 ForEach(LogSource.allCases) { s in
                     Text(s.label).tag(s)
@@ -105,33 +127,20 @@ struct LogsView: View {
         // hold a raw line even if a future caller skips the load path.
         let entries = LogRedactor.redactMany(rawEntries)
         if entries.isEmpty {
-            HSEmptyLabel(message: "No \(source.label.lowercased()) log lines returned.")
+            Section {
+                HSEmpty("Clean tail",
+                        message: "No \(source.label.lowercased()) log lines returned.",
+                        systemImage: "doc.text")
+            }
         } else {
-            LazyVStack(alignment: .leading, spacing: 0) {
+            Section {
                 ForEach(entries) { entry in
                     LogRow(entry: entry)
-                    if entry.id != entries.last?.id {
-                        Divider()
-                    }
                 }
+            } footer: {
+                Text("Showing up to the \(maxLines) most recent lines. Redacted client-side.")
             }
-            .background(
-                RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
-                    .fill(Theme.Semantic.surfaceRaised)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
-                    .strokeBorder(Theme.Semantic.onSurface.opacity(0.08), lineWidth: 1)
-            )
-            footer
         }
-    }
-
-    private var footer: some View {
-        Text("Showing up to the \(maxLines) most recent lines. Redacted client-side.")
-            .font(.caption2)
-            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Load
@@ -187,8 +196,7 @@ private struct LogRow: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, Theme.Spacing.md.rawValue)
-        .padding(.vertical, 6)
+        .padding(.vertical, Theme.Spacing.xs.rawValue)
     }
 
     private var tint: Color {

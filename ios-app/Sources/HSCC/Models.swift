@@ -1,5 +1,11 @@
 import Foundation
 
+/// A cluster template doubles as a navigation value (Phase 2 cutover):
+/// `TemplatesView` pushes `TemplateDetailView` through the app-wide stack
+/// instead of presenting a sheet (spec §3.1: "TemplateDetail converts
+/// sheet→push"). All stored fields are Hashable, so conformance is free.
+extension ClusterTemplate: Hashable {}
+
 // ---------------------------------------------------------------------------
 // Codable models matching the ACTUAL /v1 response shapes.
 //

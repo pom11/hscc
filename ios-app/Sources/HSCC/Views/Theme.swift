@@ -57,6 +57,10 @@ enum Theme {
         static let lightHalt = Theme.hex(0xB3261E)
         /// #55606E — secondary text, tuned for light surfaces (6.39:1 on white).
         static let lightMist = Theme.hex(0x55606E)
+
+        /// #08241A — the ink drawn ON a mint fill in dark mode. White on mint
+        /// is 1.58:1 (fails AA); this near-black scores 10.44:1 on `signal`.
+        static let signalInk = Theme.hex(0x08241A)
     }
 
     // MARK: - Semantic roles (the ONLY thing views should reference)
@@ -84,6 +88,36 @@ enum Theme {
         static var bad: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.halt) : UIColor(Palette.lightHalt) } }
         /// A neutral signal for an unknown / indeterminate state.
         static var neutral: Color { dynamic { $0.userInterfaceStyle == .dark ? UIColor(Palette.mist) : UIColor(Palette.lightMist) } }
+
+        /// PRIMARY ACTION + selection + the live/connection dot (IOS_REDESIGN
+        /// 2026-10-14 §2.1). Previously the app used `Color.accentColor` in 6+
+        /// views because Theme had no accent role at all — every accent usage
+        /// was off-system by construction. Same value as `ok` (mint), but a
+        /// distinct ROLE: mint-as-status and mint-as-primary-action can now be
+        /// retuned independently without touching each other.
+        static var accent: Color { ok }
+
+        /// Text/glyph drawn ON an accent-colored fill. The real contrast bug
+        /// this fixes: white on the mint fill is 1.58:1 (fails AA by a mile),
+        /// so `.white` was hardcoded on filled buttons. This resolves to a
+        /// near-black on dark-mode mint (10.44:1) and white on the darker
+        /// light-mode mint (5.05:1).
+        static var onAccent: Color {
+            // dark: #08241A on mint #7AE2B0 = 10.44:1
+            // light: white on #1B7E55 = 5.05:1
+            dynamic { $0.userInterfaceStyle == .dark
+                ? UIColor(Palette.signalInk)
+                : .white }
+        }
+
+        /// The tint wash behind banners/chips that used to hand-roll
+        /// `someColor.opacity(0.12)` / `0.15` in at least four places
+        /// (StreamingChatView, ContentView). One recipe, one place.
+        static func tintOverlay(_ base: Color) -> Color {
+            dynamic { traits in
+                UIColor(base).withAlphaComponent(traits.userInterfaceStyle == .dark ? 0.14 : 0.12)
+            }
+        }
     }
 
     // MARK: - Spacing scale (the ONE spacing scale)
@@ -115,12 +149,71 @@ enum Theme {
         case card = 12
         /// Badges / chips / small containers (10 pt, continuous).
         case badge = 10
+        /// Home dock + floating bars (IOS_REDESIGN §2.3, 24 pt, continuous).
+        case dock = 24
+    }
+
+    // MARK: Elevation (IOS_REDESIGN 2026-10-14 §2.3)
+    //
+    // Spec'd as `hairline`, `low`, `mid`. Before this the app had NO elevation
+    // token at all — raised surfaces in dark mode were readable only by luck,
+    // and the first view that needed a shadow would have hardcoded one (the
+    // check_theme gate rejects raw colours outside this file). Apply with
+    // `.hsElevated(.low)` / `.hsElevated(.mid)`.
+    enum Elevation {
+        /// Separators between rows: a hairline stroke, no shadow.
+        static var hairline: Color { Theme.Semantic.onSurface.opacity(0.08) }
+
+        /// Cards and small raised surfaces (spec `low` = 0/1/3). Light mode is
+        /// stronger because white-on-white carries no other cue (spec §2.3).
+        static var lowShadow: Color {
+            dynamic { $0.userInterfaceStyle == .light
+                ? UIColor.black.withAlphaComponent(0.28)
+                : UIColor.black.withAlphaComponent(0.20) }
+        }
+        static let lowRadius: CGFloat = 3
+        static let lowY: CGFloat = 1
+
+        /// Floating bars such as the home dock (spec `mid` = 0/6/16).
+        static var midShadow: Color {
+            dynamic { $0.userInterfaceStyle == .light
+                ? UIColor.black.withAlphaComponent(0.28)
+                : UIColor.black.withAlphaComponent(0.18) }
+        }
+        static let midRadius: CGFloat = 16
+        static let midY: CGFloat = 6
     }
 
     /// Build a `Color` that re-resolves per trait collection (used to make the
     /// semantic roles adapt to light/dark automatically).
     private static func dynamic(_ resolve: @escaping (UITraitCollection) -> UIColor) -> Color {
         Color(UIColor { resolve($0) })
+    }
+}
+
+extension Theme {
+    /// Colour ROLE for a kanban card status — the tone a leading `HSStatusDot`
+    /// or chip carries.
+    ///
+    /// Spec §2 "Duplicated renderers" counted this switch twice (SearchView,
+    /// ProjectsView); by the time this landed it had been copied a third time
+    /// into CardsRootView. Four screens, one meaning: when the daemon adds a
+    /// status, the dot colour for it now has one place to be added.
+    ///
+    /// `StreamingChatView.statusColor` is deliberately NOT folded in. It maps
+    /// the same words to different roles on purpose — a blocked card is `bad`
+    /// there (it is the reason the chat is stuck) and `warn` here (it is one
+    /// status among many on a board), and `ready` warns there but is neutral
+    /// here. Merging them would quietly change one screen's meaning to match
+    /// the other's.
+    static func cardStatusColor(_ status: String) -> Color {
+        switch status {
+        case "running", "claimed", "in_progress": return Semantic.ok
+        case "review", "blocked": return Semantic.warn
+        case "done", "merged", "closed": return Semantic.ok
+        case "failed", "failing": return Semantic.bad
+        default: return Semantic.neutral
+        }
     }
 }
 
@@ -138,6 +231,20 @@ extension Font {
     /// system fonts (`.font(.body)`, `.font(.caption)`, etc.) for human copy.
     static func hsccMono(_ size: CGFloat, weight: Font.Weight? = nil) -> Font {
         var f = Font.system(size: size, design: .monospaced)
+        if let weight { f = f.weight(weight) }
+        return f
+    }
+
+    /// Dynamic-Type-scaling monospaced font (IOS_REDESIGN 2026-10-14 §2.2).
+    ///
+    /// `hsccMono(_:)` takes a FIXED point size, so machine-produced values
+    /// (tool args, JSON, ids, tails) could not scale for a large-text user —
+    /// and several call sites clamped that unscaled text with `lineLimit(1)`.
+    /// Prefer this where the text must stay readable at accessibility sizes;
+    /// keep the fixed-size form only where the glyph grid must not move (e.g.
+    /// aligned hex dumps).
+    static func hsccMono(_ style: Font.TextStyle, weight: Font.Weight? = nil) -> Font {
+        var f = Font.system(style, design: .monospaced)
         if let weight { f = f.weight(weight) }
         return f
     }
@@ -348,35 +455,16 @@ struct HSConnectGate: View {
     }
 }
 
-/// Shared title + content section card (the "one card style"). Use everywhere a
-/// titled, rounded, raised panel wraps a switch/section of content — replacing
-/// the near-identical private `sectionCard` funcs that used to be copy-pasted
-/// into every view.
-struct HSSectionCard<Content: View>: View {
-    let title: String
-    let systemImage: String
-    @ViewBuilder let content: Content
-
-    init(title: String, systemImage: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.systemImage = systemImage
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-            Label(title, systemImage: systemImage)
-                .font(.headline)
-            content
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
-                .fill(Theme.Semantic.surfaceRaised)
-        )
-    }
-}
+// HSSectionCard (the titled rounded `surfaceRaised` box) was DELETED here on
+// t_f64706b4. Phase 2's list-recipe conversions (spec §5) retired its last call
+// sites — Fleet `45645201`, Autodown `79be2dd5`, Serving Control `644286f6`,
+// Cron, Ops, Approvals/BoardHygiene and Nodes & serving — and no screen builds a
+// ScrollView of boxes any more, so the component had zero users left. It is gone
+// deliberately: the recipe dialect (`List` + `.listStyle(.plain)` + `Section` +
+// `HSEmpty`/`HSError`) is the only panel style in the app. Do not resurrect it;
+// the prose mentions of it in the views' doc comments and
+// docs/design/PHASE2_PROGRESS_t_25aed701.md are the record of what it used to
+// be, not a TODO.
 
 /// The shared red inline error label under a section card.
 ///
@@ -441,12 +529,100 @@ struct HSMetaLine: View {
     }
 }
 
-// MARK: - Offline stale banner
+// MARK: - Banners (the ONE in-content banner recipe)
+
+/// The app's one in-content banner: a leading glyph (or spinner), a bold title
+/// line, an optional muted reason line, and an optional trailing icon action,
+/// on the elevated surface fill.
+///
+/// Spec §1.3 counted this recipe written twice — `StaleBanner` here and
+/// AutodownView's private `wakingBanner` — same shape, different meaning. They
+/// could NOT simply share `StaleBanner`'s copy: it prints "Offline — …", and a
+/// fleet that is *coming up* is not a fleet that is *unreachable*. Printing
+/// "Offline — waking the fleet…" is precisely the word/state disagreement spec
+/// §9 bans, so the shapes collapse and the copy stays with the caller. Each
+/// state still says its own truth; the geometry can no longer drift.
+struct HSBanner: View {
+    /// The glyph/tone role. `warn` = something needs attention (offline data,
+    /// a blocked pipeline); `neutral` = an in-progress state that is not a
+    /// fault (a wake in flight).
+    enum Tone {
+        case warn, neutral
+
+        var glyphColor: Color {
+            switch self {
+            case .warn: return Theme.Semantic.warn
+            case .neutral: return Theme.Semantic.onSurfaceMuted
+            }
+        }
+        var titleColor: Color {
+            switch self {
+            case .warn: return Theme.Semantic.warn
+            case .neutral: return Theme.Semantic.onSurface
+            }
+        }
+    }
+
+    /// What leads the banner: a status glyph, or a spinner when the state is
+    /// literally "in progress" (the wake poll) — a spinner is information, not
+    /// decoration, so it is part of the recipe rather than a call-site hack.
+    enum Leading {
+        case symbol(String)
+        case spinner
+    }
+
+    let leading: Leading
+    var tone: Tone = .neutral
+    let title: String
+    var reason: String = ""
+    /// Trailing icon-button action (e.g. retry). Ignored unless `action` is set.
+    var actionSystemImage: String = "arrow.clockwise"
+    var actionLabel: String = "Retry loading"
+    var action: (() -> Void)?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
+            switch leading {
+            case .symbol(let name):
+                Image(systemName: name)
+                    .foregroundColor(tone.glyphColor)
+            case .spinner:
+                ProgressView()
+            }
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(tone.titleColor)
+                if !reason.isEmpty {
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+            }
+            Spacer(minLength: 0)
+            if let action {
+                Button(action: action) {
+                    Image(systemName: actionSystemImage)
+                }
+                .buttonStyle(.borderless)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                .accessibilityLabel(actionLabel)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(Theme.Spacing.md.rawValue)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous)
+                .fill(Theme.Semantic.surfaceElevated)
+        )
+    }
+}
 
 /// A small reusable banner a view overlays when rendering stale last-known
 /// data: the age ("showing state from 6m ago") + the real reason the fetch
-/// failed. Tapping refetches. Defined here (with the rest of the system
-/// components) because it is pure UI and lives beside the palette.
+/// failed. Tapping refetches. This is `HSBanner`'s offline shape — one
+/// façade so the 20+ call sites keep their exact wording while the geometry
+/// lives in one place.
 struct StaleBanner: View {
     /// The staleness age message, e.g. "showing state from 6m ago".
     let age: String
@@ -456,32 +632,12 @@ struct StaleBanner: View {
     var retry: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
-            Image(systemName: "clock.arrow.circlepath")
-                .foregroundColor(Theme.Semantic.warn)
-            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
-                Text("Offline — \(age.lowercased())")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundColor(Theme.Semantic.warn)
-                if !reason.isEmpty {
-                    Text(reason)
-                        .font(.caption)
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                }
-            }
-            Spacer(minLength: 0)
-            Button(action: retry) {
-                Image(systemName: "arrow.clockwise")
-            }
-            .buttonStyle(.borderless)
-            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-            .accessibilityLabel("Retry loading")
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(Theme.Spacing.md.rawValue)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous)
-                .fill(Theme.Semantic.surfaceElevated)
-        )
+        HSBanner(leading: .symbol("clock.arrow.circlepath"),
+                 tone: .warn,
+                 title: "Offline — \(age.lowercased())",
+                 reason: reason,
+                 actionSystemImage: "arrow.clockwise",
+                 actionLabel: "Retry loading",
+                 action: retry)
     }
 }

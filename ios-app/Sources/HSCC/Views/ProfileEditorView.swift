@@ -247,6 +247,7 @@ struct MultiSelectSheet: View {
                     .foregroundColor(Theme.Semantic.onSurface)
                 }
             }
+            .listStyle(.plain)
             .searchable(text: $query, prompt: "Search")
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)

@@ -1,5 +1,12 @@
 # Serving Control (per-unit stop/restart) — t_e13c8c2b
 
+> **SUPERSEDED by t_65d791da** (spec §5 merge): `ServingControlView` is now
+> `NodesServingView` — the same unit rows under the node topology strip, grouped
+> per node. Read `docs/nodes-serving-t_65d791da.md` for the current surface; the
+> server-reality table, the honest per-unit-restart semantics and the
+> `MutationButton` contract below are all still exactly true and were carried
+> over unchanged.
+
 `ios-app/Sources/HSCC/Views/ServingControlView.swift` — start/stop/restart a
 serving unit from the phone, confirm-gated, with in-flight state, an honest
 result, and "which unit serves what" shown BEFORE acting.

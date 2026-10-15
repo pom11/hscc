@@ -6,10 +6,17 @@ import SwiftUI
 /// health stream, trigger rules + last run, pending escalations, and profile
 /// task counts. Each read is its own section with its own `LoadState`, so one
 /// degraded endpoint never blanks the rest. Errors surface the real message.
-/// Fleet-wide mutations live in FleetControlView and autodown controls in
-/// AutodownView; this view hosts the operator's trigger/escalation actions —
-/// "run triggers now" and "perform escalations" — both confirm-gated via
-/// `MutationButton`. A tap never fires a request by itself.
+/// Fleet-wide mutations live in Fleet's Control section (t_2a29a7ab retired
+/// `FleetControlView` as a screen) and autodown controls in AutodownView; this
+/// view hosts the operator's trigger/escalation actions — "run triggers now"
+/// and "perform escalations" — both confirm-gated via `MutationButton`. A tap
+/// never fires a request by itself.
+///
+/// LIST RECIPE (spec §5, Phase 2 C3): the five `HSSectionCard` boxes are now
+/// five `Section`s of one plain `List`, each keeping its own `LoadState`. The
+/// two operator actions move OUT of the scroll (spec §5: "today buried
+/// mid-scroll") into a sticky bottom bar under `safeAreaInset` — still
+/// confirm-gated, now always reachable.
 struct OpsView: View {
     let client: HSCCClient?
 
@@ -20,27 +27,30 @@ struct OpsView: View {
     @State private var profiles = LoadState<ProfilesResponse>.idle
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                if let client {
-                    VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
-                        verifySection
-                        daemonSection
-                        triggersSection(client: client)
-                        escalateSection(client: client)
-                        profilesSection
-                    }
-                    .padding()
-                } else {
-                    notConfiguredView
+        Group {
+            if let client {
+                List {
+                    verifySection(client)
+                    daemonSection
+                    triggersSection(client: client)
+                    escalateSection(client: client)
+                    profilesSection
                 }
+                .listStyle(.plain)
+                // Sticky operator actions (spec §5). They used to sit at the
+                // bottom of two mid-scroll cards, so reaching them meant
+                // finding them first; now they ride the safe area.
+                .safeAreaInset(edge: .bottom) { actionBar(client: client) }
+            } else {
+                notConfiguredView
             }
-            .navigationTitle("Ops")
-            .refreshable { if client != nil { await loadAll() } }
-            .task {
-                if client != nil, verify.value == nil, !verify.isLoading {
-                    await loadAll()
-                }
+        }
+        .navigationTitle("Ops")
+        .navigationBarTitleDisplayMode(.inline)
+        .refreshable { if client != nil { await loadAll() } }
+        .task {
+            if client != nil, verify.value == nil, !verify.isLoading {
+                await loadAll()
             }
         }
     }
@@ -99,103 +109,114 @@ struct OpsView: View {
         operatorErrorMessage(error)
     }
 
+    // MARK: - Sticky operator actions (spec §5)
+
+    /// The two confirm-gated operator actions, pinned to the bottom instead
+    /// of buried at the end of a mid-scroll card. Each is still a
+    /// `MutationButton`: one tap arms, the confirm names the consequence, and
+    /// only then does the request fire. Escalations keeps its `destructive`
+    /// role (it mutates tasks and notifies humans); Run Triggers is not
+    /// destructive.
+    private func actionBar(client: HSCCClient) -> some View {
+        HStack(spacing: Theme.Spacing.md.rawValue) {
+            MutationButton(
+                title: "Run Triggers Now",
+                systemImage: "bolt.circle",
+                destructive: false,
+                prompt: "Re-evaluate all trigger rules now? Enabled rules may fire actions (notify, auto-restart, block pipeline) immediately instead of waiting for the daemon's next cycle.",
+                run: {
+                    let result = try await client.triggersRun()
+                    triggers = .loaded(result)
+                    return result.speak.isEmpty ? "Trigger engine run." : result.speak
+                }
+            )
+            MutationButton(
+                title: "Perform Escalations",
+                systemImage: "arrow.up.right.circle.fill",
+                destructive: true,
+                prompt: "Run pending escalations for real now? This reassigns repeatedly-failing tasks to the strong tier and notifies a human for each one — it is not a dry run.",
+                run: {
+                    let result = try await client.escalateRun()
+                    escalations = .loaded(result)
+                    return result.speak.isEmpty ? "Escalations run." : result.speak
+                }
+            )
+        }
+        .padding(Theme.Spacing.md.rawValue)
+        .background(Theme.Semantic.surface)
+    }
+
     // MARK: - Verify (per-check pass/fail)
 
     @ViewBuilder
-    private var verifySection: some View {
-        if let client {
-            HSSectionCard(title: "Verify", systemImage: "checkmark.seal") {
-                switch verify {
-                case .loading:
-                    HSLoading()
-                case .failed(let message):
-                    errorLabel(message, retry: { Task { await loadVerify(client) } })
-                case .stale(let state, let ageMessage):
-                    VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
-                        StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
-                            Task { await loadVerify(client) }
-                        }
-                        verifyBody(state)
-                    }
-                case .loaded(let state):
-                    verifyBody(state)
-                default:
-                    EmptyView()
+    private func verifySection(_ client: HSCCClient) -> some View {
+        Section("Verify") {
+            switch verify {
+            case .idle, .loading:
+                loadingRow("Loading checks…")
+            case .failed(let message):
+                errorLabel(message, retry: { Task { await loadVerify(client) } })
+            case .stale(let state, let ageMessage):
+                StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
+                    Task { await loadVerify(client) }
                 }
+                verifyBody(state)
+            case .loaded(let state):
+                verifyBody(state)
             }
         }
     }
 
     @ViewBuilder
     private func verifyBody(_ state: VerifyResponse) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
-            Label(state.speak, systemImage: state.ok ? "checkmark.seal.fill" : "xmark.seal.fill")
-                .font(.subheadline)
-                .foregroundColor(state.ok ? Theme.Semantic.ok : Theme.Semantic.bad)
-            if state.checks.isEmpty {
-                emptyLabel("No checks reported.")
-            } else {
-                ForEach(state.checks) { check in
-                    HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
-                        Image(systemName: HealthCheckIndicator.icon(check.ok))
-                            .foregroundColor(HealthCheckIndicator.tint(check.ok))
-                        VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
-                            Text(check.name)
-                                .font(.body)
-                            if let detail = check.detail, !detail.isEmpty {
-                                Text(detail)
-                                    .font(.caption)
-                                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-        }
+        Label(state.speak, systemImage: state.ok ? "checkmark.seal.fill" : "xmark.seal.fill")
+            .font(.subheadline)
+            .foregroundColor(state.ok ? Theme.Semantic.ok : Theme.Semantic.bad)
+        // Spec §5: the byte-twin `verifyBody`/`healthBody` collapsed to ONE
+        // HealthCheckList shared with Fleet — the row layout cannot drift.
+        HealthCheckList(state.checks, emptyMessage: "The cluster reported no verify checks.")
     }
 
     // MARK: - Daemon status
 
     @ViewBuilder
     private var daemonSection: some View {
-        HSSectionCard(title: "Daemon", systemImage: "server.rack") {
+        Section("Daemon") {
             switch daemon {
-            case .loading:
-                HSLoading()
+            case .idle, .loading:
+                loadingRow("Loading daemon status…")
             case .failed(let message):
                 errorLabel(message, retry: { Task { if let c = client { await loadDaemon(c) } } })
             case .loaded(let state):
-                VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
-                    Label(state.speak, systemImage: state.daemon_running == true ? "checkmark.seal.fill" : "xmark.seal.fill")
-                        .font(.subheadline)
-                        .foregroundColor(state.daemon_running == true ? Theme.Semantic.ok : Theme.Semantic.bad)
-                    if let pid = state.pid {
-                        LabeledContent("PID") { Text("\(pid)") }
-                    }
-                    if let streams = state.streams, !streams.isEmpty {
-                        Divider()
-                        let sorted = streams.sorted { $0.key < $1.key }
-                        ForEach(sorted, id: \.key) { name, stream in
-                            HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
-                                Image(systemName: stream.ok == true ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                    .foregroundColor(stream.ok == true ? Theme.Semantic.ok : Theme.Semantic.bad)
-                                VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
-                                    Text(name)
-                                        .font(.body)
-                                    if let msg = stream.message, !msg.isEmpty {
-                                        Text(msg)
-                                            .font(.caption)
-                                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                                    }
+                Label(state.speak, systemImage: state.daemon_running == true ? "checkmark.seal.fill" : "xmark.seal.fill")
+                    .font(.subheadline)
+                    .foregroundColor(state.daemon_running == true ? Theme.Semantic.ok : Theme.Semantic.bad)
+                if let pid = state.pid {
+                    LabeledContent("PID") { Text("\(pid)") }
+                }
+                if let streams = state.streams, !streams.isEmpty {
+                    let sorted = streams.sorted { $0.key < $1.key }
+                    ForEach(sorted, id: \.key) { name, stream in
+                        HStack(alignment: .top, spacing: Theme.Spacing.sm.rawValue) {
+                            Image(systemName: stream.ok == true ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                .foregroundColor(stream.ok == true ? Theme.Semantic.ok : Theme.Semantic.bad)
+                            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+                                Text(name)
+                                    .font(.body)
+                                if let msg = stream.message, !msg.isEmpty {
+                                    Text(msg)
+                                        .font(.caption)
+                                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
                                 }
-                                Spacer(minLength: 0)
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            Spacer(minLength: 0)
                         }
+                        .accessibilityElement(children: .combine)
                     }
                 }
-            default:
+            case .stale:
+                // daemon/escalations are not offline-cached (they are live
+                // probes); `.stale` is unreachable for them.
                 EmptyView()
             }
         }
@@ -205,71 +226,59 @@ struct OpsView: View {
 
     @ViewBuilder
     private func triggersSection(client: HSCCClient) -> some View {
-        HSSectionCard(title: "Triggers", systemImage: "bolt") {
+        Section {
             switch triggers {
-            case .loading:
-                HSLoading()
+            case .idle, .loading:
+                loadingRow("Loading triggers…")
             case .failed(let message):
                 errorLabel(message, retry: { Task { await loadTriggers(client) } })
             case .loaded(let state):
-                VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
-                    Text(state.speak)
-                        .font(.subheadline)
-                        .italic()
+                Text(state.speak)
+                    .font(.footnote.italic())
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                if let lastRun = state.last_run, let msg = lastRun.message, !msg.isEmpty {
+                    Text("Last run: \(msg)")
+                        .font(.caption)
                         .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    if let lastRun = state.last_run, let msg = lastRun.message, !msg.isEmpty {
-                        Text("Last run: \(msg)")
-                            .font(.caption)
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    }
-                    let rules = state.rules ?? []
-                    if rules.isEmpty {
-                        emptyLabel("No trigger rules configured.")
-                    } else {
-                        ForEach(rules) { rule in
-                            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
-                                Text(rule.id)
-                                    .font(.body.weight(.medium))
-                                if let title = rule.trigger_params?.title, !title.isEmpty {
-                                    Text(title)
-                                        .font(.caption)
-                                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                                }
-                                if let metric = rule.condition?.metric, !metric.isEmpty {
-                                    HStack(spacing: 6) {
-                                        Text("when \(metric)")
-                                        if let op = rule.condition?.op { Text(op).foregroundColor(Theme.Semantic.onSurfaceMuted) }
-                                        if let value = rule.condition?.value {
-                                            Text(displayJSON(value)).foregroundColor(Theme.Semantic.onSurfaceMuted)
-                                        }
-                                    }
-                                    .font(.caption)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.vertical, Theme.Spacing.xxs.rawValue)
-                        }
-                    }
-                    // Operator action: force a trigger-engine run now instead
-                    // of waiting for the daemon's periodic cycle. Confirm-gated
-                    // because enabled rules may fire notify / auto_restart /
-                    // block_pipeline actions immediately.
-                    Divider()
-                    MutationButton(
-                        title: "Run Triggers Now",
-                        systemImage: "bolt.circle",
-                        destructive: false,
-                        prompt: "Re-evaluate all trigger rules now? Enabled rules may fire actions (notify, auto-restart, block pipeline) immediately instead of waiting for the daemon's next cycle.",
-                        run: {
-                            let result = try await client.triggersRun()
-                            triggers = .loaded(result)
-                            return result.speak.isEmpty ? "Trigger engine run." : result.speak
-                        }
-                    )
                 }
-            default:
+                let rules = state.rules ?? []
+                if rules.isEmpty {
+                    HSEmpty("No rules",
+                            message: "No trigger rules configured.",
+                            systemImage: "bolt")
+                } else {
+                    ForEach(rules) { rule in
+                        VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+                            Text(rule.id)
+                                .font(.headline)
+                            if let title = rule.trigger_params?.title, !title.isEmpty {
+                                Text(title)
+                                    .font(.caption)
+                                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            }
+                            if let metric = rule.condition?.metric, !metric.isEmpty {
+                                HStack(spacing: Theme.Spacing.xs.rawValue) {
+                                    Text("when \(metric)")
+                                    if let op = rule.condition?.op { Text(op).foregroundColor(Theme.Semantic.onSurfaceMuted) }
+                                    if let value = rule.condition?.value {
+                                        Text(DisplayJSON.render(value)).foregroundColor(Theme.Semantic.onSurfaceMuted)
+                                    }
+                                }
+                                .font(.hsccMono(.caption))
+                            }
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+            case .stale:
                 EmptyView()
             }
+        } header: {
+            Text("Triggers")
+        } footer: {
+            // The actions themselves are sticky at the bottom (spec §5); the
+            // footer only explains what they do.
+            Text("Both actions are confirm-gated: the confirm names the consequence, and the request fires only after you accept.")
         }
     }
 
@@ -277,43 +286,29 @@ struct OpsView: View {
 
     @ViewBuilder
     private func escalateSection(client: HSCCClient) -> some View {
-        HSSectionCard(title: "Escalations", systemImage: "arrow.up.right.circle") {
+        Section("Escalations") {
             switch escalations {
-            case .loading:
-                HSLoading()
+            case .idle, .loading:
+                loadingRow("Loading escalations…")
             case .failed(let message):
                 errorLabel(message, retry: { Task { await loadEscalations(client) } })
             case .loaded(let state):
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(state.speak)
-                        .font(.subheadline)
-                        .italic()
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    if let es = state.escalations, !es.isEmpty {
-                        ForEach(es.indices, id: \.self) { i in
-                            Text(displayJSON(es[i]))
-                                .font(.caption)
-                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                        }
+                Text(state.speak)
+                    .font(.footnote.italic())
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                let es = state.escalations ?? []
+                if es.isEmpty {
+                    HSEmpty("Nothing pending",
+                            message: "No escalations are waiting.",
+                            systemImage: "arrow.up.right.circle")
+                } else {
+                    ForEach(es.indices, id: \.self) { i in
+                        Text(DisplayJSON.render(es[i]))
+                            .font(.caption)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
                     }
-                    // Operator action: actually perform the pending failure
-                    // escalations (reassign to the strong tier + notify a
-                    // human), rather than the read-only dry-run the GET shows.
-                    // Confirm-gated — this mutates tasks and notifies humans.
-                    Divider()
-                    MutationButton(
-                        title: "Perform Escalations",
-                        systemImage: "arrow.up.right.circle.fill",
-                        destructive: true,
-                        prompt: "Run pending escalations for real now? This reassigns repeatedly-failing tasks to the strong tier and notifies a human for each one — it is not a dry run.",
-                        run: {
-                            let result = try await client.escalateRun()
-                            escalations = .loaded(result)
-                            return result.speak.isEmpty ? "Escalations run." : result.speak
-                        }
-                    )
                 }
-            default:
+            case .stale:
                 EmptyView()
             }
         }
@@ -323,35 +318,35 @@ struct OpsView: View {
 
     @ViewBuilder
     private var profilesSection: some View {
-        HSSectionCard(title: "Profiles", systemImage: "person.3") {
+        Section("Profiles") {
             switch profiles {
-            case .loading:
-                HSLoading()
+            case .idle, .loading:
+                loadingRow("Loading profiles…")
             case .failed(let message):
                 errorLabel(message, retry: { Task { if let c = client { await loadProfiles(c) } } })
             case .loaded(let state):
-                VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-                    Text(state.speak)
-                        .font(.subheadline)
-                        .italic()
-                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    let counts = state.counts ?? [:]
-                    if counts.isEmpty {
-                        emptyLabel("No profiles running tasks.")
-                    } else {
-                        ForEach(counts.sorted { $0.value > $1.value }, id: \.key) { profile, n in
-                            HStack {
-                                Text(profile)
-                                    .font(.body)
-                                Spacer()
-                                Text("\(n)")
-                                    .font(.body.monospacedDigit())
-                                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                            }
+                Text(state.speak)
+                    .font(.footnote.italic())
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                let counts = state.counts ?? [:]
+                if counts.isEmpty {
+                    HSEmpty("Idle",
+                            message: "No profiles running tasks.",
+                            systemImage: "person.3")
+                } else {
+                    ForEach(counts.sorted { $0.value > $1.value }, id: \.key) { profile, n in
+                        HStack {
+                            Text(profile)
+                                .font(.body)
+                            Spacer()
+                            Text("\(n)")
+                                .font(.hsccMono(.body, weight: .regular))
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
                         }
+                        .accessibilityLabel("\(profile): \(n) task\(n == 1 ? "" : "s")")
                     }
                 }
-            default:
+            case .stale:
                 EmptyView()
             }
         }
@@ -359,29 +354,16 @@ struct OpsView: View {
 
     // MARK: - Shared building blocks
 
-
-    private func errorLabel(_ message: String, retry: (() -> Void)? = nil) -> some View { HSErrorLabel(message: message, retry: retry) }
-    private func emptyLabel(_ text: String) -> some View { HSEmptyLabel(message: text) }
-
-    private func displayJSON(_ value: JSONValue) -> String {
-        switch value {
-        case .string(let s): return s
-        case .int(let n): return "\(n)"
-        case .double(let d): return String(format: "%.2f", d)
-        case .bool(let b): return b ? "true" : "false"
-        case .null: return "null"
-        case .object(let o):
-            // Render small objects readably instead of the opaque "<complex>"
-            // placeholder. Escalation entries are {task, action, category}
-            // (live /v1/escalate) — the operator needs to SEE which tasks are
-            // pending, not a placeholder that hides every field.
-            let items = o.keys.sorted().compactMap { key -> String? in
-                guard let v = o[key] else { return nil }
-                return key + ": " + displayJSON(v)
-            }
-            return items.joined(separator: " · ")
-        case .array(let a):
-            return "[" + a.map { displayJSON($0) }.joined(separator: ", ") + "]"
+    private func loadingRow(_ label: String) -> some View {
+        HStack(spacing: Theme.Spacing.sm.rawValue) {
+            ProgressView()
+            Text(label)
+                .font(.subheadline)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
+    }
+
+    private func errorLabel(_ message: String, retry: (() -> Void)? = nil) -> some View {
+        HSErrorLabel(message: message, retry: retry)
     }
 }

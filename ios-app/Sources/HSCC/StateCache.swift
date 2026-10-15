@@ -101,6 +101,11 @@ enum StateCache {
 enum EndpointPath {
     static let projects = "/v1/projects"
     static let clusterStatus = "/v1/cluster/status"
+    /// Node list + the live `sparkrun status` report "Nodes & serving" parses its
+    /// unit→node grouping from. Cached so a cluster that is unreachable still
+    /// shows WHERE its last-known units sat (marked stale) instead of forgetting
+    /// its own nodes.
+    static let clusterHosts = "/v1/cluster/hosts"
     static let verify = "/v1/verify"
     static let autodownStatus = "/v1/autodown/status"
     static let cronList = "/v1/cron/list"
@@ -108,6 +113,10 @@ enum EndpointPath {
     static let templateList = "/v1/template/list"
     static let templateStatus = "/v1/template/status"
     static let kanbanBlocked = "/v1/kanban/blocked"
+    /// The plain path `kanbanStale(olderThan:)` caches under — `get(path:
+    /// queryItems:)` stores a non-paging query read under the path, not the
+    /// URL, so `Offline.load` must use this exact key to find the value.
+    static let kanbanStale = "/v1/kanban/stale"
     static let activityFeed = "/v1/activity/feed"
     static let sessions = "/v1/sessions"
 }

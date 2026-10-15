@@ -8,6 +8,12 @@ import SwiftUI
 /// `hscc_daemon.autodown.list_all_cron_jobs`, so the roster reflects the same
 /// on-disk source of truth the daemon itself uses.
 ///
+/// LIST RECIPE (spec §5, Phase 2 C3): one plain `List` — leading status dot,
+/// job name (`headline`) over the mono schedule line, trailing `HSStatusChip`
+/// for active/paused. The old `HSSectionCard` box and the bare `ProgressView`
+/// are gone; states use `HSLoading` / `HSError` / `HSEmpty` like every other
+/// screen.
+///
 /// READ-ONLY by design: there are no mutating controls here. Creating,
 /// editing, pausing or deleting a job is deliberately OUT OF SCOPE — a future
 /// card if the operator wants it. A tap never fires a request.
@@ -22,17 +28,26 @@ struct CronView: View {
     @State private var list = LoadState<CronListResponse>.idle
 
     var body: some View {
-        ScrollView {
+        Group {
             if let client {
-                VStack(alignment: .leading, spacing: 16) {
-                    rosterSection(client)
+                switch list {
+                case .idle, .loading:
+                    HSLoading("Loading…")
+                case .failed(let message):
+                    HSError("Couldn't load the roster", message: message) {
+                        Task { await load(client) }
+                    }
+                case .stale(let state, let ageMessage):
+                    rosterList(state, staleMessage: ageMessage, client: client)
+                case .loaded(let state):
+                    rosterList(state, staleMessage: nil, client: client)
                 }
-                .padding()
             } else {
                 notConfiguredView
             }
         }
         .navigationTitle("Scheduled Jobs")
+        .navigationBarTitleDisplayMode(.inline)
         .refreshable { if let client { await load(client) } }
         .task {
             if let client, list.value == nil, !list.isLoading {
@@ -57,71 +72,63 @@ struct CronView: View {
         }
     }
 
-    // MARK: - Roster
+    // MARK: - List (the shared recipe)
 
-    @ViewBuilder
-    private func rosterSection(_ client: HSCCClient) -> some View {
-        HSSectionCard(title: "Scheduled jobs", systemImage: "calendar.badge.clock") {
-            switch list {
-            case .loading:
-                ProgressView()
-            case .failed(let message):
-                HSErrorLabel(message: message, retry: { Task { await load(client) } })
-                    .foregroundColor(Theme.Semantic.bad)
-            case .stale(let state, let ageMessage):
-                VStack(alignment: .leading, spacing: 10) {
-                    StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
+    /// One plain `List` for the roster: the recipe's dot · title · caption
+    /// rows, `HSEmpty` for the no-jobs case, `StaleBanner` riding as a
+    /// section. The old `HSSectionCard` box (the app's second row dialect)
+    /// is gone — the nav title is the header, like every other screen.
+    private func rosterList(_ state: CronListResponse,
+                            staleMessage: String?,
+                            client: HSCCClient) -> some View {
+        let jobs = state.jobs ?? []
+        // Active first, then paused; alphabetical inside each group.
+        let sorted = jobs.sorted { a, b in
+            if a.isActive != b.isActive { return a.isActive && !b.isActive }
+            return (a.name ?? a.id) < (b.name ?? b.id)
+        }
+        return List {
+            if let staleMessage {
+                Section {
+                    StaleBanner(age: staleMessage,
+                                reason: "Can't reach the cluster right now.") {
                         Task { await load(client) }
                     }
-                    rosterBody(state)
                 }
-            case .loaded(let state):
-                rosterBody(state)
-            default:
-                EmptyView()
             }
-        }
-    }
-
-    @ViewBuilder
-    private func rosterBody(_ state: CronListResponse) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(state.speak)
-                .font(.subheadline)
-                .italic()
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-
-            let jobs = state.jobs ?? []
-            if jobs.isEmpty {
-                HSEmptyLabel(message: "No scheduled jobs.")
+            if !state.speak.isEmpty {
+                Section {
+                    Text(state.speak)
+                        .font(.footnote.italic())
+                        .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                }
+            }
+            if sorted.isEmpty {
+                Section {
+                    HSEmpty("Idle",
+                            message: "No scheduled jobs.",
+                            systemImage: "calendar.badge.clock")
+                }
             } else {
-                // Active first, then paused — each a job row.
-                let sorted = jobs.sorted { a, b in
-                    if a.isActive != b.isActive { return a.isActive && !b.isActive }
-                    return (a.name ?? a.id) < (b.name ?? b.id)
-                }
-                ForEach(sorted) { job in
-                    jobRow(job)
+                Section("Scheduled jobs") {
+                    ForEach(sorted) { job in
+                        jobRow(job)
+                    }
                 }
             }
         }
+        .listStyle(.plain)
     }
 
     @ViewBuilder
     private func jobRow(_ job: CronJob) -> some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: Theme.Spacing.md.rawValue) {
             HSStatusDot(statusColor(job))
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
                 // Job name; fall back to the id for an unnamed job.
-                HStack(spacing: 6) {
-                    Text(job.name ?? job.id)
-                        .font(.body.weight(.medium))
-                    if job.isActive {
-                        HSStatusChip("active", systemImage: "checkmark", color: Theme.Semantic.ok)
-                    } else {
-                        HSStatusChip("paused", systemImage: "pause", color: Theme.Semantic.neutral)
-                    }
-                }
+                Text(job.name ?? job.id)
+                    .font(.headline)
+                    .multilineTextAlignment(.leading)
                 HSMetaLine([
                     job.schedule_display,
                     nextRunText(job),
@@ -134,9 +141,13 @@ struct CronView: View {
                 }
             }
             Spacer(minLength: 0)
+            HSStatusChip(job.isActive ? "active" : "paused",
+                         systemImage: job.isActive ? "checkmark" : "pause",
+                         color: job.isActive ? Theme.Semantic.ok : Theme.Semantic.neutral)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 2)
+        // One VoiceOver element per job (spec §9): the rotor walks jobs, not
+        // fragments of them.
+        .accessibilityElement(children: .combine)
     }
 
     /// The status dot colour: active → ok, paused → neutral, and a failed last

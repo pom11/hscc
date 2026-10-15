@@ -63,6 +63,7 @@ struct CardDetailView: View {
                         actionsSection(card)
                     }
                 }
+                .listStyle(.plain)
             } else {
                 HSLoading("Loading…")
             }
@@ -96,6 +97,11 @@ struct CardDetailView: View {
                     return result.message ?? "Recovered \(card.id)."
                 }
             )
+            // Spec §5: the card id joins the BUTTON's a11y label, as Approvals
+            // already does. The confirm prompt named the card, but the button
+            // itself read just "Unblock" — from the row a VoiceOver user could
+            // not tell which card it would recover.
+            .accessibilityLabel("Unblock \(card.id) (\(card.title ?? card.id))")
             Text("Blocks can only be lifted here — blocking a card, commenting, or completing it outright needs a route that isn't in the API yet.")
                 .font(.footnote)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)

@@ -24,6 +24,11 @@ import SwiftUI
 ///     sheet holds its OWN MutationButton for the actual write, so the rewrite
 ///     is confirm-gated too. The value of `editingItem` just decides whether
 ///     the sheet is shown — nothing is mutated by opening it.
+///
+/// LIST RECIPE (spec §5, Phase 2 C3): one plain `List` — the profile picker
+/// rides as the list's first section (no `surfaceRaised` box floating above
+/// the list), rows are title over the unabridged body with the source chip
+/// trailing, and states use HSLoading / HSError / HSEmpty.
 struct MemoryView: View {
     let client: HSCCClient?
 
@@ -34,18 +39,15 @@ struct MemoryView: View {
     @State private var profilePickerShown = false
 
     var body: some View {
-        ScrollView {
+        Group {
             if let client {
-                VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
-                    profileField(client)
-                    listSection(client)
-                }
-                .padding()
+                memoryScreen(client)
             } else {
                 notConfiguredView
             }
         }
         .navigationTitle("Memories")
+        .navigationBarTitleDisplayMode(.inline)
         .refreshable { if let client { await loadAll(client) } }
         .task {
             if let client, list.value == nil, !list.isLoading {
@@ -79,15 +81,49 @@ struct MemoryView: View {
         HSConnectGate(systemImage: "brain", verb: "to inspect memories")
     }
 
-    // MARK: - Profile picker
+    // MARK: - List (the shared recipe)
 
-    private func profileField(_ client: HSCCClient) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-            Label("Profile", systemImage: "person.crop.circle")
-                .font(.headline)
-            // A tappable control (not a text field) that shows which profile is
-            // selected and opens the searchable picker. No Load tap — selecting
-            // from the picker loads the profile's memories immediately.
+    /// One plain `List`: the profile picker as its first section, then the
+    /// memory rows. The picker rides INSIDE the list on every load state —
+    /// it is the only way to switch profile, so an error must never hide it
+    /// (that is why this screen keeps its load states as inline rows rather
+    /// than a full-pane HSLoading/HSError).
+    private func memoryScreen(_ client: HSCCClient) -> some View {
+        List {
+            profileSection(client)
+            switch list {
+            case .idle, .loading:
+                Section {
+                    HStack(spacing: Theme.Spacing.sm.rawValue) {
+                        ProgressView()
+                        Text("Loading memories…")
+                            .font(.subheadline)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                    }
+                }
+            case .failed(let message):
+                Section {
+                    HSErrorLabel(message: message, retry: { Task { await load(client) } })
+                }
+            case .stale(let state, let ageMessage):
+                Section {
+                    StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
+                        Task { await load(client) }
+                    }
+                }
+                memoryRows(state, client: client)
+            case .loaded(let state):
+                memoryRows(state, client: client)
+            }
+        }
+        .listStyle(.plain)
+    }
+
+    /// The profile picker as the list's first section (recipe: no boxed
+    /// field floating above the list).
+    @ViewBuilder
+    private func profileSection(_ client: HSCCClient) -> some View {
+        Section {
             Button {
                 profilePickerShown = true
             } label: {
@@ -100,22 +136,13 @@ struct MemoryView: View {
                         .font(.caption)
                         .foregroundColor(Theme.Semantic.onSurfaceMuted)
                 }
-                .padding(Theme.Spacing.md.rawValue)
-                .background(
-                    RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous)
-                        .fill(Theme.Semantic.surface)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.Corner.badge.rawValue, style: .continuous)
-                        .stroke(Theme.Semantic.onSurface.opacity(0.3), lineWidth: 1)
-                )
             }
-            .buttonStyle(.plain)
             .accessibilityLabel("Profile: \(trimmedProfile.isEmpty ? "none" : trimmedProfile)")
             .accessibilityHint("Opens a searchable list of profiles")
+
             switch profileOptions {
             case .failed(let message):
-                // We couldn't fetch the roster — the profile field degrades to a
+                // We couldn't fetch the roster — the picker degrades to a
                 // retry-able error instead of silently showing an empty picker.
                 HStack(spacing: Theme.Spacing.sm.rawValue) {
                     Label(message, systemImage: "exclamationmark.triangle.fill")
@@ -131,16 +158,80 @@ struct MemoryView: View {
             default:
                 EmptyView()
             }
+
             Text("The Hermes profile whose memories you want to inspect and correct. Picker shows every profile the cluster serves.")
                 .font(.caption)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        } header: {
+            Text("Profile")
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
-                .fill(Theme.Semantic.surfaceRaised)
-        )
+    }
+
+    @ViewBuilder
+    private func memoryRows(_ state: MemoryListResponse, client: HSCCClient) -> some View {
+        let items = state.memories ?? []
+        if !state.speak.isEmpty {
+            Section {
+                Text(state.speak)
+                    .font(.footnote.italic())
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            }
+        }
+        if items.isEmpty {
+            Section {
+                HSEmpty("Nothing here",
+                        message: "This profile holds no memories.",
+                        systemImage: "brain")
+            }
+        } else {
+            Section("Memories") {
+                ForEach(items) { item in
+                    memoryRow(client, item)
+                }
+            }
+        }
+    }
+
+    private func memoryRow(_ client: HSCCClient, _ item: MemoryItem) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs.rawValue) {
+            HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm.rawValue) {
+                Text(item.title ?? "(untitled)")
+                    .font(.headline)
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 0)
+                sourceBadge(item.sourceLabel)
+            }
+            // The FULL body — this is the actual memory the operator may deem
+            // wrong, so it is never truncated here.
+            Text(item.body ?? "")
+                .font(.subheadline)
+                .foregroundColor(Theme.Semantic.onSurface)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: Theme.Spacing.md.rawValue) {
+                // Opening the editor does NOTHING destructive — it only arms
+                // `editingItem`, which presents the sheet. The actual rewrite is
+                // confirm-gated inside the sheet.
+                Button {
+                    editingItem = item
+                } label: {
+                    Label("Correct", systemImage: "pencil")
+                }
+                MutationButton(
+                    title: "Delete",
+                    systemImage: "trash",
+                    destructive: true,
+                    prompt: "Delete the memory \"\(titleDisplay(item))\"? "
+                        + "This removes it permanently from \(item.sourceLabel)."
+                ) {
+                    let r = try await client.deleteMemory(nodeID: item.nodeID,
+                                                          profile: trimmedProfile)
+                    await reloadAfterMutation(client)
+                    return r.speak
+                }
+                Spacer()
+            }
+        }
     }
 
     // MARK: - Load
@@ -179,106 +270,11 @@ struct MemoryView: View {
         profile.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    // MARK: - List
-
-    private func listSection(_ client: HSCCClient) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md.rawValue) {
-            Label("Memories", systemImage: "brain")
-                .font(.headline)
-            switch list {
-            case .loading:
-                HSLoading()
-            case .failed(let message):
-                errorLabel(message, retry: { Task { await load(client) } })
-            case .stale(let state, let ageMessage):
-                VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-                    StaleBanner(age: ageMessage, reason: "Can't reach the cluster right now.") {
-                        Task { await load(client) }
-                    }
-                    memoryBody(client, state)
-                }
-            case .loaded(let state):
-                memoryBody(client, state)
-            default:
-                EmptyView()
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
-                .fill(Theme.Semantic.surfaceRaised)
-        )
-    }
-
-    private func memoryBody(_ client: HSCCClient, _ state: MemoryListResponse) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-            Text(state.speak)
-                .font(.subheadline)
-                .italic()
-                .foregroundColor(Theme.Semantic.onSurfaceMuted)
-            let items = state.memories ?? []
-            if items.isEmpty {
-                emptyLabel("This profile holds no memories.")
-            } else {
-                ForEach(items) { item in
-                    memoryRow(client, item)
-                    if item.id != items.last?.id {
-                        Divider()
-                    }
-                }
-            }
-        }
-    }
-
-    private func memoryRow(_ client: HSCCClient, _ item: MemoryItem) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: Theme.Spacing.sm.rawValue) {
-                Text(item.title ?? "(untitled)")
-                    .font(.headline)
-                Spacer()
-                sourceBadge(item.sourceLabel)
-            }
-            // The FULL body — this is the actual memory the operator may deem
-            // wrong, so it is never truncated here.
-            Text(item.body ?? "")
-                .font(.subheadline)
-                .foregroundColor(Theme.Semantic.onSurface)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            HStack(spacing: Theme.Spacing.md.rawValue) {
-                // Opening the editor does NOTHING destructive — it only arms
-                // `editingItem`, which presents the sheet. The actual rewrite is
-                // confirm-gated inside the sheet.
-                Button {
-                    editingItem = item
-                } label: {
-                    Label("Correct", systemImage: "pencil")
-                }
-                MutationButton(
-                    title: "Delete",
-                    systemImage: "trash",
-                    destructive: true,
-                    prompt: "Delete the memory \"\(titleDisplay(item))\"? "
-                        + "This removes it permanently from \(item.sourceLabel)."
-                ) {
-                    let r = try await client.deleteMemory(nodeID: item.nodeID,
-                                                          profile: trimmedProfile)
-                    await reloadAfterMutation(client)
-                    return r.speak
-                }
-                Spacer()
-            }
-        }
-    }
+    // MARK: - Row helpers
 
     private func sourceBadge(_ text: String) -> some View {
-        Text(text)
-            .font(.caption2.bold())
-            .padding(.horizontal, 6)
-            .padding(.vertical, Theme.Spacing.xxs.rawValue)
-            .background(Capsule().fill(Color.accentColor.opacity(0.18)))
-            .foregroundColor(Color.accentColor)
+        // Shared chip (spec §6: one of the six bespoke badges it replaces).
+        HSStatusChip(text, color: Theme.Semantic.accent)
     }
 
     private func titleDisplay(_ item: MemoryItem) -> String {
@@ -405,13 +401,13 @@ struct ProfilePickerSheet: View {
                 Spacer()
                 if isSelected {
                     Image(systemName: "checkmark")
-                        .foregroundColor(Color.accentColor)
+                        .foregroundColor(Theme.Semantic.accent)
                         .fontWeight(.semibold)
                 }
                 if p.is_default == true {
                     Text("default")
                         .font(.caption2.bold())
-                        .padding(.horizontal, 6)
+                        .padding(.horizontal, Theme.Spacing.sm.rawValue)
                         .padding(.vertical, Theme.Spacing.xxs.rawValue)
                         .background(Capsule().fill(Theme.Semantic.onSurface.opacity(0.15)))
                         .foregroundColor(Theme.Semantic.onSurfaceMuted)

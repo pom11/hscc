@@ -42,7 +42,22 @@ final class NotificationsAppDelegate: NSObject, UIApplicationDelegate {
         // the monitor orphan-sweep + foreground-poll kick. All idempotent —
         // safe on every launch.
         Task { @MainActor in
+            #if DEBUG
+            // Capture harness (t_0d5632bc): the first-run authorization alert
+            // holds the key window, and this device refuses
+            // `simctl privacy grant notifications` (proof:
+            // PHASE2_PROGRESS_t_25aed701 "Screenshots"), so a fixture capture
+            // launch skips the REQUEST rather than trying to answer the alert.
+            // Skipping authorization only means banners cannot fire —
+            // irrelevant to a screenshot. Everything below runs unchanged on
+            // every launch (its registration ordering is load-bearing, see
+            // the BGTaskScheduler note above). Release builds always request.
+            if ProcessInfo.processInfo.environment["HSCC_DEBUG_FIXTURES"] != "1" {
+                await NotificationCoordinator.shared.requestAuthorization()
+            }
+            #else
             await NotificationCoordinator.shared.requestAuthorization()
+            #endif
             // HSCC Monitor Live Activity (t_03d318cd): run the orphan sweep and
             // kick off the foreground poll loop at launch. All idempotent —
             // safe on every launch. (A Scene has no `.task` mutation seam, so

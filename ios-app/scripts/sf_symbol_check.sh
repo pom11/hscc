@@ -15,6 +15,34 @@ WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
   grep -rhoE 'systemName: *"[^"]+"' Sources/ | sed -E 's/.*"(.*)"/\1/'; } \
   | sort -u > "$WORK/syms.txt"
 
+# A second, real hole this used to miss: a symbol stored in a `var symbol: String`
+# computed property (AppDestination.symbol, DockItem.symbol) is passed to
+# `Image(systemName:)` several files away, so neither grep above ever sees the
+# literal — and a name that exists nowhere renders a BLANK drawer icon with only a
+# console line as evidence. That is exactly how `serverrack` (not a real SF
+# Symbol; the real one is `server.rack`) reached the Cluster row and stayed there.
+# Extract those literals too, from inside the property's own braces only, so the
+# `title`/`description` switches next door are not mistaken for symbol names.
+python3 - "$WORK/syms_extra.txt" <<'PY'
+import re, sys, pathlib
+out = set()
+for path in pathlib.Path("Sources").rglob("*.swift"):
+    text = path.read_text(encoding="utf-8", errors="replace")
+    for m in re.finditer(r"var\s+symbol\s*:\s*String\s*\{", text):
+        # Brace-match the property body: cheap, and enough for these switches.
+        i, depth = m.end(), 1
+        while i < len(text) and depth:
+            if text[i] == "{": depth += 1
+            elif text[i] == "}": depth -= 1
+            i += 1
+        body = text[m.end():i - 1]
+        out.update(re.findall(r'"([a-z0-9.]+)"', body))
+with open(sys.argv[1], "w") as f:
+    f.write("\n".join(sorted(out)))
+PY
+cat "$WORK/syms_extra.txt" >> "$WORK/syms.txt"
+sort -u -o "$WORK/syms.txt" "$WORK/syms.txt"
+
 COUNT=$(wc -l < "$WORK/syms.txt" | tr -d ' ')
 if [ "$COUNT" -eq 0 ]; then
     echo "FAIL: extracted 0 symbol names — the grep patterns have rotted"

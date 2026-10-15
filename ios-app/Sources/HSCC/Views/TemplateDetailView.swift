@@ -44,8 +44,6 @@ struct TemplateDetailView: View {
     /// card can refresh.
     let onApplied: () async -> Void
 
-    @Environment(\.dismiss) private var dismiss
-
     @State private var preview = LoadState<TemplatePreviewResponse>.idle
     @State private var showApplyConfirm = false
     @State private var forceRecreate = false
@@ -55,51 +53,53 @@ struct TemplateDetailView: View {
     @State private var pollTask: Task<Void, Never>?
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                if phase.isReloading {
-                    reloadingSection
-                } else {
-                    VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
-                        if phase.isReloadComplete {
-                            reloadCompletionBanner
-                        }
-                        shapeSection
-                        previewSection
-                        applySection
+        ScrollView {
+            if phase.isReloading {
+                reloadingSection
+            } else {
+                VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
+                    if phase.isReloadComplete {
+                        reloadCompletionBanner
                     }
-                    .padding()
+                    shapeSection
+                    previewSection
+                    applySection
                 }
+                .padding()
             }
-            .navigationTitle(template.name)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-            .task {
-                if preview.value == nil, !preview.isLoading {
-                    await loadPreview()
-                }
-            }
-            .refreshable {
-                // The error state says "Pull to retry" — make that gesture real.
-                // Only the read-only preview is re-fetched, never a re-apply.
+        }
+        .navigationTitle(template.name)
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            if preview.value == nil, !preview.isLoading {
                 await loadPreview()
             }
-            .onDisappear { pollTask?.cancel() }
         }
-        .sheet(isPresented: $showApplyConfirm) {
-            ApplyConfirmSheet(
-                templateName: template.name,
-                forceRecreate: $forceRecreate,
-                onCancel: { showApplyConfirm = false },
-                onApply: {
-                    showApplyConfirm = false
-                    Task { await apply() }
-                }
-            )
+        .refreshable {
+            // The error state says "Pull to retry" — make that gesture real.
+            // Only the read-only preview is re-fetched, never a re-apply.
+            await loadPreview()
+        }
+        .onDisappear { pollTask?.cancel() }
+        // Sheet-in-sheet → confirmationDialog (spec §3.1, kills the L4 chain).
+        // The consequence stays in the operator's words; the two Apply roles
+        // keep force_recreate an EXPLAINED choice, not a bare toggle — the
+        // dialog's message carries the explanation the old sheet spelled out.
+        // Apply fires only from here, never from the section's single tap.
+        .confirmationDialog("Apply \(template.name)?",
+                            isPresented: $showApplyConfirm,
+                            titleVisibility: .visible) {
+            Button("Apply \(template.name)") {
+                forceRecreate = false
+                Task { await apply() }
+            }
+            Button("Apply \(template.name) with force recreate") {
+                forceRecreate = true
+                Task { await apply() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Applying this template stops and restarts every serving unit and takes several minutes. During that time the fleet cannot serve requests. Force recreate re-applies changed serve flags — use it when only settings changed and the current layout is already what you want.")
         }
     }
 
@@ -175,7 +175,7 @@ struct TemplateDetailView: View {
             }
             try? await Task.sleep(nanoseconds: 5_000_000_000)  // 5s
         }
-        return .degraded("The fleet hasn't confirmed it's back up within 9 minutes. It may still be loading — check the Cluster tab.")
+        return .degraded("The fleet hasn't confirmed it's back up within 9 minutes. It may still be loading — check the Cluster screen.")
     }
 
     // MARK: - Shape
@@ -543,7 +543,7 @@ struct TemplateDetailView: View {
             default:
                 EmptyView()
             }
-            Text("The Cluster tab reflects the fleet's live state.")
+            Text("The Cluster screen reflects the fleet's live state.")
                 .font(.caption)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
@@ -558,63 +558,4 @@ struct TemplateDetailView: View {
     // MARK: - Building blocks
 
     private func errorLabel(_ message: String, retry: (() -> Void)? = nil) -> some View { HSErrorLabel(message: message, retry: retry) }
-}
-
-/// The confirm-gated apply sheet. This is where the operator reads the REAL
-/// consequence and takes the deliberate second step. `force_recreate` is
-/// offered as an explained option, not a bare toggle.
-private struct ApplyConfirmSheet: View {
-    let templateName: String
-    @Binding var forceRecreate: Bool
-    let onCancel: () -> Void
-    let onApply: () -> Void
-
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            VStack(alignment: .leading, spacing: Theme.Spacing.lg.rawValue) {
-                VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-                    Label("Apply \(templateName)?", systemImage: "arrow.down.circle.fill")
-                        .font(.headline)
-                    Text("Applying this template **stops and restarts every serving unit** and takes **several minutes**. During that time the fleet **cannot serve requests**.")
-                        .font(.subheadline)
-                        .foregroundColor(Theme.Semantic.onSurface)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                // force_recreate — explained, not a bare toggle.
-                Toggle(isOn: $forceRecreate) {
-                    VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
-                        Text("Force recreate")
-                            .font(.body)
-                        Text("Re-applies changed serve flags. Use when only settings changed and the current layout is already what you want.")
-                            .font(.caption)
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                    }
-                }
-                .toggleStyle(.switch)
-
-                Spacer()
-            }
-            .padding()
-            .navigationTitle("Confirm Apply")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss(); onCancel() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button {
-                        dismiss()
-                        onApply()
-                    } label: {
-                        Text("Apply \(templateName)")
-                            .bold()
-                    }
-                    .tint(Theme.Semantic.ok)
-                }
-            }
-        }
-    }
 }

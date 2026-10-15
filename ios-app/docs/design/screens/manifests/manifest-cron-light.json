@@ -1,0 +1,29 @@
+{
+  "activeClusterID" : "DEADBEEF-0000-4000-8000-0000000000D1",
+  "hasToken" : false,
+  "isConfigured" : false,
+  "missed" : {
+    "\/v1\/projects\/ecofire-app\/session\/events" : 1,
+    "\/v1\/projects\/ecofire-bc\/session\/events" : 1,
+    "\/v1\/projects\/efsdriver\/session\/events" : 1,
+    "\/v1\/projects\/flosana\/session\/events" : 1,
+    "\/v1\/projects\/grid\/session\/events" : 1,
+    "\/v1\/projects\/pickolo\/session\/events" : 1,
+    "\/v1\/projects\/pom\/session\/events" : 1,
+    "\/v1\/projects\/powerbi\/session\/events" : 1,
+    "\/v1\/projects\/radio\/session\/events" : 1,
+    "\/v1\/projects\/soconn\/session\/events" : 1,
+    "\/v1\/projects\/sphoin\/session\/events" : 1
+  },
+  "screen" : "cron",
+  "served" : {
+    "\/v1\/cron\/list" : 1,
+    "\/v1\/kanban\/blocked" : 1,
+    "\/v1\/projects" : 1,
+    "\/v1\/projects\/hscc\/session\/events" : 1
+  },
+  "suppressed" : [
+
+  ],
+  "tokenSaveFailure" : "The token could not be saved (Keychain OSStatus -34018). Host and port were saved, but the token was not — the connection will not work."
+}

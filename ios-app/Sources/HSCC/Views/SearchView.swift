@@ -23,31 +23,32 @@ struct SearchView: View {
     @State private var projects = LoadState<ProjectsResponse>.idle
     @State private var cards = LoadState<CardsResponse>.idle
     @State private var query = ""
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
             content
                 .navigationTitle("Search")
                 .navigationBarTitleDisplayMode(.inline)
-                .navigationBarItems(leading: closeButton)
+                // The old "Done" leading button + deprecated `.navigationBarItems`
+                // are gone: Search is a drawer destination now (spec §5), so the
+                // drawer itself is the way back. Results push through the one
+                // app-wide ProjectRoute registration.
                 .searchable(text: $query,
                             placement: .navigationBarDrawer(displayMode: .always),
                             prompt: "Projects, cards, boards…")
                 .task { await load() }
-        }
-    }
-
-    private var closeButton: some View {
-        Button("Done") { dismiss() }
     }
 
     @ViewBuilder
     private var content: some View {
-        if client == nil {
-            notConfiguredView
+        // Unwrap `client` ONCE here and hand the non-optional down. The result
+        // rows used to read `client!` at two sites; the guard above and the
+        // `let client` made those safe today, but a force-unwrap whose safety
+        // depends on a sibling view's `if` is a latent trap — the next edit
+        // that renders `resultsList` from anywhere else turns it into a crash.
+        if let client {
+            results(client: client)
         } else {
-            results
+            notConfiguredView
         }
     }
 
@@ -58,7 +59,7 @@ struct SearchView: View {
     // MARK: - Results
 
     @ViewBuilder
-    private var results: some View {
+    private func results(client: HSCCClient) -> some View {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
 
         switch (projects, cards) {
@@ -68,7 +69,7 @@ struct SearchView: View {
             }
         default:
             if trimmed.isEmpty {
-                emptyQueryView
+                emptyQueryView(client: client)
             } else if !hasLoaded {
                 // The search sources are still resolving — don't claim
                 // "No results" before we actually know. On a slow cluster they
@@ -81,7 +82,7 @@ struct SearchView: View {
                 if ps.isEmpty && cs.isEmpty {
                     noResultsView
                 } else {
-                    resultsList(projects: ps, cards: cs)
+                    resultsList(client: client, projects: ps, cards: cs)
                 }
             }
         }
@@ -108,6 +109,7 @@ struct SearchView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .listStyle(.plain)
     }
 
     /// Matched result rows for the current query.
@@ -132,7 +134,7 @@ struct SearchView: View {
     /// plus a hint. Shows regardless of the current load freshness — if it's
     /// cached and stale, the banner says so.
     @ViewBuilder
-    private var emptyQueryView: some View {
+    private func emptyQueryView(client: HSCCClient) -> some View {
         List {
             if let stale = staleBanner() {
                 Section { stale }
@@ -147,15 +149,14 @@ struct SearchView: View {
             if !ps.isEmpty {
                 Section("Likely items") {
                     ForEach(ps) { project in
-                        NavigationLink {
-                            ProjectDetailView(client: client!, project: project)
-                        } label: {
+                        NavigationLink(value: ProjectRoute.projectDetail(name: project.name, board: project.board)) {
                             projectRow(project)
                         }
                     }
                 }
             }
         }
+        .listStyle(.plain)
     }
 
     @ViewBuilder
@@ -168,10 +169,11 @@ struct SearchView: View {
                      message: "Search project names, repos, boards, or card titles, ids, and statuses.",
                      systemImage: "magnifyingglass")
         }
+        .listStyle(.plain)
     }
 
     @ViewBuilder
-    private func resultsList(projects ps: [Project], cards cs: [Card]) -> some View {
+    private func resultsList(client: HSCCClient, projects ps: [Project], cards cs: [Card]) -> some View {
         List {
             if let stale = staleBanner() {
                 Section { stale }
@@ -179,9 +181,7 @@ struct SearchView: View {
             if !ps.isEmpty {
                 Section("Projects — \(ps.count)") {
                     ForEach(ps) { project in
-                        NavigationLink {
-                            ProjectDetailView(client: client!, project: project)
-                        } label: {
+                        NavigationLink(value: ProjectRoute.projectDetail(name: project.name, board: project.board)) {
                             projectRow(project)
                         }
                     }
@@ -190,15 +190,14 @@ struct SearchView: View {
             if !cs.isEmpty {
                 Section("Cards — \(cs.count)") {
                     ForEach(cs) { card in
-                        NavigationLink {
-                            CardDetailView(cardID: card.id)
-                        } label: {
+                        NavigationLink(value: ProjectRoute.card(id: card.id)) {
                             cardRow(card)
                         }
                     }
                 }
             }
         }
+        .listStyle(.plain)
     }
 
     /// A stale banner when either source is showing cached last-known data.
@@ -234,25 +233,12 @@ struct SearchView: View {
     @ViewBuilder
     private func cardRow(_ card: Card) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm.rawValue) {
-            Circle()
-                .fill(statusColor(card.displayStatus))
-                .frame(width: 10, height: 10)
-                .accessibilityHidden(true)
+            HSStatusDot(Theme.cardStatusColor(card.displayStatus))
             VStack(alignment: .leading, spacing: 3) {
                 Text(card.displayTitle)
                     .foregroundColor(Theme.Semantic.onSurface)
                 HSMetaLine([card.board, card.status])
             }
-        }
-    }
-
-    private func statusColor(_ status: String) -> Color {
-        switch status {
-        case "running", "claimed", "in_progress": return Theme.Semantic.ok
-        case "review", "blocked": return Theme.Semantic.warn
-        case "done", "merged", "closed": return Theme.Semantic.ok
-        case "failed", "failing": return Theme.Semantic.bad
-        default: return Theme.Semantic.neutral
         }
     }
 

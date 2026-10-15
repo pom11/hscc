@@ -40,11 +40,36 @@ struct HSCCApp: App {
         let center = ProjectUnreadCenter()
         _unread = StateObject(wrappedValue: center)
         _replyWatcher = StateObject(wrappedValue: StreamReplyWatcher(unread: center))
+        #if DEBUG
+        // Capture harness (t_0d5632bc): a fixture launch needs a CONFIGURED
+        // cluster or every screen honestly shows "Not connected" — which
+        // would prove the shell but not the list recipe. Seed a fake cluster
+        // pointing at a reserved-bogus host with a placeholder token;
+        // FixtureURLProtocol answers the requests and forwards NOTHING to the
+        // network, so this config can never reach (or name) a real machine.
+        // Idempotent across launches (fixed UUID → saveCluster updates in
+        // place). Release builds never take this path.
+        if DebugHarness.fixturesEnabled {
+            let store = SettingsStore()
+            DebugHarness.seedFixtureCluster(in: store)
+            DebugHarness.writeCaptureManifest(settings: store)
+            _settings = StateObject(wrappedValue: store)
+        } else {
+            _settings = StateObject(wrappedValue: SettingsStore())
+        }
+        #else
+        _settings = StateObject(wrappedValue: SettingsStore())
+        #endif
     }
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            // Root (IOS_REDESIGN 2026-10-14 Phase 2): the drawer shell replaces
+            // the three-tab TabView root. The SAME five environment objects are
+            // injected — and `unread`/`replyWatcher` still share the ONE
+            // ProjectUnreadCenter built in init() (two centers would disagree
+            // about what has been read).
+            AppShell()
                 .environmentObject(settings)
                 .environmentObject(widgetSettings)
                 .environmentObject(unread)

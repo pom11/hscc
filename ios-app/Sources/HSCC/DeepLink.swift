@@ -88,15 +88,25 @@ enum DeepLinkParser {
 
 // MARK: - Navigation destination values
 
-/// A destination inside the Projects NavigationStack, as a Hashable value that
-/// can ride a typed `NavigationPath`. The app's normal `NavigationLink` pushes
-/// and a deep link's router push both append here, so user taps and external
-/// entry points share one path.
+/// A destination inside the shell's single app-wide NavigationStack, as a
+/// Hashable value that can ride a typed `NavigationPath`. The app's normal
+/// `NavigationLink` pushes and a deep link's router push both append here, so
+/// user taps and external entry points share one path.
+///
+/// Phase 2 (IOS_REDESIGN 2026-10-14 §8) added the three project SUBPAGES:
+/// the old ProjectDetailView segment sandwich dissolved, and its Chat /
+/// Board / Settings segments became pushed screens of the same stack.
 enum ProjectRoute: Hashable {
-    /// A project's detail screen. Carries the resolved board name (nil when
-    /// unknown) so a deep link can jump straight into the right board section
-    /// without depending on a freshly-fetched `Project` object.
+    /// A project's detail (Overview) screen. Carries the resolved board name
+    /// (nil when unknown) so a deep link can jump straight into the right
+    /// board section without depending on a freshly-fetched `Project` object.
     case projectDetail(name: String, board: String?)
+    /// A project's live chat (the full-bleed session stream).
+    case chat(name: String)
+    /// A project's kanban board. `board` is the board name (nil = unresolved).
+    case board(name: String, board: String?)
+    /// A project's read-only settings screen.
+    case projectSettings(name: String)
     /// A card's detail, pushed directly (optionally on top of a project detail).
     case card(id: String)
 }
