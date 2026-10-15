@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.9.1] - 2026-10-15
+
+### Added
+- **`hscc cluster monitor --live`.** A refreshing fleet view. The host table has the same columns as `sparkrun cluster monitor` (Jobs, CPU/RAM/Swap/GPU %, temperatures, GPU power) without the per-container detail. Below it, one row per backend behind the proxy: node, port, model, the proxy aliases routed there, requests running and waiting, KV-cache use, and generation/prompt tokens per second (from each vLLM `/metrics`; rates appear from the second sample). A total row sums load per model. `--interval N` and `--cluster NAME` are accepted with `--live`; unknown flags are refused. Host metrics come from one long-running `sparkrun cluster monitor --json`, so SSH sessions are not reopened every tick. Plain `hscc cluster monitor` now prints one frame of the same view instead of a raw key/value dump. Narrow terminals (<110 cols) drop the routes and prompt-rate columns.
 ## [2.9.0] - 2026-10-15
 
 ### Added
