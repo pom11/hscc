@@ -12,10 +12,14 @@ import SwiftUI
 /// a transient blip must not make the whole fleet look idle or down.
 ///
 /// LIST RECIPE (spec §5, Phase 2 C3): one plain `List` with one `Section` per
-/// feed — Health · Throughput · Stats · Streams · Autoscale · Models, then the
+/// feed — Health · Models · Throughput · Stats · Streams · Autoscale, then the
 /// two sections the retired `FleetControlView` folded into here ("Applied
 /// template" · "Control", work-log item 5 / §8 row "FleetView · FleetControlView
-/// | drawer · Fleet (+ Control section)"). The `HSSectionCard` boxes are gone;
+/// | drawer · Fleet (+ Control section)"). Models sits second on purpose: the
+/// mockup (frames 7/8) puts the serving feed first among Fleet's feeds, and the
+/// tap-free capture harness photographs the List's top, so the section order is
+/// the only honest lever for which feeds a gate shot can prove. The
+/// `HSSectionCard` boxes are gone;
 /// every feed keeps its own `LoadState`, and a feed that is loading/failed shows
 /// an inline row rather than a full-pane spinner so the feeds that DID load stay
 /// visible. The check rows render through the shared `HealthCheckList` (the §5
@@ -64,11 +68,18 @@ struct FleetView: View {
             if let client {
                 List {
                     healthSection
+                    // Models leads the traffic feeds deliberately (mockup
+                    // frames 7/8: the serving feed is Fleet's first serving
+                    // section, below only the connection-state read). It also
+                    // keeps the tap-free gate shot honest — the capture
+                    // harness photographs the top of the List, so a section
+                    // parked at #6 could never satisfy "screenshot with the
+                    // Models section" without inventing a scroll mechanism.
+                    modelsSection
                     throughputSection
                     statsSection
                     streamsSection
                     autoscaleSection
-                    modelsSection
                     appliedTemplateSection
                     controlSection(client: client)
                 }

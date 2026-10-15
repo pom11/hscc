@@ -220,11 +220,40 @@ the recipe now; what remains is only the merges:
    The new read-only Models section (workload rows from
    `GET /v1/cluster/status`, the same feed ServingControl reads) ships as its
    own Phase 2 card.
+   → **SHIPPED by `t_2a29a7ab`** (`f9289bb3`): the Models section is now
+   Fleet's sixth feed — one row per `ClusterWorkload` (headline = recipe path
+   trimmed to the model name, mono caption with the same tp/pp + container
+   head the serving screen shows, trailing `HSStatusChip`), own `LoadState` +
+   `Offline.load` under `EndpointPath.clusterStatus`, whole row combined into
+   one VoiceOver element, **read-only** (Stop/Restart stay on "Nodes &
+   serving"). Row derivation is `Sources/HSCC/FleetServing.swift` compiled
+   verbatim by the new gate `scripts/fleet_models_check.sh` (48 assertions on
+   the live capture + adversarial edges + guarded negative test). Two defects
+   the gate pins shut: the naive headline would print the engine's recipe
+   PATH (a home directory) onto the screenshot, and `ClusterWorkload.id` is
+   the name while the live feed repeats one name per container — `ForEach`
+   over it is a SwiftUI duplicate-id bug the fixture provokes. The caption
+   shows what `/v1/cluster/status` actually carries (the mockup's per-model
+   nodes/stream counts are not in this payload; the ruling ruled out a second
+   endpoint, and inventing either is the colour-lie class §9 bans — same
+   reason the chip says "no container", never "waking": the feed proves
+   container presence, not direction).
 5. `FleetControlView` is on the recipe but is still its own drawer row; §8 wants
    it as a "Control section" of Fleet. Small, but it changes the drawer, so it
    belongs with the merge cards rather than with a restyle. No card yet —
    folded into whichever Fleet-touching merge lands first (the Models-section
    card created by the `t_1897550c` ruling).
+   → **LANDED with `t_2a29a7ab`** (same card, second half): the applied-
+   template Section (with the shared `AppliedTemplateStatus` render and its
+   `Offline.load`) and both confirm-gated up/down `MutationButton`s — prompts
+   VERBATIM — are now Sections of Fleet's List; the drawer's "Fleet Control"
+   row is gone and `.fleetControl` survives as a mapped alias (the `.selfHeal`
+   precedent), so deeplink_check stays 41/41. The mutations now refresh the
+   Models feed too (a "Stop All Workloads" that left stale "serving" rows
+   above it would lie). FleetView's client became optional with this — it was
+   the app's last non-optional one and `FleetViewPlaceholder` is deleted:
+   a screen hosting the fleet-wide kill switch must show the connect gate
+   when unconfigured, never render those buttons against a fake host.
 
 
 ## Screenshots (what each one actually shows)

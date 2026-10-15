@@ -18,13 +18,15 @@
   "screen" : "fleet",
   "served" : {
     "\/v1\/autoscale" : 1,
+    "\/v1\/cluster\/status" : 1,
     "\/v1\/fleet\/stats" : 1,
     "\/v1\/fleet\/streams" : 1,
     "\/v1\/fleet\/throughput" : 1,
     "\/v1\/health" : 1,
     "\/v1\/kanban\/blocked" : 1,
     "\/v1\/projects" : 1,
-    "\/v1\/projects\/hscc\/session\/events" : 1
+    "\/v1\/projects\/hscc\/session\/events" : 1,
+    "\/v1\/template\/status" : 1
   },
   "suppressed" : [
 
