@@ -168,6 +168,44 @@ let ordered = [workload("z", tp: nil, pp: nil, cid: "1"),
 expect(FleetServing.rows(from: ordered).map(\.model) == ["z", "a", "m"],
        "rows keep feed order")
 
+// ---------------------------------------------------------------------------
+// 5. The optional `nodes` field (t_db6a32da, API commit 98cff42e) must never
+//    break this screen in EITHER direction: the committed fixture predates
+//    the key (that is exactly what capture_screens.sh feeds the Models
+//    section), and a server that DOES send it must not fail the shared
+//    decode. Fleet's rows ignore `nodes` (unit→node rendering is the
+//    ServingPlacement follow-up on t_65d791da); pinning the decode is
+//    SharedModels' contract, asserted here so a strict decode cannot ship.
+// ---------------------------------------------------------------------------
+let withNodesJSON = """
+{"ok":true,"speak":"x","idle_hosts":[],"total_hosts":4,"workloads":[
+ {"name":"/models/m","tp":"2","pp":"1","container_id":"abcd0123456789ef","nodes":["192.0.2.11","192.0.2.12"]},
+ {"name":"solo","tp":null,"pp":null,"container_id":null}]}
+"""
+if let withNodes = try? JSONDecoder().decode(ClusterStatusResponse.self,
+                                             from: Data(withNodesJSON.utf8)) {
+    expect(withNodes.workloads.count == 2,
+           "a payload WITH nodes decodes (absent-or-present, both legal)")
+    expect(FleetServing.rows(from: withNodes.workloads).map(\.model) == ["m", "solo"],
+           "rows render unchanged from a nodes-bearing payload (this screen ignores the field)")
+} else {
+    expect(false, "a payload WITH nodes decodes (absent-or-present, both legal)")
+    expect(false, "rows render unchanged from a nodes-bearing payload (this screen ignores the field)")
+}
+// This screen's model has NO `nodes` property (unit→node rendering is the
+// ServingPlacement follow-up on t_65d791da), so whatever the server puts in
+// that key cannot change what Fleet renders — the honest pin is exactly that
+// immunity: even a MALFORMED nodes value must decode and render identically.
+// (When a later card adds `nodes` to ClusterWorkload, it must add it as
+// OPTIONAL `[String]?` — never a required `[String]` — and this block is
+// where the absent/malformed contracts get re-pinned.)
+expect((try? JSONDecoder().decode(ClusterStatusResponse.self,
+                                  from: Data(#"{"ok":true,"speak":"x","idle_hosts":[],"total_hosts":1,"workloads":[{"name":"x","nodes":"192.0.2.11"}]}"#.utf8))) != nil,
+       "a malformed nodes value (string, not list) cannot break THIS screen's decode — the model never reads the key")
+expect(FleetServing.rows(from: (try? JSONDecoder().decode(ClusterStatusResponse.self,
+                                  from: Data(#"{"ok":true,"speak":"x","idle_hosts":[],"total_hosts":1,"workloads":[{"name":"x","nodes":"192.0.2.11"}]}"#.utf8)))!.workloads).map(\.model) == ["x"],
+       "and the row renders from name/tp/pp/container alone")
+
 print("")
 print("\(checks - failures)/\(checks) assertions passed")
 exit(failures == 0 ? 0 : 1)
