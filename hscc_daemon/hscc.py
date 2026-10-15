@@ -311,7 +311,7 @@ def _get_help_text():
     cluster = _section("Cluster & templates", [
         "cluster status       Running workloads + idle hosts",
         "cluster hosts        All cluster hosts and saved sparkrun clusters",
-        "cluster monitor      One CPU/RAM/GPU snapshot across the fleet",
+        "cluster monitor [--live]   Fleet CPU/RAM/GPU; --live adds per-node, per-model load",
         "cluster jobs         All sparkrun jobs currently running",
         "cluster info         Detailed resolved cluster configuration",
         "cluster stop <id>    Stop a running workload by container id",
@@ -472,7 +472,7 @@ def _handle_cluster():
         print()
         print("  hscc cluster status       Running workloads + idle hosts")
         print("  hscc cluster hosts        All cluster hosts and saved sparkrun clusters")
-        print("  hscc cluster monitor      One CPU/RAM/GPU snapshot across the fleet")
+        print("  hscc cluster monitor      One CPU/RAM/GPU snapshot (--live: refreshing view + per-model load)")
         print("  hscc cluster jobs         All sparkrun jobs currently running")
         print("  hscc cluster info         Detailed resolved cluster configuration")
         print("  hscc cluster stop <id>    Stop a running workload by container id")
@@ -524,6 +524,19 @@ def _handle_cluster():
             return 1
         result = eng.cmd_cluster_up(dry_run=dry_run)
         return cluster_render.render_up(console, result)
+
+    if sub == "monitor":
+        opts, err = _parse_monitor_flags(cluster_args)
+        if err:
+            print(err)
+            return 1
+        if opts.get("help"):
+            print(_MONITOR_HELP)
+            return 0
+        if opts.get("live"):
+            from hscc_daemon import cluster_live
+            return cluster_live.run_live(console, interval=opts["interval"],
+                                         cluster=opts.get("cluster"))
 
     fn = {
         "status": eng.cmd_cluster_status,
@@ -625,6 +638,59 @@ def _handle_template():
     if sub == "apply" and isinstance(result, dict) and result.get("success") is False:
         return 1
     return rc
+
+
+_MONITOR_HELP = """Usage: hscc cluster monitor [--live] [--interval N] [--cluster NAME]
+
+  hscc cluster monitor                 one CPU/RAM/GPU snapshot (sparkrun's JSON frame)
+  hscc cluster monitor --live          refreshing view: host table like
+                                       `sparkrun cluster monitor` (Jobs column, no
+                                       container detail) + per-node, per-model load
+                                       from each vLLM backend behind the proxy
+                                       (requests running/waiting, KV cache, tok/s)
+  --interval N                         refresh every N seconds (default 2)
+  --cluster NAME                       sparkrun cluster to watch (default: sparkrun's default)
+
+Examples:
+  hscc cluster monitor --live
+  hscc cluster monitor --live --interval 5"""
+
+
+def _parse_monitor_flags(cluster_args):
+    """Parse ``hscc cluster monitor`` flags. Returns ``(opts, error)``.
+
+    Read-only command, but keep the F6 rule: an unknown token is an error, not
+    something to ignore.
+    """
+    opts = {"live": False, "interval": 2, "cluster": None, "help": False}
+    args = list(cluster_args[1:])
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok in ("-h", "--help"):
+            opts["help"] = True
+        elif tok == "--live":
+            opts["live"] = True
+        elif tok in ("--interval", "-i", "--cluster"):
+            val = args[i + 1] if i + 1 < len(args) else None
+            if val is None or val.startswith("-"):
+                return opts, f"Error: '{tok}' needs a value.\n\n{_MONITOR_HELP}"
+            if tok == "--cluster":
+                opts["cluster"] = val
+            else:
+                try:
+                    opts["interval"] = int(val)
+                except ValueError:
+                    return opts, f"Error: '{tok}' must be a whole number of seconds, got {val!r}."
+                if opts["interval"] < 1:
+                    return opts, f"Error: '{tok}' must be at least 1."
+            i += 1
+        else:
+            return opts, f"Error: unknown argument for 'hscc cluster monitor': {tok}\n\n{_MONITOR_HELP}"
+        i += 1
+    if (opts["cluster"] or opts["interval"] != 2) and not opts["live"]:
+        return opts, "Error: --interval/--cluster only apply with --live."
+    return opts, None
 
 
 def _parse_cluster_flags(cluster_args, sub, raw_args=None):

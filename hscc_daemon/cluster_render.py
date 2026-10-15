@@ -138,6 +138,18 @@ def render_monitor(console: Console, result: dict) -> int:
         return _emit_error_panel(console, "cluster monitor", result)
 
     data = result.get("json")
+    if isinstance(data, dict) and isinstance(data.get("hosts"), list):
+        # Same view as `--live`, one frame. Token rates need two samples, so
+        # the snapshot shows load (running/waiting/KV) and '-' for tok/s.
+        from hscc_daemon import cluster_live
+        poller = cluster_live.ServingPoller()
+        try:
+            rows = poller.poll()
+        finally:
+            poller.close()
+        console.print(cluster_live.render(data, rows, None, poller.proxy_error,
+                                          snapshot=True, width=console.width))
+        return 0
     if isinstance(data, dict):
         table = theme.make_table("cluster monitor")
         table.add_column("metric")
