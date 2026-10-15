@@ -796,46 +796,6 @@
     },
     {
       "kind": "D",
-      "command": "hscc autodown disable --help",
-      "needle": "wrote state",
-      "owner": "BROKEN-AUTODOWN-DISABLE",
-      "count_at_baseline": 1,
-      "example": "--help wrote state under HOME: .hscc/autodown.json, .hscc/watchdog-block.json"
-    },
-    {
-      "kind": "D",
-      "command": "hscc autodown status --help",
-      "needle": "log line",
-      "owner": "BROKEN-AUTODOWN-STATUS",
-      "count_at_baseline": 2,
-      "example": "help emitted a daemon log line (a check ran while printing help): [<TS>] [ WARN] Autodown kanban interlock unevaluable: Hermes agent source not found at '<SANDBOX>/home/."
-    },
-    {
-      "kind": "D",
-      "command": "hscc autodown status --help",
-      "needle": "shelled out",
-      "owner": "BROKEN-AUTODOWN-STATUS",
-      "count_at_baseline": 1,
-      "example": "--help shelled out: gh pr list --repo pom11/hscc --state open --limit 1 --json number -q length"
-    },
-    {
-      "kind": "D",
-      "command": "hscc autodown status --help",
-      "needle": "wrote state",
-      "owner": "BROKEN-AUTODOWN-STATUS",
-      "count_at_baseline": 1,
-      "example": "--help wrote state under HOME: .hscc/daemon.log"
-    },
-    {
-      "kind": "D",
-      "command": "hscc autodown wake --help",
-      "needle": "log line",
-      "owner": "BROKEN-AUTODOWN-WAKE",
-      "count_at_baseline": 1,
-      "example": "help emitted a daemon log line (a check ran while printing help): [<TS>] [ INFO] Autodown autoup: state is already \"up\" \u2014 returning busy (no starts issued)"
-    },
-    {
-      "kind": "D",
       "command": "hscc cluster hosts --help",
       "needle": "shelled out",
       "owner": "F3",
@@ -900,6 +860,15 @@
     },
     {
       "kind": "D",
+      "command": "hscc kanban blocked --help",
+      "needle": "wrote state",
+      "owner": "BROKEN-KANBAN",
+      "count_at_baseline": 1,
+      "example": "--help wrote state under HOME: .hscc/daemon.log",
+      "note": "unmasked by t_3dd8651e: before the autodown --help fix the earlier autodown status --help probe created daemon.log first, so this write showed no NEW file; the kanban verb still writes the daemon log while printing help"
+    },
+    {
+      "kind": "D",
       "command": "python -m hscc_daemon.hscc --help (empty HOME)",
       "needle": "executes sparkrun",
       "owner": "BROKEN-IMPORT",
@@ -919,22 +888,6 @@
       "command": "hscc api install-service --help",
       "needle": "exited 1",
       "owner": "BROKEN-API-SVC",
-      "count_at_baseline": 1,
-      "example": "--help exited 1 (expected 0)"
-    },
-    {
-      "kind": "D-rc",
-      "command": "hscc autodown enable --help",
-      "needle": "exited 1",
-      "owner": "BROKEN-AUTODOWN-ENABLE",
-      "count_at_baseline": 1,
-      "example": "--help exited 1 (expected 0)"
-    },
-    {
-      "kind": "D-rc",
-      "command": "hscc autodown wake --help",
-      "needle": "exited 1",
-      "owner": "BROKEN-AUTODOWN-WAKE",
       "count_at_baseline": 1,
       "example": "--help exited 1 (expected 0)"
     },
