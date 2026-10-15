@@ -26,7 +26,11 @@ them; it consumed them and did the cutover on top.
 - [x] C3c the last two screens — `79be2dd5` (Autodown) + `644286f6` (Serving
       Control): **no screen in the app builds a ScrollView of HSSectionCard
       boxes any more** (10 screens converted in total)
-- [x] reviewer screenshots committed (`docs/design/screens/phase2-home*.png`)
+- [x] reviewer screenshots committed — first pass `docs/design/screens/phase2-home*.png`
+      (dimmed, alert-up — superseded); full clean 12-screen × light/dark set
+      `docs/design/screens/phase2-{screen}-{light,dark}.png` + manifests
+      delivered by `t_0d5632bc` (harness `c3a1f56a`/`5b04a8b7`, current set at
+      `5ac0cfbf`) — see "The clean screenshot set" below
 - [x] §8 merge Autodown + self-heal → `t_1a9bd7f8` (`5ac4f954`: SelfHealHistory
       retired as a screen, history is the trailing Section of the merged
       "Autodown & self-heal" List; `wakingBanner` collapsed onto the shared
@@ -259,19 +263,89 @@ the recipe now; what remains is only the merges:
 ## Screenshots (what each one actually shows)
 
 `docs/design/screens/phase2-home-first-run-notifications-prompt.png` and
-`phase2-home.png` are Home in the unconfigured state — "No cluster selected",
+`phase2-home.png` WERE Home in the unconfigured state — "No cluster selected",
 "Not connected / Add your cluster in Settings to begin.", the four Work tiles
 (Projects / Approvals / Activity / Cards), and the five-verb floating bar
 (Chat · Fleet · Cluster · Approvals · Settings). Both were taken with the iOS
 notification-permission alert up (the app asks on first run,
-`NotificationsAppDelegate`), so the tile labels are partly obscured and the
-content is dimmed — they show the empty state and the shell, NOT a connected
+`NotificationsAppDelegate`), so the tile labels were partly obscured and the
+content dimmed — they showed the empty state and the shell, NOT a connected
 fleet or any list recipe. The old `check.png` was removed: it was a third
-capture of the same dimmed Home with the same alert, adding nothing.
+capture of the same dimmed Home with the same alert, adding nothing. Both
+remaining dimmed captures were later deleted, replaced by the set below.
 
-A clean (dialog-free, connected) screen set is still owed to the reviewer, now
-tracked as card `t_0d5632bc`. It is blocked on ONE human tap, and the reason is
-worth the detail so nobody re-derives it:
+## The clean screenshot set — DELIVERED by `t_0d5632bc`, no tap was ever taken
+
+The reviewer-facing set is the 12 screens × light/dark (24 PNGs) now committed
+in `docs/design/screens/phase2-{screen}-{light,dark}.png` plus a per-launch
+`manifests/manifest-{screen}-{light,dark}.json`. It replaced both dimmed
+first-run captures (`phase2-home.png`,
+`phase2-home-first-run-notifications-prompt.png` — deleted; they are no longer
+anywhere in the directory).
+
+**Which capture is the current one (honest status line).** The first full set
+landed at `5b04a8b7` (PR #30) — that was PRE-Models Fleet. The set the reviewer
+should look at is the refresh at `5ac0cfbf` (on top of PR #31's head
+`08ca8f61`): same 12 screens, Fleet now carrying its Models serving section.
+Screens verified alert-free and fixture-rendered by independent vision review
+at both shas (Fleet light+dark at `08ca8f61`, six more screens sampled;
+the orchestrator's own vision pass covers the whole `5ac0cfbf` set).
+
+**Data honesty — what the PNGs prove and what they don't.** Every screen is
+FIXTURE-FED: `HSCC_DEBUG_FIXTURES=1` answers the client's GETs from the repo's
+committed `scripts/model_decode_check/fixtures/` (captured live from the
+daemon, kept decode-current by that gate). So the set proves the list recipe
+RENDERS with real shapes — Fleet's Health + "Models · 3 serving" rows with
+`tp=2 · pp=1 · <container>` captions and green `up` chips, Approvals'
+Pending/Stale sections, the Nodes & serving topology strip and per-node unit
+rows with Stop/Restart, Ops' Verify/Daemon sections, Autodown's
+Status/Controls/Self-heal history, the Daemon log rows. It does NOT prove a
+live connected fleet: the hero on Home still reads "Not connected" because the
+fixture cluster (`fixtures.invalid`, an RFC-6761 reserved TLD that resolves
+nowhere) can never answer a real probe, and `ConnectionMonitor` reports
+"unknown"/down rather than guessing green. That is the honest shape, not a bug
+to chase: connected-state photography needs a reachable cluster and is the
+operator's call (Settings → add cluster).
+
+**Reproduce the set** (`ios-app/scripts/capture_screens.sh`, all hooks
+`#if DEBUG`, zero release-path change):
+
+```
+xcodegen generate && xcodebuild -project HSCC.xcodeproj -scheme HSCC \
+  -configuration Debug -destination 'platform=iOS Simulator,id=D73C0828-7D02-400B-9B94-1CBD4EA76178' \
+  CODE_SIGNING_ALLOWED=NO build
+xcrun simctl install booted <derivedData>/Build/Products/Debug-iphonesimulator/HSCC.app
+./scripts/capture_screens.sh    # out: docs/design/screens (default device: booted)
+```
+
+Per screen the script does `simctl ui <dev> appearance light|dark`, then
+`simctl launch --terminate-running-process` with two env vars —
+`HSCC_DEBUG_SCREEN=<AppDestination rawValue>` (AppShell seeds its drawer
+selection from it; unknown values fall back to `.home`, never a blank screen)
+and `HSCC_DEBUG_FIXTURES=1` (client answers from the seeded
+`Documents/HSCCFixtures` folder and the app raises NO notification prompts —
+all three prompters are gated, see `DebugHarness.swift`). Bundle id is
+`com.hscc.ios` — NOT `ro.hscc.ios` (wrong id fails with
+FBSOpenApplicationServiceErrorDomain code=4, which reads like a crash). Device:
+iPhone 17 Pro `D73C0828-7D02-400B-9B94-1CBD4EA76178`. Screens: home fleet
+nodesServing opsHealth autodown approvals memory templates sessions activity
+logs cron. Proof, not vibes: every launch writes a manifest (fixture paths
+served vs missed, the `isConfigured` inputs, the suppression log) and the
+script FAILS if any screen served zero fixtures — fleet's manifest shows
+`served=10` including `/v1/cluster/status`. What the manifest does and does
+NOT prove about the alert: the launch-time authorization skip
+(`NotificationsAppDelegate`) is a silent `#if DEBUG` early-out — it is NOT
+logged — while the two prompter gates that can fire later (banner `add()` in
+`NotificationCoordinator.fire`, Live-Activity requests) DO append to the
+manifest's `suppressed` list. An empty list therefore proves no banner or
+Live-Activity prompt fired inside the manifest window; the authorization skip
+itself is proven by the code path plus the vision pass (no sheet on any of the
+24 PNGs), not by the log. A partial run (device flaked "No devices are booted"
+mid-loop, iOS 26.3 Simulator) was discarded and the loop re-run clean; no
+manifest or PNG in the repo comes from a failed loop.
+
+The blocker evidence below stands as history — it is why the harness exists,
+and nobody should re-derive it:
 
 - The app requests notification authorisation at launch
   (`NotificationsAppDelegate` → `NotificationCoordinator.requestAuthorization`,
