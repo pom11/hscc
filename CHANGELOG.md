@@ -11,6 +11,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.9.0] - 2026-10-15
+
+### Added
+- **`/v1/cluster/status` workloads now carry a `nodes` list.** Each entry of
+  `workloads` gains one optional key, `"nodes": ["10.0.0.1", "10.0.0.2"]`,
+  the host lines of that job's block in `sparkrun status` — the unit→node
+  edge the iOS "Nodes & serving" screen needs. `cmd_cluster_status()`
+  (`hscc-cluster/hscc.py`) already walked those lines and threw them away; it
+  now keeps the IP for the `Job:` block in play. A TP=2 job legitimately
+  reports BOTH nodes; a solo job reports its one. Purely additive — the
+  existing four keys are untouched and byte-identical, no new subprocess
+  call (the same `sparkrun status` output is already in hand), and `handle_cluster_status`
+  forwards the workloads verbatim so the key rides through unchanged. Old
+  clients keep decoding exactly as before; new clients must treat `nodes` as
+  optional because a pre-field engine omits it.
+
+### Changed
+- **iOS operator console redesign (Phase 2).** One drawer shell with a single NavigationStack replaces the tab bar; chat is full-bleed; every list screen uses the same list recipe through Theme. Screens were merged or moved per the redesign spec (docs/design/IOS_REDESIGN_2026-10-14.md §5/§8): Fleet gains a read-only Models serving section, and Nodes & serving groups units by node via the new `nodes` field. New app icon ("Orbit"). A DEBUG-only capture harness (launch env vars, no taps) produces the light/dark screenshot set in docs/design/screens/. Fixed: the drawer glyph was blank because "serverrack" is not an SF Symbol. After pulling, run `cd ios-app && xcodegen generate`.
+
+### Fixed
+- **Every heal path could destroy the fleet it was protecting (2026-10-14 incident).** Six defects fixed together: a shared, durable heal lease so only one repair runs at a time (F2); auto-heal recreates ONLY the wedged unit — the old whole-template `--force-recreate` tore down healthy units mid-load (F3); proxy health now compares the LIVE router to actually-healthy units instead of trusting sparkrun's state-file PID, and repairs an orphan listener behind a cmdline vet (F4); a durable per-node heal circuit breaker stops a repair storm after 6 actions in 15 min, with `hscc heal-clear` (F5); `hscc cluster up/down` now REFUSES unknown flags (`--help` used to start the fleet) and `hscc start` detaches stdio (F6); and a launch guard refuses to start a vLLM on a host whose GPU already holds a workload outside the declared span — refuse + alert, never preempt, and 'status unavailable' is also a refusal (A2).
+- **Dispatcher false 'GENUINE STALL' pages.** `kanban.max_in_progress` is a FLEET-WIDE cap, but the wedge detector computed roominess per board — with 3 tasks running across two boards a correctly-backlogged gateway was paged as wedged for an hour. Roominess now requires global headroom too, the healthy reason names which cap bound (`at_capacity (global)`), and recovery's gave-up latch clears when the stream is confirmed green (A1).
 ## [2.8.0] - 2026-10-14
 
 ### Added
