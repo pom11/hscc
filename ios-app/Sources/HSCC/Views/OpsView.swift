@@ -6,10 +6,11 @@ import SwiftUI
 /// health stream, trigger rules + last run, pending escalations, and profile
 /// task counts. Each read is its own section with its own `LoadState`, so one
 /// degraded endpoint never blanks the rest. Errors surface the real message.
-/// Fleet-wide mutations live in FleetControlView and autodown controls in
-/// AutodownView; this view hosts the operator's trigger/escalation actions —
-/// "run triggers now" and "perform escalations" — both confirm-gated via
-/// `MutationButton`. A tap never fires a request by itself.
+/// Fleet-wide mutations live in Fleet's Control section (t_2a29a7ab retired
+/// `FleetControlView` as a screen) and autodown controls in AutodownView; this
+/// view hosts the operator's trigger/escalation actions — "run triggers now"
+/// and "perform escalations" — both confirm-gated via `MutationButton`. A tap
+/// never fires a request by itself.
 ///
 /// LIST RECIPE (spec §5, Phase 2 C3): the five `HSSectionCard` boxes are now
 /// five `Section`s of one plain `List`, each keeping its own `LoadState`. The

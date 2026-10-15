@@ -195,7 +195,12 @@ targets:
       - path: Sources/HSCC/Views/DisplayJSON.swift
       - path: Sources/HSCC/Views/AppliedTemplateStatus.swift
       - path: Sources/HSCC/Views/HealthCheckIndicator.swift
-      - path: Sources/HSCC/Views/FleetControlView.swift
+      # FleetControlView.swift retired (t_2a29a7ab, §8 row "FleetView ·
+      # FleetControlView | drawer · Fleet (+ Control section)"): the applied-
+      # template Section and the confirm-gated up/down MutationButtons moved
+      # into FleetView verbatim; `.fleetControl` survives as a mapped alias
+      # (the .selfHeal / .boardHygiene / .clusterHub precedent).
+      - path: Sources/HSCC/FleetServing.swift
       # ServingControlView.swift was renamed and merged into NodesServingView
       # (t_65d791da) — listed above at ClusterView's old slot, since the new
       # screen is the union of both.

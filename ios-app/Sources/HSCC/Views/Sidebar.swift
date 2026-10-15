@@ -44,7 +44,12 @@ struct Sidebar: View {
                 // them. `.clusterHub` still resolves — as a mapped alias in
                 // AppShell.normalized, never as a second row.
                 row(.nodesServing)
-                row(.fleetControl)
+                // The "Fleet Control" row is gone (t_2a29a7ab, spec §8 row
+                // "FleetView · FleetControlView | drawer · Fleet (+ Control
+                // section)"): the applied-template read and the confirm-gated
+                // fleet up/down are Sections of Fleet's List, so one row covers
+                // both. `.fleetControl` still resolves — as a mapped alias in
+                // AppShell.normalized, never as a second row.
                 row(.opsHealth)
                 // spec §3.1: "Autodown & self-heal (was Autodown; history
                 // becomes a section)" — ONE row. The old `.selfHeal` row is

@@ -17,10 +17,20 @@ import SwiftUI
 /// replaces the ten screens that used to wrap their own `NavigationStack`.
 enum AppDestination: String, Hashable, Identifiable {
     case home, chats, projects, cards, approvals
-    case fleet, fleetControl, nodesServing, opsHealth
+    case fleet, nodesServing, opsHealth
     case autodown, cron, logs
     case memory, templates, sessions, activity
     case search, settings
+    /// LEGACY alias, kept deliberately (spec §8 "FleetView · FleetControlView |
+    /// drawer · Fleet (+ Control section)", folded into t_2a29a7ab because the
+    /// ruling that put model-serving in Fleet also put fleet-wide up/down in
+    /// Fleet). `FleetControlView` was retired as a screen: its applied-template
+    /// Section and its confirm-gated up/down buttons live in FleetView's List,
+    /// and the drawer has no separate row. No view of its own — but any stale
+    /// caller that still names `.fleetControl` (rawValue "fleetControl") lands
+    /// on Fleet instead of silently failing. New code routes `.fleet`.
+    /// (Same pattern as `.selfHeal`, `.boardHygiene`, `.clusterHub`.)
+    case fleetControl
     /// LEGACY alias, kept deliberately. `ClusterView` (the topology-only
     /// "Cluster" drawer row) was retired by t_65d791da — its strip and fleet
     /// status line are now the header Section of NodesServingView, and spec §3.1
@@ -55,11 +65,12 @@ enum AppDestination: String, Hashable, Identifiable {
         case .cards: "Cards"
         case .approvals: "Approvals"
         case .fleet: "Fleet"
-        // The retired hub's alias carries the MERGED screen's title, exactly as
-        // `.selfHeal` carries "Autodown & self-heal" — a stale caller must never
-        // land on a nav bar that names a screen which no longer exists.
+        // The retired screen's alias carries the MERGED destination's title
+        // ("Fleet" — where its sections now live), exactly as `.clusterHub`
+        // carries "Nodes & serving": a stale caller must never land on a nav
+        // bar naming a screen that no longer exists.
+        case .fleetControl: "Fleet"
         case .clusterHub: "Nodes & serving"
-        case .fleetControl: "Fleet control"
         case .nodesServing: "Nodes & serving"
         case .opsHealth: "Ops & health"
         case .autodown: "Autodown & self-heal"
@@ -211,12 +222,16 @@ struct AppShell: View {
         case .projects: ProjectsView(client: client)
         case .cards: CardsRootView(client: client)
         case .approvals: ApprovalsView(client: client)
-        case .fleet: FleetView(client: client ?? FleetViewPlaceholder.client)
+        case .fleet: FleetView(client: client)
         // §8 merge (t_65d791da): the retired Cluster hub has no view of its own
         // any more; its destination lands on the SAME merged screen as
         // `.nodesServing`, which now carries the topology strip as its header.
         case .clusterHub: NodesServingView(client: client)
-        case .fleetControl: FleetControlView(client: client)
+        // §8 fold-in (t_2a29a7ab): the retired Fleet Control screen has no view
+        // of its own any more; its destination lands on the SAME screen as
+        // `.fleet`, whose List now carries the "Applied template" + "Control"
+        // sections. Same recipe as `.clusterHub` → NodesServingView.
+        case .fleetControl: FleetView(client: client)
         case .nodesServing: NodesServingView(client: client)
         case .opsHealth: OpsView(client: client)
         case .autodown: AutodownView(client: client)
@@ -284,6 +299,7 @@ struct AppShell: View {
         case .selfHeal: return .autodown
         case .boardHygiene: return .approvals
         case .clusterHub: return .nodesServing
+        case .fleetControl: return .fleet
         default: return destination
         }
     }
@@ -303,6 +319,7 @@ struct AppShell: View {
     ///   .selfHeal    -> Autodown & self-heal  (t_1a9bd7f8)
     ///   .boardHygiene-> Approvals             (t_31d037ac)
     ///   .clusterHub  -> Nodes & serving       (t_65d791da)
+    ///   .fleetControl-> Fleet                 (t_2a29a7ab)
     private func go(_ destination: AppDestination?) {
         selection = normalized(destination)
         router.projectsPath = []
@@ -399,13 +416,12 @@ extension AppDestination {
     }
 }
 
-/// FleetView is the only screen whose client is non-optional (it predates the
-/// optional-client convention). Keep that contract without faking a connection:
-/// when the app is unconfigured we hand it a deliberately unusable client and
-/// it renders its honest error states like every other screen.
-enum FleetViewPlaceholder {
-    static let client = HSCCClient(host: "unconfigured.invalid", port: 0, token: "")
-}
+// `FleetViewPlaceholder` (the deliberately-unusable client handed to FleetView
+// when the app was unconfigured) was deleted by t_2a29a7ab: FleetView now takes
+// an optional client like every other screen, because it now hosts the
+// fleet-wide up/down mutations — an unusable-but-present client would render
+// those buttons against `unconfigured.invalid`, where a connect gate is the
+// honest surface.
 
 #Preview("Shell — home") {
     let center = ProjectUnreadCenter()

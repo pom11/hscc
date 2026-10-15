@@ -12,55 +12,109 @@ import SwiftUI
 /// a transient blip must not make the whole fleet look idle or down.
 ///
 /// LIST RECIPE (spec §5, Phase 2 C3): one plain `List` with one `Section` per
-/// feed — Health · Throughput · Stats · Streams · Autoscale (the §5 feed list
-/// plus the Stats feed the screen already had; "Models" is a separate §5 item
-/// about absorbing ModelsView here, left to its own card). The five
-/// `HSSectionCard` boxes are gone; each feed keeps its own `LoadState`, and a
-/// feed that is loading/failed shows an inline row rather than a full-pane
-/// spinner so the four feeds that DID load stay visible. The check rows render
-/// through the shared `HealthCheckList` (the §5 byte-twin collapse with Ops);
-/// only `statBadge`/`statGrid` remain bespoke, because they are value-over-
-/// label stat tiles rather than status chips.
+/// feed — Health · Throughput · Stats · Streams · Autoscale · Models, then the
+/// two sections the retired `FleetControlView` folded into here ("Applied
+/// template" · "Control", work-log item 5 / §8 row "FleetView · FleetControlView
+/// | drawer · Fleet (+ Control section)"). The `HSSectionCard` boxes are gone;
+/// every feed keeps its own `LoadState`, and a feed that is loading/failed shows
+/// an inline row rather than a full-pane spinner so the feeds that DID load stay
+/// visible. The check rows render through the shared `HealthCheckList` (the §5
+/// byte-twin collapse with Ops); only `statBadge`/`statGrid` remain bespoke,
+/// because they are value-over-label stat tiles rather than status chips.
+///
+/// THE MODELS SECTION (ruling `t_1897550c`, spec §5 as amended by PR #29):
+/// `ModelsView` never existed, so this is NOT a merge — it is the new, additive,
+/// READ-ONLY serving feed the mockup frames 7/8 always drew (`Models · 3
+/// serving`). One row per workload of `GET /v1/cluster/status` — the same
+/// `ClusterStatusResponse` / `ClusterWorkload` decode "Nodes & serving" reads —
+/// so no new endpoint and no new model types. Read-only is the point: Stop and
+/// Restart stay on "Nodes & serving" (which keeps its per-unit buttons and its
+/// own unit grouping). Fleet gains a second, non-mutating view of the same feed;
+/// the ruling deletes and moves nothing.
+///
+/// WHAT THE ROW CAN HONESTLY SAY: the mockup's caption is
+/// "spark-01, spark-02 · 2 streams", but `/v1/cluster/status` carries neither a
+/// node per workload nor a per-model stream count — the unit→node edge lives in
+/// `/v1/cluster/hosts` (`ServingPlacement`), and stream counts are not in this
+/// payload at all. The card rules out a second endpoint, so the caption shows
+/// what the feed DOES carry: the same `tp`/`pp` + container id "Nodes & serving"
+/// shows. Same reason the trailing chip says "no container" rather than the
+/// mockup's "waking": this endpoint can prove a workload has a live container or
+/// that it does not — it cannot prove which way it is heading, and guessing a
+/// direction is the colour-lie class §9 bans.
 struct FleetView: View {
-    let client: HSCCClient
+    let client: HSCCClient?
+    /// Only read for one honest line in the Control footer: fleet-wide
+    /// mutations cannot work until a cluster exists, and saying so beats a
+    /// button that can only ever fail.
+    @EnvironmentObject private var settings: SettingsStore
 
     @State private var health = LoadState<HealthResponse>.idle
     @State private var stats = LoadState<FleetStatsResponse>.idle
     @State private var throughput = LoadState<FleetThroughputResponse>.idle
     @State private var streams = LoadState<FleetStreamsResponse>.idle
     @State private var autoscale = LoadState<AutoscaleResponse>.idle
+    /// The Models serving feed (ruling `t_1897550c`). Its own `LoadState`, so a
+    /// dead `/v1/cluster/status` cannot blank the five feeds that answered — and
+    /// the reverse. Same cache key "Nodes & serving" uses, so the two screens
+    /// agree about what the last-known fleet was.
+    @State private var serving = LoadState<ClusterStatusResponse>.idle
+    /// The applied template — folded in from `FleetControlView` (work-log item 5)
+    /// with its `Offline.load` + `AppliedTemplateStatus` render intact.
+    @State private var templateStatus = LoadState<TemplateStatusResponse>.idle
 
     var body: some View {
-        List {
-            healthSection
-            throughputSection
-            statsSection
-            streamsSection
-            autoscaleSection
-        }
-        .listStyle(.plain)
-        .navigationTitle("Fleet")
-        .navigationBarTitleDisplayMode(.inline)
-        .refreshable { await loadAll() }
-        .task {
-            if health.value == nil, !health.isLoading {
-                await loadAll()
+        Group {
+            if let client {
+                List {
+                    healthSection
+                    throughputSection
+                    statsSection
+                    streamsSection
+                    autoscaleSection
+                    modelsSection
+                    appliedTemplateSection
+                    controlSection(client: client)
+                }
+                .listStyle(.plain)
+                .refreshable { await loadAll() }
+                .task {
+                    if health.value == nil, !health.isLoading {
+                        await loadAll()
+                    }
+                }
+            } else {
+                // The optional-client convention every other screen uses. This
+                // is why FleetView's client became optional in this card (it was
+                // the last non-optional one): a screen that now carries the
+                // fleet-wide up/down mutations must NOT render them against the
+                // old `FleetViewPlaceholder` — a gate that says "set your cluster
+                // in Settings" beats a Bring-Fleet-Up button that can only fail.
+                HSConnectGate(systemImage: "chart.bar", verb: "to see and control the fleet")
             }
         }
+        .navigationTitle("Fleet")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     // MARK: - Load
 
+    /// Every feed the screen owns, concurrently. The two reads folded in from
+    /// `FleetControlView` ride the same gesture: one pull refreshes the whole
+    /// screen, which is the point of the "Control section of Fleet" merge.
     private func loadAll() async {
         async let h: Void = loadHealth()
         async let s: Void = loadStats()
         async let t: Void = loadThroughput()
         async let st: Void = loadStreams()
         async let a: Void = loadAutoscale()
-        _ = await (h, s, t, st, a)
+        async let m: Void = loadModels()
+        async let ts: Void = loadTemplateStatus()
+        _ = await (h, s, t, st, a, m, ts)
     }
 
     private func loadHealth() async {
+        guard let client else { return }
         if health.value == nil { health = .loading }
         health = await Offline.load(health,
                                     cacheKey: "/v1/health",
@@ -70,6 +124,7 @@ struct FleetView: View {
     }
 
     private func loadStats() async {
+        guard let client else { return }
         if stats.value == nil { stats = .loading }
         stats = await Offline.load(stats,
                                    cacheKey: "/v1/fleet/stats",
@@ -79,6 +134,7 @@ struct FleetView: View {
     }
 
     private func loadThroughput() async {
+        guard let client else { return }
         if throughput.value == nil { throughput = .loading }
         throughput = await Offline.load(throughput,
                                         cacheKey: "/v1/fleet/throughput",
@@ -88,6 +144,7 @@ struct FleetView: View {
     }
 
     private func loadStreams() async {
+        guard let client else { return }
         if streams.value == nil { streams = .loading }
         streams = await Offline.load(streams,
                                      cacheKey: "/v1/fleet/streams",
@@ -97,6 +154,7 @@ struct FleetView: View {
     }
 
     private func loadAutoscale() async {
+        guard let client else { return }
         if autoscale.value == nil { autoscale = .loading }
         autoscale = await Offline.load(autoscale,
                                        cacheKey: "/v1/autoscale",
@@ -105,13 +163,37 @@ struct FleetView: View {
         }
     }
 
+    /// The serving feed. `Offline.load` like every other section here: a fleet
+    /// that is briefly unreachable still has a last-known model list worth
+    /// showing, marked stale.
+    private func loadModels() async {
+        guard let client else { return }
+        if serving.value == nil { serving = .loading }
+        serving = await Offline.load(serving,
+                                     cacheKey: EndpointPath.clusterStatus,
+                                     client: client) {
+            try await client.clusterStatus()
+        }
+    }
+
+    /// Folded in from `FleetControlView` verbatim (same cache key, same
+    /// offline-aware helper) — the applied-status read now belongs to Fleet.
+    private func loadTemplateStatus() async {
+        guard let client else { return }
+        templateStatus = await Offline.load(templateStatus,
+                                            cacheKey: EndpointPath.templateStatus,
+                                            client: client) {
+            try await client.templateStatus()
+        }
+    }
+
     // MARK: - Health (5-check verify)
 
     /// Each of the five reads is a `Section` of the ONE List (spec §5: one
-    /// section per feed — Health · Throughput · Stats · Streams · Autoscale).
-    /// The `HSSectionCard` boxes are gone; List supplies the separators and
-    /// the caps section headers. Each keeps its own `LoadState`, so one
-    /// degraded endpoint still cannot blank the rest of the screen.
+    /// section per feed — Health · Throughput · Stats · Streams · Autoscale
+    /// · Models). The `HSSectionCard` boxes are gone; List supplies the
+    /// separators and the caps section headers. Each keeps its own `LoadState`,
+    /// so one degraded endpoint still cannot blank the rest of the screen.
     @ViewBuilder
     private var healthSection: some View {
         Section("Health") {
@@ -361,6 +443,172 @@ struct FleetView: View {
         if let reason = state.reason, !reason.isEmpty {
             Text(reason)
                 .font(.caption)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        }
+    }
+
+    // MARK: - Models (the serving read — ruling t_1897550c)
+
+    /// The read-only Models serving feed. New, additive, one `Section` of the
+    /// one List — the ruling's "NOT a merge, must not delete or move anything".
+    ///
+    /// Same feed "Nodes & serving" reads (`GET /v1/cluster/status`,
+    /// `ClusterStatusResponse`/`ClusterWorkload`, `client.clusterStatus()`), so
+    /// no new endpoint and no new model types. The rows are deliberately not
+    /// tappable and carry no buttons: the mutating surface for a single unit
+    /// stays on "Nodes & serving" (t_65d791da owns that file).
+    ///
+    /// `speak` is the server-authored one-liner, so the count the section
+    /// states and the count the feed reports can be checked against each other
+    /// (same reason every other feed here prints it).
+    @ViewBuilder
+    private var modelsSection: some View {
+        Section {
+            switch serving {
+            case .idle, .loading:
+                loadingRow("Loading models…")
+            case .failed(let message):
+                errorLabel(message, retry: { Task { await loadModels() } })
+            case .stale(let state, let age):
+                StaleBanner(age: age, reason: "Can't reach the cluster right now.") {
+                    Task { await loadModels() }
+                }
+                modelsBody(state)
+            case .loaded(let state):
+                modelsBody(state)
+            }
+        } header: {
+            // `Models · 3 serving` (mockup frames 7/8), derived from the rows
+            // actually rendered — see `FleetServing.header`.
+            if let count = serving.value?.workloads.count {
+                Text(FleetServing.header(workloadCount: count))
+            } else {
+                Text("Models")
+            }
+        } footer: {
+            Text("Read-only here: a workload's Stop / Restart live in “Nodes & serving”, where each unit is grouped under the node that runs it.")
+                .font(.footnote)
+                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        }
+    }
+
+    @ViewBuilder
+    private func modelsBody(_ state: ClusterStatusResponse) -> some View {
+        Text(state.speak)
+            .font(.footnote.italic())
+            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+        if state.workloads.isEmpty {
+            HSEmpty("No models serving",
+                    message: "Nothing is serving right now — a workload that is down does not appear in this feed. The Control section below brings the whole serving fleet up.",
+                    systemImage: "cpu")
+        } else {
+            // `FleetServing.rows`, not `state.workloads` directly: the feed's
+            // own `id` is the workload NAME, and the live feed repeats one
+            // recipe name per container (3 replicas in the committed capture).
+            // `rows(from:)` gives ForEach the unique ids that requires.
+            ForEach(FleetServing.rows(from: state.workloads)) { row in
+                modelRow(row)
+            }
+        }
+    }
+
+    /// One Models row, built from `FleetServing.Row` so the same strings drive
+    /// the screen and the accessibility label (the label is asserted headlessly
+    /// by `scripts/fleet_models_check.sh`).
+    ///
+    /// The whole row is ONE VoiceOver element, as the card requires: there are
+    /// no buttons in this section, so nothing is lost by combining — unlike the
+    /// serving screen, whose rows deliberately stay un-combined for their two
+    /// confirm-gated buttons. The row is also `.accessibilityAddTraits(.isStaticText)`
+    ///-free on purpose: a plain row is already announced as text; adding a trait
+    /// would invite a tap affordance that does not exist.
+    @ViewBuilder
+    private func modelRow(_ row: FleetServing.Row) -> some View {
+        HStack(spacing: Theme.Spacing.sm.rawValue) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xxs.rawValue) {
+                Text(row.model)
+                    .font(.headline)
+                    .foregroundColor(Theme.Semantic.onSurface)
+                    .textSelection(.enabled)
+                Text(row.caption)
+                    .font(.hsccMono(.caption))
+                    .foregroundColor(Theme.Semantic.onSurfaceMuted)
+            }
+            Spacer(minLength: 0)
+            HSStatusChip(row.chipText,
+                         systemImage: row.state == .up ? "checkmark.circle.fill" : "circle.dashed",
+                         color: row.state == .up ? Theme.Semantic.ok : Theme.Semantic.warn)
+        }
+        // §9: read-only row → combine into one element naming the model, what
+        // the feed says about it, and its state.
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(row.accessibilityLabel)
+    }
+
+    // MARK: - Control (folded in from FleetControlView — work-log item 5, §8)
+
+    /// The applied-template read, moved with `AppliedTemplateStatus` (the §5
+    /// shared render) and its own offline-aware `Offline.load` intact. The
+    /// retired screen kept its own header/refresh/load and only shared the rows;
+    /// here the header is a `Section` header of this List, which is the §8 shape
+    /// ("FleetView · FleetControlView | drawer · Fleet (+ Control section)").
+    @ViewBuilder
+    private var appliedTemplateSection: some View {
+        Section("Applied template") {
+            AppliedTemplateStatus(status: templateStatus) {
+                Task { await loadTemplateStatus() }
+            }
+        }
+    }
+
+    /// Fleet-wide up/down, both confirm-gated `MutationButton`s with every
+    /// prompt carried over VERBATIM from `FleetControlView` (a confirm dialog
+    /// that has been reviewed and re-reviewed is not reworded as a side effect
+    /// of a merge). Both reload the applied-template read exactly as the retired
+    /// screen did, so the section below them stays honest after a mutation.
+    ///
+    /// `client` is passed in rather than unwrapped here: the call site is
+    /// already inside `if let client`, and it keeps the "these buttons only
+    /// exist when there IS a cluster" rule in one place.
+    @ViewBuilder
+    private func controlSection(client: HSCCClient) -> some View {
+        Section {
+            // Cluster Up — starts every serving unit. Confirm names it.
+            MutationButton(
+                title: "Bring Fleet Up",
+                systemImage: "play.circle",
+                prompt: "Bring the fleet up? This starts every serving unit in the cluster (orchestrator + workers).",
+                run: {
+                    let result = try await client.clusterUp()
+                    await loadTemplateStatus()
+                    await loadModels()
+                    return result.message ?? "Fleet up issued."
+                }
+            )
+            .accessibilityLabel("Bring serving fleet up")
+
+            // Cluster Down — destructive. Confirmation NAMES what happens:
+            // it stops ALL workloads fleet-wide.
+            MutationButton(
+                title: "Stop All Workloads",
+                systemImage: "stop.circle",
+                destructive: true,
+                prompt: "Stop ALL workloads fleet-wide? This shuts down every serving unit across the entire cluster and interrupts any in-flight work.",
+                run: {
+                    let result = try await client.clusterDown()
+                    await loadTemplateStatus()
+                    await loadModels()
+                    return result.message ?? "Fleet down issued."
+                }
+            )
+            .accessibilityLabel("Stop all cluster workloads")
+        } header: {
+            Text("Control")
+        } footer: {
+            Text(settings.isConfigured
+                 ? "Bring the serving fleet up, or stop ALL workloads fleet-wide. Per-unit Stop / Restart stay in “Nodes & serving”."
+                 : "Add a cluster in Settings first — fleet-wide actions need somewhere to act.")
+                .font(.footnote)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
     }

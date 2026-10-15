@@ -233,7 +233,7 @@ struct NodesServingView: View {
         if state.workloads.isEmpty {
             Section("Serving units") {
                 HSEmpty("No serving units",
-                        message: "A unit that is down does not appear here. `cluster up` (in Fleet Control) starts the whole serving fleet — orchestrator and workers — so a stopped unit only comes back through a fleet-up.",
+                        message: "A unit that is down does not appear here. `cluster up` (in Fleet's Control section) starts the whole serving fleet — orchestrator and workers — so a stopped unit only comes back through a fleet-up.",
                         systemImage: "cpu")
             }
         } else if let placement = placement() {
@@ -365,7 +365,7 @@ struct NodesServingView: View {
         } else {
             countLine = "Each serving unit is listed with what it serves."
         }
-        return countLine + " Fleet-wide actions live in Fleet Control: stopping a unit takes it out of service immediately, and to start a unit that is down — or recover after a hard stop — bring the fleet up or down from there (same confirm gate)."
+        return countLine + " Fleet-wide actions live in Fleet's Control section: stopping a unit takes it out of service immediately, and to start a unit that is down — or recover after a hard stop — bring the fleet up or down from there (same confirm gate)."
     }
 
     // MARK: - One unit row
@@ -438,7 +438,7 @@ struct NodesServingView: View {
                     Spacer()
                 }
             } else {
-                Text("Not running — no live container to stop or restart. It returns when the fleet is brought up (Fleet Control).")
+                Text("Not running — no live container to stop or restart. It returns when the fleet is brought up (Fleet's Control section).")
                     .font(.caption)
                     .foregroundColor(Theme.Semantic.onSurfaceMuted)
             }
