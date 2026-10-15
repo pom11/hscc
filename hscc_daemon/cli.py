@@ -36,6 +36,59 @@ def _console(**kwargs):
     return make_console(**kwargs)
 
 
+def _detach_stdio():
+    """Point stdin/stdout/stderr at /dev/null in the daemonised child (F6).
+
+    WHY: ``cmd_start`` double-forks but never redirected the standard streams,
+    so the daemon inherited the caller's terminal. Two consequences, both real:
+
+      1. the daemon (and any sparkrun/docker child it spawns) could write into
+         the operator's terminal whenever it liked;
+      2. the daemon HELD the caller's stdout open. A caller that waits for its
+         stdout to close — ``hscc start | cat``, a tool capturing output, an
+         editor's shell integration — blocked forever even though ``hscc start``
+         had already printed its panel and returned.
+
+    Redirecting to DEVNULL rather than ``os.close(1)``: closing fd 1 leaves the
+    descriptor free, and the next ``open()`` anywhere in the daemon silently
+    takes fd 1 — after which its file content is written into the caller's pipe,
+    which is strictly worse than today. A device keeps fd 1 valid and inert.
+
+    Best-effort by design: this runs after fork and before the loop, and a
+    failure here must not kill a daemon that is otherwise fine, so every step is
+    guarded and any error is swallowed (logged if logging still works).
+    """
+    try:
+        fd = os.open(os.devnull, os.O_RDWR)
+    except OSError:
+        try:
+            f = open(os.devnull, "r+")
+        except OSError:
+            return
+        try:
+            for std in (0, 1, 2):
+                os.dup2(f.fileno(), std)
+        except OSError:
+            pass
+        finally:
+            try:
+                f.close()
+            except OSError:
+                pass
+        return
+    try:
+        for std in (0, 1, 2):
+            os.dup2(fd, std)
+    except OSError:
+        pass
+    finally:
+        if fd > 2:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 def cmd_start():
     """Start the daemon in the background."""
     from .daemon_ops import get_pid, save_pid, write_stopped
@@ -92,6 +145,12 @@ def cmd_start():
     pid2 = os.fork()
     if pid2 > 0:
         os._exit(0)
+
+    # Grandchild. Detach the standard streams BEFORE anything else runs: this
+    # is the point after which nobody owns the caller's terminal any more, and
+    # leaving fd 0/1/2 attached is what made `hscc start` hold the caller's
+    # pipe open (F6) and let the daemon write into the operator's terminal.
+    _detach_stdio()
 
     # Grandchild — write the PID exactly ONCE here, after the final fork, so
     # ~/.hscc/daemon.pid reflects the ONE process that actually serves (the
@@ -578,6 +637,45 @@ def cmd_notify(msg):
         f"Notification {'sent' if ok else 'failed'}",
         status="ok" if ok else "error", title="notify",
     ))
+
+
+def cmd_heal(node=None, reason="", status_only=False):
+    """Inspect or clear the per-node heal circuit breaker (F5).
+
+    The breaker's alert tells the operator to run this after investigating, so
+    it must exist — an alert pointing at a command that does not exist is worse
+    than no alert. Default (no --status) CLEARS the node's strikes.
+    """
+    from . import heal_breaker
+    console = _console()
+
+    if status_only:
+        rows = []
+        for k, v in sorted(heal_breaker._load().items()):
+            if k.startswith("_") or not isinstance(v, list):
+                continue
+            remaining = heal_breaker.suspended(k)
+            rows.append(f"  {k:<16} {len(v)} action(s) in window  "
+                        + (f"SUSPENDED {int(remaining)}s more" if remaining > 0
+                           else "healing allowed"))
+        console.print(make_status_panel(
+            "\n".join(rows) if rows
+            else "No heal strikes recorded — all nodes healing normally.",
+            status="ok", title="heal breaker"))
+        return
+
+    if not node:
+        console.print("Usage: hscc heal-clear <node> [reason...]   "
+                      "(or: hscc heal-status)")
+        return
+    cleared = heal_breaker.clear(node, reason or "cleared by operator")
+    # A clear must un-silence the node too, so a later trip can alert again.
+    heal_breaker.reset_alert(node)
+    console.print(make_status_panel(
+        (f"Cleared heal strikes for {node} — healing resumes now."
+         if cleared else
+         f"No strikes recorded for {node} (nothing to clear)."),
+        status="ok" if cleared else "warn", title="heal breaker"))
 
 
 def cmd_log():

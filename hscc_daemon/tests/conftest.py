@@ -89,7 +89,8 @@ def _isolate_hscc(tmp_path, monkeypatch):
     # (b) Module-level constants already computed at import — overwrite each.
     def _module_attrs():
         from hscc_daemon import (
-            autodown, daemon_ops, desktop, health, hscc, lifecycle,
+            autodown, daemon_ops, desktop, health, heal_breaker, heal_lease,
+            hscc, lifecycle,
             serving, state, trigger, usage,
         )
         def p(sub):
@@ -148,10 +149,48 @@ def _isolate_hscc(tmp_path, monkeypatch):
             (health, "_WORKER_RELATCH_FILE", p("worker_relaunch.json")),
             (health, "_WORKER_CONTAINER_STATE_FILE",
              p("worker_container_state.json")),
+            # heal_lease.py (F2) — the durable single-flight repair lease. This
+            # MUST be redirected: check_workers / check_proxy / recover now all
+            # take and release it, so an unredirected path would write a LIVE
+            # lease into the operator's real ~/.hscc and suppress the running
+            # daemon's heals for the whole TTL.
+            (heal_lease, "HEAL_LEASE_FILE", p("heal-lease.json")),
+            # heal_breaker.py (F5) — the durable per-node strike ledger. Same
+            # MUST-redirect rationale as the lease: check_workers / check_proxy
+            # now count a strike on every heal, so an unredirected path would
+            # write strikes into the operator's real ~/.hscc and could suspend
+            # healing a LIVE node from the test run.
+            (heal_breaker, "HEAL_BREAKER_FILE", p("heal-breaker.json")),
+            # launch guard (A2) — every launch path consults
+            # health._launch_guard_status_fn() before starting a container.
+            # Default it to "we looked, nothing foreign is running" ({}), so
+            # the ~100 pre-existing heal/autoup tests keep their semantics
+            # instead of failing on NO_STATUS, and freshen the guard's caches
+            # so a refusal-alert cooldown from one test cannot suppress
+            # another test's assertion. A2's own tests re-patch the seam.
+            (health, "_launch_guard_status_fn", lambda force=False: {}),
+            (health, "_LAUNCH_STATUS_CACHE", {"at": 0.0, "status": None}),
+            (health, "_LAUNCH_ALERT_AT", {}),
         ]
 
     for mod, attr, val in _module_attrs():
         monkeypatch.setattr(mod, attr, val, raising=False)
+
+    # NOT neutered here, deliberately. desktop._notify_macos / _notify_linux
+    # shell out to osascript / notify-send, so a test that reaches a real
+    # notification path would push one on the operator's desktop. The obvious
+    # fix -- an autouse floor replacing both -- was tried and BROKE the suite:
+    # test_desktop.py tests those two functions directly (fakes subprocess.run,
+    # asserts the rc-0 return), so replacing them replaces the code under test
+    # (2 failures, and the no-live-leak canary failed on its nested run). A
+    # global floor needs a growing carve-out list, i.e. it silently changes
+    # behaviour for 1460 tests to protect against a hypothetical.
+    #
+    # Convention instead, already used across the suite: a test that exercises
+    # a notification path patches the high-level sender itself
+    # (monkeypatch.setattr(<module>, "send_macos_notification", ...)) -- see
+    # test_autodown.py (30+ sites), test_cli.py, test_heal_breaker.py:332 and
+    # test_launch_guard.py. Patch the sender, not the OS shim.
 
 
 @pytest.fixture(autouse=True)

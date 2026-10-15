@@ -781,8 +781,8 @@ class TestCheckWorkers:
 class TestCheckWorkersAutoHeal:
     """WD1: check_workers() debounced auto-heal of a down worker unit.
 
-    A unit down across N CONSECUTIVE checks (default 3 ≈ 90s) is force-recreated
-    via the REAL template-apply path (--force-recreate); a single blip or a
+    A unit down across N CONSECUTIVE checks (default 3 ≈ 90s) is recreated — the
+    unit ONLY, never the whole template (F3); a single blip or a
     flapping (down→up→down) unit does NOT trigger; a cooldown stops the same unit
     from being re-healed within the window even if it stays down. The down-check
     history and the heal call are injected — never touches a real node/docker.
@@ -930,7 +930,9 @@ class TestCheckWorkersAutoHeal:
         for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
             health.check_workers()
         assert any("Auto-heal" in m for m in log_calls)   # auditable distinct action
-        assert any("force-recreate" in m for m in log_calls)
+        # F3: the log must say it recreates THIS unit only — the old wording
+        # promised a whole-template force-recreate, which is what hung the fleet.
+        assert any("recreating this unit only" in m for m in log_calls)
 
     def test_config_values_are_read_not_hardcoded(self, tmp_hfcc_dir, monkeypatch):
         health, _ = self._setup(tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2"])
@@ -945,57 +947,160 @@ class TestCheckWorkersAutoHeal:
         health.check_workers()          # streak 2 -> fires
         assert len(heals) == 1
 
-    def test_default_heal_calls_real_apply_with_force_recreate(self, tmp_hfcc_dir, monkeypatch):
-        """The default heal action reaches the REAL apply path (cmd_cluster_template)
-        with --force-recreate for the currently applied template — no real node
-        or docker is touched (the plugin modules are injected as fakes)."""
-        import sys as _sys
-        from hscc_daemon import health
+    def _heal_isolation(self, health, monkeypatch, tmp_hfcc_dir):
+        """Neutralize every side effect _default_autoheal_worker can have, so a
+        heal test can never touch a real node, docker, or the REAL ~/.hscc:
+        silence the log, record the stop + the detached launch, and redirect
+        the heal log / relaunch-state paths into the tmp dir.
+
+        Returns (stops, launches) — argv lists of what the heal issued.
+        """
+        stops, launches = [], []
         monkeypatch.setattr(health, "log", lambda *a, **kw: None)
-        fake_calls = []
+        monkeypatch.setattr(
+            health, "run_cmd",
+            lambda args, **k: stops.append(list(args)) or {"ok": True, "output": ""})
+        monkeypatch.setattr(
+            health.subprocess, "Popen",
+            lambda argv, **k: launches.append(list(argv)) or None)
+        # Resolve the sparkrun CLI without touching a real install.
+        monkeypatch.setattr(health.sparkrun_bin, "argv", lambda *a: list(a))
+        monkeypatch.setattr(health, "_sparkrun_exec_argv", lambda argv: list(argv))
+        # Redirect ~/.hscc (heal log) into the tmp dir — never the real one.
+        (tmp_hfcc_dir / ".hscc").mkdir(parents=True, exist_ok=True)
+        _real_expanduser = os.path.expanduser
 
-        def fake_cmd_cluster_template(argv):
-            fake_calls.append(argv)
-            return {"status": "ok", "template": "candy", "success": True}
+        def fake_expanduser(p):
+            if isinstance(p, str) and p.startswith("~/.hscc/"):
+                return str(tmp_hfcc_dir / ".hscc" / p[len("~/.hscc/"):])
+            return _real_expanduser(p)
+        monkeypatch.setattr(os.path, "expanduser", fake_expanduser)
+        return stops, launches
 
-        cli_mod = types.ModuleType("cluster_template_cli")
-        cli_mod.cmd_cluster_template = fake_cmd_cluster_template
-        tpl_mod = types.ModuleType("cluster_template")
-        tpl_mod.applied_status = lambda: {"applied": {"template": "candy"}}
-        monkeypatch.setitem(_sys.modules, "cluster_template_cli", cli_mod)
-        monkeypatch.setitem(_sys.modules, "cluster_template", tpl_mod)
+    def _one_unit_serving(self, monkeypatch, node="10.0.0.2", port=8000,
+                          recipe="~/r/a.yaml", model="A"):
+        from hscc_daemon import serving
+        monkeypatch.setattr(
+            serving, "load_serving",
+            lambda: {"version": 1, "units": [
+                {"id": f"w-{node}", "role": "worker", "keepalive": True,
+                 "nodes": [node], "recipe": recipe, "model": model,
+                 "tp": 1, "port": port}]})
+
+    def test_default_heal_recreates_only_the_down_unit(self, tmp_hfcc_dir, monkeypatch):
+        """F3 (HEAL_CASCADE 2026-10-14): healing ONE unit must NOT re-apply the
+        whole template. The old path ran `template apply <applied> --confirm
+        --force-recreate`, which stopped and re-ran EVERY unit — at 07:21Z and
+        07:43Z that destroyed two healthy units mid-load. The heal must instead
+        stop the down unit's OWN span and re-issue its OWN run command."""
+        from hscc_daemon import health, serving
+        stops, launches = self._heal_isolation(health, monkeypatch, tmp_hfcc_dir)
+        # serving.json: the unit under heal + a healthy sibling on another node.
+        monkeypatch.setattr(serving, "load_serving", lambda: {"version": 1, "units": [
+            {"id": "w-a", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.2"], "recipe": "~/r/a.yaml", "model": "A",
+             "tp": 1, "port": 8000},
+            {"id": "w-b", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.3"], "recipe": "~/r/b.yaml", "model": "B",
+             "tp": 1, "port": 8001},
+        ]})
 
         res = health._default_autoheal_worker(
             ("10.0.0.2", 8000), "w-1", "10.0.0.2", 8000)
 
-        # the real apply path is reached with force-recreate for the applied template
-        assert fake_calls == [["apply", "candy", "--confirm", "--force-recreate"]]
-        assert res["template"] == "candy"
+        # exactly one stop, scoped to THIS unit's recipe + span — never --all
+        assert len(stops) == 1
+        assert stops[0][0] == "stop"
+        assert stops[0][1].endswith("r/a.yaml")
+        assert "--hosts" in stops[0] and "10.0.0.2" in stops[0]
+        assert "10.0.0.3" not in stops[0]                 # sibling host untouched
+        assert "--all" not in stops[0]
+        # exactly one launch, for THIS unit only
+        assert len(launches) == 1
+        launched = " ".join(launches[0])
+        assert "r/a.yaml" in launched and "8000" in launched
+        assert "r/b.yaml" not in launched                 # sibling not relaunched
+        assert "template" not in launched and "apply" not in launched
+        # --ensure must be stripped, or an Up-but-wedged container would no-op
+        assert "--ensure" not in launches[0]
+        assert res.get("ok") is True and res.get("status") == "recreating"
 
-    def test_default_heal_no_op_when_no_applied_template(self, tmp_hfcc_dir, monkeypatch):
-        """Without a recorded applied template there is nothing to force-recreate —
-        the heal reports 'no applied template' and never calls the apply CLI."""
+    def test_default_heal_recreates_a_tp_span_as_a_group(self, tmp_hfcc_dir, monkeypatch):
+        """A TP unit's heal must stop and re-run its WHOLE span (head + worker
+        nodes) with the unit's --tp, exactly like the gentle relaunch — never a
+        single-host solo, which would bind the wrong topology."""
+        from hscc_daemon import health, serving
+        stops, launches = self._heal_isolation(health, monkeypatch, tmp_hfcc_dir)
+        monkeypatch.setattr(serving, "load_serving", lambda: {"version": 1, "units": [
+            {"id": "w-tp", "role": "worker", "keepalive": True,
+             "nodes": ["10.0.0.2", "10.0.0.3"], "recipe": "~/r/tp.yaml",
+             "model": "TP", "tp": 2, "port": 8000},
+        ]})
+
+        res = health._default_autoheal_worker(
+            ("10.0.0.2", 8000), "w-tp", "10.0.0.2", 8000)
+
+        assert len(stops) == 1 and len(launches) == 1
+        assert stops[0][stops[0].index("--hosts") + 1] == "10.0.0.2,10.0.0.3"
+        launched = " ".join(launches[0])
+        assert "--hosts 10.0.0.2,10.0.0.3" in launched
+        assert "--tp 2" in launched
+        assert res.get("ok") is True
+
+    def test_default_heal_never_touches_the_template_apply_path(
+            self, tmp_hfcc_dir, monkeypatch):
+        """Regression guard for the incident's most destructive actor: no code
+        path in the heal may import or call cmd_cluster_template. If someone
+        reintroduces the whole-template apply, this fails at once."""
         import sys as _sys
         from hscc_daemon import health
-        monkeypatch.setattr(health, "log", lambda *a, **kw: None)
-        fake_calls = []
+        stops, launches = self._heal_isolation(health, monkeypatch, tmp_hfcc_dir)
 
-        def fake_cmd_cluster_template(argv):
-            fake_calls.append(argv)
-            return {"status": "ok"}
+        def boom(argv):
+            raise AssertionError(f"heal must NEVER apply a template: {argv}")
+
         cli_mod = types.ModuleType("cluster_template_cli")
-        cli_mod.cmd_cluster_template = fake_cmd_cluster_template
+        cli_mod.cmd_cluster_template = boom          # type: ignore[attr-defined]
         tpl_mod = types.ModuleType("cluster_template")
-        tpl_mod.applied_status = lambda: {"applied": None}
+        tpl_mod.applied_status = lambda: {"applied": {"template": "candy"}}  # type: ignore[attr-defined]
         monkeypatch.setitem(_sys.modules, "cluster_template_cli", cli_mod)
         monkeypatch.setitem(_sys.modules, "cluster_template", tpl_mod)
+        self._one_unit_serving(monkeypatch)
 
         res = health._default_autoheal_worker(
             ("10.0.0.2", 8000), "w-1", "10.0.0.2", 8000)
+        assert res.get("ok") is True                  # healed without applying
+        assert len(stops) == 1 and len(launches) == 1
 
-        assert fake_calls == []
+    def test_default_heal_records_grace_for_the_container_it_creates(
+            self, tmp_hfcc_dir, monkeypatch):
+        """The recreate re-stages weights for minutes, so it must register the
+        relaunch timestamp BEFORE launching — that is what lets the F1 load
+        grace shield the new container from the gentle relaunch."""
+        from hscc_daemon import health
+        stops, launches = self._heal_isolation(health, monkeypatch, tmp_hfcc_dir)
+        key = ("10.0.0.2", 8000)
+        health._worker_relaunch_at.pop(key, None)
+        self._one_unit_serving(monkeypatch)
+
+        health._default_autoheal_worker(key, "w-1", "10.0.0.2", 8000)
+        assert key in health._worker_relaunch_at
+
+    def test_default_heal_reports_without_recreating_when_unit_unknown(
+            self, tmp_hfcc_dir, monkeypatch):
+        """No serving.json entry for (node, port) => no stop, no launch, and a
+        loud 'no serving.json unit' error instead of a guess."""
+        from hscc_daemon import health
+        stops, launches = self._heal_isolation(health, monkeypatch, tmp_hfcc_dir)
+        from hscc_daemon import serving
+        monkeypatch.setattr(serving, "load_serving",
+                            lambda: {"version": 1, "units": []})
+
+        res = health._default_autoheal_worker(
+            ("10.0.0.9", 8000), "w-x", "10.0.0.9", 8000)
+        assert stops == [] and launches == []
         assert res.get("ok") is False
-        assert "no applied template" in res.get("error", "")
+        assert "no serving.json unit" in res.get("error", "")
 
 
 class TestWorkersStartupGrace:
@@ -1180,6 +1285,161 @@ class TestWorkersStartupGrace:
         assert len(heals) == 1       # grace elapsed → genuine failure → heal
         assert heals[0][2] == "10.0.0.2"
 
+    # ── F1 (HEAL_CASCADE 2026-10-14): the GENTLE relaunch path shares the grace ──
+    #
+    # The pre-fix code had the load grace ONLY on the force-recreate path. The
+    # plain `Worker X down — relaunching` path was guarded solely by
+    # `_worker_relaunch_at`, which records relaunches THAT path issued — so a
+    # container created by engine-wedge recovery, `cluster up` or a template
+    # apply was invisible to it and got destroyed mid-load, every check. The
+    # incident log shows exactly that: template apply recreated all 4 units at
+    # 07:21:45 and 07:24:29 check_workers relaunched a unit created 2m44s
+    # earlier, with a ~3 min model load ahead of it.
+
+    def _relaunch_recorder(self, health, monkeypatch):
+        """Record the gentle relaunches (stop+Popen) without touching a node."""
+        relaunches = []
+        monkeypatch.setattr(
+            health.subprocess, "Popen",
+            lambda argv, **k: relaunches.append(list(argv)) or None)
+        return relaunches
+
+    def test_relaunch_shares_grace_for_container_started_by_another_path(
+            self, tmp_hfcc_dir, monkeypatch):
+        """A unit created by ANOTHER path (age known, never served) must not be
+        relaunched by check_workers, even though this path never relaunched it.
+        This is the cascade bug: `_worker_relaunch_at` is empty, so the pre-fix
+        guard let the relaunch through and destroyed the load."""
+        import time as _t
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        relaunches = self._relaunch_recorder(health, monkeypatch)
+        heals = self._heals_recorder(health, monkeypatch)
+        # Container is 60s old (well inside the grace) and has never served.
+        young = _t.time() - 60
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: young)
+        health._worker_container_state[("10.0.0.2", 8000)] = {
+            "created_ts": young, "has_served": False}
+        for _ in range(3):                      # several 60s checks
+            health.check_workers()
+        assert relaunches == []                 # mid-load -> no destroy
+        assert heals == []                      # and still no force-recreate
+        # The unit is honestly reported down (not silently "online").
+        from hscc_daemon import state as state_mod
+        state = state_mod.read_state("workers") or {}
+        assert "w-10.0.0.2" in state.get("down", [])
+
+    def test_relaunch_still_fires_once_grace_expires(self, tmp_hfcc_dir, monkeypatch):
+        """The grace is bounded: an OLD never-served container is a genuine
+        failure and the gentle path must still repair it (no stranding)."""
+        import time as _t
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        relaunches = self._relaunch_recorder(health, monkeypatch)
+        monkeypatch.setattr(health, "_autoheal_worker_fn", lambda *a: {"status": "ok"})
+        old = _t.time() - health.WORKER_AUTOHEAL_LOAD_GRACE - 60
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: old)
+        health._worker_container_state[("10.0.0.2", 8000)] = {
+            "created_ts": old, "has_served": False}
+        health.check_workers()
+        assert len(relaunches) == 1
+
+    def test_relaunch_not_blocked_when_no_container_evidence(
+            self, tmp_hfcc_dir, monkeypatch):
+        """The gentle path is fail-OPEN on unknown age (unlike the destructive
+        force-recreate path): with no container at all there is no load to
+        destroy, and shielding would strand a dead unit for 20 minutes."""
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        relaunches = self._relaunch_recorder(health, monkeypatch)
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: None)
+        health.check_workers()
+        assert len(relaunches) == 1
+
+    def test_force_recreate_path_still_fails_closed(
+            self, tmp_hfcc_dir, monkeypatch):
+        """The destructive path keeps its fail-CLOSED behaviour after F1's
+        rename/flag split: unknown age → no force-recreate."""
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        heals = self._heals_recorder(health, monkeypatch)
+        self._relaunch_recorder(health, monkeypatch)
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: None)
+        for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE * 2):
+            health.check_workers()
+        assert heals == []
+
+    # ── F2 (HEAL_CASCADE 2026-10-14): both check_workers repair paths honour
+    #    the heal lease ──────────────────────────────────────────────────────
+
+    def test_relaunch_defers_when_another_repair_holds_the_lease(
+            self, tmp_hfcc_dir, monkeypatch):
+        """Path (b) must stand down while, say, engine-wedge recovery is running
+        `hscc cluster up` — the incident had both acting on one unit."""
+        from hscc_daemon import heal_lease
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        relaunches = self._relaunch_recorder(health, monkeypatch)
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: None)     # dead, no container
+        assert heal_lease.acquire(
+            "engine-wedge-recovery", "10.0.0.2:8000")[0] is True
+
+        health.check_workers()
+        assert relaunches == []
+        assert heal_lease.held_by("engine-wedge-recovery") is True
+
+    def test_autoheal_defers_when_another_repair_holds_the_lease(
+            self, tmp_hfcc_dir, monkeypatch):
+        """Path (d) — the whole-template force-recreate, the most destructive of
+        the four — must not fire while another repair is in flight."""
+        from hscc_daemon import heal_lease
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        heals = self._heals_recorder(health, monkeypatch)
+        self._relaunch_recorder(health, monkeypatch)
+        import time as _t
+        old = _t.time() - health.WORKER_AUTOHEAL_LOAD_GRACE - 60
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: old)
+        health._worker_container_state[("10.0.0.2", 8000)] = {
+            "created_ts": old, "has_served": False}
+        assert heal_lease.acquire("proxy-relaunch", "proxy :4000")[0] is True
+
+        for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
+            health.check_workers()
+        assert heals == []
+
+    def test_lease_released_after_each_repair(self, tmp_hfcc_dir, monkeypatch):
+        """Neither path may leak its lease: a leaked one suppresses every other
+        repair for the whole TTL."""
+        from hscc_daemon import heal_lease
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        self._relaunch_recorder(health, monkeypatch)
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: None)
+        health.check_workers()
+        assert heal_lease.held_by() is False
+
+    def test_lease_released_when_the_heal_action_raises(self, tmp_hfcc_dir, monkeypatch):
+        """Release sits in a ``finally`` around the injectable heal call."""
+        from hscc_daemon import heal_lease
+        health = self._setup(tmp_hfcc_dir, monkeypatch)
+        self._relaunch_recorder(health, monkeypatch)
+        import time as _t
+        old = _t.time() - health.WORKER_AUTOHEAL_LOAD_GRACE - 60
+        monkeypatch.setattr(health, "_worker_container_created_ts",
+                            lambda node, port: old)
+        health._worker_container_state[("10.0.0.2", 8000)] = {
+            "created_ts": old, "has_served": False}
+
+        def boom(*a, **k):
+            raise RuntimeError("template apply exploded")
+
+        monkeypatch.setattr(health, "_autoheal_worker_fn", boom)
+        with pytest.raises(RuntimeError):
+            for _ in range(health.WORKER_AUTOHEAL_DEBOUNCE):
+                health.check_workers()
+        assert heal_lease.held_by() is False
+
     def test_sparkrun_created_map_builds_host_port_launch(self, monkeypatch):
         """_sparkrun_created_map() turns a ClusterStatusResult.to_dict()-shaped
         dict into a (host, port) → launch-epoch map — the signal the grace keys
@@ -1246,12 +1506,20 @@ class TestCheckProxy:
     These stub _proxy_models_probe (never the live :4000) and stub
     serving.load_serving (never the operator's live serving.json — the same
     ambient-state discipline as test_doctor's _HOME_ENV guard).
+
+    F4 added a SECOND live probe (_proxy_backend_probe -> /v1/model/info, plus
+    a /health sweep of the fleet). _setup stubs BOTH by default so no test in
+    this class can reach the operator's running proxy or nodes: the backend
+    probe defaults to "could not ask the proxy", which is the documented
+    fail-open (drift check skipped) and preserves every pre-F4 expectation
+    exactly. Tests that exercise drift pass `backend=` explicitly.
     """
 
     _SERVING_NO_UNITS = {"version": 2, "units": []}
 
     def _setup(self, tmp_hfcc_dir, monkeypatch, nodes, probe=None,
-               serving_data=_SERVING_NO_UNITS):
+               serving_data=_SERVING_NO_UNITS, backend=None,
+               healthy_units=None, fleet_hp=None):
         from hscc_daemon import health, serving
         from hscc_daemon import state as state_mod
         monkeypatch.setattr(health, "log", lambda *a, **kw: None)
@@ -1263,11 +1531,273 @@ class TestCheckProxy:
         if probe is not None:
             monkeypatch.setattr(health, "_proxy_models_probe",
                                 lambda url, timeout=5: dict(probe))
+        # F4: never probe the live proxy or the real nodes from a test.
+        if backend is None:
+            backend = {"ok": False, "backends": set(),
+                       "error": "stubbed — drift check skipped"}
+        monkeypatch.setattr(health, "_proxy_backend_probe",
+                            lambda url=None, timeout=5: dict(backend))
+        if healthy_units is not None:
+            monkeypatch.setattr(
+                health, "_fleet_unit_backends",
+                lambda serving_data=None, probe=None:
+                    (set(healthy_units), set(fleet_hp or healthy_units)))
         return health
 
     def test_no_workers_noop(self, tmp_hfcc_dir, monkeypatch):
         health = self._setup(tmp_hfcc_dir, monkeypatch, nodes=[])
         assert health.check_proxy() is True
+
+    # ── F4 (HEAL_CASCADE 2026-10-14): live router vs. actually-healthy units ──
+
+    def test_backend_probe_parses_live_api_base_set(self):
+        """_proxy_backend_probe must read the LIVE router out of
+        /v1/model/info's litellm_params.api_base — /v1/models cannot show this,
+        which is exactly why the orphan routing everything to one node looked
+        healthy for two hours."""
+        from hscc_daemon import health
+        body = {
+            "data": [
+                {"model_name": "worker-model",
+                 "litellm_params": {"api_base": "http://10.0.0.2:8001/v1"}},
+                {"model_name": "orchestrator-model",
+                 "litellm_params": {"api_base": "http://10.0.0.2:8001"}},
+                {"model_name": "no-params"},
+            ]}
+        import io
+        class _FakeResp:
+            def __init__(self, b): self._b = b
+            def read(self): return self._b        # urlopen().read() -> bytes
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        payload = json.dumps(body).encode()
+        monkey_fake = lambda url, timeout=5: _FakeResp(payload)
+        orig = health.urllib.request.urlopen
+        health.urllib.request.urlopen = monkey_fake
+        try:
+            res = health._proxy_backend_probe("http://x/v1/model/info")
+        finally:
+            health.urllib.request.urlopen = orig
+        assert res["ok"] is True
+        assert res["backends"] == {"10.0.0.2:8001"}
+
+    def test_backend_probe_failure_is_not_drift(self):
+        """"Could not ask the proxy" must NOT be read as drift — failing closed
+        here would restart a working LB on any endpoint change."""
+        from hscc_daemon import health
+        assert health._proxy_backend_drift(set(), {"10.0.0.2:8001"},
+                                           {"10.0.0.2:8001"})[0] is True
+
+    def test_drift_missing_backend_is_unhealthy(self):
+        """THE INCIDENT SHAPE: the catalogue serves every alias, but all of it
+        routes through ONE backend while three units are healthy."""
+        from hscc_daemon import health
+        ok, reason = health._proxy_backend_drift(
+            {"10.0.0.2:8001"},                              # live router
+            {"10.0.0.2:8001", "10.0.0.3:8002", "10.0.0.4:8003"},  # healthy
+            {"10.0.0.2:8001", "10.0.0.3:8002", "10.0.0.4:8003"})
+        assert ok is False
+        assert "10.0.0.3:8002" in reason and "10.0.0.4:8003" in reason
+
+    def test_drift_dead_backend_is_unhealthy(self):
+        """A router pointing at a unit that is NOT healthy is sending load to a
+        dead worker — unhealthy even when every healthy unit is covered."""
+        from hscc_daemon import health
+        ok, reason = health._proxy_backend_drift(
+            {"10.0.0.2:8001", "10.0.0.9:8099"},
+            {"10.0.0.2:8001"},
+            {"10.0.0.2:8001", "10.0.0.9:8099"})
+        assert ok is False and "10.0.0.9:8099" in reason
+
+    def test_drift_ignores_backends_hscc_does_not_supervise(self):
+        """The proxy may legitimately serve endpoints outside serving.json. They
+        must never make us relaunch the LB forever."""
+        from hscc_daemon import health
+        ok, _ = health._proxy_backend_drift(
+            {"10.0.0.2:8001", "10.9.9.9:9000"},
+            {"10.0.0.2:8001"},
+            {"10.0.0.2:8001"})
+        assert ok is True
+
+    def test_drift_matches_is_healthy(self):
+        from hscc_daemon import health
+        hp = {"10.0.0.2:8001", "10.0.0.3:8002"}
+        ok, _ = health._proxy_backend_drift(hp, hp, hp)
+        assert ok is True
+
+    def test_healthy_aliases_but_single_backend_triggers_repair(
+            self, tmp_hfcc_dir, monkeypatch):
+        """check_proxy must treat catalogue-healthy + single-backend as
+        UNHEALTHY and take the repair path, not the plain `proxy start` that
+        refuses a running proxy."""
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"],
+            probe={"ok": True, "models": ["worker-model"], "error": ""},
+            serving_data={"version": 2, "units": [
+                {"id": "w1", "role": "worker", "keepalive": True,
+                 "nodes": ["10.0.0.2"], "port": 8001, "recipe": "r"},
+                {"id": "w2", "role": "worker", "keepalive": True,
+                 "nodes": ["10.0.0.3"], "port": 8002, "recipe": "r"},
+            ]},
+            backend={"ok": True, "backends": {"10.0.0.2:8001"}, "error": ""},
+            healthy_units={"10.0.0.2:8001", "10.0.0.3:8002"},
+            fleet_hp={"10.0.0.2:8001", "10.0.0.3:8002"})
+        calls = []
+        monkeypatch.setattr(health, "run_cmd",
+                            lambda a, **k: calls.append(list(a)) or {"ok": True})
+        monkeypatch.setattr(health, "_proxy_repair_orphan",
+                            lambda hosts: calls.append(["REPAIR", list(hosts)])
+                            or {"ok": True, "verified": True})
+        assert health.check_proxy() is True
+        assert any(c and c[0] == "REPAIR" for c in calls), \
+            f"drift must take the repair path, got {calls}"
+        from hscc_daemon import state as state_mod
+        assert (state_mod.read_state("proxy") or {}).get("backend_drift") is True
+
+    def test_drift_repair_does_not_use_plain_start(self, tmp_hfcc_dir, monkeypatch):
+        """The repair must never fall back to plain `proxy start`: sparkrun
+        REFUSES a running proxy (rc 1), which is how the incident persisted."""
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"],
+            probe={"ok": True, "models": ["worker-model"], "error": ""},
+            backend={"ok": True, "backends": {"10.0.0.2:8001"}, "error": ""},
+            healthy_units={"10.0.0.2:8001", "10.0.0.3:8002"})
+        started = []
+        monkeypatch.setattr(health, "_proxy_repair_orphan",
+                            lambda hosts: {"ok": True, "verified": True})
+        monkeypatch.setattr(
+            health, "run_cmd",
+            lambda a, **k: started.append(list(a)) or {"ok": True})
+        health.check_proxy()
+        for c in started:
+            assert not ("start" in c and "--restart" not in c
+                        and "stop" not in c and "status" not in c), \
+            f"plain `proxy start` used despite drift: {c}"
+
+    # ── F4b: node reboot -> proxy MUST re-add the returned unit ──────────────
+
+    def test_returned_unit_is_readded_within_one_sweep(
+            self, tmp_hfcc_dir, monkeypatch):
+        """THE OPERATOR'S PATH: power-cycle a node while the proxy runs. Its unit
+        leaves (proxy drops it), comes back healthy, and the RUNNING proxy never
+        re-adds it — sparkrun's auto-discover rewrites the config file but skips
+        the restart because is_running() only checks its own state-file PID.
+        One check_proxy sweep must detect that and repair."""
+        healthy_units = {"10.0.0.2:8001", "10.0.0.3:8002"}
+        # Sweep 1: node .3 is down for reboot -> proxy legitimately has 1 backend.
+        health = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"],
+            probe={"ok": True, "models": ["worker-model"], "error": ""},
+            backend={"ok": True, "backends": {"10.0.0.2:8001"}, "error": ""},
+            healthy_units={"10.0.0.2:8001"})
+        monkeypatch.setattr(health, "run_cmd", lambda a, **k: {"ok": True})
+        monkeypatch.setattr(health, "_proxy_repair_orphan", lambda hosts: {"ok": True})
+        assert health.check_proxy() is True          # no demand on a rebooting node
+
+        # Sweep 2: .3 is back and healthy, but the live router still has only .2.
+        health2 = self._setup(
+            tmp_hfcc_dir, monkeypatch, nodes=["10.0.0.2", "10.0.0.3"],
+            probe={"ok": True, "models": ["worker-model"], "error": ""},
+            backend={"ok": True, "backends": {"10.0.0.2:8001"}, "error": ""},
+            healthy_units=healthy_units)
+        repaired = []
+        monkeypatch.setattr(health2, "_proxy_repair_orphan",
+                            lambda hosts: repaired.append(list(hosts))
+                            or {"ok": True, "verified": True})
+        monkeypatch.setattr(health2, "run_cmd", lambda a, **k: {"ok": True})
+        health2.check_proxy()
+        assert repaired, "returned unit was not re-added within one sweep"
+
+    # ── F4: orphan reap guards ───────────────────────────────────────────────
+
+    def _reap_setup(self, monkeypatch, health, listener, tracked, killed):
+        monkeypatch.setattr(health, "_proxy_listener", lambda: listener)
+        monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: tracked)
+        monkeypatch.setattr(health.os, "kill",
+                            lambda pid, sig: killed.append((pid, sig)))
+
+    def test_reap_refuses_tracked_pid(self, tmp_hfcc_dir, monkeypatch):
+        """The tracked PID is sparkrun's own proxy — never kill it here."""
+        from hscc_daemon import health
+        killed = []
+        self._reap_setup(monkeypatch, health, (555, "litellm --config x"), 555, killed)
+        assert health._reap_orphan_proxy_listener(555) is False
+        assert killed == []
+
+    def test_reap_refuses_non_litellm_cmdline(self, tmp_hfcc_dir, monkeypatch):
+        """Blast-radius contract: an unrecognised listener on :4000 is reported
+        and left alone, same rule as the orphaned-serve heal."""
+        from hscc_daemon import health
+        killed = []
+        self._reap_setup(monkeypatch, health, (777, "/usr/bin/some-other-server"),
+                         None, killed)
+        assert health._reap_orphan_proxy_listener(None) is False
+        assert killed == []
+
+    def test_reap_kills_untracked_litellm_orphan(self, tmp_hfcc_dir, monkeypatch):
+        from hscc_daemon import health
+        killed = []
+        state = {"listener": (999, "python -m litellm --config /tmp/x.yaml")}
+        monkeypatch.setattr(health, "_proxy_listener", lambda: state["listener"])
+        monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: 111)
+        def fake_kill(pid, sig):
+            killed.append((pid, sig))
+            state["listener"] = (None, None)      # dies on first signal
+        monkeypatch.setattr(health.os, "kill", fake_kill)
+        assert health._reap_orphan_proxy_listener(111) is True
+        assert killed and killed[0][0] == 999
+
+    def test_repair_verifies_port_owner_is_tracked_pid(
+            self, tmp_hfcc_dir, monkeypatch):
+        """exit 0 is not success. `proxy start --restart` exited fine during the
+        incident while the orphan kept :4000 and the new instance bound :1708."""
+        from hscc_daemon import health
+        monkeypatch.setattr(health, "_proxy_tracked_pid", lambda: 222)
+        monkeypatch.setattr(health, "_proxy_listener", lambda: (333, "litellm"))
+        monkeypatch.setattr(health, "_reap_orphan_proxy_listener", lambda t: True)
+        monkeypatch.setattr(health, "run_cmd", lambda a, **k: {"ok": True})
+        res = health._proxy_repair_orphan(["10.0.0.2"])
+        assert res["verified"] is False and res["ok"] is False
+
+    def test_repair_orders_stop_then_reap_then_start(
+            self, tmp_hfcc_dir, monkeypatch):
+        """Stop before reaping, verify after starting — the order that makes
+        `--restart` unnecessary (and which --restart could never satisfy).
+
+        Sequence labels are derived from the SUBCOMMAND TOKEN inside each argv
+        (`sparkrun_bin.argv` prefixes the resolved binary path, so argv[0] is
+        never "stop"/"start" — asserting on argv[0] would pass vacuously).
+        """
+        from hscc_daemon import health
+        seq = []
+        monkeypatch.setattr(health, "_proxy_tracked_pid",
+                            lambda: seq.append("tracked") or 222)
+        monkeypatch.setattr(
+            health, "run_cmd",
+            lambda a, **k: seq.append(list(a)) or {"ok": True})
+        monkeypatch.setattr(
+            health, "_reap_orphan_proxy_listener",
+            lambda t: seq.append("reap") or True)
+        monkeypatch.setattr(health, "_proxy_listener",
+                            lambda: seq.append("listen") or (222, "litellm"))
+        res = health._proxy_repair_orphan(["10.0.0.2", "10.0.0.3"])
+        assert res["ok"] is True and res["verified"] is True
+
+        kinds = []
+        for c in seq:
+            if c == "reap":
+                kinds.append("reap")
+            elif isinstance(c, list) and "proxy" in c:
+                if "stop" in c:
+                    kinds.append("stop")
+                elif "start" in c:
+                    kinds.append("start")
+        assert kinds == ["stop", "reap", "start"], \
+            f"repair sequence must be stop -> reap -> start, got {kinds}"
+        start = [c for c in seq if isinstance(c, list) and "start" in c][0]
+        assert "--restart" not in start, \
+            "--restart must not be used: it only SIGTERMs sparkrun's own tracked PID"
+        assert "10.0.0.2,10.0.0.3" in start
 
     def test_proxy_healthy(self, tmp_hfcc_dir, monkeypatch):
         health = self._setup(
@@ -1343,6 +1873,75 @@ class TestCheckProxy:
         state_path.write_text(json.dumps(state))
         assert health.check_proxy() is False
         assert len(ran) == 2                     # window elapsed -> attempt again
+
+    # ── F2 (HEAL_CASCADE 2026-10-14): the proxy relaunch honours the heal lease ──
+
+    def test_relaunch_deferred_while_another_repair_holds_lease(
+            self, tmp_hfcc_dir, monkeypatch):
+        """A repair in flight elsewhere (here: auto-heal) must stop check_proxy
+        from SIGTERMing the LB underneath it — the incident's path (c)."""
+        from hscc_daemon import heal_lease
+        health, ran = self._unhealthy_setup(tmp_hfcc_dir, monkeypatch)
+        assert heal_lease.acquire("auto-heal", "10.0.0.2:8001")[0] is True
+
+        assert health.check_proxy() is False
+        assert ran == []                         # sparkrun NEVER invoked
+
+        state = json.loads((tmp_hfcc_dir / "state" / "proxy.json").read_text())
+        assert state["deferred"] is True
+        # A deferral is not a failed relaunch: no alert may fire off it.
+        assert state["relaunch_failed"] is False
+        assert "auto-heal" in state["message"]   # says what is in flight
+
+    def test_deferral_does_not_extend_the_cooldown(self, tmp_hfcc_dir, monkeypatch):
+        """Same rule as a suppressed tick: re-stamping on every deferral would
+        make the cooldown perpetual, so a blocked proxy would never recover."""
+        from hscc_daemon import heal_lease
+        health, ran = self._unhealthy_setup(tmp_hfcc_dir, monkeypatch)
+        health.check_proxy()                     # attempt 1, stamps
+        assert len(ran) == 1
+        state_path = tmp_hfcc_dir / "state" / "proxy.json"
+        stamp1 = json.loads(state_path.read_text())["last_relaunch"]
+        assert stamp1
+
+        # Backdate past the window so the cooldown is NOT what stops tick 2,
+        # then hold the lease: the deferral must not re-stamp.
+        import datetime
+        stale = (datetime.datetime.now(datetime.timezone.utc)
+                 - datetime.timedelta(seconds=2 * health.PROXY_RELAUNCH_COOLDOWN_S + 5)
+                 ).isoformat()
+        state = json.loads(state_path.read_text())
+        state["last_relaunch"] = stale
+        state_path.write_text(json.dumps(state))
+        assert heal_lease.acquire("worker-relaunch", "10.0.0.2:8001")[0] is True
+
+        health.check_proxy()
+        assert len(ran) == 1                     # no NEW sparkrun call (still 1)
+        assert json.loads(state_path.read_text())["last_relaunch"] == stale
+
+    def test_lease_released_after_relaunch_attempt(self, tmp_hfcc_dir, monkeypatch):
+        """The lease must not outlive the attempt it guarded — a leaked lease
+        would suppress every other repair for the TTL."""
+        from hscc_daemon import heal_lease
+        health, ran = self._unhealthy_setup(tmp_hfcc_dir, monkeypatch)
+        health.check_proxy()
+        assert len(ran) == 1
+        assert heal_lease.held_by() is False
+
+    def test_lease_released_even_when_the_relaunch_raises(
+            self, tmp_hfcc_dir, monkeypatch):
+        """The release lives in a ``finally``: an exception from run_cmd must
+        not leak the lease."""
+        from hscc_daemon import heal_lease
+        health, _ = self._unhealthy_setup(tmp_hfcc_dir, monkeypatch)
+
+        def boom(*a, **k):
+            raise RuntimeError("sparkrun exploded")
+
+        monkeypatch.setattr(health, "run_cmd", boom)
+        with pytest.raises(RuntimeError):
+            health.check_proxy()
+        assert heal_lease.held_by() is False
 
     def test_successful_relaunch_still_stamps_and_healthy_clears(self, tmp_hfcc_dir, monkeypatch):
         """PR #22 round 2 semantics: a relaunch whose `proxy start` EXITS 0

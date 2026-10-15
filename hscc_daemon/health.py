@@ -4,16 +4,22 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import datetime
 import time
 import threading
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 from . import serving
 from . import sparkrun_bin
+from . import heal_lease
+from . import heal_breaker
+from . import launch_guard
+from .desktop import emit_event, send_macos_notification
 from .daemon_ops import log
 from .state import now_iso, write_state
 from .util import run_cmd, ssh_cmd, http_check
@@ -50,8 +56,11 @@ NAS_PROBE_TIMEOUT = float(os.environ.get("HSCC_NAS_PROBE_TIMEOUT", "5"))
 
 # ── Worker auto-heal (WD1) ─────────────────────────────────────────────────
 # A worker unit that stays DOWN across WORKER_AUTOHEAL_DEBOUNCE CONSECUTIVE
-# checks is force-recreated via `template apply <applied-template>
-# --confirm --force-recreate` — the REAL apply path (no reimplementation).
+# checks is recreated via `sparkrun stop <recipe> --hosts <span>` + a re-issued
+# `sparkrun run` for THAT unit only (see _default_autoheal_worker). Since F3
+# (HEAL_CASCADE 2026-10-14) this no longer re-applies the whole template with
+# `--force-recreate`, which stopped and re-ran every healthy unit in the fleet
+# to heal one.
 # This fixes the "container stays Up in docker but the vLLM server inside
 # never answers (stuck past the CUDA banner)" class of failure that a plain
 # sparkrun --ensure relaunch cannot: --ensure sees the container already
@@ -711,6 +720,289 @@ def _tp_peer_nodes():
 
 
 
+# ── Proxy live-vs-healthy backend comparison (F4, HEAL_CASCADE 2026-10-14) ──
+#
+# The incident's second failure: after recovery, :4000 was an ORPHAN litellm
+# routing to ONE backend (.246) while `sparkrun proxy status` and `proxy sync`
+# both reported "in sync" — because both read the CONFIG FILE on disk, which
+# listed all 4. `proxy start --restart` did not kill the orphan either: the new
+# instance silently bound :1708, so the orphan kept :4000 and the gateway check
+# stayed OK for ~2 hours while all load went to one node.
+#
+# Root cause, read out of sparkrun's own source (we do not edit it):
+# ProxyEngine.apply_desired_state() writes the config, then returns early
+#
+#     if not self.is_running():
+#         logger.debug("Proxy not running — new config applies on next start")
+#         return added, removed
+#
+# and is_running() is only `process_exists(_read_pid())` — the STATE-FILE PID,
+# never the actual owner of the port. So with a live proxy on :4000 that sparkrun
+# does not recognise (PID file lost / PID reused / second instance bound another
+# port), every auto-discover sweep REWRITES the config and then skips the restart
+# that would have applied it. That is exactly the observed "Auto-discover enabled
+# (every 30s)" + config file holding all 4 backends + live router serving one.
+#
+# hscc cannot fix sparkrun's state file, but it can stop trusting it: compare
+# what the RUNNING proxy actually routes to against the units that are actually
+# healthy, and repair when they disagree.
+
+
+def _proxy_backend_probe(url=None, timeout=5):
+    """GET the RUNNING proxy's /v1/model/info and return the api_base set it
+    actually routes to, as {"host:port", ...}.
+
+    /v1/model/info is the only endpoint that reveals the LIVE router: it returns
+    each model's ``litellm_params.api_base``. It answers without auth on the
+    sparkrun-launched proxy (verified against the running fleet). Note this is
+    deliberately NOT /v1/models — that lists model ids only, so the 2026-10-11
+    "200 with empty catalogue" check cannot see a proxy that serves the right
+    aliases through ONE backend.
+
+    Returns {"ok": bool, "backends": set, "error": str}. ok=False means "could
+    not ask the proxy" (caller must NOT treat that as drift).
+    """
+    url = url or f"http://localhost:{PROXY_PORT}/v1/model/info"
+    try:
+        req = urllib.request.urlopen(url, timeout=timeout)
+        body = req.read()
+    except Exception as e:
+        return {"ok": False, "backends": set(), "error": str(e)}
+    try:
+        data = json.loads(body.decode("utf-8", "replace"))
+    except Exception as e:
+        return {"ok": False, "backends": set(),
+                "error": f"unparseable /v1/model/info body: {e}"}
+    backends = set()
+    for m in (data.get("data") or []):
+        base = ((m.get("litellm_params") or {}).get("api_base")) or ""
+        hostport = _hostport_from_api_base(base)
+        if hostport:
+            backends.add(hostport)
+    return {"ok": True, "backends": backends, "error": ""}
+
+
+def _hostport_from_api_base(api_base):
+    """'http://10.0.0.2:8001/v1' -> '10.0.0.2:8001'; '' when unparseable.
+
+    Hostnames and ports are kept verbatim so the comparison never has to
+    resolve anything (a proxy may legitimately use a name or a loopback).
+    """
+    if not api_base:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(api_base)
+    except Exception:
+        return ""
+    host = parsed.hostname
+    if not host:
+        return ""
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return f"{host}:{port}"
+
+
+def _fleet_unit_backends(serving_data=None, probe=None):
+    """(healthy_backends, fleet_hostports) for the units the proxy should route to.
+
+    ``healthy_backends`` = {"node:port"} for every keep-alive worker whose
+    /health answers 200 RIGHT NOW, plus the orchestrator node when serving.json
+    declares a uniform pool (that is when the proxy is expected to route
+    orchestrator-model). A unit still loading is absent from this set, which is
+    what keeps a slow load from looking like drift.
+
+    ``fleet_hostports`` = every node:port hscc owns. Backends outside this set
+    are ignored by the comparison — the proxy may be configured with endpoints
+    hscc does not supervise, and demanding them would relaunch the LB forever.
+    """
+    if probe is None:
+        probe = http_check
+    if serving_data is None:
+        serving_data = serving.load_serving()
+    healthy, all_hp = set(), set()
+    try:
+        units = serving.keepalive_units(serving_data) or []
+    except Exception:
+        units = []
+    for u in units:
+        node, port = u.get("node"), u.get("port")
+        if not node or not port:
+            continue
+        all_hp.add(f"{node}:{port}")
+        if node in serving.ORCH_NODES:
+            continue
+        if probe(f"http://{node}:{port}/health", timeout=5).get("ok"):
+            healthy.add(f"{node}:{port}")
+    if serving.is_uniform_pool(serving_data):
+        try:
+            orch_port = int(serving.serving_port(serving_data) or serving.VLLM_PORT)
+        except Exception:
+            orch_port = serving.VLLM_PORT
+        for node in serving.ORCH_NODES:
+            all_hp.add(f"{node}:{orch_port}")
+            if probe(f"http://{node}:{orch_port}/health", timeout=5).get("ok"):
+                healthy.add(f"{node}:{orch_port}")
+    return healthy, all_hp
+
+
+def _proxy_backend_drift(live_backends, healthy_backends, fleet_hostports):
+    """(healthy, reason) — does the RUNNING proxy route to what is actually up?
+
+    Only two directions matter, both scoped to hscc's own fleet:
+      * MISSING: a unit is healthy but the live router has no backend for it —
+        the incident shape (3 units up, proxy routed to 1) and the node-reboot
+        shape (rebooted nodes came back healthy, the running proxy never
+        re-added them).
+      * DEAD: the live router points at a fleet backend whose unit is NOT
+        healthy — load is being sent to a dead worker.
+    An empty live set is NOT drift here: the catalogue check already owns
+    "proxy answers but serves nothing", and reporting it twice would make one
+    fault look like two.
+    """
+    if not live_backends:
+        return True, "no live backends to compare (catalogue check owns that)"
+    scoped_fleet = set(fleet_hostports)
+    live_in_fleet = {b for b in live_backends if b in scoped_fleet}
+    missing = set(healthy_backends) - live_in_fleet
+    if missing:
+        return False, (f"live router missing backend(s) {sorted(missing)} "
+                       f"— healthy unit(s) the proxy is not serving")
+    dead = live_in_fleet - set(healthy_backends)
+    if dead:
+        return False, (f"live router points at unhealthy backend(s) {sorted(dead)} "
+                       f"— load is being sent to a dead worker")
+    return True, (f"live router matches {len(healthy_backends)} healthy "
+                  f"backend(s)")
+
+
+def _proxy_listener():
+    """(pid, cmdline) of the process LISTENING on PROXY_PORT, or (None, None).
+
+    Same lsof+ps technique as hscc-api/gateway_bridge._listener_cmdline: the
+    port owner is what actually serves, so it is the only thing worth trusting.
+    """
+    try:
+        out = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{PROXY_PORT}", "-sTCP:LISTEN", "-t"],
+            capture_output=True, text=True, timeout=5).stdout
+        pids = [int(p) for p in out.split() if p.strip().isdigit()]
+        if not pids:
+            return None, None
+        cmd = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pids[0])],
+            capture_output=True, text=True, timeout=5).stdout
+        return pids[0], (cmd.strip() or None)
+    except Exception:
+        return None, None
+
+
+def _proxy_tracked_pid():
+    """PID sparkrun believes owns the proxy (from its state file), or None.
+
+    Read through sparkrun's own `proxy status --json` rather than by parsing its
+    state file — sparkrun owns that file's format and we must not fork it.
+    """
+    res = run_cmd(sparkrun_bin.argv("proxy", "status", "--json"), timeout=30)
+    if not res.get("ok"):
+        return None
+    try:
+        data = json.loads(res.get("output") or "{}")
+    except Exception:
+        return None
+    pid = data.get("pid")
+    return int(pid) if isinstance(pid, int) and pid > 0 else None
+
+
+def _reap_orphan_proxy_listener(tracked_pid):
+    """SIGTERM a listener on PROXY_PORT that sparkrun does not track.
+
+    Guards, in order, all required before any signal is sent:
+      1. no listener -> nothing to do (returns True, port is free).
+      2. the listener IS the tracked PID -> not an orphan, do NOT touch it
+         (that is sparkrun's own process and it can stop it).
+      3. the cmdline must mention litellm -> we kill only the thing we mean.
+         A foreign listener (a second hscc-api, a dev server) is reported and
+         left alone, exactly like the 2.8.0 orphaned-serve heal's contract.
+
+    Returns True when the port ends up free.
+    """
+    pid, cmdline = _proxy_listener()
+    if pid is None:
+        return True
+    if tracked_pid is not None and pid == tracked_pid:
+        log(f"proxy listener on :{PROXY_PORT} is the tracked PID {pid} — "
+            f"not an orphan, leaving it to sparkrun")
+        return False
+    if not cmdline or "litellm" not in cmdline.lower():
+        log(f"proxy listener on :{PROXY_PORT} is PID {pid} but its cmdline is "
+            f"not litellm ({cmdline!r}) — refusing to kill an unrecognised "
+            "process", "WARN")
+        return False
+    log(f"reaping ORPHAN proxy listener PID {pid} on :{PROXY_PORT} "
+        f"(sparkrun tracks {tracked_pid}): {cmdline[:120]}", "WARN")
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except Exception as e:
+        log(f"could not SIGTERM orphan proxy PID {pid}: {e}", "ERROR")
+        return False
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        if _proxy_listener()[0] is None:
+            return True
+        time.sleep(0.2)
+    log(f"orphan proxy PID {pid} survived SIGTERM — escalating to SIGKILL", "WARN")
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except Exception as e:
+        log(f"could not SIGKILL orphan proxy PID {pid}: {e}", "ERROR")
+        return False
+    time.sleep(0.5)
+    return _proxy_listener()[0] is None
+
+
+def _proxy_repair_orphan(relaunch_hosts):
+    """Full orphan repair: stop, reap any untracked litellm listener, start.
+
+    `proxy start --restart` was PROVEN unable to fix the incident state: the
+    orphan was not the tracked PID, so sparkrun SIGTERMs nothing that matters
+    and the new instance silently binds another port (:1708) while the orphan
+    keeps :4000. So the order here is deliberate —
+      1. `sparkrun proxy stop` (the polite path, when sparkrun does track it),
+      2. reap a listener sparkrun does NOT track, cmdline-vetted first,
+      3. `sparkrun proxy start --hosts <fleet>` — plain start, no --restart:
+         after 1+2 the port is genuinely free, and --restart's own state-file
+         assumptions are what failed us.
+      4. verify the port is now owned by the tracked PID.
+    """
+    tracked_before = _proxy_tracked_pid()
+    run_cmd(sparkrun_bin.argv("proxy", "stop"), timeout=60)
+    reaped = _reap_orphan_proxy_listener(tracked_before)
+    if not reaped:
+        owner, cmd = _proxy_listener()
+        if owner is not None:
+            log(f"proxy listener on :{PROXY_PORT} still present after reap "
+                f"(PID {owner}, {cmd!r}) — starting anyway; the drift check "
+                "will re-detect it next tick", "WARN")
+    args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
+            "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT)]
+    res = run_cmd(sparkrun_bin.argv(*args), timeout=90)
+    # VERIFY, do not trust exit code: exit 0 over a proxy that bound a
+    # different port is exactly how this incident stayed invisible.
+    owner, owner_cmd = _proxy_listener()
+    tracked_after = _proxy_tracked_pid()
+    verified = (owner is not None and tracked_after is not None
+                and owner == tracked_after)
+    if not verified:
+        log(f"proxy repair UNVERIFIED on :{PROXY_PORT} — port owner {owner}, "
+            f"sparkrun tracks {tracked_after} ({owner_cmd!r})", "WARN")
+    else:
+        log(f"proxy repaired on :{PROXY_PORT}, owned by tracked PID {owner}")
+    return {"ok": bool(res.get("ok")) and verified,
+            "port_owner": owner, "tracked_pid": tracked_after,
+            "verified": verified, "output": res.get("output", "")}
+
+
 def check_proxy():
     """Keep the sparkrun LiteLLM worker proxy alive (worker load-balancer).
 
@@ -754,6 +1046,33 @@ def check_proxy():
     probe = _proxy_models_probe(url, timeout=5)
     expected = _proxy_expected_aliases(serving_data, relaunch_hosts)
     healthy, reason = _proxy_models_healthy(probe, expected)
+    # LIVE-vs-HEALTHY (F4). A catalogue that serves every expected alias can
+    # still be routing ALL of it through ONE backend — the incident shape — and
+    # the alias check above cannot see that, because /v1/models lists ids and
+    # never reveals api_base. Ask the running proxy what it actually routes to.
+    backend_drift = False
+    if healthy:
+        live = _proxy_backend_probe(timeout=5)
+        if not live.get("ok"):
+            # Could not ask the proxy. The catalogue probe just succeeded, so
+            # this is unusual (endpoint disabled/changed); it is NOT evidence of
+            # drift, and failing closed here would restart a working LB.
+            log(f"proxy backend drift check skipped — /v1/model/info "
+                f"unavailable: {live.get('error')}", "WARN")
+        else:
+            # timeout 2s, not the 5s the workers check uses: this is a
+            # consistency check, and a unit that cannot answer /health in 2s is
+            # not a backend we should DEMAND from the router. Being conservative
+            # about what we demand is what keeps a slow-but-alive unit from
+            # triggering a needless proxy restart; the authoritative down
+            # verdict (with load grace + debounce) stays with check_workers.
+            healthy_units, fleet_hp = _fleet_unit_backends(
+                serving_data, probe=lambda u, timeout=5: http_check(u, timeout=2))
+            drift_ok, drift_reason = _proxy_backend_drift(
+                live.get("backends") or set(), healthy_units, fleet_hp)
+            if not drift_ok:
+                backend_drift = True
+                healthy, reason = False, drift_reason
     if healthy:
         write_state("proxy", {"ok": True, "port": PROXY_PORT,
                               "last_check": now_iso(), "message": reason,
@@ -773,6 +1092,7 @@ def check_proxy():
     since = _proxy_relaunch_cooldown_state()
     r = {"ok": False, "skipped": "cooldown"}
     suppressed = False
+    deferred = False
     if since is not None and since < PROXY_RELAUNCH_COOLDOWN_S:
         suppressed = True
         wait = int(PROXY_RELAUNCH_COOLDOWN_S - since)
@@ -780,26 +1100,79 @@ def check_proxy():
             f"(cooldown {PROXY_RELAUNCH_COOLDOWN_S}s); retry in {wait}s", "WARN")
         message = f"relaunch cooldown — retry in {wait}s"
     else:
-        log(f"relaunching with {relaunch_hosts}"
-            f"{' (--restart: running proxy serves nothing)' if restart else ''}", "WARN")
-        args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
-                "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT)]
-        if restart:
-            args.append("--restart")
-        r = run_cmd(sparkrun_bin.argv(*args), timeout=90)
-        message = "relaunched" if r.get("ok") else "relaunch failed"
+        # ONE REPAIR AT A TIME (F2, HEAL_CASCADE 2026-10-14). The proxy relaunch
+        # was one of the four paths that fired on a single wedged unit, and the
+        # loudest of them: `sparkrun proxy start --hosts <all 4> --restart`
+        # SIGTERMs the live LB while three other mechanisms are mid-repair. Take
+        # the durable heal lease before acting; if another repair holds it, log
+        # what is in flight and back off THIS tick.
+        #
+        # Claimed only here (not before the cooldown test) so a cooldown tick
+        # neither claims nor releases anything, and a lease is held only for the
+        # duration of an actual `proxy start`.
+        lease_ok, holder = heal_lease.acquire(
+            "proxy-relaunch", f"worker proxy on :{PROXY_PORT}")
+        if not lease_ok:
+            deferred = True
+            message = f"deferred — heal in progress: {heal_lease.describe(holder)}"
+            log(f"proxy relaunch deferred — {message}", "WARN")
+        else:
+            # F5 breaker gate, AFTER the lease so a lease-deferred tick (no
+            # action attempted) never counts a strike — same semantics as the
+            # worker sites. Keyed on the host the relaunch leads with: this path
+            # issues ONE command against the whole fleet, so one strike per
+            # storm-on-a-node is the faithful count, and tripping any single
+            # host correctly stops the fleet-wide hammering.
+            allowed, note = _note_heal_action(
+                (relaunch_hosts or ["?"])[0], PROXY_PORT, "proxy-relaunch",
+                f"proxy:{PROXY_PORT}")
+            if not allowed:
+                deferred = True
+                message = note
+                log(f"proxy relaunch {note}", "WARN")
+            else:
+                try:
+                    if backend_drift:
+                        # F4: the catalogue is fine but the live router disagrees with
+                        # what is healthy, so `proxy start` alone cannot help — plain
+                        # start REFUSES a running proxy (sparkrun returns 1 on
+                        # ProxyAlreadyRunning) and --restart only SIGTERMs the PID in
+                        # sparkrun's OWN state file, which is precisely what was wrong
+                        # (the orphan kept :4000 while the new instance bound :1708).
+                        # Needs stop + cmdline-vetted reap + start + verification.
+                        log(f"repairing proxy backend drift on :{PROXY_PORT} — {reason}",
+                            "WARN")
+                        r = _proxy_repair_orphan(relaunch_hosts)
+                        message = ("repaired" if r.get("ok")
+                                   else "repair incomplete (unverified)")
+                    else:
+                        log(f"relaunching with {relaunch_hosts}"
+                            f"{' (--restart: running proxy serves nothing)' if restart else ''}", "WARN")
+                        args = ["proxy", "start", "--cluster", serving.HSCC_CLUSTER,
+                                "--hosts", ",".join(relaunch_hosts), "--port", str(PROXY_PORT)]
+                        if restart:
+                            args.append("--restart")
+                        r = run_cmd(sparkrun_bin.argv(*args), timeout=90)
+                        message = "relaunched" if r.get("ok") else "relaunch failed"
+                finally:
+                    heal_lease.release("proxy-relaunch")
     ok = bool(r.get("ok"))
     proxy_data = {"ok": ok, "port": PROXY_PORT, "relaunched": ok,
                   "last_check": now_iso(),
                   "reason": reason,
                   "restart": restart,
+                  "backend_drift": backend_drift,
                   "relaunch_hosts": relaunch_hosts,
-                  "relaunch_failed": (not ok and not suppressed),
+                  # A deferral is not a FAILED relaunch — nothing was attempted.
+                  # Same treatment as `suppressed`, so a deferred tick cannot
+                  # raise a "relaunch failed" alert.
+                  "relaunch_failed": (not ok and not suppressed and not deferred),
+                  "deferred": deferred,
                   "message": message}
-    if suppressed:
+    if suppressed or deferred:
         # Carry the ORIGINAL attempt stamp forward verbatim. Re-stamping on a
-        # suppressed tick would push the window out every tick and make the
-        # cooldown perpetual (never retries, never recovers).
+        # suppressed/deferred tick would push the window out every tick and make
+        # the cooldown perpetual (never retries, never recovers).
         stamp = _proxy_relaunch_stamp()
         if stamp:
             proxy_data["last_relaunch"] = stamp
@@ -1489,9 +1862,188 @@ def _default_worker_container_created_ts(node, port):
 _worker_container_created_ts = _default_worker_container_created_ts
 
 
-def _suppress_autoheal_for_startup_grace(key, label, node, port, now_wall):
-    """True if the down unit is still LOADING, not dead: its container is
-    younger than WORKER_AUTOHEAL_LOAD_GRACE AND has never served.
+# --------------------------------------------------------------------------
+# A2 — one-vLLM-per-host launch guard (HEAL_CASCADE 2026-10-14, F7 follow-up)
+#
+# Policy lives in launch_guard.py (pure, unit-testable). What lives here is
+# only the I/O: ONE cached sparkrun status fetch shared by every launch site,
+# so four heal paths do not each pay a fresh fleet scan, and the alert glue.
+# --------------------------------------------------------------------------
+
+_LAUNCH_STATUS_CACHE = {"at": 0.0, "status": None}
+_LAUNCH_STATUS_TTL = float(os.environ.get("HSCC_LAUNCH_GUARD_TTL_S", "20"))
+_LAUNCH_STATUS_LOCK = threading.Lock()
+
+# (host, port) -> last alert epoch. The refusal returns every heal tick; the
+# NOTIFY must not (2026-10-08 NAS: 178 notifications in 11 minutes). The
+# refusal itself still logs every time — the alert cooldown is on the push
+# channel only, never on the ERROR line.
+_LAUNCH_ALERT_AT = {}
+_LAUNCH_ALERT_COOLDOWN_S = float(os.environ.get("HSCC_LAUNCH_GUARD_ALERT_COOLDOWN_S", "1800"))
+
+
+def _sparkrun_cluster_status(force=False):
+    """Structured sparkrun status dict, or launch_guard.NO_STATUS on failure.
+
+    Deliberately a DIFFERENT cache from _sparkrun_created_map: that one returns
+    a (host,port)->epoch projection and returns a stale cache on failure, which
+    is right for age checks but WRONG here — A2's whole point is that "could
+    not look" must not read as "the host is free". So a failed fetch returns
+    the NO_STATUS sentinel and the caller refuses, and there is no stale-data
+    fallback path to fail open through.
+    """
+    now = time.time()
+    if not force and now - _LAUNCH_STATUS_CACHE["at"] < _LAUNCH_STATUS_TTL:
+        return _LAUNCH_STATUS_CACHE["status"]
+    with _LAUNCH_STATUS_LOCK:
+        if not force and now - _LAUNCH_STATUS_CACHE["at"] < _LAUNCH_STATUS_TTL:
+            return _LAUNCH_STATUS_CACHE["status"]
+        status = launch_guard.NO_STATUS
+        venv_py = _sparkrun_venv_python()
+        if venv_py:
+            try:
+                res = run_cmd([venv_py, "-c", _SPARKRUN_STATUS_SCRIPT], timeout=25)
+                if res.get("ok") and res.get("output"):
+                    status = json.loads(res["output"])
+            except Exception as e:
+                log(f"launch guard: sparkrun status query failed ({e})", "WARN")
+        _LAUNCH_STATUS_CACHE["at"] = now
+        _LAUNCH_STATUS_CACHE["status"] = status
+        return status
+
+
+# Tests monkeypatch this name (the seam) rather than the transport.
+_launch_guard_status_fn = _sparkrun_cluster_status
+
+
+def _guard_launch_or_refuse(host, port, span, actor, unit, status=None,
+                            declared=None):
+    """A2 gate. True = may launch; False = refused (caller must not launch).
+
+    Call sites pass the `span` their command builds (the unit's declared
+    `nodes`) and their own `actor` label. `status` lets a caller that already
+    fetched (cluster up / autoup fetch once for the whole plan) avoid a second
+    scan; None means "fetch it yourself (cached)". `declared` is the
+    serving.json footprint (see launch_guard.declared_footprint); None means
+    "resolve from the serving module" — a caller holding its own serving dict
+    (autoup) should pass it so planner and guard read the SAME document.
+
+    On refusal this function has already logged ERROR, notified (deduped) and
+    emitted the events.jsonl row — callers just skip the launch and record the
+    skip, like every other gate in this file (F2 lease, F5 breaker).
+    """
+    if status is None:
+        status = _launch_guard_status_fn()
+    if declared is None:
+        declared = launch_guard.declared_footprint(serving.load_serving())
+    ok, reason, detail = launch_guard.evaluate(status, host, port, span,
+                                               declared=declared)
+    if ok:
+        return True
+    key = (host, port, reason)
+    last = _LAUNCH_ALERT_AT.get(key, 0.0)
+    if time.time() - last >= _LAUNCH_ALERT_COOLDOWN_S:
+        _LAUNCH_ALERT_AT[key] = time.time()
+        # Pass OUR module-level names explicitly: launch_guard's own deferred
+        # desktop import would bypass tests that patch health.send_macos_
+        # notification / health.emit_event (the F5 alert tests set that
+        # precedent), and an unpatched desktop path fires real osascript.
+        launch_guard.alert_refusal(actor, unit, reason, detail,
+                                   notify=send_macos_notification,
+                                   emit=emit_event)
+    else:
+        # Suppressed push, but the decision must still be visible in the log.
+        log(f"launch guard: refused {unit} on {host}:{port} ({reason}: "
+            f"{detail.get('error')}) — alert suppressed (cooldown)", "ERROR")
+    return False
+
+
+def _note_heal_action(node, port, actor, label):
+    """Count one heal ACTION against `node` and honour the per-node breaker.
+
+    Returns (allowed, note). When the breaker trips or is already suspended,
+    the caller must NOT act — it logs `note` and moves on, exactly like the
+    F2 lease deferral.
+
+    WHY A BREAKER ON TOP OF THE LEASE (F5, HEAL_CASCADE 2026-10-14): the lease
+    makes repairs *sequential*; it does not make them *finite*. The incident's
+    killer was four sequential-but-unbounded repair paths firing every ~60s for
+    ~35 min against degrading hardware, until two nodes hard-hung and needed a
+    manual power-cycle. Counting per-node actions and STOPPING after HEAL_
+    BREAKER_MAX is what converts "relentless" into "relentless for a while".
+
+    Counting is durable (heal_breaker writes under ~/.hscc), so — unlike the
+    in-memory _worker_down_streak a crash-looping daemon reset every restart —
+    the count survives the very restarts healing itself can cause.
+    """
+    remaining = heal_breaker.suspended(node)
+    if remaining > 0:
+        return False, (f"node {node} heal-suspended for another {int(remaining)}s "
+                       f"after {heal_breaker.strike_count(node)} repair actions — "
+                       f"NOT attempting {actor} for {label}")
+    res = heal_breaker.note_heal(node)
+    if res["tripped"]:
+        # LATCH ONCE (heal_breaker.should_alert dedupes; the 2026-10-08 NAS
+        # rule fired 178 notifications in 11 min by getting this wrong). A tick
+        # that arrives while already suspended returns via `suspended()` above
+        # WITHOUT adding a strike — the suspension is self-sustaining (it lasts
+        # until the oldest strike ages out of the window), so re-counting would
+        # only extend it indefinitely and never let the node recover.
+        if heal_breaker.should_alert(node):
+            msg = (f"Stopped auto-healing node {node} after {res['count']} "
+                   f"repair actions in "
+                   f"{int(heal_breaker.HEAL_BREAKER_WINDOW_S)}s — the cluster is "
+                   f"not self-healing, it is being destroyed. Refusing further "
+                   f"heals for {int(res['suspended_s'])}s. Investigate the node "
+                   f"(dmesg/ping) before clearing: "
+                   f"hscc heal-clear {node}")
+            log(msg, "ERROR")
+            # Notify DIRECTLY, like autodown/watchdog/escalate_watcher do. The
+            # trigger engine could carry this, but the live ~/.hscc/triggers.json
+            # only gets a new rule on a fresh bootstrap — a critical alert that
+            # silently depends on a rule that may not exist is the same silent
+            # failure that left the 2026-10-08 NAS outage un-noticed.
+            try:
+                send_macos_notification("HSCC: heal breaker tripped", msg,
+                                        priority="high")
+            except Exception:
+                pass
+            # Ledger record regardless (the events.jsonl trail + any rule that
+            # does exist still see the trip).
+            emit_event("heal_breaker.tripped", {
+                "node": node, "strikes": res["count"],
+                "window_s": heal_breaker.HEAL_BREAKER_WINDOW_S,
+                "suspend_s": res["suspended_s"], "actor": actor, "unit": label,
+                "severity": "critical",
+            }, source="health")
+        return False, (f"node {node} just tripped the heal breaker "
+                       f"({res['count']} actions) — NOT attempting {actor} "
+                       f"for {label}; operator alerted")
+    return True, ""
+
+
+def _unit_is_still_loading(key, node, port, now_wall, *, fail_closed=False):
+    """True if the (node, port) unit is still LOADING, not dead: its container
+    is younger than WORKER_AUTOHEAL_LOAD_GRACE AND has never served.
+
+    SHARED PREDICATE (F1, HEAL_CASCADE 2026-10-14): BOTH down-repair paths in
+    check_workers consult this — the debounced auto-heal (force-recreate) AND
+    the plain gentle relaunch ("Worker X down — relaunching"). Before the
+    cascade only the auto-heal path asked, so check_workers destroyed loads in
+    progress that other paths (wedge recovery, `cluster up`, template apply)
+    had started: the age key here is the CONTAINER, so a unit created
+    elsewhere is recognised as loading too. The relaunch path's own guard
+    (`_worker_relaunch_at`) only knew about relaunches IT had issued.
+
+    `fail_closed` decides what UNKNOWN age means, and the two callers differ
+    on purpose because their actions differ in cost:
+      * auto-heal passes True — a force-recreate is destructive and expensive,
+        so with no age evidence we assume loading and shield for the window.
+      * the gentle relaunch passes False — when we have no age AND no stored
+        record, there is no container to destroy (the created-ts map returns a
+        stale cache rather than nothing on query failure, so a genuinely
+        missing entry means missing container), and shielding would strand a
+        dead unit unrepaired for the whole grace window.
 
     Both facts are durable: container age comes from sparkrun (re-resolved
     here on the down-threshold path, so a recreate is detected and has_served
@@ -1503,11 +2055,10 @@ def _suppress_autoheal_for_startup_grace(key, label, node, port, now_wall):
     A unit that HAS served and then stopped is exempt (has_served=True) and
     heals promptly.
 
-    FAIL-CLOSED (bounded): when the container age cannot be determined at all
-    (live sparkrun age unknown AND no stored created_ts), we ASSUME the unit is
-    still loading rather than dead — store created_ts = now_wall and shield it
-    for the grace window. Rationale: a force-recreate costs a full multi-minute
-    model reload and can loop (the incident this grace exists to kill), which is
+    FAIL-CLOSED (bounded, `fail_closed=True` only): assume the unit is still
+    loading rather than dead — store created_ts = now_wall and shield it for
+    the grace window. Rationale: a repair costs a full multi-minute model
+    reload and can loop (the incident this grace exists to kill), which is
     strictly worse than a bounded grace-window of suppressed healing. The
     fresh-assumption is durable, so it holds across a daemon restart, and it
     EXPIRES after WORKER_AUTOHEAL_LOAD_GRACE — a genuinely dead unit still
@@ -1527,6 +2078,11 @@ def _suppress_autoheal_for_startup_grace(key, label, node, port, now_wall):
         has_served = False
     created_ts = live_ts if live_ts is not None else stored_ts
     if created_ts is None:
+        if not fail_closed:
+            # Gentle-relaunch caller: no container evidence at all, so there
+            # is no in-progress load to destroy — let the repair proceed
+            # instead of stranding a dead unit for the whole grace window.
+            return False
         # Fail-closed: cannot determine age and have never recorded one —
         # assume this is a freshly (re)created, still-loading container and
         # shield it for the grace window. Durable so a restart doesn't reset
@@ -1563,45 +2119,117 @@ def _record_container_served(key, node, port):
 
 # ── Worker auto-heal helper ────────────────────────────────────────────────
 # The heal ACTION is injectable (``_autoheal_worker_fn``) so tests can stub it;
-# production uses the REAL template-apply path via cmd_cluster_template — the
-# exact function ``hscc template apply`` dispatches to, no reimplementation.
+# production recreates ONLY the down unit through the sanctioned sparkrun stop +
+# run path (``serving._unit_run_cmd``), never a whole-template apply — see
+# ``_default_autoheal_worker`` for why (F3, HEAL_CASCADE 2026-10-14).
 
-def _autoheal_cluster_dir():
-    """Sibling hscc-cluster plugin dir (same resolution as hscc.py)."""
-    return Path(__file__).resolve().parent.parent / "hscc-cluster"
+def _autoheal_find_unit(node, port):
+    """The serving.json unit owning (node, port), or None.
+
+    Uses the same ``keepalive_units`` view check_workers iterates, so the heal
+    acts on the very entry the check just declared down (same ``nodes`` span,
+    recipe, port, tp and served names).
+    """
+    try:
+        units = serving.keepalive_units(serving.load_serving())
+    except Exception as e:  # unreadable serving.json -> caller reports, no heal
+        log(f"Auto-heal: cannot read serving.json ({e})", "ERROR")
+        return None
+    for u in units or []:
+        if u.get("node") == node and int(u.get("port") or 0) == int(port):
+            return u
+    return None
 
 
 def _default_autoheal_worker(key, label, node, port):
-    """REAL auto-heal: force-recreate the down unit by re-applying the currently
-    applied template with ``--force-recreate``.
+    """REAL auto-heal: recreate ONLY the down unit — never the whole template.
 
-    Reuses the existing apply path (``cmd_cluster_template`` → the same function
-    ``hscc template apply <name> --confirm --force-recreate`` dispatches to) —
-    NOT a parallel mechanism. Resolves the currently-applied template from the
-    same state ``hscc template status`` reads (``~/.hscc/applied_template.json``).
-    Returns the apply result dict.
+    F3 (HEAL_CASCADE 2026-10-14). This used to re-apply the applied template
+    with ``--force-recreate``, i.e. stop and re-run EVERY unit in the fleet to
+    heal ONE. At 07:21Z and 07:43Z that tore down .246 and .248 — both healthy,
+    each mid-way through a ~3 minute model load — and the daemon then saw them
+    "down", which fed the cascade that hung .244 and .247.
 
-    Injectable for tests via monkeypatching ``_autoheal_worker_fn``; a test that
-    exercises THIS function patches ``cmd_cluster_template`` to prove the real
-    path is reached with force-recreate, never touching a real node/docker.
+    A whole-template apply is also not what the wedge needs: the wedge is one
+    unit whose vLLM never answers. So heal exactly that unit:
+
+      1. stop ITS span (``sparkrun stop <recipe> --hosts <span>`` — scoped to
+         the span, not ``--all``, so a co-located sibling on another port
+         survives), then
+      2. re-issue the unit AS DEFINED via the shared ``serving._unit_run_cmd``
+         (the single source of truth shared with ``fleet_up_plan``), with
+         ``--ensure`` STRIPPED — ``--ensure`` no-ops on a container that is
+         ``Up`` but wedged, which is precisely the failure class this path
+         exists for. Stopping first plus no ``--ensure`` is what makes the
+         recreate real; a leftover container then collides LOUDLY in the heal
+         log instead of being silently skipped.
+
+    The launch is detached (``start_new_session``) into
+    ``~/.hscc/heal-<node>-<port>.log`` because the recreate re-stages weights
+    for minutes; blocking the health check for that would stall every other
+    stream. The relaunch timestamp is recorded so the F1 load grace protects
+    the container this just created from the gentle relaunch.
+
+    Injectable for tests via monkeypatching ``_autoheal_worker_fn``; a test
+    that exercises THIS function patches ``run_cmd``/``Popen`` to prove only
+    the down unit is touched, never a real node or docker.
     """
-    cluster_dir = str(_autoheal_cluster_dir())
-    if cluster_dir not in sys.path:
-        sys.path.insert(0, cluster_dir)
+    unit = _autoheal_find_unit(node, port)
+    if unit is None:
+        log(f"Auto-heal {label}: no serving.json unit for {node}:{port} — "
+            f"nothing to recreate", "WARN")
+        return {"ok": False, "error": f"no serving.json unit for {node}:{port}"}
+
+    recipe = unit.get("recipe")
+    if not recipe:
+        log(f"Auto-heal {label}: unit has no recipe — cannot recreate", "WARN")
+        return {"ok": False, "error": "unit has no recipe in serving.json"}
+
+    span = [n for n in (unit.get("nodes") or [node]) if n] or [node]
+    run_argv = serving._unit_run_cmd(unit)
+    # --ensure would no-op on an Up-but-wedged container (see docstring).
+    recreate_argv = [a for a in run_argv if a != "--ensure"]
+
+    # A2 (before ANY destructive step): if sparkrun reports a vLLM workload on
+    # this host outside this unit's declared span, this recreate would
+    # over-commit the GPU — and the stop below would take the unit's own
+    # healthy span down first to do it. Refuse, alert, leave everything alone.
+    if not _guard_launch_or_refuse(node, port, span, "autoheal-recreate", label):
+        return {"ok": False, "error": "refused by launch guard (A2)",
+                "reason": "foreign_workload_or_no_status"}
+
+    log(f"Auto-heal {label}: recreating ONLY this unit "
+        f"({recipe} on {'+'.join(span)}:{port}) — template untouched")
+    # Stop the whole span (not just this node) so two workloads can never bind
+    # the same host:port, exactly as the gentle relaunch does.
+    stop_result = run_cmd(sparkrun_bin.argv(
+        "stop", recipe, "--hosts", ",".join(span)), timeout=60)
+    if not stop_result.get("ok"):
+        log(f"Auto-heal {label}: stop reported failure "
+            f"({stop_result.get('output', '')}) — recreating anyway; a leftover "
+            f"container will collide loudly in the heal log", "WARN")
+
+    # Record BEFORE launching so we never thrash even if Popen raises, and so
+    # the shared load grace (F1) shields the container we are about to create.
+    if key is not None:
+        _worker_relaunch_at[key] = time.time()
+        _save_worker_relaunch_timestamps()
+
+    log_path = os.path.expanduser(f"~/.hscc/heal-{node}-{port}.log")
     try:
-        from cluster_template_cli import cmd_cluster_template
-        from cluster_template import applied_status
-    except ImportError as e:
-        log(f"Auto-heal {label}: cannot load apply path ({e})", "ERROR")
-        return {"ok": False, "error": f"apply path unavailable: {e}"}
-    # The currently applied template (what `hscc template status` reports).
-    state = applied_status().get("applied") or {}
-    name = state.get("template")
-    if not name:
-        log(f"Auto-heal {label}: no applied template recorded — cannot force-recreate", "WARN")
-        return {"ok": False, "error": "no applied template recorded"}
-    log(f"Auto-heal {label}: force-recreating via template apply '{name}' --force-recreate")
-    return cmd_cluster_template(["apply", name, "--confirm", "--force-recreate"])
+        with open(log_path, "a") as log_file:
+            subprocess.Popen(
+                _sparkrun_exec_argv(recreate_argv),
+                stdout=log_file, stderr=log_file,
+                start_new_session=True,
+            )
+    except Exception as e:
+        log(f"Auto-heal {label}: failed to launch recreate: {e}", "ERROR")
+        return {"ok": False, "error": f"recreate launch failed: {e}"}
+
+    return {"ok": True, "status": "recreating", "unit": label,
+            "recipe": recipe, "hosts": span, "port": port,
+            "note": f"single-unit recreate detached to {log_path}"}
 
 
 # Production default; tests monkeypatch this to inject the heal call.
@@ -1765,8 +2393,8 @@ def check_workers():
             continue
         # DEBOUNCED AUTO-HEAL (WD1): the unit is DOWN. Increment its
         # consecutive-down streak and, once it crosses the debounce threshold
-        # AND is out of this unit's cooldown, force-recreate it via the REAL
-        # template-apply path (--force-recreate). This is what fixes a unit
+        # AND is out of this unit's cooldown, recreate THAT unit via the
+        # sanctioned sparkrun stop+run path. This is what fixes a unit
         # that stays "Up" in docker but whose vLLM never answers — a plain
         # sparkrun --ensure relaunch no-ops on it (--ensure sees the container
         # already running). Debounce/cooldown are configurable, not hardcoded.
@@ -1783,22 +2411,44 @@ def check_workers():
                 and now_wall - _worker_last_autoheal.get(key, 0.0) >= cooldown_s):
             # STARTUP GRACE (durable): a unit whose container is younger than
             # the grace AND has never served is still LOADING, not dead — do
-            # NOT force-recreate it. Keyed on container age (docker inspect) +
+            # NOT force-recreate it. Keyed on container age (sparkrun status) +
             # a persisted has-served flag, so this holds ACROSS a daemon
             # restart (the in-memory debounce resets; container age does not).
             # A unit that HAS served and then stopped is exempt and heals
             # promptly. The unit still counts as down (not online).
-            if _suppress_autoheal_for_startup_grace(key, label, node, port, now_wall):
+            if _unit_is_still_loading(key, node, port, now_wall, fail_closed=True):
                 log(f"Auto-heal: worker {label} ({node}:{port}) down {streak}x "
                     f"but container <{WORKER_AUTOHEAL_LOAD_GRACE}s old and has "
                     f"never served — still loading, NOT auto-healing")
                 down.append(label)
                 continue
-            log(f"Auto-heal: worker {label} ({node}:{port}) down {streak}x "
-                f"consecutively — force-recreate via template apply")
-            _worker_last_autoheal[key] = now_wall
-            _worker_down_streak[key] = 0  # finalise this debounce round
-            heal_result = _autoheal_worker_fn(key, label, node, port)
+            # ONE REPAIR AT A TIME (F2, HEAL_CASCADE 2026-10-14): this is the
+            # most destructive of the four paths — it recreates units while
+            # others are acting. Back off a tick rather than join the pile-up.
+            lease_ok, holder = heal_lease.acquire("auto-heal", f"{node}:{port}")
+            if not lease_ok:
+                log(f"Auto-heal: {label} deferred — heal in progress: "
+                    f"{heal_lease.describe(holder)}", "WARN")
+                down.append(label)
+                continue
+            try:
+                # F5 breaker gate, INSIDE the lease and inside the try so the
+                # `continue` below runs the finally-release (a lease-deferred
+                # tick earlier attempts nothing and counts no strike). This is
+                # the most destructive path — a whole-template force-recreate —
+                # so its strikes matter most.
+                allowed, note = _note_heal_action(node, port, "auto-heal", label)
+                if not allowed:
+                    log(f"Auto-heal: {note}", "WARN")
+                    down.append(label)
+                    continue
+                log(f"Auto-heal: worker {label} ({node}:{port}) down {streak}x "
+                    f"consecutively — recreating this unit only")
+                _worker_last_autoheal[key] = now_wall
+                _worker_down_streak[key] = 0  # finalise this debounce round
+                heal_result = _autoheal_worker_fn(key, label, node, port)
+            finally:
+                heal_lease.release("auto-heal")
             heal_note = (heal_result.get("status") or heal_result.get("ok")
                          or heal_result.get("error") or "?")
             log(f"Auto-heal result for {label}: {heal_note} "
@@ -1810,51 +2460,94 @@ def check_workers():
         if last and now_wall - last < grace_secs:
             down.append(label)  # still within load grace — leave it
             continue
+        # SHARED LOAD GRACE (F1, HEAL_CASCADE 2026-10-14): the guard above only
+        # knows about relaunches THIS path issued. A container started by wedge
+        # recovery, `cluster up` or a template apply is invisible to it, so the
+        # cascade could relaunch (destroying a ~3 min model load) every check.
+        # The durable container-age + never-served predicate sees loads started
+        # by ANY path, which is exactly what a model still loading needs.
+        # Fail-open here (no container evidence -> repair proceeds) because the
+        # alternative strands a dead unit; the destructive force-recreate path
+        # keeps fail-closed.
+        if _unit_is_still_loading(key, node, port, now_wall, fail_closed=False):
+            down.append(label)  # a container is loading (started by any path)
+            log(f"Worker {label} ({node}:{port}) down but container "
+                f"<{WORKER_AUTOHEAL_LOAD_GRACE}s old and has never served — "
+                f"still loading, NOT relaunching")
+            continue
         if not recipe:
             down.append(label)
             log(f"Worker {label} down but no recipe in serving.json — skipping", "WARN")
             continue
-        log(f"Worker {label} down — relaunching ({recipe}) on :{port}")
-        # Re-issue the unit AS DEFINED in serving.json, using the SAME shared
-        # command builder as fleet_up_plan (_unit_run_cmd), so sparkrun derives
-        # the SAME cluster_id as the declared workload. keepalive_units() now
-        # carries the unit's full span (`nodes`), tp, model and role on every
-        # per-node entry, so a TP unit is relaunched as a whole group
-        # (head + workers) WITH `--served-model-name`, exactly like
-        # fleet_up_plan. Passing --served-model-name is essential: sparkrun
-        # folds it into the intent hash, so omitting it (the pre-fix behaviour)
-        # derived a DIFFERENT cluster_id and `--ensure` then launched a
-        # PARALLEL DUPLICATE instead of re-issuing the declared workload
-        # (t_e1ff0e8e). For a plain single-node unit (tp<=1, no model) this
-        # reduces to the same single-host, no-`--tp` command as before.
-        span = u.get("nodes") or [node]
-        relaunch_cmd = serving._unit_run_cmd(u)
-        # Stop the WHOLE span first (not just this node) so requirement #3 holds:
-        # never leave two workloads bound to the same host:port. Stopping the
-        # full span clears the surviving pair members on the peer(s) before the
-        # re-provisioned group binds :port. --hosts <span> scopes the stop to the
-        # span (not --all), so an unrelated co-located sibling on another port
-        # survives.
-        stop_result = run_cmd(sparkrun_bin.argv(
-            "stop", recipe, "--hosts", ",".join(span)), timeout=60)
-        if not stop_result.get("ok"):
-            log(f"sparkrun stop for {label} failed: {stop_result.get('output', '')}", "WARN")
-        # Record relaunch time before launching so we do not thrash even if
-        # Popen itself raises.
-        _worker_relaunch_at[key] = time.time()
-        _save_worker_relaunch_timestamps()
-        log_path = os.path.expanduser(f"~/.hscc/relaunch-{node}-{port}.log")
-        try:
-            with open(log_path, "a") as log_file:
-                subprocess.Popen(
-                    _sparkrun_exec_argv(relaunch_cmd),
-                    stdout=log_file, stderr=log_file,
-                    start_new_session=True,
-                )
-            relaunched.append(label)
-        except Exception as e:
-            log(f"ERROR: failed to launch worker {label}: {e}", "ERROR")
+        # ONE REPAIR AT A TIME (F2, HEAL_CASCADE 2026-10-14). This path fired on
+        # a 60s tick against containers three other mechanisms were creating.
+        # Take the lease for the stop+re-issue; back off one tick if held.
+        lease_ok, holder = heal_lease.acquire("worker-relaunch", f"{node}:{port}")
+        if not lease_ok:
+            log(f"Worker {label} relaunch deferred — heal in progress: "
+                f"{heal_lease.describe(holder)}", "WARN")
             down.append(label)
+            continue
+        try:
+            # F5 breaker gate, inside the lease/try so `continue` runs the
+            # finally-release. Per-UNIT relaunch has its own load-grace cooldown,
+            # which cannot see this: a degrading node hammered across several of
+            # its units. The breaker is the per-NODE count that closes that gap.
+            allowed, note = _note_heal_action(node, port, "worker-relaunch", label)
+            if not allowed:
+                log(f"Worker {label}: {note}", "WARN")
+                down.append(label)
+                continue
+            log(f"Worker {label} down — relaunching ({recipe}) on :{port}")
+            # Re-issue the unit AS DEFINED in serving.json, using the SAME shared
+            # command builder as fleet_up_plan (_unit_run_cmd), so sparkrun derives
+            # the SAME cluster_id as the declared workload. keepalive_units() now
+            # carries the unit's full span (`nodes`), tp, model and role on every
+            # per-node entry, so a TP unit is relaunched as a whole group
+            # (head + workers) WITH `--served-model-name`, exactly like
+            # fleet_up_plan. Passing --served-model-name is essential: sparkrun
+            # folds it into the intent hash, so omitting it (the pre-fix behaviour)
+            # derived a DIFFERENT cluster_id and `--ensure` then launched a
+            # PARALLEL DUPLICATE instead of re-issuing the declared workload
+            # (t_e1ff0e8e). For a plain single-node unit (tp<=1, no model) this
+            # reduces to the same single-host, no-`--tp` command as before.
+            span = u.get("nodes") or [node]
+            relaunch_cmd = serving._unit_run_cmd(u)
+            # A2 (before the stop below): a launch that would land on a host
+            # whose GPU already holds a foreign vLLM is refused + alerted; the
+            # unit stays down and its healthy span members stay up.
+            if not _guard_launch_or_refuse(node, port, span,
+                                           "worker-relaunch", label):
+                down.append(label)
+                continue
+            # Stop the WHOLE span first (not just this node) so requirement #3 holds:
+            # never leave two workloads bound to the same host:port. Stopping the
+            # full span clears the surviving pair members on the peer(s) before the
+            # re-provisioned group binds :port. --hosts <span> scopes the stop to the
+            # span (not --all), so an unrelated co-located sibling on another port
+            # survives.
+            stop_result = run_cmd(sparkrun_bin.argv(
+                "stop", recipe, "--hosts", ",".join(span)), timeout=60)
+            if not stop_result.get("ok"):
+                log(f"sparkrun stop for {label} failed: {stop_result.get('output', '')}", "WARN")
+            # Record relaunch time before launching so we do not thrash even if
+            # Popen itself raises.
+            _worker_relaunch_at[key] = time.time()
+            _save_worker_relaunch_timestamps()
+            log_path = os.path.expanduser(f"~/.hscc/relaunch-{node}-{port}.log")
+            try:
+                with open(log_path, "a") as log_file:
+                    subprocess.Popen(
+                        _sparkrun_exec_argv(relaunch_cmd),
+                        stdout=log_file, stderr=log_file,
+                        start_new_session=True,
+                    )
+                relaunched.append(label)
+            except Exception as e:
+                log(f"ERROR: failed to launch worker {label}: {e}", "ERROR")
+                down.append(label)
+        finally:
+            heal_lease.release("worker-relaunch")
 
     ok = not down
     write_state("workers", {
