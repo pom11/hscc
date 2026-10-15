@@ -40,6 +40,25 @@ struct HSCCApp: App {
         let center = ProjectUnreadCenter()
         _unread = StateObject(wrappedValue: center)
         _replyWatcher = StateObject(wrappedValue: StreamReplyWatcher(unread: center))
+        #if DEBUG
+        // Capture harness (t_0d5632bc): a fixture launch needs a CONFIGURED
+        // cluster or every screen honestly shows "Not connected" — which
+        // would prove the shell but not the list recipe. Seed a fake cluster
+        // pointing at a reserved-bogus host with a placeholder token;
+        // FixtureURLProtocol answers the requests and forwards NOTHING to the
+        // network, so this config can never reach (or name) a real machine.
+        // Idempotent across launches (fixed UUID → saveCluster updates in
+        // place). Release builds never take this path.
+        if DebugHarness.fixturesEnabled {
+            let store = SettingsStore()
+            DebugHarness.seedFixtureCluster(in: store)
+            _settings = StateObject(wrappedValue: store)
+        } else {
+            _settings = StateObject(wrappedValue: SettingsStore())
+        }
+        #else
+        _settings = StateObject(wrappedValue: SettingsStore())
+        #endif
     }
 
     var body: some Scene {
