@@ -153,11 +153,19 @@ def _run_detect(boards, cap=None, n=None, now=0.0, writes=None,
     # per_profile defaults to effectively-unlimited so existing cases keep
     # testing the GLOBAL cap only, and none of them read the operator's live
     # config.
-    ok = dw.check_dispatcher_wedge(
-        kanban_db=kb, max_in_progress=cap, now=now, write_state_fn=wf,
-        max_per_profile=per_profile)
-    if n is not None:
-        dw.DISPATCHER_DETECT_TICKS = old
+    # cap=None means "no cap configured", not "go read the operator's live
+    # config": check_dispatcher_wedge falls back to _read_max_in_progress()
+    # on None, which made cap=None cases pass or fail with ~/.hermes/config.yaml.
+    real_read = dw._read_max_in_progress
+    dw._read_max_in_progress = lambda: None
+    try:
+        ok = dw.check_dispatcher_wedge(
+            kanban_db=kb, max_in_progress=cap, now=now, write_state_fn=wf,
+            max_per_profile=per_profile)
+    finally:
+        dw._read_max_in_progress = real_read
+        if n is not None:
+            dw.DISPATCHER_DETECT_TICKS = old
     return ok, captured.get("dispatcher")
 
 
