@@ -110,8 +110,23 @@ struct AppShell: View {
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var replyWatcher: StreamReplyWatcher
     @EnvironmentObject private var router: DeepLinkRouter
-    @State private var selection: AppDestination? = .home
+    @State private var selection: AppDestination? = AppShell.initialSelection()
     @StateObject private var approvals = ApprovalPoller()
+
+    /// Debug-only capture seam (t_0d5632bc, DebugHarness.swift): a capture
+    /// launch opens one named drawer destination directly — that is the
+    /// "drive navigation without taps" path, since this device refuses the
+    /// only headless dismissal of the first-run alert (proof in
+    /// PHASE2_PROGRESS_t_25aed701 "Screenshots"). Unknown values and Release
+    /// builds get the normal `.home` default; this NEVER guesses a screen.
+    /// (Fixture seeding for the same launch runs in onAppear below.)
+    static func initialSelection() -> AppDestination? {
+        #if DEBUG
+        if let screen = DebugHarness.requestedScreen() { return screen }
+        #endif
+        return .home
+    }
+
     /// Queued messages dropped because the user switched clusters mid-queue
     /// (t_42ba90d2) — surfaced here so nothing is silently lost.
     @State private var droppedBanner: [OfflineSendQueue.QueuedMessage]?
@@ -327,6 +342,20 @@ struct AppShell: View {
     }
 
     private func makeClient() -> HSCCClient? {
+        #if DEBUG
+        // Capture harness (t_0d5632bc): a headless `simctl launch` cannot write
+        // the Keychain (OSStatus -34018 errSecMissingEntitlement), so the seeded
+        // fixture cluster reads back as "no token" and every optional-client
+        // screen would honestly show its connect gate — proving the shell but
+        // not the list recipe. Fixture mode therefore builds the client
+        // directly, bypassing the Keychain entirely; its URLSession is the
+        // fixture protocol (HSCCClient.defaultSession), which forwards NOTHING
+        // to the network. Release builds never take this path.
+        if DebugHarness.fixturesEnabled {
+            return HSCCClient(host: "fixtures.invalid", port: 8788,
+                              token: "debug-fixture-token")
+        }
+        #endif
         guard settings.isConfigured,
               let token = settings.token,
               let port = Int(settings.port) else { return nil }

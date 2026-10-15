@@ -100,6 +100,11 @@ targets:
       # fail to compile if a referenced file is missing; a file here that isn't
       # listed is simply not compiled).
       - path: Sources/HSCC/HSCCApp.swift
+      # Debug-only capture harness (t_0d5632bc): fixture URLProtocol +
+      # HSCC_DEBUG_SCREEN/HSCC_DEBUG_FIXTURES seams, fully inside #if DEBUG.
+      # Registered so swiftc/xcodebuild compile it in Debug; Release strips
+      # every behaviour change (see the file header).
+      - path: Sources/HSCC/DebugHarness.swift
       # App shell (IOS_REDESIGN 2026-10-14 section 3): drawer + home dock. Registered so
       # it compiles, but NOT yet wired into HSCCApp - ContentView/TabView is still the
       # live root until the per-screen NavigationStack unwraps land (card t_25aed701).

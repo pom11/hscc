@@ -108,6 +108,14 @@ final class LiveActivityManager {
         endCurrentSilently()
 
         // Start the Live Activity (throws if the system can't show one).
+        #if DEBUG
+        // Capture harness (t_0d5632bc): see MonitorActivityDriver.push —
+        // Activity.request re-raises the notification authorization sheet.
+        if DebugHarness.suppressNotifications {
+            DebugHarness.noteSuppressed("live-activity:waking")
+            return
+        }
+        #endif
         let attributes = WakingActivityAttributes()
         let initialState = WakingActivityAttributes.ContentState(
             state: "waking",
