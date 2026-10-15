@@ -455,35 +455,16 @@ struct HSConnectGate: View {
     }
 }
 
-/// Shared title + content section card (the "one card style"). Use everywhere a
-/// titled, rounded, raised panel wraps a switch/section of content — replacing
-/// the near-identical private `sectionCard` funcs that used to be copy-pasted
-/// into every view.
-struct HSSectionCard<Content: View>: View {
-    let title: String
-    let systemImage: String
-    @ViewBuilder let content: Content
-
-    init(title: String, systemImage: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.systemImage = systemImage
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm.rawValue) {
-            Label(title, systemImage: systemImage)
-                .font(.headline)
-            content
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Corner.card.rawValue, style: .continuous)
-                .fill(Theme.Semantic.surfaceRaised)
-        )
-    }
-}
+// HSSectionCard (the titled rounded `surfaceRaised` box) was DELETED here on
+// t_f64706b4. Phase 2's list-recipe conversions (spec §5) retired its last call
+// sites — Fleet `45645201`, Autodown `79be2dd5`, Serving Control `644286f6`,
+// Cron, Ops, Approvals/BoardHygiene and Nodes & serving — and no screen builds a
+// ScrollView of boxes any more, so the component had zero users left. It is gone
+// deliberately: the recipe dialect (`List` + `.listStyle(.plain)` + `Section` +
+// `HSEmpty`/`HSError`) is the only panel style in the app. Do not resurrect it;
+// the prose mentions of it in the views' doc comments and
+// docs/design/PHASE2_PROGRESS_t_25aed701.md are the record of what it used to
+// be, not a TODO.
 
 /// The shared red inline error label under a section card.
 ///
