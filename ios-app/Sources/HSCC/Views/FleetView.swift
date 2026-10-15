@@ -44,10 +44,6 @@ import SwiftUI
 /// direction is the colour-lie class §9 bans.
 struct FleetView: View {
     let client: HSCCClient?
-    /// Only read for one honest line in the Control footer: fleet-wide
-    /// mutations cannot work until a cluster exists, and saying so beats a
-    /// button that can only ever fail.
-    @EnvironmentObject private var settings: SettingsStore
 
     @State private var health = LoadState<HealthResponse>.idle
     @State private var stats = LoadState<FleetStatsResponse>.idle
@@ -605,9 +601,14 @@ struct FleetView: View {
         } header: {
             Text("Control")
         } footer: {
-            Text(settings.isConfigured
-                 ? "Bring the serving fleet up, or stop ALL workloads fleet-wide. Per-unit Stop / Restart stay in “Nodes & serving”."
-                 : "Add a cluster in Settings first — fleet-wide actions need somewhere to act.")
+            // Static copy, deliberately NOT conditioned on settings: this
+            // section only renders inside `if let client`, so "there is a
+            // cluster to act on" is already guaranteed by the gate itself — a
+            // second, separately-computed claim about configuration could only
+            // ever contradict the buttons above it (it would in the harness's
+            // fixture mode, where the client exists but a keychain-seeded flag
+            // does not). The original FleetControlView footer, scope-extended.
+            Text("Bring the serving fleet up, or stop ALL workloads fleet-wide. Per-unit Stop / Restart stay in “Nodes & serving”.")
                 .font(.footnote)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
         }
