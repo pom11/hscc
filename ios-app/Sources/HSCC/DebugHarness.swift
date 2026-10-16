@@ -94,13 +94,105 @@ enum DebugHarness {
         return AppDestination(rawValue: raw)
     }
 
+    // MARK: - Nav-graph walker seams (t_810ab152)
+    //
+    // The XCUITest nav-graph walker (UITests/NavGraphUITests.swift) needs the
+    // SAME fixture pipeline to serve three different fixture sets per launch
+    // (live shapes / zero rows / failing bodies) and to name its per-launch
+    // manifest, without a second capture path. Every seam below is #if DEBUG,
+    // early-return, and default-off: a launch that sets nothing behaves
+    // byte-identically to the pre-walker harness.
+
+    /// True when this launch is the walker's DISCONNECTED pass (env
+    /// `HSCC_DEBUG_OFFLINE=1`, t_810ab152): no fixtures, and the app must
+    /// start as a fresh install would — the DEBUG-seeded fixture cluster and
+    /// every last-known cache entry are removed at launch, so each screen
+    /// shows its honest unconfigured/offline row. Without the clear, a
+    /// previous fixture launch's persisted cluster would make the app look
+    /// "configured" (host fixtures.invalid) and Offline.load would print
+    /// stale rows instead of the gate the pass asserts. Default-off.
+    static var offlineAtLaunch: Bool {
+        ProcessInfo.processInfo.environment["HSCC_DEBUG_OFFLINE"] == "1"
+    }
+
+    /// The fixture seed cluster's fixed UUID (see seedFixtureCluster). The
+    /// offline pass deletes exactly this cluster — never a real saved one.
+    static let fixtureClusterID = UUID(
+        uuidString: "deadbeef-0000-4000-8000-0000000000d1")!
+
+    /// Which fixture SET a fixture launch reads (env
+    /// `HSCC_DEBUG_FIXTURE_DIR`, default "main"):
+    ///   "main"  -> Documents/HSCCFixtures       (the capture_screens.sh set)
+    ///   "empty" -> Documents/HSCCFixturesEmpty  (same map, every array zeroed
+    ///             — the honest EMPTY-state pass; see nav_graph_check.sh)
+    /// Anything else falls back to "main" (never a crash on a typo — same
+    /// rule as `requestedScreen`).
+    static var fixturesSetName: String {
+        let raw = ProcessInfo.processInfo.environment["HSCC_DEBUG_FIXTURE_DIR"] ?? "main"
+        return raw == "empty" ? "empty" : "main"
+    }
+
+    /// True when EVERY GET must answer 500 with the API's error contract body
+    /// (`{"error":{...}}`) — the honest ERROR-state pass (t_810ab152). The
+    /// path is still counted as served: the screen exercised its failed-row
+    /// path, which is exactly what the walker asserts. A body shaped like a
+    /// success payload would make views decode "success" and render rows the
+    /// screen didn't earn, so the failure body is the real API error shape.
+    static var fixtureFailMode: Bool {
+        ProcessInfo.processInfo.environment["HSCC_DEBUG_FIXTURE_FAIL"] == "1"
+    }
+
+    /// A fail-mode launch must start with an EMPTY last-known cache, or
+    /// `Offline.load` would serve the previous successful launch's data as a
+    /// `.stale` row and the screen would never show the failed row the walk
+    /// asserts. Called once from HSCCApp.init's fixture branch (the cache
+    /// lives in the UserDefaults StateCache itself uses, so this is exactly
+    /// the state a fresh install has). DEBUG + fail-mode only.
+    static func clearStateCacheForFailModeLaunchIfNeeded() {
+        guard fixtureFailMode else { return }
+        StateCache.clear()
+    }
+
+    /// The API's unified error contract (docs/DESIGN-api.md §C) as canned
+    /// bytes — what `HSCCError.api(code:message:)` folds into the operator-
+    /// actionable message the walker asserts on.
+    static let fixtureFailBody = Data(
+        "{\"error\":{\"code\":\"internal_error\",\"message\":\"Debug fixture failure.\",\"speak\":\"Debug fixture failure (HSCC_DEBUG_FIXTURE_FAIL=1).\"}}"
+            .utf8)
+
+    /// The name stamped into `manifest-<name>.json` (env
+    /// `HSCC_DEBUG_MANIFEST_NAME`, default: the requested screen or "unknown").
+    /// The walker launches several screens per suite run; distinct manifest
+    /// names keep each launch's served-count receipt addressable.
+    static var manifestName: String {
+        let raw = ProcessInfo.processInfo.environment["HSCC_DEBUG_MANIFEST_NAME"] ?? ""
+        if !raw.isEmpty { return raw }
+        return ProcessInfo.processInfo.environment["HSCC_DEBUG_SCREEN"] ?? "unknown"
+    }
+
+    /// Manifest file name for this launch, sanitised the same way the capture
+    /// path sanitises screen names ("/" -> "_").
+    static var manifestFileName: String {
+        "manifest-\(manifestName)".replacingOccurrences(of: "/", with: "_") + ".json"
+    }
+
+    /// Absolute path of THIS launch's manifest (the walker reads it from the
+    /// app container's Documents folder after the run).
+    static var manifestPath: URL? {
+        fixturesDirectory?.appendingPathComponent(manifestFileName)
+    }
+
     // MARK: - Fixture-backed URLSession
 
-    /// The canned-file directory (Documents/HSCCFixtures). Created empty by
-    /// the OS; missing files are answered 404, never a crash.
+    /// The canned-file directory for THIS launch's fixture set —
+    /// Documents/HSCCFixtures (set "main") or Documents/HSCCFixturesEmpty
+    /// (set "empty", t_810ab152 walker) — NOT the app bundle, so no fixture
+    /// content enters project.yml or the Release bundle. Created empty by the
+    /// OS; missing files are answered 404/501, never a crash.
     static var fixturesDirectory: URL? {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
-            .first?.appendingPathComponent("HSCCFixtures")
+        let name = fixturesSetName == "empty" ? "HSCCFixturesEmpty" : "HSCCFixtures"
+        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
+            .first?.appendingPathComponent(name)
     }
 
     /// GET path → fixture file name. Exact matches first; the parameterised
@@ -177,28 +269,34 @@ enum DebugHarness {
     /// `capture_screens.sh` to check instead of a human eyeballing 24 PNGs:
     /// whether the shell considered itself configured (the exact inputs
     /// `makeClient()` reads) and which fixture paths were served vs missed.
-    /// Written ~3s after launch, i.e. after the views' `.task` loads have run
-    /// but before the script's screenshot.
+    /// First write ~3 s after launch, i.e. after the views' `.task` loads have
+    /// run; then every 2 s up to ~30 s (t_810ab152): the nav-graph walker's
+    /// pull-to-refresh assertions read the SERVED COUNTS live from this file,
+    /// so it must keep tracking requests made minutes after launch. Cheap
+    /// (a few hundred bytes) and DEBUG-fixture-launch only.
     @MainActor
     static func writeCaptureManifest(settings: SettingsStore) {
         Task {
             try? await Task.sleep(nanoseconds: 3_000_000_000)
-            let obj: [String: Any] = [
-                "screen": ProcessInfo.processInfo.environment["HSCC_DEBUG_SCREEN"] ?? "",
-                "isConfigured": settings.isConfigured,
-                "hasToken": settings.hasToken,
-                "activeClusterID": settings.activeClusterID.map { $0.uuidString } ?? "nil",
-                "tokenSaveFailure": settings.tokenSaveFailure ?? "none",
-                "served": FixtureURLProtocol.served,
-                "missed": FixtureURLProtocol.missed,
-                "suppressed": DebugHarness.suppressionLog,
-            ]
-            guard let dir = fixturesDirectory,
-                  let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
-            else { return }
-            let screen = (ProcessInfo.processInfo.environment["HSCC_DEBUG_SCREEN"] ?? "unknown")
-                .replacingOccurrences(of: "/", with: "_")
-            try? data.write(to: dir.appendingPathComponent("manifest-\(screen).json"))
+            for _ in 0..<15 {
+                let obj: [String: Any] = [
+                    "screen": manifestName,
+                    "isConfigured": settings.isConfigured,
+                    "hasToken": settings.hasToken,
+                    "activeClusterID": settings.activeClusterID.map { $0.uuidString } ?? "nil",
+                    "tokenSaveFailure": settings.tokenSaveFailure ?? "none",
+                    "fixtureSet": fixturesSetName,
+                    "failMode": fixtureFailMode,
+                    "served": FixtureURLProtocol.served,
+                    "missed": FixtureURLProtocol.missed,
+                    "suppressed": DebugHarness.suppressionLog,
+                ]
+                if let dir = fixturesDirectory,
+                   let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) {
+                    try? data.write(to: dir.appendingPathComponent(manifestFileName))
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
         }
     }
 }
@@ -221,6 +319,20 @@ final class FixtureURLProtocol: URLProtocol {
         let path = request.url?.path ?? ""
         guard request.httpMethod == "GET" || request.httpMethod == nil else {
             finish(status: 501, body: Data("{\"speak\":\"debug fixture mode: mutations are not served\"}".utf8))
+            return
+        }
+        // t_810ab152 ERROR-state pass: answers every GET with the API error
+        // contract (500), so each screen renders its honest failed row. Still
+        // counted as SERVED: the walk wants proof the request happened
+        // (served-count receipts) — the screen exercised its failed-path,
+        // which is exactly what the walker asserts. (The last-known
+        // StateCache is cleared once at launch for fail-mode launches — see
+        // DebugHarness.clearStateCacheForFailModeLaunchIfNeeded — so a
+        // previous successful launch's cache cannot turn the failed row into
+        // Offline.load's stale row.)
+        if DebugHarness.fixtureFailMode {
+            FixtureURLProtocol.served[path, default: 0] += 1
+            finish(status: 500, body: DebugHarness.fixtureFailBody)
             return
         }
         guard let name = DebugHarness.fixtureFile(forPath: path),

@@ -550,12 +550,20 @@ targets:
   # (regular width) proves nothing. Launches carry HSCC_DEBUG_FIXTURES=1 (the
   # canned-fixture URLProtocol — zero live API) and the drawer-open seam; the
   # tests themselves are ordinary XCUITest taps and queries.
+  #
+  # t_810ab152 EXTENDS this target with the nav-graph walker: NavGraphScreen-
+  # Table.swift is GENERATED from AppShell/Sidebar by scripts/nav_graph_screens.py
+  # (a new screen cannot dodge the walk), and NavGraphUITests.swift walks every
+  # drawer row + the detail pushes with real gestures (pull-to-refresh included).
+  # Same pipeline: fixtures-only launches, zero live API.
   HSCCUITests:
     type: bundle.ui-testing
     platform: iOS
     deploymentTarget: "26.0"
     sources:
       - path: UITests/DrawerNavigationUITests.swift
+      - path: UITests/NavGraphUITests.swift
+      - path: UITests/NavGraphScreenTable.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.hscc.ios.uitests

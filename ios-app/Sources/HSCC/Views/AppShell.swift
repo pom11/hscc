@@ -164,6 +164,34 @@ struct AppShell: View {
         return false
     }
 
+    #if DEBUG
+    /// NEGATIVE-TEST seam for the nav-graph walker (t_810ab152): with
+    /// `HSCC_DEBUG_NEGATE_BACK=1` the shell's drawer affordances — the
+    /// `drawerOpen` toolbar button and the `drawerClose` button — are not
+    /// rendered. A walker that cannot go RED when the way back disappears is
+    /// not a gate; `nav_graph_check.sh` runs the walk once under this flag and
+    /// REQUIRES it to fail naming the screen. Debug-only like every other
+    /// harness seam (the Release build reads the literal `false` below and
+    /// the affordances are unconditionally present).
+    private var negateBackForTest: Bool {
+        ProcessInfo.processInfo.environment["HSCC_DEBUG_NEGATE_BACK"] == "1"
+    }
+    #else
+    private var negateBackForTest: Bool { false }
+    #endif
+
+    /// The app-owned drawer entry (t_5ed5d281), split out only so the
+    /// negative-test seam above can omit it in one place.
+    private var drawerOpenButton: some View {
+        Button {
+            openDrawer()
+        } label: {
+            Image(systemName: "sidebar.left")
+        }
+        .accessibilityLabel("Menu")
+        .accessibilityIdentifier("drawerOpen")
+    }
+
     private func openDrawer() {
         withAnimation(.easeInOut(duration: 0.2)) { drawerOpen = true }
     }
@@ -199,13 +227,9 @@ struct AppShell: View {
                         // sits opposite it, where no screen's own leading
                         // item can crowd it out.
                         ToolbarItem(placement: .topBarTrailing) {
-                            Button {
-                                openDrawer()
-                            } label: {
-                                Image(systemName: "sidebar.left")
+                            if !negateBackForTest {
+                                drawerOpenButton
                             }
-                            .accessibilityLabel("Menu")
-                            .accessibilityIdentifier("drawerOpen")
                         }
                     }
             }
@@ -366,18 +390,23 @@ struct AppShell: View {
                         .font(.largeTitle.bold())
                         .foregroundColor(Theme.Semantic.onSurface)
                     Spacer()
-                    Button {
-                        closeDrawer()
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.title2)
-                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
-                            .frame(minWidth: 44, minHeight: 44)
-                            .contentShape(Rectangle())
+                    // The negative-test seam (t_810ab152) omits the close too:
+                    // under HSCC_DEBUG_NEGATE_BACK=1 the drawer is a real trap,
+                    // which is what the walker's negative run must catch.
+                    if !negateBackForTest {
+                        Button {
+                            closeDrawer()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.title2)
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                                .frame(minWidth: 44, minHeight: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Close menu")
+                        .accessibilityIdentifier("drawerClose")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Close menu")
-                    .accessibilityIdentifier("drawerClose")
                 }
                 .padding(.horizontal, Theme.Spacing.lg.rawValue)
                 .padding(.top, Theme.Spacing.md.rawValue)
