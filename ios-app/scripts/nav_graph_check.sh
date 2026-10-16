@@ -55,6 +55,16 @@ APP=$(xcrun simctl get_app_container "$DEVICE" "$BUNDLE" app 2>/dev/null) \
   || fail "install first: xcrun simctl install $DEVICE <path>/HSCC.app"
 CONTAINER=$(xcrun simctl get_app_container "$DEVICE" "$BUNDLE" data) || fail "no data container"
 DOC="$CONTAINER/Documents"
+# iOS recreates the data container when the bundle is reinstalled (t_810ab152
+# gate run: seed -> container A, step 3 install -> container B inherited the
+# seeded Documents, the walk wrote receipts into B — any single resolved path
+# is stale by receipt time). The receipt scan therefore covers EVERY
+# container under the device, with an mtime window as the freshness proof.
+DEVICE_UDID="$DEVICE"
+if [ "$DEVICE" = "booted" ]; then
+  DEVICE_UDID=$(xcrun simctl list devices booted | sed -n 's/.*(\([0-9A-F\-]\{36\}\)) (Booted).*/\1/p' | head -1)
+fi
+DATA_ROOT="$HOME/Library/Developer/CoreSimulator/Devices/$DEVICE_UDID/data/Containers/Data/Application"
 
 # ---------------------------------------------------------------------------
 step=1
@@ -109,9 +119,12 @@ echo "  app + runner installed (explicit — test-without-building does not refr
 # ---------------------------------------------------------------------------
 step=4
 say "the WALK — NavGraphUITests on $DEVICE (fixtures; never the live API)"
-# Fresh receipts only: drop last run's manifests so step 5 cannot pass on
-# stale files (the walker names manifests per launch, deterministic).
-rm -f "$DOC"/HSCCFixtures/manifest-*.json "$DOC"/HSCCFixturesEmpty/manifest-*.json 2>/dev/null
+# Fresh receipts only: drop last run's manifests from EVERY container under
+# this device so step 5 cannot pass on stale files (the walker names
+# manifests per launch, deterministic; UUID churn makes single-path cleanup
+# incomplete — see the DATA_ROOT note above).
+find "$DATA_ROOT" -path "*/HSCCFixtures*/manifest-*.json" -delete 2>/dev/null
+WALK_START_TS=$(date +%s)
 xcodebuild test-without-building -project HSCC.xcodeproj -scheme HSCCUITests \
   -only-testing:HSCCUITests/NavGraphUITests \
   -destination "platform=iOS Simulator,id=$DEVICE" \
@@ -130,22 +143,36 @@ grep -E "Test Case .* passed" "$RESULTS/walk.log" | sed 's/^/    /'
 # ---------------------------------------------------------------------------
 step=5
 say "manifest receipts (served fixtures per launch)"
-python3 - "$DOC" <<'PY' || fail 5 "receipt check failed"
+python3 - "$DATA_ROOT" "$WALK_START_TS" <<'PY' || fail 5 "receipt check failed"
 import json, sys, pathlib
-doc = pathlib.Path(sys.argv[1])
-walk = sorted(doc.glob("HSCCFixtures/manifest-walk-*.json"))
-missing = [p.name for p in walk if not (json.loads(p.read_text()).get("served"))]
+root = pathlib.Path(sys.argv[1])
+min_ts = int(sys.argv[2]) - 60   # one minute of slack for clock skew
+fresh = lambda p: p.stat().st_mtime >= min_ts
+# Scan EVERY app container under the device: iOS rotates the data-container
+# UUID when the bundle is reinstalled mid-gate, so receipts may land in a
+# container other than the one resolved at script start (t_810ab152).
+def glob_pat(pat):
+    return [p for p in root.glob(f"*/Documents/{pat}") if fresh(p)]
+walk = sorted(glob_pat("HSCCFixtures/manifest-walk-*.json"))
+# home + settings are static (no endpoint load until interaction), so a zero
+# served-count there is honest, not a fixture miss. Every OTHER drawer screen
+# must have served at least one fixture — otherwise its rows could be cache
+# renderings or empty views, and the walk would prove nothing.
+STATIC_SCREENS = {"manifest-walk-home.json", "manifest-walk-settings.json"}
+missing = [p.name for p in walk
+           if p.name not in STATIC_SCREENS
+           and not (json.loads(p.read_text()).get("served"))]
 print(f"  walk manifests: {len(walk)}")
 if not walk:
     sys.exit("no walk-* manifests — the walker never ran in fixture mode")
 if missing:
     sys.exit(f"manifests with zero served fixtures: {missing}")
-err = sorted(doc.glob("HSCCFixtures/manifest-err-*.json"))
+err = sorted(glob_pat("HSCCFixtures/manifest-err-*.json"))
 bad = [p.name for p in err
        if not json.loads(p.read_text()).get("failMode")]
 print(f"  error-pass manifests: {len(err)} (all flagged failMode)")
 if bad: sys.exit(f"error manifests without failMode: {bad}")
-empty = sorted(doc.glob("HSCCFixturesEmpty/manifest-empty-*.json"))
+empty = sorted(glob_pat("HSCCFixturesEmpty/manifest-empty-*.json"))
 print(f"  empty-pass manifests: {len(empty)}")
 PY
 
