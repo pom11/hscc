@@ -356,7 +356,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "why",
         help="one card's full story across kanban and git",
-        epilog="example: flightdeck why t_942dcbd1",
+        epilog="example: hscc project why t_942dcbd1",
     )
     p.add_argument("card_id", metavar="CARD_ID", help="card id to inspect")
     p.set_defaults(func=cmd_why)

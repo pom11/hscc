@@ -774,7 +774,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "qa",
         help="the manual-testing queue: what you actually have to test by hand",
-        epilog='example: flightdeck qa add flightdeck "verify the new dashboard loads"',
+        epilog='example: hscc project qa add hscc "verify the new dashboard loads"',
     )
     # `qa` takes ONE variadic positional (``project``) that serves every form:
     # the bare render ``qa`` / ``qa <project>``, ``qa add <project> \"desc\"``,

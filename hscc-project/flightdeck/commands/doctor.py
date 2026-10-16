@@ -856,8 +856,8 @@ def _render_json(report: list[dict]) -> dict:
 def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "doctor",
-        help="self-check: is flightdeck's view of the fleet trustworthy",
-        epilog="example: flightdeck doctor",
+        help="self-check: is hscc project's view of the fleet trustworthy",
+        epilog="example: hscc project doctor",
     )
     p.set_defaults(func=cmd_doctor)
 

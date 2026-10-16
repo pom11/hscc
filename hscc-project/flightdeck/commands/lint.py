@@ -114,7 +114,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
         "lint-cards",
         help="flag cards missing VERIFY / acceptance / concrete references; "
         "exit non-zero if any card would run in a repo MAIN TREE (read-only)",
-        epilog="example: flightdeck lint-cards",
+        epilog="example: hscc project lint-cards",
     )
     p.add_argument("board", nargs="?", default=None, help="board slug (default: all boards)")
     p.add_argument(

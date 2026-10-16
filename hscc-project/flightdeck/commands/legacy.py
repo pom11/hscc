@@ -405,7 +405,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
             "unmanaged cards on orphan/archived boards for review "
             "(read-only, never mutates)"
         ),
-        epilog="example: flightdeck legacy-cards --include-archived-boards",
+        epilog="example: hscc project legacy-cards --include-archived-boards",
     )
     p.add_argument(
         "--include-archived-boards",
@@ -420,7 +420,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     m = sub.add_parser(
         "migrate-card",
         help="re-home one card to the target project's board, safely",
-        epilog="example: flightdeck migrate-card t_a1b2c3 --to flightdeck --apply",
+        epilog="example: hscc project migrate-card t_a1b2c3 --to hscc --apply",
     )
     m.add_argument("card_id", help="the card id to migrate")
     m.add_argument(

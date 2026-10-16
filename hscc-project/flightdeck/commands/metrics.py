@@ -280,7 +280,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "metrics",
         help="fleet/project quality metrics: first-time-pass, stall, review latency",
-        epilog="example: flightdeck metrics flightdeck --since 7d",
+        epilog="example: hscc project metrics hscc --since 7d",
     )
     p.add_argument(
         "project",

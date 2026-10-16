@@ -145,7 +145,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "reconcile",
         help="close cards whose branch merged; flag dead/stale cards",
-        epilog="example: flightdeck reconcile --apply",
+        epilog="example: hscc project reconcile --apply",
     )
     p.add_argument(
         "--apply",

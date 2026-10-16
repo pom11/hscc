@@ -789,7 +789,7 @@ def _post(project: registry.Project, summary: str, args: argparse.Namespace) -> 
 def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "report", help="post a learnable completion summary to a project's topic",
-        epilog="example: flightdeck report flightdeck --all",
+        epilog="example: hscc project report hscc --all",
     )
     p.add_argument(
         "project",

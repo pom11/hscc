@@ -132,10 +132,10 @@ def run(args: argparse.Namespace, registry_path: str) -> int:
 
     if mechanism in ("non-git", "not-installed", "unknown"):
         lines = [
-            "  cannot self-update: flightdeck was not installed from a git",
+            "  cannot self-update: was not installed from a git",
             "  source this tool can pull (pip install a package from an index,",
             "  or the distribution could not be found in this environment).",
-            "  to update, reinstall manually from the flightdeck git repo.",
+            "  to update, reinstall manually from the hscc-project git repo.",
         ]
         make_console().print(panel(
             "flightdeck update",
@@ -193,8 +193,8 @@ def run(args: argparse.Namespace, registry_path: str) -> int:
 def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "update",
-        help="check the installed flightdeck against its git upstream, or update it (--apply-gated, no daemon)",
-        epilog="example: flightdeck update   (dry-run plan)   |   flightdeck update --apply   (actually update)",
+        help="check the installed hscc project tooling against its git upstream, or update it (--apply-gated, no daemon)",
+        epilog="example: hscc project update   (dry-run plan)   |   hscc project update --apply   (actually update)",
     )
     p.add_argument(
         "--apply",

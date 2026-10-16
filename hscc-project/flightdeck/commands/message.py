@@ -335,7 +335,7 @@ def cmd_dispatch(args: argparse.Namespace, projects: list[registry.Project]) -> 
         if dependents_notice:
             plan_lines.append(f"  dependents: {escape(dependents_notice)}")
         make_console().print(panel("message dispatch — plan", "\n".join(plan_lines)))
-        print("dry-run: pass --apply to create the card (Telegram removed, so there is nothing to announce).", file=sys.stderr)
+        print("dry-run: pass --apply to create the card (no announce surface — nothing to announce).", file=sys.stderr)
         return 0
 
     # 0. Cluster-readiness guard (§6-dispatch-guard, docs/design/idle-autodown.md).
@@ -376,7 +376,7 @@ def cmd_dispatch(args: argparse.Namespace, projects: list[registry.Project]) -> 
     # is complete once the card exists — nothing is announced.
     make_console().print(status_panel(
         f"card {esc(card_id)} created on board {esc(repr(board))} "
-        "(Telegram removed — not announced).",
+        "(not announced — the announce surface was removed).",
         status="ok", title="message dispatch"))
     return 0
 
@@ -406,12 +406,12 @@ def cmd_broadcast(args: argparse.Namespace, projects: list[registry.Project]) ->
 # --------------------------------------------------------------------------- #
 
 def build_subparser(sub: argparse._SubParsersAction) -> None:
-    p = sub.add_parser("message", help="send / read / dispatch / broadcast by project",
-                       epilog="example: flightdeck message dispatch flightdeck \"ship 0.6.0\" --apply")
+    p = sub.add_parser("message", help="deliver a message or dispatch a card by project",
+                       epilog="example: hscc project message dispatch hscc \"ship 0.6.0\" --apply")
     msub = p.add_subparsers(dest="message_cmd", metavar="MESSAGE_CMD")
 
     sp = msub.add_parser("send", help="deliver a message to a project's live REPL pane (--apply)",
-                         epilog='example: flightdeck message send flightdeck "standing up now" --apply')
+                         epilog='example: hscc project message send hscc "standing up now" --apply')
     sp.add_argument("project", nargs="?", default=None,
                     help="project name in the registry (default: detected from cwd)")
     sp.add_argument("message", nargs="?", default=None, help="message text to deliver")
@@ -420,15 +420,24 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                          "without it this is a dry run — renders only)")
     sp.set_defaults(func=cmd_send)
 
-    sp = msub.add_parser("read", help="list a project's recorded messages (Telegram removed — no live source)",
-                         epilog="example: flightdeck message read flightdeck -n 20")
+    # DEAD (CLI-HELP audit 2026-10-15, card F1): `read` has no live source and
+    # `broadcast` no delivery mechanism since Telegram was removed. Decision:
+    # HIDE both from the help surface — the handlers stay invokable and their
+    # tests keep running; documented in docs/audits/CLI_HELP_2026-10-15.md.
+    # Mechanism: argparse builds the subcommand LISTING only from parsers that
+    # pass `help=` (each becomes a _ChoicesPseudoAction), and `help=SUPPRESS`
+    # is not honoured there (it prints "==SUPPRESS==" verbatim), so omitting
+    # `help=` is what removes the verb from the listing. `--help` on the verb
+    # itself still works: `choices` is untouched.
+    sp = msub.add_parser("read",
+                         epilog="example: hscc project message read hscc -n 20")
     sp.add_argument("project", nargs="?", default=None,
                     help="project name in the registry (default: detected from cwd)")
     sp.add_argument("-n", type=int, default=10, help="number of messages (default: 10)")
     sp.set_defaults(func=cmd_read)
 
     sp = msub.add_parser("dispatch", help="create a card on a project's board",
-                         epilog='example: flightdeck message dispatch flightdeck "ship 0.6.0" --apply')
+                         epilog='example: hscc project message dispatch hscc "ship 0.6.0" --apply')
     sp.add_argument("project", nargs="?", default=None,
                     help="project name in the registry (default: detected from cwd)")
     sp.add_argument("task", nargs="?", default=None, help="card title on the project's board")
@@ -461,8 +470,9 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     )
     sp.set_defaults(func=cmd_dispatch)
 
-    sp = msub.add_parser("broadcast", help="render one message for several projects (no delivery — Telegram removed)",
-                         epilog='example: flightdeck message broadcast "outage over" --to flightdeck,hscc')
+    # DEAD (see `read` above): hidden from the help listing, handler kept.
+    sp = msub.add_parser("broadcast",
+                         epilog='example: hscc project message broadcast "outage over" --to hscc,ecofire-app')
     sp.add_argument("message", help="message text to broadcast")
     sp.add_argument("--to", metavar="a,b,c", default=None, help="comma-separated project names (default: all)")
     sp.set_defaults(func=cmd_broadcast)

@@ -878,7 +878,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "roadmap",
         help="show a roadmap, or add/move/done/adopt items in ROADMAP.md",
-        epilog="example: flightdeck roadmap show flightdeck",
+        epilog="example: hscc project roadmap show hscc",
     )
     subsub = p.add_subparsers(dest="roadmap_cmd", metavar="ROADMAP_CMD")
 
@@ -886,19 +886,19 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p.set_defaults(func=cmd_show, project=None)
 
     sp = subsub.add_parser("show", help="show one project's roadmap (or all)",
-                           epilog="example: flightdeck roadmap show flightdeck")
+                           epilog="example: hscc project roadmap show hscc")
     sp.add_argument("project", nargs="?", default=None,
                     help="project name in the registry (default: all)")
     sp.set_defaults(func=cmd_show)
 
     pp = subsub.add_parser("progress", help="per-milestone card progress",
-                           epilog="example: flightdeck roadmap progress flightdeck")
+                           epilog="example: hscc project roadmap progress hscc")
     pp.add_argument("project", nargs="?", default=None,
                     help="project name in the registry (default: all)")
     pp.set_defaults(func=cmd_progress)
 
     ap = subsub.add_parser("add", help="add an item to Now/Next/Later",
-                           epilog='example: flightdeck roadmap add flightdeck "ship 0.6.0" --apply')
+                           epilog='example: hscc project roadmap add hscc "ship 0.6.0" --apply')
     ap.add_argument("project", help="project name in the registry")
     ap.add_argument("item", help="item text to add")
     ap.add_argument(
@@ -908,7 +908,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     ap.set_defaults(func=cmd_add)
 
     mp = subsub.add_parser("move", help="promote/demote an item between sections",
-                           epilog='example: flightdeck roadmap move flightdeck "0.6.0" --to next --apply')
+                           epilog='example: hscc project roadmap move hscc "0.6.0" --to next --apply')
     mp.add_argument("project", help="project name in the registry")
     mp.add_argument("item", help="substring matching the item text")
     mp.add_argument(
@@ -918,14 +918,14 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     mp.set_defaults(func=cmd_move)
 
     dp = subsub.add_parser("done", help="tick an item's checkbox",
-                           epilog='example: flightdeck roadmap done flightdeck "0.6.0" --apply')
+                           epilog='example: hscc project roadmap done hscc "0.6.0" --apply')
     dp.add_argument("project", help="project name in the registry")
     dp.add_argument("item", help="substring matching the item text")
     dp.set_defaults(func=cmd_done)
 
     adp = subsub.add_parser(
         "adopt", help="promote a reviewed docs/ROADMAP.draft.md into ROADMAP.md",
-        epilog="example: flightdeck roadmap adopt flightdeck --apply",
+        epilog="example: hscc project roadmap adopt hscc --apply",
     )
     adp.add_argument("project", help="project name in the registry")
     adp.add_argument(

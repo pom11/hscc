@@ -28,7 +28,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "verify",
         help="run the registry verify command, record the result",
-        epilog="example: flightdeck verify --all",
+        epilog="example: hscc project verify --all",
     )
     p.add_argument(
         "project",

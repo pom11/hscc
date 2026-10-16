@@ -268,7 +268,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "monitor",
         help="live cluster activity view across all boards (refreshes every --time seconds)",
-        epilog="example: flightdeck monitor --time 30",
+        epilog="example: hscc project monitor --time 30",
     )
     p.add_argument(
         "--time",

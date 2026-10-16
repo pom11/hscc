@@ -129,10 +129,10 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
         "map-sessions",
         help="propose a project owner for each unmapped Telegram session (deterministic first, orchestrator for the rest)",
         epilog=(
-            "example: flightdeck map-sessions\n"
-            "         flightdeck map-sessions --json\n"
-            "         flightdeck map-sessions --apply\n"
-            "         flightdeck map-sessions --ask-module mypkg.ask:call"
+            "example: hscc project map-sessions\n"
+            "         hscc project --json map-sessions\n"
+            "         hscc project map-sessions --apply\n"
+            "         hscc project map-sessions --ask-module mypkg.ask:call"
         ),
     )
     p.add_argument(

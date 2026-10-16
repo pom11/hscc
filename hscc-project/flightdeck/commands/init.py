@@ -265,8 +265,8 @@ def _env_report(args: argparse.Namespace) -> list[tuple[str, dict]]:
 def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "init",
-        help="one-command bootstrap for a new machine: create ~/.flightdeck, seed it, check the environment",
-        epilog="example: flightdeck init --apply",
+        help="one-command bootstrap for a new machine: create the hscc-project home, seed it, check the environment",
+        epilog="example: hscc project init --apply",
     )
     p.add_argument(
         "--apply",
@@ -277,7 +277,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
         "--home",
         default=None,
         metavar="PATH",
-        help="flightdeck home to create/seed (default: ~/.flightdeck)",
+        help="hscc-project home to create/seed (default: the hscc-project home dir)",
     )
     p.set_defaults(func=cmd_init)
 

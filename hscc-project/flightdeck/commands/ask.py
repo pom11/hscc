@@ -203,7 +203,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
             "render a prompt template filled with project context and print it; "
             "or 'ask template list|show|edit' to manage the template store"
         ),
-        epilog="example: flightdeck ask flightdeck standup --set focus=q3 --dry-run",
+        epilog="example: hscc project ask hscc standup --set focus=q3 --dry-run",
     )
     p.add_argument(
         "parts",

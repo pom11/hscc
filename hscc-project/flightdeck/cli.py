@@ -25,14 +25,14 @@ _NOT_IMPLEMENTED = (
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="flightdeck",
+        prog="hscc project",
         description="Mission control for a multi-project agent fleet.",
         epilog=(
             "examples:\n"
-            "  flightdeck standup                  one-shot fleet digest\n"
-            "  flightdeck report flightdeck --all  post completion summaries\n"
-            "  flightdeck qa                       show the manual-testing queue\n"
-            "Try `flightdeck <COMMAND> --help` for per-command usage examples."
+            "  hscc project standup                one-shot fleet digest\n"
+            "  hscc project report hscc --all      post completion summaries\n"
+            "  hscc project qa                     show the manual-testing queue\n"
+            "Try `hscc project <COMMAND> --help` for per-command usage examples."
         ),
     )
     parser.add_argument(
@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--registry",
         default=registry.DEFAULT_REGISTRY,
         metavar="PATH",
-        help="path to registry.yaml (default: %(default)s)",
+        help="path to registry.yaml (default: <hscc-project home>/registry.yaml)",
     )
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
     parser.set_defaults(_command_modules=_install_commands(sub))

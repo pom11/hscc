@@ -1183,7 +1183,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     psub = _project_subparsers(sub)
 
     sp = psub.add_parser("sync", help="adopt existing repos/topics/boards into the registry",
-                         epilog="example: flightdeck project sync --root ~/dev --apply")
+                         epilog="example: hscc project project sync --root ~/dev --apply")
     sp.add_argument(
         "--root",
         dest="roots",

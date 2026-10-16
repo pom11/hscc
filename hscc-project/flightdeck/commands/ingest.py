@@ -821,7 +821,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "ingest",
         help="draft a project's ROADMAP.md from existing context (skills, repo)",
-        epilog="example: flightdeck ingest flightdeck --apply",
+        epilog="example: hscc project ingest hscc --apply",
     )
     p.add_argument("project", help="project name in the registry")
     p.add_argument(

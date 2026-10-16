@@ -309,7 +309,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "hygiene",
         help="detect board decay: duplicate cards, triage traps, stale worktrees",
-        epilog="example: flightdeck hygiene --apply",
+        epilog="example: hscc project hygiene --apply",
     )
     p.add_argument(
         "--apply",
