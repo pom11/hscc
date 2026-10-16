@@ -42,8 +42,13 @@ re-runs the parser and fails on any drift against the committed table.
 Per drawer row: enter via drawer -> title marker on screen -> back to drawer
 -> tap the SAME row again (2.9.0 dead-end regression) -> next row.
 One level in where detail exists: projects -> project -> chat; cards ->
-card detail; each back returns to its predecessor (back-button label
-empirically verified on the iPhone 16 sim).
+card detail; each back returns to its predecessor — PROVEN BY LANDING
+(the marker of the predecessor screen must render after the pop), not by
+asserting the back button's label: a screen pushed via
+`router.projectsPath.append` on top of a value-less NavigationLink push
+inherits the ROOT screen's title as its back label (chat under a project
+overview reads "Projects", AX-verified on iPhone 16 / iOS 26.3), so the
+label is observation-only while the landing is the contract.
 Pull-to-refresh: ONE slow XCUICoordinate drag (`press(forDuration: 1.0,
 thenDragTo:)`). PROVEN 2026-10-16 on iPhone 16 / iOS 26.3: `swipeDown()` on
 any element NEVER fires SwiftUI `.refreshable` (served-count probe stayed at

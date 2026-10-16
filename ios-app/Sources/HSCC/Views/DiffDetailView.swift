@@ -281,6 +281,15 @@ struct DiffDetailView: View {
     /// A configured client from the current settings, or nil when the operator
     /// hasn't set a usable host/port/token yet. Mirrors CardDetailView.
     private func makeClient() -> HSCCClient? {
+        #if DEBUG
+        // Fixture-mode parity — see CardDetailView.makeClient (t_810ab152):
+        // the diff is reached from card detail, and without the bypass the
+        // walker's card-detail walk would stop one level short.
+        if DebugHarness.fixturesEnabled {
+            return HSCCClient(host: "fixtures.invalid", port: 8788,
+                              token: "debug-fixture-token")
+        }
+        #endif
         guard settings.isConfigured,
               let token = settings.token,
               let port = Int(settings.port) else { return nil }

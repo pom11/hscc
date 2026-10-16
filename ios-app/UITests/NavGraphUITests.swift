@@ -173,15 +173,18 @@ final class NavGraphUITests: XCTestCase {
     private func assertMarker(_ app: XCUIApplication, _ marker: String, screen: String,
                               edge: String, timeout: TimeInterval = 8,
                               file: StaticString = #filePath, line: UInt = #line) {
-        // Poll BOTH element kinds: section headers/titles are staticTexts,
-        // toolbar actions (Refresh chats) are buttons. Querying one after
-        // the other's full timeout would burn seconds per screen.
+        // Poll THREE element kinds: section headers/titles are staticTexts,
+        // toolbar actions (Refresh chats) are buttons, and an inline
+        // navigationTitle (e.g. "hscc · Board") surfaces on the NAVIGATION
+        // BAR element rather than as a static text. Querying one after the
+        // other's full timeout would burn seconds per screen.
         let text = app.staticTexts[marker]
         let button = app.buttons[marker]
+        let bar = app.navigationBars[marker]
         let deadline = Date().addingTimeInterval(timeout)
         var shown = false
         while Date() < deadline {
-            if text.exists || button.exists { shown = true; break }
+            if text.exists || button.exists || bar.exists { shown = true; break }
             usleep(250_000)
         }
         XCTAssertTrue(shown,
@@ -311,8 +314,11 @@ final class NavGraphUITests: XCTestCase {
         tapRow(app, raw: "projects", screen: "projects")
         assertMarker(app, "Refresh projects", screen: "projects", edge: "list never rendered")
 
-        // projects -> project detail ("hscc" is the committed fixture project)
-        app.staticTexts["hscc"].waitAndTap()
+        // projects -> project detail. The row is ONE combined AX button
+        // ("hscc, hscc, topic 2046" — title + meta combined per spec §5) and
+        // contains TWO staticTexts labeled "hscc", so a staticText query is
+        // ambiguous by design; tap the combined button.
+        tapContaining(app, "hscc", screen: "projects")
         assertMarker(app, "Open Chat for hscc", screen: "projectDetail",
                      edge: "project overview never rendered after tapping the project row")
 
@@ -320,9 +326,8 @@ final class NavGraphUITests: XCTestCase {
         app.buttons["Open Chat for hscc"].tap()
         assertMarker(app, "Send", screen: "chat",
                      edge: "chat screen never rendered from the project overview")
-        tapBack(app, expectedPredecessor: "hscc", screen: "chat")
-        assertMarker(app, "Open Chat for hscc", screen: "projectDetail",
-                     edge: "back from chat did not return to the project overview")
+        tapBack(app, landsOnMarker: "Open Chat for hscc", screen: "chat",
+                expectedLabel: "hscc")
 
         // detail -> board / settings (NavigationLinks expose their label as a
         // button; the overview also carries a non-tappable "Board" label in
@@ -330,17 +335,18 @@ final class NavGraphUITests: XCTestCase {
         tapLabeled(app, "Board", screen: "projectDetail")
         assertMarker(app, "hscc · Board", screen: "board",
                      edge: "board screen never rendered from the project overview")
-        tapBack(app, expectedPredecessor: "hscc", screen: "board")
+        tapBack(app, landsOnMarker: "Open Chat for hscc", screen: "board",
+                expectedLabel: "hscc")
 
         tapLabeled(app, "Settings", screen: "projectDetail")
         assertMarker(app, "hscc · Settings", screen: "projectSettings",
                      edge: "project settings never rendered from the project overview")
-        tapBack(app, expectedPredecessor: "hscc", screen: "projectSettings")
+        tapBack(app, landsOnMarker: "Open Chat for hscc", screen: "projectSettings",
+                expectedLabel: "hscc")
 
         // overview -> projects (predecessor return for the first push)
-        tapBack(app, expectedPredecessor: "Projects", screen: "projectDetail")
-        assertMarker(app, "Refresh projects", screen: "projects",
-                     edge: "back from the project overview did not return to the list")
+        tapBack(app, landsOnMarker: "Refresh projects", screen: "projectDetail",
+                expectedLabel: "Projects")
 
         // and the drawer is still one tap away
         backToDrawer(app, screen: "projects")
@@ -359,9 +365,8 @@ final class NavGraphUITests: XCTestCase {
         tapContaining(app, "t_049d6986", screen: "cards")
         assertMarker(app, "Files & diff", screen: "cardDetail",
                      edge: "card detail never rendered after tapping a card row")
-        tapBack(app, expectedPredecessor: "Cards", screen: "cardDetail")
-        assertMarker(app, "Refresh cards", screen: "cards",
-                     edge: "back from card detail did not return to the list")
+        tapBack(app, landsOnMarker: "Refresh cards", screen: "cardDetail",
+                expectedLabel: "Cards")
     }
 
     /// Code-derived route coverage: every ProjectRoute registered in
@@ -494,25 +499,38 @@ final class NavGraphUITests: XCTestCase {
 
     // MARK: - Back-button helper
 
-    /// Tap the nav-bar back button and assert the AX label of the screen we
-    /// land on matches the predicted predecessor's title. A push with no
-    /// working predecessor return is a dead end by definition.
-    private func tapBack(_ app: XCUIApplication, expectedPredecessor: String, screen: String,
+    /// Tap the nav-bar back button and PROVE the predecessor return by
+    /// landing: after the pop, `landsOnMarker` must render. The back
+    /// button is found by its AX identifier ('BackButton' — verified on
+    /// this device) with a label fallback, NOT by asserting its label:
+    /// a screen pushed via `router.projectsPath.append` on top of a
+    /// value-less NavigationLink push gets the ROOT screen's title as its
+    /// back label (chat under the project overview reads "Projects", not
+    /// "hscc" — AX-verified 2026-10-16; the pop itself lands correctly).
+    /// The landing assertion is what makes a broken predecessor a dead
+    /// end, so that is the contract we assert. A mismatching back LABEL
+    /// is printed as an observation, not a failure.
+    private func tapBack(_ app: XCUIApplication, landsOnMarker: String, screen: String,
+                         expectedLabel: String? = nil,
                          file: StaticString = #filePath, line: UInt = #line) {
         let bar = app.navigationBars.firstMatch
         XCTAssertTrue(bar.waitForExistence(timeout: 5),
                       "DEAD END [\(screen)]: no navigation bar — nowhere to go back to",
                       file: file, line: line)
-        // The system back button carries the predecessor's title as its label
-        // (verified empirically on this device — titles >~13 chars collapse
-        // to "Back", which the walk avoids with short fixture names).
-        let back = bar.buttons[expectedPredecessor].exists
-            ? bar.buttons[expectedPredecessor]
-            : bar.buttons["Back"]
+        let byId = bar.buttons.matching(NSPredicate(format: "identifier == 'BackButton'")).firstMatch
+        let back = byId.exists ? byId : bar.buttons.firstMatch
         XCTAssertTrue(back.exists,
-                      "DEAD END [\(screen)]: no back button labelled “\(expectedPredecessor)” — no predecessor return",
+                      "DEAD END [\(screen)]: no back button on the nav bar — no predecessor return",
                       file: file, line: line)
+        if let expectedLabel, back.label != expectedLabel {
+            // Observation only (see doc comment): label quirk, not a dead end.
+            print("NOTE [\(screen)]: back button labelled “\(back.label)” "
+                  + "(expected “\(expectedLabel)”) — label quirk; landing is what we assert")
+        }
         back.tap()
+        assertMarker(app, landsOnMarker, screen: screen,
+                     edge: "back did not return to the predecessor screen",
+                     file: file, line: line)
     }
 }
 
