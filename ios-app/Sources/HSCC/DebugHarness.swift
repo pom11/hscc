@@ -75,12 +75,12 @@ enum DebugHarness {
     }
 
     /// True when the drawer must be OPEN at launch (t_5ed5d281 UI tests). A
-    /// launch with `HSCC_DEBUG_OPEN_DRAWER=1` puts NavigationSplitView into
-    /// the exact compact presentation a user's top-left toggle tap produces
-    /// (the sidebar column filling the screen), so XCUITest can assert the
-    /// drawer walk deterministically from a known start state instead of
-    /// first fighting its way into the drawer. The seam only CHOOSES the
-    /// column; every navigation rule under test is the shipping one.
+    /// launch with `HSCC_DEBUG_OPEN_DRAWER=1` starts inside the app-owned
+    /// slide-over panel (AppShell.drawerOpen), i.e. in the exact state a
+    /// user's `drawerOpen` tap produces, so XCUITest can assert the drawer
+    /// walk deterministically from a known start state instead of first
+    /// fighting its way into the drawer. The seam only CHOOSES the start
+    /// state; every navigation rule under test is the shipping one.
     static var openDrawerAtLaunch: Bool {
         ProcessInfo.processInfo.environment["HSCC_DEBUG_OPEN_DRAWER"] == "1"
     }

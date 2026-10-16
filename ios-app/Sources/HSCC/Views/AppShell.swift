@@ -2,11 +2,14 @@ import SwiftUI
 
 // MARK: - App shell (IOS_REDESIGN 2026-10-14 §3)
 //
-// One app-wide `NavigationStack` inside a `NavigationSplitView` drawer replaces
-// the old three-tab TabView. On iPhone (compact width) NavigationSplitView
-// renders the sidebar as a slide-over drawer with the system's own top-left
-// toggle and edge-swipe reveal — requirement 2, without hand-rolling a
-// gesture that fights the transcript's scroll.
+// One app-wide `NavigationStack` replaces the old three-tab TabView. The
+// drawer (t_5ed5d281) is a slide-over panel the shell owns, NOT the compact
+// column of a NavigationSplitView: on iPhone compact (iOS 26.3) the system
+// sidebar column is a dead end — no dismiss affordance of any kind once it
+// takes the screen, row taps never leave it, and the documented column
+// controls are inert (verified RED-first on the iPhone 16 simulator in
+// UITests/DrawerNavigationUITests.swift). Explicit `drawerOpen`/`drawerClose`
+// buttons replace the system toggle and the (non-existent) swipe-back.
 //
 // The home screen alone carries the dock (§3.2); every other screen reaches
 // everything through the drawer. Deep links keep working: `DeepLinkRouter.
@@ -131,19 +134,42 @@ struct AppShell: View {
     /// PHASE2_PROGRESS_t_25aed701 "Screenshots"). Unknown values and Release
     /// builds get the normal `.home` default; this NEVER guesses a screen.
     /// (Fixture seeding for the same launch runs in onAppear below.)
-    /// Debug-only drawer-open seam (t_5ed5d281): `HSCC_DEBUG_OPEN_DRAWER=1`
-    /// attempts the two documented ways to present the sidebar column at
-    /// launch (selection nil = documented "sidebar first when no selection";
-    /// delayed preferredCompactColumn write). iPhone 16 / iOS 26.3 XCUITest
-    /// evidence (DrawerNavigationUITests, 2026-10-15): the compact column
-    /// ignores BOTH — selection .home stays on screen and the column write
-    /// never lands. The shipping path of this flag is fixed in commit B.
     static func initialSelection() -> AppDestination? {
         #if DEBUG
         if let screen = DebugHarness.requestedScreen() { return screen }
-        if DebugHarness.openDrawerAtLaunch { return nil }
         #endif
         return .home
+    }
+
+    /// Whether the drawer is on screen (t_5ed5d281). The drawer is NOT the
+    /// NavigationSplitView sidebar column any more: on iPhone compact
+    /// (iOS 26.3) that column is a dead end — once the system presents it
+    /// (toggle/edge-swipe) it exposes ZERO dismiss affordances, row taps do
+    /// not switch columns, and both column controls the field brief names
+    /// (`preferredCompactColumn`, `columnVisibility`) are inert from the app
+    /// side in BOTH directions (RED evidence: DrawerNavigationUITests,
+    /// iPhone 16 sim, this card). The shell therefore owns the presentation
+    /// outright: a slide-over panel over the one app-wide stack. Any row
+    /// activation closes it (`go`), the panel's own close button closes it,
+    /// and the `drawerOpen` toolbar button — visible on every screen's nav
+    /// bar — opens it. `HSCC_DEBUG_OPEN_DRAWER=1` starts inside the drawer
+    /// so the XCUITest walk begins in the operator's exact stuck state;
+    /// Release builds only ever see `false`.
+    @State private var drawerOpen = AppShell.initialDrawerOpen()
+
+    static func initialDrawerOpen() -> Bool {
+        #if DEBUG
+        if DebugHarness.openDrawerAtLaunch { return true }
+        #endif
+        return false
+    }
+
+    private func openDrawer() {
+        withAnimation(.easeInOut(duration: 0.2)) { drawerOpen = true }
+    }
+
+    private func closeDrawer() {
+        withAnimation(.easeInOut(duration: 0.2)) { drawerOpen = false }
     }
 
     /// Queued messages dropped because the user switched clusters mid-queue
@@ -151,10 +177,7 @@ struct AppShell: View {
     @State private var droppedBanner: [OfflineSendQueue.QueuedMessage]?
 
     var body: some View {
-        NavigationSplitView {
-            Sidebar(selection: drawerBinding, approvalCount: approvals.pendingCount)
-                .navigationTitle("HSCC")
-        } detail: {
+        ZStack(alignment: .leading) {
             NavigationStack(path: $router.projectsPath) {
                 destinationView(selection ?? .home)
                     .navigationDestination(for: AppDestination.self) { destinationView($0) }
@@ -166,8 +189,36 @@ struct AppShell: View {
                     .navigationDestination(for: ProjectRoute.self) { route in
                         projectRouteView(route)
                     }
+                    .toolbar {
+                        // THE drawer entry (t_5ed5d281): an explicit, app-owned
+                        // affordance on every screen — the system's compact
+                        // split-view toggle was the only opener before, and it
+                        // vanishes the moment the drawer takes the screen.
+                        // Trailing on purpose: HomeView already owns the
+                        // leading spot (its search button); the drawer entry
+                        // sits opposite it, where no screen's own leading
+                        // item can crowd it out.
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button {
+                                openDrawer()
+                            } label: {
+                                Image(systemName: "sidebar.left")
+                            }
+                            .accessibilityLabel("Menu")
+                            .accessibilityIdentifier("drawerOpen")
+                        }
+                    }
             }
             .id(settings.activeClusterID)   // cluster switch = clean rebuild
+            // The drawer is a modal surface: while it is up, the screen
+            // behind it is not part of the accessibility tree (same rule a
+            // sheet follows — and it keeps row labels like "Home" unique to
+            // the drawer for tests and VoiceOver alike).
+            .accessibilityHidden(drawerOpen)
+
+            if drawerOpen {
+                drawerOverlay
+            }
         }
         .overlay(alignment: .bottom) { dropBanner }
         .onReceive(OfflineSendQueue.shared.$drainedDueToClusterSwitch) { dropped in
@@ -206,6 +257,11 @@ struct AppShell: View {
         .onChange(of: router.requestedTab) { _, requested in
             guard let requested else { return }
             selection = normalized(AppDestination(tab: requested))
+            // A deep link/tab request must actually LAND on its destination —
+            // if the drawer happens to be open it must not stay over it
+            // (t_5ed5d281: the drawer is now an app-owned surface, the
+            // system column hid this case behind the dead end).
+            closeDrawer()
             router.requestedTab = nil
         }
         .alert("Couldn't open that link", isPresented: Binding(
@@ -288,6 +344,54 @@ struct AppShell: View {
         }
     }
 
+    /// The drawer itself (t_5ed5d281): a slide-over panel the shell presents
+    /// and dismisses through its own buttons — the one presentation on iPhone
+    /// compact that provably leaves (RED evidence in the header comment).
+    /// The dim scrim closes it too (tap-outside, the gesture users expect).
+    private var drawerOverlay: some View {
+        ZStack(alignment: .leading) {
+            Button {
+                closeDrawer()
+            } label: {
+                Rectangle().fill(.ultraThinMaterial)
+                    .ignoresSafeArea()
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close menu")
+            .accessibilityIdentifier("drawerScrim")
+
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    Text("HSCC")
+                        .font(.largeTitle.bold())
+                        .foregroundColor(Theme.Semantic.onSurface)
+                    Spacer()
+                    Button {
+                        closeDrawer()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title2)
+                            .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close menu")
+                    .accessibilityIdentifier("drawerClose")
+                }
+                .padding(.horizontal, Theme.Spacing.lg.rawValue)
+                .padding(.top, Theme.Spacing.md.rawValue)
+                .padding(.bottom, Theme.Spacing.xs.rawValue)
+
+                Sidebar(selection: drawerBinding, approvalCount: approvals.pendingCount)
+            }
+            .frame(maxWidth: 320)
+            .frame(maxHeight: .infinity)
+            .background(Theme.Semantic.surfaceRaised)
+            .transition(.move(edge: .leading))
+        }
+    }
+
     /// Drawer selection with the stack-consistency rule (see `go`). Both the
     /// Sidebar and Home's hero/tiles/dock drive the root through this.
     private var drawerBinding: Binding<AppDestination?> {
@@ -331,12 +435,17 @@ struct AppShell: View {
     private func go(_ destination: AppDestination?) {
         selection = normalized(destination)
         router.projectsPath = []
+        // THE dead-end fix (t_5ed5d281): any row activation leaves the drawer
+        // — ALWAYS, even when the selection value is unchanged (Home re-tap
+        // while Home is current, the operator's stuck case).
+        closeDrawer()
     }
 
     /// Legacy deep-link / intent tabs map onto drawer destinations.
     private func applyPendingTabRequest() {
         if let requested = router.requestedTab {
             selection = normalized(AppDestination(tab: requested))
+            closeDrawer()   // same rule as the requestedTab onChange (t_5ed5d281)
             router.requestedTab = nil
         }
     }

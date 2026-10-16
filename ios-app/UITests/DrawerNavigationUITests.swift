@@ -60,24 +60,16 @@ final class DrawerNavigationUITests: XCTestCase {
                       "Home hero is missing", file: file, line: line)
     }
 
-    /// Tap a drawer row by its stable identifier (the AppDestination rawValue
-    /// every sidebar row exposes). Scoped to the drawer panel container:
-    /// while the drawer is up the screen behind it still renders its own nav
-    /// title (e.g. "Home") into the AX tree — the first GREEN run hit exactly
-    /// that ambiguity — and a wrong pick (tapping the background title)
-    /// would silently NOT leave the drawer: the bug class this suite pins.
-    private func tapRow(_ app: XCUIApplication, id: String, label: String) {
-        let panel = app.groups["drawerPanel"]
-        XCTAssertTrue(panel.waitForExistence(timeout: 5),
-                      "drawer panel container not on screen")
-        let cell = panel.cells[id]
-        if cell.exists {
-            cell.tap()
-            return
-        }
-        let row = panel.staticTexts[label]
+    /// Tap a drawer row by its UNIQUE identifier (each sidebar row labels
+    /// its text "drawerRow:<rawValue>"). A bare label query is ambiguous
+    /// while the drawer is up — the screen behind still renders its own nav
+    /// title (e.g. "Home"), which the first GREEN run proved — and a wrong
+    /// pick (tapping the background title) would silently NOT leave the
+    /// drawer: the bug class this suite pins.
+    private func tapRow(_ app: XCUIApplication, rawValue: String, file: StaticString = #filePath, line: UInt = #line) {
+        let row = app.staticTexts["drawerRow:\(rawValue)"]
         XCTAssertTrue(row.waitForExistence(timeout: 5),
-                      "drawer row \(id) not found inside the panel")
+                      "drawer row \(rawValue) not on screen", file: file, line: line)
         row.tap()
     }
 
@@ -96,7 +88,7 @@ final class DrawerNavigationUITests: XCTestCase {
         // THE dead-end case: Home is already the current selection, the row
         // re-tap writes the SAME tag — the compact stack must still leave
         // the drawer.
-        tapRow(app, id: "home", label: "Home")
+        tapRow(app, rawValue: "home")
 
         assertDrawer(app, open: false)
         assertHome(app)
@@ -114,7 +106,7 @@ final class DrawerNavigationUITests: XCTestCase {
         assertDrawer(app, open: true)
 
         // Drawer -> Home row (same selection) -> drawer must be left.
-        tapRow(app, id: "home", label: "Home")
+        tapRow(app, rawValue: "home")
         assertDrawer(app, open: false)
         assertHome(app)
 
@@ -135,7 +127,7 @@ final class DrawerNavigationUITests: XCTestCase {
         defer { app.terminate() }
         assertDrawer(app, open: true)
 
-        tapRow(app, id: "chats", label: "Chats")
+        tapRow(app, rawValue: "chats")
         assertDrawer(app, open: false)
         XCTAssertTrue(app.buttons["Refresh chats"].waitForExistence(timeout: 5),
                       "Chats detail never appeared after tapping the drawer row")
@@ -145,7 +137,7 @@ final class DrawerNavigationUITests: XCTestCase {
         assertDrawer(app, open: true)
 
         // Drawer -> Home without choosing anything else.
-        tapRow(app, id: "home", label: "Home")
+        tapRow(app, rawValue: "home")
         assertHome(app)
     }
 

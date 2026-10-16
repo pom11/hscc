@@ -2,10 +2,12 @@ import SwiftUI
 
 // MARK: - Drawer (IOS_REDESIGN 2026-10-14 §3.1)
 //
-// The sidebar replaces the old three-tab bar. Inside a NavigationSplitView on
-// iPhone it renders as a slide-over drawer with the system's own top-left
-// toggle and edge-swipe reveal, so the gesture is the OS one and never fights
-// the transcript's scroll.
+// The drawer replaces the old three-tab bar. It is presented by AppShell as
+// a slide-over panel the shell itself opens and closes (t_5ed5d281): on
+// iPhone compact the NavigationSplitView sidebar column proved to be a dead
+// end — zero dismiss affordances once it takes the screen, and inert column
+// controls — so the shell owns the presentation and every row activation
+// closes the panel through `go`.
 //
 // Grouped by task frequency for a single operator: Work / Cluster / Knowledge /
 // App. Every screen that lived under the tab bar or buried in ClusterView's
@@ -106,6 +108,11 @@ struct Sidebar: View {
     private func row(_ destination: AppDestination, badge: Int = 0) -> some View {
         Label {
             Text(destination.title)
+                // Stable, UNIQUE test/AX address: while the drawer is up the
+                // screen behind it still renders its own nav bar title
+                // (e.g. "Home") into the AX tree, so a bare label query is
+                // ambiguous by construction (iPhone 16 XCUITest, 2026-10-15).
+                .accessibilityIdentifier("drawerRow:\(destination.rawValue)")
         } icon: {
             Image(systemName: destination.symbol)
                 .foregroundColor(Theme.Semantic.onSurfaceMuted)
@@ -113,6 +120,19 @@ struct Sidebar: View {
         .tag(destination)
         .badge(badge > 0 ? "\(badge)" : nil)
         .accessibilityLabel(accessibilityText(for: destination, badge: badge))
+        // THE dead-end mechanism, fixed here (t_5ed5d281): List(selection:)
+        // only writes the binding when the tapped tag DIFFERS from the
+        // current selection — re-tapping the already-selected row is silent,
+        // so `go` never ran and the drawer never closed. An explicit tap
+        // handler fires for EVERY activation, same value included; the
+        // setter is idempotent, so a row tap that also moves the selection
+        // just runs `go` twice with identical effect. maxWidth .infinity so
+        // the tap target spans the full row, not just the label.
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            selection = destination
+        }
     }
 
     /// A pending-approval count must not be colour-only (spec §9): the number
