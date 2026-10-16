@@ -203,30 +203,6 @@
       "example": "width=80 overflow:   Delegates to the relocated flightdeck CLI under hscc-project/. Try 'hscc project --help' for the full subcommand surface."
     },
     {
-      "kind": "B",
-      "command": "hscc help template",
-      "needle": "width=80",
-      "owner": "F5",
-      "count_at_baseline": 1,
-      "example": "width=80 overflow:   Subcommands: list status preview <name> validate <name> [--structural-only] [--json] apply <name> [--confirm]"
-    },
-    {
-      "kind": "B",
-      "command": "hscc template --help",
-      "needle": "width=120",
-      "owner": "F2",
-      "count_at_baseline": 2,
-      "example": "width=120 overflow:   hscc template validate <name> [--structural-only] [--json]  Validate: structural (offline) layer always; placement (live) layer unless --structural-only"
-    },
-    {
-      "kind": "B",
-      "command": "hscc template --help",
-      "needle": "width=80",
-      "owner": "F2",
-      "count_at_baseline": 2,
-      "example": "width=80 overflow:   hscc template validate <name> [--structural-only] [--json]  Validate: structural (offline) layer always; placement (live) layer unless --structural-only"
-    },
-    {
       "kind": "D",
       "command": "hscc api start --help",
       "needle": "NOT EXECUTED",
@@ -307,15 +283,6 @@
       "example": "help emitted a daemon log line (a check ran while printing help): [<TS>] [ WARN] Autodown kanban interlock unevaluable: Hermes agent source not found at '<SANDBOX>/home/."
     },
     {
-      "kind": "D",
-      "command": "hscc kanban blocked --help",
-      "needle": "wrote state",
-      "owner": "BROKEN-KANBAN",
-      "count_at_baseline": 1,
-      "example": "--help wrote state under HOME: .hscc/daemon.log",
-      "note": "unmasked by t_3dd8651e: before the autodown --help fix the earlier autodown status --help probe created daemon.log first, so this write showed no NEW file; the kanban verb still writes the daemon log while printing help"
-    },
-    {
       "kind": "D-rc",
       "command": "hscc advanced --help",
       "needle": "exited 1",
@@ -368,30 +335,6 @@
       "command": "hscc help heal-status",
       "needle": "exited 1",
       "owner": "BROKEN-HEAL",
-      "count_at_baseline": 1,
-      "example": "--help exited 1 (expected 0)"
-    },
-    {
-      "kind": "D-rc",
-      "command": "hscc template apply --help",
-      "needle": "exited 1",
-      "owner": "F2",
-      "count_at_baseline": 1,
-      "example": "--help exited 1 (expected 0)"
-    },
-    {
-      "kind": "D-rc",
-      "command": "hscc template preview --help",
-      "needle": "exited 1",
-      "owner": "F2",
-      "count_at_baseline": 1,
-      "example": "--help exited 1 (expected 0)"
-    },
-    {
-      "kind": "D-rc",
-      "command": "hscc template validate --help",
-      "needle": "exited 1",
-      "owner": "F2",
       "count_at_baseline": 1,
       "example": "--help exited 1 (expected 0)"
     },
@@ -450,6 +393,15 @@
       "owner": "F5",
       "count_at_baseline": 1,
       "example": "Event-driven mode uninstall (placeholder, not yet available)"
+    },
+    {
+      "kind": "D",
+      "command": "hscc kanban blocked --help",
+      "needle": "wrote state",
+      "owner": "BROKEN-KANBAN",
+      "count_at_baseline": 1,
+      "example": "--help wrote state under HOME: .hscc/daemon.log",
+      "note": "unmasked by t_3dd8651e: before the autodown --help fix the earlier autodown status --help probe created daemon.log first, so this write showed no NEW file; the kanban verb still writes the daemon log while printing help"
     }
   ]
 }

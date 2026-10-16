@@ -20,6 +20,8 @@ import sys
 import os
 import re
 import json
+import shutil
+import textwrap
 from pathlib import Path
 
 # ── CLI rendering theme (Rich, Hermes-default gold palette; dark + light) ──
@@ -381,7 +383,7 @@ COMMAND_HELP = {
     "triggers": "Show trigger-engine rules and recent firings",
     "notify": "Send a desktop notification. Usage: hscc notify <message>",
     "cluster": "Cluster management commands.\n  Subcommands: status hosts monitor jobs info stop <id> down [--dry-run] up [--dry-run]\n  Usage: hscc cluster <subcommand> [args]",
-    "template": "Cluster template commands.\n  Subcommands: list status preview <name> validate <name> [--structural-only] [--json] apply <name> [--confirm]\n  Usage: hscc template <subcommand> [args]",
+    "template": "Cluster template commands.\n  Subcommands: list status preview validate apply\n  preview/validate take <name>; validate also takes\n  [--structural-only] [--json]; apply also takes\n  [--confirm] [--force-recreate]. Try 'hscc template --help'.\n  Usage: hscc template <subcommand> [args]",
     "profiles": "Running kanban task counts per profile",
     "project": "Project-portfolio (flightdeck) commands.\n  Delegates to the relocated flightdeck CLI under hscc-project/. Try 'hscc project --help' for the full subcommand surface.\n  Usage: hscc project <subcommand> [args]",
     "api": "HSCC HTTP API server lifecycle.\n  Subcommands: start [--tailscale] [--bind <ip>] [--port <n>] stop status\n  Usage: hscc api <subcommand> [args]",
@@ -404,6 +406,90 @@ COMMAND_HELP = {
 CLUSTER_SUBCOMMANDS = {"status", "hosts", "monitor", "jobs", "info", "stop",
                        "down", "up"}
 TEMPLATE_SUBCOMMANDS = {"list", "status", "preview", "validate", "apply"}
+
+# ── template group help surface (t_9032f96b) ───────────────────────────────
+# Shared help entries for the template verbs: `hscc template --help` prints
+# the validate/apply entries in the two-line layout (the commands that
+# overflowed as single two-column lines), `hscc template <verb> --help`
+# prints the same text as per-verb usage, so the two cannot drift.
+# Layout rules (help-surface gate, widths 80/120): the command sits on its
+# own line, the description is wrapped with a continuation indent (never
+# flush-left), and every emitted line stays inside 78 columns. The examples
+# name REAL templates from `hscc template list` — the gate parse-checks
+# every example line against the real subcommand table.
+_TEMPLATE_HELP_INDENT = 6
+_TEMPLATE_HELP_WIDTH = 78
+
+_TEMPLATE_HELP = {
+    "list": {
+        "usage": "hscc template list",
+        "desc": "List available cluster templates.",
+        "example": None,
+    },
+    "status": {
+        "usage": "hscc template status",
+        "desc": "Which template is currently applied.",
+        "example": None,
+    },
+    "preview": {
+        "usage": "hscc template preview <name>",
+        "desc": "Dry-run: what applying <name> would change.",
+        "example": None,
+    },
+    "validate": {
+        "usage": "hscc template validate <name> [--structural-only] [--json]",
+        "desc": ("Validate a template: the structural (offline) layer "
+                 "always, the placement (live) layer unless "
+                 "--structural-only. Exit non-zero if either layer fails."),
+        "example": "hscc template validate 4node-coding --structural-only",
+    },
+    "apply": {
+        "usage": "hscc template apply <name> [--confirm] [--force-recreate]",
+        "desc": ("Apply a template (--confirm executes; --force-recreate "
+                 "stops and reruns units so changed serve flags reach vLLM)."),
+        "example": "hscc template apply 4node-coding --confirm",
+    },
+}
+
+
+def _wrap_template_desc(desc, width=None):
+    """Description lines for a template help entry: wrapped with a fixed
+    continuation indent, so no continuation ever lands at col 0."""
+    if width is None:
+        width = _template_help_width()
+    return textwrap.wrap(desc, width=width,
+                         initial_indent=" " * _TEMPLATE_HELP_INDENT,
+                         subsequent_indent=" " * _TEMPLATE_HELP_INDENT)
+
+
+def _template_entry_lines(sub, width=None):
+    """Render one template help entry (command line, wrapped description, and
+    — for the name-taking verbs — one real, parse-checked example line)."""
+    if width is None:
+        width = _template_help_width()
+    entry = _TEMPLATE_HELP[sub]
+    lines = [f"  {entry['usage']}"]
+    lines.extend(_wrap_template_desc(entry["desc"], width))
+    if entry["example"]:
+        lines.append(f"{' ' * _TEMPLATE_HELP_INDENT}example: "
+                     f"{entry['example']}")
+    return lines
+
+
+def _print_template_verb_usage(sub: str):
+    """`hscc template <verb> --help`: usage + description + example.
+    Prints text only — no engine import, no dispatch (t_9032f96b: the help
+    token used to fall through to the engine as the template name, so
+    `--help` printed “Template not found: --help” and exited 1)."""
+    width = _template_help_width()
+    entry = _TEMPLATE_HELP[sub]
+    print(f"Usage: {entry['usage']}")
+    print()
+    for line in _wrap_template_desc(entry["desc"], width):
+        print(line)
+    if entry["example"]:
+        print()
+        print(f"{' ' * _TEMPLATE_HELP_INDENT}example: {entry['example']}")
 
 
 def _resolve_cluster_dir():
@@ -588,16 +674,27 @@ def _strip_theme_and_json(args):
     return cleaned, theme_name, json_mode
 
 
+def _template_help_width():
+    """Column budget for the template help surface: the terminal width when
+    the terminal (or COLUMNS) reports a usable one, else 80. Capped at 78 so
+    a description never reaches the widths the help-surface gate measures
+    (80/120) as an unindented overflow, and continuation lines have room."""
+    try:
+        cols = shutil.get_terminal_size((80, 24)).columns
+    except OSError:
+        cols = 80
+    return min(cols, _TEMPLATE_HELP_WIDTH)
+
+
 def _handle_template():
     """Route 'template' subcommands to hscc-cluster plugin, render human view."""
-    if len(sys.argv) < 3 or sys.argv[2] == "--help":
+    if len(sys.argv) < 3 or sys.argv[2] in ("--help", "-h"):
         print("Cluster template commands:")
         print()
-        print("  hscc template list                 List available cluster templates")
-        print("  hscc template status               Which template is currently applied")
-        print("  hscc template preview <name>       Dry-run: what applying <name> would change")
-        print("  hscc template validate <name> [--structural-only] [--json]  Validate: structural (offline) layer always; placement (live) layer unless --structural-only")
-        print("  hscc template apply <name> [--confirm] [--force-recreate]  Apply a template (--force-recreate re-applies changed serve flags)")
+        for sub in ("list", "status", "preview", "validate", "apply"):
+            for line in _template_entry_lines(sub):
+                print(line)
+            print()
         return 0
 
     sub = sys.argv[2]
@@ -605,6 +702,13 @@ def _handle_template():
         print(f"Error: unknown template subcommand: {sub}")
         print(f"Valid subcommands: {', '.join(sorted(TEMPLATE_SUBCOMMANDS))}")
         return 1
+
+    # `--help` on a verb prints that verb's usage and exits 0 — BEFORE the
+    # engine import and dispatch. It used to fall through, so the help token
+    # was read as the template name: "Template not found: --help", rc=1.
+    if "--help" in sys.argv[3:] or "-h" in sys.argv[3:]:
+        _print_template_verb_usage(sub)
+        return 0
 
     # Reuse the template engine's own subcommand handler (returns a dict).
     if str(_resolve_cluster_dir()) not in sys.path:
