@@ -228,7 +228,7 @@ final class NavGraphUITests: XCTestCase {
     private func pullToRefresh(_ app: XCUIApplication) {
         if app.tables.firstMatch.exists {
             app.tables.firstMatch.swipeDown()
-        } else if let list = [app.collections.firstMatch, app.scrollViews.firstMatch]
+        } else if let list = [app.collectionViews.firstMatch, app.scrollViews.firstMatch]
                     .first(where: { $0.exists }) {
             list.swipeDown()
         } else {
@@ -252,8 +252,11 @@ final class NavGraphUITests: XCTestCase {
                 XCTFail("DEAD END [\(raw)]: drawer row has no walk expectation in NavGraphUITests.swift")
                 continue
             }
+            // One launch per screen, terminated at the bottom of the body
+            // (a loop-scoped `defer` would keep 17 launches alive until the
+            // method ends). No assertion here returns early — XCTAssert
+            // continues — so the terminate always runs.
             let app = navLaunch(openDrawer: true, manifest: "walk-\(raw)")
-            defer { app.terminate() }
 
             assertDrawer(app, open: true, screen: raw, edge: "launch with drawer-open seam never showed the drawer")
             XCTAssertTrue(app.buttons["drawerClose"].waitForExistence(timeout: 5),
@@ -289,6 +292,7 @@ final class NavGraphUITests: XCTestCase {
                               "(fixture served-count stayed at \(baseline))",
                               file: #filePath, line: #line)
             }
+            app.terminate()
         }
     }
 
@@ -371,10 +375,11 @@ final class NavGraphUITests: XCTestCase {
     /// drawer rows in Sidebar.swift (generated FROM the code). This is the
     /// runtime half of "a new screen cannot dodge the walk".
     func testDrawerTableMatchesExpectations() {
-        XCTAssertEqual(Set(NavGraphScreenTable.drawerRows).subtracting(plans.keys), [],
+        let planned: Set<String> = Set(plans.keys)
+        XCTAssertEqual(Set(NavGraphScreenTable.drawerRows).subtracting(planned), Set<String>(),
                        "DEAD END [table]: drawer row(s) from Sidebar.swift have no walk plan — " +
                        "add expect(...) entries to NavGraphUITests.swift and regenerate the table")
-        XCTAssertEqual(plans.keys.subtracting(Set(NavGraphScreenTable.drawerRows)), [],
+        XCTAssertEqual(planned.subtracting(Set(NavGraphScreenTable.drawerRows)), Set<String>(),
                        "DEAD END [table]: walk plans exist for non-rows — regenerate NavGraphScreenTable.swift")
     }
 
@@ -388,7 +393,6 @@ final class NavGraphUITests: XCTestCase {
         for raw in NavGraphScreenTable.drawerRows {
             guard let plan = plans[raw] else { continue }
             let app = navLaunch(fixtureSet: "empty", screen: raw, manifest: "empty-\(raw)")
-            defer { app.terminate() }
 
             if let empty = plan.emptyMarker {
                 assertMarker(app, empty, screen: raw,
@@ -400,6 +404,7 @@ final class NavGraphUITests: XCTestCase {
             tapRow(app, raw: "home", screen: raw)
             assertMarker(app, "Search everywhere", screen: raw,
                          edge: "empty state trapped the user — home unreachable from it")
+            app.terminate()
         }
     }
 
@@ -412,7 +417,6 @@ final class NavGraphUITests: XCTestCase {
         for raw in NavGraphScreenTable.drawerRows {
             guard let plan = plans[raw] else { continue }
             let app = navLaunch(failMode: true, screen: raw, manifest: "err-\(raw)")
-            defer { app.terminate() }
 
             if let err = plan.errMarker {
                 assertMarker(app, err, screen: raw,
@@ -423,6 +427,7 @@ final class NavGraphUITests: XCTestCase {
             tapRow(app, raw: "home", screen: raw)
             assertMarker(app, "Search everywhere", screen: raw,
                          edge: "error state trapped the user — home unreachable from it")
+            app.terminate()
         }
     }
 
