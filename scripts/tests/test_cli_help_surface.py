@@ -337,7 +337,11 @@ def test_write_findings_artifact(report):
 
     ``HSCC_CLI_HELP_WRITE_ARTIFACT=1`` writes
     docs/audits/artifacts/CLI_HELP_FINDINGS.json; off by default so a normal
-    test run never dirties the tree.
+    test run never dirties the tree. That path is gitignored on purpose
+    (decision, card t_36580090): the artifact is a pure function of the tree,
+    so committing it only guarantees it rots as fix cards land. Regenerate
+    instead of reading a stale snapshot (or run the audit CLI directly:
+    ``python scripts/hscc_cli_help_audit.py --json <path>``).
     """
     if not os.environ.get("HSCC_CLI_HELP_WRITE_ARTIFACT"):
         pytest.skip("set HSCC_CLI_HELP_WRITE_ARTIFACT=1 to emit the findings "

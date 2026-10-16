@@ -1094,8 +1094,16 @@ def _handle_profiles():
 
 # Verbs of flightdeck's `project` subgroup, aliased to the top of
 # `hscc project` so the group name does not have to be typed twice.
+# MUST mirror flightdeck's real subgroup — test_project_alias_covers_whole_subgroup
+# pins this set against the live parser and fails listing what drifted
+# (sessions/digest/link/unlink were added to the subgroup and silently
+# missing here: those four kept reading the doubled `hscc project project X`).
+# Adding a verb to flightdeck's subgroup is still safe without touching this
+# table (the doubled form always works); adding it here upgrades that verb to
+# the short form.
 _PROJECT_SUBGROUP_VERBS = frozenset(
-    {"new", "list", "remove", "repair", "pull", "push", "chat", "sync"})
+    {"chat", "digest", "link", "list", "new", "pull", "push", "remove",
+     "repair", "sessions", "sync", "unlink"})
 
 
 def _handle_project():

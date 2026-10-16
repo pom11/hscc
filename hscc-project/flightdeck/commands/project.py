@@ -1041,12 +1041,17 @@ def _fmt_time(ts) -> str:
 # --------------------------------------------------------------------------- #
 
 def build_subparser(sub: argparse._SubParsersAction) -> None:
-    p = sub.add_parser("project", help="project lifecycle + registry CRUD",
-                       epilog="example: hscc project project list")
+    # prog pinned to the documented invocation: argparse would derive
+    # `hscc project project` (parent prog + name) and every subcommand
+    # usage line would double the group name even though the alias makes
+    # `hscc project <verb>` the canonical spelling (t_36580090).
+    p = sub.add_parser("project", prog="hscc project",
+                       help="project lifecycle + registry CRUD",
+                       epilog="example: hscc project list")
     subsub = p.add_subparsers(dest="project_cmd", metavar="PROJECT_CMD")
 
     sp = subsub.add_parser("new", help="wire repo + board + roadmap + registry",
-                           epilog="example: hscc project project new ecofire-app --github")
+                           epilog="example: hscc project new ecofire-app --github")
     sp.add_argument("name", help="project name (also the repo dir basename and board slug)")
     sp.add_argument("--repo", help="repo path (default ~/dev/<name>)")
     sp.add_argument("--github", nargs="?", const=True, default=False,
@@ -1057,17 +1062,17 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     sp.set_defaults(func=cmd_new)
 
     sp = subsub.add_parser("list", help="name, repo, board, topic, health (read-only)",
-                           epilog="example: hscc project project list")
+                           epilog="example: hscc project list")
     sp.set_defaults(func=cmd_list)
 
     sp = subsub.add_parser("remove", help="remove a REGISTRY entry (never the repo/topic)",
-                           epilog="example: hscc project project remove ecofire-bc --apply")
+                           epilog="example: hscc project remove ecofire-bc --apply")
     sp.add_argument("name", help="project name in the registry")
     _add_apply(sp)
     sp.set_defaults(func=cmd_remove)
 
     sp = subsub.add_parser("repair", help="re-run `new` on an existing registry project",
-                           epilog="example: hscc project project repair ecofire-app")
+                           epilog="example: hscc project repair ecofire-app")
     sp.add_argument("name", help="project name in the registry")
     sp.add_argument("--repo", help="override the repo path (default: from registry)")
     sp.add_argument("--github", nargs="?", const=True, default=False,
@@ -1077,14 +1082,14 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     sp.set_defaults(func=cmd_repair)
 
     sp = subsub.add_parser("pull", help="safe fast-forward pull of a registered project's repo",
-                           epilog="example: hscc project project pull hscc   (no --apply: only ever fast-forwards or skips)")
+                           epilog="example: hscc project pull hscc   (no --apply: only ever fast-forwards or skips)")
     sp.add_argument("name", nargs="?", default=None,
                     help="project name (default: every registered project with a repo)")
     sp.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     sp.set_defaults(func=cmd_pull)
 
     sp = subsub.add_parser("push", help="push the current branch (gated behind --apply, never --force)",
-                           epilog="example: hscc project project push hscc --apply")
+                           epilog="example: hscc project push hscc --apply")
     sp.add_argument("name", nargs="?", default=None,
                     help="project name (default: every registered project with a repo)")
     sp.add_argument("--json", action="store_true", help="emit machine-readable JSON")
@@ -1092,7 +1097,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     sp.set_defaults(func=cmd_push)
 
     sp = subsub.add_parser("chat", help="open an INTERACTIVE hermes session on the project's orchestrator",
-                           epilog="example: hscc project project chat hscc   (attaches to the permanent orchestrator thread the app uses)")
+                           epilog="example: hscc project chat hscc   (attaches to the permanent orchestrator thread the app uses)")
     sp.add_argument("name", nargs="?", default=None,
                     help="project name (default: detect from the current directory)")
     sp.add_argument("--resume", dest="resume_id", metavar="SESSION_ID", default=None,
@@ -1106,13 +1111,13 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     sp.set_defaults(func=cmd_chat)
 
     sp = subsub.add_parser("sessions", help="list every session belonging to a project (orchestrator + legacy telegram threads), newest first",
-                           epilog="example: hscc project project sessions hscc   (resolves registry topic -> sessions.thread_id on the DEFAULT profile; read-only)")
+                           epilog="example: hscc project sessions hscc   (resolves registry topic -> sessions.thread_id on the DEFAULT profile; read-only)")
     sp.add_argument("name", help="project name in the registry")
     sp.set_defaults(func=cmd_sessions)
 
     # digest — bounded, readable synthesis of the project's archive history.
     sp = subsub.add_parser("digest", help="bounded digest of a project's archive history (title/date-range/count/decision/resume per session)",
-                           epilog="example: hscc project project digest hscc   (reads the project's archive folder under ~/.hermes/archive/telegram/; bounded to a few thousand tokens, never raw transcripts)")
+                           epilog="example: hscc project digest hscc   (reads the project's archive folder under ~/.hermes/archive/telegram/; bounded to a few thousand tokens, never raw transcripts)")
     sp.add_argument("name", help="project name in the registry")
     sp.add_argument("--json", action="store_true", help="emit machine-readable JSON (clean, not byte-exact to anything)")
     sp.add_argument("--archive-dir", dest="archive_dir", default=None,
@@ -1124,9 +1129,9 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     # link — bind a session to a project (metadata only; never merges).
     # `link --list [<project>]` prints; `link <project> <session-id>` writes.
     sp = subsub.add_parser("link", help="bind a session to a project (or --list bindings)",
-                           epilog="example: hscc project project link hscc <session-id>\n"
-                                  "         hscc project project link --list\n"
-                                  "         hscc project project link --list hscc  (just one project)")
+                           epilog="example: hscc project link hscc <session-id>\n"
+                                  "         hscc project link --list\n"
+                                  "         hscc project link --list hscc  (just one project)")
     sp.add_argument("project", nargs="?", default=None,
                     help="project name (with --list: filter to this project)")
     sp.add_argument("session_id", nargs="?", default=None,
@@ -1141,7 +1146,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
 
     # unlink — remove a session's binding entry entirely.
     sp = subsub.add_parser("unlink", help="remove a session's binding from the binding store",
-                           epilog="example: hscc project project unlink hscc <session-id>")
+                           epilog="example: hscc project unlink hscc <session-id>")
     sp.add_argument("project", nargs="?", default=None,
                     help="project name the session was linked to (informational)")
     sp.add_argument("session_id", nargs="?", default=None,

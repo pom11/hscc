@@ -54,7 +54,7 @@ hscc project init
 
 # Find your existing repos and boards and wire them into the registry, so the
 # tool knows what projects you have.
-hscc project project sync --apply
+hscc project sync --apply
 
 # Your daily digest: what's happening across every project and what needs you.
 hscc project standup
@@ -80,7 +80,7 @@ Environment check:
   hermes-kanban    [ok] Hermes kanban DB reachable and readable at ~/.hermes/kanban.db
 
 Next steps:
-  1. Run `hscc project project sync --apply` to adopt your existing repos
+  1. Run `hscc project sync --apply` to adopt your existing repos
      into the registry.
   2. Register the MCP server with your MCP client so an agent can drive it
      (see "MCP — let an agent drive it" below).
@@ -97,7 +97,7 @@ and never overwrites an existing binding. A real run (trimmed, paths shortened
 to `~`):
 
 ```text
-$ hscc project project sync
+$ hscc project sync
 PARTIAL (N)
   ecofire-app  repo ✓   topic —  board ecofire-app
   ...

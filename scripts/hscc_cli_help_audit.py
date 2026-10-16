@@ -641,6 +641,19 @@ class ExampleParser:
                             | {"heal-clear", "heal-status", "start-daemon",
                                "advanced", "ed-status", "ed-install",
                                "ed-uninstall"})
+        # `hscc project <verb>` promotion (hscc_daemon hscc._handle_project):
+        # subgroup verbs are accepted bare at the top. The oracle models the
+        # SHIPPED dispatcher, not just flightdeck's raw parser — examples are
+        # documented in the short form, and `hscc project chat` is real.
+        self.project_alias = set(daemon_hscc._PROJECT_SUBGROUP_VERBS)
+        try:
+            self.fd_top_level = {
+                name
+                for action in (self.parser._subparsers._group_actions
+                               if self.parser._subparsers else [])
+                for name in (getattr(action, "choices", {}) or {})}
+        except Exception:
+            self.fd_top_level = set()
         self.subs = {
             "cluster": daemon_hscc.CLUSTER_SUBCOMMANDS,
             "template": daemon_hscc.TEMPLATE_SUBCOMMANDS,
@@ -703,6 +716,14 @@ class ExampleParser:
         return f"unknown command {head!r}"
 
     def _parse_project(self, rest):
+        # Model the hscc dispatcher's promotion (hscc_daemon
+        # hscc._handle_project): a subgroup verb typed bare at the top of
+        # `hscc project` is rewritten to the subgroup, unless a top-level
+        # command shadows it (the runtime guard's rule — the top level wins).
+        # Without this the oracle would reject the documented short form
+        # (`hscc project chat hscc`) that F1's examples now use.
+        if rest and rest[0] in self.project_alias and rest[0] not in self.fd_top_level:
+            rest = ["project", *rest]
         argv = ["audit-placeholder" if re.match(r"^<.+>$", a) else a
                 for a in rest]
         # --help/-h: the D probes cover help execution separately; here we

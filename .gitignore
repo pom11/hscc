@@ -45,6 +45,12 @@ hscc-*/REVIEW-*.md
 REPORT_*.md
 ARTIFACT_t_*.md
 
+# Generated audit output — a pure function of the tree (see the decision note
+# in docs/audits/PR33-FOLLOWUPS-t_36580090.md). Regenerate on demand:
+#   HSCC_CLI_HELP_WRITE_ARTIFACT=1 pytest scripts/tests/test_cli_help_surface.py -k artifact
+#   python scripts/hscc_cli_help_audit.py --json docs/audits/artifacts/CLI_HELP_FINDINGS.json
+docs/audits/artifacts/
+
 # Python build artifacts
 *.egg-info/
 build/
