@@ -16,12 +16,12 @@ Files owned by this card:
   gate fails on drift so a new screen cannot dodge the walk).
 - `ios-app/UITests/NavGraphUITests.swift` — the walker.
 - `ios-app/scripts/nav_graph_check.sh` — the gate (seed fixtures incl.
-  empty-mode set, run suite green, run guarded negative test red, manifest
-  receipts for pull-to-refresh).
+  empty-mode set, run suite green, run guarded negative test red).
 - `ios-app/Sources/HSCC/DebugHarness.swift` — DEBUG seams (fixture dir
-  override, failure mode, manifest name/periodic write).
-- `ios-app/Sources/HSCC/Views/AppShell.swift` — NEGATE_BACK seam only
-  (negative self-check).
+  override, failure mode, offline mode, quiet-poller mode, live
+  served-count probe feed `ptrProbeFeed`).
+- `ios-app/Sources/HSCC/Views/AppShell.swift` — NEGATE_BACK seam,
+  quiet-poller gate on the badge pollers, and the `ptrProbe` AX text.
 
 ## Code-derived enumeration (no hardcoded screen list)
 
@@ -44,8 +44,16 @@ Per drawer row: enter via drawer -> title marker on screen -> back to drawer
 One level in where detail exists: projects -> project -> chat; cards ->
 card detail; each back returns to its predecessor (back-button label
 empirically verified on the iPhone 16 sim).
-Pull-to-refresh: real `swipeDown`/coordinate drag; receipt = the manifest's
-fixture served-count increments (same trick capture_screens.sh uses).
+Pull-to-refresh: ONE slow XCUICoordinate drag (`press(forDuration: 1.0,
+thenDragTo:)`). PROVEN 2026-10-16 on iPhone 16 / iOS 26.3: `swipeDown()` on
+any element NEVER fires SwiftUI `.refreshable` (served-count probe stayed at
+1 through every element-swipe variant); the coordinate drag increments it.
+Receipt = the app's live served-count AX probe (`ptrProbe`, published by
+DebugHarness for the walked feed) — NOT the Documents manifest: the runner
+cannot see app files (proven the same day; that is why the receipt moved
+on-screen). Badge pollers (ApprovalPoller, StreamReplyWatcher,
+NotificationCoordinator) are silenced for walked launches
+(`HSCC_DEBUG_QUIET_POLLERS=1`) so the increment can only be the PTR.
 Empty: `HSCC_DEBUG_FIXTURE_DIR=empty` (zero-row fixture set) -> honest empty
 marker renders AND drawerOpen still there.
 Error: `HSCC_DEBUG_FIXTURE_FAIL=1` (all GETs answer 500) -> failed-row marker

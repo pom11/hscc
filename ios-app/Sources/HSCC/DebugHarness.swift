@@ -153,11 +153,41 @@ enum DebugHarness {
         StateCache.clear()
     }
 
+    /// True when this fixture launch silences the app's background badge
+    /// pollers (env `HSCC_DEBUG_QUIET_POLLERS=1`, t_810ab152): ApprovalPoller
+    /// (60 s /v1/kanban/blocked) and StreamReplyWatcher (30 s /v1/projects +
+    /// per-project session pages) would otherwise bump the SAME served
+    /// counters the walker reads as pull-to-refresh receipts — an increment
+    /// from a timer is not proof the gesture worked. Quiet mode makes every
+    /// fixture request attributable to a screen or to the swipe. Badge state
+    /// is purely informational; suppressing it changes no navigation rule.
+    /// Default-off: capture_screens.sh behaviour is unchanged.
+    static var quietPollers: Bool {
+        fixturesEnabled
+            && ProcessInfo.processInfo.environment["HSCC_DEBUG_QUIET_POLLERS"] == "1"
+    }
+
+    /// The feed path whose SERVED COUNT the walker wants to observe live
+    /// (env `HSCC_DEBUG_PTR_FEED`, t_810ab152). When set (fixture launches
+    /// only), AppShell renders a DEBUG-only off-screen AX marker
+    /// `ptrProbe` = "ptr:<feed>:<count>" refreshed every 0.5 s from
+    /// FixtureURLProtocol.served. Why AX instead of the manifest file: the
+    /// XCUITest runner process is sandboxed and CANNOT read the app's
+    /// Documents (a live run proved it — every file read returned nil while
+    /// the host could read the same file). The count lives in the app
+    /// process; the AX tree is the channel the runner is built to read.
+    /// The file manifest remains the host-side receipt (nav_graph_check.sh
+    /// step 5) — different reader, same source of truth. Default-off.
+    static var ptrProbeFeed: String? {
+        let raw = ProcessInfo.processInfo.environment["HSCC_DEBUG_PTR_FEED"] ?? ""
+        return raw.isEmpty ? nil : raw
+    }
+
     /// The API's unified error contract (docs/DESIGN-api.md §C) as canned
     /// bytes — what `HSCCError.api(code:message:)` folds into the operator-
     /// actionable message the walker asserts on.
     static let fixtureFailBody = Data(
-        "{\"error\":{\"code\":\"internal_error\",\"message\":\"Debug fixture failure.\",\"speak\":\"Debug fixture failure (HSCC_DEBUG_FIXTURE_FAIL=1).\"}}"
+        "{\"error\":{\"code\":\"internal_error\",\"message\":\"Debug fixture failure\",\"speak\":\"Debug fixture failure (HSCC_DEBUG_FIXTURE_FAIL=1)\"}}"
             .utf8)
 
     /// The name stamped into `manifest-<name>.json` (env
@@ -176,8 +206,8 @@ enum DebugHarness {
         "manifest-\(manifestName)".replacingOccurrences(of: "/", with: "_") + ".json"
     }
 
-    /// Absolute path of THIS launch's manifest (the walker reads it from the
-    /// app container's Documents folder after the run).
+    /// Absolute path of THIS launch's manifest (read from the HOST side —
+    /// nav_graph_check.sh reaches it through the simctl data container).
     static var manifestPath: URL? {
         fixturesDirectory?.appendingPathComponent(manifestFileName)
     }
@@ -270,9 +300,11 @@ enum DebugHarness {
     /// whether the shell considered itself configured (the exact inputs
     /// `makeClient()` reads) and which fixture paths were served vs missed.
     /// First write ~3 s after launch, i.e. after the views' `.task` loads have
-    /// run; then every 2 s up to ~30 s (t_810ab152): the nav-graph walker's
-    /// pull-to-refresh assertions read the SERVED COUNTS live from this file,
-    /// so it must keep tracking requests made minutes after launch. Cheap
+    /// run; then every 2 s up to ~30 s (t_810ab152): the nav-graph GATE
+    /// (nav_graph_check.sh step 5) reads these served/missed counts from the
+    /// host side as per-launch receipts, so the file must keep tracking
+    /// requests made minutes after launch. The walker's own live PTR receipt
+    /// is the `ptrProbe` AX marker (the runner cannot see this file). Cheap
     /// (a few hundred bytes) and DEBUG-fixture-launch only.
     @MainActor
     static func writeCaptureManifest(settings: SettingsStore) {
@@ -311,6 +343,12 @@ final class FixtureURLProtocol: URLProtocol {
     /// manifest is only ever read in DEBUG fixture mode.
     nonisolated(unsafe) static var served: [String: Int] = [:]
     nonisolated(unsafe) static var missed: [String: Int] = [:]
+
+    /// Served count for one path, read by the walker's live AX probe. The
+    /// dictionary is only ever touched on the URL-loading thread(s) with
+    /// `+= 1` on a single shared protocol class — DEBUG harness only, and a
+    /// stale read here is one 0.5 s probe tick, which the walker tolerates.
+    static func servedCount(forPath path: String) -> Int { served[path] ?? 0 }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }

@@ -206,6 +206,20 @@ struct AppShell: View {
 
     var body: some View {
         ZStack(alignment: .leading) {
+            #if DEBUG
+            // Live served-count probe for the walker's pull-to-refresh
+            // receipt (DebugHarness.ptrProbeFeed). Off the visible canvas
+            // (the offset pushes it below the safe area, off-screen) but IN
+            // the AX tree — the XCUITest runner reads it with a label query
+            // and never taps it. Renders on fixture launches that opt in;
+            // nothing else ever sees it.
+            if let feed = DebugHarness.ptrProbeFeed, DebugHarness.fixturesEnabled {
+                PtrProbeView(feed: feed)
+                    .accessibilityIdentifier("ptrProbe")
+                    .offset(y: 1200)
+                    .allowsHitTesting(false)
+            }
+            #endif
             NavigationStack(path: $router.projectsPath) {
                 destinationView(selection ?? .home)
                     .navigationDestination(for: AppDestination.self) { destinationView($0) }
@@ -249,9 +263,24 @@ struct AppShell: View {
             droppedBanner = dropped
         }
         .onAppear {
+            // t_810ab152: quiet-poller fixture launches (the walker's PTR
+            // pass) skip the two BADGE pollers — ApprovalPoller's 60 s
+            // kanban/blocked and StreamReplyWatcher's 30 s projects/session
+            // polls bump the same served counters the walker reads as
+            // pull-to-refresh receipts, and a timer increment is not proof
+            // the gesture fired. Purely informational badges; zero navigation
+            // change; default-off so capture_screens.sh is untouched.
+            #if DEBUG
+            if !DebugHarness.quietPollers {
+                approvals.setClient(makeClient())
+                replyWatcher.setClient(makeClient())
+                NotificationCoordinator.shared.setClient(makeClient())
+            }
+            #else
             approvals.setClient(makeClient())
             replyWatcher.setClient(makeClient())
             NotificationCoordinator.shared.setClient(makeClient())
+            #endif
             router.setClient(makeClient())
             seedOfflineQueue()
             applyPendingTabRequest()
@@ -568,6 +597,28 @@ extension AppDestination {
 // fleet-wide up/down mutations — an unusable-but-present client would render
 // those buttons against `unconfigured.invalid`, where a connect gate is the
 // honest surface.
+
+#if DEBUG
+/// The AX probe AppShell renders for the walker (see AppShell.body): polls
+/// the fixture protocol's served counter for `feed` twice a second and
+/// publishes "ptr:<feed>:<count>" as its AX label. DEBUG-compiled only.
+struct PtrProbeView: View {
+    let feed: String
+    @State private var count = 0
+
+    var body: some View {
+        Text("ptr:\(feed):\(count)")
+            .font(.system(size: 1))
+            .foregroundColor(.clear)
+            .task {
+                while !Task.isCancelled {
+                    count = FixtureURLProtocol.servedCount(forPath: feed)
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
+            }
+    }
+}
+#endif
 
 #Preview("Shell — home") {
     let center = ProjectUnreadCenter()

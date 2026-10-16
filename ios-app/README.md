@@ -147,6 +147,13 @@ fleet-level folded into one Cluster tab.
 - `project.yml` — XcodeGen spec, listing every source file explicitly. Defines
   the app plus the two embedded extension targets.
 - `scripts/` — verification helpers:
+  - `nav_graph_check.sh` — the **navigation-graph gate** (t_810ab152): XCUITest
+    walker over every drawer screen — enter via drawer → marker → back → same-row
+    re-tap, one level into detail pushes, real pull-to-refresh (coordinate drag,
+    receipt = the app's live served-count AX probe), honest EMPTY + ERROR states,
+    a disconnected pass, and a guarded negative self-check that must turn the
+    walk RED. Screen list is code-derived (`nav_graph_screens.py`); fails naming
+    the screen + missing edge. See `docs/design/NAV_GRAPH_t_810ab152.md`.
   - `shared_model_check.swift` — decodes the shared widget/Live Activity model
     shapes against live API JSON (runs as a macOS CLI).
   - `model_decode_check.sh` — compiles the **real** `Models.swift` +

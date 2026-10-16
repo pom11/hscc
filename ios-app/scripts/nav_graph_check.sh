@@ -73,29 +73,11 @@ for f in "${MAIN_LIST[@]}"; do
   [ -f "$FIXTURES_SRC/$f.json" ] && cp "$FIXTURES_SRC/$f.json" "$DOC/HSCCFixtures/" || true
 done
 # The EMPTY set: same file names (the harness maps paths -> names identically),
-# every top-level ARRAY zeroed. Decoding stays legal (keys/types preserved);
-# rows vanish, so each screen must show its honest empty row. Generation is
-# deterministic and printed, so the gate shows WHAT it zeroed.
-python3 - "$FIXTURES_SRC" "$DOC/HSCCFixturesEmpty" "${MAIN_LIST[@]}" <<'PY' || fail 2 "empty-fixture generation failed"
-import json, shutil, sys, pathlib
-src, dst = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-names = sys.argv[3:]
-zeroed = []
-for n in names:
-    f = src / f"{n}.json"
-    if not f.exists():
-        continue
-    d = json.loads(f.read_text())
-    if isinstance(d, dict):
-        out = {k: ([] if isinstance(v, list) else v) for k, v in d.items()}
-        if any(isinstance(v, list) for v in d.values()):
-            zeroed.append(n)
-    else:
-        out = []
-        zeroed.append(n)
-    (dst / f"{n}.json").write_text(json.dumps(out, indent=1))
-print(f"  empty set: {len(names)} files, arrays zeroed in {len(zeroed)}: {', '.join(zeroed)}")
-PY
+# every top-level ARRAY zeroed (and matching *count fields). Decoding stays
+# legal (keys/types preserved); rows vanish, so each screen must show its
+# honest empty row. Shared with the dev loop via scripts/make_empty_fixtures.py.
+python3 "$HERE/make_empty_fixtures.py" "$FIXTURES_SRC" "$DOC/HSCCFixturesEmpty" "${MAIN_LIST[@]}" \
+  || fail 2 "empty-fixture generation failed"
 
 # ---------------------------------------------------------------------------
 step=3
@@ -113,6 +95,9 @@ echo "  build ok"
 # ---------------------------------------------------------------------------
 step=4
 say "the WALK — NavGraphUITests on $DEVICE (fixtures; never the live API)"
+# Fresh receipts only: drop last run's manifests so step 5 cannot pass on
+# stale files (the walker names manifests per launch, deterministic).
+rm -f "$DOC"/HSCCFixtures/manifest-*.json "$DOC"/HSCCFixturesEmpty/manifest-*.json 2>/dev/null
 xcodebuild test-without-building -project HSCC.xcodeproj -scheme HSCCUITests \
   -only-testing:HSCCUITests/NavGraphUITests \
   -destination "platform=iOS Simulator,id=$DEVICE" \

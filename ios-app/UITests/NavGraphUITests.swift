@@ -22,12 +22,14 @@ import XCTest
 //
 // Launches use the SAME fixture pipeline as capture_screens.sh (never the
 // live API): HSCC_DEBUG_FIXTURES=1 plus the t_810ab152 seams —
-// HSCC_DEBUG_FIXTURE_DIR=empty (zero-row set) and HSCC_DEBUG_FIXTURE_FAIL=1
-// (every GET answers the API error contract) — and HSCC_DEBUG_MANIFEST_NAME
-// to give each launch an addressable served-count receipt. The UI-test
-// runner is hosted in the app process, so the manifest written by
-// DebugHarness.writeCaptureManifest is readable here through the shared
-// Documents directory.
+// HSCC_DEBUG_FIXTURE_DIR=empty (zero-row set), HSCC_DEBUG_FIXTURE_FAIL=1
+// (every GET answers the API error contract), HSCC_DEBUG_OFFLINE=1
+// (connection-failure pass) and HSCC_DEBUG_QUIET_POLLERS=1 (badge pollers
+// silenced so the pull-to-refresh receipt cannot be polluted). The PTR
+// receipt is the app's live served-count AX probe (`ptrProbe`,
+// DebugHarness.ptrProbeFeed) — the runner CANNOT read the app's Documents
+// (proven 2026-10-16: the manifest file was never visible from the runner),
+// which is why the probe is on-screen text the XCUITest queries.
 
 /// One drawer screen's walk plan. Curated by hand (which marker proves the
 /// screen landed, which texts prove the honest empty/error states, which feed
@@ -62,13 +64,13 @@ final class NavGraphUITests: XCTestCase {
         expect("chats", titleMarker: "Refresh chats", emptyMarker: "No projects", errMarker: "Couldn't load projects", ptrPath: "/v1/projects"),
         expect("projects", titleMarker: "Refresh projects", emptyMarker: "No projects registered.", errMarker: "Couldn't load projects", ptrPath: "/v1/projects"),
         expect("cards", titleMarker: "Refresh cards", emptyMarker: "No open cards", errMarker: "Couldn't load cards", ptrPath: "/v1/cards"),
-        expect("approvals", titleMarker: "Pending approvals", emptyMarker: "No pending approvals", errMarker: "Debug fixture failure", ptrPath: "/v1/kanban/blocked"),
+        expect("approvals", titleMarker: "Waiting on your decision. Allow recovers the card so the worker proceeds.", emptyMarker: "No pending approvals", errMarker: "Debug fixture failure", ptrPath: "/v1/kanban/blocked"),
         expect("fleet", titleMarker: "Health", emptyMarker: nil, errMarker: "Debug fixture failure", ptrPath: "/v1/fleet/stats"),
-        expect("nodesServing", titleMarker: "Serving units", emptyMarker: "No serving units", errMarker: "Debug fixture failure", ptrPath: "/v1/cluster/status"),
+        expect("nodesServing", titleMarker: "Topology", emptyMarker: "No serving units", errMarker: "Debug fixture failure", ptrPath: "/v1/cluster/status"),
         expect("opsHealth", titleMarker: "Verify", emptyMarker: nil, errMarker: "Debug fixture failure", ptrPath: "/v1/verify"),
         expect("autodown", titleMarker: "Status", emptyMarker: "No automation history", errMarker: "Debug fixture failure", ptrPath: "/v1/autodown/status"),
         expect("cron", titleMarker: "Scheduled jobs", emptyMarker: "Idle", errMarker: "Couldn't load the roster", ptrPath: "/v1/cron/list"),
-        expect("logs", titleMarker: "Log source", emptyMarker: "Clean tail", errMarker: "Debug fixture failure", ptrPath: "/v1/logs"),
+        expect("logs", titleMarker: "the daemon core — scheduler, fleet, trigger engine", emptyMarker: "Clean tail", errMarker: "Debug fixture failure", ptrPath: "/v1/logs"),
         expect("memory", titleMarker: "Memories", emptyMarker: "Nothing here", errMarker: "Debug fixture failure", ptrPath: "/v1/memory"),
         expect("templates", titleMarker: "Applied template", emptyMarker: "No templates", errMarker: "Debug fixture failure", ptrPath: "/v1/template/list"),
         expect("sessions", titleMarker: "Sessions", emptyMarker: "Nothing here", errMarker: "Debug fixture failure", ptrPath: "/v1/sessions"),
@@ -77,58 +79,31 @@ final class NavGraphUITests: XCTestCase {
         expect("settings", titleMarker: "Settings", emptyMarker: nil, errMarker: nil, ptrPath: nil),
     ].map { ($0.raw, $0) })
 
-    // MARK: - Fixture manifest receipt (served counts)
+    // MARK: - Pull-to-refresh receipt (live served-count probe)
 
-    /// The APP's Documents directory, resolved from the runner process (the
-    /// XCUITest code runs in the runner, the manifest is written by the app).
-    /// On the Simulator every app's container is a sibling under
-    /// .../Devices/<UDID>/data/Containers/Data/Application/ and the simulator
-    /// does not enforce cross-container reads for the test runner (the same
-    /// filesystem capture_screens.sh reads through `simctl get_app_container`),
-    /// so the receipt is a plain directory scan: whichever sibling carries
-    /// HSCCFixtures/ is the app under test.
-    private let appDocDir: URL? = {
-        let fm = FileManager.default
-        guard let runnerDocs = fm.urls(for: .documentDirectory, in: .userDomainMask).first
-        else { return nil }
-        let appsDir = runnerDocs.deletingLastPathComponent().deletingLastPathComponent()
-        guard let siblings = try? fm.contentsOfDirectory(at: appsDir,
-                                                         includingPropertiesForKeys: nil)
-        else { return nil }
-        for sibling in siblings {
-            let fixtures = sibling.appendingPathComponent("Documents/HSCCFixtures")
-            if fm.fileExists(atPath: fixtures.path) {
-                return sibling.appendingPathComponent("Documents")
-            }
-        }
-        return nil
-    }()
-
-    private func manifestURL(set: String, name: String) -> URL? {
-        let dir = set == "empty" ? "HSCCFixturesEmpty" : "HSCCFixtures"
-        return appDocDir?.appendingPathComponent(dir)
-            .appendingPathComponent("manifest-\(name).json")
+    /// The live served count for `feed`, read from the DEBUG AX probe
+    /// (`ptr:<feed>:<count>`, AppShell + DebugHarness.ptrProbeFeed). The
+    /// runner CANNOT read the app's Documents (proved by a live run — the
+    /// sandboxed XCUITest runner sees nil while the host sees the file), so
+    /// the app exposes the count through the AX tree, the channel the runner
+    /// is built to read. -1 = probe not on this launch.
+    private func ptrCount(_ app: XCUIApplication, feed: String) -> Int {
+        let el = app.staticTexts["ptrProbe"]
+        guard el.exists else { return -1 }
+        let label = el.label
+        guard label.hasPrefix("ptr:\(feed):"),
+              let n = Int(label.dropFirst("ptr:\(feed):".count)) else { return -1 }
+        return n
     }
 
-    /// served[path] from a launch's manifest (0 when the file/body is not
-    /// there yet — the polling callers treat that as "not yet").
-    private func servedCount(set: String, name: String, path: String) -> Int {
-        guard let url = manifestURL(set: set, name: name),
-              let data = try? Data(contentsOf: url),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let served = obj["served"] as? [String: Int] else { return 0 }
-        return served[path] ?? 0
-    }
-
-    /// Poll until `served[path]` exceeds `baseline` (the manifest is rewritten
-    /// every ~2 s by the DEBUG harness). Returns true on the receipt.
-    private func waitForServedIncrement(set: String, name: String,
-                                        path: String, baseline: Int,
-                                        timeout: TimeInterval = 15) -> Bool {
+    /// Poll until the probe's count exceeds `baseline` (the app refreshes it
+    /// every 0.5 s from FixtureURLProtocol.served).
+    private func waitForPtrIncrement(_ app: XCUIApplication, feed: String,
+                                     baseline: Int, timeout: TimeInterval = 15) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if servedCount(set: set, name: name, path: path) > baseline { return true }
-            usleep(500_000)
+            if ptrCount(app, feed: feed) > baseline { return true }
+            usleep(400_000)
         }
         return false
     }
@@ -142,14 +117,20 @@ final class NavGraphUITests: XCTestCase {
     private func navLaunch(fixtureSet: String? = nil, failMode: Bool = false,
                            screen: String? = nil, openDrawer: Bool = false,
                            manifest: String? = nil, offline: Bool = false,
+                           ptrFeed: String? = nil,
                            file: StaticString = #filePath, line: UInt = #line) -> XCUIApplication {
         let app = XCUIApplication()
         if offline {
             app.launchEnvironment["HSCC_DEBUG_OFFLINE"] = "1"
         } else {
             app.launchEnvironment["HSCC_DEBUG_FIXTURES"] = "1"
+            // Timer bumps are not proof a gesture fired: fixture launches
+            // silence the badge pollers so every served-count increment is
+            // attributable to a screen load or to the swipe itself.
+            app.launchEnvironment["HSCC_DEBUG_QUIET_POLLERS"] = "1"
             if let fixtureSet { app.launchEnvironment["HSCC_DEBUG_FIXTURE_DIR"] = fixtureSet }
             if failMode { app.launchEnvironment["HSCC_DEBUG_FIXTURE_FAIL"] = "1" }
+            if let ptrFeed { app.launchEnvironment["HSCC_DEBUG_PTR_FEED"] = ptrFeed }
         }
         if let screen { app.launchEnvironment["HSCC_DEBUG_SCREEN"] = screen }
         if openDrawer { app.launchEnvironment["HSCC_DEBUG_OPEN_DRAWER"] = "1" }
@@ -192,9 +173,17 @@ final class NavGraphUITests: XCTestCase {
     private func assertMarker(_ app: XCUIApplication, _ marker: String, screen: String,
                               edge: String, timeout: TimeInterval = 8,
                               file: StaticString = #filePath, line: UInt = #line) {
+        // Poll BOTH element kinds: section headers/titles are staticTexts,
+        // toolbar actions (Refresh chats) are buttons. Querying one after
+        // the other's full timeout would burn seconds per screen.
         let text = app.staticTexts[marker]
         let button = app.buttons[marker]
-        let shown = text.waitForExistence(timeout: timeout) || button.waitForExistence(timeout: 0)
+        let deadline = Date().addingTimeInterval(timeout)
+        var shown = false
+        while Date() < deadline {
+            if text.exists || button.exists { shown = true; break }
+            usleep(250_000)
+        }
         XCTAssertTrue(shown,
                       "DEAD END [\(screen)]: \(edge) — marker “\(marker)” never rendered",
                       file: file, line: line)
@@ -203,9 +192,26 @@ final class NavGraphUITests: XCTestCase {
     private func tapRow(_ app: XCUIApplication, raw: String, screen: String,
                         file: StaticString = #filePath, line: UInt = #line) {
         let row = app.staticTexts["drawerRow:\(raw)"]
+        // The drawer list is longer than one screen (17 rows + header on
+        // iPhone height): scroll the panel until the row is on screen. The
+        // swipe lives inside the 320pt panel so it can never hit the screen
+        // behind (which is AX-hidden while the drawer is up anyway).
+        var scrolls = 0
+        while !row.exists && scrolls < 6 {
+            let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.70))
+            let to = app.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.30))
+            from.press(forDuration: 0.05, thenDragTo: to)
+            scrolls += 1
+        }
         XCTAssertTrue(row.waitForExistence(timeout: 5),
                       "DEAD END [\(screen)]: drawer row “\(raw)” not on screen",
                       file: file, line: line)
+        if !row.isHittable {   // half-scrolled row: nudge it fully into view
+            let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.60))
+            let to = app.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.50))
+            from.press(forDuration: 0.05, thenDragTo: to)
+            usleep(300_000)
+        }
         row.tap()
     }
 
@@ -222,20 +228,17 @@ final class NavGraphUITests: XCTestCase {
                      edge: "drawerOpen did not bring the drawer up", file: file, line: line)
     }
 
-    /// Real pull-to-refresh gesture on the screen's list. SwiftUI Lists are
-    /// collections on this OS (DrawerNavigationUITests AX finding); try the
-    /// semantic element first, fall back to a coordinate drag.
+    /// Real pull-to-refresh gesture. PROVEN on this device+OS (iPhone 16
+    /// sim, iOS 26.3, diag run 2026-10-16): SwiftUI Lists bridge to ONE
+    /// AXCollection, and `swipeDown()` on it — or on any element — NEVER
+    /// fires `.refreshable` (probe stayed at 1 through every variant). What
+    /// DOES fire it is a slow XCUICoordinate drag with a press-hold (probe
+    /// 1→2 and 2→3 on two consecutive drags), so this is one coordinate
+    /// drag — the gesture a thumb performs.
     private func pullToRefresh(_ app: XCUIApplication) {
-        if app.tables.firstMatch.exists {
-            app.tables.firstMatch.swipeDown()
-        } else if let list = [app.collectionViews.firstMatch, app.scrollViews.firstMatch]
-                    .first(where: { $0.exists }) {
-            list.swipeDown()
-        } else {
-            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
-            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
-            start.press(forDuration: 0.1, thenDragTo: end)
-        }
+        let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.32))
+        let to = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.88))
+        from.press(forDuration: 1.0, thenDragTo: to)
     }
 
     // MARK: - The walk: every drawer row, both directions, same-row re-tap
@@ -256,7 +259,7 @@ final class NavGraphUITests: XCTestCase {
             // (a loop-scoped `defer` would keep 17 launches alive until the
             // method ends). No assertion here returns early — XCTAssert
             // continues — so the terminate always runs.
-            let app = navLaunch(openDrawer: true, manifest: "walk-\(raw)")
+            let app = navLaunch(openDrawer: true, manifest: "walk-\(raw)", ptrFeed: plan.ptrPath)
 
             assertDrawer(app, open: true, screen: raw, edge: "launch with drawer-open seam never showed the drawer")
             XCTAssertTrue(app.buttons["drawerClose"].waitForExistence(timeout: 5),
@@ -276,20 +279,20 @@ final class NavGraphUITests: XCTestCase {
                          edge: "re-tapping the already-selected row does not leave the drawer (2.9.0 dead end)")
             assertMarker(app, plan.titleMarker, screen: raw, edge: "screen never re-rendered after same-row re-tap")
 
-            // pull-to-refresh with a real gesture; receipt = served count up
+            // pull-to-refresh with a real gesture; receipt = the app's live
+            // served-count probe (AX — the runner cannot read app files).
             if let feed = plan.ptrPath {
-                let servedFirst = waitForServedIncrement(set: "main", name: "walk-\(raw)",
-                                                         path: feed, baseline: 0, timeout: 12)
-                XCTAssertTrue(servedFirst,
-                              "DEAD END [\(raw)]: the screen's feed \(feed) was never requested on load",
+                let first = waitForPtrIncrement(app, feed: feed, baseline: 0, timeout: 12)
+                let baseline = ptrCount(app, feed: feed)
+                XCTAssertTrue(first && baseline > 0,
+                              "DEAD END [\(raw)]: the screen's feed \(feed) was never requested on load " +
+                              "(probe: \(baseline); -1 means the probe itself is missing)",
                               file: #filePath, line: #line)
-                let baseline = servedCount(set: "main", name: "walk-\(raw)", path: feed)
                 pullToRefresh(app)
-                let bumped = waitForServedIncrement(set: "main", name: "walk-\(raw)",
-                                                    path: feed, baseline: baseline, timeout: 15)
+                let bumped = waitForPtrIncrement(app, feed: feed, baseline: baseline, timeout: 15)
                 XCTAssertTrue(bumped,
                               "DEAD END [\(raw)]: pull-to-refresh never re-requested \(feed) " +
-                              "(fixture served-count stayed at \(baseline))",
+                              "(served-count probe stayed at \(baseline))",
                               file: #filePath, line: #line)
             }
             app.terminate()
