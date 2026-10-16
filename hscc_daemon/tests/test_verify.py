@@ -62,6 +62,14 @@ def _hermetic_new_checks_overrides(tmp_path, healthy=True):
     prof_dir.mkdir(parents=True, exist_ok=True)
     _make_state_db_with_session(prof_dir / "state.db", "alpha")
 
+    # provider_routing — hermetic applied-template state: a NON-uniform
+    # template, for which direct node endpoints are legitimate and the check
+    # skips (ok True). Without a planted state the check would be UNVERIFIED
+    # (ok None) and the run_all-ok assertion would (correctly) go red; the
+    # uniform_pool fail/pass paths are covered by TestCheckProviderRouting.
+    applied = tmp_path / "applied_template.json"
+    applied.write_text(json.dumps({"template": "fake", "uniform_pool": False}))
+
     return {
         "script": str(sweep),
         "python": sys.executable,
@@ -69,6 +77,7 @@ def _hermetic_new_checks_overrides(tmp_path, healthy=True):
         "repo_root": str(tmp_path / "repo"),
         "names": ["hscc-commands"],
         "registry_path": str(registry),
+        "applied_state_path": str(applied),
     }
 
 
@@ -795,7 +804,7 @@ class TestRunAll:
             )
 
         assert result["ok"] is True
-        assert len(result["checks"]) == 10
+        assert len(result["checks"]) == 11
         assert all(c["ok"] for c in result["checks"])
 
     def test_run_all_fail_aggregation(self, tmp_path):
@@ -825,7 +834,7 @@ class TestRunAll:
                 **_hermetic_new_checks_overrides(tmp_path),
             )
 
-        assert len(result["checks"]) == 10
+        assert len(result["checks"]) == 11
         # At least the proxy check passes here — overall ok depends on individual checks
         names = [c["name"] for c in result["checks"]]
         assert "plugins" in names
@@ -853,7 +862,7 @@ class TestRunAll:
                          profiles_dir=str(empty_profiles),
                          serving_path=str(serving),
                          **_hermetic_new_checks_overrides(tmp_path))
-        assert len(result["checks"]) == 10
+        assert len(result["checks"]) == 11
 
     def test_run_all_ok_none_is_not_pass(self, tmp_path):
         """When multiplex is enabled but gateway state is missing (ok=None),
