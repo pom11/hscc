@@ -287,14 +287,21 @@ def _review_dispatch_capable(kanban_db):
     ``capable`` is what gates review rows out of ``spawnable``; ``reason`` is the
     non-empty human string used in the warning when it is False.
 
-    Two independent ways the answer is False, both observed on this fleet:
-      * the kanban lib in use exposes no ``has_spawnable_review`` — i.e. this
-        runtime has no review lane to spawn into. That is also exactly the
-        condition that makes ``_board_snapshot`` fall back to raw SQL, and the
-        raw-SQL predicate counting ``status='review'`` was what paged the
-        operator into four gateway restarts on 2026-10-15.
-      * ``kanban.review_dispatch`` is off: review work is parked for a human by
-        configuration, so no dispatcher state can ever clear it.
+    Two independent ways the answer is False, and BOTH were live on 2026-10-15
+    in the sense that each one alone would have produced the phantom stall:
+      * the kanban lib in use exposes no ``has_spawnable_review`` — no review
+        lane to spawn into. That is the condition that makes ``_board_snapshot``
+        fall back to raw SQL, and the raw-SQL predicate counting
+        ``status='review'`` was the door the operator's diagnosis pointed at
+        (measured 2026-10-16: on THIS box the bind in
+        ``_bind_spawnable_helpers`` does succeed, so the reachable door here is
+        the second one — but the fallback is one unimportable
+        ``kanban_db_dispatch`` away, e.g. a daemon started with a
+        ``HERMES_AGENT_PATH`` that has no dispatch module, and it must not be
+        allowed to lie again).
+      * ``kanban.review_dispatch`` is off (the dispatcher's own gate): review
+        work is parked for a human by configuration, so no dispatcher state can
+        ever clear it. This box currently has it ON.
 
     When the lib DOES advertise ``has_spawnable_review`` but the config gate is
     unreadable (``None``), we report CAPABLE — the same fail-toward-today's-
