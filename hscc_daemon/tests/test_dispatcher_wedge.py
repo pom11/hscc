@@ -109,6 +109,46 @@ class Recorder:
                                             "gui/501/ai.hermes.gateway"]}
 
 
+class NoReviewLaneKanban:
+    """Kanban lib with NO ``has_spawnable_ready`` / ``has_spawnable_review``.
+
+    The faithful stand-in for the runtime that caused the 2026-10-15 restart
+    loop: the live ``hermes_cli.kanban_db`` re-exports both predicates only
+    through the removal-scheduled compat shim, so when
+    ``hermes_cli.kanban_db_dispatch`` is unimportable
+    ``_bind_spawnable_helpers`` binds nothing and ``_board_snapshot`` falls back
+    to raw SQL. It exposes the same board surface as ``FakeKanban``
+    (``list_boards`` / ``connect_closing``) and nothing else, so the code under
+    test takes exactly the fallback branch the live daemon took.
+    """
+
+    def __init__(self, boards):
+        self._inner = FakeKanban(boards)
+        assert not hasattr(self, "has_spawnable_ready")
+        assert not hasattr(self, "has_spawnable_review")
+
+    def list_boards(self):
+        return self._inner.list_boards()
+
+    def connect_closing(self, board=None):
+        return self._inner.connect_closing(board)
+
+
+class LogSpy:
+    """Collects daemon log lines by level; replaces ``dispatcher_wedge.log``."""
+
+    def __init__(self):
+        self.lines = []
+
+    def __call__(self, msg, level="INFO", **kw):
+        self.lines.append((level, str(msg)))
+
+    def count(self, level, needle):
+        return sum(1 for lvl, msg in self.lines
+                   if lvl == level and needle in msg)
+
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -125,23 +165,38 @@ def _reset_detector():
         "declared_since": None, "peak_stall_ticks": 0,
     }
     dw._recovery_detection_streak = 0
+    dw._reset_stale_review_warning()
     yield
     dw._detector = {
         "stall_ticks": 0, "last_running_total": None, "declared": False,
         "declared_since": None, "peak_stall_ticks": 0,
     }
     dw._recovery_detection_streak = 0
+    dw._reset_stale_review_warning()
 
 
-def _capture(boards, cap=None):
-    """Build a capture dict as if ``_capture_kanban`` had read the fake DB."""
+def _capture(boards, cap=None, review_capable=True):
+    """Build a capture dict as if ``_capture_kanban`` had read the fake DB.
+
+    ``review_capable`` defaults to True so captures exercise today's libV4
+    semantics (review work is spawnable); the not-dispatchable-review tests
+    pin it False or let the real capability probe decide.
+    """
     kb = FakeKanban(boards)
-    return dw._capture_kanban(kanban_db=kb, max_in_progress=cap)
+    return dw._capture_kanban(kanban_db=kb, max_in_progress=cap,
+                              review_capable=review_capable)
 
 
 def _run_detect(boards, cap=None, n=None, now=0.0, writes=None,
-                per_profile=1_000_000):
-    """Run one probe pass with injectables; return (ok, written_stream)."""
+                per_profile=1_000_000, review_capable=True):
+    """Run one probe pass with injectables; return (ok, written_stream).
+
+    ``review_capable`` pins the runtime's review-dispatch capability instead of
+    probing the LIVE operator config (``kanban.review_dispatch``): the suite
+    must pass identically whether or not review dispatch is on in
+    ``~/.hermes/config.yaml``, and True keeps every pre-existing case on
+    today's libV4 semantics. Tests of the capability probe itself pass None.
+    """
     if n is not None:
         old = dw.DISPATCHER_DETECT_TICKS
         dw.DISPATCHER_DETECT_TICKS = n
@@ -161,7 +216,7 @@ def _run_detect(boards, cap=None, n=None, now=0.0, writes=None,
     try:
         ok = dw.check_dispatcher_wedge(
             kanban_db=kb, max_in_progress=cap, now=now, write_state_fn=wf,
-            max_per_profile=per_profile)
+            max_per_profile=per_profile, review_capable=review_capable)
     finally:
         dw._read_max_in_progress = real_read
         if n is not None:
@@ -466,7 +521,12 @@ class TestNoSpawnableWorkIsNotAStall:
         assert "roomy_spawnable" in stream
 
     def test_review_work_counts_as_spawnable(self):
-        """A spawnable review card with room and no spawn IS a stall."""
+        """A spawnable review card with room and no spawn IS a stall.
+
+        Only when this runtime can actually dispatch review work — the case
+        pinned here (``review_capable=True``, the libV4 runtime). The
+        not-dispatchable counterpart is ``TestReviewNotDispatchableByRuntime``.
+        """
         boards = {"default": [("review", "worker-a")] * 2}
         ok, stream = _run_detect(boards, cap=4, n=1)
         assert ok is False
@@ -499,6 +559,341 @@ class TestWorkerSpawnedIsNotStall:
         boards2 = {"default": [RUNNING] + [READY] * 1}
         _run_detect(boards2, cap=4, n=5, now=60.0)
         assert dw._detector["stall_ticks"] == 0
+
+
+class TestReviewNotDispatchableByRuntime:
+    """The 2026-10-15 phantom-stall class, at the probe level.
+
+    Live incident: ``t_25aed701`` sat ``status=review`` after its PR merged —
+    harmless — but ``_board_snapshot``'s raw-SQL fallback counted ANY review row
+    as spawnable (the live hermes build exposes ``has_spawnable_review`` only
+    through a compat shim ``_bind_spawnable_helpers`` cannot bind when
+    ``kanban_db_dispatch`` is unimportable). The detector therefore declared a
+    "GENUINE STALL" that no dispatcher action could ever clear, and recovery
+    restarted the gateway on every cooldown expiry: four SIGTERMs in two hours.
+
+    The contract these tests pin: review work this runtime cannot dispatch is
+    NOT spawnable, never declares a stall, never restarts anything, and is
+    reported once per cooldown window as a warning.
+    """
+
+    def _detect_lib(self, lib, cap=4, n=1, now=0.0):
+        """One probe tick against an arbitrary lib fake; (ok, stream)."""
+        captured = {}
+        real_read = dw._read_max_in_progress
+        dw._read_max_in_progress = lambda: None
+        old_ticks = dw.DISPATCHER_DETECT_TICKS
+        dw.DISPATCHER_DETECT_TICKS = n
+        try:
+            ok = dw.check_dispatcher_wedge(
+                kanban_db=lib, max_in_progress=cap, now=now,
+                write_state_fn=lambda name, data: captured.update({name: data}),
+                max_per_profile=1_000_000, review_capable=None)
+        finally:
+            dw._read_max_in_progress = real_read
+            dw.DISPATCHER_DETECT_TICKS = old_ticks
+        return ok, captured.get("dispatcher")
+
+    def test_review_row_without_lib_support_is_not_spawnable(self):
+        """Fake lib WITHOUT has_spawnable_review + a review task -> capture
+        says NOT spawnable, and reports the review count separately."""
+        lib = NoReviewLaneKanban({"default": [("review", "architect")] * 2})
+        cap = dw._capture_kanban(kanban_db=lib, max_in_progress=4,
+                                 max_per_profile=1_000_000)
+        assert cap["spawnable"] == [], "review row leaked into spawnable"
+        assert cap["roomy_spawnable"] == []
+        assert cap["stale_review"] is True
+        assert cap["review_count"] == 2
+
+    def test_parked_review_never_declares_a_stall_and_never_restarts(self,
+                                                                      tmp_path):
+        """Many ticks of a review-parked card: stream stays GREEN every tick and
+        the recovery is handed that green, so restart_fn is never called."""
+        lib = NoReviewLaneKanban({"default": [("review", "architect")]})
+        rec = Recorder()
+        p = str(tmp_path / "recover.json")
+        for t in range(dw.DISPATCHER_DETECT_TICKS * 3):
+            ok, stream = self._detect_lib(lib, cap=4,
+                                          n=dw.DISPATCHER_DETECT_TICKS,
+                                          now=t * 60.0)
+            assert ok is True, f"tick {t}: review-parked card declared a stall"
+            assert stream["ok"] is True
+            dw.recover_dispatcher_wedge(stream_state=stream, restart_fn=rec,
+                                        now=t * 60.0, state_file=p)
+        assert rec.calls == 0, "a card nobody can spawn must never restart " \
+            "the gateway"
+        assert dw._detector["declared"] is False
+
+    def test_warning_emitted_once_per_cooldown_window_not_per_tick(self,
+                                                                    monkeypatch):
+        """The stale-review warning is rate-limited: one line per
+        ``DISPATCHER_RECOVER_COOLDOWN_SECONDS``, not one per probe tick."""
+        spy = LogSpy()
+        monkeypatch.setattr(dw, "log", spy)
+        lib = NoReviewLaneKanban({"default": [("review", "architect")] * 3})
+        window = dw.DISPATCHER_RECOVER_COOLDOWN_SECONDS
+        # Ticks at 0, 60, 120 ... all inside the first window.
+        for i in range(10):
+            ok, _ = self._detect_lib(lib, now=i * 60.0)
+            assert ok is True
+        assert spy.count("WARNING", "not dispatchable by this runtime") == 1, \
+            "stale-review warning fired more than once inside one window"
+        # Past the window the steady state is allowed to speak again.
+        self._detect_lib(lib, now=window + 1)
+        assert spy.count("WARNING", "not dispatchable by this runtime") == 2
+        # And the warning says what to do about it.
+        warn = [m for lvl, m in spy.lines if lvl == "WARNING"]
+        assert "review feature not enabled" in warn[0]
+        assert "NOT a dispatcher stall" in warn[0]
+
+    def test_green_stream_reports_stale_review_fields(self):
+        """The stream carries the count so `hscc status` can show it — as a
+        warning on a GREEN stream, never as a stall."""
+        lib = NoReviewLaneKanban({"default": [("review", "architect")] * 2})
+        ok, stream = self._detect_lib(lib, now=0.0)
+        assert ok is True
+        assert stream["ok"] is True
+        assert stream["stale_review"] is True
+        assert stream["review_count"] == 2
+        assert stream["spawnable"] == []
+        assert "not dispatchable by this runtime" in stream["message"]
+
+    def test_capable_runtime_still_counts_review_as_spawnable(self):
+        """Requirement (b): the same board WITH lib support keeps today's
+        semantics — review work is spawnable and a stall fires with room."""
+        cap = _capture({"default": [("review", "worker-a")] * 2}, cap=4)
+        assert cap["spawnable"] == ["default"]
+        assert cap["stale_review"] is False
+        ok, stream = _run_detect({"default": [("review", "worker-a")] * 2},
+                                 cap=4, n=1)
+        assert ok is False and stream["ok"] is False
+
+    def test_gate_off_runtime_reports_not_spawnable(self, monkeypatch):
+        """The live-relevant trigger: this runtime's lib DOES expose
+        ``has_spawnable_review`` (so the lib predicate path is taken, exactly as
+        on the operator's box) but the dispatcher's own gate says review does not
+        dispatch. Review work must then be non-spawnable + reported, and a real
+        ready row must still be able to declare a stall.
+
+        Pinned against the live config surface (``kanban.review_dispatch``)
+        rather than the fallback branch, because that combination is the one a
+        normal Hermes install can reach by configuration.
+        """
+        monkeypatch.setattr(dw, "_review_dispatch_config_state", lambda: False)
+        rows = [("ready", "worker-a"), ("review", "architect")]
+        lib = FakeKanban({"default": rows})
+        cap = dw._capture_kanban(kanban_db=lib, max_in_progress=4,
+                                 max_per_profile=1_000_000)
+        # Ready still spawnable (detection intact), review reported not spawnable.
+        assert cap["spawnable"] == ["default"]
+        assert cap["stale_review"] is True and cap["review_count"] == 1
+        # Review-only board: nothing spawnable, so no stall, warning only.
+        lib2 = FakeKanban({"default": [rows[1]]})
+        cap2 = dw._capture_kanban(kanban_db=lib2, max_in_progress=4,
+                                  max_per_profile=1_000_000)
+        assert cap2["spawnable"] == []
+        assert cap2["stale_review"] is True and cap2["review_count"] == 1
+        ok, stream = self._detect_lib(lib2)
+        assert ok is True and stream["stale_review"] is True
+        assert "review_dispatch" in stream["review_reason"]
+
+    def test_mixed_board_ready_is_spawnable_review_is_not(self):
+        """A board with BOTH a ready row and a review row: the ready row still
+        makes the board spawnable (stall detection intact) while the review
+        count is still reported — and the review row alone could not stall."""
+        rows = [("ready", "worker-a"), ("review", "architect")]
+        lib = NoReviewLaneKanban({"default": rows})
+        cap = dw._capture_kanban(kanban_db=lib, max_in_progress=4,
+                                 max_per_profile=1_000_000)
+        assert cap["spawnable"] == ["default"]
+        assert cap["stale_review"] is True
+        assert cap["review_count"] == 1
+        # Without the ready row the same board is NOT spawnable.
+        lib2 = NoReviewLaneKanban({"default": [rows[1]]})
+        cap2 = dw._capture_kanban(kanban_db=lib2, max_in_progress=4,
+                                  max_per_profile=1_000_000)
+        assert cap2["spawnable"] == []
+
+
+class TestReviewDispatchCapabilityProbe:
+    """``_review_dispatch_capable`` — the gate that decides whether review rows
+    may count as spawnable at all.
+
+    It reuses the lib's own accessors (``has_spawnable_review`` presence +
+    ``kanban_db_dispatch.review_dispatch_enabled``) rather than re-reading the
+    config, so our answer cannot drift from the dispatcher's. ``kanban
+    .auto_review`` is the pairing policy (who reviews a new card), NOT this
+    gate, and is deliberately not consulted.
+    """
+
+    def test_not_capable_when_lib_lacks_the_helper(self, monkeypatch):
+        # Even with the config gate ON, no lib helper means no review lane.
+        monkeypatch.setattr(dw, "_review_dispatch_config_state",
+                            lambda: True)
+        lib = NoReviewLaneKanban({"default": []})
+        capable, reason = dw._review_dispatch_capable(lib)
+        assert capable is False
+        assert "has_spawnable_review" in reason
+
+    def test_not_capable_when_config_gate_off(self, monkeypatch):
+        monkeypatch.setattr(dw, "_review_dispatch_config_state", lambda: False)
+        lib = FakeKanban({"default": []})
+        capable, reason = dw._review_dispatch_capable(lib)
+        assert capable is False
+        assert "review_dispatch" in reason
+
+    def test_capable_when_helper_present_and_gate_on(self, monkeypatch):
+        monkeypatch.setattr(dw, "_review_dispatch_config_state", lambda: True)
+        capable, reason = dw._review_dispatch_capable(
+            FakeKanban({"default": []}))
+        assert capable is True and reason == ""
+
+    def test_unknown_gate_state_fails_toward_capable(self, monkeypatch):
+        """An unreadable config gate must NOT silently disable review-stall
+        detection on a runtime that can dispatch review (matches the lib's own
+        fail-open in ``review_dispatch_enabled``)."""
+        monkeypatch.setattr(dw, "_review_dispatch_config_state", lambda: None)
+        capable, _ = dw._review_dispatch_capable(FakeKanban({"default": []}))
+        assert capable is True
+
+    def test_gate_reuses_the_dispatchers_own_accessor(self, monkeypatch):
+        """We call ``kanban_db_dispatch.review_dispatch_enabled`` — not a
+        private re-read of ``kanban.review_dispatch``."""
+        kbd = pytest.importorskip("hermes_cli.kanban_db_dispatch")
+        calls = []
+
+        def fake_enabled():
+            calls.append(1)
+            return False
+        monkeypatch.setattr(kbd, "review_dispatch_enabled", fake_enabled)
+        assert dw._review_dispatch_config_state() is False
+        assert calls == [1]
+
+    def test_unimportable_gate_reads_as_unknown(self, monkeypatch):
+        import sys
+        import types
+
+        import hermes_cli
+        # An interpreter where kanban_db_dispatch cannot be imported at all:
+        # unknown, NOT "off" — the raw-SQL/hasattr check still gates review.
+        # BOTH surfaces must go: `from hermes_cli import kanban_db_dispatch`
+        # resolves the parent-package ATTRIBUTE first and only then consults
+        # sys.modules, so shadowing one leaves the other reachable.
+        monkeypatch.delattr(hermes_cli, "kanban_db_dispatch", raising=False)
+        monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db_dispatch", None)
+        assert dw._review_dispatch_config_state() is None
+        # And a module without the accessor is unknown too.
+        stub = types.ModuleType("kbd_stub")
+        monkeypatch.setattr(hermes_cli, "kanban_db_dispatch", stub,
+                            raising=False)
+        monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db_dispatch", stub)
+        assert dw._review_dispatch_config_state() is None
+
+    def test_gate_read_failure_is_unknown(self, monkeypatch):
+        kbd = pytest.importorskip("hermes_cli.kanban_db_dispatch")
+
+        def boom():
+            raise RuntimeError("config unreadable")
+        monkeypatch.setattr(kbd, "review_dispatch_enabled", boom)
+        assert dw._review_dispatch_config_state() is None
+
+
+class TestNonDispatchableStallRestartsOncePerIncident:
+    """The restart-latching contract at the recovery level.
+
+    The 2026-10-15 loop needed three ingredients, all present here: a persistent
+    stall the runtime cannot dispatch, a cooldown that expires, and green ticks
+    in between (the fleet briefly spawning something else) that renewed the
+    attempt budget via A1. Every ingredient is real; the latch removes the
+    outcome. Each test drives its own clock and its own state file.
+    """
+
+    SIG = "default|roomy:default"
+
+    def _drive(self, tmp_path, monkeypatch, rec, stream, ticks=6,
+               with_green=True, start=0.0):
+        """Alternate red/green ticks far past the cooldown; return results."""
+        monkeypatch.setattr(dw, "DISPATCHER_RESTART_AFTER_DETECTIONS", 1)
+        p = str(tmp_path / "recover.json")
+        step = dw.DISPATCHER_RECOVER_COOLDOWN_SECONDS + 1
+        results = []
+        for i in range(ticks):
+            t = start + i * step
+            results.append(dw.recover_dispatcher_wedge(
+                stream_state=stream, restart_fn=rec, now=t, state_file=p))
+            if with_green:
+                results.append(dw.recover_dispatcher_wedge(
+                    stream_state=_green_stream(), restart_fn=rec,
+                    now=t + 10, state_file=p))
+        return p, results
+
+    def test_unfixable_stall_restarts_EXACTLY_once_despite_greens(self,
+                                                                   tmp_path,
+                                                                   monkeypatch):
+        """The headline proof: persistent non-dispatchable stall signature,
+        many ticks, cooldowns expiring, green ticks in between — exactly ONE
+        restart, and the state records why the rest were refused."""
+        rec = Recorder()
+        red = _red_stream(stall_signature=self.SIG,
+                          stall_dispatchable=False, stale_review=True,
+                          review_count=1)
+        p, results = self._drive(tmp_path, monkeypatch, rec, red, ticks=6)
+        assert rec.calls == 1, [r["result"] for r in results]
+        assert results[0]["result"] == "recovered"
+        reds = [r for r in results if r.get("reason")
+                in ("not_dispatcher_fixable", "incident_latched")]
+        assert reds, "later ticks never hit the incident latch"
+        assert all(r["result"] == "suppressed" for r in reds)
+        state = json.load(open(p))
+        assert state["last_incident"]["signature"] == self.SIG
+        assert state["last_incident"]["dispatchable"] is False
+
+    def test_unfixable_stall_gets_no_restart_for_a_NEW_signature_either(
+            self, tmp_path, monkeypatch):
+        """A gateway restart cannot fix a stall this runtime cannot dispatch,
+        so after one proved it didn't, a different unfixable signature is
+        refused too (still exactly one restart total)."""
+        rec = Recorder()
+        red_a = _red_stream(stall_signature="a|roomy:a",
+                            stall_dispatchable=False)
+        p, _ = self._drive(tmp_path, monkeypatch, rec, red_a, ticks=1)
+        assert rec.calls == 1
+        red_b = _red_stream(stall_signature="b|roomy:b",
+                            stall_dispatchable=False)
+        _, results = self._drive(tmp_path, monkeypatch, rec, red_b, ticks=3,
+                                 start=10 * dw.DISPATCHER_RECOVER_COOLDOWN_SECONDS)
+        assert rec.calls == 1, results
+        assert all(r["result"] == "suppressed" for r in results
+                   if r["result"] != "none-wedged")
+
+    def test_unfixable_stall_without_signature_still_latches(self, tmp_path,
+                                                             monkeypatch):
+        """A pre-upgrade stream carrying no ``stall_signature`` must not slip
+        past the latch: the second unfixable restart is still refused."""
+        rec = Recorder()
+        red = _red_stream(stall_dispatchable=False)
+        p, results = self._drive(tmp_path, monkeypatch, rec, red, ticks=4)
+        assert rec.calls == 1, results
+
+    def test_dispatchable_stall_is_NEVER_latched(self, tmp_path, monkeypatch):
+        """Requirement (b) at the recovery level: today's libV4 semantics are
+        intact — a dispatcher-fixable stall with the SAME signature keeps the
+        cooldown + max-attempt behaviour, restart per cooldown, and the green
+        tick still renews the A1 budget."""
+        rec = Recorder()
+        monkeypatch.setattr(dw, "DISPATCHER_RESTART_AFTER_DETECTIONS", 1)
+        p = str(tmp_path / "recover.json")
+        step = dw.DISPATCHER_RECOVER_COOLDOWN_SECONDS + 1
+        red = _red_stream(stall_signature=self.SIG, stall_dispatchable=True)
+        for i in range(dw.DISPATCHER_RECOVER_MAX_ATTEMPTS):
+            r = dw.recover_dispatcher_wedge(stream_state=red, restart_fn=rec,
+                                            now=i * step, state_file=p)
+            assert r["result"] == "recovered", (i, r)
+            dw.recover_dispatcher_wedge(stream_state=_green_stream(),
+                                        restart_fn=rec, now=i * step + 10,
+                                        state_file=p)
+        assert rec.calls == dw.DISPATCHER_RECOVER_MAX_ATTEMPTS
+        assert json.load(open(p))["last_incident"]["dispatchable"] is True
 
 
 class TestUnreachableKanbanFailsSafe:
