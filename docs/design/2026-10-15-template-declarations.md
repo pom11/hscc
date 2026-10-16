@@ -120,13 +120,13 @@ provider and its `model.default`, `family-*` providers,
 
 | Consumer | Written value | Replaces |
 |---|---|---|
-| `model.base_url` | `http://localhost:<proxy_port>/v1` of the family named by `endpoints.chat` | `chat_url` inference (`:1613-1618`) |
-| `providers.custom.base_url` | same string (literally the same value, not a second crafted URL) | `:1647-1651` |
-| `providers.custom.model.default` | the probe-resolved alias of that family | `:1651` (`f"{o.node}:{o.port}"`) |
-| `providers.family-<name>` | alias-valued `model.default` (per t_ac795424) | `localhost:<port>` default (`:1657`) |
+| `model.base_url` | `http://localhost:<proxy_port>/v1` of the family named by `endpoints.chat` | `chat_url` inference (`:1613-1617`) |
+| `providers.custom.base_url` | same string (literally the same value, not a second crafted URL) | `:1645-1649` |
+| `providers.custom.model.default` | the probe-resolved alias of that family | `:1647` (`f"{o.node}:{o.port}"`) |
+| `providers.family-<name>` | alias-valued `model.default` (per t_ac795424) | `localhost:<port>` default (`:1656`) |
 | `delegation.model` + `.base_url`, every `fallback_providers[].*` | target's proxy URL + probe-resolved alias | `_set_worker_model_in_config` defaults (`:1861-1874`) |
 | auxiliary/compression entries | target's proxy URL + alias | `_apply_routing` targets (unchanged path) |
-| role profiles (`profiles/*/config.yaml` `model.*`) | per `endpoints.profiles` selector | `_set_worker_model_in_profile` / `_set_orchestrator_profile_to_pool` heuristics (`:1877-1935`) |
+| role profiles (`profiles/*/config.yaml` `model.*`) | per `endpoints.profiles` selector | `_set_worker_model_in_profile` / `_set_orchestrator_profile_to_pool` heuristics (`:1877-1927`) |
 
 The invariants:
 
@@ -145,8 +145,10 @@ The invariants:
 ### 1.3 The non-uniform exemption, stated precisely
 
 A template is exempt from `proxy-alias` enforcement when it is **not**
-`uniform_pool` — i.e. `ClusterTemplate.uniform_pool` is false (`template_intent.py:189`), which includes every v2 template (uniform_pool requires v3,
-structural gate `:1332-1334`) and every v3/v4 template that omits the flag.
+`uniform_pool` — i.e. `ClusterTemplate.uniform_pool` is false
+(`template_intent.py:189`), which includes every v2 template (uniform_pool
+requires v3, structural gate `:1333-1334`) and every v3/v4 template that
+omits the flag.
 Exempt templates keep explicit pins: `orchestrator: <ip>:<port>` targets are
 legal, and `endpoints:` there is an *optional* override only — absent, apply
 writes exactly what it writes today (byte-identical, §6). The reason is the
@@ -178,8 +180,8 @@ spec deliberately does not break v3 templates.
 
 ### 1.5 Apply writes it all
 
-`apply_template` step 3 (`config.yaml`, `:1078-1082`) and step 5
-(`worker-model-ids`, `:1098-1114`) consume the declared block instead of
+`apply_template` step 3 (`config.yaml`, `:1073-1077`) and step 5
+(`worker-model-ids`, `:1100-1119`) consume the declared block instead of
 deciding. Step 5's `skip_delegation` heuristic (`:1108`, derived from
 "routing block present") is replaced: the declared block says per-consumer
 whether it is written — omission means untouched, same doctrine as `routing:`.
@@ -189,9 +191,10 @@ gated each write).
 
 ### 1.6 Version bump
 
-`endpoints:` and `proxy:` are v4 keys (`RECOGNISED_VERSIONS = (2, 3, 4)`,
-`cluster_template.py:1219`). v2/v3 templates carrying them are refused with
-the existing legacy-key error (`template_intent.py:206-218`), matching how
+`endpoints:` and `proxy:` are v4 keys (`RECOGNISED_VERSIONS`, currently
+`(2, 3)` at `cluster_template.py:1222`, becomes `(2, 3, 4)`). v2/v3 templates
+carrying them are refused with the existing legacy-key error
+(`template_intent.py:206-218`), matching how
 `routing`/`uniform_pool` were introduced. v3 parses unchanged and stays
 byte-identical.
 
@@ -279,7 +282,7 @@ reads router settings only at startup, so a policy change requires a proxy
 restart. The live fork already rewrites + restarts on policy change
 (`5b0f9b5e`); hscc's apply follows the same rule — write, and restart the
 proxy only when the region actually changed (mirroring the gateway-restart
-discipline at `cluster_template.py:1144-1156`). The operator hand-fix that
+discipline at `cluster_template.py:1149-1161`). The operator hand-fix that
 established the live config (`config.yaml.bak-direct244-20261015`,
 `proxy.yaml.bak-*`) is never restored or rewritten by hscc code.
 
