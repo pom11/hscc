@@ -185,6 +185,12 @@ routing:
 
 `hscc template validate` is now two layers — **structural** (offline: no cluster state, no resolver) and **placement** (live) — and reports them separately. `--structural-only` skips the live layer (usable in CI), and a non-zero exit means either layer failed. `apply` runs the same validation as its pre-flight gate and blocks before touching anything. Full schema detail: [docs/DESIGN-template-explicit-placement.md](docs/DESIGN-template-explicit-placement.md) and [hscc-cluster/templates/README.md](hscc-cluster/templates/README.md).
 
+The next step on that schema is declared routing end-to-end — an
+`endpoints:` block (under `uniform_pool`, every hermes consumer points at the
+family proxy by alias), a `proxy:` block (LiteLLM balancing + per-deployment
+knobs, written into sparkrun's proxy config through sparkrun), and kanban
+caps as template fields: [docs/design/2026-10-15-template-declarations.md](docs/design/2026-10-15-template-declarations.md).
+
 ```
 hscc template list                          # see the shipped layouts
 hscc template preview 4node-coding          # dry-run against the live cluster
