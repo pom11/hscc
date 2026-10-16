@@ -492,6 +492,129 @@ def _print_template_verb_usage(sub: str):
         print(f"{' ' * _TEMPLATE_HELP_INDENT}example: {entry['example']}")
 
 
+# ── cluster group help surface (t_875c5019, audit B6 + B12) ────────────────
+# `_handle_cluster` used to handle `--help` ONLY at group level
+# (`len(sys.argv) < 3 or sys.argv[2] == "--help"`), so every per-subcommand
+# help request fell through to verb dispatch: `cluster stop --help` forwarded
+# the help token to `sparkrun stop` as the container id (B6 — a MUTATING
+# shell-out), and `status`/`hosts`/`info`/`jobs --help` shelled out to their
+# read-only sparkrun calls (B12 — "help executes nothing" violated, and the
+# help costs seconds). Each subcommand now carries its own help entry, printed
+# by an intercept that runs before `--theme` stripping, before the engine
+# import and before dispatch, so a help request loads nothing and shells out
+# nothing.
+#
+# The layout helpers are separate from the template ones above on purpose:
+# `hscc_daemon/hscc.py` is the four-card collision file (F2/F3/F4/F5 all touch
+# it), so this card adds code rather than reshaping F2's just-landed helpers.
+_CLUSTER_HELP_INDENT = 6
+_CLUSTER_HELP_WIDTH = 78
+
+# Verbs whose `--help` keeps the F6 refusal contract (rc=1 + "Nothing was
+# started or stopped") instead of printing help: `up`/`down` already refuse
+# every unknown token including `--help` via _parse_cluster_flags, and that
+# refusal message is itself the subject of other fix cards' (B) rules. `stop`
+# is NOT in here — its help now prints, because printing help executes
+# nothing (it never touches sparkrun) and the audit's help-path contract is
+# exit 0.
+_CLUSTER_F6_REFUSES = ("up", "down")
+
+_CLUSTER_SUBCOMMAND_HELP = {
+    "status": {
+        "usage": "hscc cluster status",
+        "desc": ("Running workloads across the fleet — tensor/pipeline "
+                 "parallel layout and container id per workload. Read-only."),
+        "example": None,
+    },
+    "hosts": {
+        "usage": "hscc cluster hosts",
+        "desc": ("Every host recorded in cluster.json plus the sparkrun "
+                 "clusters it resolves to, with ip and role. Read-only."),
+        "example": None,
+    },
+    "jobs": {
+        "usage": "hscc cluster jobs",
+        "desc": ("Every sparkrun job currently running on the cluster. "
+                 "Read-only."),
+        "example": None,
+    },
+    "info": {
+        "usage": "hscc cluster info",
+        "desc": ("The resolved cluster configuration: cluster.json, the "
+                 "sparkrun cluster it maps to and the serving topology. "
+                 "Read-only."),
+        "example": None,
+    },
+    "stop": {
+        "usage": "hscc cluster stop <container-id>",
+        "desc": ("Stop ONE running workload by container id — this stops a "
+                 "live container. List the current ids with "
+                 "'hscc cluster status'."),
+        "example": None,
+    },
+}
+
+
+def _cluster_help_width():
+    """Column budget for the cluster help surface: terminal width when the
+    terminal (or COLUMNS) reports a usable one, else 80, capped at 78 — the
+    same rule as the template surface, so no help line overflows at width
+    80/120 (the gate's wrap widths)."""
+    try:
+        cols = shutil.get_terminal_size((80, 24)).columns
+    except OSError:
+        cols = 80
+    return min(cols, _CLUSTER_HELP_WIDTH)
+
+
+def _cluster_entry_lines(sub, width=None):
+    """Render one cluster help entry (usage line + wrapped description, with
+    a continuation indent so no continuation ever lands at col 0)."""
+    if width is None:
+        width = _cluster_help_width()
+    entry = _CLUSTER_SUBCOMMAND_HELP[sub]
+    lines = [f"  {entry['usage']}"]
+    lines.extend(textwrap.wrap(entry["desc"], width=width,
+                               initial_indent=" " * _CLUSTER_HELP_INDENT,
+                               subsequent_indent=" " * _CLUSTER_HELP_INDENT))
+    if entry["example"]:
+        lines.append(f"{' ' * _CLUSTER_HELP_INDENT}example: "
+                     f"{entry['example']}")
+    return lines
+
+
+def _print_cluster_verb_usage(sub: str):
+    """`hscc cluster <verb> --help`: usage + description, exit 0, executing
+    nothing (no engine import, no sparkrun call)."""
+    print(f"Usage: {_CLUSTER_SUBCOMMAND_HELP[sub]['usage']}")
+    print()
+    for line in _cluster_entry_lines(sub)[1:]:
+        print(line)
+
+
+# The verbs whose per-subcommand `--help` this card made inert. `monitor` is
+# deliberately absent: it already had its own `--help` branch (proven inert by
+# the audit — zero canary trips) and its help text is operator-owned
+# (t_1cc33407), so this card leaves that surface exactly as it is. `up`/`down`
+# keep the F6 refusal contract (see _CLUSTER_F6_REFUSES).
+_CLUSTER_HELP_VERBS = ("status", "hosts", "jobs", "info", "stop")
+
+
+def _help_token_index(args):
+    """Index of a `--help`/`-h` token in a raw argv slice, else None.
+
+    The scan is deliberately over the RAW slice — before `--theme` stripping.
+    `_strip_theme_arg` consumes the token after `--theme` as the palette name,
+    so `cluster stop --theme --help` would otherwise swallow the help flag and
+    dispatch the mutating verb with `--theme` as its container id: the exact
+    hole the F6 raw-argv guard closes for up/down.
+    """
+    for i, tok in enumerate(args):
+        if tok in ("-h", "--help"):
+            return i
+    return None
+
+
 def _resolve_cluster_dir():
     """Locate the hscc-cluster plugin as a sibling of hscc_daemon."""
     cluster_dir = Path(__file__).resolve().parent.parent / "hscc-cluster"
@@ -579,6 +702,16 @@ def _handle_cluster():
     cluster_args_raw = list(sys.argv[2:])
     cluster_args, theme_name = _strip_theme_arg(cluster_args_raw)
     sub = cluster_args[0] if cluster_args else sub
+
+    # ── per-subcommand --help (B6 + B12) ───────────────────────────────────
+    # Must sit BEFORE the engine load: `hscc cluster status --help` used to
+    # import the cluster engine and shell `sparkrun status` before anybody
+    # looked for a help token. It also sits on the RAW slice so `--help` can
+    # never be eaten as a `--theme` value (see _help_token_index).
+    help_at = _help_token_index(cluster_args_raw)
+    if help_at is not None and sub in _CLUSTER_HELP_VERBS:
+        _print_cluster_verb_usage(sub)
+        return 0
 
     eng = _load_cluster_engine()
     if eng is None:
@@ -837,7 +970,8 @@ def _parse_cluster_flags(cluster_args, sub, raw_args=None):
             + " (and --theme <name> for the human view).\n"
             f"  Nothing was started or stopped. Refusing to guess what {tok} "
             f"meant — a destructive command runs only on arguments it "
-            f"understands.")
+            f"understands.\n"
+            f"  Full group help: hscc cluster --help")
     return dry_run, None
 
 
