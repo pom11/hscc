@@ -72,7 +72,7 @@ def list_review_prs():
 
 
 def _card_body(pr):
-    return (
+    body = (
         f"Verify the runtime dependency bump in PR {pr['url']} "
         f"(\"{pr.get('title', '')}\").\n\n"
         "Steps:\n"
@@ -87,6 +87,43 @@ def _card_body(pr):
         "6. Report what worked and any incompatibilities fixed. Do NOT merge "
         "the PR — leave that to the human reviewer."
     )
+    # sparkrun cards carry the fork-branch rule inline: the deployed runtime
+    # is a rebased fork branch, and a worker that "reinstalls sparkrun" from
+    # upstream silently loses the proxy router_settings passthrough + the
+    # least-in-flight balancer. Text is shared with the CI PR body via
+    # hscc_daemon/dep_bump_guard.py; if that module can't be reached the card
+    # says so loudly instead of shipping a rule-less bump card.
+    title = (pr.get("title") or "").lower()
+    if "sparkrun" in title:
+        lines = None
+        try:
+            import importlib.util
+            here = os.path.dirname(os.path.abspath(__file__))
+            # Repo checkout: scripts/../hscc_daemon/…  Installed runtime
+            # (Hermes cron runs this copy from ~/.hermes/scripts/): the
+            # hscc_daemon plugin payload at ~/.hermes/plugins/hscc_daemon/.
+            candidates = [
+                os.path.join(os.path.dirname(here), "hscc_daemon", "dep_bump_guard.py"),
+                os.path.expanduser("~/.hermes/plugins/hscc_daemon/dep_bump_guard.py"),
+            ]
+            path = next((p for p in candidates if os.path.isfile(p)), None)
+            if path is None:
+                raise FileNotFoundError(candidates[0])
+            spec = importlib.util.spec_from_file_location("dep_bump_guard", path)
+            if spec is None or spec.loader is None:
+                raise ImportError(path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            lines = mod.fork_rule_block(["sparkrun"])
+        except Exception:
+            lines = [
+                "**GUARD UNAVAILABLE — stop before the sparkrun bump**: could "
+                "not load hscc_daemon/dep_bump_guard.py; read it in the repo "
+                "first. sparkrun runs from a FORK BRANCH, not upstream main.",
+            ]
+        body += ("\n\n**sparkrun fork-branch rule (read before step 2):**\n"
+                 + "\n".join(f"- {ln}" for ln in lines))
+    return body
 
 
 def ensure_cards(prs, *, _kb=None):
