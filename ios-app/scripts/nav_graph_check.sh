@@ -88,7 +88,7 @@ xcodebuild build-for-testing -project HSCC.xcodeproj -scheme HSCCUITests \
   -destination "platform=iOS Simulator,id=$DEVICE" \
   CODE_SIGNING_ALLOWED=NO -derivedDataPath "$DERIVED" \
   > "$RESULTS/build.log" 2>&1 \
-  || { tail -40 "$RESULTS/build.log"; fail 3 "build-for-testing failed (see $RESULTS/build.log)" }
+  || { tail -40 "$RESULTS/build.log"; fail 3 "build-for-testing failed (see $RESULTS/build.log)"; }
 grep -q "TEST BUILD SUCCEEDED" "$RESULTS/build.log" || fail 3 "build did not report success"
 echo "  build ok"
 # test-without-building does NOT re-install changed bundles (proved
