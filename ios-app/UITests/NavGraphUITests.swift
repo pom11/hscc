@@ -135,10 +135,12 @@ final class NavGraphUITests: XCTestCase {
         if let screen { app.launchEnvironment["HSCC_DEBUG_SCREEN"] = screen }
         if openDrawer { app.launchEnvironment["HSCC_DEBUG_OPEN_DRAWER"] = "1" }
         if let manifest { app.launchEnvironment["HSCC_DEBUG_MANIFEST_NAME"] = manifest }
-        // Negative self-check (nav_graph_check.sh step 2): the gate runs the
-        // walk once with HSCC_NEGATE_BACK=1 in the TEST process; the walk
+        // Negative self-check (nav_graph_check.sh step 6): the gate exports
+        // TEST_RUNNER_HSCC_NEGATE_BACK=1, xcodebuild strips the prefix and
+        // puts HSCC_NEGATE_BACK in THIS (test) process' env; the walk
         // forwards it to the app, whose shell then omits drawerOpen/
-        // drawerClose — the walk MUST go red naming the screen.
+        // drawerClose — the walk MUST go red naming the screen
+        // (testNegativeSeamEngages guards exactly this forwarding).
         if ProcessInfo.processInfo.environment["HSCC_NEGATE_BACK"] == "1" {
             app.launchEnvironment["HSCC_DEBUG_NEGATE_BACK"] = "1"
         }
@@ -242,6 +244,46 @@ final class NavGraphUITests: XCTestCase {
         let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.32))
         let to = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.88))
         from.press(forDuration: 1.0, thenDragTo: to)
+    }
+
+    // MARK: - Negative-seam wiring guard (gate harness self-check)
+
+    /// GUARD for the negative self-check wiring (gate fix 2026-10-16).
+    /// `nav_graph_check.sh` step 6 runs this test TOGETHER with the walk
+    /// under `TEST_RUNNER_HSCC_NEGATE_BACK=1` — xcodebuild's passthrough
+    /// strips the prefix and exports HSCC_NEGATE_BACK into the TEST-PROCESS
+    /// environment. A plain `HSCC_NEGATE_BACK=1 xcodebuild …` does NOT:
+    /// XCUITests execute in a separately-launched runner with a clean env,
+    /// and the first real negative run proved it — drawerClose stayed
+    /// present in all 17 launches and the run was falsely GREEN. This test
+    /// fails FAST (one launch) and names itself (`SEAM INERT` / `SEAM
+    /// LEAKED`) so a regression in this wiring reports as a broken harness,
+    /// not as "the walker cannot detect a dead end".
+    func testNegativeSeamEngages() {
+        let negated = ProcessInfo.processInfo.environment["HSCC_NEGATE_BACK"] == "1"
+        let app = navLaunch(openDrawer: true, manifest: "seam-\(negated ? "on" : "off")")
+        defer { app.terminate() }
+        assertDrawer(app, open: true, screen: "seam-guard",
+                     edge: "drawer-open seam never showed the drawer (guard cannot judge)")
+        let close = app.buttons["drawerClose"]
+        if negated {
+            XCTAssertFalse(close.waitForExistence(timeout: 5),
+                           "SEAM INERT [negative run]: drawerClose still rendered — " +
+                           "HSCC_NEGATE_BACK never reached the app process. Fix the " +
+                           "TEST_RUNNER_ passthrough in nav_graph_check.sh step 6 " +
+                           "BEFORE blaming the walker for a green negative run.")
+        } else {
+            XCTAssertTrue(close.waitForExistence(timeout: 5),
+                          "SEAM LEAKED [default run]: drawerClose missing although " +
+                          "HSCC_NEGATE_BACK is unset — the DEBUG seam is not default-off")
+            // Close via the real X button, then the toolbar entry must be
+            // exposed underneath (it is covered while the panel is up).
+            close.tap()
+            assertDrawer(app, open: false, screen: "seam-guard", edge: "drawerClose tap did not close")
+            XCTAssertTrue(app.buttons["drawerOpen"].waitForExistence(timeout: 5),
+                          "SEAM LEAKED [default run]: drawerOpen missing although " +
+                          "HSCC_NEGATE_BACK is unset — the DEBUG seam is not default-off")
+        }
     }
 
     // MARK: - The walk: every drawer row, both directions, same-row re-tap

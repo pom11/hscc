@@ -2,22 +2,26 @@
 # nav_graph_check.sh — the navigation-graph GATE (t_810ab152, operator brief
 # v2 2026-10-15: "the gate is XCUITest — real taps, no human").
 #
-# What it runs, in order:
-#   0  build-check the UI-test target (xcodebuild build-for-testing, 0 errors)
+# What it runs, in order (the step numbers below are the ones `fail` prints):
 #   1  the code-derived screen table is FRESH (nav_graph_screens.py check) —
 #      a drawer row added without a walk plan fails HERE, before the walker
 #   2  seed the fixture sets into the app container (main = the committed
 #      model_decode_check fixtures, same files capture_screens.sh seeds;
 #      empty = the same file names with every top-level array zeroed, which
 #      is what the EMPTY-state pass launches read via HSCC_DEBUG_FIXTURE_DIR)
-#   3  the WALK: every test in NavGraphUITests on the iPhone-16-class compact
+#   3  build-for-testing + EXPLICIT install of HSCC.app and the UI-test
+#      runner (test-without-building does not refresh installed bundles)
+#   4  the WALK: every test in NavGraphUITests on the iPhone-16-class compact
 #      simulator (enter -> marker -> back -> same-row re-tap -> PTR served-
 #      count receipt; honest empty + error states; disconnected pass)
-#   4  the receipts: per-launch fixture manifests under the app container
+#   5  the receipts: per-launch fixture manifests under the app container
 #      (pull-to-refresh increments proved by the harness's own served counts)
-#   5  the NEGATIVE self-check: the walk re-run once with HSCC_NEGATE_BACK=1
-#      (DEBUG seam removes drawerOpen/drawerClose). The suite MUST go red and
-#      name the screen. A walker that cannot fail is not a gate.
+#   6  the NEGATIVE self-check: the walk re-run once with
+#      TEST_RUNNER_HSCC_NEGATE_BACK=1 (xcodebuild passthrough into the test
+#      process; the walk forwards it to the app, whose DEBUG seam then omits
+#      drawerOpen/drawerClose). The suite MUST go red and name the screen —
+#      testNegativeSeamEngages guards this wiring in the same run. A walker
+#      that cannot fail is not a gate.
 #
 # The gate FAILS naming the screen + missing edge: every assertion message in
 # NavGraphUITests is prefixed "DEAD END [<screen>]: <missing edge>".
@@ -179,9 +183,21 @@ PY
 # ---------------------------------------------------------------------------
 step=6
 say "NEGATIVE self-check — HSCC_NEGATE_BACK=1 must turn the walk RED"
-rm -f "$DOC/HSCCFixtures"/manifest-neg-* 2>/dev/null
-HSCC_NEGATE_BACK=1 xcodebuild test-without-building -project HSCC.xcodeproj \
+# All manifests were already cleared by step 4's find-delete (the negative
+# pass rewrites manifest-walk-*, which step 5 has already consumed).
+# The flag must reach the TEST-RUNNER PROCESS environment. A plain
+# `HSCC_NEGATE_BACK=1 xcodebuild ...` only sets it in xcodebuild's own
+# process: XCUITests run in a separately-launched runner with a clean env,
+# so the walk NEVER saw the flag, drawerClose existed in all 17 launches
+# and the negative run was falsely GREEN (proven 2026-10-16 — the gate
+# would have reported "the walker cannot detect a dead end" for what was
+# a propagation hole). TEST_RUNNER_<NAME> is xcodebuild's documented
+# passthrough: it strips the prefix and exports <NAME> into the test
+# process, where NavGraphUITests picks it up and forwards it to the app.
+# testNegativeSeamEngages is the alarm-first guard for this wiring.
+TEST_RUNNER_HSCC_NEGATE_BACK=1 xcodebuild test-without-building -project HSCC.xcodeproj \
   -scheme HSCCUITests \
+  -only-testing:HSCCUITests/NavGraphUITests/testNegativeSeamEngages \
   -only-testing:HSCCUITests/NavGraphUITests/testWalkEveryDrawerRow \
   -destination "platform=iOS Simulator,id=$DEVICE" \
   CODE_SIGNING_ALLOWED=NO -derivedDataPath "$DERIVED" \
@@ -190,6 +206,12 @@ HSCC_NEGATE_BACK=1 xcodebuild test-without-building -project HSCC.xcodeproj \
 NEG_RC=$?
 if [ "$NEG_RC" = "0" ]; then
   fail 6 "NEGATIVE TEST PASSED — the walk stayed GREEN while drawerOpen/drawerClose were removed. The walker cannot detect a dead end; it is not a gate."
+fi
+# A red run whose only failure is SEAM INERT is a BROKEN HARNESS (the flag
+# never reached the app), not a walker that misses dead ends — say which.
+if grep -q "SEAM INERT" "$RESULTS/negative.log"; then
+  grep "SEAM INERT" "$RESULTS/negative.log" | head -2 | sed 's/^/    /'
+  fail 6 "negative run went red on the GUARD, not the walk: the negation flag never reached the app (TEST_RUNNER_ passthrough broken). Fix the gate wiring before trusting any green/negative result."
 fi
 if ! grep -q "DEAD END" "$RESULTS/negative.log"; then
   fail 6 "negative run failed for an unexpected reason (no DEAD END message): see $RESULTS/negative.log"

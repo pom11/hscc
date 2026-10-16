@@ -83,6 +83,20 @@ drawer and shows its honest gate/offline row.
 open/close affordances; `nav_graph_check.sh` runs the walk once under it and
 REQUIRES red output naming a screen — a walker that cannot fail is not a gate.
 
+The flag reaches the app through a two-hop chain — gate process → xcodebuild
+→ **test-runner process** (clean env, NOT inherited) → `launchEnvironment` →
+app process — and the first real negative run proved hop 2 does not happen
+for free: a plain `HSCC_NEGATE_BACK=1 xcodebuild …` left `drawerClose`
+present in all 17 launches and the negative run was falsely GREEN
+(2026-10-16). The gate therefore exports `TEST_RUNNER_HSCC_NEGATE_BACK=1`
+(xcodebuild's documented passthrough: strips the prefix, exports
+`HSCC_NEGATE_BACK` into the test process), and
+`testNegativeSeamEngages` runs FIRST in that pass: if the flag is set but
+`drawerClose` still renders, it fails with `SEAM INERT` naming the wiring,
+and step 6 reports "broken harness" instead of blaming the walker. The same
+test under the default (step-4) run asserts the seam is OFF and the real X
+button closes the drawer.
+
 ## Findings log
 
 (appended as discovered; every dead-end/trap fix gets its own commit)
