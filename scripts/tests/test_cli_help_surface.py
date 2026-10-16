@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -44,6 +45,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 import hscc_cli_help_audit as audit_mod  # noqa: E402
 
 EXPECTED_PATH = HERE / "cli_help_expected.json"
+A_COUNTS_PATH = HERE / "cli_help_a_counts.json"
 
 # Surface floors. If enumeration shrinks, the walker broke (or commands were
 # removed without amending the audit) — that must fail, not silently pass.
@@ -62,6 +64,48 @@ def report():
 def rules():
     data = json.loads(EXPECTED_PATH.read_text())
     return data["rules"]
+
+
+@pytest.fixture(scope="module")
+def a_counts_baseline():
+    data = json.loads(A_COUNTS_PATH.read_text())
+    return data["counts"], data["lines"]
+
+
+def _sibling_interpreters() -> list[str]:
+    """Interpreters distinct from this one that can run the (A)-only pass.
+
+    The gate must produce the SAME normalised (A) table on every CPython the
+    suite runs on (t_cfdcefa9 / GATE-313: argparse 3.13 widened its help column
+    by 2 chars and the gate went red on 3.13 only). Candidates: this leg's
+    ``HSCC_TEST_PY`` siblings from run_tests.sh, plus PATH ``python3.x``.
+    Deduped by realpath so aliases don't re-run the same interpreter."""
+    cands = []
+    for p in (os.environ.get("HSCC_SIBLING_PY"),
+              os.path.expanduser("~/.hermes/hermes-agent/venv/bin/python"),
+              "~/miniconda3/envs/p313/bin/python",
+              "/Users/desac/miniconda3/envs/p313/bin/python",
+              "python3.11", "python3.12", "python3.13"):
+        if not p:
+            continue
+        cands.append(os.path.expanduser(p))
+    here = os.path.realpath(sys.executable)
+    seen, out = {here}, []
+    for c in cands:
+        path = c if os.path.isabs(c) else _which(c)
+        if not path:
+            continue
+        real = os.path.realpath(path)
+        if real in seen:
+            continue
+        seen.add(real)
+        out.append(path)
+    return out
+
+
+def _which(name: str):
+    from shutil import which
+    return which(name)
 
 
 def _finding_matches_rule(f, rule):
@@ -120,6 +164,132 @@ def test_help_paths_only_skip_api_start(report):
         assert "api start" in s["surface"], (
             f"unexpected skip — every help path must actually run: {s}")
     assert report["widths"] == [80, 120, 500]
+
+
+def test_a_counts_match_committed_table(report, a_counts_baseline):
+    """(A) is logical-line identity: the per-surface table must equal the
+    committed one (t_cfdcefa9 / GATE-313).
+
+    The table holds canonicalised (A) details, so this fails the moment an
+    (A) count or line becomes rendering-dependent — e.g. a CPython argparse
+    tweak re-introduces a width-80 wrap fragment counted as a second
+    violation — on the interpreter that sees the drift, with no subprocess
+    and no interpreter guessing. Re-cut it with
+    ``python3 scripts/gen_cli_help_a_baseline.py`` and REVIEW the diff: the
+    table is a contract, not a snapshot."""
+    counts, lines = a_counts_baseline
+    assert {k: len(v) for k, v in report["a_counts"].items()} == counts, (
+        "the (A) per-surface count table drifted from "
+        "scripts/tests/cli_help_a_counts.json — (A) identity is supposed to "
+        "be rendering-independent; see the audit's a_findings_for_surface")
+    assert report["a_counts"] == lines, (
+        "the (A) per-surface LINE table drifted from the committed fixture — "
+        "a canonicalised help line changed content, or (A) detail became "
+        "width-dependent again")
+
+
+def test_a_table_identical_under_sibling_interpreters(report):
+    """Cross-interpreter pin (the stronger half of GATE-313).
+
+    Runs the audit's (A)-only pass for every surface that currently has an
+    (A) line under a SIBLING CPython (one distinct from pytest's own) and
+    asserts the tables are equal. argparse 3.13 widened its help column by 2
+    chars, which is exactly the class of drift this catches inside a single
+    leg — a sibling that renders the same logical line differently can no
+    longer hide until its own full-suite leg runs. Skips only when this host
+    has no runnable sibling."""
+    surfaces = sorted(report["a_counts"])
+    siblings = _sibling_interpreters()
+    if not siblings:
+        pytest.skip("no sibling interpreter distinct from this one is "
+                    "runnable on PATH")
+    for py in siblings:
+        proc = subprocess.run(
+            [py, str(REPO / "scripts" / "hscc_cli_help_audit.py"),
+             "--repo", str(REPO), "--a-table", ",".join(surfaces)],
+            capture_output=True, text=True, timeout=300)
+        assert proc.returncode == 0, (
+            f"sibling {py} failed the (A)-only pass: {proc.stderr[-400:]}")
+        table = json.loads(proc.stdout)
+        assert table == report["a_counts"], (
+            f"(A) table differs under sibling interpreter {py} "
+            f"({' '.join(_py_version(py))}) — finding identity became "
+            f"interpreter-dependent again:\n"
+            f"  sibling: {json.dumps(table, indent=2)}\n"
+            f"  local:   {json.dumps(report['a_counts'], indent=2)}")
+
+
+def _py_version(py: str) -> list:
+    proc = subprocess.run([py, "-c", "import sys;print(sys.version)"],
+                          capture_output=True, text=True, timeout=30)
+    return proc.stdout.split() or ["?"]
+
+
+# ── (A) identity: pure-function pins (no subprocess, deterministic) ──────
+# These are the unit-level guard of the GATE-313 fix: the wide-only +
+# canonicalise rules and the A-WIDTH content guard, pinned directly.
+
+def _render(width, text):
+    return {"argv": [], "width": width, "rc": 0, "hung": False,
+            "out": text, "err": "", "secs": 0, "new_files": [], "trips": [],
+            "plist_created": False, "port_flip": False}
+
+
+def _renders(wide_text, w80_text=None, w120_text=None):
+    return {500: _render(500, wide_text),
+            120: _render(120, w120_text if w120_text is not None else wide_text),
+            80: _render(80, w80_text if w80_text is not None else wide_text)}
+
+
+def test_a_identity_absorbs_wrap_fragments():
+    """A width-80 fragment of the wide line counts ONCE (GATE-313 itself):
+    3.13's wider help column wrapped 'doctor …' at 80 where 3.11 did not, and
+    the raw union counted the same logical line twice."""
+    wide = ("doctor          self-check: is flightdeck's view of the fleet "
+            "trustworthy right now across nodes")
+    wrapped = "doctor self-check: is flightdeck's view of the fleet"
+    findings = audit_mod.a_findings_for_surface(_renders(wide, w80_text=wrapped))
+    a = [f for f in findings if f["kind"] == "A"]
+    assert [f["detail"] for f in a] == [audit_mod.canonical_line(wide)]
+    assert not [f for f in findings if f["kind"] == "A-WIDTH"]
+
+
+def test_a_identity_absorbs_continuation_wrap():
+    """A wrapped CONTINUATION carrying 'flightdeck' is a substring of the wide
+    line — absorbed, not reported as width-dependent content."""
+    wide = "x" * 60 + " flightdeck keeps its own roadmap under hscc-project"
+    cont = "flightdeck keeps its own roadmap under hscc-project"
+    findings = audit_mod.a_findings_for_surface(
+        _renders(wide, w80_text="x" * 60 + "\n" + cont))
+    assert [f["kind"] for f in findings] == ["A"]
+
+
+def test_a_identity_canonicalises_padding_drift():
+    """argparse column-gap drift (2 extra spaces) is the same identity."""
+    a = audit_mod.canonical_line("doctor    self-check:  flightdeck posture")
+    b = audit_mod.canonical_line("doctor      self-check: flightdeck posture")
+    assert a == b == "doctor self-check: flightdeck posture"
+
+
+def test_a_width_guard_fires_on_width_aware_content():
+    """A narrow line that is no fragment of the wide render means the help
+    CONTENT itself depends on width — reported as A-WIDTH, never dropped."""
+    wide = "try 'hscc project doctor' for the fleet view"
+    narrow = "try 'hscc project doctor' flightdeck legacy mode only at 80 cols"
+    findings = audit_mod.a_findings_for_surface(_renders(wide, w80_text=narrow))
+    guard = [f for f in findings if f["kind"] == "A-WIDTH"]
+    assert len(guard) == 1 and "flightdeck" in guard[0]["detail"]
+    assert guard[0]["width"] == 80
+
+
+def test_a_count_table_shape():
+    """a_count_table() keys on command, keeps only kind (A), sorted."""
+    fs = [{"command": "hscc x --help", "kind": "A", "detail": "b flightdeck"},
+          {"command": "hscc x --help", "kind": "A", "detail": "a flightdeck"},
+          {"command": "hscc x --help", "kind": "B", "detail": "c flightdeck"},
+          {"command": "hscc y --help", "kind": "A-WIDTH", "detail": "d"}]
+    assert audit_mod.a_count_table(fs) == {
+        "hscc x --help": ["a flightdeck", "b flightdeck"]}
 
 
 def test_styles_recorded(report):

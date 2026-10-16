@@ -9,6 +9,16 @@ and 500 columns, and checks the operator's four invariants plus a style log:
       Boundary: package paths / internal symbols / ``--flightdeck-home``-style
       flags in SOURCE are internal names, not user-facing — we assert on the
       rendered stdout/stderr only, never on source files.
+      IDENTITY (t_cfdcefa9): one LOGICAL help line, not one physical rendered
+      line — (A) is derived from the widest render only and the detail is
+      whitespace-canonicalised. argparse widened its help column by 2 chars in
+      CPython 3.13, so a raw rendered line is not a stable identity: the same
+      logical line wrapped at width 80 on 3.13 and unwrapped on 3.11, which
+      counted one violation twice on one interpreter and once on the other.
+      Narrow renders are kept only as a GUARD (see ``a_width_fragments``): a
+      narrow canonical line that is neither in the wide render nor a strict
+      prefix of one means the help text is width-aware in CONTENT, which is
+      itself a defect and is emitted as an ``A-WIDTH`` finding.
   (B) no line wraps without continuation indent, at BOTH 80 and 120 columns
       (a run of >=2 full-width lines: lines after the first must be indented;
       lines LONGER than the width that were not wrapped are "overflow").
@@ -67,10 +77,16 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-PY = sys.executable
 
 WIDTHS_WRAP = (80, 120)   # operator-mandated wrap widths for (B)
 WIDTH_WIDE = 500          # "no-wrap" width: (A)/(C) read logical lines intact
+WIDTHS_ALL = WIDTHS_WRAP + (WIDTH_WIDE,)
+
+# The probe interpreter is whichever python runs pytest, so the RENDERED help
+# is that interpreter's argparse output. (B) legitimately measures it; (A)
+# normalises it away instead of encoding a CPython minor-version quirk into the
+# expectations file (t_cfdcefa9 / GATE-313 — the gate was red on 3.13 only).
+PY = sys.executable
 
 API_DEFAULT_PORT = 8787   # hscc-api/api_server.py DEFAULT_PORT (tripwire)
 API_SMOKE_PORT = 8788     # scripts/api_smoke.py default (defensive second hold)
@@ -305,10 +321,100 @@ def _is_table_line(line: str) -> bool:
     return bool(s) and (s[0] in _BOX or bool(_BOX_ART.match(s)))
 
 
+def canonical_line(ln: str) -> str:
+    """A help line's IDENTITY: whitespace-collapsed and stripped.
+
+    CPython 3.13's argparse widened its help column by 2 characters, so the
+    padding between a subcommand name and its description is interpreter
+    version dependent. Canonicalising absorbs that drift, which keeps (A)
+    details — and the `needle`/`example` fields of cli_help_expected.json that
+    match against them — stable across argparse versions.
+    """
+    return re.sub(r"\s+", " ", ln).strip()
+
+
 def check_flightdeck(text: str):
-    """(A) every rendered line containing 'flightdeck'."""
+    """(A) every rendered line containing 'flightdeck' (raw, legacy form).
+
+    NOT how (A) findings are built any more — see :func:`a_findings_for_surface`
+    for the logical-line form the gate consumes. Kept because it is the raw
+    "which physical lines mention flightdeck" primitive the wide/narrow
+    comparison is built from.
+    """
     return [ln.strip()[:200] for ln in text.splitlines()
             if FLIGHTDECK_RE.search(ln)]
+
+
+def a_findings_for_surface(renders: dict) -> list:
+    """(A) findings for one help surface: one entry per LOGICAL help line.
+
+    ``renders`` maps width -> probe result. Two rules make the result
+    interpreter-independent (t_cfdcefa9 / GATE-313):
+
+    1. only the WIDEST render available is authoritative (``WIDTH_WIDE`` for
+       every surface that has one; the 120 render for the ``hscc help <cmd>``
+       paths, which are probed at the wrap widths only). At a no-wrap width one
+       logical help line is one physical line. A line read at 80/120 is a wrap
+       fragment of a wide line (see rule 2), so unioning the narrow renders in
+       only re-counts a violation — that is exactly what made the gate count 15
+       findings on 3.13 and 14 on 3.11 for the same 14 logical lines;
+    2. a narrow render may only ever ADD fragments, never content. Any
+       canonical narrow line that is not contained in some authoritative line
+       means the help text changes with terminal WIDTH — a defect in its own
+       right — so it is reported as ``A-WIDTH`` instead of being dropped
+       silently. Containment, not prefix: a wrapped continuation fragment
+       ("… flightdeck …" landing on the second physical line) is a substring
+       of its wide line but not a prefix of it. The assumption in rule 1 is
+       checked, not trusted.
+
+    Returns [{"kind": "A"|"A-WIDTH", "detail": str, "width": int}] with
+    details truncated to 200 chars (the committed contract length); the guard
+    comparison uses the untruncated canonical lines so a truncated wide line
+    cannot fake a content change.
+    """
+    def lines_at(width, truncate_after):
+        r = renders.get(width)
+        if not r:
+            return []
+        out = []
+        for ln in (r["out"] + r["err"]).splitlines():
+            if not FLIGHTDECK_RE.search(ln):
+                continue
+            c = canonical_line(ln)
+            if truncate_after:
+                c = c[:truncate_after]
+            if c and c not in out:
+                out.append(c)
+        return out
+
+    top = max(renders) if renders else WIDTH_WIDE
+    wide_full = lines_at(top, truncate_after=None)
+    wide = []
+    for ln in wide_full:
+        ln = ln[:200]
+        if ln and ln not in wide:
+            wide.append(ln)
+    findings = [{"kind": "A", "detail": ln, "width": top} for ln in wide]
+    for w in sorted(set(renders) - {top}):
+        for ln in lines_at(w, truncate_after=None):
+            if any(ln in wl for wl in wide_full):
+                continue  # a fragment (head or continuation) — counted once
+            findings.append({"kind": "A-WIDTH", "detail": ln[:200], "width": w})
+    return findings
+
+
+def a_count_table(findings: list) -> dict:
+    """{surface command: sorted canonical (A) detail lines} from raw findings.
+
+    The shape the gate pins interpreter-independence on (the width is left out
+    on purpose: width-dependent (A) detail is what we are guarding against).
+    """
+    table = {}
+    for f in findings:
+        if f["kind"] != "A":
+            continue
+        table.setdefault(f["command"], []).append(f["detail"])
+    return {k: sorted(v) for k, v in sorted(table.items())}
 
 
 def check_wraps(text: str, width: int):
@@ -409,9 +515,11 @@ def _clean_segment(seg: str):
     """One candidate command string from a segment, cleaned; None if empty."""
     seg = seg.split("#", 1)[0].strip().rstrip(";,.")
     # a description tail: two+ spaces before prose that is not a flag
-    seg = re.split(r"\s{2,}(?!--)", seg, 1)[0]
+    # (maxsplit is keyword: passing it positionally is a DeprecationWarning on
+    # 3.13 and an error in a future CPython)
+    seg = re.split(r"\s{2,}(?!--)", seg, maxsplit=1)[0]
     # an inline note: "cmd (does x)" keeps the command
-    seg = re.split(r"\s\((?![^)]*--)", seg, 1)[0]
+    seg = re.split(r"\s\((?![^)]*--)", seg, maxsplit=1)[0]
     seg = seg.strip().rstrip(";,")
     if not seg or "`" in seg:
         return None
@@ -747,15 +855,27 @@ def audit(repo=None) -> dict:
                     "fix the probe")
                 continue
 
+            # (A) rendered text — one finding per LOGICAL line: the widest
+            # render only + whitespace-canonicalised, plus the width-aware
+            # content guard (see a_findings_for_surface). Reading every width
+            # raw is what made the count interpreter-dependent (GATE-313).
+            for af in a_findings_for_surface(renders):
+                if af["kind"] == "A":
+                    add(group, name, "A", af["detail"],
+                        "rename standalone 'flightdeck' to 'hscc project'")
+                else:
+                    add(group, name, "A-WIDTH",
+                        f"width={af['width']} renders {af['detail']!r}, which "
+                        "is not contained in any line of the authoritative "
+                        "render — help CONTENT changes with terminal width",
+                        "make the help text width-independent in content "
+                        "(the audit counts (A) on the widest render only)")
+
             for w, r in renders.items():
                 if r["hung"]:
                     add(group, name, "D", "help invocation hung past 60s — "
                         "it is executing something", "intercept --help first")
                     continue
-                # (A) rendered text
-                for ln in check_flightdeck(r["out"] + r["err"]):
-                    add(group, name, "A", ln,
-                        "rename standalone 'flightdeck' to 'hscc project'")
                 # DEAD: help advertises a command that no longer does anything
                 for ln in r["out"].splitlines():
                     if DEAD_RE.search(ln):
@@ -830,12 +950,68 @@ def audit(repo=None) -> dict:
         "surface_paths": len(paths),
         "probes": probes,
         "findings": findings,
+        "a_counts": a_count_table(findings),
         "skips": skips,
         "styles": styles,
         "examples_total": examples_total,
         "examples_failed": examples_failed,
-        "widths": list(WIDTHS_WRAP) + [WIDTH_WIDE],
+        "widths": list(WIDTHS_ALL),
     }
+
+
+def a_table(repo=None, surfaces=None) -> dict:
+    """(A)-only pass: {surface command: sorted canonical (A) lines}.
+
+    Walks the real surface but derives ONLY class (A) (no sensors, no
+    examples), and can be restricted to a set of surface names, so a sibling
+    interpreter can produce the table cheaply and the gate can assert it is
+    identical across interpreters (t_cfdcefa9)."""
+    global REPO
+    if repo:
+        REPO = Path(repo).resolve()
+        if str(REPO) not in sys.path:
+            sys.path.insert(0, str(REPO))
+        globals()["PROJECT_DIR"] = REPO / "hscc-project"
+        if str(PROJECT_DIR) not in sys.path:
+            sys.path.insert(0, str(PROJECT_DIR))
+    want = set(surfaces) if surfaces else None
+    tmp = Path(tempfile.mkdtemp(prefix="hscc-cli-help-a-table-"))
+    sandbox = tmp / "home"
+    sandbox.mkdir(parents=True, exist_ok=True)
+    canary = make_canary_dir(tmp)
+    _seed_sandbox(sandbox)
+    prober = Prober(sandbox, canary, Path(os.path.expanduser("~")))
+    paths, _fd = build_surface()
+    table: dict = {}
+    for group, argv, style, kind in paths:
+        invocations = []
+        if kind == "flag":
+            invocations.append(argv + ["--help"])
+            if argv:
+                invocations.append(["help", argv[0]])
+        elif kind == "flag2":
+            invocations.append(argv + ["--help"])
+        else:
+            invocations.append(["help", *argv])
+        for inv in invocations:
+            name = _norm(inv)
+            if want and name not in want:
+                continue
+            if inv[:2] == ["api", "start"]:
+                continue  # never executed (see audit docstring)
+            widths = WIDTHS_ALL if kind != "help" else WIDTHS_WRAP
+            try:
+                renders = {w: prober.run(inv, w) for w in widths}
+            except Exception:
+                continue
+            lines = table.setdefault(name, [])
+            for af in a_findings_for_surface(renders):
+                if af["kind"] == "A" and af["detail"] not in lines:
+                    lines.append(af["detail"])
+    shutil.rmtree(tmp, ignore_errors=True)
+    # same semantics as a_count_table(): only surfaces that actually leak
+    table = {k: sorted(v) for k, v in sorted(table.items()) if v}
+    return table
 
 
 def main():
@@ -843,7 +1019,23 @@ def main():
     ap.add_argument("--repo", default=None)
     ap.add_argument("--json", dest="json_out", default=None)
     ap.add_argument("--strict", action="store_true")
+    ap.add_argument("--a-table", dest="a_table", nargs="?", const="*",
+                    default=None, metavar="SURFACES",
+                    help="run the (A)-only pass and print the per-surface "
+                         "canonical (A) table as JSON (no findings, no "
+                         "sensors); SURFACES is an optional comma-separated "
+                         "list of surface names to restrict the walk to — "
+                         "used by the interpreter-independence regression "
+                         "test")
     args = ap.parse_args()
+
+    if args.a_table is not None:
+        raw = args.a_table
+        surfaces = [s.strip() for s in raw.split(",")
+                    if s.strip() and s.strip() != "*"]
+        print(json.dumps(a_table(args.repo, surfaces or None),
+                         indent=2, sort_keys=True))
+        return 0
 
     rep = audit(args.repo)
     by_kind = {}

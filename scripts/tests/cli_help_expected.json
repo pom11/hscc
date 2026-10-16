@@ -7,8 +7,8 @@
       "command": "hscc --help",
       "needle": "flightdeck",
       "owner": "F5",
-      "count_at_baseline": 2,
-      "example": "project <cmd>        Project-portfolio (flightdeck) commands: standup verify"
+      "count_at_baseline": 1,
+      "example": "project <cmd> Project-portfolio (flightdeck) commands: standup verify doctor ..."
     },
     {
       "kind": "A",

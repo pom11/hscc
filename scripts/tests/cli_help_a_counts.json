@@ -1,0 +1,16 @@
+{
+  "counts": {
+    "hscc --help": 1,
+    "hscc help project": 2
+  },
+  "lines": {
+    "hscc --help": [
+      "project <cmd> Project-portfolio (flightdeck) commands: standup verify doctor ..."
+    ],
+    "hscc help project": [
+      "Delegates to the relocated flightdeck CLI under hscc-project/. Try 'hscc project --help' for the full subcommand surface.",
+      "Project-portfolio (flightdeck) commands."
+    ]
+  },
+  "note": "Committed (A) count/lines table for scripts/tests/test_cli_help_surface.py. (A) identity is the widest render, whitespace-canonicalised \u2014 this table must be byte-identical on every CPython the suite runs on. Review diffs; never regenerate blindly."
+}
