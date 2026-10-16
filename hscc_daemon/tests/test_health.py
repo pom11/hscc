@@ -1528,6 +1528,12 @@ class TestCheckProxy:
         monkeypatch.setattr(state_mod, "STATE_DIR", str(state_dir))
         monkeypatch.setattr(serving, "KEEPALIVE_NODES", set(nodes))
         monkeypatch.setattr(serving, "load_serving", lambda *a, **k: serving_data)
+        # Dep-bump guard: the router-drift probe must NEVER read the operator's
+        # live ~/.config/sparkrun + ~/.cache/sparkrun from a test. Default stub
+        # is the neutral "skip"; drift-specific tests override it.
+        monkeypatch.setattr(
+            health, "_router_drift_probe",
+            lambda: {"status": "skip", "warn": False, "detail": "stubbed"})
         if probe is not None:
             monkeypatch.setattr(health, "_proxy_models_probe",
                                 lambda url, timeout=5: dict(probe))
