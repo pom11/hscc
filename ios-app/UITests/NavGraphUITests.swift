@@ -350,13 +350,13 @@ final class NavGraphUITests: XCTestCase {
     /// One level in where detail exists: projects -> project -> chat; cards
     /// -> card detail; each back is the real nav-bar back button and must
     /// LAND on its predecessor (asserted by the predecessor's marker).
-    /// KNOWN BUG (t_706129d8): chat pushed via `router.projectsPath.append`
-    /// on top of the value-less project NavigationLink pops past the
-    /// overview (back label reads "Projects" — the overview is not on the
-    /// value path; SwiftUI NavigationStack replaces value-less links when
-    /// the bound path is appended to). The chat-return assertion runs under
-    /// XCTExpectFailure until the follow-up card fixes the push path; the
-    /// test then re-enters the overview deterministically.
+    /// t_706129d8: the project overview used to be pushed by a VALUE-LESS
+    /// NavigationLink, so it never entered `router.projectsPath`; every
+    /// sub-page append rewrote the bound path and popped the overview off,
+    /// landing the back button on the Projects list. All three sub-pages are
+    /// asserted as plain predecessor returns here — the overview is a
+    /// value-registered push (`ProjectRoute.projectDetail`) now, so this is
+    /// the contract, not an expectation of failure.
     func testProjectDetailChatBoardSettingsPushes() {
         let app = navLaunch(openDrawer: true, manifest: "walk-projects-detail")
         defer { app.terminate() }
@@ -372,28 +372,28 @@ final class NavGraphUITests: XCTestCase {
         assertMarker(app, "Open Chat for hscc", screen: "projectDetail",
                      edge: "project overview never rendered after tapping the project row")
 
-        // detail -> chat (the push renders; that half is asserted normally)
+        // detail -> chat, then chat -> overview: the back must LAND on the
+        // overview (t_706129d8 — this is the assertion that used to be broken).
         app.buttons["Open Chat for hscc"].tap()
         assertMarker(app, "Send", screen: "chat",
                      edge: "chat screen never rendered from the project overview")
-        // chat -> overview: CURRENTLY BROKEN (see doc comment) — asserted
-        // under an expectation so the walk proves BOTH halves of the bug:
-        // the failure exists (red under XCTExpectFailure if it stops being
-        // the observed behaviour) and nothing else regressed.
-        knownBugBackThenOverview(app, from: "chat")
+        tapBack(app, landsOnMarker: "Open Chat for hscc", screen: "chat",
+                expectedLabel: "hscc")
 
-        // detail -> board (value-registered NavigationLink — SAME bug:
-        // back pops past the overview, AX-verified 2026-10-16)
+        // detail -> board (value-registered NavigationLink; same predecessor
+        // contract as chat — t_706129d8 makes the overview a real path entry)
         tapLabeled(app, "Board", screen: "projectDetail")
         assertMarker(app, "hscc · Board", screen: "board",
                      edge: "board screen never rendered from the project overview")
-        knownBugBackThenOverview(app, from: "board")
+        tapBack(app, landsOnMarker: "Open Chat for hscc", screen: "board",
+                expectedLabel: "hscc")
 
-        // detail -> settings (same bug again)
+        // detail -> settings (same contract)
         tapLabeled(app, "Settings", screen: "projectDetail")
         assertMarker(app, "hscc · Settings", screen: "projectSettings",
                      edge: "project settings never rendered from the project overview")
-        knownBugBackThenOverview(app, from: "projectSettings")
+        tapBack(app, landsOnMarker: "Open Chat for hscc", screen: "projectSettings",
+                expectedLabel: "hscc")
 
         // overview -> projects (predecessor return for the first push)
         tapBack(app, landsOnMarker: "Refresh projects", screen: "projectDetail",
@@ -403,56 +403,6 @@ final class NavGraphUITests: XCTestCase {
         backToDrawer(app, screen: "projects")
         tapRow(app, raw: "home", screen: "home")
         assertMarker(app, "Search everywhere", screen: "home", edge: "home never rendered from the drawer")
-    }
-
-    /// One sub-page back under the known-bug umbrella (t_706129d8): the
-    /// landing assertion is EXPECTED to fail today — chat, board AND
-    /// settings are all pushed while the overview sits on a value-less
-    /// link, so the bound-path append replaces it and the pop lands on
-    /// the Projects list (AX-verified 2026-10-16 for all three). After
-    /// the (pop-)back, deterministically re-enter the overview. When the
-    /// follow-up card fixes the push path XCTest reports an UNEXPECTED
-    /// PASS here (the expected failure stops happening) — that is the
-    /// tripwire: flip these three calls to plain tapBack and the walk
-    /// closes the loop on the fix.
-    private func knownBugBackThenOverview(_ app: XCUIApplication, from screen: String) {
-        XCTExpectFailure("known bug t_706129d8: back from \(screen) pops past "
-                         + "the project overview (value-less overview link, "
-                         + "bound-path append)", strict: false) {
-            tapBack(app, landsOnMarker: "Open Chat for hscc", screen: screen,
-                    expectedLabel: "hscc")
-        }
-        ensureOnOverview(app)
-    }
-
-    /// Leave the known-bug pop wherever it landed and arrive on the hscc
-    /// project overview. Recovery is deterministic, not state-guessing:
-    /// pop the stack until the drawer-root appears (the drawerOpen toolbar
-    /// entry exists ONLY on the stack root — pushed pages never show it,
-    /// AX-verified), then re-enter projects -> hscc through the drawer.
-    /// Works whether the pop landed on another pushed page, the Projects
-    /// list, or Home.
-    private func ensureOnOverview(_ app: XCUIApplication,
-                                  file: StaticString = #filePath, line: UInt = #line) {
-        if app.buttons["Open Chat for hscc"].exists { return }
-        var hops = 0
-        while hops < 5 && !app.buttons["drawerOpen"].exists {
-            let byId = app.navigationBars.firstMatch
-                .buttons.matching(NSPredicate(format: "identifier == 'BackButton'")).firstMatch
-            guard byId.exists else { break }
-            byId.tap()
-            hops += 1
-            usleep(500_000)
-        }
-        backToDrawer(app, screen: "projects", file: file, line: line)
-        tapRow(app, raw: "projects", screen: "projects", file: file, line: line)
-        assertMarker(app, "Refresh projects", screen: "projects",
-                     edge: "projects list never rendered on re-entry",
-                     file: file, line: line)
-        tapContaining(app, "hscc", screen: "projects")
-        assertMarker(app, "Open Chat for hscc", screen: "projectDetail",
-                     edge: "project overview never re-rendered via the recovery path",
-                     file: file, line: line)
     }
 
     /// cards -> card detail (fixture card t_049d6986) -> back -> cards.
