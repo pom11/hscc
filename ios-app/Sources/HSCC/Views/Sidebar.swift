@@ -79,6 +79,19 @@ struct Sidebar: View {
     }
 
     /// The drawer's own header: which cluster am I looking at, is it up.
+    ///
+    /// THE PROBE (t_e5d24c6d): this header is the one place that is on screen
+    /// while status may still be `.unknown` — the drawer itself fires no
+    /// requests, so without a probe the pill sits "checking…" forever even
+    /// with the API up. A `.task` keyed on `connectionIdentity` owns the
+    /// loop: it starts the moment the header appears (or the cluster switches,
+    /// which also reset()s the monitor in AppShell), fires ONE authed
+    /// GET /v1/health immediately — enough to flip `.unknown` — then keeps
+    /// checking every 15 s while visible, and dies with the view when the
+    /// drawer closes (SwiftUI cancels the task on disappear: zero traffic
+    /// while the pill can't be seen). The state machine — including why a
+    /// failed probe never pins the banner — is documented on
+    /// ConnectionMonitor; this attachment is only "run it while visible".
     private var clusterHeader: some View {
         HStack(spacing: Theme.Spacing.md.rawValue) {
             HSCCMark(size: 34)
@@ -99,6 +112,34 @@ struct Sidebar: View {
         }
         .padding(.vertical, Theme.Spacing.xs.rawValue)
         .accessibilityElement(children: .combine)
+        .task(id: settings.connectionIdentity) {
+            // The visible-drawer probe (see the doc comment above). The
+            // client is built here with the same host/port/token rules every
+            // screen uses; `HSCCClient.defaultSession` keeps fixture captures
+            // honest (in a headless HSCC_DEBUG_FIXTURES launch the Keychain is
+            // unreadable, the guard below returns, and the pill truthfully
+            // reads "not configured" like every other screen's gate — a real
+            // Simulator/device run with a saved cluster probes the configured
+            // API for real). `client.health()` reports NOTHING through the
+            // client's own GET path, so the monitor is updated exactly once
+            // per probe, by the probe itself.
+            guard settings.isConfigured, let token = settings.token,
+                  let port = Int(settings.port) else { return }
+            let client = HSCCClient(host: settings.host, port: port, token: token)
+            while !Task.isCancelled {
+                // Back off (30 s) only when the server refused our credential;
+                // otherwise hold the 15 s cadence while the pill is visible.
+                // A refused probe must never pin the banner (ConnectionMonitor
+                // header): the loop keeps observing and any real success —
+                // here or on the request path — flips it back immediately.
+                let report = await ConnectionProbe.runReachabilityProbe(on: monitor) {
+                    _ = try await client.health()
+                }
+                let nanos: UInt64 = report == .authRefused ? 30_000_000_000
+                                                            : 15_000_000_000
+                try? await Task.sleep(nanoseconds: nanos)
+            }
+        }
     }
 
     private func group<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {

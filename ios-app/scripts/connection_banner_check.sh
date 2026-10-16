@@ -26,10 +26,16 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 real_source="Sources/HSCC/ConnectionMonitor.swift"
-if [ ! -f "$real_source" ]; then
-  echo "error: $real_source missing — did the monitor get moved?" >&2
-  exit 1
-fi
+# t_e5d24c6d: the monitor file now also carries ConnectionProbe, whose
+# classification catches HSCCError — the type must be in scope for the
+# verbatim compile (pure Foundation, no behaviour added to the banner logic).
+real_error="Sources/HSCC/APIError.swift"
+for f in "$real_source" "$real_error"; do
+  if [ ! -f "$f" ]; then
+    echo "error: $f missing — did it get moved?" >&2
+    exit 1
+  fi
+done
 
 harness="scripts/connection_banner_check/main.swift"
 if ! grep -q "ConnectionMonitor.shared" "$harness"; then
@@ -39,7 +45,7 @@ fi
 
 echo "compiling the REAL ConnectionMonitor + harness into a macOS CLI..."
 if ! xcrun --sdk "$SDK" swiftc -o "$TMP/connection_banner_check" \
-     "$real_source" "$harness" 2>"$TMP/compile.err"; then
+     "$real_source" "$real_error" "$harness" 2>"$TMP/compile.err"; then
   echo "error: failed to compile the connection banner state machine — see below" >&2
   cat "$TMP/compile.err" >&2
   exit 1
