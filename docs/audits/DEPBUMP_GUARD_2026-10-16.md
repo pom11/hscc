@@ -120,8 +120,25 @@ goes silent. Restore via in-memory copies with sha pins (never `git checkout --`
 
 ## Gates
 
-- Canonical suite: see completion metadata (run after this file lands).
+- Canonical suite: **ALL GREEN — 11/11 legs, exit 0** (run 2:
+  `env -u CONDA_* bash scripts/run_tests.sh`, log
+  `scratch/t_39d7c915/suite2.log`). Run 1 was 10/11 — the scripts leg caught
+  my changelog fragment using `### Added` instead of the `kind:`/`task:`
+  header format; fixed and re-ran fully. Leg counts incl. scripts 123 pass
+  (3 new watcher body pins) and .github/scripts 129 pass (3 new PR-body pins),
+  hscc_daemon 1500 pass (incl. the new 23-test test_dep_bump_guard.py).
+- Live e2e (read-only): `verify.run_all()` returns 11 checks with
+  `proxy_router_settings ok=True` and the matching detail. Two OTHER checks
+  red in that live run — `api_routes` (live-API sweep; PROVEN pre-existing:
+  byte-identical red from a throwaway worktree at base e2278355) and
+  `plugin_payload` (compares the worktree checkout against the INSTALLED
+  payload, so any un-released commit flags it by design; clears with the
+  operator's next release). Neither is caused by this diff (changed-file
+  list excludes everything those checks read).
 - `scripts/address_guard.py --repo .` exit 0 before every commit (only
   documented 10.0.0.x placeholders in test fixtures).
-- changelog.d/t_39d7c915.md; no attribution lines; PUSH ONLY.
+- commits: 3823b776 (impl+tests) / docs artifact / changelog-format fix;
+  branch wt/t_39d7c915 pushed, PUSH ONLY. No release, no live-config touch,
+  no sparkrun repo edit, no service restart, no cron install.
+
 
