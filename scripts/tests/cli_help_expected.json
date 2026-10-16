@@ -68,22 +68,6 @@
     },
     {
       "kind": "B",
-      "command": "hscc api uninstall-service --help",
-      "needle": "width=120",
-      "owner": "BROKEN-API-SVC",
-      "count_at_baseline": 1,
-      "example": "width=120 overflow: no unit file at <SANDBOX>/home/Library/LaunchAgents/com.hscc.api.plist (nothing to remove)"
-    },
-    {
-      "kind": "B",
-      "command": "hscc api uninstall-service --help",
-      "needle": "width=80",
-      "owner": "BROKEN-API-SVC",
-      "count_at_baseline": 1,
-      "example": "width=80 overflow: no unit file at <SANDBOX>/home/Library/LaunchAgents/com.hscc.api.plist (nothing to remove)"
-    },
-    {
-      "kind": "B",
       "command": "hscc autodown --help",
       "needle": "width=80",
       "owner": "F4",
@@ -204,22 +188,6 @@
     },
     {
       "kind": "D",
-      "command": "hscc api start --help",
-      "needle": "NOT EXECUTED",
-      "owner": "BROKEN-API-START",
-      "count_at_baseline": 1,
-      "example": "NOT EXECUTED by the audit (forking a live server cannot be undone by the sandbox); cmd_api dispatches 'start' before any --help check, so --help would start the API (api_cli.py cmd_api -> _handle_start fork)"
-    },
-    {
-      "kind": "D",
-      "command": "hscc api status --help",
-      "needle": "wrote state",
-      "owner": "BROKEN-API-STATUS",
-      "count_at_baseline": 1,
-      "example": "--help wrote state under HOME: .hscc/api-token"
-    },
-    {
-      "kind": "D",
       "command": "hscc cluster hosts --help",
       "needle": "shelled out",
       "owner": "F3",
@@ -287,14 +255,6 @@
       "command": "hscc advanced --help",
       "needle": "exited 1",
       "owner": "F5",
-      "count_at_baseline": 1,
-      "example": "--help exited 1 (expected 0)"
-    },
-    {
-      "kind": "D-rc",
-      "command": "hscc api install-service --help",
-      "needle": "exited 1",
-      "owner": "BROKEN-API-SVC",
       "count_at_baseline": 1,
       "example": "--help exited 1 (expected 0)"
     },

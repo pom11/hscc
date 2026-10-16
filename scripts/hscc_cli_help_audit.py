@@ -34,9 +34,11 @@ command; this module must never execute a mutating verb):
     and ``hermes`` binaries (exit 97, log their argv). PATH resolution finds
     the canary first, so the real CLIs are never reached; a canary trip during
     a ``--help`` probe is a (D) finding;
-  * ``hscc api start --help`` is NEVER executed (it would fork a live server
-    and bind the API port — an effect the sandbox cannot contain). It is
-    reported from static evidence instead, as an operator-class finding.
+  * ``hscc api`` verb ``--help`` probes (start included) run ONLY because
+    t_bf9f1909 made ``cmd_api`` intercept ``--help`` before dispatch — they
+    print the verb help and fork/bind/write nothing. The port tripwire below
+    stays armed as a regression guard: if that intercept ever regresses, the
+    probe fails here on (D) sensors (port flip / new files / hang).
 
 Usage:
   python3 scripts/hscc_cli_help_audit.py                 # audit repo root
@@ -71,6 +73,7 @@ WIDTHS_WRAP = (80, 120)   # operator-mandated wrap widths for (B)
 WIDTH_WIDE = 500          # "no-wrap" width: (A)/(C) read logical lines intact
 
 API_DEFAULT_PORT = 8787   # hscc-api/api_server.py DEFAULT_PORT (tripwire)
+API_SMOKE_PORT = 8788     # scripts/api_smoke.py default (defensive second hold)
 API_PLIST_NAME = "com.hscc.api.plist"
 
 sys.path.insert(0, str(REPO))
@@ -197,6 +200,24 @@ class Prober:
         self.real_home = real_home
         self._cache = {}
         self.port_busy_at_start = self._port_busy()
+        # Defensive hold: bind (WITHOUT listen) the api ports for the whole
+        # audit. A `--help` probe must never fork a server (t_bf9f1909 made
+        # cmd_api intercept --help before dispatch); if that intercept ever
+        # regresses, a stray grandchild here dies on EADDRINUSE instead of
+        # staying bound to the operator's machine. No listen() means
+        # connect_ex still reports "refused", so the port_flip sensor below
+        # keeps its exact semantics (a regression is then detected via
+        # new_files/hang findings instead). A port already in use (operator's
+        # live API, or a concurrent audit) degrades to holding nothing.
+        self._tripwire_socks = []
+        for port in (API_DEFAULT_PORT, API_SMOKE_PORT):
+            s = socket.socket()
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                s.close()
+            else:
+                self._tripwire_socks.append(s)
 
     def _env(self, width: int) -> dict:
         env = {k: v for k, v in os.environ.items()
@@ -682,13 +703,6 @@ def audit(repo=None) -> dict:
         findings.append({"group": group, "command": command, "kind": kind,
                          "detail": detail, "fix": fix})
 
-    # static (never-executed) D finding: api start --help would fork a server
-    add("api", "hscc api start --help", "D",
-        "NOT EXECUTED by the audit (forking a live server cannot be undone by "
-        "the sandbox); cmd_api dispatches 'start' before any --help check, so "
-        "--help would start the API (api_cli.py cmd_api -> _handle_start fork)",
-        "intercept --help in cmd_api before dispatch")
-
     # systemic regression probe: importing the CLI must execute NOTHING.
     # (B11 — the import-time resolve_cluster_config sparkrun fallback — was
     # FIXED by t_8d2eb400; this probe now measures zero and catches any
@@ -719,12 +733,11 @@ def audit(repo=None) -> dict:
         for inv in invocations:
             name = _norm(inv)
             styles.setdefault(name, style)
-            # NEVER execute api start --help (would bind/fork for real)
-            if inv[:2] == ["api", "start"]:
-                skips.append({"surface": name,
-                              "reason": "would fork a live API server "
-                                        "(D-static finding covers it)"})
-                continue
+            # api verb --help probes run for real since t_bf9f1909: cmd_api
+            # intercepts --help before dispatch, so they fork/bind nothing.
+            # There is deliberately NO skip here any more — an api start
+            # regression that forks a server is caught by the (D) sensors
+            # (port flip, new HOME files, 60s hang), not by refusing to look.
             probes += 1
             widths = (WIDTHS_WRAP + (WIDTH_WIDE,)) if kind != "help" else WIDTHS_WRAP
             try:
