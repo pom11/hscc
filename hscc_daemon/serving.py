@@ -1,5 +1,10 @@
-"""Serving configuration and cluster topology resolution."""
+"""Serving configuration and cluster topology resolution.
 
+Importing this module performs NO I/O: the cluster topology is resolved on the
+first READ of a topology name, not at import (see "LAZY TOPOLOGY" below).
+"""
+
+import copy
 import json
 import os
 import re
@@ -8,21 +13,122 @@ import sys
 import datetime
 
 
-# Module-level globals (set by resolve_cluster_config at import)
-PRIMARY_NODE = "192.0.2.10"
-ORCH_NODES = {"192.0.2.10"}
-KEEPALIVE_NODES = set()
-VLLM_HEALTH_URL = ""
-VLLM_STOP_CMD = ""
-VLLM_START_CMD = ""
-VLLM_RECIPE = ""
+# ── LAZY TOPOLOGY (t_8d2eb400, audit BROKEN B11) ──────────────────────────
+# These names used to be plain module globals filled in by a module-level
+# ``resolve_cluster_config()`` call. That made EVERY import of the daemon
+# package — every ``hscc --help``, every fresh-HOME or CI process — shell out
+# ``sparkrun cluster list --json`` (below, the sparkrun fallback) whenever
+# ``~/.hscc/cluster.json`` was absent: printing help executed the fleet, CLI
+# startup paid seconds, and a machine with no cluster config implicitly
+# launched cluster queries. Importing must be side-effect-free.
+#
+# Resolution now happens on the first READ of a topology name through PEP 562
+# module ``__getattr__`` — the same idiom hscc-cluster/clusterlib.py already
+# uses for HEAD/NODES/NAS_HOST — and the answer is cached in the module
+# globals, so any path that actually USES the topology gets exactly what it
+# got before, from the same cluster.json → sparkrun → documented-default
+# precedence.
+#
+# What this deliberately keeps:
+#   * the public names stay readable and importable (``serving.PRIMARY_NODE``,
+#     ``from hscc_daemon.serving import NAS_HOST``, ``monkeypatch.setattr``);
+#   * ``resolve_cluster_config()`` stays public and eager-when-called — it is
+#     the resolver, not the trigger;
+#   * the daemon loop (``daemon_ops.run_daemon_loop``) resolves eagerly at
+#     startup exactly as before, so a fleet check never pays resolution
+#     inside a tick.
+#
+# Address placeholders only: 192.0.2.0/24 is documentation space (RFC 5737).
+_TOPOLOGY_DEFAULTS = {
+    "PRIMARY_NODE": "192.0.2.10",
+    "ORCH_NODES": {"192.0.2.10"},
+    "KEEPALIVE_NODES": set(),
+    "VLLM_HEALTH_URL": "",
+    "VLLM_STOP_CMD": "",
+    "VLLM_START_CMD": "",
+    "VLLM_RECIPE": "",
+    "NAS_HOST": "192.0.2.20",
+}
+_TOPOLOGY_NAMES = frozenset(_TOPOLOGY_DEFAULTS)
+
+# Config-independent constants (safe at import: no I/O).
 VLLM_PORT = 8000
 HSCC_CLUSTER = "hscc"
-NAS_HOST = "192.0.2.20"
 CLUSTER_JSON = os.path.expanduser("~/.hscc/cluster.json")
 SERVING_JSON = os.path.expanduser("~/.hscc/serving.json")
 PROFILES_DIR = os.path.expanduser("~/.hermes/profiles")
 ORCH_ENDPOINT_STATE = os.path.expanduser("~/.hscc/.daemon_orch_endpoint")
+
+_topo_resolved = False    # True once resolve_cluster_config() has run
+_topo_resolving = False   # guard: reads INSIDE the resolver must not recurse
+
+
+def _topo_value(name):
+    """Read a topology name from INSIDE this module, resolving on first use.
+
+    Code in this file cannot read a lazy name directly: a bare ``PRIMARY_NODE``
+    here is a plain global lookup, which does NOT consult ``__getattr__``. All
+    internal reads therefore go through here. While the resolver is mid-flight
+    the lookup is not triggered (that would recurse) — it takes the value
+    assigned so far, or the documented default, which is exactly what a plain
+    module constant gave.
+    """
+    if not _topo_resolving:
+        _ensure_topology_resolved()
+    return globals().get(name, _TOPOLOGY_DEFAULTS[name])
+
+
+def _ensure_topology_resolved():
+    """Run the resolver once per process (idempotent; never re-entrant)."""
+    if _topo_resolved or _topo_resolving:
+        return
+    resolve_cluster_config()
+
+
+def __getattr__(name):
+    """PEP 562: a lazy topology name resolves on its first external read."""
+    if name in _TOPOLOGY_NAMES:
+        _ensure_topology_resolved()
+        try:
+            return globals()[name]
+        except KeyError:
+            # Only reachable when the resolver raised before assigning every
+            # name — hand out a COPY so a caller mutating the returned set can
+            # never poison the default for the next read.
+            _v = _TOPOLOGY_DEFAULTS[name]
+            return copy.copy(_v) if isinstance(_v, (set, list)) else _v
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def reset_resolution_cache():
+    """Forget the resolved topology — the next read re-resolves.
+
+    For tests (each test starts unresolved) and for any future config-reload
+    path. Names already materialized — by resolution or by a direct assignment
+    such as a test's ``monkeypatch.setattr`` — are dropped, so the lazy
+    ``__getattr__`` owns them again.
+    """
+    global _topo_resolved, _topo_resolving
+    _topo_resolved = False
+    _topo_resolving = False
+    for _n in _TOPOLOGY_NAMES:
+        globals().pop(_n, None)
+
+
+def _materialize_topology_defaults():
+    """Pin every topology name to its documented default WITHOUT resolving.
+
+    No file read, no subprocess. The hermetic test fixture uses this so a test
+    that patches one name and reads another can never reach the sparkrun
+    fallback shell-out (the ``HSCC_SPARKRUN_BIN`` override does not cover a
+    ``shell=True`` command string). Copies of the mutable defaults are handed
+    out so an in-place mutation cannot poison a later test.
+    """
+    global _topo_resolved, _topo_resolving
+    for _n, _v in _TOPOLOGY_DEFAULTS.items():
+        globals()[_n] = copy.copy(_v) if isinstance(_v, (set, list)) else _v
+    _topo_resolved = True
+    _topo_resolving = False
 
 
 def _serving_warn(msg):
@@ -157,13 +263,17 @@ def _worker_recipe_for(node, serving):
 def _rebuild_vllm_cmds():
     """Rebuild the vLLM health URL + control commands from the current PRIMARY_NODE.
 
-    Must be called after any change to PRIMARY_NODE.
+    Must be called after any change to PRIMARY_NODE. Internal reads of lazy
+    topology names go through ``_topo_value`` (a bare global read in this
+    module would not trigger resolution).
     """
     global VLLM_HEALTH_URL, VLLM_STOP_CMD, VLLM_START_CMD
-    VLLM_HEALTH_URL = f"http://{PRIMARY_NODE}:{VLLM_PORT}/health"
-    VLLM_STOP_CMD = ["sparkrun", "stop", "--hosts", PRIMARY_NODE]
-    VLLM_START_CMD = ["sparkrun", "run", VLLM_RECIPE,
-                      "--cluster", HSCC_CLUSTER, "--hosts", PRIMARY_NODE,
+    primary = _topo_value("PRIMARY_NODE")
+    recipe = _topo_value("VLLM_RECIPE")
+    VLLM_HEALTH_URL = f"http://{primary}:{VLLM_PORT}/health"
+    VLLM_STOP_CMD = ["sparkrun", "stop", "--hosts", primary]
+    VLLM_START_CMD = ["sparkrun", "run", recipe,
+                      "--cluster", HSCC_CLUSTER, "--hosts", primary,
                       "--port", str(VLLM_PORT), "--no-follow", "--ensure"]
 
 
@@ -447,7 +557,7 @@ def fleet_up_plan(serving=None):
         unit_id = u.get("id") or ",".join(nodes)
         port = u.get("port") or serving_port(serving)
         if role == "orchestrator":
-            recipe = orchestrator_recipe(serving) or VLLM_RECIPE
+            recipe = orchestrator_recipe(serving) or _topo_value("VLLM_RECIPE")
             orch.append({"kind": "orchestrator", "role": role,
                          "nodes": nodes, "port": port, "unit_id": unit_id,
                          "recipe": recipe, "keepalive": False,
@@ -455,7 +565,7 @@ def fleet_up_plan(serving=None):
                          "tp": u.get("tp"), "uniform_pool": pool})
         elif role == "worker":
             # BOTH keepalive and non-keepalive workers come up on fleet-up.
-            recipe = u.get("recipe") or VLLM_RECIPE
+            recipe = u.get("recipe") or _topo_value("VLLM_RECIPE")
             recipe = os.path.expanduser(recipe) if recipe else None
             workers.append({"kind": "worker", "role": role,
                             "nodes": nodes, "port": port, "unit_id": unit_id,
@@ -487,12 +597,13 @@ def _resolve_serving_overlay():
     """Overlay serving.json onto PRIMARY_NODE + ORCH_NODES.
 
     Returns True when topology was applied, False when serving.json is
-    absent/invalid. No logging here: this runs at import before log() is defined.
+    absent/invalid. No logging here: this runs inside the resolver, which may
+    run inside the first read of a topology name.
     """
     global PRIMARY_NODE, ORCH_NODES, KEEPALIVE_NODES, VLLM_RECIPE
     serving = load_serving()
     if serving is None:
-        ORCH_NODES = {PRIMARY_NODE}
+        ORCH_NODES = {_topo_value("PRIMARY_NODE")}
         KEEPALIVE_NODES = _env_keepalive_nodes()
         return False
     head = orchestrator_head(serving)
@@ -501,14 +612,35 @@ def _resolve_serving_overlay():
     orch_recipe = orchestrator_recipe(serving)
     if orch_recipe:
         VLLM_RECIPE = orch_recipe
-    ORCH_NODES = orchestrator_nodes(serving) or {PRIMARY_NODE}
+    ORCH_NODES = orchestrator_nodes(serving) or {_topo_value("PRIMARY_NODE")}
     KEEPALIVE_NODES = keepalive_nodes(serving) - ORCH_NODES
     return True
 
 
 def resolve_cluster_config():
-    """Resolve gateway/workers/NAS from cluster.json, falling back to sparkrun."""
-    global NAS_HOST, PRIMARY_NODE, VLLM_HEALTH_URL, ORCH_NODES, KEEPALIVE_NODES
+    """Resolve gateway/workers/NAS from cluster.json, falling back to sparkrun.
+
+    The resolver — not the trigger (t_8d2eb400). First READ of a lazy topology
+    name runs this once via the module ``__getattr__``; the daemon loop calls
+    it explicitly at startup so its fleet checks run against resolved values,
+    exactly as when a module-level call did it at import. Calling it directly
+    always re-runs the resolution (operators/tests keep the eager contract),
+    and it never raises: every failure path lands on the documented default or
+    a loud warning.
+    """
+    global NAS_HOST, PRIMARY_NODE, ORCH_NODES, KEEPALIVE_NODES
+    global _topo_resolved, _topo_resolving
+    _topo_resolved = True   # set BEFORE resolving: a read inside this body
+    _topo_resolving = True  # must not re-trigger the resolver
+    try:
+        _resolve_cluster_config_body()
+    finally:
+        _topo_resolving = False
+
+
+def _resolve_cluster_config_body():
+    """The resolution itself (no flag bookkeeping — see resolve_cluster_config)."""
+    global NAS_HOST, PRIMARY_NODE, ORCH_NODES, KEEPALIVE_NODES
     try:
         with open(CLUSTER_JSON) as f:
             config = json.load(f)
@@ -520,13 +652,13 @@ def resolve_cluster_config():
 
         # Primary node = gateway
         if gateway:
-            PRIMARY_NODE = gateway.get("ip", PRIMARY_NODE)
+            PRIMARY_NODE = gateway.get("ip", _topo_value("PRIMARY_NODE"))
         elif workers:
-            PRIMARY_NODE = workers[0].get("ip", PRIMARY_NODE)
+            PRIMARY_NODE = workers[0].get("ip", _topo_value("PRIMARY_NODE"))
 
         # NAS
         if nas_devices:
-            NAS_HOST = nas_devices[0].get("ip", NAS_HOST)
+            NAS_HOST = nas_devices[0].get("ip", _topo_value("NAS_HOST"))
 
         # serving.json overlay
         _resolve_serving_overlay()
@@ -561,8 +693,9 @@ def resolve_cluster_config():
     applied = _resolve_serving_overlay()
     if not applied:
         _serving_warn(f"no serving.json overlay; using PRIMARY_NODE="
-                      f"{PRIMARY_NODE} (cluster.json/sparkrun or hardcoded "
-                      f"default), ORCH_NODES={sorted(ORCH_NODES)}")
+                      f"{_topo_value('PRIMARY_NODE')} (cluster.json/sparkrun "
+                      f"or hardcoded default), ORCH_NODES="
+                      f"{sorted(_topo_value('ORCH_NODES'))}")
     _rebuild_vllm_cmds()
 
 
@@ -685,5 +818,9 @@ def update_orchestrator_followers():
     _write_prev_orch_endpoint(new_endpoint)
 
 
-# Resolve cluster config at import time
-resolve_cluster_config()
+# NOTE (t_8d2eb400, audit BROKEN B11): this module used to end with a
+# module-level ``resolve_cluster_config()`` call — importing the CLI shelled
+# ``sparkrun cluster list --json`` on every invocation and every --help in a
+# fresh HOME. Resolution is LAZY now: the first READ of a topology name
+# resolves it (module __getattr__ above); the daemon resolves eagerly in
+# ``daemon_ops.run_daemon_loop`` where it always belongs.

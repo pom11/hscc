@@ -347,14 +347,6 @@
       "example": "help emitted a daemon log line (a check ran while printing help): [<TS>] [ WARN] Autodown kanban interlock unevaluable: Hermes agent source not found at '<SANDBOX>/home/."
     },
     {
-      "kind": "D",
-      "command": "python -m hscc_daemon.hscc --help (empty HOME)",
-      "needle": "executes sparkrun",
-      "owner": "BROKEN-IMPORT",
-      "count_at_baseline": 1,
-      "example": "import of hscc_daemon.hscc executes sparkrun (module-level resolve_cluster_config fallback): sparkrun cluster list --json"
-    },
-    {
       "kind": "D-rc",
       "command": "hscc advanced --help",
       "needle": "exited 1",

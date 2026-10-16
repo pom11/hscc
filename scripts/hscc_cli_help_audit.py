@@ -596,13 +596,13 @@ class ExampleParser:
 
 # ── Driver ───────────────────────────────────────────────────────────────
 
-# Pre-seeded sandbox cluster.json. serving.py:resolve_cluster_config() runs AT
-# IMPORT (serving.py:689) and, when ~/.hscc/cluster.json is absent, falls back
-# to shelling out `sparkrun cluster list --json` — which would make EVERY
-# probe (including plain `hscc --help`) trip the canary. Seeding keeps the
-# matrix focused on help-path execution; the import-time shelling itself is
-# reported ONCE by the dedicated systemic probe below (it is a real finding:
-# importing the CLI must not launch fleet queries).
+# Pre-seeded sandbox cluster.json. serving.py USED to resolve cluster config
+# AT IMPORT and shell `sparkrun cluster list --json` when ~/.hscc/cluster.json
+# was absent (audit B11 — FIXED by t_8d2eb400: topology resolution is lazy,
+# first READ not import). The seed stays as defence-in-depth for any future
+# import-time reader, and the systemic probe below now measures ZERO trips;
+# it is the regression detector — a reintroduced import-time shell-out comes
+# back as a NEW finding (mutation-proven both directions).
 # Address guard: 10.0.0.x is the documented LAN placeholder, never a real host.
 _SEED_CLUSTER_JSON = json.dumps({
     "gateway": {"host": "10.0.0.1"},
@@ -689,8 +689,10 @@ def audit(repo=None) -> dict:
         "--help would start the API (api_cli.py cmd_api -> _handle_start fork)",
         "intercept --help in cmd_api before dispatch")
 
-    # systemic: importing the CLI shells out when ~/.hscc/cluster.json is
-    # missing (serving.py:689 resolve_cluster_config at import time).
+    # systemic regression probe: importing the CLI must execute NOTHING.
+    # (B11 — the import-time resolve_cluster_config sparkrun fallback — was
+    # FIXED by t_8d2eb400; this probe now measures zero and catches any
+    # reintroduction as a NEW D finding.)
     trip = _systemic_import_probe(tmp, canary)
     if trip:
         add("top-level", "python -m hscc_daemon.hscc --help (empty HOME)", "D",
