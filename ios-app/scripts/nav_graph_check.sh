@@ -91,6 +91,15 @@ xcodebuild build-for-testing -project HSCC.xcodeproj -scheme HSCCUITests \
   || { tail -40 "$RESULTS/build.log"; fail 3 "build-for-testing failed (see $RESULTS/build.log)" }
 grep -q "TEST BUILD SUCCEEDED" "$RESULTS/build.log" || fail 3 "build did not report success"
 echo "  build ok"
+# test-without-building does NOT re-install changed bundles (proved
+# t_810ab152: a stale runner on the sim kept executing an old test binary
+# — confusing dead-end "findings" that were really stale code). Install
+# both products explicitly every run.
+xcrun simctl install "$DEVICE" "$DERIVED/Build/Products/Debug-iphonesimulator/HSCC.app" \
+  || fail 3 "install HSCC.app failed"
+xcrun simctl install "$DEVICE" "$DERIVED/Build/Products/Debug-iphonesimulator/HSCCUITests-Runner.app" \
+  || fail 3 "install HSCCUITests-Runner.app failed"
+echo "  app + runner installed (explicit — test-without-building does not refresh installs)"
 
 # ---------------------------------------------------------------------------
 step=4
