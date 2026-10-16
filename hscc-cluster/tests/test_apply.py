@@ -3199,3 +3199,315 @@ class TestWorkerRewriteRespectsOrchestratorIntent:
             cluster_template._set_orchestrator_profile_to_pool(cfg, self.POOL)
         assert cfg["model"]["default"] == "orchestrator-model"
         assert cfg["model"]["base_url"] == self.POOL
+
+
+# ── Fix t_ac795424: uniform_pool apply writes NO fleet node into hermes config ──
+#
+# Placeholder nodes follow the documented 10.0.0.x LAN convention (address
+# guard); the live operator hosts never appear in fixtures.
+
+_UNIF_NODE_A = "10.0.0.1"
+_UNIF_NODE_B = "10.0.0.2"
+_UNIF_NODE_C = "10.0.0.3"
+_UNIF_NODE_V1 = "http://10.0.0.1:8000/v1"
+_UNIF_NODE_DEFAULT = "10.0.0.1:8000"
+
+
+class TestUniformPoolProviderEndpoints:
+    """`_update_hermes_config` under uniform_pool: hermes talks ONLY to the
+    proxy. The provider block used to re-infect `http://<node>:<port>/v1` +
+    `model.default = <node>:<port>` into the custom provider on every apply —
+    undoing the (correct) model block on the same page — and family-*
+    providers carried `localhost:<port>` (a host:port, never resolvable as a
+    model id) as their default. Non-uniform plans must stay byte-identical."""
+
+    CONCRETE = "concrete/model"
+
+    def _plan(self, uniform, fam_name="coding"):
+        d = {
+            "name": "t", "version": 3,
+            "orchestrator": {"recipe": "same.yaml"},
+            "families": [{"name": fam_name, "models": [{"recipe": "same.yaml"}],
+                          "workers": 2, "proxy": True}],
+        }
+        if uniform:
+            d["uniform_pool"] = True
+        return ti.resolve(ti.ClusterTemplate.from_dict(d), _topo(2),
+                          _coster=_coster(per_gpu=30))
+
+    @staticmethod
+    def _serving(*served):
+        import json as _json
+
+        def get(url, api_key=None):
+            return _json.dumps({"data": [{"id": m} for m in served]})
+        return get
+
+    def _custom(self, cfg):
+        return next(p for p in cfg["providers"] if p["name"] == "custom")
+
+    def _family(self, cfg, fam="coding"):
+        return next(p for p in cfg["providers"] if p["name"] == f"family-{fam}")
+
+    # ── a) uniform_pool: NO node ip/port anywhere in what the writer emits ──
+    def test_uniform_pool_config_carries_no_node_ip_or_port(self):
+        plan = self._plan(uniform=True)
+        cfg = cluster_template._update_hermes_config(
+            {}, plan, _http_get=self._serving(
+                "orchestrator-model", "worker-model", self.CONCRETE))
+        import yaml
+        text = yaml.dump(cfg, default_flow_style=False, sort_keys=False)
+        for u in plan.all_units:
+            for node in u.nodes:
+                assert node not in text, f"{node} leaked into config: {text}"
+            assert f":{u.port}" not in text, f"port {u.port} leaked: {text}"
+        # The proxy front IS the only endpoint allowed
+        assert "localhost:4000" in text
+
+    def test_uniform_pool_custom_provider_aims_at_chat_url(self):
+        plan = self._plan(uniform=True)
+        cfg = cluster_template._update_hermes_config(
+            {}, plan, _http_get=self._serving(
+                "orchestrator-model", "worker-model", self.CONCRETE))
+        cust = self._custom(cfg)
+        # Exactly the chat_url the model block got — the SAME value, no
+        # second crafted URL.
+        assert cust["base_url"] == cfg["model"]["base_url"]
+        assert cust["base_url"] == "http://localhost:4000/v1"
+
+    def test_uniform_pool_custom_default_is_probe_resolved_alias(self):
+        plan = self._plan(uniform=True)
+        cfg = cluster_template._update_hermes_config(
+            {}, plan, _http_get=self._serving(
+                "orchestrator-model", "worker-model", self.CONCRETE))
+        assert self._custom(cfg)["model"]["default"] == "orchestrator-model"
+        # single-probe doctrine: the SAME resolution the model block carries
+        assert (self._custom(cfg)["model"]["default"]
+                == cfg["model"]["default"])
+
+    def test_uniform_pool_custom_default_falls_back_to_concrete(self):
+        """Proxy does NOT advertise the alias but serves exactly one id →
+        concrete served id written (same doctrine as the model block)."""
+        plan = self._plan(uniform=True)
+        cfg = cluster_template._update_hermes_config(
+            {}, plan, _http_get=self._serving(self.CONCRETE))
+        assert self._custom(cfg)["model"]["default"] == self.CONCRETE
+        assert cfg["model"]["default"] == self.CONCRETE
+
+    def test_uniform_pool_unreachable_probe_refuses_new_id_keeps_good_prev(self):
+        """Probe unreachable → never write an unconfirmed id; a previous GOOD
+        (non host:port) default is carried, per leave-untouched doctrine."""
+        plan = self._plan(uniform=True)
+
+        def _get(url, api_key=None):
+            raise OSError("connection refused")
+        start = {"providers": [{"name": "custom",
+                                "model": {"default": "good-existing-model"},
+                                "base_url": "http://localhost:4000/v1"}]}
+        cfg = cluster_template._update_hermes_config(start, plan, _http_get=_get)
+        assert self._custom(cfg)["model"]["default"] == "good-existing-model"
+        assert self._custom(cfg)["base_url"] == "http://localhost:4000/v1"
+
+    def test_uniform_pool_unreachable_probe_drops_host_port_default(self):
+        """The one default class that must NEVER survive: a host:port value
+        (unresolvable as a model id, and the very re-infection this card
+        removes) is dropped even when the probe cannot confirm a replacement."""
+        plan = self._plan(uniform=True)
+
+        def _get(url, api_key=None):
+            raise OSError("connection refused")
+        start = {"providers": [{"name": "custom",
+                                "model": {"default": _UNIF_NODE_DEFAULT},
+                                "base_url": _UNIF_NODE_V1}]}
+        cfg = cluster_template._update_hermes_config(start, plan, _http_get=_get)
+        cust = self._custom(cfg)
+        assert "model" not in cust, cust
+        assert cust["base_url"] == "http://localhost:4000/v1"
+
+    # ── b) family-* provider default is the family alias, not host:port ────
+    def test_family_provider_default_is_alias_not_host_port(self):
+        plan = self._plan(uniform=True)
+        cfg = cluster_template._update_hermes_config(
+            {}, plan, _http_get=self._serving(
+                "orchestrator-model", "worker-model", self.CONCRETE))
+        fam = self._family(cfg)
+        assert fam["model"]["default"] == "worker-model"
+        assert ":" not in fam["model"]["default"]
+        assert fam["base_url"] == "http://localhost:4000/v1"
+
+    def test_family_provider_default_alias_on_non_uniform_too(self):
+        """The host:port default was wrong for ANY template — the non-uniform
+        family provider now carries the units' alias too."""
+        plan = self._plan(uniform=False)
+        cfg = cluster_template._update_hermes_config(
+            {}, plan, _http_get=self._serving(self.CONCRETE))
+        fam = self._family(cfg)
+        assert fam["model"]["default"] == "worker-model"
+        assert fam["base_url"] == "http://localhost:4000/v1"
+
+    def test_family_provider_orchestrator_unit_gets_orch_alias(self):
+        """Alias by role identity, not family name: a family whose unit IS the
+        orchestrator (co-location corner) carries orchestrator-model."""
+        orch = ti.ResolvedUnit("orchestrator", None, "o.yaml", "m",
+                               [_UNIF_NODE_A], 8000, 1, 1)
+        fam = ti.ResolvedFamily(name="co", proxy_port=4000, units=[orch])
+        plan = ti.ResolvedPlan(template="t", orchestrator=orch, families=[fam])
+        cfg = cluster_template._update_hermes_config(
+            {}, plan, _http_get=self._serving("orchestrator-model"))
+        assert self._family(cfg, "co")["model"]["default"] == "orchestrator-model"
+
+    # ── c) non-uniform: custom provider byte-identical to the old writer ───
+    def test_non_uniform_custom_provider_byte_identical(self):
+        import yaml
+        plan = self._plan(uniform=False)
+        o = plan.orchestrator
+        # What the writer emitted for EVERY plan before this fix — the exact
+        # bytes, not just the values (overreach guard).
+        expected = {
+            "name": "custom",
+            "model": {"default": f"{o.node}:{o.port}"},
+            "base_url": f"http://{o.node}:{o.port}/v1",
+        }
+        cfg = cluster_template._update_hermes_config(
+            {}, plan, _http_get=self._serving("orchestrator-model"))
+        assert yaml.dump(self._custom(cfg), default_flow_style=False,
+                         sort_keys=False) == yaml.dump(
+            expected, default_flow_style=False, sort_keys=False)
+        assert cfg["model"]["base_url"] == f"http://{o.node}:{o.port}/v1"
+
+    def test_non_uniform_no_proxy_keeps_direct_entry_even_with_flag(self):
+        """uniform_pool WITHOUT a family proxy owning the worker port has no
+        pool front to point at — the direct entry stays (never aim at a proxy
+        that does not exist)."""
+        d = {
+            "name": "t", "version": 3, "uniform_pool": True,
+            "orchestrator": {"recipe": "same.yaml"},
+            "families": [{"name": "coding",
+                          "models": [{"recipe": "same.yaml"}],
+                          "workers": 2, "proxy": False}],
+        }
+        plan = ti.resolve(ti.ClusterTemplate.from_dict(d), _topo(2),
+                          _coster=_coster(per_gpu=30))
+        o = plan.orchestrator
+        cfg = cluster_template._update_hermes_config(
+            {}, plan, _http_get=self._serving("orchestrator-model"))
+        cust = self._custom(cfg)
+        assert cust["base_url"] == f"http://{o.node}:{o.port}/v1"
+        assert cust["model"]["default"] == f"{o.node}:{o.port}"
+
+    # ── idempotence + pruning must not regress ──────────────────────────────
+    def test_uniform_pool_second_apply_is_a_noop(self):
+        plan = self._plan(uniform=True)
+        get = self._serving("orchestrator-model", "worker-model",
+                            self.CONCRETE)
+        import yaml
+        first = cluster_template._update_hermes_config({}, plan, _http_get=get)
+        second = cluster_template._update_hermes_config(
+            first, plan, _http_get=get)
+        assert yaml.dump(first, sort_keys=False) == yaml.dump(
+            second, sort_keys=False)
+
+    def test_stale_family_pruning_survives_the_rewrite(self):
+        plan = self._plan(uniform=True, fam_name="coding")
+        start = {"providers": [
+            {"name": "family-reasoning", "base_url": "http://localhost:4001/v1"},
+            {"name": "openai", "base_url": "https://api.openai.com/v1"},
+        ]}
+        cfg = cluster_template._update_hermes_config(
+            start, plan, _http_get=self._serving(
+                "orchestrator-model", "worker-model"))
+        names = {p["name"] for p in cfg["providers"]}
+        assert names == {"custom", "family-coding", "openai"}
+
+
+class TestUniformPoolApplyEndToEndNoNodeUrls:
+    """Full apply_template() on a uniform_pool template writes a config.yaml
+    (and applied state) that names no fleet node — the exact live failure the
+    operator hand-fixed on 2026-10-15: the model block said proxy, the custom
+    provider said node. Also pins uniform_pool into applied_template.json."""
+
+    UNIFORM_YAML = (
+        "name: uniform-e2e\nversion: 3\nuniform_pool: true\n"
+        "orchestrator:\n  recipe: same.yaml\n  tp: 1\n"
+        "families:\n  - name: coding\n    models:\n      - recipe: same.yaml\n"
+        "        tp: 1\n    workers: remaining\n    proxy: true\n"
+    )
+    NON_UNIFORM_YAML = UNIFORM_YAML.replace("uniform_pool: true\n", "")
+
+    def _setup(self, tmp_path, monkeypatch, yaml_text, name):
+        import cluster_template as ct
+        import subprocess
+        from unittest.mock import MagicMock
+        tdir = tmp_path / "templates"
+        tdir.mkdir()
+        (tdir / f"{name}.yaml").write_text(yaml_text)
+        cj = tmp_path / "cluster.json"
+        cj.write_text(json.dumps({
+            "gateway": {"ip": _UNIF_NODE_A},
+            "workers": [{"ip": _UNIF_NODE_B}, {"ip": _UNIF_NODE_C}],
+        }))
+        hscc = tmp_path / "hscc"
+        hscc.mkdir()
+        for attr, val in [("TEMPLATE_DIR", tdir), ("CLUSTER_JSON", cj),
+                          ("HSCC_DIR", hscc),
+                          ("SERVING_JSON", hscc / "serving.json"),
+                          ("MODELS_JSON", hscc / "models.json"),
+                          ("CONFIG_YAML", hscc / "config.yaml"),
+                          ("PROFILES_DIR", hscc / "profiles"),
+                          ("PROXY_DIR", hscc / "proxies"),
+                          ("APPLIED_STATE", hscc / "applied_template.json"),
+                          ("ROLLBACK_DIR", hscc / "rollback")]:
+            monkeypatch.setattr(ct, attr, val)
+        monkeypatch.setattr(ct, "_discover", lambda probe=False: FakeTopo(
+            FakeNode(_UNIF_NODE_A),
+            [FakeNode(_UNIF_NODE_B), FakeNode(_UNIF_NODE_C)]))
+        monkeypatch.setattr(ct.Path, "is_file", lambda self: True)
+        monkeypatch.setattr(ct, "_http_get_default", lambda _u, api_key=None:
+                            json.dumps({"data": [{"id": "orchestrator-model"},
+                                                 {"id": "worker-model"}]}))
+        import recipe_cost as rc
+        monkeypatch.setattr(ti._rc, "recipe_cost",
+                            lambda r: rc.RecipeCost(r, per_gpu_total_gb=30,
+                                                    fits=True))
+        monkeypatch.setattr(subprocess, "run",
+                            lambda *a, **k: MagicMock(returncode=0,
+                                                      stderr="", stdout=""))
+        monkeypatch.setattr(ct, "_provision_models",
+                            lambda plan, **k: {"status": "ok",
+                                               "provisioned": [], "note": "t"})
+        return ct, hscc
+
+    def test_uniform_apply_leaves_no_node_address_in_config(self, tmp_path,
+                                                            monkeypatch):
+        ct, hscc = self._setup(tmp_path, monkeypatch, self.UNIFORM_YAML,
+                               "uniform-e2e")
+        res = ct.apply_template("uniform-e2e", confirm=True)
+        assert res["success"] is True, res
+        text = (hscc / "config.yaml").read_text()
+        for node in (_UNIF_NODE_A, _UNIF_NODE_B, _UNIF_NODE_C):
+            assert node not in text, f"{node} present in rendered config:\n{text}"
+        import yaml
+        cfg = yaml.safe_load(text)
+        assert cfg["model"]["base_url"] == "http://localhost:4000/v1"
+        cust = next(p for p in cfg["providers"] if p["name"] == "custom")
+        assert cust["base_url"] == "http://localhost:4000/v1"
+        assert cust["model"]["default"] == "orchestrator-model"
+        fam = next(p for p in cfg["providers"] if p["name"] == "family-coding")
+        assert fam["model"]["default"] == "worker-model"
+        state = json.loads((hscc / "applied_template.json").read_text())
+        assert state["uniform_pool"] is True
+
+    def test_non_uniform_apply_still_writes_direct_custom(self, tmp_path,
+                                                          monkeypatch):
+        ct, hscc = self._setup(tmp_path, monkeypatch, self.NON_UNIFORM_YAML,
+                               "plain-e2e")
+        res = ct.apply_template("plain-e2e", confirm=True)
+        assert res["success"] is True, res
+        import yaml
+        cfg = yaml.safe_load((hscc / "config.yaml").read_text())
+        cust = next(p for p in cfg["providers"] if p["name"] == "custom")
+        # Gateway is the orchestrator here: direct is legitimate without a pool.
+        assert cust["base_url"] == _UNIF_NODE_V1
+        assert cust["model"]["default"] == _UNIF_NODE_DEFAULT
+        state = json.loads((hscc / "applied_template.json").read_text())
+        assert state["uniform_pool"] is False

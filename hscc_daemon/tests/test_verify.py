@@ -1525,3 +1525,228 @@ class TestCheckProjectChatReady:
         assert "nothing to verify" in r["detail"]
 
 
+# ── provider_routing: no direct fleet node in any hermes config under uniform_pool ──
+
+class TestCheckProviderRouting:
+    """`check_provider_routing` — while the applied template is uniform_pool,
+    NO hermes config (root + every profile) may aim base_url / providers /
+    fallback_providers / auxiliary entries at a fleet node; the proxy
+    (loopback) is hermes' only chat route. Fleet node set comes from sparkrun's
+    own host resolution (injected here; the seam itself is pinned too).
+    Pure-read: the check never rewrites anything."""
+
+    NODE = "10.0.0.1"
+    NODE2 = "10.0.0.2"
+    NODE_URL = "http://10.0.0.1:8000/v1"
+
+    def _state(self, tmp_path, uniform=True):
+        p = tmp_path / "applied_template.json"
+        p.write_text(json.dumps({"template": "t",
+                                 "uniform_pool": bool(uniform)}))
+        return str(p)
+
+    def _cfg(self, tmp_path, name, cfg, raw=None):
+        """Write a config.yaml for `name` ("root" -> tmp/config.yaml,
+        otherwise tmp/profiles/<name>/config.yaml); return its path."""
+        import yaml
+        if name == "root":
+            path = tmp_path / "config.yaml"
+        else:
+            d = tmp_path / "profiles" / name
+            d.mkdir(parents=True, exist_ok=True)
+            path = d / "config.yaml"
+        path.write_text(raw if raw is not None else yaml.safe_dump(cfg))
+        return str(path)
+
+    def _check(self, tmp_path, **kw):
+        from hscc_daemon.verify import check_provider_routing
+        # Only plant the default state when the caller did not supply one —
+        # setdefault would still EVALUATE (and write) the default first and
+        # clobber the caller's planted file, since both live at the same path.
+        if "applied_state_path" not in kw:
+            kw["applied_state_path"] = self._state(tmp_path)
+        kw.setdefault("fleet_hosts", {self.NODE, self.NODE2})
+        kw.setdefault("profiles_dir", str(tmp_path / "profiles"))
+        return check_provider_routing(**kw)
+
+    # ── fail paths ──────────────────────────────────────────────────────────
+    def test_root_config_node_url_fails(self, tmp_path):
+        cfg = self._cfg(tmp_path, "root",
+                        {"model": {"base_url": self.NODE_URL}})
+        r = self._check(tmp_path, config=cfg)
+        assert r["ok"] is False
+        assert r["name"] == "provider_routing"
+        assert "model.base_url" in r["detail"]
+        assert self.NODE in r["detail"]
+
+    def test_provider_entry_node_url_fails(self, tmp_path):
+        cfg = self._cfg(tmp_path, "root",
+                        {"providers": [{"name": "custom",
+                                        "base_url": self.NODE_URL}]})
+        r = self._check(tmp_path, config=cfg)
+        assert r["ok"] is False
+        assert "providers" in r["detail"]
+
+    def test_fallback_providers_node_url_fails(self, tmp_path):
+        cfg = self._cfg(tmp_path, "root",
+                        {"fallback_providers": [{"name": "fb",
+                                                 "base_url": self.NODE_URL}]})
+        r = self._check(tmp_path, config=cfg)
+        assert r["ok"] is False
+        assert "fallback_providers" in r["detail"]
+
+    def test_fallback_providers_url_key_variant_fails(self, tmp_path):
+        """Fallback chains store the address under base_url OR url depending
+        on hermes version — both spellings are scanned."""
+        cfg = self._cfg(tmp_path, "root",
+                        {"fallback_providers": [{"name": "fb",
+                                                 "url": self.NODE_URL}]})
+        r = self._check(tmp_path, config=cfg)
+        assert r["ok"] is False
+        assert "url" in r["detail"]
+
+    def test_auxiliary_block_node_url_fails(self, tmp_path):
+        cfg = self._cfg(tmp_path, "root",
+                        {"auxiliary": {"compression":
+                                       {"base_url": self.NODE_URL}}})
+        r = self._check(tmp_path, config=cfg)
+        assert r["ok"] is False
+        assert "auxiliary.compression.base_url" in r["detail"]
+
+    def test_profile_variant_also_scanned(self, tmp_path):
+        """profiles_dir override (like check_profile_endpoints) — the offending
+        url lives in a PROFILE, the root config is clean."""
+        root = self._cfg(tmp_path, "root", {"model": {
+            "base_url": "http://localhost:4000/v1"}})
+        self._cfg(tmp_path, "worker-01", {"model": {"base_url": self.NODE_URL}})
+        r = self._check(tmp_path, config=root)
+        assert r["ok"] is False
+        assert "profile:worker-01" in r["detail"]
+
+    def test_every_finding_reported_not_just_first(self, tmp_path):
+        self._cfg(tmp_path, "bad-a", {"model": {"base_url": self.NODE_URL}})
+        self._cfg(tmp_path, "bad-b", {"model": {"base_url":
+                                                f"http://{self.NODE2}:8001/v1"}})
+        root = self._cfg(tmp_path, "root", {"model": {
+            "base_url": "http://localhost:4000/v1"}})
+        r = self._check(tmp_path, config=root)
+        assert r["ok"] is False
+        assert "2 direct node endpoint(s)" in r["detail"]
+        assert "profile:bad-a" in r["detail"] and "profile:bad-b" in r["detail"]
+
+    # ── pass paths ──────────────────────────────────────────────────────────
+    def test_localhost_proxy_passes(self, tmp_path):
+        cfg = self._cfg(tmp_path, "root", {
+            "model": {"base_url": "http://localhost:4000/v1"},
+            "providers": [{"name": "custom",
+                           "base_url": "http://localhost:4000/v1"},
+                          {"name": "family-coding",
+                           "base_url": "http://127.0.0.1:4001/v1"}]})
+        r = self._check(tmp_path, config=cfg)
+        assert r["ok"] is True
+        assert "no fleet-node base_url" in r["detail"]
+
+    def test_external_non_fleet_host_passes(self, tmp_path):
+        """A host the fleet does not run (e.g. api.openai.com) is not this
+        guard's problem — profile_endpoints owns 'unknown endpoint'."""
+        cfg = self._cfg(tmp_path, "root", {"providers": [
+            {"name": "openai", "base_url": "https://api.openai.com/v1"}]})
+        r = self._check(tmp_path, config=cfg)
+        assert r["ok"] is True
+
+    # ── skip / unverified paths ─────────────────────────────────────────────
+    def test_non_uniform_template_skips(self, tmp_path):
+        cfg = self._cfg(tmp_path, "root", {"model": {"base_url": self.NODE_URL}})
+        r = self._check(tmp_path, config=cfg,
+                        applied_state_path=self._state(tmp_path, uniform=False))
+        assert r["ok"] is True
+        assert "skipped" in r["detail"]
+
+    def test_pre_flag_state_skips(self, tmp_path):
+        """An applied state written before uniform_pool was recorded reads as
+        non-uniform → skip (documented), never a false fail."""
+        p = tmp_path / "applied_template.json"
+        p.write_text(json.dumps({"template": "old"}))
+        cfg = self._cfg(tmp_path, "root", {"model": {"base_url": self.NODE_URL}})
+        r = self._check(tmp_path, config=cfg, applied_state_path=str(p))
+        assert r["ok"] is True
+        assert "skipped" in r["detail"]
+
+    def test_missing_state_unverified(self, tmp_path):
+        cfg = self._cfg(tmp_path, "root", {"model": {"base_url": self.NODE_URL}})
+        r = self._check(tmp_path, config=cfg,
+                        applied_state_path=str(tmp_path / "nope.json"))
+        assert r["ok"] is None
+        assert "unverified" in r["detail"]
+
+    def test_corrupt_state_unverified(self, tmp_path):
+        p = tmp_path / "applied_template.json"
+        p.write_text("{not json")
+        cfg = self._cfg(tmp_path, "root", {"model": {"base_url": self.NODE_URL}})
+        r = self._check(tmp_path, config=cfg, applied_state_path=str(p))
+        assert r["ok"] is None
+
+    def test_empty_fleet_hosts_unverified_not_pass(self, tmp_path):
+        """An EMPTY resolved node set is 'we could not look', not 'the fleet
+        is empty' — fail-closed (the v1.15.0 docker-ps class)."""
+        cfg = self._cfg(tmp_path, "root", {"model": {"base_url": self.NODE_URL}})
+        r = self._check(tmp_path, config=cfg, fleet_hosts=set())
+        assert r["ok"] is None
+        assert "unverified" in r["detail"]
+
+    # ── the sparkrun seam (sanctioned host resolution, injectable) ─────────
+    def test_fleet_hosts_come_from_sparkrun_seam(self, tmp_path):
+        """No injected fleet_hosts → the check resolves them by running
+        sparkrun's own host resolution under sparkrun's venv python: argv is
+        [venv_python, '-c', script], the script calls resolve_hosts (NOT
+        template yaml parsing, NOT ssh)."""
+        seen = {}
+
+        def fake_run(argv, timeout):
+            seen["argv"] = argv
+            return 0, json.dumps([self.NODE, self.NODE2])
+        cfg = self._cfg(tmp_path, "root", {"model": {"base_url": self.NODE_URL}})
+        r = self._check(tmp_path, config=cfg, fleet_hosts=None,
+                        venv_python="/fake/venv/bin/python", run=fake_run)
+        assert r["ok"] is False
+        assert seen["argv"][0] == "/fake/venv/bin/python"
+        assert seen["argv"][1] == "-c"
+        assert "resolve_hosts" in seen["argv"][2]
+        assert "ssh" not in seen["argv"][2]
+
+    def test_sparkrun_failure_is_unverified_not_pass(self, tmp_path):
+        """Every failure mode of the seam — interpreter missing, exec error —
+        is UNVERIFIED. The check never guesses a node set and never passes
+        when it could not look."""
+        from hscc_daemon import verify as v
+        assert v._fleet_node_hosts(venv_python="") == \
+            (None, "sparkrun venv python unavailable")
+        cfg = self._cfg(tmp_path, "root", {"model": {"base_url": self.NODE_URL}})
+        r = self._check(tmp_path, config=cfg, fleet_hosts=None,
+                        venv_python="/fake/python",
+                        run=lambda argv, timeout: (_ for _ in ()).throw(
+                            OSError("no exec")))
+        assert r["ok"] is None
+        assert "unverified" in r["detail"]
+
+    def test_sparkrun_nonzero_exit_unverified(self, tmp_path):
+        cfg = self._cfg(tmp_path, "root", {"model": {"base_url": self.NODE_URL}})
+        r = self._check(tmp_path, config=cfg, fleet_hosts=None,
+                        venv_python="/fake/python",
+                        run=lambda argv, timeout: (2, ""))
+        assert r["ok"] is None
+        assert "exited 2" in r["detail"]
+
+    # ── pure-read guarantee ──────────────────────────────────────────────────
+    def test_pure_read_never_touches_configs(self, tmp_path):
+        import hashlib
+        root = self._cfg(tmp_path, "root", {"model": {"base_url": self.NODE_URL}})
+        prof = self._cfg(tmp_path, "worker", {"model": {
+            "base_url": "http://localhost:4000/v1"}})
+        before = {p: hashlib.sha256(open(p, "rb").read()).hexdigest()
+                  for p in (root, prof)}
+        r = self._check(tmp_path, config=root)
+        assert r["ok"] is False           # found the violation...
+        after = {p: hashlib.sha256(open(p, "rb").read()).hexdigest()
+                 for p in (root, prof)}
+        assert before == after            # ...and repaired NOTHING
