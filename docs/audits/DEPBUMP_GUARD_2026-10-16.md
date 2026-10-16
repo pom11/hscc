@@ -47,4 +47,81 @@ card comment thread.
 
 ## Findings
 
-(append as they land)
+1. **Where bump workers read text (all three surfaces now covered).**
+   - PR body: `.github/scripts/check_runtime_deps.py` `main()` body builder
+     (~L215-235). Section "sparkrun fork-branch rule" appears only when the
+     bump touches sparkrun.
+   - Card body: `scripts/dep_pr_watcher.py` `_card_body()` — the bump card
+     created on the board for PRs whose title contains `sparkrun`. The real
+     PR title format is `chore(deps): runtime bump — sparkrun v0.2.40 -> v0.2.41`
+     (workflow TITLE at check-runtime-deps.yml:63), so the title match fires.
+   - Skill: `references/runtime-bump-verification.md` — the bump cards are
+     assigned to `backend-engineer` (dep_pr_watcher ASSIGNEE), and this is the
+     only runtime-bump procedure skill. It existed ONLY in the runtime trees
+     (`~/.hermes/skills/...`), was missing from the repo payload, and was not
+     listed in any SKILL.md index — three fixes: canonical copy now in
+     `install/hscc-skills/hscc/references/` (shipped by `hscc.py install-skills`),
+     index line added to payload + both live trees.
+   - All three load the SAME canonical text from `hscc_daemon/dep_bump_guard.py`
+     (branch `feat/proxy-least-in-flight`, remote `pom11/sparkrun` — verified
+     live before writing). A load failure emits a loud "GUARD UNAVAILABLE"
+     line instead of a silently rule-less card.
+
+2. **Drift check semantics.** `hscc_daemon/proxy_router.py::router_drift`
+   mirrors sparkrun's own emission rules (verified against the live fork
+   source, read-only): `ProxyConfig.router_settings` (config.py:276-285 —
+   non-mapping ignored), `BALANCING_CALLBACKS = {"least-in-flight":
+   "sparkrun_balancer.handler"}` (engine.py:57), emit-only-if-truthy
+   (engine.py:193-194), unimplemented balancing warn-and-ignore
+   (engine.py:736-738). The least-busy flag is grounded in
+   `src/sparkrun/proxy/balancer.py`'s docstring: LiteLLM's least-busy counter
+   is never incremented on the async path — ties go to the first model_list
+   entry. Statuses: ok / warn / skip (no proxy.yaml — check not applicable) /
+   unverified (unreadable). WARN never makes anything red; verify-check `ok`
+   is True except None-on-unverified.
+
+3. **Daemon stream wiring.** The `proxy` stream (daemon_ops PERIODIC_INTERVALS
+   "proxy": 60) runs `health.check_proxy`, NOT verify.check_proxy. So the
+   verdict is recorded inside health.check_proxy on BOTH write paths
+   (healthy + unhealthy) as `router_drift` / `router_drift_warn`, behind a
+   `_router_drift_probe()` seam (tests never read the operator's live
+   configs); WARN log line while drift is live. It never changes the health
+   verdict or triggers a restart. verify gains the sibling check
+   `proxy_router_settings` in `run_all` (10 -> 11 checks).
+
+4. **Live state passes today.** Read-only probe of the real files returned
+   `status: ok` — litellm_config carries proxy.yaml's router_settings
+   ({'routing_strategy': 'simple-shuffle'}) + balancer callback. No false
+   warning on the operator's current setup (simple-shuffle + least-in-flight
+   balancer coexist by design: the balancer callback does the balancing).
+
+5. **hscc-dep-watcher cron (investigate-only item).** The job EXISTS and is
+   ACTIVE (id 09304286e562, daily 08:00) — it is NOT paused and NOT absent,
+   so `cron resume` does not apply. It has FAILED 17 runs in a row:
+   `Script not found: /Users/desac/.hermes/profiles/backend-engineer/scripts/dep_pr_watcher.py`.
+   Root cause: the job was created from the backend-engineer profile, and
+   hermes resolves `--script` names against THIS profile's scripts dir
+   (cron/scheduler_script.py:~294 — "profiles never share files"), while
+   `scripts/install_dep_watcher.sh` installs the script to the SHARED
+   `~/.hermes/scripts/` and the header doc suggests the default profile.
+   So the watcher has never created a card since the profile split.
+   NOT fixed here (card says investigate+report, do not install/mutate): the
+   fix is `cp scripts/dep_pr_watcher.py
+   ~/.hermes/profiles/backend-engineer/scripts/` (or re-create the job from
+   the profile whose scripts dir install_dep_watcher.sh targets) —
+   one-line operator action, fan a card if desired.
+
+## Mutation battery (8/8 CAUGHT, restored, tree clean)
+
+M1 CI rule disabled / M2 card rule disabled / M3 divergence comparison
+disabled / M4 least-busy trap removed / M5 warn->hard-fail / M6 healthy-stream
+write loses drift / M7 unhealthy-stream write loses drift / M8 loader-failure
+goes silent. Restore via in-memory copies with sha pins (never `git checkout --`).
+
+## Gates
+
+- Canonical suite: see completion metadata (run after this file lands).
+- `scripts/address_guard.py --repo .` exit 0 before every commit (only
+  documented 10.0.0.x placeholders in test fixtures).
+- changelog.d/t_39d7c915.md; no attribution lines; PUSH ONLY.
+
