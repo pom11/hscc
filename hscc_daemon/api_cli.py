@@ -40,6 +40,77 @@ API_LOG_FILE = os.path.expanduser("~/.hscc/api.log")
 
 VALID_SUBCOMMANDS = ("start", "stop", "status", "install-service", "uninstall-service")
 
+# Flags that mean "print help, execute nothing" at the verb level
+# (BROKEN B1/B2/B3, card t_bf9f1909). Intercepted in cmd_api BEFORE dispatch —
+# see SUBCOMMAND_HELP.
+SUB_HELP = ("--help", "-h")
+
+# Per-verb help, printed INSTEAD of running the verb when --help/-h appears
+# anywhere in the verb's argv. Every verb acts before it reports (start forks
+# a server that binds the API port, status can mint ~/.hscc/api-token and
+# print a QR, install-service/uninstall-service write/remove the LaunchAgent
+# plist) — so the intercept must come BEFORE dispatch. Lines stay <= 78
+# columns, matching the group HELP_TEXT convention (keeps the CLI help-surface
+# gate's wrap analysis clean at width 80). Flag-shaped bracket tokens
+# ([--no-qr]) are safe through Rich markup; bare words in brackets are not
+# (the group line's "[args]" renders as markup), so verb usage lines avoid
+# them.
+SUBCOMMAND_HELP = {
+    "start": """\
+Usage: hscc api start [--tailscale] [--bind <ip>] [--port <n>] [--no-qr]
+
+Start the HSCC API server in the background (double-fork, PID at
+~/.hscc/api.pid, log at ~/.hscc/api.log). Refuses to start a second
+instance — prints the running PID instead.
+
+  --tailscale     Bind the tailnet address instead of loopback
+  --bind <ip>     Bind this specific address (0.0.0.0 is always refused)
+  --port <n>      Override the configured port (default 8787)
+  --no-qr         Suppress the scannable connection QR
+
+Bind defaults to loopback (127.0.0.1). The QR encodes the live auth token
+from ~/.hscc/api-token — treat it like a password. '--theme <name>' selects
+the human palette.""",
+    "stop": """\
+Usage: hscc api stop
+
+Stop the running API server: read ~/.hscc/api.pid, SIGTERM it (SIGKILL
+after 10s), remove the PID file. Harmless when nothing is running.
+
+'--theme <name>' selects the human palette.""",
+    "status": """\
+Usage: hscc api status [--no-qr]
+
+Read-only report: running / not running (from ~/.hscc/api.pid) and the
+configured host:port. NEVER prints the auth token. Shows the scannable
+connection QR when a token exists (it encodes that credential — keep it
+off streams and screen-shares); '--no-qr' suppresses the QR.
+
+'--theme <name>' selects the human palette.""",
+    "install-service": """\
+Usage: hscc api install-service
+
+OPT-IN boot-resilience (macOS only): write the launchd unit
+~/Library/LaunchAgents/com.hscc.api.plist (RunAtLoad + KeepAlive) so a
+reboot no longer takes the API offline. Deliberately does NOT load the
+unit — activating stays your call:
+
+  plutil -lint ~/Library/LaunchAgents/com.hscc.api.plist
+  launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.hscc.api.plist
+
+'--theme <name>' selects the human palette.""",
+    "uninstall-service": """\
+Usage: hscc api uninstall-service
+
+Remove the launchd unit file written by install-service (a file operation
+only — it never execs launchctl). If the unit was loaded, boot it out
+yourself first:
+
+  launchctl bootout gui/$UID/com.hscc.api
+
+'--theme <name>' selects the human palette.""",
+}
+
 HELP_TEXT = """\
 HSCC API server — HTTP API for external apps (e.g. the iOS client).
 
@@ -604,11 +675,26 @@ def cmd_api(argv):
 
     With no subcommand (or ``--help``/``-h``) prints the group help and exits 0
     — matching how the other group verbs handle their no-subcommand/``--help``
-    case. Unknown subcommands exit non-zero. ``--theme`` selects the human
-    palette (stripped before dispatch, like autodown_cli / kanban_cli).
+    case. ``<verb> --help``/``-h`` prints that VERB's help and exits 0 without
+    executing anything (BROKEN B1/B2/B3 — every verb acts before it reports:
+    start forks a server that binds the API port, status can mint the token
+    and print a QR, install-service/uninstall-service write/remove the
+    LaunchAgent plist), so the help scan runs on the RAW argv BEFORE the
+    ``--theme`` strip and before dispatch — a help flag can never be swallowed
+    as a flag value (e.g. ``start --theme --help``). Unknown subcommands exit
+    non-zero. ``--theme`` selects the human palette (stripped before dispatch,
+    like autodown_cli / kanban_cli).
     """
     if not argv or argv[0] in ("--help", "-h"):
         _console().print(HELP_TEXT)
+        return 0
+
+    # --help/-h ANYWHERE after the verb prints that verb's help and executes
+    # NOTHING (BROKEN B1/B2/B3). Raw-argv scan, before --theme stripping and
+    # before dispatch: dispatch is what the bug was. An unknown subcommand +
+    # --help shows the group help (there is no verb-specific help to print).
+    if len(argv) > 1 and any(a in SUB_HELP for a in argv[1:]):
+        _console().print(SUBCOMMAND_HELP.get(argv[0], HELP_TEXT))
         return 0
 
     argv, theme_name = _strip_theme(argv)
