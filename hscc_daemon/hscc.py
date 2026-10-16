@@ -510,47 +510,37 @@ def _print_template_verb_usage(sub: str):
 _CLUSTER_HELP_INDENT = 6
 _CLUSTER_HELP_WIDTH = 78
 
-# Verbs whose `--help` keeps the F6 refusal contract (rc=1 + "Nothing was
-# started or stopped") instead of printing help: `up`/`down` already refuse
-# every unknown token including `--help` via _parse_cluster_flags, and that
-# refusal message is itself the subject of other fix cards' (B) rules. `stop`
-# is NOT in here — its help now prints, because printing help executes
-# nothing (it never touches sparkrun) and the audit's help-path contract is
-# exit 0.
-_CLUSTER_F6_REFUSES = ("up", "down")
-
 _CLUSTER_SUBCOMMAND_HELP = {
+    # No `example:` lines on purpose: every verb here takes no arguments
+    # (except stop's container id, which only exists at run time), so there is
+    # no real example to print — and a fabricated one would be parse-checked
+    # by the (C) gate as a lie.
     "status": {
         "usage": "hscc cluster status",
         "desc": ("Running workloads across the fleet — tensor/pipeline "
                  "parallel layout and container id per workload. Read-only."),
-        "example": None,
     },
     "hosts": {
         "usage": "hscc cluster hosts",
         "desc": ("Every host recorded in cluster.json plus the sparkrun "
                  "clusters it resolves to, with ip and role. Read-only."),
-        "example": None,
     },
     "jobs": {
         "usage": "hscc cluster jobs",
         "desc": ("Every sparkrun job currently running on the cluster. "
                  "Read-only."),
-        "example": None,
     },
     "info": {
         "usage": "hscc cluster info",
         "desc": ("The resolved cluster configuration: cluster.json, the "
                  "sparkrun cluster it maps to and the serving topology. "
                  "Read-only."),
-        "example": None,
     },
     "stop": {
         "usage": "hscc cluster stop <container-id>",
         "desc": ("Stop ONE running workload by container id — this stops a "
                  "live container. List the current ids with "
                  "'hscc cluster status'."),
-        "example": None,
     },
 }
 
@@ -577,7 +567,7 @@ def _cluster_entry_lines(sub, width=None):
     lines.extend(textwrap.wrap(entry["desc"], width=width,
                                initial_indent=" " * _CLUSTER_HELP_INDENT,
                                subsequent_indent=" " * _CLUSTER_HELP_INDENT))
-    if entry["example"]:
+    if entry.get("example"):
         lines.append(f"{' ' * _CLUSTER_HELP_INDENT}example: "
                      f"{entry['example']}")
     return lines
@@ -596,7 +586,9 @@ def _print_cluster_verb_usage(sub: str):
 # deliberately absent: it already had its own `--help` branch (proven inert by
 # the audit — zero canary trips) and its help text is operator-owned
 # (t_1cc33407), so this card leaves that surface exactly as it is. `up`/`down`
-# keep the F6 refusal contract (see _CLUSTER_F6_REFUSES).
+# keep the F6 refusal contract: `_parse_cluster_flags` already rejects
+# `--help` as an unknown token (rc=1 + "Nothing was started or stopped"), and
+# that message belongs to another card's gate rules.
 _CLUSTER_HELP_VERBS = ("status", "hosts", "jobs", "info", "stop")
 
 
@@ -970,8 +962,7 @@ def _parse_cluster_flags(cluster_args, sub, raw_args=None):
             + " (and --theme <name> for the human view).\n"
             f"  Nothing was started or stopped. Refusing to guess what {tok} "
             f"meant — a destructive command runs only on arguments it "
-            f"understands.\n"
-            f"  Full group help: hscc cluster --help")
+            f"understands.")
     return dry_run, None
 
 

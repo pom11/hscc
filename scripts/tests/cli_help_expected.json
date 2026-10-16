@@ -188,46 +188,6 @@
     },
     {
       "kind": "D",
-      "command": "hscc cluster hosts --help",
-      "needle": "shelled out",
-      "owner": "F3",
-      "count_at_baseline": 1,
-      "example": "--help shelled out: sparkrun cluster list; sparkrun status"
-    },
-    {
-      "kind": "D",
-      "command": "hscc cluster info --help",
-      "needle": "shelled out",
-      "owner": "F3",
-      "count_at_baseline": 1,
-      "example": "--help shelled out: sparkrun cluster list; sparkrun cluster show hscc"
-    },
-    {
-      "kind": "D",
-      "command": "hscc cluster jobs --help",
-      "needle": "shelled out",
-      "owner": "F3",
-      "count_at_baseline": 1,
-      "example": "--help shelled out: sparkrun cluster status"
-    },
-    {
-      "kind": "D",
-      "command": "hscc cluster status --help",
-      "needle": "shelled out",
-      "owner": "F3",
-      "count_at_baseline": 1,
-      "example": "--help shelled out: sparkrun status"
-    },
-    {
-      "kind": "D",
-      "command": "hscc cluster stop --help",
-      "needle": "shelled out",
-      "owner": "BROKEN-CLUSTER",
-      "count_at_baseline": 1,
-      "example": "--help shelled out: sparkrun stop --help"
-    },
-    {
-      "kind": "D",
       "command": "hscc heal-clear --help",
       "needle": "executed the mutating verb",
       "owner": "BROKEN-HEAL",
@@ -263,14 +223,6 @@
       "command": "hscc cluster down --help",
       "needle": "exited 1",
       "owner": "F3",
-      "count_at_baseline": 1,
-      "example": "--help exited 1 (expected 0)"
-    },
-    {
-      "kind": "D-rc",
-      "command": "hscc cluster stop --help",
-      "needle": "exited 1",
-      "owner": "BROKEN-CLUSTER",
       "count_at_baseline": 1,
       "example": "--help exited 1 (expected 0)"
     },

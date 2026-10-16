@@ -250,8 +250,28 @@ def cmd_jobs():
 
 
 def cmd_stop(container_id):
-    """Stop a running sparkrun workload by container ID."""
-    return run_cmd([SPARKRUN, "stop", container_id], timeout=30)
+    """Stop a running sparkrun workload by container ID.
+
+    Refuses (without shelling out) when the id is missing or looks like a
+    flag: `--help`, `-h`, `--dry-run`, an empty string. B6 (audit
+    t_7b0f65c8, card t_875c5019) measured `hscc cluster stop --help` reaching
+    this function with `--help` as the container id and executing
+    `sparkrun stop --help` — a help request invoking a MUTATING verb. The
+    unified CLI now intercepts `--help` before dispatch, but this is the
+    second line of defence and the only one that also covers the standalone
+    `hscc-cluster stop <id>` entry: a destructive verb runs only on an
+    argument that can actually name a container.
+    """
+    cid = (container_id or "").strip()
+    if not cid or cid.startswith("-"):
+        return {
+            "success": False,
+            "error": (f"a container id is required, got {container_id!r}"
+                      if cid else "a container id is required"),
+            "usage": "hscc cluster stop <container-id> "
+                     "(ids: hscc cluster status)",
+        }
+    return run_cmd([SPARKRUN, "stop", cid], timeout=30)
 
 
 def _load_daemon_serving():

@@ -224,11 +224,19 @@ class TestVerbHelpIsInert:
         assert "Nothing was started or stopped" in text
         assert "--dry-run" in text
 
-    def test_destructive_help_refusal_points_at_group_help(self, monkeypatch):
-        """The refusal is not a dead end: it names the group help."""
+    def test_destructive_help_refusal_message_is_byte_identical(self, monkeypatch):
+        """The F6 refusal message belongs to another card's rules (F3 quotes it
+        verbatim in cli_help_expected.json), so this card must NOT reword it —
+        not even to add a helpful group-help pointer. Pinned byte-for-byte."""
         text, code = self._run(monkeypatch, ["down", "--help"])
         assert code == 1
-        assert "hscc cluster --help" in text
+        assert text == (
+            "Error: unknown argument for 'hscc cluster down': --help\n"
+            "  'hscc cluster down' accepts only: --dry-run (and --theme <name>"
+            " for the human view).\n"
+            "  Nothing was started or stopped. Refusing to guess what --help"
+            " meant — a destructive command runs only on arguments it"
+            " understands.\n")
 
     def test_unknown_subcommand_help_still_errors(self, monkeypatch):
         text, code = self._run(monkeypatch, ["bogus", "--help"])
@@ -353,3 +361,4 @@ class TestVerbHelpRealCLI:
             assert proc.returncode == 0
         assert time.monotonic() - t0 < 10 * len(HELP_VERBS), (
             "cluster --help is slow — a help path is executing something")
+
