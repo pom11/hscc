@@ -22,6 +22,9 @@ Files owned by this card:
   served-count probe feed `ptrProbeFeed`).
 - `ios-app/Sources/HSCC/Views/AppShell.swift` — NEGATE_BACK seam,
   quiet-poller gate on the badge pollers, and the `ptrProbe` AX text.
+- `ios-app/scripts/seed_fixtures.sh` + `scripts/make_empty_fixtures.py` —
+  push the main + zero-row fixture sets into the app container (shared by
+  the gate and the dev loop; the gate seeds, these scripts build the sets).
 
 ## Code-derived enumeration (no hardcoded screen list)
 
