@@ -81,7 +81,10 @@ hours on ``t_25aed701``, a merged PR sitting in ``review``). So:
     exact gate hermes' own ``dispatch_once`` uses for the review lane. Neither
     holds → the board's review rows are reported as ``stale_review`` (a warning
     line + stream fields), the stream stays GREEN, nothing is restarted, no
-    wedge state is written.
+    wedge state is written. The same capability also decides the per-profile
+    ROOM question (``_any_assignee_under_cap``): an assignee that is only
+    waiting on undispatchable review work must not make a capped board look
+    roomy, or the phantom stall returns through the other door.
   * a declared stall the runtime cannot dispatch (``stall_dispatchable: False``)
     restarts AT MOST ONCE per incident, and an incident is identified by its
     spawnable/roomy signature — see ``recover_dispatcher_wedge``.
@@ -287,19 +290,30 @@ def _enum_board_names(kanban_db):
     return autodown._enum_board_names(kanban_db)
 
 
-def _any_assignee_under_cap(kanban_db, board, multi, max_per_profile):
-    """True iff some assignee with unclaimed ready/review work is under its cap.
+def _any_assignee_under_cap(kanban_db, board, multi, max_per_profile,
+                            include_review=True):
+    """True iff some assignee with unclaimed SPAWNABLE work is under its cap.
+
+    ``include_review`` must be False when this runtime cannot dispatch the
+    review lane: a review row is not work the dispatcher could spawn this tick,
+    so its assignee must not answer the room question. Letting it do so
+    re-created the same phantom stall on the OTHER side of the detector — with
+    the ready-holding profile legitimately AT its per-profile cap, an unclaimed
+    review row owned by an idle assignee made the board look roomy, the ready
+    row kept it spawnable, and recovery restarted the gateway for a stall that
+    was just correct throttling.
 
     Read-only. On any error, return True (fail toward "there is room"), which
     keeps this helper from silencing a real stall — the stall path still has
     its own cooldown and attempt cap.
     """
+    lanes = "'ready', 'review'" if include_review else "'ready'"
     try:
         with kanban_db.connect_closing(board=board) if multi \
                 else kanban_db.connect_closing() as conn:
             waiting = [r[0] for r in conn.execute(
                 "SELECT DISTINCT assignee FROM tasks "
-                "WHERE status IN ('ready', 'review') "
+                f"WHERE status IN ({lanes}) "
                 "AND assignee IS NOT NULL AND claim_lock IS NULL"
             ).fetchall()]
             if not waiting:
@@ -491,7 +505,8 @@ def _board_snapshot(kanban_db, board, multi, max_in_progress,
     # so the detector declared a "GENUINE STALL" every 5s against a healthy
     # dispatcher.
     if roomy and spawnable and max_per_profile is not None:
-        roomy = _any_assignee_under_cap(kanban_db, board, multi, max_per_profile)
+        roomy = _any_assignee_under_cap(kanban_db, board, multi, max_per_profile,
+                                        include_review=review_capable)
     return {"board": "default" if not board else board,
             "spawnable": spawnable, "in_progress": in_progress,
             "pending": pending, "roomy": roomy, "error": None,

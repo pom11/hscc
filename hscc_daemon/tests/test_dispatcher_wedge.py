@@ -175,15 +175,20 @@ def _reset_detector():
     dw._reset_stale_review_warning()
 
 
-def _capture(boards, cap=None, review_capable=True):
+def _capture(boards, cap=None, review_capable=True, per_profile=1_000_000):
     """Build a capture dict as if ``_capture_kanban`` had read the fake DB.
 
     ``review_capable`` defaults to True so captures exercise today's libV4
     semantics (review work is spawnable); the not-dispatchable-review tests
-    pin it False or let the real capability probe decide.
+    pin it False or let the real capability probe decide. ``per_profile``
+    defaults to effectively-unlimited rather than None: None makes
+    ``_capture_kanban`` read the operator's LIVE
+    ``kanban.max_in_progress_per_profile``, and a test must never depend on
+    that (same trap ``_run_detect`` documents above).
     """
     kb = FakeKanban(boards)
     return dw._capture_kanban(kanban_db=kb, max_in_progress=cap,
+                              max_per_profile=per_profile,
                               review_capable=review_capable)
 
 
@@ -577,7 +582,7 @@ class TestReviewNotDispatchableByRuntime:
     reported once per cooldown window as a warning.
     """
 
-    def _detect_lib(self, lib, cap=4, n=1, now=0.0):
+    def _detect_lib(self, lib, cap=4, n=1, now=0.0, per_profile=1_000_000):
         """One probe tick against an arbitrary lib fake; (ok, stream)."""
         captured = {}
         real_read = dw._read_max_in_progress
@@ -588,7 +593,7 @@ class TestReviewNotDispatchableByRuntime:
             ok = dw.check_dispatcher_wedge(
                 kanban_db=lib, max_in_progress=cap, now=now,
                 write_state_fn=lambda name, data: captured.update({name: data}),
-                max_per_profile=1_000_000, review_capable=None)
+                max_per_profile=per_profile, review_capable=None)
         finally:
             dw._read_max_in_progress = real_read
             dw.DISPATCHER_DETECT_TICKS = old_ticks
@@ -686,6 +691,7 @@ class TestReviewNotDispatchableByRuntime:
                                  max_per_profile=1_000_000)
         # Ready still spawnable (detection intact), review reported not spawnable.
         assert cap["spawnable"] == ["default"]
+        assert cap["roomy_spawnable"] == ["default"]
         assert cap["stale_review"] is True and cap["review_count"] == 1
         # Review-only board: nothing spawnable, so no stall, warning only.
         lib2 = FakeKanban({"default": [rows[1]]})
@@ -696,6 +702,93 @@ class TestReviewNotDispatchableByRuntime:
         ok, stream = self._detect_lib(lib2)
         assert ok is True and stream["stale_review"] is True
         assert "review_dispatch" in stream["review_reason"]
+
+    def test_per_profile_room_decision_ignores_undispatchable_review(
+            self, tmp_path, monkeypatch):
+        """A parked review card must not manufacture ROOM for a capped board.
+
+        Same bug class as the spawnable leak, one function further down: the
+        per-profile room check (`_any_assignee_under_cap`) asks "is any assignee
+        with unclaimed ready/review work under its cap?" So when the profile
+        holding the ready work IS at its per-profile cap — correctly blocked, not
+        a wedge — an unclaimed review row assigned to a profile with nothing
+        running made the board look ROOMY. The board is still spawnable via its
+        ready row, so the detector declared a stall and the recovery restarted
+        the gateway for it. With review non-dispatchable, the room question may
+        only be answered by work this runtime can actually spawn.
+        """
+        monkeypatch.setattr(dw, "_review_dispatch_config_state", lambda: False)
+        # worker-a: 3 running + 1 ready -> AT its per-profile cap of 3 (blocked,
+        # healthy). architect: 0 running and holds one review row -> would look
+        # "roomy" if review rows were allowed to answer the room question.
+        rows = ([("running", "worker-a")] * 3 + [("ready", "worker-a")]
+                + [("review", "architect")])
+        lib = FakeKanban({"default": rows})
+        cap = dw._capture_kanban(kanban_db=lib, max_in_progress=10,
+                                 max_per_profile=3, review_capable=None)
+        assert cap["spawnable"] == ["default"], "ready work is still spawnable"
+        assert cap["stale_review"] is True and cap["review_count"] == 1
+        assert cap["roomy_spawnable"] == [], (
+            "review work manufactured room for a per-profile-capped board")
+        assert cap["at_capacity"] == ["default"]
+        # And the whole path stays green with no restart, many ticks on.
+        rec = Recorder()
+        p = str(tmp_path / "recover.json")
+        monkeypatch.setattr(dw, "DISPATCHER_RESTART_AFTER_DETECTIONS", 1)
+        step = dw.DISPATCHER_RECOVER_COOLDOWN_SECONDS + 1
+        for i in range(4):
+            ok, stream = self._detect_lib(lib, cap=10, n=1, now=i * step,
+                                          per_profile=3)
+            assert ok is True, f"tick {i}: capped profile paged on a review row"
+            dw.recover_dispatcher_wedge(stream_state=stream, restart_fn=rec,
+                                        now=i * step, state_file=p)
+        assert rec.calls == 0, "phantom per-profile stall restarted the gateway"
+
+    def test_dispatchable_review_still_answers_the_room_question(self):
+        """The other half: on a runtime that CAN dispatch review, an uncapped
+        review assignee still counts as room — today's semantics preserved."""
+        rows = ([("running", "worker-a")] * 3 + [("ready", "worker-a")]
+                + [("review", "architect")])
+        cap = _capture({"default": rows}, cap=10, per_profile=3)
+        assert cap["stale_review"] is False
+        assert cap["roomy_spawnable"] == ["default"]
+
+    def test_dispatchable_flag_reported_from_the_predicate_that_proved_it(
+            self, tmp_path, monkeypatch):
+        """`stall_dispatchable` is the recovery's "could a restart help?" signal,
+        so it must be asserted where it is PRODUCED (the probe), not only where
+        it is consumed.
+
+        A stall whose spawnable answer came from the raw-SQL fallback is not
+        PROVEN dispatcher-fixable (we could not check the assignee against the
+        profile registry, so the dispatcher may be correctly idle) — the stream
+        must say False and say so in the message. A stall the dispatcher's own
+        predicate proved must say True.
+        """
+        # Proven path (lib predicate): a genuine, restartable stall.
+        ok, stream = _run_detect({"default": [READY] * 3}, cap=4, n=1)
+        assert ok is False
+        assert stream["stall_dispatchable"] is True
+        assert "NOT proven dispatcher-fixable" not in stream["message"]
+        # Unproven path (raw-SQL fallback): stall still surfaced (we do not
+        # suppress a possible real wedge) but flagged as not proven.
+        lib = NoReviewLaneKanban({"default": [("ready", "worker-a")] * 2})
+        ok, stream = self._detect_lib(lib, cap=4, n=1)
+        assert ok is False, "a possible wedge must still go red"
+        assert stream["stall_dispatchable"] is False
+        assert "NOT proven dispatcher-fixable" in stream["message"]
+        # ...and that flag is what the latch keys on: a restart for an unproven
+        # stall is allowed exactly once, cooldown after cooldown.
+        rec = Recorder()
+        monkeypatch.setattr(dw, "DISPATCHER_RESTART_AFTER_DETECTIONS", 1)
+        p = str(tmp_path / "recover.json")
+        step = dw.DISPATCHER_RECOVER_COOLDOWN_SECONDS + 1
+        for i in range(3):
+            dw.recover_dispatcher_wedge(stream_state=stream, restart_fn=rec,
+                                        now=i * step, state_file=p)
+        assert rec.calls == 1, (
+            "an unproven stall restarted more than once — the probe flag is "
+            "not reaching the latch")
 
     def test_mixed_board_ready_is_spawnable_review_is_not(self):
         """A board with BOTH a ready row and a review row: the ready row still
