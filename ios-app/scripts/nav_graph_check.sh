@@ -36,7 +36,12 @@ APP_ROOT="$(dirname "$HERE")"
 DEVICE="${1:-${HSCC_UI_DEVICE_UDID:-booted}}"
 BUNDLE="com.hscc.ios"
 FIXTURES_SRC="$APP_ROOT/scripts/model_decode_check/fixtures"
-DERIVED="${HSCC_UI_DERIVED:-$HOME/.cache/hscc-uitest-dd}"
+# Derived dir per-CHECKOUT (path hash), not a shared global: any two
+# workers building different branches (this card vs main vs a sibling
+# fix) into one shared dir clobber each other's runner bundle, and a
+# test-without-building run then executes someone else's binary.
+# HSCC_UI_DERIVED overrides.
+DERIVED="${HSCC_UI_DERIVED:-$HOME/.cache/hscc-uitest-dd/$(printf '%s' "$APP_ROOT" | shasum -a 1 | cut -c1-12)}"
 RESULTS="$HOME/.cache/hscc-uitest-results/$(date +%s)-navgraph"
 mkdir -p "$RESULTS"
 
