@@ -1,6 +1,11 @@
 """Per-subcommand ``--help`` inertness for ``hscc cluster`` — BROKEN B6 + B12
 (card t_875c5019, docs/audits/CLI_HELP_2026-10-15.md Class D).
 
+t_5132deb3 (operator ruling on PR #33's final pass) extends this surface:
+``up``/``down`` joined HELP_VERBS — a help token now prints their usage
+(rc 0, engine never loaded, nothing shelled) instead of the F6 refusal,
+while the refusal stays byte-identical for every NON-help unknown token.
+
 Measured on the base tree, in a sandbox HOME with recording PATH canaries:
 
   * ``cluster stop --help``    -> INVOKED ``sparkrun stop --help``. The help
@@ -45,10 +50,13 @@ import hscc_daemon.hscc as unified
 
 REPO = Path(__file__).resolve().parents[2]
 
-# Verbs whose per-subcommand help this card made inert (B12 read-only half +
-# B6 mutating half). `monitor` is NOT included: it already had its own inert
-# --help branch and its help text is operator-owned (t_1cc33407).
-HELP_VERBS = ("status", "hosts", "jobs", "info", "stop")
+# Verbs whose per-subcommand help prints their own usage (B12 read-only half
+# + B6 mutating half). `monitor` is NOT included: it already had its own
+# inert --help branch and its help text is operator-owned (t_1cc33407).
+# `up`/`down` joined with t_5132deb3 (operator ruling on PR #33's final
+# pass: help wins over the F6 refusal for a help token — the refusal itself
+# stays, byte-identical, for every NON-help unknown token).
+HELP_VERBS = ("status", "hosts", "jobs", "info", "stop", "up", "down")
 
 # Each verb's own usage line — distinct, and never a substring of another
 # verb's marker, so "it printed the VERB's help, not the group's" is checkable.
@@ -58,6 +66,8 @@ USAGE_MARKERS = {
     "jobs": "Usage: hscc cluster jobs",
     "info": "Usage: hscc cluster info",
     "stop": "Usage: hscc cluster stop",
+    "up": "Usage: hscc cluster up [--dry-run]",
+    "down": "Usage: hscc cluster down [--dry-run]",
 }
 
 # The group help heading — used to assert verb help is NOT the group blob.
@@ -161,6 +171,14 @@ class TestVerbHelpIsInert:
         text, _ = self._run(monkeypatch, [verb, "--help"])
         if verb == "stop":
             assert "live container" in text
+        elif verb in ("up", "down"):
+            # t_5132deb3: up/down joined the help surface with the operator
+            # ruling, so their entries carry the same honesty contract — the
+            # text must name what the verb does to a LIVE fleet and pin the
+            # --dry-run escape hatch (B6's failure mode is a help request
+            # that really started or stopped workloads).
+            assert "fleet" in text, f"{verb} help hides the blast radius"
+            assert "--dry-run" in text, f"{verb} help omits the dry-run hatch"
         else:
             assert "Read-only" in text
 
@@ -218,30 +236,65 @@ class TestVerbHelpIsInert:
         assert USAGE_MARKERS["stop"] in text
 
     @pytest.mark.parametrize("sub", ("up", "down"))
-    def test_destructive_up_down_help_still_refuses_rc1(self, sub, monkeypatch):
-        """Non-help behaviour byte-identical: the F6 contract (rc=1 + refusal)
-        is NOT replaced by help — rc=0 on `up --help` means the fleet starts."""
+    def test_destructive_up_down_help_prints_help_not_refusal(self, sub,
+                                                               monkeypatch):
+        """t_5132deb3 (operator ruling on PR #33's final pass): a HELP token
+        on up/down prints the verb's usage (rc 0) — it never reaches the F6
+        refusal and never starts/stops anything. The refusal itself stays for
+        everything that is not a help token (test_destructive_*_below)."""
+        calls = []
+
+        class Eng:
+            def cmd_cluster_up(self, dry_run=False):
+                calls.append(("up", dry_run))
+
+            def cmd_cluster_down(self, dry_run=False):
+                calls.append(("down", dry_run))
+
+        monkeypatch.setattr(unified, "_load_cluster_engine", lambda: Eng())
         text, code = self._run(monkeypatch, [sub, "--help"])
-        assert code == 1, f"{sub} --help returned {code}: {text}"
+        assert code == 0, f"{sub} --help returned {code}: {text}"
+        assert calls == [], f"{sub} --help DISPATCHED: {calls}"
+        assert f"Usage: hscc cluster {sub}" in text
+        assert "Nothing was started or stopped" not in text, (
+            "help must not print the F6 refusal any more (operator ruling)")
+
+    @pytest.mark.parametrize("sub", ("up", "down"))
+    @pytest.mark.parametrize("tok", ("--foo", "--hosts", "3node-coding",
+                                     "--dry", "--dryrun"))
+    def test_destructive_unknown_nonhelp_token_still_refuses_rc1(
+            self, sub, tok, monkeypatch):
+        """The other half of the ruling: with NO help token in argv the F6
+        refusal is untouched — rc=1, inert, and byte-identical wording (the
+        canonical-whitespace pin below locks the words)."""
+        text, code = self._run(monkeypatch, [sub, tok])
+        assert code == 1, f"{sub} {tok} returned {code}: {text}"
         assert "Nothing was started or stopped" in text
         assert "--dry-run" in text
 
-    def test_destructive_help_refusal_message_is_not_reworded(self, monkeypatch):
+    @pytest.mark.parametrize("sub", ("up", "down"))
+    def test_destructive_help_refusal_message_is_not_reworded(self, sub,
+                                                              monkeypatch):
         """The F6 refusal wording belongs to F3's gate rules
         (cli_help_expected.json quotes it), so wording changes are forbidden —
         t_90082309 (F3) legitimately re-wrapped it to pass the (B) gate, so
         the pin is on the CANONICAL whitespace form: identical words, the
-        physical line breaks may move."""
+        physical line breaks may move.
+
+        t_5132deb3 moved the probe token from --help (help now wins over the
+        refusal) to --foo — an unknown token with no help meaning. The refusal
+        text is token-parameterised, so the canonical form is re-templated."""
         import re
-        text, code = self._run(monkeypatch, ["down", "--help"])
+        text, code = self._run(monkeypatch, [sub, "--foo"])
         assert code == 1
         canon = re.sub(r"\s+", " ", text).strip()
-        assert canon == (
-            "Error: unknown argument for 'hscc cluster down': --help "
-            "'hscc cluster down' accepts only: --dry-run (and --theme <name> "
-            "for the human view). Nothing was started or stopped. Refusing to "
-            "guess what --help meant — a destructive command runs only on "
-            "arguments it understands."), f"refusal reworded:\n{text}"
+        want = (
+            "Error: unknown argument for 'hscc cluster {sub}': --foo "
+            "'hscc cluster {sub}' accepts only: --dry-run (and --theme "
+            "<name> for the human view). Nothing was started or stopped. "
+            "Refusing to guess what --foo meant — a destructive command runs "
+            "only on arguments it understands.").format(sub=sub)
+        assert canon == want, f"refusal reworded:\n{text}"
 
     def test_unknown_subcommand_help_still_errors(self, monkeypatch):
         text, code = self._run(monkeypatch, ["bogus", "--help"])
@@ -345,14 +398,31 @@ class TestVerbHelpRealCLI:
         assert USAGE_MARKERS["stop"] in proc.stdout
 
     @pytest.mark.parametrize("verb", ("up", "down"))
-    def test_real_cli_destructive_help_refuses_without_shelling(
+    @pytest.mark.parametrize("flag", ("--help", "-h"))
+    def test_real_cli_destructive_help_prints_help_without_shelling(
+            self, verb, flag, sandbox):
+        """t_5132deb3 (operator ruling): a help token on the destructive
+        verbs prints their usage rc=0 AND shells out nothing (engine never
+        loaded, zero canary trips). The refusal half moved to the NON-help
+        token below — the F6 guard stays, it just no longer fires on --help."""
+        proc = self._run(sandbox, [verb, flag])
+        assert proc.returncode == 0, (
+            f"{verb} {flag} exited {proc.returncode}\n{proc.stdout}\n{proc.stderr}")
+        assert USAGE_MARKERS[verb] in proc.stdout
+        assert "Nothing was started or stopped" not in proc.stdout
+        assert sandbox["trips"].read_text().strip() == "", (
+            f"{verb} {flag} shelled out to sparkrun")
+
+    @pytest.mark.parametrize("verb", ("up", "down"))
+    def test_real_cli_destructive_unknown_nonhelp_refuses_without_shelling(
             self, verb, sandbox):
-        """The F6 half stays a refusal (rc=1) AND shells out nothing."""
-        proc = self._run(sandbox, [verb, "--help"])
+        """The F6 half stays a refusal (rc=1) AND shells out nothing — for a
+        token that is NOT help (help now wins; --foo must not)."""
+        proc = self._run(sandbox, [verb, "--foo"])
         assert proc.returncode == 1
         assert "Nothing was started or stopped" in proc.stdout
         assert sandbox["trips"].read_text().strip() == "", (
-            f"{verb} --help shelled out to sparkrun")
+            f"{verb} --foo shelled out to sparkrun")
 
     def test_real_cli_help_is_fast(self, sandbox):
         """B12's other half: a help request that shells out costs seconds.

@@ -53,10 +53,16 @@ A_COUNTS_PATH = HERE / "cli_help_a_counts.json"
 # was DELETEd from the CLI (operator fan-out ruling), and the audit's
 # enumeration loses the three commands in the same commit — they are gone
 # from COMMAND_HELP too, so both the `--help` and the `hscc help` probes go
-# (6 paths, 9 probes). 178 is EXACTLY what a healthy surface measures after
-# that deletion — zero slack, so any further shrink trips this gate.
+# (6 paths, 9 probes).
+# Probe floor amended 178 -> 299 by t_5132deb3 (the CLI-wide -h close F5
+# recorded as a follow-up): every flag/flag2 surface now probes `-h`
+# alongside `--help` (scripts/hscc_cli_help_audit.py invocations_for), except
+# the six launch-class verbs whose -h half is pinned IN-PROCESS instead
+# (LAUNCH_PROBE_EXEMPT — their --help probes still run). 299 is EXACTLY what
+# a healthy surface measures with both flags — zero slack, so any further
+# shrink trips this gate.
 MIN_SURFACE_PATHS = 150
-MIN_PROBES = 178
+MIN_PROBES = 299
 MIN_EXAMPLES = 60
 
 
@@ -165,10 +171,18 @@ def test_examples_are_parse_checked(report):
 
 
 def test_help_paths_only_skip_api_start(report):
-    """Only 'api start --help' may be skipped (it would fork a live server)."""
+    """Only 'api start --help' may be skipped (it would fork a live server),
+    plus the t_5132deb3 launch-class `-h` exemptions — and those are pinned
+    to the audit constant EXACTLY, so an exemption can never be quietly
+    widened: the skip set must equal LAUNCH_PROBE_EXEMPT one-for-one."""
     for s in report["skips"]:
-        assert "api start" in s["surface"], (
+        assert "api start" in s["surface"] or s.get("kind") == "h-exempt", (
             f"unexpected skip — every help path must actually run: {s}")
+    h_exempt = {s["surface"] for s in report["skips"]
+                if s.get("kind") == "h-exempt"}
+    assert h_exempt == {"hscc " + " ".join(list(v) + ["-h"])
+                        for v in audit_mod.LAUNCH_PROBE_EXEMPT}, (
+        f"the -h exemption drifted from LAUNCH_PROBE_EXEMPT: {sorted(h_exempt)}")
     assert report["widths"] == [80, 120, 500]
 
 

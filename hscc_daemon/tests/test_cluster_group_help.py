@@ -14,13 +14,19 @@ scripts/tests/cli_help_expected.json):
   * ``hscc help cluster``       -> the COMMAND_HELP ``cluster`` value's single
     ``Subcommands: …`` line overflowed at width 80.
 
-The F3 contract is LAYOUT ONLY: wording preserved (the refusal sentences
+The F3 contract was LAYOUT ONLY: wording preserved (the refusal sentences
 rejoin to their exact originals — pinned via a canonical-whitespace guard, so
-a silent reword fails even though the wrap differs), rc preserved (``up``/
-``down --help`` still exit 1 with the F6 refusal — their D-rc rules stay in
-the gate), and the operator-owned monitor surfaces (_MONITOR_HELP,
-_parse_monitor_flags, cluster_live.py) are not touched — the group ENTRY for
-monitor keeps its description byte-identical, only re-flowed.
+a silent reword fails even though the wrap differs), rc preserved, and the
+operator-owned monitor surfaces (_MONITOR_HELP, _parse_monitor_flags,
+cluster_live.py) are not touched — the group ENTRY for monitor keeps its
+description byte-identical, only re-flowed.
+
+t_5132deb3 (operator ruling on PR #33's final pass) changed ONE thing here:
+a HELP token (--help/-h) on up/down now prints the verb's usage rc=0 instead
+of the F6 refusal, so the two owner=F3 D-rc rules were pruned from
+cli_help_expected.json. The refusal itself is unchanged code — its rc=1
+contract and byte-identical wording now pin on a NON-help unknown token
+(--foo), which is what the refusal class below probes.
 
 Safety: unit tests monkeypatch the engine loader to RAISE, so any group/refusal
 help path that reaches dispatch fails here; real-CLI probes run only help argv
@@ -154,8 +160,15 @@ class TestGroupHelpLayout:
 
 
 class TestF6RefusalWrap:
-    """``cluster up/down --help``: F6 refusal kept (rc=1, wording preserved),
-    only the LINE BREAKS change."""
+    """``cluster up/down`` NON-help unknown token: F6 refusal kept (rc=1,
+    wording preserved), only the LINE BREAKS change.
+
+    t_5132deb3 (operator ruling on PR #33's final pass): a HELP token
+    (--help/-h) no longer lands here — it prints the verb's usage rc=0 (the
+    up/down entries + pins live in test_cluster_cli_help.py). The refusal
+    this class guards is unchanged CODE: it now fires on every token that
+    is not a help flag, so the probe token moved from --help to --foo and
+    the canonical message is re-templated for it."""
 
     @pytest.fixture(autouse=True)
     def _no_dispatch(self, monkeypatch):
@@ -174,11 +187,11 @@ class TestF6RefusalWrap:
         monkeypatch.setattr(unified, "_load_cluster_engine",
                             lambda: FakeEng())
 
-    def _run(self, monkeypatch, sub):
+    def _run(self, monkeypatch, sub, tok="--foo"):
         import io
         from contextlib import redirect_stdout
         monkeypatch.setenv("COLUMNS", "80")
-        monkeypatch.setattr(sys, "argv", ["hscc", "cluster", sub, "--help"])
+        monkeypatch.setattr(sys, "argv", ["hscc", "cluster", sub, tok])
         out = io.StringIO()
         try:
             with redirect_stdout(out):
@@ -190,7 +203,7 @@ class TestF6RefusalWrap:
     @pytest.mark.parametrize("sub", ("up", "down"))
     def test_refusal_still_rc1(self, sub, monkeypatch):
         text, code = self._run(monkeypatch, sub)
-        assert code == 1, f"{sub} --help returned {code}: {text}"
+        assert code == 1, f"{sub} --foo returned {code}: {text}"
         assert "Nothing was started or stopped" in text
         assert "--dry-run" in text
 
@@ -202,18 +215,20 @@ class TestF6RefusalWrap:
             assert code == 1
             for ln in text.splitlines():
                 assert len(ln) <= 78, (
-                    f"{sub} --help @COLUMNS={cols}: line over 78: {ln!r}")
+                    f"{sub} --foo @COLUMNS={cols}: line over 78: {ln!r}")
 
     @pytest.mark.parametrize("sub", ("up", "down"))
     def test_refusal_message_is_rewrapped_not_reworded(self, sub, monkeypatch):
         """Canonical-whitespace guard: the base-tree sentences, joined back and
         collapsed, must equal the new rendering collapsed — so this card can
-        only move line breaks, never reword the F6 refusal."""
+        only move line breaks, never reword the F6 refusal. (Probe token
+        --foo per the class docstring; the sentences are token-parameterised.)"""
         text, code = self._run(monkeypatch, sub)
         assert code == 1
-        assert canon(text) == canon(REFUSAL_CANONICAL.format(sub=sub)), (
-            f"{sub} --help refusal text changed beyond wrapping:\n"
-            f"  got:  {canon(text)}\n  want: {canon(REFUSAL_CANONICAL.format(sub=sub))}")
+        want = REFUSAL_CANONICAL.format(sub=sub).replace("--help", "--foo")
+        assert canon(text) == canon(want), (
+            f"{sub} --foo refusal text changed beyond wrapping:\n"
+            f"  got:  {canon(text)}\n  want: {canon(want)}")
 
     def test_dangling_theme_message_also_wrapped(self, monkeypatch):
         """The '--theme' needs-a-value refusal comes from the same parser and
@@ -311,8 +326,12 @@ class TestClusterHelpSurfaceRealCLI:
     @pytest.mark.parametrize("cols", (80, 120))
     @pytest.mark.parametrize("argv,rc", [
         (["cluster", "--help"], 0),
-        (["cluster", "up", "--help"], 1),     # F6 refusal: rc stays 1
-        (["cluster", "down", "--help"], 1),
+        (["cluster", "-h"], 0),              # t_5132deb3: -h joins group help
+        (["cluster", "up", "--help"], 0),    # t_5132deb3: help wins (rc 0)
+        (["cluster", "up", "-h"], 0),
+        (["cluster", "down", "--help"], 0),
+        (["cluster", "down", "-h"], 0),
+        (["cluster", "up", "--foo"], 1),     # F6 refusal: NON-help stays rc 1
         (["help", "cluster"], 0),
     ])
     def test_real_cli_surface(self, argv, rc, cols, sandbox):

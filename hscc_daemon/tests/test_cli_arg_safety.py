@@ -110,9 +110,14 @@ class TestClusterUpHelpDoesNotExecute:
         return out.getvalue(), code, calls
 
     def test_up_help_does_not_start_the_fleet(self, monkeypatch):
+        """t_5132deb3 (operator ruling): `up --help` prints the verb's usage
+        rc=0 instead of the F6 refusal rc=1. The incident invariant is
+        UNCHANGED and still the point: the fleet never starts — the fake
+        engine records any dispatch, and help must not reach it."""
         text, code, calls = self._run(monkeypatch, ["up", "--help"])
         assert calls == [], f"cluster up --help EXECUTED: {calls}"
-        assert code not in (None, 0), f"rc={code}: an ignored flag returned OK"
+        assert code == 0, f"rc={code}: help must exit 0 (operator ruling)"
+        assert "Usage: hscc cluster up" in text
         assert "dry-run" in text.lower()
 
     def test_up_typo_flag_does_not_start_the_fleet(self, monkeypatch):
@@ -133,9 +138,12 @@ class TestClusterUpHelpDoesNotExecute:
         assert code == 0
 
     def test_down_help_does_not_stop_the_fleet(self, monkeypatch):
+        """Same ruling as up: help rc=0, and the recording engine proves the
+        fleet was never touched."""
         text, code, calls = self._run(monkeypatch, ["down", "--help"])
         assert calls == []
-        assert code != 0
+        assert code == 0
+        assert "Usage: hscc cluster down" in text
 
     def test_dangling_theme_does_not_start_the_fleet(self, monkeypatch):
         """Second instance of the same bug class, found while writing the fix.
