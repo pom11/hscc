@@ -3,7 +3,8 @@
 The Hermes kanban dispatcher's OWN health check ("kanban dispatcher stuck")
 fires whenever it sees spawnable ready work but 0 spawned — which is exactly
 what it does when the fleet is legitimately AT CAPACITY (``kanban.max_in_progress``
-reached). Two very different situations look identical to that check:
+reached). Very different situations look identical to that check (trigger 3
+was added the hard way on 2026-10-17):
 
   * trigger 1 (healthy, at capacity): ready cards ARE being held back because
     every running worker slot is taken — correct behaviour, the dispatcher is
@@ -12,8 +13,23 @@ reached). Two very different situations look identical to that check:
     EMPTY. The dispatcher should be spawning when slots free up but its own
     internal state is wedged, so it spawns NOTHING — silent, and `hscc status`/
     `hscc verify` stay green because nothing surfaced it.
+  * trigger 3 (healthy, dispatcher-design holds — t_160d306f, 2026-10-17):
+    ready cards sit unclaimed with FREE slots because the dispatcher's own
+    respawn guard is refusing to re-spawn them (``active_pr`` /
+    ``recent_success`` / a rate-limit cooldown / the dispatch lock / memory
+    pressure). The gateway still logs "dispatcher stuck" for these ticks —
+    the hold only annotates the warning, it does not influence the counter —
+    and on 2026-10-17 that false positive restarted the gateway three times
+    in 65 minutes. Two fail-closed layers tell trigger 2 from trigger 3:
+    the probe believes the dispatcher's own ``Last tick held back:`` payload
+    (fresh lookback + reconcilable counts + benign names only), and the
+    recovery independently re-verifies through the sanctioned ``hermes
+    kanban`` CLI that every ready card is explainably held BEFORE it will
+    restart. Anything the watchdog cannot explain (``blocker_auth``, unknown
+    reason names, missing/stale warnings, unreadable boards) stays
+    wedge-worthy — the original purpose is never disarmed.
 
-This module is the hscc-side watchdog that tells the two apart. It is a
+This module is the hscc-side watchdog that tells them apart. It is a
 sibling of the operator-approved recovery automation in ``recover.py`` (the
 engine-wedge watchdog) and reuses the exact same seams:
 
@@ -582,21 +598,23 @@ def _read_gateway_log_tail(path=None, max_bytes=262_144):
 
 
 def _last_stuck_warning(lines, now=None):
-    """The most recent 'dispatcher stuck' warning line at or before ``now``,
-    or None. Scans backwards: the newest applicable warning is the one that
-    describes the current zero-spawn state. Lines stamped in the future
-    (log replay, clock jumps) are skipped — a warning cannot explain a tick
-    that happened before it was written; lines with no parseable timestamp
-    are accepted (age then cannot be judged and the caller only exempts on
-    an actually-fresh warning).
+    """The most recent 'dispatcher stuck' warning line stamped at or before
+    ``now``, or None. Scans backwards: the newest applicable warning is the
+    one that describes the current zero-spawn state.
+
+    Fail-closed on stamps: a line WITHOUT a parseable timestamp, or stamped
+    in the future (log replay / clock jump), is SKIPPED — the gateway's
+    formatter always stamps every record, so an undated "warning" is not
+    evidence of anything and must not exonerate a live wedge.
     """
     for line in reversed(lines or []):
         if not _STUCK_WARNING_RE.search(line):
             continue
-        if now is not None:
-            ts = _log_line_ts(line)
-            if ts is not None and ts > now + 60:
-                continue
+        ts = _log_line_ts(line)
+        if ts is None:
+            continue
+        if now is not None and ts > now + 60:
+            continue
         return line
     return None
 

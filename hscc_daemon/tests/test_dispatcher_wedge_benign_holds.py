@@ -217,6 +217,30 @@ class TestClassifyDispatcherHold:
             now=_ts(p.read_text()) + 5, log_path=str(p))
         assert info["classified"] is False
 
+    def test_undated_warning_line_is_no_evidence(self, tmp_path):
+        """The gateway's formatter stamps every record; an undated
+        'stuck warning' cannot have its freshness judged, so it must NOT
+        exonerate a wedge (fail closed)."""
+        p = tmp_path / "gateway.log"
+        p.write_text("WARNING gateway.run: kanban dispatcher stuck: ready "
+                     "queue non-empty for 26 consecutive ticks but 0 workers "
+                     "spawned. Last tick held back: active_pr=1.\n")
+        info = dw.classify_dispatcher_hold(now=1_800_000_000.0,
+                                           log_path=str(p))
+        assert info["classified"] is False
+
+    def test_future_stamped_warning_cannot_explain_a_past_tick(self, tmp_path):
+        p = tmp_path / "gateway.log"
+        p.write_text("2026-10-17 14:00:00,000 WARNING gateway.run: kanban "
+                     "dispatcher stuck: ready queue non-empty for 6 "
+                     "consecutive ticks but 0 workers spawned. Last tick "
+                     "held back: active_pr=1.\n")
+        # now = 13:00 — the only warning on disk is stamped an hour LATER.
+        info = dw.classify_dispatcher_hold(
+            now=datetime.datetime(2026, 10, 17, 13, 0, 0).timestamp(),
+            log_path=str(p))
+        assert info["classified"] is False
+
 
 # ---------------------------------------------------------------------------
 # LAYER 1 — the REQUIRED regression: replay today's tick ladder
