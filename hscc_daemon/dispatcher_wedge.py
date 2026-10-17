@@ -1217,7 +1217,7 @@ def _default_gate_cli_runner(argv):
 
 
 def _board_ready_facts(cli_fn, board, kanban_db, max_in_progress,
-                       max_per_profile, now):
+                       max_per_profile, now, nonspawnable=None):
     """Explain the zero-spawn state of ONE spawnable board.
 
     Returns ``(explained: bool, why: str)``. ``explained`` is True ONLY when
@@ -1235,6 +1235,14 @@ def _board_ready_facts(cli_fn, board, kanban_db, max_in_progress,
 
     Anything else — a plain ready card with no hold evidence, a board whose
     list cannot be read — returns False (wedge stays actionable).
+
+    ``nonspawnable`` (optional list, filled in place) is the audit trail for
+    the THIRD kind of explanation: cards the dispatcher idles on because their
+    assignee is definitely not a Hermes profile. Those hold the restart (a
+    restart never fixes a typo'd name) but they are NOT a benign dispatcher
+    hold — the caller notifies the operator about them, because "no worker will
+    ever run this card" is exactly the silent no-dispatch failure mode this
+    watchdog exists to surface (t_ab960663, PR #43 review).
     """
     list_argv = (["--board", board] if board and board != "default" else []) \
         + ["list", "--status", "ready", "--json"]
@@ -1249,6 +1257,7 @@ def _board_ready_facts(cli_fn, board, kanban_db, max_in_progress,
     capped = _capped_assignees(kanban_db, board, max_per_profile)
     unexplained = []
     hold_evidence = []
+    dead_lanes = []
     for task in ready:
         assignee = task.get("assignee")
         if assignee is None:
@@ -1259,7 +1268,12 @@ def _board_ready_facts(cli_fn, board, kanban_db, max_in_progress,
         if _assignee_is_nonspawnable(assignee):
             # Control-plane lane (not a Hermes profile): the dispatcher
             # correctly idles on it — the dispatcher's own
-            # skipped_nonspawnable bucket.
+            # skipped_nonspawnable bucket. Explainable, but recorded: a name
+            # that no profile matches may also just be a typo, and the
+            # watchdog must not go quiet on that.
+            dead_lanes.append({"board": board or "default",
+                               "card": task.get("id") or "?",
+                               "assignee": assignee})
             continue
         if capped is not None and assignee in capped:
             continue  # per-profile cap — explainable
@@ -1271,10 +1285,26 @@ def _board_ready_facts(cli_fn, board, kanban_db, max_in_progress,
     if unexplained:
         return False, (f"board '{board}': unexplained ready cards: "
                        + ", ".join(unexplained[:5]))
-    return True, (f"board '{board}': all {len(ready)} ready cards explainably "
-                  "held"
-                  + (f" [{'; '.join(hold_evidence[:5])}]"
-                     if hold_evidence else ""))
+    # Only an EXPLAINED board contributes: when a board is unexplained the
+    # caller restarts anyway, and its partial findings would be noise.
+    if nonspawnable is not None:
+        nonspawnable.extend(dead_lanes)
+    dead = ", ".join("%s=%s" % (d["card"], d["assignee"])
+                     for d in dead_lanes[:5])
+    if dead_lanes and len(dead_lanes) == len(ready):
+        # Nothing on this board is runnable at all — say so in the evidence
+        # line rather than hiding it behind the generic "explainably held".
+        why = (f"board '{board}': all {len(ready)} ready cards have "
+               f"non-spawnable assignees [{dead}] — no worker can ever "
+               "claim them")
+    else:
+        why = (f"board '{board}': all {len(ready)} ready cards explainably "
+               "held")
+        if dead_lanes:
+            why += f" [non-spawnable assignee: {dead}]"
+    if hold_evidence:
+        why += " [" + "; ".join(hold_evidence[:5]) + "]"
+    return True, why
 
 
 def _assignee_is_nonspawnable(assignee):
@@ -1363,12 +1393,50 @@ def _card_hold_from_cli(cli_fn, board, task_id, now):
     return "unexplained", "no recent hold event"
 
 
+class GateVerdict(tuple):
+    """The gate's ``(explained, detail)`` pair, plus the structured findings.
+
+    A ``tuple`` subclass on purpose: the gate's documented contract is a
+    2-tuple and every existing caller/test unpacks it as such (including the
+    injectable fakes in the tests), so this adds information without changing
+    the shape. ``nonspawnable`` is a tuple of
+    ``{"board":…, "card":…, "assignee":…}`` dicts naming the ready cards the
+    dispatcher idles on because their assignee is DEFINITELY not a Hermes
+    profile (t_ab960663). Suppression and notification are two different
+    questions: those cards legitimately suppress the restart — restarting the
+    gateway never fixes a typo'd profile name — but they must NOT make the
+    watchdog go quiet, because "no worker will ever run this card" is the
+    silent no-dispatch failure this daemon exists to surface.
+    """
+
+    # Class-level default so a plain 2-tuple (what the injectable test gates
+    # return) and a GateVerdict are read the same way by callers.
+    _nonspawnable = ()
+
+    def __new__(cls, explained, detail, nonspawnable=()):
+        obj = tuple.__new__(cls, (bool(explained), str(detail)))
+        obj._nonspawnable = tuple(nonspawnable or ())
+        return obj
+
+    @property
+    def nonspawnable(self):
+        return self._nonspawnable
+
+
+def _gate_nonspawnable(verdict):
+    """The non-spawnable findings carried by a gate verdict ([] for a plain
+    2-tuple, so custom/injected gates keep working unchanged)."""
+    return list(getattr(verdict, "nonspawnable", ()) or [])
+
+
 def board_state_explains_stall(stream, kanban_db=None, max_in_progress=None,
                                max_per_profile=None, cli_fn=None, now=None):
     """Layer-2 verdict for a DECLARED stall: do the boards themselves prove
     the dispatcher is merely holding work back (NOT a wedge)?
 
-    Returns ``(explained: bool, detail: str)``. Fail CLOSED: any doubt
+    Returns a :class:`GateVerdict` — a 2-tuple ``(explained: bool,
+    detail: str)`` that also carries ``.nonspawnable``, the ready cards whose
+    assignee is not a Hermes profile at all. Fail CLOSED: any doubt
     (missing CLI, unreadable payload, a board we cannot fully account for)
     returns False so the restart proceeds. ``cli_fn`` is injectable (tests
     stub the CLI); production defaults to ``_default_gate_cli_runner``.
@@ -1409,15 +1477,17 @@ def board_state_explains_stall(stream, kanban_db=None, max_in_progress=None,
     if not spawnable:
         # Red stream that names no spawnable board: nothing to explain, keep
         # the restart path (fail closed — the stream is our only witness).
-        return False, "stream names no spawnable board"
+        return GateVerdict(False, "stream names no spawnable board")
     reasons = []
+    nonspawnable = []
     for board in spawnable:
         explained, why = _board_ready_facts(
-            run_cli, board, kanban_db, max_in_progress, max_per_profile, now)
+            run_cli, board, kanban_db, max_in_progress, max_per_profile, now,
+            nonspawnable)
         reasons.append(why)
         if not explained:
-            return False, "; ".join(reasons)
-    return True, "; ".join(reasons)
+            return GateVerdict(False, "; ".join(reasons))
+    return GateVerdict(True, "; ".join(reasons), nonspawnable)
 
 
 def _notify_hold(msg, title="HSCC Dispatcher Hold (no restart)"):
@@ -1428,6 +1498,41 @@ def _notify_hold(msg, title="HSCC Dispatcher Hold (no restart)"):
         send_macos_notification(title, msg, priority="normal")
     except Exception:  # noqa: BLE001
         pass
+
+
+def _notify_nonspawnable(msg):
+    """Operator notify for the config-typo class (t_ab960663). Same single
+    notify channel as ``_notify_hold`` — a different TITLE only, so the
+    operator can tell 'dispatcher is holding, sit tight' apart from 'a ready
+    card will never be run by anyone' without opening the message."""
+    return _notify_hold(msg, title="HSCC Dispatcher: unrunnable ready card")
+
+
+def _nonspawnable_message(dead):
+    """The operator-facing line for ready cards no worker will ever claim.
+
+    ``dead`` is the gate's list of ``{"board", "card", "assignee"}`` findings.
+    Names every card/board/assignee (the whole point of the ping is that the
+    operator can fix the assignment without opening a terminal), states the
+    class of failure (a profile that does not exist — a config typo, not a
+    dispatcher fault) and that NO restart was attempted.
+    """
+    if len(dead) == 1:
+        d = dead[0]
+        body = (f"ready card {d['card']} on board {d['board']} has "
+                f"non-spawnable assignee {d['assignee']!r}: no worker will "
+                "ever run it")
+    else:
+        body = ("%d ready cards have non-spawnable assignees, so no worker "
+                "will ever run them: %s" % (
+                    len(dead),
+                    "; ".join(f"{d['card']} on board {d['board']} -> "
+                              f"{d['assignee']!r}" for d in dead[:10])))
+    return (body + " — that assignee names no Hermes profile (a config typo "
+            "or a deleted profile, not a dispatcher wedge), so NO gateway "
+            "restart was attempted: fix the card's assignee "
+            "(`hermes kanban assign` / the board UI) or create the profile. "
+            "A restart can never fix this.")
 
 
 # ── Guarded recovery (self-heal) ───────────────────────────────────────────
@@ -1629,26 +1734,54 @@ def recover_dispatcher_wedge(stream_state=None, restart_fn=None, now=None,
     # restart. Unverifiable ⇒ fail closed and restart (the original purpose).
     gate_fn = board_gate_fn or board_state_explains_stall
     try:
-        explained, gate_detail = gate_fn(stream)
+        gate_verdict = gate_fn(stream)
+        explained, gate_detail = gate_verdict
     except Exception as e:  # noqa: BLE001 - a broken gate never blocks action
+        gate_verdict = None
         explained, gate_detail = False, f"gate error: {e}"
     if explained:
         global _hold_notify_at
-        msg = (f"Dispatcher stream is red but the board says the dispatcher "
-               f"is only HOLDING work back (not wedged) — no gateway restart. "
-               f"Evidence: {gate_detail}")
-        log("Dispatcher-wedge recovery: SUPPRESSED — " + msg)
+        # t_ab960663 (PR #43 review): suppression and notification are two
+        # different questions. A ready card whose assignee is not a Hermes
+        # profile at all DOES suppress the restart — `launchctl kickstart`
+        # has never once fixed a typo'd profile name — but going quiet about
+        # it was the bug: "no worker will ever run this card" is precisely the
+        # silent no-dispatch failure this watchdog exists to surface. When the
+        # gate names such cards, the operator ping is the DISTINCT config-typo
+        # message (naming card/board/assignee), not the generic "dispatcher is
+        # only holding work back" line — on a mixed board the generic text
+        # would bury the one finding the operator can actually act on. The
+        # full board evidence stays in the log line.
+        dead = _gate_nonspawnable(gate_verdict)
+        if dead:
+            msg = _nonspawnable_message(dead)
+            reason = "nonspawnable_assignee"
+            log("Dispatcher-wedge recovery: SUPPRESSED — " + msg
+                + f" (full board evidence: {gate_detail})")
+        else:
+            msg = (f"Dispatcher stream is red but the board says the "
+                   f"dispatcher is only HOLDING work back (not wedged) — no "
+                   f"gateway restart. Evidence: {gate_detail}")
+            reason = "benign_dispatcher_hold"
+            log("Dispatcher-wedge recovery: SUPPRESSED — " + msg)
         if _hold_notify_at is None or (
                 now - _hold_notify_at
                 >= DISPATCHER_HOLD_NOTIFY_COOLDOWN_SECONDS):
             _hold_notify_at = now
-            notify = notify_fn or _notify_hold
+            # One throttled notify channel (``notify_fn`` in tests,
+            # ``_notify_hold`` → desktop sender in production). The
+            # non-spawnable class only changes the title, never the path.
+            notify = notify_fn or (
+                _notify_nonspawnable if dead else _notify_hold)
             try:
                 notify(msg)
             except Exception:  # noqa: BLE001 - notify is best-effort
                 pass
-        return {"result": "suppressed", "reason": "benign_dispatcher_hold",
-                "detail": gate_detail, "actions": []}
+        result = {"result": "suppressed", "reason": reason,
+                  "detail": gate_detail, "actions": []}
+        if dead:
+            result["nonspawnable"] = dead
+        return result
 
     # -- Act: restart the gateway -------------------------------------------
     restart_fn = restart_fn if restart_fn is not None else _run_restart
