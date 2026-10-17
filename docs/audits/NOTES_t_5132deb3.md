@@ -113,7 +113,11 @@ Matrix JSON: scratch base_h_probe2.json. Findings:
 - [x] mutation battery M1-M6 all red-then-restored (md5-verified); M7 = M1
       re-run under the full audit -> 25 NEW findings incl. 11 D-h (sensor has
       teeth)
-- [ ] canonical suite green (frozen tree, both interpreters)
+- [x] canonical suite green — frozen tree @ 45d118bd, both interpreters:
+      leg1 (3.11 hermes venv) ALL GREEN LEG1_RC=0; leg2 (3.13 miniconda
+      p313) ALL GREEN LEG2_RC=0. Tree md5-verified unchanged (30d72f99)
+      across both legs. (This status-log line is the post-stamp docs commit;
+      the stamps apply to the tree at 45d118bd, which has no code after it.)
 - [x] address_guard 0 (rc 0, no findings), changelog fragment
       (changelog.d/t_5132deb3.md, `check` OK 29 entries), no attribution
 
