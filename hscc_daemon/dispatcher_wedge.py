@@ -478,14 +478,27 @@ def _board_snapshot(kanban_db, board, multi, max_in_progress,
             in_progress = int(conn.execute(
                 "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
             ).fetchone()[0])
-            # Pending ready+review work for reconciliation of the dispatcher's
-            # hold counts (t_160d306f). Deliberately counts EVERY
-            # assigned+unclaimed row (control-plane lanes included):
-            # over-counting pending makes a benign-hold EXEMPTION harder,
-            # never easier — fail closed.
+            # Pending work for reconciliation of the dispatcher's hold counts
+            # (t_160d306f). The lane set follows the SAME capability answer
+            # the spawnable decision above used (t_dc04732e, the combined
+            # case): when this runtime cannot dispatch the review lane, the
+            # dispatcher's own tick never even enumerates review rows
+            # (``review_rows = _lane_rows(conn, "review") if
+            # review_dispatch_enabled() else []``), so its "Last tick held
+            # back" clause can never be counting a parked review card —
+            # letting such a row pad the reconciliation would exonerate a
+            # live wedge (pending >= claimed) for up to the lookback window.
+            # When the lane IS dispatchable a review card may legitimately
+            # sit held by a respawn guard, so it counts there. Deliberately
+            # counts EVERY assigned+unclaimed row in the dispatchable lanes
+            # (control-plane lanes included): over-counting pending makes a
+            # benign-hold EXEMPTION harder, never easier — fail closed.
+            pending_lanes = "'ready', 'review'" if review_capable \
+                else "'ready'"
             pending = int(conn.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status IN ('ready', "
-                "'review') AND assignee IS NOT NULL AND claim_lock IS NULL"
+                "SELECT COUNT(*) FROM tasks WHERE status IN ("
+                f"{pending_lanes}) AND assignee IS NOT NULL "
+                "AND claim_lock IS NULL"
             ).fetchone()[0])
     except Exception as e:  # noqa: BLE001
         label = "default" if not board else board
