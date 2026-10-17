@@ -31,6 +31,40 @@ LOCK_PATH = os.environ.get(
     "RUNTIME_VERSIONS_FILE", "hscc-bootstrap/runtime-versions.json")
 BRANCH = "deps/runtime-bump"
 
+#: Repo root as seen from this script (.github/scripts/check_runtime_deps.py).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _fork_rule_lines(dep_names):
+    """Fork-branch rule lines for a bump touching sparkrun ([] otherwise).
+
+    The text lives in ``hscc_daemon/dep_bump_guard.py`` — ONE source shared
+    with the cluster-side card generator (scripts/dep_pr_watcher.py) and
+    pinned by tests there — but CI runs this file with only
+    ``.github/scripts`` importable, so load it by path (stdlib-only module,
+    no package import). If it cannot be loaded the PR body says SO, loudly:
+    a silently missing guard on the bump PR is exactly how the least-in-flight
+    fork branch gets dropped by a future ``git checkout main``.
+    """
+    if not any(name == "sparkrun" for name in dep_names):
+        return []
+    path = os.path.join(_REPO_ROOT, "hscc_daemon", "dep_bump_guard.py")
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("dep_bump_guard", path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"no module spec for {path}")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.fork_rule_block(dep_names)
+    except Exception:
+        return [
+            "**GUARD UNAVAILABLE — do not run the sparkrun bump yet**: could "
+            f"not load `{path}`. The sparkrun runtime is deployed from a FORK "
+            "BRANCH, not upstream main; the full rule lives in "
+            "`hscc_daemon/dep_bump_guard.py` and must be read before bumping.",
+        ]
+
 
 def _parse_version(tag):
     """Parse 'v0.2.41' → (0, 2, 41) for numeric comparison.
@@ -181,6 +215,20 @@ def main():
         "### Cluster verification checklist",
         "- [ ] Upgrade the runtime "
         "(`hermes update` / rebase-bump sparkrun) with a recovery point",
+    ]
+    # sparkrun bumps carry the fork-branch rule (see _fork_rule_lines): the
+    # deployed runtime is pom11/sparkrun@feat/proxy-least-in-flight, and a
+    # bump that checks out upstream main silently drops the proxy balancer.
+    rule = _fork_rule_lines([name for name, _, _, _ in changes])
+    if rule:
+        lines += ["", "### sparkrun fork-branch rule (read before the bump)"]
+        lines += [f"- {ln}" for ln in rule]
+        lines += [
+            "- [ ] Fork branch intact after the bump: "
+            "`rev-parse --abbrev-ref HEAD` == the fork branch above, "
+            "and `proxy_router_settings` verify check is quiet",
+        ]
+    lines += [
         "- [ ] Re-bootstrap HSCC: `hscc-bootstrap/bootstrap.sh`",
         "- [ ] Run every component test suite (bootstrap, cluster, commands, "
         "roles, daemon, sparkrun-hermes)",

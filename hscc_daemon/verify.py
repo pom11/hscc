@@ -427,6 +427,35 @@ def check_proxy(url=None, timeout=None):
         return {"name": "proxy", "ok": False, "detail": str(exc)}
 
 
+def check_proxy_router_settings(proxy_config=None, litellm_config=None):
+    """WARN-level drift check: live litellm_config carries proxy.yaml's router intent.
+
+    Pure-read comparison of ``~/.config/sparkrun/proxy.yaml`` (what the
+    operator asked for: top-level ``router_settings`` +
+    ``gateways.litellm.balancing: least-in-flight``) against the generated
+    ``~/.cache/sparkrun/proxy/litellm_config.yaml`` (what the proxy actually
+    runs). All logic lives in :mod:`hscc_daemon.proxy_router`, which mirrors
+    sparkrun's own emission rules.
+
+    This is the post-bump tripwire for the fork-branch failure (see
+    :mod:`hscc_daemon.dep_bump_guard`): a sparkrun bump that checks out
+    upstream main instead of rebasing ``feat/proxy-least-in-flight`` drops
+    the ``router_settings`` passthrough and the least-in-flight balancer
+    with NO error anywhere. The proxy keeps serving; routing silently
+    reverts. This check is what makes that visible.
+
+    Operator rule encoded here: WARN, never fail. Drift reports ``ok: True``
+    with a ``WARN:``-prefixed detail (never trains operators to ignore a
+    red proxy verdict over a soft policy mismatch); ``ok: None`` only when
+    the inputs cannot be read at all. Never writes anything, never restarts.
+    """
+    from . import proxy_router
+    res = proxy_router.router_drift(
+        proxy_config=proxy_config, litellm_config=litellm_config)
+    ok = None if res["status"] == "unverified" else True
+    return {"name": "proxy_router_settings", "ok": ok, "detail": res["detail"]}
+
+
 def check_config_wiring(config=None):
     """Check config.yaml has required HSCC wiring.
 
@@ -1239,6 +1268,7 @@ def run_all(**overrides):
         check_multiplex,
         check_daemon_streams,
         check_proxy,
+        check_proxy_router_settings,
         check_config_wiring,
         check_profile_endpoints,
         check_api_routes,

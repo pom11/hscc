@@ -1003,6 +1003,18 @@ def _proxy_repair_orphan(relaunch_hosts):
             "verified": verified, "output": res.get("output", "")}
 
 
+def _router_drift_probe():
+    """Seam: compare proxy.yaml router intent vs the live litellm_config.
+
+    Thin wrapper over :func:`hscc_daemon.proxy_router.router_drift` so tests
+    (and nothing else) can stub it — health tests must never read the
+    operator's live ~/.config/sparkrun (ambient-state discipline, same as the
+    serving.load_serving stub in TestCheckProxy._setup).
+    """
+    from . import proxy_router
+    return proxy_router.router_drift()
+
+
 def check_proxy():
     """Keep the sparkrun LiteLLM worker proxy alive (worker load-balancer).
 
@@ -1039,6 +1051,18 @@ def check_proxy():
 
     serving_data = serving.load_serving()
     url = f"http://localhost:{PROXY_PORT}/v1/models"
+    # Router-settings drift (dep-bump guard, WARN-only): does the generated
+    # litellm_config still carry what ~/.config/sparkrun/proxy.yaml asks for?
+    # Computed BEFORE the healthy branch so BOTH state writes record it — a
+    # drift must survive on the healthy path too (the exact 2026-10-15 failure
+    # shape is a proxy that serves fine yet routes blind after a bump dropped
+    # the fork branch). Pure-read (proxy_router.router_drift); never writes,
+    # never restarts; a raising probe must never take the proxy check down.
+    try:
+        drift = _router_drift_probe()
+    except Exception as exc:  # pragma: no cover - defensive, check never raises
+        drift = {"status": "unverified", "warn": False,
+                 "detail": f"router drift probe raised {type(exc).__name__}"}
     # Host set FIRST: it is what `proxy start --hosts` points the LB at, so
     # the expected-alias requirement below must be scoped to it (PR #22 review
     # — expecting an alias the host set can never serve = relaunch forever).
@@ -1076,7 +1100,11 @@ def check_proxy():
     if healthy:
         write_state("proxy", {"ok": True, "port": PROXY_PORT,
                               "last_check": now_iso(), "message": reason,
+                              "router_drift": drift["detail"],
+                              "router_drift_warn": bool(drift["warn"]),
                               "models": sorted(probe.get("models") or [])})
+        if drift["warn"]:
+            log(f"proxy router drift ({drift['detail']})", "WARN")
         return True
 
     log(f"Worker proxy unhealthy on :{PROXY_PORT} ({reason})")
@@ -1168,6 +1196,8 @@ def check_proxy():
                   # raise a "relaunch failed" alert.
                   "relaunch_failed": (not ok and not suppressed and not deferred),
                   "deferred": deferred,
+                  "router_drift": drift["detail"],
+                  "router_drift_warn": bool(drift["warn"]),
                   "message": message}
     if suppressed or deferred:
         # Carry the ORIGINAL attempt stamp forward verbatim. Re-stamping on a
