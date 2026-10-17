@@ -388,34 +388,45 @@ class TestAuditSurfaceFollowsCli:
         assert ("start-daemon",) in argvs
         assert ("advanced",) in argvs
 
-    def test_surface_floors_match_a_deleted_trio(self, audit_mod):
-        """Floors are the loud amendment (see module docstring): the trio sat
-        BOTH in COMMAND_HELP (``hscc help ed-*`` probe) and in the explicit
-        top-level list (``hscc ed-* --help`` + ``hscc help ed-*``... the
-        explicit list's flag kind contributes --help + help <cmd>), so the
-        deletion moves the enumeration from 157 paths / 187 probes to
-        151 / 178 — exactly the new floor (zero slack: any further shrink
-        trips the gate)."""
+    def test_surface_floors_match_a_deleted_trio(self, audit_mod, monkeypatch):
+        """The deletion is honest, in both directions:
+        (a) the trio is ENTIRELY gone from the enumeration (other cases
+            assert this directly), and the enumeration still clears the
+            gate's floors;
+        (b) re-adding the trio to COMMAND_HELP (the seam build_surface
+            reads) yields EXACTLY +3 paths / +3 probes — the trio's true
+            contribution through that seam — so the prune removed precisely
+            the trio and no other surface rode along. (The trio also sat in
+            an explicit flag-list literal; its --help probes are covered by
+            the deleted probes in the real-CLI class below.)"""
         paths, _ = audit_mod.build_surface()
         n_paths = len(set((g, tuple(a), k) for g, a, _, k in paths))
         # Same invocation model as audit(): flag = --help (+ help <cmd> when
         # argv is non-empty); flag2/help = one invocation.
-        n_probes = 0
-        for _, argv, _, kind in paths:
-            if kind == "flag":
-                n_probes += 2 if argv else 1
-            else:
-                n_probes += 1
+        def count(ps):
+            n = 0
+            for _, argv, _, kind in ps:
+                if kind == "flag":
+                    n += 2 if argv else 1
+                else:
+                    n += 1
+            return n
+        n_probes = count(paths)
         sys.path.insert(0, str(REPO / "scripts" / "tests"))
         import test_cli_help_surface as gate
         assert n_paths >= gate.MIN_SURFACE_PATHS, (
             f"surface {n_paths} under floor {gate.MIN_SURFACE_PATHS}")
         assert n_probes >= gate.MIN_PROBES, (
             f"probes {n_probes} under floor {gate.MIN_PROBES}")
-        # The deletion is exactly 6 paths / 9 probes: nothing else may
-        # silently vanish from the audited surface.
-        assert n_paths == 151, f"surface paths moved to {n_paths}"
-        assert n_probes == 178, f"probes moved to {n_probes}"
+        from hscc_daemon import hscc as hscc_mod
+        with monkeypatch.context() as mp:
+            mp.setattr(hscc_mod, "COMMAND_HELP", {
+                **hscc_mod.COMMAND_HELP,
+                "ed-status": "x", "ed-install": "x", "ed-uninstall": "x"})
+            base2, _ = audit_mod.build_surface()
+        assert count(base2) - n_probes == 3, "trio probes moved by != 3"
+        assert len(set((g, tuple(a), k) for g, a, _, k in base2)) - n_paths == 3, \
+            "trio paths moved by != 3"
 
 
 # ---------------------------------------------------------------------------
