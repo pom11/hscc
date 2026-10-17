@@ -130,12 +130,11 @@ class TestNoRenderedFlightdeck:
 # (2) Class B — main help: two-line layout, 78-col budget, indented tails
 # ---------------------------------------------------------------------------
 
-# (usage, first-continuation) pairs that MUST render two-line because the pair
-# cannot fit the 78 budget on one line (the two template verbs and the
-# check --repo pair, the base's only over-budget hard lines beyond the
-# footer). The rest keep the base's one-line look — the (B) contract is "no
-# line exceeds the budget, no unindented spill", which the budget/verbatim
-# pins below check for every entry.
+# (usage, first-continuation) pairs that MUST render two-line because the
+# pair cannot fit the 78 budget on one line (the two template verbs — the
+# base's only over-budget section lines). The rest keep the base's one-line
+# look — the (B) contract is "no line exceeds the budget, no unindented
+# spill", which the budget/verbatim pins below check for every entry.
 TWO_LINE_ENTRIES = [
     ("  template validate <name> [--structural-only] [--json]",
      "      Validate a template: structural (offline) layer always; placement (live)"),

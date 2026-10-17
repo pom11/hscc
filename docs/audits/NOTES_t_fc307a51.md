@@ -60,10 +60,21 @@ append a FIXED note; do not rewrite the historical row.
 - [x] fix committed (2514773f)
 - [x] rules pruned + gate green (d835bc25; 27 -> 7, 0 NEW / 0 STALE / 0 OVER;
   a_counts re-cut; gate 12 passed / 1 sibling-interpreter skip)
-- [ ] red-first verification of the FINAL test file at base 8906e151
-- [ ] mutation battery
-- [ ] canonical suite ALL GREEN (frozen tip, both interpreters)
-- [ ] address_guard 0 + diff grep + attribution grep
+- [x] red-first verification of the FINAL test file at base 8906e151
+  (scratch worktree; 44 of 60 red, 16 structural passes)
+- [x] mutation battery 9/9 CAUGHT unfiltered (M1 no-split, M2 blurb-back,
+  M3 A6-back, M4 advanced-gone, M5 ed-COMMAND_HELP, M6 ed-dispatch,
+  M7 stale audit surface, M8 footer spill, M9 kanban overflow); final
+  restore verified diff-clean (git diff of both files empty)
+- [x] canonical suite ALL GREEN on the frozen tip ac25c0fc: py3.11 leg
+  (FROZEN_TIP==TIP_AFTER verified) and py3.13 leg, both exit 0
+- [x] address_guard --tracked exit 0; own-diff IP grep: only the documented
+  10.0.0.1 sandbox placeholder in the new test fixture; attribution grep 0
+  hits
+- [x] real-CLI smoke (sandbox HOME + canaries, COLUMNS 80/120): 17 surfaces
+  x both widths = 34 runs, all ok — rc as designed, zero trips, zero new
+  HOME files, no ANSI, no line over budget on help surfaces, no placeholder
+  text, no rendered flightdeck
 - [ ] pushed; sha reported
 
 ## Follow-ups found (NOT folded into F5 — recorded per protocol)
