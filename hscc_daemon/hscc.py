@@ -405,6 +405,20 @@ COMMAND_HELP = {
     "escalate": "Show pending failure escalations (dry-run, no mutations).\n  Usage: hscc escalate [--json]",
     "advanced": "Internal/service-manager commands.\n  See 'hscc help advanced' for details.",
     "start-daemon": "Run the daemon loop in the foreground (used by launchd)",
+    # heal verbs (audit B5, card t_aeb982bc): the breaker's alert text names
+    # `hscc heal-clear <node>`, so `hscc help heal-clear` must answer — until
+    # these entries existed it exited 1. Multi-line values print as authored
+    # (only the FIRST line gets _handle_help's 2-space prefix), so every line
+    # stays <=76 to fit the (B) gate's 78 budget at both widths. Wording note:
+    # the audit's (D) EXEC_ECHO sensor matches the executing verb's output
+    # ("Cleared heal strikes" / "healing resumes"), so the help text must
+    # never quote that wording — "clears nothing" is the contract B4 proves.
+    "heal-clear": "Clear one node's heal-breaker strikes (MUTATES the ledger).\n"
+                  "Usage: hscc heal-clear <node> [reason...]\n"
+                  "  --help/-h prints this help and clears nothing. See: hscc heal-status",
+    "heal-status": "List heal-breaker strikes per node (read-only).\n"
+                   "Usage: hscc heal-status\n"
+                   "  --help/-h prints this help. See also: hscc heal-clear <node>",
     "ed-status": "Event-driven mode status (placeholder, not yet available)",
     "ed-install": "Event-driven mode install (placeholder, not yet available)",
     "ed-uninstall": "Event-driven mode uninstall (placeholder, not yet available)",
@@ -1494,6 +1508,22 @@ def main():
 
     # Daemon command dispatch
     cmd_lower = cmd.lower()
+
+    # Per-command --help for the heal verbs (BROKEN B4, card t_aeb982bc).
+    # Must sit BEFORE the dispatch below and scan the RAW tail: on the base
+    # tree `heal-clear --help` reached cmd_heal with "--help" as the NODE
+    # NAME and ran the clear path (audit EXEC_ECHO: "No strikes recorded for
+    # --help"), and `heal-clear <node> --help` CLEARED <node>'s strikes while
+    # the operator believed they were reading help. Same raw-argv shape as
+    # the cluster/kanban/api intercepts. Wording comes from COMMAND_HELP —
+    # the same source `hscc help heal-clear` prints — so the two cannot
+    # drift. cmd_heal keeps a second-line guard for direct callers.
+    if cmd_lower in ("heal-clear", "heal-status") and any(
+            a in ("-h", "--help") for a in args[1:]):
+        print(f"hscc {cmd_lower}")
+        print(f"  {COMMAND_HELP[cmd_lower]}")
+        sys.exit(0)
+
     if cmd_lower == "start":
         from hscc_daemon.cli import cmd_start
         cmd_start()

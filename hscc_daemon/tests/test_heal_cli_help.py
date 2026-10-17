@@ -19,6 +19,9 @@ Three layers of proof, same shape as test_cluster_cli_help.py / test_api_cli_hel
     here even where the side effect would be invisible in a sandbox; plus
     the argv-shape case (help AFTER the node name) and a positive-dispatch
     pin proving the verbs still work when no help token is present;
+  * second-line-of-defence — ``cmd_heal(node="--help")`` called DIRECTLY
+    (bypassing the CLI intercept) must print usage and leave a tmp-redirected
+    ledger byte-identical (the B6 engine-side ``cmd_stop`` guard's shape);
   * COMMAND_HELP content pins — both entries exist, every line of the
     rendered block stays inside the (B) gate's 78-column budget at width 80
     AND 120 (the block is printed with plain ``print``, so authored width IS
@@ -155,6 +158,45 @@ class TestDispatchHelpInert:
         assert hits == [{"status_only": True}]
 
 
+class TestCmdHealDirectGuard:
+    """Defence-in-depth: the guard inside cmd_heal itself (B6 cmd_stop shape).
+
+    The unified CLI intercept covers the CLI path; these tests pin the
+    library-direct path — a caller that lands in cmd_heal with a help token
+    as the node name must not touch the ledger. State file redirected to
+    tmp: the real ~/.hscc/heal-breaker.json is never opened.
+    """
+
+    @pytest.fixture()
+    def breaker_file(self, tmp_path, monkeypatch):
+        path = tmp_path / "heal-breaker.json"
+        path.write_text(json.dumps(
+            {SEEDED_NODE: [time.time() - 30, time.time() - 20]}))
+        monkeypatch.setattr(hb, "HEAL_BREAKER_FILE", str(path))
+        return path
+
+    @pytest.mark.parametrize("flag", ["--help", "-h"])
+    def test_direct_call_with_help_token_touches_nothing(self, flag,
+                                                         breaker_file,
+                                                         capsys):
+        blob = breaker_file.read_bytes()
+        stamp = breaker_file.stat().st_mtime_ns
+        hscc_cli.cmd_heal(node=flag)
+        out = capsys.readouterr().out
+        assert "Usage: hscc heal-clear" in out
+        assert breaker_file.read_bytes() == blob, (
+            "cmd_heal mutated the ledger on a help token — the second line "
+            "of defence is down")
+        assert breaker_file.stat().st_mtime_ns == stamp
+
+    def test_direct_call_missing_node_still_usage(self, breaker_file,
+                                                  capsys):
+        blob = breaker_file.read_bytes()
+        hscc_cli.cmd_heal()
+        assert "Usage: hscc heal-clear" in capsys.readouterr().out
+        assert breaker_file.read_bytes() == blob
+
+
 class TestHelpTopics:
     """B5: 'hscc help heal-clear' / 'hscc help heal-status' exit 0."""
 
@@ -164,7 +206,7 @@ class TestHelpTopics:
         rc, out = _main_capture(monkeypatch, capsys, "help", verb)
         assert rc == 0, f"help {verb} exited {rc}: {out!r}"
         assert f"hscc {verb}" in out
-        assert "circuit breaker" in out
+        assert "heal-breaker" in out
 
     def test_unknown_topic_still_exits_one(self, heal_landmine, monkeypatch,
                                            capsys):
