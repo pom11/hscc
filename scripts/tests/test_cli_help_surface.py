@@ -49,8 +49,14 @@ A_COUNTS_PATH = HERE / "cli_help_a_counts.json"
 
 # Surface floors. If enumeration shrinks, the walker broke (or commands were
 # removed without amending the audit) — that must fail, not silently pass.
+# Probe floor amended 180 -> 178 by t_fc307a51 (F5): the ed-* placeholder trio
+# was DELETEd from the CLI (operator fan-out ruling), and the audit's
+# enumeration loses the three commands in the same commit — they are gone
+# from COMMAND_HELP too, so both the `--help` and the `hscc help` probes go
+# (6 paths, 9 probes). 178 is EXACTLY what a healthy surface measures after
+# that deletion — zero slack, so any further shrink trips this gate.
 MIN_SURFACE_PATHS = 150
-MIN_PROBES = 180
+MIN_PROBES = 178
 MIN_EXAMPLES = 60
 
 

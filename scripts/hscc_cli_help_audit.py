@@ -139,8 +139,7 @@ def build_surface():
         add("top-level", [c], "print", "help")
     for c in sorted(daemon_hscc.DAEMON_COMMANDS):
         add("top-level", [c], "print", "flag")
-    for c in ("advanced", "start-daemon", "ed-status", "ed-install",
-              "ed-uninstall", "heal-clear", "heal-status"):
+    for c in ("advanced", "start-daemon", "heal-clear", "heal-status"):
         add("top-level", [c], "print", "flag")
 
     # ── cluster group (plain print at group level; monitor --live included)
@@ -639,8 +638,7 @@ class ExampleParser:
         self.daemon_cmds = (set(daemon_hscc.COMMAND_HELP)
                             | set(daemon_hscc.DAEMON_COMMANDS)
                             | {"heal-clear", "heal-status", "start-daemon",
-                               "advanced", "ed-status", "ed-install",
-                               "ed-uninstall"})
+                               "advanced"})
         # `hscc project <verb>` promotion (hscc_daemon hscc._handle_project):
         # subgroup verbs are accepted bare at the top. The oracle models the
         # SHIPPED dispatcher, not just flightdeck's raw parser — examples are

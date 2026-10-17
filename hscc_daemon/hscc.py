@@ -262,11 +262,35 @@ def _get_version():
     return "1.0.0"
 
 
+# Budgets for the main help (see _get_help_text): the (B) gate measures the
+# render at COLUMNS 80 and 120, so every authored line must be inside 78
+# (the stricter budget — identical render at both widths, matching the
+# cluster/template group convention: _CLUSTER_HELP_WIDTH / _TEMPLATE_HELP_WIDTH).
+# ``usage`` sits in a 2-space-indented column of width _TOP_HELP_COL; a pair
+# that no longer fits splits into usage-alone + hanging-indent description.
+_TOP_HELP_COL = 21
+_TOP_HELP_INDENT = 6
+_TOP_HELP_WIDTH = 78
+
+
 def _get_help_text():
     """Build the full grouped help as a themed Rich renderable (Group).
     The output is a single scrolling Group of section blocks in the
     Hermes-default gold palette: gold section headings, plain cornsilk command
     lines, dim footer. ``main()`` prints it through a themed Console.
+
+    Layout contract (F5, card t_fc307a51; audit Class B): the console renders
+    at the caller's COLUMNS (the (B) gate measures 80 and 120), and a hard
+    line wider than the console is what made Rich spill unindented
+    continuations at column 0 — the base tree measured 10 such wraps at width
+    80 and 2 at width 120 here. Every authored line therefore stays inside the
+    78-column budget: usage/description pairs render on ONE line while they
+    fit, otherwise the usage stands alone and the description follows as
+    hanging-indented continuation — the two-line layout the cluster/template
+    group help already uses (t_875c5019 / t_90082309). Wording is the base's
+    verbatim (re-flowed, never reworded); the ONLY wording change is dropping
+    the internal ``(flightdeck)`` blurb from the project line (audit Class A,
+    row A5).
     """
     from rich.console import Group
     from rich.text import Text
@@ -282,77 +306,142 @@ def _get_help_text():
     def _section(heading, lines):
         block = [Text(heading, style="label")]
         for line in lines:
-            block.append(Text(f"  {line}", style="text"))
+            block.append(Text(line, style="text"))
         block.append(Text(""))
         return block
 
+    def _entry(usage, desc, notes=()):
+        """One command line: hard-wrapped to the budget, never spilling.
+
+        One line while ``usage`` + ``desc`` fit side by side (the base's
+        two-column look), otherwise the usage stands alone and the
+        description wraps to hanging-indented continuation lines. ``notes``
+        are the sub-lines the base printed under some commands (e.g. the
+        check streams list); they align to the description column when they
+        fit there, else to the continuation indent. The gutter is at least
+        one space (``str.ljust`` alone would butt the description against a
+        usage longer than the column)."""
+        gutter = " " * max(1, _TOP_HELP_COL - len(usage))
+        one_line = f"  {usage}{gutter}{desc}"
+        if len(one_line) <= _TOP_HELP_WIDTH:
+            out = [one_line]
+        else:
+            out = [f"  {usage}"]
+            out.extend(textwrap.wrap(
+                desc, width=_TOP_HELP_WIDTH,
+                initial_indent=" " * _TOP_HELP_INDENT,
+                subsequent_indent=" " * _TOP_HELP_INDENT))
+        for note in notes:
+            aligned = f"{' ':<{_TOP_HELP_COL + 2}}{note}"
+            if len(aligned) <= _TOP_HELP_WIDTH:
+                out.append(aligned)
+            else:
+                out.extend(textwrap.wrap(
+                    note, width=_TOP_HELP_WIDTH,
+                    initial_indent=" " * _TOP_HELP_INDENT,
+                    subsequent_indent=" " * _TOP_HELP_INDENT))
+        return out
+
     daemon = _section("Daemon control", [
-        "start                Start the monitoring daemon in the background",
-        "stop                 Gracefully stop the running daemon",
-        "status               Daemon status + last result of every health stream",
-        "install              Install the launchd service (auto-start at login)",
-        "uninstall            Remove the service and stop the daemon",
-        "plist                Print the launchd plist (no install)",
-        "log                  Show the daemon log output",
+        *_entry("start", "Start the monitoring daemon in the background"),
+        *_entry("stop", "Gracefully stop the running daemon"),
+        *_entry("status", "Daemon status + last result of every health stream"),
+        *_entry("install", "Install the launchd service (auto-start at login)"),
+        *_entry("uninstall", "Remove the service and stop the daemon"),
+        *_entry("plist", "Print the launchd plist (no install)"),
+        *_entry("log", "Show the daemon log output"),
     ])
 
     health = _section("Health & monitoring", [
-        "check [stream]       Run one check cycle now (default: all)",
-        "                       streams: dgx gateway local heartbeat nas watchdog triggers",
-        "check --repo <path>  Commit-time address-guard posture for that checkout",
-        "                       (default cwd; --json; exit 0 only when 'armed')",
-        "watch [stream]       Live-tail check results",
-        "triggers             Show trigger-engine rules and recent firings",
-        "verify               Run a full compatibility/health smoke-test of the cluster",
-        "stats [days]         Fleet activity — completions & tool usage over N days (default 7)",
-        "throughput           Aggregate vLLM throughput + queue depth across the fleet",
-        "autoscale            Show autoscale decision from current queue depth (read-only)",
-        "escalate             Show pending failure escalations (dry-run, no mutations)",
+        *_entry("check [stream]",
+                "Run one check cycle now (default: all)",
+                ["streams: dgx gateway local heartbeat nas watchdog triggers"]),
+        *_entry("check --repo <path>",
+                "Commit-time address-guard posture for that checkout",
+                ["(default cwd; --json; exit 0 only when 'armed')"]),
+        *_entry("watch [stream]", "Live-tail check results"),
+        *_entry("triggers", "Show trigger-engine rules and recent firings"),
+        *_entry("verify", "Run a full compatibility/health smoke-test of the cluster"),
+        *_entry("stats [days]",
+                "Fleet activity — completions & tool usage over N days (default 7)"),
+        *_entry("throughput",
+                "Aggregate vLLM throughput + queue depth across the fleet"),
+        *_entry("autoscale",
+                "Show autoscale decision from current queue depth (read-only)"),
+        *_entry("escalate",
+                "Show pending failure escalations (dry-run, no mutations)"),
     ])
 
     cluster = _section("Cluster & templates", [
-        "cluster status       Running workloads + idle hosts",
-        "cluster hosts        All cluster hosts and saved sparkrun clusters",
-        "cluster monitor [--live]   Fleet CPU/RAM/GPU; --live adds per-node, per-model load",
-        "cluster jobs         All sparkrun jobs currently running",
-        "cluster info         Detailed resolved cluster configuration",
-        "cluster stop <id>    Stop a running workload by container id",
-        "cluster down [--dry-run]   Stop ALL sparkrun workloads fleet-wide",
-        "cluster up   [--dry-run]   Start every unit in serving.json (orch + keepalive)",
-        "template list        List available cluster templates (declared fleet layouts)",
-        "template status      Which template is currently applied",
-        "template preview <name>    Dry-run: what applying <name> would change",
-        "template validate <name> [--structural-only] [--json]   Validate a template: structural (offline) layer always; placement (live) layer unless --structural-only. Exit non-zero if either layer fails.",
-        "template apply <name> [--confirm] [--force-recreate]   Apply a template (--confirm executes; --force-recreate stops+reruns units so changed serve flags reach vLLM)",
-        "profiles             Running kanban task counts per profile",
-        "project <cmd>        Project-portfolio (flightdeck) commands: standup verify doctor ...",
-        "api <cmd>            HSCC HTTP API server: start stop status (external apps)",
-        "autodown <cmd>       Idle autodown/autoup: status enable disable wake cancel",
-        "kanban <cmd>         Board hygiene: blocked (show/recover), stale (list/archive)",
+        *_entry("cluster status", "Running workloads + idle hosts"),
+        *_entry("cluster hosts", "All cluster hosts and saved sparkrun clusters"),
+        *_entry("cluster monitor [--live]",
+                "Fleet CPU/RAM/GPU; --live adds per-node, per-model load"),
+        *_entry("cluster jobs", "All sparkrun jobs currently running"),
+        *_entry("cluster info", "Detailed resolved cluster configuration"),
+        *_entry("cluster stop <id>", "Stop a running workload by container id"),
+        *_entry("cluster down [--dry-run]",
+                "Stop ALL sparkrun workloads fleet-wide"),
+        *_entry("cluster up   [--dry-run]",
+                "Start every unit in serving.json (orch + keepalive)"),
+        *_entry("template list",
+                "List available cluster templates (declared fleet layouts)"),
+        *_entry("template status", "Which template is currently applied"),
+        *_entry("template preview <name>",
+                "Dry-run: what applying <name> would change"),
+        *_entry("template validate <name> [--structural-only] [--json]",
+                "Validate a template: structural (offline) layer always; "
+                "placement (live) layer unless --structural-only. Exit "
+                "non-zero if either layer fails."),
+        *_entry("template apply <name> [--confirm] [--force-recreate]",
+                "Apply a template (--confirm executes; --force-recreate "
+                "stops+reruns units so changed serve flags reach vLLM)"),
+        *_entry("profiles", "Running kanban task counts per profile"),
+        *_entry("project <cmd>",
+                "Project-portfolio commands: standup verify doctor ..."),
+        *_entry("api <cmd>",
+                "HSCC HTTP API server: start stop status (external apps)"),
+        *_entry("autodown <cmd>",
+                "Idle autodown/autoup: status enable disable wake cancel"),
+        *_entry("kanban <cmd>",
+                "Board hygiene: blocked (show/recover), stale (list/archive)"),
     ])
 
     util = _section("Utility", [
-        "notify <message>     Send a desktop notification",
+        *_entry("notify <message>", "Send a desktop notification"),
     ])
 
     examples = _section("Examples", [
-        "hscc status                          # is the daemon healthy?",
-        "hscc check gateway                   # re-run just the gateway check",
-        "hscc template list                   # see the declared fleet layouts",
-        "hscc template preview 3node-coding",
-        "hscc template apply 3node-coding --confirm",
-        "hscc cluster status",
+        "  hscc status                          # is the daemon healthy?",
+        "  hscc check gateway                   # re-run just the gateway check",
+        "  hscc template list                   # see the declared fleet layouts",
+        "  hscc template preview 3node-coding",
+        "  hscc template apply 3node-coding --confirm",
+        "  hscc cluster status",
     ])
 
-    footer = Text("\nDocs: ~/dev/hscc/README.md   Slash commands (in Hermes chat): /cluster /workers-up /cluster-restart /template", style="dim")
+    # Every footer segment is authored inside the budget for the same reason
+    # as the section lines: two base segments (88 and 86 cols) wrapped at 80
+    # and left "auto)." at column 0 — (B) findings on the base tree.
+    footer = Text("\nDocs: ~/dev/hscc/README.md   Slash commands (in Hermes chat):", style="dim")
+    footer.append("\n  /cluster /workers-up /cluster-restart /template", style="dim")
     footer.append("\nRun `hscc help advanced` for internal/service-manager commands.", style="dim")
-    footer.append("\nTheme: add `--theme dark|light` after any command to pick a palette (default: auto).", style="dim")
+    footer.append("\nTheme: add `--theme dark|light` after any command to pick a palette", style="dim")
+    footer.append("\n  (default: auto).", style="dim")
 
     return Group(title, *daemon, *health, *cluster, *util, *examples, footer)
 
 
 def _get_advanced_help():
-    """Return advanced/internal help as a themed Rich Panel/Group."""
+    """Return advanced/internal help as a themed Rich Panel/Group.
+
+    The ed-status / ed-install / ed-uninstall placeholder trio was DELETED
+    from this surface (and from COMMAND_HELP and main()'s dispatch) by card
+    t_fc307a51: the audit's Class DEAD measured them advertising commands
+    that do nothing ("placeholder, not yet available"), and the operator's
+    fan-out ruling was DELETE, not hide. The library functions stay in cli.py
+    for their own tests; only the CLI surface is gone.
+    """
     from rich.console import Group
     from rich.text import Text
 
@@ -361,9 +450,6 @@ def _get_advanced_help():
     lines.append("", style="text")
     for cmd, desc in [
         ("start-daemon", "Run the daemon loop in the foreground (used by launchd)"),
-        ("ed-status", "Event-driven mode status (placeholder, not yet available)"),
-        ("ed-install", "Event-driven mode install (placeholder, not yet available)"),
-        ("ed-uninstall", "Event-driven mode uninstall (placeholder, not yet available)"),
     ]:
         lines.append(f"  {cmd:<16}{desc}", style="text")
         lines.append("", style="text")
@@ -393,10 +479,32 @@ COMMAND_HELP = {
                "  Usage: hscc cluster <subcommand> [args]",
     "template": "Cluster template commands.\n  Subcommands: list status preview validate apply\n  preview/validate take <name>; validate also takes\n  [--structural-only] [--json]; apply also takes\n  [--confirm] [--force-recreate]. Try 'hscc template --help'.\n  Usage: hscc template <subcommand> [args]",
     "profiles": "Running kanban task counts per profile",
-    "project": "Project-portfolio (flightdeck) commands.\n  Delegates to the relocated flightdeck CLI under hscc-project/. Try 'hscc project --help' for the full subcommand surface.\n  Usage: hscc project <subcommand> [args]",
+    # Multi-line value: _handle_help prints `  {value}`, so only the FIRST
+    # line gets the 2-space prefix — every line is authored to stay <=76 so
+    # the rendered block fits the (B) gate's 78 budget (F5 card t_fc307a51:
+    # the base "Delegates to the relocated flightdeck CLI under
+    # hscc-project/. Try 'hscc project --help'…" sentence measured 123 cols
+    # and overflowed at BOTH mandated widths). Class A (row A6): the rendered
+    # blurb no longer names the internal package — "relocated flightdeck CLI"
+    # became "relocated portfolio CLI" (the hscc-project/ path stays: it is
+    # where the code actually lives, and a path string is not the A
+    # invariant's target).
+    "project": "Project-portfolio commands.\n"
+               "  Delegates to the relocated portfolio CLI under hscc-project/.\n"
+               "  Try 'hscc project --help' for the full subcommand surface.\n"
+               "  Usage: hscc project <subcommand> [args]",
     "api": "HSCC HTTP API server lifecycle.\n  Subcommands: start [--tailscale] [--bind <ip>] [--port <n>] stop status\n  Usage: hscc api <subcommand> [args]",
     "autodown": "Idle autodown/autoup for the GPU serving layer.\n  Subcommands: status enable [--idle-minutes <n>] [--force] disable wake cancel\n  Usage: hscc autodown <subcommand> [args]",
-    "kanban": "Board hygiene for autodown.\n  blocked [--json]: list BLOCKED cards with why; blocked --recover <id> [--reason <t>]: recover one blocked card to ready\n  stale [--older-than <days>] [--json]: list non-terminal cards; stale --archive <id>: archive one (t_e751e652)\n  Usage: hscc kanban <subcommand> [args]",
+    # Multi-line value, same 76-col authored budget as project/cluster above
+    # (F5 card t_fc307a51: the base blocked/stale sentences measured 121 and
+    # 111 cols — (B) overflow at width 80 and, for blocked, at width 120.
+    # Wording verbatim; re-flowed onto hanging-indent continuations).
+    "kanban": "Board hygiene for autodown.\n"
+              "  blocked [--json]: list BLOCKED cards with why; blocked --recover\n"
+              "    <id> [--reason <t>]: recover one blocked card to ready\n"
+              "  stale [--older-than <days>] [--json]: list non-terminal cards;\n"
+              "    stale --archive <id>: archive one (t_e751e652)\n"
+              "  Usage: hscc kanban <subcommand> [args]",
     "help": "Show help. Usage: hscc help [command]\n  Use 'hscc help advanced' for internal commands.",
     "verify": "Run a full compatibility/health smoke-test of the cluster.\n  Usage: hscc verify [--json] [--chat]\n  --chat  also run a deep end-to-end chat round trip against the live\n          orchestrator (real POST, poll, assert reply, assert model tokens\n          moved). Opt-in: it fires a real prompt and can take ~600s.",
     "stats": "Fleet activity — completions & tool usage over N days (default 7).\n  Usage: hscc stats [days] [--json]",
@@ -405,9 +513,6 @@ COMMAND_HELP = {
     "escalate": "Show pending failure escalations (dry-run, no mutations).\n  Usage: hscc escalate [--json]",
     "advanced": "Internal/service-manager commands.\n  See 'hscc help advanced' for details.",
     "start-daemon": "Run the daemon loop in the foreground (used by launchd)",
-    "ed-status": "Event-driven mode status (placeholder, not yet available)",
-    "ed-install": "Event-driven mode install (placeholder, not yet available)",
-    "ed-uninstall": "Event-driven mode uninstall (placeholder, not yet available)",
 }
 
 
@@ -1484,8 +1589,16 @@ def main():
     if cmd == "escalate":
         _handle_escalate()
 
-    # Advanced commands (also support --help)
-    advanced_cmds = {"start-daemon", "ed-status", "ed-install", "ed-uninstall"}
+    # Advanced commands (also support --help). The ed-* placeholder trio is
+    # GONE (F5 card t_fc307a51, operator fan-out ruling DELETE): it was
+    # advertised as "placeholder, not yet available" and did nothing — help
+    # must not advertise dead commands. `advanced` joined this set so
+    # `hscc advanced --help` prints its COMMAND_HELP entry instead of the
+    # unknown-command blob + exit 1 (audit D-rc finding). `-h` deliberately
+    # stays unhandled here, matching the DAEMON_COMMANDS convention above
+    # (the audit only probes `--help`; a CLI-wide `-h` gap is recorded in
+    # docs/audits/NOTES_t_fc307a51.md as follow-up, not folded into F5).
+    advanced_cmds = {"start-daemon", "advanced"}
     if cmd in advanced_cmds and len(args) > 1 and args[1] == "--help":
         help_text = COMMAND_HELP.get(cmd, "")
         print(f"hscc {cmd}")
@@ -1532,15 +1645,6 @@ def main():
     elif cmd_lower == "start-daemon":
         from hscc_daemon.cli import cmd_start_daemon
         cmd_start_daemon()
-    elif cmd_lower == "ed-status":
-        from hscc_daemon.cli import cmd_ed_status
-        cmd_ed_status()
-    elif cmd_lower == "ed-install":
-        from hscc_daemon.cli import cmd_ed_install
-        cmd_ed_install()
-    elif cmd_lower == "ed-uninstall":
-        from hscc_daemon.cli import cmd_ed_uninstall
-        cmd_ed_uninstall()
     elif cmd_lower == "heal-clear":
         # F5 operator override: the breaker's alert text names this command,
         # so it must resolve (an alert pointing at a non-existent command is
