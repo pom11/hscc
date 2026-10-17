@@ -324,6 +324,26 @@ def _unit_alias(u: Any, plan: Any) -> str:
     return "orchestrator-model" if u is plan.orchestrator else "worker-model"
 
 
+def _family_provider_alias(fam: Any, plan: Any) -> str:
+    """The model-id alias a ``family-*`` provider must declare.
+
+    A provider's ``model.default`` is a MODEL ID, not an endpoint — the old
+    writer put ``localhost:{proxy_port}`` there, which no endpoint resolves as
+    a model. The family proxy load-balances its units, and every unit
+    advertises its role alias via ``_unit_serve_names``; routing keeps
+    single-valued aliases (see ``_unit_serve_names``), so the proxy answers to
+    the units' alias. Every unit in a family shares one recipe and therefore
+    one alias, so units[0] is representative; a unit that IS the orchestrator
+    (co-location/degenerate plans) yields ``orchestrator-model`` via
+    ``_unit_alias`` — the same identity rule everywhere. A family with no
+    units has no proxy target at all: return the generic alias rather than a
+    host:port (the provider entry itself is a config pointer, and the stale-
+    family drop keeps entries this plan does not define out).
+    """
+    units = getattr(fam, "units", None) or []
+    return _unit_alias(units[0], plan) if units else "worker-model"
+
+
 def _unit_serve_names(u: Any, plan: Any) -> str:
     """Alias token(s) this unit advertises via ``--served-model-name``.
 
@@ -1196,6 +1216,12 @@ def apply_template(template_name: str, confirm: bool = False,
                 "orchestrator_node": plan.orchestrator.node,
                 "families": [f.name for f in plan.families],
                 "units": len(serving["units"]),
+                # Which routing RULESET is live, recorded at apply. The
+                # verify.provider_routing guard reads this to decide whether
+                # the "no direct fleet node in any hermes config" invariant
+                # applies; a state written before this field existed reads as
+                # False there (non-uniform = check skipped, documented).
+                "uniform_pool": bool(getattr(plan, "uniform_pool", False)),
             }, backup=False)
         except Exception:
             pass
@@ -1599,7 +1625,16 @@ def _update_hermes_config(config: dict, plan: Any, *, _http_get=None) -> dict:
     actually written — the alias when the orchestrator endpoint advertises it,
     else the concrete id it serves, else NOTHING (never write an id the endpoint
     cannot resolve). ``_http_get`` is injectable for tests; default is a real
-    network probe."""
+    network probe.
+
+    Under ``uniform_pool`` (with a family proxy owning the worker port) NOTHING
+    this function writes names a fleet node: the top-level ``model`` block and
+    the ``custom`` provider both point at the family proxy (``chat_url``) with
+    the probe-resolved alias as their model id, and every ``family-*`` provider
+    carries its units' alias as ``model.default`` — a model id, never a
+    host:port. The pool's proxy is hermes' only chat route; a direct node URL
+    here bypasses routing and dies with the node. Non-uniform plans keep the
+    historical direct-node ``custom`` entry byte-for-byte."""
     o = plan.orchestrator
     orch_url = f"http://{o.node}:{o.port}/v1"
 
@@ -1611,10 +1646,11 @@ def _update_hermes_config(config: dict, plan: Any, *, _http_get=None) -> dict:
     # Non-uniform templates keep the pinned orchestrator endpoint exactly as
     # before — the role split is real there.
     chat_url = orch_url
+    _pool_fam = None
     if getattr(plan, "uniform_pool", False):
-        _fam = _owned_worker_family(plan)
-        if _fam is not None:
-            chat_url = f"http://localhost:{_fam.proxy_port}/v1"
+        _pool_fam = _owned_worker_family(plan)
+        if _pool_fam is not None:
+            chat_url = f"http://localhost:{_pool_fam.proxy_port}/v1"
 
     # ── Top-level model block ────────────────────────────────────────
     model_cfg = config.setdefault("model", {})
@@ -1642,18 +1678,52 @@ def _update_hermes_config(config: dict, plan: Any, *, _http_get=None) -> dict:
             if isinstance(p, dict) and p.get("name"):
                 by_name[p["name"]] = p
 
-    by_name["custom"] = {
-        "name": "custom",
-        "model": {"default": f"{o.node}:{o.port}"},
-        "base_url": f"http://{o.node}:{o.port}/v1",
-    }
+    # `custom` provider. NON-uniform plans keep the historical direct-node entry
+    # byte-for-byte — direct is legitimate when there is no proxy in front of
+    # the orchestrator. Under ``uniform_pool`` the pool's front (the family
+    # proxy) is the ONLY endpoint hermes may talk to: base_url is ``chat_url``
+    # — the very URL the top-level model block above uses, never a second
+    # crafted one — and model.default reuses the SAME probe-before-write
+    # result as that block: the orchestrator alias when the proxy advertises
+    # it, else the single concrete id it serves, else NOTHING new (carry the
+    # existing entry's default rather than invent an id the endpoint does not
+    # serve). Writing the node URL here re-infected a config the model block
+    # had just been corrected (operator report 2026-10-15).
+    if getattr(plan, "uniform_pool", False) and _pool_fam is not None:
+        custom: dict = {"name": "custom", "base_url": chat_url}
+        default = resolved
+        if default is None and isinstance(by_name.get("custom"), dict):
+            prev = (by_name["custom"].get("model") or {}).get("default")
+            # Carry the existing id on a failed probe (leave-untouched
+            # doctrine) — EXCEPT a host:port-shaped one: that is the very
+            # value class this fix removes, and it can never resolve as a
+            # model id at the proxy.
+            if isinstance(prev, str) and prev and (
+                    "://" in prev or (":" in prev and "/" not in prev)):
+                prev = None
+            default = prev
+        if default is not None:
+            custom["model"] = {"default": default}
+        by_name["custom"] = custom
+    else:
+        by_name["custom"] = {
+            "name": "custom",
+            "model": {"default": f"{o.node}:{o.port}"},
+            "base_url": f"http://{o.node}:{o.port}/v1",
+        }
     for fam in plan.families:
         if fam.proxy_port is None:
             continue
         name = f"family-{fam.name}"
+        # model.default is a MODEL ID, not an endpoint. The old value
+        # ``localhost:{port}`` was a host:port no endpoint can resolve as a
+        # model; the family proxy load-balances its units and every unit
+        # advertises its role alias, so the family alias (``_unit_alias`` —
+        # ``worker-model`` for any non-orchestrator unit) is what the proxy
+        # answers to.
         by_name[name] = {
             "name": name,
-            "model": {"default": f"localhost:{fam.proxy_port}"},
+            "model": {"default": _family_provider_alias(fam, plan)},
             "base_url": f"http://localhost:{fam.proxy_port}/v1",
         }
 

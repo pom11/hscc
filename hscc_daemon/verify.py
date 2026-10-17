@@ -33,6 +33,11 @@ try:
 except Exception:  # pragma: no cover - import-time safety
     _health = None
 
+try:
+    from . import sparkrun_bin as _sparkrun_bin
+except Exception:  # pragma: no cover - import-time safety
+    _sparkrun_bin = None
+
 
 def _repo_root():
     """Absolute path to the checked-out repo root from verify.py's location.
@@ -634,6 +639,227 @@ def check_profile_endpoints(serving_path=None, profiles_dir=None,
     return {"name": "profile_endpoints", "ok": True,
             "detail": f"all {checked} base_urls across {len(by_profile)} "
                       f"profiles served by cluster endpoints"}
+
+
+# ── provider_routing: hermes talks ONLY to the proxy under uniform_pool ────
+
+# The applied-template state path is resolved AT CALL TIME (not baked in at
+# import) so the hscc_daemon/tests conftest ~/.hscc redirect — which patches
+# os.path.expanduser for runtime-computed paths — keeps the check hermetic.
+_APPLIED_TEMPLATE_STATE_REL = "~/.hscc/applied_template.json"
+
+# Resolve the fleet's node address set through sparkrun's OWN host resolution
+# (the sanctioned path — health.py runs the same `resolve_hosts(None, None,
+# None, mgr, config.default_hosts)` under sparkrun's venv python). Pure host
+# resolution: no ssh, no status collection, unlike _SPARKRUN_STATUS_SCRIPT.
+# Returns [] when no default cluster resolves, so the caller reports
+# "unverified", never a false pass. NEVER hand-parse template yaml or hardcode
+# ranges — sparkrun owns the fleet.
+_FLEET_HOSTS_SCRIPT = (
+    "import json,sys\n"
+    "from sparkrun.core.config import SparkrunConfig,get_config_root\n"
+    "from sparkrun.core.cluster_manager import ClusterManager\n"
+    "from sparkrun.core.hosts import resolve_hosts\n"
+    "config=SparkrunConfig()\n"
+    "mgr=ClusterManager(get_config_root())\n"
+    "hosts=resolve_hosts(None,None,None,mgr,config.default_hosts)\n"
+    "print(json.dumps(sorted(set(str(h) for h in (hosts or [])))))\n"
+)
+
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
+
+
+def _fleet_node_hosts(*, venv_python=None, run=None, timeout=25):
+    """Fleet node hostnames from sparkrun's own host resolution.
+
+    Returns ``(hosts, error)``: ``(set, None)`` on success (possibly an empty
+    set when sparkrun reports no default cluster — the caller must treat that
+    as UNVERIFIED, not "fleet is empty"); ``(None, reason)`` when the address
+    set could not be obtained at all. The shell-out runs sparkrun's venv
+    python (resolved PATH-independently via ``sparkrun_bin``, like health.py)
+    with the pure ``_FLEET_HOSTS_SCRIPT`` — no ssh, no node contact.
+    ``venv_python``/``run`` are injectable for tests.
+    """
+    if venv_python is None:
+        venv_python = (_sparkrun_bin.sparkrun_venv_python()
+                       if _sparkrun_bin is not None else None)
+    if not venv_python:
+        return None, "sparkrun venv python unavailable"
+
+    def _default_runner(argv, timeout):
+        import subprocess as _sp          # local import, like run_chat_roundtrip
+        cp = _sp.run(argv, capture_output=True, text=True, timeout=timeout)
+        return cp.returncode, cp.stdout
+
+    if run is None and subprocess is None:
+        return None, "subprocess unavailable"
+    runner = run or _default_runner
+    try:
+        rc, out = runner([venv_python, "-c", _FLEET_HOSTS_SCRIPT], timeout)
+    except Exception as exc:
+        return None, f"sparkrun host resolution failed ({exc})"
+    if rc != 0:
+        return None, f"sparkrun host resolution exited {rc}"
+    try:
+        hosts = json.loads(out or "")
+    except ValueError:
+        return None, "sparkrun host resolution returned no JSON"
+    if not isinstance(hosts, list):
+        return None, "sparkrun host resolution returned a non-list"
+    return {str(h) for h in hosts}, None
+
+
+def _routing_candidate_urls(data):
+    """Yield ``(key_path, url)`` base_urls the routing guard inspects.
+
+    Covers every placement the card names — the top-level ``model`` block,
+    ``providers[].base_url``, ``fallback_providers`` entries, and auxiliary
+    model entries — by walking every ``base_url`` key wherever it is nested
+    (the same walker check_profile_endpoints uses), then adding any string
+    under a ``url``/``endpoint`` key inside a ``fallback_providers`` subtree
+    (fallback chains store the address under either name across hermes
+    versions). Key paths are dotted and de-duplicated per path.
+    """
+    seen = set()
+    for kp, v in _iter_keys(data, "base_url"):
+        if isinstance(v, str) and v.strip():
+            seen.add((kp, v.strip()))
+    for kp, fb in _iter_keys(data, "fallback_providers"):
+        chains = fb if isinstance(fb, list) else [fb]
+        for entry in chains:
+            for sub, url in _iter_keys(entry, "url"):
+                if isinstance(url, str) and url.strip():
+                    seen.add((f"{kp}.{sub}" if sub else kp, url.strip()))
+            for sub, url in _iter_keys(entry, "endpoint"):
+                if isinstance(url, str) and url.strip():
+                    seen.add((f"{kp}.{sub}" if sub else kp, url.strip()))
+    return sorted(seen)
+
+
+def check_provider_routing(config=None, profiles_dir=None,
+                           applied_state_path=None, fleet_hosts=None,
+                           venv_python=None, run=None, timeout=25):
+    """Guard: under a uniform_pool template, NO hermes config may name a fleet
+    node — hermes talks ONLY to the proxy (:4000); that is the whole point of
+    hscc on a uniform pool.
+
+    Fail path: while the APPLIED template is ``uniform_pool`` (read from
+    ``~/.hscc/applied_template.json``, injectable via ``applied_state_path``),
+    any base_url — in the root ``~/.hermes/config.yaml`` OR every
+    ``~/.hermes/profiles/*/config.yaml`` — whose host is a FLEET NODE is a
+    finding (covers model.base_url, providers[].base_url, fallback_providers
+    and auxiliary model entries; see ``_routing_candidate_urls``). Loopback
+    (localhost/127.0.0.1/::1) proxy URLs pass on any port.
+
+    Skip/pass (documented): when the applied template is NOT uniform_pool
+    (including an applied state predating the recorded flag) the direct-node
+    form is legitimate and the check passes with ``skipped:`` in the detail.
+    When the applied state or the fleet host set cannot be obtained the check
+    is UNVERIFIED (ok=None) — "could not check" is not "broken" and, crucially,
+    never a silent pass: this guard exists precisely because every apply used
+    to re-infect a hand-fixed config.
+
+    The fleet node address set comes from sparkrun's own host resolution
+    (``_FLEET_HOSTS_SCRIPT`` under sparkrun's venv python — the sanctioned
+    path, health.py's pattern), never from hand-parsed template yaml, hardcoded
+    ranges, or ssh to nodes.
+
+    PURE-READ: never writes or repairs any config, never restarts anything.
+    Returns the standard {name, ok, detail} shape; never raises.
+    """
+    if yaml is None:
+        return {"name": "provider_routing", "ok": None,
+                "detail": "unverified: pyyaml not installed"}
+
+    # ── 1. Is the uniform_pool invariant live? ────────────────────────────
+    state_path = os.path.expanduser(
+        applied_state_path or _APPLIED_TEMPLATE_STATE_REL)
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+    except FileNotFoundError:
+        return {"name": "provider_routing", "ok": None,
+                "detail": "unverified: no applied-template state "
+                          f"({state_path}) — cannot tell if the pool invariant "
+                          "applies"}
+    except (json.JSONDecodeError, OSError) as exc:
+        return {"name": "provider_routing", "ok": None,
+                "detail": f"unverified: applied-template state unreadable ({exc})"}
+    if not isinstance(state, dict) or not state.get("uniform_pool"):
+        # Non-uniform (or pre-flag) template: direct node endpoints are
+        # legitimate there — the role split is real and there may be no proxy.
+        return {"name": "provider_routing", "ok": True,
+                "detail": "skipped: applied template is not uniform_pool"
+                          " — direct node endpoints are legitimate"}
+
+    # ── 2. Fleet node addresses (sparkrun's own resolution) ───────────────
+    if fleet_hosts is None:
+        fleet_hosts, err = _fleet_node_hosts(venv_python=venv_python,
+                                             run=run, timeout=timeout)
+        if err:
+            return {"name": "provider_routing", "ok": None,
+                    "detail": f"unverified: {err}"}
+    if not fleet_hosts:
+        return {"name": "provider_routing", "ok": None,
+                "detail": "unverified: sparkrun resolved no fleet hosts — "
+                          "an empty node set is UNKNOWN, not empty (fail-closed)"}
+    fleet_hosts = {str(h).strip().lower() for h in fleet_hosts}
+
+    # ── 3. Scan root config + every profile config, pure-read ─────────────
+    targets = []
+    if config is None:
+        targets.append(("root", os.path.expanduser("~/.hermes/config.yaml")))
+    else:
+        targets.append(("root", os.path.expanduser(config)))
+    profiles_dir = profiles_dir if profiles_dir is not None else (
+        _serving.PROFILES_DIR if _serving is not None
+        else os.path.expanduser("~/.hermes/profiles"))
+    profiles_dir = os.path.expanduser(profiles_dir)
+    if os.path.isdir(profiles_dir):
+        try:
+            entries = sorted(os.scandir(profiles_dir), key=lambda e: e.name)
+        except OSError:
+            entries = []
+        for entry in entries:
+            if entry.is_dir():
+                targets.append((f"profile:{entry.name}",
+                                os.path.join(entry.path, "config.yaml")))
+
+    issues = []
+    checked = 0
+    unreadable = 0
+    for source, path in targets:
+        if not os.path.isfile(path):
+            continue
+        try:
+            data = yaml.safe_load(open(path))
+        except Exception:
+            # A config we cannot parse is not evidence of bad routing;
+            # config_wiring/other checks police readability itself.
+            unreadable += 1
+            continue
+        for key_path, url in _routing_candidate_urls(data):
+            checked += 1
+            origin = _origin(url)
+            if origin is None:
+                continue  # unparseable url is config_wiring's problem, not ours
+            host = origin[1]
+            if host in _LOOPBACK_HOSTS:
+                continue
+            if host in fleet_hosts:
+                issues.append(f"{source}: {key_path} {url} points at fleet "
+                              f"node {host} while uniform_pool routes hermes "
+                              "only through the proxy")
+
+    if issues:
+        return {"name": "provider_routing", "ok": False,
+                "detail": f"{len(issues)} direct node endpoint(s) under "
+                          "uniform_pool: " + "; ".join(issues)}
+    note = (f"no fleet-node base_url across {checked} url(s) in "
+            f"{len(targets)} hermes config(s)")
+    if unreadable:
+        note += f" ({unreadable} unreadable config(s) skipped)"
+    return {"name": "provider_routing", "ok": True, "detail": note}
 
 
 def run_chat_roundtrip():
@@ -1241,6 +1467,7 @@ def run_all(**overrides):
         check_proxy,
         check_config_wiring,
         check_profile_endpoints,
+        check_provider_routing,
         check_api_routes,
         check_chat_roundtrip,
         check_plugin_payload,
