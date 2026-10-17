@@ -11,6 +11,593 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Entries now live in `changelog.d/` (in the source repo) — one `<task-id>.md` per kanban card. Run `python3 scripts/changelog_fragments.py sync` to materialise them here (the release step does; see `changelog.d/README.md`)._
 
+## [2.10.0] - 2026-10-17
+
+### Added
+- **CLI help-surface gate.** `scripts/tests/test_cli_help_surface.py`
+  (+ engine `scripts/hscc_cli_help_audit.py`, expectations
+  `scripts/tests/cli_help_expected.json`) walks the code-derived command
+  surface — 153 paths, 182 sandboxed help probes at widths 80/120/500,
+  75 examples parse-checked — and asserts the operator's five invariants:
+  no standalone `flightdeck` in rendered help, no continuation-less wraps,
+  every `example:` line parses through the real parser (never executed),
+  `--help` executes nothing (sandboxed HOME + recording sparkrun/hermes/gh/git
+  canaries + LaunchAgent/port tripwires), and each surface's help style is
+  recorded for the convergence card. Today's violations ship as 326 named
+  expectation rules keyed to fix cards F1–F5 (`t_7b0f65c8` findings doc);
+  fixing one without pruning its rule goes red as STALE, any new violation
+  goes red as NEW — both directions mutation-tested.
+
+### Changed
+- **`docs/audits/artifacts/CLI_HELP_FINDINGS.json` is no longer committed**
+  (PR #33 review follow-up decision, recorded in
+  `docs/audits/PR33-FOLLOWUPS-t_36580090.md`). It is the raw output of
+  `audit()` — a pure function of the tree — and every fix card pruning
+  findings silently rotted the snapshot (326 findings at audit time; the
+  rules file is at 56 after F1/BROKEN-* landed). Nothing reads the
+  committed copy. Regenerate on demand:
+  `HSCC_CLI_HELP_WRITE_ARTIFACT=1 pytest scripts/tests/test_cli_help_surface.py -k artifact`
+  or `python scripts/hscc_cli_help_audit.py --json <path>`. The path is
+  gitignored; the human-authored findings doc
+  (`docs/audits/CLI_HELP_2026-10-15.md`) remains committed.
+
+### Fixed
+- **Four `project` verbs were still doubling the group name.** The
+  `hscc project <verb>` alias (1.16.0) shipped with a hand-maintained verb
+  table that drifted: `sessions`, `digest`, `link` and `unlink` were added
+  to flightdeck's `project` subgroup and never added to
+  `_PROJECT_SUBGROUP_VERBS`, so exactly those four kept reading the awkward
+  `hscc project project <verb>` (the doubled form always works — the alias
+  only upgrades the short form). The table now covers the whole subgroup,
+  and pins in `hscc_daemon/tests/test_hscc_cli.py` fail listing the
+  drifters if it ever lags the parser again (and if it ever claims a verb
+  the subgroup lacks, or one that shadows a top-level command).
+- **Help stopped teaching the doubled form.** All 15 `example: hscc project
+  project …` epilogs (project.py, sync.py) and the hscc-project README now
+  advertise the short form the alias actually supports; the doubled
+  invocation keeps working (parse and behaviour unchanged, pinned per verb
+  by test). The inner subgroup parser now pins `prog="hscc project"` so its
+  rendered usage lines read `usage: hscc project link …`, not the doubled
+  form. The audit's parse oracle models the daemon's alias promotion the
+  same way `_handle_project` implements it (set membership +
+  top-level-wins guard), so the documented short form parses — F1 had
+  called the doubled form "canonical" only because the oracle rejected the
+  short one.
+- **`hscc autodown <sub> --help` executed the verb instead of printing
+  help** (audit BROKEN B7/B8/B9). `cmd_autodown` had a group-level `--help`
+  branch but none per subcommand, so `disable --help` DISARMED autodown
+  (rewrote `~/.hscc/autodown.json` + `watchdog-block.json`), `status --help`
+  ran the kanban + PR/CI interlocks (gh canary trip, `daemon.log` write,
+  WARN log lines in the "help" output), `wake --help` ran `autoup`, and
+  `enable --help` exited 1 via the cron-guard. Every subcommand now carries
+  its own help text (`SUBCOMMAND_HELP`); `cmd_autodown` scans the RAW
+  subcommand argv for `--help`/`-h` (before `--json`/`--theme` stripping, so
+  a help flag can never be swallowed as a flag value) and prints that text,
+  exit 0, executing nothing. Non-help behaviour byte-identical.
+- **`hscc project` help surface speaks `hscc project`, not `flightdeck`.**
+  The project group rendered 209 help lines naming the retired standalone
+  tool (`usage: flightdeck …` on every subcommand plus ~60
+  `example: flightdeck …` epilogs whose project names were not even
+  registered). The parser prog is now `hscc project`; every epilog is
+  rewritten against real registry names (`hscc`, `ecofire-app`,
+  `ecofire-bc`), with the canonical doubled form where the parse oracle
+  demands it (`hscc project project new …`). `message read`/`broadcast`
+  (dead since Telegram removal) are hidden from the help listing — handlers
+  and tests intact — and `map-sessions`' unparseable
+  `flightdeck map-sessions --json` example became
+  `hscc project --json map-sessions`. Rendered path strings
+  (`--registry`, `init --home`, `review --baseline`, self-update text) say
+  "hscc-project home" instead of `~/.flightdeck`; the on-disk dir is
+  unchanged (behaviour, not text). Pruned all 70 owner=F1 rules from
+  `scripts/tests/cli_help_expected.json` — gate green.
+- **`hscc cluster <subcommand> --help` executed the subcommand instead of
+  printing help** (audit BROKEN B6 + B12, docs/audits/CLI_HELP_2026-10-15.md
+  Class D). `_handle_cluster` handled `--help` only at GROUP level
+  (`len(sys.argv) < 3 or sys.argv[2] == "--help"`), so every per-subcommand
+  help request fell through to verb dispatch. Measured in a sandbox HOME with
+  recording PATH canaries: `cluster stop --help` INVOKED the mutating
+  `sparkrun stop --help` (B6 — the help token was consumed as the container id
+  and forwarded), and `cluster status` / `hosts` / `info` / `jobs --help`
+  shelled out to `sparkrun status` / `cluster list` / `cluster show hscc` /
+  `cluster status` — read-only, but a help request that costs seconds and
+  shells out is still executing something (B12). Only `monitor --help` was
+  inert (it already had its own branch), and `up`/`down --help` refused via the
+  F6 flag parser.
+- **Fix:** the cluster group now carries a per-subcommand help table
+  (`_CLUSTER_SUBCOMMAND_HELP`) and `_handle_cluster` intercepts `--help`/`-h`
+  anywhere in the subcommand argv — before `--theme` stripping, before the
+  engine load, before dispatch — printing that verb's usage and description,
+  exit 0, executing nothing (the F6 `up`/`down` guard's shape, extended to the
+  uncovered half). Each help line says whether the verb is read-only; `stop`'s
+  says it stops a live container. Because the intercept scans the RAW argv,
+  `cluster stop --id --help` prints help instead of stopping container `--id`,
+  and `cluster stop --theme --help` can no longer swallow the help token as
+  the palette name and dispatch the mutating verb with `--theme` as its
+  container id. `status` / `hosts` / `jobs` / `info` / `stop --help` now exit
+  0; `up`/`down --help` keep the F6 refusal contract byte-for-byte (rc=1 +
+  "Nothing was started or stopped" — that message is quoted verbatim in
+  another card's gate rules, so this card does not reword it). `monitor`'s
+  help surface is operator-owned and untouched. Non-help behaviour
+  byte-identical.
+- **Engine-side second line of defence (`hscc-cluster/hscc.py` `cmd_stop`):**
+  the engine now refuses a container id that is empty or flag-shaped
+  (`--help`, `-h`, `--dry-run`, …) with a usage-carrying error instead of
+  shelling `sparkrun stop <arg>` — B6's destructive shell-out stays closed
+  even for callers that bypass the unified CLI (the back-compat standalone
+  `hscc-cluster stop <id>` entry has no intercept in front of it). Same F6
+  rule `up`/`down` apply to their flags: a destructive verb runs only on an
+  argument that can actually name a container. A real container id is
+  unaffected (byte-identical argv to sparkrun).
+- Non-help behaviour unchanged, with one deliberate exception: the `cmd_stop`
+  guard above, which turns the `stop ""` / `stop <flag>` paths from a
+  sparkrun call into a refusal (that IS the fix). Group help, `monitor`'s
+  help, the up/down F6 message, and every non-help verb path are untouched.
+- **Importing the CLI executed the fleet** (audit BROKEN B11).
+  `hscc_daemon/serving.py` resolved the cluster topology at IMPORT
+  (module-level `resolve_cluster_config()`), so ANY invocation — every
+  `--help`, even `hscc --help` in a fresh HOME — shelled
+  `sparkrun cluster list --json` whenever `~/.hscc/cluster.json` was absent:
+  help violated "help executes nothing", every CLI start paid seconds, and a
+  fresh/CI machine shelled out implicitly. Topology resolution is now LAZY:
+  `PRIMARY_NODE` / `ORCH_NODES` / `KEEPALIVE_NODES` / `VLLM_HEALTH_URL` /
+  `VLLM_STOP_CMD` / `VLLM_START_CMD` / `VLLM_RECIPE` / `NAS_HOST` are PEP 562
+  module attributes (the idiom `hscc-cluster/clusterlib.py` already uses) that
+  resolve — with the unchanged cluster.json → sparkrun → documented-default
+  precedence — on the first READ and cache for the process. Import + help
+  execute nothing; any path that actually uses the topology gets exactly what
+  it got before. `resolve_cluster_config()` stays public and eager-when-called,
+  and the daemon loop resolves it explicitly at startup (where it always
+  belongs), so daemon behaviour is unchanged.
+- **Cluster group help overflowed the 80-column budget** (audit Class B,
+  owner=F3 rows of docs/audits/CLI_HELP_2026-10-15.md). `hscc cluster --help`
+  printed each subcommand entry as one hard line; the `monitor` entry (91
+  cols) and the `up` entry (83 cols) were measured as overflow at width 80.
+  The group listing now uses the two-line layout the template and per-verb
+  surfaces already use: usage alone on its line, description wrapped with a
+  fixed continuation indent (never col 0) at the same 78-col budget
+  (`_CLUSTER_GROUP_ENTRIES` + `_print_cluster_group_help`). Entry wording is
+  the base text verbatim — pinned by a canonical-whitespace test — and the
+  operator-owned monitor surfaces (`_MONITOR_HELP`, `_parse_monitor_flags`,
+  `cluster_live.py`, t_1cc33407) were not touched.
+- **The F6 safety refusal was unreadable** (same audit rows): the refusal
+  that `hscc cluster up/down --help` (or any unknown flag to a destructive
+  verb) prints had two body sentences as single lines of ~90 and ~140 chars,
+  overflowing at BOTH gate widths 80 and 120. `_cluster_refusal_message` now
+  wraps those sentences at the cluster help budget with a 2-space
+  continuation indent; the dangling-`--theme` refusal from the same parser
+  (91 cols) is wrapped the same way. This is layout only: rc stays 1, and
+  the canonical-whitespace form of the whole message is byte-identical to
+  the base tree (pinned in `hscc_daemon/tests/test_cluster_group_help.py`;
+  the card t_875c5019 byte-pin was moved to the same canonical form —
+  physical line breaks may move, words may not).
+- **`hscc help cluster` overflowed at 80** (the COMMAND_HELP "cluster" value
+  the card body assigns to this surface): its single `Subcommands: status
+  hosts … up [--dry-run]` line (89 cols) is now two aligned lines, every
+  line of the rendered block within 78. Verb list unchanged.
+- **`hscc template --help` wrapped without a continuation indent.** The
+  `validate` and `apply` entries were single two-column lines (154 and 127
+  columns), so at 80 — and even at 120 — their descriptions overflowed
+  instead of wrapping (the operator's original complaint). Both entries now
+  use a two-line layout: the command with its flags on its own line, the
+  description on continuation lines indented to the description column. The
+  group's example lines name real templates from `hscc template list`
+  (`4node-coding`), so they parse against the real subcommand table instead
+  of being placeholders. The `COMMAND_HELP["template"]` block (printed by
+  `hscc help template`) lost its 111-column subcommand line — the verb list
+  is short and each verb's flags now point at `hscc template --help`
+  instead of being crammed into one overflowing row.
+- **`hscc template preview|validate|apply --help` executed the verb and
+  exited 1.** The help token was forwarded to the template engine as the
+  template name, so `--help` printed `Template not found: --help` (and for
+  `apply` reached the engine at all) and exited 1. `--help`/`-h` after a
+  template verb now prints that verb's own usage and exits 0, before any
+  engine import or dispatch; `hscc template -h` prints the group help like
+  `--help` does.
+- **`hscc api --help` and `hscc autodown --help` overflowed the help-surface
+  gate at the mandated widths** (audit Class B, owner F4,
+  docs/audits/CLI_HELP_2026-10-15.md). Both group HELP_TEXTs packed usage and
+  description onto ONE hard line separated by a padding gutter, so the block
+  was 83-116 columns wide: `hscc api --help` measured 5 overflow lines at
+  width 80 plus 2 at width 120 (the `install-service` / `uninstall-service`
+  entries are 116 cols, so they failed at BOTH widths), and `hscc autodown
+  --help` measured 16. Both groups now use the two-line layout the template
+  and per-verb surfaces already use — usage alone on its line, description on
+  indented continuation lines — with every line authored within the 78-column
+  budget. `autodown_cli` emits its help with plain `print` (the authored width
+  IS the rendered width) and `api_cli` prints through Rich, whose non-tty
+  console is fixed at width 200, so re-flowing the authored text is the only
+  fix that holds at every width; neither COLUMNS nor Rich can rescue a hard
+  line here. Wording is the base's verbatim — re-flowed, never reworded.
+- **`hscc api uninstall-service` embedded an absolute path in a hard
+  sentence** (audit Class B, owner F4). The removal notice printed
+  `no unit file at <absolute plist path> (nothing to remove)`, so with a long
+  HOME root — the audit probes under a sandbox HOME — the line ran to 87+
+  columns and overflowed at both mandated widths; Rich cannot wrap it either,
+  because a filesystem path has no break opportunity. The path now gets its
+  own indented line, rendered `~`-relative when it is under HOME (it always
+  is, by construction of `api_launchd.API_PLIST_PATH`), and verbatim if
+  anything ever rebinds that constant — so the notice is width-independent and
+  still names exactly the file it acted on. This also shrinks the (D) surface:
+  the path no longer leaks the sandbox/absolute HOME root into help-shaped
+  output.
+- **`hscc kanban blocked --help` / `hscc kanban stale --help` ran the verb**
+  (audit BROKEN B10, Class D — folded into this card with operator approval,
+  recorded on t_7b0f65c8 comment 1157). `cmd_kanban` honoured `--help` only as
+  the GROUP's first token, so a per-subcommand help request fell through into
+  the listing branch and enumerated every board: the autodown C3 interlock read
+  logged WARN lines and wrote `~/.hscc/daemon.log` under the caller's HOME
+  while "printing help" — and the mutating sibling of that same branch
+  (`blocked --recover <id>`, `stale --archive <id>`) was one token away. Both
+  kanban dispatchers now carry a per-subcommand help table and intercept
+  `--help`/`-h` ANYWHERE in the raw argv — before `--json`/`--theme` stripping,
+  before dispatch, exactly as `cmd_api` and `cmd_autodown` already do — so
+  `blocked --recover --help` prints help instead of reaching the recovery
+  seam. `stale` help is delegated to `kanban_cli` (its owner) rather than
+  duplicated here, so the wording has one source; if that module is absent the
+  delegation says so instead of advertising a verb the build lacks. Non-help
+  behaviour unchanged, `--recover`/`--archive` still dispatch normally.
+- **`hscc heal-clear --help` EXECUTED the mutating verb** (audit BROKEN B4,
+  docs/audits/CLI_HELP_2026-10-15.md Class D, safety-class). Measured in a
+  sandbox HOME: the `--help` token was consumed as the NODE NAME and
+  `cmd_heal` ran the clear path — output echo `No strikes recorded for
+  --help` — and the dangerous sibling `heal-clear <node> --help` CLEARED the
+  node's live strikes (rewrote `~/.hscc/heal-breaker.json`) while the
+  operator believed they were reading help. `hscc.py main()` now intercepts
+  `--help`/`-h` anywhere in the RAW tail of `heal-clear`/`heal-status` —
+  before the dispatch that builds the node kwargs — prints the COMMAND_HELP
+  wording and exits 0 executing nothing (the raw-argv shape of the
+  cluster/kanban/api intercepts). `cmd_heal` keeps a second guard for direct
+  library callers: a node name of `--help`/`-h` prints usage and touches no
+  state (the B6 engine-side `cmd_stop` shape).
+- **`hscc help heal-clear` / `hscc help heal-status` exited 1** (audit B5):
+  both verbs the breaker alert tells operators to run had no COMMAND_HELP
+  entries (`Error: no help for …`). Added, so both exit 0. Multi-line values
+  print as authored (only the first line takes `_handle_help`'s 2-space
+  prefix), so every line stays <= 76 cols for the (B) gate's 78 budget, and
+  the wording deliberately never quotes the (D) EXEC_ECHO strings (`Cleared
+  heal strikes` / `healing resumes`) — help that echoed the execution output
+  would itself trip the sensor.
+- **`hscc api <verb> --help` executed the verb instead of printing help**
+  (audit BROKEN B1/B2/B3). `cmd_api` had only a group-level `--help` branch,
+  so `api start --help` reached the fork path that binds the API port
+  (8787), `api status --help` GENERATED the credential `~/.hscc/api-token`
+  and printed its QR, and `api install-service` / `api uninstall-service`
+  `--help` ran the install/uninstall bodies (writing/removing the
+  LaunchAgent plist). Every verb now carries its own help text
+  (`SUBCOMMAND_HELP`); `cmd_api` scans the RAW argv for `--help`/`-h`
+  (before `--theme` stripping and before dispatch, so a help flag can never
+  be swallowed as a flag value) and prints that text, exit 0, executing
+  nothing. Non-help behaviour byte-identical.
+- **CLI help-surface gate was interpreter-dependent (GATE-313).** The probe
+  interpreter renders the help it audits (`PY = sys.executable`), and class
+  (A) deduped findings by *raw rendered* text across all three widths — so
+  CPython 3.13's argparse (help column +2 chars) wrapped one `doctor`/`update`
+  description at width 80 where 3.11 did not, and the gate counted 15 findings
+  on 3.13 vs 14 on 3.11 for the *same* 14 logical help lines
+  (`EXTRA x15 (baseline 14) [A] hscc project --help contains 'flightdeck'`,
+  green on the canonical leg, red on the p313 leg). (A) now has
+  logical-line identity: derived from the widest render only and
+  whitespace-canonicalised (`canonical_line`), exactly as the engine's own
+  docstring always mandated for (A)/(C) — (C) already honoured it, (A) did
+  not. (B)/(C)/(D)/DEAD are untouched: (B) *measures* wrapping, so
+  width-dependent rendering is its subject. A narrow render can no longer add
+  a violation, only a fragment; a narrow line that is not contained in any
+  wide line means help CONTENT is width-aware and is reported as a new
+  `A-WIDTH` finding — the superset assumption is guarded, not trusted.
+  Re-baselined the 2 remaining A rules from the wide canonical form
+  (`hscc --help` 2 → **1**, the collapsed pair was one logical line; `hscc
+  help project` stays **2** — two genuinely distinct lines). Also: `re.split`
+  `maxsplit` in the example cleaner is now keyword, killing the 3.13
+  `DeprecationWarning` that becomes an error in a future CPython.
+- **The rendered top-level help named the internal `flightdeck` package**
+  (audit Class A, rows A5/A6, docs/audits/CLI_HELP_2026-10-15.md).
+  `hscc --help` printed "Project-portfolio (flightdeck) commands: …" and
+  `hscc help project` printed "(flightdeck)" twice plus "Delegates to the
+  relocated flightdeck CLI under hscc-project/". The blurb is gone from both
+  surfaces and the sentence reads "Delegates to the relocated portfolio CLI
+  under hscc-project/." — the `hscc-project/` path stays (it is where the
+  code lives, and the (A) invariant targets the package NAME in rendered
+  text, not repo paths). `flightdeck` now appears nowhere in `hscc --help`,
+  any `hscc help <topic>`, or any group `--help` this card owns.
+- **The main help spilled at 80 and 120 columns** (audit Class B: 10 bare
+  wraps at width 80, 2 at width 120 — 'streams: …', '(default 7)',
+  'doctor …', 'auto).' at column 0). `_get_help_text` used hard two-column
+  strings up to 220 chars; Rich wrapped them and dropped continuations at
+  column 0. The section renderer is now budget-aware: a usage/description
+  pair stays one line while it fits 78 columns (the base's look), otherwise
+  the usage stands alone and the description wraps as hanging-indented
+  continuation — the two-line layout the cluster/template group help
+  already uses. Wording is the base's verbatim, re-flowed never reworded.
+  `hscc help kanban` (blocked/stale sentences at 121/111 cols) and
+  `hscc help project` (the delegates sentence at 123 cols) got the same
+  treatment inside COMMAND_HELP, authored to the 76-column budget the
+  cluster entry uses (print adds the 2-space prefix).
+- **`hscc advanced --help` exited 1 and printed the unknown-command blob**
+  (audit D-rc + the 220-char "Available:" line overflowing both mandated
+  widths). `advanced` was in neither `DAEMON_COMMANDS` nor `advanced_cmds`,
+  so `--help` fell through to the unknown-command print + exit 1. It now has
+  a real help path (COMMAND_HELP entry, rc 0) beside `start-daemon`'s.
+- **The ed-status / ed-install / ed-uninstall placeholder trio is DELETED**
+  (audit Class DEAD — 7 rules; operator fan-out ruling: delete, not hide).
+  The trio advertised "Event-driven mode … (placeholder, not yet available)"
+  in `hscc help advanced`, in the advanced `--help` rows and in COMMAND_HELP,
+  and dispatched to inert `cmd_ed_*` stubs. Help must not advertise commands
+  that do nothing. The three verbs are gone from every surface AND from
+  main()'s dispatch; `hscc help ed-*` now behaves like any unknown topic
+  (rc 1). The library functions `cmd_ed_*` stay in `cli.py` for their own
+  unit tests — the deletion is the CLI surface only.
+- **Surface honesty for the deletion**: the help-surface audit enumerated
+  the trio by name (surface + example oracle); with the commands gone those
+  probes would print "Unknown command" and become NEW (D-rc) findings, so
+  the enumeration loses them in the same commit. The gate's probe floor moved
+  180 → 178 — exactly what a healthy surface measures after the deletion
+  (151 paths), zero slack, so any further silent shrink still trips it.
+
+### Verified
+- `hscc_daemon/tests/test_hscc_cli.py` 31 passed (incl. 24 new alias
+  parametrizations + subgroup-mirror + shadow + epilog-advertised-form
+  pins); hscc-project targeted `test_project`/`test_project_lifecycle`/
+  `test_cli` 66 passed; the audit gate green (5 passed, 1 skipped) — no
+  NEW/STALE, all rewritten short-form examples parse-check clean.
+- Findings-artifact regeneration proven: `HSCC_CLI_HELP_WRITE_ARTIFACT=1`
+  writes the gitignored path; `hscc project link/digest/sessions --help`
+  smoke-tested (short + doubled forms) in a sandbox HOME. Full canonical
+  suite run against this exact commit before push; result recorded in the
+  t_36580090 completion metadata.
+- Tests (red-first on the base tree, green after): 26 unit cases — a
+  landmine fixture raising on every mutating/acting entry point
+  (`record_activity`/`save_config`/`autoup`/`_clear_intentional_block`/
+  cron-guard/interlock screens), explicit B8 "state files byte-identical"
+  assertions (contents + mtime of autodown.json + watchdog-block.json),
+  sub-help width <= 78, group paths unchanged, and a flag-value-position
+  landmine (`enable --idle-minutes --help` must not reach the verb) — plus 5
+  real-CLI cases driving `python -m hscc_daemon.hscc autodown <sub> --help`
+  under a sandbox HOME pre-seeded ARMED + PATH canaries (sparkrun/hermes/gh/
+  git): rc=0, zero new/changed files, zero canary trips.
+- Help-surface gate (t_7b0f65c8): the 7 `owner=BROKEN-AUTODOWN-*` rules in
+  `scripts/tests/cli_help_expected.json` pruned; all 8 autodown D/D-rc
+  findings gone. Mutation probe: disabling the intercept turns them NEW-red
+  and the newly-recorded BROKEN-KANBAN rule STALE-red (both directions).
+- `scripts/address_guard.py --repo .` exit 0; full canonical suite ALL GREEN.
+- Gate: `scripts/tests/test_cli_help_surface.py` green (5 passed, 1 skipped)
+  in the canonical `scripts` leg; findings artifact re-derived — 0 NEW, 0
+  STALE after pruning; parse-only example check: 69 examples, 0 failures.
+- `hscc-project` suite 1408 passed / 3 skipped; `hscc_daemon` suite 1474
+  passed / 3 skipped; full canonical suite ALL GREEN.
+- Real-CLI smoke at COLUMNS=80 and 120: `hscc project --help`, one `--help`
+  per fixed subcommand group — no `flightdeck` string, no `==SUPPRESS==`,
+  hidden verbs still invokable.
+- `scripts/address_guard.py --repo .` exit 0.
+- Findings doc: `docs/audits/CLI_HELP_2026-10-15.md` (ownership map, real
+  template/registry example data, B1–B12 "genuinely broken" `--help`
+  repros — report-only per operator ACK, separate cards); machine-readable:
+  `docs/audits/artifacts/CLI_HELP_FINDINGS.json`.
+- Gate suite: 6 cases green on the canonical interpreter in ~30 s via the
+  existing `scripts` leg of `scripts/run_tests.sh`; mutation probe
+  (inject a violation / prune a rule) verified red both ways.
+- `scripts/address_guard.py --repo .` exit 0.
+- Tests (red-first on the base tree — 45 of 51 fail before the fix, all green
+  after): landmine unit cases whose fake engine makes every verb CALL fatal
+  (and which count `_load_cluster_engine` calls, pinning "help for the inert
+  verbs does not even load the engine"), per-subcommand usage markers with no
+  cross-verb leakage, argv-shape landmines (`stop --id --help`,
+  `stop --help --dry-run`, `stop --theme --help` — the last one fails if the
+  intercept ever reads the STRIPPED argv instead of the raw slice), the up/down
+  F6-refusal regression pinned byte-for-byte, and a 78-column line budget on
+  every help path. Real-CLI cases re-run the exact audit probes under a
+  throwaway HOME + recording `sparkrun`/`hermes`/`gh`/`git` PATH canaries: rc
+  0, zero canary trips, zero new files under HOME, no ANSI, for both `--help`
+  and `-h` — the strongest evidence a help request shells out nothing. No
+  audit-engine change was needed: the new help lines stay inside the
+  (A)/(B)/(C) contracts unchanged (no examples emitted, so nothing new enters
+  the (C) parse-check pool).
+- Gate: the 2 `owner=BROKEN-CLUSTER` rules and the 4 read-only-shelling
+  `owner=F3` rules that this card clears are pruned by hand from
+  `scripts/tests/cli_help_expected.json` (45 → 39 rules; the rules are the
+  contract, every hunk reviewed, never regenerated — no other owner's rule
+  touched).
+- Mutation probes, three mutants, every one caught: (1) deleting the
+  intercept turns the gate NEW-red with 6 findings (`stop --help` canary trip
+  + rc=1 and the four read-only verbs' trips) and fails 45 tests; (2) reading
+  the stripped argv instead of the raw slice fails the `stop --theme --help`
+  landmine; (3) reverting `cmd_stop` to the base one-liner fails 6 of the 7
+  engine-guard cases (the positive control keeps passing, so the guard — not
+  the fixture — is what is measured).
+  `scripts/tests/test_cli_help_surface.py` 12 passed / 1 expected skip.
+- Tests (red-first on the base tree, green after): 12 cases in
+  `hscc_daemon/tests/test_serving_lazy_topology.py` drive REAL subprocesses
+  with a fake `sparkrun` on PATH that COUNTS every invocation (the audit's own
+  canary technique — an in-process monkeypatch cannot prove the import is
+  silent, the import IS the thing under test): `import hscc_daemon.serving` /
+  `import hscc_daemon.hscc` / `python -m hscc_daemon.hscc --help` shell ZERO
+  times in a fresh HOME; first real use shells EXACTLY once, resolves the fake
+  default cluster's primary (10.0.0.x placeholder) and rebuilds the vLLM
+  commands from it; 7 further reads in the same process shell ZERO more
+  (cached); a present `~/.hscc/cluster.json` shells ZERO; public names stay
+  importable (`from hscc_daemon.serving import PRIMARY_NODE` resolves through
+  the lazy path); fresh HOME with NO sparkrun anywhere — `hscc --help` exits 0
+  (the same fragility the import-time fallback caused); the resolver runs
+  exactly once even when the read happens mid-resolution (recursion guard).
+- Hermetic floor: autouse `_hermetic_topology` in the daemon conftest
+  materialises the documented defaults per test without any I/O (teardown
+  hands the names back to the lazy path), so a test that patches one topology
+  name and reads another can never reach the sparkrun fallback shell-out —
+  the `HSCC_SPARKRUN_BIN` override does not cover a `shell=True` string.
+- Help-surface gate (t_7b0f65c8): the `owner=BROKEN-IMPORT` rule in
+  `scripts/tests/cli_help_expected.json` pruned in this commit; the systemic
+  empty-HOME probe now measures zero trips. Mutation probe both ways:
+  re-injecting the import-time call turns the new unit tests red (3 import/
+  help zero-shell cases) AND turns the gate red NEW, and pre-prune the gate
+  went red STALE on exactly that rule.
+- Real-CLI smoke under `env -i` (empty HOME, PATH without sparkrun, without
+  `timeout`): `hscc --help` rc=0 with full help, nothing written under HOME.
+- `scripts/address_guard.py --repo .` exit 0; full canonical suite ALL GREEN
+  (hscc_daemon leg 1489 passed incl. the 12 new cases).
+- Tests (red-first on the base tree — 18 of 21 new cases fail before the fix,
+  all green after): two-line layout + wording-preservation for all eight
+  group entries, 78-col line budget on the group help and the up/down
+  refusal at COLUMNS 80 AND 120, canonical-whitespace guard proving the F6
+  refusal was re-wrapped and never re-worded, dangling-`--theme` refusal
+  budget, COMMAND_HELP cluster block width + verb-list pin, and real-CLI
+  probes of the exact audit invocations (`cluster --help`, `cluster up/down
+  --help`, `help cluster`) under a throwaway HOME + recording
+  `sparkrun`/`hermes`/`gh`/`git` PATH canaries at both widths: rc correct
+  (0 / 1 / 1 / 0), zero canary trips, zero new files under HOME, no ANSI.
+  Up/down help paths run against a fake engine whose verbs raise, pinning
+  "a refusal dispatches nothing".
+- Gate: pruned the 6 now-satisfied rules from
+  `scripts/tests/cli_help_expected.json` (39 -> 33): the 5 owner=F3 kind-B
+  wrap rules, plus the 1 owner=F5 `hscc help cluster` rule whose fix the
+  card body assigns to this card (COMMAND_HELP "cluster") — leaving it would
+  make the bipartite gate red. The 2 owner=F3 D-rc rules stay ON PURPOSE:
+  `up`/`down --help` keep the F6 refusal contract (rc=1), which the card
+  body mandates ("keep behavior"); the gate accepts them as expected rules.
+  Surface suite green (12 passed / 1 expected sibling-interpreter skip).
+- `scripts/tests/cli_help_expected.json`: the five `owner: F2` rules
+  (`B` x2 on `hscc template --help` at width 80/120, `D-rc` x3 on
+  `template preview|validate|apply --help`) are pruned in the same commit —
+  the STALE-half of the help-surface gate contract (t_7b0f65c8). The
+  `hscc help template` wrap rule stays: it lives in `COMMAND_HELP` and is
+  owned by F5.
+- Real-CLI smoke at `COLUMNS=80` and `COLUMNS=120`: `hscc template --help`,
+  `hscc help template`, and all five `hscc template <sub> --help` render
+  with no line over the width and exit 0.
+- Canonical suite green (`env -u CONDA_* bash scripts/run_tests.sh`);
+  `scripts/address_guard.py --repo .` exit 0.
+- Tests (red-first on the base tree): `hscc_daemon/tests/test_cli_help_f4_surfaces.py`,
+  47 cases — two-line layout + 78-column budget on both re-flowed group surfaces,
+  canonical-whitespace no-reword guards pinning every base description, the
+  uninstall path line driven through an absurdly long HOME (plus the
+  path-outside-HOME case, so ~-relativising is pinned as display, never as a
+  lie about which file was removed), kanban landmine fixtures making ANY board
+  read or recovery seam FATAL during a help path, argv-shape cases
+  (`blocked --recover --help`, `blocked --theme dark -h`, `stale --json -h`,
+  `stale --archive --help`) that fail if the intercept ever reads stripped argv,
+  the positive pins that `--recover` still dispatches and that both kanban entry
+  points render byte-identical `stale` help. Real-CLI cases re-run the exact
+  audit invocations at COLUMNS 80 and 120 under a throwaway HOME + recording
+  `sparkrun`/`hermes`/`gh`/`git` canaries: rc 0, zero new HOME files (above all
+  no `.hscc/daemon.log`), zero canary trips, no daemon-log-shaped line, no ANSI,
+  no line over budget. `blocked --recover` is never executed — it is mutating;
+  the recovery path is pinned through a monkeypatched seam only.
+- Gate: the 3 `owner=F4` rules and the 3 `owner=BROKEN-KANBAN` rules this card
+  clears are pruned by hand from `scripts/tests/cli_help_expected.json`
+  (39 → 33 rules; the rules are the contract, every hunk reviewed, never
+  regenerated — no other owner's rule touched). Post-fix audit: 89 → 63
+  findings, zero UNEXPECTED violations, zero rule over-counts, and
+  `scripts/tests/test_cli_help_surface.py` green.
+- Safety: no real sparkrun/fleet touched — sandbox HOME + exit-97 recording
+  canaries, and the kanban help paths run against landmines rather than a
+  board. Operator-owned monitor surfaces and every other card's rules are
+  byte-untouched.
+- Tests (red-first on the base tree — 25 of 30 new cases fail before the
+  fix, all 33 green after, incl. the 3 controls that pass on both trees):
+  dispatch landmines (`cmd_heal` + the breaker's state reader/writer RAISE,
+  so a `--help` reaching dispatch fails on the spot), the argv-shape case
+  `heal-clear <node> --help`, positive-dispatch pins (kwargs byte-pinned —
+  an over-eager always-help fix cannot pass them), the second-line-of-defence
+  guard via a tmp-redirected ledger, COMMAND_HELP existence + 76-col line
+  budget + EXEC_ECHO-wording absence, and real-CLI probes of the exact audit
+  invocations (`heal-clear --help`/`-h`, `heal-clear <node> --help`,
+  `heal-status --help`, `help heal-clear`, `help heal-status`) at COLUMNS 80
+  AND 120 under a throwaway HOME + recording `sparkrun`/`hermes`/`gh`/`git`
+  PATH canaries, against a PRE-SEEDED LIVE `heal-breaker.json` (in-window
+  strikes + alert/cleared stamps): file bytes AND mtime must not move, zero
+  canary trips, zero new files under HOME, rc 0, no ANSI, no breaker-panel
+  state rendered. A positive control (`heal-clear <node>` WITHOUT a help
+  token, same sandbox) proves the tripwire has teeth — that same file does
+  move when the verb really runs.
+- Gate: pruned the 3 now-satisfied owner=BROKEN-HEAL rules from
+  `scripts/tests/cli_help_expected.json` (27 -> 24) with a scripted
+  JSON-level check (only those 3 rules changed; every other owner's count
+  — F5 x20, F3 x2, MONITOR x2 — verified untouched). Surface suite green
+  (12 passed / 1 expected sibling-interpreter skip). Real-CLI audit
+  invocations re-run in the sandbox: B4/B5 signatures gone, the mutating
+  verb unchanged.
+- Tests (red-first on the base tree — all 40 fail before the fix, green
+  after): 30 unit cases — a landmine fixture raising on every mutating /
+  acting / forking entry point (`os.fork`, `daemon_ops.log/save_pid/
+  write_stopped/get_pid`, `_load_api_server`, `_warn_payload_drift`,
+  `_print_api_qr`, `api_launchd.install_api_plist/uninstall_api_plist`),
+  per-verb usage markers with no cross-verb leakage, flag-value-position
+  landmine (`start --port 9999 --help`, `start --theme --help` must not
+  reach the verb), PID/log files byte-identical (contents + mtime), verb
+  help width <= 78, group paths unchanged — plus 10 real-CLI cases driving
+  `python -m hscc_daemon.hscc api <verb> [--help|-h]` under a sandbox HOME
+  pre-seeded with api.pid + api-token, PATH canaries (sparkrun/hermes/gh/
+  git) and bound tripwire sockets on 8787/8788: rc=0, zero new/changed
+  files, no plist written, zero canary trips, zero port connections.
+- Help-surface gate (t_7b0f65c8): the 5 `owner=BROKEN-API-*` rules in
+  `scripts/tests/cli_help_expected.json` pruned. The audit engine's
+  hardcoded skip of `api start --help` (and its static D finding) are
+  GONE — the probe now really runs the exact B1 repro, defended by
+  bind-without-listen tripwire sockets in the Prober (a regressed fork dies
+  on EADDRINUSE instead of staying bound); the port/hang/new-file sensors
+  stay armed as the regression guard. Mutation probe (measured): reverting
+  the cmd_api intercept turns the scripts gate red — 31 NEW findings,
+  `hscc api start --help` (28: fork-path log lines + drift-banner B
+  overflows + api-token/api.log/api.pid written under the sandbox HOME),
+  `hscc api uninstall-service --help` (2: plist-body B overflows), `hscc
+  api install-service --help` (1). `api status --help` mints the token
+  first via the start probe in the same sandbox, so its B2 class is pinned
+  by the dedicated real-CLI test instead.
+- `scripts/address_guard.py --repo .` exit 0; full canonical suite ALL
+  GREEN (default interpreter, hermes venv 3.11: 11/11 legs incl. the
+  help-surface gate). Extra 3.13 (conda p313) stamp: one PRE-EXISTING gate
+  failure unrelated to this change — `EXTRA x15 (baseline 14) [A] hscc
+  project --help contains 'flightdeck'` (interpreter-dependent argparse
+  rendering of the F1-owned project help surface). Reproduces byte-identical
+  on base ccdf9a0c with the same interpreter; the 10 api-group surfaces are
+  clean on both interpreters.
+- `scripts/tests/test_cli_help_surface.py`: 8 → **13** cases (the 127-case
+  `scripts` leg green on BOTH interpreters — hermes venv 3.11.16 and conda
+  p313 3.13.12, where the gate was red before this fix). New pins:
+  `test_a_counts_match_committed_table` (committed per-surface (A) table
+  `scripts/tests/cli_help_a_counts.json` — fails the moment an (A) count
+  becomes rendering-dependent, no subprocess),
+  `test_a_table_identical_under_sibling_interpreters` (runs the audit's new
+  `--a-table` pass under every sibling CPython on PATH and asserts table
+  equality inside a single leg), plus four pure-function pins of the
+  fragment/canonicalisation rules and the `A-WIDTH` guard. Mutation-proven
+  both directions: a genuinely NEW flightdeck help line injected on a clean
+  surface (`hscc cluster`) went NEW-red exactly once despite wrapping at
+  width 80 (wide-only neither swallows nor double-counts), and clearing the
+  leak without pruning its rule went STALE-red as designed.
+- Tests (red-first on the base tree):
+  `hscc_daemon/tests/test_toplevel_cli_help_f5.py`, 60 cases (44 fail at the
+  base 8906e151 in a scratch worktree) — Class-A
+  absence pins on `hscc --help` / `hscc help project` (blurb gone, surface
+  still says what the group is), the 78-column budget + no-column-0-spill
+  pins at COLUMNS 80/120/terminal-default, canonical-whitespace no-reword
+  guards pinning every base description verbatim, the two over-budget
+  template verbs pinned as usage-alone + hanging-indent, COMMAND_HELP
+  authored-budget (<= 76) for every multi-line entry, the `advanced --help`
+  rc-0 path (and that the unknown-command blob stays alive for real unknown
+  verbs), ed-* deletion pins on help, COMMAND_HELP, dispatch (source-level)
+  and the "library functions stay" scope pin, audit-surface pins that the
+  enumeration dropped exactly 6 paths / 9 probes (151/178) and keeps
+  `advanced`/`start-daemon`. Real-CLI cases re-run the exact audit
+  invocations at COLUMNS 80 and 120 under a throwaway HOME + recording
+  `sparkrun`/`hermes`/`gh`/`git` canaries: rc 0 everywhere (rc 1 only for
+  the deleted trio's `--help`/`hscc help`), zero new HOME files, zero canary
+  trips, no daemon-log-shaped line, no ANSI, no line over budget. Mutating
+  verbs are never executed. Sibling pins updated in
+  `test_unified_cli.py` (the `help advanced` ed-* listing and the A6
+  "flightdeck present" pin flipped to the new contract) and
+  `test_cli_rich_handlers.py` (advanced render is start-daemon only).
+- Gate: the 20 `owner=F5` rules this card clears are pruned by a scripted
+  JSON-level edit (27 → 7 rules; pattern-unique check + per-rule identity,
+  per-owner counts verified: BROKEN-HEAL ×3, F3 ×2, MONITOR ×2 untouched);
+  `scripts/tests/cli_help_a_counts.json` re-cut with
+  `scripts/gen_cli_help_a_baseline.py` and the diff reviewed (the
+  `hscc help project` lines lose the two (A) hits, the re-flowed `hscc
+  --help` lines are identical content); post-fix audit zero UNEXPECTED
+  violations, zero rule over-counts, `scripts/tests/test_cli_help_surface.py`
+  green on both interpreters.
+- Safety: no real fleet/board/daemon touched — sandbox HOME + exit-97
+  recording canaries in every real-CLI case; the deleted trio's post-deletion
+  probes (`ed-* --help`, `hscc help ed-*`) are print-only unknown-command
+  paths verified inert by the same canaries.
 ## [2.9.1] - 2026-10-15
 
 ### Added
