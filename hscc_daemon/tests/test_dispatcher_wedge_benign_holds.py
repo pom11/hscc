@@ -408,6 +408,14 @@ def _show_with_guard(tid, reason, age_s, now):
 @pytest.fixture()
 def cli_available(monkeypatch):
     monkeypatch.setattr(dw, "_hermes_cli_argv", lambda: ["hermes", "kanban"])
+    # Fake assignees ("worker-a") are not real profiles. Under the Hermes venv
+    # `hermes_cli.profiles` imports, so without this pin they read as
+    # non-spawnable and skip the hold-evidence path these tests exercise.
+    monkeypatch.setattr(dw, "_assignee_is_nonspawnable", lambda assignee: False)
+    # max_per_profile=None falls back to the LIVE ~/.hermes config (cap 2 on
+    # the operator's box); three running worker-a rows would then be
+    # "explained" by the per-profile cap instead of the hold under test.
+    monkeypatch.setattr(dw, "_read_max_per_profile", lambda: None)
 
 
 class TestBoardStateGate:
