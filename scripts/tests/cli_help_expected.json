@@ -19,14 +19,6 @@
       "example": "width=80 overflow:   hscc cluster monitor                 one CPU/RAM/GPU snapshot (sparkrun's JSON frame)"
     },
     {
-      "kind": "D",
-      "command": "hscc heal-clear --help",
-      "needle": "executed the mutating verb",
-      "owner": "BROKEN-HEAL",
-      "count_at_baseline": 1,
-      "example": "--help executed the mutating verb (output echo: 'No strikes recorded for --help')"
-    },
-    {
       "kind": "D-rc",
       "command": "hscc cluster down --help",
       "needle": "exited 1",
@@ -39,22 +31,6 @@
       "command": "hscc cluster up --help",
       "needle": "exited 1",
       "owner": "F3",
-      "count_at_baseline": 1,
-      "example": "--help exited 1 (expected 0)"
-    },
-    {
-      "kind": "D-rc",
-      "command": "hscc help heal-clear",
-      "needle": "exited 1",
-      "owner": "BROKEN-HEAL",
-      "count_at_baseline": 1,
-      "example": "--help exited 1 (expected 0)"
-    },
-    {
-      "kind": "D-rc",
-      "command": "hscc help heal-status",
-      "needle": "exited 1",
-      "owner": "BROKEN-HEAL",
       "count_at_baseline": 1,
       "example": "--help exited 1 (expected 0)"
     }
