@@ -75,7 +75,12 @@ append a FIXED note; do not rewrite the historical row.
   x both widths = 34 runs, all ok — rc as designed, zero trips, zero new
   HOME files, no ANSI, no line over budget on help surfaces, no placeholder
   text, no rendered flightdeck
-- [ ] pushed; sha reported
+- [ ] re-stamp on the MERGED tip (lane advanced mid-run: BROKEN-HEAL landed
+  as b97b4b48 -> merge 18ce7727 + test rebase 7a9dcba7): surface gate green
+  (12 pass/1 skip), bipartite 0 NEW / 0 STALE / 0 OVER (12 findings <-> 4
+  rules: F3 D-rc x2 + MONITOR B x10), rules file = union of both prunes
+  (27 - 20 - 3 = 4); canonical suite ALL GREEN both interpreters on frozen 7a9dcba7 (FROZEN_TIP==TIP_AFTER verified)
+- [ ] pushed; sha reported (branch wt/t_fc307a51 pushed; final doc commit TBD)
 
 ## Follow-ups found (NOT folded into F5 — recorded per protocol)
 
