@@ -406,3 +406,48 @@ report as the appendix below.
 | `wt/t_cfdcefa9` | `c272e49f` | byte-identical pick |
 
 Total: 65 branches.
+
+## Final state (post-deletion, appended after execution)
+
+Executed on origin (normal `git push origin --delete`, batched by proof family,
+no force, no rewrites, no tag changes):
+
+- **Deleted 65 branches** — every entry of Appendix A. Post-delete
+  `git ls-remote origin refs/heads/*`: **102 heads** remain
+  (165 pre-run + 2 branches created during the window by sibling workers
+  (`wt/t_5132deb3`, `wt/t_f47f89d2` this report's own branch) − 65 deleted).
+- **Zero** delete-set branches remain on origin (verified by `ls-remote`
+  after each batch; final verify: 0 remaining).
+- Open-PR heads all intact: #34 wt/t_b7458cf4, #35 wt/t_1e54481a,
+  #36 wt/t_ac795424, #37 wt/t_6e1e8443, #38 fix/nav-graph-2026-10-15,
+  #39 wt/t_e286c4b9, #40 wt/t_39d7c915, #41 release/2.10.0 — re-checked live
+  immediately before deletion (delete-set ∩ open heads = empty; tip drift =
+  none; origin/main still baf98413 so every proof applies unchanged).
+- `backup/pr19-pre-20260818-090812` NOT deleted (deferred, see Deferred section).
+- KEEP branches NOT deleted.
+
+Recovery anchors created BEFORE deletion: **65 refs** under
+`refs/hygiene-2026-10-17/<branch>` in the local main checkout
+(`/Users/desac/dev/hscc`), each pinned to the deleted tip recorded in
+Appendix A. Restore any single branch with:
+
+```
+git branch <name> refs/hygiene-2026-10-17/<name>   # local
+git push origin <name>                              # if it must go back to origin
+```
+
+Local cleanup performed (metadata only, no origin effect):
+
+- `git fetch origin --prune` — tracking refs now mirror origin exactly
+  (103 refs incl. HEAD).
+- Stale non-origin remote refs removed after `ls-remote` proved the branches
+  absent upstream: `refs/remotes/ops/dev`, `refs/remotes/wt-api-cli-theme`.
+- `git worktree prune` — 5 dead registrations removed (worktrees whose
+  directories kanban had already cleaned; among them t_160d306f, t_3aadd2c0,
+  t_79015ab0, t_e286c4b9); remaining `git worktree list` entries all point at
+  live directories (0 missing, 0 prunable).
+
+The 11 flagged-branch families in the KEEP section (guard-fix trio,
+dispatcher_wedge fix, iOS audit corpus, PR#38-stacked branches, feat/fix-aux-ip)
+were NOT touched — they hold real unlanded work per the standing rule and
+await an operator decision (open PRs / harvest / explicit retire).
