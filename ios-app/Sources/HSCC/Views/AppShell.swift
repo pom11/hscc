@@ -2,11 +2,14 @@ import SwiftUI
 
 // MARK: - App shell (IOS_REDESIGN 2026-10-14 §3)
 //
-// One app-wide `NavigationStack` inside a `NavigationSplitView` drawer replaces
-// the old three-tab TabView. On iPhone (compact width) NavigationSplitView
-// renders the sidebar as a slide-over drawer with the system's own top-left
-// toggle and edge-swipe reveal — requirement 2, without hand-rolling a
-// gesture that fights the transcript's scroll.
+// One app-wide `NavigationStack` replaces the old three-tab TabView. The
+// drawer (t_5ed5d281) is a slide-over panel the shell owns, NOT the compact
+// column of a NavigationSplitView: on iPhone compact (iOS 26.3) the system
+// sidebar column is a dead end — no dismiss affordance of any kind once it
+// takes the screen, row taps never leave it, and the documented column
+// controls are inert (verified RED-first on the iPhone 16 simulator in
+// UITests/DrawerNavigationUITests.swift). Explicit `drawerOpen`/`drawerClose`
+// buttons replace the system toggle and the (non-existent) swipe-back.
 //
 // The home screen alone carries the dock (§3.2); every other screen reaches
 // everything through the drawer. Deep links keep working: `DeepLinkRouter.
@@ -138,15 +141,85 @@ struct AppShell: View {
         return .home
     }
 
+    /// Whether the drawer is on screen (t_5ed5d281). The drawer is NOT the
+    /// NavigationSplitView sidebar column any more: on iPhone compact
+    /// (iOS 26.3) that column is a dead end — once the system presents it
+    /// (toggle/edge-swipe) it exposes ZERO dismiss affordances, row taps do
+    /// not switch columns, and both column controls the field brief names
+    /// (`preferredCompactColumn`, `columnVisibility`) are inert from the app
+    /// side in BOTH directions (RED evidence: DrawerNavigationUITests,
+    /// iPhone 16 sim, this card). The shell therefore owns the presentation
+    /// outright: a slide-over panel over the one app-wide stack. Any row
+    /// activation closes it (`go`), the panel's own close button closes it,
+    /// and the `drawerOpen` toolbar button — visible on every screen's nav
+    /// bar — opens it. `HSCC_DEBUG_OPEN_DRAWER=1` starts inside the drawer
+    /// so the XCUITest walk begins in the operator's exact stuck state;
+    /// Release builds only ever see `false`.
+    @State private var drawerOpen = AppShell.initialDrawerOpen()
+
+    static func initialDrawerOpen() -> Bool {
+        #if DEBUG
+        if DebugHarness.openDrawerAtLaunch { return true }
+        #endif
+        return false
+    }
+
+    #if DEBUG
+    /// NEGATIVE-TEST seam for the nav-graph walker (t_810ab152): with
+    /// `HSCC_DEBUG_NEGATE_BACK=1` the shell's drawer affordances — the
+    /// `drawerOpen` toolbar button and the `drawerClose` button — are not
+    /// rendered. A walker that cannot go RED when the way back disappears is
+    /// not a gate; `nav_graph_check.sh` runs the walk once under this flag and
+    /// REQUIRES it to fail naming the screen. Debug-only like every other
+    /// harness seam (the Release build reads the literal `false` below and
+    /// the affordances are unconditionally present).
+    private var negateBackForTest: Bool {
+        ProcessInfo.processInfo.environment["HSCC_DEBUG_NEGATE_BACK"] == "1"
+    }
+    #else
+    private var negateBackForTest: Bool { false }
+    #endif
+
+    /// The app-owned drawer entry (t_5ed5d281), split out only so the
+    /// negative-test seam above can omit it in one place.
+    private var drawerOpenButton: some View {
+        Button {
+            openDrawer()
+        } label: {
+            Image(systemName: "sidebar.left")
+        }
+        .accessibilityLabel("Menu")
+        .accessibilityIdentifier("drawerOpen")
+    }
+
+    private func openDrawer() {
+        withAnimation(.easeInOut(duration: 0.2)) { drawerOpen = true }
+    }
+
+    private func closeDrawer() {
+        withAnimation(.easeInOut(duration: 0.2)) { drawerOpen = false }
+    }
+
     /// Queued messages dropped because the user switched clusters mid-queue
     /// (t_42ba90d2) — surfaced here so nothing is silently lost.
     @State private var droppedBanner: [OfflineSendQueue.QueuedMessage]?
 
     var body: some View {
-        NavigationSplitView {
-            Sidebar(selection: drawerBinding, approvalCount: approvals.pendingCount)
-                .navigationTitle("HSCC")
-        } detail: {
+        ZStack(alignment: .leading) {
+            #if DEBUG
+            // Live served-count probe for the walker's pull-to-refresh
+            // receipt (DebugHarness.ptrProbeFeed). Off the visible canvas
+            // (the offset pushes it below the safe area, off-screen) but IN
+            // the AX tree — the XCUITest runner reads it with a label query
+            // and never taps it. Renders on fixture launches that opt in;
+            // nothing else ever sees it.
+            if let feed = DebugHarness.ptrProbeFeed, DebugHarness.fixturesEnabled {
+                PtrProbeView(feed: feed)
+                    .accessibilityIdentifier("ptrProbe")
+                    .offset(y: 1200)
+                    .allowsHitTesting(false)
+            }
+            #endif
             NavigationStack(path: $router.projectsPath) {
                 destinationView(selection ?? .home)
                     .navigationDestination(for: AppDestination.self) { destinationView($0) }
@@ -158,17 +231,56 @@ struct AppShell: View {
                     .navigationDestination(for: ProjectRoute.self) { route in
                         projectRouteView(route)
                     }
+                    .toolbar {
+                        // THE drawer entry (t_5ed5d281): an explicit, app-owned
+                        // affordance on every screen — the system's compact
+                        // split-view toggle was the only opener before, and it
+                        // vanishes the moment the drawer takes the screen.
+                        // Trailing on purpose: HomeView already owns the
+                        // leading spot (its search button); the drawer entry
+                        // sits opposite it, where no screen's own leading
+                        // item can crowd it out.
+                        ToolbarItem(placement: .topBarTrailing) {
+                            if !negateBackForTest {
+                                drawerOpenButton
+                            }
+                        }
+                    }
             }
             .id(settings.activeClusterID)   // cluster switch = clean rebuild
+            // The drawer is a modal surface: while it is up, the screen
+            // behind it is not part of the accessibility tree (same rule a
+            // sheet follows — and it keeps row labels like "Home" unique to
+            // the drawer for tests and VoiceOver alike).
+            .accessibilityHidden(drawerOpen)
+
+            if drawerOpen {
+                drawerOverlay
+            }
         }
         .overlay(alignment: .bottom) { dropBanner }
         .onReceive(OfflineSendQueue.shared.$drainedDueToClusterSwitch) { dropped in
             droppedBanner = dropped
         }
         .onAppear {
+            // t_810ab152: quiet-poller fixture launches (the walker's PTR
+            // pass) skip the two BADGE pollers — ApprovalPoller's 60 s
+            // kanban/blocked and StreamReplyWatcher's 30 s projects/session
+            // polls bump the same served counters the walker reads as
+            // pull-to-refresh receipts, and a timer increment is not proof
+            // the gesture fired. Purely informational badges; zero navigation
+            // change; default-off so capture_screens.sh is untouched.
+            #if DEBUG
+            if !DebugHarness.quietPollers {
+                approvals.setClient(makeClient())
+                replyWatcher.setClient(makeClient())
+                NotificationCoordinator.shared.setClient(makeClient())
+            }
+            #else
             approvals.setClient(makeClient())
             replyWatcher.setClient(makeClient())
             NotificationCoordinator.shared.setClient(makeClient())
+            #endif
             router.setClient(makeClient())
             seedOfflineQueue()
             applyPendingTabRequest()
@@ -198,6 +310,11 @@ struct AppShell: View {
         .onChange(of: router.requestedTab) { _, requested in
             guard let requested else { return }
             selection = normalized(AppDestination(tab: requested))
+            // A deep link/tab request must actually LAND on its destination —
+            // if the drawer happens to be open it must not stay over it
+            // (t_5ed5d281: the drawer is now an app-owned surface, the
+            // system column hid this case behind the dead end).
+            closeDrawer()
             router.requestedTab = nil
         }
         .alert("Couldn't open that link", isPresented: Binding(
@@ -280,6 +397,59 @@ struct AppShell: View {
         }
     }
 
+    /// The drawer itself (t_5ed5d281): a slide-over panel the shell presents
+    /// and dismisses through its own buttons — the one presentation on iPhone
+    /// compact that provably leaves (RED evidence in the header comment).
+    /// The dim scrim closes it too (tap-outside, the gesture users expect).
+    private var drawerOverlay: some View {
+        ZStack(alignment: .leading) {
+            Button {
+                closeDrawer()
+            } label: {
+                Rectangle().fill(.ultraThinMaterial)
+                    .ignoresSafeArea()
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close menu")
+            .accessibilityIdentifier("drawerScrim")
+
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    Text("HSCC")
+                        .font(.largeTitle.bold())
+                        .foregroundColor(Theme.Semantic.onSurface)
+                    Spacer()
+                    // The negative-test seam (t_810ab152) omits the close too:
+                    // under HSCC_DEBUG_NEGATE_BACK=1 the drawer is a real trap,
+                    // which is what the walker's negative run must catch.
+                    if !negateBackForTest {
+                        Button {
+                            closeDrawer()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.title2)
+                                .foregroundColor(Theme.Semantic.onSurfaceMuted)
+                                .frame(minWidth: 44, minHeight: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Close menu")
+                        .accessibilityIdentifier("drawerClose")
+                    }
+                }
+                .padding(.horizontal, Theme.Spacing.lg.rawValue)
+                .padding(.top, Theme.Spacing.md.rawValue)
+                .padding(.bottom, Theme.Spacing.xs.rawValue)
+
+                Sidebar(selection: drawerBinding, approvalCount: approvals.pendingCount)
+            }
+            .frame(maxWidth: 320)
+            .frame(maxHeight: .infinity)
+            .background(Theme.Semantic.surfaceRaised)
+            .transition(.move(edge: .leading))
+        }
+    }
+
     /// Drawer selection with the stack-consistency rule (see `go`). Both the
     /// Sidebar and Home's hero/tiles/dock drive the root through this.
     private var drawerBinding: Binding<AppDestination?> {
@@ -323,12 +493,17 @@ struct AppShell: View {
     private func go(_ destination: AppDestination?) {
         selection = normalized(destination)
         router.projectsPath = []
+        // THE dead-end fix (t_5ed5d281): any row activation leaves the drawer
+        // — ALWAYS, even when the selection value is unchanged (Home re-tap
+        // while Home is current, the operator's stuck case).
+        closeDrawer()
     }
 
     /// Legacy deep-link / intent tabs map onto drawer destinations.
     private func applyPendingTabRequest() {
         if let requested = router.requestedTab {
             selection = normalized(AppDestination(tab: requested))
+            closeDrawer()   // same rule as the requestedTab onChange (t_5ed5d281)
             router.requestedTab = nil
         }
     }
@@ -422,6 +597,28 @@ extension AppDestination {
 // fleet-wide up/down mutations — an unusable-but-present client would render
 // those buttons against `unconfigured.invalid`, where a connect gate is the
 // honest surface.
+
+#if DEBUG
+/// The AX probe AppShell renders for the walker (see AppShell.body): polls
+/// the fixture protocol's served counter for `feed` twice a second and
+/// publishes "ptr:<feed>:<count>" as its AX label. DEBUG-compiled only.
+struct PtrProbeView: View {
+    let feed: String
+    @State private var count = 0
+
+    var body: some View {
+        Text("ptr:\(feed):\(count)")
+            .font(.system(size: 1))
+            .foregroundColor(.clear)
+            .task {
+                while !Task.isCancelled {
+                    count = FixtureURLProtocol.servedCount(forPath: feed)
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
+            }
+    }
+}
+#endif
 
 #Preview("Shell — home") {
     let center = ProjectUnreadCenter()
