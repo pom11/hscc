@@ -14,7 +14,15 @@ set -euo pipefail
 JOB="hscc-dep-watcher"
 SCHEDULE="${HSCC_DEP_WATCHER_SCHEDULE:-0 8 * * *}"   # daily 08:00 (cron spec)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HERMES_SCRIPTS="$HOME/.hermes/scripts"
+# DRIFT RULE (t_3aadd2c0): `hermes cron create --script NAME` resolves NAME only
+# against <bound home>/scripts, and profiles never share files — the bound home
+# is $HERMES_HOME (default ~/.hermes). The old installer hard-coded the shared
+# ~/.hermes/scripts while the job bound to the INVOKING profile's home, so
+# installing from a profile produced a job whose script could never be found:
+# hscc-dep-watcher failed 17 consecutive daily runs that way. The install dir
+# and the cron binding must resolve from the SAME home — derive both here.
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+HERMES_SCRIPTS="$HERMES_HOME/scripts"
 HERMES="$HOME/.hermes/hermes-agent"
 HERMES_BIN="$HERMES/venv/bin/hermes"
 [ -x "$HERMES_BIN" ] || HERMES_BIN="hermes"
