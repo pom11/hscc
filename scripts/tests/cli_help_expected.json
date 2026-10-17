@@ -3,54 +3,6 @@
   "note": "Baseline expectations for scripts/tests/test_cli_help_surface.py. A fix card prunes the rules it clears; an unmatched rule fails the gate (stale) and an unmatched finding fails it (new violation).",
   "rules": [
     {
-      "kind": "A",
-      "command": "hscc --help",
-      "needle": "flightdeck",
-      "owner": "F5",
-      "count_at_baseline": 1,
-      "example": "project <cmd> Project-portfolio (flightdeck) commands: standup verify doctor ..."
-    },
-    {
-      "kind": "A",
-      "command": "hscc help project",
-      "needle": "flightdeck",
-      "owner": "F5",
-      "count_at_baseline": 2,
-      "example": "Project-portfolio (flightdeck) commands."
-    },
-    {
-      "kind": "B",
-      "command": "hscc --help",
-      "needle": "width=120",
-      "owner": "F5",
-      "count_at_baseline": 2,
-      "example": "width=120 bare-wrap: placement (live) layer unless --structural-only. Exit non-zero if either layer fails."
-    },
-    {
-      "kind": "B",
-      "command": "hscc --help",
-      "needle": "width=80",
-      "owner": "F5",
-      "count_at_baseline": 10,
-      "example": "width=80 bare-wrap: triggers"
-    },
-    {
-      "kind": "B",
-      "command": "hscc advanced --help",
-      "needle": "width=120",
-      "owner": "F5",
-      "count_at_baseline": 1,
-      "example": "width=120 overflow: Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, project, api, kanban, verify, stats, throughput, autoscale, escalate, start-daemon, heal-clear,"
-    },
-    {
-      "kind": "B",
-      "command": "hscc advanced --help",
-      "needle": "width=80",
-      "owner": "F5",
-      "count_at_baseline": 1,
-      "example": "width=80 overflow: Available: start, stop, status, check, watch, triggers, notify, plist, install, uninstall, log, cluster, template, profiles, project, api, kanban, verify, stats, throughput, autoscale, escalate, start-daemon, heal-clear, "
-    },
-    {
       "kind": "B",
       "command": "hscc cluster monitor --help",
       "needle": "width=80",
@@ -67,68 +19,12 @@
       "example": "width=80 overflow:   hscc cluster monitor                 one CPU/RAM/GPU snapshot (sparkrun's JSON frame)"
     },
     {
-      "kind": "B",
-      "command": "hscc help advanced",
-      "needle": "width=120",
-      "owner": "F5",
-      "count_at_baseline": 2,
-      "example": "width=120 bare-wrap: (placeholder, not yet available)  ed-install      Event-driven mode install (placeholder, not yet available)  "
-    },
-    {
-      "kind": "B",
-      "command": "hscc help advanced",
-      "needle": "width=80",
-      "owner": "F5",
-      "count_at_baseline": 3,
-      "example": "width=80 bare-wrap: ed-status       Event-driven mode status (placeholder, not yet available)  "
-    },
-    {
-      "kind": "B",
-      "command": "hscc help kanban",
-      "needle": "width=120",
-      "owner": "F5",
-      "count_at_baseline": 1,
-      "example": "width=120 overflow:   blocked [--json]: list BLOCKED cards with why; blocked --recover <id> [--reason <t>]: recover one blocked card to ready"
-    },
-    {
-      "kind": "B",
-      "command": "hscc help kanban",
-      "needle": "width=80",
-      "owner": "F5",
-      "count_at_baseline": 2,
-      "example": "width=80 overflow:   blocked [--json]: list BLOCKED cards with why; blocked --recover <id> [--reason <t>]: recover one blocked card to ready"
-    },
-    {
-      "kind": "B",
-      "command": "hscc help project",
-      "needle": "width=120",
-      "owner": "F5",
-      "count_at_baseline": 1,
-      "example": "width=120 overflow:   Delegates to the relocated flightdeck CLI under hscc-project/. Try 'hscc project --help' for the full subcommand surface."
-    },
-    {
-      "kind": "B",
-      "command": "hscc help project",
-      "needle": "width=80",
-      "owner": "F5",
-      "count_at_baseline": 1,
-      "example": "width=80 overflow:   Delegates to the relocated flightdeck CLI under hscc-project/. Try 'hscc project --help' for the full subcommand surface."
-    },
-    {
       "kind": "D",
       "command": "hscc heal-clear --help",
       "needle": "executed the mutating verb",
       "owner": "BROKEN-HEAL",
       "count_at_baseline": 1,
       "example": "--help executed the mutating verb (output echo: 'No strikes recorded for --help')"
-    },
-    {
-      "kind": "D-rc",
-      "command": "hscc advanced --help",
-      "needle": "exited 1",
-      "owner": "F5",
-      "count_at_baseline": 1,
-      "example": "--help exited 1 (expected 0)"
     },
     {
       "kind": "D-rc",
@@ -161,62 +57,6 @@
       "owner": "BROKEN-HEAL",
       "count_at_baseline": 1,
       "example": "--help exited 1 (expected 0)"
-    },
-    {
-      "kind": "DEAD",
-      "command": "hscc ed-install --help",
-      "needle": "not yet available",
-      "owner": "F5",
-      "count_at_baseline": 1,
-      "example": "Event-driven mode install (placeholder, not yet available)"
-    },
-    {
-      "kind": "DEAD",
-      "command": "hscc ed-status --help",
-      "needle": "not yet available",
-      "owner": "F5",
-      "count_at_baseline": 1,
-      "example": "Event-driven mode status (placeholder, not yet available)"
-    },
-    {
-      "kind": "DEAD",
-      "command": "hscc ed-uninstall --help",
-      "needle": "not yet available",
-      "owner": "F5",
-      "count_at_baseline": 1,
-      "example": "Event-driven mode uninstall (placeholder, not yet available)"
-    },
-    {
-      "kind": "DEAD",
-      "command": "hscc help advanced",
-      "needle": "not yet available",
-      "owner": "F5",
-      "count_at_baseline": 5,
-      "example": "ed-status       Event-driven mode status (placeholder, not yet available)"
-    },
-    {
-      "kind": "DEAD",
-      "command": "hscc help ed-install",
-      "needle": "not yet available",
-      "owner": "F5",
-      "count_at_baseline": 1,
-      "example": "Event-driven mode install (placeholder, not yet available)"
-    },
-    {
-      "kind": "DEAD",
-      "command": "hscc help ed-status",
-      "needle": "not yet available",
-      "owner": "F5",
-      "count_at_baseline": 1,
-      "example": "Event-driven mode status (placeholder, not yet available)"
-    },
-    {
-      "kind": "DEAD",
-      "command": "hscc help ed-uninstall",
-      "needle": "not yet available",
-      "owner": "F5",
-      "count_at_baseline": 1,
-      "example": "Event-driven mode uninstall (placeholder, not yet available)"
     }
   ]
 }
