@@ -111,17 +111,34 @@ yourself first:
 '--theme <name>' selects the human palette.""",
 }
 
+# Two-line layout per verb (F4, docs/audits/CLI_HELP_2026-10-15.md Class B):
+# the usage line stands alone, the description goes on an indented continuation
+# line. The old two-column block overflowed the help-surface gate at BOTH
+# mandated widths (the install-service/uninstall-service entries at 116 cols
+# failed even width 120) because Rich does NOT wrap a pre-formatted string —
+# on a non-tty stdout the group console is fixed at width 200 (see _console),
+# so COLUMNS is ignored and a hard line simply stays hard. That is why every
+# line below is authored <= 74 columns: it must survive the widest console this
+# group can print from, not just the 80/120 the gate measures.
+# Wording is the base's verbatim — this surface is re-flowed, never reworded.
 HELP_TEXT = """\
 HSCC API server — HTTP API for external apps (e.g. the iOS client).
 
 Usage: hscc api <subcommand> [args]
 
-  hscc api start [--tailscale] [--bind <ip>] [--port <n>] [--no-qr]   Start the API server in the background
-  hscc api stop                                                       Stop the running API server
-  hscc api status [--no-qr]                                           Show running/stopped + bound host:port
-  hscc api install-service                                            OPT-IN: write the launchd unit (boot-resilient API; loading stays manual)
-  hscc api uninstall-service                                          Remove the launchd unit file written by install-service
-  hscc api --help                                                     This help
+  hscc api start [--tailscale] [--bind <ip>] [--port <n>] [--no-qr]
+      Start the API server in the background
+  hscc api stop
+      Stop the running API server
+  hscc api status [--no-qr]
+      Show running/stopped + bound host:port
+  hscc api install-service
+      OPT-IN: write the launchd unit (boot-resilient API;
+      loading stays manual)
+  hscc api uninstall-service
+      Remove the launchd unit file written by install-service
+  hscc api --help
+      This help
 
 Bind defaults to loopback (127.0.0.1). '--tailscale' or '--bind <ip>' opt in
 to exposing it on the tailnet / a specific IP. 0.0.0.0 is always refused.
@@ -652,6 +669,27 @@ def _handle_install_service(argv, theme_name=None):
     return 0
 
 
+def _display_plist_path(path: str) -> str:
+    """Render a LaunchAgent path as ``~/Library/…`` when it is under HOME.
+
+    F4 (docs/audits/CLI_HELP_2026-10-15.md Class B): the base emitted this
+    path inline in one hard sentence, so a HOME with an unusually long root
+    (the audit probes under a sandbox HOME) produced an 87-120+ column line
+    that overflowed the help-surface gate at BOTH mandated widths. Rich cannot
+    help: a filesystem path has no break opportunity, and on a non-tty stdout
+    this group's console is fixed at width 200, so nothing re-wraps it.
+
+    ``API_PLIST_PATH`` is always ``~/Library/LaunchAgents/…`` by construction
+    (api_launchd.API_PLIST_PATH), so the ``~``-relative form loses nothing an
+    operator needs and is width-independent. A path outside HOME (only
+    possible if something rebinds API_PLIST_PATH) is returned verbatim.
+    """
+    home = os.path.expanduser("~")
+    if home and path.startswith(home + os.sep):
+        return "~" + path[len(home):]
+    return path
+
+
 def _handle_uninstall_service(argv, theme_name=None):
     """Remove the launchd unit FILE. Bootout first, yourself:
     `launchctl bootout gui/$UID/com.hscc.api` (this command never execs
@@ -660,13 +698,17 @@ def _handle_uninstall_service(argv, theme_name=None):
     from hscc_daemon import api_launchd
     res = api_launchd.uninstall_api_plist()
     console = _console(theme_name)
+    # The path always gets its OWN indented line (F4, see _display_plist_path):
+    # the absolute path must never be padded into a sentence, whatever its
+    # length — that is what made this line overflow the (B) gate.
     if res["removed"]:
-        console.print(f"removed {res['path']}")
+        console.print(f"removed (launchd unit file):\n  {_display_plist_path(res['path'])}")
         console.print(
             "If it was loaded, unload it now:\n"
             f"  launchctl bootout gui/$UID/{api_launchd.API_LABEL}")
     else:
-        console.print(f"no unit file at {res['path']} (nothing to remove)")
+        console.print("no unit file — nothing to remove:\n"
+                      f"  {_display_plist_path(res['path'])}")
     return 0
 
 

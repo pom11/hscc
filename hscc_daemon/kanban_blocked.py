@@ -64,6 +64,39 @@ Usage: hscc kanban <subcommand> [args]
   hscc kanban --help          This help
 """
 
+# Flags that mean "print help, execute nothing" at the subcommand level
+# (BROKEN B10, card t_a166be3d). Intercepted in cmd_kanban BEFORE dispatch.
+SUB_HELP = ("--help", "-h")
+
+# Per-subcommand help, printed INSTEAD of running the verb when --help/-h
+# appears anywhere in that verb's argv (B10: the base only honoured --help as
+# the GROUP's first token — `blocked --help` fell through into the listing
+# branch and ran the whole board enumeration, which logged interlock WARNs and
+# wrote ~/.hscc/daemon.log while "printing help"; `blocked --recover <id>` is
+# the mutating sibling of the very same code path). Lines stay <= 78 columns,
+# matching the api_cli / autodown_cli per-verb convention. Wording is verbatim
+# from the group HELP_TEXT entries above — re-flowed, never reworded — and only
+# flag-shaped bracket tokens are used (Rich eats bare-word brackets as markup).
+SUBCOMMAND_HELP = {
+    "blocked": """\
+hscc kanban blocked [--json]
+
+List every BLOCKED task across ALL boards, with why it's blocked
+(block_kind, last error, block comments), oldest first.
+
+  hscc kanban blocked --recover <task_id> [--reason <text>]
+      Recover exactly ONE blocked task to ready. Never automatic,
+      never bulk — a judgement call about whether the work is safe
+      to re-run.
+
+'--theme <name>' selects the human palette.""",
+# No `stale` entry on purpose: that verb is owned by kanban_cli
+# (t_e751e652) and cmd_kanban DELEGATES its --help there, so the wording
+# has exactly one source in the tree. If kanban_cli is absent (the same
+# ImportError window the dispatch already handles) the delegation reports
+# that instead of printing help for a verb that does not exist here.
+}
+
 
 def _board_names(kanban_db):
     """Enumerate board slugs via the SAME seam autodown._has_active_work uses.
@@ -443,6 +476,41 @@ def cmd_kanban(argv):
     palette (stripped before dispatch, like autodown_cli).
     """
     if not argv or argv[0] in ("--help", "-h"):
+        _console().print(HELP_TEXT)
+        return 0
+
+    # --help/-h ANYWHERE after the subcommand prints that verb's help and
+    # executes NOTHING (BROKEN B10). Raw-argv scan, before --json/--theme
+    # stripping and before dispatch, exactly as cmd_api does it: the base only
+    # honoured --help as the GROUP's first token, so `hscc kanban blocked
+    # --help` fell through into the listing branch and enumerated every board
+    # (autodown interlock WARN lines on stderr + ~/.hscc/daemon.log written
+    # under the caller's HOME) — while `blocked --recover <id>`, the mutating
+    # sibling of that same branch, was one token away. Scanning the RAW argv
+    # means a help flag can never be swallowed as a flag value
+    # (e.g. `blocked --recover --help`).
+    if len(argv) > 1 and any(a in SUB_HELP for a in argv[1:]):
+        sub = argv[0]
+        if sub == "blocked":
+            _console().print(SUBCOMMAND_HELP["blocked"])
+            return 0
+        if sub == "stale":
+            # Single source of truth: `stale` help is kanban_cli's wording, so
+            # hand the help request to the module that owns the verb (it never
+            # acts on a --help argv). If that module is absent from the tree,
+            # report that rather than advertise a verb this build lacks.
+            try:
+                from hscc_daemon import kanban_cli as _kcli
+            except ImportError:
+                return _error(
+                    "stale is not available yet (card t_e751e652 not merged)",
+                    "--json" in argv)
+            # Pass the argv UNSTRIPPED ("stale" first): kanban_cli's own raw
+            # scan then prints the VERB help. Handing it the tail would make
+            # argv[0] a flag and print the GROUP help instead — a help surface
+            # that answers a different question than the operator asked.
+            return _kcli.cmd_kanban(list(argv))
+        # Unknown verb + --help: the group help (there is no verb help to show).
         _console().print(HELP_TEXT)
         return 0
 

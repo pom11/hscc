@@ -52,30 +52,6 @@
     },
     {
       "kind": "B",
-      "command": "hscc api --help",
-      "needle": "width=120",
-      "owner": "F4",
-      "count_at_baseline": 2,
-      "example": "width=120 overflow:   hscc api install-service                                            OPT-IN: write the launchd unit (boot-resilient API; loading stays manual)"
-    },
-    {
-      "kind": "B",
-      "command": "hscc api --help",
-      "needle": "width=80",
-      "owner": "F4",
-      "count_at_baseline": 5,
-      "example": "width=80 overflow:   hscc api start [--tailscale] [--bind <ip>] [--port <n>] [--no-qr]   Start the API server in the background"
-    },
-    {
-      "kind": "B",
-      "command": "hscc autodown --help",
-      "needle": "width=80",
-      "owner": "F4",
-      "count_at_baseline": 16,
-      "example": "width=80 overflow: idle, and back up automatically on the next inbound activity. Opt-in, OFF by default."
-    },
-    {
-      "kind": "B",
       "command": "hscc cluster monitor --help",
       "needle": "width=80",
       "owner": "MONITOR-t_1cc33407",
@@ -145,22 +121,6 @@
       "owner": "BROKEN-HEAL",
       "count_at_baseline": 1,
       "example": "--help executed the mutating verb (output echo: 'No strikes recorded for --help')"
-    },
-    {
-      "kind": "D",
-      "command": "hscc kanban blocked --help",
-      "needle": "log line",
-      "owner": "BROKEN-KANBAN",
-      "count_at_baseline": 1,
-      "example": "help emitted a daemon log line (a check ran while printing help): [<TS>] [ WARN] Autodown kanban interlock unevaluable: Hermes agent source not found at '<SANDBOX>/home/."
-    },
-    {
-      "kind": "D",
-      "command": "hscc kanban stale --help",
-      "needle": "log line",
-      "owner": "BROKEN-KANBAN",
-      "count_at_baseline": 1,
-      "example": "help emitted a daemon log line (a check ran while printing help): [<TS>] [ WARN] Autodown kanban interlock unevaluable: Hermes agent source not found at '<SANDBOX>/home/."
     },
     {
       "kind": "D-rc",
@@ -257,15 +217,6 @@
       "owner": "F5",
       "count_at_baseline": 1,
       "example": "Event-driven mode uninstall (placeholder, not yet available)"
-    },
-    {
-      "kind": "D",
-      "command": "hscc kanban blocked --help",
-      "needle": "wrote state",
-      "owner": "BROKEN-KANBAN",
-      "count_at_baseline": 1,
-      "example": "--help wrote state under HOME: .hscc/daemon.log",
-      "note": "unmasked by t_3dd8651e: before the autodown --help fix the earlier autodown status --help probe created daemon.log first, so this write showed no NEW file; the kanban verb still writes the daemon log while printing help"
     }
   ]
 }

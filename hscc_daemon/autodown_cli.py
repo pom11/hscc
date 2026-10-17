@@ -96,32 +96,48 @@ Pass --json for machine-readable output (scripting).""",
 # Default idle window (minutes) when `enable` is given no --idle-minutes (§7).
 DEFAULT_IDLE_MINUTES = 10
 
+# Two-line layout per subcommand (F4, docs/audits/CLI_HELP_2026-10-15.md
+# Class B): the usage line stands alone and the description goes on indented
+# continuation lines. The base packed both into one hard line per entry with
+# a 47-column padding gutter, which made the block 83-93 columns wide — 16
+# (B) overflow findings at width 80 (the block is emitted with plain `print`,
+# so nothing re-wraps it; the authored width IS the rendered width).
+# Every line below is authored <= 78 columns, the same budget the per-verb
+# SUBCOMMAND_HELP above uses. Wording is the base's verbatim — re-flowed,
+# never reworded.
 HELP_TEXT = """\
-HSCC idle autodown/autoup — bring the GPU serving layer down when the cluster is
-idle, and back up automatically on the next inbound activity. Opt-in, OFF by default.
+HSCC idle autodown/autoup — bring the GPU serving layer down when the
+cluster is idle, and back up automatically on the next inbound activity.
+Opt-in, OFF by default.
 
 Usage: hscc autodown <subcommand> [args]
 
-  hscc autodown status [--json]              Show enabled? state? idle_minutes? last activity? down_since?
-  hscc autodown enable [--idle-minutes <n>]  Arm idle autodown (default 10). Resets the idle timer
-                                               so arming never immediately tears down. Non-acting: if
-                                               serving is down it does NOT start it. Aborts non-zero if an
-                                               ACTIVE model-requiring Hermes cron job exists (one that
-                                               runs an agent and needs the GPU serving layer). CPU-only
-                                               watchdogs (no_agent:true, model:null) do NOT block — they
-                                               are noted.
-  hscc autodown enable --force               Arm even when active model-requiring Hermes cron jobs
-                                               exist (autodown may power the cluster down when they are
-                                               due). Overridden jobs are recorded and shown in 'status'.
-  hscc autodown disable                      Disarm autodown and clear the intentional watchdog block so
-                                               ordinary supervision resumes. Does NOT restart serving — if
-                                               you want it up, run 'hscc autodown wake' or bring it up another way.
-  hscc autodown wake                         Force autoup now (also resets the idle timer)
-  hscc autodown cancel                       Abort an in-progress teardown
-  hscc autodown --help                       This help
+  hscc autodown status [--json]
+      Show enabled? state? idle_minutes? last activity? down_since?
+  hscc autodown enable [--idle-minutes <n>]
+      Arm idle autodown (default 10). Resets the idle timer so arming
+      never immediately tears down. Non-acting: if serving is down it
+      does NOT start it. Aborts non-zero if an ACTIVE model-requiring
+      Hermes cron job exists (one that runs an agent and needs the GPU
+      serving layer). CPU-only watchdogs (no_agent:true, model:null)
+      do NOT block — they are noted.
+  hscc autodown enable --force
+      Arm even when active model-requiring Hermes cron jobs exist
+      (autodown may power the cluster down when they are due).
+      Overridden jobs are recorded and shown in 'status'.
+  hscc autodown disable
+      Disarm autodown and clear the intentional watchdog block so
+      ordinary supervision resumes. Does NOT restart serving — if you
+      want it up, run 'hscc autodown wake' or bring it up another way.
+  hscc autodown wake
+      Force autoup now (also resets the idle timer)
+  hscc autodown cancel
+      Abort an in-progress teardown
+  hscc autodown --help
+      This help
 
-'status' is read-only and never mutates anything. Pass --json for machine-readable
-output (scripting)."""
+'status' is read-only and never mutates anything. Pass --json for
+machine-readable output (scripting)."""
 
 
 def _parse_idle_minutes(rest):
