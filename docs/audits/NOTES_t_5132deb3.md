@@ -101,10 +101,38 @@ Matrix JSON: scratch base_h_probe2.json. Findings:
 
 ## Status log
 
-- [ ] red-first measurements
-- [ ] (a) fix + rules prune
-- [ ] (b) fix
-- [ ] (c) audit -h probes + gap enumeration + fixes
-- [ ] mutation battery
+- [x] red-first measurements (probe v2 honest rc; matrix in notes above)
+- [x] (a) fix + rules prune (up/down help wins over F6 refusal; 2 owner=F3
+      D-rc rules pruned; MONITOR x2 untouched; refusal byte-identical for
+      non-help unknown tokens — probe token moved to --foo)
+- [x] (b) fix (raw-tail -h/--help intercept on DAEMON_COMMANDS + advanced +
+      profiles; cluster group -h; escalate/autoscale -h print help rc 0)
+- [x] (c) audit -h probes + D-h parity check + visible launch-class
+      exemptions + test_cli_h_shortflag.py (122 cases); probes 178 -> 299,
+      MIN_PROBES raised same commit
+- [x] mutation battery M1-M6 all red-then-restored (md5-verified); M7 = M1
+      re-run under the full audit -> 25 NEW findings incl. 11 D-h (sensor has
+      teeth)
 - [ ] canonical suite green (frozen tree, both interpreters)
-- [ ] address_guard 0, changelog fragment, no-attribution, push
+- [x] address_guard 0 (rc 0, no findings), changelog fragment
+      (changelog.d/t_5132deb3.md, `check` OK 29 entries), no attribution
+
+## Mutation battery (frozen tree; backup+restore, never git checkout --)
+
+- M1 intercept reverted to `args[1] == "--help"` -> test_cli_h_shortflag RED
+  (escalate -h rc 1). Re-run as M7 under the FULL audit on the mutated tree:
+  +25 findings vs the fixed tree — 11 x D-h (autoscale/escalate/check/log/
+  notify/plist/stats/status/throughput/triggers/verify), plus D canary trips
+  (check -h shelled out sparkrun + wrote .hscc/daemon.log; status -h wrote
+  .hscc/state; notify -h SENT a macOS notification) and verify -h D-rc=1.
+  The D-h sensor has teeth.
+- M2 intercepted help text reworded -> byte-parity pin RED.
+- M3 up/down dropped from _CLUSTER_HELP_VERBS -> 28 RED across
+  test_cluster_cli_help / test_cluster_group_help / test_cli_arg_safety /
+  test_cluster_cli_help's help-surface pins.
+- M4 parser silently ignores unknown tokens (pre-F6) -> 26 RED incl. the
+  incident pins; restored refusal byte-identical.
+- M5 profiles intercept removed -> profiles -h pins RED (engine load).
+- M6 oracle stops emitting -h invocations -> probe-floor pins RED.
+- All mutations restored byte-identical (md5 30d72f99... before/after).
+
