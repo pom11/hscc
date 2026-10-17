@@ -76,30 +76,6 @@
     },
     {
       "kind": "B",
-      "command": "hscc cluster --help",
-      "needle": "width=80",
-      "owner": "F3",
-      "count_at_baseline": 2,
-      "example": "width=80 overflow:   hscc cluster monitor      One CPU/RAM/GPU snapshot (--live: refreshing view + per-model load)"
-    },
-    {
-      "kind": "B",
-      "command": "hscc cluster down --help",
-      "needle": "width=120",
-      "owner": "F3",
-      "count_at_baseline": 1,
-      "example": "width=120 overflow:   Nothing was started or stopped. Refusing to guess what --help meant \u2014 a destructive command runs only on arguments it understands."
-    },
-    {
-      "kind": "B",
-      "command": "hscc cluster down --help",
-      "needle": "width=80",
-      "owner": "F3",
-      "count_at_baseline": 2,
-      "example": "width=80 overflow:   'hscc cluster down' accepts only: --dry-run (and --theme <name> for the human view)."
-    },
-    {
-      "kind": "B",
       "command": "hscc cluster monitor --help",
       "needle": "width=80",
       "owner": "MONITOR-t_1cc33407",
@@ -116,22 +92,6 @@
     },
     {
       "kind": "B",
-      "command": "hscc cluster up --help",
-      "needle": "width=120",
-      "owner": "F3",
-      "count_at_baseline": 1,
-      "example": "width=120 overflow:   Nothing was started or stopped. Refusing to guess what --help meant \u2014 a destructive command runs only on arguments it understands."
-    },
-    {
-      "kind": "B",
-      "command": "hscc cluster up --help",
-      "needle": "width=80",
-      "owner": "F3",
-      "count_at_baseline": 2,
-      "example": "width=80 overflow:   'hscc cluster up' accepts only: --dry-run (and --theme <name> for the human view)."
-    },
-    {
-      "kind": "B",
       "command": "hscc help advanced",
       "needle": "width=120",
       "owner": "F5",
@@ -145,14 +105,6 @@
       "owner": "F5",
       "count_at_baseline": 3,
       "example": "width=80 bare-wrap: ed-status       Event-driven mode status (placeholder, not yet available)  "
-    },
-    {
-      "kind": "B",
-      "command": "hscc help cluster",
-      "needle": "width=80",
-      "owner": "F5",
-      "count_at_baseline": 1,
-      "example": "width=80 overflow:   Subcommands: status hosts monitor jobs info stop <id> down [--dry-run] up [--dry-run]"
     },
     {
       "kind": "B",

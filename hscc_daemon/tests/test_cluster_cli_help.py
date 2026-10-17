@@ -60,8 +60,10 @@ USAGE_MARKERS = {
     "stop": "Usage: hscc cluster stop",
 }
 
-# The group help as it renders (used to assert verb help is NOT the group blob).
-GROUP_MARKER = "hscc cluster status       Running workloads + idle hosts"
+# The group help heading — used to assert verb help is NOT the group blob.
+# (t_90082309 re-flowed the group entries into the two-line layout, so the
+# old padded single line no longer exists; the heading is the stable marker.)
+GROUP_MARKER = "Cluster management commands:"
 
 
 # ---------------------------------------------------------------------------
@@ -224,19 +226,22 @@ class TestVerbHelpIsInert:
         assert "Nothing was started or stopped" in text
         assert "--dry-run" in text
 
-    def test_destructive_help_refusal_message_is_byte_identical(self, monkeypatch):
-        """The F6 refusal message belongs to another card's rules (F3 quotes it
-        verbatim in cli_help_expected.json), so this card must NOT reword it —
-        not even to add a helpful group-help pointer. Pinned byte-for-byte."""
+    def test_destructive_help_refusal_message_is_not_reworded(self, monkeypatch):
+        """The F6 refusal wording belongs to F3's gate rules
+        (cli_help_expected.json quotes it), so wording changes are forbidden —
+        t_90082309 (F3) legitimately re-wrapped it to pass the (B) gate, so
+        the pin is on the CANONICAL whitespace form: identical words, the
+        physical line breaks may move."""
+        import re
         text, code = self._run(monkeypatch, ["down", "--help"])
         assert code == 1
-        assert text == (
-            "Error: unknown argument for 'hscc cluster down': --help\n"
-            "  'hscc cluster down' accepts only: --dry-run (and --theme <name>"
-            " for the human view).\n"
-            "  Nothing was started or stopped. Refusing to guess what --help"
-            " meant — a destructive command runs only on arguments it"
-            " understands.\n")
+        canon = re.sub(r"\s+", " ", text).strip()
+        assert canon == (
+            "Error: unknown argument for 'hscc cluster down': --help "
+            "'hscc cluster down' accepts only: --dry-run (and --theme <name> "
+            "for the human view). Nothing was started or stopped. Refusing to "
+            "guess what --help meant — a destructive command runs only on "
+            "arguments it understands."), f"refusal reworded:\n{text}"
 
     def test_unknown_subcommand_help_still_errors(self, monkeypatch):
         text, code = self._run(monkeypatch, ["bogus", "--help"])

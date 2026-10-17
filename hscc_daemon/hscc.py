@@ -382,7 +382,15 @@ COMMAND_HELP = {
     "watch": "Live-tail check results. Usage: hscc watch [stream]",
     "triggers": "Show trigger-engine rules and recent firings",
     "notify": "Send a desktop notification. Usage: hscc notify <message>",
-    "cluster": "Cluster management commands.\n  Subcommands: status hosts monitor jobs info stop <id> down [--dry-run] up [--dry-run]\n  Usage: hscc cluster <subcommand> [args]",
+    # Multi-line value: _handle_help prints `  {value}`, so only the FIRST
+    # line gets the 2-space prefix — every line is authored to stay <=76 so
+    # the rendered block fits the (B) gate's 78 budget (t_90082309: the old
+    # single "Subcommands: status hosts … up [--dry-run]" line overflowed at
+    # width 80). Verb list unchanged, split into two aligned lines.
+    "cluster": "Cluster management commands.\n"
+               "  Subcommands: status  hosts  monitor  jobs  info\n"
+               "               stop <id>  down [--dry-run]  up [--dry-run]\n"
+               "  Usage: hscc cluster <subcommand> [args]",
     "template": "Cluster template commands.\n  Subcommands: list status preview validate apply\n  preview/validate take <name>; validate also takes\n  [--structural-only] [--json]; apply also takes\n  [--confirm] [--force-recreate]. Try 'hscc template --help'.\n  Usage: hscc template <subcommand> [args]",
     "profiles": "Running kanban task counts per profile",
     "project": "Project-portfolio (flightdeck) commands.\n  Delegates to the relocated flightdeck CLI under hscc-project/. Try 'hscc project --help' for the full subcommand surface.\n  Usage: hscc project <subcommand> [args]",
@@ -509,6 +517,28 @@ def _print_template_verb_usage(sub: str):
 # it), so this card adds code rather than reshaping F2's just-landed helpers.
 _CLUSTER_HELP_INDENT = 6
 _CLUSTER_HELP_WIDTH = 78
+
+# The group help (`hscc cluster --help`): one (usage, description) pair per
+# verb, rendered in the same two-line layout as the per-verb entries below —
+# usage alone on its line, description wrapped with a fixed continuation
+# indent (t_90082309 / F3: the base printed each entry as one hard line, and
+# the monitor + `up` entries overflowed the gate's width-80 budget).
+# Descriptions are the base-tree wording verbatim — this surface is re-flowed,
+# never reworded (the monitor entry especially: its verb's own help text
+# _MONITOR_HELP is operator-owned, t_1cc33407, and untouched).
+_CLUSTER_GROUP_ENTRIES = [
+    ("hscc cluster status", "Running workloads + idle hosts"),
+    ("hscc cluster hosts", "All cluster hosts and saved sparkrun clusters"),
+    ("hscc cluster monitor",
+     "One CPU/RAM/GPU snapshot (--live: refreshing view + per-model load)"),
+    ("hscc cluster jobs", "All sparkrun jobs currently running"),
+    ("hscc cluster info", "Detailed resolved cluster configuration"),
+    ("hscc cluster stop <id>", "Stop a running workload by container id"),
+    ("hscc cluster down [--dry-run]",
+     "Stop ALL sparkrun workloads fleet-wide"),
+    ("hscc cluster up [--dry-run]",
+     "Start every unit in serving.json (orch + keepalive)"),
+]
 
 _CLUSTER_SUBCOMMAND_HELP = {
     # No `example:` lines on purpose: every verb here takes no arguments
@@ -666,19 +696,35 @@ def _emit(result):
     return 1 if isinstance(result, dict) and result.get("error") else 0
 
 
+def _cluster_group_entry_lines(cmd, desc, width):
+    """Two-line group-help entry: usage alone, description wrapped with a
+    continuation indent (never col 0). Wording is passed through verbatim —
+    only line breaks are chosen here."""
+    lines = [f"  {cmd}"]
+    lines.extend(textwrap.wrap(desc, width=width,
+                               initial_indent=" " * _CLUSTER_HELP_INDENT,
+                               subsequent_indent=" " * _CLUSTER_HELP_INDENT,
+                               break_long_words=False))
+    return lines
+
+
+def _print_cluster_group_help():
+    """`hscc cluster --help` / bare `hscc cluster`: the group listing in the
+    two-line layout (t_90082309 / F3: the base's single hard lines for
+    `monitor` and `up` overflowed the (B) gate's 80-col budget). Text only —
+    no engine import, no dispatch."""
+    width = _cluster_help_width()
+    print("Cluster management commands:")
+    print()
+    for cmd, desc in _CLUSTER_GROUP_ENTRIES:
+        for line in _cluster_group_entry_lines(cmd, desc, width):
+            print(line)
+
+
 def _handle_cluster():
     """Route 'cluster' subcommands to hscc-cluster plugin, render human view."""
     if len(sys.argv) < 3 or sys.argv[2] == "--help":
-        print("Cluster management commands:")
-        print()
-        print("  hscc cluster status       Running workloads + idle hosts")
-        print("  hscc cluster hosts        All cluster hosts and saved sparkrun clusters")
-        print("  hscc cluster monitor      One CPU/RAM/GPU snapshot (--live: refreshing view + per-model load)")
-        print("  hscc cluster jobs         All sparkrun jobs currently running")
-        print("  hscc cluster info         Detailed resolved cluster configuration")
-        print("  hscc cluster stop <id>    Stop a running workload by container id")
-        print("  hscc cluster down [--dry-run]  Stop ALL sparkrun workloads fleet-wide")
-        print("  hscc cluster up   [--dry-run]  Start every unit in serving.json (orch + keepalive)")
+        _print_cluster_group_help()
         return 0
 
     sub = sys.argv[2]
@@ -922,6 +968,34 @@ def _parse_monitor_flags(cluster_args):
     return opts, None
 
 
+def _cluster_refusal_message(sub, tok, allowed):
+    """The F6 refusal for an unknown argument to a DESTRUCTIVE verb (up/down).
+
+    Layout only (t_90082309 / F3): the base emitted the two body sentences as
+    single ~90- and ~140-character lines, which the (B) gate measured as
+    overflow at width 80 AND at 120 — a safety refusal nobody can read in a
+    normal terminal. textwrap here only chooses line breaks; the wording is
+    the base's verbatim, and the canonical-whitespace form of the whole
+    message is pinned byte-for-byte in
+    hscc_daemon/tests/test_cluster_group_help.py (this card owns the F6
+    refusal's gate rules).
+    """
+    width = _cluster_help_width()
+    ind = " " * 2
+    lines = [f"Error: unknown argument for 'hscc cluster {sub}': {tok}"]
+    lines.extend(textwrap.wrap(
+        f"'hscc cluster {sub}' accepts only: " + ", ".join(allowed)
+        + " (and --theme <name> for the human view).",
+        width=width, initial_indent=ind, subsequent_indent=ind,
+        break_long_words=False))
+    lines.extend(textwrap.wrap(
+        f"Nothing was started or stopped. Refusing to guess what {tok} meant "
+        f"— a destructive command runs only on arguments it understands.",
+        width=width, initial_indent=ind, subsequent_indent=ind,
+        break_long_words=False))
+    return "\n".join(lines)
+
+
 def _parse_cluster_flags(cluster_args, sub, raw_args=None):
     """Validate the flag list of a DESTRUCTIVE cluster command (up/down).
 
@@ -948,21 +1022,22 @@ def _parse_cluster_flags(cluster_args, sub, raw_args=None):
         if tok == "--theme":
             nxt = raw[i + 1] if i + 1 < len(raw) else None
             if nxt is None or str(nxt).startswith("-"):
-                return False, (
-                    f"Error: '--theme' needs a palette name "
-                    f"(e.g. --theme dark). Nothing was started or stopped.")
+                # Same re-flow rule as the unknown-argument refusal below:
+                # the wording is base-verbatim (one sentence), only the
+                # 91-char single line becomes wrapped indented lines. The
+                # "Error: " prefix goes through initial_indent so the width
+                # budget counts it (prefix-then-wrap could exceed 78).
+                return False, "\n".join(textwrap.wrap(
+                    "'--theme' needs a palette name (e.g. --theme "
+                    "dark). Nothing was started or stopped.",
+                    width=_cluster_help_width(),
+                    initial_indent="Error: ", subsequent_indent="  ",
+                    break_long_words=False))
     for tok in cluster_args[1:]:
         if tok in allowed:
             dry_run = True
             continue
-        return False, (
-            f"Error: unknown argument for 'hscc cluster {sub}': {tok}\n"
-            f"  'hscc cluster {sub}' accepts only: "
-            + ", ".join(allowed)
-            + " (and --theme <name> for the human view).\n"
-            f"  Nothing was started or stopped. Refusing to guess what {tok} "
-            f"meant — a destructive command runs only on arguments it "
-            f"understands.")
+        return False, _cluster_refusal_message(sub, tok, allowed)
     return dry_run, None
 
 
