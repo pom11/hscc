@@ -1,0 +1,37 @@
+# Fixture — the 2026-10-17 dispatcher-wedge false-restart incident (card
+# t_160d306f). Seeded from the real ~/.hermes/logs/gateway.log (lines
+# ~22401-22524); personal data redacted (home paths -> /Users/<operator>,
+# chat ids -> <redacted>), timestamps kept verbatim (local time).
+#
+# What happened: card t_4e0f0509 on a foreign board sat READY but was held
+# by the dispatcher's OWN respawn guard (an open PR -> active_pr=1). The
+# dispatcher correctly refused to respawn and said so in every stuck warning
+# ("Last tick held back: active_pr=1."). The hscc dispatcher-wedge watchdog
+# read the red warning anyway and kicked `launchctl kickstart` for the
+# gateway at 12:13, 12:43 and 13:17 — three restarts in ~65 minutes for a
+# dispatcher that was working exactly as designed.
+2026-10-17 11:51:08,114 WARNING gateway.run: kanban dispatcher stuck: ready queue non-empty for 6 consecutive ticks but 0 workers spawned. Check profile health (venv, PATH, credentials) and `hermes kanban list --status ready`.
+2026-10-17 11:56:10,062 WARNING gateway.run: kanban dispatcher stuck: ready queue non-empty for 11 consecutive ticks but 0 workers spawned. Check profile health (venv, PATH, credentials) and `hermes kanban list --status ready`.
+2026-10-17 11:58:10,862 INFO gateway.run: kanban dispatcher [hscc]: spawned=1 reclaimed=0 crashed=0 timed_out=0 promoted=0 auto_blocked=0
+2026-10-17 12:09:15,304 WARNING gateway.run: kanban dispatcher stuck: ready queue non-empty for 11 consecutive ticks but 0 workers spawned. Last tick held back: active_pr=1. Check profile health (venv, PATH, credentials) and `hermes kanban list --status ready`.
+2026-10-17 12:13:53,023 INFO gateway.run: Received SIGTERM — initiating shutdown
+2026-10-17 12:13:53,023 WARNING gateway.run: Shutdown context: signal=SIGTERM under_systemd=yes parent_pid=1 parent_name=? loadavg_1m=4.53
+2026-10-17 12:13:53,031 INFO gateway.run: Stopping gateway...
+2026-10-17 12:13:53,228 INFO gateway.run: Sent shutdown notification to home channel telegram:<redacted>
+2026-10-17 12:13:57,000 WARNING gateway.run: restart_drain_timeout=180s exceeds the live launchd exit timeout (5s) for ai.hermes.gateway; signal-driven stops will drain at most 0s so teardown finishes before launchd SIGKILLs (launchd clamps ExitTimeOut in the per-user domain).
+2026-10-17 12:13:58,369 INFO gateway.control_socket: Gateway control socket listening at /Users/<operator>/.hermes/gateway.sock
+2026-10-17 12:14:08,660 INFO gateway.run: Starting Hermes Gateway...
+2026-10-17 12:42:41,663 WARNING gateway.run: kanban dispatcher stuck: ready queue non-empty for 11 consecutive ticks but 0 workers spawned. Last tick held back: active_pr=1. Check profile health (venv, PATH, credentials) and `hermes kanban list --status ready`.
+2026-10-17 12:43:53,871 INFO gateway.run: Received SIGTERM — initiating shutdown
+2026-10-17 12:43:56,924 INFO gateway.run: Exiting with code 1 (signal-initiated shutdown without restart request) so the service manager can revive the gateway.
+2026-10-17 12:43:58,840 INFO gateway.control_socket: Gateway control socket listening at /Users/<operator>/.hermes/gateway.sock
+2026-10-17 12:44:08,778 INFO gateway.run: Starting Hermes Gateway...
+2026-10-17 12:49:30,405 WARNING gateway.run: kanban dispatcher stuck: ready queue non-empty for 6 consecutive ticks but 0 workers spawned. Last tick held back: active_pr=1. Check profile health (venv, PATH, credentials) and `hermes kanban list --status ready`.
+2026-10-17 12:54:32,320 WARNING gateway.run: kanban dispatcher stuck: ready queue non-empty for 11 consecutive ticks but 0 workers spawned. Last tick held back: active_pr=1. Check profile health (venv, PATH, credentials) and `hermes kanban list --status ready`.
+2026-10-17 12:59:34,220 WARNING gateway.run: kanban dispatcher stuck: ready queue non-empty for 16 consecutive ticks but 0 workers spawned. Last tick held back: active_pr=1. Check profile health (venv, PATH, credentials) and `hermes kanban list --status ready`.
+2026-10-17 13:04:36,214 WARNING gateway.run: kanban dispatcher stuck: ready queue non-empty for 21 consecutive ticks but 0 workers spawned. Last tick held back: active_pr=1. Check profile health (venv, PATH, credentials) and `hermes kanban list --status ready`.
+2026-10-17 13:09:38,123 WARNING gateway.run: kanban dispatcher stuck: ready queue non-empty for 26 consecutive ticks but 0 workers spawned. Last tick held back: active_pr=1. Check profile health (venv, PATH, credentials) and `hermes kanban list --status ready`.
+2026-10-17 13:16:40,901 WARNING gateway.run: kanban dispatcher stuck: ready queue non-empty for 6 consecutive ticks but 0 workers spawned. Last tick held back: active_pr=1. Check profile health (venv, PATH, credentials) and `hermes kanban list --status ready`.
+2026-10-17 13:17:57,213 INFO gateway.run: Received SIGTERM — initiating shutdown
+2026-10-17 13:18:01,003 WARNING gateway.run: restart_drain_timeout=180s exceeds the live launchd exit timeout (5s) for ai.hermes.gateway; signal-driven stops will drain at most 0s so teardown finishes before launchd SIGKILLs (launchd clamps ExitTimeOut in the per-user domain).
+2026-10-17 13:18:13,337 INFO gateway.run: Starting Hermes Gateway...

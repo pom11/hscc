@@ -1,0 +1,591 @@
+"""Benign dispatcher holds must NOT restart the gateway (t_160d306f).
+
+2026-10-17 incident: card ``t_4e0f0509`` sat READY but was held by the
+dispatcher's own respawn guard (``active_pr=1``); every stuck warning said
+so ("Last tick held back: active_pr=1.") and the tick ladder climbed
+6→11→16→21→26 across ~30 min while the watchdog kicked launchd three times
+in 65 minutes. A held-back card is the dispatcher WORKING, not wedging.
+
+Coverage maps 1:1 to the card's proof requirements:
+
+  PARSE (fail-closed matrix)
+    * the verbatim incident line parses and classifies benign
+    * ``active_pr`` / ``recent_success`` / the cooldowns (rate_limited,
+      skipped_locked, memory_pressure) are benign — the vocabulary mirrored
+      from Hermes' describe_suppression
+    * ``blocker_auth`` and ANY unknown/unparseable reason stay wedge-worthy
+    * a stuck warning with NO hold clause stays wedge-worthy
+
+  LAYER 1 (probe) — the required regression test
+    * replay the REAL gateway.log tick ladder from the fixture
+      (6,11,16,21,26 across ~30 min) → ZERO restart actions
+    * same ladder, hold clause stripped → restart fires
+    * same ladder, unknown hold (``frobnicated=1``) → restart fires
+    * ``blocker_auth=1`` ladder → restart fires (credential wall = page)
+    * stale benign warning outside the lookback (a wedged dispatcher stops
+      writing) → restart fires
+    * hold counts that do not reconcile against the board's pending queue →
+      restart fires
+
+  LAYER 2 (recovery board-state gate, sanctioned hermes CLI)
+    * red stream + every ready card explainably held (active PR event /
+      per-profile cap / fleet cap) → suppressed + notified, ZERO restarts
+    * red stream + a plain ready card with no hold evidence → restart fires
+    * gate unable to reach the CLI / gate raises → restart fires (fail closed)
+    * suppression notifies on a throttle, not every tick
+
+Every side effect (kanban read, gateway log tail, hermes CLI, clock, state
+writer, restart runner, notification) is injectable — the suite never reads
+the operator's real gateway.log, never shells out to the real CLI (the
+conftest stubs the CLI-locator seam), and NEVER touches a live gateway.
+"""
+
+import datetime
+import json
+import os
+
+import pytest
+
+from hscc_daemon import dispatcher_wedge as dw
+from hscc_daemon.tests.test_dispatcher_wedge import (
+    FakeKanban, Recorder, READY, RUNNING,
+)
+
+FIXTURE = os.path.join(os.path.dirname(__file__),
+                       "fixtures", "gateway_wedge_incident_20261017.log")
+
+# The REQUIRED verbatim line from the incident report (card body, item 4).
+INCIDENT_LINE_VERBATIM = (
+    "kanban dispatcher stuck: ready queue non-empty for N consecutive ticks "
+    "but 0 workers spawned. Last tick held back: active_pr=1.")
+
+
+@pytest.fixture(autouse=True)
+def _reset_wedge_state():
+    """Module streaks are process-global; every test starts clean (mirrors
+    test_dispatcher_wedge.py's own reset fixture)."""
+    def _clean():
+        dw._detector = {
+            "stall_ticks": 0, "last_running_total": None, "declared": False,
+            "declared_since": None, "peak_stall_ticks": 0,
+            "benign_hold_ticks": 0, "last_hold_explained": False,
+        }
+        dw._recovery_detection_streak = 0
+        dw._hold_notify_at = None
+    _clean()
+    yield
+    _clean()
+
+
+def _fixture_lines():
+    with open(FIXTURE) as f:
+        return [ln for ln in f.read().splitlines() if ln.strip()
+                and not ln.startswith("#")]
+
+
+def _ts(line):
+    """Epoch seconds of a fixture log line (local tz, same as _log_line_ts)."""
+    return datetime.datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S").timestamp()
+
+
+# ---------------------------------------------------------------------------
+# Fixtures for the hold-evidence seams
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def incident_log(tmp_path):
+    """Copy of the redacted real gateway.log slice at a tmp path."""
+    p = tmp_path / "gateway.log"
+    p.write_text("\n".join(_fixture_lines()) + "\n")
+    return str(p)
+
+
+def _variant_log(tmp_path, old, new):
+    """The fixture with every ``old`` replaced by ``new`` (ladder variants)."""
+    lines = [ln.replace(old, new) for ln in _fixture_lines()]
+    p = tmp_path / "gateway.log"
+    p.write_text("\n".join(lines) + "\n")
+    return str(p)
+
+
+def _hold_fn(log_path):
+    return lambda now: dw.classify_dispatcher_hold(now=now, log_path=log_path)
+
+
+# ---------------------------------------------------------------------------
+# PARSE — fail-closed matrix
+# ---------------------------------------------------------------------------
+
+class TestHoldClauseParsing:
+    def test_verbatim_incident_line_parses_benign(self):
+        reasons, benign = dw.parse_hold_clause(INCIDENT_LINE_VERBATIM)
+        assert reasons == [("active_pr", "1")]
+        assert benign is True
+
+    def test_real_gateway_log_line_parses_benign(self):
+        line = _fixture_lines()[3]  # 12:09:15 active_pr=1 warning, verbatim
+        assert "Last tick held back: active_pr=1." in line
+        reasons, benign = dw.parse_hold_clause(line)
+        assert reasons == [("active_pr", "1")] and benign is True
+
+    def test_stuck_warning_regex_matches_verbatim_line(self):
+        assert dw._STUCK_WARNING_RE.search(INCIDENT_LINE_VERBATIM)
+
+    @pytest.mark.parametrize("clause", [
+        "active_pr=1",
+        "recent_success=1",
+        "rate_limited=2",
+        "skipped_locked=1",
+        "memory_pressure=critical",
+        "active_pr=1, recent_success=2, rate_limited=1, skipped_locked=1, "
+        "memory_pressure=elevated",
+    ])
+    def test_benign_vocabulary_is_not_a_wedge(self, clause):
+        reasons, benign = dw.parse_hold_clause(f"Last tick held back: {clause}.")
+        assert benign is True, clause
+        assert reasons  # parsed something
+
+    @pytest.mark.parametrize("clause,reason", [
+        ("blocker_auth=1", "blocker_auth"),      # credential wall = page
+        ("frobnicated=1", "frobnicated"),        # unknown / future vocabulary
+        ("active_pr=1, frobnicated=2", "frobnicated"),  # one poison pill
+    ])
+    def test_unknown_reasons_stay_wedge_worthy(self, clause, reason):
+        reasons, benign = dw.parse_hold_clause(f"Last tick held back: {clause}.")
+        assert benign is False, clause
+        assert any(n == reason for n, _ in reasons)
+
+    def test_garbage_clause_is_wedge_worthy(self):
+        reasons, benign = dw.parse_hold_clause(
+            "Last tick held back: ???nonsense???.")
+        assert benign is False and reasons
+
+    def test_absent_clause_is_not_benign(self):
+        reasons, benign = dw.parse_hold_clause(
+            "dispatcher stuck: ... 0 workers spawned. Check profile health.")
+        assert reasons == [] and benign is False
+
+    def test_vocabulary_mirrors_hermes_describe_suppression(self):
+        """Every benign name must still exist in Hermes' dispatcher source.
+        A RENAMED hold must fail loudly here rather than silently silence the
+        watchdog with a stale name (a genuinely NEW name stays wedge-worthy
+        by design — it will not be in BENIGN_HOLD_REASONS)."""
+        import inspect
+        try:
+            from hermes_cli import kanban_db_dispatch as kbd
+            src = inspect.getsource(kbd)
+        except Exception:
+            pytest.skip("hermes_cli not importable in this interpreter")
+        for name in dw.BENIGN_HOLD_REASONS:
+            assert name in src, (
+                f"{name!r} no longer appears in Hermes' dispatcher source — "
+                "the hold vocabulary moved; re-mirror it (do NOT silently "
+                "keep silencing the watchdog)")
+
+
+# ---------------------------------------------------------------------------
+# LAYER 1 — classify_dispatcher_hold freshness + fail-closed
+# ---------------------------------------------------------------------------
+
+class TestClassifyDispatcherHold:
+    def test_fresh_benign_warning_explains(self, incident_log):
+        line = _fixture_lines()[3]
+        info = dw.classify_dispatcher_hold(now=_ts(line) + 30,
+                                           log_path=incident_log)
+        assert info["classified"] and info["benign"]
+        assert info["reasons"] == [("active_pr", "1")]
+
+    def test_stale_warning_expires_the_exemption(self, incident_log):
+        last = _fixture_lines()[-1]
+        info = dw.classify_dispatcher_hold(
+            now=_ts(last) + dw.DISPATCHER_HOLD_LOOKBACK_SECONDS + 60,
+            log_path=incident_log)
+        assert info["classified"] is False, (
+            "a warning older than the lookback must not explain anything — "
+            "a wedged dispatcher stops writing")
+
+    def test_unreadable_log_is_no_evidence(self, tmp_path):
+        info = dw.classify_dispatcher_hold(
+            now=0.0, log_path=str(tmp_path / "does-not-exist.log"))
+        assert info["classified"] is False and info["benign"] is False
+
+    def test_no_warning_at_all_is_no_evidence(self, tmp_path):
+        p = tmp_path / "gateway.log"
+        p.write_text("2026-10-17 12:00:00,000 INFO gateway.run: nothing "
+                     "to see here\n")
+        info = dw.classify_dispatcher_hold(
+            now=_ts(p.read_text()) + 5, log_path=str(p))
+        assert info["classified"] is False
+
+
+# ---------------------------------------------------------------------------
+# LAYER 1 — the REQUIRED regression: replay today's tick ladder
+# ---------------------------------------------------------------------------
+
+def _warn_lines():
+    return [ln for ln in _fixture_lines() if dw._STUCK_WARNING_RE.search(ln)]
+
+
+def _replay_ladder(log_path, boards, cap=4, extra_ticks=6, per_profile=None):
+    """Run probe tick + recovery tick at every stuck-warning timestamp of
+    the fixture (bare and held — the watchdog ticks on its own cadence and
+    reads whatever the newest warning says), then ``extra_ticks``
+    continuation ticks (5 min apart) so a real wedge has enough red ticks to
+    clear the N-declare and M-restart debounces.
+
+    Returns (restart_recorder, notifications, streams_per_tick, results).
+    """
+    warns = _warn_lines()
+    counts = [dw._STUCK_WARNING_RE.search(ln).group(1) for ln in warns]
+    # The incident as the gateway actually logged it: two bare warnings at
+    # the end of a healthy spawn run, then the held ladder 6→11→16→21→26
+    # across ~30 min after the PR comment landed (12:49 → 13:09).
+    assert counts == ["6", "11", "11", "11", "6", "11", "16", "21", "26",
+                      "6"], f"fixture must carry the real ladder, got {counts}"
+    kb = FakeKanban(boards)
+    rec = Recorder()
+    notifs = []
+    streams, results = [], []
+
+    def tick(now):
+        captured = {}
+        ok = dw.check_dispatcher_wedge(
+            kanban_db=kb, max_in_progress=cap, now=now,
+            write_state_fn=lambda name, data: captured.__setitem__(name, data),
+            max_per_profile=per_profile if per_profile is not None
+            else 1_000_000,
+            hold_fn=_hold_fn(log_path))
+        stream = captured.get("dispatcher", {"ok": ok})
+        streams.append(stream)
+        results.append(dw.recover_dispatcher_wedge(
+            stream_state=stream, restart_fn=rec, now=now,
+            notify_fn=notifs.append))
+
+    for ln in warns:
+        tick(_ts(ln))
+    last = _ts(warns[-1])
+    for k in range(extra_ticks):
+        tick(last + (k + 1) * 300.0)
+    return rec, notifs, streams, results
+
+
+class TestIncidentLadderReplay:
+    """The card's item 4: replay the exact incident → ZERO restart actions;
+    same ladder without (or against) a benign hold → the restart fires."""
+
+    def test_real_incident_ladder_restarts_nothing(self, incident_log):
+        # The board state the dispatcher was holding against: 1 pending card,
+        # free worker slots — exactly why the OLD logic called it a wedge
+        # (spawnable + roomy + zero spawns).
+        rec, notifs, streams, _ = _replay_ladder(
+            incident_log, {"default": [READY]})
+        assert rec.calls == 0, "benign active_pr hold must never restart"
+        assert all(s["ok"] is True for s in streams), (
+            "the stream must never go red while the dispatcher reports a "
+            "benign hold")
+        assert any(s.get("hold_explained") for s in streams)
+
+    def test_bare_warning_ladder_still_restarts(self, tmp_path):
+        """Same ladder with the hold clause STRIPPED (the dispatcher holds
+        back NOTHING while spawning nothing) → the original purpose stands:
+        the restart must fire."""
+        path = _variant_log(tmp_path, "Last tick held back: active_pr=1. ", "")
+        rec, _, streams, results = _replay_ladder(path, {"default": [READY]})
+        assert rec.calls >= 1, (
+            "a true wedge (no hold explanation) must still escalate — "
+            f"streams={[s['ok'] for s in streams]} results={results}")
+
+    def test_unknown_hold_ladder_still_restarts(self, tmp_path):
+        path = _variant_log(tmp_path, "active_pr=1", "frobnicated=1")
+        rec, _, _, results = _replay_ladder(path, {"default": [READY]})
+        assert rec.calls >= 1, (
+            f"unknown hold vocabulary must stay wedge-worthy {results}")
+
+    def test_blocker_auth_ladder_still_restarts(self, tmp_path):
+        path = _variant_log(tmp_path, "active_pr=1", "blocker_auth=1")
+        rec, _, _, _ = _replay_ladder(path, {"default": [READY]})
+        assert rec.calls >= 1, "a credential wall must still escalate"
+
+    def test_unreconcilable_hold_counts_still_restart(self, tmp_path):
+        """The dispatcher claims 3 held cards but the board holds only 1:
+        the claim does not add up → not trusted → wedge path proceeds."""
+        path = _variant_log(tmp_path, "active_pr=1", "active_pr=3")
+        rec, _, _, _ = _replay_ladder(path, {"default": [READY]})
+        assert rec.calls >= 1
+
+    def test_stale_benign_warning_cannot_mask_a_live_wedge(self, tmp_path):
+        """A dispatcher that WEDGES stops writing warnings; once the last
+        (benign) warning ages out of the lookback, the stall must declare and
+        the restart must fire even though the newest line on disk is benign."""
+        p = tmp_path / "gateway.log"
+        t0 = datetime.datetime(2026, 10, 17, 12, 0, 0).timestamp()
+        p.write_text(
+            "2026-10-17 12:00:00,000 WARNING gateway.run: kanban dispatcher "
+            "stuck: ready queue non-empty for 6 consecutive ticks but 0 "
+            "workers spawned. Last tick held back: active_pr=1. Check "
+            "profile health (venv, PATH, credentials) and "
+            "`hermes kanban list --status ready`.\n")
+        kb = FakeKanban({"default": [READY]})
+        rec = Recorder()
+        for k in range(dw.DISPATCHER_DETECT_TICKS
+                       + dw.DISPATCHER_RESTART_AFTER_DETECTIONS + 4):
+            now = t0 + dw.DISPATCHER_HOLD_LOOKBACK_SECONDS + 60 + k * 60
+            captured = {}
+            dw.check_dispatcher_wedge(
+                kanban_db=kb, max_in_progress=4, now=now,
+                write_state_fn=lambda n, d: captured.__setitem__(n, d),
+                max_per_profile=1_000_000,
+                hold_fn=_hold_fn(str(p)))
+            dw.recover_dispatcher_wedge(
+                stream_state=captured.get("dispatcher", {"ok": True}),
+                restart_fn=rec, now=now, notify_fn=lambda m: None)
+        assert rec.calls == 1, (
+            "an aged-out benign hold must not shield a live wedge forever")
+
+
+# ---------------------------------------------------------------------------
+# LAYER 2 — belt-and-braces board-state gate (sanctioned hermes CLI)
+# ---------------------------------------------------------------------------
+
+class FakeProc:
+    def __init__(self, payload, rc=0):
+        self.returncode = rc
+        self.stdout = json.dumps(payload)
+        self.stderr = ""
+
+
+class FakeCli:
+    """Fake sanctioned CLI: matches subcommand-key tuples against argv."""
+
+    def __init__(self, payloads):
+        self.payloads = payloads
+        self.calls = []
+
+    def __call__(self, argv):
+        self.calls.append(list(argv))
+        for key, payload in self.payloads.items():
+            if all(k in argv for k in key):
+                return FakeProc(payload)
+        return FakeProc({"error": "unmapped argv"}, rc=1)
+
+
+def _ready_row(tid, assignee="worker-a"):
+    return {"id": tid, "status": "ready", "assignee": assignee}
+
+
+def _show_with_guard(tid, reason, age_s, now):
+    return {"task": {"id": tid, "status": "ready", "assignee": "worker-a"},
+            "events": [{"kind": "respawn_guarded",
+                        "payload": {"reason": reason},
+                        "created_at": now - age_s}],
+            "runs": [], "comments": []}
+
+
+@pytest.fixture()
+def cli_available(monkeypatch):
+    monkeypatch.setattr(dw, "_hermes_cli_argv", lambda: ["hermes", "kanban"])
+
+
+class TestBoardStateGate:
+    def test_active_pr_hold_on_every_card_suppresses_restart(
+            self, cli_available):
+        now = 1_800_000_000.0
+        kb = FakeKanban({"default": [READY, RUNNING, RUNNING, RUNNING]})
+        cli = FakeCli({
+            ("list", "--status", "ready"): [_ready_row("t_x1")],
+            ("show", "t_x1"): _show_with_guard("t_x1", "active_pr", 60, now),
+        })
+        stream = {"ok": False, "declared": True, "spawnable": ["default"],
+                  "total_running": 3}
+        explained, why = dw.board_state_explains_stall(
+            stream, kanban_db=kb, max_in_progress=6, max_per_profile=None,
+            cli_fn=cli, now=now)
+        assert explained is True, why
+        assert "active_pr" in why
+        # The gate really did go through the sanctioned CLI:
+        assert cli.calls and cli.calls[0][:2] == ["hermes", "kanban"]
+
+    def test_plain_ready_card_without_hold_restarts(self, cli_available):
+        now = 1_800_000_000.0
+        kb = FakeKanban({"default": [READY]})
+        cli = FakeCli({
+            ("list", "--status", "ready"): [_ready_row("t_plain")],
+            ("show", "t_plain"): {"task": {"id": "t_plain"}, "events": [],
+                                  "runs": [], "comments": []},
+        })
+        explained, why = dw.board_state_explains_stall(
+            {"ok": False, "spawnable": ["default"], "total_running": 0},
+            kanban_db=kb, max_in_progress=6, max_per_profile=None,
+            cli_fn=cli, now=now)
+        assert explained is False
+        assert "unexplained" in why
+
+    def test_fleet_at_capacity_explains_every_board(self, cli_available):
+        kb = FakeKanban({"default": [READY] + [RUNNING] * 4})
+        explained, why = dw.board_state_explains_stall(
+            {"ok": False, "spawnable": ["default"], "total_running": 4},
+            kanban_db=kb, max_in_progress=4, max_per_profile=None,
+            cli_fn=FakeCli({}), now=1.0)
+        assert explained is True and "at capacity" in why
+
+    def test_per_profile_cap_explains(self, cli_available):
+        now = 1_800_000_000.0
+        # worker-a has 2 running (cap 2) + ready work → per-profile hold.
+        kb = FakeKanban({"default": [READY, RUNNING, RUNNING]})
+        cli = FakeCli({("list", "--status", "ready"): [_ready_row("t_cap")]})
+        explained, why = dw.board_state_explains_stall(
+            {"ok": False, "spawnable": ["default"], "total_running": 2},
+            kanban_db=kb, max_in_progress=6, max_per_profile=2,
+            cli_fn=cli, now=now)
+        assert explained is True and "explainably held" in why
+        assert not any("show" in c for c in cli.calls), (
+            "a capped profile needs no per-card lookup")
+
+    def test_unassigned_ready_card_is_unexplained(self, cli_available):
+        kb = FakeKanban({"default": [("ready", None)]})
+        cli = FakeCli({("list", "--status", "ready"):
+                       [{"id": "t_u", "status": "ready", "assignee": None}]})
+        explained, why = dw.board_state_explains_stall(
+            {"ok": False, "spawnable": ["default"], "total_running": 0},
+            kanban_db=kb, max_in_progress=6, max_per_profile=None,
+            cli_fn=cli, now=1.0)
+        assert explained is False
+
+    @pytest.mark.parametrize("payload", [None, "not-json", {"weird": True}])
+    def test_unparseable_cli_payload_fails_closed(self, cli_available,
+                                                  payload):
+        kb = FakeKanban({"default": [READY]})
+        cli = FakeCli({("list", "--status", "ready"): payload})
+        explained, _ = dw.board_state_explains_stall(
+            {"ok": False, "spawnable": ["default"], "total_running": 0},
+            kanban_db=kb, max_in_progress=6, max_per_profile=None,
+            cli_fn=cli, now=1.0)
+        assert explained is False, "an unreadable board never silences us"
+
+    def test_missing_cli_binary_fails_closed(self, monkeypatch):
+        monkeypatch.setattr(dw, "_hermes_cli_argv", lambda: None)
+        explained, why = dw.board_state_explains_stall(
+            {"ok": False, "spawnable": ["default"], "total_running": 0},
+            kanban_db=FakeKanban({"default": [READY]}),
+            max_in_progress=6, now=1.0)
+        assert explained is False and "CLI" in why
+
+    def test_rate_limited_failure_error_explains(self, cli_available):
+        now = 1_800_000_000.0
+        kb = FakeKanban({"default": [READY]})
+        cli = FakeCli({
+            ("list", "--status", "ready"): [_ready_row("t_rl")],
+            ("show", "t_rl"): {
+                "task": {"id": "t_rl",
+                         "last_failure_error": "rate limit hit (EX_TEMPFAIL)"},
+                "events": [], "runs": [], "comments": []},
+        })
+        explained, why = dw.board_state_explains_stall(
+            {"ok": False, "spawnable": ["default"], "total_running": 0},
+            kanban_db=kb, max_in_progress=6, max_per_profile=None,
+            cli_fn=cli, now=now)
+        assert explained is True and "rate_limited" in why
+
+    def test_blocker_auth_event_never_explains(self, cli_available):
+        now = 1_800_000_000.0
+        kb = FakeKanban({"default": [READY]})
+        cli = FakeCli({
+            ("list", "--status", "ready"): [_ready_row("t_auth")],
+            ("show", "t_auth"): _show_with_guard("t_auth", "blocker_auth",
+                                                 60, now),
+        })
+        explained, _ = dw.board_state_explains_stall(
+            {"ok": False, "spawnable": ["default"], "total_running": 0},
+            kanban_db=kb, max_in_progress=6, max_per_profile=None,
+            cli_fn=cli, now=now)
+        assert explained is False
+
+    def test_stale_guard_event_is_not_a_hold(self, cli_available):
+        """A 30-day-old active_pr event is outside Hermes' own 24h PR window
+        — it no longer describes why the dispatcher would hold the card."""
+        now = 1_800_000_000.0
+        kb = FakeKanban({"default": [READY]})
+        cli = FakeCli({
+            ("list", "--status", "ready"): [_ready_row("t_old")],
+            ("show", "t_old"): _show_with_guard("t_old", "active_pr",
+                                                30 * 86400, now),
+        })
+        explained, _ = dw.board_state_explains_stall(
+            {"ok": False, "spawnable": ["default"], "total_running": 0},
+            kanban_db=kb, max_in_progress=6, max_per_profile=None,
+            cli_fn=cli, now=now)
+        assert explained is False
+
+
+class TestGateWiredIntoRecovery:
+    """The gate runs on the restart path — before any launchctl kick."""
+
+    def _red(self):
+        return {"ok": False, "declared": True, "spawnable": ["default"],
+                "total_running": 0}
+
+    def _drive_to_restart(self, tmp_path, gate_fn, notify_fn=None):
+        state = str(tmp_path / "recover.json")
+        rec = Recorder()
+        notifs = []
+        results = []
+        for k in range(dw.DISPATCHER_RESTART_AFTER_DETECTIONS):
+            results.append(dw.recover_dispatcher_wedge(
+                stream_state=self._red(), restart_fn=rec,
+                now=1000.0 + k * 60, state_file=state,
+                board_gate_fn=gate_fn,
+                notify_fn=notify_fn or notifs.append))
+        return rec, notifs, results, state
+
+    def test_explained_stall_suppresses_and_notifies(self, tmp_path):
+        rec, notifs, results, _ = self._drive_to_restart(
+            tmp_path, lambda s: (True, "board 'default': all 1 ready cards "
+                                       "explainably held (active_pr=1)"))
+        assert rec.calls == 0, "explained hold must never kick launchd"
+        assert results[-1]["result"] == "suppressed"
+        assert results[-1]["reason"] == "benign_dispatcher_hold"
+        assert len(notifs) == 1, "log + notify, exactly one notification"
+        assert "active_pr" in notifs[0]
+
+    def test_unexplained_stall_restarts(self, tmp_path):
+        rec, notifs, results, _ = self._drive_to_restart(
+            tmp_path, lambda s: (False, "unexplained ready cards: t_x"))
+        assert rec.calls == 1
+        assert results[-1]["result"] == "recovered"
+        assert notifs == []
+
+    def test_raising_gate_fails_closed_toward_restart(self, tmp_path):
+        def boom(_s):
+            raise RuntimeError("gate exploded")
+        rec, _, results, _ = self._drive_to_restart(tmp_path, boom)
+        assert rec.calls == 1, "a broken gate must not disarm the watchdog"
+        assert results[-1]["result"] == "recovered"
+
+    def test_suppression_notifies_on_a_throttle_not_every_tick(self, tmp_path):
+        """3 hours of 60s recovery ticks against a sustained hold: notify is
+        throttled (the incident restarted the gateway every 30 min; we must
+        not page the operator every minute either)."""
+        state = str(tmp_path / "recover.json")
+        rec = Recorder()
+        notifs = []
+        t = 1000.0
+        for _ in range(int(3 * 3600 / 60)):
+            dw.recover_dispatcher_wedge(
+                stream_state=self._red(), restart_fn=rec, now=t,
+                state_file=state,
+                board_gate_fn=lambda s: (True, "held: active_pr=1"),
+                notify_fn=notifs.append)
+            t += 60
+        assert rec.calls == 0
+        assert 1 <= len(notifs) <= 4, (
+            f"expected ~1 notify/hour over 3h, got {len(notifs)}")
+
+    def test_default_gate_fails_closed_when_cli_absent(self, tmp_path):
+        """Integration of the DEFAULT gate on the restart path: with the CLI
+        locator stubbed to None (conftest), the gate cannot verify anything →
+        the restart proceeds (every pre-existing recovery test relies on
+        exactly this)."""
+        rec, _, results, _ = self._drive_to_restart(tmp_path, None)
+        assert rec.calls == 1, (
+            "unverifiable board state must NOT silence the restart path")
+        assert results[-1]["result"] == "recovered"

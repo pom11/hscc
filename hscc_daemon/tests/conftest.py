@@ -178,6 +178,24 @@ def _isolate_hscc(tmp_path, monkeypatch):
             # ~/.hermes/logs/gateway.log, and tests wanting hold evidence pass
             # an explicit hold_fn / write their own log file.
             (dispatcher_wedge, "GATEWAY_LOG", p("gateway.log")),
+            # Layer-2 board gate (t_160d306f): the default gate consults the
+            # hermes CLI. In the sandbox the binary EXISTS on this host, so
+            # without this the existing restart tests would shell out to the
+            # real CLI and read real boards (slow, and their outcome would
+            # depend on live board state). Stub "no hermes CLI" = the gate's
+            # documented fail-closed path → the restart proceeds exactly as
+            # pre-fix, so every pre-existing recovery test keeps its
+            # semantics. Gate tests re-patch this seam explicitly.
+            (dispatcher_wedge, "_hermes_cli_argv", lambda: None),
+            # ...and the same for the gate's profile probe: the real
+            # hermes_cli.profiles IS importable in the test interpreter, so
+            # without this, fake test assignees ("worker-a") would resolve as
+            # control-plane lanes and every ready card would self-explain.
+            # Default False = "unknown, assume spawnable" — the fail-closed
+            # direction (stricter evidence required). Gate tests opt in via
+            # monkeypatch when they exercise the nonspawnable path.
+            (dispatcher_wedge, "_assignee_is_nonspawnable",
+             lambda assignee: False),
         ]
 
     for mod, attr, val in _module_attrs():

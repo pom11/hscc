@@ -339,7 +339,7 @@ def _board_snapshot(kanban_db, board, multi, max_in_progress,
         roomy = _any_assignee_under_cap(kanban_db, board, multi, max_per_profile)
     return {"board": "default" if not board else board,
             "spawnable": spawnable, "in_progress": in_progress,
-            "roomy": roomy, "error": None}
+            "pending": pending, "roomy": roomy, "error": None}
 
 
 def _read_max_in_progress():
@@ -421,7 +421,7 @@ _recovery_detection_streak = 0
 # ongoing hold must notify ONCE per DISPATCHER_HOLD_NOTIFY_COOLDOWN_SECONDS,
 # not every minute. In-memory matches the streak counters' lifetime: a daemon
 # restart re-notifies once, which is the correct "I'm still here" ping.
-_hold_notify_at = 0.0
+_hold_notify_at = None
 
 
 def _capture_kanban(kanban_db=None, max_in_progress=None,
@@ -581,15 +581,23 @@ def _read_gateway_log_tail(path=None, max_bytes=262_144):
         return None
 
 
-def _last_stuck_warning(lines):
-    """The most recent 'dispatcher stuck' warning line in ``lines``, or None.
-
-    Scans backwards: the newest warning is the one that describes the current
-    zero-spawn state.
+def _last_stuck_warning(lines, now=None):
+    """The most recent 'dispatcher stuck' warning line at or before ``now``,
+    or None. Scans backwards: the newest applicable warning is the one that
+    describes the current zero-spawn state. Lines stamped in the future
+    (log replay, clock jumps) are skipped — a warning cannot explain a tick
+    that happened before it was written; lines with no parseable timestamp
+    are accepted (age then cannot be judged and the caller only exempts on
+    an actually-fresh warning).
     """
     for line in reversed(lines or []):
-        if _STUCK_WARNING_RE.search(line):
-            return line
+        if not _STUCK_WARNING_RE.search(line):
+            continue
+        if now is not None:
+            ts = _log_line_ts(line)
+            if ts is not None and ts > now + 60:
+                continue
+        return line
     return None
 
 
@@ -619,7 +627,7 @@ def classify_dispatcher_hold(now=None, log_path=None):
     if lines is None:
         return {"classified": False, "benign": False, "reasons": [],
                 "age_s": None}
-    line = _last_stuck_warning(lines)
+    line = _last_stuck_warning(lines, now=now)
     if line is None:
         return {"classified": False, "benign": False, "reasons": [],
                 "age_s": None}
@@ -947,6 +955,7 @@ def _board_ready_facts(cli_fn, board, kanban_db, max_in_progress,
 
     capped = _capped_assignees(kanban_db, board, max_per_profile)
     unexplained = []
+    hold_evidence = []
     for task in ready:
         assignee = task.get("assignee")
         if assignee is None:
@@ -963,12 +972,16 @@ def _board_ready_facts(cli_fn, board, kanban_db, max_in_progress,
             continue  # per-profile cap — explainable
         status, why = _card_hold_from_cli(cli_fn, board, task.get("id"), now)
         if status == "spawnable-hold":
+            hold_evidence.append(f"{task.get('id')}: {why}")
             continue
         unexplained.append(f"{task.get('id') or '?'} ({why})")
     if unexplained:
         return False, (f"board '{board}': unexplained ready cards: "
                        + ", ".join(unexplained[:5]))
-    return True, f"board '{board}': all {len(ready)} ready cards explainably held"
+    return True, (f"board '{board}': all {len(ready)} ready cards explainably "
+                  "held"
+                  + (f" [{'; '.join(hold_evidence[:5])}]"
+                     if hold_evidence else ""))
 
 
 def _assignee_is_nonspawnable(assignee):
@@ -1270,7 +1283,9 @@ def recover_dispatcher_wedge(stream_state=None, restart_fn=None, now=None,
                f"is only HOLDING work back (not wedged) — no gateway restart. "
                f"Evidence: {gate_detail}")
         log("Dispatcher-wedge recovery: SUPPRESSED — " + msg)
-        if now - _hold_notify_at >= DISPATCHER_HOLD_NOTIFY_COOLDOWN_SECONDS:
+        if _hold_notify_at is None or (
+                now - _hold_notify_at
+                >= DISPATCHER_HOLD_NOTIFY_COOLDOWN_SECONDS):
             _hold_notify_at = now
             notify = notify_fn or _notify_hold
             try:
