@@ -60,11 +60,75 @@ operator state.
 
 import json
 import os
+import re
 import time
 
 from .daemon_ops import log
 
 DISPATCHER_STREAM = "dispatcher"
+
+# ── Benign dispatcher holds (t_160d306f) ───────────────────────────────────
+# The 2026-10-17 incident: card t_4e0f0509 sat READY but held by the
+# dispatcher's OWN respawn guard (an open PR on the card — ``active_pr=1``),
+# while the gateway logged the "kanban dispatcher stuck" warning every tick
+# (6→11→16→21→26 consecutive). This watchdog read that red warning plus the
+# board's spawnable-ready predicate and restarted the gateway 3× in 65 min.
+# A held-back card is NOT a wedge: the dispatcher is working correctly by
+# refusing to respawn.
+#
+# The hold names below mirror, AS THEY EXIST, Hermes' own suppression
+# vocabulary (hermes_cli/kanban_db_dispatch.py::describe_suppression, which
+# feeds the "Last tick held back: <payload>" clause, and gateway/
+# kanban_watchers.py which writes it):
+#   * ``active_pr``       — respawn guard: recent comment carries a PR URL
+#   * ``recent_success``  — respawn guard: completed run inside the guard window
+#   * ``rate_limited``    — cooldown: workers hit a provider quota wall and
+#     were deliberately released to ready WITHOUT counting a failure
+#   * ``skipped_locked``  — another process holds the board dispatch lock
+#     (the lock holder is making progress on the same board)
+#   * ``memory_pressure`` — tick-level restriction (critical/elevated); a
+#     restart only ADDS pressure
+# ``blocker_auth`` is deliberately NOT benign: it signals a credential/quota
+# failure the operator must fix (exactly the "check credentials" case this
+# watchdog exists to surface) — fail CLOSED. Any unknown/new reason string is
+# wedge-worthy for the same reason: a Hermes upgrade that renames or adds a
+# hold must not silently silence the watchdog.
+BENIGN_HOLD_REASONS = frozenset({
+    "active_pr", "recent_success", "rate_limited", "skipped_locked",
+    "memory_pressure",
+})
+
+# The dispatcher logs the stuck warning at most once per 300s while bad_ticks
+# run; a warning older than this lookback no longer describes the CURRENT
+# zero-spawn state, so it must not explain (or silence) anything.
+DISPATCHER_HOLD_LOOKBACK_SECONDS = int(
+    os.environ.get("HSCC_DISPATCHER_HOLD_LOOKBACK_SECONDS", "900"))
+# Minimum seconds between operator notifications for the SAME explained stall
+# (the gate itself re-evaluates every recovery tick; notify once, not hourly).
+DISPATCHER_HOLD_NOTIFY_COOLDOWN_SECONDS = int(
+    os.environ.get("HSCC_DISPATCHER_HOLD_NOTIFY_COOLDOWN_SECONDS", "3600"))
+
+# Gateway log the dispatcher's stuck warning is written to. Module constant
+# (computed at import) so the test conftest can redirect it per-test — same
+# mechanism as every other ``~/.hscc`` module constant.
+GATEWAY_LOG = os.path.expanduser("~/.hermes/logs/gateway.log")
+
+# "kanban dispatcher stuck: ready queue non-empty for 11 consecutive ticks
+# but 0 workers spawned. ..." — the gateway (gateway/kanban_watchers.py) and
+# the CLI daemon (hermes_cli/kanban_ops.py: "...0 workers spawned
+# successfully.") share this prefix. The tick count is a free token (\S+, so
+# a quoted/synthetic line such as the incident report's "for N consecutive
+# ticks" still parses) and optional so a truncated quote still matches.
+_STUCK_WARNING_RE = re.compile(
+    r"dispatcher stuck: ready queue non-empty for(?: (\S+) consecutive"
+    r" ticks)? but 0 workers spawned")
+_HOLD_BACK_RE = re.compile(r"Last tick held back:\s*([^.]+)\.")
+# One ``name=value`` pair of describe_suppression's payload grammar
+# ("active_pr=1, recent_success=2, memory_pressure=critical"). A pair that
+# does NOT parse as name=value is an UNKNOWN hold → wedge-worthy.
+_HOLD_PAIR_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(\S+)$")
+# Leading logging-formatter timestamp (local time), e.g. 2026-10-17 12:49:30,405
+_LOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 
 # ── Detect debounce (probe-level) ─────────────────────────────────────────
 # N consecutive genuine-stall *ticks* before the detector DECLARES a stall and
@@ -249,10 +313,19 @@ def _board_snapshot(kanban_db, board, multi, max_in_progress,
             in_progress = int(conn.execute(
                 "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
             ).fetchone()[0])
+            # Pending ready+review work for reconciliation of the dispatcher's
+            # hold counts (t_160d306f). Deliberately counts EVERY
+            # assigned+unclaimed row (control-plane lanes included):
+            # over-counting pending makes a benign-hold EXEMPTION harder,
+            # never easier — fail closed.
+            pending = int(conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE status IN ('ready', "
+                "'review') AND assignee IS NOT NULL AND claim_lock IS NULL"
+            ).fetchone()[0])
     except Exception as e:  # noqa: BLE001
         label = "default" if not board else board
         return {"board": label, "spawnable": False, "in_progress": 0,
-                "roomy": False, "error": str(e)}
+                "pending": 0, "roomy": False, "error": str(e)}
     roomy = (max_in_progress is None
              or in_progress < max_in_progress)
     # A board with global room can still be unable to spawn ANYTHING when every
@@ -335,11 +408,20 @@ _detector = {
     "declared": False,     # a genuine stall has been DECLARED (stream is red)
     "declared_since": None,  # epoch clock of first declaring tick
     "peak_stall_ticks": 0,
+    "benign_hold_ticks": 0,    # consecutive ticks explained by a benign hold
+    "last_hold_explained": False,
 }
 
 # M-debounce for the recovery: how many consecutive RED ticks (declared
 # detections) the recovery needs before it considers restarting.
 _recovery_detection_streak = 0
+
+# In-memory throttle for benign-hold operator notifications (t_160d306f): the
+# recovery loop ticks every DISPATCHER_RECOVER_CHECK_INTERVAL seconds, so an
+# ongoing hold must notify ONCE per DISPATCHER_HOLD_NOTIFY_COOLDOWN_SECONDS,
+# not every minute. In-memory matches the streak counters' lifetime: a daemon
+# restart re-notifies once, which is the correct "I'm still here" ping.
+_hold_notify_at = 0.0
 
 
 def _capture_kanban(kanban_db=None, max_in_progress=None,
@@ -391,6 +473,7 @@ def _capture_kanban(kanban_db=None, max_in_progress=None,
             continue
         snaps.append(snap)
     total_running = sum(s["in_progress"] for s in snaps)
+    total_pending = sum(s.get("pending", 0) for s in snaps)
 
     # THE CAP IS GLOBAL, NOT PER BOARD (A1, false dispatcher stall
     # 2026-10-14). hermes enforces kanban.max_in_progress ACROSS ALL BOARDS
@@ -422,6 +505,7 @@ def _capture_kanban(kanban_db=None, max_in_progress=None,
         "boards": ["default" if b is None else b for b in boards],
         "spawnable": spawnable, "roomy_spawnable": roomy_spawnable,
         "at_capacity": at_capacity, "total_running": total_running,
+        "total_pending": total_pending,
         "max_in_progress": max_in_progress, "errors": errors,
         "global_at_capacity": global_at_capacity,
     }
@@ -435,8 +519,124 @@ def _kanban_unreachable_reason():
         return "kanban lib unreachable"
 
 
+# ── Layer 1: the dispatcher's own hold evidence (gateway.log) ──────────────
+def parse_hold_clause(text):
+    """Parse a ``Last tick held back: <payload>`` clause into (reasons, benign).
+
+    ``reasons`` is the list of ``(name, value)`` pairs of Hermes'
+    ``describe_suppression`` grammar; ``benign`` is True ONLY when the clause
+    carries at least one pair AND every pair names a reason in
+    ``BENIGN_HOLD_REASONS``. Unknown names, unparseable pairs and an absent
+    clause (the bare zero-spawn warning — the dispatcher holding back NOTHING
+    while spawning nothing) all return ``benign=False``: fail CLOSED, a hold
+    the watchdog does not recognise stays wedge-worthy.
+    """
+    m = _HOLD_BACK_RE.search(text or "")
+    if not m:
+        return [], False
+    reasons = []
+    for part in m.group(1).split(","):
+        pm = _HOLD_PAIR_RE.match(part.strip())
+        if not pm:
+            # Garbage inside the clause: unknown vocabulary → not benign.
+            return [(m.group(1).strip(), "?")], False
+        reasons.append((pm.group(1), pm.group(2)))
+    if not reasons:
+        return [], False
+    benign = all(name in BENIGN_HOLD_REASONS for name, _v in reasons)
+    return reasons, benign
+
+
+def _log_line_ts(line):
+    """Epoch seconds of a leading ``YYYY-MM-DD HH:MM:SS,mmm`` stamp, or None."""
+    m = _LOG_TS_RE.match(line)
+    if not m:
+        return None
+    try:
+        import datetime
+        return datetime.datetime.strptime(
+            m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+    except ValueError:
+        return None
+
+
+def _read_gateway_log_tail(path=None, max_bytes=262_144):
+    """Last ``max_bytes`` of the gateway log as lines, or None if unreadable.
+
+    Read-only, bounded: the stuck warning is rate-limited to once per 300s, so
+    256 KB of tail always spans the lookback window. A missing/unreadable log
+    returns None — the caller then has NO hold evidence and (fail closed) a
+    stall is judged on board state alone.
+    """
+    path = path if path is not None else GATEWAY_LOG
+    try:
+        with open(path, "rb") as f:
+            try:
+                f.seek(-max_bytes, os.SEEK_END)
+            except OSError:  # file smaller than the window
+                f.seek(0)
+            chunk = f.read().decode("utf-8", errors="replace")
+        return chunk.splitlines()
+    except OSError:
+        return None
+
+
+def _last_stuck_warning(lines):
+    """The most recent 'dispatcher stuck' warning line in ``lines``, or None.
+
+    Scans backwards: the newest warning is the one that describes the current
+    zero-spawn state.
+    """
+    for line in reversed(lines or []):
+        if _STUCK_WARNING_RE.search(line):
+            return line
+    return None
+
+
+def classify_dispatcher_hold(now=None, log_path=None):
+    """Layer-1 evidence: does the dispatcher's own last stuck warning explain
+    the zero-spawn tick with BENIGN holds?
+
+    Returns ``{"classified": bool, "benign": bool, "reasons": [...],
+    "age_s": int|None}``:
+
+      * no recent stuck warning inside ``DISPATCHER_HOLD_LOOKBACK_SECONDS``
+        ⇒ ``classified=False`` — no hold evidence either way; the board-state
+        decision stands unchanged (a wedged dispatcher stops writing, so a
+        stale warning ages out and CANNOT mask a real wedge).
+      * warning with all-benign hold names ⇒ ``classified=True, benign=True``
+        — a HELD card, not a wedge (t_160d306f: ``active_pr=1`` restarted the
+        gateway three times in 65 minutes).
+      * warning with an unknown/non-benign name (``blocker_auth``, future
+        vocabulary) or no hold clause at all ⇒ ``classified=True,
+        benign=False`` — wedge-worthy, exactly as before this fix.
+
+    Never raises; an unreadable log degrades to ``classified=False``.
+    """
+    if now is None:
+        now = time.time()
+    lines = _read_gateway_log_tail(log_path)
+    if lines is None:
+        return {"classified": False, "benign": False, "reasons": [],
+                "age_s": None}
+    line = _last_stuck_warning(lines)
+    if line is None:
+        return {"classified": False, "benign": False, "reasons": [],
+                "age_s": None}
+    ts = _log_line_ts(line)
+    age = int(now - ts) if ts is not None else None
+    if age is not None and age > DISPATCHER_HOLD_LOOKBACK_SECONDS:
+        # The warning predates the current state (log stalled / dispatcher
+        # wedged and stopped writing): it cannot exonerate a live wedge.
+        return {"classified": False, "benign": False, "reasons": [],
+                "age_s": age}
+    reasons, benign = parse_hold_clause(line)
+    return {"classified": True, "benign": benign, "reasons": reasons,
+            "age_s": age}
+
+
 # ── The stall decision ─────────────────────────────────────────────────────
-def evaluate_stall_tick(capture, detector_state, now):
+def evaluate_stall_tick(capture, detector_state, now, hold_info=None):
     """One detector-tick's stall decision, as a pure update of state.
 
     Returns ``(declared_change, stall_tick)`` where ``declared_change`` is
@@ -449,7 +649,13 @@ def evaluate_stall_tick(capture, detector_state, now):
       * some board has spawnable ready/review work AND that board has room
         under ``max_in_progress`` (``roomy_spawnable`` non-empty), AND
       * the fleet spawned ZERO new workers this tick
-        (``total_running`` did not increase since the previous tick).
+        (``total_running`` did not increase since the previous tick), AND
+      * t_160d306f: the dispatcher's own hold evidence (``hold_info`` from
+        ``classify_dispatcher_hold``) does NOT explain the zero-spawn tick
+        with BENIGN holds. A card held by ``active_pr`` / ``recent_success`` /
+        a cooldown is the dispatcher working as designed — holding it back is
+        not a wedge (the 2026-10-17 incident restarted the gateway 3× for
+        exactly this).
 
     Everything else is NOT a stall: no spawnable work (correctly idle), or all
     spawnable boards are AT capacity (trigger 1 — healthy, never page), or a
@@ -465,7 +671,35 @@ def evaluate_stall_tick(capture, detector_state, now):
         spawned = capture.get("total_running", 0) > last_running
     detector_state["last_running_total"] = capture.get("total_running", 0)
 
-    if roomy and not spawned:
+    # t_160d306f benign-hold exemption — every condition must hold, or the
+    # tick is judged exactly as before (fail closed):
+    #   * the dispatcher's last stuck warning is FRESH (inside the lookback —
+    #     a wedged dispatcher stops writing, so its exemption expires on its
+    #     own) and every hold name in it is benign;
+    #   * the claimed holds add up: the dispatcher says it held back >=1 task
+    #     this tick and the boards really do have >= claimed pending cards.
+    #     A hold clause borrowed from a stale/other state cannot reconcile
+    #     against a queue that no longer carries the work;
+    #   * a hold that PERSISTS while the warning stays fresh exempts for as
+    #     long as it lasts — the incident's hours-long active_pr=1 is exactly
+    #     the healthy steady state this exists to protect. The recovery-side
+    #     board-state gate (layer 2) independently re-verifies the hold
+    #     against the cards' own respawn_guarded events before ANY restart,
+    #     so a dispatcher frozen while CLAIMING a benign hold still escalates
+    #     when the cards show no such hold.
+    explained = False
+    if hold_info and hold_info.get("classified") and hold_info.get("benign"):
+        claimed = sum(int(v) for _n, v in (hold_info.get("reasons") or [])
+                      if v.isdigit())
+        pending = int(capture.get("total_pending", 0) or 0)
+        explained = bool(claimed) and pending >= claimed
+        detector_state["benign_hold_ticks"] = (
+            detector_state.get("benign_hold_ticks", 0) + 1 if explained else 0)
+    else:
+        detector_state["benign_hold_ticks"] = 0
+    detector_state["last_hold_explained"] = explained
+
+    if roomy and not spawned and not explained:
         stall_ticks += 1
     else:
         stall_ticks = 0
@@ -477,9 +711,10 @@ def evaluate_stall_tick(capture, detector_state, now):
         detector_state["declared"] = True
         detector_state["declared_since"] = now
         return 1, True
-    if was_declared and (not roomy or spawned):
-        # Stall cleared: a worker spawned (dispatcher working again), or the
-        # work drained / every board filled up (nothing left to spawn).
+    if was_declared and (not roomy or spawned or explained):
+        # Stall cleared: a worker spawned (dispatcher working again), the work
+        # drained / every board filled up (nothing left to spawn), or a benign
+        # dispatcher hold arrived and explains the zero-spawn (t_160d306f).
         detector_state["declared"] = False
         detector_state["declared_since"] = None
         detector_state["stall_ticks"] = 0
@@ -492,7 +727,8 @@ def evaluate_stall_tick(capture, detector_state, now):
 
 
 def check_dispatcher_wedge(kanban_db=None, max_in_progress=None, now=None,
-                           write_state_fn=None, max_per_profile=None):
+                           write_state_fn=None, max_per_profile=None,
+                           hold_fn=None):
     """The dispatcher-wedge probe (the ``dispatcher`` CHECK STREAM).
 
     Runs on the daemon's periodic cadence (see ``PERIODIC_INTERVALS``). Reads
@@ -505,7 +741,8 @@ def check_dispatcher_wedge(kanban_db=None, max_in_progress=None, now=None,
 
     Injectable: ``kanban_db`` (fake lib), ``max_in_progress`` (avoids reading
     the operator's real config in tests), ``now`` (clock), ``write_state_fn``
-    (avoids touching the real state dir).
+    (avoids touching the real state dir), ``hold_fn`` (layer-1 hold evidence;
+    defaults to ``classify_dispatcher_hold`` reading the gateway log).
     """
     from .state import now_iso, write_state
     write_state_fn = write_state_fn or write_state
@@ -528,7 +765,13 @@ def check_dispatcher_wedge(kanban_db=None, max_in_progress=None, now=None,
             f"({capture['unreachable']}) — not declaring a stall")
         return True
 
-    change, stall = evaluate_stall_tick(capture, _detector, now)
+    # Layer 1 (t_160d306f): ask the dispatcher itself, from its own log,
+    # whether the last zero-spawn tick was a benign hold (active_pr,
+    # recent_success, cooldowns). Fail closed — see classify_dispatcher_hold.
+    hold_info = (hold_fn or classify_dispatcher_hold)(now=now)
+
+    change, stall = evaluate_stall_tick(capture, _detector, now,
+                                        hold_info=hold_info)
 
     declared = _detector["declared"]
     details = {
@@ -544,25 +787,34 @@ def check_dispatcher_wedge(kanban_db=None, max_in_progress=None, now=None,
         "global_at_capacity": capture.get("global_at_capacity", False),
         "stall_ticks": _detector["stall_ticks"],
         "errors": capture["errors"],
+        # t_160d306f: what the dispatcher said, and whether we believed it.
+        "hold_explained": _detector.get("last_hold_explained", False),
+        "hold_reasons": [f"{n}={v}" for n, v in
+                         (hold_info or {}).get("reasons", [])],
     }
 
     if change == -1:
         # A declared stall cleared — report the duration in the recovery end
         # of the logs/message only; here we just go green.
         log("Dispatcher-wedge check: genuine stall CLEARED (work drained / "
-            "boards at capacity) — stream back to OK")
+            "boards at capacity / benign dispatcher hold) — stream back to OK")
 
     if not declared:
         write_state_fn(DISPATCHER_STREAM, {
             "ok": True, **details,
             "last_check": now_iso(),
             "message": "dispatcher healthy — no genuine stall "
-                       "(%s)" % _healthy_reason(capture),
+                       "(%s)" % _healthy_reason(capture, details),
         })
-        log(f"Dispatcher-wedge check: OK — "
-            f"total_running={capture['total_running']}, "
-            f"spawnable={capture['spawnable']}, "
-            f"roomy={capture['roomy_spawnable']}")
+        if details["hold_explained"]:
+            log(f"Dispatcher-wedge check: OK — zero spawns explained by "
+                f"benign dispatcher hold "
+                f"{details['hold_reasons']} (held != wedged, t_160d306f)")
+        else:
+            log(f"Dispatcher-wedge check: OK — "
+                f"total_running={capture['total_running']}, "
+                f"spawnable={capture['spawnable']}, "
+                f"roomy={capture['roomy_spawnable']}")
         return True
 
     # A genuine stall is DECLARED: surface it. This is what turns the lights
@@ -584,7 +836,13 @@ def check_dispatcher_wedge(kanban_db=None, max_in_progress=None, now=None,
     return False
 
 
-def _healthy_reason(capture):
+def _healthy_reason(capture, details=None):
+    # t_160d306f: a benign dispatcher hold is its own healthy reason and wins
+    # over the stale board-derived branches — "no spawnable work" would be
+    # flatly wrong when the queue IS non-empty and simply held back.
+    if details and details.get("hold_explained"):
+        return (f"zero spawns explained by benign dispatcher hold "
+                f"{details.get('hold_reasons') or []} (held != wedged)")
     if not capture.get("spawnable"):
         return "no spawnable ready work (correctly idle)"
     if not capture.get("roomy_spawnable"):
@@ -598,6 +856,272 @@ def _healthy_reason(capture):
                 f"(total_running={capture.get('total_running')} >= "
                 f"max_in_progress={capture.get('max_in_progress')})")
     return "worker recently spawned"
+
+
+# ── Layer 2: belt-and-braces board-state gate (sanctioned hermes CLI) ──────
+# Runs ONLY on the restart path of ``recover_dispatcher_wedge``. Consults the
+# board through the sanctioned ``hermes kanban`` CLI — never a direct DB read,
+# never Hermes' internals — and answers one question: could a human reading
+# ``kanban list``/``kanban show`` right now EXPLAIN every ready card's zero
+# spawn (cap reached, per-profile cap, active PR, cooldown)? If yes, this is
+# not a wedge and the restart must not happen.
+#
+# Fail CLOSED in every direction: an unreachable CLI, an unparseable payload,
+# a board whose ready cards cannot be listed, or a card with no hold evidence
+# all return "not explained" → the restart proceeds exactly as before.
+_GATE_CLI_TIMEOUT_SECONDS = 20
+
+
+def _hermes_cli_argv():
+    """Argv prefix for the sanctioned hermes CLI (resolved at CALL time).
+
+    Deferred import of ``lifecycle.find_hermes_bin`` keeps this module
+    importable without the binary on PATH (and test-injectable). Returns None
+    when hermes cannot be found.
+    """
+    try:
+        from .lifecycle import find_hermes_bin
+        bin_path = find_hermes_bin()
+    except Exception:  # noqa: BLE001
+        bin_path = None
+    return [bin_path, "kanban"] if bin_path else None
+
+
+def _gate_cli_json(cli_fn, argv):
+    """Run the hermes kanban CLI and parse its JSON stdout, or None.
+
+    Any failure (non-zero exit, timeout, bad JSON) returns None — the caller
+    treats that as "unexplained" (fail closed).
+    """
+    try:
+        proc = cli_fn(argv)
+    except Exception:  # noqa: BLE001
+        return None
+    if proc is None or getattr(proc, "returncode", 1) != 0:
+        return None
+    try:
+        return json.loads(proc.stdout)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _default_gate_cli_runner(argv):
+    """Default runner for the board-state gate: list-form subprocess, no shell."""
+    import subprocess
+    try:
+        return subprocess.run(list(argv), capture_output=True, text=True,
+                              timeout=_GATE_CLI_TIMEOUT_SECONDS)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _board_ready_facts(cli_fn, board, kanban_db, max_in_progress,
+                       max_per_profile, now):
+    """Explain the zero-spawn state of ONE spawnable board.
+
+    Returns ``(explained: bool, why: str)``. ``explained`` is True ONLY when
+    every spawnable ready card is accounted for:
+
+      * the fleet is at ``max_in_progress`` ⇒ every board is explained by the
+        global cap (checked by the caller); or
+      * each ready card's assignee is at its per-profile cap; or
+      * the card's recent events carry a benign ``respawn_guarded`` /
+        released-to-ready hold (``active_pr`` / ``recent_success`` /
+        ``rate_limited``) inside the guard windows — the board-side twin of
+        the ``describe_suppression`` clause, read via ``hermes kanban show``; or
+      * the card is not spawnable at all (its assignee is not a Hermes
+        profile — the dispatcher's own ``has_spawnable_ready`` decides).
+
+    Anything else — a plain ready card with no hold evidence, a board whose
+    list cannot be read — returns False (wedge stays actionable).
+    """
+    list_argv = (["--board", board] if board and board != "default" else []) \
+        + ["list", "--status", "ready", "--json"]
+    ready = _gate_cli_json(cli_fn, list_argv)
+    if not isinstance(ready, list):
+        return False, f"ready list for board '{board}' unreadable via CLI"
+    if not ready:
+        # The probe saw spawnable ready work but the CLI lists none: state
+        # moved or the two disagree — do not trust the explanation.
+        return False, f"board '{board}': probe saw spawnable work, CLI listed none"
+
+    capped = _capped_assignees(kanban_db, board, max_per_profile)
+    unexplained = []
+    for task in ready:
+        assignee = task.get("assignee")
+        if assignee is None:
+            # Unassigned ready work: the dispatcher would apply the default
+            # assignee and spawn — holding it back needs no guard. Unexplained.
+            unexplained.append(task.get("id") or "?")
+            continue
+        if _assignee_is_nonspawnable(assignee):
+            # Control-plane lane (not a Hermes profile): the dispatcher
+            # correctly idles on it — the dispatcher's own
+            # skipped_nonspawnable bucket.
+            continue
+        if capped is not None and assignee in capped:
+            continue  # per-profile cap — explainable
+        status, why = _card_hold_from_cli(cli_fn, board, task.get("id"), now)
+        if status == "spawnable-hold":
+            continue
+        unexplained.append(f"{task.get('id') or '?'} ({why})")
+    if unexplained:
+        return False, (f"board '{board}': unexplained ready cards: "
+                       + ", ".join(unexplained[:5]))
+    return True, f"board '{board}': all {len(ready)} ready cards explainably held"
+
+
+def _assignee_is_nonspawnable(assignee):
+    """True iff ``assignee`` is DEFINITELY not a dispatchable Hermes profile.
+
+    Mirrors the dispatcher's ``skipped_nonspawnable`` bucket (control-plane
+    lanes like ``orion-cc``). Unknown (``hermes_cli.profiles`` unimportable —
+    test interpreter, no Hermes on PATH) returns False = "assume spawnable",
+    which keeps the stricter hold-evidence requirement in force (fail closed).
+    """
+    try:
+        from hermes_cli.profiles import profile_exists
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        return not bool(profile_exists(assignee))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _capped_assignees(kanban_db, board, max_per_profile):
+    """Assignees at their per-profile cap on one board, or None if unknown.
+
+    Mirrors the dispatcher's per-profile rule: an assignee with ready work
+    whose running count is >= ``max_per_profile``. None (no cap configured /
+    unreadable) means "no per-profile explanation available".
+    """
+    if max_per_profile is None:
+        return None
+    try:
+        multi = bool(board) and board != "default"
+        with (kanban_db.connect_closing(board=board) if multi
+              else kanban_db.connect_closing()) as conn:
+            rows = conn.execute(
+                "SELECT assignee, COUNT(*) AS n FROM tasks "
+                "WHERE status = 'running' AND assignee IS NOT NULL "
+                "GROUP BY assignee").fetchall()
+    except Exception:  # noqa: BLE001
+        return None
+    return {r[0] for r in rows if int(r[1]) >= max_per_profile}
+
+
+def _card_hold_from_cli(cli_fn, board, task_id, now):
+    """Classify one ready card via ``hermes kanban show --json``.
+
+    Returns ``(status, why)``:
+
+      * ``("spawnable-hold", reason)`` — a benign hold event (respawn_guarded
+        active_pr/recent_success, or a rate_limited release) within its
+        Hermes-side guard window. Windows mirror the dispatcher's own
+        (3600 s success, 86400 s PR).
+      * ``("unexplained", why)`` — no hold evidence (fail closed).
+    """
+    if not task_id:
+        return "unexplained", "no id"
+    show_argv = (["--board", board] if board and board != "default" else []) \
+        + ["show", task_id, "--json"]
+    data = _gate_cli_json(cli_fn, show_argv)
+    if not isinstance(data, dict):
+        return "unexplained", "show unreadable"
+    # Guard windows as Hermes defines them (kanban_db_dispatch.py).
+    _SUCCESS_WINDOW = 3600
+    _PR_WINDOW = 86400
+    # A worker that bailed on a provider quota wall requeues with a
+    # rate-limited sentinel in last_failure_error (kanban_db_dispatch.py's
+    # dead-worker classification) — the dispatcher deliberately does NOT
+    # respawn into the same wall, which is a cooldown hold, not a wedge.
+    lfe = ((data.get("task") or {}).get("last_failure_error") or "").lower()
+    if ("rate" in lfe and "limit" in lfe) or "tempfail" in lfe \
+            or "quota" in lfe:
+        return "spawnable-hold", "rate_limited(last_failure_error)"
+    for ev in (data.get("events") or []):
+        kind = ev.get("kind")
+        payload = ev.get("payload") or {}
+        age = now - float(ev.get("created_at") or 0)
+        if kind == "respawn_guarded":
+            reason = payload.get("reason")
+            if reason in ("active_pr", "recent_success") and age <= _PR_WINDOW:
+                return "spawnable-hold", f"respawn_guarded:{reason}"
+            if reason == "blocker_auth":
+                return "unexplained", "blocker_auth"
+            if reason:
+                return "unexplained", f"respawn_guarded:{reason}"
+        if kind == "rate_limited" and age <= _SUCCESS_WINDOW:
+            return "spawnable-hold", "rate_limited"
+    return "unexplained", "no recent hold event"
+
+
+def board_state_explains_stall(stream, kanban_db=None, max_in_progress=None,
+                               max_per_profile=None, cli_fn=None, now=None):
+    """Layer-2 verdict for a DECLARED stall: do the boards themselves prove
+    the dispatcher is merely holding work back (NOT a wedge)?
+
+    Returns ``(explained: bool, detail: str)``. Fail CLOSED: any doubt
+    (missing CLI, unreadable payload, a board we cannot fully account for)
+    returns False so the restart proceeds. ``cli_fn`` is injectable (tests
+    stub the CLI); production defaults to ``_default_gate_cli_runner``.
+    """
+    if now is None:
+        now = time.time()
+    base = _hermes_cli_argv()
+    if base is None:
+        return False, "hermes CLI not found — gate cannot verify board state"
+    # Callers (and tests) pass board-level argv; the hermes/kanban prefix is
+    # ALWAYS bound here so an injected fake sees exactly what a human would
+    # type after `hermes kanban`.
+    _runner = cli_fn or _default_gate_cli_runner
+
+    def run_cli(argv):
+        return _runner(base + list(argv))
+
+    if kanban_db is None:
+        kanban_db = _load_kanban_db_or_default()
+        if kanban_db is not None:
+            _bind_spawnable_helpers(kanban_db)
+    if kanban_db is None:
+        return False, "kanban lib unreachable — board state unverifiable"
+    if max_in_progress is None:
+        max_in_progress = _read_max_in_progress()
+    if max_per_profile is None:
+        max_per_profile = _read_max_per_profile()
+
+    # The global cap explains EVERY board at once: the dispatcher is correctly
+    # refusing to exceed max_in_progress.
+    total_running = int((stream or {}).get("total_running", 0) or 0)
+    if (max_in_progress is not None
+            and total_running >= max_in_progress):
+        return True, (f"fleet at capacity: total_running={total_running} >= "
+                      f"max_in_progress={max_in_progress}")
+
+    spawnable = (stream or {}).get("spawnable") or []
+    if not spawnable:
+        # Red stream that names no spawnable board: nothing to explain, keep
+        # the restart path (fail closed — the stream is our only witness).
+        return False, "stream names no spawnable board"
+    reasons = []
+    for board in spawnable:
+        explained, why = _board_ready_facts(
+            run_cli, board, kanban_db, max_in_progress, max_per_profile, now)
+        reasons.append(why)
+        if not explained:
+            return False, "; ".join(reasons)
+    return True, "; ".join(reasons)
+
+
+def _notify_hold(msg, title="HSCC Dispatcher Hold (no restart)"):
+    """Best-effort operator notify for an explained-but-stalled dispatcher.
+    Never raises; mirrors autodown._notify."""
+    try:
+        from .desktop import send_macos_notification
+        send_macos_notification(title, msg, priority="normal")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # ── Guarded recovery (self-heal) ───────────────────────────────────────────
@@ -626,7 +1150,8 @@ def _save_recover_state(state, state_file=None):
 
 
 def recover_dispatcher_wedge(stream_state=None, restart_fn=None, now=None,
-                             state_file=None):
+                             state_file=None, board_gate_fn=None,
+                             notify_fn=None):
     """One guarded self-heal pass for a wedged dispatcher. Never raises.
 
     Consumes ``stream_state`` (the latest ``dispatcher`` stream; if None it is
@@ -635,7 +1160,13 @@ def recover_dispatcher_wedge(stream_state=None, restart_fn=None, now=None,
       * the probe has DECLARED a genuine stall (``ok: False``) for M
         consecutive detections (``DISPATCHER_RESTART_AFTER_DETECTIONS``),
       * outside the cooldown window,
-      * under the max-attempt cap.
+      * under the max-attempt cap,
+      * t_160d306f: the board-state gate (``board_state_explains_stall``, via
+        the sanctioned hermes CLI) cannot explain every ready card as a benign
+        hold (cap reached / per-profile cap / active PR / cooldown). If it CAN
+        — the dispatcher is holding, not wedging — the restart is suppressed
+        and the operator is notified with the reason instead. The gate fails
+        CLOSED: a gate that cannot verify the boards lets the restart through.
 
     Once the cap is hit we STOP acting and keep alerting, exactly like
     ``recover.py``. The restart is injectable (``restart_fn``); production
@@ -644,8 +1175,8 @@ def recover_dispatcher_wedge(stream_state=None, restart_fn=None, now=None,
 
     Returns ``{"result": ...}`` where result is one of ``skipped``
     (intentional), ``none-wedged`` (no declared stall / below M), ``suppressed``
-    (declared but held by cooldown/cap), ``recovered`` (restarted), or
-    ``gave-up`` (attempt cap reached).
+    (declared but held by cooldown/cap/benign-hold gate), ``recovered``
+    (restarted), or ``gave-up`` (attempt cap reached).
     """
     global _recovery_detection_streak
     if now is None:
@@ -719,6 +1250,35 @@ def recover_dispatcher_wedge(stream_state=None, restart_fn=None, now=None,
             "UP (stop acting, keep alerting)")
         return {"result": "gave-up", "reason": "max_attempts",
                 "attempts": attempts, "actions": []}
+
+    # -- t_160d306f belt-and-braces: is this really a wedge? ----------------
+    # Every guard above passed and we are about to kick launchd. One more
+    # check FIRST: ask the boards themselves (sanctioned hermes CLI) whether
+    # every ready card is explainably held — cap reached, per-profile cap,
+    # active PR, cooldown. A held-back card is the dispatcher working as
+    # designed; restarting it would (and did, 2026-10-17) churn the gateway
+    # every cooldown window for nothing. Explainable ⇒ log + notify, NO
+    # restart. Unverifiable ⇒ fail closed and restart (the original purpose).
+    gate_fn = board_gate_fn or board_state_explains_stall
+    try:
+        explained, gate_detail = gate_fn(stream)
+    except Exception as e:  # noqa: BLE001 - a broken gate never blocks action
+        explained, gate_detail = False, f"gate error: {e}"
+    if explained:
+        global _hold_notify_at
+        msg = (f"Dispatcher stream is red but the board says the dispatcher "
+               f"is only HOLDING work back (not wedged) — no gateway restart. "
+               f"Evidence: {gate_detail}")
+        log("Dispatcher-wedge recovery: SUPPRESSED — " + msg)
+        if now - _hold_notify_at >= DISPATCHER_HOLD_NOTIFY_COOLDOWN_SECONDS:
+            _hold_notify_at = now
+            notify = notify_fn or _notify_hold
+            try:
+                notify(msg)
+            except Exception:  # noqa: BLE001 - notify is best-effort
+                pass
+        return {"result": "suppressed", "reason": "benign_dispatcher_hold",
+                "detail": gate_detail, "actions": []}
 
     # -- Act: restart the gateway -------------------------------------------
     restart_fn = restart_fn if restart_fn is not None else _run_restart

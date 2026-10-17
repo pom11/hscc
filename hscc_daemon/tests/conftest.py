@@ -68,8 +68,8 @@ def _isolate_hscc(tmp_path, monkeypatch):
     base = str(tmp_path / "hscc")
 
     from hscc_daemon import (
-        autodown, daemon_ops, desktop, hscc, lifecycle, recover, state,
-        trigger,
+        autodown, daemon_ops, desktop, dispatcher_wedge, hscc, lifecycle,
+        recover, state, trigger,
     )
 
     # (a) Runtime expanduser redirect for the whole ~/.hscc directory tree.
@@ -171,6 +171,13 @@ def _isolate_hscc(tmp_path, monkeypatch):
             (health, "_launch_guard_status_fn", lambda force=False: {}),
             (health, "_LAUNCH_STATUS_CACHE", {"at": 0.0, "status": None}),
             (health, "_LAUNCH_ALERT_AT", {}),
+            # dispatcher_wedge.py (t_160d306f) — the layer-1 hold classifier
+            # tails the GATEWAY LOG. Redirect to a per-test path that does not
+            # exist: the tail then returns None (= "no hold evidence", the
+            # fail-closed default), so no test ever reads the operator's live
+            # ~/.hermes/logs/gateway.log, and tests wanting hold evidence pass
+            # an explicit hold_fn / write their own log file.
+            (dispatcher_wedge, "GATEWAY_LOG", p("gateway.log")),
         ]
 
     for mod, attr, val in _module_attrs():
