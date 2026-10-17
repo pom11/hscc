@@ -169,11 +169,29 @@ class TestCmdHealDirectGuard:
 
     @pytest.fixture()
     def breaker_file(self, tmp_path, monkeypatch):
+        now = time.time() - 30
         path = tmp_path / "heal-breaker.json"
+        # The ledger deliberately carries strike records keyed "--help" and
+        # "-h" — exactly what the base tree produces after the bug runs once
+        # (the clear path stores a "_cleared" stamp for whatever "node" it
+        # was handed). Without those keys the base tree's clear("--help")
+        # pops nothing and does NOT save, so the byte tripwire below would
+        # have no teeth; with them the base bug rewrites the file and the
+        # guard test fails for the right reason.
         path.write_text(json.dumps(
-            {SEEDED_NODE: [time.time() - 30, time.time() - 20]}))
+            {SEEDED_NODE: [now, now + 10],
+             "-h": [now], "--help": [now],
+             "_cleared": {"old-node": {"at": now, "reason": "x"}}}))
         monkeypatch.setattr(hb, "HEAL_BREAKER_FILE", str(path))
         return path
+
+    def test_positive_direct_clear_moves_file(self, breaker_file, capsys):
+        """Tripwire teeth: the real clear path DOES rewrite this file."""
+        blob = breaker_file.read_bytes()
+        hscc_cli.cmd_heal(node=SEEDED_NODE)
+        assert breaker_file.read_bytes() != blob, (
+            "positive control failed — nothing can rewrite the fixture, so "
+            "the inertness assertions below prove nothing")
 
     @pytest.mark.parametrize("flag", ["--help", "-h"])
     def test_direct_call_with_help_token_touches_nothing(self, flag,
