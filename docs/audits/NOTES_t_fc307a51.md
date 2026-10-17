@@ -54,8 +54,24 @@ append a FIXED note; do not rewrite the historical row.
 
 ## Status log
 
-- [ ] base ground-truth audit (base_findings.json) inspected
-- [ ] red tests committed
-- [ ] fix committed
-- [ ] rules pruned + gates green
+- [x] base ground-truth audit (base_findings.json) inspected — 54 findings,
+  42 top-level (39 F5 + parent's 3 BROKEN-HEAL), matches the rules file 1:1
+- [x] red tests committed (dd2e85af notes; test file lands with the fix)
+- [x] fix committed (2514773f)
+- [x] rules pruned + gate green (d835bc25; 27 -> 7, 0 NEW / 0 STALE / 0 OVER;
+  a_counts re-cut; gate 12 passed / 1 sibling-interpreter skip)
+- [ ] red-first verification of the FINAL test file at base 8906e151
+- [ ] mutation battery
+- [ ] canonical suite ALL GREEN (frozen tip, both interpreters)
+- [ ] address_guard 0 + diff grep + attribution grep
 - [ ] pushed; sha reported
+
+## Follow-ups found (NOT folded into F5 — recorded per protocol)
+
+- `start-daemon -h` / every `-h` outside top-level `hscc -h`: falls through
+  to dispatch (start-daemon would LAUNCH the daemon loop on a help request).
+  The audit probes `--help` only, and the codebase convention in main() is
+  `args[1] == "--help"`, so fixing the whole CLI's `-h` gap is a separate
+  surface card (would touch every dispatcher); deliberately not widened here.
+- `hscc help <topic>` prints COMMAND_HELP values via `print` (style (E)
+  "print"); convergence card (E) tracks that, not F5.

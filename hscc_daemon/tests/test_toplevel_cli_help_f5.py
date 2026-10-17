@@ -23,11 +23,11 @@ scripts/tests/cli_help_expected.json) and pinned here so they cannot come back:
       "Available: ..." 220-char line and exited 1 (D-rc + B at both widths).
       ``advanced`` now has a real help path: COMMAND_HELP entry, rc 0.
   (5) Class DEAD — the ed-status / ed-install / ed-uninstall placeholder trio
-      ("placeholder, not yet available") was advertised in ``hscc --help``? no
-      — in ``hscc help advanced``, the advanced ``--help`` row, COMMAND_HELP,
-      and dispatched at main(). Operator fan-out ruling: DELETE, not hide
-      (the trio never did anything; an alert or a human following the help
-      finds only "not yet available"). Commands gone from help AND dispatch;
+      ("placeholder, not yet available") was advertised in ``hscc help
+      advanced``, the advanced ``--help`` row, COMMAND_HELP, and dispatched at
+      main(). Operator fan-out ruling: DELETE, not hide (the trio never did
+      anything; an alert or a human following the help finds only "not yet
+      available"). Commands gone from help AND dispatch;
       the library functions in cli.py stay for their own tests.
   (6) Surface honesty: scripts/hscc_cli_help_audit.py enumerates the ed-* trio
       by name. With the commands gone those probes would print "Unknown
