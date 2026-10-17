@@ -514,7 +514,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "start",
         help="release a milestone's cards to the fleet, concurrency-aware",
-        epilog="example: flightdeck start flightdeck --milestone 0.6.0 --apply",
+        epilog="example: hscc project start hscc --milestone 0.6.0 --apply",
     )
     p.add_argument("project", help="project name in the registry")
     p.add_argument(

@@ -198,8 +198,11 @@ def test_get_advanced_help_is_renderable():
     renderable = hscc_mod._get_advanced_help()
     assert isinstance(renderable, Group)
     text = _render(renderable)
-    for kw in ("start-daemon", "ed-status", "ed-install", "ed-uninstall"):
-        assert kw in text
+    assert "start-daemon" in text
+    # F5 (t_fc307a51): the ed-* placeholder trio was deleted from the CLI
+    # surface (help + dispatch) — the advanced surface is start-daemon only.
+    for gone in ("ed-status", "ed-install", "ed-uninstall"):
+        assert gone not in text
 
 
 def _render(renderable):

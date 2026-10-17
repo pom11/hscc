@@ -519,6 +519,14 @@ def run_daemon_loop():
             "auto-heal cannot relaunch; install sparkrun or fix the service "
             "PATH", "ERROR")
 
+    # Topology resolution is LAZY since t_8d2eb400 (a topology READ resolves,
+    # not the import — so `hscc --help` and fresh-HOME/CI processes execute
+    # nothing). The daemon is the one process that ALWAYS needs the topology,
+    # so resolve it once HERE at startup — before the first check tick —
+    # exactly as the old module-level call at serving.py import did.
+    from . import serving as _serving
+    _serving.resolve_cluster_config()
+
     ensure_state_dir()
     log("Daemon loop started")
     # Autodown daemon-start recovery (§8): if the layer was intentionally down

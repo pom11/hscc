@@ -898,7 +898,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "review",
         help="review a card, list the awaiting-review queue, or gate a verify run",
-        epilog="example: flightdeck review t_942dcbd1 --apply",
+        epilog="example: hscc project review t_942dcbd1 --apply",
     )
     p.add_argument(
         "--queue",
@@ -925,7 +925,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
         "--baseline",
         default=None,
         metavar="PATH",
-        help="test-baseline file (default ~/.flightdeck/test-baseline.yaml)",
+        help="test-baseline file (default: <hscc-project home>/test-baseline.yaml)",
     )
     p.set_defaults(func=cmd_dispatch)
 

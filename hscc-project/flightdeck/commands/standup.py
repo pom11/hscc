@@ -1168,7 +1168,7 @@ def _watch(args: argparse.Namespace, registry_path: str) -> int:
 
 def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("standup", help="the daily digest (one-shot or --watch)",
-                       epilog="example: flightdeck standup")
+                       epilog="example: hscc project standup")
     p.add_argument(
         "--watch",
         action="store_true",

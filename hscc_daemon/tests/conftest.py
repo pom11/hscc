@@ -194,6 +194,29 @@ def _isolate_hscc(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_topology():
+    """Pin serving's LAZY topology to the documented defaults for every test.
+
+    serving.py resolves cluster topology on the first READ of a topology name
+    (t_8d2eb400 — import must execute nothing). Tests that patch one name
+    (``monkeypatch.setattr(serving, "VLLM_HEALTH_URL", ...)``) and let a check
+    read another (``serving.PRIMARY_NODE``) would otherwise trigger a REAL
+    resolution inside the test — including the ``sparkrun cluster list --json``
+    fallback shell-out, which the ``HSCC_SPARKRUN_BIN`` override does NOT cover
+    (it is a ``shell=True`` command string). Materialising the defaults here
+    costs no I/O, keeps ``setattr``-style patches (raising=True) working, and
+    teardown hands the names back to the lazy mechanism so every test starts
+    unresolved. Tests that want resolution call ``resolve_cluster_config()``
+    themselves (or delete these globals explicitly).
+    """
+    from hscc_daemon import serving
+
+    serving._materialize_topology_defaults()
+    yield
+    serving.reset_resolution_cache()
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_sparkrun_resolution(tmp_path, monkeypatch):
     """Pin sparkrun resolution so no test can reach the operator's real CLI.
 

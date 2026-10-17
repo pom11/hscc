@@ -794,14 +794,14 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
         help="persistent monitoring/logging daemon (watch + log + notify, never acts)",
         epilog=(
             "examples:\n"
-            "  flightdeck daemon start               start the background daemon\n"
-            "  flightdeck daemon status              show running state + last checks\n"
-            "  flightdeck daemon check fleet         run one check cycle for 'fleet'\n"
-            "  flightdeck daemon check               run every stream once now\n"
-            "  flightdeck daemon log                 show the daemon log\n"
-            "  flightdeck daemon watch               tail stream states in real time\n"
-            "  flightdeck daemon stop                stop the daemon\n"
-            "  flightdeck daemon install             install launchd auto-start (needs your go-ahead)\n"
+            "  hscc project daemon start               start the background daemon\n"
+            "  hscc project daemon status              show running state + last checks\n"
+            "  hscc project daemon check fleet         run one check cycle for 'fleet'\n"
+            "  hscc project daemon check               run every stream once now\n"
+            "  hscc project daemon log                 show the daemon log\n"
+            "  hscc project daemon watch               tail stream states in real time\n"
+            "  hscc project daemon stop                stop the daemon\n"
+            "  hscc project daemon install             install launchd auto-start (needs your go-ahead)\n"
         ),
     )
     p.add_argument(
@@ -822,26 +822,26 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
 
     s = subcmd.add_parser(
         "start", help="start the daemon in the background",
-        epilog="example: flightdeck daemon start",
+        epilog="example: hscc project daemon start",
     )
     s.set_defaults(func=cmd_start)
 
     st = subcmd.add_parser(
         "stop", help="stop the running daemon",
-        epilog="example: flightdeck daemon stop",
+        epilog="example: hscc project daemon stop",
     )
     st.set_defaults(func=cmd_stop)
 
     status = subcmd.add_parser(
         "status", help="show running state and last check results",
-        epilog="example: flightdeck daemon status",
+        epilog="example: hscc project daemon status",
     )
     status.set_defaults(func=cmd_status)
 
     chk = subcmd.add_parser(
         "check",
         help="run one check cycle now (one stream, or all when omitted)",
-        epilog="example: flightdeck daemon check fleet",
+        epilog="example: hscc project daemon check fleet",
     )
     chk.add_argument(
         "stream",
@@ -868,7 +868,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     wt = subcmd.add_parser(
         "watch",
         help="tail persisted stream states in real time",
-        epilog="example: flightdeck daemon watch freshness",
+        epilog="example: hscc project daemon watch freshness",
     )
     wt.add_argument(
         "stream",
@@ -888,7 +888,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     lg = subcmd.add_parser(
         "log",
         help="show the daemon log (tail)",
-        epilog="example: flightdeck daemon log",
+        epilog="example: hscc project daemon log",
     )
     lg.add_argument(
         "--lines",
@@ -902,7 +902,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     nt = subcmd.add_parser(
         "notify",
         help="send a macOS notification (the daemon's optional notify path)",
-        epilog="example: flightdeck daemon notify 'fleet over cap'",
+        epilog="example: hscc project daemon notify 'fleet over cap'",
     )
     nt.add_argument(
         "message",
@@ -914,7 +914,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     ins = subcmd.add_parser(
         "install",
         help="install launchd auto-start (requires explicit --apply)",
-        epilog="example: flightdeck daemon install --apply",
+        epilog="example: hscc project daemon install --apply",
     )
     ins.add_argument(
         "--apply",
@@ -926,7 +926,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     un = subcmd.add_parser(
         "uninstall",
         help="remove the launchd auto-start service",
-        epilog="example: flightdeck daemon uninstall",
+        epilog="example: hscc project daemon uninstall",
     )
     un.set_defaults(func=cmd_uninstall)
 

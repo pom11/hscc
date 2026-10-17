@@ -60,6 +60,36 @@ Usage: hscc kanban <subcommand> [args]
   hscc kanban --help          This help
 """ % DEFAULT_STALE_DAYS
 
+# Flags that mean "print help, execute nothing" at the subcommand level
+# (BROKEN B10, card t_a166be3d — the same class api_cli/autodown_cli already
+# fix). Intercepted in cmd_kanban BEFORE the verb runs.
+SUB_HELP = ("--help", "-h")
+
+# Per-subcommand help, printed INSTEAD of running the verb when --help/-h
+# appears anywhere in that verb's argv. Before this, `hscc kanban stale --help`
+# reached _cmd_stale and enumerated every board (autodown's C3 interlock reads,
+# which log WARN lines and write ~/.hscc/daemon.log) while printing "help" —
+# and `stale --archive <id>`, the mutating sibling of that same branch, was one
+# token away. Lines stay <= 78 columns (the api_cli/autodown_cli per-verb
+# convention); wording is this module's own group HELP_TEXT verbatim, so the
+# two surfaces cannot drift. Only flag-shaped bracket tokens are used: Rich
+# swallows bare-word brackets as markup.
+SUBCOMMAND_HELP = {
+    "stale": """\
+hscc kanban stale [--older-than <days>] [--json]
+
+List every non-terminal task across ALL boards, oldest first (board,
+id, status, assignee, age, title). Default --older-than is %d days;
+pass --older-than 0 for ALL non-terminal cards.
+
+  hscc kanban stale --archive <task_id>
+      Archive exactly ONE task by id. Never automatic, never bulk —
+      this is a judgement call about whether the work is actually
+      done.
+
+'--theme <name>' selects the human palette.""" % DEFAULT_STALE_DAYS,
+}
+
 
 def _parse_older_than(rest):
     """Pull optional ``--older-than N`` out of ``rest``.
@@ -236,6 +266,15 @@ def cmd_kanban(argv):
     """
     if not argv or argv[0] in ("--help", "-h"):
         _console().print(HELP_TEXT)
+        return 0
+
+    # --help/-h ANYWHERE after the subcommand prints that verb's help and
+    # executes NOTHING (BROKEN B10, card t_a166be3d). Raw-argv scan before
+    # --json/--theme stripping and before dispatch, as cmd_api does it: the
+    # base only honoured --help as the group's first token, so `stale --help`
+    # reached _cmd_stale and ran the board enumeration while printing "help".
+    if len(argv) > 1 and any(a in SUB_HELP for a in argv[1:]):
+        _console().print(SUBCOMMAND_HELP.get(argv[0], HELP_TEXT))
         return 0
 
     json_mode = "--json" in argv

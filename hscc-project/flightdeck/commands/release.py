@@ -63,7 +63,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "release",
         help="check release preconditions and print the dry-run plan (does nothing)",
-        epilog="example: flightdeck release flightdeck 0.6.0 --apply",
+        epilog="example: hscc project release hscc 0.6.0 --apply",
     )
     p.add_argument("project", help="project name from the registry")
     p.add_argument("version", help="target version, e.g. 1.9.0 or v1.9.0")

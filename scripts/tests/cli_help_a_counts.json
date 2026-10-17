@@ -1,0 +1,5 @@
+{
+  "counts": {},
+  "lines": {},
+  "note": "Committed (A) count/lines table for scripts/tests/test_cli_help_surface.py. (A) identity is the widest render, whitespace-canonicalised \u2014 this table must be byte-identical on every CPython the suite runs on. Review diffs; never regenerate blindly."
+}

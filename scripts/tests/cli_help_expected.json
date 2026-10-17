@@ -1,0 +1,38 @@
+{
+  "generated_from_commit": "e2278355",
+  "note": "Baseline expectations for scripts/tests/test_cli_help_surface.py. A fix card prunes the rules it clears; an unmatched rule fails the gate (stale) and an unmatched finding fails it (new violation).",
+  "rules": [
+    {
+      "kind": "B",
+      "command": "hscc cluster monitor --help",
+      "needle": "width=80",
+      "owner": "MONITOR-t_1cc33407",
+      "count_at_baseline": 5,
+      "example": "width=80 overflow:   hscc cluster monitor                 one CPU/RAM/GPU snapshot (sparkrun's JSON frame)"
+    },
+    {
+      "kind": "B",
+      "command": "hscc cluster monitor --live --help",
+      "needle": "width=80",
+      "owner": "MONITOR-t_1cc33407",
+      "count_at_baseline": 5,
+      "example": "width=80 overflow:   hscc cluster monitor                 one CPU/RAM/GPU snapshot (sparkrun's JSON frame)"
+    },
+    {
+      "kind": "D-rc",
+      "command": "hscc cluster down --help",
+      "needle": "exited 1",
+      "owner": "F3",
+      "count_at_baseline": 1,
+      "example": "--help exited 1 (expected 0)"
+    },
+    {
+      "kind": "D-rc",
+      "command": "hscc cluster up --help",
+      "needle": "exited 1",
+      "owner": "F3",
+      "count_at_baseline": 1,
+      "example": "--help exited 1 (expected 0)"
+    }
+  ]
+}

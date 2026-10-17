@@ -664,6 +664,17 @@ def cmd_heal(node=None, reason="", status_only=False):
             status="ok", title="heal breaker"))
         return
 
+    # Second line of defence (B4, card t_aeb982bc) — same shape as the
+    # engine-side cmd_stop guard (B6, t_875c5019): the unified CLI intercepts
+    # --help before dispatch, but a DIRECT caller (library import) used to be
+    # able to land here with "--help" as the node name and CLEAR it (audit
+    # EXEC_ECHO: "No strikes recorded for --help"). A help token can never
+    # name a node, so it prints usage and touches no state.
+    if node in ("-h", "--help"):
+        console.print("Usage: hscc heal-clear <node> [reason...]   "
+                      "(or: hscc heal-status)")
+        return
+
     if not node:
         console.print("Usage: hscc heal-clear <node> [reason...]   "
                       "(or: hscc heal-status)")

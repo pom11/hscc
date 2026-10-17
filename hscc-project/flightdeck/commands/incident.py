@@ -206,7 +206,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "incident",
         help="append a dated lesson to docs/INCIDENTS.md (newest first)",
-        epilog='example: flightdeck incident "board not linked" --fix "re-ran flightdeck project repair" --apply',
+        epilog='example: hscc project incident "board not linked" --fix "re-ran hscc project repair" --apply',
     )
     p.add_argument(
         "symptom",
@@ -215,7 +215,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p.add_argument(
         "--project",
         default=None,
-        help=f"project in the registry whose repo to write (default: {_DEFAULT_PROJECT})",
+        help="project in the registry whose repo to write "
+        "(default: this tool's own registry entry)",
     )
     p.add_argument("--fix", default=None, help="what actually resolved it")
     p.add_argument("--cause", default=None, help="why it happened")

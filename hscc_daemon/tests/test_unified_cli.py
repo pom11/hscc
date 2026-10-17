@@ -135,13 +135,17 @@ class TestPerCommandHelp:
         output, rc = self._run_help_cmd("advanced", monkeypatch)
         assert rc == 0
         assert "start-daemon" in output
-        assert "ed-status" in output
 
-    def test_help_advanced_lists_ed_commands(self, monkeypatch):
+    def test_help_advanced_dropped_ed_placeholder_trio(self, monkeypatch):
+        """F5 (t_fc307a51, operator fan-out ruling DELETE): the ed-status /
+        ed-install / ed-uninstall placeholders were advertised as 'not yet
+        available' and did nothing — gone from help and from dispatch (the
+        library functions in cli.py stay for their own tests)."""
         output, rc = self._run_help_cmd("advanced", monkeypatch)
         assert rc == 0
-        assert "ed-install" in output
-        assert "ed-uninstall" in output
+        for cmd in ("ed-status", "ed-install", "ed-uninstall"):
+            assert cmd not in output, cmd
+        assert "not yet available" not in output
 
 
 class TestClusterSubcommand:
@@ -1060,7 +1064,12 @@ class TestProjectRouting:
             hscc_mod.main()
         assert exc.value.code == 0
         assert "hscc project" in out.getvalue()
-        assert "flightdeck" in out.getvalue()
+        # F5 (t_fc307a51, Class A row A6): the rendered blurb no longer names
+        # the internal package — this pin used to assert the OLD wording
+        # ("flightdeck" present); the invariant is now its ABSENCE, while the
+        # surface keeps telling the user where the detail lives.
+        assert "flightdeck" not in out.getvalue()
+        assert "hscc project --help" in out.getvalue()
 
 
 class TestApiVerb:

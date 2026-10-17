@@ -673,7 +673,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "decompose",
         help="ask the cluster to break a goal into atomic cards, gated on card quality",
-        epilog='example: flightdeck decompose flightdeck "make the release installable" --apply',
+        epilog='example: hscc project decompose hscc "make the release installable" --apply',
     )
     p.add_argument("project", help="project name in the registry")
     p.add_argument(

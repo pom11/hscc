@@ -78,9 +78,9 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
         "archive-sessions",
         help="export Telegram session history to durable readable Markdown",
         epilog=(
-            "example: flightdeck archive-sessions\n"
-            "         flightdeck archive-sessions --out /path/to/archive\n"
-            "         flightdeck archive-sessions --project hscc"
+            "example: hscc project archive-sessions\n"
+            "         hscc project archive-sessions --out /path/to/archive\n"
+            "         hscc project archive-sessions --project hscc"
         ),
     )
     p.add_argument(
