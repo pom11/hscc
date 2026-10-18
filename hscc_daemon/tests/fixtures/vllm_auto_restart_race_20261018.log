@@ -1,0 +1,63 @@
+# Fixture — the 2026-10-18 01:38 UTC PipelineWatchdog race (card t_b72dce57).
+# Seeded verbatim from the real ~/.hscc/daemon.log.1.gz (lines covering
+# 01:36:25–01:39:10 UTC); the ONLY edit is the sanctioned address redaction
+# (live LAN hosts -> 10.0.0.x placeholders — scripts/address_guard.py owns the
+# rule). Timestamps, levels and message text are kept exactly as logged,
+# including the cosmetic "deferred — deferred —" double-prefix in the proxy
+# WARN (health.py builds that message from a prefix that already says
+# "deferred"; fixing cosmetics is not this card's scope).
+#
+# What happened, in order:
+#   * 01:36:25 / 01:37:29  the engine-wedge probe reports 'orch' WEDGED twice.
+#   * 01:38:29             engine-wedge recovery crosses the streak=3 threshold,
+#                          takes the autodown lock + the heal lease
+#                          ("engine-wedge-recovery (orch)"), stops 'orch'
+#                          (stop_ok=True) and relaunches it via
+#                          `hscc cluster up` — the CORRECT job (03fae933, with
+#                          the served_model_name aliases).
+#   * 01:38:34             the proxy stream finds the lease held and DEFERS.
+#                          The lock exists and works here.
+#   * 01:38:44             10s later the PipelineWatchdog tick sees DGX/Gateway
+#                          down and IGNORES the lease: it issues its own vLLM
+#                          restart.
+#   * 01:38:45             its stop is the target-less `sparkrun stop --hosts
+#                          <node>`, which sparkrun rejects ("Must specify
+#                          TARGET or --all") — nothing was stopped — and the
+#                          code continued anyway.
+#   * 01:39:09             the launch "succeeded": a SECOND job from the bare
+#                          recipe (no served_model_name; recipe_fingerprint
+#                          9c2c08c6ba56 vs the correct 256790855d81) landed on
+#                          10.0.0.244 while :8000 was still held by the correct
+#                          job, so vllm inside it never started (container ran
+#                          `sleep infinity` only) — a HOLLOW launch, and the
+#                          counter/notification recorded it as success. Both
+#                          jobs sat in ~/.hscc/state/dgx.json ~7h until the
+#                          operator stopped the hollow one manually.
+# The replay tests in test_lifecycle_watchdog_race_20261018.py assert the NEW
+# behaviour (deferral only, no stop, no launch, no hollow success) against this
+# exact window, and pin the OLD behaviour (stop-then-launch despite the lease)
+# against the mutation probes.
+[2026-10-18T01:36:25.720354+00:00] [ERROR] Engine-wedge check: WEDGED unit(s) detected: orch, family-coding-Flash-Next-NVFP4-248-8002
+[2026-10-18T01:36:25.721928+00:00] [ INFO] Engine-wedge check: 1/3 streaming ok, WEDGED: orch, family-coding-Flash-Next-NVFP4-248-8002
+[2026-10-18T01:37:29.330551+00:00] [ERROR] Engine-wedge check: WEDGED unit(s) detected: orch
+[2026-10-18T01:37:29.332030+00:00] [ INFO] Engine-wedge check: 2/3 streaming ok, WEDGED: orch
+[2026-10-18T01:38:29.532361+00:00] [ INFO] Running engine-wedge check
+[2026-10-18T01:38:29.612316+00:00] [ INFO] Engine-wedge recovery: unit 'orch' streak=3 — resolved container_id='sparkrun_03fae933e3df92bf_de6e280b97b0'
+[2026-10-18T01:38:33.101616+00:00] [ INFO] Engine-wedge recovery: stopped unit 'orch' (container 'sparkrun_03fae933e3df92bf_de6e280b97b0', attempt 1, stop_ok=True)
+[2026-10-18T01:38:33.102153+00:00] [ INFO] Engine-wedge recovery: relaunching missing units via `hscc cluster up`
+[2026-10-18T01:38:34.010511+00:00] [ INFO] Running proxy check
+[2026-10-18T01:38:34.132508+00:00] [ INFO] Worker proxy unhealthy on :4000 (live router points at unhealthy backend(s) ['10.0.0.244:8000'] — load is being sent to a dead worker)
+[2026-10-18T01:38:34.133669+00:00] [ WARN] proxy relaunch deferred — deferred — heal in progress: engine-wedge-recovery (orch)
+[2026-10-18T01:38:36.887459+00:00] [ERROR] Engine-wedge check: WEDGED unit(s) detected: orch
+[2026-10-18T01:38:36.889917+00:00] [ INFO] Engine-wedge check: 2/3 streaming ok, WEDGED: orch
+[2026-10-18T01:38:42.891195+00:00] [ INFO] Running PipelineWatchdog
+[2026-10-18T01:38:42.892098+00:00] [ INFO] Running DGX check
+[2026-10-18T01:38:44.710499+00:00] [ INFO] DGX check complete: ok=False
+[2026-10-18T01:38:44.710813+00:00] [ INFO] Running gateway check
+[2026-10-18T01:38:44.864422+00:00] [ INFO] Gateway check: ok=False (job=True vllm=False mux=True) all 42 multiplex profile(s) served
+[2026-10-18T01:38:44.864964+00:00] [ INFO] Watchdog: attempting vLLM auto-restart via sparkrun
+[2026-10-18T01:38:44.865123+00:00] [ INFO] Restarting vLLM via sparkrun...
+[2026-10-18T01:38:45.568170+00:00] [ WARN] vLLM stop failed: Error: Must specify TARGET or --all.
+[2026-10-18T01:39:09.974991+00:00] [ INFO] vLLM restart: success
+[2026-10-18T01:39:09.978029+00:00] [ INFO] Watchdog: vLLM auto-restart #270: success
+[2026-10-18T01:39:10.235126+00:00] [ INFO] macOS notification sent: HSCC vLLM Auto-Restart

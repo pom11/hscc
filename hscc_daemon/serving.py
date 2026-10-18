@@ -260,18 +260,53 @@ def _worker_recipe_for(node, serving):
     return None
 
 
+def vllm_stop_cmd(node=None, recipe=None, port=None):
+    """``sparkrun stop <TARGET> --hosts <node>`` — an EXPLICIT target, or None.
+
+    The bare ``sparkrun stop --hosts <node>`` form this module used to emit is
+    not a stop at all: sparkrun rejects it with ``Error: Must specify TARGET or
+    --all`` and stops NOTHING. The daemon's auto-restart path logged that as a
+    failed stop and launched anyway (2026-10-18 01:38, incident card
+    t_b72dce57), so a target-less stop is treated here as *unbuildable* rather
+    than emitted in a form that silently does nothing.
+
+    The TARGET is the unit's recipe scoped to one host — the sanctioned form
+    (hscc-cluster/ops.py:147 ``sparkrun stop <recipe> --hosts <node>``).
+    ``--all`` is deliberately NOT a fallback: it would take the whole fleet
+    down to restart one unit.
+
+    Returns None when no explicit target can be resolved (no recipe known) —
+    callers must ABORT, never fall back to a broader stop.
+    """
+    node = node if node is not None else _topo_value("PRIMARY_NODE")
+    recipe = recipe if recipe is not None else _topo_value("VLLM_RECIPE")
+    recipe = os.path.expanduser(recipe) if recipe else ""
+    if not recipe or not node:
+        return None
+    cmd = ["sparkrun", "stop", recipe, "--hosts", node]
+    if port is not None:
+        cmd.extend(["--port", str(port)])
+    return cmd
+
+
 def _rebuild_vllm_cmds():
     """Rebuild the vLLM health URL + control commands from the current PRIMARY_NODE.
 
     Must be called after any change to PRIMARY_NODE. Internal reads of lazy
     topology names go through ``_topo_value`` (a bare global read in this
     module would not trigger resolution).
+
+    ``VLLM_STOP_CMD`` carries an explicit TARGET whenever a recipe is known
+    (t_b72dce57): the target-less form was a silent no-op. With no recipe it
+    stays the legacy bare form, which ``lifecycle.restart_vllm`` REFUSES to use
+    — a caller that needs a stop must resolve a target or abort.
     """
     global VLLM_HEALTH_URL, VLLM_STOP_CMD, VLLM_START_CMD
     primary = _topo_value("PRIMARY_NODE")
     recipe = _topo_value("VLLM_RECIPE")
     VLLM_HEALTH_URL = f"http://{primary}:{VLLM_PORT}/health"
-    VLLM_STOP_CMD = ["sparkrun", "stop", "--hosts", primary]
+    VLLM_STOP_CMD = vllm_stop_cmd(node=primary, recipe=recipe) or [
+        "sparkrun", "stop", "--hosts", primary]
     VLLM_START_CMD = ["sparkrun", "run", recipe,
                       "--cluster", HSCC_CLUSTER, "--hosts", primary,
                       "--port", str(VLLM_PORT), "--no-follow", "--ensure"]
