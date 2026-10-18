@@ -216,6 +216,10 @@ def test_read_oserror_fails_loud_without_touching_file(tmp_path, monkeypatch):
 def test_main_prints_json(capsys, tmp_path, monkeypatch):
     """The __main__ block prints valid JSON and writes under a TMP HOME."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    # ensure_autodown prefers HSCC_DIR over HOME; if the invoking environment
+    # exports it, patching HOME alone would seed the REAL state dir. Delenv so
+    # HOME is authoritative here too (same leak class the live guard checks).
+    monkeypatch.delenv("HSCC_DIR", raising=False)
 
     import importlib
     mod = importlib.reload(PA)
@@ -233,33 +237,113 @@ def test_main_prints_json(capsys, tmp_path, monkeypatch):
 
 # ── LIVE-LEAK GUARD: the suite must never touch real ~/.hscc ──────────
 
+# Env marker for the guard's own nested subprocess run (see below).
+_NESTED_ENV = "HSCC_PRESERVE_AUTODOWN_NESTED"
+
+
+def _operator_keys(path):
+    """Return (enabled, idle_minutes) as stored at `path`, or None when the
+    file is absent/unreadable. These are the OPERATOR-DECISION keys: the live
+    daemon's autodown tick never rewrites them (only the `hscc autodown
+    enable|disable` CLI does), so comparing them is race-free against the
+    30s heartbeat."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    return (data.get("enabled"), data.get("idle_minutes"))
+
 
 def test_live_hscc_autodown_unchanged_by_suite(tmp_path):
-    """REGRESSION GUARD: running this test module against a tmp HOME must leave
-    the REAL ~/.hscc/autodown.json byte-identical. Mirrors the daemon's
+    """REGRESSION GUARD: running this test module against a sandboxed HOME must
+    never write the operator's autodown state. Mirrors the daemon's
     test_no_live_hscc_leak guard for this helper — a future edit that leaks a
-    write into the operator's real config trips this loudly."""
-    live = os.path.expanduser("~/.hscc/autodown.json")
-    if not os.path.exists(live):
-        # No live config on this host; the guard has nothing to protect and is
-        # trivially satisfied. (On the real cluster it exists.)
+    write into the real config trips this loudly.
+
+    Why this does NOT byte-hash the live ~/.hscc/autodown.json (the original
+    design flaked the merged-tree sweep on 2026-10-18): the live daemon's
+    autodown loop (hscc_daemon/daemon_ops.py::run_autodown_loop, interval=30s)
+    rewrites that file EVERY tick via record_activity()/save_config() —
+    advancing last_activity_iso/wake_source — so a byte-identical assert
+    races a tick and fails false-positive whenever one lands inside the read
+    window (the daemon rewrites the file atomically via os.replace, so the
+    hash is a moving target; measured live: md5 changed within 33 s). The
+    daemon-side guard documents the same reasoning for ~/.hscc/state/*.json.
+
+    Two race-free layers instead:
+      1. Detective sandbox check — the module re-runs with HOME pointed at a
+         sandbox holding a PLANTED ~/.hscc/autodown.json. The planted file is
+         static (the live daemon only ever writes the operator's real home,
+         never this tmp one), so any suite leak that resolves through HOME
+         changes it → fails loudly, not flakily.
+      2. Semantic live check — the real file's OPERATOR keys (enabled,
+         idle_minutes) must be invariant across the nested run. A tick can
+         move the volatile keys (last_activity_iso, wake_source, state …) but
+         can never flip the operator's decision; only a suite that actually
+         rewrote the operator's config could change them.
+
+    The sandbox is only hermetic if HOME is authoritative: preserve_autodown
+    prefers HSCC_DIR over HOME (preserve_autodown.ensure_autodown), so an
+    exported HSCC_DIR would let the nested run leak straight past the fake
+    HOME into the real state dir. It is stripped from the nested env.
+    """
+    if os.environ.get(_NESTED_ENV) == "1":
+        # This IS the guard's nested re-run; the outer process performs both
+        # checks. Without this marker the planted sandbox would keep the
+        # nested guard alive and recursion would never terminate.
         return
 
-    before = open(live, "rb").read()
+    live = os.path.expanduser("~/.hscc/autodown.json")
+    live_existed = os.path.exists(live)
+    before_operator = _operator_keys(live)
 
-    # Re-run this module's own tests inside a sandboxed tmp HOME. If any test
-    # path (e.g. __main__ without proper tmp isolation) were to reach the real
-    # ~/.hscc, the sandbox run's own checks would write live — fail loudly.
+    # Layer 1: planted sandbox home (deterministic, works on every host).
+    home = tmp_path / "home"
+    (home / ".hscc").mkdir(parents=True)
+    seed = home / ".hscc" / "autodown.json"
+    planted = json.dumps({
+        "enabled": True, "idle_minutes": 60, "state": "up",
+        "last_activity_iso": "2020-01-01T00:00:00+00:00",
+    }, indent=2) + "\n"
+    seed.write_text(planted)
+    before_seed = seed.read_bytes()
+
+    # Re-run this module's own tests inside the sandboxed tmp HOME. If any
+    # test path (e.g. __main__ without proper tmp isolation) were to reach
+    # the real ~/.hscc or write its HOME-resolved config, one of the two
+    # checks below trips.
     env = dict(os.environ)
-    env["HOME"] = str(tmp_path)
+    env["HOME"] = str(home)
+    env.pop("HSCC_DIR", None)   # keep HOME authoritative — see docstring
+    env[_NESTED_ENV] = "1"
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", __file__, "-p", "no:cacheprovider"],
         env=env, capture_output=True, text=True, timeout=300,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
-    after = open(live, "rb").read()
-    assert before == after, (
-        "TEST SUITE WROTE TO LIVE ~/.hscc/autodown.json! "
-        f"before={before!r} after={after!r}"
+    assert seed.read_bytes() == before_seed, (
+        "TEST SUITE WROTE TO ~/.hscc/autodown.json UNDER THE SANDBOX HOME — "
+        "a code path resolved the config through something other than the "
+        "sandboxed HOME (check ensure_autodown's HSCC_DIR/HSCC_DIR-relative "
+        "resolution and any new expanduser call)."
     )
+
+    # Layer 2: live operator keys must be untouched by the suite. A live tick
+    # rewrites volatile keys (even the whole file, atomically) — comparing
+    # only (enabled, idle_minutes) tolerates every tick and still catches the
+    # one mutation that matters: the suite flipping the operator's decision.
+    if live_existed:
+        assert os.path.exists(live), (
+            "TEST SUITE DELETED the live ~/.hscc/autodown.json — operator "
+            "state must never be removed by a test run."
+        )
+        after_operator = _operator_keys(live)
+        if before_operator is not None and after_operator is not None:
+            assert after_operator == before_operator, (
+                "TEST SUITE FLIPPED OPERATOR KEYS in live "
+                f"~/.hscc/autodown.json: enabled/idle_minutes went "
+                f"{before_operator} -> {after_operator} (the daemon tick "
+                "never rewrites these; only a leaking suite could)"
+            )
