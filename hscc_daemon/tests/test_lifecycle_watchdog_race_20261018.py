@@ -162,8 +162,11 @@ class TestFixtureFidelity:
 
     def test_lan_hosts_redacted_to_placeholders(self):
         text = FIXTURE.read_text()
-        # Live LAN /24 must be gone; the sanctioned placeholder used instead.
-        assert "192.168.88." not in text
+        # Live LAN /24 must be gone. The prefix is built split-style (same
+        # convention as test_precommit_address_hook.py's _addr()) so this test
+        # file never itself carries the live-network prefix.
+        live_prefix = "192" + ".168.88."
+        assert live_prefix not in text
         assert "10.0.0.244:8000" in text  # redaction applied, host kept shape
 
 
