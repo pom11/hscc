@@ -34,6 +34,17 @@ Coverage maps 1:1 to the card's proof requirements:
     * gate unable to reach the CLI / gate raises → restart fires (fail closed)
     * suppression notifies on a throttle, not every tick
 
+  NON-SPAWNABLE ASSIGNEE (t_ab960663 — the PR #43 review finding)
+    * a ready card whose assignee names no Hermes profile suppresses the
+      restart (a kickstart never fixes a typo) but must NOT silence us: the
+      ladder notifies the operator exactly once, naming card + board +
+      assignee, and states that no restart was attempted
+    * mixed board (one cap-held card + one non-spawnable card) → zero
+      restarts + the notification names ONLY the non-spawnable card
+    * profile lookup that itself fails → "assume spawnable" → the restart
+      path is unchanged (fail closed)
+    * the distinct notify branch is mutation-probed (flip it off → red)
+
 Every side effect (kanban read, gateway log tail, hermes CLI, clock, state
 writer, restart runner, notification) is injectable — the suite never reads
 the operator's real gateway.log, never shells out to the real CLI (the
@@ -250,12 +261,17 @@ def _warn_lines():
     return [ln for ln in _fixture_lines() if dw._STUCK_WARNING_RE.search(ln)]
 
 
-def _replay_ladder(log_path, boards, cap=4, extra_ticks=6, per_profile=None):
+def _replay_ladder(log_path, boards, cap=4, extra_ticks=6, per_profile=None,
+                   gate=None):
     """Run probe tick + recovery tick at every stuck-warning timestamp of
     the fixture (bare and held — the watchdog ticks on its own cadence and
     reads whatever the newest warning says), then ``extra_ticks``
     continuation ticks (5 min apart) so a real wedge has enough red ticks to
     clear the N-declare and M-restart debounces.
+
+    ``gate`` is passed through to the recovery as ``board_gate_fn`` (the
+    layer-2 board gate); None keeps the conftest-stubbed default, which is
+    the documented fail-closed "cannot verify" path.
 
     Returns (restart_recorder, notifications, streams_per_tick, results).
     """
@@ -283,7 +299,7 @@ def _replay_ladder(log_path, boards, cap=4, extra_ticks=6, per_profile=None):
         streams.append(stream)
         results.append(dw.recover_dispatcher_wedge(
             stream_state=stream, restart_fn=rec, now=now,
-            notify_fn=notifs.append))
+            board_gate_fn=gate, notify_fn=notifs.append))
 
     for ln in warns:
         tick(_ts(ln))
@@ -840,3 +856,419 @@ class TestCombinedCaseReviewRowVsBenignHold:
         assert explained is False, (
             "a red stream naming no spawnable board must fail closed")
 
+
+# NON-SPAWNABLE ASSIGNEE — notify, do not go quiet (t_ab960663)
+# ---------------------------------------------------------------------------
+# The PR #43 review finding: the L2 gate counted a ready card whose assignee
+# is not a Hermes profile as an EXPLAINED hold, so the watchdog suppressed the
+# restart AND said nothing — on exactly the silent no-dispatch case (dispatcher
+# silently drops unknown assignees; the card sits in ``ready`` forever).
+# Suppressing the restart is correct; silence is not.
+#
+# Detection is NOT redefined here: the gate keeps using ``_assignee_is_nonspawnable``
+# (the profile lookup mirroring the dispatcher's own ``skipped_nonspawnable``
+# bucket) and these tests stub that ONE seam, as ``cli_available`` does.
+
+# A ready card on a name no profile matches (typo'd, or a deleted profile).
+READY_GHOST = ("ready", "ghost-bot")
+# The REAL profile-probe helper, captured at import time — before the autouse
+# sandbox in conftest replaces it — so the fail-closed test can exercise the
+# actual code path rather than the sandbox's stub.
+_REAL_NONSPAWNABLE = dw._assignee_is_nonspawnable
+# A review-status card on a REAL fake profile. Its only job is to keep the
+# probe's own ``has_spawnable_ready``/``has_spawnable_review`` verdict honest:
+# the board is genuinely spawnable to Hermes' definition (review work on a real
+# lane) while NO READY card is runnable — the production shape where the L2
+# gate runs and finds every ready card non-spawnable.
+REVIEW_REAL = ("review", "worker-a")
+
+
+def _ghost_gate(dead, detail="board 'default': all ready cards explainably "
+                            "held (active_pr=1)"):
+    """A gate stub shaped exactly like the real ``GateVerdict``: explained, with
+    a generic hold ``detail`` plus the structured non-spawnable findings. The
+    detail deliberately names nothing from ``dead``, so a test can tell the
+    DISTINCT config-typo message apart from the generic hold message."""
+    return (lambda stream: dw.GateVerdict(True, detail, dead)), detail
+
+
+class TestNonspawnableAssigneeGate:
+    """Layer-2 detection: which cards the gate files as non-spawnable."""
+
+    def _drive(self, monkeypatch, ready_rows, extra_cli=None, per_profile=None,
+               running=(), nonspawnable=("ghost-bot",), patch_probe=True):
+        """Run the real gate over one board with ``ready_rows`` listed by the
+        stub CLI.
+
+        ``patch_probe`` stubs the ONE non-spawnability seam the gate uses
+        (``_assignee_is_nonspawnable``); pass False to exercise the real helper
+        against a sabotaged profile lookup.
+
+        Returns (verdict, explained, why, findings, cli)."""
+        monkeypatch.setattr(dw, "_hermes_cli_argv", lambda: ["hermes", "kanban"])
+        monkeypatch.setattr(dw, "_read_max_per_profile", lambda: None)
+        monkeypatch.setattr(dw, "_read_max_in_progress", lambda: None)
+        if patch_probe:
+            monkeypatch.setattr(dw, "_assignee_is_nonspawnable",
+                                lambda assignee: assignee in nonspawnable)
+        now = 1_800_000_000.0
+        kb = FakeKanban({"default": list(running)})
+        payloads = {("list", "--status", "ready"): list(ready_rows)}
+        payloads.update(extra_cli or {})
+        cli = FakeCli(payloads)
+        verdict = dw.board_state_explains_stall(
+            {"ok": False, "spawnable": ["default"],
+             "total_running": len(running)},
+            kanban_db=kb, max_in_progress=6, max_per_profile=per_profile,
+            cli_fn=cli, now=now)
+        return (verdict, verdict[0], verdict[1],
+                dw._gate_nonspawnable(verdict), cli)
+
+    def test_gate_carries_nonspawnable_findings(self, monkeypatch):
+        verdict, explained, why, dead, cli = self._drive(
+            monkeypatch, [_ready_row("t_ghost", assignee="ghost-bot")])
+        assert explained is True, why          # restart suppression stays correct
+        assert "non-spawnable" in why          # …but the evidence says WHY
+        assert dead == [{"board": "default", "card": "t_ghost",
+                         "assignee": "ghost-bot"}]
+        assert cli.calls[0][:2] == ["hermes", "kanban"]
+
+    def test_findings_shape_is_a_2_tuple_for_callers(self, monkeypatch):
+        """The gate's contract stays a 2-tuple: old callers that unpack it (and
+        the injectable fakes that return one) keep working."""
+        verdict, explained, why, dead, _ = self._drive(
+            monkeypatch, [_ready_row("t_ghost", assignee="ghost-bot")])
+        assert isinstance(verdict, tuple) and len(verdict) == 2
+        a, b = verdict                      # plain unpacking, as every caller does
+        assert (a, b) == (explained, why)
+        # A plain tuple carries no findings (custom gates stay valid).
+        assert dw._gate_nonspawnable((True, "held")) == []
+        assert dw._gate_nonspawnable(verdict) == list(dead)
+
+    def test_mixed_board_reports_only_the_nonspawnable_card(self, monkeypatch):
+        """One card held by the per-profile cap + one typo'd card: the gate
+        explains the board (no restart) and names ONLY the typo'd card."""
+        # worker-a at cap (2 running, cap 2) explains t_cap with no per-card
+        # lookup; ghost-bot is not a profile at all.
+        verdict, explained, why, dead, cli = self._drive(
+            monkeypatch,
+            [_ready_row("t_cap", assignee="worker-a"),
+             _ready_row("t_ghost", assignee="ghost-bot")],
+            per_profile=2,
+            running=[("running", "worker-a"), ("running", "worker-a")])
+        assert explained is True, why
+        assert dead == [{"board": "default", "card": "t_ghost",
+                         "assignee": "ghost-bot"}]
+        assert "t_ghost" in why and "t_cap" not in why
+        assert not any("show" in c for c in cli.calls)
+
+    def test_all_spawnable_card_is_never_reported(self, monkeypatch):
+        """The findings list is exactly the non-spawnable subset: a board whose
+        ready cards all sit on real lanes (held by an active PR) reports
+        nothing, so the generic hold notification stays untouched."""
+        now = 1_800_000_000.0
+        verdict, explained, why, dead, _ = self._drive(
+            monkeypatch,
+            [_ready_row("t_ok")],
+            extra_cli={("show", "t_ok"): _show_with_guard("t_ok", "active_pr",
+                                                           60, now)})
+        assert explained is True and dead == []
+        assert "non-spawnable" not in why and "active_pr" in why
+
+    def test_profile_lookup_failure_keeps_the_restart_path(self, monkeypatch):
+        """Fail CLOSED at the source: when the profile lookup cannot decide,
+        ``_assignee_is_nonspawnable`` returns False ("assume spawnable"), the
+        card then needs real hold evidence, has none → unexplained → restart.
+
+        Runs the REAL helper (the sandbox stub is replaced by the function
+        captured at import time) against a ``hermes_cli.profiles`` whose
+        ``profile_exists`` raises, so this pins the helper's own fail-closed
+        direction rather than a stub's return value. Interpreter-agnostic: on
+        a box without ``hermes_cli`` the import branch fails the same way."""
+        import sys
+        class _BrokenProfiles:
+            @staticmethod
+            def profile_exists(name):
+                raise RuntimeError("profile store unreadable")
+        monkeypatch.setitem(sys.modules, "hermes_cli.profiles", _BrokenProfiles)
+        monkeypatch.setattr(dw, "_assignee_is_nonspawnable", _REAL_NONSPAWNABLE)
+        assert dw._assignee_is_nonspawnable("ghost-bot") is False, (
+            "a profile lookup that raises must mean 'assume spawnable' — the "
+            "stricter, fail-closed direction")
+        verdict, explained, why, dead, _ = self._drive(
+            monkeypatch,
+            [_ready_row("t_ghost", assignee="ghost-bot")],
+            extra_cli={("show", "t_ghost"): {"task": {"id": "t_ghost"},
+                                              "events": [], "runs": [],
+                                              "comments": []}},
+            patch_probe=False)   # the real helper, with the lookup sabotaged
+        assert explained is False
+        assert dead == [] and "unexplained" in why
+
+
+class TestNonspawnableAssigneeNotifies:
+    """The operator must hear about it: distinct message, one notify, 0 restarts."""
+
+    def _dead(self, card="t_ghost", board="default", assignee="ghost-bot"):
+        return [{"board": board, "card": card, "assignee": assignee}]
+
+    def test_ladder_with_only_nonspawnable_cards_notifies_once_and_never_restarts(
+            self, incident_log, tmp_path, monkeypatch):
+        """THE required ladder: the real 6→11→16→21→26 warning ladder (hold
+        clause stripped — the dispatcher gives NO benign reason), on a board
+        whose READY cards all sit on a non-existent profile → ZERO restarts AND
+        exactly one operator notification naming card, board and assignee."""
+        monkeypatch.setattr(dw, "_read_max_per_profile", lambda: None)
+        path = _variant_log(tmp_path, "Last tick held back: active_pr=1. ", "")
+        dead = self._dead()
+        gate, _ = _ghost_gate(dead)
+        rec, notifs, streams, results = _replay_ladder(
+            path, {"default": [READY_GHOST, REVIEW_REAL]}, gate=gate)
+        assert rec.calls == 0, (
+            "restarting the gateway has never fixed a typo'd assignee — "
+            f"results={results}")
+        assert len(notifs) == 1, (
+            f"exactly one throttled notification, got {len(notifs)}: {notifs}")
+        msg = notifs[0]
+        assert "t_ghost" in msg and "ghost-bot" in msg and "default" in msg
+        assert "no worker will ever run it" in msg
+        assert "restart" in msg.lower()          # states that none was attempted
+        assert any(r["result"] == "suppressed" for r in results)
+        assert any(r.get("reason") == "nonspawnable_assignee" for r in results)
+
+    def test_ladder_without_the_notify_branch_stays_quiet(self, tmp_path,
+                                                          monkeypatch):
+        """Mutation sentinel for the notify branch: with the findings suppressed
+        (what PR #43 shipped — explained ⇒ suppress AND go quiet) the same
+        ladder must produce ZERO notifications. If this test ever passes with
+        ``notifs`` non-empty, the two classes are no longer distinguishable."""
+        monkeypatch.setattr(dw, "_read_max_per_profile", lambda: None)
+        path = _variant_log(tmp_path, "Last tick held back: active_pr=1. ", "")
+        silent_gate = lambda stream: (True, "board 'default': all 1 ready cards "
+                                           "explainably held")   # plain 2-tuple
+        rec, notifs, _streams, results = _replay_ladder(
+            path, {"default": [READY_GHOST, REVIEW_REAL]}, gate=silent_gate)
+        assert rec.calls == 0
+        assert len(notifs) == 1, (
+            "the plain-hold class still notifies — the DISTINCT message is the "
+            f"only thing that changes, got {notifs}")
+        assert "ghost" not in notifs[0], (
+            "a gate that reports no findings must not invent one: " + notifs[0])
+
+    def test_mixed_board_notification_names_only_the_nonspawnable_card(
+            self, tmp_path):
+        """Required mixed-board case: cap-held card + typo'd card → zero
+        restarts, and the notification is about the card the operator can act
+        on — the capped card is NOT page-worthy."""
+        state = str(tmp_path / "recover.json")
+        rec = Recorder()
+        notifs = []
+        gate, _ = _ghost_gate(self._dead("t_ghost"))
+        results = None
+        for k in range(dw.DISPATCHER_RESTART_AFTER_DETECTIONS):
+            results = dw.recover_dispatcher_wedge(
+                stream_state={"ok": False, "declared": True,
+                              "spawnable": ["default"], "total_running": 2},
+                restart_fn=rec, now=1000.0 + k * 60, state_file=state,
+                board_gate_fn=gate, notify_fn=notifs.append)
+        assert rec.calls == 0
+        assert len(notifs) == 1
+        assert results is not None
+        assert "t_ghost" in notifs[0] and "ghost-bot" in notifs[0]
+        assert "t_cap" not in notifs[0], notifs[0]
+        assert results["reason"] == "nonspawnable_assignee"
+        assert results["nonspawnable"] == self._dead("t_ghost")
+
+    def test_lookup_exception_on_the_restart_path_keeps_the_restart(self,
+                                                                     tmp_path):
+        """Fail-closed end-to-end: a gate whose profile lookup cannot decide
+        reports no findings and cannot explain the board, so the restart
+        proceeds (the pre-fix behaviour, unchanged) and nothing notifies."""
+        def gate(stream):
+            # Exactly what the real gate returns when every card needs hold
+            # evidence and none exists — no findings, not explained.
+            return dw.GateVerdict(False, "unexplained ready cards: t_ghost")
+        rec = Recorder()
+        notifs = []
+        state = str(tmp_path / "recover.json")
+        results = []
+        for k in range(dw.DISPATCHER_RESTART_AFTER_DETECTIONS + 1):
+            results.append(dw.recover_dispatcher_wedge(
+                stream_state={"ok": False, "declared": True,
+                              "spawnable": ["default"], "total_running": 0},
+                restart_fn=rec, now=1000.0 + k * 60, state_file=state,
+                board_gate_fn=gate, notify_fn=notifs.append))
+        assert rec.calls == 1, "a lookup that cannot decide must not silence us"
+        assert any(r["result"] == "recovered" for r in results), results
+        assert notifs == []
+
+    def test_throttle_applies_to_the_config_typo_class_too(self, tmp_path):
+        """3 h of 60 s ticks against a sustained typo: ONE notify per hour, not
+        one per minute — the existing 1/h throttle is the mechanism."""
+        state = str(tmp_path / "recover.json")
+        rec = Recorder()
+        notifs = []
+        gate, _ = _ghost_gate(self._dead())
+        t = 1000.0
+        for _ in range(int(3 * 3600 / 60)):
+            dw.recover_dispatcher_wedge(
+                stream_state={"ok": False, "declared": True,
+                              "spawnable": ["default"], "total_running": 0},
+                restart_fn=rec, now=t, state_file=state,
+                board_gate_fn=gate, notify_fn=notifs.append)
+            t += 60
+        assert rec.calls == 0
+        assert 1 <= len(notifs) <= 4, (
+            f"expected ~1 notify/hour over 3h, got {len(notifs)}")
+
+    def test_message_class_is_config_typo_not_a_wedge(self):
+        msg = dw._nonspawnable_message(
+            self._dead("t_ab", "hscc", "backend-enginer"))
+        assert "ready card t_ab on board hscc" in msg
+        assert "backend-enginer" in msg
+        assert "config typo" in msg
+        assert "NO gateway restart was attempted" in msg
+
+    def test_message_names_every_card_when_there_are_several(self):
+        dead = self._dead("t_one") + self._dead("t_two", board="other")
+        msg = dw._nonspawnable_message(dead)
+        assert "t_one" in msg and "t_two" in msg and "other" in msg
+        assert "no worker will ever run them" in msg
+
+    def test_end_to_end_default_gate_and_recovery_path_notifies(self, tmp_path,
+                                                                monkeypatch):
+        """The real gate + the real recovery, with only the EXTERNAL seams
+        injected: red stream → ``board_state_explains_stall`` (sanctioned CLI
+        fake) → non-spawnable findings → ``recover_dispatcher_wedge`` suppresses
+        the restart AND notifies.
+
+        This is the call-site pin: the recovery calls ``gate_fn(stream)`` with
+        no arguments of its own, so a delegating wrapper is the only way to
+        reach the real gate with fakes (and the only way to prove the recovery
+        actually consults the findings — flip that branch off and this goes
+        red). It never touches the real CLI or a live board.
+        """
+        monkeypatch.setattr(dw, "_hermes_cli_argv", lambda: ["hermes", "kanban"])
+        monkeypatch.setattr(dw, "_read_max_per_profile", lambda: None)
+        monkeypatch.setattr(dw, "_read_max_in_progress", lambda: None)
+        monkeypatch.setattr(dw, "_assignee_is_nonspawnable",
+                            lambda assignee: assignee == "ghost-bot")
+        kb = FakeKanban({"default": [REVIEW_REAL]})   # board IS spawnable
+        cli = FakeCli({("list", "--status", "ready"):
+                       [_ready_row("t_ghost", assignee="ghost-bot")]})
+
+        def gate(stream):
+            return dw.board_state_explains_stall(
+                stream, kanban_db=kb, max_in_progress=6, max_per_profile=None,
+                cli_fn=cli, now=1_800_000_000.0)
+
+        rec = Recorder()
+        notifs = []
+        state = str(tmp_path / "recover.json")
+        results = []
+        for k in range(dw.DISPATCHER_RESTART_AFTER_DETECTIONS + 1):
+            results.append(dw.recover_dispatcher_wedge(
+                stream_state={"ok": False, "declared": True,
+                              "spawnable": ["default"], "total_running": 0},
+                restart_fn=rec, now=1000.0 + k * 60, state_file=state,
+                board_gate_fn=gate, notify_fn=notifs.append))
+        assert rec.calls == 0, f"restart must stay suppressed: {results}"
+        assert len(notifs) == 1, notifs
+        assert "t_ghost" in notifs[0] and "ghost-bot" in notifs[0]
+        assert any(r.get("reason") == "nonspawnable_assignee" for r in results)
+        # The gate really did read the board through the sanctioned CLI.
+        assert any("list" in c and "ready" in c for c in cli.calls)
+
+
+class TestNonspawnableNotifyBranchIsLive:
+    """Mutation sentinels for the exact PR #43 regression: 'explained' used to
+    mean 'say nothing'. Each test fails if the distinct notify branch is
+    flipped off, and passes for the WRONG reason if the message is not
+    distinct — so both directions are pinned."""
+
+    def _dead(self, card="t_ghost", assignee="ghost-bot"):
+        return [{"board": "default", "card": card, "assignee": assignee}]
+
+    def test_generic_hold_message_is_not_reused_for_the_typo_class(self,
+                                                                   tmp_path):
+        """A typo'd assignee must not be reported as 'the dispatcher is only
+        HOLDING work back' — that phrasing tells the operator to wait, when in
+        fact the card needs its assignee fixed."""
+        state = str(tmp_path / "recover.json")
+        notifs = []
+        gate, _ = _ghost_gate(self._dead())
+        for k in range(dw.DISPATCHER_RESTART_AFTER_DETECTIONS):
+            dw.recover_dispatcher_wedge(
+                stream_state={"ok": False, "declared": True,
+                              "spawnable": ["default"], "total_running": 0},
+                restart_fn=Recorder(), now=1000.0 + k * 60, state_file=state,
+                board_gate_fn=gate, notify_fn=notifs.append)
+        assert len(notifs) == 1
+        assert "HOLDING work back" not in notifs[0], notifs[0]
+        assert "no worker will ever run it" in notifs[0]
+
+    def test_findings_reaching_the_gate_without_a_notify_would_be_a_bug(self,
+                                                                        tmp_path):
+        """Pin the reason field the operator/trigger rules key on: the two
+        classes must stay separable in the recovery result, not collapse into
+        one 'benign_dispatcher_hold' bucket."""
+        hold_only = lambda s: (True, "held: active_pr=1")   # plain 2-tuple
+        typo = _ghost_gate(self._dead("t_typo"))[0]
+        outs = []
+        for gate in (hold_only, typo):
+            rec_i = Recorder()
+            notifs = []
+            # The notify throttle is process-global (one 1/h ping for the
+            # whole watchdog, by design) — reset it so the two classes are
+            # exercised independently, as they would be in separate incidents.
+            dw._hold_notify_at = None
+            state = str(tmp_path / f"recover-{id(gate)}.json")
+            for k in range(dw.DISPATCHER_RESTART_AFTER_DETECTIONS):
+                outs.append(dw.recover_dispatcher_wedge(
+                    stream_state={"ok": False, "declared": True,
+                                  "spawnable": ["default"], "total_running": 0},
+                    restart_fn=rec_i, now=1000.0 + k * 60, state_file=state,
+                    board_gate_fn=gate, notify_fn=notifs.append))
+            assert rec_i.calls == 0 and len(notifs) == 1, (
+                f"each class must notify exactly once: {notifs}")
+        reasons = {o.get("reason") for o in outs if o["result"] == "suppressed"}
+        assert reasons == {"benign_dispatcher_hold", "nonspawnable_assignee"}
+        typo_results = [o for o in outs
+                        if o.get("reason") == "nonspawnable_assignee"]
+        assert typo_results and typo_results[0]["nonspawnable"] == self._dead("t_typo")
+
+    def test_nonspawnable_notify_uses_the_same_channel(self, monkeypatch):
+        """Requirement 3: no second notify path — the config-typo class goes
+        through the same desktop sender as the hold class, only titled
+        differently."""
+        sent = []
+        import hscc_daemon.desktop as desktop
+        monkeypatch.setattr(desktop, "send_macos_notification",
+                            lambda t, m, priority="normal": sent.append((t, m)))
+        dw._notify_nonspawnable("boom")
+        dw._notify_hold("quiet")
+        assert [t for t, _m in sent] == [
+            "HSCC Dispatcher: unrunnable ready card",
+            "HSCC Dispatcher Hold (no restart)"]
+        assert [m for _t, m in sent] == ["boom", "quiet"]
+
+    def test_recovery_routes_the_default_notify_by_class(self, tmp_path,
+                                                        monkeypatch):
+        """Production wiring (``notify_fn`` omitted): the typo class must reach
+        the desktop sender with the distinct title, NOT a second channel."""
+        sent = []
+        import hscc_daemon.desktop as desktop
+        monkeypatch.setattr(desktop, "send_macos_notification",
+                            lambda t, m, priority="normal": sent.append((t, m)))
+        state = str(tmp_path / "recover.json")
+        rec = Recorder()
+        gate, _ = _ghost_gate(self._dead())
+        for k in range(dw.DISPATCHER_RESTART_AFTER_DETECTIONS):
+            dw.recover_dispatcher_wedge(
+                stream_state={"ok": False, "declared": True,
+                              "spawnable": ["default"], "total_running": 0},
+                restart_fn=rec, now=1000.0 + k * 60, state_file=state,
+                board_gate_fn=gate)
+        assert rec.calls == 0
+        assert len(sent) == 1 and sent[0][0] == "HSCC Dispatcher: unrunnable ready card"
+        assert "ghost-bot" in sent[0][1]
