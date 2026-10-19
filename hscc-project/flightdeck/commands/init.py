@@ -334,7 +334,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     else:
         plan = _would_create(home_root, ses)
         lines = [
-            f"flightdeck home: {escape(str(home_root))} (dry run — use --apply to write)",
+            f"hscc-project home: {escape(str(home_root))} (dry run — use --apply to write)",
             "Would create:",
             _render_plan(plan),
         ]

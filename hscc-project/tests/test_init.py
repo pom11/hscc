@@ -385,6 +385,10 @@ class TestNoAnsiInit:
             _ns(home=str(home), apply=False)))
         assert "would create" in out
         assert "flightdeck initialized" not in out  # dry-run, not applied
+        # F1 branding (t_5005a067, completed by t_5f9b8fc7): the dry-run line
+        # speaks the product name; the on-disk dir stays ~/.flightdeck.
+        assert "hscc-project home:" in out
+        assert "flightdeck home:" not in out
         assert "[ok]" in out
 
     def test_apply(self, tmp_path):
