@@ -23,5 +23,6 @@ task: t_8fccf0cd
   (`.tool(` appears nowhere else). The README's existing "24 tools" was
   already right, so the row is kept at 24 and the tool list was corrected to
   match the code (it double-listed `reconcile` and omitted `reconcile
-  preview`). `docs/APPROACH.md:118` ("25 tools") carries the same wrong number
-  and is untouched here — it is not an R3 file.
+  preview`). `docs/APPROACH.md:118` ("25 tools, 11 mutating ones") carries the
+  same wrong total — and 12 tools take an `apply` param, not 11 — but it is
+  not an R3 file, so it is untouched here and filed as a follow-up card.
