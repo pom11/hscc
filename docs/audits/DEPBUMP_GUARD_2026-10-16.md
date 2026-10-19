@@ -87,7 +87,9 @@ card comment thread.
    `_router_drift_probe()` seam (tests never read the operator's live
    configs); WARN log line while drift is live. It never changes the health
    verdict or triggers a restart. verify gains the sibling check
-   `proxy_router_settings` in `run_all` (10 -> 11 checks).
+   `proxy_router_settings` in `run_all`. (Post-rebase count: 12 checks — the
+   11 landed on main by rebase time already included #36's `provider_routing`,
+   so this PR's addition is 11 -> 12, not 10 -> 11. See t_5102a0a7.)
 
 4. **Live state passes today.** Read-only probe of the real files returned
    `status: ok` — litellm_config carries proxy.yaml's router_settings
