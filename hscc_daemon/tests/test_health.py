@@ -2360,6 +2360,16 @@ class TestProxyRelaunchStall:
         monkeypatch.setattr(health, "_proxy_backend_probe",
                             lambda url=None, timeout=5: {"ok": False, "backends": set(),
                                                           "error": "refused"})
+        # Dep-bump guard (#40) added a THIRD read surface to check_proxy: the
+        # router-drift probe. Stub it here too — this class builds its own
+        # setup rather than reusing TestCheckProxy._setup, so without this line
+        # every stall test would read the operator's live
+        # ~/.config/sparkrun + ~/.cache/sparkrun (ambient-state discipline).
+        # Combined-path tests override it; see
+        # test_escalated_repair_state_also_carries_router_drift.
+        monkeypatch.setattr(
+            health, "_router_drift_probe",
+            lambda: {"status": "skip", "warn": False, "detail": "stubbed"})
         calls = []
         # Plain `proxy start` is REFUSED while the hollow tracked PID lives —
         # the incident's refusal verbatim.
@@ -2490,6 +2500,43 @@ class TestProxyRelaunchStall:
         # The hollow tracked PID was retired first (vetted cmdline stubbed).
         assert kills and kills[0][0] == 12477
         assert self._state(tmp_hfcc_dir)["relaunched"] is True
+
+    def test_escalated_repair_state_also_carries_router_drift(
+            self, tmp_hfcc_dir, monkeypatch):
+        """REBASE PROOF (t_5102a0a7): #49's escalation path and #40's
+        router-drift recording must BOTH work on the SAME check_proxy call.
+
+        The two PRs touched the same function body from opposite ends — #49
+        rewrote the unhealthy repair branch (hollow-PID kill -> repair ->
+        streak -> stall alert), #40 added the drift probe at the top of the
+        function and made BOTH state writes carry `router_drift`. A
+        signature-merge that kept only one side would pass a unit test of
+        either feature in isolation, so this pins the combined behaviour on
+        one object: the tick that escalates must STILL have killed the hollow
+        tracked PID, must STILL have run the escalated repair, and must STILL
+        surface the drift verdict in the state file it writes.
+        """
+        health, calls, repairs, kills, notes, events = self._incident_setup(
+            tmp_hfcc_dir, monkeypatch, repair_ok=False)
+        # #40's surface, overridden on #49's setup object (not the default stub).
+        monkeypatch.setattr(
+            health, "_router_drift_probe",
+            lambda: {"status": "warn", "warn": True,
+                     "detail": "WARN: router_settings diverged"})
+        self._attempts(tmp_hfcc_dir, health.PROXY_RELAUNCH_MAX_CONSECUTIVE)
+        st = self._state(tmp_hfcc_dir)
+        # ── #49 side: the outage fix ran, end to end, on this same tick set.
+        assert st["relaunch_streak"] == health.PROXY_RELAUNCH_MAX_CONSECUTIVE
+        assert kills and kills[0][0] == 12477        # hollow PID retired first
+        assert len(repairs) >= 1                     # escalated to the repair
+        assert len(notes) == 1 and notes[0][2] == "high"   # stall alarm fired
+        assert st.get("stall_alerted_at")
+        # ── #40 side: the drift verdict survived the UNHEALTHY write.
+        assert st["router_drift_warn"] is True
+        assert "router_settings diverged" in st["router_drift"]
+        # Drift is WARN-only: it must not have changed the health verdict nor
+        # manufactured an extra repair (only the stalled escalations repaired).
+        assert st["ok"] is False
 
     def test_escalation_never_uses_restart_and_respects_the_guards(
             self, tmp_hfcc_dir, monkeypatch):
