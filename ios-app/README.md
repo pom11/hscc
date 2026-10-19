@@ -555,6 +555,11 @@ No tailnet IP, token, or API key is hardcoded anywhere in this repo.
 
 ## Further reading
 
+- [**E2E API review 2026-08-27**](docs/E2E-API-REVIEW-2026-08-27.md) — the
+  dated view → endpoint → model verification table (every row confirmed against
+  the live API, every model decoded against captured JSON) plus the two decode
+  fixes that pass made; relocated out of this README per the 2026-10-15 audit,
+  with its historical rows marked.
 - [**Sideload · Tailscale · Security**](docs/SIDELOAD-TAILSCALE-SECURITY.md) —
   the same guidance above as a standalone reference you can keep handy.
 - [**Device smoke checklist**](docs/DEVICE-SMOKE-CHECKLIST.md) — five
