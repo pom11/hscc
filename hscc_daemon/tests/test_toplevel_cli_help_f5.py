@@ -401,16 +401,14 @@ class TestAuditSurfaceFollowsCli:
             the deleted probes in the real-CLI class below.)"""
         paths, _ = audit_mod.build_surface()
         n_paths = len(set((g, tuple(a), k) for g, a, _, k in paths))
-        # Same invocation model as audit(): flag = --help (+ help <cmd> when
-        # argv is non-empty); flag2/help = one invocation.
+        # Same invocation model as audit() — t_5132deb3 made it a function
+        # (invocations_for) precisely so this accounting stays true when the
+        # oracle grows the -h probes: flag = --help + -h (+ help <cmd> when
+        # argv is non-empty), except the launch-class -h exemption;
+        # flag2 = --help + -h; help = one invocation.
         def count(ps):
-            n = 0
-            for _, argv, _, kind in ps:
-                if kind == "flag":
-                    n += 2 if argv else 1
-                else:
-                    n += 1
-            return n
+            return sum(len(audit_mod.invocations_for(argv, kind))
+                       for _, argv, _, kind in ps)
         n_probes = count(paths)
         sys.path.insert(0, str(REPO / "scripts" / "tests"))
         import test_cli_help_surface as gate

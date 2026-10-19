@@ -691,6 +691,27 @@ _CLUSTER_SUBCOMMAND_HELP = {
                  "live container. List the current ids with "
                  "'hscc cluster status'."),
     },
+    # up/down (card t_5132deb3, operator ruling on PR #33's final pass):
+    # `hscc cluster up --help` used to print the F6 refusal ("unknown
+    # argument", rc=1) — inert, but not helpful. Help now WINS over the
+    # refusal for a help token; the refusal code path is untouched and still
+    # refuses rc=1, byte-identical, for every token that is NOT a help flag
+    # (--foo, a dangling --theme, a positional typo). Wording note: the
+    # descriptions name what the verb does to a LIVE fleet, because the
+    # B6-class failure this surface prevents is a help request that started
+    # or stopped real workloads.
+    "down": {
+        "usage": "hscc cluster down [--dry-run]",
+        "desc": ("Stop ALL sparkrun workloads fleet-wide — this stops every "
+                 "running container on every node. Pass --dry-run to see "
+                 "what would stop without stopping anything."),
+    },
+    "up": {
+        "usage": "hscc cluster up [--dry-run]",
+        "desc": ("Start every unit in serving.json (orch + keepalive) — "
+                 "this starts live workloads across the fleet. Pass "
+                 "--dry-run to see the plan without touching the cluster."),
+    },
 }
 
 
@@ -731,14 +752,18 @@ def _print_cluster_verb_usage(sub: str):
         print(line)
 
 
-# The verbs whose per-subcommand `--help` this card made inert. `monitor` is
-# deliberately absent: it already had its own `--help` branch (proven inert by
-# the audit — zero canary trips) and its help text is operator-owned
-# (t_1cc33407), so this card leaves that surface exactly as it is. `up`/`down`
-# keep the F6 refusal contract: `_parse_cluster_flags` already rejects
-# `--help` as an unknown token (rc=1 + "Nothing was started or stopped"), and
-# that message belongs to another card's gate rules.
-_CLUSTER_HELP_VERBS = ("status", "hosts", "jobs", "info", "stop")
+# The verbs whose per-subcommand `--help`/`-h` prints help instead of
+# dispatching. `monitor` is deliberately absent: it already had its own
+# `--help` branch (proven inert by the audit — zero canary trips) and its
+# help text is operator-owned (t_1cc33407), so that surface stays as it is.
+# `up`/`down` joined with t_5132deb3 (operator ruling: help wins over the
+# F6 refusal for a help token); the F6 refusal itself still guards every
+# NON-help unknown token — `_parse_cluster_flags` and
+# `_cluster_refusal_message` are unchanged and their wording belongs to
+# F3's gate rules (canonical-whitespace pin in
+# hscc_daemon/tests/test_cluster_group_help.py).
+_CLUSTER_HELP_VERBS = ("status", "hosts", "jobs", "info", "stop", "up",
+                       "down")
 
 
 def _help_token_index(args):
@@ -842,7 +867,10 @@ def _print_cluster_group_help():
 
 def _handle_cluster():
     """Route 'cluster' subcommands to hscc-cluster plugin, render human view."""
-    if len(sys.argv) < 3 or sys.argv[2] == "--help":
+    # Group help: a bare `cluster`, or a help flag as the group token. The
+    # -h half joined with t_5132deb3 (the CLI-wide short-flag close; every
+    # other group — template/api/autodown/kanban — already accepted it).
+    if len(sys.argv) < 3 or sys.argv[2] in ("--help", "-h"):
         _print_cluster_group_help()
         return 0
 
@@ -1403,6 +1431,15 @@ def _handle_help():
 
 def _handle_profiles():
     """Route 'profiles' to the cluster engine's profile-status, render human view."""
+    # t_5132deb3: `hscc profiles --help` (and `-h`) used to load the cluster
+    # engine and run cmd_profile_status — the only group-less verb the audit
+    # had no help intercept for. Same raw-argv shape as the cluster/kanban/
+    # api intercepts: a help token anywhere in the tail prints COMMAND_HELP
+    # (the same text `hscc help profiles` prints) and loads nothing.
+    if _help_token_index(sys.argv[1:]) is not None:
+        print("hscc profiles")
+        print(f"  {COMMAND_HELP['profiles']}")
+        return 0
     eng = _load_cluster_engine()
     if eng is None:
         return 1
@@ -1576,10 +1613,18 @@ def main():
         rc = cmd_kanban(args[1:])
         sys.exit(rc)
 
-    # Per-command --help (daemon commands)
-    if cmd in DAEMON_COMMANDS and len(args) > 1 and args[1] == "--help":
-        help_text = COMMAND_HELP.get(cmd, f"Run 'hscc help {cmd}' for details.")
-        print(f"hscc {cmd}")
+    # Per-command help for the daemon verbs (t_5132deb3: the branch used to
+    # fire only on `args[1] == "--help"`, so `escalate -h` / `autoscale -h`
+    # RAN the read-only verb instead of printing help, and a --help that was
+    # not the first tail token (e.g. `verify --json --help`) fell through to
+    # dispatch too — the B10 class one level deeper. Now ANY "-h"/"--help"
+    # token anywhere in the RAW tail intercepts before dispatch, the same
+    # raw-argv shape as the cluster/kanban/api/heal intercepts. Wording comes
+    # from COMMAND_HELP — the same source `hscc help <cmd>` prints — so the
+    # two cannot drift. `-h` and `--help` print the SAME bytes (pinned).
+    if cmd.lower() in DAEMON_COMMANDS and _help_token_index(args[1:]) is not None:
+        help_text = COMMAND_HELP.get(cmd.lower(), f"Run 'hscc help {cmd}' for details.")
+        print(f"hscc {cmd.lower()}")
         print(f"  {help_text}")
         sys.exit(0)
 
@@ -1603,19 +1648,21 @@ def main():
     if cmd == "escalate":
         _handle_escalate()
 
-    # Advanced commands (also support --help). The ed-* placeholder trio is
+    # Advanced commands (also support help). The ed-* placeholder trio is
     # GONE (F5 card t_fc307a51, operator fan-out ruling DELETE): it was
     # advertised as "placeholder, not yet available" and did nothing — help
     # must not advertise dead commands. `advanced` joined this set so
     # `hscc advanced --help` prints its COMMAND_HELP entry instead of the
-    # unknown-command blob + exit 1 (audit D-rc finding). `-h` deliberately
-    # stays unhandled here, matching the DAEMON_COMMANDS convention above
-    # (the audit only probes `--help`; a CLI-wide `-h` gap is recorded in
-    # docs/audits/NOTES_t_fc307a51.md as follow-up, not folded into F5).
+    # unknown-command blob + exit 1 (audit D-rc finding). t_5132deb3 closes
+    # the `-h` half of that surface (the gap F5 recorded in
+    # docs/audits/NOTES_t_fc307a51.md): `start-daemon -h` used to fall
+    # straight into the daemon-loop launcher — the worst case of the CLI-wide
+    # -h blind spot — and `advanced -h` printed "Unknown command". Same
+    # raw-argv any-tail-token shape as the DAEMON_COMMANDS branch above.
     advanced_cmds = {"start-daemon", "advanced"}
-    if cmd in advanced_cmds and len(args) > 1 and args[1] == "--help":
-        help_text = COMMAND_HELP.get(cmd, "")
-        print(f"hscc {cmd}")
+    if cmd.lower() in advanced_cmds and _help_token_index(args[1:]) is not None:
+        help_text = COMMAND_HELP.get(cmd.lower(), "")
+        print(f"hscc {cmd.lower()}")
         print(f"  {help_text}")
         sys.exit(0)
 

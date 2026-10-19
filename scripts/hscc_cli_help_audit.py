@@ -92,6 +92,53 @@ API_DEFAULT_PORT = 8787   # hscc-api/api_server.py DEFAULT_PORT (tripwire)
 API_SMOKE_PORT = 8788     # scripts/api_smoke.py default (defensive second hold)
 API_PLIST_NAME = "com.hscc.api.plist"
 
+# Launch-class verbs: a REGRESSED help intercept on these would fork a
+# daemon (start / start-daemon), talk to launchd (stop / install /
+# uninstall) or hang a live tail (watch). Their `--help` probes run (the
+# intercepts are proven inert — zero canary trips, F5/BROKEN-HEAL pins) and
+# stay. Their short `-h` half is NOT probed here: the exact argv that makes
+# them dangerous is one missed intercept away from launching the loop or
+# re-writing the LaunchAgent under the operator's real HOME, and a hang here
+# costs 3x60 s per width. They are pinned IN-PROCESS instead by
+# landmine-raise tests (hscc_daemon/tests/test_cli_h_shortflag.py: patch
+# cli.cmd_start_daemon AND daemon_ops.run_daemon_loop to RAISE, then drive
+# main() — a -h that reaches dispatch fails there with zero real side
+# effects). The exemption is never silent: every exempted -h probe is
+# recorded in report["skips"] with kind "h-exempt", and the gate pins the
+# exempted set to this constant exactly (test_cli_help_surface.py).
+LAUNCH_PROBE_EXEMPT = frozenset({
+    ("start",), ("stop",), ("install",), ("uninstall",),
+    ("start-daemon",), ("watch",),
+})
+
+
+def _h_probe_exempt(argv) -> bool:
+    """True when this surface's argv is a launch-class verb (no -h probe)."""
+    return tuple(argv[:1]) in LAUNCH_PROBE_EXEMPT
+
+
+def invocations_for(argv, kind):
+    """The probe invocations for one surface path: [(argv, flag), ...].
+
+    t_5132deb3 (the -h gap F5 recorded in docs/audits/NOTES_t_fc307a51.md):
+    the oracle probed `--help` only, so every `-h` path on the CLI was a
+    blind spot — and `start-daemon -h` LAUNCHED THE LOOP while `--help` was
+    inert. Every flag/flag2 surface now probes BOTH forms, except the
+    launch-class set above. The `hscc help <cmd>` paths print from
+    COMMAND_HELP and take no flag of their own, so they stay single.
+
+    Single source of truth: the audit walk, the (A)-only sibling pass AND
+    the F5 surface-accounting test all consume this function.
+    """
+    if kind == "help":
+        return [([ "help", *argv], None)]
+    out: list = [(list(argv) + ["--help"], "--help")]
+    if kind == "flag" and argv:
+        out.append((["help", argv[0]], None))
+    if not _h_probe_exempt(argv):
+        out.append((list(argv) + ["-h"], "-h"))
+    return out
+
 sys.path.insert(0, str(REPO))
 PROJECT_DIR = REPO / "hscc-project"
 sys.path.insert(0, str(PROJECT_DIR))
@@ -847,17 +894,15 @@ def audit(repo=None) -> dict:
         r"Cleared heal strikes|healing resumes|No strikes recorded for --help")
 
     for group, argv, style, kind in paths:
-        invocations = []
-        if kind == "flag":
-            invocations.append(argv + ["--help"])
-            if argv:
-                invocations.append(["help", argv[0]])
-        elif kind == "flag2":
-            invocations.append(argv + ["--help"])
-        else:  # help
-            invocations.append(["help", *argv])
-
-        for inv in invocations:
+        invs = invocations_for(argv, kind)
+        if kind != "help" and _h_probe_exempt(argv):
+            # The exemption must be visible, not silent (see the constant).
+            skips.append({"surface": _norm(argv + ["-h"]),
+                          "kind": "h-exempt",
+                          "why": "launch-class verb; pinned in-process"})
+        last_rc = {}          # flag -> rc, for the -h-vs---help parity below
+        last_out = {}         # flag -> canonical (out+err)
+        for inv, flag in invs:
             name = _norm(inv)
             styles.setdefault(name, style)
             # api verb --help probes run for real since t_bf9f1909: cmd_api
@@ -873,6 +918,14 @@ def audit(repo=None) -> dict:
                 add(group, name, "D", f"probe error: {type(e).__name__}: {e}",
                     "fix the probe")
                 continue
+            # Parity bookkeeping for the (D-h) check below: the rc and the
+            # canonical WIDEST render of this flag's invocation. (The widest
+            # render is the same authority (A) uses — the only width where
+            # one logical help line is one physical line, so a legitimately
+            # wrapped render can never fake a divergence.)
+            _auth = renders.get(WIDTH_WIDE) or renders[WIDTHS_WRAP[-1]]
+            last_rc[flag] = _auth["rc"]
+            last_out[flag] = canonical_line(_auth["out"] + _auth["err"])
 
             # (A) rendered text — one finding per LOGICAL line: the widest
             # render only + whitespace-canonicalised, plus the width-aware
@@ -942,8 +995,28 @@ def audit(repo=None) -> dict:
                         "intercept --help before forking the server")
                 if r["rc"] not in (0, None) and not r["hung"]:
                     add(group, name, "D-rc",
-                        f"--help exited {r['rc']} (expected 0)",
+                        f"{flag or 'help'} exited {r['rc']} (expected 0)",
                         "help paths should exit 0")
+
+            # (D-h) short-flag parity (t_5132deb3 — the CLI-wide -h gap F5
+            # recorded in docs/audits/NOTES_t_fc307a51.md). Both forms are
+            # probed (invocations_for); if `-h` did not print help where
+            # `--help` does, its output/rc diverge from the help render —
+            # most often because it EXECUTED the verb instead (escalate -h
+            # scanned, start-daemon -h launched the loop). Only surfaces that
+            # probed BOTH flags can be compared (help-kind paths and the
+            # launch-class -h exemption are covered by in-process pins).
+            if "--help" in last_rc and "-h" in last_rc:
+                if (last_rc["-h"] != last_rc["--help"]
+                        or last_out.get("-h") != last_out.get("--help")):
+                    add(group, _norm(argv + ["-h"]), "D-h",
+                        "-h does not print the same help as --help "
+                        f"(rc {last_rc['-h']} vs {last_rc['--help']}; "
+                        "output differs: "
+                        f"{(last_out.get('-h') or '')[:120]!r} vs "
+                        f"{(last_out.get('--help') or '')[:120]!r})",
+                        "intercept -h exactly like --help (same COMMAND_HELP "
+                        "text) before dispatch")
 
             # (C) examples — raw parser epilogs for the argparse surface
             # (rendered help re-wraps and corrupts two-column examples);
@@ -1003,16 +1076,7 @@ def a_table(repo=None, surfaces=None) -> dict:
     paths, _fd = build_surface()
     table: dict = {}
     for group, argv, style, kind in paths:
-        invocations = []
-        if kind == "flag":
-            invocations.append(argv + ["--help"])
-            if argv:
-                invocations.append(["help", argv[0]])
-        elif kind == "flag2":
-            invocations.append(argv + ["--help"])
-        else:
-            invocations.append(["help", *argv])
-        for inv in invocations:
+        for inv, flag in invocations_for(argv, kind):
             name = _norm(inv)
             if want and name not in want:
                 continue
